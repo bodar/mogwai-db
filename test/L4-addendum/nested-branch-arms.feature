@@ -123,3 +123,27 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
       | unknown |
       | unknown |
       | unknown |
+
+  # ---- an UNPRODUCTIVE choice takes the Pick.none option ----
+  #
+  # `BranchStep.applyCurrentTraverser` maps a non-productive choice traversal to `Pick.unproductive`,
+  # and `pickBranches` falls back to `traversalPickOptions.get(Pick.none)` whenever no option matched
+  # — so a vertex with no `lang` property takes the none arm rather than being dropped. Pinned because
+  # the work index filed this as "a real wrong answer"; it is the reference's answer. Verified against
+  # vendor/tinkerpop/gremlin-core/.../step/branch/BranchStep.java:155-162, 206-220.
+  @gap:nested-branch-arms
+  Scenario: g_V_chooseXvaluesXlangXX_optionXjavaX_optionXnoneX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().choose(__.values("lang")).option("java", __.constant("j")).option(Pick.none, __.constant("n"))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | j |
+      | j |
+      | n |
+      | n |
+      | n |
+      | n |

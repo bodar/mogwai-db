@@ -146,3 +146,57 @@ Feature: mogwai addendum — as()/select(label) inside a child body
       """
     When iterated to list
     Then the result should be empty
+
+  # ---- a label at the START of a body means different things under where() and filter() ----
+  #
+  # TinkerPop routes `where(traversal)` by VARIABLE LOCATION and only where(): `WhereTraversalStep`'s
+  # `configureStartAndEndSteps` replaces a variable start step with a `WhereStartStep`, so
+  # `where(__.as("a")…)` RE-ROOTS at label a. `filter()` builds a plain `TraversalFilterStep` — no
+  # rewriting, no `getVariableLocations` — so the same body under filter() is an ordinary REBIND of the
+  # current object and the label is inert.
+  #
+  # These two scenarios are the same body under the two hosts, and they MUST disagree. The work index
+  # filed the filter() answer as a defect ("dropping rows TinkerPop keeps"); it is the reference's
+  # answer, and pinning both here is what stops it being re-filed. Verified against
+  # vendor/tinkerpop/gremlin-core/.../step/filter/WhereTraversalStep.java:60-83 and
+  # .../dsl/graph/GraphTraversal.java:2578.
+
+  @gap:child-body-labels
+  Scenario: g_V_asXaX_out_asXbX_whereXasXaX_outXknowsXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").out().as("b").where(__.as("a").out("knows")).count()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[3].l |
+
+  # The SAME body under filter(): `as("a")` rebinds the current object (an out-neighbour), so the
+  # body is `filter(__.out("knows"))` and no out-neighbour of anything has a knows edge.
+  @gap:child-body-labels
+  Scenario: g_V_asXaX_out_asXbX_filterXasXaX_outXknowsXX_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").out().as("b").filter(__.as("a").out("knows")).count()
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | d[0].l |
+
+  # The rebind is CONFINED to the child: a filter() consumer re-projects the parent domain, so the
+  # outer "a" still holds the source vertex afterwards.
+  @gap:child-body-labels
+  Scenario: g_V_asXaX_out_filterXasXaX_outX_selectXaX_name
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().as("a").out().filter(__.as("a").out()).select("a").values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | marko |
