@@ -294,8 +294,7 @@ fail-closed rule: **27** → **22** → **26** → **2** → **17**'s `tail`/`sa
 19. **Multi-label vertices — LANDED except two narrow tails** (60 of 67 in-scope scenarios pass).
     `labels()` as a CHILD BODY (3 scenarios — not label work, it is item 2 meeting a fan-out body), and
     `elementMap()` on EDGES (3, a pre-existing gap needing the IN/OUT direction tokens).
-    → [multi-label-elements](./2026-07-30-multi-label-elements-plan.md) (its header still says
-    "Phase E … BLOCKED", which is stale — fix when next in it)
+    → [multi-label-elements](./archive/2026-07-30-multi-label-elements-plan.md)
 
 19b. **No provider can declare a multi-label DEFAULT, so `@MultiLabelDefault` is untestable for
     everyone — an upstream gap and a good fork contribution.** All three GLVs skip its 10 scenarios.

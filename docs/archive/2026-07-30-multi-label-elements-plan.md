@@ -1,8 +1,13 @@
 # Multi-label vertices — `labels()` / `addLabel()` / `dropLabel()` / `dropLabels()`
 
-**Status: Phases A–D LANDED** (2026-07-30). L3 1529 → 1586, +57 scenarios; 52 of the 84
-`@MultiLabel` scenarios now pass. **Phase E is the remainder and is BLOCKED — see "Phase E" below,
-which now carries a decision that has to be taken before the code.**
+> **✅ CLOSED and archived 2026-07-31. Phases A–E all LANDED** — L3 1529 → 1598 across
+> `cbaab02`…`7f61f05`, and **60 of the 67 in-scope `@MultiLabel` scenarios pass** (84 exist; `tags.ts`
+> scopes the label-default tags out, see `docs/outstanding-work.md` 19b). The "Phase E is BLOCKED"
+> status this header carried until now was stale: the decision it was waiting on was taken and the
+> map-shape regimes shipped with it. Two narrow tails remain and are indexed as P2·19 — `labels()` as a
+> CHILD BODY (3 scenarios, ordinary child-seam work) and `elementMap()` on EDGES (3, a pre-existing gap
+> needing the IN/OUT direction tokens). Read the Phase E section below as the record of how the
+> decision was framed, not as open work.
 
 Storage decided and shipped: vertex labels normalize into `vertex_labels`, `edges.label` stays
 inline, no migration (there were no users). See the git history from `cbaab02` for the phase
