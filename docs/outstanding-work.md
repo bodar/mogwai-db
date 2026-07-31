@@ -247,6 +247,47 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    conformance cluster. **Medium.**
    → [path-history-substrate](./2026-07-18-path-history-substrate.md)
 
+20. **Results that are ordered only because SQLite scanned the convenient way — 20 of them, and 13
+   are L3 conformance scenarios.** Found by `mise run test:perturbed` (`82d011b`), which runs the
+   suite under `PRAGMA reverse_unordered_selects`; see `test/CLAUDE.md`. A failure there is never a
+   flake — it is a result the emitted SQL does not actually determine. Three distinct mechanisms,
+   and they are separate items of work:
+   - **`order().fold()` — the whole 13-scenario L3 block, and the one to take first.**
+     `lowerGlobalFold` DOES emit `json_group_array(… ORDER BY <encounter>)`, but only when the chain
+     carries an encounter, and an explicit `order()` CLEARS the encounter demand. That is sound for a
+     slice — `LIMIT` applies to the ordered relation inside the same query — and wrong for an
+     aggregate, because `json_group_array` reads rows in scan order, which SQLite chooses. So
+     `g.V().values('name').order().fold()` yields a list whose MEMBER order is arbitrary. Every one of
+     the 13 is `…order().fold().<local op>`. The fix is in the demand pass, not in `fold`: an
+     aggregate consumer must demand an encounter even behind an explicit `order()` (or `order()` must
+     MINT one from its own ordering rather than suppress it). *High — 13 conformance scenarios
+     currently pass by luck, and the same mechanism silently corrupts any `order().fold()` a user
+     writes.*
+   - **A RECORD stream carries no `encounter`**, so `recordSlice`'s `orderByEncounter` is inert and a
+     record slice picks an arbitrary window. The projection CTE's declared column list drops the
+     channel. This is `TraverserLayout` role preservation across a shape transition — the
+     channel-preservation ground the closed Phase 1 covered for merges, applied to projections.
+     *Med.*
+   - The remaining ~6 are ordinary test-side order sensitivity in `test/compiler/` and
+     `test/L2-sql/`; each needs reading to decide whether the ASSERTION is over-strong or the
+     traversal genuinely under-determined. Do not bulk-relax them.
+   **Clearing all three makes `test:perturbed` a gate**, which is the point of filing it as one item.
+
+21. **`union()` emits arm-major GLOBALLY; the reference is arm-major PER TRAVERSER.** Verified in
+   `vendor/tinkerpop/gremlin-core` — `BranchStep.standardAlgorithm` calls
+   `applyCurrentTraverser(this.starts.next())` for ONE traverser and then drains each option for it,
+   so `g.V().hasLabel('software').order().by('name').union(__.values('name'), __.identity())` is
+   `lop, v[lop], ripple, v[ripple]` upstream and `lop, ripple, v[lop], v[ripple]` here. Our
+   `arm_idx, arm_encounter` re-mint (`prefix/branch.ts`, `tail/variant.ts`) orders by arm FIRST
+   across the whole stream rather than within each origin.
+   **`emission-order.feature`'s comment "union emits arm 0 fully before arm 1 (TinkerPop's contract)"
+   is right for its own scenario and over-general** — that scenario is `g.V(4)`, a single traverser,
+   where the two readings coincide. Every `union` scenario in the corpus asserts *unordered*, which
+   is why nothing catches it. Before fixing, check whether the re-mint should partition by the input
+   origin; that is a one-clause change to a `ROW_NUMBER() OVER`, but it moves emission order for every
+   branch shape, so it needs the census as the instrument. *Med — a real divergence, currently
+   invisible to every gate.*
+
 17. **Share the row-ops — LANDED for the slice/dedup family (`2d7a3f2`, `8bbd3e3`).** The three
    near-verbatim slice builders are one implementation, `reprojectRows` (`tail/barrier.ts`, beside
    `lowerGlobalCount`), and `globalRowOps()` registers limit/skip/range/dedup as dispatch entries so
@@ -656,10 +697,15 @@ proves nothing — read the deferral clusters instead.
   a rename. → [tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md) §6
 - **`feature-support-matrix.md`'s legend over-promises** — generate the capability ratchet's per-step
   shape strip (`test/L5-properties/capability.test.ts`) into the matrix so its ✅ claim matches item 5c.
-- **Deterministic variant/record slicing shipped UNPINNED** — `variantSlice` now passes
-  `orderByEncounter: true` (`tail/variant.ts`), so `g.V().values('x').limit(2)` picks a deterministic
-  window; the instruction to pin each newly-deterministic result in an L4 `.feature` was not done, so
-  a user-visible semantic is live but unspecified.
+- ~~**Deterministic variant/record slicing shipped UNPINNED**~~ — **HALF LANDED `82d011b`, and the
+  other half turned out not to be true.** The VARIANT slice is genuinely deterministic and is now
+  pinned as three `ordered` scenarios in `variant-rowops.feature`. The RECORD slice is **not**:
+  measured, a record stream carries no `encounter` column at all (the projection CTE's column list
+  drops it), so `recordSlice`'s `orderByEncounter` is INERT and
+  `g.V().project('n').by('name').limit(2)` picks a different pair under perturbation. Deliberately
+  left unpinned — see the new item below. Also closed a harness gap on the way: L4 could express
+  `v[marko].id` but not `v[marko]`, so no addendum scenario could assert an ELEMENT result at all;
+  `canon` now compares a decoded element by id, which is upstream's own rule.
 - **L5's known-bad state is scattered across THREE hand-curated artifacts in two languages** —
   `known.ts` (`KNOWN`, fast-path divergences), `capability-baseline.ts` (`KNOWN_RAW_WITNESSES`, raw
   failures from generated compositions) and the `knownBroken` entries buried inside `laws.ts`
