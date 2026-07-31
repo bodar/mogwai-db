@@ -264,6 +264,40 @@ that `mogwai.graph.federate` already occupies, run by the executor's one `await`
 loop. So `io()` desugars to a `call()` on an internal service and inherits the whole async seam.
 The alternative — teaching the compiler a second async step kind — is the thing to avoid.
 
+### 3a. What the barrier seam does NOT give `io()` — the one open decision in phase 5
+
+Checked while phases 0–4 landed, because it decides how phase 5 is shaped. The barrier seam gives
+`io()` the ASYNC half for free and **none of the MUTATION half**:
+
+```
+apply(rows: readonly ForeignRow[], params: CallParams, source: FederationSource, depth: number)
+                                                    → Promise<ForeignRow[]>
+```
+
+`ServiceCallCtx` (`services/spi/types.ts`) carries `params`/`q`/`compileParams`/`registry`/`parent`/
+`scope`; `apply` adds the federation source and the depth. **Neither reaches a `GraphStore`, and
+neither could reach an `IoStore`** — because a barrier was designed for the one job it has, which is
+to RETURN detached rows for the executor to land in a relation, not to write to the graph. `io().read()`
+needs the opposite: mutate this graph's tables (through `BulkLoader`) and return **nothing** — and the
+"return nothing" half is already right, since the Gherkin scenarios assert an empty result.
+
+So phase 5 opens with a contract choice. Both options are real; the first is recommended:
+
+1. **Widen the barrier contribution to take a context OBJECT** — `apply(ctx)` with
+   `{rows, params, source, depth, store, io}` instead of four positional arguments. It is the smaller
+   diff (two call sites: `federate.ts` and the executor's segment loop), it removes a signature that
+   has already grown twice, and every later barrier service — `io().write()`, a federated
+   *materialize* (§5), a bulk-load service — needs exactly the same two capabilities. That makes it
+   generic substrate rather than a widening for one caller.
+2. **Make `io()` a WRITE plan instead of a barrier.** Writes already own the mutation seam
+   (`WritePlan.run(store)`), so the store is right there — but `run` is SYNCHRONOUS and R2 is not, so
+   this needs an async write plan, which is the same size of change pointed at a seam that currently
+   has the useful property of being sync end-to-end. It also splits `io()` across two plan kinds,
+   since `io().read()` would be a write and a future `io()`-as-source read would not.
+
+Worth noting what is NOT open: the loader, the format and the seam are all built, so phase 5 is now
+plumbing plus this decision. `loadGraphson(store, text)` is exactly what the service body calls.
+
 One honest consequence: `io()` in the *source* position means a traversal that today compiles to
 one synchronous statement becomes async. `framed`/`buffers` already throw a clear "use the async
 path" error for a federated traversal; `io()` joins that set. No new failure mode.
