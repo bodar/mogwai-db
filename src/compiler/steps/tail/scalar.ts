@@ -1,31 +1,21 @@
 import { derived, empty, list, paren, q, raw, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { hasUnresolvedOperand, operandDeps, resolveTraversalOperands } from './operand.ts';
 import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx, TYPE_PER_ROW, TYPE_STATIC, TYPE_UNKNOWN, typeCtxOf } from '../../plan/plan.ts';
-import { gtypeName, isNested, isOperatorArg, isOrderArg, isScopeArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
+import { isNested, isOperatorArg, isOrderArg, isScopeArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { layoutProjection, layoutProjectionMinting, layoutCols, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
 import { loweringStateOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec, SCALAR_TRANSFORMS } from './coerce.ts';
-import { normalizeTypeName } from '../../../gremlin/types.ts';
 import { perRowColumnOf, perRowCols, STATIC, staticTypeOf, UNKNOWN, type ScalarType, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { reprojectRows } from './barrier.ts';
+import { collectionAssert } from './child-shape.ts';
 
-/** If `step` is `is(typeOf(GType.X))` for a COLLECTION type, the canonical collection name
- *  ('list'|'set'|'map'); else null. list/set RETYPE a scalar value stream into a ListStream
- *  (the stored collection value becomes the `list` column) so the whole list substrate
- *  (unfold/count(local)/range/…) reuses it — see scalarCollectionRetype. MAP stays a plain
- *  scalar vtype filter (no MapStream relational unfold yet — deferred); a bare map value
- *  still frames whole via the per-row vtype path (execute.ts case 'value' → frameStoredValue). */
-export function collectionTypeOf(step: IRStep): 'list' | 'set' | 'map' | null {
-  if (step.name !== 'is') return null;
-  const pred = (step.args ?? [])[0];
-  if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf') return null;
-  const arg = pred.values?.[0];
-  const name = gtypeName(arg);
-  const c = name ? normalizeTypeName(name) : null;
-  return c === 'list' || c === 'set' || c === 'map' ? c : null;
-}
+// `is(typeOf(GType.LIST|SET))` RETYPES a scalar value stream into a ListStream (the stored
+// collection value becomes the `list` column) so the whole list substrate (unfold/count(local)/
+// range/…) reuses it — see scalarCollectionRetype below. MAP retypes to a MapStream the same way.
+// The assert is decoded by `collectionAssert` (child-shape.ts), the collection reading of the one
+// `typeOfAssert` every shape arm shares.
 
 /** Retype a scalar value stream at is(typeOf(LIST|SET)): keep only rows whose stored vtype
  *  matches `kind` and expose each stored collection value as the ListStream `list` column
@@ -656,7 +646,7 @@ export function lowerScalarRows(
     // is(typeOf(LIST)) over a stored-typed stream is a RETYPE (scalar→list), not a value
     // filter — stop so compileFromScalar builds the ListStream. Without a per-row stored
     // vtype (a computed scalar) it stays a fused is() that static-folds to empty.
-    if (step.name === 'is' && perRowColumnOf(stream.type) && collectionTypeOf(step) !== null) break;
+    if (step.name === 'is' && perRowColumnOf(stream.type) && collectionAssert(step) !== null) break;
     // An apply-style traversal operand needs a child scope per argument, which is a row
     // boundary rather than an expression the fuse can represent. Literal forms stay fused.
     if ((step.name === 'concat' && (step.args ?? []).some(isNested))

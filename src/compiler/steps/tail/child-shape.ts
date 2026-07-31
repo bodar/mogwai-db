@@ -19,7 +19,8 @@
 
 import { ALWAYS_PRODUCTIVE_TERMINAL } from '../../ir/productivity.ts';
 import type { Relation } from '../../../sql/kernel/q.ts';
-import { isColumnArg, isOperatorArg, isOrderArg, isPickArg, isScopeArg, isTokenArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { gtypeName, isColumnArg, isOperatorArg, isOrderArg, isPickArg, isPred, isScopeArg, isTokenArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { normalizeTypeName } from '../../../gremlin/types.ts';
 import type { AliasMap, TraverserLayout, ElementStream } from '../context/context.ts';
 import type { PropertyStream, ScalarStream, Stream } from '../context/stream.ts';
 import { type IRStep } from '../../ir/strategies.ts';
@@ -942,6 +943,57 @@ export const byAt = (bys: readonly any[][] | undefined, i: number): any[] | unde
 /** PURE. Classify the i-th round-robin by() group — the common `classifyBy(byAt(...))`. */
 export const classifyByAt = (bys: readonly any[][] | undefined, i: number): ByClass =>
   classifyBy(byAt(bys, i));
+
+// ---------- the is(typeOf(GType.X)) type-assert triage ----------
+//
+// `is(typeOf(GType.MAP))` is a TYPE ASSERT, not an ordinary is() predicate: over a stream that
+// already has the asserted shape it is the IDENTITY, and over one that does not it selects
+// nothing. Every shape arm meets it — list, scalar, group, path, projection — and each decoded it
+// inline: `pred.op === 'typeOf'` → `gtypeName` → uppercase-compare, five near-verbatim copies that
+// had already DRIFTED (the group arm THREW on a non-MAP assert where the path arm returned an empty
+// relation). This is the one decode.
+//
+// What a NON-matching assert means is deliberately NOT decided here, because it genuinely differs
+// per arm and both answers are defensible: an empty relation (the assert is a filter that matched
+// nothing) or a throw (the arm has no lowering for the shape the caller is claiming). Naming the
+// decode separately from the policy is what lets the two stop drifting without forcing one on both.
+
+export type TypeAssert =
+  /** `is(typeOf(GType.X))`; `gtype` is X in Gremlin's own UPPERCASE spelling ('MAP', 'PATH', …). */
+  | { readonly kind: 'gtype'; readonly gtype: string }
+  /** The predicate IS `typeOf`, but its argument names no GType we can read. */
+  | { readonly kind: 'opaque' }
+  /** Not an `is(typeOf(…))` at all — a different step, or an is() with a different predicate. */
+  | { readonly kind: 'none' };
+
+const NO_TYPE_ASSERT: TypeAssert = { kind: 'none' };
+
+/** PURE. Decode an `is(typeOf(GType.X))` follower. Total over the three outcomes so a reader must
+ *  say what it does with each — an arm that only cares about one GType should use `assertsGType`. */
+export function typeOfAssert(step: IRStep): TypeAssert {
+  if (step.name !== 'is') return NO_TYPE_ASSERT;
+  const pred = (step.args ?? [])[0];
+  if (!isPred(pred) || pred.op !== 'typeOf') return NO_TYPE_ASSERT;
+  const name = gtypeName(pred.values?.[0]);
+  return name ? { kind: 'gtype', gtype: name.toUpperCase() } : { kind: 'opaque' };
+}
+
+/** PURE. Does `step` assert exactly this GType? The boolean reading of `typeOfAssert`, for the arms
+ *  whose own shape answers exactly one GType (`'MAP'` for map/group/valueMap, `'PATH'` for path). */
+export const assertsGType = (step: IRStep, gtype: string): boolean => {
+  const a = typeOfAssert(step);
+  return a.kind === 'gtype' && a.gtype === gtype;
+};
+
+/** PURE. The COLLECTION reading of `typeOfAssert`: the canonical collection name a scalar value
+ *  stream is being retyped to (`is(typeOf(GType.LIST|SET|MAP))`), else null. A derived coarse view
+ *  of the one decode, not a second one. */
+export function collectionAssert(step: IRStep): 'list' | 'set' | 'map' | null {
+  const a = typeOfAssert(step);
+  if (a.kind !== 'gtype') return null;
+  const c = normalizeTypeName(a.gtype);
+  return c === 'list' || c === 'set' || c === 'map' ? c : null;
+}
 
 // ---------- the option-map choose() arm triage ----------
 //

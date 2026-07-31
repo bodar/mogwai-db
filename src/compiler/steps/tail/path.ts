@@ -1,4 +1,4 @@
-import { gtypeName, isNested } from '../../../gremlin/frontend.ts';
+import { isNested } from '../../../gremlin/frontend.ts';
 import { empty, list, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { type PathPos } from '../../../sql/kernel/render.ts';
 import { nodes } from '../../../sql/schema.ts';
@@ -9,7 +9,7 @@ import { dropLayoutAtBarrier, layoutCols, layoutProjection, scopePathCols, witho
 import { continueLowering, dispatchShapeTail, loweringStateOf, pathColumns, toListStream, toPathStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { tryLowerScalarChoose, tryLowerScalarCoalesce } from '../prefix/branch.ts';
 import { lowerGlobalCount } from './barrier.ts';
-import { byAt, childCtx, childSteps, classifyBy, classifyScalarChild, reuseCurrentFrame, type ChildFrame, type ChildScope } from './child-shape.ts';
+import { byAt, childCtx, childSteps, classifyBy, classifyScalarChild, reuseCurrentFrame, typeOfAssert, type ChildFrame, type ChildScope } from './child-shape.ts';
 import { pushChildScope, tryCompileScalarValueChild } from './child.ts';
 import { compileFromList } from './list.ts';
 import { type TailAcc } from './projection.ts';
@@ -375,12 +375,12 @@ const PATH_DISPATCH = new Map<string, ShapeTailFn<PathStream>>([
   // GROUPED (recursive) path counts its runs rather than its positions.
   ['count', (s, _step, _steps, at) => continueLowering(lowerGlobalCount(s), at + 1)],
   ['is', (s, step, _steps, at) => {
-    const pred = (step.args ?? [])[0];
-    if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf')
+    const assert = typeOfAssert(step);
+    if (assert.kind === 'none')
       throw new Error('is() after path() supports only is(typeOf(GType.PATH))');
-    const name = gtypeName(pred.values?.[0]);
-    // A path IS a Path → is(typeOf(PATH)) is identity; any other type matches nothing.
-    if (name && name.toUpperCase() === 'PATH') return continueLowering(s, at + 1);
+    // A path IS a Path → is(typeOf(PATH)) is identity; any other type matches nothing. (The group
+    // arm THROWS on the same non-matching assert; both are deliberate — see `typeOfAssert`.)
+    if (assert.kind === 'gtype' && assert.gtype === 'PATH') return continueLowering(s, at + 1);
     const p = s.rel.as('p');
     const cols = pathColumns(s.layout);
     const rel = s.q.cte(q`SELECT ${list(cols.map((c) => p.c[c]), ', ')} FROM ${p} WHERE 0`, cols);

@@ -1,4 +1,4 @@
-import { gtypeName, isColumnArg, isNested, isOrderArg, isScopeArg, isTokenArg } from '../../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isOrderArg, isScopeArg, isTokenArg } from '../../../gremlin/frontend.ts';
 import { empty, list, q, raw, Relation, value, type Expression } from '../../../sql/kernel/q.ts';
 import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type Shape } from '../../../sql/kernel/render.ts';
 import { edgeProperties, labels, vertexLabels, vertexProperties } from '../../../sql/schema.ts';
@@ -23,14 +23,14 @@ import { lowerElementDedup } from '../prefix/filter.ts';
 import { lowerScalarAggregate, tryLowerLocalAggregate } from '../prefix/sideeffect.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
 import { lowerCall } from './call.ts';
-import { BRANCH_SHAPE_ORDER, childCtx, childSteps, classifyBy, classifyListChild, classifyTotalScalarChild, isScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
+import { assertsGType, BRANCH_SHAPE_ORDER, childCtx, childSteps, classifyBy, collectionAssert, classifyListChild, classifyTotalScalarChild, isScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
 import { mintChildEncounter, tryCompileBranchChildAllCard, tryCompileCountChild, tryCompileListChild, tryCompileScalarModulations, type ScalarModulationSpec } from './child.ts';
 import { elementGroupSource, lowerGroup, lowerProperties, lowerScalarGroupCount, lowerValueMap, tryCompileMapChild } from './group.ts';
 import { lowerChooseOptions, lowerChooseOptionsScalar, lowerConcatScalar, lowerDateDiffScalar, lowerFormat, lowerFormatScalar, lowerMapScalar, lowerMath, lowerMathScalar, tryLowerFlatMap, tryLowerListChild, tryLowerLocalElement, tryLowerMapElement } from './mapscalar.ts';
 import { elementOrderDrop, orderProductivityFilter } from './modulation.ts';
 import { lowerPath } from './path.ts';
 import { tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './scalar-arm.ts';
-import { collectionTypeOf, lowerConstant, lowerScalarConstant, lowerScalarFilter, lowerScalarSack, lowerScalarSplit, scalarCollectionRetype, scalarMapRetype } from './scalar.ts';
+import { lowerConstant, lowerScalarConstant, lowerScalarFilter, lowerScalarSack, lowerScalarSplit, scalarCollectionRetype, scalarMapRetype } from './scalar.ts';
 import { compileSelectProject, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect, tryCompileRecordChild } from './select.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
@@ -184,14 +184,7 @@ export function foldTailAcc(steps: IRStep[], from: number): { acc: TailAcc; stop
 }
 
 /** is(typeOf(GType.MAP)) — the identity type-assert on a valueMap/map result. */
-function isMapTypeOf(step: IRStep): boolean {
-  if (step.name !== 'is') return false;
-  const pred = (step.args ?? [])[0];
-  if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf') return false;
-  const arg = pred.values?.[0];
-  const name = gtypeName(arg);
-  return !!name && name.toUpperCase() === 'MAP';
-}
+const isMapTypeOf = (step: IRStep): boolean => assertsGType(step, 'MAP');
 
 const hasColumnArg = (step: IRStep): boolean =>
   (step.args ?? []).some((a: unknown) => isColumnArg(a) && (a.column === 'keys' || a.column === 'values'));
@@ -823,7 +816,7 @@ const SCALAR_LIST_ONLY = new Set(['combine', 'intersect', 'difference', 'disjunc
 // A stored non-matching row is filtered out; a computed scalar (no stored vtype) can't be a
 // collection, so it falls through to the generic is() fold (which static-folds to empty).
 const scalarIsCollectionRetype: ShapeTailFn<ScalarStream> = (s, step, _steps, at) => {
-  const kind = collectionTypeOf(step);
+  const kind = collectionAssert(step);
   if (kind === 'list' || kind === 'set') {
     const listed = scalarCollectionRetype(s, kind);
     return listed ? continueLowering(listed, at + 1) : null;

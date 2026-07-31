@@ -1,4 +1,4 @@
-import { gtypeName, isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { empty, list, q, raw, value, values, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { NUMERIC_REDUCERS, REDUCERS } from '../../ir/step.ts';
@@ -25,7 +25,7 @@ import {
 import { dropLayoutAtBarrier, elemRel, layoutCols, layoutProjection, layoutProjectionMinting, partitionOver, patchLayout, type ElementStream, type LoweringState, type TraverserLayout } from '../context/context.ts';
 import { continueLowering, dispatchShapeTail, groupColumns, loweringStateOf, PROPERTY_PAYLOAD, toElementStream, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { globalRowOps, lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
-import { childCtx, childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyMapChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, ROOT_SCOPE, type ChildFrameStack, type ChildParent, type ChildUse } from './child-shape.ts';
+import { assertsGType, childCtx, childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyMapChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, ROOT_SCOPE, type ChildFrameStack, type ChildParent, type ChildUse } from './child-shape.ts';
 import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
 import { isMapLocalOrder } from './list.ts';
 
@@ -668,11 +668,10 @@ const asMapValue: ShapeTailFn<GroupStream> = (s, _step, _steps, at) => {
 
 const GROUP_DISPATCH = new Map<string, ShapeTailFn<GroupStream>>([
   // is(typeOf(MAP)) — a group IS a Map → identity. Any other is() predicate over a group is not a
-  // narrower version of the same question, so it throws here rather than declining.
+  // narrower version of the same question, so it throws here rather than declining. (The path arm
+  // answers the SAME decode with an empty relation; both are deliberate — see `typeOfAssert`.)
   ['is', (s, step, _steps, at) => {
-    const pred = (step.args ?? [])[0];
-    const tn = pred && typeof pred === 'object' && pred.op === 'typeOf' ? gtypeName(pred.values?.[0]) : null;
-    if (tn && tn.toUpperCase() === 'MAP') return continueLowering(s, at + 1);
+    if (assertsGType(step, 'MAP')) return continueLowering(s, at + 1);
     throw new Error('is() on a group value supports only is(typeOf(GType.MAP))');
   }],
   // count()/count(Scope.local) — the number of map entries (distinct keys). Scope.local on a Map

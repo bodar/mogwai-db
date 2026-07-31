@@ -7,14 +7,14 @@
 
 import { q, value, raw, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { predicateSql, scalarTx, compareKey, inferVtypeSql } from '../../plan/plan.ts';
-import { gtypeName, isNested, isOrderArg, isScopeArg, stepChain } from '../../../gremlin/frontend.ts';
+import { isNested, isOrderArg, isScopeArg, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from '../context/stream.ts';
 import { layoutProjection, layoutCols, type ElementStream } from '../context/context.ts';
 import { PER_ROW, STATIC, type Compiled, type ListOf, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf, type Engine } from '../../engine/deps.ts';
 import { firstOf, globalRowOps, lowerGlobalCount } from './barrier.ts';
-import { collectionTypeOf } from './scalar.ts';
+import { assertsGType, collectionAssert } from './child-shape.ts';
 import { REDUCERS } from '../../ir/step.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
@@ -439,7 +439,7 @@ const listCount: ShapeTailFn<ListStream> = (s, step, _steps, at) =>
 // stream's own `set` marker decides which token matches; a non-matching token / any other is()
 // predicate would filter to empty and has no worked-out list form yet, so it defers (fail closed).
 const listIs: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
-  const kind = collectionTypeOf(step);
+  const kind = collectionAssert(step);
   if ((kind === 'list' && !s.set) || (kind === 'set' && s.set)) return continueLowering(s, at + 1);
   return null;
 };
@@ -546,14 +546,7 @@ function mapOfSelect(step: IRStep, params: Record<string, any>): IRStep | null {
 }
 
 /** Is this an is(typeOf(GType.MAP)) identity assert? (A map value IS a map.) */
-function isMapTypeOf(step: IRStep): boolean {
-  if (step.name !== 'is') return false;
-  const pred = (step.args ?? [])[0];
-  if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf') return false;
-  const arg = pred.values?.[0];
-  const name = gtypeName(arg);
-  return !!name && name.toUpperCase() === 'MAP';
-}
+const isMapTypeOf = (step: IRStep): boolean => assertsGType(step, 'MAP');
 
 /** Extract one side (key=$[0] / value=$[1]) of a blob pair `je.value`. A scalar side is a
  *  {t,v} node kept as JSON (`->`, framed via frameTypedNode); an element side is a bare rowid

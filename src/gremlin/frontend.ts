@@ -600,6 +600,14 @@ function mapKeyOf(mk: any): any {
 
 export interface Pred { op: string; values: any[]; }
 
+/** Is this argument a parsed predicate? `Step.args` is deliberately `any[]` (the front-end
+ *  boundary), so every consumer used to open-code `!a || typeof a !== 'object' || a.op !== …`
+ *  before reading `.op`/`.values`. This is the narrowing guard, the same role `isTokenArg` and
+ *  friends play for the tagged arguments above — a cast that names `Pred` is also rename-safe
+ *  where a bare property read is not. */
+export const isPred = (arg: unknown): arg is Pred =>
+  !!arg && typeof arg === 'object' && typeof (arg as Pred).op === 'string';
+
 /**
  * The three infix predicate combinators, or null if `node` is a plain predicate.
  *
