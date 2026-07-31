@@ -277,7 +277,7 @@ test('alias-compare where — the co-creator idiom', () => {
 //
 // This asserts the DEFERRAL, not the answer: 'marko' is what TinkerPop gives, and reaching it means
 // reaching the modulator owner from a value-shaped parent (see
-// docs/2026-07-28-match-string-frontend-design.md). Pinned so it cannot regress to the wrong answer
+// docs/archive/2026-07-28-match-string-frontend-design.md). Pinned so it cannot regress to the wrong answer
 // — a test that accepted the vertex here would have locked the bug in.
 // `select(label).by(key)` composed in the MAIN chain but was declined at every CHILD position: the
 // shape classifier read only what the label held and never the modulator, so a by()-projected

@@ -4,24 +4,42 @@ The de-duplicated index of open work across the `docs/` corpus. **Each line sets
 why, where to start — not a spec.** The linked doc holds the rationale; the picking agent does the
 detailed validation and design. Live per-step capability: `feature-support-matrix.md`.
 
-**Refreshed** 2026-07-31 (channel-preservation Phase 1 closed; item 18 deleted, its two deliberate
-non-goals moved to won't-do). Conformance figures below are from the 2026-07-30 sweep against L3
-**1598 / 2267** — Phase 1 was a substrate tranche and moved no scenario. The denominator moved twice
+**Refreshed** 2026-07-31 (second pass — the error-assertion sweep below is new, and it found the
+largest unindexed defect class in this refresh). Conformance figures below are measured against
+**L3 1623 / 2267** (`l3-state.json`, this run; 1621 unique — the name-collision gap is expected, see
+won't-do). The denominator moved twice
 on 2026-07-30, both
 times to drop scenarios the harness cannot adjudicate rather than gaps of ours — see `tags.ts`,
 which now names which of three KINDS each exclusion is, and `runner-skips.test.ts`, which fails if
 the vendored runner's own skip set ever diverges from it. Item
 numbers are stable IDs — landed items are deleted and their numbers are not reused, because code
-comments and other docs cite them.
+comments and other docs cite them. **A deleted number must have no live citations left** — item 0
+was deleted with four still standing (item 22b).
 
-**The five committed test baselines are inputs to this index, not just gates.** `l3-state.json`
+**The committed test baselines are inputs to this index, not just gates.** `l3-state.json`
 (the ratchet floor), `census/{goldens,deferrals}.tsv` (the two-way behavioural baseline — **0
 `crashed` rows** as of `cdaa7b9`, down from 17; the antlr4ng patch of item 0f cleared every one, and
-item 0c with them), and the two hand-curated L5 ratchets — `L5-properties/known.ts` and
-`capability-baseline.ts`, plus the `knownBroken` entries inside `laws.ts`. A defect parked in any of
-them must ALSO appear here; a ratchet entry is tracked, not defended. **L5 derives its ordinary
-generated-input seed from `HEAD` and prints the `L5_SEED=<n>` reproduction command**, so each commit
-gets new coverage while CI and a local checkout execute the same corpus.
+item 0c with them), and the hand-curated L5 ratchets — `L5-properties/known.ts` (**empty, and that is
+the intended state**) and `capability-baseline.ts` (2 entries, **one of them now stale — item 22c**).
+The `knownBroken` list inside `laws.ts` is a **declared type with zero entries**: the field exists at
+`laws.ts:47` and nothing populates it, so the "three artifacts" framing in the debt section is now
+two-and-a-type, and `L5-properties/README.md:29` still claims two entries that are not there. A
+defect parked in any baseline must ALSO appear here; a ratchet entry is tracked, not defended.
+**L5 derives its ordinary generated-input seed from `HEAD` and prints the `L5_SEED=<n>` reproduction
+command**, so each commit gets new coverage while CI and a local checkout execute the same corpus.
+
+**The L3 telemetry's deferral buckets are NOT the whole failure set — read `scenarios[].firstFailingStep`
+too.** The buckets rank traversals that THREW; they are blind to a scenario that failed because we
+returned rows where the spec demands an error. That blind spot hid 60 scenarios (item 22).
+
+**L5 found nothing this refresh, and that is a finding about the instrument.** `mise run L5-random`
+plus five fixed seeds (5, 11, 27, 91, 143 at `L5_RUNS=3000`) were **35 pass / 0 fail, every run** — no
+divergence, no law break, no new raw witness. So the generated-input oracles are saturated at the
+current generator depth, and every defect below came from the L3 telemetry, the committed baselines or
+a code audit instead. Two consequences worth acting on rather than re-deriving: the lattice still
+covers 54 of the corpus's 131 step names (`table.test.ts` prints the gap), so **growing the generator
+is now higher value than running it more**; and all six runs printed *"2 known raw witness(es) not
+drawn by this seed"* — six seeds, neither witness ever drawn, which is item 22c.
 
 > **Verify an item's premise against the code before picking it — this index has been stale in BOTH
 > directions.** The cheapest check is usually a 10-line probe that compiles the traversals the item
@@ -37,6 +55,14 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 ---
 
 ## P1 — ceiling-raising generic-substrate lifts
+
+**Ranked entry point (2026-07-31).** Item numbers are stable IDs, not an ordering — read this line for
+priority. Correctness first, because two of these break the fail-closed rule: **27** (`Scope.local`
+slices emit `LIMIT NaN`) → **22** (33 scenarios where we answer a question the spec says to refuse, 24
+of them one merge guard) → **26** (nine of eleven root materializers discard emission order, which
+gates 4, 20 and 21) → **2** (the child seam) → **17**'s `tail`/`sample` cells and **28** (flag the
+seventh fast path) as the cheap ceiling lifts → **29** (barrier role policy, which makes 17 deferral
+sites answerable) → **3**'s `times(n)` unroll, still the biggest single L3 mechanism at 41 queries.
 
 0b. **Apply-contract consumers.** `ModulationContract` (`'produce' | 'apply' | 'presence'`) is
    available in `steps/tail/child.ts`; the imperative write path has the analogous
@@ -236,6 +262,20 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    and the first three cut ACROSS parent shapes. Both cautions above stand (not one substrate fix;
    not one item); the axis does not. Re-file before picking this up.
 
+   **The whole deferral surface re-clustered by root cause, 2026-07-31** — 258 typed deferral throws
+   of 488 `throw` sites, with L3 traversals lost beside each, ranked by "one lift, most sites cleared":
+   **D carried-state × barrier 17 sites → item 29's one policy table** · **C's
+   `path() through a mixed-shape X` sub-cluster 8 of branch triage's 20 sites → one
+   path-position-over-a-variant-merge lift** · **F `by()`/modulator vocabulary 42 sites / 21 scenarios,
+   the highest site count in the codebase → ~24 collapse into a shared "resolve a by() to a
+   sort/projection Expression over any stream" seam** (`classifyBy` is the one decode but its `ByClass`
+   has no `'column'` arm, so every host re-decides what it accepts — the residue is genuine, `by(T.x)`
+   on shapes with no token) · **A shape-tail ceiling 14 sites but 85 scenarios**, the highest
+   scenarios-per-site ratio here at 6:1, because each is an unbounded fallback throw covering every
+   unregistered step name — that is item 17's matrix. Then E repeat-body 26/66 (item 3), G write 31/92
+   (items 10 + P3-write), K label/`select(Pop.*)` 17/11 (~6 share item 1's `AliasEntry` root), B
+   child-seam 13/32 (items 2/5).
+
    **The ~30 row-op cells are now their own item — take item 17 FIRST.** The 2026-07-29 audit measured
    the (shape × row-op) matrix at 55/100 gaps and confirmed `RelationalCardinality` is the named axis
    that makes sharing safe, so that slice is no longer "per-step dispatch" work at all. What is left
@@ -334,6 +374,140 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    branch shape, so it needs the census as the instrument. *Med — a real divergence, currently
    invisible to every gate.*
 
+28. **`expandRepeatBody` is a SEVENTH specialized lowering and the only one the differential cannot
+   see.** `branch.ts:875-887` picks between three recursive-term body renderings — the generic keyed
+   relation (`tail/keyed.ts`), `singleMove` (`branch.ts:766`) and `expandRepeatBody`
+   (`branch.ts:602-652`) — and the gate `flatOk || sackCol || trackArray ? null : keyedChildRelation(…)`
+   (`branch.ts:800`) means the flat expansion **always wins** where it recognises the body. Its own
+   header calls it *"a private movement/filter mini-compiler: its own direction table, its own edge
+   aliases, its own has() handling — a second implementation of what the StepFns already do"*, kept as
+   the frontier-lazy fast path. But it is **not a `FastPath` object**: no `FastPathConfig` flag, no
+   `equivalentWhen`, no `runFastPath`. The six real ones (`plan.ts:488`, `branch.ts:297`,
+   `predicate.ts:140`, `movement.ts:22`, `scalar-arm.ts:257`, `bulk.ts:258`) all carry
+   `equivalentWhen: 'test/L5-properties/differential.test.ts …'`; this one is invisible to L5, on the
+   highest-risk seam there is — a hand-rolled direction table inside a recursive CTE.
+   Adding `repeatBodyExpansion` to `FastPathConfig` (`options/fast-paths.ts:7-29`) and gating `flatOk`
+   makes every body where both routes apply (`out()`, `out().has(k,v)`) differential-testable.
+   **Do this BEFORE item 3's `times(n)` unroll** — it is the instrument that would catch a repeat-body
+   regression the way the census caught item 17's 42-traversal loss, and item 3 is the biggest L3
+   mechanism (41 queries). *Medium-High — instrument integrity on the seam with the most to lose.*
+
+29. **The barrier side of the carried-role contract has no policy table, so Phase 1's totality
+   guarantee is half a guarantee.** `LAYOUT_ROLE_POLICY`
+   (`context/context.ts:288-298`) is a `Record<keyof TraverserLayout, …>` whose stated point is that
+   *"adding a role to `TraverserLayout` fails the build until its policy is declared here"* — but it
+   covers ARM MERGE only. `dropLayoutAtBarrier` (`context/context.ts:617-628`) hand-constructs a fresh
+   literal with four fields, and every other role in `TraverserLayout` is optional, so **a role added
+   tomorrow compiles clean and is silently dropped at all 15 barrier sites** — the exact
+   "carried field dropped at a barrier" class the shape doc measured at 33% of defects. Same hole at
+   `branch.ts:1114` and at the ~9 `traverserLayout: { aliases: new Map(), origins: [] }` seed literals.
+   A `BARRIER_ROLE_POLICY` beside the merge table, with `dropLayoutAtBarrier` derived from it, also
+   makes the **17 `carried-state × barrier` deferral sites** answerable in one place (they all say some
+   form of *"X after `as()`/`path()`/`sack()` not yet supported"* and each declines because no rule
+   says what the barrier does to that role). **This is NOT one of Phase 1's two deliberate non-goals** —
+   those were `finishElementMerge` and `bulk`-through-`match()`, both on the merge side. *Medium.*
+
+26. **The root materialization boundary DROPS emission order for 9 of the 11 shapes — so every
+   ordering item above only reaches the wire on scalar results.** Verified 2026-07-31:
+   `materializeScalarRoot` (`tail/materialize.ts:37`) is the **only** root materializer that emits
+   `ORDER BY <traverserLayout.encounter>`; grep the file and there is exactly one such clause across
+   eleven `materialize*Root` functions. List, variant, property, record, mapEntry, path, group, map
+   and foreign roots all project `SELECT <cols> FROM <rel>` bare — **even when the final CTE
+   physically declares an `encounter` column**. Measured under `reverse_unordered_selects`:
+   `g.V().order().by('name').values('name')` is stable, while `…order().by('name').properties()`,
+   `…order().by('name').local(__.out().fold())` and
+   `g.V().hasLabel('software').order().by('name').union(__.values('name'),__.identity())` all FLIP.
+   The union case is the sharpest: `mergeArmRelation` computes
+   `ROW_NUMBER() OVER (… ORDER BY arm_idx, arm_encounter)` into `encounter` *precisely* to establish
+   arm-major order, and the root throws it away.
+   **This reframes items 4, 20 and 21.** Item 20 names `recordSlice`'s *inert* `orderByEncounter` (an
+   ABSENT encounter); this is the opposite and larger mechanism — a PRESENT encounter discarded at the
+   boundary, for nine shapes at once. Item 21 (`union` emission order) cannot even be measured until
+   the root determines order. The lift is one `orderByEncounter(stream, rel)` applied inside
+   `materializeStream` (`materialize.ts:244-258`), guarded on `traverserLayout.encounter` — mechanical,
+   and it is a precondition for making `test:perturbed` a gate. **High.**
+
+27. **Seven fail-closed VIOLATIONS: `Scope.local` slices emit malformed SQL.** Reproduced directly
+   this refresh — these do not defer, they emit broken SQL:
+   `g.V().limit(Scope.local,1)` and `g.V().range(Scope.local,0,1)` → **`no such column: NaN`**;
+   the same on a variant stream (`g.V().union(…).limit(Scope.local,1)`); and
+   `g.V().project('n').by('name').skip(Scope.local,1)` → **`near "FROM": syntax error`**.
+   Cause: three slice builders read `Number(s.args[0])` off the `{scope:'local'}` TOKEN and splice the
+   `NaN` into `LIMIT`, never reaching `globalRowOps`' `isLocalScope` decline
+   (`tail/barrier.ts:14-15,141-143`) — `projection.ts:104-106` (`TAIL_MODIFIERS`),
+   `variant.ts:172-177` (`variantSlice`), `select.ts:654-671` (`recordSlice`'s local branch, which
+   produces an empty column list). Adjacent wrong MESSAGE, same root: `g.V().union(…).dedup(Scope.local)`
+   reports *"dedup(label) not yet supported"* — the scope token read as a label argument
+   (`variant.ts:182`). **Item 17 already built the guard; these three call sites bypass it.** **High —
+   the fail-closed rule is the one invariant this project does not trade.**
+
+22. **Validation the spec MANDATES and we do not perform — 33 scenarios, and they are silent wrong
+   answers on the write path.** Measured this refresh from `l3-telemetry.summary.json`
+   `scenarios[].firstFailingStep`: **60 failing scenarios fail AT the error-assertion step**
+   (`Then the traversal will raise an error…`), and 33 of them fail because we **returned a result**
+   where the spec requires a throw. This is the fail-closed rule inverted — we do not mis-answer a
+   question we declined, we answer one we should have refused. Four families:
+   - **`option(onCreate|onMatch)` may not override a key already bound by the `merge()` argument —
+     24 scenarios, all `mergeV`/`mergeE`, and we perform the write.** `g.mergeV([(T.label):'a']).
+     option(Merge.onCreate,[(T.label):'b'])` must raise *"option(onCreate) cannot override values from
+     merge() argument"*; we return `Vertex{id:1, label:'b'}`. Same for the `Direction.OUT`/`IN`, `T.id`
+     and `T.label` overrides on `mergeE`, their `withSideEffect` dynamic twins, and the hidden-key
+     (`~id`/`~label`) prohibitions in the merge map, `onCreate` and `onMatch` alike
+     (`MergeVertex.feature`, `MergeEdge.feature`). One shared check over the merge argument vs each
+     option map, at the point the option map is resolved — the whole family is one guard. **High.**
+   - **A string step in `Scope.local` over a LIST must raise, not pass the list through** — 6
+     (`asString`, `asString(local)`, `lTrim/rTrim/trim(local)`, `concat` over a `List`). We return
+     the list unchanged.
+   - **`groupCount()` accepts two `by()` modulators** — 2. The `aggregate`/`dedup` siblings already
+     reject it (with our own wording, item 23); `groupCount` does not reject it at all.
+   - `g.V(1).property(Cardinality.single,'friend',__.out('knows').values('name'))` — 1.
+   Start at the merge family: it is 24 of the 33, is one guard, and is the only one that WRITES.
+   → `MergeVertex.feature` / `MergeEdge.feature`, `steps/write/`
+
+22b. **Item 0 was deleted from this index while four live citations still point at it — and the
+   defect it named is FIXED, so all four now describe trunk wrongly.** `POSITION_MOVEMENTS`
+   (`steps/tail/path.ts:49`) **does** include `OTHER_V` today, and
+   `test/L4-addendum/where-under-otherv-context.feature` is its test — so the §6 debt bullet's
+   instruction ("must land with a test FIRST") is discharged. Still asserting the old, wrong story:
+   `src/compiler/ir/step.ts:38` ("a real open bug for `POSITION_MOVEMENTS`"),
+   `test/compiler/step-vocabulary.exec.test.ts:11` ("a KNOWN BUG … pinned here as-is on purpose" —
+   and its `COLLAPSE_MOVES / POSITION_MOVEMENTS: the nine, no otherV` test now asserts a locally
+   rebuilt set, NOT the real `POSITION_MOVEMENTS`, so the name misdescribes what is checked),
+   `test/L5-properties/README.md:29`, and this file's own §6 bullet.
+   `docs/2026-07-28-property-based-testing-l5.md` lists four defects against the same dead number and
+   **all four probe clean at HEAD**. *Low as code, Medium as integrity — the index's stable-ID promise
+   is only worth something if a deletion sweeps its citations.*
+
+22c. **The capability ratchet cannot tell "fixed" from "not drawn", so a stale entry sits forever.**
+   `capability.test.ts` computes `stale` only over witnesses the seed actually DREW, and reports it as
+   a `console.log`, never a failure — every run this refresh printed *"2 known raw witness(es) not
+   drawn by this seed"*. Re-run directly, entry 1 of `KNOWN_RAW_WITNESSES`
+   (`g.V(1).where(__.identity()).has('age').hasId(2).repeat(__.both('created').in('created')).times(1).dedup()`,
+   banked as `no such column: edges.label`) now **executes cleanly** — it is fixed, and the ratchet
+   never noticed. Entry 2 (the path-regime syntax error) reproduces, minimal repro confirmed:
+   `g.V(1).simplePath().project('a').by(__.repeat(__.in('knows')).times(2))` → `near "FROM": syntax
+   error` (P3 recursive-path tails). The list is TWO fixed strings; re-running both unconditionally
+   costs nothing and turns the stale check into a real one. Entry 1 also carries **no diagnosis**,
+   which its own file header forbids. *Low — but it is the ratchet-rots-silently mechanism, and this
+   index exists because of it.*
+
+23. **27 scenarios where we DO reject and only our WORDING differs — and several are deferrals
+   mis-phrased as permanent gaps.** The other half of item 22's 60. We correctly refuse
+   `g.V().aggregate('x').by('name').by('age')`, but say *"aggregate() with more than one by()
+   modulator not yet supported"* where the spec asserts *"Aggregate step can only have one by
+   modulator"*. **The wording is the cheap part; the conceptual defect is "not yet supported".**
+   Two `by()`s on `aggregate` is invalid Gremlin forever, not a gap we might close — spelling it as a
+   deferral puts it in the deferral telemetry that RANKS THIS INDEX, so permanent validation errors
+   are inflating the gap buckets we prioritise from. Split the message vocabulary: a spec violation
+   gets the spec's text, a genuine gap keeps "not yet supported".
+   **Not all 27 are free — check the REASON before adopting the text.** Where we reject for the same
+   reason it is a rename (`aggregate`/`dedup` two-`by()`, `emit`/`until`/`times` without `repeat`,
+   `mergeE` missing `outV` → *"Out Vertex not specified"*, `addE` endpoints, `ReadOnlyStrategy`).
+   Where we reject for a DIFFERENT reason it is a real gap that merely coincides — `choose().option()`
+   expects *"Traversal is not allowed as a Pick token"* and we say *"choose().option() not yet
+   supported"*; `asBool()`/`asDate()`/`asNumber()` over a list expect *"Can't parse…"* and we defer on
+   the list shape. Those stay in their own items. *Medium — cheap, and it cleans the instrument.*
+
 17. **Share the row-ops — LANDED for the slice/dedup family (`2d7a3f2`, `8bbd3e3`).** The three
    near-verbatim slice builders are one implementation, `reprojectRows` (`tail/barrier.ts`, beside
    `lowerGlobalCount`), and `globalRowOps()` registers limit/skip/range/dedup as dispatch entries so
@@ -354,9 +528,37 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      establish it was not.
    - **`Scope.local` is deliberately outside the shared ops** — a local slice addresses a shape's
      MEMBERS, a different question from slicing rows, so each shape keeps its own member builder.
+     **That decision is sound and its EXECUTION is broken in three places — see item 27**, where the
+     local branch splices `NaN` into `LIMIT` instead of declining.
    - Still hand-written per shape and NOT yet shared: `order` (needs a per-shape comparable key, so
      it is not a row-algebraic op), `tail`, and the `mapEntry`/`map` reducers. `order` is the
      valuable one and is genuinely a different problem — do not assume this pattern extends to it.
+   - **Re-measured 2026-07-31 at 15 ops × 10 producers = 150 cells, 86 gaps, and the item's own
+     figure VERIFIED: item 17's five ops are 50 cells with exactly 4 gaps, all `group`.** Two
+     corrections and one addition:
+     - The CAUSAL claim above is wrong. Those four `group` cells do not reach `reprojectRows` and
+       decline on `cardinalityOf` — `globalRowOps` is **not registered into `GROUP_DISPATCH` at all**,
+       so they fall to the fallback throw (`group.ts:692`). The outcome is the same; the mechanism a
+       reader would go looking for is not there.
+     - `variant.ts:165-188` still **re-declares** `limit`/`skip`/`range`/`dedup` verbatim, including
+       three error strings byte-identical to `barrier.ts:150-153`, minus the `isLocalScope` guard. So
+       "the three slice builders are one implementation" is true of `reprojectRows` and not yet true
+       of the variant table — and that omission IS item 27's defect.
+     - **`tail` and `sample` are 19 of the 82 remaining cells and fall to ONE mechanical lift of the
+       mechanism this item already built** — `tail(n)` over a `perRow` relation is
+       `ORDER BY encounter DESC LIMIT n`, `sample(n)` is `ORDER BY RANDOM() LIMIT n`; two
+       `SLICE_SUFFIX` entries (`barrier.ts:90-97`) plus a reverse flag on `reprojectRows`. Note
+       **`tail()` does not exist on the ELEMENT stream at all** (`g.V().tail(2)` →
+       `step not implemented: tail()`) though `filter/Tail.feature` carries 22 scenarios, and
+       `sample()` exists nowhere. This is the cheapest remaining ceiling lift in the matrix.
+     The other 63 gaps split: 42 current-object aggregates (`fold`/`sum`/`max`/`aggregate`/`groupCount`
+     — ARCHITECTURAL, they need the "expression denoting the traverser's value" authority that would
+     generalise `foldMember`, `barrier.ts:186`), 7 `order` (architectural, as stated), 6 `is` (now
+     mechanical — `typeOfAssert` unblocked it), 5 `unfold` (shape-interpreting, correctly per-shape
+     forever). **`lowerScalarRows` (`scalar.ts:640-730`) is the one shape tail that never got the
+     `dispatchShapeTail` transposition** — an if-chain, not a Map, despite `f3c4606` claiming all
+     eleven. It owns the only global `tail` implementation, so it is the reference any shared `tail`
+     lift must read first.
    **Remaining from the original item:** the ~35 genuinely per-step cases of 5c, and the
    `ResultStream` residue. What follows is the original framing, kept for the 5c cross-reference.
 
@@ -420,7 +622,7 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    an incidental `ElementStream` signature — which is the most reusable thing in the design doc.
    Residuals, all fail-closed: an undirected edge carrying a VARIABLE; a terminal pattern declaring
    no variables; `__.match("…")` in a nested position.
-   → [match-string-frontend-design](./2026-07-28-match-string-frontend-design.md)
+   → [match-string-frontend-design](./archive/2026-07-28-match-string-frontend-design.md)
 
 
 7c. **Predicate operands that are TRAVERSALS — narrow tails only.** The four shapes (constant,
@@ -445,9 +647,9 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    `predicate.ts`'s own header asserts it, and `until()` routes through the same call (it correlates
    on the recursive-walk row, the one consumer with no materialized fallback).
    The residue, and it is the doc's own open CHECK: **`correlatedReduce`'s E-form aggregate still
-   hand-writes an `edgeProperties` join** (`…outE().values(k).<sum|min|max|mean>()` inside
-   `where`/`is` — `predicate.ts` ~line 90). Its COUNT sibling already goes through the child; only the
-   aggregate does not. Before touching it, grep tests + corpus for that shape and decide whether to
+   hand-writes an `edgeProperties.as('xep')` join** (`…outE().values(k).<sum|min|max|mean>()` inside
+   `where`/`is` — `prefix/predicate.ts:95-97`, re-confirmed 2026-07-31). Its COUNT sibling
+   (`:81-84`) already goes through `compileCorrelatedChild`; only the aggregate does not. Before touching it, grep tests + corpus for that shape and decide whether to
    extend it or let it fail closed — "do NOT silently regress a working shape". Bare `out()`/`in()`
    deliberately stays out (the value would come from the neighbour vertex, a different join).
    *Low — a narrow residue, no longer a cross-layer refactor.*
@@ -499,7 +701,9 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
 19. **Multi-label vertices — LANDED except two narrow tails.** L3 1529 → 1598 across phases A–E
     (`cbaab02`…`7f61f05`); **60 of the 67 in-scope `@MultiLabel` scenarios pass**. Storage, steps,
     predicates, writes, the harness and the map-shape regimes are all in — design of record:
-    [multi-label-elements](./2026-07-30-multi-label-elements-plan.md). What is left:
+    [multi-label-elements](./2026-07-30-multi-label-elements-plan.md), whose **header is stale**: it
+    still says "Phase E is the remainder and is BLOCKED", which the map-shape regimes landing refutes.
+    Fix the header when next in that doc. What is left:
     - ~~A VERTEX ELEMENT on the wire reports ONE label~~ — **LANDED**, with the payload authority
       it needed. The estimate was right that the vertex `label` COLUMN was a scalar pick, and wrong
       about the fix being regime-aware: GraphBinary's `{label}` field IS a list and the client reads
@@ -552,6 +756,22 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
     Meanwhile `tags.ts` scopes both label-default tags out and `runner-skips.test.ts` fails if the
     runner's skip set changes, so a fix upstream surfaces here instead of silently keeping scenarios
     out of scope.
+
+24. **`tree()` — 12 scenarios, the largest unimplemented-step bucket, and it was parked on a false
+    premise.** The won't-do entry said the JS GLV stubs `DataType.TREE`; it does not — the vendored
+    client ships a full `TreeSerializer.js` with both directions and a wire-format comment citing the
+    Java serializer as authoritative, so the result is decodable end to end. What is missing is ours:
+    `step not implemented: tree()`. `tree()` is a path-history consumer (it folds the traversers'
+    paths into a nested map), so scope it against P3's recursive-path tails and item 6 before
+    estimating — the wire half is free, the path half is not. **Medium.**
+
+25. **Unimplemented-step matrix-fill, with this refresh's L3 counts.** Ranked, all fail closed today:
+    `subgraph()` 6 · `branch()` 5 (also P3, its own family) · `discard()` 4 · `sideEffect()` 4
+    (P3) · `sample()` 3 at global position · `index()` 2 (item 14) · `with()` 2 (item 13) ·
+    `asString()` 2 · `fail()` 2 · `hasNot()` 1 (P3). Separately, **`select(Pop.mixed).by(…)` is 5
+    scenarios** and is not a missing step but an unimplemented `Pop` mode. Counted from
+    `l3-telemetry.summary.json` buckets this refresh. *Low each — matrix-fill, listed so the counts
+    are not re-derived every sweep.*
 
 ---
 
@@ -649,14 +869,29 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
 
 ## Internal debt / give-backs (Low)
 
-- **LSP refactoring tooling — four scripts landed (`8c33450`), four items remain.**
-  `docs/2026-07-30-lsp-tooling-plan.md` is the continuation plan, written against that commit with
-  every number measured. Highest value is wiring `scripts/arch-check.ts` into `ci` — it is written,
-  run, and adversarially verified (it catches an injected `analyzeChain` call from a Pass, exit 1),
-  so only the `mise` task remains. Also open: a `lint` task for the three unused-code tsconfig flags
-  (46 real errors to clear first; generated `parser/` cannot be exempted at config level — the plan
-  records all four mechanisms measured and the one untested option), plus a dead-export sweep and
-  `moveToFile`.
+- ~~**LSP refactoring tooling — four scripts landed (`8c33450`), four items remain**~~ — **ALL FOUR
+  LANDED.** `mise.toml` has `[tasks.arch]`, `[tasks.lint]` and `[tasks.orphans]`, and
+  `[tasks.ci] depends = ["check","lint","arch","test","build"]`; the lint backlog went 76 → 0
+  (`3181430`/`fda7a27`/`0635cab`); the dead-export sweep is `scripts/orphans.ts`; `moveToFile` split
+  into a landed `scripts/move.ts` plus a measured-blocked SYMBOL move.
+  `docs/2026-07-30-lsp-tooling-plan.md` self-reports all four resolved. **What is left is smaller and
+  is four policy calls, not code:**
+  - **Four module-boundary decisions `mise run orphans` surfaces but cannot settle** — `alias.ts`'s
+    symmetric accessor vocabulary (only `entryTypeTag`/`nodeEntry`/`elemEntry` are used),
+    `isMidBarrierPoint` (`tail/call.ts`), `SCALAR_ROW_STEPS` (`tail/scalar.ts` — check it against the
+    "vocabulary declared twice" hazard first) and the 86 `local-only` exports. Each is a policy call
+    about what a module's public surface IS; decide the policy once rather than drifting into it one
+    sweep at a time. → plan §3b.
+  - **`compile()` — the named public entry — is exercised only by tests**, while production goes
+    through `compilePlan`. Left standing deliberately: a finding about the API surface, not dead code.
+  - **No tool can move a SYMBOL between files** — `tsc --lsp` advertises no `refactor.*` code-action
+    kind (measured), so relocating a symbol across the `src/gremlin/` ↔ compiler boundary (locked
+    decision 5) is hand work. The real question is whether `tsserver` is worth losing "the same
+    TypeScript `mise run check` uses". *Low-Med.* → plan §4.
+  - **`parser/` as a separately-built package** is the one config route never tested for exempting
+    generated code from the three unused-code flags (tsc would consume `.d.ts`, so `skipLibCheck`
+    covers it) — it would move them out of `scripts/lint.ts` into `tsconfig.json`, at the cost of
+    reintroducing a build step into a build-free project. Needs a human call. → plan §2.
 
 **There is no TODO/FIXME/XXX/HACK anywhere in `src/compiler/`, `src/sql/` or `src/execute.ts`**
 (verified 2026-07-29; the one repo-wide hit is `src/serializers.ts`, an upstream-TinkerPop note). Debt
@@ -721,28 +956,49 @@ proves nothing — read the deferral clusters instead.
   each with its own `Not a legal range` validation, because a local slice indexes MEMBERS and its
   bounds interact with the shape's own length (`tail` needs `fields.length`). Deliberately left: a
   shared local derivation needs a "member count" authority that does not exist yet.
+  **The remaining count is UNDERCOUNTED — three more survive beyond the two named**
+  (re-measured 2026-07-31): `projection.ts:714,1116,1143` (the element `TailMods` derivation),
+  `scalar.ts:669,708` (`lowerScalarRows`' if-chain) and `variant.ts:172-177`. The first and last are
+  the source of item 27's malformed SQL, so this bullet and that item are the same code — fix them
+  together, and note that the "member count authority" gap is the REASON to decline, not a reason to
+  compute `NaN`.
 - **The `ResultStream` residue is the one worthwhile `Shape` retirement** — six orphan `Shape` kinds
   serving `ResultStream` across 13 `toResultStream` call sites, and ~14 of item 5c's parent-shape
   failures. [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md) §9 says
   retiring *that* is finishing a migration (unlike merging `Stream` into `Shape`, which it refutes).
   Zero corpus demand, so it is a give-back, not a feature.
 - **The remaining `as any` reads are a live rename-safety hole** — each is a field read a future LSP
-  rename yields `undefined` for, silently and invisibly to `tsc`. **Re-scoped 2026-07-30: the two
-  files this item used to name (`tail/path.ts`, `tail/scalar-arm.ts`) are now clean.** 35 `as any`
-  remain in `src/`, but most are benign row/bind casts; the rename-unsafe FIELD READS are the ones to
-  convert — `(s as any).modulators` (`prefix/sack.ts:46`), `(s as any).productiveBy`
-  (`prefix/sideeffect.ts:152`, `prefix/filter.ts:205-206`), `(arg as any).nested`
-  (`tail/list.ts:532`), `(a as any).nested` (`ir/strategies.ts:856`), `(pred as any).values`
-  (`ir/strategies.ts:471,474`) and `(nestedPrefix[0] as any).args` (`tail/group.ts:290,398`).
-  Convert to a cast that NAMES a real type as encountered; it is the only defence against defect class
-  1 of the 2026-07-29 rename sweep.
-- **§6 vocabulary-set derivation** — reducers and movement families remain: `{count,sum,min,max,mean}` still appears verbatim at
-  6 sites and ~10 movement spellings persist. One family per commit, gated on byte-identical
-  `test/L2-sql/` snapshots. **Do not fix a membership bug inside a rename** — `POSITION_MOVEMENTS`
-  missing `otherV` (item 0's path defect) must land with a test FIRST, or the fix arrives disguised as
-  a rename. → [tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md) §6
-- **`feature-support-matrix.md`'s legend over-promises** — generate the capability ratchet's per-step
-  shape strip (`test/L5-properties/capability.test.ts`) into the matrix so its ✅ claim matches item 5c.
+  rename yields `undefined` for, silently and invisibly to `tsc`. **Re-measured 2026-07-31: `cb8eabf`
+  cleared all seven sites this item used to name, and every one of those paths now greps zero.** The
+  count is **26** in `src/`, down from 35, and most are benign row/bind casts. The rename-unsafe FIELD
+  READS that remain have simply relocated — `(s as any).productiveBy` (`tail/projection.ts:91`),
+  `(a as any).nested` (`tail/child-shape.ts:214,239`, already behind an `isNested` filter that
+  narrows) and `(pred as any).values` (`tail/operand.ts:162,164,178,179,191`, exactly the shape the
+  `isPred` guard was built for in `ir/strategies.ts`). Convert to a cast that NAMES a real type as
+  encountered; it is the only defence against defect class 1 of the 2026-07-29 rename sweep. **The
+  pattern worth noting: this item has now been "cleared" once and refilled from elsewhere, so treat it
+  as a standing sweep, not a task with an end.**
+- **§6 vocabulary-set derivation — three of its four counts have moved; ~4 movement lists left.**
+  Re-measured 2026-07-31: the reducer list is now ONE site (`NUMERIC_REDUCER_NAMES`,
+  `ir/step.ts:69`), `{path,simplePath,cyclicPath}` is one (`PATH_FAMILY`, `ir/step.ts:66`), and the
+  movement BASES landed (`unionOf`/`VERTEX_MOVES`/`EDGE_MOVES`/`ENDPOINT_MOVES`/`OTHER_V`,
+  `ir/step.ts:47-62`). What actually remains is **~4 hand-spelled movement lists** that do not yet
+  derive from those bases: `ir/analyze.ts:60`, `tail/child-shape.ts:293`, `ir/strategies.ts:210`,
+  `tail/bulk.ts:178`. One family per commit, gated on byte-identical `test/L2-sql/` snapshots.
+  **The old caution here — "`POSITION_MOVEMENTS` missing `otherV` must land with a test FIRST" — is
+  DISCHARGED**, not pending: `POSITION_MOVEMENTS` includes `OTHER_V` (`tail/path.ts:49`) and
+  `test/L4-addendum/where-under-otherv-context.feature` is the test. The rule it illustrates still
+  holds: do not fix a membership bug inside a rename. See item 22b for the citations that never caught
+  up. → [tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md) §6
+- **`feature-support-matrix.md`'s legend over-promises, and one of its claims is now false.** Two
+  separate defects. (a) Generate the capability ratchet's per-step shape strip
+  (`test/L5-properties/capability.test.ts`) into the matrix so its ✅ claim matches item 5c. (b) The
+  matrix states **"There are currently NO 🐞 rows — no form is known to mis-execute"** (line 19), which
+  is untrue: items 2 (`choose().option(Pick.none)`, the filter-body label rebind), 20 (the group-value
+  barrier scope) and 21 (`union` emission order) each name a live wrong answer, and item 22 adds 33
+  more. The legend points readers at `known.ts` for the diagnoses, and `known.ts` is EMPTY — so the
+  mark has no source of truth. Either wire 🐞 to this index's wrong-answer items or say plainly that
+  the matrix does not track them.
 - ~~**Deterministic variant/record slicing shipped UNPINNED**~~ — **HALF LANDED `82d011b`, and the
   other half turned out not to be true.** The VARIANT slice is genuinely deterministic and is now
   pinned as three `ordered` scenarios in `variant-rowops.feature`. The RECORD slice is **not**:
@@ -756,7 +1012,13 @@ proves nothing — read the deferral clusters instead.
   `known.ts` (`KNOWN`, fast-path divergences), `capability-baseline.ts` (`KNOWN_RAW_WITNESSES`, raw
   failures from generated compositions) and the `knownBroken` entries buried inside `laws.ts`
   (metamorphic violations — the highest-severity class, and the easiest of the three to miss because it
-  is not a file of its own). Each has exactly ONE reader. **The cost is measured, not hypothetical:**
+  is not a file of its own). Each has exactly ONE reader.
+  **Re-measured 2026-07-31 and two of the three are now empty, which sharpens the item rather than
+  closing it:** `KNOWN` is empty (intended), and `laws.ts` has the `knownBroken` **field declaration at
+  line 47 and zero entries** — so it is a type, not a list. `README.md:29` still advertises "two
+  diagnosed contexts carried as `knownBroken` … both open in `docs/outstanding-work.md` item 0"; both
+  the entries and item 0 are gone, and all four defects that README names probe clean at HEAD. Fix the
+  README as part of this. Only `capability-baseline.ts` holds live entries (2, one stale — item 22c). **The cost is measured, not hypothetical:**
   the 2026-07-29 refresh found the now-landed L5 discovery gap only by running `L5-random` by hand,
   and the skill that refreshes this index had never looked at any of the three. The obvious target is
   one committed file per the `l3-state.json` precedent. **The HEAD-derived seed raises the stakes
@@ -790,6 +1052,13 @@ proves nothing — read the deferral clusters instead.
 - **Review-fix duplication residue (C1/C2/C3 + D)** — property-list framing / tie-break / `PARTITION
   BY ordinal` dups; the `execute.ts` pre-parsed-`pmeta` divergence is latent-correctness. Status
   unconfirmed — treat as open. → [review-fix-plan](./2026-07-22-review-fix-plan.md)
+- **The anchor rule is enforced by a script, not by the type system.** `mise run arch` statically
+  checks the REACHABILITY half (no Pass reaches `ChainFacts` or the fast-path layer) by walking LSP
+  call hierarchy, which is the enforceable part; the bright line itself — *a Pass may CONSULT shape, it
+  may never CONSTRUCT it* — is still not expressible in a type, so a Pass that constructs shape is
+  caught by a build step rather than by the compiler. This is the shape doc's §8 step-5 "independently"
+  ask, and it is a real gap, not a restatement of the gate.
+  → [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md) §8
 - **Upstream `q`-kernel surface to lazyrecords**.
   → [q-kernel-sql-builder](./2026-07-12-q-kernel-sql-builder.md)
 - **Land the TinkerPop fork's upstream payloads.** The submodule tracks `origin/master` and the fork
@@ -827,7 +1096,11 @@ proves nothing — read the deferral clusters instead.
   `*_properties` tables + static covering indexes.
 - **"L3 count has duplicate names → miscount"** → *not a bug*; distinct scenarios normalize to the
   same name across feature files. See `test/CLAUDE.md`.
-- **`tree()`** → parked (JS GLV stubs `DataType.TREE`, zero conformance value).
+- ~~**`tree()`** → parked (JS GLV stubs `DataType.TREE`, zero conformance value)~~ → **PREMISE FALSE,
+  moved to P2·24 (2026-07-31).** The vendored client has a complete bidirectional `TreeSerializer.js`
+  (serialize + async deserialize, doc-commented *"authoritative from Java TreeSerializer"*), and
+  `tree()` is the **largest single unimplemented-step bucket in L3 at 12 scenarios**. Neither half of
+  the parking reason survives.
 - **Two-`union` merge / `optional` fast-path cleanup** → keep the fast path.
 - **BulkSet "wire dead-end"** → corrected; wire bulking landed and is live.
 - **Cross-DO federation via `ATTACH` coordinator** → rejected; per-request `call(federate)` landed

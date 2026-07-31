@@ -24,7 +24,7 @@ const isLocal = (s: IRStep): boolean => (s.args ?? []).some((a: unknown) => isSc
 //
 // A list's members ride in ONE of two physical encodings, uniformly per list (the
 // uniformity is the whole point — see the dead end in
-// docs/2026-07-25-type-channel-unification.md, where mixing them within a list broke the
+// docs/archive/2026-07-25-type-channel-unification.md, where mixing them within a list broke the
 // typed readers):
 //
 //   bare      — the member IS the SQL value. Correct exactly when the SQLite storage class

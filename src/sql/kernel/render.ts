@@ -124,7 +124,7 @@ export type { ValueType };
 // This is a COMPILE-TIME property; the physical encoding stays a per-site choice (bare when
 // the SQLite storage class already determines it, a sibling column for row-preserving ops,
 // a {t,v} envelope only inside a JSON blob). Conflating the two is what caused the dead end
-// recorded in docs/2026-07-25-type-channel-unification.md.
+// recorded in docs/archive/2026-07-25-type-channel-unification.md.
 export type ScalarType =
   | { kind: 'static'; type: ValueType }   // a cast, a typed literal, count()→long
   | { kind: 'perRow'; column: string }    // a stored-vtype column — the only heterogeneous-safe case

@@ -2,9 +2,9 @@
 
 **Status: Phases 1–6 all closed as of 2026-07-31** (Phase 6 as a committed NEGATIVE result — see the
 execution log). This is a broad application of
-the pattern distilled in [the `ScalarType` retrospective](./2026-07-28-scalartype-refactoring-pattern.md).
+the pattern distilled in [the `ScalarType` retrospective](../2026-07-28-scalartype-refactoring-pattern.md).
 It is deliberately not a proposal for a universal shape algebra: the evidence in
-[the shape vocabulary architecture](./2026-07-28-shape-vocabulary-architecture.md)
+[the shape vocabulary architecture](../2026-07-28-shape-vocabulary-architecture.md)
 rules that out. The target is narrower and more consequential: make information
 preservation explicit at every compiler boundary, then apply that discipline where
 measurement says it prevents real defects.
@@ -19,7 +19,7 @@ and CI passed after that merge.
 **The whole channel was RENAMED on 2026-07-29** (`Carry`/`Carried` → `LoweringState`/
 `TraverserLayout`, and every `carry*` function with them). The completed-tranche log below keeps the
 names those commits actually used — it is a record, not instructions — so read it against the rename
-map in [tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md). Everything
+map in [tinkerpop-core-engine-alignment](../2026-07-29-tinkerpop-core-engine-alignment.md). Everything
 from Phase 1 onward is remaining work and uses the CURRENT names.
 
 Completed preservation tranches:

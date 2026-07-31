@@ -36,7 +36,7 @@ Every shape vocabulary answers exactly one of three questions, and nothing in th
 the P-vs-W mismatch** — two physical encodings of one logical value get two `Shape`s but one
 `Stream`, or the reverse.
 
-This is the same category error `docs/2026-07-25-type-channel-unification.md:80` already recorded:
+This is the same category error `docs/archive/2026-07-25-type-channel-unification.md:80` already recorded:
 *"Uniform typing is a compile-time property; the physical encoding stays free. Conflating those two
 is what caused the dead end."* `ScalarType` (`render.ts:120`) is the only vocabulary in the codebase
 that got the separation right, and it is the template for everything worth doing below.
@@ -130,7 +130,7 @@ or a hand-written copy so their call sites would not move.
    carries **no type channel at all**, and `recordFieldColumns` emits only `${prefix}_v`, so a
    sibling vtype column is not even possible: `project('x').by('someUuid')` frames by JS inference
    while the same value via `values()` frames exactly. The step-3 build order in
-   `2026-07-25-type-channel-unification.md:127` names this and was never done.
+   `archive/2026-07-25-type-channel-unification.md:127` names this and was never done.
 2. **`VALUETYPE_TO_CANONICAL`** — its comment (`types.ts:150-153`) says it replaced three
    hand-written copies. It missed `execute.ts:355` (`VTYPE_TO_VALUETYPE`, a 14-entry verbatim
    duplicate) **[verified]**, and `write.ts:66`/`plan.ts:144` survive as pure renames.

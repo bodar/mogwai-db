@@ -17,7 +17,7 @@
 //   V().hasLabel("person").as("a").match(__.as("a").out("knows").hasLabel("person").as("b"))
 //
 // Design rationale, the measured translation table, and the residuals:
-// docs/2026-07-28-match-string-frontend-design.md.
+// docs/archive/2026-07-28-match-string-frontend-design.md.
 import { CharStream, CommonTokenStream, BaseErrorListener, type ParserRuleContext } from 'antlr4ng';
 import { GQLLexer } from '../../parser/gql/GQLLexer.ts';
 import { GQLParser } from '../../parser/gql/GQLParser.ts';

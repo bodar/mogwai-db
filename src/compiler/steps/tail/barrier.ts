@@ -181,7 +181,7 @@ const LOSSLESS_VTYPES = raw(`('string', 'double', 'int')`);
  *   unknown — nothing to carry; bare members, inferred per value at the wire.
  *
  * Uniform per list is the invariant: mixing encodings within one list is what broke the
- * reverted attempt (docs/2026-07-25-type-channel-unification.md).
+ * reverted attempt (docs/archive/2026-07-25-type-channel-unification.md).
  */
 export function foldMember(input: ScalarStream, src: Relation): { member: Expression; of: ListOf } {
   const perRow = perRowColumnOf(input.type);

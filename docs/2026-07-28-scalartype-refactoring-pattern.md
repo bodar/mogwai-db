@@ -1,7 +1,7 @@
 # `ScalarType` as a pattern — the one vocabulary refactor that paid, and how to reuse it
 
 **Status: retrospective, 2026-07-28. No code change.** Distilled from
-`2026-07-25-type-channel-unification.md` (the migration that landed it) and §5 of
+`archive/2026-07-25-type-channel-unification.md` (the migration that landed it) and §5 of
 `2026-07-28-shape-vocabulary-architecture.md` (the measurement that vindicated it). Those two
 docs hold the narrative; this one states the *pattern* so the next vocabulary cleanup can copy
 it deliberately rather than rediscover it. Line citations and counts re-verified against `82992c7`
@@ -62,7 +62,7 @@ that.
 **3. Compile-time property, free physical encoding.** The type is uniformly KNOWN either way;
 whether it rides bare, as a sibling column, or in a `{t,v}` envelope inside a JSON blob stays a
 per-site choice. Conflating the two IS the reverted dead end
-(`2026-07-25-type-channel-unification.md:78-101`): always-wrapping breaks the list transforms,
+(`archive/2026-07-25-type-channel-unification.md:78-101`): always-wrapping breaks the list transforms,
 because `ORDER BY` over `{"t":"int","v":5}` string-orders JSON.
 
 **4. The fine case records what it is a case OF.** `perRow` carries a *column name*, so a
