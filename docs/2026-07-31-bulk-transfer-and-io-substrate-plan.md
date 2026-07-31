@@ -281,7 +281,20 @@ to RETURN detached rows for the executor to land in a relation, not to write to 
 needs the opposite: mutate this graph's tables (through `BulkLoader`) and return **nothing** — and the
 "return nothing" half is already right, since the Gherkin scenarios assert an empty result.
 
-So phase 5 opens with a contract choice. Both options are real; the first is recommended:
+**SUPERSEDED 2026-07-31 — the answer is DI, and it is its own piece of work:
+`docs/2026-07-31-di-scopes-and-services-plan.md`.** Widening the barrier signature (either positionally
+or into a context object) is a *third* copy of a workaround the codebase already has twice: `source` is
+already in `AppScope` and `depth` already in `CompilerScope`, and they are threaded positionally anyway
+because a service — a module-level constant in a registry of module-level constants — has no way to
+receive a dependency at construction. Upstream does the opposite (`ServiceFactory.createService` is built
+by the provider, so `execute(ctx, in, params)` carries only per-call values). Once services are DI-wired,
+**`io()` needs no contract change at all**: it reads `store`/`io` like any other dependency, and
+`apply(rows)` keeps only what is genuinely per-call. That doc also carries the request-tier split the
+same smell exposed (`params`/`federationDepth`/`sourceOptions` are request-shaped; `q` is duplicated
+between `CompilerScope` and `LoweringState`), the `--list` enumeration constraint an internal service
+hits, and the decision NOT to gate compile-time store access.
+
+The two options below are kept as the record of what was considered:
 
 1. **Widen the barrier contribution to take a context OBJECT** — `apply(ctx)` with
    `{rows, params, source, depth, store, io}` instead of four positional arguments. It is the smaller
@@ -296,7 +309,8 @@ So phase 5 opens with a contract choice. Both options are real; the first is rec
    since `io().read()` would be a write and a future `io()`-as-source read would not.
 
 Worth noting what is NOT open: the loader, the format and the seam are all built, so phase 5 is now
-plumbing plus this decision. `loadGraphson(store, text)` is exactly what the service body calls.
+plumbing on top of the DI consolidation. `loadGraphson(store, text)` is exactly what the service body
+calls.
 
 One honest consequence: `io()` in the *source* position means a traversal that today compiles to
 one synchronous statement becomes async. `framed`/`buffers` already throw a clear "use the async

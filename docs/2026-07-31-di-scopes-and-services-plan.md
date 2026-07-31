@@ -1,0 +1,149 @@
+# Dependencies vs arguments: a request tier, and services in DI
+
+**Status: design, agreed 2026-07-31 (not yet built).** Origin: phase 5 of
+`2026-07-31-bulk-transfer-and-io-substrate-plan.md` needed `io().read()` to reach a `GraphStore` and an
+`IoStore`, and the barrier contribution's signature had nowhere to put them. The first answer was to
+widen the signature into a context object. **That was the wrong shape**, and noticing why turned a
+one-signature question into a consolidation this doc scopes: the project already has a DI mechanism and
+a stated rule for exactly this, and three places quietly work around it.
+
+The rule, from `src/compiler/CLAUDE.md`, is already ours:
+
+> **Dependencies vs state are separate — do not conflate.** Ambient capabilities … are DI, grouped by
+> lifecycle into `AppScope`/`CompilerScope`. … Never put a dependency on `LoweringState` or thread it
+> through signatures — add a scope field + an `Engine` accessor instead.
+
+## 1. What the code says today
+
+**a. The barrier signature is a hand-rolled copy of the scopes.**
+`Contribution` (`services/spi/types.ts`) declares:
+
+```ts
+apply(rows: readonly ForeignRow[], params: CallParams, source: FederationSource, depth: number)
+```
+
+Of those four, `source` is **already in `AppScope`** and `depth` is **already in `CompilerScope`**
+(`federationDepth`). Only `rows` is genuinely per-call. `params` is per-call but is *also* on
+`ServiceCallCtx`, which the service already receives at `resolve` time — and `federate.ts` writes
+`resolve: () => …`, ignoring its ctx entirely, which is *why* it needs everything positionally. Adding
+`store` and `io` here would repeat the workaround twice more.
+
+**b. `q` and `params` live in a scope AND in state.** `CompilerScope` holds `q`/`params`;
+`LoweringState` (`compiler/steps/context/context.ts:185`) holds `q`/`params`/`sideEffects`/
+`traverserLayout`. The same two values are a dependency and state at once, which is the conflation the
+rule above forbids.
+
+**c. There is no request tier, so the request-shaped fields are re-threaded by hand.**
+`createCompilerScope` is called four times in `src/` — once for the root compile
+(`compiler.ts:60`) and three times for nested sub-compiles (`engine/engine.ts:181,540,547`) — and every
+nested call restates `params` and `federationDepth`. They are restated because there is nothing above
+the compile tier to inherit them from. Meanwhile the HTTP/RPC edge mints no per-request object at all:
+the router calls `manager.executor(id).framedAsync(gremlin, params)` and the values flow as arguments.
+
+**d. Services have no construction-time dependencies.** `standardRegistry` / `extendedRegistry`
+(`services/standard.ts:26-29`) are module-level CONSTANTS built from module-level service objects. A
+service can therefore depend on nothing: everything it needs must arrive per call, which is (a)'s root
+cause. Upstream does the opposite — `Service.ServiceFactory.createService(isStart, params)` is built by
+the provider, so a Java service captures its graph access at construction and `execute(ctx, in, params)`
+carries only per-call values.
+
+## 2. The shape
+
+**Three dependency tiers, and `LoweringState` keeps only state.**
+
+| entry | tier | why |
+|---|---|---|
+| `registry` (services), `fastPaths`, `source`, `labelCardinality`, `io` | **App** — one per process/graph | `scopes.ts` already states the lifecycle: *"app scope is per-graph (one Executor, one store, one scope)"* |
+| `params`, `federationDepth`, `sourceOptions` | **Request** — one per client request / federated hop | a hop to a sibling graph IS a new request, with its own params and depth |
+| `store` | **Request** (executor-minted, see §4) | per-graph by lifetime, but placed by *visibility* |
+| `q`, `traverserLayout`, `sideEffects` | **not a scope — `LoweringState`** | per-compile mutable accumulation, already threaded as state |
+
+So `CompilerScope` → `RequestScope` is **not a rename**: three fields move up into a tier that does not
+exist yet, and `q` moves out (down into the state it is already in). Whether the compile tier vanishes
+entirely depends on one check the implementation must make first: **does anything read `scope.q`?**
+`engine.ts` passes `q` *into* `createCompilerScope`, so something does — if that reader can take the
+`Query` from the `LoweringState` it already holds, the tier goes; if not, a two-field compile scope stays
+and the split is App → Request → Compile.
+
+**Services become scope entries.** `createRegistry([...])` becomes a function of the app scope, so
+`federate` takes `source`, and the `io` service takes `io` + `store`, at construction. `Contribution`
+then shrinks to what is genuinely per-call:
+
+```ts
+| { kind: 'stream';  build(ctx: ServiceCallCtx): Stream }
+| { kind: 'barrier'; apply(rows: readonly ForeignRow[]): Promise<ForeignRow[]> }
+```
+
+with `params` reaching the service through the ctx it already gets (or staying an argument — see the
+open question in §5). `ServiceCallCtx` loses `registry` (a dependency) and keeps only what a *call* is.
+
+**And `ServiceCallCtx` should probably be renamed.** Upstream's `ServiceCallContext` is
+`{traversal, step}` plus `generateTraverser`/`split`, documented for *"Barrier services that want to
+produce their own Traversers that maintain path information"* — a need we do not have (we lower to SQL;
+path rides in columns). Ours is a compile-time collaborator bag wearing that name, which is the trap the
+root `CLAUDE.md` names: *"never copy a TinkerPop implementation name because an approximate analogue
+exists."*
+
+## 3. What this buys, beyond phase 5
+
+- **`io()` needs no contract change at all** — it reads its dependencies like every other service.
+- **A service can depend on another service** by naming it, instead of reaching through
+  `ctx.registry.get(name)`.
+- **Three re-threaded arguments disappear** from the nested-compile call sites.
+- **One duplication resolves** (`q`/`params` in two places).
+
+## 4. Constraints the implementation must respect
+
+1. **The apparent registry↔scope cycle is fine BECAUSE `LazyMap` is lazy.** `AppScope` holds
+   `registry`; the registry's members need the `AppScope`. `set('registry', (scope) => …)` resolves on
+   first use, after the scope is fully declared. With eager construction this would be a real cycle.
+2. **The `.set()` stays in the ENTRY POINTS, never in `scopes.ts`.** `src/services/CLAUDE.md`:
+   *"Do not make the compiler core import the service impls."* `scopes.ts` may declare the `registry`
+   TYPE (it already does); only `application.ts` / `bun/server.ts` / `cloudflare/worker.ts` / the L3 host
+   may name `standard.ts`.
+3. **`--list` must keep enumerating exactly the reference set.** The official `g_call` /
+   `g_callXlistX` scenarios assert it, which is why `extendedRegistry` (with `mogwai.graph.federate`)
+   is production-only and the conformance host takes the reference registry. An INTERNAL `io` service
+   needs the same treatment as the directory service, which excludes itself from its own `list()`
+   (`DIRECTORY_SERVICE_NAME`, `spi/types.ts`). Getting this wrong is a visible L3 regression, so it is
+   the cheapest thing to check first.
+4. **A service cycle fails at first use, not at compile.** Lazy resolution turns A→B→A into a stack
+   overflow when the service is called. Nothing prevents it; a clear error would need a resolution guard.
+5. **`store` placement is a visibility decision, not a lifetime one.** Its lifetime is per-graph
+   (`AppScope`), but putting it there makes a store reachable from COMPILE-time code, which today is
+   impossible because no compile-time type has the field. Keeping the property costs nothing if the
+   store is minted by the executor into the request tier and `compile()` is handed app + compile only —
+   enforced by the type, needing no new `mise run arch` rule. **Decided 2026-07-31: prefer that
+   placement, and do not add a gate.** The risk of someone reading rows at compile time and
+   interpreting in JS (locked decision #3's failure mode) is real but unlikely, and if it ever happens
+   a gate can be added then — the interesting fact is that #3 does not *state* this boundary; the
+   boundary is what keeps #3 self-enforcing.
+
+## 5. Open questions, deliberately not answered here
+
+- **Does `params` stay an argument or move to the ctx?** Upstream keeps it an argument
+  (`execute(ctx, in, params)`) while getting dependencies by construction. Either is defensible for us;
+  the ctx already carries it, so the argument may be redundant.
+- **Does the compile tier survive?** §2's `scope.q` check decides it.
+- **Do the two param TIERS upstream has matter to us?** `createService(isStart, params)` (static —
+  which service INSTANCE you get) vs `execute(…, params)` (per call). We collapse both into one map.
+  The one place it brushes against us is `io("x.json").with(IO.reader, IO.graphson).read()`, where the
+  reader choice is upstream a *static* param selecting the codec. Collapsing is simpler and probably
+  right; recorded so the next reader knows it was a choice.
+
+## 6. Sequencing
+
+This is a **behaviour-preserving refactor**: no traversal changes its answer, so the census
+(`mise run census`) is the gate that matters, alongside `mise run ci`. Suggested order, each landing green:
+
+1. `--list` check (constraint 3) — cheapest, and it bounds what an internal service may be called.
+2. Services as scope entries; `Contribution.apply` shrinks; `federate` stops taking `source`/`depth`
+   positionally.
+3. The request tier: `CompilerScope` → `RequestScope`, `params`/`federationDepth`/`sourceOptions` move
+   up, nested compiles stop restating them.
+4. `q` out of the scope (or a two-field compile tier), resolving the `LoweringState` duplication.
+5. `ServiceCallCtx` renamed to whatever it actually is.
+6. **Then** phase 5 of the bulk-transfer plan lands on top: `IoStore` in `AppScope`, an `io` service
+   reading it, `io()` desugaring to a `call()`.
+
+Steps 1–2 alone unblock phase 5; 3–5 are the consolidation that makes it not a workaround.
