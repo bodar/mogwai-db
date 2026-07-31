@@ -12,6 +12,7 @@ import { compileInject } from './inject.ts';
 import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../../../services/fts-index.ts';
 import { layoutCols, type ElementStream } from '../context/context.ts';
 import { DEFAULT_VERTEX_LABEL, LABEL_MUTATION_UNSUPPORTED } from '../../../api.ts';
+import { validateLabel, validatePropertyKey } from './validate.ts';
 
 // ---------- nested-traversal write arguments (read spine reuse) ----------
 //
@@ -410,6 +411,7 @@ export function applyVertexProperty(
   meta: Record<string, any> | null, cardinality: 'single' | 'list' | 'set', typeNode: TypeNode | null = null,
 ): void {
   if (val && typeof val === 'object' && 'nested' in val) throw new Error('property() with a traversal value not yet supported');
+  validatePropertyKey(key); // the waist: every vertex property key reaches storage through here
   const metaJson = meta ? JSON.stringify(meta) : null;
   // A collection value (list/map/set) is stored as a self-describing typed-JSON tree in the
   // value column (bind the JSON text, wrap jsonb(?)) — a raw JS array/Map bind would throw at
@@ -444,6 +446,7 @@ export function applyVertexProperty(
 // to JSONB like vertex properties; scalars bind raw (storage class preserved).
 export function insertEdgeProperty(store: GraphStore, edge: number, key: string, val: any, vtype: CanonicalType | null, typeNode: TypeNode | null = null): void {
   if (val && typeof val === 'object' && 'nested' in val) throw new Error('property() with a traversal value not yet supported');
+  validatePropertyKey(key); // the waist, edge side (see applyVertexProperty)
   const collection = isCollectionType(vtype);
   const storedVal = collection ? collectionValueJson(val, typeNode) : storedScalar(val, vtype);
   const valPh = collection ? 'jsonb(?)' : '?';
@@ -663,7 +666,9 @@ function nodeExtId(store: GraphStore, rowid: number): any {
 // edge row carries no props (retired flat blob) — each property becomes an
 // edge_properties row, typed via the cluster's captured argTypes (else JS-inferred).
 function insertEdge(engine: Engine, store: GraphStore, c: EdgeCluster, src: number, tgt: number, params: Record<string, any> = {}, sideEffects?: Map<string, any>): any {
-  const { id, extId } = insertRow(store, 'edges', ['src', 'label', 'tgt'], [src, store.labelId(c.label), tgt], c.edgeUid);
+  // The edge-label waist. An edge carries exactly one label and so never reaches `labelNames`;
+  // the rule is the same one (validate.ts).
+  const { id, extId } = insertRow(store, 'edges', ['src', 'label', 'tgt'], [src, store.labelId(validateLabel(c.label)), tgt], c.edgeUid);
   // Each inline prop VALUE routes through resolveSpecValue (a nested value is evaluated
   // correlated at the new edge). The response echoes the RESOLVED values, never the raw
   // {nested} args.
@@ -787,7 +792,20 @@ function resolveEndpoint(engine: Engine, store: GraphStore, spec: any, d: { alia
 // propTypes carries each prop VALUE's canonical type: from the map's TypeNode (a literal
 // subtype or a typed client's wire DataType) for a literal value, or from the read shape
 // for a nested value (filled by resolveMergeSpec). null = infer from the JS value.
+/**
+ * WHICH map this is. The spec-mandated validation differs per role and cannot be re-derived from
+ * the spec's contents — `option(onMatch)` admits only String keys (plus `T.label`, for multi-label
+ * replacement) where the merge argument and `option(onCreate)` admit the element's id/label (and,
+ * for `mergeE`, its endpoint directions). Carrying it on the spec is what lets ONE validation run
+ * at the ONE place every map becomes concrete, instead of three near-copies at three call sites.
+ */
+interface MergeRole {
+  readonly op: 'mergeV' | 'mergeE';
+  readonly kind: 'merge' | 'onCreate' | 'onMatch';
+}
+
 interface MergeSpec {
+  readonly role: MergeRole;
   /** A LIST because a merge map's T.label may be `["a","b"]`; null = the key was absent. */
   label: string[] | null | { nested: any };
   id: any;
@@ -848,9 +866,78 @@ function resolveMergeArg(raw: any, sideEffects: Map<string, any> | undefined, pa
   throw new Error(`merge whole-arg traversal __.${names} not yet supported`);
 }
 
-function normalizeMergeMap(raw: any, typeNode: TypeNode | null, sideEffects?: Map<string, any>, params: Record<string, any> = {}, defaultCardinality: Cardinality = 'single'): MergeSpec {
+/**
+ * The spec-mandated shape of ONE merge map, checked against its role — `MergeElementStep.validate`
+ * in gremlin-core, which we did not perform at all. Two rules, both about the KEY:
+ *
+ *  - a token key must be one this role admits (`getAllowedTokens`): `mergeV` takes `T.id`/`T.label`,
+ *    `mergeE` adds `Direction.IN`/`OUT`, and `option(onMatch)` takes none of them except `T.label`,
+ *    because onMatch writes properties onto an element whose identity is already settled;
+ *  - a token key may not carry a null value, which would otherwise reach `labelNames(null)` and
+ *    write the LABEL `"null"`.
+ *
+ * The rules about the identifier ITSELF (hidden namespace, empty) are `validate.ts`, and they run
+ * on the RESOLVED spec instead — a nested map key produces its string per driver, so a compile-time
+ * check would see a traversal, not `~id`.
+ */
+function validateMergeKey(role: MergeRole, k: any, v: any, kind: ReturnType<typeof classifyMergeKey>['kind']): void {
+  if (kind === 'prop') return; // a String key; validate.ts checks it once resolved
+  const token = kind === 'label' ? 'T.label' : kind === 'id' ? 'T.id' : kind === 'outV' ? 'Direction.OUT' : 'Direction.IN';
+  if (role.kind === 'onMatch') {
+    // T.label survives: onMatch replaces/extends an element's labels where the graph allows it.
+    if (kind !== 'label')
+      throw new Error(`option(onMatch) expects keys in Map to be of String - check: ${token}`);
+  } else {
+    const allowed = role.op === 'mergeV' ? kind === 'label' || kind === 'id' : true;
+    if (!allowed)
+      throw new Error(`${role.op}() and option(onCreate) args expect keys in Map to be either String or [id, label] - check: ${token}`);
+  }
+  if (v === null || v === undefined)
+    throw new Error(`${role.op}() does not allow null Map values - check: ${String(k && typeof k === 'object' && 'elementName' in k ? k.elementName : token)}`);
+}
+
+/**
+ * The element-identifier rules over a RESOLVED merge map's property keys.
+ *
+ * The two storage waists (`labelNames`, `applyVertexProperty`/`insertEdgeProperty`) already reject
+ * a bad identifier on the way IN, and a merge map's labels go through `labelNames` — but a merge
+ * map's property keys are SEARCH criteria first and only reach a writer if the branch happens to
+ * create. `g.mergeV(['~id':1])` against a graph that matches would otherwise write nothing, find
+ * something, and never be told the key was illegal. So the map is validated as a map, whichever
+ * branch it takes.
+ */
+function validateResolvedMergeSpec(spec: MergeSpec): void {
+  for (const k of Object.keys(spec.props)) validatePropertyKey(k);
+}
+
+/**
+ * `MergeElementStep.validateNoOverrides`: `option(onCreate)` may RESTATE a key the merge argument
+ * already bound, but not change it — the merge argument IS the existence criterion, so an onCreate
+ * that contradicts it would create something the search could never have found.
+ *
+ * Compared over the normalized spec rather than the raw maps, which is why the four token slots are
+ * named individually: `label`/`id`/`outV`/`inV` ARE the map's `T.label`/`T.id`/`Direction.*` keys
+ * after classification. A slot still holding a nested traversal is skipped — two traversals are not
+ * comparable, and the create-branch call sees them resolved.
+ */
+function validateNoOverrides(merge: MergeSpec, onCreate: MergeSpec): void {
+  const clash = (token: string, a: any, b: any) => {
+    if (a === undefined || a === null || b === undefined || b === null) return;
+    if (isNested(a) || isNested(b)) return;
+    if (JSON.stringify(a) !== JSON.stringify(b))
+      throw new Error(`option(onCreate) cannot override values from merge() argument: (${token}, ${JSON.stringify(b)})`);
+  };
+  clash('label', merge.label, onCreate.label);
+  clash('id', merge.id, onCreate.id);
+  clash('OUT', merge.outV, onCreate.outV);
+  clash('IN', merge.inV, onCreate.inV);
+  for (const [k, v] of Object.entries(onCreate.props))
+    if (k in merge.props) clash(k, merge.props[k], v);
+}
+
+function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null, sideEffects?: Map<string, any>, params: Record<string, any> = {}, defaultCardinality: Cardinality = 'single'): MergeSpec {
   raw = resolveMergeArg(raw, sideEffects, params);
-  const spec: MergeSpec = { label: null, id: null, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {}, propCardinalities: {} };
+  const spec: MergeSpec = { role, label: null, id: null, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {}, propCardinalities: {} };
   if (raw == null) return spec; // mergeV(null) — match anything
   if (!(raw instanceof Map))
     throw new Error('merge argument must be a map ([k:v] / bound Map), null, or empty ([:])');
@@ -868,6 +955,7 @@ function normalizeMergeMap(raw: any, typeNode: TypeNode | null, sideEffects?: Ma
       continue;
     }
     const c = classifyMergeKey(k);
+    validateMergeKey(role, k, v, c.kind);
     // label/id/prop VALUES may be nested traversals — keep them UNRESOLVED (deferred to
     // resolveMergeSpec, per driver). Only a non-nested label collapses to a string now.
     if (c.kind === 'label') spec.label = isNested(v) ? v : labelNames(v, true, 'mergeV');
@@ -922,12 +1010,17 @@ function resolveMergeSpec(engine: Engine, store: GraphStore, spec: MergeSpec, se
     const r = rv(v, slot, `value for '${k}'`);
     props[k] = r.value; propTypes[k] = r.typeNode; propCardinalities[k] = spec.propCardinalities[slot] ?? 'single';
   }
-  return {
+  const resolved: MergeSpec = {
+    role: spec.role,
     label: isNested(spec.label) ? labelNames(rv(spec.label, null, 'label').value, true, 'mergeV') : spec.label,
     id: rv(spec.id, null, 'id').value,
     outV: spec.outV, inV: spec.inV,
     props, propTypes, propKeys: Object.fromEntries(Object.keys(props).map((k) => [k, k])), propCardinalities,
   };
+  // THE place every merge map becomes concrete — match, onCreate and onMatch alike, literal keys
+  // and per-driver nested ones alike. One call here is what item 22's whole family needed.
+  validateResolvedMergeSpec(resolved);
+  return resolved;
 }
 
 // The label / id-or-uid / per-prop equality conditions shared by the vertex and
@@ -957,7 +1050,7 @@ function mergeMatchQuery(spec: MergeSpec): { sql: string; binds: any[] } {
   return render(q`SELECT id, uid FROM nodes WHERE ${where}`);
 }
 
-function parseMergeOptions(mods: Step[], step: string, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { onCreate: MergeSpec | null; onMatch: MergeSpec | null } {
+function parseMergeOptions(mods: Step[], step: MergeRole['op'], sideEffects: Map<string, any> | undefined, params: Record<string, any>): { onCreate: MergeSpec | null; onMatch: MergeSpec | null } {
   let onCreate: MergeSpec | null = null, onMatch: MergeSpec | null = null;
   for (const s of mods) {
     if (s.name !== 'option') throw new Error(`step not implemented after ${step}(): ${s.name}()`);
@@ -969,10 +1062,10 @@ function parseMergeOptions(mods: Step[], step: string, sideEffects: Map<string, 
     const defaultCardinality = cardinalityArg?.cardinality ?? 'single';
     if (defaultCardinality !== 'single' && defaultCardinality !== 'list' && defaultCardinality !== 'set')
       throw new Error(`${step} option() has unsupported cardinality '${defaultCardinality}'`);
-    const spec = normalizeMergeMap(mapArg, s.argTypes?.[1] ?? null, sideEffects, params, defaultCardinality);
-    if (sel.merge === 'oncreate') onCreate = spec;
-    else if (sel.merge === 'onmatch') onMatch = spec;
-    else throw new Error(`${step} option(Merge.${sel.merge}) not supported`);
+    const kind = sel.merge === 'oncreate' ? 'onCreate' : sel.merge === 'onmatch' ? 'onMatch' : null;
+    if (!kind) throw new Error(`${step} option(Merge.${sel.merge}) not supported`);
+    const spec = normalizeMergeMap({ op: step, kind }, mapArg, s.argTypes?.[1] ?? null, sideEffects, params, defaultCardinality);
+    if (kind === 'onCreate') onCreate = spec; else onMatch = spec;
   }
   return { onCreate, onMatch };
 }
@@ -992,8 +1085,13 @@ function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, a
   const mvIdx = steps.findIndex((s) => s.name === 'mergeV');
   if (steps[mvIdx].args.length === 0)
     throw new Error('mergeV() with no argument (uses the incoming traverser as the map) not yet supported');
-  const matchSpecRaw = normalizeMergeMap(steps[mvIdx].args[0], steps[mvIdx].argTypes?.[0] ?? null, sideEffects, params);
+  const matchSpecRaw = normalizeMergeMap({ op: 'mergeV', kind: 'merge' }, steps[mvIdx].args[0], steps[mvIdx].argTypes?.[0] ?? null, sideEffects, params);
   const { onCreate, onMatch } = parseMergeOptions(steps.slice(mvIdx + 1), 'mergeV', sideEffects, params);
+  // Statically, before anything runs — TinkerPop's `validateStaticNoOverrides`, which is why the
+  // corpus expects a contradicting onCreate to raise even when the merge argument MATCHES and no
+  // create would have happened. The create branch re-checks the RESOLVED specs, for the slots that
+  // held a nested traversal here.
+  if (onCreate) validateNoOverrides(matchSpecRaw, onCreate);
   const drivers = mergeDrivers(engine, steps.slice(0, mvIdx), params);
   return {
     kind: 'write',
@@ -1027,6 +1125,7 @@ function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, a
             out.push({ vertex: { id: m.uid ?? m.id, labels: store.vertexLabels(m.id), props: readVertexProps(store, m.id) } });
           }
         } else {
+          if (oc) validateNoOverrides(matchSpec, oc);
           const labels = (oc?.label as string[]) ?? (matchSpec.label as string[]) ?? [];
           const props = { ...matchSpec.props, ...(oc?.props ?? {}) };
           const propTypes = { ...matchSpec.propTypes, ...(oc?.propTypes ?? {}) };
@@ -1062,8 +1161,9 @@ function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, a
   const meIdx = steps.findIndex((s) => s.name === 'mergeE');
   if (steps[meIdx].args.length === 0)
     throw new Error('mergeE() with no argument (uses the incoming traverser as the map) not yet supported');
-  const matchSpecRaw = normalizeMergeMap(steps[meIdx].args[0], steps[meIdx].argTypes?.[0] ?? null, sideEffects, params);
+  const matchSpecRaw = normalizeMergeMap({ op: 'mergeE', kind: 'merge' }, steps[meIdx].args[0], steps[meIdx].argTypes?.[0] ?? null, sideEffects, params);
   const { onCreate, onMatch } = parseMergeOptions(steps.slice(meIdx + 1), 'mergeE', sideEffects, params);
+  if (onCreate) validateNoOverrides(matchSpecRaw, onCreate);
   const drivers = mergeDrivers(engine, steps.slice(0, meIdx), params);
   return {
     kind: 'write',
@@ -1093,6 +1193,7 @@ function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, a
             out.push({ edge: { id: m.uid ?? m.id, label: m.label, src: nodeExtId(store, m.src), tgt: nodeExtId(store, m.tgt), props: readEdgeProps(store, m.id) } });
           }
         } else {
+          if (oc) validateNoOverrides(matchSpec, oc);
           // An edge carries exactly ONE label, so a merge map's list must hold exactly one name.
           const edgeLabels = (matchSpec.label ?? oc?.label) as string[] | null | undefined;
           if (edgeLabels && edgeLabels.length > 1) throw new Error('mergeE: an edge takes exactly one label');
@@ -1124,14 +1225,16 @@ interface WriteRule { match: (steps: IRStep[]) => boolean; compile: (engine: Eng
  *  only legal as the sole argument (TinkerPop rejects mixing, with a message naming Collection).
  *  Returns the flattened names. `sole` says whether this value was the only argument. */
 function labelNames(v: any, sole: boolean, step: string): string[] {
-  if (!Array.isArray(v)) return [String(v)];
+  // THE waist every label name passes through — addV, addLabel, mergeV and mergeE alike — so the
+  // element-identifier rules (validate.ts) are enforced once here rather than at each caller.
+  if (!Array.isArray(v)) return [validateLabel(v)];
   // Upstream words the two rejections differently and the scenarios match on the text, so this
   // is not one shared message: AddVertex asserts "must produce a scalar String when multiple
   // traversals are provided", AddLabel asserts "Collection".
   if (!sole) throw new Error(step === 'addV'
     ? `${step}(): a label traversal must produce a scalar String when multiple traversals are provided`
     : `${step}(): a Collection argument must be the only argument`);
-  return v.map(String);
+  return v.map(validateLabel);
 }
 
 const LABEL_MUTATIONS = new Set(['addLabel', 'dropLabel', 'dropLabels']);
