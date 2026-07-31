@@ -6,12 +6,39 @@
 // expression directly; keeping that compatibility behind this function prevents new
 // readCompiled islands while those leaves are converted to Stream -> Stream lowerers.
 
-import { list, q, raw, type Expression, type Query } from '../../../sql/kernel/q.ts';
+import { empty, list, q, raw, type Expression, type Query, type Relation } from '../../../sql/kernel/q.ts';
 import { perRowColumnOf, readCompiled, STATIC, UNKNOWN, type Compiled, type ListOf, type Shape, type VariantShapeArm } from '../../../sql/kernel/render.ts';
 import { edges, nodes } from '../../../sql/schema.ts';
 import { elemCtx, elementPayloadObject, elemTable, extIdOf, framedProps, labelNameSub, vertexLabelsJson } from '../../plan/plan.ts';
 import type { ElementStream } from '../context/context.ts';
-import { groupResultColumns, pathColumns, recordResultColumns, type ForeignStream, type GroupStream, type ListStream, type MapEntryStream, type MapOf, type MapStream, type PathStream, type PropertyStream, type RecordStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
+import { cardinalityOf, groupResultColumns, pathColumns, recordResultColumns, type ForeignStream, type GroupStream, type ListStream, type MapEntryStream, type MapOf, type MapStream, type PathStream, type PropertyStream, type RecordStream, type ResultStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
+
+/**
+ * The `ORDER BY` a root owes its stream — the ONE place the wire's row order is decided.
+ *
+ * Emission order is a CARRIED column (`traverserLayout.encounter`), threaded all the way to the
+ * root by the ordering machinery upstream, and every root below drops the carried columns from its
+ * projection because they are internal. Dropping them from the projection is right; dropping the
+ * ORDER BY with them was not. `materializeScalarRoot` was the only root that kept it, so
+ * `order().by('name').values('name')` was stable while the same prefix followed by `.properties()`
+ * or `.local(__.out().fold())` returned whatever order SQLite's scan happened to produce — visible
+ * under `mise run test:perturbed`, invisible otherwise (docs/outstanding-work.md item 26). Every
+ * ordering item upstream only reached the wire on scalar results because of this one omission.
+ *
+ * SQL lets `ORDER BY` name a column the SELECT list does not, which is why this needs nothing from
+ * the projection — only the alias the root is already reading FROM.
+ *
+ * `cardinalityOf` is the guard, and it is the same authority `reprojectRows` uses for the same
+ * question: ordering ROWS by encounter only means "ordering traversers" when one row IS one
+ * traverser. A `GroupStream` is one whole result and a grouped `PathStream` is one row per
+ * POSITION — sorting either by encounter would answer a different question, so both stay
+ * unordered here and say so through the shared predicate rather than through an exception list.
+ */
+function rootOrder(stream: Exclude<Stream, ResultStream | ElementStream>, rel: Relation): Expression {
+  const encounter = stream.traverserLayout.encounter;
+  if (!encounter || cardinalityOf(stream).kind !== 'perRow') return empty;
+  return q` ORDER BY ${rel.c[encounter]}`;
+}
 
 export function materializeRoot(query: Query, tail: Expression, shape: Shape): Compiled {
   return readCompiled(query, tail, shape);
@@ -32,9 +59,8 @@ export function materializeScalarRoot(stream: ScalarStream): Compiled {
   // handler frames each row by its own type, not one compile-time tag.
   const perRow = perRowColumnOf(stream.type);
   const cols = stream.result === 'number' ? q`v, vt` : perRow ? q`v, ${raw(perRow)}` : q`v`;
-  if (!stream.traverserLayout.encounter) return materializeRoot(stream.q, q`SELECT ${cols} FROM ${stream.rel}`, shape);
   const s = stream.rel.as('s');
-  return materializeRoot(stream.q, q`SELECT ${cols} FROM ${s} ORDER BY ${s.c[stream.traverserLayout.encounter]}`, shape);
+  return materializeRoot(stream.q, q`SELECT ${cols} FROM ${s}${rootOrder(stream, s)}`, shape);
 }
 
 /** Expand each present arm at the wire boundary (P4 dynamic-tag row). The tag is put
@@ -69,7 +95,7 @@ export function materializeVariantRoot(stream: VariantStream): Compiled {
     if (e) joins.push(q` LEFT JOIN ${e} ON ${e.c.id}=${v.c.rid} AND ${v.c.vk}=3`);
   }
   if (stream.listOf) cols.push(q`${listResult(v.c.list, stream.listOf)} AS list`);
-  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${v}${list(joins, '')}`, shape);
+  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${v}${list(joins, '')}${rootOrder(stream, v)}`, shape);
 }
 
 /** Turn a JSON list of internal element rowids into an ordered JSON array carrying
@@ -110,7 +136,7 @@ export function materializeListRoot(stream: ListStream): Compiled {
     const elem = stream.of.elem;
     return materializeRoot(
       stream.q,
-      q`SELECT ${elementListResult(c.c.list, elem)} AS list FROM ${c}`,
+      q`SELECT ${elementListResult(c.c.list, elem)} AS list FROM ${c}${rootOrder(stream, c)}`,
       { kind: 'jsonbElementList', elem },
     );
   }
@@ -119,12 +145,12 @@ export function materializeListRoot(stream: ListStream): Compiled {
   // listResult recurses and only the leaf join hits nodes/edges. The `of` descriptor rides
   // on the jsonbList shape so frameListOf recurses the same nesting on the framing side.
   if (stream.of.kind === 'list')
-    return materializeRoot(stream.q, q`SELECT ${listResult(c.c.list, stream.of)} AS list FROM ${c}`, { kind: 'jsonbList', items: stream.of });
+    return materializeRoot(stream.q, q`SELECT ${listResult(c.c.list, stream.of)} AS list FROM ${c}${rootOrder(stream, c)}`, { kind: 'jsonbList', items: stream.of });
   const typed = stream.of.kind === 'scalar' && stream.of.typed ? true : undefined;
   const shape: Shape = stream.set
     ? { kind: 'jsonbSet', typed }
     : { kind: 'jsonbList', items: stream.of };
-  return materializeRoot(stream.q, q`SELECT json(${c.c.list}) AS list FROM ${c}`, shape);
+  return materializeRoot(stream.q, q`SELECT json(${c.c.list}) AS list FROM ${c}${rootOrder(stream, c)}`, shape);
 }
 
 /** Expand one internal element rowid into a JSON object carrying the public element
@@ -153,14 +179,14 @@ export function materializeMapRoot(stream: MapStream): Compiled {
   // All-scalar (the common case: stored map, groupCount, scalar-valued group) → the blob is
   // already a frameable [[{t,v},{t,v}],…] tree; hand it straight to the map framer.
   if (stream.keyOf.kind === 'scalar' && stream.valOf.kind === 'scalar')
-    return materializeRoot(stream.q, q`SELECT json(${c.c.map}) AS map FROM ${c}`, { kind: 'mapValue' });
+    return materializeRoot(stream.q, q`SELECT json(${c.c.map}) AS map FROM ${c}${rootOrder(stream, c)}`, { kind: 'mapValue' });
   // A LIST value side is what a valueMap-derived map carries (properties are multi-valued). It
   // frames with NO conversion: the blob's value side is a naked array — the untyped list
   // substrate's contract, which the re-entry consumers own — and the typed framer treats a bare
   // array as a list of bare members, exactly as it treats a bare scalar as an inferred value.
   // So there is ONE blob encoding, not two with a rebuild between them.
   if (stream.keyOf.kind === 'scalar' && stream.valOf.kind === 'list')
-    return materializeRoot(stream.q, q`SELECT json(${c.c.map}) AS map FROM ${c}`, { kind: 'mapValue' });
+    return materializeRoot(stream.q, q`SELECT json(${c.c.map}) AS map FROM ${c}${rootOrder(stream, c)}`, { kind: 'mapValue' });
   // An ELEMENT side still needs per-pair expansion — deferred, fails closed.
   throw new Error('a terminal map with an element key or value not yet supported');
 }
@@ -172,7 +198,7 @@ export function materializeMapEntryRoot(stream: MapEntryStream): Compiled {
   const c = stream.rel.as('c');
   return materializeRoot(
     stream.q,
-    q`SELECT ${mapSideResult(c.c.mk, stream.keyOf)} AS mk, ${mapSideResult(c.c.mv, stream.valOf)} AS mv FROM ${c}`,
+    q`SELECT ${mapSideResult(c.c.mk, stream.keyOf)} AS mk, ${mapSideResult(c.c.mv, stream.valOf)} AS mv FROM ${c}${rootOrder(stream, c)}`,
     { kind: 'mapEntry', keyOf: stream.keyOf, valOf: stream.valOf },
   );
 }
@@ -184,7 +210,7 @@ export function materializePropertyRoot(stream: PropertyStream): Compiled {
   const p = stream.rel.as('p');
   return materializeRoot(
     stream.q,
-    q`SELECT ${p.c.vpid}, ${p.c.owner}, ${p.c.pk}, ${p.c.pv}, ${p.c.pvtype}, ${p.c.pmeta} FROM ${p}`,
+    q`SELECT ${p.c.vpid}, ${p.c.owner}, ${p.c.pk}, ${p.c.pv}, ${p.c.pvtype}, ${p.c.pmeta} FROM ${p}${rootOrder(stream, p)}`,
     { kind: 'property' },
   );
 }
@@ -199,7 +225,7 @@ export function materializeRecordRoot(stream: RecordStream): Compiled {
       cols.push(q`${listResult(r.c[`${field.prefix}_list`], field.of)} AS ${`${field.prefix}_list`}`);
     else cols.push(...recordResultColumns(field).map((name) => r.c[name]));
   }
-  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${r}`, { kind: 'map', entries: [...stream.fields] });
+  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${r}${rootOrder(stream, r)}`, { kind: 'map', entries: [...stream.fields] });
 }
 
 /** Materialize the rich group barrier layout. The handler folds rows into one Map;
@@ -207,16 +233,17 @@ export function materializeRecordRoot(stream: RecordStream): Compiled {
 export function materializeGroupRoot(stream: GroupStream): Compiled {
   const g = stream.rel.as('g');
   const cols = groupResultColumns(stream).map((name) => g.c[name]);
-  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${g}`, { kind: 'group', key: stream.key, val: stream.val });
+  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${g}${rootOrder(stream, g)}`, { kind: 'group', key: stream.key, val: stream.val });
 }
 
 export function materializePathRoot(stream: PathStream): Compiled {
   const p = stream.rel.as('p');
   const cols = pathColumns(stream.layout).map((name) => p.c[name]);
+  const order = rootOrder(stream, p);
   const shape: Shape = stream.layout.kind === 'linear'
     ? { kind: 'path', positions: [...stream.layout.positions] }
     : { kind: 'pathGrouped', elem: stream.layout.elem, ...(stream.layout.byKey ? { byKey: true } : {}) };
-  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${p}`, shape);
+  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${p}${order}`, shape);
 }
 
 /** Materialize a foreign (detached) element stream — the result of a federated call().
@@ -232,7 +259,7 @@ export function materializeForeignRoot(stream: ForeignStream): Compiled {
   const cols: Expression[] = [q`${p.c.fid} AS id`, q`${stream.elem === 'edge' ? p.c.flabel : p.c.flabels} AS label`];
   if (stream.elem === 'edge') cols.push(q`${p.c.fsrc} AS src`, q`${p.c.ftgt} AS tgt`);
   cols.push(q`json(${p.c.fprops}) AS props`);
-  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${p}`, { kind: stream.elem });
+  return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${p}${rootOrder(stream, p)}`, { kind: stream.elem });
 }
 
 /** The single terminal dispatch for every fully-typed relational stream. ElementStream

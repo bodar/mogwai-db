@@ -623,7 +623,10 @@ describe('scalar-parent / projection SQL', () => {
     // q-kernel built: Query mints the CTE name (unquoted, identifier-safe) + our
     // SQL casing; binds ride as Value tokens (one row each).
     // inject is a ScalarStream source materialized directly from its VALUES relation.
-    expect(p.sql).toBe('with c0(v) as (VALUES (?), (?), (?)) SELECT v FROM c0');
+    // The trailing alias is `materializeScalarRoot`'s, and every root carries one now: the ORDER BY
+    // that restores emission order (`rootOrder`) needs a name to qualify the carried encounter with,
+    // and asking the question uniformly beats aliasing only when the answer turns out to be yes.
+    expect(p.sql).toBe('with c0(v) as (VALUES (?), (?), (?)) SELECT v FROM c0 s');
     expect(p.binds).toEqual([1, 2, 3]);
   });
 
