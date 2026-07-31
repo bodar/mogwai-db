@@ -31,8 +31,8 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-**Ranked entry point.** Numbers are IDs, not an order. Correctness first: **21** (a live
-wrong answer, re-sized — see below) → **2** →
+**Ranked entry point.** Numbers are IDs, not an order. Correctness first: **21**'s T2 (a live
+wrong answer the corpus already pins; T1 landed) → **2** →
 **17**'s `tail`/`sample` + **28** → **29** → **3**'s `times(n)` unroll. Both fail-closed
 VIOLATIONS landed 2026-07-31 — item 27's seven `Scope.local` slices (one argument decode,
 `sliceOf`) and item 22's 24 write-path non-validations (`steps/write/validate.ts`). So did the
@@ -131,23 +131,32 @@ size of the corpus's exposure to a defect that was large in SHAPES and small in 
    **Clearing these makes `test:perturbed` a gate**, which is the point of one item.
 
 21. **A `union`/`choose` ARM's barrier observes the branch's whole input; we lower every arm
-   per-origin — a wrong ANSWER with the wrong CARDINALITY, and the ordering divergence is only its
-   symptom.** `g.V().values('age').union(__.min(), __.max())` is `[27, 35]`; we return all four ages
-   twice. `g.V(1,4).union(__.outE().count(), …)` returns 6 rows where `Union.feature` asserts 3 —
-   **the corpus already pins both readings and we answer the `local()` one when asked the bare
-   one.** `BranchStep.standardAlgorithm`'s `hasBarrier` flag decides arm SCOPE and emission order
-   together; only `union`/`choose` extend `BranchStep`, so `coalesce`/`optional` are per-traverser by
-   class and our lowering of those is CORRECT.
-   **This item was filed as "one clause on a `ROW_NUMBER() OVER`" and that is wrong by an order of
-   magnitude** — the plan's own §6 records it as one of four mis-framings. Emission order is its T4
-   and comes LAST, after the arms batch; it needs the parent's encounter as a distinct carried role,
-   which does not exist today (the child ordinal is `ROW_NUMBER() OVER ()` — it identifies a
-   traverser without ordering them). Start at **T1, the scalar parent**, which the plan argues is
-   nearly free: the arm needs the branch's input `ScalarStream` and one existing
-   `lowerGlobalNumericReducer` call, not a child scope at all.
-   **The fail-closed gate the plan assumes has NOT landed** — nothing named
-   `verifyBranchArmBarrierScope` exists in `src/`, and `ir/step.ts`'s comment cited it as though it
-   did. **High** (it is a live wrong answer, not an ordering nicety).
+   per-origin — a wrong ANSWER with the wrong CARDINALITY. T1 LANDED 2026-07-31; T2/T3/T4 open.**
+   `BranchStep.standardAlgorithm`'s `hasBarrier` decides arm SCOPE and emission order together, and
+   only `union`/`choose` extend `BranchStep` — `coalesce`/`optional` are per-traverser by class and
+   our lowering of those is CORRECT. `BATCHING_BRANCHES`/`COLLAPSING_BARRIERS` (`ir/step.ts`) record
+   both halves.
+   **T1 (scalar parent) is done** and needed no new substrate: the arm lowers through the ordinary
+   engine over the parent `ScalarStream`. What it DID need is `collapsedArmProjection` — a
+   barrier-dropped arm has no carried columns, so it FILLS the merged schema (aliases NULL, `bulk` 1,
+   which is what a generated reducer traverser carries) rather than projecting it, and
+   `collapsedArmAdmissible` refuses a live `path`/`sack`/`fromV`/origin before any CTE is appended.
+   **Open, in the plan's order:**
+   - **T2, the ELEMENT parent — the biggest block, and the corpus already pins it.**
+     `g.V(1,4).union(__.outE().count(), …)` returns 6 rows where `Union.feature` asserts 3; we answer
+     the `local()` reading of the same graph when asked the bare one. Needs the merge to tolerate one
+     collapsed arm beside an N-row arm — `collapsedArmProjection` is the piece T1 built for it, and
+     the rigid-role assertion is what will fight. Channel-preservation ground.
+   - **T3, the slice/order arms.** `union(__.out().limit(1), …)` batches in the reference too
+     (`FilteringBarrier`), but our per-origin form is pinned the WRONG WAY by our own tests and by no
+     corpus scenario. **Needs a hand-derived L4 pin BEFORE any code**, which is why those steps are
+     deliberately OUT of `COLLAPSING_BARRIERS`.
+   - **T4, emission order** — the original framing of this item, and it comes last: once an arm
+     batches, arm-major over the whole stream is CORRECT and is what we already emit. What remains is
+     the barrier-FREE case, needing the parent's encounter as a distinct carried role (the child
+     ordinal is `ROW_NUMBER() OVER ()` — it identifies a traverser without ordering them).
+   **A fail-closed gate for what T2/T3 have not reached does not exist**; nothing named
+   `verifyBranchArmBarrierScope` is in `src/`. **High.**
    → [branch-arm-barrier-scope](./2026-08-01-branch-arm-barrier-scope-plan.md) — **read §1 and §6
    before proposing anything**
 

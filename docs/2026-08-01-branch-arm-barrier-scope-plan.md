@@ -1,6 +1,23 @@
 # A branch arm's barrier observes the branch's whole input — doing it properly
 
-**Status: plan, 2026-08-01. The fail-closed gate is landing separately; this is the real fix.**
+**Status: T1 LANDED 2026-07-31. T2/T3/T4 open. The fail-closed gate has NOT been written** — nothing
+named `verifyBranchArmBarrierScope` exists in `src/`, so anything T2/T3 have not reached still
+mis-executes rather than deferring.
+**T1's outcome, and it revises T1's own prediction.** "Probably nearly free" was right about the
+LOWERING — the arm goes through the ordinary engine over the parent `ScalarStream`, no child scope,
+no new substrate — and wrong about the MERGE. A barrier-dropped arm declares no carried columns, so
+`unionScalarStreams` cannot project the merged schema off it; `collapsedArmProjection`
+(`context/context.ts`) fills it instead, from the reference's own answer (`ReducingBarrierStep` emits
+a GENERATED traverser: no labels, bulk 1), and `collapsedArmAdmissible` refuses a live
+`path`/`sack`/`fromV`/origin at the branch INPUT, before a CTE is appended. **That is the piece T2
+inherits** — §T2's "the merge must tolerate arms whose layouts differ in that specific way" now has a
+name. `choose` also lands: the batched arm lowers over the GATED seed, because `hasBarrier` changes
+how many starts are injected, not which option each start picks.
+**Two tests asserted the old answer and both said so in a comment** ("matches the element-parent
+branch convention"). They did; the convention was wrong. `test/compiler/scalar.exec.test.ts` and
+`test/L4-addendum/scalar-reentry.feature` now carry the reference's answer plus a cardinality-MIXING
+pin (`union(__.min(), __.constant(99))` is one row plus four), so batching is visible in the row
+count and not only in the values.
 Every claim below is cited to vendored reference source or to a measurement taken while writing it.
 Read §1 and §6 before proposing anything here — §6 records four things I got wrong in one sitting,
 each of which would have produced a confident, wrong change.
