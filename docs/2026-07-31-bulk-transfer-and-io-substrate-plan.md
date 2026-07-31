@@ -1,11 +1,11 @@
 # Bulk transfer + the `io()` substrate — one primitive under five threads
 
-**Build status (2026-07-31):** phases **0, 1, 2, 3 and 4 have landed**. Every live wrong-answer wall on
+**Build status (2026-07-31):** phases **0, 1, 2, 3, 4 and 7 have landed**. Every live wrong-answer wall on
 the production runtime is closed, `mise run binds` fails the build on the idiom, the bulk loader is
 gated table-by-table against the write path, the conformance host seeds its two GraphSON graphs through
 the reader (host startup 5.0s → 1.1s; ggrateful 4.4s → 0.14s; L3 unchanged at 1650), and the v4 writer
-round-trips modern/crew/sink/grateful-dead/**gzoo** canonically. What is left is 5–7 (`IoStore` + `io()`,
-CSV interop, the remap pass). Two findings from building it
+round-trips modern/crew/sink/grateful-dead/**gzoo** canonically. What is left is 5 (`IoStore` + `io()`, which opens with the
+contract choice in §3a) and 6 (CSV interop). Two findings from building it
 are folded in below rather than appended: §5's "scratch relation, chunked" is **superseded** (a
 compiled read plan is ONE statement — see §5), and the whole-suite CF-parity run is **green** before
 any fix, which is itself the measurement that says why the ladder could not have found §1c/§1d (§2's
@@ -631,6 +631,23 @@ memoized `labelId`) and offsets/remaps element ids from `SELECT max(id)`, keepin
 `uid` when the caller wants source identity preserved. One pass, two queries, no schema change, and
 it composes with §5's federated materialize.
 
+**Landed, and preserving the source id turned out to need a THIRD case — `nodes.uid` is UNIQUE.**
+It is the TinkerPop user-supplied id, so a uid can hold one value once: a source graph can be
+remapped into a target **exactly once**, and loading it twice (or loading two sources that share an
+id space) collides on `uid` rather than on `id`. Found by writing the §7 gate as "load the same graph
+twice", which is the shape a replication or merge path actually has. So `idPolicy` is three named
+cases — `'preserve'` (a numeric source id IS the rowid; the default, and what every seeding load
+wants), `'remap'` (mint + keep the source id as uid), `'renumber'` (mint and drop it) — and each
+collision fails closed naming the next one. Two further notes for whoever picks up the federated
+materialize:
+
+- **What `'remap'` preserves is provenance, not lookup.** `uid` is TEXT, so a remapped element is
+  `V('3')`, not `V(3)`. That is the schema's asymmetry (`COALESCE(uid, id)` over a TEXT uid), not the
+  loader's, and it is a cost §7 already accepted when it refused to widen the primary key.
+- **Label re-interning needed no code at all** — `labelId` already memoizes against the TARGET's
+  labels, so `person` is matched across the boundary by NAME. The test pins that, because a loader
+  that carried a source label id across would silently point a label at whatever that id means here.
+
 **So: do not widen the primary key.** Recorded here with the measurements so it does not have to be
 re-derived — and note that the reasoning is *not* "this is a database change and we have users". We
 have no users and the change would be legitimate; it is simply the wrong trade on its own numbers.
@@ -650,7 +667,7 @@ Each phase lands green and is useful alone.
 | **4** ✅ | **Typed GraphSON reader (v3 + v4) and writer (v4)** over `RowBatch`, line-oriented adjacency form; conformance host seeds through it | L3 unchanged at 1650, ggrateful seeds in 0.14 s (statement count 98,198 → 1,482 is the deterministic half, so it is what the test asserts), census unchanged, the file's TYPES survive (the retired string-building fixture re-emitted a `g:Double` of 1.0 as an int), and **`gcrew` + `gzoo` + modern + sink + grateful-dead all round-trip canonically**. Two findings the plan had wrong are in §4c |
 | **5** | `IoStore` (Bun FS / CF R2 / L3 host mapping) + `io()` as a barrier service | the 2 `.json` `Read.feature` scenarios pass; `.xml` and `.kryo` fail closed naming the format; `tags.ts` reclassified (§4) |
 | **6** | Neptune/Neo4j CSV reader/writer (**interop only**); `io().write()` to R2 | round-trip through CSV for the types CSV *can* carry, with the lossy cases documented and asserted as lossy rather than silently wrong |
-| **7** | remap pass (non-empty target, label re-interning, `uid` preservation) | load-into-non-empty round-trip |
+| **7** ✅ | remap pass (non-empty target, label re-interning, `uid` preservation) | load-into-non-empty round-trip — and the gate found a THIRD policy the plan did not anticipate, because `uid` is UNIQUE (below) |
 | — | federated *materialize* | scope after 5–7 land |
 
 Phases 0–3 are the ones that fix live defects. Phases 4–7 are the capability. **If only part of this
