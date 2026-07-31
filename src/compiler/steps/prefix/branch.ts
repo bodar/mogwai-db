@@ -160,7 +160,10 @@ function mergePaths(arms: PathState[]): PathState {
 function mergeBranchCarried(seed: TraverserLayout, arms: TraverserLayout[]): TraverserLayout {
   // The path pad-to-max is branch-specific (every other merge declines a live path), so it is
   // computed here and handed to the shared authority.
-  return mergeLayouts(seed, arms, seed.path ? mergePaths(arms.map((a) => a.path!)) : undefined);
+  return mergeLayouts(seed, arms, {
+    rigid: 'peer',
+    path: seed.path ? mergePaths(arms.map((a) => a.path!)) : undefined,
+  });
 }
 
 /** One arm's merge SELECT column list. Order MUST match layoutCols(out): id, aliases,

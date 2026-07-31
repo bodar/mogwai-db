@@ -14,7 +14,7 @@ import { type ValueType } from '../../../sql/kernel/render.ts';
 import { rangeToOffsetLimit } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
-import { aliasArmProjection, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, mergeAliasMaps, partitionOver, type LoweringState } from '../context/context.ts';
+import { aliasArmProjection, layoutProjection, layoutProjectionMinting, layoutCols, layoutGrewAliases, patchLayout, mergeLayouts, partitionOver, type LoweringState } from '../context/context.ts';
 import { lowerGlobalCount } from './barrier.ts';
 
 // ---------- variant-arm merge builders (parent-agnostic; element- and scalar-parent share) ----------
@@ -65,11 +65,12 @@ export function finishListMerge(
   // barrier because it is bound after it. Without the union that column is absent from the merged
   // schema and a later select() reads nothing: a silent [].
   //
-  // Only the aliases: NOT mergeLayouts. These arms are child-scoped and tryCompileListChild has
-  // already re-homed them onto the parent, so mergeLayouts's rigid-role assertion is false here
-  // (a child scope pushed an ordinal the base lacks) — asserting it breaks coalesce outright.
-  const mergedAliases = mergeAliasMaps(base.traverserLayout.aliases, arms.map((a) => a.traverserLayout));
-  const grew = mergedAliases.size !== base.traverserLayout.aliases.size;
+  // `rigid: 'rehomed'` and not 'peer': these arms are child-scoped and tryCompileListChild has
+  // already re-homed them onto the parent, so the rigid-role comparison is false here (a child
+  // scope pushed an ordinal the base lacks) — asserting it breaks coalesce outright.
+  const merged = mergeLayouts(base.traverserLayout, arms.map((a) => a.traverserLayout), { rigid: 'rehomed' });
+  const mergedAliases = merged.aliases;
+  const grew = layoutGrewAliases(base.traverserLayout, merged);
   const withAliases = (c: LoweringState['traverserLayout']) => grew ? { ...c, aliases: mergedAliases } : c;
   const armSelect = (arm: ListStream, k: number, layout: LoweringState['traverserLayout'], tag: boolean): Expression => {
     const a = arm.rel.as('a');

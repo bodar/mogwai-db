@@ -219,11 +219,11 @@ export const aliasColsOf = (a: AliasMap): string[] => [...a.values()].map((x) =>
  *  differing count, or a dynamic (repeat/arm) bind → undefined, so Pop resolves at runtime off
  *  the array.
  *
- *  Lives HERE, not in branch.ts, because every branch merge needs it — element (branch.ts),
- *  scalar (tail/scalar.ts) and variant (tail/variant.ts) — and variant.ts cannot import from
- *  branch.ts (branch.ts imports variant.ts; that direction would cycle). Pure Map algebra, no
- *  SQL, so context.ts is the right leaf. */
-export function mergeAliasMaps(seed: AliasMap, arms: readonly TraverserLayout[]): AliasMap {
+ *  MODULE-LOCAL on purpose: `mergeLayouts` below is the ONE route to it, so a merge cannot take
+ *  the alias half of the contract while skipping the rigid-role policy. It was exported and called
+ *  directly by the scalar/list/variant merges, which is how those three grew three copies of one
+ *  algorithm that then disagreed. Pure Map algebra, no SQL, so context.ts is the right leaf. */
+function mergeAliasMaps(seed: AliasMap, arms: readonly TraverserLayout[]): AliasMap {
   const order: string[] = [...seed.keys()];
   for (const a of arms) for (const lbl of a.aliases.keys()) if (!order.includes(lbl)) order.push(lbl);
   const merged = new Map<string, AliasEntry>();
@@ -248,14 +248,26 @@ export function mergeAliasMaps(seed: AliasMap, arms: readonly TraverserLayout[])
  *  be identical across arms; aliases fork and merge, path pads. */
 export const rigidCols = (c: TraverserLayout): string[] => layoutCols({ ...c, aliases: new Map(), path: undefined });
 
+/** How an arm merge treats the RIGID roles (sack/bulk/origins/fromV/encounter). This is a
+ *  POLICY, not a strictness dial: the two cases describe genuinely different boundaries, so a
+ *  caller states which one it is at and never picks the lenient one to make a call type-check.
+ *
+ *  - `'peer'` — SAME-SCOPE peer arms, forked from the seed and rejoined in the seed's own scope.
+ *    The rigid roles are per-traverser physical state a fork cannot reconcile, so a disagreement
+ *    FAILS CLOSED rather than emitting SQL that references a column one arm lacks.
+ *  - `'rehomed'` — CHILD-SCOPED arms already re-homed onto the parent (`rehomeLayout`). A child
+ *    scope minted an ordinal the parent does not have, so the arms' rigid roles are not
+ *    comparable with the parent's by construction and only the label sets merge. Asserting here
+ *    would reject valid `coalesce`/`optional` forms outright — see `tail/variant.ts`. */
+export type RigidRolePolicy = 'peer' | 'rehomed';
+
 /**
  * THE merge authority — the one `context.ts:122` and `prefix/branch.ts:234` have cited all along
  * while it did not exist. Every arm merge routes through this.
  *
  * It does two things and refuses to guess at a third. It UNIONS the arms' label sets onto the seed
- * (an arm may bind an `as()` label the seed never saw), and it ASSERTS the rigid roles agree —
- * those are per-traverser state a fork cannot reconcile, so a disagreement fails closed rather
- * than emitting SQL that references a column one arm lacks.
+ * (an arm may bind an `as()` label the seed never saw), and it applies the caller's declared
+ * `rigid` policy to the roles a fork cannot reconcile (see `RigidRolePolicy`).
  *
  * What it deliberately does NOT do: mint or clear `encounter` (each merge re-mints it in its own
  * window, and `layoutProjectionMinting` requires the column to be already declared), and merge `path` (the
@@ -268,16 +280,34 @@ export const rigidCols = (c: TraverserLayout): string[] => layoutCols({ ...c, al
  * `g.V(1).union(__.as("x").out().fold(), __.as("x").in().fold()).select("x")` returned 0 rows
  * where the element-shaped twin returns 3. A silent empty result, which is the failure mode this
  * project treats as worse than a crash.
+ *
+ * `rigid` and `path` are ONE options argument, and `rigid` is REQUIRED: a second optional
+ * parameter with a default is exactly how a caller hands off half a contract and silently drops
+ * the rest (the plan's constitution, point 7).
  */
-export function mergeLayouts(seed: TraverserLayout, arms: readonly TraverserLayout[], path?: PathState): TraverserLayout {
-  const want = rigidCols(seed);
-  for (const a of arms) {
-    const got = rigidCols(a);
-    if (got.length !== want.length || got.some((x, i) => x !== want[i]))
-      throw new Error('branch arms disagree on carried columns (a step binding new sack/origin state inside a branch arm not yet supported)');
+export function mergeLayouts(
+  seed: TraverserLayout,
+  arms: readonly TraverserLayout[],
+  opts: { readonly rigid: RigidRolePolicy; readonly path?: PathState },
+): TraverserLayout {
+  if (opts.rigid === 'peer') {
+    const want = rigidCols(seed);
+    for (const a of arms) {
+      const got = rigidCols(a);
+      if (got.length !== want.length || got.some((x, i) => x !== want[i]))
+        throw new Error('branch arms disagree on carried columns (a step binding new sack/origin state inside a branch arm not yet supported)');
+    }
   }
-  return { ...seed, aliases: mergeAliasMaps(seed.aliases, arms), path: path ?? seed.path };
+  return { ...seed, aliases: mergeAliasMaps(seed.aliases, arms), path: opts.path ?? seed.path };
 }
+
+/** Did the arm merge APPEND a canonical alias column the seed did not carry? A merge that only
+ *  inherited the seed's labels can project them flat (`layoutProjection`); one that GREW must
+ *  remap each arm's own physical column onto the canonical name and NULL-pad the labels that arm
+ *  never bound (`aliasArmProjection`). The three value-shaped merges each spelled this comparison
+ *  inline, and the copy that never made it is the one that returned a silent `[]`. */
+export const layoutGrewAliases = (seed: TraverserLayout, merged: TraverserLayout): boolean =>
+  merged.aliases.size !== seed.aliases.size;
 
 /** One arm's projection of the MERGED alias columns: the arm's own physical column aliased onto
  *  the canonical name, or NULL where the arm never bound that label (a `select()` of it then

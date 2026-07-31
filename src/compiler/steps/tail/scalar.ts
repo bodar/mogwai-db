@@ -3,7 +3,7 @@ import { hasUnresolvedOperand, operandDeps, resolveTraversalOperands } from './o
 import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx, TYPE_PER_ROW, TYPE_STATIC, TYPE_UNKNOWN, typeCtxOf } from '../../plan/plan.ts';
 import { gtypeName, isNested, isOperatorArg, isOrderArg, isScopeArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { aliasArmProjection, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, mergeAliasMaps, partitionOver, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
+import { aliasArmProjection, layoutProjection, layoutProjectionMinting, layoutCols, layoutGrewAliases, patchLayout, mergeLayouts, partitionOver, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
 import { loweringStateOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec, SCALAR_TRANSFORMS } from './coerce.ts';
 import { normalizeTypeName } from '../../../gremlin/types.ts';
@@ -538,8 +538,11 @@ export function unionScalarStreams(base: LoweringState, arms: readonly ScalarStr
   // relation's declared schema and a later select() reads nothing — a silent empty result. Each
   // arm then projects the CANONICAL alias columns (its own physical column remapped, NULL where it
   // never bound the label) instead of a flat layoutProjection of the base's.
-  const mergedAliases = mergeAliasMaps(base.traverserLayout.aliases, arms.map((a) => a.traverserLayout));
-  const armsGrewAlias = mergedAliases.size !== base.traverserLayout.aliases.size;
+  // `rigid: 'rehomed'`, like its list/variant siblings: a scalar arm is compiled over a pushed
+  // child scope, so its ordinal stack is not the base's and the rigid-role comparison is false.
+  const mergedLayout = mergeLayouts(base.traverserLayout, arms.map((a) => a.traverserLayout), { rigid: 'rehomed' });
+  const mergedAliases = mergedLayout.aliases;
+  const armsGrewAlias = layoutGrewAliases(base.traverserLayout, mergedLayout);
   // Forward the base carried EXCEPT any prior encounter — the merge supersedes it.
   const baseNoEnc = patchLayout(base.traverserLayout, { encounter: null, aliases: mergedAliases });
   const nonAlias = layoutCols({ ...baseNoEnc, aliases: new Map() });
