@@ -394,6 +394,16 @@ export function assertStreamColumns<T extends Stream>(s: T): T {
 export const withRelation = <T extends RelationalStream>(s: T, rel: Relation): T =>
   assertStreamColumns({ ...s, rel }) as T;
 
+/** Rebuild a relational stream over a new relation AND a new carried schema, payload untouched.
+ * This is the preserving rebuild for a step that MINTS or drops a carried role while leaving the
+ * traversers' shape alone — a scalar child minting its one-row encounter, a label re-select, a
+ * child-scope seed pushing its ordinal. `withRelation` is the narrower form for when the layout is
+ * unchanged; both assert, which is the point: the sites this replaces spread the stream and the new
+ * layout together by hand, and a layout claiming a column the replacement relation lacks is a
+ * type error at no layer. */
+export const withRelationAndLayout = <T extends RelationalStream>(s: T, traverserLayout: LoweringState['traverserLayout'], rel: Relation): T =>
+  assertStreamColumns({ ...s, traverserLayout, rel }) as T;
+
 /** Project a stream's shape-independent state for a new stream. Supplying `carried`
  * makes a re-home/retype explicit without reopening the rest of LoweringState through an
  * object spread. */

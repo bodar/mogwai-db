@@ -20,7 +20,7 @@ import { compileFromList, compileFromMap, compileFromMapEntry } from '../steps/t
 import { compileFromRecord, selectRecordFromAlias } from '../steps/tail/select.ts';
 import { compileFromPath } from '../steps/tail/path.ts';
 import { asOnStream, selectOneFromAlias } from '../steps/tail/labelselect.ts';
-import { assertStreamColumns, continueLowering, isSuspension, toScalarStream, type LoweringResult, type LoweringSuspension, type Stream } from '../steps/context/stream.ts';
+import { assertStreamColumns, continueLowering, isSuspension, toElementStream, toScalarStream, type LoweringResult, type LoweringSuspension, type Stream } from '../steps/context/stream.ts';
 import { type Compiled } from '../../sql/kernel/render.ts';
 import { BulkRepeatCountFastPath } from '../steps/tail/bulk.ts';
 import { runFastPath, fastPathContext, type FastPathConfig } from '../options/fast-paths.ts';
@@ -576,7 +576,10 @@ export class LoweringEngine implements Engine {
       q`SELECT ${p.c.id} AS id${carried.length ? q`, ${list(carried, ', ')}` : empty} FROM ${p}`,
       ['id', ...cols],
     );
-    const stream: ElementStream = { ...seeded, rel, elem: driver.elem, traverserLayout: driver.traverserLayout };
+    // The loop above checks the DRIVER has a value for every declared role; toElementStream checks
+    // the RELATION has the column. Two different questions, both needed — the driver's record and
+    // the CTE's column list are built from the same `cols`, so a divergence would be a wiring bug.
+    const stream = toElementStream({ ...seeded, traverserLayout: driver.traverserLayout }, rel, driver.elem);
     return materializeRootStream(eng.lowerStepsStrict(stream, steps, 0));
   }
 }

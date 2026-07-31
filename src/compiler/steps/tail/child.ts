@@ -4,7 +4,7 @@ import { isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { appendCte, patchLayout, layoutProjection, layoutProjectionMinting, layoutCols, partitionOver, prevRel, withLayout, type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
-import { loweringStateOf, streamPayloadCols, toScalarStream, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream, type RelationalStream } from '../context/stream.ts';
+import { loweringStateOf, streamPayloadCols, toScalarStream, withRelationAndLayout, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream, type RelationalStream } from '../context/stream.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { lowerScalarRows } from './scalar.ts';
 import { SCALAR_TRANSFORMS } from './coerce.ts';
@@ -83,7 +83,7 @@ export function pushChildScope<P extends ChildParent>(
       q`SELECT ${payload}, ${carriedSelect} FROM ${p}`,
       [...head, ...vtypeCols, ...seedCols],
     );
-    const seed = { ...parent, rel: domain, traverserLayout: seedCarried } as P;
+    const seed = withRelationAndLayout(parent, seedCarried, domain) as P;
     const frame: ChildFrame = { ordinal, domain, parent, traverserLayout: seedCarried };
     const frames = scope.kind === 'child' ? [...scope.frames, frame] : [frame];
     return { scope: { kind: 'child', frames }, frame, seed };
@@ -99,7 +99,7 @@ export function pushChildScope<P extends ChildParent>(
     q`SELECT ${payload}, ${carriedSelect} FROM ${p}`,
     [...payloadCols, ...seedCols],
   );
-  const seed = { ...parent, rel: domain, traverserLayout: seedCarried } as P;
+  const seed = withRelationAndLayout(parent, seedCarried, domain) as P;
   const frame: ChildFrame = { ordinal, domain, parent, traverserLayout: seedCarried };
   const frames = scope.kind === 'child' ? [...scope.frames, frame] : [frame];
   return { scope: { kind: 'child', frames }, frame, seed };
@@ -339,7 +339,7 @@ function oneRowEncounter(stream: ScalarStream, terminal: IRStep): ScalarStream {
     q`SELECT ${list(payload.map((c) => q`${p.c[c]} AS ${c}`), ', ')}${layoutProjectionMinting(layout, p, 'encounter', q`1`)} FROM ${p}`,
     [...payload, ...layoutCols(layout)],
   );
-  return { ...stream, traverserLayout: layout, rel };
+  return withRelationAndLayout(stream, layout, rel);
 }
 
 /** Compile a scalar-producing child as rows, so productivity is represented by row

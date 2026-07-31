@@ -44,7 +44,10 @@ function finishMove(st: ElementStream, body: Expression, opts: MoveOpts): Elemen
   const mv = derived(body, cols, 'mv');
   const over = partitionOver(layout, mv, q`${mv.c[enc]}, ${mv.c.id}`);
   const outBody = q`SELECT ${mv.c.id} AS id${layoutProjectionMinting(layout, mv, enc, q`ROW_NUMBER() OVER (${over})`)} FROM ${mv}`;
-  return { ...st, traverserLayout: layout, elem: opts.elem ?? st.elem, rel: st.q.cte(outBody, cols) };
+  // Back through the ONE append route rather than a hand-built stream: it re-derives the same
+  // `layout` from `opts` and the same declared columns from it, so the refined branch cannot drift
+  // from the plain one above.
+  return appendCte(st, outBody, opts);
 }
 
 // ---------- movement (vertex ⇄ edge traversal) ----------

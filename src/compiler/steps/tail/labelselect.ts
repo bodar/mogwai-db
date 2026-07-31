@@ -6,7 +6,7 @@ import {
     type AliasShape,
 } from '../context/alias.ts';
 import {
-    assertStreamColumns, loweringStateOf, pathColumns, streamColumns, toElementStream, toListStream, toPropertyStream, toScalarStream, PROPERTY_PAYLOAD,
+    loweringStateOf, withRelationAndLayout, pathColumns, streamColumns, toElementStream, toListStream, toPropertyStream, toScalarStream, PROPERTY_PAYLOAD,
     type ListOf, type PropertyStream, type Stream,
 } from '../context/stream.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf } from '../../../sql/kernel/render.ts';
@@ -107,7 +107,7 @@ export function asOnStream(s: Exclude<Stream, { kind: 'result' | 'elements' }>, 
     return e ? q`${e} AS ${raw(c)}` : q`${p.c[c]}`;
   });
   const rel = s.q.cte(q`SELECT ${list(proj, ', ')} FROM ${p}`, newCols);
-  return assertStreamColumns({ ...s, traverserLayout: layout, rel });
+  return withRelationAndLayout(s, layout, rel);
 }
 
 /** An empty element stream (zero rows). select() of a label bound NOWHERE on the
