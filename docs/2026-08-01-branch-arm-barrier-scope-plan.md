@@ -1,6 +1,6 @@
 # A branch arm's barrier observes the branch's whole input — doing it properly
 
-**Status: T1 and T2 LANDED 2026-07-31. T3/T4 open. The fail-closed gate has NOT been written** — nothing
+**Status: T1, T2 and T3 LANDED 2026-07-31. T4 open. The fail-closed gate has NOT been written** — nothing
 named `verifyBranchArmBarrierScope` exists in `src/`, so anything T2/T3 have not reached still
 mis-executes rather than deferring.
 **T1's outcome, and it revises T1's own prediction.** "Probably nearly free" was right about the
@@ -25,6 +25,15 @@ GONE, subsumed into `layoutArmProjection`, which now resolves the merged schema 
 nothing even though its barrier has a seed value (`count()` over empty is 0 as a main chain, but
 `ChooseStep` never runs an unrouted option). `gateArmOnNonEmptyInput` (`tail/barrier.ts`) is that, and a
 `V()` re-source arm is what makes it visible, since its rows do not come from the arm's input at all.
+**T3's outcome.** The hand-derived pins the tranche demanded, all three confirmed and all three
+changed: `union(__.out().limit(2))` 5 → 2, `union(__.out().dedup())` 6 → 4, `union(__.out().limit(1),
+__.in())` 9 → 7. `dedup` is the sharpest — per-origin it was not a different window but a NO-OP, since
+each vertex's own out-set is already distinct. The code was smaller than T1 or T2: for element arms
+`tryCompileElementTraversal` already falls back to the root-scope fold, so a slice arm took the child
+scope only because it was offered first, and asking `armBatches` before it reverses the order. The
+merge needed nothing, because a root-scope arm carries the parent's layout exactly. `armBatchAdmissible`
+is the gate and is NARROWER than the collapsing one — a slice arm preserves path/sack/fromV, so only
+`origins` matters — and `collapsedArmAdmissible` now derives from it.
 **Two tests asserted the old answer and both said so in a comment** ("matches the element-parent
 branch convention"). They did; the convention was wrong. `test/compiler/scalar.exec.test.ts` and
 `test/L4-addendum/scalar-reentry.feature` now carry the reference's answer plus a cardinality-MIXING
@@ -122,7 +131,10 @@ migration" before starting, and expect the merge's rigid-role assertion to be th
 (`FilteringBarrier`), so a per-origin `limit(1)` is also wrong. Deliberately NOT gated by the
 fail-closed step and NOT in `COLLAPSING_BARRIERS`, because unlike T1/T2 it is pinned the WRONG WAY by
 our own tests and by no corpus scenario — so flipping it is a semantic change with no external
-witness. **T3 needs an L4 pin derived from the reference by hand, before any code.**
+witness. **T3 needs an L4 pin derived from the reference by hand, before any code.** *(Done — five scenarios in
+`test/L4-addendum/element-branch-child.feature`, written as COUNTS so they are order-insensitive, each
+with its derivation spelled out. The child-scope guard has no pin: every spelling that would exercise
+it defers today.)*
 
 **T4 — emission order.** Once an arm is batched, arm-major over the whole stream is CORRECT, which is
 what we already emit — so T1–T3 fix the ordering for those cases for free. What remains is the
