@@ -61,6 +61,24 @@ rest fail closed. Read that as the index's centre of gravity moving from correct
    missing "member count" authority as item 17's `tail`), **2 = `groupCount()` taking two `by()`s**
    (a modulator-arity rule, item 23's ground), **1 = `property(single,k,traversal)`**. *Low each.*
 
+30. **The DO's 100-bound-parameter cap is breached by two SHIPPED paths — and the fix is the one
+   primitive five other threads want.** Cloudflare DO SQLite allows **max 100 bound parameters per
+   query** (documented limit). Measured against this tree: `landForeignElements` (`tail/foreign.ts`)
+   binds 4 cells per federated row, so **a federated call returning >25 vertices cannot run on CF**;
+   `compileDrop`'s `run` (`write/write.ts:165-186`) binds `[...ids, ...ids]`, so **`g.V().drop()`
+   fails past 50 vertices** (16,098 binds on grateful-dead), and `deleteFtsForOwners`
+   (`fts-index.ts:95`) past 99 edges. `jsonbArrayOf` (`plan/plan.ts:154`) caps the federated
+   bind-join at 100 keys. **Nothing catches any of it — the whole suite runs on Bun**, where the
+   limit is 65,535 (and it throws rather than mis-binding, so the Bun wall is loud and the CF one is
+   silent). **Start with the CF-parity `Sql` decorator** (>100 binds / >100KB throws): ~20 lines that
+   make every DO-only wall a Bun failure — that is item 11's "CF-parity test", and it is mispriced
+   there at Low-Med. Then land the chunked loader those paths route through, which is ALSO the
+   substrate for bulk import/export, `io()`, and seeding: **grateful-dead seeds in 143ms vs 5,918ms
+   today, every statement ≤100 binds** (41×; only 17% of the current cost is inside SQLite at all).
+   A bind-count static gate (`mise run binds`) is what stops the class recurring. **High** — two live
+   production-runtime walls.
+   → [bulk-transfer-and-io-substrate](./2026-07-31-bulk-transfer-and-io-substrate-plan.md)
+
 2. **Universal child-seam acceptance.** Element, scalar, list, count, branch, `repeat`,
    `as()`/`select(label)` and option-map bodies compose everywhere. **Two of the four things this item
    called wrong answers were the REFERENCE's answers** — probed 2026-07-31 against the vendored
@@ -299,9 +317,11 @@ rest fail closed. Read that as the index's centre of gravity moving from correct
 10. **`addV` mid-chain + read-tails-after-write.** Gates a write-conformance cluster. **Medium.**
     → [compiler-consolidation](./2026-07-16-compiler-consolidation-plan.md) §6
 
-11. **Federation tail:** CF-parity test on the DO harness (Low-Med); map-valued injection for
-    mid-traversal federation (Med); import-a-graph (Med/Large); federated *traversal* via local scratch
-    (Large); async failure/timeout/retry policy (Low-Med).
+11. **Federation tail:** map-valued injection for mid-traversal federation (Med); async
+    failure/timeout/retry policy (Low-Med); federated *traversal* via local scratch (Large). The
+    **CF-parity test** moved to item 30 and is no longer Low-Med — it is what finds the 100-bind
+    walls. **import-a-graph** and federated *materialize* are item 30's substrate too: the persist
+    path was always the one thing needing bulk-write machinery.
 
 12. **Strategy completion tails** — `SubgraphStrategy(vertexProperties)` (6 scenarios),
     `PartitionStrategy` meta-properties + partition-aware upsert (7), nested-body descent. **Medium/Low.**
@@ -398,7 +418,10 @@ Each fails closed. Do only when a concrete scenario demands it.
   `runner-skips.test.ts` gates the kind that depends on someone else's code. **Do not descope
   GraphComputer or the `io` source**: 4 of GraphComputer's 6 scenarios are the OLAP names item 8 will
   serve (that exclusion should NARROW, not harden), and `io(...).read()` (6, in scope and failing) is a
-  real capability — unlike `io().write()`, which needs a filesystem a DO does not have. *Low.*
+  real capability. **`io().write()` is NOT the wall this used to claim** — R2 bucket bindings are
+  reachable from inside a DO, so the sink has a home and the source/sink asymmetry dissolves; the real
+  scope is 4 of the 6 `Read.feature` scenarios (`.json`/`.xml`), with `.kryo` the one genuine refusal
+  (JVM serialization, no dependency available). Item 30's `IoStore` seam. *Low.*
 
 ---
 
@@ -534,6 +557,12 @@ deferral clusters in 5c instead.
 - **[graph-algorithms](./2026-07-24-graph-algorithms-plan.md)** — build spec for P2·8.
 - **[conformance-structural-bets](./2026-07-12-conformance-structural-bets.md)** — strategic unlock map.
 - **[cross-do-federation-prior-art](./2026-07-13-cross-do-federation-prior-art.md)** — federation prior-art.
+  Its 2026-07-21 addendum's deferred bulk capability is now item 30's plan; the `ATTACH` correction stands.
+- **[bulk-transfer-and-io-substrate](./2026-07-31-bulk-transfer-and-io-substrate-plan.md)** — item 30's
+  build spec. **Also the measured refutation of widening the primary key** (a random 52-bit `INTEGER`
+  costs 2.8× on the 3-hop hot path, a `TEXT` uuid 5× and 7× on disk; `uid TEXT UNIQUE` already IS the
+  global-identity slot; and `coerceBindValue` makes >2^53 unrepresentable as an integer at our own bind
+  seam) — read §7 before proposing an id change.
 - **[path-tracking-prior-art](./2026-07-12-path-tracking-prior-art.md)** — path prior-art for P3 tails.
 - **[wire-and-storage-facts](./2026-07-25-wire-and-storage-facts.md)** — Map.Entry framing + MapStream.
 - **[shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md)** — the shape/type

@@ -225,6 +225,12 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
   **reference only, never built or imported**. Cite TinkerPop as `vendor/tinkerpop/...` so the claim
   resolves at the pinned gitlink; a path outside the repo is uncheckable by anyone else and by CI, and
   the outside clone is typically at a SHA that is not even a valid object in our blobless history.
+- **DO SQLite caps a query at 100 BOUND PARAMETERS (and 100 KB of statement text) — Bun's cap is
+  65,535, so a bind list that scales with ROW COUNT passes every test and fails only in production.**
+  Two shipped paths breach it (measured: item 30). Never write `ids.map(() => '?')`; chunk at
+  `floor(100 / columns)` with a FIXED-shape statement so the prepared-statement cache hits — measured
+  4.6× faster than inlining literals to dodge the cap, so the portable form is also the fast one.
+  Detail + the CF-parity harness: `docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md`.
 - Storage runtimes meet at the sync **`Sql` interface** (`src/storage.ts`): `bun:sqlite` (dev) and
   DO `ctx.storage.sql` (prod). Compiler + frame tier are storage-agnostic; the HTTP edge never
   touches a store. **Bind-type gotcha:** DO SQLite throws on `boolean`/`bigint` binds — `GraphStore`
