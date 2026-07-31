@@ -153,6 +153,23 @@ Phase 1 tranches (current names throughout):
   `movementCollapse` does not fire ahead of a `match()` and collapse-on ≡ collapse-off, so there is
   no live wrong answer to bank.
 
+- `3657344` — **every stream construction route now checks its own carried contract.**
+  `withRelationAndLayout` (`context/stream.ts`) is the preserving rebuild for a step that mints or
+  drops a carried role while leaving the payload alone (the scalar child's one-row encounter mint, a
+  label re-select, both child-scope seeds); `withRelation` stays the narrower unchanged-layout form.
+  `finishMove`'s emission-order refine returns through `appendCte` instead of rebuilding the stream
+  beside it, so it cannot drift from the plain branch above it, and the write-driver re-entry goes
+  through `toElementStream`. None of these was wrong — each derived its columns from the same
+  `layoutCols` call it patched — so this closes routes rather than fixing defects.
+
+**Phase 1 status.** The merge authority, the shared merge algorithm, and the construction/runtime
+contract are all done. What is left of Phase 1 is the `TraverserLayout` role-by-role merge-policy
+table (unionable / preserving / declared-deferral) as an explicit artifact rather than as the
+`peer`/`rehomed` split plus `rigidCols`, and the `finishElementMerge` fold-in — deliberately NOT
+done, because it keeps the arm's encounter in its declared slot rather than renaming it to
+`arm_encounter` and it is the only merge that pads a ragged `path`. Folding it changes element-merge
+SQL for no correctness gain.
+
 ## North star
 
 Every compiler boundary must make one of three outcomes explicit:

@@ -306,21 +306,32 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      because the next step rebuilt the layout. Both `match()` seeds now go through `toElementStream`
      via the named drop `layoutOverAliases`. **The method transfers: add the assertion, read the
      failures, then prefer deleting the escape hatch over keeping the assertion.**
-     Still hand-building an element/typed stream without an assertion: `movement.ts`'s `finishMove`,
-     `tail/child.ts`'s `oneRowEncounter` + child seed/rejoin (`child.ts:86,102,342`), `engine.ts`'s
-     write-driver re-entry (`engine.ts:579`) and `tail/scalar.ts:742`. Each derives `cols` from the
-     same `layoutCols` call it patches, so none is currently wrong — the value is closing the route,
-     not reporting a bug.
+     ~~Still hand-building an element/typed stream without an assertion~~ — **CLOSED `3657344`.**
+     `withRelationAndLayout` covers the mint-or-drop-a-role rebuild (both child-scope seeds, the
+     scalar one-row encounter, the label re-select), `finishMove` returns through `appendCte`, and
+     the write-driver re-entry goes through `toElementStream`. The one remaining spread is
+     `tail/scalar.ts:742`, which builds a THROWAWAY layout to ask `cols` a narrower question — the
+     same deliberate pattern as `rigidCols`, not a preservation route.
      **Declared latent gap from the same tranche:** `bulk` is lost through `match()`, so a reducer
      after one counts ROWS rather than traversers. No live wrong answer (`movementCollapse` does not
      fire ahead of a `match()`; collapse-on ≡ collapse-off on
      `g.V().both().both().match(…).select("a").count()`), so it is declared rather than banked.
      Threading it means touching `applyPattern` and every pattern route. *Low.*
-   - **The paired exit-gate regression tests are unwritten** — "a label bound AFTER a barrier survives
-     an arm merge while a label consumed BY that barrier is not silently resurrected", and for each
-     migrated merge both a same-scope and a child-scoped arm.
+   - ~~**The paired exit-gate regression tests are unwritten**~~ — **WRITTEN.** The barrier half was
+     already there (`branch.exec.test.ts` "a label bound AFTER fold() inside a branch arm survives
+     the merge", covering the list AND scalar merges, including the bound-BEFORE-the-fold twin that
+     must stay at 0 rows); the policy half is now `test/channel-contracts.test.ts` "arm-merge
+     authority" — `peer` fails closed on a diverging rigid role, `rehomed` never inherits the child's
+     ordinal, an arm-minted label joins the canonical set with a non-static bind count, the
+     binding-table drop states every role it loses, and the merge core declares the minted encounter
+     in its `layoutCols` slot.
+   - **What is actually LEFT of Phase 1** is one artifact: the role-by-role merge-policy table the
+     plan's design section asks for (unionable / preserving-identical / incompatible→deferral), as
+     something a reader can check rather than as the `peer`/`rehomed` split plus `rigidCols`. Small,
+     and mostly documentation of what the code already does. *Low — the mechanism is built.*
    **Phase 6 is a committed NEGATIVE result — do not re-propose it** (IR shape annotation: 56.8%
-   unknown against a 10% ceiling). **High.**
+   unknown against a 10% ceiling). **Was High; now Low** — the substrate landed 2026-07-31 across
+   `66cb779`/`65e0fe8`/`e1aa251`/`3657344`.
    → [channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md)
 
 ---
