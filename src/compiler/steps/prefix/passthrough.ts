@@ -1,5 +1,6 @@
 import { q, empty, type Expression } from '../../../sql/kernel/q.ts';
-import { rangeToOffsetLimit } from '../../plan/plan.ts';
+import { sliceOf } from '../../ir/step.ts';
+import { limitOffset } from '../../plan/plan.ts';
 import { appendCte, layoutCols, layoutProjection, prevRel, type ElementStream, type StepFn } from '../context/context.ts';
 
 // ---------- passthrough range/limit/skip (prefix phase) ----------
@@ -41,21 +42,26 @@ function scopedSlice(st: ElementStream, offset: number, limit: number | null): E
     q`SELECT ${r.c.id} AS id${layoutProjection(st.traverserLayout, r)} FROM ${r} WHERE ${r.c.srn} > ${offset}${stop === null ? empty : q` AND ${r.c.srn} <= ${stop}`}`);
 }
 
-export const limit: StepFn = (s, st) => {
-  if (st.traverserLayout.origins.length) return scopedSlice(st, 0, Number(s.args[0]));
+/**
+ * limit/skip/range over an ELEMENT stream — one body for all three, because `sliceOf` already
+ * turned the three spellings into the one window they denote.
+ *
+ * **`Scope.local` is IDENTITY here, and that is the reference's answer, not a shortcut.**
+ * `RangeLocalStep.applyRange` (gremlin-core) slices a `Map`, an `Iterable` or an array and
+ * `return start` for anything else — and a vertex/edge is none of those, so `V().limit(local,1)`
+ * yields every vertex unchanged. We used to read the scope TOKEN as the row count and emit
+ * `LIMIT NaN`, i.e. `no such column: NaN` at execution (item 27). The element tail
+ * (`foldTailAcc`) already treats the local forms of sum/min/max/order/dedup as identity for
+ * exactly this reason; the slices join them.
+ */
+const elementSlice: StepFn = (s, st) => {
+  const slice = sliceOf(s);
+  if (slice.scope === 'local') return st;
+  if (st.traverserLayout.origins.length) return scopedSlice(st, slice.offset, slice.limit);
   const p = prevRel(st, 'p');
-  return appendCte(st, q`SELECT ${p.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${p}${orderByEncounter(st, p)} LIMIT ${Number(s.args[0])}`);
+  return appendCte(st, q`SELECT ${p.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${p}${orderByEncounter(st, p)}${limitOffset(slice)}`);
 };
 
-export const range: StepFn = (s, st) => {
-  const { offset, limit } = rangeToOffsetLimit(s.args);
-  if (st.traverserLayout.origins.length) return scopedSlice(st, offset, limit);
-  const p = prevRel(st, 'p');
-  return appendCte(st, q`SELECT ${p.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${p}${orderByEncounter(st, p)} LIMIT ${limit} OFFSET ${offset}`);
-};
-
-export const skip: StepFn = (s, st) => {
-  if (st.traverserLayout.origins.length) return scopedSlice(st, Number(s.args[0]), null);
-  const p = prevRel(st, 'p');
-  return appendCte(st, q`SELECT ${p.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${p}${orderByEncounter(st, p)} LIMIT -1 OFFSET ${Number(s.args[0])}`);
-};
+export const limit = elementSlice;
+export const range = elementSlice;
+export const skip = elementSlice;

@@ -1,9 +1,9 @@
 import { derived, empty, list, paren, q, raw, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { hasUnresolvedOperand, operandDeps, resolveTraversalOperands } from './operand.ts';
-import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx, TYPE_PER_ROW, TYPE_STATIC, TYPE_UNKNOWN, typeCtxOf } from '../../plan/plan.ts';
-import { isNested, isOperatorArg, isOrderArg, isScopeArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
+import { compareKey, limitOffset, predicateSql, scalarTx, TYPE_PER_ROW, TYPE_STATIC, TYPE_UNKNOWN, typeCtxOf } from '../../plan/plan.ts';
+import { isNested, isOperatorArg, isOrderArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { REDUCERS } from '../../ir/step.ts';
+import { isLocalScope, REDUCERS, sliceOf } from '../../ir/step.ts';
 import { layoutProjection, layoutProjectionMinting, layoutCols, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
 import { loweringStateOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec, SCALAR_TRANSFORMS } from './coerce.ts';
@@ -75,8 +75,7 @@ export const SCALAR_ROW_STEPS = new Set([
   ...REDUCERS, 'fold', 'unfold', 'inject',
 ]);
 
-const isLocal = (step: IRStep): boolean =>
-  (step.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
+const isLocal = isLocalScope;
 
 // Payload = the value/type projection columns; emission order (encounter) is a CARRIED
 // column now, so it rides via layoutProjection alongside every other carried column (never here).
@@ -443,7 +442,7 @@ export function lowerScalarFilter(s: ScalarStream, step: IRStep): ScalarStream |
  */
 export function lowerScalarSplit(s: ScalarStream, step: IRStep): ListStream {
   const args = step.args ?? [];
-  if (args.some((a: unknown) => isScopeArg(a) && a.scope === 'local'))
+  if (isLocalScope(step))
     throw new Error('split(Scope.local) requires a preceding list-producing step (e.g. fold())');
   const sep = args[0];
   if (sep !== null && sep !== undefined && typeof sep !== 'string')
@@ -659,14 +658,10 @@ export function lowerScalarRows(
       continue;
     }
     if (step.name === 'limit' || step.name === 'skip' || step.name === 'range') {
-      const { offset, limit } = step.name === 'limit'
-        ? { offset: 0, limit: Number(step.args[0]) }
-        : step.name === 'skip'
-          ? { offset: Number(step.args[0]), limit: null }
-          : rangeToOffsetLimit(step.args);
+      const slice = sliceOf(step);
       stream = stream.traverserLayout.origins.length
-        ? partitionedSlice(stream, offset, limit)
-        : rowPreserving(stream, q` LIMIT ${limit ?? -1} OFFSET ${offset}`, true);
+        ? partitionedSlice(stream, slice.offset, slice.limit)
+        : rowPreserving(stream, limitOffset(slice), true);
       continue;
     }
     if (step.name === 'tail') {
@@ -700,12 +695,7 @@ export function lowerScalarRows(
       }
       const next = steps[i + 1];
       if (next && !isLocal(next) && (next.name === 'limit' || next.name === 'skip' || next.name === 'range')) {
-        const { offset, limit } = next.name === 'limit'
-          ? { offset: 0, limit: Number(next.args[0]) }
-          : next.name === 'skip'
-            ? { offset: Number(next.args[0]), limit: null }
-            : rangeToOffsetLimit(next.args);
-        stream = rowPreserving(stream, q` ORDER BY ${order} LIMIT ${limit ?? -1} OFFSET ${offset}`);
+        stream = rowPreserving(stream, q` ORDER BY ${order}${limitOffset(sliceOf(next))}`);
         i++;
       } else stream = rowPreserving(stream, q` ORDER BY ${order}`);
       continue;

@@ -11,7 +11,8 @@ import { SCALAR_TRANSFORMS } from './coerce.ts';
 import { lowerReSource } from '../graph-source.ts';
 import { someStepDeep, type IRStep } from '../../ir/strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
-import { predicateSql, rangeToOffsetLimit, elemTable } from '../../plan/plan.ts';
+import { predicateSql, elemTable } from '../../plan/plan.ts';
+import { sliceOf } from '../../ir/step.ts';
 import { elementOrderDrop, elementOrderSql } from './modulation.ts';
 import {
     childCtx, childSteps, classifyCountChild, isKeyModulatedLabelSelect, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
@@ -1053,16 +1054,14 @@ function compileElementChildRows(
       end = appendCte(end, q`SELECT DISTINCT ${p.c.id} AS id${layoutProjection(deduped, p)} FROM ${p}`, { encounter: null });
       continue;
     }
-    const slice = step.name === 'range' ? rangeToOffsetLimit(step.args)
-      : step.name === 'skip' ? { offset: Number(step.args[0]), limit: -1 }
-      : { offset: 0, limit: Number(step.args[0]) };
+    const slice = sliceOf(step);
     const cols = layoutCols(end.traverserLayout);
     const r = derived(
       q`SELECT ${p.c.id} AS id${layoutProjection(end.traverserLayout, p)}, ${rankPerParent(end.traverserLayout, p, end.traverserLayout.encounter ? p.c[end.traverserLayout.encounter] : p.c.id)} AS rn FROM ${p}`,
       ['id', ...cols, 'rn'],
       'r',
     );
-    const hi = slice.limit < 0 ? null : slice.offset + slice.limit;
+    const hi = slice.limit === null ? null : slice.offset + slice.limit;
     const upper = hi === null ? empty : q` AND ${r.c.rn} <= ${hi}`;
     end = appendCte(end, q`SELECT ${r.c.id} AS id${layoutProjection(end.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn} > ${slice.offset}${upper}`);
   }

@@ -1,4 +1,4 @@
-import { isColumnArg, isNested, isOrderArg, isScopeArg, isTokenArg } from '../../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isOrderArg, isTokenArg } from '../../../gremlin/frontend.ts';
 import { empty, list, q, raw, Relation, value, type Expression } from '../../../sql/kernel/q.ts';
 import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type Shape } from '../../../sql/kernel/render.ts';
 import { edgeProperties, labels, vertexLabels, vertexProperties } from '../../../sql/schema.ts';
@@ -9,7 +9,8 @@ import {
     elementPayload,
     jsonbGroupArray,
     labelNameFor, labelTokenFor,
-    predicateSql, rangeToOffsetLimit,
+    limitOffset,
+    predicateSql,
     propSortKeyFor,
     scalarPropSortKey,
     storedValueExpr,
@@ -22,7 +23,7 @@ import { choose as lowerElementChoose, coalesce as lowerElementCoalesce, flatMap
 import { lowerElementDedup } from '../prefix/filter.ts';
 import { lowerScalarAggregate, tryLowerLocalAggregate } from '../prefix/sideeffect.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
-import { NUMERIC_REDUCERS } from '../../ir/step.ts';
+import { isLocalScope, NUMERIC_REDUCERS, sliceOf } from '../../ir/step.ts';
 import { lowerCall } from './call.ts';
 import { assertsGType, BRANCH_SHAPE_ORDER, childCtx, childSteps, classifyBy, collectionAssert, classifyListChild, classifyTotalScalarChild, isScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
 import { mintChildEncounter, tryCompileBranchChildAllCard, tryCompileCountChild, tryCompileListChild, tryCompileScalarModulations, type ScalarModulationSpec } from './child.ts';
@@ -72,8 +73,7 @@ const PROJECTION_NAMES = new Set(['values', 'id', 'label', 'labels', 'count', 'v
 // scalar pipeline (lowerScalarProjection → scalar.ts/barrier.ts), never this accumulator.
 const SCALAR_PROJ = new Set(['values', 'id', 'label', 'labels']);
 const isMapProj = (p: IRStep | null) => p?.name === 'select' || p?.name === 'project';
-const isScopeLocalStep = (s: IRStep | undefined): boolean =>
-  !!s && (s.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
+const isScopeLocalStep = (s: IRStep | undefined): boolean => !!s && isLocalScope(s);
 
 /** A tail modifier: fold the step into the accumulator. `at` gives position so a
  *  terminal reducer (fold/sum) can reject anything following it. */
@@ -101,9 +101,13 @@ const MODIFIERS = new Map<string, ModFn>([
       acc.orders.push({ key, dir: (ord?.order ?? 'asc') as OrderClause['dir'] });
     }
   }],
-  ['range', (s, acc) => { ({ offset: acc.offset, limit: acc.limit } = rangeToOffsetLimit(s.args)); }],
-  ['skip', (s, acc) => { acc.offset = Number(s.args[0]); }],
-  ['limit', (s, acc) => { acc.limit = Number(s.args[0]); }],
+  // The three slices share ONE decode (`sliceOf`), which is also what keeps the Scope.local token
+  // out of the numbers. `acc.limit` stays `null` for "no LIMIT clause at all" — a distinct state
+  // from `sliceOf`'s `null` ("no upper bound"), which only `range`/`skip` can produce and which
+  // this accumulator has always rendered as `LIMIT -1`.
+  ['range', (s, acc) => { const sl = sliceOf(s); acc.offset = sl.offset; acc.limit = sl.limit; }],
+  ['skip', (s, acc) => { acc.offset = sliceOf(s).offset; }],
+  ['limit', (s, acc) => { acc.limit = sliceOf(s).limit; }],
   ['dedup', (_s, acc) => { acc.distinct = true; }],
   ['is', (s, acc) => {
     // is() folds into the projection WHERE (before ORDER BY/LIMIT). Only correct
@@ -711,7 +715,7 @@ function lowerScalarProjection(st: ElementStream, projStep: IRStep, acc: TailAcc
   // The ROW_NUMBER window already captures order (materializeScalarRoot sorts by the
   // encounter); an outer ORDER BY is only needed so LIMIT/OFFSET picks the right slice.
   const orderNode = hasNewEncounter && hasLimit ? q` ORDER BY ${list(orderExprs, ', ')}` : empty;
-  const limitNode = hasLimit ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
+  const limitNode = hasLimit ? limitOffset({ scope: 'global', offset: acc.offset, limit: acc.limit }) : empty;
   if (hasNewEncounter) {
     // order().by(key) SUPERSEDES the carried encounter (fresh ROW_NUMBER) in its declared slot.
     const layout = patchLayout(st.traverserLayout, { encounter: 'encounter' });
@@ -1113,7 +1117,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
     const inner = countDrop
       ? q`SELECT ${distinct ? 'DISTINCT ' : ''}${cd.c.id} AS id FROM ${cd} WHERE ${countDrop}`
       : q`SELECT ${distinct ? 'DISTINCT ' : ''}id FROM ${st.rel}`;
-    const innerLim = (limit !== null || offset > 0) ? q` LIMIT ${limit ?? -1} OFFSET ${offset}` : empty;
+    const innerLim = (limit !== null || offset > 0) ? limitOffset({ scope: 'global', offset, limit }) : empty;
     let countNode: Expression = q`SELECT COUNT(*) AS v FROM (${inner}${innerLim})`;
     // count().is(P): filter the single count value (0 or 1 result rows).
     if (isPreds.length)
@@ -1140,7 +1144,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
     });
   } else if (st.traverserLayout.encounter) keyNodes = [q`${p.c[st.traverserLayout.encounter]}`];
   const orderNode = keyNodes.length ? q` ORDER BY ${list(keyNodes, ', ')}` : empty;
-  const limitNode = (limit !== null || offset > 0) ? q` LIMIT ${limit ?? -1} OFFSET ${offset}` : empty;
+  const limitNode = (limit !== null || offset > 0) ? limitOffset({ scope: 'global', offset, limit }) : empty;
   // Under movementCollapse a bare vertex/edge leaf carries the collapsed multiplicity out to
   // the wire: emit the carried `bulk` column so framing reads it as the per-value multiplicity
   // (framedResults picks up a `bulk` column wherever present — bulk is orthogonal to shape, not

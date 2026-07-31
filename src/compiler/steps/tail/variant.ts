@@ -11,11 +11,10 @@
 
 import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { type ValueType } from '../../../sql/kernel/render.ts';
-import { rangeToOffsetLimit } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { continueLowering, variantPayloadCols, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
-import { layoutProjection, layoutCols, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, type LoweringState } from '../context/context.ts';
-import { lowerGlobalCount, reprojectRows } from './barrier.ts';
+import { layoutProjection, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, type LoweringState } from '../context/context.ts';
+import { globalRowOps, lowerGlobalCount } from './barrier.ts';
 
 // ---------- variant-arm merge builders (parent-agnostic; element- and scalar-parent share) ----------
 //
@@ -156,12 +155,6 @@ export function mergeVariantParts(base: LoweringState, parts: readonly Expressio
   return toVariantStream(stateWithLayout(base, armMerge.traverserLayout), armMerge.rel, meta);
 }
 
-/** Re-project every physical column of the variant relation, optionally slicing rows
- *  or collapsing duplicates. Shape-agnostic: it names only the declared columns and
- *  never touches the per-row tag, so all arms survive intact. */
-const variantSlice = (suffix: (step: IRStep) => Expression): ShapeTailFn<VariantStream> =>
-  (s, step, _steps, at) => continueLowering(reprojectRows(s, { suffix: suffix(step), orderByEncounter: true }), at + 1);
-
 const VARIANT_DISPATCH = new Map<string, ShapeTailFn<VariantStream>>([
   // count is a relational barrier over any shaped row stream → one Long scalar.
   ['count', (s, _step, _steps, at) => continueLowering(lowerGlobalCount(s), at + 1)],
@@ -169,23 +162,13 @@ const VARIANT_DISPATCH = new Map<string, ShapeTailFn<VariantStream>>([
   // over an already-row variant there is nothing to unfold → fall through to the throw.
   ['unfold', (s, _step, _steps, at) =>
     s.result === 'list' ? continueLowering({ ...s, result: 'rows' as const }, at + 1) : null],
-  ['limit', variantSlice((step) => q` LIMIT ${Number(step.args[0])}`)],
-  ['skip', variantSlice((step) => q` LIMIT -1 OFFSET ${Number(step.args[0])}`)],
-  ['range', variantSlice((step) => {
-    const { offset, limit } = rangeToOffsetLimit(step.args);
-    return q` LIMIT ${limit} OFFSET ${offset}`;
-  })],
-  // dedup() collapses the multiset on the current object = the tagged (vk,v,rid) row.
-  // Label/by()-scoped and carried path/label state defer rather than over-collapse,
-  // mirroring element dedup (filter.ts).
-  ['dedup', (s, step, _steps, at) => {
-    if (step.args.length > 0) throw new Error('dedup(label) not yet supported');
-    if ((step.modulators ?? []).length) throw new Error('dedup().by() over a variant value not yet supported');
-    // A carried bulk column rides through the DISTINCT re-projection (bulk≡1 today, so
-    // DISTINCT is unaffected); real path/label state still defers.
-    if (layoutCols(s.traverserLayout).some((c) => c !== s.traverserLayout.bulk)) throw new Error('dedup() over a variant with carried path/label state not yet supported (path-distinct semantics)');
-    return continueLowering(reprojectRows(s, { distinct: true }), at + 1);
-  }],
+  // limit/skip/range/dedup are the SHARED row ops verbatim: a variant's rows ARE its traversers,
+  // and the ops name only the declared column list, so every arm rides through untouched. This file
+  // used to re-declare all four, and the copy was the global slice MINUS `globalRowOps`'
+  // `isLocalScope` decline — so `limit(Scope.local, 1)` read the scope TOKEN as its row count and
+  // emitted `LIMIT NaN` (item 27). Declining sends it to the fallback throw below instead: a
+  // variant row can be a list, so slicing its MEMBERS is a per-arm question no merge answers.
+  ...globalRowOps<VariantStream>(),
 ]);
 
 /** The variant arm of lowerSteps: shape-agnostic row-ops over a widened union; every

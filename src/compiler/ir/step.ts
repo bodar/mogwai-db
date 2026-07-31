@@ -101,8 +101,58 @@ export const isGlobalBarrier = (s: { readonly name: string }): boolean => GLOBAL
  *  and a `Scope.local` argument narrows the same name to one shape's MEMBERS — `order(Scope.local)`
  *  reorders a list value's members and is row-local, where bare `order()` observes every traverser.
  *  Both gates that need this distinction spelled the exemption inline; this is the one predicate. */
-export const isStreamBarrier = (s: IRStep): boolean =>
-  isGlobalBarrier(s) && !(s.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
+export const isStreamBarrier = (s: IRStep): boolean => isGlobalBarrier(s) && !isLocalScope(s);
+
+// ---------- Scope.local, and what a slice step's arguments MEAN ----------
+//
+// These two belong together and belong HERE, in the step vocabulary, for the same reason the
+// barrier sets do: they are facts about a step's ARGUMENTS, and every lowering that reads those
+// arguments needs the same answer. The alternative is what the tree actually had — SEVEN inline
+// copies of the Scope.local scan (`ir/step.ts`, `tail/{barrier,list,scalar,projection,select}.ts`)
+// and NINE independent derivations of a slice's offset/limit. That duplication was not neutral:
+// the copy in `tail/variant.ts` was the global slice WITHOUT the scope guard, so
+// `g.V().union(…).limit(Scope.local,1)` read the scope TOKEN as its row count and emitted
+// `LIMIT NaN` (docs/outstanding-work.md item 27). One decode makes that unspellable — you cannot
+// reach the numbers without also being handed the scope.
+
+/** Does this step carry a `Scope.local` token? A local op addresses one VALUE's members — a list's
+ *  elements, a record's fields — where the same step name unscoped addresses the stream's ROWS. */
+export const isLocalScope = (s: IRStep): boolean =>
+  (s.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
+
+/** The three steps that denote a window. `tail` is deliberately NOT one: "the last n" cannot be
+ *  turned into an offset without knowing how many there are, which is a question about the STREAM,
+ *  not about the step — so its hosts keep their own derivation until item 17 gives them a count. */
+export const SLICE_STEPS: ReadonlySet<string> = new Set(['limit', 'skip', 'range']);
+
+/** A slice step decoded: the window, and WHOSE window it is. `limit: null` is "no upper bound"
+ *  (`range(2,-1)`, `skip(2)`) — spelled as null rather than SQL's `-1` because the two consumers
+ *  that compute with it (`scopedSlice`, `partitionedSlice`) take an offset+count and would read
+ *  `offset + -1` as a real upper bound; the sites that render SQL write `${limit ?? -1}`, which is
+ *  what all but one of them already did. */
+export interface Slice {
+  readonly scope: 'global' | 'local';
+  readonly offset: number;
+  readonly limit: number | null;
+}
+
+/** THE decode of `limit`/`skip`/`range`. Skips the scope token rather than counting it as an
+ *  argument, which is the whole point: `limit(Scope.local, 1)` has the same numbers as `limit(1)`
+ *  and differs only in `scope`. Rejects an illegal range with TinkerPop's own wording. */
+export function sliceOf(step: IRStep): Slice {
+  const scope = isLocalScope(step) ? 'local' : 'global';
+  const nums = (step.args ?? []).filter((a: unknown) => !isScopeArg(a)).map(Number);
+  switch (step.name) {
+    case 'limit': return { scope, offset: 0, limit: nums[0] };
+    case 'skip': return { scope, offset: nums[0], limit: null };
+    case 'range': {
+      const [lo, hi] = nums;
+      if (hi >= 0 && lo > hi) throw new Error(`Not a legal range: [${lo}, ${hi}]`);
+      return { scope, offset: lo, limit: hi < 0 ? null : hi - lo };
+    }
+    default: throw new Error(`${step.name}() is not a slice step`);
+  }
+}
 
 /** The four steps that fork a traverser into arms and merge the results. */
 export type BranchKind = 'union' | 'choose' | 'coalesce' | 'optional';

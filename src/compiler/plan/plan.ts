@@ -4,6 +4,7 @@ import type { FastPath } from '../options/fast-paths.ts';
 import { normalizeTypeName, BigDecimal, Duration } from '../../gremlin/types.ts';
 import { nodes, edges, labels, vertexLabels, vertexProperties, edgeProperties } from '../../sql/schema.ts';
 import type { LabelRegime } from '../../api.ts';
+import { sliceOf, type IRStep, type Slice } from '../ir/step.ts';
 import { type ElemShape, type ScalarType, type ValueType } from '../../sql/kernel/render.ts';
 
 // ---------- SQL node builders ----------
@@ -494,12 +495,20 @@ export const FtsSubstringFastPath: FastPath<[ScalarCtx, string, any], Expression
     ftsSubstringExists(sqlElem(scalarCtx.elem as Elem), scalarCtx.idExpr, key, ftsSubstringMatch(pred)!),
 };
 
-/** range(low, high) → SQL [offset, limit]. high < 0 means "no upper bound". */
-export function rangeToOffsetLimit(args: any[]): { offset: number; limit: number } {
-  const [lo, hi] = args.map(Number);
-  if (hi >= 0 && lo > hi) throw new Error(`Not a legal range: [${lo}, ${hi}]`);
-  return { offset: lo, limit: hi < 0 ? -1 : hi - lo };
-}
+/**
+ * The `LIMIT/OFFSET` suffix of a GLOBAL slice — the ONE rendering, for every shape's row op, the
+ * element prefix and the projection accumulator alike. `sliceOf` (ir/step.ts) owns the arithmetic;
+ * this owns only how it reaches SQL, and the two together are what `rangeToOffsetLimit` plus nine
+ * hand-rolled `Number(step.args[0])` reads used to be.
+ *
+ * `OFFSET 0` is elided because it says nothing — which also keeps `limit(n)` rendering exactly as
+ * it did before the three spellings were merged.
+ */
+export const limitOffset = (slice: Slice): Expression =>
+  q` LIMIT ${slice.limit ?? -1}${slice.offset ? q` OFFSET ${slice.offset}` : empty}`;
+
+/** `limitOffset` reached straight from the step, for the row ops that hold no other slice state. */
+export const sliceSuffix = (step: IRStep): Expression => limitOffset(sliceOf(step));
 
 /** Whether the current traverser's `id` column is a node id or an edge id. The
  *  id-relation is typed but the type is *static* — known from the step chain, so

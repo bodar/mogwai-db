@@ -1,18 +1,11 @@
 import { derived, empty, list, q, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { perRowColumnOf, staticTypeOf, type ListOf } from '../../../sql/kernel/render.ts';
-import { rangeToOffsetLimit, typedScalarNode } from '../../plan/plan.ts';
-import { isScopeArg } from '../../../gremlin/frontend.ts';
-import { type IRStep } from '../../ir/strategies.ts';
-import { type NumericReducer, type ScalarReducer } from '../../ir/step.ts';
+import { sliceSuffix, typedScalarNode } from '../../plan/plan.ts';
+import { isLocalScope, type NumericReducer, type ScalarReducer } from '../../ir/step.ts';
 
 import { cardinalityOf, continueLowering, loweringStateOf, streamColumns, toListStream, toScalarStream, withRelation, type ListStream, type RelationalStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { layoutCols, layoutProjection, layoutProjectionMinting, patchLayout, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
 import { type ChildScope } from './child-shape.ts';
-
-/** Does this step carry a Scope.local token? A local slice/dedup addresses a shape's MEMBERS, not
- *  its rows, so every shared row op declines one. */
-const isLocalScope = (step: IRStep): boolean =>
-  (step.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
 
 const currentFrame = (scope: ChildScope) => {
   const frame = scope.frames.at(-1);
@@ -85,15 +78,24 @@ export function reprojectRows<T extends RelationalStream>(s: T, opts: RowOpts = 
   return withRelation(s, s.q.cte(body, cols));
 }
 
-/** The `LIMIT/OFFSET` suffix of each GLOBAL slice step. One derivation, reached by name, instead of
- *  the per-shape copies that each re-derived it from `step.args`. */
-const SLICE_SUFFIX: Record<string, (step: IRStep) => Expression> = {
-  limit: (step) => q` LIMIT ${Number(step.args[0])}`,
-  skip: (step) => q` LIMIT -1 OFFSET ${Number(step.args[0])}`,
-  range: (step) => {
-    const { offset, limit } = rangeToOffsetLimit(step.args);
-    return q` LIMIT ${limit} OFFSET ${offset}`;
-  },
+/**
+ * Compose handlers for ONE step name: the first that does not decline wins.
+ *
+ * `dispatchShapeTail` consults exactly one handler per name, so a shape that already owns a builder
+ * for `limit` cannot also take the shared row op by spreading both into the Map — the later entry
+ * silently WINS, and the shared op then declines a `Scope.local` step into the fallback throw rather
+ * than into the handler that was there before.
+ *
+ * That is not hypothetical: spreading both is what the first attempt did, and it stopped **42 corpus
+ * traversals executing** (`limit()/range()/skip()/dedup() on a list value not yet supported`), which
+ * the census caught as its headline "support lost" gate. Compose, never shadow.
+ */
+export const firstOf = <T>(...fns: readonly ShapeTailFn<T>[]): ShapeTailFn<T> => (s, step, steps, at) => {
+  for (const fn of fns) {
+    const result = fn(s, step, steps, at);
+    if (result) return result;
+  }
+  return null;
 };
 
 /**
@@ -117,34 +119,14 @@ const SLICE_SUFFIX: Record<string, (step: IRStep) => Expression> = {
  * alias state makes a bare `DISTINCT` over the row the wrong question (path-distinct semantics).
  * `bulk` is exempt because it is ≡1 today, so it cannot change what DISTINCT collapses.
  */
-/**
- * Compose handlers for ONE step name: the first that does not decline wins.
- *
- * `dispatchShapeTail` consults exactly one handler per name, so a shape that already owns a builder
- * for `limit` cannot also take the shared row op by spreading both into the Map — the later entry
- * silently WINS, and the shared op then declines a `Scope.local` step into the fallback throw rather
- * than into the handler that was there before.
- *
- * That is not hypothetical: spreading both is what the first attempt did, and it stopped **42 corpus
- * traversals executing** (`limit()/range()/skip()/dedup() on a list value not yet supported`), which
- * the census caught as its headline "support lost" gate. Compose, never shadow.
- */
-export const firstOf = <T>(...fns: readonly ShapeTailFn<T>[]): ShapeTailFn<T> => (s, step, steps, at) => {
-  for (const fn of fns) {
-    const result = fn(s, step, steps, at);
-    if (result) return result;
-  }
-  return null;
-};
-
 export function globalRowOps<T extends RelationalStream>(): [string, ShapeTailFn<T>][] {
-  const slice = (name: keyof typeof SLICE_SUFFIX): ShapeTailFn<T> => (s, step, _steps, at) =>
+  const slice: ShapeTailFn<T> = (s, step, _steps, at) =>
     isLocalScope(step) ? null
-      : continueLowering(reprojectRows(s, { suffix: SLICE_SUFFIX[name](step), orderByEncounter: true }), at + 1);
+      : continueLowering(reprojectRows(s, { suffix: sliceSuffix(step), orderByEncounter: true }), at + 1);
   return [
-    ['limit', slice('limit')],
-    ['skip', slice('skip')],
-    ['range', slice('range')],
+    ['limit', slice],
+    ['skip', slice],
+    ['range', slice],
     ['dedup', (s, step, _steps, at) => {
       if (isLocalScope(step)) return null;
       if ((step.args ?? []).length) throw new Error('dedup(label) not yet supported');

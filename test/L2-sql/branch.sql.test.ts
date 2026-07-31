@@ -238,7 +238,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(() => compile(`${base}.order()`, {})).toThrow('order() on a variant value not yet supported');
     // dedup with carried label state defers rather than over-collapsing
     expect(() => compile(`g.V().as("a").union(__.values("name"), __.out()).dedup()`, {}))
-      .toThrow('dedup() over a variant with carried path/label state not yet supported');
+      .toThrow('dedup() over a variant value with carried path/label state not yet supported');
   });
 
   test('coalesce() → first non-empty branch per input via the ordinal', () => {

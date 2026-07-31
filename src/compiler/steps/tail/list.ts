@@ -7,7 +7,7 @@
 
 import { q, value, raw, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { predicateSql, scalarTx, compareKey, inferVtypeSql } from '../../plan/plan.ts';
-import { isColumnArg, isNested, isScopeArg, stepChain } from '../../../gremlin/frontend.ts';
+import { isColumnArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from '../context/stream.ts';
 import { layoutProjection, layoutCols, type ElementStream } from '../context/context.ts';
@@ -15,10 +15,10 @@ import { PER_ROW, STATIC, type Compiled, type ListOf, type ValueType } from '../
 import { engineOf, type Engine } from '../../engine/deps.ts';
 import { firstOf, globalRowOps, lowerGlobalCount } from './barrier.ts';
 import { assertsGType, classifyBy, collectionAssert } from './child-shape.ts';
-import { REDUCERS } from '../../ir/step.ts';
+import { isLocalScope, REDUCERS } from '../../ir/step.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
-const isLocal = (s: IRStep): boolean => (s.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
+const isLocal = isLocalScope;
 
 // ---------- the member seam: one encoding decision, read in one place ----------
 //

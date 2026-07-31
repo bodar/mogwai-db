@@ -1,8 +1,9 @@
-import { isColumnArg, isNested, isPopArg, isScopeArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isPopArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
 import { empty, list, q, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { PER_ROW, perRowColumnOf, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
+import { isLocalScope, SLICE_STEPS, sliceOf, type Slice } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { elemCtx, elementPayload, elemTable, labelNameFor, propScalarFor, P_OPS, predicateSql, propExtract, storedPropFor } from '../../plan/plan.ts';
+import { elemCtx, elementPayload, elemTable, labelNameFor, limitOffset, propScalarFor, P_OPS, predicateSql, propExtract, storedPropFor } from '../../plan/plan.ts';
 import { aliasId, aliasPop, aliasPresent, aliasScalar, entryTypeTag, shapeElem } from '../context/alias.ts';
 import { aliasElem, aliasIsElement, layoutCols, layoutProjection, scalarTypeFromAlias, type AliasMap, type ElementStream } from '../context/context.ts';
 import { continueLowering, dispatchShapeTail, loweringStateOf, recordFieldColumns, toElementStream, toListStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type LoweringResult, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
@@ -637,48 +638,51 @@ const recordOrder: ShapeTailFn<RecordStream> = (s, step, steps, at) => {
     // Fuse a directly-following limit/skip/range so the LIMIT applies AFTER the sort in
     // one query (a following Scope.local limit is a per-field slice, not a row cut → skip).
     const nxt = steps[at + 1];
-    const fuse = nxt && (nxt.name === 'limit' || nxt.name === 'skip' || nxt.name === 'range')
-      && !nxt.args.some((a: unknown) => isScopeArg(a) && a.scope === 'local');
+    const fuse = !!nxt && SLICE_STEPS.has(nxt.name) && !isLocalScope(nxt);
     let suffix: Expression = empty;
     if (fuse) {
-      const nums = nxt.args.filter((a): a is number => typeof a === 'number').map(Number);
-      const offset = nxt.name === 'skip' ? nums[0] : nxt.name === 'range' ? nums[0] : 0;
-      const limit = nxt.name === 'limit' ? nums[0] : nxt.name === 'range' ? nums[1] - nums[0] : null;
-      if (offset < 0 || (limit !== null && limit < 0)) throw new Error(`Not a legal range: [${offset}, ${limit === null ? -1 : offset + limit}]`);
-      suffix = q` LIMIT ${limit ?? -1} OFFSET ${offset}`;
+      const sl = sliceOf(nxt);
+      if (sl.offset < 0 || (sl.limit !== null && sl.limit < 0)) throw new Error(`Not a legal range: [${sl.offset}, ${sl.limit === null ? -1 : sl.offset + sl.limit}]`);
+      suffix = limitOffset(sl);
     }
     const rel = s.q.cte(q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r} ORDER BY ${list(terms, ', ')}${suffix}`, names);
     return continueLowering(toRecordStream(loweringStateOf(s), rel, s.fields), fuse ? at + 2 : at + 1);
 };
 
+/** `tail` is the one window `sliceOf` cannot decode on its own — "the last n" is an offset only
+ *  once you know how many there are. For a RECORD the members are its FIELDS, so the count is
+ *  static and the local form becomes an ordinary window right here; every other stream still has
+ *  to ask the relation, which is why `tail` stays out of `SLICE_STEPS` (item 17). */
+const recordWindow = (step: IRStep, members: number): Slice => {
+  if (step.name !== 'tail') return sliceOf(step);
+  const limit = Number(step.args.find((a: unknown) => typeof a === 'number') ?? 1);
+  return { scope: isLocalScope(step) ? 'local' : 'global', offset: Math.max(0, members - limit), limit };
+};
+
 const recordSlice: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
-    const local = step.args.some((a: unknown) => isScopeArg(a) && a.scope === 'local');
-    const nums = step.args.filter((a): a is number => typeof a === 'number').map(Number);
-    if (local) {
-      let offset = 0;
-      let limit: number | null = null;
-      if (step.name === 'limit') limit = nums[0];
-      else if (step.name === 'skip') offset = nums[0];
-      else if (step.name === 'range') { offset = nums[0]; limit = nums[1] - nums[0]; }
-      else { limit = nums[0] ?? 1; offset = Math.max(0, s.fields.length - limit); }
-      if (offset < 0 || (limit !== null && limit < 0)) throw new Error(`Not a legal range: [${offset}, ${limit === null ? -1 : offset + limit}]`);
+    const { scope, offset, limit } = recordWindow(step, s.fields.length);
+    if (offset < 0 || (limit !== null && limit < 0)) throw new Error(`Not a legal range: [${offset}, ${limit === null ? -1 : offset + limit}]`);
+    if (scope === 'local') {
       const fields = s.fields.slice(offset, limit === null ? undefined : offset + limit);
-      if (!fields.length && layoutCols(s.traverserLayout).length === 0)
-        throw new Error(`${step.name}(Scope.local) producing an empty record needs a zero-field record layout`);
+      // A record whose field list is empty has no columns to project, and the guard used to also
+      // require an empty carried layout — so `project('n').by('name').skip(Scope.local,1)` (one
+      // field, skipped past) slipped through with a `bulk` column still carried and rendered
+      // `SELECT  FROM …`, a fail-closed VIOLATION (item 27). The reference answer is an empty map
+      // per traverser, which needs a record shape that can carry zero fields all the way to the
+      // framer; until then this defers on the field count alone.
+      if (!fields.length)
+        throw new Error(`${step.name}(Scope.local) slicing a record down to zero fields not yet supported (no empty-map record shape)`);
       const r = s.rel.as('r');
       const names = [...fields.flatMap(recordFieldColumns), ...layoutCols(s.traverserLayout)];
       const rel = s.q.cte(q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r}`, names);
       return continueLowering(toRecordStream(loweringStateOf(s), rel, fields), at + 1);
     }
     if (step.name === 'tail') throw new Error('tail() on a record stream needs explicit encounter-order metadata');
-    const offset = step.name === 'skip' ? nums[0] : step.name === 'range' ? nums[0] : 0;
-    const limit = step.name === 'limit' ? nums[0] : step.name === 'range' ? nums[1] - nums[0] : null;
-    if (offset < 0 || (limit !== null && limit < 0)) throw new Error(`Not a legal range: [${offset}, ${limit === null ? -1 : offset + limit}]`);
     // Record rows are one traverser each, so a global slice is the SHARED row op — the projection
     // this used to spell out is `streamColumns`, and `cardinalityOf` confirms the rows are the
     // traversers rather than leaving that implicit.
     return continueLowering(
-      reprojectRows(s, { suffix: q` LIMIT ${limit ?? -1} OFFSET ${offset}`, orderByEncounter: true }),
+      reprojectRows(s, { suffix: limitOffset({ scope, offset, limit }), orderByEncounter: true }),
       at + 1,
     );
 };

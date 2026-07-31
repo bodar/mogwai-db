@@ -341,7 +341,7 @@ describe('scalar-parent / projection SQL', () => {
     const ordered = read('g.V().order().by("age").limit(2).values("name").count()');
     expect(ordered.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(ordered.sql).toContain('ORDER BY (SELECT (CASE WHEN vtype IN');
-    expect(ordered.sql).toContain('LIMIT 2 OFFSET 0), c2(v) as (SELECT COALESCE(SUM(s.bulk), 0) AS v FROM c1 s)');
+    expect(ordered.sql).toContain('LIMIT 2), c2(v) as (SELECT COALESCE(SUM(s.bulk), 0) AS v FROM c1 s)');
     expect(run(seededStore(), 'g.V().order().by("age").limit(2).values("name").count()').map((r) => r.v))
       .toEqual([2]);
     expect(() => compile('g.V().values("name").id()', {})).toThrow('id() requires element input');
@@ -768,7 +768,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(p.sql).toContain('ORDER BY r.e1_v DESC');
     // a following limit fuses into the same ORDER BY query (LIMIT after the sort)
     const lim = read("g.V().out('created').project('a','b').by('name').by(__.in('created').count()).order().by(__.select('b'), Order.desc).limit(2).select('a')");
-    expect(lim.sql).toContain('ORDER BY r.e1_v DESC LIMIT 2 OFFSET 0');
+    expect(lim.sql).toContain('ORDER BY r.e1_v DESC LIMIT 2');
     // an element field orders by its external id
     expect(read("g.V(1).project('self','b').by().by(__.out().count()).order().by(__.select('self')).select('b')").sql)
       .toContain('ORDER BY r.e0_id ASC');
@@ -892,9 +892,9 @@ describe('scalar-parent / projection SQL', () => {
   test('scalar row operators lower left-to-right instead of commuting through a tail accumulator', () => {
     const p = read('g.V().values("age").count().limit(1).is(P.gt(3))');
     expect(p.shape).toEqual({ kind: 'value', type: STATIC('long') });
-    expect(p.sql).toContain('LIMIT 1 OFFSET 0');
+    expect(p.sql).toContain('LIMIT 1');
     expect(p.sql).toContain('WHERE p.v > ?');
-    expect(p.sql.indexOf('LIMIT 1 OFFSET 0')).toBeLessThan(p.sql.indexOf('WHERE p.v > ?'));
+    expect(p.sql.indexOf('LIMIT 1')).toBeLessThan(p.sql.indexOf('WHERE p.v > ?'));
 
     const store = seededStore();
     expect(run(store, 'g.V().values("age").count().limit(1).is(P.gt(3))').map((r) => r.v)).toEqual([4]);
