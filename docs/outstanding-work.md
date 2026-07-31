@@ -276,26 +276,36 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md)
 
 18. **Channel-preservation Phase 1 — deployment, not construction.** The largest MEASURED defect
-   category (carried-channel drops, 33%) and the index has never carried it. `withRelation`,
-   `mergeLayouts` and `rehomeLayout` all exist, so the work is converting the hand-written layout
-   spreads so each survivor must *say* what it drops. **Re-measured 2026-07-30: 113 spreads against
-   42 `patchLayout` sites.** (The previously recorded 104/32 was taken before the `Carry` →
-   `LoweringState`/`TraverserLayout` rename and counted a different pattern, so read the two as
-   independent snapshots, not a trend — the honest reading is that Phase 1 has not started.)
-   Concentrated in `steps/tail/`; start `steps/context/context.ts`.
-   - **`assertStreamColumns` does not yet check declared layout-role columns** — it validates payload
-     and per-row-type columns only. Extending it is the "runtime contract" third of the ScalarType
-     pattern and the assertion point Phase 1's own exit criterion names. `steps/context/stream.ts`.
-   - **`mergeLayouts` is declared "THE merge authority — every arm merge routes through this" and has
-     ONE caller** (`tail/branch.ts`); `tail/scalar.ts` and `tail/variant.ts` call `mergeAliasMaps`
-     directly. That is NOT drift — `variant.ts` documents that child-scoped arms make the rigid-role
-     assertion false and asserting "breaks coalesce outright". The real duplication is one layer up:
-     `unionScalarStreams`, `finishListMerge` and `mergeVariantArms` are three copies of one algorithm
-     (alias-union → `grew` check → per-arm tag → `ROW_NUMBER()` re-mint). The missing concept is a
-     `mergeLayouts` that takes the rigid-role check as a POLICY (`assert` vs `child-scoped`). **Do not
-     weaken the assertion to make a call type-check** — the plan says so explicitly, and the recorded
-     silent-`[]` bug (`union(__.as("x").out().fold(), …).select("x")`) lived in the one copy that never
-     grew the alias union.
+   category (carried-channel drops, 33%) and the index carried it only from 2026-07-30.
+   **The "113 spreads against 42 `patchLayout` sites" measurement was WRONG and is withdrawn**
+   (corrected 2026-07-31): it counted `...layoutCols(...)` expansions, which are the
+   single-source-of-truth column list — i.e. exactly what a correct preservation route looks like —
+   so it measured the opposite of the defect. `TraverserLayout`-valued object spreads number ~13,
+   every one a construction site, and the same grep run against `docs/`-era history is why the
+   earlier 104/32 reading looked like a trend. Do not re-derive a spread count without excluding
+   `layoutCols`.
+   - ~~**`mergeLayouts` … has ONE caller**~~ — **LANDED `66cb779`.** The missing concept was the
+     POLICY, as predicted: `mergeLayouts` now takes a REQUIRED `RigidRolePolicy` (`'peer'` asserts
+     the rigid roles, `'rehomed'` merges label sets only for child-scoped arms already re-homed),
+     the assertion was not weakened, and `mergeAliasMaps` is module-local so the route is
+     structural. `layoutGrewAliases` replaces the inline `.size !== .size` each copy spelled.
+   - **`unionScalarStreams`, `finishListMerge` and `mergeVariantParts` are still three copies of one
+     ALGORITHM** — per-arm payload + `arm_idx`/`arm_encounter` tag → inner CTE → `ROW_NUMBER() OVER
+     (partitionOver(…, arm_idx, arm_encounter))` re-minted into the carried `encounter` slot. Only
+     the payload column list differs, and `streamPayloadCols` already owns that. `finishElementMerge`
+     (`prefix/branch.ts`) is a fourth with one deliberate difference: it keeps the arm's encounter in
+     its declared slot instead of renaming it to `arm_encounter`. **One genuine asymmetry to preserve:
+     `unionScalarStreams` mints UNCONDITIONALLY** where list/variant mint only when the base
+     encounter is live — a scalar merge's positional consumers are reachable, a list-valued
+     `limit()` is not (yet). Shares the substrate question with item 17.
+   - **`assertStreamColumns` DOES check declared layout-role columns** — `streamColumns` is
+     `streamPayloadCols` + `layoutCols`, so the earlier "payload and per-row-type only" claim is
+     withdrawn. The real hole is the CONSTRUCTION SITES THAT SKIP IT: `appendCte`
+     (`steps/context/context.ts`, the element hot path) builds `{...st, rel: q.cte(body, cols)}`
+     directly and honours a caller's `cols:` override unchecked, and `movement.ts`'s `finishMove`,
+     `tail/child.ts`'s `oneRowEncounter`/child rejoin, `prefix/match.ts`'s seed and `engine.ts`'s
+     write-driver re-entry each hand-build the same object. Routing those through an asserting
+     constructor is the "runtime contract" third of the ScalarType pattern.
    - **The paired exit-gate regression tests are unwritten** — "a label bound AFTER a barrier survives
      an arm merge while a label consumed BY that barrier is not silently resurrected", and for each
      migrated merge both a same-scope and a child-scoped arm.

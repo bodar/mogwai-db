@@ -110,6 +110,20 @@ Completed IR-annotation experiment (negative result):
   also corrected the L5 walker's member-shape bookkeeping: list-preserving local
   transforms no longer overwrite the shape remembered by a preceding `fold()`.
 
+Phase 1 tranches (current names throughout):
+
+- `66cb779` — **`mergeLayouts` becomes THE merge authority, with the rigid check as a POLICY.** It
+  had one caller while three sibling merges called `mergeAliasMaps` directly, taking the alias half
+  of the contract and skipping the rest. The fix is the missing concept, not a weaker assertion: one
+  REQUIRED `RigidRolePolicy` — `'peer'` (same-scope arms; rigid roles must agree, fails closed) or
+  `'rehomed'` (child-scoped arms already re-homed onto the parent; label sets only). `mergeAliasMaps`
+  is now module-local, so the route is structural; the `.size !== .size` grew-a-column comparison
+  each copy spelled inline is `layoutGrewAliases`. No SQL moves — the L2 snapshots are unchanged.
+  **A measurement correction landed with it:** the index's "113 hand-written layout spreads" counted
+  `...layoutCols(...)` expansions, which are the single-source-of-truth column list and precisely
+  what a preservation route is supposed to look like. The real count of `TraverserLayout`-valued
+  object spreads is ~13, and each one is a construction site.
+
 ## North star
 
 Every compiler boundary must make one of three outcomes explicit:
