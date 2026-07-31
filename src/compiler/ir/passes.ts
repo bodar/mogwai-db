@@ -1,7 +1,7 @@
 import { isNested, type Step, type StrategyUse } from '../../gremlin/frontend.ts';
 import { PASS_CATEGORIES, type Pass, type PassCategory, type PassContext } from './pass.ts';
 import {
-    stripTerminal, desugarMatchString, formRepeatRegions, unrollFixedRepeat, absorbModulators, absorbOptionArms, absorbCallWith,
+    stripTerminal, desugarMatchString, formRepeatRegions, unrollFixedRepeat, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
     canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
     verifyReadOnlyChildren,
     absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
@@ -108,6 +108,9 @@ const FOLD: Pass[] = group('canonicalize', [
   { name: 'absorbValueMapWith', run: (steps) => absorbValueMapWith(steps) },
   { name: 'absorbModulators', run: (steps) => absorbModulators(steps) },
   { name: 'absorbOptionArms', run: (steps) => absorbOptionArms(steps) },
+  // BEFORE absorbCallWith: desugarIo re-emits io()'s with() steps after the call it mints, for
+  // absorbCallWith to fold exactly as it folds a hand-written call()'s.
+  { name: 'desugarIo', run: (steps) => desugarIo(steps) },
   { name: 'absorbCallWith', run: (steps) => absorbCallWith(steps) },
 ]);
 

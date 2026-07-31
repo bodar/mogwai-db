@@ -6,6 +6,7 @@ import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
 import { Executor } from '../execute.ts';
 import type { Executor as ExecutorApi } from '../api.ts';
 import type { RegistryProvider } from '../scopes.ts';
+import type { IoStore } from '../iostore.ts';
 import { BunSqlite } from './BunSqlite.ts';
 
 /**
@@ -48,6 +49,10 @@ export class BunGraphManager implements GraphManager {
     private dir: string | undefined,
     registry: RegistryProvider,
     private labelCardinalityFor: (id: string) => LabelCardinality = () => LabelCardinality.ONE,
+    /** The io namespace io() resolves against — one rooted directory, shared by every graph this
+     *  manager owns (a document is addressed by path, not by graph). Omitted → io() fails closed
+     *  naming the missing binding. */
+    private readonly io?: IoStore,
   ) {
     if (dir) mkdirSync(dir, { recursive: true });
     this.registry = registry;
@@ -72,7 +77,7 @@ export class BunGraphManager implements GraphManager {
   /** The per-graph executor, bound to that graph's store + the registry + this manager as the
    *  federation source. Created on demand; a sibling federated call reaches this same method. */
   executor(id: string): ExecutorApi {
-    return new Executor(this.resolve(id).store, this.registry, this);
+    return new Executor(this.resolve(id).store, this.registry, this, undefined, this.io);
   }
 
   /**

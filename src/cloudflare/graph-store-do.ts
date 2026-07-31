@@ -7,6 +7,7 @@ import { Executor as ExecutorImpl, type Framed } from '../execute.ts';
 import { extendedRegistry } from '../services/standard.ts';
 import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
 import { CloudflareGraphManager } from './cloudflare-graph-manager.ts';
+import { R2IoStore } from './R2IoStore.ts';
 
 export interface Env {
   GRAPH: DurableObjectNamespace<GraphDatabase>;
@@ -14,6 +15,9 @@ export interface Env {
    *  a Worker `var` in wrangler config to change it. The bare `/gremlin`
    *  stock-client endpoint is fixed and unaffected. */
   PATH_PREFIX?: string;
+  /** Optional R2 bucket backing io() — where `io("data/x.json")` resolves. A binding, so an
+   *  operator opts in per deployment; absent, io() fails closed naming it (NO_IO_STORE). */
+  IO?: R2Bucket;
 }
 
 /** One Durable Object = one isolated graph database. The DO owns a
@@ -54,7 +58,10 @@ export class GraphDatabase extends DurableObject<Env> {
    *  via the same executor(id) seam — genuine cross-DO pushdown, same shape as Bun in-process. */
   private executor(): Executor {
     this.ensureLive();
-    return new ExecutorImpl(this.store, extendedRegistry, new CloudflareGraphManager(this.env.GRAPH));
+    // The R2 binding is read INSIDE the DO (bindings are a property of a DO's env exactly as they
+    // are a Worker's), so a whole-graph read/write happens where the graph lives.
+    const io = this.env.IO ? new R2IoStore(this.env.IO) : undefined;
+    return new ExecutorImpl(this.store, extendedRegistry, new CloudflareGraphManager(this.env.GRAPH), undefined, io);
   }
 
   /** Data-plane RPC: compile + run + FRAME inside the DO (concern B, client wire path). The edge

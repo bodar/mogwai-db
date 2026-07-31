@@ -111,6 +111,11 @@ export interface ServiceRegistry {
   list(): readonly Service[];
 }
 
+/** The service name `io()` desugars to (services/catalog/io.ts). Lives here for the same reason
+ *  DIRECTORY_SERVICE_NAME does — a dependency-free leaf both the desugaring Pass (compiler core)
+ *  and the service impl can import, without the compiler core importing a service module. */
+export const IO_SERVICE_NAME = 'mogwai.io';
+
 /** The directory command name. A service registered under it is resolvable by name but
  *  excluded from its own list() (TinkerPop's rule — expressed as `internal: true`). Lives here
  *  (a dependency-free leaf) so both call-params.ts and directory.ts import it without a cycle. */

@@ -1,0 +1,87 @@
+import type { Service, CallParams } from '../spi/types.ts';
+import { IO_SERVICE_NAME } from '../spi/types.ts';
+import type { IoStore } from '../../iostore.ts';
+import type { GraphStore } from '../../storage.ts';
+import { loadGraphson, writeGraphson } from '../../formats/graphson.ts';
+
+// ---------- mogwai.io — what io() desugars to (async, Barrier, INTERNAL) ----------
+//
+// `g.io("data/modern.json").read()` is not new machinery: it is async, it collects, and it lowers
+// to nothing at compile time — which is exactly `Contribution {kind:'barrier'}`, the shape
+// mogwai.graph.federate already occupies, run by the executor's one await. So io() desugars to a
+// call() on THIS service (ir/strategies.ts desugarIo) and inherits the whole async seam. The
+// alternative — a second async step kind in the compiler — is the thing to avoid.
+//
+// INTERNAL (`internal: true`): resolvable by name, absent from `--list`. It is sugar's backing
+// service, not part of the reference provider surface the official g_call/g_callXlistX scenarios
+// assert, so it must be registered in BOTH registries and visible in neither.
+//
+// Both dependencies arrive at CONSTRUCTION off the app scope — the IoStore (where documents live)
+// and this graph's rows. That is the whole point of the DI consolidation
+// (docs/2026-07-31-di-scopes-and-services-plan.md): `apply` needs no wider contract, because a
+// service is not a module-level constant that can depend on nothing.
+
+// The name itself lives in spi/types.ts (a dependency-free leaf), so the desugaring Pass in the
+// compiler core can reach it without importing this module.
+export { IO_SERVICE_NAME } from '../spi/types.ts';
+
+/** `read` loads a document INTO this graph; `write` dumps this graph OUT to one. */
+export type IoDirection = 'read' | 'write';
+
+/** The `direction` param desugarIo stamps on the call. Present on every io() call by
+ *  construction, so an absent/other value means someone called the service by hand. */
+function directionOf(params: CallParams): IoDirection {
+  const d = params.direction;
+  if (d === 'read' || d === 'write') return d;
+  throw new Error(`${IO_SERVICE_NAME}: a "direction" param of "read" or "write" is required`);
+}
+
+function pathOf(params: CallParams): string {
+  const p = params.path;
+  if (typeof p !== 'string' || p.length === 0)
+    throw new Error(`${IO_SERVICE_NAME}: a "path" param (the document to read or write) is required`);
+  return p;
+}
+
+/** Which codec serves a path. The EXTENSION decides, which is what the reference provider does
+ *  too. An unsupported format fails closed NAMING the format — never a wrong-format parse:
+ *   • `.xml` (GraphML) is excluded by decision — its `attr.type` admits no date/uuid/nesting/meta,
+ *     so it is lossier than CSV, and Workers has no XML DOM to parse it with anyway.
+ *   • `.kryo` (Gryo) is a genuine wall: JVM serialization, not reimplementable without a
+ *     dependency that does not exist.
+ *  See docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md §4. */
+function codecFor(path: string): 'graphson' {
+  const ext = path.slice(path.lastIndexOf('.')).toLowerCase();
+  if (ext === '.json') return 'graphson';
+  if (ext === '.xml')
+    throw new Error(`io("${path}"): GraphML is not supported — its attribute types cannot carry date/uuid/nested/meta-property values. Use typed GraphSON (.json)`);
+  if (ext === '.kryo')
+    throw new Error(`io("${path}"): Gryo is not supported — it is JVM serialization. Use typed GraphSON (.json)`);
+  throw new Error(`io("${path}"): unrecognized format "${ext}" — only typed GraphSON (.json) is supported`);
+}
+
+/** The io service. `apply` returns NO rows in both directions, which is already the right answer:
+ *  a read mutates this graph and the official scenarios assert an empty result, and a write
+ *  produces bytes, not traversers. */
+export const createIoService = (io: IoStore, store: GraphStore | undefined): Service => ({
+  name: IO_SERVICE_NAME,
+  type: 'barrier',
+  internal: true,
+  describeParams: () => ({
+    path: 'string — the document to read or write, a key in the server-owned io namespace',
+    direction: '"read" (load into this graph) or "write" (dump this graph out)',
+  }),
+  resolve: ({ params }) => ({
+    kind: 'barrier',
+    apply: async () => {
+      const path = pathOf(params);
+      const direction = directionOf(params);
+      codecFor(path);   // format check FIRST, so an unsupported one costs no io
+      if (!store)
+        throw new Error(`io("${path}"): this compile has no graph store behind it (io() needs the executor's data plane)`);
+      if (direction === 'read') loadGraphson(store, new TextDecoder().decode(await io.read(path)));
+      else await io.write(path, new TextEncoder().encode(writeGraphson(store)));
+      return [];
+    },
+  }),
+});

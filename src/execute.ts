@@ -5,6 +5,7 @@ import type { FederationSource, Plan } from './compiler/segment.ts';
 import { hasSerializer, isCollectionType, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import { ioc, Property, t, VertexProperty } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
+import type { IoStore } from './iostore.ts';
 import type { GraphStore } from './storage.ts';
 
 // ---- GraphBinary v4 result framing ----
@@ -706,8 +707,11 @@ export class Executor implements ExecutorApi {
      *  (`FastPath.equivalentWhen`) but unprovable through the real data plane — L5 flips these
      *  off and asserts the generic lowering answers identically. */
     fastPaths?: FastPathConfig,
+    /** Where io() reads and writes documents. Omitted → the fail-closed NO_IO_STORE, so an
+     *  unbound graph reports the missing binding rather than silently doing nothing. */
+    io?: IoStore,
   ) {
-    this.app = createAppScope({ registry, source, fastPaths, labelCardinality: store.labelCardinality });
+    this.app = createAppScope({ registry, source, fastPaths, io, store, labelCardinality: store.labelCardinality });
   }
 
   /** SYNC GraphBinary buffers with per-value bulk (concern C appends it as a Long). A

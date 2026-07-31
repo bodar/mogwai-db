@@ -4,6 +4,7 @@ import { createDirectoryService } from './catalog/directory.ts';
 import { degreeCentralityService } from './catalog/degree-centrality.ts';
 import { searchService } from './catalog/search.ts';
 import { createFederateService } from './catalog/federate.ts';
+import { createIoService } from './catalog/io.ts';
 
 // ---------- the standard + extended registries ----------
 //
@@ -27,10 +28,14 @@ import { createFederateService } from './catalog/federate.ts';
 //     — correct in production, absent in the reference host (so the official g_call/g_callXlistX
 //     scenarios, which assert the exact reference set, stay green there).
 
-/** The reference provider surface — the three canonical TinkerPop services. */
+/** The reference provider surface — the three canonical TinkerPop services, plus the INTERNAL
+ *  service `io()` desugars to. `mogwai.io` is in the REFERENCE registry deliberately: `io()` is
+ *  TinkerPop's own step, so a reference-exact context must serve it, and `internal: true` keeps it
+ *  out of `--list` so the exact provider surface the official scenarios assert is unchanged. */
 export const standardRegistry: RegistryProvider = (app) =>
-  createRegistry([createDirectoryService(app), degreeCentralityService, searchService]);
+  createRegistry([createDirectoryService(app), degreeCentralityService, searchService, createIoService(app.io, app.store)]);
 
 /** The reference services PLUS our mogwai.* extensions (federation). Production. */
 export const extendedRegistry: RegistryProvider = (app) =>
-  createRegistry([createDirectoryService(app), degreeCentralityService, searchService, createFederateService(app.source)]);
+  createRegistry([createDirectoryService(app), degreeCentralityService, searchService, createIoService(app.io, app.store),
+    createFederateService(app.source)]);

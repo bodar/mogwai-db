@@ -27,6 +27,8 @@ import { DEFAULT_FAST_PATHS, type FastPathConfig } from './compiler/options/fast
 import type { ServiceRegistry } from './services/spi/types.ts';
 import { EMPTY_REGISTRY } from './services/spi/registry.ts';
 import type { FederationSource } from './compiler/segment.ts';
+import { NO_IO_STORE, type IoStore } from './iostore.ts';
+import type { GraphStore } from './storage.ts';
 import { LabelCardinality } from './api.ts';
 
 /** How the app scope OBTAINS its registry. A registry is not a value the entry point can build
@@ -48,7 +50,19 @@ export type AppScope =
   // A GRAPH capability, and app scope is per-graph (one Executor, one store, one scope), so this
   // is its lifecycle. Only the VERTEX cardinality is a provider choice — edges are fixed at ONE
   // by spec, so there is nothing to declare for them.
-  & Dependency<'labelCardinality', LabelCardinality>;
+  & Dependency<'labelCardinality', LabelCardinality>
+  /** Where io() reads and writes whole-graph documents (iostore.ts). Per-graph, like the store.
+   *  Never undefined: an unbound one fails closed naming the missing binding. */
+  & Dependency<'io', IoStore>
+  /** THIS graph's rows. Per-graph by lifetime, and per-graph is what app scope means here.
+   *
+   *  The plan (§4.5) preferred the request tier to keep a store out of COMPILE-time reach; that
+   *  premise held only while the engine took an `AppScope` directly. It now takes a `RequestScope`
+   *  and publishes a hand-picked `Engine` interface, so compile-time code cannot reach ANY scope
+   *  object — the tier no longer decides the visibility, the Engine interface does, and an
+   *  app-scope store is exactly as unreachable as a request-scope one. Undefined for a compile
+   *  with no executor behind it (a bare `compile()`); a service that needs rows fails closed. */
+  & Dependency<'store', GraphStore | undefined>;
 
 /** The per-REQUEST dependency contract (an AppScope plus what one traversal fixes). */
 export type RequestScope =
@@ -71,11 +85,15 @@ export function createAppScope(deps?: Partial<{
   fastPaths: FastPathConfig;
   source: FederationSource | undefined;
   labelCardinality: LabelCardinality;
+  io: IoStore;
+  store: GraphStore | undefined;
 }>): AppScope {
   const app: AppScope = LazyMap.create()
     .set('fastPaths', instance(deps?.fastPaths ?? DEFAULT_FAST_PATHS))
     .set('source', instance(deps?.source))
     .set('labelCardinality', instance(deps?.labelCardinality ?? LabelCardinality.ONE))
+    .set('io', instance(deps?.io ?? NO_IO_STORE))
+    .set('store', instance(deps?.store))
     .set('registry', () => (deps?.registry ?? (() => EMPTY_REGISTRY))(app));
   return app;
 }

@@ -2,6 +2,7 @@ import { stepChain, isNested, isPred, type Step, type StrategySpec } from '../..
 import { bodyAlwaysProduces } from './productivity.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { type IRStep } from './step.ts';
+import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf } from './step.ts';
 
 // IRStep moved to ir/step.ts (it is needed by both halves of ir/). Re-exported here so the
@@ -392,6 +393,41 @@ export function verify(spec: StrategySpec, steps: Step[]): void {
  *  (`__.constant(...)`); both are carried verbatim and resolved to a constant later
  *  (call-params.ts). A `with()` NOT preceded by a call() is left untouched (it is not a
  *  supported step elsewhere, so it will fail closed at dispatch if it ever appears). */
+/** `g.io(path)[.with(k,v)…].read()|.write()` → `g.call("mogwai.io", {path, direction})[.with(k,v)…]`.
+ *
+ *  io() is a barrier service, not a step: it is async, it collects, and it lowers to nothing at
+ *  compile time — the shape `Contribution {kind:'barrier'}` already has. Desugaring here means the
+ *  compiler learns NO second async step kind, and the `with` steps ride through untouched for
+ *  absorbCallWith (which runs after this) to fold onto the call exactly as a hand-written call()'s
+ *  would be. See services/catalog/io.ts and the bulk-transfer plan §3.
+ *
+ *  Fails closed rather than mis-executing: an io() with no read()/write() is not a traversal that
+ *  does nothing, it is one whose direction nobody stated. */
+export function desugarIo(steps: IRStep[]): IRStep[] {
+  if (!steps.some((s) => s.name === 'io')) return steps;
+  const out: IRStep[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    if (s.name !== 'io') { out.push(s); continue; }
+    const path = s.args[0];
+    if (typeof path !== 'string')
+      throw new Error('io() takes a string path (the document to read or write)');
+    // The direction step is the first NON-with step after io() — with() modulates the call, so it
+    // may legally sit between them (g.io(p).with(k,v).read()).
+    let j = i + 1;
+    while (j < steps.length && steps[j].name === 'with') j++;
+    const direction = steps[j]?.name;
+    if (direction !== 'read' && direction !== 'write')
+      throw new Error(`io("${path}") must be followed by read() or write()`);
+    out.push({ ...s, name: 'call', args: [IO_SERVICE_NAME, new Map<string, any>([['path', path], ['direction', direction]])] });
+    // Re-emit the with() steps AFTER the call so absorbCallWith folds them, and drop the
+    // read()/write() itself — it was the direction, and it is now a param.
+    for (let k = i + 1; k < j; k++) out.push(steps[k]);
+    i = j;
+  }
+  return out;
+}
+
 export function absorbCallWith(steps: IRStep[]): IRStep[] {
   const out: IRStep[] = [];
   for (let i = 0; i < steps.length; i++) {
