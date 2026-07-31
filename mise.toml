@@ -92,8 +92,9 @@ run = "bun test"
 # holds under the default is pinned by SQLite's scan choice, not by the SQL we emit — and on a
 # six-vertex fixture that choice is reliably the flattering one, which is exactly why this cannot be
 # found by reading. At first run: 20 failures, 13 of them L3 CONFORMANCE scenarios (~0.8% of the
-# conformance floor passing by luck), all one defect — `order().fold()`. Two rounds of fixes have
-# taken it to 13, and the corpus view (the perturbed census) from 41 order-fragile traversals to 26.
+# conformance floor passing by luck), all one defect — `order().fold()`. Three rounds of fixes have
+# taken the CORPUS view (the perturbed census, a fixed 2,298 denominator) from 41 to 8; the suite
+# total sits at 18, mostly order-sensitive assertions in test/compiler/.
 # Not a gate because it is still red; the remainder are item 20 in docs/outstanding-work.md, and it
 # becomes a gate once they are cleared. A failure here is a REAL under-specification, never a flake.
 [tasks."test:perturbed"]

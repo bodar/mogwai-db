@@ -247,8 +247,11 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    conformance cluster. **Medium.**
    → [path-history-substrate](./2026-07-18-path-history-substrate.md)
 
-20. **Results that are ordered only because SQLite scanned the convenient way.** Suite: 20 at first
-   run, **13 today**. Corpus (the perturbed census, the most useful single view): 41 → **26**. Found by `mise run test:perturbed` (`82d011b`), which runs the
+20. **Results that are ordered only because SQLite scanned the convenient way.** Corpus — the
+   perturbed census, the useful number because it is a fixed 2,298-traversal denominator: **41 → 8**.
+   Suite: 20 at first run, **18 now**, and read that one with care — the suite total barely moves
+   because most of its entries are order-sensitive ASSERTIONS in `test/compiler/`, and two are L5
+   tests whose generated corpus rotates with the HEAD-derived seed, so they come and go. Found by `mise run test:perturbed` (`82d011b`), which runs the
    suite under `PRAGMA reverse_unordered_selects`; see `test/CLAUDE.md`. A failure there is never a
    flake — it is a result the emitted SQL does not actually determine. Three distinct mechanisms,
    and they are separate items of work:
@@ -269,13 +272,21 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      both clauses, so they cannot share a rule. **The trap to remember: a child ORDINAL is not an
      order channel** — `pushChildScope` mints it with `ROW_NUMBER() OVER ()`, an empty window, so it
      numbers in scan order and reverses with it. Order on the parent domain's `encounter`.
-   - **`local(aggregate(…))` — the Scope.local collection, ~17 of the remaining 26 and now the
-     biggest block.** A separate lowering from the global `aggregate` above and untouched by it;
-     the same fix should apply (find its `json_group_array`, give it the member order). Start here.
-     *Med.*
+   - ~~**`local(aggregate(…))` — the Scope.local collection, ~17**~~ — **LANDED `cca0d02`**, and the
+     premise above was wrong in a useful way: it is NOT a separate lowering. It reaches the same
+     `aggregate` StepFn inside a child scope, and the reason the previous fix missed it is that
+     `computeDemandsEncounter` walks the chain **FLAT** — an `aggregate` inside a `local()` body is
+     not there to be seen, so no encounter was seeded for it to order by. Adding `cap` to
+     `COLLECTING_CONSUMERS` fixes it at the one step that can never be hidden in a body.
+     **The general lesson: any chain-global demand computed by a flat scan is blind to child
+     bodies.** Before adding a step to that scan, ask whether the same step can appear nested, and if
+     so anchor on a top-level consumer instead of descending.
    - **A child-scoped `order().fold()`** — `group().by(T.label).by(__.values('name').order().fold())`
      (2). `lowerScopedFold` already emits `ORDER BY <encounter>`, so this is the child-scope analogue
      of the chain-level demand fix: the child body's own analysis must demand one. *Low-Med.*
+   - **`aggregate('x').by(__.out().order().by('name'))`** — the by(traversal) arm with a FAN-OUT
+     child body. The outer collection is ordered now, but the child's `first`-per-parent pick reads
+     the child rows in scan order. Child-internal; adjacent to the child-scoped fold below. *Low-Med.*
    - **Three WRITE traversals** whose nested read driver consumes rows in scan order
      (`addV(…).property(k, __.values(…))`, two `addE` forms). This is the row-at-a-time `write.ts`
      surface already filed under internal debt — worth noting the perturbation makes its
