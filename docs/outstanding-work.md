@@ -453,6 +453,19 @@ Each fails closed (clear error, never mis-executes). Do only when a concrete sce
   mixed linear+repeat, recursive-regime `from()`/`to()`, multiple `by()`s (round-robin needs a known
   length; a recursive path's is dynamic). Also `order()` before a movement/branch while a path is
   live (a fresh emission encounter would collide with the path's positional ordering).
+  · **A path-REGIME change inside a child body emits malformed SQL — the one fail-closed VIOLATION
+    in this cluster, so take it first.** `g.V(1).simplePath().project('a').by(__.repeat(__.in('knows')).times(2))`
+    → `near "FROM": syntax error`. The child's `repeat()` retypes the carried path from linear
+    `cols` (p0, p1, …) to its own recursive `array` accumulator; the parent still DECLARES the
+    position columns, and the cardinality rejoin projects the parent's declared schema off the
+    CHILD relation, so `rel.c.p0` is `undefined` and splices an empty string —
+    `c7(…, p0) as (SELECT …, b0.bulk, FROM c6 b0)`. **Do not "fix" it by declining at the repeat:
+    measured, the same condition holds for `local(__.repeat(…))` and `where(__.repeat(…))` under a
+    `simplePath()` and BOTH execute correctly today** (their rejoins do not project the parent's
+    positions off the child), so a guard there regresses two working shapes. The fix is for a child
+    body to restore the parent's path regime across the rejoin. Banked with the full diagnosis in
+    `capability-baseline.ts`; found by the L5 capability ratchet after its HEAD-derived seed
+    rotated, which is that design working as intended. *Med — a fail-closed violation.*
   *Low-Med.*
   → [path-history-substrate](./2026-07-18-path-history-substrate.md)
 - **Group re-entry matrix-fill** — element/property-valued inner keys+values, composite `project()`

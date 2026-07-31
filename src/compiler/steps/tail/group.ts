@@ -657,32 +657,41 @@ export function lowerScalarGroupCount(s: ScalarStream): GroupStream {
 /** Continue from the rich group barrier. Terminal framing consumes the same lowered
  * relation; a supported Column selection derives the narrow entry MapStream without
  * recompiling group semantics based on terminal position. */
-export function compileFromGroup(s: GroupStream, steps: IRStep[], at: number): LoweringResult {
-  const step = steps[at];
-  // is(typeOf(MAP)) — a group IS a Map → identity.
-  if (step.name === 'is') {
+/** unfold(), select(Column.keys/values) and order(Scope.local).by(Column.*) all consume the group
+ *  AS a map VALUE → derive the whole-map blob and re-enter as a MapStream, which then orders /
+ *  unfolds / selects / frames the pairs. Note the cursor does NOT advance: the same step is
+ *  re-dispatched against the new shape. */
+const asMapValue: ShapeTailFn<GroupStream> = (s, _step, _steps, at) => {
+  const { rel, keyOf, valOf } = deriveGroupMap(s);
+  return continueLowering(toMapStream(loweringStateOf(s), rel, keyOf, valOf), at);
+};
+
+const GROUP_DISPATCH = new Map<string, ShapeTailFn<GroupStream>>([
+  // is(typeOf(MAP)) — a group IS a Map → identity. Any other is() predicate over a group is not a
+  // narrower version of the same question, so it throws here rather than declining.
+  ['is', (s, step, _steps, at) => {
     const pred = (step.args ?? [])[0];
-    const tn = pred && typeof pred === 'object' && pred.op === 'typeOf'
-      ? gtypeName(pred.values?.[0])
-      : null;
+    const tn = pred && typeof pred === 'object' && pred.op === 'typeOf' ? gtypeName(pred.values?.[0]) : null;
     if (tn && tn.toUpperCase() === 'MAP') return continueLowering(s, at + 1);
     throw new Error('is() on a group value supports only is(typeOf(GType.MAP))');
-  }
-  // count()/count(Scope.local) — the number of map entries (distinct keys). Scope.local
-  // on a Map counts its size, same value.
-  if (step.name === 'count') {
+  }],
+  // count()/count(Scope.local) — the number of map entries (distinct keys). Scope.local on a Map
+  // counts its size, the same value.
+  ['count', (s, _step, _steps, at) => {
     if (s.key.kind !== 'scalar') throw new Error('count() over a non-scalar-key group not yet supported');
     const g = s.rel.as('g');
     const rel = s.q.cte(q`SELECT COUNT(DISTINCT ${g.c.gk}) AS v FROM ${g}`, ['v']);
     return continueLowering(toScalarStream(dropLayoutAtBarrier(loweringStateOf(s)), rel, 'long', { result: 'count' }), at + 1);
-  }
-  // unfold(), select(Column.keys/values), and order(Scope.local).by(Column.*) all consume the
-  // group AS a map VALUE → derive the whole-map blob and re-enter as a MapStream (compileFromMap
-  // then orders / unfolds / selects / frames the pairs).
-  if (step.name !== 'unfold' && step.name !== 'select' && !isMapLocalOrder(step))
-    throw new Error(`${step.name}() on a group value not yet supported`);
-  const { rel, keyOf, valOf } = deriveGroupMap(s);
-  return continueLowering(toMapStream(loweringStateOf(s), rel, keyOf, valOf), at);
+  }],
+  ['unfold', asMapValue],
+  ['select', asMapValue],
+  ['order', (s, step, steps, at) => isMapLocalOrder(step) ? asMapValue(s, step, steps, at) : null],
+]);
+
+export function compileFromGroup(s: GroupStream, steps: IRStep[], at: number): LoweringResult {
+  return dispatchShapeTail(GROUP_DISPATCH, s, steps, at, (_s, ss, i) => {
+    throw new Error(`${ss[i].name}() on a group value not yet supported`);
+  });
 }
 
 /** Derive the whole-map VALUE blob of a rich group barrier: ONE JSONB `map` column per group

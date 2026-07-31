@@ -556,19 +556,18 @@ const pairSide = (pair: Expression, idx: 0 | 1, of: MapOf): Expression =>
  * explodes the pairs into a per-entry MapEntryStream; a bare terminal frames each blob as a
  * whole MAP (materializeMapRoot). fold()/where and richer followers defer with a clear message.
  */
-export function compileFromMap(s: MapStream, steps: IRStep[], at: number): LoweringResult {
-  if (at >= steps.length) throw new Error('a map value at end of chain should not be a MapStream');
-  const step = steps[at];
-  const c = s.rel.as('c');
-  // is(typeOf(MAP)) — a map IS a map → identity.
-  if (isMapTypeOf(step)) return continueLowering(s, at + 1);
+const MAP_DISPATCH = new Map<string, ShapeTailFn<MapStream>>([
+  // is(typeOf(MAP)) — a map IS a map → identity. Any other is() predicate declines.
+  ['is', (s, step, _steps, at) => isMapTypeOf(step) ? continueLowering(s, at + 1) : null],
   // order(Scope.local).by(Column.keys|values [, Order]) — re-sort the pairs array of THIS
   // whole-map blob by one side, in place. A scalar side sorts type-correctly via compareKey
   // (numeric values numerically, strings lexically); an element/list value side has no
   // total order → defer. The result is another MapStream (ordering is a same-shape blob
   // transform); a following unfold() then emits entries in the new order.
-  const localOrder = mapLocalOrder(step);
-  if (localOrder) {
+  ['order', (s, step, _steps, at) => {
+    const localOrder = mapLocalOrder(step);
+    if (!localOrder) return null;
+    const c = s.rel.as('c');
     const of = localOrder.col === 'values' ? s.valOf : s.keyOf;
     if (of.kind !== 'scalar')
       throw new Error(`order(Scope.local).by(Column.${localOrder.col}) over an element/list map ${localOrder.col === 'values' ? 'value' : 'key'} not yet supported`);
@@ -581,25 +580,30 @@ export function compileFromMap(s: MapStream, steps: IRStep[], at: number): Lower
       ['map', ...layoutCols(s.traverserLayout)],
     );
     return continueLowering(toMapStream(loweringStateOf(s), rel, s.keyOf, s.valOf), at + 1);
-  }
-  // count(Scope.local) → number of entries (map size).
-  if (step.name === 'count' && isLocal(step)) {
+  }],
+  // count(Scope.local) → number of entries (map size). A GLOBAL count over a map stream is a
+  // different question and declines to the fallback.
+  ['count', (s, step, _steps, at) => {
+    if (!isLocal(step)) return null;
+    const c = s.rel.as('c');
     const rel = s.q.cte(q`SELECT json_array_length(json(${c.c.map})) AS v${layoutProjection(s.traverserLayout, c)} FROM ${c}`, ['v', ...layoutCols(s.traverserLayout)]);
     return continueLowering(toScalarStream(loweringStateOf(s), rel, 'long', { result: 'count' }), at + 1);
-  }
+  }],
   // unfold() → a per-entry Map.Entry stream (explode the pairs; each side extracted per its shape).
-  if (step.name === 'unfold') {
+  ['unfold', (s, _step, _steps, at) => {
+    const c = s.rel.as('c');
     const je = q`json_each(json(${c.c.map})) je`;
     const rel = s.q.cte(
       q`SELECT ${pairSide(q`je.value`, 0, s.keyOf)} AS mk, ${pairSide(q`je.value`, 1, s.valOf)} AS mv${layoutProjection(s.traverserLayout, c)} FROM ${c}, ${je} ORDER BY je.key`,
       ['mk', 'mv', ...layoutCols(s.traverserLayout)],
     );
     return continueLowering(toMapEntryStream(loweringStateOf(s), rel, s.keyOf, s.valOf), at + 1);
-  }
+  }],
   // select(Column.keys/values) → aggregate one side of every entry into a single list VALUE.
-  if (step.name === 'select') {
+  ['select', (s, step, _steps, at) => {
     const col = columnOf(step);
     if (!col) throw new Error('select() on a map value requires Column.keys or Column.values');
+    const c = s.rel.as('c');
     const [idx, of] = col === 'values' ? [1 as const, s.valOf] : [0 as const, s.keyOf];
     const side = pairSide(q`je.value`, idx, of);
     const rel = s.q.cte(
@@ -607,8 +611,14 @@ export function compileFromMap(s: MapStream, steps: IRStep[], at: number): Lower
       ['list', ...layoutCols(s.traverserLayout)],
     );
     return continueLowering(toListStream(loweringStateOf(s), rel, mapOfToListOf(of)), at + 1);
-  }
-  throw new Error(`${step.name}() on a map value not yet supported`);
+  }],
+]);
+
+export function compileFromMap(s: MapStream, steps: IRStep[], at: number): LoweringResult {
+  if (at >= steps.length) throw new Error('a map value at end of chain should not be a MapStream');
+  return dispatchShapeTail(MAP_DISPATCH, s, steps, at, (_s, ss, i) => {
+    throw new Error(`${ss[i].name}() on a map value not yet supported`);
+  });
 }
 
 /**
@@ -616,11 +626,9 @@ export function compileFromMap(s: MapStream, steps: IRStep[], at: number): Lower
  * MapStream. select(Column.keys/values) (or its 1-to-1 map(__.select(…)) form) projects THIS
  * entry's key/value per row; a bare terminal frames each entry as a size-1 MAP.
  */
-export function compileFromMapEntry(s: MapEntryStream, steps: IRStep[], at: number): LoweringResult {
-  if (at >= steps.length) throw new Error('a map entry at end of chain should not be a MapEntryStream');
-  const step = steps[at];
-  const sel = step.name === 'select' ? step : mapOfSelect(step, s.params);
-  if (!sel) throw new Error(`${step.name}() on unfolded map entries not yet supported`);
+/** Project THIS entry's key or value per row, from an already-recognized select(Column) step —
+ *  reached either directly or through its 1-to-1 `map(__.select(Column))` form. */
+function mapEntryColumn(s: MapEntryStream, sel: IRStep, at: number): LoweringResult {
   const col = columnOf(sel);
   if (!col) throw new Error('select() on a map entry requires Column.keys or Column.values');
   const c = s.rel.as('c');
@@ -632,4 +640,21 @@ export function compileFromMapEntry(s: MapEntryStream, steps: IRStep[], at: numb
   // stream (each entry's key/value, its own type via the vtype carried in the {t,v} node).
   const rel = s.q.cte(q`SELECT ${src} ->> '$.v' AS v, ${src} ->> '$.t' AS vtype${layoutProjection(s.traverserLayout, c)} FROM ${c}`, ['v', 'vtype', ...layoutCols(s.traverserLayout)]);
   return continueLowering(toScalarStream(loweringStateOf(s), rel, undefined, { result: 'value', type: PER_ROW('vtype') }), at + 1);
+}
+
+const MAP_ENTRY_DISPATCH = new Map<string, ShapeTailFn<MapEntryStream>>([
+  ['select', (s, step, _steps, at) => mapEntryColumn(s, step, at)],
+  // The 1-to-1 `map(__.select(Column))` spelling of the same projection. `mapOfSelect` unwraps the
+  // single-step body; any other map() body declines to the fallback.
+  ['map', (s, step, _steps, at) => {
+    const sel = mapOfSelect(step, s.params);
+    return sel ? mapEntryColumn(s, sel, at) : null;
+  }],
+]);
+
+export function compileFromMapEntry(s: MapEntryStream, steps: IRStep[], at: number): LoweringResult {
+  if (at >= steps.length) throw new Error('a map entry at end of chain should not be a MapEntryStream');
+  return dispatchShapeTail(MAP_ENTRY_DISPATCH, s, steps, at, (_s, ss, i) => {
+    throw new Error(`${ss[i].name}() on unfolded map entries not yet supported`);
+  });
 }

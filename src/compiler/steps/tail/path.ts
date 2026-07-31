@@ -6,7 +6,7 @@ import { EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, VERTEX_MOVES, unionOf } from '../.
 import { type IRStep } from '../../ir/strategies.ts';
 import { aliasCtx, elemCtx, elemTable, elementPayload, predicateSql, scalarProp, type ScalarCtx } from '../../plan/plan.ts';
 import { dropLayoutAtBarrier, layoutCols, layoutProjection, scopePathCols, withoutPath, type ElementStream, type TraverserLayout } from '../context/context.ts';
-import { continueLowering, loweringStateOf, pathColumns, toListStream, toPathStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream } from '../context/stream.ts';
+import { continueLowering, dispatchShapeTail, loweringStateOf, pathColumns, toListStream, toPathStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { tryLowerScalarChoose, tryLowerScalarCoalesce } from '../prefix/branch.ts';
 import { lowerGlobalCount } from './barrier.ts';
 import { byAt, childCtx, childSteps, classifyBy, classifyScalarChild, reuseCurrentFrame, type ChildFrame, type ChildScope } from './child-shape.ts';
@@ -370,28 +370,33 @@ function linearScalarList(s: PathStream): ListStream | null {
  * loop, and a homogeneous scalar path (path().by(key)) retypes into the list-value
  * engine for the collection ops (set-ops/reverse/unfold/…). select(Column)/whole-stream
  * order still defer (they need the path's as()-label history — separate slices). */
-export function compileFromPath(s: PathStream, steps: IRStep[], at: number): LoweringResult {
-  const step = steps[at];
-  if (step.name === 'count') {
-    return continueLowering(lowerGlobalCount(s), at + 1);
-  }
-  if (step.name === 'is') {
+const PATH_DISPATCH = new Map<string, ShapeTailFn<PathStream>>([
+  // count() is a relational barrier over any shaped row stream. It reads `cardinalityOf`, so a
+  // GROUPED (recursive) path counts its runs rather than its positions.
+  ['count', (s, _step, _steps, at) => continueLowering(lowerGlobalCount(s), at + 1)],
+  ['is', (s, step, _steps, at) => {
     const pred = (step.args ?? [])[0];
-    if (pred && typeof pred === 'object' && pred.op === 'typeOf') {
-      const arg = pred.values?.[0];
-      const name = gtypeName(arg);
-      // A path IS a Path → is(typeOf(PATH)) is identity; any other type matches nothing.
-      if (name && name.toUpperCase() === 'PATH') return continueLowering(s, at + 1);
-      const p = s.rel.as('p');
-      const cols = pathColumns(s.layout);
-      const rel = s.q.cte(q`SELECT ${list(cols.map((c) => p.c[c]), ', ')} FROM ${p} WHERE 0`, cols);
-      return continueLowering(toPathStream(loweringStateOf(s), rel, s.layout), at + 1);
-    }
-    throw new Error('is() after path() supports only is(typeOf(GType.PATH))');
-  }
-  // A homogeneous scalar path coerces to a list for the collection ops — reuse the
-  // whole list-value engine (set-ops, reverse, unfold, conjoin, all/any/none).
-  const listForm = PATH_LIST_OPS.has(step.name) ? linearScalarList(s) : null;
-  if (listForm) return compileFromList(listForm, steps, at);
-  throw new Error(`${step.name}() on a path value not yet supported`);
+    if (!pred || typeof pred !== 'object' || pred.op !== 'typeOf')
+      throw new Error('is() after path() supports only is(typeOf(GType.PATH))');
+    const name = gtypeName(pred.values?.[0]);
+    // A path IS a Path → is(typeOf(PATH)) is identity; any other type matches nothing.
+    if (name && name.toUpperCase() === 'PATH') return continueLowering(s, at + 1);
+    const p = s.rel.as('p');
+    const cols = pathColumns(s.layout);
+    const rel = s.q.cte(q`SELECT ${list(cols.map((c) => p.c[c]), ', ')} FROM ${p} WHERE 0`, cols);
+    return continueLowering(toPathStream(loweringStateOf(s), rel, s.layout), at + 1);
+  }],
+]);
+
+export function compileFromPath(s: PathStream, steps: IRStep[], at: number): LoweringResult {
+  return dispatchShapeTail(PATH_DISPATCH, s, steps, at, (_s, ss, i) => {
+    // A homogeneous scalar path coerces to a list for the collection ops — reuse the whole
+    // list-value engine (set-ops, reverse, unfold, conjoin, all/any/none). This stays in the
+    // FALLBACK rather than becoming |PATH_LIST_OPS| Map entries: it is one retype covering a
+    // whole vocabulary the list arm owns, not a per-step lowering, so registering it per name
+    // would duplicate `PATH_LIST_OPS` as a second membership list.
+    const listForm = PATH_LIST_OPS.has(ss[i].name) ? linearScalarList(s) : null;
+    if (listForm) return compileFromList(listForm, ss, i);
+    throw new Error(`${ss[i].name}() on a path value not yet supported`);
+  });
 }
