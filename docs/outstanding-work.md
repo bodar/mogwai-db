@@ -5,7 +5,9 @@ why, where to start — not a spec.** The linked doc holds the rationale; the pi
 validation and design. Live per-step capability: `feature-support-matrix.md`.
 
 **Refreshed** 2026-07-31 · **L3 1650 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
-collision is expected, see won't-do) · census **0 `crashed`, 4 `nondet`** (sample() landed) · `known.ts` empty (intended) ·
+collision is expected, see won't-do) · census **0 `crashed`, 4 `nondet`** (`sample()` landed) ·
+`known.ts` **1 entry** — repeat's two body routes disagree on a positional window, found by the
+`repeatBodyExpansion` switch on its first sweep ·
 `capability-baseline.ts` 2 entries, one stale (22c).
 
 Item numbers are stable IDs; landed items are DELETED and their numbers not reused, because code
@@ -31,8 +33,9 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-**Ranked entry point.** Numbers are IDs, not an order. **2** → **21**'s T4 → **28** → **29** →
-**3**'s `times(n)` unroll. (**17**'s cheap half landed; its remainder is the architectural
+**Ranked entry point.** Numbers are IDs, not an order. **2** → **21**'s T4 → **29** →
+**3**'s `times(n)` unroll. (**28** landed — and **it is now a precondition met** for 3's
+`times(n)` unroll, which the item said to do only after it.) (**17**'s cheap half landed; its remainder is the architectural
 current-object-aggregate authority, which is a bigger question than its neighbours.)
 
 **Landed 2026-07-31, in this order, and each changed what came after it.** Item 27's seven
@@ -42,7 +45,8 @@ non-validations (`steps/write/validate.ts`, L3 1623 → 1647). The root-material
 and **that is what made 21 measurable at all**. Then 21's T1/T2/T3, the branch-arm batching family
 (L3 → 1648). Two of item 2's four named wrong answers turned out to be the reference's own answers
 and are now L4-pinned rather than open. Then item 17's `tail`/`sample` (L3 → 1650), which also gave
-the census its first four `nondet` rows.
+the census its first four `nondet` rows; and item 28's `repeatBodyExpansion` switch, whose first
+sweep found one real disagreement (now diagnosed in `known.ts`) where nothing could look before.
 
 **What that leaves.** No item below is a known wrong answer except 20's residuals and 21's T4 — the
 rest fail closed. Read that as the index's centre of gravity moving from correctness to ceiling.
@@ -102,13 +106,6 @@ rest fail closed. Read that as the index's centre of gravity moving from correct
    (`scalar.ts:640`) is the one tail never transposed to a dispatch Map. **Medium** (was Low-Med; what
    is left is the architectural half).
 
-28. **`expandRepeatBody` is a SEVENTH specialized lowering and the only one the differential cannot
-   see.** `branch.ts:800`'s gate means the flat expansion always wins where it recognises the body, and
-   its own header calls it *"a second implementation of what the StepFns already do"* — but it is not a
-   `FastPath` object, so it has no config flag and no `equivalentWhen`; the six real ones all do. Add
-   `repeatBodyExpansion` to `FastPathConfig` and gate `flatOk`. **Do this BEFORE item 3's unroll.**
-   *Medium-High.*
-
 29. **The barrier side of the carried-role contract has no policy table.** `LAYOUT_ROLE_POLICY`
    (`context/context.ts:288`) is total over `keyof TraverserLayout` — for ARM MERGE only.
    `dropLayoutAtBarrier` (`:617`) hand-builds a literal with four fields and every other role is
@@ -117,7 +114,8 @@ rest fail closed. Read that as the index's centre of gravity moving from correct
    `carried-state × barrier` deferral sites** answerable in one place. Not one of Phase 1's two
    non-goals (both merge-side). *Medium.*
 
-3. **`repeat()` residuals.** The body compiles through the ordinary StepFns into a keyed child relation
+3. **`repeat()` residuals.** *(Its stated precondition — item 28's `repeatBodyExpansion` switch — is
+   met as of 2026-07-31, so the `times(n)` unroll is unblocked.)* The body compiles through the ordinary StepFns into a keyed child relation
    (`tail/keyed.ts`). **The gate is NOT "whatever `lowerElementSteps` accepts"**: a per-iteration GLOBAL
    barrier observes the whole frontier and the generic StepFns would lower it per-origin, answering a
    different question — the gate is the row-local vocabulary (`isElementChildStep`).
@@ -445,7 +443,7 @@ deferral clusters in 5c instead.
   `ir/strategies.ts:210`, `tail/bulk.ts:178`. One family per commit, gated on byte-identical
   `test/L2-sql/` snapshots. **Do not fix a membership bug inside a rename.**
   → [tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md) §6
-- **L5's known-bad state is split across artifacts with one reader each** — `known.ts` (empty),
+- **L5's known-bad state is split across artifacts with one reader each** — `known.ts` (1 entry),
   `capability-baseline.ts` (2 entries) and `laws.ts`'s `knownBroken`, which is now **a declared type at
   line 47 with zero entries** while `README.md:29` still advertises two. **Do not merge them naively:**
   they are keyed differently on purpose (exact query / query→message Map / per-law PREFIX RegExp), all
