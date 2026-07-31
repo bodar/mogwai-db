@@ -526,6 +526,22 @@ export function patchLayout(c: TraverserLayout, o: LayoutPatch): TraverserLayout
   };
 }
 
+/** DROP to a relation that carries only `id` plus the given alias columns — a fresh BINDING TABLE.
+ *  Every other carried role goes, explicitly, because the relation does not have the column:
+ *  `match()`'s seed and each of its pattern seeds project `id` + the bound variables and nothing
+ *  else.
+ *
+ *  A `drop`, not a barrier: the LABELS survive (they ARE the binding table), so `consumedAliases`
+ *  is untouched and `select()` still resolves every variable. `trackFromV` is a chain-level
+ *  requirement rather than a column, so it rides through.
+ *
+ *  The role this drops that a caller might want back is `bulk`. A traverser reaching `match()` with
+ *  multiplicity > 1 (a collapsed movement) loses it, so a reducer after the match counts ROWS
+ *  rather than traversers. That was already true physically — the seed has never projected `bulk`;
+ *  what is new is that the declaration says so instead of claiming a column the relation lacks. */
+export const layoutOverAliases = (c: TraverserLayout, aliases: AliasMap): TraverserLayout =>
+  ({ aliases, origins: [], trackFromV: c.trackFromV, consumedAliases: c.consumedAliases });
+
 /** Re-home child-scoped carried state onto its parent schema. This is deliberately
  * narrower than `mergeLayouts`: a child ordinal is meaningful only inside the child
  * relation, so a caller restores the parent origin stack before any peer-arm merge. */
@@ -572,16 +588,24 @@ export const dropLayoutAtBarrier = <T extends LoweringState>(st: T): T => {
 };
 
 /**
- * Append `body` as the new id-relation and advance to it. Layout-column opts route
- * through patchLayout (same tri-state as before); `cols` defaults to id + the resulting
- * carried columns; `elem` overrides when a step changes the element kind (…E/…V). Flat
- * opts kept identical, so every call site is unchanged. Returns a fresh ElementStream.
+ * Append `body` as the new id-relation and advance to it. Layout-column opts route through
+ * patchLayout (same tri-state as before); `elem` overrides when a step changes the element kind
+ * (…E/…V). Returns a fresh ElementStream.
+ *
+ * The declared column list is DERIVED from the resulting layout and there is no override, so the
+ * physical contract holds by construction rather than by assertion. It used to accept a `cols`
+ * option, and the single caller that used it (`match()`'s seed) declared a binding table while its
+ * layout still claimed `bulk` — a role the relation did not have. That survived only because the
+ * next step rebuilt the layout from scratch. A layout claiming a column the relation lacks makes
+ * `rel.c[role]` `undefined`, and an `undefined` spliced into a `q` template is a type error at no
+ * layer, so removing the override closes the hole rather than merely reporting it: a site that
+ * genuinely carries fewer roles must now say which ones it dropped (`layoutOverAliases`,
+ * `dropLayoutAtBarrier`).
  */
 export function appendCte(
   st: ElementStream, body: Expression,
-  opts: LayoutPatch & { elem?: Elem; cols?: readonly string[] } = {},
+  opts: LayoutPatch & { elem?: Elem } = {},
 ): ElementStream {
   const layout = patchLayout(st.traverserLayout, opts);
-  const cols = opts.cols ?? ['id', ...layoutCols(layout)];
-  return { ...st, traverserLayout: layout, elem: opts.elem ?? st.elem, rel: st.q.cte(body, cols) };
+  return { ...st, traverserLayout: layout, elem: opts.elem ?? st.elem, rel: st.q.cte(body, ['id', ...layoutCols(layout)]) };
 }

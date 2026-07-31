@@ -1,10 +1,10 @@
 import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { streamPayloadCols } from '../context/stream.ts';
+import { streamPayloadCols, toElementStream } from '../context/stream.ts';
 import { where } from './filter.ts';
 import { isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
 import { MATCH_FILTER_HEADS, type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
-import { appendCte, aliasColsOf, aliasScalarTypeOf, prevRel, withLayout, type AliasEntry, type TraverserLayout, type ElementStream, type StepFn } from '../context/context.ts';
+import { appendCte, aliasColsOf, aliasScalarTypeOf, layoutCols, layoutOverAliases, prevRel, withLayout, type AliasEntry, type TraverserLayout, type ElementStream, type StepFn } from '../context/context.ts';
 import { aliasEntry, aliasId, aliasScalar, aliasSeed, elemEntry, elemShape, isElementShape, nodeEntry, shapeElem, type AliasShape } from '../context/alias.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { type Stream } from '../context/stream.ts';
@@ -175,10 +175,11 @@ function applyPattern(st: ElementStream, p: Extract<Pattern, { kind: 'bind' }>, 
 
   // Seed: id = the start var's rowid, carrying every bound var column so movement/filter
   // thread them through unchanged. The bound vars ARE the seed's carried aliases.
+  const seedLayout = layoutOverAliases(st.traverserLayout, new Map(aliases));
   const seedRel = st.q.cte(
     q`SELECT ${aliasId(prev.c[startCol], 'last')} AS id${list(varCols.map((c) => q`, ${prev.c[c]}`), '')} FROM ${prev}`,
-    ['id', ...varCols]);
-  const seed: ElementStream = { ...st, rel: seedRel, elem: startElem, traverserLayout: { aliases: new Map(aliases), origins: [] } };
+    ['id', ...layoutCols(seedLayout)]);
+  const seed: ElementStream = toElementStream({ ...st, traverserLayout: seedLayout }, seedRel, startElem);
 
   // TWO routes, and which one is right is decided by a real semantic fact, not a vocabulary.
   //
@@ -251,8 +252,10 @@ function applyPattern(st: ElementStream, p: Extract<Pattern, { kind: 'bind' }>, 
     }
   }
   const where = conds.length ? q` WHERE ${list(conds, ' AND ')}` : empty;
-  return appendCte(st, q`SELECT ${list(proj, ', ')} FROM ${f}${where}`,
-    { aliases: new Map(aliases), bulk: null, cols: ['id', ...aliasColsOf(aliases)] });
+  // `bulk: null` because the re-projection reads the pattern BODY's relation, which carries the
+  // bound variables and no multiplicity column. The declared list is now derived from the layout,
+  // so this clear is what keeps the two in step rather than a `cols` override asserting it twice.
+  return appendCte(st, q`SELECT ${list(proj, ', ')} FROM ${f}${where}`, { aliases: new Map(aliases), bulk: null });
 }
 
 export const match: StepFn = (s, st) => {
@@ -295,7 +298,17 @@ export const match: StepFn = (s, st) => {
   const restoreId: IdSource = (f) => aliasId(f.c[idCol], 'last');
   const seedProj: Expression[] = [q`${prev0.c.id}`, ...aliasColsOf(st.traverserLayout.aliases).map((c) => q`${prev0.c[c]}`),
     q`${aliasSeed(nodeEntry(prev0.c.id))} AS ${idCol}`];
-  let cur: ElementStream = appendCte(st, q`SELECT ${list(seedProj, ', ')} FROM ${prev0}`, { aliases: new Map(aliases), cols: ['id', ...aliasColsOf(aliases)] });
+  // The seed is a fresh BINDING TABLE: `id` + the bound variables, and no other carried role — so
+  // the layout must DROP them rather than inherit a claim to columns this relation lacks (it used
+  // to keep `bulk`, surviving only because applyPattern rebuilds the layout below). `bulk` is the
+  // role that goes: a traverser reaching match() with multiplicity > 1 loses it. See
+  // layoutOverAliases.
+  const seedLayout = layoutOverAliases(st.traverserLayout, new Map(aliases));
+  let cur: ElementStream = toElementStream(
+    { ...st, traverserLayout: seedLayout },
+    st.q.cte(q`SELECT ${list(seedProj, ', ')} FROM ${prev0}`, ['id', ...layoutCols(seedLayout)]),
+    st.elem,
+  );
 
   // Greedy dependency order, one readiness rule for both argument kinds: an argument may run once
   // the variables it READS are bound — the start var for a bind (its end is what it produces), every

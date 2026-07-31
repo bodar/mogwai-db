@@ -6,7 +6,7 @@ import {
 } from '../src/gremlin/frontend.ts';
 import { cardinalityOf } from '../src/compiler/steps/context/stream.ts';
 import {
-    layoutCols, layoutGrewAliases, mergeArmRelation, mergeLayouts, nonAliasCols, rigidCols,
+    layoutCols, layoutGrewAliases, layoutOverAliases, mergeArmRelation, mergeLayouts, nonAliasCols, rigidCols,
     type AliasEntry, type TraverserLayout,
 } from '../src/compiler/steps/context/context.ts';
 import { Query, q } from '../src/sql/kernel/q.ts';
@@ -99,6 +99,26 @@ describe('arm-merge authority', () => {
     expect(layoutCols(c)).toEqual(['a0', 'sk', 'o0', 'encounter', 'p0']);
     expect(nonAliasCols(c)).toEqual(['sk', 'o0', 'encounter', 'p0']);
     expect(rigidCols(c)).toEqual(['sk', 'o0', 'encounter']);
+  });
+
+  test('a binding-table drop keeps the labels and states every role it loses', () => {
+    const c = layout({
+      aliases: new Map([['a', alias('a0')]]),
+      sack: 'sk', bulk: 'bulk', origins: ['o0'], fromV: 'fv', encounter: 'encounter',
+      path: { kind: 'cols', cols: [{ col: 'p0', elem: 'vertex' }] },
+      trackFromV: true, consumedAliases: ['gone'],
+    });
+    const bound = new Map([['a', alias('a0')], ['b', alias('a1')]]);
+    const dropped = layoutOverAliases(c, bound);
+    // `match()`'s seed projects id + the bound variables and nothing else, so the layout must
+    // declare exactly that — claiming `bulk` here is what made rel.c.bulk undefined.
+    expect(layoutCols(dropped)).toEqual(['a0', 'a1']);
+    expect(rigidCols(dropped)).toEqual([]);
+    // The labels ARE the binding table, so they survive and a barrier's diagnosis rides along;
+    // trackFromV is a chain requirement, not a column.
+    expect([...dropped.aliases.keys()]).toEqual(['a', 'b']);
+    expect(dropped.trackFromV).toBe(true);
+    expect(dropped.consumedAliases).toEqual(['gone']);
   });
 
   test('the shared merge core declares the minted encounter in its layoutCols slot', () => {
