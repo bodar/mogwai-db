@@ -43,6 +43,9 @@ export interface RowOpts {
   readonly where?: Expression;
   readonly suffix?: Expression;
   readonly orderByEncounter?: boolean;
+  /** Read the encounter order BACKWARDS. Only meaningful with `orderByEncounter`, and it exists for
+   *  exactly one op: `tail(n)` is `LIMIT n` taken from the far end. */
+  readonly descending?: boolean;
 }
 
 /**
@@ -76,7 +79,9 @@ export function reprojectRows<T extends RelationalStream>(s: T, opts: RowOpts = 
   // Keep an unordered relation unordered rather than inventing a SQLite scan order; minting the
   // encounter channel is the source/merge builders' job, and a positional consumer has a canonical
   // answer exactly when the chain asked for one.
-  const order = opts.orderByEncounter && s.traverserLayout.encounter ? q` ORDER BY ${p.c[s.traverserLayout.encounter]}` : empty;
+  const order = opts.orderByEncounter && s.traverserLayout.encounter
+    ? q` ORDER BY ${p.c[s.traverserLayout.encounter]}${opts.descending ? raw(' DESC') : empty}`
+    : empty;
   const where = opts.where ? q` WHERE ${opts.where}` : empty;
   const body = q`SELECT ${opts.distinct ? q`DISTINCT ` : empty}${list(cols.map((c) => p.c[c]), ', ')} FROM ${p}${where}${order}${opts.suffix ?? empty}`;
   return withRelation(s, s.q.cte(body, cols));
@@ -148,10 +153,36 @@ export function globalRowOps<T extends RelationalStream>(): [string, ShapeTailFn
   const slice: ShapeTailFn<T> = (s, step, _steps, at) =>
     isLocalScope(step) ? null
       : continueLowering(reprojectRows(s, { suffix: sliceSuffix(step), orderByEncounter: true }), at + 1);
+  // `tail(n)` is `limit(n)` read from the far end, which is why it is the reverse FLAG on the shared
+  // op and not a fourth builder — but it is also the one window `sliceOf` will not decode, because
+  // "the last n" is an offset only once something supplies the member count. Here nothing has to:
+  // the relation is read backwards and the count never appears.
+  //
+  // It needs a carried `encounter`, and that is not a limitation to work around — "last" is a
+  // question ABOUT emission order, so a relation that carries none has no last. Declining sends it to
+  // the shape's fallback throw, which names the shape; that is a better message than a generic one
+  // here, and it keeps a shape that owns a member-scoped `tail` (a list's) reaching its own builder.
+  const tail: ShapeTailFn<T> = (s, step, _steps, at) => {
+    if (isLocalScope(step) || !s.traverserLayout.encounter) return null;
+    const n = Number((step.args ?? []).find((a: unknown) => typeof a === 'number') ?? 1);
+    return continueLowering(
+      reprojectRows(s, { suffix: q` LIMIT ${n}`, orderByEncounter: true, descending: true }), at + 1);
+  };
+  // `sample(n)` is n traversers chosen uniformly. `SampleGlobalStep` is a weighted reservoir sample
+  // whose weights come from a `by()` modulator; with no modulator every weight is 1 and the result is
+  // a uniform sample, which `ORDER BY RANDOM() LIMIT n` is. A `by()` has no shared form — the weight
+  // is a per-shape expression — so it declines.
+  const sample: ShapeTailFn<T> = (s, step, _steps, at) => {
+    if (isLocalScope(step) || (step.modulators ?? []).length) return null;
+    const n = Number((step.args ?? []).find((a: unknown) => typeof a === 'number') ?? 1);
+    return continueLowering(reprojectRows(s, { suffix: q` ORDER BY RANDOM() LIMIT ${n}` }), at + 1);
+  };
   return [
     ['limit', slice],
     ['skip', slice],
     ['range', slice],
+    ['tail', tail],
+    ['sample', sample],
     ['dedup', (s, step, _steps, at) => {
       if (isLocalScope(step)) return null;
       if ((step.args ?? []).length) throw new Error('dedup(label) not yet supported');

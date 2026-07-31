@@ -10,7 +10,7 @@ import { union, optional, repeat, choose, coalesce, sourceUnion } from '../steps
 import { seedInject } from '../steps/write/inject.ts';
 import { asBranchKind, branchNeedsShapeDispatch, childCtx, isElementChild, isListChild, isScalarChild, labelSelectOf, type ChildCtx } from '../steps/tail/child-shape.ts';
 import { match } from '../steps/prefix/match.ts';
-import { identity, limit, range, skip } from '../steps/prefix/passthrough.ts';
+import { identity, limit, range, sample, skip, tail } from '../steps/prefix/passthrough.ts';
 import { sack } from '../steps/prefix/sack.ts';
 import { aggregate, group as groupSE, groupCount as groupCountSE } from '../steps/prefix/sideeffect.ts';
 import { type SackSpec } from '../../gremlin/frontend.ts';
@@ -159,7 +159,8 @@ export class LoweringEngine implements Engine {
       // The whole folded repeat/emit/times/until cluster dispatches here (strategies
       // anchors it on repeat() when present, else the first cluster step).
       ['repeat', repeat], ['emit', repeat], ['times', repeat], ['until', repeat],
-      ['limit', limit], ['range', range], ['skip', skip], ['identity', identity], ['barrier', identity],
+      ['limit', limit], ['range', range], ['skip', skip], ['tail', tail], ['sample', sample],
+      ['identity', identity], ['barrier', identity],
       // Only the MUTATE form sack(Operator.x) is a prefix step; bare sack() (read) breaks
       // out to the tail (lowerElementSteps guard below).
       ['sack', sack],

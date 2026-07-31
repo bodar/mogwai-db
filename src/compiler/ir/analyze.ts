@@ -1,5 +1,5 @@
 import { type IRStep } from './strategies.ts';
-import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, unionOf } from './step.ts';
+import { isLocalScope, PATH_FAMILY, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, unionOf } from './step.ts';
 
 // ---------- whole-chain analysis: annotate, never rewrite ----------
 //
@@ -99,6 +99,13 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
     // their answer under a reversed scan. Do NOT "simplify" this into the fan-out branch below —
     // that is the shape that was wrong.
     if (COLLECTING_CONSUMERS.has(s.name)) return true;
+    // `tail` is the one SLICE that needs the encounter with NO fan-out at all, and for a reason
+    // neither set above covers: it reads from the FAR END. `limit(n)` over an unconstrained relation
+    // is "some n", and SQLite's forward scan quietly makes that the source's first n — there is no
+    // equivalent accident available for the last n. Without a column to sort by, `tail` cannot be
+    // rendered at all: `ORDER BY <encounter> DESC LIMIT n` IS the implementation, at every shape.
+    // `Scope.local` is exempt because that form slices a VALUE's members, not the stream's rows.
+    if (s.name === 'tail' && !isLocalScope(s)) return true;
     if (sawFanout && POSITIONAL_CONSUMERS.has(s.name)) return true;
     // dedup(labels) keeps the FIRST traverser per key — first-in-emission, so it needs the
     // encounter. Bare dedup() collapses a multiset regardless of order (never triggers).

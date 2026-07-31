@@ -1,5 +1,5 @@
 import { q, empty, type Expression } from '../../../sql/kernel/q.ts';
-import { sliceOf } from '../../ir/step.ts';
+import { isLocalScope, sliceOf, type IRStep } from '../../ir/step.ts';
 import { limitOffset } from '../../plan/plan.ts';
 import { appendCte, layoutCols, layoutProjection, prevRel, type ElementStream, type StepFn } from '../context/context.ts';
 
@@ -65,3 +65,44 @@ const elementSlice: StepFn = (s, st) => {
 export const limit = elementSlice;
 export const range = elementSlice;
 export const skip = elementSlice;
+
+/** The one numeric argument of `tail`/`sample`, past any scope token. Neither is a `sliceOf` step:
+ *  `tail` is a window measured from the far END, `sample` is not a window at all. */
+const armCount = (s: IRStep): number =>
+  Number((s.args ?? []).find((a: unknown) => typeof a === 'number') ?? 1);
+
+/**
+ * `tail(n)` over an ELEMENT stream — the last n traversers in emission order, which is `limit(n)`
+ * read backwards. The element twin of the shared row op (`globalRowOps`, tail/barrier.ts); the two
+ * cannot be one function because an element stream is not dispatched through `dispatchShapeTail`.
+ *
+ * It REQUIRES a carried encounter, and that is the semantics rather than a limitation: "the last n"
+ * is a question about emission order, so a relation carrying none has no last. `tail` is already in
+ * `POSITIONAL_CONSUMERS`, so a chain with a fan-out upstream seeds one; a chain without a fan-out has
+ * nothing to be last OF in any order the traversal fixed, and fails closed here rather than inventing
+ * one out of rowid order.
+ *
+ * `Scope.local` is identity for the same reason the slices are — `RangeLocalStep.applyRange` returns a
+ * non-collection unchanged, and an element is one.
+ */
+export const tail: StepFn = (s, st) => {
+  if (isLocalScope(s)) return st;
+  const enc = st.traverserLayout.encounter;
+  if (!enc) throw new Error('tail() over an element stream requires emission order (nothing upstream fixed one — an order() or a fan-out does)');
+  const p = prevRel(st, 'p');
+  return appendCte(st, q`SELECT ${p.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${p} ORDER BY ${p.c[enc]} DESC LIMIT ${armCount(s)}`);
+};
+
+/**
+ * `sample(n)` over an ELEMENT stream — n traversers chosen uniformly.
+ *
+ * `SampleGlobalStep` is a weighted reservoir sample whose weights come from a `by()` modulator; with
+ * no modulator every weight is 1, and a uniform sample of n is exactly `ORDER BY RANDOM() LIMIT n`.
+ * A `by()` weight is a per-shape expression with no shared form, so it fails closed.
+ */
+export const sample: StepFn = (s, st) => {
+  if (isLocalScope(s)) return st;
+  if ((s.modulators ?? []).length) throw new Error('sample().by(weight) not yet supported (weighted reservoir sampling)');
+  const p = prevRel(st, 'p');
+  return appendCte(st, q`SELECT ${p.c.id}${layoutProjection(st.traverserLayout, p)} FROM ${p} ORDER BY RANDOM() LIMIT ${armCount(s)}`);
+};

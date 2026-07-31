@@ -26,7 +26,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import type { Framed } from '../../src/execute.ts';
 import { exec } from '../support/executor.ts';
-import { isWrite, seeded } from '../support/graph.ts';
+import { isNondeterministic, isWrite, seeded } from '../support/graph.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 
 /** What the engine did with one traversal.
@@ -43,7 +43,9 @@ import { MODERN_SEED } from '../fixtures/seed-modern.ts';
  *  silently answer a DIFFERENT question (`g.V(vid1)` becoming `g.V(null)`), which is precisely the
  *  mis-execution the project forbids. If a binding table ever lands, this bucket is the work item.
  *
- *  `nondet` = it ran, but its result is deliberately NOT digested. See NONDETERMINISTIC. */
+ *  `nondet` = it ran, but its result is deliberately NOT digested. See `isNondeterministic`
+ *  (test/support/graph.ts) — shared with L5, which must SKIP those traversals rather than digest
+ *  them, since its differential compares two runs. */
 export type Status = 'ran' | 'nondet' | 'deferred' | 'crashed' | 'unbound';
 
 /** Statuses that mean "the engine produced an answer". Losing this is a support regression. */
@@ -68,22 +70,6 @@ export interface Row {
   readonly message?: string;
 }
 
-/**
- * Traversals whose RESULT is legitimately nondeterministic. They are still run and their
- * ran-vs-threw status still gates; only the digest is withheld.
- *
- * The guard goes in now, while it is free. 24 corpus lines match and 23 of them currently throw
- * (`sample()`/`coin()` are unimplemented) — so today this costs nothing. The day one of those steps
- * lands, 23 goldens would start flapping with no warning and no diagnosis. The sources:
- * `Order.shuffle` → SQL `RANDOM()` (5 sites: select.ts:522, modulation.ts:87, projection.ts:646
- * and :1034, scalar.ts:694), and a bare `datetime()` → `Date.now()` (frontend.ts:335). Both were
- * probe-confirmed to give four different answers in four runs.
- *
- * `datetime('2020-01-01')` is deterministic — only the ARGUMENT-LESS form is not, hence `\(\s*\)`.
- * TinkerPop's own answer to this (`withStrategies(SeedStrategy(seed: …))`) is unimplemented here,
- * so we cannot lean on it.
- */
-const NONDETERMINISTIC = /\b(?:sample|coin)\s*\(|Order\.shuffle|\bshuffle\b|\b(?:datetime|DateTime)\s*\(\s*\)/;
 
 /**
  * Throws that did NOT come from our own fail-closed deferral path.
@@ -157,7 +143,7 @@ export function runCensus(corpus: readonly string[]): Row[] {
   return corpus.map((query) => {
     try {
       const framed = exec(isWrite(query) ? seeded(MODERN_SEED) : shared).framed(query, {});
-      return NONDETERMINISTIC.test(query)
+      return isNondeterministic(query)
         ? { query, status: 'nondet' as const, n: framed.length }
         : { query, status: 'ran' as const, ...digest(framed) };
     } catch (e) {

@@ -40,3 +40,22 @@ export type StoreFactory = () => GraphStore;
 export function isWrite(q: string): boolean {
   try { return compile(q, {}).kind === 'write'; } catch { return false; }
 }
+
+/**
+ * Is this traversal's RESULT legitimately nondeterministic?
+ *
+ * It lives here, beside `isWrite`, for the reason `test/CLAUDE.md` gives for `seeded`: the census
+ * and L5 both need the answer and neither owns it. The census withholds a digest for these; L5's
+ * fast-path DIFFERENTIAL must skip them outright, because it compares two runs and a random result
+ * differs between any two runs whatever the fast paths do.
+ *
+ * The sources, each probe-confirmed to give four different answers in four runs: `sample()`/`coin()`
+ * and `Order.shuffle` lower to SQL `RANDOM()`, and an ARGUMENT-LESS `datetime()` reads the clock —
+ * hence the `\(\s*\)`, since `datetime('2020-01-01')` is perfectly deterministic.
+ *
+ * A regex and not the compiler, unlike `isWrite`: nondeterminism is a property of the SQL a step
+ * emits, and no compiled artifact reports it. TinkerPop's own answer
+ * (`withStrategies(SeedStrategy(seed: …))`) is unimplemented here, so we cannot lean on it.
+ */
+const NONDETERMINISTIC = /\b(?:sample|coin)\s*\(|Order\.shuffle|\bshuffle\b|\b(?:datetime|DateTime)\s*\(\s*\)/;
+export const isNondeterministic = (q: string): boolean => NONDETERMINISTIC.test(q);

@@ -28,7 +28,7 @@ import {
     differential, gatingDivergences, ran, onlyDisabled, FAST_PATH_NAMES, GATING,
     type Divergence,
 } from './oracle.ts';
-import { seeded } from '../support/graph.ts';
+import { isNondeterministic, seeded } from '../support/graph.ts';
 import { traversal } from './generate.ts';
 import { isKnown, staleEntries } from './known.ts';
 import { L5_SEED, L5_SEED_SOURCE } from './seed.ts';
@@ -62,6 +62,11 @@ describe('L5 — fast-path differential', () => {
       // identically on both sides (an unsupported shape, or a corpus traversal wanting bound
       // params). Counting these keeps the pass honest: coverage is asserted below.
       if (!ran(shared, q)) continue;
+      // A traversal whose RESULT is random cannot be differentiated by comparing two runs: it
+      // disagrees with itself. Skipped rather than ratcheted, because a ratchet entry per traversal
+      // would be a list that grows with the corpus and diagnoses nothing. The census makes the same
+      // call from the other side (it withholds the digest), which is why the predicate is shared.
+      if (isNondeterministic(q)) continue;
       executed++;
       const ds = differential(mint, q);
       for (const d of ds) byKind[d.kind] = (byKind[d.kind] ?? 0) + 1;
