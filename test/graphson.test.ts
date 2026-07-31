@@ -4,10 +4,11 @@ import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { CfLimitedSql } from '../src/cf-limits.ts';
 import { LabelCardinality } from '../src/api.ts';
-import { loadGraphson, graphsonValue } from '../src/formats/graphson.ts';
+import { loadGraphson, graphsonValue, writeGraphson } from '../src/formats/graphson.ts';
 import { executeQuery } from './support/executor.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { CREW_SEED } from './fixtures/seed-crew.ts';
+import { ZOO_SEED } from './fixtures/seed-zoo.ts';
 import { BigDecimal, Duration } from '../src/gremlin/types.ts';
 
 // The typed GraphSON adjacency reader (src/formats/graphson.ts) — read against the corpus's own
@@ -195,5 +196,160 @@ describe('v3 and v4 differ in exactly one field, and the other artefacts fail cl
   test('a malformed line names its line number', () => {
     expect(() => loadGraphson(fresh(), '{"id":{"@type":"g:Int32","@value":1},"label":"a"}\n{oops'))
       .toThrow(/GraphSON line 2:/);
+  });
+});
+
+// ---------- the writer (v4) ----------
+
+/**
+ * The CANONICAL projection a round-trip is compared on: every column the format carries, and none it
+ * does not.
+ *
+ * Two local ids are deliberately excluded, because GraphSON has no field for either and a round-trip
+ * therefore cannot preserve them — asserting on them would be asserting that two loads happened to
+ * intern in the same order:
+ *
+ *   `labels.id`          — an interning rowid. The NAME is what the file carries, so vertex_labels and
+ *                          edges are joined to it and compared by name.
+ *   `edge_properties.id` — TinkerPop's edge `Property` has no id at all (unlike a VertexProperty,
+ *                          whose id the file DOES carry and this projection therefore keeps).
+ *
+ * Everything else is compared exactly, storage class included: `typeof(value)` is what catches a type
+ * that survived as a name but not as a representation (an int re-read as a real).
+ */
+const CANONICAL: Array<[string, string]> = [
+  ['nodes', 'SELECT id, uid FROM nodes ORDER BY id'],
+  ['vertex_labels',
+    `SELECT vl.node AS node, l.name AS label FROM vertex_labels vl JOIN labels l ON l.id = vl.label
+     ORDER BY node, label`],
+  ['vertex_properties',
+    `SELECT id, node, key, value, typeof(value) AS storage, vtype,
+            CASE WHEN meta IS NULL THEN NULL ELSE json(meta) END AS meta
+     FROM vertex_properties ORDER BY node, key, id`],
+  ['edges',
+    `SELECT e.id AS id, e.uid AS uid, e.src AS src, l.name AS label, e.tgt AS tgt
+     FROM edges e JOIN labels l ON l.id = e.label ORDER BY e.id`],
+  ['edge_properties', 'SELECT edge, key, value, typeof(value) AS storage, vtype FROM edge_properties ORDER BY edge, key'],
+  ['property_fts',
+    `SELECT owner_elem, owner, pk, kind, text FROM property_fts
+     ORDER BY owner_elem, owner, pk, kind, text`],
+];
+
+const canonical = (store: GraphStore) =>
+  Object.fromEntries(CANONICAL.map(([name, sql]) => [name, store.query(sql).map((r: any) =>
+    Object.fromEntries(Object.entries(r).map(([k, v]) => [k, v instanceof Uint8Array ? `blob:${Buffer.from(v).toString('hex')}` : v])))]));
+
+/** Write `store` out and read it back into a fresh one — the round trip both gates assert on. */
+function roundTrip(store: GraphStore, cardinality?: LabelCardinality): { document: string; reloaded: GraphStore } {
+  const document = writeGraphson(store);
+  const reloaded = fresh(cardinality);
+  loadGraphson(reloaded, document);
+  return { document, reloaded };
+}
+
+describe('the v4 writer round-trips every reference graph', () => {
+  for (const file of ['tinkerpop-modern-v3.json', 'tinkerpop-crew-v3.json', 'tinkerpop-sink-v3.json']) {
+    test(`${file}: load → write v4 → load is canonically identical`, () => {
+      const store = fresh();
+      loadGraphson(store, fixture(file));
+      const { reloaded } = roundTrip(store);
+      expect(canonical(reloaded)).toEqual(canonical(store));
+    });
+  }
+
+  test('grateful-dead: 808 vertices and 8,049 edges survive a whole-graph dump', () => {
+    // The scale case, and the one that says the drain is not accidentally O(n²): it pages the vertices
+    // (keysetPages) and chunks every per-page read, all under the CF-parity store.
+    const store = fresh();
+    loadGraphson(store, fixture('grateful-dead-v3.json'));
+    const { document, reloaded } = roundTrip(store);
+    expect(canonical(reloaded)).toEqual(canonical(store));
+    expect(document.split('\n').length).toBe(808);
+  });
+
+  test('the output is v4: a label ARRAY, and one line per vertex', () => {
+    const store = fresh();
+    loadGraphson(store, fixture('tinkerpop-modern-v3.json'));
+    const lines = writeGraphson(store).split('\n');
+    expect(lines.length).toBe(6);
+    const first = JSON.parse(lines[0]);
+    expect(first.label).toEqual(['person']);
+    expect(first.id).toEqual({ '@type': 'g:Int32', '@value': 1 });
+    // Both incidence directions, because TinkerPop's own readGraph reads the IN side — a file with
+    // only outE reads as edgeless there. Vertex 1 is marko: three outE, no inE.
+    expect(Object.keys(first.outE).sort()).toEqual(['created', 'knows']);
+    expect(JSON.parse(lines[1]).inE.knows[0].outV).toEqual({ '@type': 'g:Int32', '@value': 1 });
+  });
+});
+
+describe('the round trip preserves what the type channel carries', () => {
+  test('multi-label vertices survive — the assertion a v3 writer could not pass', () => {
+    // gzoo is the multi-label showcase (ten of its thirteen vertices carry several labels). v3's
+    // `label` is ONE bare string, so a v3 writer is lossy for exactly the graph that exercises the
+    // feature we declare (§4c); v4's label array is what makes this test possible.
+    const store = new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ZERO_OR_MORE);
+    for (const q of ZOO_SEED) executeQuery(store, q, {});
+    const { document, reloaded } = roundTrip(store, LabelCardinality.ZERO_OR_MORE);
+    expect(canonical(reloaded)).toEqual(canonical(store));
+    // Not vacuous: the graph really does carry multi-label vertices, and one deliberately single one.
+    const labelCounts = JSON.parse(document.split('\n')[0]).label;
+    expect(labelCounts).toEqual(['animal', 'bird', 'aquatic', 'endangered']);
+    expect(executeQuery(reloaded, "g.V().hasLabel('endangered').count()", {}))
+      .toEqual(executeQuery(store, "g.V().hasLabel('endangered').count()", {}));
+  });
+
+  test('the exact-tail and time types survive: long > 2^53, BigDecimal, Duration, datetime, uuid', () => {
+    const store = fresh();
+    for (const q of [
+      'g.addV("typed").property(T.id,1)'
+      + '.property("n", 9007199254740993L)'
+      + '.property("bd", 3.141592653589793238462643383279M)'
+      + '.property("du", Duration(90, 500000000))'
+      + '.property("dt", datetime("2024-01-01T00:00:00Z"))'
+      + '.property("u", UUID("0263f28b-eff9-4c17-8e33-0b41c74b6d4c"))',
+    ]) executeQuery(store, q, {});
+    const { document, reloaded } = roundTrip(store);
+    expect(canonical(reloaded)).toEqual(canonical(store));
+
+    // The exact-digit types must reach the file as bare JSON NUMBERS, not as strings: JSON numbers are
+    // arbitrary-precision by spec (max-long-v4.json is 9223372036854775807), and a string would be a
+    // different value to every other reader.
+    expect(document).toContain('{"@type":"g:Int64","@value":9007199254740993}');
+    expect(document).toContain('{"@type":"g:BigDecimal","@value":3.141592653589793238462643383279}');
+    // ISO-8601 for both time types, the spelling the corpus fixtures use.
+    expect(document).toContain('{"@type":"g:Duration","@value":"PT1M30.5S"}');
+    expect(document).toContain('{"@type":"g:DateTime","@value":"2024-01-01T00:00:00.000Z"}');
+  });
+
+  test('typed collections survive, including a typed map KEY', () => {
+    const store = fresh();
+    executeQuery(store, 'g.addV("c").property(T.id,1).property("tags", ["a","brave"])', {});
+    loadGraphson(store, JSON.stringify({
+      id: { '@type': 'g:Int32', '@value': 2 },
+      label: ['c'],
+      properties: {
+        scores: [{
+          id: { '@type': 'g:Int64', '@value': 99 },
+          value: { '@type': 'g:Map', '@value': [{ '@type': 'g:Int64', '@value': 7 }, { '@type': 'g:Double', '@value': 1.5 }] },
+        }],
+      },
+    }));
+    const { document, reloaded } = roundTrip(store);
+    expect(canonical(reloaded)).toEqual(canonical(store));
+    // The map went out as the flat alternating array with its key still a g:Int64.
+    expect(document).toContain('{"@type":"g:Map","@value":[{"@type":"g:Int64","@value":7},{"@type":"g:Double","@value":1.5}]}');
+    expect(document).toContain('{"@type":"g:List","@value":["a","brave"]}');
+  });
+
+  test('a user-supplied string id round-trips as a bare string id', () => {
+    const store = fresh();
+    loadGraphson(store, [
+      '{"id":"v:a","label":["person"],"outE":{"knows":[{"id":"e:ab","inV":"v:b"}]}}',
+      '{"id":"v:b","label":["person"]}',
+    ].join('\n'));
+    const { document, reloaded } = roundTrip(store);
+    expect(canonical(reloaded)).toEqual(canonical(store));
+    expect(document).toContain('"id":"v:a"');
+    expect(document).toContain('"inV":"v:b"');
   });
 });

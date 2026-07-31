@@ -90,6 +90,31 @@ export function insertRows(
   return statements;
 }
 
+/**
+ * DRAIN: stream a table's rows in ascending-id pages, bounded memory, two binds per statement.
+ *
+ * KEYSET pagination (`WHERE id > ?`), not `LIMIT ? OFFSET ?`: an OFFSET scan re-walks and discards
+ * every earlier row, so draining a whole table costs O(n²) row visits, and the pages are not even
+ * stable under a concurrent insert. Both statements are one fixed shape, so the prepared statement is
+ * reused across every page.
+ *
+ * `columns` must include `id` — it is the cursor. The rows come back exactly as `query` gives them, so
+ * a caller reads its own column names.
+ */
+export function* keysetPages<T extends { id: number }>(
+  w: RowWriter, table: string, columns: readonly string[], pageSize = 500,
+): Generator<T[]> {
+  const sql = `SELECT ${columns.join(', ')} FROM ${table} WHERE id > ? ORDER BY id LIMIT ?`;
+  let after = -1;
+  for (;;) {
+    const rows = w.query<T>(sql, [after, pageSize]);
+    if (!rows.length) return;
+    yield rows;
+    if (rows.length < pageSize) return;
+    after = rows[rows.length - 1].id;
+  }
+}
+
 /** `DELETE FROM <table> WHERE <column> IN (…)` — chunked. The delete-by-id-set half of every
  *  cascade (drop()'s six statements, the FTS owner sweep). */
 export function deleteWhereIn(w: RowWriter, table: string, column: string, ids: readonly unknown[]): void {
