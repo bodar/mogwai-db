@@ -84,10 +84,18 @@ fi
 #    so it cannot tell a permissive one from a restrictive one. What differs between them
 #    is what egress the gateway allows, so probe exactly that.
 #
-#    Why fail rather than degrade: `bun install` cannot resolve `@bodar/*`, so the `q`
+#    Why stop rather than degrade: `bun install` cannot resolve `@bodar/*`, so the `q`
 #    kernel and the executor do not import, and L2-L5 plus the census cannot run at all.
 #    Only L1 does. That is a tree that looks buildable and silently is not — and the
 #    submodule clone that precedes the discovery is several hundred MB.
+#
+#    Report on STDOUT and exit 0, deliberately, even though this is a failure. Exit 2 is the
+#    natural code and it sends this to the WRONG AUDIENCE: for SessionStart, exit-2 stderr
+#    renders in the user's transcript as a hook-error notice that CLAUDE NEVER SEES, so the
+#    one actor that will otherwise keep running tests and reporting green is the one left
+#    uninformed. Exit 0 + stdout is the only channel into the session's context, so the
+#    message is addressed to Claude and asks it to relay — a human who sees only "hook
+#    success" still learns, via the first reply, that this session cannot build.
 blocked() {
   local code
   # 403/407 = the egress gateway denied the host by policy; 000 = it refused CONNECT.
@@ -104,21 +112,20 @@ if ! command -v mise >/dev/null 2>&1 && blocked mise.run; then
 fi
 
 if [ -n "$BLOCKED" ]; then
-  cat >&2 <<EOF
-mogwai-db cannot be built in this environment — its egress policy blocks:
+  cat <<EOF
+
+THIS SESSION CANNOT BUILD mogwai-db. Its environment's egress policy blocks:
 $BLOCKED
 
-Stopping here instead of cloning the submodule into a tree that cannot install.
-Recreate the session in the environment named "unrestricted" — it is the ONLY one that
-builds this project. Both "Default" and "Default Cloud Environment" restrict egress and
-will land here again. Environments are listed at
-https://claude.ai/settings/code-environments and the policy model is documented at
-https://code.claude.com/docs/en/claude-code-on-the-web
+The bootstrap stopped here rather than cloning the submodule into a tree that cannot install.
+Only L1 can run: treat every conformance level above it as UNVERIFIED, never as passing.
 
-If you continue in this session anyway, only L1 will run — treat every other level as
-unverified rather than passing.
+Claude: say this in your first reply, before anything else — the session has to be recreated
+in the environment named "unrestricted", the only one that builds this project. "Default" and
+"Default Cloud Environment" both land here again. The list is at
+https://claude.ai/settings/code-environments
 EOF
-  exit 2
+  exit 0
 fi
 
 # 2. Install mise via the official installer unless it's already present. The

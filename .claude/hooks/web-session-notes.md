@@ -59,7 +59,12 @@ It probes REACHABILITY rather than environment identity on purpose: no environme
 is exposed to a session at all, and `CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE` reports only the
 kind (`cloud_default` for every `anthropic_cloud` environment), so it cannot discriminate.
 
-One consequence worth knowing, since it is invisible from in here: on exit 2 the hook's
-stderr goes to the USER's transcript and **not** to Claude. If the bootstrap stopped at the
-preflight, you will not have seen the banner, will not have seen this file either, and the
-tree will look buildable while `bun install` cannot resolve `@bodar/*`.
+That preflight reports on stdout and exits **0** even though it is a failure, and the reason
+is audience: exit 2 routes a `SessionStart` hook's stderr to the user's transcript and not to
+Claude, leaving the one actor that would otherwise keep running tests and reporting green as
+the only one uninformed. Stdout at exit 0 is the single channel into context, so both that
+block and this file reach Claude in a blocked session.
+
+**So if you can see that block, relay it in your first reply.** The user may see nothing but a
+"hook success" notice, and the tree will look buildable while `bun install` cannot resolve
+`@bodar/*`.
