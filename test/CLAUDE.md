@@ -5,6 +5,17 @@
   skips type-checking and the submodule, so green there can hide broken types. `bun test <file>` is
   fine for a fast inner loop on one already-type-checked file, never as the gate. `mise run L1`..`L5`
   run one level each; `mise run ci` is the full gate.
+- **"Did my change slow the build?" is answered by `[test] Finished in`, NOT by CI wall-clock.**
+  mise prints a `Finished in` per task and those are the measurement; wall-clock also contains three
+  network-bound phases (`submodule` git fetch, `install`, `build`'s `bunx wrangler`) whose cost is
+  set by registry latency, not by the diff. Measured on trunk before those were cached: the same 62
+  packages against the same lockfile installed in **0.9s on one run and 51.6s on the next**, which
+  read as a 50% CI regression that per-phase timings placed entirely outside `test` (79.4–81.5s
+  across all four runs). `.github/workflows/ci.yml` now caches bun's download cache and the built
+  gremlin client, so the tail is much smaller — but the rule stands, because the phases are still
+  network-bound and a cache still misses on a lockfile or gitlink bump. To A/B a compiler change
+  properly, pin `L5_SEED` as well: the seed derives from `HEAD`, so it otherwise changes under you
+  every commit (±10s of legitimate variation, and a different generated corpus).
 
 ## The conformance ladder — one folder per level
 
