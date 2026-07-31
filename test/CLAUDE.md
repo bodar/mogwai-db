@@ -93,10 +93,12 @@ scan choice — and on a six-vertex fixture that choice is reliably the flatteri
 this class of defect cannot be found by reading or by any assertion in the ladder.
 
 It is an **instrument, not a gate** (the `orphans` standing) and is absent from `ci`, because it is
-still red: 20 failures at first run, **13 of them L3 conformance scenarios** — ~0.8% of the
-conformance floor passing by luck, all one defect (`order().fold()`, fixed in `9acd2f8`), leaving
-17. A failure here is a real under-specification, never a flake — the remainder are tracked as item
-20 in `docs/outstanding-work.md`, and this becomes a gate when they are cleared. It is an ENV switch (`MOGWAI_REVERSE_UNORDERED=1`, read in `src/bun/BunSqlite.ts`)
+still red. At first run: 20 failures, **13 of them L3 conformance scenarios** — ~0.8% of the
+conformance floor passing by luck, all one defect (`order().fold()`). Two rounds of fixes have taken
+the suite to 13 and the corpus view (the perturbed CENSUS, which names every order-fragile traversal
+in one place and is the best worklist) from 41 to 26. A failure here is a real under-specification,
+never a flake — the remainder are item 20 in `docs/outstanding-work.md`, and this becomes a gate
+when they are cleared. It is an ENV switch (`MOGWAI_REVERSE_UNORDERED=1`, read in `src/bun/BunSqlite.ts`)
 rather than a parameter precisely so the suite under test cannot know it is being perturbed.
 
 Related: an `ordered` L4 assertion is only worth writing if it survives this. Check before adding one.

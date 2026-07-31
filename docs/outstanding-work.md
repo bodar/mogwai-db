@@ -247,8 +247,8 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    conformance cluster. **Medium.**
    → [path-history-substrate](./2026-07-18-path-history-substrate.md)
 
-20. **Results that are ordered only because SQLite scanned the convenient way — 20 at first run,
-   **17 today** after the `order().fold()` block below landed.** Found by `mise run test:perturbed` (`82d011b`), which runs the
+20. **Results that are ordered only because SQLite scanned the convenient way.** Suite: 20 at first
+   run, **13 today**. Corpus (the perturbed census, the most useful single view): 41 → **26**. Found by `mise run test:perturbed` (`82d011b`), which runs the
    suite under `PRAGMA reverse_unordered_selects`; see `test/CLAUDE.md`. A failure there is never a
    flake — it is a result the emitted SQL does not actually determine. Three distinct mechanisms,
    and they are separate items of work:
@@ -262,6 +262,26 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      satisfies this consumer" is true for a consumer reading the ordered relation in the SAME query
      and false across a relation boundary — check which before reusing that reasoning for any other
      aggregate.**
+   - ~~**`aggregate()…cap()` member order**~~ — **LANDED `d00e7ea`**, 33 of the corpus's 41. The
+     order channel now lives in the shared `jsonbGroupArray` (`plan.ts`), which takes an optional
+     `order` so a caller passing nothing is ASSERTING there is none; and
+     `COLLECTING_CONSUMERS = {fold, aggregate}` in `analyze.ts` differs from the slice consumers on
+     both clauses, so they cannot share a rule. **The trap to remember: a child ORDINAL is not an
+     order channel** — `pushChildScope` mints it with `ROW_NUMBER() OVER ()`, an empty window, so it
+     numbers in scan order and reverses with it. Order on the parent domain's `encounter`.
+   - **`local(aggregate(…))` — the Scope.local collection, ~17 of the remaining 26 and now the
+     biggest block.** A separate lowering from the global `aggregate` above and untouched by it;
+     the same fix should apply (find its `json_group_array`, give it the member order). Start here.
+     *Med.*
+   - **A child-scoped `order().fold()`** — `group().by(T.label).by(__.values('name').order().fold())`
+     (2). `lowerScopedFold` already emits `ORDER BY <encounter>`, so this is the child-scope analogue
+     of the chain-level demand fix: the child body's own analysis must demand one. *Low-Med.*
+   - **Three WRITE traversals** whose nested read driver consumes rows in scan order
+     (`addV(…).property(k, __.values(…))`, two `addE` forms). This is the row-at-a-time `write.ts`
+     surface already filed under internal debt — worth noting the perturbation makes its
+     order-dependence visible. *Low.*
+   - `g.V().repeat(__.both()).times(3).range(5,11)` is EXPECTED: `computeDemandsEncounter` returns
+     false at a `repeat`/`match` boundary by design (item 4). Not a defect; do not "fix" it here.
    - **A RECORD stream carries no `encounter`**, so `recordSlice`'s `orderByEncounter` is inert and a
      record slice picks an arbitrary window. The projection CTE's declared column list drops the
      channel. This is `TraverserLayout` role preservation across a shape transition — the
