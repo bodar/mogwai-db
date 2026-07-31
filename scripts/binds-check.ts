@@ -94,7 +94,16 @@ for (const rel of files) {
 }
 
 // ---------- check 2: every placeholders() call is inside a function that chunks ----------
-type SymbolInfo = { name: string; location: { range: { start: { line: number }; end: { line: number } } } };
+type SymbolInfo = { name: string; kind: number; location: { range: { start: { line: number }; end: { line: number } } } };
+
+/** LSP `SymbolKind` Variable(13) / Constant(14). A WRAPPED declaration statement whose initializer
+ *  happens to contain the call — `const clash = store.query(\`… IN (${placeholders(n)})\`, chunk)` —
+ *  is the innermost symbol containing that line, and it is never the chunking SCOPE. Excluded when
+ *  short; a multi-line arrow assigned to a const IS a real function scope, and a chunking one always
+ *  spans at least a loop plus its body, so the cut is at 3 lines. (Measured kinds at the real call
+ *  sites: a method(6), a function(12) and an object-literal property(7) — none of them 13/14.) */
+const DECLARATION_KINDS = new Set([13, 14]);
+const MIN_SCOPE_LINES = 3;
 
 if (placeholderCalls.length) {
   const session = await startSession();
@@ -115,6 +124,8 @@ if (placeholderCalls.length) {
       // as unresolved rather than passed — fail closed.)
       const enclosing = symbols
         .filter((s) => s.location.range.start.line < call.line && call.line <= s.location.range.end.line)
+        .filter((s) => !DECLARATION_KINDS.has(s.kind)
+          || s.location.range.end.line - s.location.range.start.line + 1 >= MIN_SCOPE_LINES)
         .sort((a, b) => (a.location.range.end.line - a.location.range.start.line) - (b.location.range.end.line - b.location.range.start.line))[0];
       if (!enclosing) {
         unresolved.push(`${rel}:${call.line + 1} — placeholders() call has no enclosing declaration in documentSymbol`);

@@ -21,12 +21,16 @@
 //     `pid` BEFORE the insert, and multi-row `RETURNING` has no defined row order — so ids come from
 //     one `SELECT max(id)` per table, not from a statement per row.
 //
-// SCOPE: append into an EMPTY-or-disjoint graph. There is no match-vs-create decision here, which is
-// exactly why phase 1 can exist without resolving the interleaved read/write item (plan doc §9): an
-// upsert mode WOULD inherit it, and should be built as this loader's second mode rather than as a fix
-// inside the per-element `run`. A collision with an existing id fails closed rather than merging.
+// SCOPE: APPEND. There is no match-vs-create decision here, which is exactly why this can exist
+// without resolving the interleaved read/write item (plan doc §9): an upsert mode WOULD inherit it,
+// and should be built as this loader's third mode rather than as a fix inside the per-element `run`.
+//
+// Appending into a NON-EMPTY graph is supported through `idPolicy: 'remap'` (plan doc §7): local
+// rowids have no cross-graph meaning, so a second graph's ids collide for no reason, and remapping is
+// one pass with no schema change. Under the default `'preserve'` a collision fails closed with a
+// message naming the option — never a silent merge, and never a raw UNIQUE constraint error.
 import type { GraphStore } from './storage.ts';
-import { insertRows } from './rowbatch.ts';
+import { bindChunks, insertRows, placeholders } from './rowbatch.ts';
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from './gremlin/types.ts';
 import { PROPERTY_FTS_COLUMNS, propertyFtsRows, type OwnerElem } from './services/fts-index.ts';
 
@@ -61,6 +65,32 @@ export interface BulkEdge {
   readonly src: number | string;
   readonly tgt: number | string;
   readonly properties?: readonly BulkProperty[];
+}
+
+/**
+ * How a load resolves the ids it is handed.
+ *
+ *   `'preserve'` (default) — a NUMERIC source id becomes the rowid, so a reference fixture's ids
+ *     land exactly (`V(1)` means what the file meant). Correct for a load into an empty or disjoint
+ *     graph, which is what phases 1–6 need; a collision with an existing element FAILS CLOSED.
+ *   `'remap'` — every element takes a MINTED rowid and its source id is kept as `uid`. This is what
+ *     makes a load into a NON-EMPTY graph work (plan doc §7): `labels.id` and `nodes.id`/`edges.id`
+ *     are local rowids with no cross-graph meaning, so two graphs' ids collide for no reason. Edge
+ *     endpoints resolve through the same source→rowid map either way, so nothing else changes.
+ *   `'renumber'` — mint the rowid and DROP the source id. The same offset without the provenance, for
+ *     the case `'remap'` structurally cannot serve: `nodes.uid`/`edges.uid` are UNIQUE (they are the
+ *     TinkerPop user-supplied id), so the SAME source graph can only be remapped into a target once.
+ *     Loading it twice, or loading two sources that share an id space, needs the ids dropped.
+ *
+ * What `'remap'` preserves is id PROVENANCE, not id LOOKUP: `uid` is a TEXT column, so a remapped
+ * element is `V('3')`, not `V(3)`. That asymmetry is the schema's (`COALESCE(uid, id)` over a TEXT
+ * uid), not this loader's, and it is the honest cost of not widening the primary key — which §7
+ * refuted on measurement.
+ */
+export type IdPolicy = 'preserve' | 'remap' | 'renumber';
+
+export interface BulkOptions {
+  readonly idPolicy?: IdPolicy;
 }
 
 export interface BulkStats {
@@ -103,14 +133,23 @@ export class BulkLoader {
   private nextVertexProp: number;
   private nextEdgeProp: number;
   private counts = { vertices: 0, edges: 0, properties: 0, statements: 0 };
+  private readonly emptyTarget: boolean;
 
-  constructor(private store: GraphStore) {
+  /** The resolved policy — `options.idPolicy` defaults to `'preserve'` HERE rather than at each use,
+   *  because a `=== 'preserve'` test against an absent option silently skipped the collision check. */
+  private readonly policy: IdPolicy;
+
+  constructor(private store: GraphStore, options: BulkOptions = {}) {
+    this.policy = options.idPolicy ?? 'preserve';
     // One query per table, not per row (invariant 4). `max(id)` of an empty table is NULL → start 1.
     this.nextNode = this.maxOf('nodes') + 1;
     this.nextEdge = this.maxOf('edges') + 1;
     this.nextVertexProp = this.maxOf('vertex_properties') + 1;
     this.nextEdgeProp = this.maxOf('edge_properties') + 1;
     this.counts.statements = 4;
+    // Was this graph empty when the load began? If so no collision check is needed at all — see
+    // assertNoCollisions. Read from the cursors, so it costs no extra statement.
+    this.emptyTarget = this.nextNode === 1 && this.nextEdge === 1;
   }
 
   private maxOf(table: string): number {
@@ -128,8 +167,14 @@ export class BulkLoader {
     return id;
   }
 
-  /** Split an id into (rowid, uid) exactly as the per-element write path does. */
+  /** Split an id into (rowid, uid). Under `'preserve'` this is exactly what the per-element write
+   *  path does for `property(T.id, …)`: a number IS the rowid, a string is the uid. Under `'remap'`
+   *  the rowid is always minted and the source id — number or string — is kept as the uid, so the
+   *  provenance survives a collision-free offset. */
   private idOf(id: number | string | null | undefined, next: () => number): { rowid: number; uid: string | null } {
+    if (this.policy === 'renumber') return { rowid: next(), uid: null };
+    if (this.policy === 'remap')
+      return { rowid: next(), uid: id === null || id === undefined ? null : String(id) };
     if (typeof id === 'number') return { rowid: id, uid: null };
     return { rowid: next(), uid: typeof id === 'string' ? id : null };
   }
@@ -191,6 +236,7 @@ export class BulkLoader {
    * edge_properties — and property_fts last, since nothing references it.
    */
   flush(): BulkStats {
+    this.assertNoCollisions();
     this.land('nodes', ['id', 'uid'], this.nodeRows);
     this.land('vertex_labels', ['node', 'label'], this.vertexLabelRows);
     this.land('vertex_properties', VERTEX_PROP_COLUMNS, this.vertexProps.scalar);
@@ -216,6 +262,38 @@ export class BulkLoader {
     this.edgeProps = { scalar: [], collection: [] };
     this.ftsRows = [];
     return { ...this.counts, ftsRows: fts };
+  }
+
+  /**
+   * An id or uid this batch claims may already exist — the load-into-non-empty case. SQLite would
+   * report `UNIQUE constraint failed: nodes.id`, which is true but says nothing about what to do;
+   * this names the element, the state and the option that resolves it.
+   *
+   * SKIPPED ENTIRELY when the target was EMPTY at construction, which is every seeding load: nothing
+   * can collide with rows that do not exist, so the common path pays nothing. Otherwise it is two
+   * chunked `SELECT`s per table (~6% more statements on a 4,000-element batch), which buys turning a
+   * production-shaped mystery into an instruction.
+   */
+  private assertNoCollisions(): void {
+    if (this.emptyTarget) return;
+    for (const [table, rows] of [['nodes', this.nodeRows], ['edges', this.edgeRows]] as const) {
+      // A minted rowid is past max(id) by construction, so only an EXPLICIT id can collide.
+      if (this.policy === 'preserve') this.assertFree(table, 'id', rows.map((r) => r[0]),
+        "load with { idPolicy: 'remap' } to mint fresh ids and keep the source ids as uid");
+      // uid is UNIQUE — the TinkerPop user-supplied id — so remapping the same source twice collides.
+      this.assertFree(table, 'uid', rows.map((r) => r[1]).filter((u) => u !== null),
+        "load with { idPolicy: 'renumber' } to drop the source ids, which uid cannot hold twice");
+    }
+  }
+
+  private assertFree(table: string, column: 'id' | 'uid', values: readonly unknown[], remedy: string): void {
+    for (const chunk of bindChunks(values)) {
+      const clash = this.store.query<{ v: unknown }>(
+        `SELECT ${column} AS v FROM ${table} WHERE ${column} IN (${placeholders(chunk.length)}) LIMIT 1`, chunk)[0];
+      this.counts.statements++;
+      if (clash !== undefined)
+        throw new Error(`bulk load: ${table} ${column} ${JSON.stringify(clash.v)} already exists in this graph — ${remedy}`);
+    }
   }
 
   /** A batch of rows for one table. `jsonbValue` is the collection/meta shape — a SEPARATE statement
@@ -245,9 +323,9 @@ export class BulkLoader {
 /** Load a whole graph in one call — the convenience form over `BulkLoader`. Vertices land first, so
  *  edges resolve their endpoints without a store lookup. */
 export function loadBulk(
-  store: GraphStore, vertices: Iterable<BulkVertex>, edges: Iterable<BulkEdge> = [],
+  store: GraphStore, vertices: Iterable<BulkVertex>, edges: Iterable<BulkEdge> = [], options?: BulkOptions,
 ): BulkStats {
-  const loader = new BulkLoader(store);
+  const loader = new BulkLoader(store, options);
   for (const v of vertices) loader.vertex(v);
   for (const e of edges) loader.edge(e);
   return loader.flush();

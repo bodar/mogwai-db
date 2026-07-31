@@ -246,3 +246,99 @@ describe('the loader is DO-legal and batched at scale', () => {
     expect(executeQuery(store, 'g.V().count()', {})).toEqual(executeQuery(store, 'g.V().count()', {}));
   });
 });
+
+describe("idPolicy: 'remap' — loading into a graph that already has these ids", () => {
+  // Plan doc §7: a cross-graph load does NOT need a wider primary key. `labels.id` and
+  // `nodes.id`/`edges.id` are local rowids with no cross-graph meaning, so two graphs' ids collide
+  // for no reason — one remap pass fixes it with no schema change, and the measurements that refuted
+  // widening the key (1.9-7.2x storage, 2.8-5x on the traversal hot path) stay unspent.
+
+  /** Two graphs with the SAME ids — the situation a cross-graph load is always in. */
+  const collidingSource: BulkVertex[] = [
+    { id: 1, labels: ['person'], properties: [{ key: 'name', value: 'other-marko' }] },
+    { id: 2, labels: ['robot'], properties: [{ key: 'name', value: 'bender' }] },
+  ];
+  const collidingEdges: BulkEdge[] = [{ id: 7, label: 'knows', src: 1, tgt: 2 }];
+
+  test("the default 'preserve' fails closed, naming the option that fixes it", () => {
+    const store = fresh();
+    loadBulk(store, MODERN_VERTICES, MODERN_EDGES);
+    // Not a raw `UNIQUE constraint failed: nodes.id` — that is true but says nothing about what to do.
+    expect(() => loadBulk(store, collidingSource, collidingEdges))
+      .toThrow(/nodes id 1 already exists in this graph — load with \{ idPolicy: 'remap' \}/);
+    // And it failed BEFORE writing anything: the pre-check runs ahead of the first insert.
+    expect(store.query<{ n: number }>('SELECT count(*) AS n FROM nodes')[0].n).toBe(6);
+  });
+
+  test("'remap' mints fresh ids, keeps the source ids as uid, and rewires the edges", () => {
+    const store = fresh();
+    loadBulk(store, MODERN_VERTICES, MODERN_EDGES);
+    const stats = loadBulk(store, collidingSource, collidingEdges, { idPolicy: 'remap' });
+    expect([stats.vertices, stats.edges]).toEqual([2, 1]);
+
+    expect(store.query('SELECT id, uid FROM nodes WHERE uid IS NOT NULL ORDER BY id'))
+      .toEqual([{ id: 7, uid: '1' }, { id: 8, uid: '2' }]);
+    // The edge points at the REMAPPED endpoints, not at the source's 1 and 2 (which are marko and
+    // vadas here). Endpoint resolution goes through the same source→rowid map either way.
+    expect(store.query('SELECT id, uid, src, tgt FROM edges WHERE uid IS NOT NULL'))
+      .toEqual([{ id: 13, uid: '7', src: 7, tgt: 8 }]);
+    // Nothing of the original graph moved.
+    expect(store.query<{ n: number }>('SELECT count(*) AS n FROM nodes')[0].n).toBe(8);
+    expect(executeQuery(store, "g.V().has('name','marko').out('knows').count()", {}))
+      .toEqual(executeQuery(seededByTraversals(MODERN_SEED), "g.V().has('name','marko').out('knows').count()", {}));
+  });
+
+  test("'remap' re-interns labels rather than trusting the source's label ids", () => {
+    const store = fresh();
+    loadBulk(store, MODERN_VERTICES, MODERN_EDGES);
+    loadBulk(store, collidingSource, collidingEdges, { idPolicy: 'remap' });
+    // `person` and `knows` were already interned and are REUSED; `robot` is new. A loader that
+    // carried a source label id across would have pointed `robot` at whatever that id means here.
+    const labels = store.query<{ id: number; name: string }>('SELECT id, name FROM labels ORDER BY id');
+    expect(labels.map((l) => l.name)).toEqual(['person', 'software', 'knows', 'created', 'robot']);
+    expect(executeQuery(store, "g.V().hasLabel('robot').values('name').fold()", {}).length).toBe(1);
+    // modern's four persons plus the source's one, under ONE interned `person` — which is the point:
+    // the label is matched by NAME across the boundary, not by the source's local label id.
+    expect(store.query<{ n: number }>(
+      `SELECT count(*) AS n FROM vertex_labels vl JOIN labels l ON l.id=vl.label WHERE l.name='person'`)[0].n)
+      .toBe(5);
+  });
+
+  test("the SAME graph loads twice under 'renumber' — what uid's UNIQUE cannot do", () => {
+    // The §7 gate: load-into-non-empty. Twice over, because that is the case 'remap' structurally
+    // cannot serve — `nodes.uid` is UNIQUE, so a source id can be preserved in a target only once.
+    const store = freshLimited();
+    for (const pass of [1, 2]) {
+      void pass;
+      const l = new BulkLoader(store, { idPolicy: 'renumber' });
+      for (const v of MODERN_VERTICES) l.vertex(v);
+      for (const e of MODERN_EDGES) l.edge(e);
+      l.flush();
+    }
+    expect(store.query<{ n: number }>('SELECT count(*) AS n FROM nodes')[0].n).toBe(12);
+    expect(store.query<{ n: number }>('SELECT count(*) AS n FROM edges')[0].n).toBe(12);
+    // Two disjoint copies: marko's out-degree is unchanged in each, so the two loads did not
+    // cross-wire (which is exactly what a shared id space would have done).
+    expect(store.query<{ n: number }>(
+      `SELECT count(*) AS n FROM edges e JOIN vertex_properties p ON p.node = e.src
+       WHERE p.key='name' AND p.value='marko'`)[0].n).toBe(6);
+    expect(store.query<{ n: number }>('SELECT count(*) AS n FROM property_fts')[0].n).toBe(36);
+  });
+
+  test("'remap' twice over the same source fails closed, naming 'renumber'", () => {
+    const store = fresh();
+    loadBulk(store, MODERN_VERTICES, MODERN_EDGES, { idPolicy: 'remap' });
+    expect(() => loadBulk(store, MODERN_VERTICES, MODERN_EDGES, { idPolicy: 'remap' }))
+      .toThrow(/nodes uid "1" already exists in this graph — load with \{ idPolicy: 'renumber' \}/);
+  });
+
+  test('an empty target pays nothing for the collision check', () => {
+    // The check is skipped when the graph was empty at construction, which is every seeding load.
+    const store = fresh();
+    const statements = loadBulk(store, MODERN_VERTICES, MODERN_EDGES).statements;
+    const second = fresh();
+    loadBulk(second, [{ id: 99, labels: ['x'] }]);
+    const withCheck = loadBulk(second, MODERN_VERTICES, MODERN_EDGES).statements;
+    expect(statements).toBeLessThan(withCheck);
+  });
+});
