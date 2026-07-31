@@ -1,6 +1,6 @@
 # Dependencies vs arguments: a request tier, and services in DI
 
-**Status: in progress — steps 1-3 landed 2026-07-31, steps 4-6 outstanding (see §6).** Origin: phase 5 of
+**Status: in progress — steps 1-4 landed 2026-07-31, steps 5-6 outstanding (see §6).** Origin: phase 5 of
 `2026-07-31-bulk-transfer-and-io-substrate-plan.md` needed `io().read()` to reach a `GraphStore` and an
 `IoStore`, and the barrier contribution's signature had nowhere to put them. The first answer was to
 widen the signature into a context object. **That was the wrong shape**, and noticing why turned a
@@ -124,7 +124,8 @@ exists."*
 - ~~**Does `params` stay an argument or move to the ctx?**~~ **Answered in step 2: the ctx.** Upstream
   keeps it an argument (`execute(ctx, in, params)`) because ITS service instance is shared across
   calls; ours is resolved per call site, so the argument was pure redundancy.
-- **Does the compile tier survive?** §2's `scope.q` check decides it.
+- ~~**Does the compile tier survive?**~~ **Answered in step 4: no.** Its only content was state the
+  per-compile object already held.
 - **Do the two param TIERS upstream has matter to us?** `createService(isStart, params)` (static —
   which service INSTANCE you get) vs `execute(…, params)` (per call). We collapse both into one map.
   The one place it brushes against us is `io("x.json").with(IO.reader, IO.graphson).read()`, where the
@@ -170,7 +171,14 @@ This is a **behaviour-preserving refactor**: no traversal changes its answer, so
    `compileInject` seeds its own source and lowers against an empty param table. The plan's table put
    `params` in the request tier without noticing that; the difference that matters is that an absent
    override now INHERITS instead of resetting to `{}`, which is what a mandatory argument did.
-4. `q` out of the scope (or a two-field compile tier), resolving the `LoweringState` duplication.
+4. ~~`q` out of the scope (or a two-field compile tier), resolving the `LoweringState` duplication.~~
+   **Landed, and the compile tier VANISHED** — §2's check resolved the second way round. The one
+   reader of `scope.q` is the `LoweringEngine`, which copies it into a field and attaches itself to
+   it; with the request tier underneath, the compile scope held that Query plus inject()'s params
+   override and nothing else. Both are per-compile STATE the engine already owns and publishes, so
+   the tier is not two fields, it is zero: `new LoweringEngine(request, { q?, params?, fastPaths? })`.
+   The split is **App → Request**, and `src/compiler/CLAUDE.md` now says so, with the reason a third
+   scope is not coming back.
 5. `ServiceCallCtx` renamed to whatever it actually is.
 6. **Then** phase 5 of the bulk-transfer plan lands on top: `IoStore` in `AppScope`, an `io` service
    reading it, `io()` desugaring to a `call()`.
