@@ -31,16 +31,9 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-**Ranked entry point.** Numbers are IDs, not an order. Correctness first, because two break the
-fail-closed rule: **27** → **22** → **26** → **2** → **17**'s `tail`/`sample` + **28** → **29** →
-**3**'s `times(n)` unroll.
-
-27. **Seven fail-closed VIOLATIONS: `Scope.local` slices emit malformed SQL.** `g.V().limit(Scope.local,1)`
-   → `no such column: NaN` (same for `range`, and on a variant stream);
-   `project('n').by('name').skip(Scope.local,1)` → `near "FROM": syntax error`. Three builders read
-   `Number(s.args[0])` off the `{scope:'local'}` TOKEN instead of reaching `globalRowOps`'
-   `isLocalScope` decline — `projection.ts:104`, `variant.ts:172`, `select.ts:654`. Item 17 built the
-   guard; these bypass it. **High.**
+**Ranked entry point.** Numbers are IDs, not an order. Correctness first, because one still breaks the
+fail-closed rule: **22** → **26** → **2** → **17**'s `tail`/`sample` + **28** → **29** → **3**'s `times(n)` unroll.
+(Item 27's seven `Scope.local` violations landed 2026-07-31 — the fix was one argument decode, `sliceOf`.)
 
 22. **Validation the spec MANDATES and we do not perform — 33 scenarios, silent wrong answers on the
    write path.** 60 L3 scenarios fail AT the error-assertion step; 33 because we returned a result
@@ -77,7 +70,10 @@ fail-closed rule: **27** → **22** → **26** → **2** → **17**'s `tail`/`sa
 17. **Share the row-ops — slice/dedup family LANDED; `tail`+`sample` are the cheap remainder.**
    `reprojectRows` + `globalRowOps()` (`tail/barrier.ts`) took those five ops from 17/50 gaps to 4/50.
    Re-measured at 15 ops × 10 producers = **150 cells, 86 gaps**, of which **`tail`+`sample` are 19 and
-   fall to ONE lift of the mechanism already built** (two `SLICE_SUFFIX` entries + a reverse flag).
+   fall to ONE lift of the mechanism already built** — `tail` is the one window `sliceOf` (`ir/step.ts`)
+   deliberately does NOT decode, because "the last n" is an offset only once something supplies the member
+   COUNT; supply that and `tail` joins `SLICE_STEPS` and `limitOffset` renders it. `select.ts`'s
+   `recordWindow` is the shape of the answer for the one stream whose count is static.
    **`tail()` does not exist on the ELEMENT stream at all** though `filter/Tail.feature` has 22
    scenarios; `sample()` exists nowhere. The other 63: 42 current-object aggregates (ARCHITECTURAL —
    they need an "expression denoting the traverser's value" authority), 7 `order`, 6 `is` (mechanical
@@ -85,9 +81,9 @@ fail-closed rule: **27** → **22** → **26** → **2** → **17**'s `tail`/`sa
    **The trap that cost 42 corpus traversals:** a shape table is a Map where the LAST duplicate key wins
    and `dispatchShapeTail` consults ONE handler per name, so spreading a shared op into a table that
    already owns that name REPLACES the incumbent — and a handler that "declines" falls to the FALLBACK
-   THROW rather than through. Compose with `firstOf`. `variant.ts:165-188` still re-declares the four
-   minus the `isLocalScope` guard (that omission IS item 27), and `lowerScalarRows` (`scalar.ts:640`) is
-   the one tail never transposed to a dispatch Map. **Low-Med.**
+   THROW rather than through. Compose with `firstOf`. The variant tail now takes `globalRowOps()` verbatim
+   (its re-declared copy was the one missing the `Scope.local` decline); `lowerScalarRows`
+   (`scalar.ts:640`) is the one tail never transposed to a dispatch Map. **Low-Med.**
 
 28. **`expandRepeatBody` is a SEVENTH specialized lowering and the only one the differential cannot
    see.** `branch.ts:800`'s gate means the flat expansion always wins where it recognises the body, and
@@ -391,10 +387,17 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
 typed `throw` deferrals and prose, so a marker grep finds nothing and proves nothing — read the
 deferral clusters in 5c instead.
 
-- **`Scope.local` offset/limit is derived independently at five sites** — `recordSlice`'s local branch,
-  `listLocalTx`, `projection.ts:714,1116,1143`, `scalar.ts:669,708`, `variant.ts:172`. The GLOBAL half is
-  already one `SLICE_SUFFIX`. Same code as item 27, so fix them together — and note the missing "member
-  count" authority is the reason to DECLINE, not a reason to compute `NaN`.
+- **A `Scope.local` slice over a SCALAR or ELEMENT-tail value still declines rather than answering.**
+  The argument decode is now one function (`sliceOf`/`isLocalScope`, `ir/step.ts`) and the rendering one
+  more (`limitOffset`, `plan/plan.ts`), so a host can no longer read the scope token as a row count — but
+  three hosts still have no member-scoped FORM. `values('name').limit(Scope.local,1)` throws where the
+  reference is identity (a String is not a Collection), and it cannot simply become identity: the same
+  stream carries list-valued properties, for which it is a real member slice. `dedup(Scope.local)` on an
+  element stream is the same shape of gap. The missing authority is "how many members does this value
+  have", which is also what keeps `tail` out of `SLICE_STEPS` (item 17). *Low-Med.*
+- **A record sliced down to ZERO fields defers** — `project('n').by('name').skip(Scope.local,1)` should be
+  an empty map per traverser; `materializeRecordRoot` has no zero-field form, so it throws. Needs the
+  record shape and the framer to agree that `{}` is a value. *Low.*
 - **The remaining `as any` reads are a rename-safety hole** — a field read a future LSP rename yields
   `undefined` for, invisibly to `tsc`. 26 in `src/` (down from 35 after `cb8eabf`), most benign row/bind
   casts; the rename-unsafe FIELD reads are `(s as any).productiveBy` (`tail/projection.ts:91`),
