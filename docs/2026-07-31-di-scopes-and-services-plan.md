@@ -1,6 +1,6 @@
 # Dependencies vs arguments: a request tier, and services in DI
 
-**Status: in progress — steps 1-4 landed 2026-07-31, steps 5-6 outstanding (see §6).** Origin: phase 5 of
+**Status: steps 1-5 landed 2026-07-31. Step 6 is phase 5 of the bulk-transfer plan and lives there.** Origin: phase 5 of
 `2026-07-31-bulk-transfer-and-io-substrate-plan.md` needed `io().read()` to reach a `GraphStore` and an
 `IoStore`, and the barrier contribution's signature had nowhere to put them. The first answer was to
 widen the signature into a context object. **That was the wrong shape**, and noticing why turned a
@@ -179,7 +179,12 @@ This is a **behaviour-preserving refactor**: no traversal changes its answer, so
    the tier is not two fields, it is zero: `new LoweringEngine(request, { q?, params?, fastPaths? })`.
    The split is **App → Request**, and `src/compiler/CLAUDE.md` now says so, with the reason a third
    scope is not coming back.
-5. `ServiceCallCtx` renamed to whatever it actually is.
+5. ~~`ServiceCallCtx` renamed to whatever it actually is.~~ **Landed: `CallSite`** — one call()
+   occurrence plus what a service needs to lower into it (the arguments, the enclosing lowering
+   target, the enclosing traverser position, the hop depth), which is what a call site IS in
+   compiler literature. It pairs with `CallSpec` as parse/lower, stated in both doc comments because
+   the names are close enough to need it. `compileParams` → `boundParams` in the same pass: "compile"
+   named a phase, and it read as a near-synonym of the `params` beside it.
 6. **Then** phase 5 of the bulk-transfer plan lands on top: `IoStore` in `AppScope`, an `io` service
    reading it, `io()` desugaring to a `call()`.
 
