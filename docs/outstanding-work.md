@@ -166,16 +166,33 @@ Cloudflare** — which is why nothing above found it. Every level of the ladder 
    touched, not done as a rename. **Do not "finish" this by mechanically rewriting all 17**: some of
    them defer for a reason the table does not capture. *Low.*
 
-3. **`repeat()` residuals.** *(Its stated precondition — item 28's `repeatBodyExpansion` switch — is
-   met as of 2026-07-31, so the `times(n)` unroll is unblocked.)* The body compiles through the ordinary StepFns into a keyed child relation
-   (`tail/keyed.ts`). **The gate is NOT "whatever `lowerElementSteps` accepts"**: a per-iteration GLOBAL
-   barrier observes the whole frontier and the generic StepFns would lower it per-origin, answering a
-   different question — the gate is the row-local vocabulary (`isElementChildStep`).
-   **A barrier body under a fixed `times(n)` could be UNROLLED into n generic phases** — the single
-   biggest L3 mechanism at **41 queries** (`order` 15, `limit` 7, `local` 5, `dedup` 4, `range` 4,
-   `groupCount` 3, `sample` 2, `group` 1; plus 8 on the adjacent row-local gate), unchanged across three
-   measurements. *Medium.* Also: named-loop `repeat("a",…)` needs named loop counters; `as()` in the body
-   rebinds per iteration so it stays out; `path()`/`sack()` bodies stay with the flat expansion (→ P3).
+3. **`repeat()` residuals — and the `times(n)` unroll is NOT the free rewrite this item claimed.**
+   The body compiles through the ordinary StepFns into a keyed child relation (`tail/keyed.ts`).
+   **The gate is NOT "whatever `lowerElementSteps` accepts"**: a per-iteration GLOBAL barrier observes
+   the whole frontier and the generic StepFns would lower it per-origin, answering a different
+   question — the gate is the row-local vocabulary (`isElementChildStep`).
+   **Two reference facts, read from the vendored source 2026-07-31 and pinned in
+   `test/compiler/repeat-unroll-boundary.exec.test.ts`. They pull opposite ways:**
+   - *Our deferral message is the REFERENCE's reading, not our assumption.*
+     `RepeatStep.standardAlgorithm:217` tests `hasStepOfAssignableClassRecursively(Barrier.class, …)`
+     and, when it holds, drains EVERY start into the body before iterating it — "so that RepeatStep
+     always has 'global' children". Without a barrier it pulls ONE start at a time.
+   - *TinkerPop refuses to unroll such a body, on purpose.*
+     `RepeatUnrollStrategy.ALLOWED_STEP_CLASSES` is movement + `has()` only, and the class comment
+     says why: "intentionally conservative as there have been unintentional traversal semantics
+     changes in the past when allowing a large variety of steps (**especially barriers**)."
+   **So the 41 queries are not 41 free wins.** Every body they count is a barrier body — the set the
+   reference strategy declines — and the bodies it DOES admit already compile here, so unrolling those
+   buys nothing. The unroll may still be right for us, for a reason that does not apply to an
+   interpreter: our phases are set-at-a-time by construction, so "the whole frontier at iteration k"
+   IS phase k's relation — the property `:217` had to special-case to obtain. **But that is an
+   argument to make per barrier, with a pin each, not a corpus count to cash in.** Breakdown, unchanged
+   across four measurements: `order` 15, `limit` 7, `local` 5, `dedup` 4, `range` 4, `groupCount` 3,
+   `sample` 2, `group` 1; plus 8 on the adjacent row-local gate. *Medium, and re-scoped: the cheapest
+   honest slice is ONE barrier (`dedup`, 4 queries, the easiest equivalence to state) rather than the
+   mechanism wholesale.*
+   Also: named-loop `repeat("a",…)` needs named loop counters; `as()` in the body rebinds per iteration
+   so it stays out; `path()`/`sack()` bodies stay with the flat expansion (→ P3).
    → [deep-seam-migration-roadmap](./2026-07-18-deep-seam-migration-roadmap.md) #5,
    [foldable-carried-column](./2026-07-24-foldable-carried-column-plan.md)
 
