@@ -613,12 +613,20 @@ proves nothing — read the deferral clusters instead.
     set hid that behind `&& term.name !== 'count'`, i.e. `NUMERIC_REDUCERS` spelled as a subtraction.
     A duplicate set does not merely duplicate; it lets a reader express its real membership as a
     correction to the wrong base.
-- **`lowerGlobalNumericReducer` bypasses its own extracted policy helper** — `numericReducerAggregate`
-  (`tail/barrier.ts`) is documented as the one shared reducer policy and owns the eligible-storage-class
-  `CASE WHEN typeof(...)` guard; the root barrier 60 lines below re-derives sum/mean/min/max inline with
-  a `WHERE typeof(...)`. **Not a pure transposition** — `WHERE` and `CASE WHEN` differ on
-  empty/all-ineligible input (no row vs a NULL row), which interacts with `productiveNull`. Latent
-  divergence the L5 metamorphic oracle would attribute to the wrong layer.
+- ~~**`lowerGlobalNumericReducer` bypasses its own extracted policy helper**~~ — **LANDED `109ed6a`,
+  and it was hiding a live wrong answer, not just debt.** The index's stated caution ("`WHERE` and
+  `CASE WHEN` differ on empty/all-ineligible input — no row vs a NULL row") was **wrong**: a bare
+  aggregate with no GROUP BY returns exactly one row either way, so the two forms are equivalent for
+  min/max/mean. The real divergence was that the global `sum` arm carried **no eligibility guard at
+  all** — `g.V().values('name').sum()` returned a fabricated **0** (SQLite coerces text to 0 inside
+  SUM) where min/max/mean over the same stream all reported nothing eligible.
+  Routing through the policy makes an all-ineligible `sum()` agree with the same `sum()` over an
+  EMPTY stream. A MIXED stream was always right (each text value contributes 0) and is pinned as
+  such, because that is what a careless guard breaks. No census row moved, so no corpus traversal
+  sums a non-numeric value — which is exactly why this survived: **the L2 test asserting "mean/sum
+  numeric only" only ever checked the SQL, never the result.** Worth generalising: a test that pins
+  a policy's TEXT does not pin its behaviour, and every reducer/guard assertion in `test/L2-sql/`
+  is that shape.
 - **Ten independent `LIMIT ${limit ?? -1} OFFSET ${offset}` derivations** — PARTLY subsumed by item
   17 as predicted: the shared `SLICE_SUFFIX` (`tail/barrier.ts`) is now the one derivation for every
   GLOBAL slice, routed through `rangeToOffsetLimit`. What remains is the `Scope.local` half —
