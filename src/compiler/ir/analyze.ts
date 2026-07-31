@@ -69,8 +69,13 @@ const POSITIONAL_CONSUMERS = new Set(['limit', 'range', 'skip', 'tail']);
  *  order is part of the answer rather than a property of how the rows arrived. Two consequences
  *  the slice steps above do not share: an upstream `order()` does not satisfy them (they read
  *  across a relation boundary, where SQL drops a subquery's ORDER BY), and neither does the
- *  absence of a fan-out (a bare `g.V().fold()` observes the source's order just as much). */
-const COLLECTING_CONSUMERS = new Set(['fold', 'aggregate']);
+ *  absence of a fan-out (a bare `g.V().fold()` observes the source's order just as much).
+ *
+ *  `cap` is here as well as `aggregate`, and that is not redundancy: this scan is FLAT, so an
+ *  `aggregate` written inside a child body — `g.V().local(aggregate('a')).cap('a')`, the whole
+ *  Scope.local family — is invisible to it. `cap` is the step that makes a collection's member
+ *  order observable and it is always at the top level, so it is the one that cannot be missed. */
+const COLLECTING_CONSUMERS = new Set(['fold', 'aggregate', 'cap']);
 
 /** Does this chain need a threaded emission-order encounter? True iff a positional consumer
  *  appears after a fan-out. repeat()/match() are opaque boundaries this substrate doesn't
