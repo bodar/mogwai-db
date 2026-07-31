@@ -19,14 +19,14 @@
 
 import { ALWAYS_PRODUCTIVE_TERMINAL } from '../../ir/productivity.ts';
 import type { Relation } from '../../../sql/kernel/q.ts';
-import { gtypeName, isColumnArg, isOperatorArg, isOrderArg, isPickArg, isPred, isScopeArg, isTokenArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { gtypeName, isColumnArg, isOperatorArg, isOrderArg, isPickArg, isPred, isTokenArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
 import { normalizeTypeName } from '../../../gremlin/types.ts';
 import type { AliasMap, TraverserLayout, ElementStream } from '../context/context.ts';
 import type { PropertyStream, ScalarStream, Stream } from '../context/stream.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { SCALAR_TRANSFORMS } from './coerce.ts';
-import { REDUCERS } from '../../ir/step.ts';
+import { asBranchKind, isStreamBarrier, REDUCERS, type BranchKind } from '../../ir/step.ts';
 
 /** Root/child compilation context. A child frame retains the complete parent domain,
  * not merely an ordinal on productive child rows: reducers need that domain to
@@ -384,18 +384,10 @@ function elementRun(steps: readonly IRStep[], ctx: ChildCtx | undefined): { ctx:
 // an existence consumer can observe the same ordered/sliced child rows as a
 // normal child cardinality consumer; the emitter mints the per-parent encounter
 // before applying the following slice.
-/** PURE. A step that observes the WHOLE stream at once, so it cannot be evaluated per-row
- *  without answering a different question. The canonical example is the one that made this
- *  shared: a global `dedup()` drops a value two origins both reach, a per-origin one keeps
- *  both. Two sites need exactly this fact and must not drift apart —
- *  `repeat()`'s body (a barrier there observes the whole FRONTIER at one iteration) and a
- *  `match()` pattern body (a barrier there reduces over the whole BINDING TABLE, not per
- *  binding). Both defer on it rather than mis-execute. */
-export const GLOBAL_BARRIER_STEPS = new Set([
-  'dedup', 'order', 'limit', 'range', 'skip', 'tail', 'sample', 'barrier',
-  'group', 'groupCount', 'aggregate', 'local', 'fold', ...REDUCERS,
-]);
-export const isGlobalBarrier = (s: IRStep): boolean => GLOBAL_BARRIER_STEPS.has(s.name);
+// `GLOBAL_BARRIER_STEPS`/`isGlobalBarrier` moved DOWN to `ir/step.ts`, beside the other step-name
+// vocabularies, because its third consumer is an `ir/` verify Pass and `ir/` must not import from
+// `steps/`. Re-exported here so the importers that already read it from this leaf did not move.
+export { GLOBAL_BARRIER_STEPS, isGlobalBarrier } from '../../ir/step.ts';
 
 const CHILD_ELEMENT_ROW_STEPS = new Set(['order', 'limit', 'skip', 'range', 'dedup', 'local']);
 
@@ -598,9 +590,9 @@ export interface ChildPlan { body: IRStep[]; suffix: IRStep[] }
  */
 function longestClassifying(full: IRStep[], ok: (body: IRStep[]) => boolean): ChildPlan | null {
   // Scope.local narrows a would-be barrier to one list VALUE, so `order(Scope.local)` is a
-  // row-local transform and rides the suffix fine; bare `order()`/`fold()` do not.
-  const barriers = (steps: IRStep[]) => steps.some((s) =>
-    isGlobalBarrier(s) && !s.args.some((a: unknown) => isScopeArg(a) && a.scope === 'local'));
+  // row-local transform and rides the suffix fine; bare `order()`/`fold()` do not. That distinction
+  // is `isStreamBarrier` (ir/step.ts) — it was spelled inline here and again in the branch-arm gate.
+  const barriers = (steps: IRStep[]) => steps.some(isStreamBarrier);
   for (let end = full.length; end > 0; end--) {
     if (barriers(full.slice(end))) continue;
     const body = full.slice(0, end);
@@ -802,8 +794,6 @@ export function isListChild(nested: any, ctx: ChildCtx): boolean {
 // The MERGE order (which shape wins when a body could satisfy two classifiers) lives in
 // BRANCH_SHAPE_ORDER below — written down once, not restated per call site.
 
-/** The four steps that fork a traverser into arms and merge the results. */
-export type BranchKind = 'union' | 'choose' | 'coalesce' | 'optional';
 
 /** One arm's shape class. `null` = unclassifiable by any of the three child classifiers. */
 export type BranchArmShape = 'element' | 'scalar' | 'list' | null;
@@ -896,9 +886,9 @@ export function branchNeedsShapeDispatch(kind: BranchKind, step: IRStep, ctx: Ch
   return classifyBranchArms(kind, step, ctx).merge !== 'element';
 }
 
-export const BRANCH_KINDS = new Set<string>(['union', 'choose', 'coalesce', 'optional']);
-export const asBranchKind = (name: string): BranchKind | null =>
-  BRANCH_KINDS.has(name) ? name as BranchKind : null;
+// The branch-kind vocabulary moved to `ir/step.ts` for the same reason as GLOBAL_BARRIER_STEPS
+// above — the verify Pass needs it. Re-exported so no importer moved.
+export { asBranchKind, BRANCH_KINDS, type BranchKind } from '../../ir/step.ts';
 
 // ---------- by() modulator argument triage (the pure shell every host shares) ----------
 //

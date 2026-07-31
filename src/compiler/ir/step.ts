@@ -1,4 +1,4 @@
-import { type Step } from '../../gremlin/frontend.ts';
+import { isScopeArg, type Step } from '../../gremlin/frontend.ts';
 
 // ---------- the compiler's step node ----------
 //
@@ -77,3 +77,35 @@ export const REDUCERS: ReadonlySet<string> = unionOf(NUMERIC_REDUCERS, new Set([
  *  lived in `tail/barrier.ts` and the set here, two independent spellings of four names.) */
 export type NumericReducer = (typeof NUMERIC_REDUCER_NAMES)[number];
 export type ScalarReducer = 'count' | NumericReducer;
+
+/** A step that observes the WHOLE stream at once, so it cannot be evaluated per-row without
+ *  answering a different question. The canonical example is the one that made this shared: a global
+ *  `dedup()` drops a value two origins both reach, a per-origin one keeps both.
+ *
+ *  **THREE sites need exactly this fact and must not drift apart** — `repeat()`'s body (a barrier
+ *  there observes the whole FRONTIER at one iteration), a `match()` pattern body (a barrier there
+ *  reduces over the whole BINDING TABLE, not per binding), and a BRANCH ARM (a barrier there
+ *  observes every traverser reaching the branch, not one). The first two defer rather than
+ *  mis-execute; the third did neither until `verifyBranchArmBarrierScope`.
+ *
+ *  It lives HERE, in the IR's step vocabulary, and not beside its first consumer, because the
+ *  branch-arm site is an `ir/` verify Pass — and `ir/` must not import from `steps/`. `child-shape.ts`
+ *  re-exports it so no existing importer moved. */
+export const GLOBAL_BARRIER_STEPS: ReadonlySet<string> = new Set([
+  'dedup', 'order', 'limit', 'range', 'skip', 'tail', 'sample', 'barrier',
+  'group', 'groupCount', 'aggregate', 'local', 'fold', ...REDUCERS,
+]);
+export const isGlobalBarrier = (s: { readonly name: string }): boolean => GLOBAL_BARRIER_STEPS.has(s.name);
+
+/** Is this step a barrier over the whole stream **as written**? `GLOBAL_BARRIER_STEPS` is by NAME,
+ *  and a `Scope.local` argument narrows the same name to one shape's MEMBERS — `order(Scope.local)`
+ *  reorders a list value's members and is row-local, where bare `order()` observes every traverser.
+ *  Both gates that need this distinction spelled the exemption inline; this is the one predicate. */
+export const isStreamBarrier = (s: IRStep): boolean =>
+  isGlobalBarrier(s) && !(s.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
+
+/** The four steps that fork a traverser into arms and merge the results. */
+export type BranchKind = 'union' | 'choose' | 'coalesce' | 'optional';
+export const BRANCH_KINDS: ReadonlySet<string> = new Set<string>(['union', 'choose', 'coalesce', 'optional']);
+export const asBranchKind = (name: string): BranchKind | null =>
+  BRANCH_KINDS.has(name) ? name as BranchKind : null;

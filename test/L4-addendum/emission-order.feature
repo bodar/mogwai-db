@@ -57,9 +57,15 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
       | result |
       | l[d[35].i,d[32].i,d[29].i,d[27].i] |
 
-  # union emits arm 0 fully before arm 1 (TinkerPop's contract); limit after a mixed/element
-  # union must not interleave arms. josh(4): out={lop,ripple} (arm 0), in={marko} (arm 1);
-  # limit(2) is the two out-neighbours, never marko. Guards the branch-merge encounter re-mint.
+  # union emits arm 0 fully before arm 1 FOR ONE INPUT TRAVERSER, which is what this scenario has
+  # (`g.V(4)`) — so the pin is correct, but the justification it used to carry ("TinkerPop's
+  # contract", unqualified) is not. Verified in gremlin-core: `BranchStep.standardAlgorithm` injects
+  # ONE start and drains each arm for it unless `hasBarrier` is set, so with several traversers the
+  # reference is traverser-major, arm-minor, and we are arm-major GLOBALLY. That divergence is real
+  # and separately filed (outstanding-work item 21 / the branch-arm plan); do NOT add a
+  # multi-traverser union case here expecting it to hold.
+  # josh(4): out={lop,ripple} (arm 0), in={marko} (arm 1); limit(2) is the two out-neighbours, never
+  # marko. Guards the branch-merge encounter re-mint.
   @gap:emission-order
   Scenario: g_V4_unionXout_inX_limitX2X_name
     Given the modern graph
