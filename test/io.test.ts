@@ -56,6 +56,14 @@ describe('io() desugars to a call() on the internal service', () => {
     expect(call.withArgs).toEqual([['~tinkerpop.io.registry', 'r']]);
   });
 
+  test('IO.reader/IO.graphson resolve to the strings a GLV puts on the wire', () => {
+    // The front-end emits the canonical string rather than a tagged token, so a query typed at our
+    // server and the same query from a client become the SAME chain. Before this, the enum
+    // constants were dropped entirely and with() saw no argument at all.
+    const [call] = steps('g.io("x.json").with(IO.reader, IO.graphson).read()');
+    expect(call.withArgs).toEqual([['~tinkerpop.io.reader', 'graphson']]);
+  });
+
   test('io() with no read()/write() fails closed — an unstated direction is not a no-op', () => {
     expect(() => steps('g.io("x.json")')).toThrow(/must be followed by read\(\) or write\(\)/);
   });
@@ -120,6 +128,17 @@ describe('io() fails closed', () => {
     await expect(ex.framedAsync('g.io("x.xml").read()', {})).rejects.toThrow(/GraphML is not supported/);
     await expect(ex.framedAsync('g.io("x.kryo").read()', {})).rejects.toThrow(/Gryo is not supported/);
     await expect(ex.framedAsync('g.io("x.csv").read()', {})).rejects.toThrow(/unrecognized format "\.csv"/);
+  });
+
+  test('a DECLARED reader overrides the extension, in both directions', async () => {
+    const ex = managerOn(ioDir()).executor('g');
+    // .with(IO.reader, IO.gryo) on a .json path: the declaration wins, and Gryo is a wall.
+    await expect(ex.framedAsync('g.io("modern.json").with(IO.reader, IO.gryo).read()', {}))
+      .rejects.toThrow(/Gryo is not supported/);
+    // and the reference form the official g_io_read_withXreader_graphsonX scenario uses works
+    await ex.framedAsync('g.io("modern.json").with(IO.reader, IO.graphson).read()', {});
+    const [count] = await ex.framedAsync('g.V().count()', {});
+    expect(Number(await decode(count.buf))).toBe(6);
   });
 
   test('the format check happens BEFORE any io — an unsupported format costs no read', async () => {

@@ -10,7 +10,11 @@
 // no dev-only handler fork, no StoreSource resolver. Seeding runs the canonical
 // graphs' write traversals through the normal query path (see seed-modern.ts), so
 // it is identical on Bun and Cloudflare — a graph is seeded by talking to it.
+import { copyFileSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { BunGraphManager } from '../../src/bun/BunGraphManager.ts';
+import { FileIoStore } from '../../src/bun/FileIoStore.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
 import { application } from '../../src/application.ts';
 import { LoggingGraphManager, telemetryPath, clearTelemetry, expectedErrorSubstrings, progressMark } from './telemetry.ts';
@@ -35,6 +39,22 @@ import { readFileSync } from 'node:fs';
 // A bulk load is only trustworthy while that comparison exists.
 const GRAPHSON = 'vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/structure/io/graphson';
 const relToRepo = (p: string) => new URL(`../../${p}`, import.meta.url).pathname;
+
+/** The io() namespace the Read.feature scenarios address. They name `data/tinkerpop-modern.json`,
+ *  a path the REFERENCE provider resolves from its own working directory — the corpus ships no
+ *  `features/data/`, so the server defines the namespace. We map it onto the submodule's
+ *  `structure/io/*` resources: one temp root, populated by copy at startup, so `FileIoStore` (the
+ *  real production seam, rooting guard included) serves the scenarios unmodified.
+ *
+ *  Only the GraphSON scenarios can pass — `.kryo` (Gryo) and `.xml` (GraphML) are the two formats
+ *  we decline by decision and by wall, and their scenarios stay red NAMING the format. Populating
+ *  their paths anyway would trade a clear refusal for a confusing one. */
+function ioNamespace(): string {
+  const root = mkdtempSync(join(tmpdir(), 'mogwai-l3-io-'));
+  mkdirSync(join(root, 'data'));
+  copyFileSync(relToRepo(`${GRAPHSON}/tinkerpop-modern-v3.json`), join(root, 'data', 'tinkerpop-modern.json'));
+  return root;
+}
 
 /** A reference graph's seed: hand-authored write traversals, or a GraphSON adjacency file. */
 type Seed = readonly string[] | { readonly graphson: string };
@@ -92,7 +112,8 @@ export async function startConformanceServer(port = 45940, graphs: readonly stri
   // LabelCardinality.ZERO_OR_MORE" (LoadGraphWith.GraphData.ZOO). Everything else stays ONE, so
   // the untagged *_single_label_graph scenarios still get their refusal.
   const manager = new BunGraphManager(undefined, standardRegistry, (id) =>
-    id === 'gmultilabel' || id === 'gzoo' ? LabelCardinality.ZERO_OR_MORE : LabelCardinality.ONE);
+    id === 'gmultilabel' || id === 'gzoo' ? LabelCardinality.ZERO_OR_MORE : LabelCardinality.ONE,
+    new FileIoStore(ioNamespace()));
   // Seed before serving so the first scenario sees a populated graph. Each write
   // traversal goes through the manager seam exactly as a client request would.
   for (const g of graphs) {

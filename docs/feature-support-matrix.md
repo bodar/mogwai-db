@@ -3,7 +3,7 @@
 What you can rely on. Each step gets one mark based on how much of it works and how
 freely it composes — a ✅ step works **anywhere in a traversal**, however deeply nested,
 not just at the top. Notes call out **only the cases that don't work yet**; if a row has
-no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,650<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,652<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 | Mark | Meaning |
 |---|---|
@@ -32,6 +32,7 @@ it was the first thing ever to execute the compiler's generic lowering path — 
 | `otherV` | ✅ | composes wherever any other movement does, incl. inside a child body (`local(__.bothE().otherV())`) and a `repeat()` body |
 | `inject(…)` | ✅ | ❌ appending a list onto an existing scalar stream |
 | `call(service[, params])`, `.with(k,v)` | ✅ | source (`g.call`) + mid-traversal (`V().call`); pure (`'stream'`) + async/federated (`'barrier'`) contributions. Services below. |
+| `io(path).read()` / `.write()` | 🟡 | desugars to `call("mogwai.io", …)` (one canonicalize Pass), so it inherits the barrier seam and the compiler learns no second async step kind. Typed GraphSON (`.json`) both ways; `.with(IO.reader\|IO.writer, …)` overrides the extension. Documents live behind `IoStore` — a rooted directory on Bun, an R2 binding in a DO. ❌ GraphML (`.xml`) and Gryo (`.kryo`), both fail closed naming the format; no binding fails closed naming the binding |
 
 **Services** (the `call()` registry — a per-runtime DI seam; `--list` enumerates the live registry):
 
@@ -40,6 +41,7 @@ it was the first thing ever to execute the compiler's generic lowering path — 
 | `--list` | ✅ | enumerates registered services; `.with("service",…)` filter, `verbose` describe blob |
 | `tinker.degree.centrality` | ✅ | per-vertex incident-edge count via the child-scope reducer seam; `direction` OUT/IN/BOTH (default IN); composes in `where(call(…).is(n))`, `group`/`order`/`project` by() |
 | `tinker.search` | 🟡 | FTS5-trigram search over property values (`property_fts`); `.element()` walks to the owner. `type` Vertex (default) / Edge; **case-insensitive** (documented). ❌ `type=VertexProperty` (empty), `<3`-char term & `regex` (fail closed) |
+| `mogwai.io` | 🟡 | INTERNAL (excluded from `--list`, in BOTH registries) — what `io()` desugars to. Takes the `IoStore` + this graph's store at construction, so the barrier contract stays `apply(rows)`. Coverage as `io()` above |
 | `mogwai.graph.federate` | 🟡 | cross-graph query pushdown (async barrier). Source form `g.call(federate,{graph,traversal})` runs a rooted sub-traversal on a sibling graph → detached refs. Mid-traversal `V().call(federate,…,__.values('k'))` injects each parent's scalar (`values`/`id`/`label`) via the GLV-native `T.value` marker, batched one hop, value-rejoined per parent (flatMap). ❌ local movement over a detached result (fail closed); `path()`/`as()` spanning the call (deferred); n-ary/map injection & traversable-subgraph return (future) |
 
 ## 2. Filters & predicates

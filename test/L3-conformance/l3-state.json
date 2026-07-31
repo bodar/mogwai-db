@@ -1,5 +1,5 @@
 {
-  "passing": 1650,
+  "passing": 1652,
   "total": 2267,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -1324,6 +1324,8 @@
     "g_injectXxx1X_combineXV_valuesXnameX_foldX_unfold",
     "g_inject_match_midTraversal_noMatch_emptyResult",
     "g_inject_match_midTraversal_selectXa_bX_byXnameX",
+    "g_io_readXgraphsonX",
+    "g_io_read_withXreader_graphsonX",
     "g_match_absentAgeProperty_selectXvX_byXnameX",
     "g_match_anonymousXknowsX_person_selectXbX_byXnameX",
     "g_match_anyXknowsX_any_selectXaX_byXnameX_concatXconstant_selectXbX_byXnameXX",
@@ -2160,10 +2162,8 @@
     "g_inject_order",
     "g_inject_order_byXdescX",
     "g_io_readXgraphmlX",
-    "g_io_readXgraphsonX",
     "g_io_readXkryoX",
     "g_io_read_withXreader_graphmlX",
-    "g_io_read_withXreader_graphsonX",
     "g_io_read_withXreader_gryoX",
     "g_mergeEXemptyX",
     "g_mergeEXemptyX_exists",

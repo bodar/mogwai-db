@@ -43,21 +43,38 @@ function pathOf(params: CallParams): string {
   return p;
 }
 
-/** Which codec serves a path. The EXTENSION decides, which is what the reference provider does
- *  too. An unsupported format fails closed NAMING the format — never a wrong-format parse:
- *   • `.xml` (GraphML) is excluded by decision — its `attr.type` admits no date/uuid/nesting/meta,
- *     so it is lossier than CSV, and Workers has no XML DOM to parse it with anyway.
- *   • `.kryo` (Gryo) is a genuine wall: JVM serialization, not reimplementable without a
- *     dependency that does not exist.
- *  See docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md §4. */
-function codecFor(path: string): 'graphson' {
+/** `.with(IO.reader, …)` / `.with(IO.writer, …)` — a DECLARED format, overriding the extension.
+ *  The front-end resolves the `IO.*` tokens to these exact strings (the GLV's own wire form). */
+const READER_KEY = '~tinkerpop.io.reader';
+const WRITER_KEY = '~tinkerpop.io.writer';
+
+/** The format a path implies. TinkerPop's own extensions, so `.json`/`.xml`/`.kryo` name the same
+ *  three formats the reference provider resolves them to. */
+function formatOf(path: string): string {
   const ext = path.slice(path.lastIndexOf('.')).toLowerCase();
   if (ext === '.json') return 'graphson';
-  if (ext === '.xml')
-    throw new Error(`io("${path}"): GraphML is not supported — its attribute types cannot carry date/uuid/nested/meta-property values. Use typed GraphSON (.json)`);
-  if (ext === '.kryo')
-    throw new Error(`io("${path}"): Gryo is not supported — it is JVM serialization. Use typed GraphSON (.json)`);
+  if (ext === '.xml') return 'graphml';
+  if (ext === '.kryo') return 'gryo';
   throw new Error(`io("${path}"): unrecognized format "${ext}" — only typed GraphSON (.json) is supported`);
+}
+
+/** Which codec serves this call: the DECLARED format if `.with(IO.reader|IO.writer, …)` named one,
+ *  else the one the extension implies. An unsupported format fails closed NAMING the format —
+ *  never a wrong-format parse:
+ *   • GraphML is excluded by decision — its `attr.type` admits no date/uuid/nesting/meta, so it is
+ *     lossier than CSV, and Workers has no XML DOM to parse it with anyway.
+ *   • Gryo is a genuine wall: JVM serialization, not reimplementable without a dependency that
+ *     does not exist.
+ *  See docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md §4. */
+function codecFor(path: string, params: CallParams, direction: IoDirection): 'graphson' {
+  const declared = params[direction === 'read' ? READER_KEY : WRITER_KEY];
+  const format = typeof declared === 'string' ? declared : formatOf(path);
+  if (format === 'graphson') return 'graphson';
+  if (format === 'graphml')
+    throw new Error(`io("${path}"): GraphML is not supported — its attribute types cannot carry date/uuid/nested/meta-property values. Use typed GraphSON (.json)`);
+  if (format === 'gryo')
+    throw new Error(`io("${path}"): Gryo is not supported — it is JVM serialization. Use typed GraphSON (.json)`);
+  throw new Error(`io("${path}"): unrecognized format "${format}" — only typed GraphSON (.json) is supported`);
 }
 
 /** The io service. `apply` returns NO rows in both directions, which is already the right answer:
@@ -76,7 +93,7 @@ export const createIoService = (io: IoStore, store: GraphStore | undefined): Ser
     apply: async () => {
       const path = pathOf(params);
       const direction = directionOf(params);
-      codecFor(path);   // format check FIRST, so an unsupported one costs no io
+      codecFor(path, params, direction);   // format check FIRST, so an unsupported one costs no io
       if (!store)
         throw new Error(`io("${path}"): this compile has no graph store behind it (io() needs the executor's data plane)`);
       if (direction === 'read') loadGraphson(store, new TextDecoder().decode(await io.read(path)));

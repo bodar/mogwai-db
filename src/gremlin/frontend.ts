@@ -92,6 +92,17 @@ export const isCardinalityValueArg = (arg: unknown): arg is { readonly cardinali
 export const isGTypeArg = (arg: unknown): arg is Extract<TaggedArg, { gtype: string }> => tagged(arg, 'gtype');
 export const isPickArg = (arg: unknown): arg is Extract<TaggedArg, { pick: string }> => tagged(arg, 'pick');
 export const isWithOptionArg = (arg: unknown): arg is Extract<TaggedArg, { withOption: string }> => tagged(arg, 'withOption');
+
+/** `IO.*` → the string the JS GLV serializes it to (its `IO` class getters, verbatim). The two
+ *  option KEYS are namespaced tokens; the three format names are bare. */
+const IO_OPTION_STRINGS: Record<string, string> = {
+  reader: '~tinkerpop.io.reader',
+  writer: '~tinkerpop.io.writer',
+  registry: '~tinkerpop.io.registry',
+  graphson: 'graphson',
+  gryo: 'gryo',
+  graphml: 'graphml',
+};
 export const isDtArg = (arg: unknown): arg is Extract<TaggedArg, { dt: string }> => tagged(arg, 'dt');
 export const isOperatorArg = (arg: unknown): arg is Extract<TaggedArg, { operator: string }> => tagged(arg, 'operator');
 export const isScopeArg = (arg: unknown): arg is Extract<TaggedArg, { scope: string }> => tagged(arg, 'scope');
@@ -479,6 +490,12 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (Ty
   // {withOption} so absorbValueMapWith can desugar with(WithOptions.tokens) to valueMap(true);
   // without this the generic recursion dropped them and with() saw no argument.
   if (cls.startsWith('WithOptionsConstants_')) { emit({ withOption: enumSuffix(node) }); return; }
+  // IO.reader/writer/registry/graphson/gryo/graphml — io()'s with() selectors. Emitted as the
+  // CANONICAL STRING rather than a tagged token, because that is what a GLV puts on the wire (the
+  // JS client's IO.reader IS '~tinkerpop.io.reader', IO.graphson IS 'graphson'), so a query typed
+  // straight at our server and the same query from a client become the SAME chain. Without this the
+  // generic recursion dropped them and with() saw no argument at all.
+  if (cls.startsWith('IoOptionsConstants_')) { emit(IO_OPTION_STRINGS[enumSuffix(node)] ?? enumSuffix(node)); return; }
   // datetime('iso') / DateTime('iso') / datetime() (now) — a date literal, captured as
   // epoch-millis (the internal datetime representation; the 'date' shape tag frames it
   // back to a JS Date). An offset-bearing ISO string folds into the correct instant.
