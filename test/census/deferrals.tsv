@@ -353,7 +353,7 @@ deferred	with() cannot consume the valueMap result shape	g.V().valueMap("name", 
 deferred	match() cannot consume the valueMap result shape	g.V().valueMap().match(__.as("a").select("name").as("b"))
 deferred	math() cannot consume the valueMap result shape	g.V().valueMap().math("_+_").by(__.select("age").unfold())
 deferred	project() cannot consume the valueMap result shape	g.V().valueMap().project("x").by(__.select("name"))
-deferred	dedup() on a list value not yet supported	g.V().valueMap().select(keys).dedup().is(P.typeOf(GType.SET))
+deferred	is() on a list value not yet supported	g.V().valueMap().select(keys).dedup().is(P.typeOf(GType.SET))
 deferred	all step can only take an array or an Iterable type for incoming traversers, encountered a scalar	g.V().values("age").all(P.gt(32))
 deferred	any step can only take an array or an Iterable type for incoming traversers, encountered a scalar	g.V().values("age").any(P.gt(32))
 deferred	The child traversal of is() contains a mutating step (addV) and thus is not read only: a mutating step is not allowed in a value-argument child traversal	g.V().values("age").is(P.gt(__.addV("x").values("age")))

@@ -132,7 +132,21 @@ export const labelPredicateFor = (n: Relation, elem: Elem, pred: any): Expressio
  *  native `jsonb_group_array` is unverified on the DO's SQLite 3.47, and `json_each`
  *  reads a JSONB blob transparently, so the wrapper costs nothing at read time.
  *  New JSON columns use JSONB per project policy (see CLAUDE.md). */
-export const jsonbGroupArray = (expr: Expression): Expression => q`jsonb(json_group_array(${expr}))`;
+/**
+ * `jsonb(json_group_array(expr))` — collect rows into ONE list value.
+ *
+ * `order` is not decoration. `json_group_array` takes its members in whatever order SQLite scans,
+ * and a relation's `ORDER BY` does not survive the boundary into an enclosing aggregate — so a
+ * collection built without one has arbitrary member order, and member order is fully observable
+ * (the members ride inside the collected traverser's own GraphBinary buffer). Pass the carried
+ * emission encounter wherever the relation has one; a caller that passes nothing is asserting the
+ * collection genuinely has no order channel, not merely that it did not think about it.
+ *
+ * Measured with `mise run test:perturbed`: 41 corpus traversals changed their answer under a
+ * reversed scan order, 33 of them `aggregate(…)…cap(…)` built here.
+ */
+export const jsonbGroupArray = (expr: Expression, order?: Expression): Expression =>
+  q`jsonb(json_group_array(${expr}${order ? q` ORDER BY ${order}` : empty}))`;
 
 /** A JSONB array literal from constant values — inject([a,b,c]) → one list value.
  *  Values ride as bound tokens; an empty list yields `json_array()` → `[]`. */

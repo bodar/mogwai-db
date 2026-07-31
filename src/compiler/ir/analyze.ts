@@ -60,30 +60,40 @@ const FANOUT_STEPS = new Set([
   'out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'bothV', 'otherV',
   'values', 'union', 'choose', 'coalesce', 'optional', 'local', 'flatMap',
 ]);
-/** Positional consumers whose result depends on emission order once a fan-out precedes. */
-const POSITIONAL_CONSUMERS = new Set(['limit', 'range', 'skip', 'tail', 'fold']);
+/** SLICE consumers: their result depends on emission order once a fan-out precedes, and an
+ *  upstream `order()` satisfies them because `LIMIT` reads the ordered relation in the same query.
+ *  `fold` is deliberately NOT here — it is a collection, and both of those clauses are false for
+ *  one (see `COLLECTING_CONSUMERS`). Listing it in both would be two answers to one question. */
+const POSITIONAL_CONSUMERS = new Set(['limit', 'range', 'skip', 'tail']);
+/** The COLLECTING consumers — they fold N traversers into one whose members are the N, so member
+ *  order is part of the answer rather than a property of how the rows arrived. Two consequences
+ *  the slice steps above do not share: an upstream `order()` does not satisfy them (they read
+ *  across a relation boundary, where SQL drops a subquery's ORDER BY), and neither does the
+ *  absence of a fan-out (a bare `g.V().fold()` observes the source's order just as much). */
+const COLLECTING_CONSUMERS = new Set(['fold', 'aggregate']);
 
 /** Does this chain need a threaded emission-order encounter? True iff a positional consumer
  *  appears after a fan-out. repeat()/match() are opaque boundaries this substrate doesn't
  *  cross yet — return false there (preserving today's behaviour, never a silent mis-order). */
 function computeDemandsEncounter(steps: IRStep[]): boolean {
   let sawFanout = false;
-  let sawOrder = false;
   for (const s of steps) {
     if (s.name === 'repeat' || s.name === 'match') return false;
     // A keyed/bare order() re-establishes a deterministic total order, so a following slice needs
     // no emission encounter — clear the fan-out (the same predicate collapseSafe's sawOrder gate
     // uses, so the two agree and movementCollapse stays enabled for <movement>.order().by(key).limit()).
-    if (isPlainOrder(s)) { sawFanout = false; sawOrder = true; continue; }
-    // …but that reasoning is about a SLICE, and it does not extend to an AGGREGATE. `LIMIT` reads
-    // the ordered relation inside the SAME query, so the ORDER BY genuinely satisfies it. A fold
-    // reads its rows across a relation boundary, and SQL does not carry a subquery's ORDER BY over
-    // one — `json_group_array` takes whatever scan order SQLite picks. So an ordered fold needs a
-    // column to order BY *inside* the aggregate, whatever established that order.
-    // Measured: 13 L3 scenarios (`…order().fold().<local op>`) passed only because the default
-    // planner happened to scan the ordered CTE in order; all 13 fail under
-    // `mise run test:perturbed`. Do NOT "simplify" this back by folding it into the branch above.
-    if (sawOrder && s.name === 'fold') return true;
+    if (isPlainOrder(s)) { sawFanout = false; continue; }
+    // …but that reasoning is about a SLICE, and it does not extend to a COLLECTION. `LIMIT` reads
+    // the ordered relation inside the SAME query, so the ORDER BY genuinely satisfies it. A
+    // fold/aggregate reads its rows across a relation boundary, and SQL does not carry a
+    // subquery's ORDER BY over one — `json_group_array` takes whatever scan order SQLite picks. So
+    // a collection needs a column to order BY *inside* the aggregate whatever established the
+    // order, and it needs one even with no fan-out at all: `g.V().fold()` observes the source's
+    // order exactly as much as `g.V().out().fold()` does.
+    // Measured with `mise run test:perturbed`: 41 corpus traversals and 13 L3 scenarios changed
+    // their answer under a reversed scan. Do NOT "simplify" this into the fan-out branch below —
+    // that is the shape that was wrong.
+    if (COLLECTING_CONSUMERS.has(s.name)) return true;
     if (sawFanout && POSITIONAL_CONSUMERS.has(s.name)) return true;
     // dedup(labels) keeps the FIRST traverser per key — first-in-emission, so it needs the
     // encounter. Bare dedup() collapses a multiset regardless of order (never triggers).

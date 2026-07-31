@@ -1,4 +1,4 @@
-import { derived, q } from '../../../sql/kernel/q.ts';
+import { derived, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { scalarProp, predicateSql, jsonbGroupArray, elemCtx } from '../../plan/plan.ts';
 import { stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
@@ -32,6 +32,13 @@ const aggregateName = (s: any): string => {
   return name;
 };
 
+/** The column an aggregate's members must be ordered by, or undefined when the chain carries no
+ *  emission order (`analyze.ts` seeds one for every collecting consumer, so undefined here means a
+ *  relation that genuinely lost the channel — a repeat()/match() boundary). One reader, because
+ *  every collection in this file has the same answer and they used to have none. */
+const memberOrder = (s: { traverserLayout: { encounter?: string } }, rel: Relation): Expression | undefined =>
+  s.traverserLayout.encounter ? rel.c[s.traverserLayout.encounter] : undefined;
+
 export const aggregate: StepFn = (s, st) => {
   const name = aggregateName(s);
   const modulators = (s as IRStep).modulators ?? [];
@@ -40,7 +47,8 @@ export const aggregate: StepFn = (s, st) => {
   let def: SideEffectDef;
   if (by.kind === 'none') {
     // Element bag: store the rowids; cap('x') rejoins nodes/edges when framing.
-    const rel = st.q.cte(q`SELECT ${jsonbGroupArray(q`p.id`)} AS list FROM ${st.rel.as('p')}`, ['list']);
+    const p = st.rel.as('p');
+    const rel = st.q.cte(q`SELECT ${jsonbGroupArray(p.c.id, memberOrder(st, p))} AS list FROM ${p}`, ['list']);
     def = { kind: 'list', rel, of: { kind: 'elem', elem: st.elem } };
   } else {
     const productive = (s as IRStep).productiveBy === true;
@@ -52,7 +60,7 @@ export const aggregate: StepFn = (s, st) => {
       // aggregate keeps values()-style productivity and drops that parent.
       const where = productive ? q`` : q` WHERE ${predicateSql(pe, undefined)}`;
       const rel = st.q.cte(
-        q`SELECT ${jsonbGroupArray(pe)} AS list FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${where}`,
+        q`SELECT ${jsonbGroupArray(pe, memberOrder(st, p))} AS list FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${where}`,
         ['list'],
       );
       def = { kind: 'list', rel, of: { kind: 'scalar', productiveNull: productive } };
@@ -69,14 +77,19 @@ export const aggregate: StepFn = (s, st) => {
           ['v', rows.frame.ordinal, 'rn'],
           'f',
         );
-        const source = productive
-          ? q`${rows.frame.domain.as('d')} LEFT JOIN ${first} ON ${first.c[rows.frame.ordinal]}=${q`d.${rows.frame.ordinal}`} AND ${first.c.rn}=1`
-          : q`${first}`;
-        const filter = productive ? q`` : q` WHERE ${first.c.rn}=1`;
+        // BOTH arms read from the parent DOMAIN, differing only in the join: productive LEFT-joins
+        // so a childless parent contributes an explicit NULL member, ordinary INNER-joins so it
+        // drops. Written as one source because the domain is also the only thing here carrying the
+        // parent's emission `encounter` — `first` narrows to (v, ordinal, rn), and the ordinal is
+        // NOT an order channel (`pushChildScope` mints it with `ROW_NUMBER() OVER ()`, an empty
+        // window, so it numbers in scan order and reverses right along with the scan).
+        const d = rows.frame.domain.as('d');
+        const on = q`${first.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]} AND ${first.c.rn}=1`;
+        const source = productive ? q`${d} LEFT JOIN ${first} ON ${on}` : q`${d} JOIN ${first} ON ${on}`;
         // NB the `first` projection above narrows to (v, ordinal, rn) — it does not carry a
         // per-row vtype column, so this by()-modulated path can only offer the static tag.
         // Widening it to preserve the type channel is follow-on work, not a silent drop.
-        const rel = st.q.cte(q`SELECT ${jsonbGroupArray(first.c.v)} AS list FROM ${source}${filter}`, ['list']);
+        const rel = st.q.cte(q`SELECT ${jsonbGroupArray(first.c.v, memberOrder(st, d))} AS list FROM ${source}`, ['list']);
         def = { kind: 'list', rel, of: { kind: 'scalar', as: staticTypeOf(rows.stream.type), productiveNull: productive } };
       } else {
         const elements = tryCompileFirstElementValueRows(st, by.nested);
@@ -120,7 +133,7 @@ export function lowerScalarAggregate(s: ScalarStream, step: IRStep): ScalarStrea
   // Same encoding decision as fold() — a per-row type channel becomes self-describing
   // members, so cap() frames each one by its own stored type.
   const { member, of } = foldMember(s, p);
-  const rel = s.q.cte(q`SELECT ${jsonbGroupArray(member)} AS list FROM ${p}`, ['list']);
+  const rel = s.q.cte(q`SELECT ${jsonbGroupArray(member, memberOrder(s, p))} AS list FROM ${p}`, ['list']);
   const def: SideEffectDef = { kind: 'list', rel, of };
   return { ...s, sideEffects: new Map([...(s.sideEffects ?? []), [name, def]]) };
 }
