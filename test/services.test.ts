@@ -1,7 +1,8 @@
 import { test, expect, describe } from 'bun:test';
 import { createRegistry, EMPTY_REGISTRY } from '../src/services/spi/registry.ts';
 import { standardRegistry, extendedRegistry } from '../src/services/standard.ts';
-import { directoryService } from '../src/services/catalog/directory.ts';
+import { createAppScope, type RegistryProvider } from '../src/scopes.ts';
+import { createDirectoryService } from '../src/services/catalog/directory.ts';
 import { DIRECTORY_SERVICE_NAME, type Service, type ServiceRegistry } from '../src/services/spi/types.ts';
 import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { normalize } from '../src/compiler/ir/passes.ts';
@@ -27,6 +28,10 @@ const spec = (gremlin: string, params: Record<string, any> = {}) =>
 // The call() service subsystem: the ServiceRegistry (this file) + the call/with front-end
 // fold + param resolver (added as those land). The registry is a DI seam sibling to
 // GraphManager; --list enumerates it live, EXCLUDING the directory service itself.
+
+/** A registry is a function OF its app scope now (services take dependencies at construction), so
+ *  resolving one for a direct assertion means minting the scope it lives in. */
+const resolved = (provider: RegistryProvider): ServiceRegistry => createAppScope({ registry: provider }).registry;
 
 const stubService = (name: string, internal = false): Service => ({
   name,
@@ -73,16 +78,16 @@ describe('ServiceRegistry', () => {
     // The official g_call / g_callXlistX scenarios assert this exact set, so this is a
     // conformance obligation, not a convenience assertion: anything added to the standard
     // registry that is not a reference service must be `internal` (or belong in extendedRegistry).
-    expect(standardRegistry.list().map((s) => s.name).sort())
+    expect(resolved(standardRegistry).list().map((s) => s.name).sort())
       .toEqual(['tinker.degree.centrality', 'tinker.search']);
     // --list itself is registered but excluded from list(). It is always resolvable by name.
-    expect(standardRegistry.get('--list')?.name).toBe('--list');
+    expect(resolved(standardRegistry).get('--list')?.name).toBe('--list');
   });
 
   test('extendedRegistry.list() is the reference surface PLUS our mogwai.* extensions', () => {
-    expect(extendedRegistry.list().map((s) => s.name).sort())
+    expect(resolved(extendedRegistry).list().map((s) => s.name).sort())
       .toEqual(['mogwai.graph.federate', 'tinker.degree.centrality', 'tinker.search']);
-    expect(extendedRegistry.get('--list')?.name).toBe('--list');
+    expect(resolved(extendedRegistry).get('--list')?.name).toBe('--list');
   });
 });
 
@@ -198,7 +203,7 @@ describe('call() routing (seedCall)', () => {
       }),
     };
     const reg = createRegistry([probe]);
-    expect(() => compile('g.call("--list").with("service", "tinker.search")', {}, { registry: reg }))
+    expect(() => compile('g.call("--list").with("service", "tinker.search")', {}, { registry: () => reg }))
       .toThrow(/probe-reached/);
     expect(seenParams).toEqual({ service: 'tinker.search' });
   });
@@ -213,7 +218,7 @@ describe('call() routing (seedCall)', () => {
     const reg = createRegistry([federate]);
     // compile() is synchronous and cannot resolve a barrier; the executor (executeFramed) drives
     // the async segment plan. compilePlan yields a segment instead of throwing.
-    expect(() => compile('g.call("mogwai.graph.federate")', {}, { registry: reg }))
+    expect(() => compile('g.call("mogwai.graph.federate")', {}, { registry: () => reg }))
       .toThrow(/segment executor/);
   });
 
@@ -225,7 +230,7 @@ describe('call() routing (seedCall)', () => {
       resolve: () => ({ kind: 'barrier', apply: async () => [] }),
     };
     const reg = createRegistry([federate]);
-    const plan = compilePlan('g.call("mogwai.graph.federate")', {}, { registry: reg });
+    const plan = compilePlan('g.call("mogwai.graph.federate")', {}, { registry: () => reg });
     expect(plan.kind).toBe('segment');
     if (plan.kind === 'segment') expect(plan.head).toBeNull();
   });
@@ -237,7 +242,7 @@ describe('call() routing (seedCall)', () => {
     };
     const reg = createRegistry([federate]);
     const plan = compilePlan(
-      'g.V().call("mogwai.graph.federate", ["graph":"crew"], __.values("name"))', {}, { registry: reg });
+      'g.V().call("mogwai.graph.federate", ["graph":"crew"], __.values("name"))', {}, { registry: () => reg });
     expect(plan.kind).toBe('segment');
     if (plan.kind === 'segment') {
       expect(plan.head).not.toBeNull();
@@ -255,7 +260,7 @@ describe('call() routing (seedCall)', () => {
     };
     const reg = createRegistry([federate]);
     expect(() => compilePlan(
-      'g.V().call("mogwai.graph.federate", ["graph":"crew"], __.values("name").fold())', {}, { registry: reg }))
+      'g.V().call("mogwai.graph.federate", ["graph":"crew"], __.values("name").fold())', {}, { registry: () => reg }))
       .toThrow(/injection must be a direct value read/);
   });
 });
@@ -264,8 +269,8 @@ describe('--list (DirectoryService) — end to end over GraphBinary', () => {
   // Register the real directoryService alongside stubs for the OTHER standard services, so
   // --list enumerates realistic names (the actual tinker.* services land in later steps; the
   // directory doesn't care what they do, only that they're registered).
-  const reg: ServiceRegistry = createRegistry([
-    directoryService, stubService('tinker.search'), stubService('tinker.degree.centrality'),
+  const reg: RegistryProvider = (app) => createRegistry([
+    createDirectoryService(app), stubService('tinker.search'), stubService('tinker.degree.centrality'),
   ]);
   const store = new GraphStore(new BunSqlite(':memory:'));
   const run = async (g: string, params: Record<string, any> = {}) =>
@@ -382,16 +387,22 @@ describe('barrier source form via Executor (stub source → drive → land → f
     { kind: 'vertex', id: 1, label: 'person', labels: ['person'], props: { name: [{ t: 'string', v: 'alice' }] } },
     { kind: 'vertex', id: 2, label: 'person', labels: ['person'], props: { name: [{ t: 'string', v: 'bob' }] } },
   ];
-  const stubFederate: Service = {
+  // The stub takes its source at CONSTRUCTION off the app scope (exactly as the real federate
+  // does) and reads params/depth off the call ctx, so `apply` takes only rows.
+  const stubFederate = (source: FederationSource | undefined): Service => ({
     name: 'mogwai.graph.federate',
     type: 'barrier',
     describeParams: () => ({}),
-    resolve: () => ({ kind: 'barrier', apply: async (_in, params, source, depth) => source.executor(String(params.graph)).raw('g.V()', {}, depth + 1) }),
-  };
+    resolve: ({ params, federationDepth }) => ({
+      kind: 'barrier',
+      apply: async () => source!.executor(String(params.graph)).raw('g.V()', {}, federationDepth + 1),
+    }),
+  });
   const stubSource: FederationSource = { executor: () => ({ raw: async () => foreignVerts }) };
   const store = new GraphStore(new BunSqlite(':memory:')); // empty — foreign rows are literals
-  const reg = createRegistry([stubFederate]);
-  const ex = new Executor(store, reg, stubSource); // Executor bound directly to the stub source
+  const reg: RegistryProvider = (app) => createRegistry([stubFederate(app.source)]);
+  // The Executor's own `source` is what lands in the app scope the provider reads.
+  const ex = new Executor(store, reg, stubSource);
   const run = async (g: string) => decodeAll((await ex.framedAsync(g, {})).map((f: any) => f.buf));
 
   test('g.call(federate) lands the sibling vertices as detached references', async () => {

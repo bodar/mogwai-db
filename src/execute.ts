@@ -4,8 +4,7 @@ import { compilePlan, staticTypeOf, type Compiled, type ElemShape, type FastPath
 import type { FederationSource, Plan } from './compiler/segment.ts';
 import { hasSerializer, isCollectionType, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import { ioc, Property, t, VertexProperty } from './io.ts';
-import { createAppScope, type AppScope } from './scopes.ts';
-import type { ServiceRegistry } from './services/spi/types.ts';
+import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { GraphStore } from './storage.ts';
 
 // ---- GraphBinary v4 result framing ----
@@ -696,8 +695,11 @@ export class Executor implements ExecutorApi {
     private readonly store: GraphStore,
     // NOT a `private readonly` field: it is read once here to build the AppScope and never
     // through `this`, so the modifier declared a property nothing uses.
-    registry: ServiceRegistry,
-    private readonly source: FederationSource,
+    registry: RegistryProvider,
+    // Also NOT a `private readonly`: like `registry` it is read once to build the AppScope. The
+    // federated service takes it from there at CONSTRUCTION, so the executor no longer hands it to
+    // a barrier's apply at run time.
+    source: FederationSource,
     /** Override the ambient fast-path config for every compile on this executor. Omitted in
      *  production (DEFAULT_FAST_PATHS). `createAppScope` has always accepted it; the Executor
      *  simply never threaded it, which left the fast-path equivalence obligation declared
@@ -764,14 +766,14 @@ export class Executor implements ExecutorApi {
   /** Drive a (possibly segmented) plan to a final synchronous Compiled/WritePlan — the ONE await
    *  boundary, and the ONLY async loop outside a runtime entry point. A pure single-segment
    *  traversal (all of Phases 1-5) returns immediately, zero async overhead. A barrier (federate)
-   *  loops: read+drain head → await apply(source) → land + resume. `federationDepth` rides
-   *  CompileOptions beside the registry so the barrier's apply closure captures it (a recursive
-   *  federate hops at depth+1). */
+   *  loops: read+drain head → await apply() → land + resume. `federationDepth` rides
+   *  CompileOptions beside the registry, reaching the service's ServiceCallCtx so the barrier's
+   *  apply closure captures it (a recursive federate hops at depth+1). */
   private async drive(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, federationDepth: number): Promise<Compiled | WritePlan> {
     let p: Plan = compilePlan(gremlin, params, { app: this.app, federationDepth }, paramTypes);
     while (p.kind === 'segment') {
       const rows = p.head ? this.readSegmentHead(p.head) : [];
-      const foreign = await p.apply(rows, this.source);
+      const foreign = await p.apply(rows);
       p = p.resume(foreign, rows);
     }
     return p.compiled;

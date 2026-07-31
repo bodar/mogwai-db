@@ -1,5 +1,5 @@
 import { EMPTY_REGISTRY } from '../../services/spi/registry.ts';
-import type { ServiceRegistry } from '../../services/spi/types.ts';
+import type { RegistryProvider } from '../../scopes.ts';
 import type { ChainFacts } from '../ir/analyze.ts';
 
 /** Independently switchable optimized lowerings. The generic path remains the
@@ -51,9 +51,11 @@ export interface FastPathConfig {
 export interface CompileOptions {
   readonly fastPaths?: Partial<FastPathConfig>;
   /** The service registry for call(), injected via DI (application → manager → executeFramed
-   *  → compile). When absent, the compiler defaults to EMPTY_REGISTRY — correct for every
-   *  non-call() traversal; a call() then throws "unknown service". */
-  readonly registry?: ServiceRegistry;
+   *  → compile) as a PROVIDER — a function of the app scope, because a service takes its own
+   *  dependencies at construction (see scopes.ts RegistryProvider). When absent, the compiler
+   *  defaults to EMPTY_REGISTRY — correct for every non-call() traversal; a call() then throws
+   *  "unknown service". */
+  readonly registry?: RegistryProvider;
   /** Federation recursion depth for THIS compile (request-scoped DI context, rides the same
    *  channel as `registry` — read where a barrier's apply closure is built, so it captures the
    *  starting depth and recurses at depth+1). 0 at the top-level query; each federated hop
@@ -81,8 +83,11 @@ export const resolveFastPaths = (options?: CompileOptions): FastPathConfig => ({
   ...options?.fastPaths,
 });
 
-export const resolveRegistry = (options?: CompileOptions): ServiceRegistry =>
-  options?.registry ?? options?.app?.registry ?? EMPTY_REGISTRY;
+/** The registry PROVIDER for a compile that brought no app scope — the loose-options path. (When
+ *  `options.app` is present the compiler uses that scope directly and never calls this, so there
+ *  is no `app.registry` branch to fall back to.) */
+export const resolveRegistry = (options?: CompileOptions): RegistryProvider =>
+  options?.registry ?? (() => EMPTY_REGISTRY);
 
 /** The federation depth for this compile (0 at the top level). */
 export const resolveFederationDepth = (options?: CompileOptions): number =>

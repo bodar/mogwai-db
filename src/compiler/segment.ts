@@ -36,14 +36,15 @@ export interface FederationSource {
 /** A compile suspended at a barrier call(). `head` is a COMPLETE, ordinary Compiled — the
  *  barrier's INPUT rows (each parent traverser's id + ordinal for a mid-traversal call), run and
  *  drained like any read — or `null` for a source-form g.call(...) that has no local input (apply
- *  then runs over an empty input). `apply` is the service's apply pre-bound to this call's params
- *  + captured depth; it receives the FederationSource at run time. `resume` turns the barrier's
+ *  then runs over an empty input). `apply` is the service's apply, already closed over this call's
+ *  params, its hop depth, and the service's own app-scope dependencies (the FederationSource among
+ *  them) — so it takes only the rows. `resume` turns the barrier's
  *  awaited output into the next Plan (synchronously — the only await is `apply`). Nothing here is
  *  federate-specific: any future barrier service returns this shape. */
 export interface SegmentPlan {
   readonly kind: 'segment';
   readonly head: Compiled | null;
-  readonly apply: (rows: readonly ForeignRow[], source: FederationSource) => Promise<ForeignRow[]>;
+  readonly apply: (rows: readonly ForeignRow[]) => Promise<ForeignRow[]>;
   readonly params: CallParams;
   /** Turn the barrier's awaited OUTPUT (`foreign`) into the next Plan. `headRows` is the drained
    *  head INPUT (empty for a source-form call) — a mid-traversal rejoin needs it to reconstruct the

@@ -19,7 +19,7 @@ describe('DI scopes', () => {
   test('a compiler scope inherits app-scope deps by direct access', () => {
     const registry = createRegistry([]);
     const fastPaths = { ...DEFAULT_FAST_PATHS, movementCollapse: false };
-    const app = createAppScope({ registry, fastPaths });
+    const app = createAppScope({ registry: () => registry, fastPaths });
     const scope = createCompilerScope(app, { params: { x: 1 }, federationDepth: 2 });
 
     // inherited from the app scope — the direct-read contract
@@ -31,6 +31,24 @@ describe('DI scopes', () => {
     expect(scope.params).toEqual({ x: 1 });
     expect(scope.federationDepth).toBe(2);
     expect(scope.q).toBeDefined();
+  });
+
+  test('the registry provider is LAZY and sees the whole scope it lives in', () => {
+    // Constraint 1 of docs/2026-07-31-di-scopes-and-services-plan.md: `registry` is a function of
+    // its own container, so its services take dependencies (source, and the registry itself) at
+    // construction. That is only not-a-cycle because the provider runs on first READ.
+    let built = 0;
+    let seenSource: unknown = 'unread';
+    const source = { executor: () => { throw new Error('unused'); } };
+    const app = createAppScope({
+      source,
+      registry: (scope) => { built++; seenSource = scope.source; return createRegistry([]); },
+    });
+    expect(built).toBe(0);              // declaring the scope builds nothing
+    const first = app.registry;
+    expect(built).toBe(1);
+    expect(seenSource).toBe(source);    // the provider reads its sibling entries
+    expect(app.registry).toBe(first);   // and resolves once, not per read
   });
 
   test('each compiler scope gets a fresh Query but shares the app scope', () => {

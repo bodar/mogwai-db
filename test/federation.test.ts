@@ -4,7 +4,7 @@ import { extendedRegistry } from '../src/services/standard.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { CREW_SEED } from './fixtures/seed-crew.ts';
 import { MAX_FEDERATION_DEPTH, guardFederationDepth } from '../src/services/params/federation-depth.ts';
-import { federateService } from '../src/services/catalog/federate.ts';
+import { createFederateService } from '../src/services/catalog/federate.ts';
 import { INJECT_VALUES_KEY } from '../src/compiler/steps/injection.ts';
 import { decode } from './support/decode.ts';
 
@@ -74,7 +74,6 @@ describe('mogwai.graph.federate — MID-TRAVERSAL per-parent value injection (Ph
   test('BATCHED: N distinct injected values → exactly ONE sibling hop (apply, spy source)', async () => {
     // Unit-test apply directly with a spy FederationSource: 4 distinct parent values must produce
     // exactly ONE raw() call (the batched hop binding the distinct-value array), not one per value.
-    const contribution: any = federateService.resolve({} as any);
     let rawCalls = 0; let boundValues: any = null;
     const spySource: any = {
       executor: () => ({
@@ -85,13 +84,19 @@ describe('mogwai.graph.federate — MID-TRAVERSAL per-parent value injection (Ph
         },
       }),
     };
+    // The source is a CONSTRUCTION dependency and params/depth come off the call ctx, so `apply`
+    // takes only the rows — this test wires the spy the same way the app scope does.
+    const contribution: any = createFederateService(spySource).resolve({
+      params: { graph: 'crew', traversal: { kind: 'traversal', gremlin: 'g.V().has("name", T.value)' } },
+      federationDepth: 0,
+    } as any);
     const head = [
       { kind: 'vertex', id: 1, label: 'person', props: {}, ordinal: 1, injectedValue: 'marko' },
       { kind: 'vertex', id: 2, label: 'person', props: {}, ordinal: 2, injectedValue: 'vadas' },
       { kind: 'vertex', id: 3, label: 'person', props: {}, ordinal: 3, injectedValue: 'marko' }, // dup
       { kind: 'vertex', id: 4, label: 'person', props: {}, ordinal: 4, injectedValue: 'josh' },
     ] as const;
-    await contribution.apply(head, { graph: 'crew', traversal: { kind: 'traversal', gremlin: 'g.V().has("name", T.value)' } }, spySource, 0);
+    await contribution.apply(head);
     expect(rawCalls).toBe(1);                         // ONE batched hop
     expect([...boundValues].sort()).toEqual(['josh', 'marko', 'vadas']); // DISTINCT values only
   });

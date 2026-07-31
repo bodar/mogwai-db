@@ -1,7 +1,7 @@
 import { Executor, type Framed } from '../../src/execute.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
 import type { GraphStore } from '../../src/storage.ts';
-import type { ServiceRegistry } from '../../src/services/spi/types.ts';
+import type { RegistryProvider } from '../../src/scopes.ts';
 import type { FederationSource } from '../../src/compiler/segment.ts';
 import type { TypeNode } from '../../src/gremlin/types.ts';
 import type { FastPathConfig } from '../../src/compiler/compiler.ts';
@@ -24,14 +24,14 @@ const NO_SIBLINGS: FederationSource = {
 /** An Executor bound to `store` + `registry` (default: the reference services) + a no-sibling
  *  source. The sync framed/buffers methods are the store-tier data plane for tests. `fastPaths`
  *  overrides the ambient config (L5's differential runs the same traversal with them off). */
-export const exec = (store: GraphStore, registry: ServiceRegistry = standardRegistry, fastPaths?: FastPathConfig): Executor =>
+export const exec = (store: GraphStore, registry: RegistryProvider = standardRegistry, fastPaths?: FastPathConfig): Executor =>
   new Executor(store, registry, NO_SIBLINGS, fastPaths);
 
 /** SYNC flat Buffer[] — the drop-in for the old `executeQuery(store, g, p)` (same signature,
  *  same synchronous result). Throws if the traversal federates (use a manager). */
-export const executeQuery = (store: GraphStore, gremlin: string, params: Record<string, any> = {}, paramTypes: Record<string, TypeNode> = {}, registry?: ServiceRegistry): Buffer[] =>
+export const executeQuery = (store: GraphStore, gremlin: string, params: Record<string, any> = {}, paramTypes: Record<string, TypeNode> = {}, registry?: RegistryProvider): Buffer[] =>
   exec(store, registry).buffers(gremlin, params, paramTypes);
 
 /** SYNC Framed[] — the drop-in for the old `executeFramed(store, g, p)`. */
-export const executeFramed = (store: GraphStore, gremlin: string, params: Record<string, any> = {}, paramTypes: Record<string, TypeNode> = {}, registry?: ServiceRegistry): Framed[] =>
+export const executeFramed = (store: GraphStore, gremlin: string, params: Record<string, any> = {}, paramTypes: Record<string, TypeNode> = {}, registry?: RegistryProvider): Framed[] =>
   exec(store, registry).framed(gremlin, params, paramTypes);

@@ -2,7 +2,6 @@ import type { Stream } from '../../compiler/steps/context/stream.ts';
 import type { ChildFrameStack, ChildParent } from '../../compiler/steps/tail/child-shape.ts';
 import type { Query } from '../../sql/kernel/q.ts';
 import type { ForeignRow } from '../../api.ts';
-import type { FederationSource } from '../../compiler/segment.ts';
 
 // ---------- the call() service seam ----------
 //
@@ -43,15 +42,18 @@ export interface CallSpec {
   readonly injectionTraversal?: any;
 }
 
-/** Compile-time context handed to a Service. A superset the resolver reads selectively:
- *  a source service (--list, tinker.search) ignores `parent`/`scope`; a per-parent
- *  service (tinker.degree.centrality) requires them (lowerCall pushes the child scope
+/** Compile-time context handed to a Service — what a CALL is, never what a service DEPENDS on
+ *  (a dependency arrives at construction, off the app scope: see standard.ts). A superset the
+ *  resolver reads selectively: a source service (--list, tinker.search) ignores `parent`/`scope`;
+ *  a per-parent service (tinker.degree.centrality) requires them (lowerCall pushes the child scope
  *  BEFORE building, so `parent` is already the pushed seed). */
 export interface ServiceCallCtx {
   readonly params: CallParams;
   readonly q: Query;
   readonly compileParams: Record<string, any>;   // the traversal's bound-param table
-  readonly registry: ServiceRegistry;            // so --list can enumerate the live registry
+  /** This compile's federation hop depth — request-scoped, so a barrier's `apply` closure can
+   *  capture it at resolve time and recurse at depth+1 without an `apply` parameter. */
+  readonly federationDepth: number;
   readonly parent?: ChildParent;                 // present only for mid-traversal call()
   readonly scope?: ChildFrameStack;
 }
@@ -64,13 +66,16 @@ export type { ForeignRow } from '../../api.ts';
  *  (Phases 1-5): it lowers to SQL synchronously and the generic engine takes over. 'barrier'
  *  is the Phase-6 async/federated shape: it does NOT lower to a Stream at compile time (its
  *  rows come from an awaited sibling call), so it yields no `build`; instead `apply` runs at
- *  EXECUTION time (the one await in the executor's segment loop), taking the drained input rows
- *  (empty for a source-form call), the resolved params, the FederationSource (how to reach other
- *  graphs), and this hop's federation depth, and returning the foreign rows the executor lands +
- *  resumes from. */
+ *  EXECUTION time (the one await in the executor's segment loop) and returns the foreign rows
+ *  the executor lands + resumes from.
+ *
+ *  `apply` takes ONLY the drained input rows (empty for a source-form call) — the one value that
+ *  is genuinely per-execution. Everything it used to take positionally now arrives where it
+ *  belongs: the FederationSource at construction (an app-scope dependency), the params and this
+ *  hop's federation depth off the `ServiceCallCtx` that `resolve` already receives. */
 export type Contribution =
   | { readonly kind: 'stream'; build(ctx: ServiceCallCtx): Stream }
-  | { readonly kind: 'barrier'; apply(rows: readonly ForeignRow[], params: CallParams, source: FederationSource, depth: number): Promise<ForeignRow[]> };
+  | { readonly kind: 'barrier'; apply(rows: readonly ForeignRow[]): Promise<ForeignRow[]> };
 
 export interface Service {
   readonly name: string;

@@ -40,10 +40,12 @@ function traversalOf(params: CallParams): string {
   throw new Error('mogwai.graph.federate: a "traversal" param (a nested __.V()… sub-traversal, or a rooted Gremlin string) is required');
 }
 
-/** The federated service. Registered by standard.ts's extendedRegistry only (the presence of a
- *  federation source is the gate). The FederationSource + this hop's depth are threaded to
- *  `apply` at execution time; the sibling runs one level deeper (depth + 1), guarded first. */
-export const federateService: Service = {
+/** The federated service. Registered by standard.ts's extendedRegistry only. Takes the
+ *  FederationSource — how to reach other graphs — at CONSTRUCTION, off the app scope where it
+ *  already lived; the per-call values (params, this hop's depth) come from the ServiceCallCtx
+ *  `resolve` already receives, so `apply` carries only the rows that are genuinely per-call.
+ *  The sibling runs one level deeper (depth + 1), guarded first. */
+export const createFederateService = (source: FederationSource | undefined): Service => ({
   name: 'mogwai.graph.federate',
   type: 'barrier',
   describeParams: () => ({
@@ -52,12 +54,15 @@ export const federateService: Service = {
     // Honesty surfaced in --list --verbose: a federated read is not isolated across the await.
     '~note': 'results reflect the sibling graph state at call time; not single-snapshot isolated across the segment boundary',
   }),
-  resolve: () => ({
+  resolve: ({ params, federationDepth: depth }) => ({
     kind: 'barrier',
-    apply: async (rows: readonly ForeignRow[], params: CallParams, source: FederationSource, depth: number): Promise<ForeignRow[]> => {
+    apply: async (rows: readonly ForeignRow[]): Promise<ForeignRow[]> => {
       const graph = graphOf(params);
       guardFederationDepth(depth + 1, graph);
       const gremlin = traversalOf(params);
+      // Fail closed rather than answer a different question: a registry carrying this service in a
+      // context with no way to reach siblings is a wiring mistake, not an empty result.
+      if (!source) throw new Error('mogwai.graph.federate: no federation source is wired into this graph\'s app scope');
       const ex = source.executor(graph);
 
       // SOURCE form (g.call(...)): no local input rows — run the sub-traversal ONCE, unbound.
@@ -77,4 +82,4 @@ export const federateService: Service = {
       return ex.raw(gremlin, { [INJECT_VALUES_KEY]: distinct }, depth + 1);
     },
   }),
-};
+});

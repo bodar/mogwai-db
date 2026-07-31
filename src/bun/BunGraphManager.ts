@@ -5,7 +5,7 @@ import { LabelCardinality } from '../api.ts';
 import { type GraphManager, type GraphInfo, graphInfo } from '../manager.ts';
 import { Executor } from '../execute.ts';
 import type { Executor as ExecutorApi } from '../api.ts';
-import type { ServiceRegistry } from '../services/spi/types.ts';
+import type { RegistryProvider } from '../scopes.ts';
 import { BunSqlite } from './BunSqlite.ts';
 
 /**
@@ -28,15 +28,16 @@ import { BunSqlite } from './BunSqlite.ts';
  */
 export class BunGraphManager implements GraphManager {
   private graphs = new Map<string, { store: GraphStore; sql: BunSqlite }>();
-  private readonly registry: ServiceRegistry;
+  private readonly registry: RegistryProvider;
 
   /**
    * `registry` is INJECTED (DI single-source, no default): the entry point decides — production
    * (bun/server.ts) injects the EXTENDED registry (federation on); the L3 conformance host injects
    * `standardRegistry` (reference-exact, no mogwai.* extensions). To change the registry you change
-   * it at app construction, nowhere else. The federated service reaches sibling graphs through THIS
-   * manager (the FederationSource), threaded to its apply at execution time — no manager↔registry
-   * construction cycle, because executor(id) isn't CALLED until query time.
+   * it at app construction, nowhere else. It is a PROVIDER, not a registry: the federated service
+   * takes THIS manager (the FederationSource) as a construction dependency off the executor's app
+   * scope. Still no manager↔registry construction cycle — the provider runs on first use of the
+   * scope entry, and executor(id) isn't CALLED until query time.
    */
   /** `labelCardinalityFor` declares a graph's VERTEX label cardinality at provisioning time,
    *  which is where TinkerPop puts it too (a provider's `Graph.Features`). Defaults to `ONE` —
@@ -45,7 +46,7 @@ export class BunGraphManager implements GraphManager {
    *  beside single-label reference graphs, which is exactly what the official runner expects. */
   constructor(
     private dir: string | undefined,
-    registry: ServiceRegistry,
+    registry: RegistryProvider,
     private labelCardinalityFor: (id: string) => LabelCardinality = () => LabelCardinality.ONE,
   ) {
     if (dir) mkdirSync(dir, { recursive: true });

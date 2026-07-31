@@ -27,6 +27,17 @@ import { EMPTY_REGISTRY } from './services/spi/registry.ts';
 import type { FederationSource } from './compiler/segment.ts';
 import { LabelCardinality } from './api.ts';
 
+/** How the app scope OBTAINS its registry. A registry is not a value the entry point can build
+ *  in isolation: a service takes its own dependencies at CONSTRUCTION (federate needs `source`,
+ *  the directory needs the live registry), so the registry is a function OF the scope it lives in.
+ *
+ *  The apparent cycle — `AppScope` holds `registry`, the registry's members need the `AppScope` —
+ *  is safe BECAUSE `LazyMap` is lazy: the entry resolves on first use, long after the scope is
+ *  fully declared. With eager construction this would be a real cycle. What is NOT prevented is a
+ *  service→service cycle: A resolving B resolving A overflows the stack at first call, not at
+ *  compile (nothing guards it today). */
+export type RegistryProvider = (app: AppScope) => ServiceRegistry;
+
 /** The process/runtime-scoped dependency contract. */
 export type AppScope =
   & Dependency<'registry', ServiceRegistry>
@@ -47,18 +58,24 @@ export type CompilerScope =
   & Dependency<'sourceOptions', ReadonlyMap<string, any>>;
 
 /** Build an app scope. Every field is optional at the call site; unset falls back to the
- *  reference-safe defaults (empty registry, all fast paths on, no federation source). */
+ *  reference-safe defaults (empty registry, all fast paths on, no federation source).
+ *
+ *  `registry` is set LAST and is handed back the scope it lives in — the one entry whose value is
+ *  a function of its own container, because its services take their dependencies at construction
+ *  (federate ← `source`, the directory ← this very registry). LazyMap makes that safe: the provider
+ *  runs on FIRST USE, long after `app` is assigned, so the self-reference is a closure, not a cycle. */
 export function createAppScope(deps?: Partial<{
-  registry: ServiceRegistry;
+  registry: RegistryProvider;
   fastPaths: FastPathConfig;
   source: FederationSource | undefined;
   labelCardinality: LabelCardinality;
 }>): AppScope {
-  return LazyMap.create()
-    .set('registry', instance(deps?.registry ?? EMPTY_REGISTRY))
+  const app: AppScope = LazyMap.create()
     .set('fastPaths', instance(deps?.fastPaths ?? DEFAULT_FAST_PATHS))
     .set('source', instance(deps?.source))
-    .set('labelCardinality', instance(deps?.labelCardinality ?? LabelCardinality.ONE));
+    .set('labelCardinality', instance(deps?.labelCardinality ?? LabelCardinality.ONE))
+    .set('registry', () => (deps?.registry ?? (() => EMPTY_REGISTRY))(app));
+  return app;
 }
 
 /** Mint a fresh compiler scope from an app scope for ONE traversal compile. `q` defaults to a
