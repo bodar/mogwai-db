@@ -300,12 +300,22 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      do it only if a third spelling appears.
    - **`assertStreamColumns` DOES check declared layout-role columns** — `streamColumns` is
      `streamPayloadCols` + `layoutCols`, so the earlier "payload and per-row-type only" claim is
-     withdrawn. The real hole is the CONSTRUCTION SITES THAT SKIP IT: `appendCte`
-     (`steps/context/context.ts`, the element hot path) builds `{...st, rel: q.cte(body, cols)}`
-     directly and honours a caller's `cols:` override unchecked, and `movement.ts`'s `finishMove`,
-     `tail/child.ts`'s `oneRowEncounter`/child rejoin, `prefix/match.ts`'s seed and `engine.ts`'s
-     write-driver re-entry each hand-build the same object. Routing those through an asserting
-     constructor is the "runtime contract" third of the ScalarType pattern.
+     withdrawn. The hole was the CONSTRUCTION SITES THAT SKIP IT, and the worst one is closed:
+     **`appendCte`'s `cols:` override is deleted (`e1aa251`)**, which found a real defect —
+     `match()`'s seed declared a binding table while its layout still claimed `bulk`, surviving only
+     because the next step rebuilt the layout. Both `match()` seeds now go through `toElementStream`
+     via the named drop `layoutOverAliases`. **The method transfers: add the assertion, read the
+     failures, then prefer deleting the escape hatch over keeping the assertion.**
+     Still hand-building an element/typed stream without an assertion: `movement.ts`'s `finishMove`,
+     `tail/child.ts`'s `oneRowEncounter` + child seed/rejoin (`child.ts:86,102,342`), `engine.ts`'s
+     write-driver re-entry (`engine.ts:579`) and `tail/scalar.ts:742`. Each derives `cols` from the
+     same `layoutCols` call it patches, so none is currently wrong — the value is closing the route,
+     not reporting a bug.
+     **Declared latent gap from the same tranche:** `bulk` is lost through `match()`, so a reducer
+     after one counts ROWS rather than traversers. No live wrong answer (`movementCollapse` does not
+     fire ahead of a `match()`; collapse-on ≡ collapse-off on
+     `g.V().both().both().match(…).select("a").count()`), so it is declared rather than banked.
+     Threading it means touching `applyPattern` and every pattern route. *Low.*
    - **The paired exit-gate regression tests are unwritten** — "a label bound AFTER a barrier survives
      an arm merge while a label consumed BY that barrier is not silently resurrected", and for each
      migrated merge both a same-scope and a child-scoped arm.

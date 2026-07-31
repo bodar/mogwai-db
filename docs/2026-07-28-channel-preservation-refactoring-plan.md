@@ -137,6 +137,22 @@ Phase 1 tranches (current names throughout):
   `test/channel-contracts.test.ts` (the `peer` policy fails closed on a diverging rigid role; the
   `rehomed` policy never inherits the ordinal a child minted).
 
+- `e1aa251` — **`appendCte` loses its `cols` override; `match()` names the roles its binding table
+  drops.** `appendCte` derives the declared column list from the layout (consistent by construction)
+  but honoured a caller override, and `match()`'s seed was the one caller using it — declaring
+  `['id', …variables]` while its layout still claimed `bulk`. It survived only because
+  `applyPattern` rebuilds the layout immediately after. The override is now GONE rather than
+  asserted, so a site carrying fewer roles must say which it dropped: `layoutOverAliases` is that
+  verb (DROP to a binding table of `id` + bound variables), both `match()` seeds use it, both go
+  through `toElementStream`, and two hand-written spreads went with them.
+  **Method note worth keeping.** The bug was found by ADDING the assertion first and reading the 18
+  failures, not by inspection — and the assertion then became unnecessary, because the honest fix was
+  to delete the escape hatch. That is the preferred shape of a "runtime contract" tranche: prefer
+  removing the way to be wrong over reporting it. The residual is declared, not fixed: `bulk` is
+  lost through `match()`, so a reducer after one counts rows rather than traversers. Probed —
+  `movementCollapse` does not fire ahead of a `match()` and collapse-on ≡ collapse-off, so there is
+  no live wrong answer to bank.
+
 ## North star
 
 Every compiler boundary must make one of three outcomes explicit:
