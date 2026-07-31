@@ -1,6 +1,6 @@
 # Dependencies vs arguments: a request tier, and services in DI
 
-**Status: steps 1-5 landed 2026-07-31. Step 6 is phase 5 of the bulk-transfer plan and lives there.** Origin: phase 5 of
+**Status: COMPLETE — steps 1-6 landed 2026-07-31.** Origin: phase 5 of
 `2026-07-31-bulk-transfer-and-io-substrate-plan.md` needed `io().read()` to reach a `GraphStore` and an
 `IoStore`, and the barrier contribution's signature had nowhere to put them. The first answer was to
 widen the signature into a context object. **That was the wrong shape**, and noticing why turned a
@@ -109,7 +109,9 @@ exists."*
    the cheapest thing to check first.
 4. **A service cycle fails at first use, not at compile.** Lazy resolution turns A→B→A into a stack
    overflow when the service is called. Nothing prevents it; a clear error would need a resolution guard.
-5. **`store` placement is a visibility decision, not a lifetime one.** Its lifetime is per-graph
+5. **`store` placement is a visibility decision, not a lifetime one.** *(REVERSED when step 6
+   landed — see §6.6: after step 4 the tier no longer decides the visibility. Kept as written
+   because the reasoning is right up to the premise that changed.)* Its lifetime is per-graph
    (`AppScope`), but putting it there makes a store reachable from COMPILE-time code, which today is
    impossible because no compile-time type has the field. Keeping the property costs nothing if the
    store is minted by the executor into the request tier and `compile()` is handed app + compile only —
@@ -185,7 +187,17 @@ This is a **behaviour-preserving refactor**: no traversal changes its answer, so
    compiler literature. It pairs with `CallSpec` as parse/lower, stated in both doc comments because
    the names are close enough to need it. `compileParams` → `boundParams` in the same pass: "compile"
    named a phase, and it read as a near-synonym of the `params` beside it.
-6. **Then** phase 5 of the bulk-transfer plan lands on top: `IoStore` in `AppScope`, an `io` service
-   reading it, `io()` desugaring to a `call()`.
+6. ~~**Then** phase 5 of the bulk-transfer plan lands on top: `IoStore` in `AppScope`, an `io` service
+   reading it, `io()` desugaring to a `call()`.~~ **Landed** — see
+   `2026-07-31-bulk-transfer-and-io-substrate-plan.md` §3. It went exactly as §3 predicted: `io()`
+   needed **no contract change at all**, because `createIoService(app.io, app.store)` reads its
+   dependencies like every other service and `apply(rows)` never widened.
+   **One placement decision was REVERSED**, and the reason is worth keeping: §4.5 put `store` in the
+   request tier to keep it out of compile-time reach, but that premise held only while the engine
+   took an `AppScope` directly. After step 4 the engine takes a `RequestScope` and publishes a
+   hand-picked `Engine` interface, so compile-time code cannot reach ANY scope object — the Engine
+   interface is what enforces the boundary, not the tier, and an app-scope store is exactly as
+   unreachable as a request-scope one. `store` therefore sits where its LIFETIME says (per-graph,
+   app scope), which is also what lets an app-scoped registry construct a service that needs it.
 
 Steps 1–2 alone unblock phase 5; 3–5 are the consolidation that makes it not a workaround.

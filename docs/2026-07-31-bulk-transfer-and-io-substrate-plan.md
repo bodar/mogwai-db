@@ -1,11 +1,12 @@
 # Bulk transfer + the `io()` substrate — one primitive under five threads
 
-**Build status (2026-07-31):** phases **0, 1, 2, 3, 4 and 7 have landed**. Every live wrong-answer wall on
+**Build status (2026-07-31):** phases **0, 1, 2, 3, 4, 5 and 7 have landed**. Every live wrong-answer wall on
 the production runtime is closed, `mise run binds` fails the build on the idiom, the bulk loader is
 gated table-by-table against the write path, the conformance host seeds its two GraphSON graphs through
 the reader (host startup 5.0s → 1.1s; ggrateful 4.4s → 0.14s; L3 unchanged at 1650), and the v4 writer
-round-trips modern/crew/sink/grateful-dead/**gzoo** canonically. What is left is 5 (`IoStore` + `io()`, which opens with the
-contract choice in §3a) and 6 (CSV interop). Two findings from building it
+round-trips modern/crew/sink/grateful-dead/**gzoo** canonically. **Phase 5 (`IoStore` + `io()`) landed
+on the DI consolidation** — the contract choice §3a opened is closed there, with no contract change.
+What is left is 6 (CSV interop). Two findings from building it
 are folded in below rather than appended: §5's "scratch relation, chunked" is **superseded** (a
 compiled read plan is ONE statement — see §5), and the whole-suite CF-parity run is **green** before
 any fix, which is itself the measurement that says why the ladder could not have found §1c/§1d (§2's
@@ -265,6 +266,15 @@ loop. So `io()` desugars to a `call()` on an internal service and inherits the w
 The alternative — teaching the compiler a second async step kind — is the thing to avoid.
 
 ### 3a. What the barrier seam does NOT give `io()` — the one open decision in phase 5
+
+**CLOSED 2026-07-31: phase 5 landed and the answer was DI, exactly as the supersede note below
+predicted — `io()` needed no contract change at all.** `createIoService(app.io, app.store)` takes
+both dependencies at construction and `apply(rows)` was never widened. What landed beyond this
+section's sketch: `mogwai.io` is registered in BOTH registries (`io()` is TinkerPop's own step, so a
+reference-exact context must serve it) and is `internal`, so `--list` is unchanged; `desugarIo` is
+one canonicalize Pass running before `absorbCallWith`, re-emitting io()'s `with()` steps after the
+call it mints so the modulators fold through the existing path; and format selection is by
+extension, checked BEFORE any io, so `.xml`/`.kryo` cost no read. Tests: `test/io.test.ts`.
 
 Checked while phases 0–4 landed, because it decides how phase 5 is shaped. The barrier seam gives
 `io()` the ASYNC half for free and **none of the MUTATION half**:
