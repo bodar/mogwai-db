@@ -89,6 +89,13 @@ Cloudflare** — which is why nothing above found it. Every level of the ladder 
    today, every statement ≤100 binds** (41×; only 17% of the current cost is inside SQLite at all).
    A bind-count static gate (`mise run binds`) is what stops the class recurring. **High** — two live
    production-runtime walls.
+   **Format set is DECIDED, do not re-widen it** (2026-07-31): GraphSON v3 adjacency + Neptune/Neo4j
+   CSV. **No homegrown format and nothing XML** — so GraphML is a refusal (its `attr.type` is more
+   type-lossy than CSV anyway), and the lossless our→our path is a table-shaped CSV dump (headers =
+   real column names, same RFC 4180 writer), which invents no container and no type vocabulary. The
+   test that separates that from a lossy CSV export is **`gcrew` round-tripping** — Neptune CSV cannot
+   carry its meta-properties. Untyped GraphSON is a RESPONSE encoder, a different problem, and stays
+   where it is scoped. Plan §4/§4a/§4b.
    → [bulk-transfer-and-io-substrate](./2026-07-31-bulk-transfer-and-io-substrate-plan.md)
 
 2. **Universal child-seam acceptance.** Element, scalar, list, count, branch, `repeat`,
@@ -435,9 +442,12 @@ Each fails closed. Do only when a concrete scenario demands it.
   GraphComputer or the `io` source**: 4 of GraphComputer's 6 scenarios are the OLAP names item 8 will
   serve (that exclusion should NARROW, not harden), and `io(...).read()` (6, in scope and failing) is a
   real capability. **`io().write()` is NOT the wall this used to claim** — R2 bucket bindings are
-  reachable from inside a DO, so the sink has a home and the source/sink asymmetry dissolves; the real
-  scope is 4 of the 6 `Read.feature` scenarios (`.json`/`.xml`), with `.kryo` the one genuine refusal
-  (JVM serialization, no dependency available). Item 30's `IoStore` seam. *Low.*
+  reachable from inside a DO, so the sink has a home and the source/sink asymmetry dissolves. In-scope
+  is **2 of the 6** `Read.feature` scenarios (the `.json` GraphSON-adjacency pair). The other four are
+  both REFUSALS, of two different kinds: `.kryo` is a platform wall (JVM serialization, no dependency
+  available), `.xml` is a **format decision** — no XML, taken 2026-07-31 because GraphML's `attr.type`
+  is more type-lossy than CSV *and* Workers has no `DOMParser`. That makes `tags.ts` carry its first
+  format-decision exclusion. Item 30's `IoStore` seam. *Low.*
 
 ---
 

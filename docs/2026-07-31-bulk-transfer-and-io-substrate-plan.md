@@ -135,8 +135,8 @@ Five threads, one missing thing:
 
 | thread | what it needs |
 |---|---|
-| bulk import (Neptune/Neo4j CSV, GraphSON, GraphML) | land N rows into this graph's tables |
-| `io(…).read()` — 6 L3 scenarios, deliberately in scope | land N rows, from bytes the server resolves |
+| bulk import (Neptune/Neo4j CSV, GraphSON adjacency — §4) | land N rows into this graph's tables |
+| `io(…).read()` — 2 of its 6 L3 scenarios in scope (§4) | land N rows, from bytes the server resolves |
 | federated `call()` returning a large result | land N rows in a relation (§1c breaks today) |
 | conformance + L3 seeding (5.9 s → 0.14 s) | land N rows |
 | `io(…).write()` / export / our→our replication | the inverse: **drain** rows to bytes |
@@ -229,23 +229,84 @@ path" error for a federated traversal; `io()` joins that set. No new failure mod
 `RowBatch` is format-free. Each format is a reader (bytes → row batches) and/or a writer (rows →
 bytes). Ranked by ratio of capability unlocked to work:
 
+**Two formats are excluded by decision, ahead of any scoping** (2026-07-31): **no homegrown format,
+and nothing XML.** The first is not a new rule — `2026-07-13-graphson-untyped-scope.md` already made
+"target the **standard** format, not a homegrown one" the policy for the response encoder, and it
+applies with equal force here. §4b records what excluding them costs, because it is not nothing.
+
 | format | direction | unlocks | verdict |
 |---|---|---|---|
-| **GraphSON v3 adjacency (`.json`)** | read + write | 2 of 6 `io()` scenarios; **replaces `seed-graphson.ts` and the 5.9 s seed**; our own dump format for free | **first.** The reader already exists as `test/fixtures/seed-graphson.ts` — promote it from a test fixture to a real reader that emits row batches instead of Gremlin strings |
-| **Neptune/Neo4j CSV-with-typed-headers** | read + write | the interop story (`~id`,`~label`,`prop:type` / `:ID`,`:LABEL`,`:START_ID`) | **second.** Cross-vendor de-facto standard, no deps, and the format the earlier analysis already converged on |
-| **our compact typed dump** | read + write | our→our replication/backup, and the whole-graph R2 dump | **third**, and it is nearly free — same producer as CSV, shared header, `vtype` per column not per cell |
-| **GraphML (`.xml`)** | read (+ write) | 2 of 6 `io()` scenarios | **fourth, scope with care.** Workers has no `DOMParser`; `HTMLRewriter` is an HTML streaming transformer, not an XML DOM. So this needs a hand-rolled pull parser. GraphML is a regular enough subset that ~150 lines is realistic, but it is the only format here that is *new code rather than new plumbing* |
+| **GraphSON v3 adjacency (`.json`)** | read + write | 2 of 6 `io()` scenarios; **replaces `seed-graphson.ts` and the 5.9 s seed** | **first.** A TinkerPop standard, not homegrown — the typed v3 adjacency file (one vertex per line, embedded `inE`/`outE`), which is a *different artefact* from untyped GraphSON responses (§4a). The reader already exists as `test/fixtures/seed-graphson.ts`; promote it from test fixture to a real reader emitting row batches instead of Gremlin strings |
+| **Neptune/Neo4j CSV-with-typed-headers** | read + write | the interop story (`~id`,`~label`,`prop:type` / `:ID`,`:LABEL`,`:START_ID`) | **second.** Cross-vendor de-facto standard, RFC 4180, no deps. Lossy against our type channel — §4b quantifies it |
+| ~~our compact typed dump~~ | — | — | **EXCLUDED — homegrown.** See §4b for what this costs and for the one route that recovers it without inventing a format |
+| ~~GraphML (`.xml`)~~ | — | 2 of 6 `io()` scenarios | **EXCLUDED — XML.** Two independent reasons, and the type one is the stronger: GraphML's `attr.type` admits only `boolean/int/long/float/double/string`, so it is **more** lossy than CSV (no date, no uuid, no nesting, no meta-properties). Separately, Workers has no `DOMParser` and `HTMLRewriter` is an HTML streaming transformer, not an XML DOM — so it would also be the only format here that is new *code* rather than new plumbing |
 | **Gryo / `.kryo`** | — | 2 of 6 `io()` scenarios | **a genuine wall.** JVM serialization; not reimplementable without a dependency, and no dependency exists. Fail closed naming the format |
 
-**So the honest `io()` scope is 4 of 6 scenarios, not 6** — and the `tags.ts` note should say so, in
-its own three-kind vocabulary: `.json`/`.xml` are *NOT YET*, `.kryo` is *WE REFUSE* (a platform
-wall, like the regex UDFs). The two kryo scenarios should never be counted as a gap in our engine.
+**So the honest `io()` scope is 2 of 6 scenarios**, and `tags.ts` should say so in its own three-kind
+vocabulary: `.json` is *NOT YET*; `.xml` and `.kryo` are both *WE REFUSE* — the kryo pair a platform
+wall (like the regex UDFs), the graphml pair a **format decision**, which is a first for that file
+and worth spelling out as such. Four scenarios should therefore never be counted as a gap in our
+engine. (This supersedes the "4 of 6" figure in the item-30 index line and in `outstanding-work.md`'s
+`io()` bullet — both were written before the XML exclusion.)
 
 **Not a bulk format, and this stays decided:** GraphBinary. It is a row-oriented, per-value
 self-describing *wire* protocol — every cell carries `type_code+type_info+value_flag`, no shared
 schema, no cursor streaming on DO. It is right at the client edge and wrong everywhere else. The
 internal cross-DO hop already avoids it (JS RPC structured-clones `ForeignRow[]`), which is correct
 and unchanged. Likewise **Apache GraphAr** stays a cited north star, not a dependency.
+
+### 4a. Untyped GraphSON is a different problem, and it stays where it is
+
+Worth separating explicitly, because the name collides three ways. Untyped GraphSON v4
+(`application/vnd.gremlin-v4.0+json;types=false`) is a **response encoder** — per-result JSON for
+generic HTTP clients — already scoped in `2026-07-13-graphson-untyped-scope.md` (~250–350 lines,
+½–1 day) and already carried in the index under Product/operations. It is:
+
+- **not** the GraphSON v3 *adjacency* file `io("data/tinkerpop-modern.json").read()` consumes;
+- **not** a candidate bulk format, and cannot become one — it is untyped *by definition*, so it
+  cannot carry `vtype`. Its own doc already concedes the consequence for responses ("Int vs Double
+  indistinguishable", ">2^53 loses precision"). For a *graph* dump that is not a cosmetic
+  deviation, it is the loss of the entire type channel.
+
+So: keep it as the response encoder it was scoped as. It is a good next piece of work — it makes the
+shipped `/docs` panel usable — and it is unrelated to this plan.
+
+### 4b. What excluding the homegrown dump costs — and the one route that recovers it
+
+Excluding it is defensible, but it should be an owned trade rather than a silent one, because
+**it leaves no lossless export path.** Measured against the two vocabularies:
+
+Our `CanonicalType` (`gremlin/types.ts:89`) is 17 names. Neptune CSV admits
+`Bool/Byte/Short/Int/Long/Float/Double/String/Date/Datetime`, plus `[]` arrays and a
+`(single|set)` cardinality suffix. So CSV cannot express:
+
+- **6 of our scalar types** — `bigint`, `bigdecimal`, `uuid`, `char`, `duration` have no header
+  type, and `map` has no representation at all;
+- **nesting** — our collection values are a self-describing `{t,v}` tree with per-leaf types and
+  arbitrary depth; CSV has one flat `[]` level;
+- **TinkerPop's `list` cardinality** — Neptune's cardinality vocabulary is `single|set`, not
+  `single|list|set`;
+- **meta-properties — nothing at all.** This is the decisive one and it is checkable against our own
+  fixtures: `gcrew` (an official TinkerPop reference graph, `test/fixtures/seed-crew.ts`) gives every
+  `location` value `startTime`/`endTime` meta-properties. **`gcrew` cannot round-trip through Neptune
+  CSV**, and neither can our `meta BLOB` column in general.
+
+Two honest ways forward:
+
+1. **Accept it.** Import/export is interop-only and lossy at the edges of our type system; there is
+   no backup/replication story pre-v1. Simple, and legitimate — but it means "export your graph" has
+   a caveat that bites exactly the fixtures we test against.
+2. **Recommended — and it satisfies the exclusion rather than working around it.** A **table-shaped
+   CSV dump is not a homegrown format.** Six RFC 4180 CSVs whose headers *are* the real column names
+   (`vertex_properties` → `id,node,key,value,vtype,meta`), written by the *same* CSV writer the
+   Neptune path uses with a different column mapping: `vtype` rides as a column, collection values
+   ride as the stored JSON text, `meta` rides as its stored JSON. **Nothing is invented — no
+   container, no type vocabulary, no envelope.** That is the distinction that matters: a homegrown
+   *format* invents a spec someone has to learn; a standard *encoding of our own schema* invents
+   nothing and is lossless by construction, because the schema is the source of truth.
+
+The plan takes route 2. If it reads as homegrown-by-the-back-door, route 1 is the fallback and only
+phase 6 changes — everything through phase 5 is unaffected either way.
 
 ---
 
@@ -352,10 +413,10 @@ Each phase lands green and is useful alone.
 | **2** | Fix §1d (`drop`) and §1c (`landForeignElements`, `jsonbArrayOf`) through `RowBatch` | phase 0's harness goes green; `g.V().drop()` on grateful-dead passes under it |
 | **3** | `mise run binds` static gate | at zero, fails the build (not a ratchet) |
 | **4** | GraphSON reader/writer over `RowBatch`; conformance host seeds through it | L3 count unchanged; seed ≤ 0.5 s; census unchanged |
-| **5** | `IoStore` (Bun FS / CF R2 / L3 host mapping) + `io()` as a barrier service | 4 of the 6 `Read.feature` scenarios pass; `.kryo` fails closed naming the format; `tags.ts` reclassified |
-| **6** | Neptune/Neo4j CSV reader/writer; `io().write()` to R2 | round-trip: export a graph, load into an empty graph, compare |
+| **5** | `IoStore` (Bun FS / CF R2 / L3 host mapping) + `io()` as a barrier service | the 2 `.json` `Read.feature` scenarios pass; `.xml` and `.kryo` fail closed naming the format; `tags.ts` reclassified (§4) |
+| **6** | Neptune/Neo4j CSV reader/writer + the table-shaped CSV dump (§4b route 2, same writer); `io().write()` to R2 | round-trip: export a graph, load into an empty graph, compare — **and `gcrew` round-trips**, which is the assertion that separates route 2 from route 1 |
 | **7** | remap pass (non-empty target, label re-interning, `uid` preservation) | load-into-non-empty round-trip |
-| — | GraphML pull parser; federated *materialize* | scope after 5–7 land |
+| — | federated *materialize* | scope after 5–7 land |
 
 Phases 0–3 are the ones that fix live defects. Phases 4–7 are the capability. **If only part of this
 gets built, build 0–3** — they are small, they are gates, and they close two wrong-answer walls on
@@ -389,8 +450,14 @@ per-element `run`.
 - **A wider primary key** — §7, refuted on measurement.
 - **`ATTACH` / raw SQLite file dumps** — dead on CF, already recorded; not revived by a bulk path.
 - **GraphBinary as a bulk format** — §4; it stays the client wire only.
-- **A new dependency for CSV, XML, or Parquet/Arrow** — the no-new-dependencies lock holds. GraphAr
-  stays a cited north star.
+- **A new dependency for CSV or Parquet/Arrow** — the no-new-dependencies lock holds. GraphAr stays a
+  cited north star.
+- **Any XML format — GraphML included.** A decision (2026-07-31), not a scoping outcome: §4 shows
+  GraphML is *more* type-lossy than CSV, and it would also be the only format needing a hand-rolled
+  parser. Costs 2 `Read.feature` scenarios; they become a refusal, not a gap.
+- **Any homegrown format** — §4b. The lossless path is a standard *encoding* of our own table schema,
+  never an invented container or type vocabulary.
+- **Untyped GraphSON as a bulk format** — §4a. It stays the response encoder it was scoped as.
 - **Gryo/`.kryo`** — a platform wall, fails closed.
 - **Cross-DO transactions / snapshot consistency** across a load — best-effort, as federation
   already is.
