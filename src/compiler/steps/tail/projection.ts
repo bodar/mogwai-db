@@ -22,6 +22,7 @@ import { choose as lowerElementChoose, coalesce as lowerElementCoalesce, flatMap
 import { lowerElementDedup } from '../prefix/filter.ts';
 import { lowerScalarAggregate, tryLowerLocalAggregate } from '../prefix/sideeffect.ts';
 import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
+import { NUMERIC_REDUCERS } from '../../ir/step.ts';
 import { lowerCall } from './call.ts';
 import { assertsGType, BRANCH_SHAPE_ORDER, childCtx, childSteps, classifyBy, collectionAssert, classifyListChild, classifyTotalScalarChild, isScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
 import { mintChildEncounter, tryCompileBranchChildAllCard, tryCompileCountChild, tryCompileListChild, tryCompileScalarModulations, type ScalarModulationSpec } from './child.ts';
@@ -73,7 +74,6 @@ const SCALAR_PROJ = new Set(['values', 'id', 'label', 'labels']);
 const isMapProj = (p: IRStep | null) => p?.name === 'select' || p?.name === 'project';
 const isScopeLocalStep = (s: IRStep | undefined): boolean =>
   !!s && (s.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
-const NUMERIC_REDUCERS = new Set<NumericReducer>(['sum', 'min', 'max', 'mean']);
 
 /** A tail modifier: fold the step into the accumulator. `at` gives position so a
  *  terminal reducer (fold/sum) can reject anything following it. */

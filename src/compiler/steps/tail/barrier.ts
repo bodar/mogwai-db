@@ -3,6 +3,7 @@ import { perRowColumnOf, staticTypeOf, type ListOf } from '../../../sql/kernel/r
 import { rangeToOffsetLimit, typedScalarNode } from '../../plan/plan.ts';
 import { isScopeArg } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
+import { type NumericReducer, type ScalarReducer } from '../../ir/step.ts';
 
 import { cardinalityOf, continueLowering, loweringStateOf, streamColumns, toListStream, toScalarStream, withRelation, type ListStream, type RelationalStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { layoutCols, layoutProjection, layoutProjectionMinting, patchLayout, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
@@ -261,8 +262,10 @@ export function lowerScopedElementFold(
   return toListStream(loweringStateOf(input, layout), rel, { kind: 'elem', elem: input.elem });
 }
 
-export type NumericReducer = 'sum' | 'min' | 'max' | 'mean';
-export type ScalarReducer = 'count' | NumericReducer;
+// The reducer NAME types are declared beside their member set in `ir/step.ts` (the set is the
+// authority; the type is derived from its member list). Re-exported here because this is where
+// every reducer-lowering caller already looks, and moving the imports would be pure churn.
+export type { NumericReducer, ScalarReducer } from '../../ir/step.ts';
 
 /** One numeric/comparable reducer policy shared by root, child-scoped, and group-
  * scoped barriers. Callers decide the domain and productivity join; this helper owns

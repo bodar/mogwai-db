@@ -2,7 +2,7 @@ import { isNested } from '../../../gremlin/frontend.ts';
 import { empty, list, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { type PathPos } from '../../../sql/kernel/render.ts';
 import { nodes } from '../../../sql/schema.ts';
-import { EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, VERTEX_MOVES, unionOf } from '../../ir/step.ts';
+import { EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, REDUCERS, VERTEX_MOVES, unionOf } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { aliasCtx, elemCtx, elemTable, elementPayload, predicateSql, scalarProp, type ScalarCtx } from '../../plan/plan.ts';
 import { dropLayoutAtBarrier, layoutCols, layoutProjection, scopePathCols, withoutPath, type ElementStream, type TraverserLayout } from '../context/context.ts';
@@ -62,7 +62,7 @@ const ELEMENT_POSITION_BRANCH = new Set(['choose', 'coalesce', 'union']);
  *  route/by(key) which both take first). */
 function positionArmFansOut(body: IRStep[], params: Record<string, any>): boolean {
   const last = body.at(-1);
-  if (last && (last.name === 'count' || last.name === 'sum' || last.name === 'min' || last.name === 'max' || last.name === 'mean' || last.name === 'fold')) return false;
+  if (last && (REDUCERS.has(last.name) || last.name === 'fold')) return false; // a terminal reducer/fold collapses the body back to one
   return body.some((s) => {
     if (POSITION_MOVEMENTS.has(s.name) || s.name === 'V' || s.name === 'E' || s.name === 'union') return true;
     if ((s.name === 'choose' || s.name === 'coalesce') && !(s as IRStep).optionArms) {

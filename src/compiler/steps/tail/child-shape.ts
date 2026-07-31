@@ -393,7 +393,7 @@ function elementRun(steps: readonly IRStep[], ctx: ChildCtx | undefined): { ctx:
  *  binding). Both defer on it rather than mis-execute. */
 export const GLOBAL_BARRIER_STEPS = new Set([
   'dedup', 'order', 'limit', 'range', 'skip', 'tail', 'sample', 'barrier',
-  'group', 'groupCount', 'aggregate', 'local', 'fold', 'count', 'sum', 'min', 'max', 'mean',
+  'group', 'groupCount', 'aggregate', 'local', 'fold', ...REDUCERS,
 ]);
 export const isGlobalBarrier = (s: IRStep): boolean => GLOBAL_BARRIER_STEPS.has(s.name);
 

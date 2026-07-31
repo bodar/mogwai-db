@@ -8,7 +8,7 @@ import { materializeRootStream } from './materialize.ts';
 import { type ElementStream } from '../context/context.ts';
 import type { Engine } from '../../engine/deps.ts';
 import type { FastPath } from '../../options/fast-paths.ts';
-import { VERTEX_MOVES, PATH_FAMILY } from '../../ir/step.ts';
+import { NUMERIC_REDUCERS, REDUCERS, VERTEX_MOVES, PATH_FAMILY } from '../../ir/step.ts';
 
 // ---------- traverser bulking: repeat(...).times(n).<bulk-aware terminal> ----------
 //
@@ -48,9 +48,11 @@ import { VERTEX_MOVES, PATH_FAMILY } from '../../ir/step.ts';
  *  by |V|). Threaded through the generic engine, whose movementCollapse fast path keeps them
  *  collapsed; recognized here only so the suffix gate can walk past them to the terminal. */
 const BULK_MOVES = VERTEX_MOVES;
-/** Global reducers the generic tail already weights by the carried bulk (count → SUM(bulk),
- *  sum/mean → SUM(v·bulk)/Σbulk, min/max bulk-invariant). */
-const BULK_REDUCERS = new Set(['count', 'sum', 'min', 'max', 'mean']);
+// Every global reducer is already weighted by the carried bulk in the generic tail (count →
+// SUM(bulk), sum/mean → SUM(v·bulk)/Σbulk, min/max bulk-invariant), so the gate below reads
+// `REDUCERS`/`NUMERIC_REDUCERS` (ir/step.ts) directly rather than re-listing them: the two
+// readers below want DIFFERENT halves, which a single local `BULK_REDUCERS` hid behind a
+// `&& term.name !== 'count'`.
 
 /** A `groupCount()` whose key does NOT fan out (bare element identity, a property key, or a
  *  token key) is bulk-mergeable: lowerGroup weights every group by SUM(bulk), so a collapsed
@@ -122,12 +124,12 @@ function suffixBulkSafe(suffix: IRStep[], params: Record<string, any>): boolean 
 
   // A single scalar projection may precede a numeric reducer: values('k').sum().
   if (rest.length === 2 && rest[0].name === 'values' && (rest[0].args?.length ?? 0) === 1
-    && typeof rest[0].args[0] === 'string' && BULK_REDUCERS.has(term.name) && term.name !== 'count'
+    && typeof rest[0].args[0] === 'string' && NUMERIC_REDUCERS.has(term.name)
     && (term.args?.length ?? 0) === 0)
     return true;
 
   if (rest.length !== 1) return false; // no other multi-step suffix is bulk-collapsible here
-  if (BULK_REDUCERS.has(term.name) && (term.args?.length ?? 0) === 0) return true; // sum/min/max/mean
+  if (REDUCERS.has(term.name) && (term.args?.length ?? 0) === 0) return true; // count/sum/min/max/mean
   if (nonFanoutGroupCount(term)) return true;
   if (bulkCountGroup(term, params)) return true;
   return false;

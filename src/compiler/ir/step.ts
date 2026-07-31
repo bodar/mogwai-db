@@ -66,7 +66,14 @@ export const EDGE_SOURCE: ReadonlySet<string> = new Set(['E']);
 export const PATH_FAMILY: ReadonlySet<string> = new Set(['path', 'simplePath', 'cyclicPath']);
 
 /** The numeric reducers — every one a bulk-aware SQL aggregate over a scalar stream. */
-export const NUMERIC_REDUCERS: ReadonlySet<string> = new Set(['sum', 'min', 'max', 'mean']);
+const NUMERIC_REDUCER_NAMES = ['sum', 'min', 'max', 'mean'] as const;
+export const NUMERIC_REDUCERS: ReadonlySet<string> = new Set(NUMERIC_REDUCER_NAMES);
 /** The reducers including `count`. Spelled as a union so the several consumers that admit `count`
  *  and the two that do NOT are telling you which they are. */
 export const REDUCERS: ReadonlySet<string> = unionOf(NUMERIC_REDUCERS, new Set(['count']));
+
+/** A reducer by NAME, derived from the same member list as the set above rather than declared
+ *  beside it — the set is the authority and the type cannot drift from it. (It could: the type
+ *  lived in `tail/barrier.ts` and the set here, two independent spellings of four names.) */
+export type NumericReducer = (typeof NUMERIC_REDUCER_NAMES)[number];
+export type ScalarReducer = 'count' | NumericReducer;

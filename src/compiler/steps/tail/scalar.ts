@@ -3,6 +3,7 @@ import { hasUnresolvedOperand, operandDeps, resolveTraversalOperands } from './o
 import { compareKey, predicateSql, rangeToOffsetLimit, scalarTx, TYPE_PER_ROW, TYPE_STATIC, TYPE_UNKNOWN, typeCtxOf } from '../../plan/plan.ts';
 import { isNested, isOperatorArg, isOrderArg, isScopeArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
+import { REDUCERS } from '../../ir/step.ts';
 import { layoutProjection, layoutProjectionMinting, layoutCols, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
 import { loweringStateOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec, SCALAR_TRANSFORMS } from './coerce.ts';
@@ -71,7 +72,7 @@ export function combineSack(op: string, byVal: Expression, oldSack: Expression |
 
 export const SCALAR_ROW_STEPS = new Set([
   ...SCALAR_TRANSFORMS, 'is', 'limit', 'skip', 'range', 'tail', 'order', 'dedup',
-  'count', 'sum', 'min', 'max', 'mean', 'fold', 'unfold', 'inject',
+  ...REDUCERS, 'fold', 'unfold', 'inject',
 ]);
 
 const isLocal = (step: IRStep): boolean =>
