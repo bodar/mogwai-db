@@ -7,7 +7,7 @@ import { routeWrite } from './steps/write/write.ts';
 import { type Compiled, type WritePlan } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
 import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './options/fast-paths.ts';
-import { createAppScope, createRequestScope, createCompilerScope } from '../scopes.ts';
+import { createAppScope, createRequestScope } from '../scopes.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
 export type { Compiled, WritePlan, WriteResult, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from '../sql/kernel/render.ts';
 export { staticTypeOf, perRowColumnOf, PER_ROW, STATIC, UNKNOWN } from '../sql/kernel/render.ts';
@@ -62,13 +62,12 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   const request = createRequestScope(app, {
     params, federationDepth: resolveFederationDepth(options), sourceOptions: extractSourceOptions(tree, params),
   });
-  const scope = createCompilerScope(request);
-  const engine = new LoweringEngine(request, scope, collapseSafeFastPaths(scope.fastPaths, analyzeChain(steps)));
+  const engine = new LoweringEngine(request, { fastPaths: collapseSafeFastPaths(request.fastPaths, analyzeChain(steps)) });
 
   const write = routeWrite(engine, steps, params, sackInit ?? undefined, sideEffects);
   if (write) return { kind: 'sql', compiled: discard ? applyDiscard(write) : write };
 
-  const read = engine.compileRead(steps, scope.params, sackInit ?? undefined);
+  const read = engine.compileRead(steps, request.params, sackInit ?? undefined);
   if (read.kind === 'segment') {
     // A discard trailing a federated source (g.call(...).iterate()) applies to the RESUMED leaf,
     // so wrap resume rather than the segment itself (which carries no shape).

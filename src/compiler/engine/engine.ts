@@ -32,8 +32,7 @@ import { compileFromVariant } from '../steps/tail/variant.ts';
 import { compileFromForeign, landForeignElements, resumeMidBarrier } from '../steps/tail/foreign.ts';
 import type { SegmentPlan } from '../segment.ts';
 import type { ForeignRow } from '../../services/spi/types.ts';
-import type { RequestScope, CompilerScope } from '../../scopes.ts';
-import { createCompilerScope } from '../../scopes.ts';
+import type { RequestScope } from '../../scopes.ts';
 import type { ElementReadDriver, Engine } from './deps.ts';
 import { labelRegime, type LabelCardinality, type LabelRegime } from '../../api.ts';
 
@@ -44,7 +43,7 @@ export { compileTail };
 // The Engine is the compiler's recursive-traversal authority: the PREFIX dispatch table + the
 // prefix fold (buildPrefix/lowerElementSteps) + the shaped lowering loop (lowerSteps/lowerStream)
 // + source seeding + the root read (compileRead). It was the free-function barrel `steps/index.ts`;
-// it is now an OBJECT built per-compile from a CompilerScope, holding the ambient dependencies
+// it is now an OBJECT built per-compile from a RequestScope, holding the ambient dependencies
 // (fastPaths/registry/federationDepth) that used to ride LoweringState. It attaches itself to its compile's
 // Query (`q.engine`) so every step family reaches lowering + deps through `stream.q.engine` — no
 // parameter threading, no dependency on a dispatcher module (which is what dissolved the old
@@ -114,9 +113,8 @@ function dispatchAlias(s: Exclude<Stream, { kind: 'result' }>, steps: IRStep[], 
 }
 
 /**
- * The lowering Engine. Constructed per-compile from a CompilerScope (a child of the request
- * scope it also holds, so a nested sub-compile inherits the request rather than restating it);
- * holds the ambient
+ * The lowering Engine. Constructed per-compile from the REQUEST scope plus the little that a
+ * single compile owns (its Query, and — for inject() only — a params override); holds the ambient
  * dependencies + drives the recursive traversal. Attaches itself to its Query so every stream
  * built during this compile reaches it via `stream.q.engine`.
  */
@@ -130,18 +128,27 @@ export class LoweringEngine implements Engine {
   readonly federationDepth: number;
   private readonly PREFIX: Map<string, StepFn>;
 
-  constructor(private readonly request: RequestScope, scope: CompilerScope, fastPaths?: FastPathConfig) {
-    this.q = scope.q;
-    this.params = scope.params;
-    // `fastPaths` may be the collapse-GATED config for this compile's chain (movementCollapse is
-    // per-chain result-safety — see collapseSafeFastPaths); the compile entry points compute it
-    // from the steps and pass it here. Absent → the scope's ungated base (a bare Engine used
-    // before its chain is known re-gates in compileRead-for-a-chain, below).
-    this.fastPaths = fastPaths ?? scope.fastPaths;
-    this.registry = scope.registry;
-    this.labelCardinality = scope.labelCardinality;
-    this.labelRegime = labelRegime(scope.sourceOptions, scope.labelCardinality);
-    this.federationDepth = scope.federationDepth;
+  /** `own` is what THIS compile owns and a sibling compile must not share — the state a compile
+   *  tier would otherwise have held as a third scope:
+   *   • `q`     — the fresh CTE namespace to mint into (default: a new one).
+   *   • `params` — an override of the request's bound-param table. Only inject() uses it: it seeds
+   *     its own source and lowers against an empty table. Absent → the request's.
+   *   • `fastPaths` — the collapse-GATED config for this compile's chain (movementCollapse is
+   *     per-chain result-safety, see collapseSafeFastPaths); the compile entry points compute it
+   *     from the steps. Absent → the request's ungated base (a bare Engine used before its chain
+   *     is known re-gates in compileRead-for-a-chain, below). */
+  constructor(private readonly request: RequestScope, own: {
+    q?: Query;
+    params?: Record<string, any>;
+    fastPaths?: FastPathConfig;
+  } = {}) {
+    this.q = own.q ?? new Query();
+    this.params = own.params ?? request.params;
+    this.fastPaths = own.fastPaths ?? request.fastPaths;
+    this.registry = request.registry;
+    this.labelCardinality = request.labelCardinality;
+    this.labelRegime = labelRegime(request.sourceOptions, request.labelCardinality);
+    this.federationDepth = request.federationDepth;
     this.q.engine = this; // ride the Query so families reach us via stream.q.engine
     // The movement/filter/branch/passthrough compilers, keyed by step name. A step absent from
     // this table is where the prefix ends (the tail takes over) — that boundary is also the
@@ -180,9 +187,10 @@ export class LoweringEngine implements Engine {
    *  given, re-gates movementCollapse for the child's OWN chain (per-chain result-safety); absent
    *  → carry the base fastPaths (a resume closure whose chain is already lowered). */
   private child(params: Record<string, any>, steps?: IRStep[], q?: Query): LoweringEngine {
-    const scope = createCompilerScope(this.request, { q, params });
-    const fp = steps ? collapseSafeFastPaths(scope.fastPaths, analyzeChain(steps)) : scope.fastPaths;
-    return new LoweringEngine(this.request, scope, fp);
+    const base = this.request.fastPaths;
+    return new LoweringEngine(this.request, {
+      q, params, fastPaths: steps ? collapseSafeFastPaths(base, analyzeChain(steps)) : base,
+    });
   }
 
   /** Seed the source CTE (c0) from V(...)/E(...) and its optional id list. When the
@@ -539,14 +547,13 @@ export class LoweringEngine implements Engine {
    *  movementCollapse on for its already-collapsed frontier). */
   subEngine(params: Record<string, any> = {}, fastPaths?: FastPathConfig): LoweringEngine {
     if (!fastPaths) return this.child(params);
-    return new LoweringEngine(this.request, createCompilerScope(this.request, { params }), fastPaths);
+    return new LoweringEngine(this.request, { params, fastPaths });
   }
 
   /** A variant engine sharing THIS engine's deps but bound to `q` — for the correlated inline
    *  child's `DerivedQuery`. Reuses this engine's (already collapse-gated) fastPaths. */
   withQuery(q: Query): LoweringEngine {
-    const scope = createCompilerScope(this.request, { q, params: this.params });
-    return new LoweringEngine(this.request, scope, this.fastPaths);
+    return new LoweringEngine(this.request, { q, params: this.params, fastPaths: this.fastPaths });
   }
 
   /** compileRead narrowed to a synchronous Compiled — for INNER sub-traversal compiles (a

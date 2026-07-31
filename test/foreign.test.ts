@@ -5,7 +5,7 @@ import { landForeignElements } from '../src/compiler/steps/tail/foreign.ts';
 import { executeQuery, exec } from './support/executor.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { LoweringEngine } from '../src/compiler/engine/engine.ts';
-import { createAppScope, createRequestScope, createCompilerScope } from '../src/scopes.ts';
+import { createAppScope, createRequestScope } from '../src/scopes.ts';
 import { materializeRootStream } from '../src/compiler/steps/tail/materialize.ts';
 import { normalize } from '../src/compiler/ir/passes.ts';
 import { stepChain, parseGremlin } from '../src/gremlin/frontend.ts';
@@ -22,10 +22,8 @@ import type { ForeignStream } from '../src/compiler/steps/context/stream.ts';
 const store = new GraphStore(new BunSqlite(':memory:')); // empty — foreign rows are literals, no join
 // A fresh lowering engine per call — it attaches itself to its Query, which the carry rides, so
 // landForeignElements' seed reaches lowering via q.engine (the object-model wiring).
-const freshEngine = (): LoweringEngine => {
-  const request = createRequestScope(createAppScope(), { params: {} });
-  return new LoweringEngine(request, createCompilerScope(request));
-};
+const freshEngine = (): LoweringEngine =>
+  new LoweringEngine(createRequestScope(createAppScope(), { params: {} }));
 
 // The {t,v} node shape vertexBuffer/edgeBuffer consume (one per key; vertex is multi-valued).
 const vprops = (o: Record<string, unknown>) =>

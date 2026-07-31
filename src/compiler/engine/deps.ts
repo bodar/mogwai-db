@@ -44,7 +44,7 @@ export interface ElementReadDriver {
 }
 
 /** The lowering engine: the recursive-traversal authority (dispatcher + prefix fold + shaped
- *  lowering loop) plus the ambient compile dependencies. Built per-compile from a CompilerScope
+ *  lowering loop) plus the ambient compile dependencies. Built per-compile from a RequestScope
  *  and attached to that compile's Query, so every family reaches it via `stream.q.engine`. */
 export interface Engine {
   // ---- ambient dependencies (were LoweringState fields; now held by the object) ----
@@ -80,12 +80,12 @@ export interface Engine {
    *  path/encounter demands, which a branch's own text cannot show. */
   lowerRootedArm(steps: IRStep[], params: Record<string, any>, sackInit?: SackSpec, facts?: ChainFacts): Stream;
 
-  /** buildPrefix on a FRESH child engine (fresh Query, same app scope) — for the write path, which
+  /** buildPrefix on a FRESH child engine (fresh Query, same request scope) — for the write path, which
    *  materializes several independent target-id relations in one traversal (each needs its own WITH,
    *  and its own engine on the stream so movement/filter reach deps). */
   buildPrefixFresh(steps: IRStep[], params?: Record<string, any>): { st: ElementStream; stop: number };
 
-  /** A FRESH child engine (fresh Query, same app scope). For a source constructor (inject()) that
+  /** A FRESH child engine (fresh Query, same request scope). For a source constructor (inject()) that
    *  builds its own seed relation on the fresh Query and then lowers the chain through it.
    *  `fastPaths` overrides the inherited config for this sub-compile — the bulk-repeat handoff
    *  forces movementCollapse on, since its unrolled frontier is a collapsed (id, bulk) stream. */
@@ -108,8 +108,8 @@ export interface Engine {
   /** A read traversal: prefix fold + shaped lowering loop. A source barrier call() suspends. */
   compileRead(steps: IRStep[], params?: Record<string, any>, sackInit?: SackSpec): Compiled | SegmentPlan;
 
-  /** compileRead narrowed to a synchronous Compiled, minting a FRESH compile scope (fresh Query,
-   *  same app scope) for the nested sub-traversal — a within()/all() operand, a merge body. */
+  /** compileRead narrowed to a synchronous Compiled, on a FRESH child engine (fresh Query, same
+   *  request scope) for the nested sub-traversal — a within()/all() operand, a merge body. */
   compileReadCompiled(steps: IRStep[], params?: Record<string, any>, sackInit?: SackSpec): Compiled;
 
   /** Compile a nested read body from one materialized element traverser. This is the write
