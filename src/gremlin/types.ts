@@ -82,6 +82,42 @@ export class Duration {
     if (x instanceof Duration) return x;
     return Duration.fromTotalNanos(typeof x === 'bigint' ? x : BigInt(x));
   }
+
+  /**
+   * ISO-8601 `PnDTnHnMn.nS` — the spelling EVERY external format uses for a duration (GraphSON's
+   * `g:Duration`, Neo4j CSV's `duration` column), as opposed to the total-nanos text `toString`
+   * gives, which is our own storage form. It lives on the class rather than in a format module
+   * because two formats now need it in both directions, and a second copy of a duration parser is
+   * exactly the silent divergence `bulk.ts` invariant 3 is about.
+   */
+  static fromIso(text: string): Duration {
+    const m = /^(-)?P(?:(\d+)D)?(?:T(?:(-?\d+)H)?(?:(-?\d+)M)?(?:(-?\d+(?:\.\d+)?)S)?)?$/.exec(text);
+    if (!m) throw new Error(`unparseable ISO-8601 duration "${text}"`);
+    const [, neg, d, h, min, sec] = m;
+    // A negative duration may be spelled either way: one leading sign (`-PT2M`) or per-component
+    // (`PT-2M-3S`, which is what our own writer and the corpus `negative-duration-v4.json` emit).
+    const seconds = BigInt(d ?? 0) * 86_400n + BigInt(h ?? 0) * 3_600n + BigInt(min ?? 0) * 60n
+      + BigInt(Math.trunc(Number(sec ?? 0)));
+    const nanos = Math.round((Number(sec ?? 0) % 1) * 1e9);
+    const total = seconds * Duration.NANOS_PER_SEC + BigInt(nanos);
+    return Duration.fromTotalNanos(neg ? -total : total);
+  }
+
+  /** ISO-8601, the inverse of `fromIso`. Components are negated individually (`PT-2M-3S`) rather
+   *  than sign-prefixed, matching the corpus fixtures. */
+  toIso(): string {
+    const total = this.totalNanos();
+    if (total === 0n) return 'PT0S';
+    const neg = total < 0n;
+    const abs = neg ? -total : total;
+    const secs = abs / Duration.NANOS_PER_SEC;
+    const nanos = abs % Duration.NANOS_PER_SEC;
+    const h = secs / 3600n, m = (secs % 3600n) / 60n, s = secs % 60n;
+    const sign = neg ? '-' : '';
+    const frac = nanos === 0n ? '' : `.${nanos.toString().padStart(9, '0').replace(/0+$/, '')}`;
+    const parts = [h ? `${sign}${h}H` : '', m ? `${sign}${m}M` : '', s || nanos ? `${sign}${s}${frac}S` : ''];
+    return `PT${parts.join('')}`;
+  }
 }
 
 /** The canonical type names. A superset of the GType tokens; every typeOf argument
@@ -186,6 +222,15 @@ export const isCollectionType = (t: string | null | undefined): boolean =>
  *  (DO rejects bigint binds; a number loses the low bits — see do-sqlite-bind-precision). */
 const SAFE_MIN = -9007199254740991n, SAFE_MAX = 9007199254740991n;
 export const fitsSafeInteger = (b: bigint): boolean => b >= SAFE_MIN && b <= SAFE_MAX;
+
+/** Integer digits → the NARROWEST carrier that holds them exactly: a JS number inside ±2^53, a
+ *  bigint beyond it. Every format READER wants this for a 64-bit integer, because the same
+ *  `g:Int64` / `Long` channel carries both a big number and an element id — and an id must come back
+ *  as a number to be a rowid. The ±2^53 boundary is `fitsSafeInteger`'s, stated once. */
+export const exactInteger = (digits: string | bigint): number | bigint => {
+  const b = BigInt(digits);
+  return fitsSafeInteger(b) ? Number(b) : b;
+};
 
 /** Normalize ANY value to a lossless SQLite bind at the one seam both runtimes cross
  *  (storage.ts coerceBind). A bigint binds as a JS number while it fits ±2^53 exactly,

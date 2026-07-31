@@ -1,6 +1,6 @@
 // The bulk loader — N elements into one graph's tables, through RowBatch.
 //
-// Design: docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md §2. Measured there: seeding the
+// Design: docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md §2. Measured there: seeding the
 // grateful-dead graph by write traversals is 5,918 ms and 98,198 statements, of which only 17% is
 // spent inside SQLite. The cost is JS per-element round-tripping — a whole read plan compiled and run
 // per edge ENDPOINT, a response framed for every element, and every property read back to echo it.
@@ -127,7 +127,11 @@ export class BulkLoader {
   private edgeRows: unknown[][] = [];
   private edgeProps: PropertyRows = { scalar: [], collection: [] };
   private ftsRows: unknown[][] = [];
-  private pendingEdges: Array<{ edge: BulkEdge; id: number }> = [];
+  /** Edges whose endpoints were not yet known when they were added — resolved at `flush`, AFTER the
+   *  vertices land. `uid` is carried rather than re-derived: it is `idOf`'s output, so it already
+   *  reflects the id POLICY (under `'remap'` a numeric source id becomes a uid, under `'renumber'`
+   *  nothing does), which a second `typeof edge.id === 'string'` test at flush time cannot know. */
+  private pendingEdges: Array<{ edge: BulkEdge; id: number; uid: string | null }> = [];
   private nextNode: number;
   private nextEdge: number;
   private nextVertexProp: number;
@@ -200,7 +204,7 @@ export class BulkLoader {
     const src = this.vertexIds.get(String(e.src));
     const tgt = this.vertexIds.get(String(e.tgt));
     if (src !== undefined && tgt !== undefined) this.edgeRows.push([rowid, uid, src, this.labelId(e.label), tgt]);
-    else this.pendingEdges.push({ edge: e, id: rowid });
+    else this.pendingEdges.push({ edge: e, id: rowid, uid });
     for (const p of e.properties ?? [])
       this.property(this.edgeProps, 'edge', rowid, p, () => p.id ?? this.nextEdgeProp++, 'edge');
     this.counts.edges++;
@@ -245,10 +249,10 @@ export class BulkLoader {
     // Endpoints resolve AFTER the vertices land, so a store lookup can see this batch's own rows —
     // which is what makes an edge referencing a MINTED id (no source id to remember it by) resolvable
     // at all, not just one referencing a source id.
-    for (const { edge, id } of this.pendingEdges) {
+    for (const { edge, id, uid } of this.pendingEdges) {
       const src = this.resolveEndpoint(edge.src, edge);
       const tgt = this.resolveEndpoint(edge.tgt, edge);
-      this.edgeRows.push([id, typeof edge.id === 'string' ? edge.id : null, src, this.labelId(edge.label), tgt]);
+      this.edgeRows.push([id, uid, src, this.labelId(edge.label), tgt]);
     }
     this.pendingEdges = [];
     this.land('edges', ['id', 'uid', 'src', 'label', 'tgt'], this.edgeRows);
@@ -273,10 +277,16 @@ export class BulkLoader {
    * can collide with rows that do not exist, so the common path pays nothing. Otherwise it is two
    * chunked `SELECT`s per table (~6% more statements on a 4,000-element batch), which buys turning a
    * production-shaped mystery into an instruction.
+   *
+   * PENDING edges are checked alongside the resolved ones. They are not in `edgeRows` yet (their
+   * endpoints resolve after the vertices land), and leaving them out meant an edge-only load — which
+   * is exactly what a CSV edge FILE is, and what no earlier format produced — reported SQLite's raw
+   * `UNIQUE constraint failed` instead of naming the policy that resolves it.
    */
   private assertNoCollisions(): void {
     if (this.emptyTarget) return;
-    for (const [table, rows] of [['nodes', this.nodeRows], ['edges', this.edgeRows]] as const) {
+    const edges = [...this.edgeRows, ...this.pendingEdges.map(({ id, uid }) => [id, uid])];
+    for (const [table, rows] of [['nodes', this.nodeRows], ['edges', edges]] as const) {
       // A minted rowid is past max(id) by construction, so only an EXPLICIT id can collide.
       if (this.policy === 'preserve') this.assertFree(table, 'id', rows.map((r) => r[0]),
         "load with { idPolicy: 'remap' } to mint fresh ids and keep the source ids as uid");

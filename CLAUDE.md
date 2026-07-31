@@ -244,11 +244,20 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
   `jsonbArrayBind`); and a set bounded by the QUERY TEXT may stay an IN-list. Two gates keep it that
   way: `mise run binds` statically, `mise run test:cf-limits` at runtime (`src/cf-limits.ts` — the
   `Sql` decorator that makes a DO-only wall fail on Bun).
-  Detail: `docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md`.
+  Detail: `docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md`.
 - Storage runtimes meet at the sync **`Sql` interface** (`src/storage.ts`): `bun:sqlite` (dev) and
   DO `ctx.storage.sql` (prod). Compiler + frame tier are storage-agnostic; the HTTP edge never
   touches a store. **Bind-type gotcha:** DO SQLite throws on `boolean`/`bigint` binds — `GraphStore`
   coerces them at the one seam so both runtimes agree.
+- **A SECOND storage seam, `IoStore` (`src/iostore.ts`), hides where a graph's DOCUMENTS live** —
+  `Sql` hides where its rows do. ASYNC (an object store's get/put are promises, which costs nothing
+  because `io()` is a barrier service): a rooted directory on Bun (`$MOGWAI_IO_DIR`, so a path cannot
+  escape it), an **R2 bucket binding** inside a DO (`IO` in wrangler.jsonc — bindings are a property of
+  a DO's env exactly as they are a Worker's, so a whole-graph read/write happens where the graph
+  lives). **Optional on both**, and absent it fails closed NAMING the missing binding rather than
+  silently doing nothing. Formats are adapters over `RowBatch`, in `src/formats/`: typed GraphSON
+  adjacency is the lossless one (backup, seeding, `io()`), CSV is interop-only and says so by refusing
+  what it cannot carry.
 - Bun ⇄ Cloudflare via DI (`@bodar/yadic`): `application(deps)` wires the shared router from one
   injected `GraphManager`. Entry points: `src/bun/server.ts`, `src/cloudflare/worker.ts`.
 - Web-session-only facts (which environment can build this at all, the shallow clone, pushing to a

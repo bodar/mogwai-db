@@ -35,6 +35,7 @@ export function graphContract(name: string, harness: Harness) {
     gremlinContract(() => origin);
     managementContract(() => origin);
     docsContract(() => origin);
+    ioContract(() => origin);
   });
 }
 
@@ -255,6 +256,58 @@ function gremlinContract(getOrigin: () => string) {
 // springs into being on first access; the namespace can't report "not found"),
 // which the Bun registry mirrors so the local, dependency-free server has
 // identical semantics.
+/**
+ * `io()` on the REAL runtime, which is the only place the second storage seam is proven.
+ *
+ * Both halves of `IoStore` are exercised here and nowhere else: on Bun a rooted `FileIoStore`
+ * (`$MOGWAI_IO_DIR`), inside a Durable Object an **R2 bucket binding** — the thing
+ * `outstanding-work.md` used to call impossible ("`io().write()` needs a filesystem a DO does not
+ * have"). Neither is reachable from a unit test: R2 exists only under workerd, and the DO reads the
+ * binding off its own env. So this test is what says the CF write side runs at all, rather than
+ * merely type-checking.
+ *
+ * Both formats, because they have different shapes: GraphSON is one document, CSV is two.
+ */
+function ioContract(getOrigin: () => string) {
+  describe('io', () => {
+    const graphUrl = (id: string) => `${getOrigin()}/gremlin/${id}`;
+    const counts = async (id: string) => (await (await fetch(graphUrl(id))).json()) as any;
+
+    test('a graph dumps itself out and reads back into another — GraphSON and CSV', async () => {
+      // One prefix per run: the io namespace is per-DEPLOYMENT (one bucket / one directory), not per
+      // graph, and `wrangler dev` persists its local bucket across runs.
+      const stamp = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+      const conns = new Map<string, InstanceType<typeof DriverRemoteConnection>>();
+      const g = (id: string) => {
+        if (!conns.has(id)) conns.set(id, new DriverRemoteConnection(graphUrl(`io-${stamp}-${id}`)));
+        return traversal().with_(conns.get(id)!);
+      };
+      try {
+        await g('src').addV('person').property('name', 'marko').property('age', 29).iterate();
+        await g('src').addV('person').property('name', 'vadas').property('age', 27).iterate();
+        await g('src').V().has('name', 'marko').as('a').V().has('name', 'vadas')
+          .addE('knows').from_('a').property('weight', 0.5).iterate();
+
+        await g('src').io(`${stamp}/dump.json`).write().iterate();
+        await g('json').io(`${stamp}/dump.json`).read().iterate();
+        expect(await counts(`io-${stamp}-json`)).toMatchObject({ vertexCount: 2, edgeCount: 1 });
+
+        // CSV writes TWO documents at derived keys; each is an ordinary readable path, vertices first.
+        await g('src').io(`${stamp}/dump.csv`).write().iterate();
+        await g('csv').io(`${stamp}/dump-vertices.csv`).read().iterate();
+        await g('csv').io(`${stamp}/dump-edges.csv`).read().iterate();
+        expect(await counts(`io-${stamp}-csv`)).toMatchObject({ vertexCount: 2, edgeCount: 1 });
+
+        // Not vacuous about WHAT came back: the typed property survives both formats.
+        expect(await g('json').V().has('name', 'marko').values('age').toList()).toEqual([29]);
+        expect(await g('csv').V().has('name', 'marko').values('age').toList()).toEqual([29]);
+      } finally {
+        for (const c of conns.values()) await c.close();
+      }
+    }, 40_000);
+  });
+}
+
 function managementContract(getOrigin: () => string) {
   describe('management', () => {
     const graphUrl = (id: string) => `${getOrigin()}/gremlin/${id}`;

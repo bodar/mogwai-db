@@ -3,6 +3,7 @@ import { IO_SERVICE_NAME } from '../spi/types.ts';
 import type { IoStore } from '../../iostore.ts';
 import type { GraphStore } from '../../storage.ts';
 import { loadGraphson, writeGraphson } from '../../formats/graphson.ts';
+import { csvPaths, loadCsv, writeCsv } from '../../formats/csv.ts';
 
 // ---------- mogwai.io — what io() desugars to (async, Barrier, INTERNAL) ----------
 //
@@ -48,14 +49,20 @@ function pathOf(params: CallParams): string {
 const READER_KEY = '~tinkerpop.io.reader';
 const WRITER_KEY = '~tinkerpop.io.writer';
 
-/** The format a path implies. TinkerPop's own extensions, so `.json`/`.xml`/`.kryo` name the same
- *  three formats the reference provider resolves them to. */
+/** The formats this service serves. */
+type Codec = 'graphson' | 'csv';
+
+/** The format a path implies. `.json`/`.xml`/`.kryo` are TinkerPop's own extensions, so they name the
+ *  same three formats the reference provider resolves them to; `.csv` is ours to define, since neither
+ *  TinkerPop nor its `IO` enum has a CSV format at all (plan doc §3 — the io namespace is the
+ *  server's). */
 function formatOf(path: string): string {
   const ext = path.slice(path.lastIndexOf('.')).toLowerCase();
   if (ext === '.json') return 'graphson';
+  if (ext === '.csv') return 'csv';
   if (ext === '.xml') return 'graphml';
   if (ext === '.kryo') return 'gryo';
-  throw new Error(`io("${path}"): unrecognized format "${ext}" — only typed GraphSON (.json) is supported`);
+  throw new Error(`io("${path}"): unrecognized format "${ext}" — supported: typed GraphSON (.json), Neptune/Neo4j CSV (.csv)`);
 }
 
 /** Which codec serves this call: the DECLARED format if `.with(IO.reader|IO.writer, …)` named one,
@@ -65,16 +72,17 @@ function formatOf(path: string): string {
  *     lossier than CSV, and Workers has no XML DOM to parse it with anyway.
  *   • Gryo is a genuine wall: JVM serialization, not reimplementable without a dependency that
  *     does not exist.
- *  See docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md §4. */
-function codecFor(path: string, params: CallParams, direction: IoDirection): 'graphson' {
+ *  See docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md §4. */
+function codecFor(path: string, params: CallParams, direction: IoDirection): Codec {
   const declared = params[direction === 'read' ? READER_KEY : WRITER_KEY];
   const format = typeof declared === 'string' ? declared : formatOf(path);
   if (format === 'graphson') return 'graphson';
+  if (format === 'csv') return 'csv';
   if (format === 'graphml')
     throw new Error(`io("${path}"): GraphML is not supported — its attribute types cannot carry date/uuid/nested/meta-property values. Use typed GraphSON (.json)`);
   if (format === 'gryo')
     throw new Error(`io("${path}"): Gryo is not supported — it is JVM serialization. Use typed GraphSON (.json)`);
-  throw new Error(`io("${path}"): unrecognized format "${format}" — only typed GraphSON (.json) is supported`);
+  throw new Error(`io("${path}"): unrecognized format "${format}" — supported: typed GraphSON (.json), Neptune/Neo4j CSV (.csv)`);
 }
 
 /** The io service. `apply` returns NO rows in both directions, which is already the right answer:
@@ -93,11 +101,26 @@ export const createIoService = (io: IoStore, store: GraphStore | undefined): Ser
     apply: async () => {
       const path = pathOf(params);
       const direction = directionOf(params);
-      codecFor(path, params, direction);   // format check FIRST, so an unsupported one costs no io
+      const codec = codecFor(path, params, direction);   // format check FIRST, so an unsupported one costs no io
       if (!store)
         throw new Error(`io("${path}"): this compile has no graph store behind it (io() needs the executor's data plane)`);
-      if (direction === 'read') loadGraphson(store, new TextDecoder().decode(await io.read(path)));
-      else await io.write(path, new TextEncoder().encode(writeGraphson(store)));
+      if (direction === 'read') {
+        const document = new TextDecoder().decode(await io.read(path));
+        if (codec === 'graphson') loadGraphson(store, document);
+        // CSV is TWO documents (a vertex file and an edge file cannot share a header), so a read takes
+        // ONE of them and the header says which — load the vertex file first, then the edge file, whose
+        // endpoints resolve against the vertices already in the graph.
+        else loadCsv(store, document);
+      } else if (codec === 'graphson') {
+        await io.write(path, new TextEncoder().encode(writeGraphson(store)));
+      } else {
+        // …and a WRITE has to produce both halves, so it emits them at the two derived keys `csvPaths`
+        // names. They are ordinary readable paths, so the round trip is two `read()`s.
+        const keys = csvPaths(path);
+        const dump = writeCsv(store);
+        await io.write(keys.vertices, new TextEncoder().encode(dump.vertices));
+        await io.write(keys.edges, new TextEncoder().encode(dump.edges));
+      }
       return [];
     },
   }),

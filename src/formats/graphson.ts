@@ -1,6 +1,6 @@
 // TYPED GraphSON, the line-oriented ADJACENCY form — reader and writer.
 //
-// Design: docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md §4/§4b/§4c. This one format carries
+// Design: docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md §4/§4b/§4c. This one format carries
 // three jobs: it is what `io("…json").read()` consumes, it is the lossless export/backup path, and it
 // is the fast seed (the reference graphs load from these files in the pinned submodule).
 //
@@ -31,10 +31,11 @@
 import { BulkLoader, type BulkEdge, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
 import {
-  BigDecimal, Duration, fitsSafeInteger, gremlinTypeOf, valueNodeFromStored,
+  BigDecimal, Duration, exactInteger, gremlinTypeOf, valueNodeFromStored,
   type CanonicalType, type MapEntryType, type TypeNode, type ValueNode,
 } from '../gremlin/types.ts';
-import { bindChunks, keysetPages, placeholders } from '../rowbatch.ts';
+import { keysetPages } from '../rowbatch.ts';
+import { groupByOwner, rowsForOwners } from './drain.ts';
 
 /**
  * GraphSON's `@type` names → our canonical type vocabulary, 17 for 17 (plan doc §4b).
@@ -166,7 +167,7 @@ function scalarOf(type: CanonicalType, raw: unknown): unknown {
     // A g:Int64 is both a big number's type AND the type an ELEMENT ID uses, so it narrows to the
     // smallest exact carrier: a JS number while it fits ±2^53 (which is what an id needs, and what
     // `storedScalar` would produce anyway), a bigint only when the digits genuinely exceed it.
-    case 'long': return typeof raw === 'string' ? longCarrier(raw) : raw;
+    case 'long': return typeof raw === 'string' ? exactInteger(raw) : raw;
     case 'bigdecimal': return BigDecimal.from(String(raw));
     case 'duration': return graphsonDuration(String(raw));
     // Internally a datetime is epoch-millis (gremlin/types leafStore, and the `datetime('…')` literal).
@@ -175,24 +176,16 @@ function scalarOf(type: CanonicalType, raw: unknown): unknown {
   }
 }
 
-/** Digits → the narrowest exact carrier for a 64-bit integer. */
-function longCarrier(digits: string): number | bigint {
-  const b = BigInt(digits);
-  return fitsSafeInteger(b) ? Number(b) : b;
-}
-
-/** ISO-8601 `PnDTnHnMn.nS` (what `gx:Duration` writes) → our Duration carrier. Total-nanos digits are
- *  accepted too, since that is how we render one. */
+/** ISO-8601 `PnDTnHnMn.nS` (what `g:Duration` writes) → our Duration carrier. Total-nanos digits are
+ *  accepted too, since that is how we STORE one, so a value that has been through our own storage
+ *  reads back either way. The ISO half is `Duration.fromIso` — one parser, shared with CSV. */
 function graphsonDuration(text: string): Duration {
   if (/^-?\d+$/.test(text)) return Duration.from(text);
-  const m = /^(-)?P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/.exec(text);
-  if (!m) throw new Error(`GraphSON: unparseable gx:Duration "${text}"`);
-  const [, neg, d, h, min, sec] = m;
-  const seconds = BigInt(d ?? 0) * 86_400n + BigInt(h ?? 0) * 3_600n + BigInt(min ?? 0) * 60n
-    + BigInt(Math.trunc(Number(sec ?? 0)));
-  const nanos = Math.round((Number(sec ?? 0) % 1) * 1e9);
-  const total = seconds * Duration.NANOS_PER_SEC + BigInt(nanos);
-  return Duration.fromTotalNanos(neg ? -total : total);
+  try {
+    return Duration.fromIso(text);
+  } catch {
+    throw new Error(`GraphSON: unparseable g:Duration "${text}"`);
+  }
 }
 
 /** An element id as the loader wants it: a number stays a rowid, anything else becomes a `uid`. */
@@ -332,23 +325,6 @@ const typed = (type: CanonicalType | null, value: unknown): unknown => {
   return { '@type': name, '@value': value };
 };
 
-/** ISO-8601 for `g:Duration` (`PT2M3.000456789S`) — the spelling the corpus fixtures use and the one
- *  `graphsonDuration` reads back. A negative duration writes its components negated, matching
- *  `negative-duration-v4.json` (`PT-2M-3S`). */
-export function isoDuration(d: Duration): string {
-  const total = d.totalNanos();
-  if (total === 0n) return 'PT0S';
-  const neg = total < 0n;
-  const abs = neg ? -total : total;
-  const secs = abs / Duration.NANOS_PER_SEC;
-  const nanos = abs % Duration.NANOS_PER_SEC;
-  const h = secs / 3600n, m = (secs % 3600n) / 60n, s = secs % 60n;
-  const sign = neg ? '-' : '';
-  const frac = nanos === 0n ? '' : `.${nanos.toString().padStart(9, '0').replace(/0+$/, '')}`;
-  const parts = [h ? `${sign}${h}H` : '', m ? `${sign}${m}M` : '', s || nanos ? `${sign}${s}${frac}S` : ''];
-  return `PT${parts.join('')}`;
-}
-
 /** A stored ValueNode → its GraphSON encoding. The inverse of `graphsonValue`, and the reason the
  *  writer needs no knowledge of the SQL row: `valueNodeFromStored` already reconstructs the typed tree
  *  from `(value, vtype)`, so this walks a value tree and nothing else. */
@@ -372,7 +348,7 @@ function leafJson(type: CanonicalType | null, stored: unknown): unknown {
     // A long past 2^53 is stored as decimal TEXT (coerceBindValue); within range it is a number.
     case 'long': return typeof stored === 'string' ? stored : stored;
     // Stored as total nanos (TEXT) / epoch millis; GraphSON wants ISO-8601 for both.
-    case 'duration': return isoDuration(Duration.from(String(stored)));
+    case 'duration': return Duration.from(String(stored)).toIso();
     case 'datetime': return new Date(Number(stored)).toISOString();
     default: return stored;
   }
@@ -391,17 +367,6 @@ const VALUE_AS_TEXT = "CASE WHEN vtype IN ('list','map','set') THEN json(value) 
 
 interface PropRow { id: number; owner: number; key: string; value: unknown; vtype: string | null; meta: string | null }
 interface EdgeRow { id: number; uid: string | null; src: number; tgt: number; label: string; owner: number }
-
-/** Group rows by their owner id — the per-page join the drain does in JS rather than in SQL, so every
- *  statement stays one fixed shape over a chunked id list. */
-function groupByOwner<T extends { owner: number }>(rows: readonly T[]): Map<number, T[]> {
-  const out = new Map<number, T[]>();
-  for (const r of rows) {
-    const list = out.get(r.owner);
-    if (list) list.push(r); else out.set(r.owner, [r]);
-  }
-  return out;
-}
 
 /** `{key: <typed value>}` for an edge's properties. */
 const edgePropsJson = (rows: readonly PropRow[]): Record<string, unknown> =>
@@ -447,13 +412,6 @@ function incidenceJson(
     const list = out[e.label];
     if (list) list.push(entry); else out[e.label] = [entry];
   }
-  return out;
-}
-
-/** Read rows for a set of owner ids, chunked so no statement's bind list scales with the page size. */
-function rowsForOwners<T>(store: GraphStore, sql: (ph: string) => string, ids: readonly number[]): T[] {
-  const out: T[] = [];
-  for (const chunk of bindChunks(ids)) out.push(...store.query<T>(sql(placeholders(chunk.length)), chunk));
   return out;
 }
 

@@ -4,7 +4,7 @@
 // (https://developers.cloudflare.com/durable-objects/platform/limits/). `bun:sqlite`'s bind cap is
 // 65,535 and its text cap is far higher, so a bind list whose length scales with ROW COUNT passes
 // every test here and fails only in production. Two shipped paths breached it when this was written
-// (`g.V().drop()` and `landForeignElements`) — see docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md
+// (`g.V().drop()` and `landForeignElements`) — see docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md
 // §1c/§1d — and nothing in the suite could see either, because the suite runs on Bun.
 //
 // So this is the instrument that converts a DO-only wall into a Bun-visible failure. It sits at the

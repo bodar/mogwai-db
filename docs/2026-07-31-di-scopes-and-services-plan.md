@@ -1,7 +1,7 @@
 # Dependencies vs arguments: a request tier, and services in DI
 
 **Status: COMPLETE — steps 1-6 landed 2026-07-31.** Origin: phase 5 of
-`2026-07-31-bulk-transfer-and-io-substrate-plan.md` needed `io().read()` to reach a `GraphStore` and an
+`archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md` needed `io().read()` to reach a `GraphStore` and an
 `IoStore`, and the barrier contribution's signature had nowhere to put them. The first answer was to
 widen the signature into a context object. **That was the wrong shape**, and noticing why turned a
 one-signature question into a consolidation this doc scopes: the project already has a DI mechanism and
@@ -189,7 +189,7 @@ This is a **behaviour-preserving refactor**: no traversal changes its answer, so
    named a phase, and it read as a near-synonym of the `params` beside it.
 6. ~~**Then** phase 5 of the bulk-transfer plan lands on top: `IoStore` in `AppScope`, an `io` service
    reading it, `io()` desugaring to a `call()`.~~ **Landed** — see
-   `2026-07-31-bulk-transfer-and-io-substrate-plan.md` §3. It went exactly as §3 predicted: `io()`
+   `archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md` §3. It went exactly as §3 predicted: `io()`
    needed **no contract change at all**, because `createIoService(app.io, app.store)` reads its
    dependencies like every other service and `apply(rows)` never widened.
    **One placement decision was REVERSED**, and the reason is worth keeping: §4.5 put `store` in the

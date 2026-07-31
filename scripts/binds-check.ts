@@ -7,7 +7,7 @@
  * A Durable Object rejects a query carrying more than 100 bound parameters (src/cf-limits.ts).
  * `bun:sqlite` accepts 65,535, so the whole suite is green on a statement that hard-fails on the one
  * runtime we ship to — which is how TWO shipped paths came to breach it
- * (docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md §1c/§1d). The fix was `src/rowbatch.ts`;
+ * (docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md §1c/§1d). The fix was `src/rowbatch.ts`;
  * this is the gate that stops the idiom coming back, and the root CLAUDE.md states it as a rule:
  * *never write `ids.map(() => '?')`*.
  *

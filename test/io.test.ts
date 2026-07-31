@@ -116,6 +116,39 @@ describe('io().write() over the real stack', () => {
   });
 });
 
+describe('io() over CSV — one file in, two files out', () => {
+  test('write() emits the vertex and edge documents at the derived keys, and each reads back', async () => {
+    // The format's shape, not a choice: a vertex file and an edge file have different system columns,
+    // so they cannot share a header. The derived keys are ordinary readable paths (csvPaths), which is
+    // what keeps the round trip two plain read()s.
+    const dir = ioDir();
+    const store = new FileIoStore(dir);
+    const mgr = managerOn(dir);
+    const src = mgr.executor('src');
+    await src.framedAsync('g.io("modern.json").read()', {});
+    expect(await src.framedAsync('g.io("out/graph.csv").write()', {})).toEqual([]);
+    expect(await store.list('out/')).toEqual(['out/graph-edges.csv', 'out/graph-vertices.csv']);
+
+    const round = mgr.executor('round');
+    await round.framedAsync('g.io("out/graph-vertices.csv").read()', {});
+    await round.framedAsync('g.io("out/graph-edges.csv").read()', {});
+    const [count] = await round.framedAsync('g.V().count()', {});
+    expect(Number(await decode(count.buf))).toBe(6);
+    const [edges] = await round.framedAsync('g.E().count()', {});
+    expect(Number(await decode(edges.buf))).toBe(6);
+    const names = await decodeAll((await round.framedAsync('g.V().values("name")', {})).map((f) => f.buf));
+    expect(names.sort()).toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+  });
+
+  test('a DECLARED writer selects CSV over the extension', async () => {
+    const dir = ioDir();
+    const mgr = managerOn(dir);
+    await mgr.executor('src').framedAsync('g.io("modern.json").read()', {});
+    await mgr.executor('src').framedAsync('g.io("out/dump.txt").with(IO.writer, "csv").write()', {});
+    expect(await new FileIoStore(dir).list('out/')).toEqual(['out/dump-edges.txt', 'out/dump-vertices.txt']);
+  });
+});
+
 describe('io() fails closed', () => {
   test('with no binding, naming what is missing rather than doing nothing', async () => {
     const ex = new BunGraphManager(undefined, standardRegistry).executor('g');
@@ -127,7 +160,7 @@ describe('io() fails closed', () => {
     const ex = managerOn(ioDir()).executor('g');
     await expect(ex.framedAsync('g.io("x.xml").read()', {})).rejects.toThrow(/GraphML is not supported/);
     await expect(ex.framedAsync('g.io("x.kryo").read()', {})).rejects.toThrow(/Gryo is not supported/);
-    await expect(ex.framedAsync('g.io("x.csv").read()', {})).rejects.toThrow(/unrecognized format "\.csv"/);
+    await expect(ex.framedAsync('g.io("x.parquet").read()', {})).rejects.toThrow(/unrecognized format "\.parquet"/);
   });
 
   test('a DECLARED reader overrides the extension, in both directions', async () => {

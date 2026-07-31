@@ -4,7 +4,7 @@ The de-duplicated index of open work across the `docs/` corpus. **Each item sets
 why, where to start — not a spec.** The linked doc holds the rationale; the picking agent does the
 validation and design. Live per-step capability: `feature-support-matrix.md`.
 
-**Refreshed** 2026-07-31 · **L3 1650 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
+**Refreshed** 2026-07-31 · **L3 1652 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
 collision is expected, see won't-do) · census **0 `crashed`, 4 `nondet`** (`sample()` landed) ·
 `known.ts` **1 entry** — repeat's two body routes disagree on a positional window, found by the
 `repeatBodyExpansion` switch on its first sweep ·
@@ -33,16 +33,17 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-**Ranked entry point.** Numbers are IDs, not an order. **30**'s phase 0 (a ~20-line `Sql` decorator
-that makes two CF-only hard failures reproduce on Bun) → **2** → **21**'s T4 → **29** → **3**'s
+**Ranked entry point.** Numbers are IDs, not an order. **2** → **21**'s T4 → **29** → **3**'s
 `times(n)` unroll. **28** landed and was 3's stated precondition, so the unroll is unblocked;
 **17**'s cheap half landed and its remainder is the architectural current-object-aggregate
-authority, a bigger question than its neighbours.
+authority, a bigger question than its neighbours. (Item **30** headed this list and is now DELETED —
+all eight phases of its plan landed, so the two CF-only wrong-answer walls are closed and the bulk
+substrate they needed is built.)
 
-> **CLAIMED, 2026-07-31 — two agents are on this trunk.** Item **30** and the whole write /
-> bulk-import-export cluster it pulls in (`io()`, seeding, the chunked loader, and the write-path
-> items that route through them — **10**, **16**, **0b**, P2·11's import-a-graph, and the `write.ts`
-> row-at-a-time entry in Internal debt) belong to the OTHER agent. Do not pick them up; take the next
+> **CLAIMED, 2026-07-31 — two agents are on this trunk.** Item 30 itself has LANDED and is deleted
+> (`io()`, seeding, the chunked loader, both formats), but the write / bulk-import-export cluster it
+> pulls in still belongs to the OTHER agent: **10**, **16**, **0b**, P2·11's import-a-graph, and the
+> `write.ts` row-at-a-time entry in Internal debt. Do not pick them up; take the next
 > item in the ranking instead. This note is transient — delete it when the claim lapses.
 > Already landed on trunk and NOT part of that claim, but in the same file: item 22's merge
 > validation (`steps/write/validate.ts`, `MergeRole`, `validateNoOverrides`) touched `write.ts`
@@ -60,8 +61,12 @@ sweep found one real disagreement (now diagnosed in `known.ts`) where nothing co
 
 **What that leaves.** No item below is a known wrong answer except 20's residuals and 21's T4 — the
 rest fail closed. Read that as the index's centre of gravity moving from correctness to ceiling.
-**One exception, and it is new: item 30 is a hard FAILURE, not a fail-closed deferral, and only on
-Cloudflare** — which is why nothing above found it. Every level of the ladder runs on Bun.
+**The one exception is now CLOSED: item 30's two breaches were hard FAILURES rather than fail-closed
+deferrals, and only on Cloudflare** — which is why nothing in the ladder found them, since every level
+of it runs on Bun. All eight phases landed 2026-07-31, so what is left of that thread is two
+instruments that keep the class from returning: `mise run binds` statically, and
+`mise run test:cf-limits` at runtime (green, and green BEFORE the fixes — the suite never reaches the
+cardinality, which is the measurement that says the ladder could not have found this).
 
 22. **Validation the spec MANDATES and we do not perform — the write family LANDED; 9 scenarios of
    three unrelated causes are left.** 60 L3 scenarios fail AT the error-assertion step because we
@@ -72,42 +77,6 @@ Cloudflare** — which is why nothing above found it. Every level of the ladder 
    one family — **6 = a string step in `Scope.local` over a LIST passes the list through** (the same
    missing "member count" authority as item 17's `tail`), **2 = `groupCount()` taking two `by()`s**
    (a modulator-arity rule, item 23's ground), **1 = `property(single,k,traversal)`**. *Low each.*
-
-30. **The DO's 100-bound-parameter cap is breached by two SHIPPED paths — and the fix is the one
-   primitive five other threads want.** Cloudflare DO SQLite allows **max 100 bound parameters per
-   query** (documented limit). Measured against this tree: `landForeignElements` (`tail/foreign.ts`)
-   binds 4 cells per federated row, so **a federated call returning >25 vertices cannot run on CF**;
-   `compileDrop`'s `run` (`write/write.ts:165-186`) binds `[...ids, ...ids]`, so **`g.V().drop()`
-   fails past 50 vertices** (16,098 binds on grateful-dead), and `deleteFtsForOwners`
-   (`fts-index.ts:95`) past 99 edges. `jsonbArrayOf` (`plan/plan.ts:154`) caps the federated
-   bind-join at 100 keys. **Nothing catches any of it — the whole suite runs on Bun**, where the
-   limit is 65,535 (and it throws rather than mis-binding, so the Bun wall is loud and the CF one is
-   silent). **Start with the CF-parity `Sql` decorator** (>100 binds / >100KB throws): ~20 lines that
-   make every DO-only wall a Bun failure — that is item 11's "CF-parity test", and it is mispriced
-   there at Low-Med. Then land the chunked loader those paths route through, which is ALSO the
-   substrate for bulk import/export, `io()`, and seeding: **grateful-dead seeds in 143ms vs 5,918ms
-   today, every statement ≤100 binds** (41×; only 17% of the current cost is inside SQLite at all).
-   A bind-count static gate (`mise run binds`) is what stops the class recurring. **High** — two live
-   production-runtime walls.
-   **Format set is DECIDED, do not re-widen it** (2026-07-31): **TYPED GraphSON adjacency — read v3
-   AND v4, write v4** + Neptune/Neo4j CSV for interop. **No homegrown format and nothing XML** — GraphML is a
-   refusal, its `attr.type` being more type-lossy than CSV anyway. **Typed GraphSON is ALSO the
-   lossless export/backup path — verified 17-for-17 against `CanonicalType` in `gremlin-core` at the
-   pinned gitlink**, plus nesting with per-leaf types, typed `g:Map` keys, and meta-properties
-   (`tinkerpop-crew-v3.json` nests them inside a VertexProperty, ids and all). So ONE codec serves
-   `io()`, seeding and backup, and no homegrown dump is needed — an earlier draft proposed one and it
-   was unnecessary. CSV is then interop-ONLY, and its losses (6 of our 17 scalars, one flat `[]`
-   level, `single|set`, no meta-properties — `gcrew` cannot round-trip it) stop mattering once it is
-   not the backup path. **`gcrew` round-tripping through GraphSON is the gate** that proves the type
-   channel survives a dump, **and `gzoo` is the gate for multi-label** — the v3→v4 delta is exactly
-   the vertex label (bare string vs array, 165→177 lines in the star-graph serializer), so a v3
-   WRITER would be lossy for the one graph that exercises the feature; reading v3 is non-optional
-   because every whole-graph corpus fixture is v3. **Write the LINE-ORIENTED adjacency form, not
-   `g:graph`** — `tinker-graph-v4.json`, the only whole-graph `-v4` file shipped, is the `g:graph`
-   document, which is not streamable, so the fixture on disk is the shape we do NOT want. Untyped
-   GraphSON v4 is a RESPONSE encoder — a different artefact, cannot carry `vtype` by definition, stays
-   where it is scoped. Plan §4/§4a/§4b/§4c.
-   → [bulk-transfer-and-io-substrate](./2026-07-31-bulk-transfer-and-io-substrate-plan.md)
 
 2. **Universal child-seam acceptance.** Element, scalar, list, count, branch, `repeat`,
    `as()`/`select(label)` and option-map bodies compose everywhere. **Two of the four things this item
@@ -370,9 +339,14 @@ Cloudflare** — which is why nothing above found it. Every level of the ladder 
 
 11. **Federation tail:** map-valued injection for mid-traversal federation (Med); async
     failure/timeout/retry policy (Low-Med); federated *traversal* via local scratch (Large). The
-    **CF-parity test** moved to item 30 and is no longer Low-Med — it is what finds the 100-bind
-    walls. **import-a-graph** and federated *materialize* are item 30's substrate too: the persist
-    path was always the one thing needing bulk-write machinery.
+    **CF-parity test landed** as `src/cf-limits.ts` + `mise run test:cf-limits` (it was mispriced here
+    at Low-Med: it is what makes a DO-only bind wall fail on Bun), and so did the bulk-write machinery
+    the persist path always needed. So **federated *materialize* is now UNBLOCKED and is this item's
+    next piece**: `call(federate,…)` returns detached rows, `BulkLoader` lands them, and its stated
+    blocker — cross-graph id collision — is `idPolicy: 'remap'`/`'renumber'` (a source id has no
+    meaning in the target, so it is kept as `uid` or dropped). **import-a-graph** is the same
+    machinery pointed at a document instead of a sibling graph, and `io().read()` already is it.
+    → [bulk-transfer-and-io-substrate](./archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md) §5/§7
 
 12. **Strategy completion tails** — `SubgraphStrategy(vertexProperties)` (6 scenarios),
     `PartitionStrategy` meta-properties + partition-aware upsert (7), nested-body descent. **Medium/Low.**
@@ -467,15 +441,14 @@ Each fails closed. Do only when a concrete scenario demands it.
 - **`repeat`/`match` emission order** — a recursive CTE can't window across iterations. *Low.*
 - **L3 ratchet hygiene.** `tags.ts` names which of three exclusion KINDS each tag is, and
   `runner-skips.test.ts` gates the kind that depends on someone else's code. **Do not descope
-  GraphComputer or the `io` source**: 4 of GraphComputer's 6 scenarios are the OLAP names item 8 will
-  serve (that exclusion should NARROW, not harden), and `io(...).read()` (6, in scope and failing) is a
-  real capability. **`io().write()` is NOT the wall this used to claim** — R2 bucket bindings are
-  reachable from inside a DO, so the sink has a home and the source/sink asymmetry dissolves. In-scope
-  is **2 of the 6** `Read.feature` scenarios (the `.json` GraphSON-adjacency pair). The other four are
-  both REFUSALS, of two different kinds: `.kryo` is a platform wall (JVM serialization, no dependency
-  available), `.xml` is a **format decision** — no XML, taken 2026-07-31 because GraphML's `attr.type`
-  is more type-lossy than CSV *and* Workers has no `DOMParser`. That makes `tags.ts` carry its first
-  format-decision exclusion. Item 30's `IoStore` seam. *Low.*
+  GraphComputer**: 4 of its 6 scenarios are the OLAP names item 8 will serve, so that exclusion should
+  NARROW, not harden. **The `io` source is now LANDED, not a descoping question** — the 2 in-scope
+  `Read.feature` scenarios (the `.json` GraphSON-adjacency pair) pass, and `io().write()` runs on a real
+  R2 binding inside a DO, so the source/sink asymmetry that line used to claim is gone. The other four
+  scenarios are REFUSALS of two different kinds and must be read as such rather than as a gap: `.kryo`
+  is a platform wall (JVM serialization, no dependency available), `.xml` is a **format decision** — no
+  XML, taken 2026-07-31 because GraphML's `attr.type` is more type-lossy than CSV *and* Workers has no
+  `DOMParser`. That makes `tags.ts` carry its first format-decision exclusion. *Low.*
 
 ---
 
@@ -611,12 +584,17 @@ deferral clusters in 5c instead.
 - **[graph-algorithms](./2026-07-24-graph-algorithms-plan.md)** — build spec for P2·8.
 - **[conformance-structural-bets](./2026-07-12-conformance-structural-bets.md)** — strategic unlock map.
 - **[cross-do-federation-prior-art](./2026-07-13-cross-do-federation-prior-art.md)** — federation prior-art.
-  Its 2026-07-21 addendum's deferred bulk capability is now item 30's plan; the `ATTACH` correction stands.
-- **[bulk-transfer-and-io-substrate](./2026-07-31-bulk-transfer-and-io-substrate-plan.md)** — item 30's
-  build spec. **Also the measured refutation of widening the primary key** (a random 52-bit `INTEGER`
+  Its 2026-07-21 addendum's deferred bulk capability was item 30's plan and is now BUILT; the `ATTACH`
+  correction stands.
+- **[bulk-transfer-and-io-substrate](./archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md)** —
+  closed (all eight phases; item 30 was deleted with it), and kept for three durable things.
+  **The measured refutation of widening the primary key** (a random 52-bit `INTEGER`
   costs 2.8× on the 3-hop hot path, a `TEXT` uuid 5× and 7× on disk; `uid TEXT UNIQUE` already IS the
   global-identity slot; and `coerceBindValue` makes >2^53 unrepresentable as an integer at our own bind
-  seam) — read §7 before proposing an id change.
+  seam) — read §7 before proposing an id change. **The DECIDED format set** — typed GraphSON adjacency
+  (read v3+v4, write v4) plus Neptune/Neo4j CSV for interop, no homegrown format and nothing XML; §4/§4b
+  is why re-widening it buys no capability, and §4d is CSV's loss table split into declared widenings
+  and refusals. **And the two instruments** that keep the 100-bind class from returning (§2).
 - **[path-tracking-prior-art](./2026-07-12-path-tracking-prior-art.md)** — path prior-art for P3 tails.
 - **[wire-and-storage-facts](./2026-07-25-wire-and-storage-facts.md)** — Map.Entry framing + MapStream.
 - **[shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md)** — the shape/type

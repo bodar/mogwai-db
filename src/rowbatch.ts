@@ -1,6 +1,6 @@
 // RowBatch — the bind-bounded way to move N rows across the `Sql` seam.
 //
-// Design: docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md §2. The one rule everything here
+// Design: docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md §2. The one rule everything here
 // exists to keep: **no statement's bind list is a function of row count.** A Durable Object rejects
 // a statement past 100 bound parameters, so `ids.map(() => '?')` is a production wall that no Bun
 // test can see (src/cf-limits.ts is the instrument that makes it visible; this module is the

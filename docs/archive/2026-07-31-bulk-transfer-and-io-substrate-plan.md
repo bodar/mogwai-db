@@ -1,16 +1,18 @@
 # Bulk transfer + the `io()` substrate — one primitive under five threads
 
-**Build status (2026-07-31):** phases **0, 1, 2, 3, 4, 5 and 7 have landed**. Every live wrong-answer wall on
+**Build status (2026-07-31): COMPLETE — every phase 0–7 has landed.** Every live wrong-answer wall on
 the production runtime is closed, `mise run binds` fails the build on the idiom, the bulk loader is
 gated table-by-table against the write path, the conformance host seeds its two GraphSON graphs through
 the reader (host startup 5.0s → 1.1s; ggrateful 4.4s → 0.14s; L3 unchanged at 1650), and the v4 writer
 round-trips modern/crew/sink/grateful-dead/**gzoo** canonically. **Phase 5 (`IoStore` + `io()`) landed
 on the DI consolidation** — the contract choice §3a opened is closed there, with no contract change.
-What is left is 6 (CSV interop). Two findings from building it
-are folded in below rather than appended: §5's "scratch relation, chunked" is **superseded** (a
-compiled read plan is ONE statement — see §5), and the whole-suite CF-parity run is **green** before
-any fix, which is itself the measurement that says why the ladder could not have found §1c/§1d (§2's
-gate section).
+**Phase 6 (CSV interop + `io().write()` to R2) landed last**; §4d is what building it found, and the
+one thing that was not foreseen is that CSV's two-file shape is also what exposed a real defect in the
+loader (an edge file arrives with no vertices beside it, which no earlier format did).
+Findings from the build are folded in below rather than appended: §5's "scratch relation, chunked" is
+**superseded** (a compiled read plan is ONE statement — see §5), and the whole-suite CF-parity run is
+**green** before any fix, which is itself the measurement that says why the ladder could not have found
+§1c/§1d (§2's gate section).
 
 **Status: research + build plan.** Origin: five separately-filed threads that turned out to be one
 missing primitive — the L3 `io()` exclusion, an R2/filesystem write side, import/export formats,
@@ -356,7 +358,7 @@ GraphML is a decision, which is a different claim.
 | format | direction | unlocks | verdict |
 |---|---|---|---|
 | **TYPED GraphSON adjacency (`.json`)** | read + write | 2 of 6 `io()` scenarios; **replaced `seed-graphson.ts` and the 5.9 s seed** ✅; **AND is the lossless export/backup path** (§4b) | **first, and it is now carrying three jobs.** A TinkerPop standard, not homegrown — the typed adjacency file (one vertex per line, embedded `inE`/`outE`), a *different artefact* from untyped GraphSON responses (§4a). **Read v3 AND v4, write v4** — decided 2026-07-31, and §4c has the measured delta (it is one branch, not two codecs). The reader already exists as `test/fixtures/seed-graphson.ts`; promote it from test fixture to a real reader emitting row batches instead of Gremlin strings |
-| **Neptune/Neo4j CSV-with-typed-headers** | read + write | **interop only** (`~id`,`~label`,`prop:type` / `:ID`,`:LABEL`,`:START_ID`) | **second.** Cross-vendor de-facto standard, RFC 4180, no deps. Lossy against our type channel, which is fine once it is not also the backup path — §4b |
+| **Neptune/Neo4j CSV-with-typed-headers** | read + write | **interop only** (`~id`,`~label`,`prop:type` / `:ID`,`:LABEL`,`:START_ID`) | **second, and BUILT** (`src/formats/csv.ts`, §4d). Cross-vendor de-facto standard, RFC 4180, no deps. Lossy against our type channel, which is fine once it is not also the backup path — §4b. Reads BOTH dialects, writes Neptune; the losses are split into declared widenings and refusals, never a silent drop |
 | ~~our compact typed dump~~ | — | — | **EXCLUDED — homegrown, and it turns out to be UNNECESSARY too.** Typed GraphSON already covers all 17 `CanonicalType`s, nesting, typed map keys and meta-properties — §4b |
 | ~~GraphML (`.xml`)~~ | — | 2 of 6 `io()` scenarios | **EXCLUDED — XML.** Two independent reasons, and the type one is the stronger: GraphML's `attr.type` admits only `boolean/int/long/float/double/string`, so it is **more** lossy than CSV (no date, no uuid, no nesting, no meta-properties). Separately, Workers has no `DOMParser` and `HTMLRewriter` is an HTML streaming transformer, not an XML DOM — so it would also be the only format here that is new *code* rather than new plumbing |
 | **Gryo / `.kryo`** | — | 2 of 6 `io()` scenarios | **a genuine wall.** JVM serialization; not reimplementable without a dependency, and no dependency exists. Fail closed naming the format |
@@ -461,7 +463,9 @@ level; its cardinality vocabulary is `single|set` where TinkerPop's is `single|l
 **no meta-property representation at all**, so `gcrew` cannot round-trip through it. None of that is
 our defect to fix — Neptune and Neo4j have the same limits natively, which is what makes the format
 interoperable in the first place. The rule is just: **a CSV export documents its lossy cases; a
-GraphSON export does not have any.**
+GraphSON export does not have any.** (**Built, and that list needed splitting rather than
+documenting** — five of those scalars widen to a DECLARED `String` and keep their text exactly, while
+`map`/nesting and meta-properties refuse outright. §4d·1 is why the difference is load-bearing.)
 
 `gcrew` round-tripping is therefore **phase 4's** gate (GraphSON), not phase 6's, and it is the one
 assertion that proves the type channel survives a dump.
@@ -555,6 +559,95 @@ that declares multi-label (item 19b). One reader with a label branch, one writer
    (every edge appears there exactly once, so nothing is lost), and `tinkerpop-sink-v3.json` is the
    fixture that would catch getting this wrong: its two self-loops appear as both `inE` and `outE` of
    the SAME vertex, so a reader that took both would double them.
+
+### 4d. CSV, as built — and the four things the plan did not have
+
+**Landed 2026-07-31 (`src/formats/csv.ts`, `test/csv.test.ts`).** The scope line held: it is interop
+only, GraphSON stayed the backup path, and no dependency was added (RFC 4180 is a ~30-line scanner).
+What the build settled that this section could not:
+
+1. **The loss table splits in TWO, and the boundary is whether the loss is VISIBLE IN THE FILE.** §4b
+   counted "6 of our 17 scalars" as one bucket; they are not one bucket, and treating them as one is
+   what would have made this format quietly wrong. Five of them — `bigint`, `bigdecimal`, `uuid`,
+   `char`, `duration` — have an exact TEXT rendering, so the writer declares the column `String` and
+   the text round-trips byte-exact; the only thing lost is the type TAG, and the header says so. That
+   is interop. The rest have no honest column at all: a **collection-valued property** (`list`/`map`/
+   `set`) and a **meta-property** would each have to invent a convention inside a standard format, and
+   reading one back would produce a DIFFERENT graph (a `list` VALUE and a multi-property are not the
+   same thing). Those **fail closed at header time**, before a row is drained, naming the element, the
+   key and GraphSON. So `gcrew` does not "round-trip lossily" through CSV — it refuses, which is the
+   only honest answer and is now the assertion.
+2. **Neo4j's header vocabulary is WIDER than Neptune's, so read-both is not just tolerance.** Neo4j
+   declares `char` and `duration` column types where Neptune has neither. An inbound Neo4j file
+   therefore keeps two types our own Neptune-shaped output has to widen — the asymmetry is the
+   dialects', not ours, and it is why the reader accepts both and the writer picks one. (Its
+   `point`/`time`/`localtime` have no canonical type here at all, so they fail closed as unknown
+   rather than landing as strings.)
+3. **RFC 4180 can carry the present/absent distinction every CSV graph format loses, for one boolean.**
+   Both vendors read a blank cell as "no value", which silently deletes an empty-STRING property on a
+   round trip. But `""` and a bare empty field are distinguishable in the SCANNER, so the reader keeps
+   that difference (`CsvField = string | null`) and the writer always quotes an empty string. A vendor
+   file's blank cell still reads as absent, because a vendor writing an empty string does not quote it.
+4. **A heterogeneous key gets ONE COLUMN PER TYPE**, not one widened column. A CSV header is per-file,
+   so `age:Int` on one vertex and `age:String` on another cannot share a cell; the header stays unique
+   because the type suffix differs, and each row fills only its own column. This is the point at which
+   an export stops being portable (both vendors key a property by NAME alone), but widening to `String`
+   would lose the type for every row that had one — a worse trade than a file only we can read back.
+
+Two shape facts that fall out of the format rather than out of a choice:
+
+- **Two files, and a write emits both.** A vertex file and an edge file have different system columns,
+  so they cannot share a header — which means `io("x.csv")` cannot be one document in both directions.
+  A **read** takes ONE file and detects which it is from the header (so a vendor export loads
+  unmodified, which is the direction that matters); a **write** emits both at the derived keys
+  `csvPaths` names (`graph.csv` → `graph-vertices.csv` + `graph-edges.csv`), and those are ordinary
+  readable paths, so the round trip is two plain `read()`s with nothing magic in between. The
+  derivation strips a trailing `-vertices`/`-edges` first, so it is idempotent on a key it produced.
+- **A CSV header needs the column set before the first row, which costs ONE statement, not a pre-pass.**
+  The distinct `(key, vtype)` pairs plus whether any single owner holds more than one instance of a
+  pair (which is what decides an `[]` array column) is one grouped SELECT per table. Everything after
+  the header still streams in keyset pages, so the drain stays bounded-memory and DO-legal.
+
+**And the defect CSV exposed in the loader, which is the phase's most valuable finding.** An edge FILE
+is the first thing to reach `BulkLoader` with no vertices beside it — a GraphSON adjacency line always
+carries its own vertex — so every edge lands in the pending-endpoint queue, which `flush` resolves
+AFTER the vertices. Two things were wrong there and neither could be reached before:
+
+- `assertNoCollisions` read `edgeRows` only, and a pending edge is not in `edgeRows` yet. So loading the
+  same edge file twice reported SQLite's raw `UNIQUE constraint failed: edges.id` instead of the message
+  that names `idPolicy` — the exact failure §7's fail-closed rule exists to prevent.
+- the pending path re-derived the edge's `uid` as `typeof edge.id === 'string' ? edge.id : null`,
+  ignoring the id POLICY that `idOf` had already applied. Under `'remap'` a pending edge silently lost
+  its provenance (a numeric source id should become a uid) and under `'renumber'` a string one kept an
+  id that policy says to drop. Fixed by carrying `idOf`'s own output on the queue rather than
+  recomputing it — the general lesson being that a value derived by a policy must be STORED, not
+  re-derived at the second use site.
+
+**Three things the SECOND format made shared rather than duplicated**, which is invariant 3 (§2)
+applied to the writers instead of to the loader: ISO-8601 duration text moved onto the `Duration`
+class itself (`fromIso`/`toIso` — every external format spells a duration that way, and a second
+parser is exactly the silent divergence the invariant is about); the ±2^53 "narrowest exact carrier"
+choice became `exactInteger` in the type vocabulary, next to the `fitsSafeInteger` bound it depends
+on; and the two helpers every whole-graph drain needs — a chunked owner-keyed read and its grouping —
+became `src/formats/drain.ts`. A re-derived bind-chunked read is how a DO-only 100-bind wall comes
+back, so that one is a gate concern and not tidiness.
+
+**And moving the duration parser found a latent GraphSON defect: a negative duration was WRITE-ONLY.**
+The writer negates the components (`PT-2M-3.5S`, matching `negative-duration-v4.json`) and the
+reader's own regex accepted only `(\d+)M` — so a value we emit was one our own reader refused. Every
+fixture and every phase-4 assertion used a positive duration, so neither the round-trip gate nor L3
+could see it; it surfaced only because a second format wanted the same parser. Now pinned in
+`test/graphson.test.ts`. The transferable part is the shape of the bug, not the regex: an
+**asymmetric** encoder/decoder pair whose test data only exercises the symmetric half.
+
+**`io().write()` on R2 is now EXECUTED, not merely reachable.** wrangler.jsonc declares the optional
+`IO` R2 binding, so `wrangler dev` provisions a local bucket, and the shared runtime contract
+(`test/contract.ts`) dumps a graph and reads it back **on workerd** — both formats, both directions.
+The Bun twin needed the same treatment for the contract to be symmetric: `startServer` gained
+`$MOGWAI_IO_DIR`, without which the Bun *production* entry point could not do io at all (only the
+in-process manager the unit tests build could). Neither half is reachable from a unit test — R2 exists
+only under workerd, and the DO reads the binding off its own env — so that contract test is the only
+thing that says the CF write side runs rather than merely type-checks.
 
 ---
 
@@ -701,14 +794,15 @@ Each phase lands green and is useful alone.
 | **2** ✅ | Fix §1d (`drop`) and §1c (`landForeignElements`, `within`) through `RowBatch` | done at 250–500 elements under the phase-0 store, which is what makes those tests gates rather than ordinary behaviour tests |
 | **3** ✅ | `mise run binds` static gate | at zero, fails the build (not a ratchet) — scoped to the IDIOM, because "is this bind list bounded?" is undecidable locally (§2) |
 | **4** ✅ | **Typed GraphSON reader (v3 + v4) and writer (v4)** over `RowBatch`, line-oriented adjacency form; conformance host seeds through it | L3 unchanged at 1650, ggrateful seeds in 0.14 s (statement count 98,198 → 1,482 is the deterministic half, so it is what the test asserts), census unchanged, the file's TYPES survive (the retired string-building fixture re-emitted a `g:Double` of 1.0 as an int), and **`gcrew` + `gzoo` + modern + sink + grateful-dead all round-trip canonically**. Two findings the plan had wrong are in §4c |
-| **5** | `IoStore` (Bun FS / CF R2 / L3 host mapping) + `io()` as a barrier service | the 2 `.json` `Read.feature` scenarios pass; `.xml` and `.kryo` fail closed naming the format; `tags.ts` reclassified (§4) |
-| **6** | Neptune/Neo4j CSV reader/writer (**interop only**); `io().write()` to R2 | round-trip through CSV for the types CSV *can* carry, with the lossy cases documented and asserted as lossy rather than silently wrong |
+| **5** ✅ | `IoStore` (Bun FS / CF R2 / L3 host mapping) + `io()` as a barrier service | the 2 `.json` `Read.feature` scenarios pass (**L3 1650 → 1652**); `.xml` and `.kryo` fail closed naming the format; `tags.ts` reclassified (§4). Landed on the DI plan, with no contract change — §3a |
+| **6** ✅ | Neptune/Neo4j CSV reader/writer (**interop only**); `io().write()` to R2 | modern (every type native) round-trips CANONICALLY through the two files — `vtype` and SQLite storage class included; the five widened scalars are asserted for exactly what they lose (the text survives, the type tag does not); a collection value and a meta-property REFUSE by name. `io()` reads and writes on workerd through a real R2 binding in the shared runtime contract. §4d |
 | **7** ✅ | remap pass (non-empty target, label re-interning, `uid` preservation) | load-into-non-empty round-trip — and the gate found a THIRD policy the plan did not anticipate, because `uid` is UNIQUE (below) |
-| — | federated *materialize* | scope after 5–7 land |
+| — | federated *materialize* | **the only follow-on left, and it is now UNBLOCKED** — its blocker was §7's id remapping, which phase 7 landed. Not part of this plan; it belongs to the federation tail (`outstanding-work.md` item 11) |
 
 Phases 0–3 are the ones that fix live defects. Phases 4–7 are the capability. **If only part of this
 gets built, build 0–3** — they are small, they are gates, and they close two wrong-answer walls on
-the production runtime.
+the production runtime. (All eight landed, so that ordering advice is now only a record of how the
+phases were priced.)
 
 ---
 
@@ -760,6 +854,8 @@ Recorded so they get swept rather than rediscovered:
 - **`outstanding-work.md:395`** — *"`io().write()`, which needs a filesystem a DO does not have"* is
   **wrong**: R2 bindings are reachable from inside a DO, and an object store is a better fit than a
   filesystem for a whole-graph dump. The `io()` source/sink asymmetry in that line dissolves.
+  **Now settled by execution rather than by citation** (§4d): the shared runtime contract writes a
+  graph out and reads it back inside a Durable Object, through a real R2 binding under `wrangler dev`.
 - **`outstanding-work.md:298` (item 11)** — "CF-parity test on the DO harness *(Low-Med)*" is
   mispriced. It is the gate that catches §1c and §1d, both live wrong-answer/hard-failure walls on
   the production runtime. It is phase 0 here.

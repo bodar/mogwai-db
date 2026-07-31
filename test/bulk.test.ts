@@ -8,7 +8,7 @@ import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { Duration } from '../src/gremlin/types.ts';
 
 // The bulk loader's gate: **a graph landed in batches is byte-for-byte the graph the write
-// traversals produce.** (docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md phase 1.)
+// traversals produce.** (docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md phase 1.)
 //
 // Why this test and not a behavioural one. Today's seed is self-validating: it goes through the same
 // parse → compile → execute path a client uses, so a broken write path cannot produce a correct

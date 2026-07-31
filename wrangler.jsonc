@@ -8,5 +8,14 @@
   "durable_objects": {
     "bindings": [{ "name": "GRAPH", "class_name": "GraphDatabase" }]
   },
+  // Where io() reads and writes whole-graph documents (src/cloudflare/R2IoStore.ts). Read INSIDE the
+  // Durable Object — a binding is a property of a DO's env exactly as it is a Worker's — so a
+  // whole-graph read/write happens where the graph lives and only bytes cross a seam.
+  //
+  // OPTIONAL by design: `Env.IO` is `R2Bucket | undefined`, and with the binding removed io() fails
+  // closed naming it (NO_IO_STORE) rather than silently doing nothing. Declared here so `wrangler dev`
+  // provisions a LOCAL bucket, which is what lets the shared runtime contract exercise the R2 half of
+  // the seam on workerd instead of only the filesystem half on Bun.
+  "r2_buckets": [{ "binding": "IO", "bucket_name": "mogwai-io" }],
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GraphDatabase"] }]
 }

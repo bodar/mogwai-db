@@ -321,6 +321,22 @@ describe('the round trip preserves what the type channel carries', () => {
     expect(document).toContain('{"@type":"g:DateTime","@value":"2024-01-01T00:00:00.000Z"}');
   });
 
+  test('a NEGATIVE duration round-trips — it was WRITE-ONLY until the ISO parser moved onto Duration', () => {
+    // The writer negates the COMPONENTS (`PT-2M-3.5S`, matching negative-duration-v4.json) and the
+    // reader's own regex accepted only `(\d+)M` — so a negative duration went out in a spelling our
+    // own reader refused. Nothing caught it because every fixture and every other assertion here uses
+    // a positive one; it surfaced only when CSV needed the same parser and it moved onto `Duration`.
+    const store = fresh();
+    loadGraphson(store, '{"id":{"@type":"g:Int32","@value":1},"label":["t"],"properties":{"d":['
+      + '{"id":{"@type":"g:Int64","@value":1},"value":{"@type":"g:Duration","@value":"PT-2M-3.5S"}}]}}');
+    expect(store.query('SELECT value FROM vertex_properties')).toEqual([{ value: '-123500000000' }]);
+    const { document, reloaded } = roundTrip(store);
+    expect(document).toContain('{"@type":"g:Duration","@value":"PT-2M-3.5S"}');
+    expect(canonical(reloaded)).toEqual(canonical(store));
+    // The other legal spelling of the same value — one leading sign, which some producers emit.
+    expect(Duration.fromIso('-PT2M3.5S').totalNanos()).toBe(-123_500_000_000n);
+  });
+
   test('typed collections survive, including a typed map KEY', () => {
     const store = fresh();
     executeQuery(store, 'g.addV("c").property(T.id,1).property("tags", ["a","brave"])', {});

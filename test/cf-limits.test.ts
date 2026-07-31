@@ -17,7 +17,7 @@ import type { LoweringState } from '../src/compiler/steps/context/context.ts';
 // accepts 65,535. So a bind list whose length scales with ROW COUNT is green in every suite here
 // and broken in production, on the ONE runtime we ship to. This file is where that asymmetry stops
 // being invisible: it asserts the decorator's own contract, and then runs the two paths that were
-// breaching it (docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md §1c/§1d) at a cardinality
+// breaching it (docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md §1c/§1d) at a cardinality
 // far past the cap, under a store that fails on the statement a DO would reject.
 //
 // Both are now DO-legal — drop() chunks through RowBatch, and a federated landing rides one JSON
