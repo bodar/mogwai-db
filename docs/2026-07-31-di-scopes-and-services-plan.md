@@ -1,6 +1,6 @@
 # Dependencies vs arguments: a request tier, and services in DI
 
-**Status: design, agreed 2026-07-31 (not yet built).** Origin: phase 5 of
+**Status: in progress — step 1 landed 2026-07-31, steps 2-6 outstanding (see §6).** Origin: phase 5 of
 `2026-07-31-bulk-transfer-and-io-substrate-plan.md` needed `io().read()` to reach a `GraphStore` and an
 `IoStore`, and the barrier contribution's signature had nowhere to put them. The first answer was to
 widen the signature into a context object. **That was the wrong shape**, and noticing why turned a
@@ -136,7 +136,14 @@ exists."*
 This is a **behaviour-preserving refactor**: no traversal changes its answer, so the census
 (`mise run census`) is the gate that matters, alongside `mise run ci`. Suggested order, each landing green:
 
-1. `--list` check (constraint 3) — cheapest, and it bounds what an internal service may be called.
+1. ~~`--list` check (constraint 3) — cheapest, and it bounds what an internal service may be called.~~
+   **Landed.** The check found the exclusion was a NAME comparison in the registry mechanism
+   (`s.name !== DIRECTORY_SERVICE_NAME`), so an internal service was not merely unbuilt, it was
+   unexpressible without another special case. It is now `Service.internal`, a flag on the service
+   that owns the decision, and the reference surface is asserted as a SET (`standardRegistry.list()`
+   ≡ {`tinker.search`, `tinker.degree.centrality`}) rather than implied — so a later internal service
+   that forgets the flag fails a unit test instead of an L3 scenario. Answer to "what may an internal
+   service be called": anything. The name carries no policy now.
 2. Services as scope entries; `Contribution.apply` shrinks; `federate` stops taking `source`/`depth`
    positionally.
 3. The request tier: `CompilerScope` → `RequestScope`, `params`/`federationDepth`/`sourceOptions` move
