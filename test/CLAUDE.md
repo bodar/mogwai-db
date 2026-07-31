@@ -11,9 +11,9 @@
   set by registry latency, not by the diff. Measured on trunk before those were cached: the same 62
   packages against the same lockfile installed in **0.9s on one run and 51.6s on the next**, which
   read as a 50% CI regression that per-phase timings placed entirely outside `test` (79.4–81.5s
-  across all four runs). `.github/workflows/ci.yml` now caches bun's download cache and the built
-  gremlin client, so the tail is much smaller — but the rule stands, because the phases are still
-  network-bound and a cache still misses on a lockfile or gitlink bump. To A/B a compiler change
+  across all four runs). `.github/workflows/ci.yml` caches bun's download cache, which is where
+  that swing lived — but the rule stands, because all three phases are still network-bound and the
+  cache still misses on a lockfile or submodule-pin bump. To A/B a compiler change
   properly, pin `L5_SEED` as well: the seed derives from `HEAD`, so it otherwise changes under you
   every commit (±10s of legitimate variation, and a different generated corpus).
 

@@ -11,11 +11,6 @@ build/
 *.tsbuildinfo
 .wrangler/
 
-# CI scratch: where the workflow restores the cached gremlin client build for
-# scripts/init-submodule.sh to adopt (GREMLIN_CLIENT_BUILD_CACHE). Never populated
-# by a local run, which leaves the build in the submodule tree instead.
-.cache/
-
 # L3 telemetry artifacts (always on; transient per-run capture — the durable
 # cross-run state lives in the committed test/L3-conformance/l3-state.json)
 test/L3-conformance/l3-telemetry.ndjson
