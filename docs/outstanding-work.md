@@ -4,8 +4,8 @@ The de-duplicated index of open work across the `docs/` corpus. **Each item sets
 why, where to start — not a spec.** The linked doc holds the rationale; the picking agent does the
 validation and design. Live per-step capability: `feature-support-matrix.md`.
 
-**Refreshed** 2026-07-31 · **L3 1623 / 2267** (`l3-state.json`; 1621 unique — the name collision is
-expected, see won't-do) · census **0 `crashed`** · `known.ts` empty (intended) ·
+**Refreshed** 2026-07-31 · **L3 1647 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
+collision is expected, see won't-do) · census **0 `crashed`** · `known.ts` empty (intended) ·
 `capability-baseline.ts` 2 entries, one stale (22c).
 
 Item numbers are stable IDs; landed items are DELETED and their numbers not reused, because code
@@ -31,18 +31,20 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-**Ranked entry point.** Numbers are IDs, not an order. Correctness first, because one still breaks the
-fail-closed rule: **22** → **26** → **2** → **17**'s `tail`/`sample` + **28** → **29** → **3**'s `times(n)` unroll.
-(Item 27's seven `Scope.local` violations landed 2026-07-31 — the fix was one argument decode, `sliceOf`.)
+**Ranked entry point.** Numbers are IDs, not an order. Correctness first: **26** → **2** →
+**17**'s `tail`/`sample` + **28** → **29** → **3**'s `times(n)` unroll. Both fail-closed
+VIOLATIONS landed 2026-07-31 — item 27's seven `Scope.local` slices (one argument decode,
+`sliceOf`) and item 22's 24 write-path non-validations (`steps/write/validate.ts`).
 
-22. **Validation the spec MANDATES and we do not perform — 33 scenarios, silent wrong answers on the
-   write path.** 60 L3 scenarios fail AT the error-assertion step; 33 because we returned a result
-   where a throw is required. **24 = `option(onCreate|onMatch)` overriding a key already bound by the
-   `merge()` argument** (`g.mergeV([(T.label):'a']).option(onCreate,[(T.label):'b'])` must raise; we
-   write `label:'b'`) plus the `~id`/`~label` hidden-key prohibitions — **one check where the option map
-   is resolved clears all 24, and it is the only family that WRITES.** Then 6 = a string step in
-   `Scope.local` over a LIST passing the list through, 2 = `groupCount()` taking two `by()`s, 1 =
-   `property(single,k,traversal)`. → `MergeVertex.feature`, `MergeEdge.feature`. **High.**
+22. **Validation the spec MANDATES and we do not perform — the write family LANDED; 9 scenarios of
+   three unrelated causes are left.** 60 L3 scenarios fail AT the error-assertion step because we
+   returned a result where a throw is required. The 24 write ones went in one change (2026-07-31,
+   L3 1623 → 1647): `steps/write/validate.ts` holds TinkerPop's `ElementHelper` identifier rules and
+   is reached from the four storage waists; a `MergeRole` on `MergeSpec` lets one check cover all
+   three maps; `validateNoOverrides` runs statically AND in the create branch. The remainder is not
+   one family — **6 = a string step in `Scope.local` over a LIST passes the list through** (the same
+   missing "member count" authority as item 17's `tail`), **2 = `groupCount()` taking two `by()`s**
+   (a modulator-arity rule, item 23's ground), **1 = `property(single,k,traversal)`**. *Low each.*
 
 26. **The root materialization boundary DROPS emission order for 9 of 11 shapes, so every ordering item
    only reaches the wire on scalar results.** `materializeScalarRoot` (`tail/materialize.ts:37`) is the
@@ -417,7 +419,7 @@ deferral clusters in 5c instead.
   check, keeping the per-kind matcher. Fix the README as part of it.
 - **`feature-support-matrix.md` over-promises.** (a) Generate the capability ratchet's per-step shape
   strip into it so its ✅ matches 5c. (b) It states "There are currently NO 🐞 rows — no form is known to
-  mis-execute", which is false (items 2, 20, 21, and 22's 33), and the legend points at `known.ts`,
+  mis-execute", which is false (items 2, 20, 21, and 22's remaining 9), and the legend points at `known.ts`,
   which is empty — so the mark has no source of truth.
 - **The `ResultStream` residue is the one worthwhile `Shape` retirement** — six orphan `Shape` kinds
   across 13 `toResultStream` sites, and ~14 of 5c's failures. Zero corpus demand, so it is a give-back.
