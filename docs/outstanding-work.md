@@ -247,7 +247,32 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    conformance cluster. **Medium.**
    → [path-history-substrate](./2026-07-18-path-history-substrate.md)
 
-17. **Share the row-ops: the (shape × row-op) matrix is 55/100 GAPS, and the axis is now named.**
+17. **Share the row-ops — LANDED for the slice/dedup family (`2d7a3f2`, `8bbd3e3`).** The three
+   near-verbatim slice builders are one implementation, `reprojectRows` (`tail/barrier.ts`, beside
+   `lowerGlobalCount`), and `globalRowOps()` registers limit/skip/range/dedup as dispatch entries so
+   each shape takes them with a spread. **Measured over five ops × ten producers: 17/50 gaps →
+   4/50**, the survivors being `group`, which declines because `cardinalityOf` reports `wholeResult`.
+   New coverage: whole-list slices + dedup on LIST, the full set + count on MAP.ENTRY (was 0/10),
+   the slices on PROPERTY, `dedup` on RECORD. Pinned in
+   `test/compiler/unified-lowering.exec.test.ts`.
+   - **The trap, and it cost 42 corpus traversals — read this before registering anything else into
+     a shape table.** `dispatchShapeTail` consults exactly ONE handler per step name, and a shape
+     table is a `new Map([...])` where the LAST duplicate key wins. So spreading a shared op into a
+     table that ALREADY owns that name REPLACES the incumbent, and a handler that "declines"
+     (`return null`) to defer to it instead falls to the FALLBACK THROW. Declining does not fall
+     through to a previous registration. Compose with `firstOf` (`tail/barrier.ts`). Two second-order
+     lessons: only the CENSUS caught it (the probe measuring the gains tested the global forms and
+     was structurally blind to the `Scope.local` ones), and a test written FROM that post-change
+     probe asserted the regression as if it were intent — verified against clean trunk afterwards to
+     establish it was not.
+   - **`Scope.local` is deliberately outside the shared ops** — a local slice addresses a shape's
+     MEMBERS, a different question from slicing rows, so each shape keeps its own member builder.
+   - Still hand-written per shape and NOT yet shared: `order` (needs a per-shape comparable key, so
+     it is not a row-algebraic op), `tail`, and the `mapEntry`/`map` reducers. `order` is the
+     valuable one and is genuinely a different problem — do not assume this pattern extends to it.
+   **Remaining from the original item:** the ~35 genuinely per-step cases of 5c, and the
+   `ResultStream` residue. What follows is the original framing, kept for the 5c cross-reference.
+
    Measured 2026-07-29. `count()` is the only row-op routed through a shared implementation
    (`lowerGlobalCount`, `barrier.ts`, reading `cardinalityOf`) and it is 9/10; every other op is
    hand-written per shape or absent. `mapEntry` is 0/10. Three near-verbatim slice builders already
@@ -278,8 +303,10 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      and it needed none of the `dispatchShapeTail` precondition below — worth checking whether some
      of the row-ops are the same shape of unlock.
    This is the work [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md) §8
-   step 4 sanctions ("name the cardinality axis, **then** share row-ops") — and the axis is now named,
-   so the gate is open. **High — the largest single ceiling block measured.**
+   step 4 sanctions ("name the cardinality axis, **then** share row-ops") — and that sequencing was
+   right: `cardinalityOf` now has a real second consumer, and it is what keeps `group` and a grouped
+   `PathStream` out of a row slice. **Was High; now Low-Med** — the slice/dedup family is done, and
+   what is left (`order` per shape, the 5c per-step residue) is not this mechanism.
    → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md)
 
 ---
@@ -569,11 +596,13 @@ proves nothing — read the deferral clusters instead.
   a `WHERE typeof(...)`. **Not a pure transposition** — `WHERE` and `CASE WHEN` differ on
   empty/all-ineligible input (no row vs a NULL row), which interacts with `productiveNull`. Latent
   divergence the L5 metamorphic oracle would attribute to the wrong layer.
-- **Ten independent `LIMIT ${limit ?? -1} OFFSET ${offset}` derivations** — `rangeToOffsetLimit`
-  (`src/compiler/plan/plan.ts:406`, NOT `sql/`) exists and 6 sites use it;
-  `recordOrder`/`recordSlice` (`tail/select.ts`) instead hand-derive offset/limit from `nxt.args`
-  including a duplicated `Not a legal range` validation, and re-implement the negative-range guard
-  three times (`select.ts:679,696,708`). **Subsumed by item 17** if that lands.
+- **Ten independent `LIMIT ${limit ?? -1} OFFSET ${offset}` derivations** — PARTLY subsumed by item
+  17 as predicted: the shared `SLICE_SUFFIX` (`tail/barrier.ts`) is now the one derivation for every
+  GLOBAL slice, routed through `rangeToOffsetLimit`. What remains is the `Scope.local` half —
+  `recordSlice`'s local branch and `listLocalTx` still hand-derive offset/limit from `step.args`,
+  each with its own `Not a legal range` validation, because a local slice indexes MEMBERS and its
+  bounds interact with the shape's own length (`tail` needs `fields.length`). Deliberately left: a
+  shared local derivation needs a "member count" authority that does not exist yet.
 - **The `ResultStream` residue is the one worthwhile `Shape` retirement** — six orphan `Shape` kinds
   serving `ResultStream` across 13 `toResultStream` call sites, and ~14 of item 5c's parent-shape
   failures. [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md) §9 says
