@@ -6,7 +6,7 @@ import { elemCtx, elementPayload, elemTable, labelNameFor, propScalarFor, P_OPS,
 import { aliasId, aliasPop, aliasPresent, aliasScalar, entryTypeTag, shapeElem } from '../context/alias.ts';
 import { aliasElem, aliasIsElement, layoutCols, layoutProjection, scalarTypeFromAlias, type AliasMap, type ElementStream } from '../context/context.ts';
 import { continueLowering, dispatchShapeTail, loweringStateOf, recordFieldColumns, toElementStream, toListStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type LoweringResult, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
-import { lowerGlobalCount } from './barrier.ts';
+import { lowerGlobalCount, reprojectRows } from './barrier.ts';
 import { byAt, childCtx, childSteps, classifyBy, classifyElementChild, classifyListChild, classifyRecordChildRows, classifyScalarChild, reuseCurrentFrame, ROOT_SCOPE, type ChildFrameStack, type ChildParent, type ChildUse } from './child-shape.ts';
 import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
 import { emptyElementLike, historyPropertyValues, historyScalarValues, historyValues, popEnd, popIsListResult, selectKeyFromAlias, selectOneFromAlias } from './labelselect.ts';
@@ -672,17 +672,13 @@ const recordSlice: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
     const offset = step.name === 'skip' ? nums[0] : step.name === 'range' ? nums[0] : 0;
     const limit = step.name === 'limit' ? nums[0] : step.name === 'range' ? nums[1] - nums[0] : null;
     if (offset < 0 || (limit !== null && limit < 0)) throw new Error(`Not a legal range: [${offset}, ${limit === null ? -1 : offset + limit}]`);
-    const r = s.rel.as('r');
-    const names = s.rel.cols;
-    // Record rows are one traverser each. When the chain carries canonical
-    // encounter order (the fan-out + positional case), use it here just as the
-    // scalar/element slice builders do; otherwise retain the order-free contract.
-    const order = s.traverserLayout.encounter ? q` ORDER BY ${r.c[s.traverserLayout.encounter]}` : empty;
-    const rel = s.q.cte(
-      q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r}${order} LIMIT ${limit ?? -1} OFFSET ${offset}`,
-      names,
+    // Record rows are one traverser each, so a global slice is the SHARED row op — the projection
+    // this used to spell out is `streamColumns`, and `cardinalityOf` confirms the rows are the
+    // traversers rather than leaving that implicit.
+    return continueLowering(
+      reprojectRows(s, { suffix: q` LIMIT ${limit ?? -1} OFFSET ${offset}`, orderByEncounter: true }),
+      at + 1,
     );
-    return continueLowering(toRecordStream(loweringStateOf(s), rel, s.fields), at + 1);
 };
 
 const recordSelect: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {

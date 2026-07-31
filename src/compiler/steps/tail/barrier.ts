@@ -1,7 +1,7 @@
-import { derived, empty, q, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
+import { derived, empty, list, q, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { perRowColumnOf, staticTypeOf, type ListOf } from '../../../sql/kernel/render.ts';
 import { typedScalarNode } from '../../plan/plan.ts';
-import { cardinalityOf, loweringStateOf, toListStream, toScalarStream, type ListStream, type RelationalStream, type ScalarStream } from '../context/stream.ts';
+import { cardinalityOf, loweringStateOf, streamColumns, toListStream, toScalarStream, withRelation, type ListStream, type RelationalStream, type ScalarStream } from '../context/stream.ts';
 import { layoutCols, layoutProjection, layoutProjectionMinting, patchLayout, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
 import { type ChildScope } from './child-shape.ts';
 
@@ -29,6 +29,51 @@ export function lowerGlobalCount(input: RelationalStream): ScalarStream {
     ? input.q.cte(q`SELECT ${agg} AS v`, ['v'])
     : input.q.cte(q`SELECT ${agg} AS v FROM ${s}`, ['v']);
   return toScalarStream(dropLayoutAtBarrier(loweringStateOf(input)), rel, 'long', { result: 'count' });
+}
+
+/** What a row-preserving re-projection may do beyond re-projecting. `suffix` carries a slice's
+ *  `LIMIT/OFFSET`; `distinct` collapses duplicate rows; `orderByEncounter` makes the window
+ *  deterministic when — and only when — the chain actually carries emission order. */
+export interface RowOpts {
+  readonly distinct?: boolean;
+  readonly suffix?: Expression;
+  readonly orderByEncounter?: boolean;
+}
+
+/**
+ * A ROW-PRESERVING re-projection of any shaped stream: same traversers, same payload, same carried
+ * schema, over a new relation that may drop rows (a slice) or collapse duplicates (a dedup).
+ *
+ * This is the shared row-op `lowerGlobalCount` above has been the only instance of. The scalar,
+ * variant and record tails each had their own near-verbatim copy (`rowPreserving`, `reselect`,
+ * `recordSlice`'s global branch) differing in nothing but how they spelled the projected column
+ * list — and `streamColumns` already owns that per kind, so there was nothing per-shape left.
+ * `withRelation` then rebuilds the stream with every other channel (type, arms, fields, `of`,
+ * `result`) intact and asserts the replacement relation against the declared contract.
+ *
+ * **`cardinalityOf` is the load-bearing part, not decoration.** A row op is only the op the user
+ * asked for when one row IS one traverser. A grouped `PathStream` has one row per POSITION and a
+ * `GroupStream` is one whole result, so slicing their rows would answer a different question
+ * silently — `limit(2)` over a grouped path would take two positions, not two paths. Both fail
+ * closed here rather than at each caller, which is what makes registering this into eleven
+ * dispatch tables safe instead of a way to spread wrong answers.
+ *
+ * It deliberately says nothing about `Scope.local`: a local slice addresses a shape's MEMBERS (a
+ * list's elements, a record's fields), which is not a row op at all. Callers must route that to
+ * their own local builder before reaching this.
+ */
+export function reprojectRows<T extends RelationalStream>(s: T, opts: RowOpts = {}): T {
+  const cardinality = cardinalityOf(s);
+  if (cardinality.kind !== 'perRow')
+    throw new Error(`a row operation over a ${cardinality.kind} relation is not yet supported (its rows are not its traversers, so slicing them would answer a different question)`);
+  const p = s.rel.as('p');
+  const cols = streamColumns(s);
+  // Keep an unordered relation unordered rather than inventing a SQLite scan order; minting the
+  // encounter channel is the source/merge builders' job, and a positional consumer has a canonical
+  // answer exactly when the chain asked for one.
+  const order = opts.orderByEncounter && s.traverserLayout.encounter ? q` ORDER BY ${p.c[s.traverserLayout.encounter]}` : empty;
+  const body = q`SELECT ${opts.distinct ? q`DISTINCT ` : empty}${list(cols.map((c) => p.c[c]), ', ')} FROM ${p}${order}${opts.suffix ?? empty}`;
+  return withRelation(s, s.q.cte(body, cols));
 }
 
 /** The canonical types a bare member round-trips WITHOUT an envelope — i.e. the types the

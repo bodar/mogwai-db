@@ -13,9 +13,9 @@ import { q, list, empty, type Expression, type Relation } from '../../../sql/ker
 import { type ValueType } from '../../../sql/kernel/render.ts';
 import { rangeToOffsetLimit } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { loweringStateOf, continueLowering, variantPayloadCols, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
+import { continueLowering, variantPayloadCols, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
 import { layoutProjection, layoutCols, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, type LoweringState } from '../context/context.ts';
-import { lowerGlobalCount } from './barrier.ts';
+import { lowerGlobalCount, reprojectRows } from './barrier.ts';
 
 // ---------- variant-arm merge builders (parent-agnostic; element- and scalar-parent share) ----------
 //
@@ -156,25 +156,11 @@ export function mergeVariantParts(base: LoweringState, parts: readonly Expressio
   return toVariantStream(stateWithLayout(base, armMerge.traverserLayout), armMerge.rel, meta);
 }
 
-const armsOf = (s: VariantStream) => ({ scalarAs: s.scalarAs, node: s.node, edge: s.edge, listOf: s.listOf });
-
 /** Re-project every physical column of the variant relation, optionally slicing rows
  *  or collapsing duplicates. Shape-agnostic: it names only the declared columns and
  *  never touches the per-row tag, so all arms survive intact. */
-function reselect(s: VariantStream, opts: { distinct?: boolean; suffix?: Expression; orderByEncounter?: boolean }): VariantStream {
-  const p = s.rel.as('p');
-  const cols = s.rel.cols;
-  const projected = list(cols.map((c) => q`${p.c[c]}`), ', ');
-  // A positional consumer has a canonical answer whenever the chain requested an
-  // encounter channel. Keep unordered relations unordered rather than inventing a
-  // SQLite scan order; source/merge builders are responsible for minting that channel.
-  const order = opts.orderByEncounter && s.traverserLayout.encounter ? q` ORDER BY ${p.c[s.traverserLayout.encounter]}` : empty;
-  const body = q`SELECT ${opts.distinct ? q`DISTINCT ` : empty}${projected} FROM ${p}${order}${opts.suffix ?? empty}`;
-  return toVariantStream(loweringStateOf(s), s.q.cte(body, cols), armsOf(s), s.result);
-}
-
 const variantSlice = (suffix: (step: IRStep) => Expression): ShapeTailFn<VariantStream> =>
-  (s, step, _steps, at) => continueLowering(reselect(s, { suffix: suffix(step), orderByEncounter: true }), at + 1);
+  (s, step, _steps, at) => continueLowering(reprojectRows(s, { suffix: suffix(step), orderByEncounter: true }), at + 1);
 
 const VARIANT_DISPATCH = new Map<string, ShapeTailFn<VariantStream>>([
   // count is a relational barrier over any shaped row stream → one Long scalar.
@@ -198,7 +184,7 @@ const VARIANT_DISPATCH = new Map<string, ShapeTailFn<VariantStream>>([
     // A carried bulk column rides through the DISTINCT re-projection (bulk≡1 today, so
     // DISTINCT is unaffected); real path/label state still defers.
     if (layoutCols(s.traverserLayout).some((c) => c !== s.traverserLayout.bulk)) throw new Error('dedup() over a variant with carried path/label state not yet supported (path-distinct semantics)');
-    return continueLowering(reselect(s, { distinct: true }), at + 1);
+    return continueLowering(reprojectRows(s, { distinct: true }), at + 1);
   }],
 ]);
 

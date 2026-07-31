@@ -9,6 +9,7 @@ import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, isDateDiffConstant, 
 import { normalizeTypeName } from '../../../gremlin/types.ts';
 import { perRowColumnOf, perRowCols, STATIC, staticTypeOf, UNKNOWN, type ScalarType, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf } from '../../engine/deps.ts';
+import { reprojectRows } from './barrier.ts';
 
 /** If `step` is `is(typeOf(GType.X))` for a COLLECTION type, the canonical collection name
  *  ('list'|'set'|'map'); else null. list/set RETYPE a scalar value stream into a ListStream
@@ -94,14 +95,12 @@ const payload = (s: ScalarStream, p: ReturnType<ScalarStream['rel']['as']>): Exp
 const cols = (s: ScalarStream): string[] =>
   [...(s.result === 'number' ? ['v', 'vt'] : ['v']), ...perRowCols(s.type), ...layoutCols(s.traverserLayout)];
 
-function rowPreserving(s: ScalarStream, suffix: Expression, orderByEnc = false): ScalarStream {
-  const p = s.rel.as('p');
-  // A root slice (limit/skip/range) picks a DETERMINISTIC window only when the chain carries
-  // emission order (Stage B); otherwise it stays order-free over incidental row order.
-  const order = orderByEnc && s.traverserLayout.encounter ? q` ORDER BY ${p.c[s.traverserLayout.encounter]}` : empty;
-  const rel = s.q.cte(q`SELECT ${payload(s, p)}${layoutProjection(s.traverserLayout, p)} FROM ${p}${order}${suffix}`, cols(s));
-  return rebuildScalar(s, rel);
-}
+// A root slice (limit/skip/range) picks a DETERMINISTIC window only when the chain carries
+// emission order (Stage B); otherwise it stays order-free over incidental row order. Now one call
+// into the shared row-op — the scalar payload/carried column list it used to spell out is what
+// `streamColumns` already owns, which is the whole reason the three copies were identical.
+const rowPreserving = (s: ScalarStream, suffix: Expression, orderByEncounter = false): ScalarStream =>
+  reprojectRows(s, { suffix, orderByEncounter });
 
 function scalarTransform(step: IRStep, currentAs: ValueType | undefined, expr: Expression, next?: IRStep): { expr: Expression; as?: ValueType } {
   let as: ValueType | undefined;
