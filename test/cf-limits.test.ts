@@ -7,7 +7,7 @@ import { compile } from '../src/compiler/compiler.ts';
 import { landForeignElements } from '../src/compiler/steps/tail/foreign.ts';
 import { materializeRootStream } from '../src/compiler/steps/tail/materialize.ts';
 import { LoweringEngine } from '../src/compiler/engine/engine.ts';
-import { createAppScope, createCompilerScope } from '../src/scopes.ts';
+import { createAppScope, createRequestScope, createCompilerScope } from '../src/scopes.ts';
 import type { ForeignRow } from '../src/services/spi/types.ts';
 import type { LoweringState } from '../src/compiler/steps/context/context.ts';
 
@@ -86,7 +86,8 @@ describe('a federated landing binds the whole result set once', () => {
     ({ kind: 'vertex', id, label: 'person', labels: ['person'], props: { name: [{ t: 'string', v: `v${id}` }] } });
 
   const landAndCount = (n: number) => {
-    const engine = new LoweringEngine(createAppScope(), createCompilerScope(createAppScope(), { params: {} }));
+    const request = createRequestScope(createAppScope(), { params: {} });
+    const engine = new LoweringEngine(request, createCompilerScope(request));
     const c: LoweringState = { q: engine.q, params: {}, traverserLayout: { aliases: new Map(), origins: [] } };
     const seed = landForeignElements(c, Array.from({ length: n }, (_, i) => vrow(i + 1)), 'vertex');
     const plan = materializeRootStream(engine.lowerStepsStrict(seed, [], 0));

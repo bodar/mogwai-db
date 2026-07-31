@@ -7,7 +7,7 @@ import { routeWrite } from './steps/write/write.ts';
 import { type Compiled, type WritePlan } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
 import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './options/fast-paths.ts';
-import { createAppScope, createCompilerScope } from '../scopes.ts';
+import { createAppScope, createRequestScope, createCompilerScope } from '../scopes.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
 export type { Compiled, WritePlan, WriteResult, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from '../sql/kernel/render.ts';
 export { staticTypeOf, perRowColumnOf, PER_ROW, STATIC, UNKNOWN } from '../sql/kernel/render.ts';
@@ -49,18 +49,21 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   const sackInit = extractSack(tree, params);
   const sideEffects = extractSideEffects(tree, params);
 
-  // The per-compilation DI scope: an app scope (from options, or a default one for callers that
-  // pass loose fields / nothing) plus this compile's collaborators. The lowering Engine (the
+  // The DI scopes: an app scope (from options, or a default one for callers that pass loose
+  // fields / nothing), the REQUEST scope this traversal fixes (its bound params, its federation
+  // hop depth, its g.with(...) source options — all inherited by every nested sub-compile), and
+  // this compile's own Query. The lowering Engine (the
   // dependency object that replaced the free-function dispatcher barrel) is built HERE from the
   // scope, with movementCollapse gated to this chain's result-safety, and drives read AND write;
   // it rides its own Query (`scope.q`) so every step family reaches lowering + deps through the
   // stream without any parameter threading. The write path only ever mints fresh child engines
   // off it (buildPrefixFresh / compileReadCompiled), so building it before the write check is safe.
   const app = options?.app ?? createAppScope({ registry: resolveRegistry(options), fastPaths: resolveFastPaths(options) });
-  const scope = createCompilerScope(app, {
+  const request = createRequestScope(app, {
     params, federationDepth: resolveFederationDepth(options), sourceOptions: extractSourceOptions(tree, params),
   });
-  const engine = new LoweringEngine(app, scope, collapseSafeFastPaths(scope.fastPaths, analyzeChain(steps)));
+  const scope = createCompilerScope(request);
+  const engine = new LoweringEngine(request, scope, collapseSafeFastPaths(scope.fastPaths, analyzeChain(steps)));
 
   const write = routeWrite(engine, steps, params, sackInit ?? undefined, sideEffects);
   if (write) return { kind: 'sql', compiled: discard ? applyDiscard(write) : write };

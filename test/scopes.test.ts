@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { createAppScope, createCompilerScope } from '../src/scopes.ts';
+import { createAppScope, createRequestScope, createCompilerScope } from '../src/scopes.ts';
 import { DEFAULT_FAST_PATHS } from '../src/compiler/options/fast-paths.ts';
 import { EMPTY_REGISTRY, createRegistry } from '../src/services/spi/registry.ts';
 
@@ -16,21 +16,46 @@ describe('DI scopes', () => {
     expect(app.source).toBeUndefined();
   });
 
-  test('a compiler scope inherits app-scope deps by direct access', () => {
+  test('a compiler scope inherits app AND request deps by direct access', () => {
     const registry = createRegistry([]);
     const fastPaths = { ...DEFAULT_FAST_PATHS, movementCollapse: false };
     const app = createAppScope({ registry: () => registry, fastPaths });
-    const scope = createCompilerScope(app, { params: { x: 1 }, federationDepth: 2 });
+    const sourceOptions = new Map([['~mogwai.test', true]]);
+    const request = createRequestScope(app, { params: { x: 1 }, federationDepth: 2, sourceOptions });
+    const scope = createCompilerScope(request);
 
     // inherited from the app scope — the direct-read contract
     expect(scope.registry).toBe(registry);
     expect(scope.fastPaths).toBe(fastPaths);
     expect(scope.fastPaths.movementCollapse).toBe(false);
 
-    // the compiler scope's own per-compilation collaborators
+    // inherited from the request scope — one traversal's fixed context
     expect(scope.params).toEqual({ x: 1 });
     expect(scope.federationDepth).toBe(2);
+    expect(scope.sourceOptions).toBe(sourceOptions);
+
+    // the compiler scope's own per-compilation collaborator
     expect(scope.q).toBeDefined();
+  });
+
+  test('a nested sub-compile INHERITS the whole request — only the Query is fresh', () => {
+    // What the request tier is for: before it, every nested createCompilerScope restated params
+    // and federationDepth, and silently reset sourceOptions to an empty Map.
+    const sourceOptions = new Map([['~mogwai.test', true]]);
+    const request = createRequestScope(createAppScope(), { params: { x: 1 }, federationDepth: 3, sourceOptions });
+    const nested = createCompilerScope(request);
+    expect(nested.federationDepth).toBe(3);
+    expect(nested.sourceOptions).toBe(sourceOptions);
+    expect(nested.params).toEqual({ x: 1 });
+  });
+
+  test('params is the one request entry a sub-compile may override', () => {
+    // inject() seeds its own source and lowers against an empty param table; everything else it
+    // must still inherit. An ABSENT override inherits rather than resetting to {}.
+    const request = createRequestScope(createAppScope(), { params: { x: 1 }, federationDepth: 3 });
+    expect(createCompilerScope(request, { params: {} }).params).toEqual({});
+    expect(createCompilerScope(request, { params: {} }).federationDepth).toBe(3);
+    expect(createCompilerScope(request, {}).params).toEqual({ x: 1 });
   });
 
   test('the registry provider is LAZY and sees the whole scope it lives in', () => {
@@ -51,10 +76,10 @@ describe('DI scopes', () => {
     expect(app.registry).toBe(first);   // and resolves once, not per read
   });
 
-  test('each compiler scope gets a fresh Query but shares the app scope', () => {
-    const app = createAppScope();
-    const a = createCompilerScope(app, { params: {} });
-    const b = createCompilerScope(app, { params: {} });
+  test('each compiler scope gets a fresh Query but shares the request scope', () => {
+    const request = createRequestScope(createAppScope(), {});
+    const a = createCompilerScope(request);
+    const b = createCompilerScope(request);
     expect(a.q).not.toBe(b.q);          // independent CTE namespaces
     expect(a.registry).toBe(b.registry); // same shared app-scope dependency
   });

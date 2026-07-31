@@ -32,7 +32,7 @@ import { compileFromVariant } from '../steps/tail/variant.ts';
 import { compileFromForeign, landForeignElements, resumeMidBarrier } from '../steps/tail/foreign.ts';
 import type { SegmentPlan } from '../segment.ts';
 import type { ForeignRow } from '../../services/spi/types.ts';
-import type { AppScope, CompilerScope } from '../../scopes.ts';
+import type { RequestScope, CompilerScope } from '../../scopes.ts';
 import { createCompilerScope } from '../../scopes.ts';
 import type { ElementReadDriver, Engine } from './deps.ts';
 import { labelRegime, type LabelCardinality, type LabelRegime } from '../../api.ts';
@@ -114,7 +114,9 @@ function dispatchAlias(s: Exclude<Stream, { kind: 'result' }>, steps: IRStep[], 
 }
 
 /**
- * The lowering Engine. Constructed per-compile from a CompilerScope; holds the ambient
+ * The lowering Engine. Constructed per-compile from a CompilerScope (a child of the request
+ * scope it also holds, so a nested sub-compile inherits the request rather than restating it);
+ * holds the ambient
  * dependencies + drives the recursive traversal. Attaches itself to its Query so every stream
  * built during this compile reaches it via `stream.q.engine`.
  */
@@ -128,7 +130,7 @@ export class LoweringEngine implements Engine {
   readonly federationDepth: number;
   private readonly PREFIX: Map<string, StepFn>;
 
-  constructor(private readonly app: AppScope, scope: CompilerScope, fastPaths?: FastPathConfig) {
+  constructor(private readonly request: RequestScope, scope: CompilerScope, fastPaths?: FastPathConfig) {
     this.q = scope.q;
     this.params = scope.params;
     // `fastPaths` may be the collapse-GATED config for this compile's chain (movementCollapse is
@@ -174,13 +176,13 @@ export class LoweringEngine implements Engine {
     ]);
   }
 
-  /** Mint a FRESH child Engine (fresh Query, SAME app scope) for a nested sub-compile. `steps`, when
+  /** Mint a FRESH child Engine (fresh Query, SAME request scope) for a nested sub-compile. `steps`, when
    *  given, re-gates movementCollapse for the child's OWN chain (per-chain result-safety); absent
    *  → carry the base fastPaths (a resume closure whose chain is already lowered). */
   private child(params: Record<string, any>, steps?: IRStep[], q?: Query): LoweringEngine {
-    const scope = createCompilerScope(this.app, { params, federationDepth: this.federationDepth, q });
+    const scope = createCompilerScope(this.request, { q, params });
     const fp = steps ? collapseSafeFastPaths(scope.fastPaths, analyzeChain(steps)) : scope.fastPaths;
-    return new LoweringEngine(this.app, scope, fp);
+    return new LoweringEngine(this.request, scope, fp);
   }
 
   /** Seed the source CTE (c0) from V(...)/E(...) and its optional id list. When the
@@ -522,7 +524,7 @@ export class LoweringEngine implements Engine {
     return materializeRootStream(lowered);
   }
 
-  /** buildPrefix on a FRESH child engine (fresh Query, same app scope). The write path calls this
+  /** buildPrefix on a FRESH child engine (fresh Query, same request scope). The write path calls this
    *  for each independent target-id relation it materializes in one traversal — each gets its own
    *  WITH and its own engine attached to the returned stream's Query (so a nested movement/filter
    *  reaches deps). Collapse is gated off (a write prefix is not a reducer-terminal read chain). */
@@ -532,26 +534,25 @@ export class LoweringEngine implements Engine {
     return this.child(params, steps).buildPrefix(steps, params, undefined, { ...analyzeChain(steps), demandsEncounter: false });
   }
 
-  /** A FRESH child engine (fresh Query, same app scope) — see the interface. An explicit
+  /** A FRESH child engine (fresh Query, same request scope) — see the interface. An explicit
    *  `fastPaths` overrides the inherited config (used by the bulk-repeat handoff to force
    *  movementCollapse on for its already-collapsed frontier). */
   subEngine(params: Record<string, any> = {}, fastPaths?: FastPathConfig): LoweringEngine {
     if (!fastPaths) return this.child(params);
-    const scope = createCompilerScope(this.app, { params, federationDepth: this.federationDepth });
-    return new LoweringEngine(this.app, scope, fastPaths);
+    return new LoweringEngine(this.request, createCompilerScope(this.request, { params }), fastPaths);
   }
 
   /** A variant engine sharing THIS engine's deps but bound to `q` — for the correlated inline
    *  child's `DerivedQuery`. Reuses this engine's (already collapse-gated) fastPaths. */
   withQuery(q: Query): LoweringEngine {
-    const scope = createCompilerScope(this.app, { params: this.params, federationDepth: this.federationDepth, q });
-    return new LoweringEngine(this.app, scope, this.fastPaths);
+    const scope = createCompilerScope(this.request, { q, params: this.params });
+    return new LoweringEngine(this.request, scope, this.fastPaths);
   }
 
   /** compileRead narrowed to a synchronous Compiled — for INNER sub-traversal compiles (a
    *  within()/all() operand, a merge match/insert body) that structurally cannot be a barrier
    *  source (only a TOP-LEVEL g.call(barrier) suspends). Mints a FRESH child scope (fresh Query,
-   *  SAME app scope) so the nested compile inherits registry/fastPaths. Asserts the invariant
+   *  SAME request scope) so the nested compile inherits registry/fastPaths/depth/source options. Asserts the invariant
    *  rather than silently mis-typing. */
   compileReadCompiled(steps: IRStep[], params: Record<string, any> = {}, sackInit?: SackSpec): Compiled {
     const plan = this.child(params, steps).compileRead(steps, params, sackInit);
