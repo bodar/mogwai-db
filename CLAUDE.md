@@ -89,6 +89,7 @@ free upgrade.
 | `bun scripts/fix.ts [--organize] [--unused] [--dry] [paths…]` | TypeScript's own `source.*` code actions | tool |
 | `mise run arch` (`scripts/arch-check.ts`) | no Pass reaches `ChainFacts`/fast paths | **CI gate**, at zero |
 | `mise run lint` (`scripts/lint.ts`) | unused locals/params/value-position type imports | **CI gate**, at zero |
+| `mise run binds` (`scripts/binds-check.ts`) | no bind list sized by ROW COUNT outside `RowBatch` | **CI gate**, at zero |
 | `mise run orphans` (`scripts/orphans.ts`) | exports nothing imports | instrument — findings need judgement |
 | `scripts/lsp.ts` | the shared session library — build new tools on it | library |
 
@@ -137,9 +138,16 @@ applies TypeScript's own `source.*` code actions (so they cannot disagree with `
 no Pass may reach `ChainFacts` or the fast-path layer — by walking LSP call hierarchy transitively.
 It is a CI gate, not just a tool: `mise run arch`, and `ci` depends on it. Zero violations IS the
 gate — it is deliberately not a ratchet, so a new violation fails the build rather than widening an
-allowlist. **`mise run lint`** (`scripts/lint.ts`) is the other one: the three unused-code flags that
+allowlist. **`mise run lint`** (`scripts/lint.ts`) is the second: the three unused-code flags that
 cannot live in `tsconfig.json` because generated `parser/` fails them, run with `parser/` filtered
 out of the OUTPUT and every suppression counted and attributed. Also at zero, also gated.
+**`mise run binds`** (`scripts/binds-check.ts`) is the third, and the one whose absence let a
+production-only wall ship twice: no hand-rolled placeholder repetition outside `src/rowbatch.ts`, and
+every `placeholders(…)` call inside a function that also chunks (enclosing extents come from
+`documentSymbol`, so it is the real declaration and not a brace-matching guess). It deliberately does
+NOT try to decide whether an arbitrary `binds` array is bounded — that is dataflow over every
+`store.query` call, and `store.query(plan.sql, plan.binds)` is unbounded to any local analysis and
+perfectly correct. What is decidable is the IDIOM, and the idiom is what produced both walls.
 
 One INSTRUMENT, deliberately not a gate, because its answer needs judgement:
 **`mise run orphans`** (`scripts/orphans.ts`) reports exports nothing imports, split into
@@ -227,10 +235,16 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
   the outside clone is typically at a SHA that is not even a valid object in our blobless history.
 - **DO SQLite caps a query at 100 BOUND PARAMETERS (and 100 KB of statement text) — Bun's cap is
   65,535, so a bind list that scales with ROW COUNT passes every test and fails only in production.**
-  Two shipped paths breach it (measured: item 30). Never write `ids.map(() => '?')`; chunk at
-  `floor(100 / columns)` with a FIXED-shape statement so the prepared-statement cache hits — measured
-  4.6× faster than inlining literals to dodge the cap, so the portable form is also the fast one.
-  Detail + the CF-parity harness: `docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md`.
+  Never write `ids.map(() => '?')`. Three answers, and which one applies is decided by whether the
+  statement can be split: a WRITE chunks through **`src/rowbatch.ts`** (`bindChunks` at
+  `floor(100 / binds-per-row)`, FIXED shape so the prepared-statement cache hits — measured 4.6×
+  faster than inlining literals to dodge the cap, so the portable form is also the fast one); a READ
+  cannot chunk at all (a compiled plan is ONE statement, with nowhere to put a preceding INSERT), so
+  it lands the whole set as **one JSON bind** exploded by `json_each` (`landForeignElements`,
+  `jsonbArrayBind`); and a set bounded by the QUERY TEXT may stay an IN-list. Two gates keep it that
+  way: `mise run binds` statically, `mise run test:cf-limits` at runtime (`src/cf-limits.ts` — the
+  `Sql` decorator that makes a DO-only wall fail on Bun).
+  Detail: `docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md`.
 - Storage runtimes meet at the sync **`Sql` interface** (`src/storage.ts`): `bun:sqlite` (dev) and
   DO `ctx.storage.sql` (prod). Compiler + frame tier are storage-agnostic; the HTTP edge never
   touches a store. **Bind-type gotcha:** DO SQLite throws on `boolean`/`bigint` binds — `GraphStore`

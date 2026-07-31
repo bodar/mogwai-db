@@ -59,3 +59,57 @@ export function isWrite(q: string): boolean {
  */
 const NONDETERMINISTIC = /\b(?:sample|coin)\s*\(|Order\.shuffle|\bshuffle\b|\b(?:datetime|DateTime)\s*\(\s*\)/;
 export const isNondeterministic = (q: string): boolean => NONDETERMINISTIC.test(q);
+
+/**
+ * Is this traversal's result determined only up to WHICH members a positional window picks?
+ *
+ * A weaker property than `isNondeterministic` and a different one: the same compiled statement gives
+ * the same answer every run, but two DIFFERENT statements over the same multiset may pick different
+ * members. `range`/`limit`/`tail`/`skip` are positional consumers, and a movement/filter relation has
+ * no emission order for them to be faithful to — SQLite has no reason to visit two plans' rows in the
+ * same order. Measured: `g.V(1).out().union(__.identity(), __.range(0, 2))` yields {2,2,3,4,4} while
+ * the same chain plus `.fold().unfold()` yields {2,2,3,3,4} — one arm took vadas+josh, the other
+ * vadas+lop, both "the first two".
+ *
+ * TinkerPop, iterating lazily over a definite sequence, has one answer here, so this is a real
+ * under-determination on our side and not a licence — it is `docs/outstanding-work.md` item 4 (the
+ * missing emission-order primitive) surfacing where item 20 predicts. What it means for an ORACLE is
+ * that a comparison between two different chains cannot evaluate anything over such a prefix: the
+ * disagreement is the missing order channel, already filed, not the property under test. L5's
+ * METAMORPHIC oracle therefore skips these (and reports the count); the fast-path DIFFERENTIAL does
+ * not, because there both sides are the same chain — where a positional window does still diverge,
+ * that is a diagnosed entry in `L5-properties/known.ts` rather than a whole class.
+ *
+ * An `order()` earlier in the chain supplies the missing channel, so a windowed chain that has one is
+ * determinate and stays in scope.
+ */
+const POSITIONAL_WINDOW = /\b(?:range|limit|tail|skip)\s*\(/g;
+
+/**
+ * How much of the result an un-ordered positional window leaves undetermined:
+ *
+ *   `null`          — nothing (no window, or an `order()` supplies the channel).
+ *   `'members'`     — WHICH rows the window took. The traverser COUNT still holds, so a law can be
+ *                     compared on cardinality. This is the window at the tail of its scope.
+ *   `'cardinality'` — the count too, because something data-dependent FOLLOWS the window:
+ *                     `range(0, 2).hasLabel('person')` filters whatever the window happened to pick,
+ *                     so two plans differ in how many survive. Nothing is comparable.
+ *
+ * "Something follows" is judged syntactically — ANY chained step, so a count-preserving one
+ * (`order()`, `as()`) reads as `'cardinality'` too. Deliberately the conservative direction: it costs
+ * an oracle some coverage, which the run reports, where the other direction would compare a count
+ * that is not determined.
+ */
+export function orderIndeterminacy(q: string): 'members' | 'cardinality' | null {
+  let worst: 'members' | 'cardinality' | null = null;
+  for (const at of q.matchAll(POSITIONAL_WINDOW)) {
+    const start = at.index + at[0].length;
+    if (/\border\s*\(/.test(q.slice(0, at.index))) continue; // ordered: determinate
+    // Walk to the window call's matching `)`; a chained step after it consumes the picked rows.
+    let depth = 1, i = start;
+    for (; i < q.length && depth > 0; i++) depth += q[i] === '(' ? 1 : q[i] === ')' ? -1 : 0;
+    if (q[i] === '.') return 'cardinality';
+    worst = 'members';
+  }
+  return worst;
+}

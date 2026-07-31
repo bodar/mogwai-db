@@ -21,13 +21,17 @@ import { test, expect, describe } from 'bun:test';
 import fc from 'fast-check';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { outcomeOf, diverge, GATING } from './oracle.ts';
-import { seeded } from '../support/graph.ts';
+import { seeded, orderIndeterminacy } from '../support/graph.ts';
 import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
 import { prefix } from './generate.ts';
 import { LAWS } from './laws.ts';
 import { L5_SEED } from './seed.ts';
 
 const SEED = L5_SEED;
+
+/** Total traverser count (bulk summed) — the weakest comparison a law still implies, used where a
+ *  positional window makes the MEMBERS undetermined. */
+const bulkOf = (m: ReadonlyMap<string, bigint>): bigint => [...m.values()].reduce((a, b) => a + b, 0n);
 /** Per-law instantiations. Modest by default (there are ~17 laws, so this is ~1,300 pairs and ~2,600
  *  compiles); L5_RUNS raises it for an exploration pass. */
 const RUNS = Number(process.env.L5_LAW_RUNS ?? Math.max(40, Math.floor(Number(process.env.L5_RUNS ?? 300) / 4)));
@@ -40,11 +44,32 @@ describe('L5 — metamorphic laws', () => {
     test(`${law.name}`, () => {
       const broken: string[] = [];
       let evaluated = 0, prefixUnsupported = 0, lawFormUnsupported = 0, orderDiffs = 0, knownBrokenHits = 0;
+      let countOnly = 0, undetermined = 0;
 
       fc.assert(
         fc.property(prefix(law.on, { steps: 4, depth: 2 }), (p) => {
           const a = outcomeOf(store, law.lhs(p.src), DEFAULT_FAST_PATHS);
           const b = outcomeOf(store, law.rhs(p.src), DEFAULT_FAST_PATHS);
+          // A prefix carrying an un-ordered positional window (range/limit/tail/skip) has no single
+          // multiset to compare against: two DIFFERENT chains over the same rows may take different
+          // members, because a movement relation has no emission order for a positional consumer to
+          // be faithful to (support/graph.ts carries the measurement and points at the filed item).
+          //
+          // Downgraded rather than skipped, because every law here is at least CARDINALITY-preserving
+          // — multiset equality implies it — so the count still catches the defects this oracle exists
+          // for (a silent [], a dropped or duplicated traverser) while tolerating the one thing that
+          // is genuinely undetermined: WHICH members the window took.
+          const window = orderIndeterminacy(p.src);
+          if (window === 'cardinality') { undetermined++; return true; }
+          if (window === 'members' && a.kind === 'rows' && b.kind === 'rows') {
+            countOnly++;
+            const [na, nb] = [bulkOf(a.weighed), bulkOf(b.weighed)];
+            if (na === nb) return true;
+            broken.push(`  prefix ${p.src}\n    lhs ${law.lhs(p.src)}\n    rhs ${law.rhs(p.src)}`
+              + `\n    [cardinality] order-indeterminate prefix, so only the traverser COUNT is`
+              + ` compared: lhs ${na} vs rhs ${nb}`);
+            return false;
+          }
           // Either side unsupported → the law says nothing here. Split by CAUSE, because the two
           // mean different things: an unsupported PREFIX is a ceiling measure (the generator reached
           // a composition we do not lower yet, already fail-closed and visible in the matrix), while
@@ -78,7 +103,7 @@ describe('L5 — metamorphic laws', () => {
       expect(evaluated).toBeGreaterThan(0);
       console.log(`  ${law.name}: ${evaluated} evaluated`
         + `, ${prefixUnsupported} prefix-unsupported, ${lawFormUnsupported} law-form-unsupported`
-        + `, ${orderDiffs} order-only`
+        + `, ${orderDiffs} order-only, ${countOnly} window-count-only, ${undetermined} window-undetermined`
         + (knownBrokenHits ? `, ${knownBrokenHits} KNOWN-BROKEN (diagnosed in laws.ts)` : ''));
     }, 600_000);
   });

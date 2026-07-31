@@ -60,6 +60,18 @@ description = "Unused-code checks over our source (generated parser/ is exempt �
 depends = ["install"]
 run = "bun scripts/lint.ts"
 
+# The third gate in the `arch`/`lint` mould, and the one that stops the DO 100-bind class of defect
+# coming back: no statement's bind list may be a function of ROW COUNT (src/rowbatch.ts is the
+# answer, src/cf-limits.ts the runtime instrument). Same `depends` reasoning as `arch` and `lint` —
+# it reads source through the LSP, so no submodule, no graph, no traversal execution.
+#
+# Also not a ratchet: zero violations IS the gate, so a new one fails the build rather than widening
+# an allowlist.
+[tasks.binds]
+description = "Bind-budget invariants: no bind list sized by row count outside RowBatch"
+depends = ["install"]
+run = "bun scripts/binds-check.ts"
+
 # An INSTRUMENT, not a gate, and deliberately absent from `ci`. An export with zero references is a
 # question, not a verdict: DI-registered leaves, names reached through the service registry, symbols
 # used only by a .feature step, and the worker/server entry points all look dead to a reference
@@ -97,26 +109,27 @@ run = "bun test"
 # total sits at 18, mostly order-sensitive assertions in test/compiler/.
 # Not a gate because it is still red; the remainder are item 20 in docs/outstanding-work.md, and it
 # becomes a gate once they are cleared. A failure here is a REAL under-specification, never a flake.
-# The CF-PARITY instrument, and the second thing in the same mould as test:perturbed: run the whole
-# suite with every Bun statement asserted DO-legal (≤ 100 bound parameters, ≤ 100 KB of text — see
-# src/cf-limits.ts). bun:sqlite's bind cap is 65,535, so a bind list that scales with ROW COUNT is
-# green in every suite here and hard-fails on the one runtime we ship to; this is the switch that
-# makes that class of defect Bun-visible.
-#
-# Not a gate yet, for the same reason `test:perturbed` is not: it is still red, and the failures are
-# real (docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md §1c/§1d — `drop()` and
-# `landForeignElements`). The two walls are pinned as failing-on-purpose assertions in
-# test/cf-limits.test.ts, so `mise run ci` sees them; this task is how you find the NEXT one.
-[tasks."test:cf-limits"]
-description = "Instrument: the full suite with every statement asserted Cloudflare-legal (≤100 binds)"
-depends = ["install", "check", "submodule"]
-env = { MOGWAI_CF_LIMITS = "1" }
-run = "bun test"
-
 [tasks."test:perturbed"]
 description = "Instrument: the full suite under reversed unordered scans (finds order-by-luck results)"
 depends = ["install", "check", "submodule"]
 env = { MOGWAI_REVERSE_UNORDERED = "1" }
+run = "bun test"
+
+# The CF-PARITY instrument, in the same mould as test:perturbed: run the whole suite with every Bun
+# statement asserted DO-legal (≤ 100 bound parameters, ≤ 100 KB of text — src/cf-limits.ts).
+# bun:sqlite's bind cap is 65,535, so a bind list that scales with ROW COUNT is green in every suite
+# here and hard-fails on the one runtime we ship to.
+#
+# GREEN, and it was green before the fixes too — which is the finding, not a reassurance: nothing in
+# the suite reaches the cardinality where the walls bite (the conformance runner's `g.V().drop()`
+# reset cleans the EMPTY graph; every other fixture is six vertices). So the two reproductions are
+# written deliberately at 250-500 elements in test/cf-limits.test.ts, and `mise run binds` is the
+# gate that catches the IDIOM statically. This task is how you find the next wall in a path the
+# suite does exercise at scale.
+[tasks."test:cf-limits"]
+description = "Instrument: the full suite with every statement asserted Cloudflare-legal (≤100 binds)"
+depends = ["install", "check", "submodule"]
+env = { MOGWAI_CF_LIMITS = "1" }
 run = "bun test"
 
 # Conformance ladder — invoke a single level directly. Every level now provisions the submodule
@@ -203,6 +216,6 @@ depends = ["install", "submodule"]
 run = "bunx wrangler deploy --dry-run --outdir dist"
 
 [tasks.ci]
-description = "CI gate: type-check + lint + architectural invariants + test + worker build"
-depends = ["check", "lint", "arch", "test", "build"]
+description = "CI gate: type-check + lint + architectural + bind-budget invariants + test + worker build"
+depends = ["check", "lint", "arch", "binds", "test", "build"]
 run = "echo 'CI passed'"
