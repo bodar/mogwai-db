@@ -33,7 +33,8 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-**Ranked entry point.** Numbers are IDs, not an order. **2** → **21**'s T4 → **29** →
+**Ranked entry point.** Numbers are IDs, not an order. **30**'s phase 0 (a ~20-line `Sql` decorator
+that makes two CF-only hard failures reproduce on Bun) → **2** → **21**'s T4 → **29** →
 **3**'s `times(n)` unroll. (**28** landed — and **it is now a precondition met** for 3's
 `times(n)` unroll, which the item said to do only after it.) (**17**'s cheap half landed; its remainder is the architectural
 current-object-aggregate authority, which is a bigger question than its neighbours.)
@@ -50,6 +51,8 @@ sweep found one real disagreement (now diagnosed in `known.ts`) where nothing co
 
 **What that leaves.** No item below is a known wrong answer except 20's residuals and 21's T4 — the
 rest fail closed. Read that as the index's centre of gravity moving from correctness to ceiling.
+**One exception, and it is new: item 30 is a hard FAILURE, not a fail-closed deferral, and only on
+Cloudflare** — which is why nothing above found it. Every level of the ladder runs on Bun.
 
 22. **Validation the spec MANDATES and we do not perform — the write family LANDED; 9 scenarios of
    three unrelated causes are left.** 60 L3 scenarios fail AT the error-assertion step because we
