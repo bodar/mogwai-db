@@ -576,11 +576,19 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
 here is encoded as typed `throw` deferrals and in-code prose, so grep for markers finds nothing and
 proves nothing — read the deferral clusters instead.
 
-- **`is(typeOf(GType.X))` is decoded independently at 5 sites** (`tail/{list,scalar,group,path}.ts`,
-  `tail/projection.ts`) — each re-writes `pred.op === 'typeOf'` → `gtypeName` → uppercase-compare.
-  **They disagree on the same input:** the `group` arm THROWS on a non-MAP typeOf where `path`
-  correctly returns an empty relation. One pure classifier (`typeOfAssert`) beside `classifyBy`, then
-  5 readers; no SQL moves. Prerequisite for registering `is` into item 17's tables.
+- ~~**`is(typeOf(GType.X))` is decoded independently at 5 sites**~~ — **LANDED `fe0e257`.**
+  `typeOfAssert` (`tail/child-shape.ts`, beside `classifyBy`) is the one decode, total over three
+  outcomes (`gtype`/`opaque`/`none`) so a reader must say what it does with each; `assertsGType` and
+  `collectionAssert` are DERIVED readings, not second decoders. `gtypeName` is now unused in all five
+  files — none decodes a GType any more. No SQL moved.
+  **The recorded disagreement was kept, deliberately.** `group` still throws on a non-MAP assert where
+  `path` returns an empty relation: what a non-matching assert MEANS is per-arm policy, and both
+  answers are defensible (a filter that matched nothing vs an arm with no lowering for the claimed
+  shape). Separating the decode from the policy is what stops them drifting further; each site now
+  names its twin. **Do not "finish" this by picking one.**
+  Also landed on the way: `isPred` (`gremlin/frontend.ts`), the narrowing guard beside the tagged-arg
+  guards, so reading `.op`/`.values` off an `any[]` arg goes through a guard instead of an open-coded
+  typeof chain. The `is` registration into item 17's tables is now unblocked.
 - **`classifyBy` says "no host should re-scan byArgs inline" — 4 hosts still do**
   (`tail/list.ts:520`, `tail/select.ts:581`, `tail/group.ts:869,898`). Each hand-rolls
   `by.find(a => 'order' in a)?.order`, the exact scan the classifier retired, and each silently sorts
