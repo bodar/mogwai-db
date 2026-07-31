@@ -77,6 +77,12 @@ export interface Service {
   /** TinkerPop Service.Type — 'start' (a source producer), 'streaming' (per-input),
    *  'barrier' (collect-all, async). Load-bearing for the future batching path. */
   readonly type: 'start' | 'streaming' | 'barrier';
+  /** Resolvable by name, but EXCLUDED from `--list` enumeration. The directory service is
+   *  internal by TinkerPop's own rule (it never lists itself); a service that exists only to
+   *  back a SUGAR STEP — `io()` desugaring to a `call()` — is internal for the same reason the
+   *  reference corpus can assert an exact provider surface: it is not part of that surface.
+   *  A flag, not a name list, so the decision sits on the service that owns it. */
+  readonly internal?: boolean;
   /** The describe blob for `--list --verbose`. A minimal `{}` is fine for now. */
   describeParams(): Record<string, unknown>;
   resolve(ctx: ServiceCallCtx): Contribution;
@@ -84,11 +90,12 @@ export interface Service {
 
 export interface ServiceRegistry {
   get(name: string): Service | undefined;
-  /** Enumeration order for --list — EXCLUDES the directory service itself. */
+  /** Enumeration order for --list — EXCLUDES every `internal` service (the directory itself,
+   *  and any sugar-backing service). */
   list(): readonly Service[];
 }
 
 /** The directory command name. A service registered under it is resolvable by name but
- *  excluded from its own list() (TinkerPop's rule). Lives here (a dependency-free leaf) so
- *  both registry.ts and directory.ts import it without a cycle. */
+ *  excluded from its own list() (TinkerPop's rule — expressed as `internal: true`). Lives here
+ *  (a dependency-free leaf) so both call-params.ts and directory.ts import it without a cycle. */
 export const DIRECTORY_SERVICE_NAME = '--list';

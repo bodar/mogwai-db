@@ -1,6 +1,6 @@
 import { test, expect, describe } from 'bun:test';
 import { createRegistry, EMPTY_REGISTRY } from '../src/services/spi/registry.ts';
-import { standardRegistry } from '../src/services/standard.ts';
+import { standardRegistry, extendedRegistry } from '../src/services/standard.ts';
 import { directoryService } from '../src/services/catalog/directory.ts';
 import { DIRECTORY_SERVICE_NAME, type Service, type ServiceRegistry } from '../src/services/spi/types.ts';
 import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
@@ -28,9 +28,10 @@ const spec = (gremlin: string, params: Record<string, any> = {}) =>
 // fold + param resolver (added as those land). The registry is a DI seam sibling to
 // GraphManager; --list enumerates it live, EXCLUDING the directory service itself.
 
-const stubService = (name: string): Service => ({
+const stubService = (name: string, internal = false): Service => ({
   name,
   type: 'start',
+  internal,
   describeParams: () => ({}),
   resolve: () => ({ kind: 'stream', build: () => { throw new Error('stub'); } }),
 });
@@ -42,9 +43,9 @@ describe('ServiceRegistry', () => {
     expect(r.get('nope')).toBeUndefined();
   });
 
-  test('list() enumerates services but EXCLUDES the directory service', () => {
+  test('list() enumerates services but EXCLUDES every internal one', () => {
     const r = createRegistry([
-      stubService(DIRECTORY_SERVICE_NAME),
+      stubService(DIRECTORY_SERVICE_NAME, true),
       stubService('tinker.search'),
       stubService('tinker.degree.centrality'),
     ]);
@@ -54,15 +55,34 @@ describe('ServiceRegistry', () => {
     expect(r.get(DIRECTORY_SERVICE_NAME)?.name).toBe(DIRECTORY_SERVICE_NAME);
   });
 
+  test('internal is a FLAG, not the directory name — any service can opt out of --list', () => {
+    // What constraint 3 of docs/2026-07-31-di-scopes-and-services-plan.md buys: a service that
+    // backs a sugar step (io()) can exist in the production registry and stay out of the
+    // reference provider surface the official g_call/g_callXlistX scenarios assert.
+    const r = createRegistry([stubService('mogwai.io', true), stubService('tinker.search')]);
+    expect(r.list().map((s) => s.name)).toEqual(['tinker.search']);
+    expect(r.get('mogwai.io')?.name).toBe('mogwai.io');
+  });
+
   test('EMPTY_REGISTRY is the cycle-free compiler default (no services)', () => {
     expect(EMPTY_REGISTRY.list()).toEqual([]);
     expect(EMPTY_REGISTRY.get('--list')).toBeUndefined();
   });
 
-  test('standardRegistry lists the DirectoryService-excluded standard services', () => {
-    // --list itself is registered but excluded from list(); as more services land they
-    // appear here. It is always resolvable by name.
+  test('standardRegistry.list() IS the reference provider surface, exactly', () => {
+    // The official g_call / g_callXlistX scenarios assert this exact set, so this is a
+    // conformance obligation, not a convenience assertion: anything added to the standard
+    // registry that is not a reference service must be `internal` (or belong in extendedRegistry).
+    expect(standardRegistry.list().map((s) => s.name).sort())
+      .toEqual(['tinker.degree.centrality', 'tinker.search']);
+    // --list itself is registered but excluded from list(). It is always resolvable by name.
     expect(standardRegistry.get('--list')?.name).toBe('--list');
+  });
+
+  test('extendedRegistry.list() is the reference surface PLUS our mogwai.* extensions', () => {
+    expect(extendedRegistry.list().map((s) => s.name).sort())
+      .toEqual(['mogwai.graph.federate', 'tinker.degree.centrality', 'tinker.search']);
+    expect(extendedRegistry.get('--list')?.name).toBe('--list');
   });
 });
 

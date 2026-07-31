@@ -1,5 +1,4 @@
 import type { Service, ServiceRegistry } from './types.ts';
-import { DIRECTORY_SERVICE_NAME } from './types.ts';
 
 // ---------- the ServiceRegistry mechanism ----------
 //
@@ -11,7 +10,9 @@ import { DIRECTORY_SERVICE_NAME } from './types.ts';
 // the compiler core.
 //
 // The registry is a DI seam sibling to GraphManager, injected through application(deps) and
-// lazily constructed by yadic. `--list` (DirectoryService) enumerates it live.
+// lazily constructed by yadic. `--list` (DirectoryService) enumerates it live — minus every
+// service that declares itself `internal`, which is how the directory excludes itself and how a
+// sugar-backing service stays out of the reference provider surface the official corpus asserts.
 
 class MapRegistry implements ServiceRegistry {
   private readonly byName: Map<string, Service>;
@@ -22,7 +23,7 @@ class MapRegistry implements ServiceRegistry {
     return this.byName.get(name);
   }
   list(): readonly Service[] {
-    return [...this.byName.values()].filter((s) => s.name !== DIRECTORY_SERVICE_NAME);
+    return [...this.byName.values()].filter((s) => !s.internal);
   }
 }
 

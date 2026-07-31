@@ -25,6 +25,7 @@ function scalarStrings(ctx: ServiceCallCtx, rows: string[]) {
 export const directoryService: Service = {
   name: DIRECTORY_SERVICE_NAME,
   type: 'start',
+  internal: true,   // TinkerPop's rule: the directory never lists itself.
   describeParams: () => ({ service: 'string (filter)', verbose: 'boolean' }),
   resolve: () => ({
     kind: 'stream',
