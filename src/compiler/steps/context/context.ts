@@ -388,6 +388,48 @@ export function layoutArmProjection(out: TraverserLayout, armAliases: AliasMap, 
   return cols.length ? list(cols.map((e) => q`, ${e}`), '') : empty;
 }
 
+/**
+ * Is this arm's carried schema the one a COLLAPSING barrier left behind? `dropLayoutAtBarrier`
+ * removes every per-traverser channel, so a collapsed arm declares NO carried columns while the
+ * merged schema still declares the ones its per-row siblings carry. That difference is the signal —
+ * asked of the LAYOUT, which is the physical contract, rather than tracked as a flag a caller could
+ * forget to pass.
+ */
+export const isCollapsedArm = (arm: TraverserLayout, out: TraverserLayout): boolean =>
+  layoutCols(arm).length === 0 && layoutCols(out).length > 0;
+
+/**
+ * ONE COLLAPSED arm's projection of the merged carried schema.
+ *
+ * A collapsed arm is one traverser, and the reference says what it carries: `ReducingBarrierStep`
+ * emits a freshly GENERATED traverser, so no labels, no path, and a bulk of one. So the alias
+ * columns NULL-pad — the same answer `layoutArmProjection` already gives a label an arm never bound
+ * — and `bulk` is the literal 1.
+ *
+ * **Every other role has no honest fill, and the caller must have refused before reaching here.**
+ * A live `path`/`sack`/`fromV` is per-traverser state the collapse destroyed, and a non-empty
+ * `origins` means the collapse crossed the very ordinals the merge partitions by — NULL-padding any
+ * of them would hand a downstream consumer a channel that reads as "absent" when the truth is
+ * "unanswerable". The assertion here is therefore a contract check on the caller, not a deferral
+ * point: a deferral has to happen before any CTE is appended (the classify-then-emit rule).
+ *
+ * It takes no relation, and that is the whole difference from `layoutArmProjection`: every column a
+ * collapsed arm contributes is a CONSTANT, because there is no per-traverser row left to read one
+ * from.
+ */
+export function collapsedArmProjection(out: TraverserLayout): Expression {
+  if (out.origins.length || out.path || out.sack || out.fromV)
+    throw new Error('a collapsed branch arm cannot fill a carried path/sack/fromV/origin role — the caller must decline before lowering it');
+  const bulk = out.bulk;
+  const cols = layoutCols(out).map((c) => c === bulk ? q`1 AS ${c}` : q`NULL AS ${c}`);
+  return cols.length ? list(cols.map((e) => q`, ${e}`), '') : empty;
+}
+
+/** The carried roles a COLLAPSED arm can honestly fill — asked of the branch's INPUT layout,
+ *  before any arm is lowered, because that is the only place a decline is still free. */
+export const collapsedArmAdmissible = (input: TraverserLayout): boolean =>
+  !input.origins.length && !input.path && !input.sack && !input.fromV;
+
 /** The relation an arm merge produces, plus the carried schema it declares.
  *  `mergeArmRelation` owns both, so a caller cannot take one without the other. */
 export interface ArmMergeRelation {

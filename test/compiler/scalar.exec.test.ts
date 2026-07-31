@@ -77,18 +77,26 @@ describe('scalar-parent branch/map (Stage 1)', () => {
     expect(() => compile("g.V().values('age').union(__.out(),__.in())", {})).toThrow('union() after a scalar stream not yet supported');
   });
 
-  // Slice 1: reducer arms (count/sum/min/max/mean) lower per input through the pushed scalar
-  // child scope — matching the L3-ratcheted element-parent union/choose/coalesce, which also
-  // scope a reducer arm per incoming traverser (tryCompileScalarChild(...,'all')).
-  test('reducer arms lower per input (matches the element-parent branch convention)', async () => {
-    // count()/sum() per input: each value is one traverser → count 1, sum = the value itself.
+  // A COLLAPSING arm reduces over the whole input of a BATCHING branch, and only over one
+  // traverser's sub-stream otherwise. That split is a class fact, not a convention:
+  // `UnionStep`/`ChooseStep extends BranchStep`, whose `standardAlgorithm` injects every start at
+  // once when an option holds a `Barrier`; `CoalesceStep extends FlatMapStep` and
+  // `OptionalStep extends AbstractStep` take one start at a time unconditionally.
+  //
+  // This test asserted the per-input answer for all three, with a comment saying it "matches the
+  // element-parent branch convention" — which it did, and the convention was wrong for two of them.
+  // See docs/2026-08-01-branch-arm-barrier-scope-plan.md §1.
+  test('a collapsing arm batches under union/choose and stays per-traverser under coalesce', async () => {
+    // union: both arms see all four ages, so count() is 4 (one row) while constant() is four rows.
     expect(await vals("g.V().hasLabel('person').values('age').union(__.count(),__.constant(0))"))
-      .toEqual(['0', '0', '0', '0', '1', '1', '1', '1']);
+      .toEqual(['0', '0', '0', '0', '4']);
     expect(await vals("g.V().hasLabel('person').values('age').union(__.sum(),__.constant(0))"))
-      .toEqual(['0', '0', '0', '0', '27', '29', '32', '35']);
-    // choose/coalesce reducer arms: only the gated subset flows into the arm.
+      .toEqual(['0', '0', '0', '0', '123']);
+    // choose: batching changes how many starts are injected, not which option each start picks —
+    // so the collapsing arm reduces over the traversers ROUTED TO IT ({32,35}), not over all four.
     expect(await vals("g.V().hasLabel('person').values('age').choose(__.is(gt(30)),__.count(),__.constant(0))"))
-      .toEqual(['0', '0', '1', '1']);
+      .toEqual(['0', '0', '2']);
+    // coalesce is NOT a BranchStep, so its arm genuinely reduces over one traverser: count() is 1.
     expect(await vals("g.V().hasLabel('person').values('age').coalesce(__.is(gt(30)),__.count())"))
       .toEqual(['1', '1', '32', '35'].sort());
   });

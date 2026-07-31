@@ -24,7 +24,7 @@
 import { isNested } from '../../../gremlin/frontend.ts';
 import { UNKNOWN, staticTypeOf, perRowColumnOf, perRowCols } from '../../../sql/kernel/render.ts';
 import { empty, list, paren, q, value, type Expression } from '../../../sql/kernel/q.ts';
-import { layoutCols, patchLayout, layoutProjection, type ElementStream } from '../context/context.ts';
+import { collapsedArmAdmissible, layoutCols, patchLayout, layoutProjection, type ElementStream } from '../context/context.ts';
 import { loweringStateOf, rebuildScalar, toScalarStream, type ScalarStream, type VariantStream } from '../context/stream.ts';
 import { mergeVariantArms, mergeVariantParts, variantArmsMeta, type VariantArm } from './variant.ts';
 import { engineOf, fastPathContextOf } from '../../engine/deps.ts';
@@ -32,6 +32,7 @@ import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
 import { gateScalar, tryInlineScalarPredicate, unionScalarStreams } from './scalar.ts';
 import { predicateSql, TYPE_PER_ROW, TYPE_UNKNOWN } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
+import { COLLAPSING_BARRIERS } from '../../ir/step.ts';
 import {
     CHILD_SCALAR_REDUCERS, isResourceHead, pushChildScope, resourceElement,
     tryCompileListChild, tryCompileScalarValueChild, tryCompileScalarValueRows,
@@ -289,10 +290,16 @@ export function tryScalarChooseChild(s: ScalarStream, step: IRStep): ScalarStrea
 
   const gate = buildScalarGate(s, [predIsTraversal ? { nested: args[0].nested } : { p: args[0] }]);
   if (!gate) return null;
-  const thenEnd = tryCompileScalarArm(gate.seed((b) => b[0]), thenArg.nested);
+  // A collapsing arm reduces over the traversers ROUTED TO IT, not over the branch's whole input:
+  // `hasBarrier` changes how many starts `ChooseStep` injects, not which option each start picks.
+  // So the batched lowering runs over the GATED seed — the same relation, one arm's share of it.
+  const thenSeed = gate.seed((b) => b[0]);
+  const thenEnd = tryCompileBatchedScalarArm(thenSeed, thenArg.nested) ?? tryCompileScalarArm(thenSeed, thenArg.nested);
   if (!thenEnd) return null;
   const elseSeed = gate.seed((b) => q`NOT COALESCE((${b[0]}), 0)`);
-  const elseEnd = elseArg ? tryCompileScalarArm(elseSeed, elseArg.nested) : elseSeed; // no else → identity value
+  const elseEnd = elseArg
+    ? (tryCompileBatchedScalarArm(elseSeed, elseArg.nested) ?? tryCompileScalarArm(elseSeed, elseArg.nested))
+    : elseSeed; // no else → identity value
   if (!elseEnd) return null;
   return unionScalarStreams(s, [thenEnd, elseEnd]);
 }
@@ -304,11 +311,44 @@ export function tryScalarUnionChild(s: ScalarStream, step: IRStep): ScalarStream
   if (branches.length < 2) return null;
   const arms: ScalarStream[] = [];
   for (const b of branches) {
-    const end = tryCompileScalarArm(s, b.nested);
+    const end = tryCompileBatchedScalarArm(s, b.nested) ?? tryCompileScalarArm(s, b.nested);
     if (!end) return null;
     arms.push(end);
   }
   return unionScalarStreams(s, arms);
+}
+
+/**
+ * A COLLAPSING arm of a BATCHING branch, lowered over the branch's whole input.
+ *
+ * `BranchStep.standardAlgorithm` injects every start at once when any option contains a `Barrier`
+ * (`hasBarrier`), so `values('age').union(__.min(), __.max())` reduces each arm over the WHOLE
+ * scalar stream and yields `[27, 35]`. Routing that arm through `tryCompileScalarArm` instead
+ * pushes a child scope and reduces per value, which returned all four ages twice — a wrong
+ * cardinality, not a wrong order (docs/2026-08-01-branch-arm-barrier-scope-plan.md T1).
+ *
+ * It needs no new substrate and that is the point: the arm is lowered by the ORDINARY engine over
+ * the parent stream, exactly as the same steps would lower as a main-chain suffix. `lowerSteps`'
+ * scalar tail already routes a bare reducer to `lowerGlobalNumericReducer`/`lowerGlobalCount`,
+ * which are already total over a `ScalarStream` and already consult `cardinalityOf`. This is the
+ * "cannot be HANDED this" case from `steps/CLAUDE.md`, not the "cannot EXPRESS this" case.
+ *
+ * Declines (rather than defers) on three fronts, each leaving today's answer in place:
+ *  - a carried `path`/`sack`/`fromV`/origin, because a collapsed arm has no honest value for those
+ *    roles (`collapsedArmAdmissible`) — and a decline has to happen before any CTE is appended;
+ *  - a prefix outside the root-scope scalar-arm vocabulary, so the recognizer never accepts a body
+ *    the engine would throw partway through;
+ *  - a body that does not stay scalar, which is T2's mixed-shape ground.
+ */
+function tryCompileBatchedScalarArm(parent: ScalarStream, nested: any): ScalarStream | null {
+  if (!collapsedArmAdmissible(parent.traverserLayout)) return null;
+  const body = childSteps(nested, parent.params);
+  const last = body.at(-1);
+  if (!last || !COLLAPSING_BARRIERS.has(last.name)) return null;
+  const prefix = body.slice(0, -1);
+  if (prefix.length && !scalarBranchArm(prefix, parent.params)) return null;
+  const end = engineOf(parent).lowerStepsStrict(parent, body, 0);
+  return end.kind === 'scalar' ? end : null;
 }
 
 /** coalesce(a, b, …) over a scalar: the first arm that PRODUCES a value, per input row. Arm k is

@@ -159,6 +159,44 @@ export function sliceOf(step: IRStep): Slice {
   }
 }
 
+/**
+ * The barriers that COLLAPSE — a body ending in one reduces its whole input to a SINGLE traverser.
+ * Lowering such a body per-origin does not merely reorder the answer, it returns a different
+ * cardinality: `values('age').union(__.min(), __.max())` becomes four per-value minima instead of
+ * `[27, 35]`.
+ *
+ * A strict subset of `GLOBAL_BARRIER_STEPS`, and the difference is deliberate. The SLICE and SORT
+ * barriers (`limit`/`range`/`skip`/`tail`/`order`/`sample`/`dedup`) also batch in the reference —
+ * `RangeGlobalStepContract extends FilteringBarrier`, `OrderGlobalStep extends
+ * CollectingBarrierStep`, both `Barrier` — but they preserve cardinality, our per-origin form of
+ * them is pinned the WRONG WAY by our own tests, and no corpus scenario witnesses either reading.
+ * Flipping those is T3 of the branch-arm plan and needs a hand-derived L4 pin FIRST.
+ *
+ * `fold`/`group`/`groupCount` collapse too and are absent for a different reason: they change the
+ * stream's SHAPE, so batching one turns a homogeneous merge into a mixed-shape one. That is T2's
+ * ground, not this vocabulary's.
+ *
+ * So it is `REDUCERS` exactly, today — deliberately spelled as an equality rather than a fresh list,
+ * because the two are the same members for different reasons and only one of them is free to grow:
+ * `REDUCERS` is "the SQL aggregates over a scalar stream", this is "the barriers whose result is one
+ * traverser". `fold` joining the second (T2) must not silently join the first.
+ */
+export const COLLAPSING_BARRIERS: ReadonlySet<string> = REDUCERS;
+
+/**
+ * The branch kinds whose arms can see the branch's WHOLE input, and it is a class-hierarchy fact,
+ * not a judgement: `UnionStep` and `ChooseStep` extend `BranchStep`, whose `standardAlgorithm`
+ * injects every start at once when `hasBarrier` is set. `CoalesceStep extends FlatMapStep` and
+ * `OptionalStep extends AbstractStep` take ONE traverser at a time unconditionally, so a barrier in
+ * one of their arms genuinely reduces over that traverser's sub-stream and our per-origin lowering
+ * of those two is CORRECT.
+ *
+ * Named separately from `BRANCH_KINDS` for exactly that reason — "fix all four branch kinds" would
+ * break a dozen tests that are already right
+ * (docs/2026-08-01-branch-arm-barrier-scope-plan.md §1, §6).
+ */
+export const BATCHING_BRANCHES: ReadonlySet<string> = new Set(['union', 'choose']);
+
 /** The four steps that fork a traverser into arms and merge the results. */
 export type BranchKind = 'union' | 'choose' | 'coalesce' | 'optional';
 export const BRANCH_KINDS: ReadonlySet<string> = new Set<string>(['union', 'choose', 'coalesce', 'optional']);
