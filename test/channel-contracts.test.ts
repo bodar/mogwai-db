@@ -6,7 +6,7 @@ import {
 } from '../src/gremlin/frontend.ts';
 import { cardinalityOf } from '../src/compiler/steps/context/stream.ts';
 import {
-    layoutCols, layoutGrewAliases, layoutOverAliases, mergeArmRelation, mergeLayouts, nonAliasCols, rigidCols,
+    LAYOUT_ROLE_POLICY, layoutCols, layoutGrewAliases, layoutOverAliases, mergeArmRelation, mergeLayouts, nonAliasCols, rigidCols,
     type AliasEntry, type TraverserLayout,
 } from '../src/compiler/steps/context/context.ts';
 import { Query, q } from '../src/sql/kernel/q.ts';
@@ -119,6 +119,32 @@ describe('arm-merge authority', () => {
     expect([...dropped.aliases.keys()]).toEqual(['a', 'b']);
     expect(dropped.trackFromV).toBe(true);
     expect(dropped.consumedAliases).toEqual(['gone']);
+  });
+
+  test('every role the column accessors emit agrees with its declared merge policy', () => {
+    // The table is kept TOTAL by the type checker; this ties it to the three accessors, so a policy
+    // recorded there and a column list that disagrees cannot both survive.
+    const c = layout({
+      aliases: new Map([['a', alias('a0')]]),
+      sack: 'sk', bulk: 'bulk', origins: ['o0'], fromV: 'fv', encounter: 'encounter',
+      path: { kind: 'cols', cols: [{ col: 'p0', elem: 'vertex' }] },
+      trackFromV: true, consumedAliases: ['gone'],
+    });
+    const identical = Object.entries(LAYOUT_ROLE_POLICY).filter(([, p]) => p === 'identical').map(([r]) => r);
+    expect(identical.sort()).toEqual(['bulk', 'encounter', 'fromV', 'origins', 'sack']);
+    // `rigidCols` IS the identical set: same size, and every column belongs to one of those roles.
+    expect(rigidCols(c)).toEqual(['sk', 'bulk', 'o0', 'fv', 'encounter']);
+    expect(rigidCols(c).length).toBe(identical.length);
+    // The two non-identical COLUMN roles are exactly what layoutCols adds beyond the rigid set:
+    // `union` contributes the alias columns, `pad` the path positions.
+    const extra = layoutCols(c).filter((col) => !rigidCols(c).includes(col));
+    expect(extra).toEqual(['a0', 'p0']);
+    // `metadata` roles are never columns — set on `c` above, absent from every accessor.
+    const metadata = Object.entries(LAYOUT_ROLE_POLICY).filter(([, p]) => p === 'metadata').map(([r]) => r);
+    expect(metadata.sort()).toEqual(['consumedAliases', 'trackFromV']);
+    for (const role of metadata) expect(layoutCols(c)).not.toContain(role);
+    // nonAliasCols is the same set minus the `union` role, which is what an arm merge remaps.
+    expect(nonAliasCols(c)).toEqual([...rigidCols(c), 'p0']);
   });
 
   test('the shared merge core declares the minted encounter in its layoutCols slot', () => {

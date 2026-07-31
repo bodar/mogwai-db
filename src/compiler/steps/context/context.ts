@@ -245,7 +245,9 @@ function mergeAliasMaps(seed: AliasMap, arms: readonly TraverserLayout[]): Alias
 
 /** The RIGID carried columns — sack/bulk/origins/fromV/encounter (everything but aliases and
  *  path). These are per-traverser physical state a branch cannot fork or reconcile, so they must
- *  be identical across arms; aliases fork and merge, path pads.
+ *  be identical across arms; aliases fork and merge, path pads. Equivalently: the roles whose
+ *  `LAYOUT_ROLE_POLICY` is `'identical'` — derived here by EXCLUDING the two that are not, since
+ *  each needs its own empty value and a generic clear would be more machinery than the table saves.
  *
  *  The spread is a deliberate CONSTRUCTION of a throwaway layout to ask layoutCols a narrower
  *  question, not a preservation route — `patchLayout` cannot express it, because clearing `path`
@@ -256,6 +258,44 @@ export const rigidCols = (c: TraverserLayout): string[] => layoutCols({ ...c, al
  *  `rigidCols`. This is the half an arm merge projects STRAIGHT THROUGH from each arm while the
  *  alias half is remapped per arm, and the scalar and list merges each derived it inline. */
 export const nonAliasCols = (c: TraverserLayout): string[] => layoutCols(patchLayout(c, { aliases: new Map() }));
+
+/** What an arm merge does with one carried role.
+ *
+ *  - `union` — the arms' values COMBINE. Only `aliases`: a label bound in one arm NULL-pads in the
+ *    others, so `select()` of it drops that arm's traversers (TinkerPop's drop-not-throw).
+ *  - `pad` — the arms' values combine by padding to the LONGEST. Only `path`: a shorter arm's path
+ *    genuinely is shorter, so its trailing positions are NULL and nullable.
+ *  - `identical` — per-traverser physical state a fork cannot reconcile. A same-scope `peer` merge
+ *    requires every arm to agree and fails closed otherwise; a `rehomed` merge takes the SEED's,
+ *    because a child arm's copy describes the child's scope rather than this one.
+ *  - `metadata` — never a physical column, so there is nothing to merge: it rides through
+ *    unchanged. `trackFromV` is a chain-level requirement; `consumedAliases` is a barrier's
+ *    diagnosis, which must survive every downstream patch or `select()` loses the ability to tell
+ *    "never bound" from "a barrier ate it". */
+export type LayoutRolePolicy = 'union' | 'pad' | 'identical' | 'metadata';
+
+/** The merge policy of EVERY carried role — the explicit classification Phase 1's design section
+ *  asks for, as a table the type checker keeps total rather than prose that goes stale.
+ *
+ *  `Record<keyof TraverserLayout, …>` is the enforcement: adding a role to `TraverserLayout` fails
+ *  the build until its policy is declared here. Without that, a new role falls into `identical` by
+ *  ACCIDENT — `rigidCols` derives the rigid set by exclusion (everything `layoutCols` emits that is
+ *  not an alias or a path position), so omission silently means "a branch must fail closed on it",
+ *  which is the safe default but not necessarily the intended one.
+ *
+ *  `test/channel-contracts.test.ts` ties the table to the three column accessors, so a policy
+ *  recorded here and a column list that disagrees cannot both survive. */
+export const LAYOUT_ROLE_POLICY: Readonly<Record<keyof TraverserLayout, LayoutRolePolicy>> = {
+  aliases: 'union',
+  path: 'pad',
+  origins: 'identical',
+  sack: 'identical',
+  fromV: 'identical',
+  encounter: 'identical',
+  bulk: 'identical',
+  trackFromV: 'metadata',
+  consumedAliases: 'metadata',
+};
 
 /** How an arm merge treats the RIGID roles (sack/bulk/origins/fromV/encounter). This is a
  *  POLICY, not a strictness dial: the two cases describe genuinely different boundaries, so a
