@@ -89,13 +89,18 @@ Cloudflare** — which is why nothing above found it. Every level of the ladder 
    today, every statement ≤100 binds** (41×; only 17% of the current cost is inside SQLite at all).
    A bind-count static gate (`mise run binds`) is what stops the class recurring. **High** — two live
    production-runtime walls.
-   **Format set is DECIDED, do not re-widen it** (2026-07-31): GraphSON v3 adjacency + Neptune/Neo4j
-   CSV. **No homegrown format and nothing XML** — so GraphML is a refusal (its `attr.type` is more
-   type-lossy than CSV anyway), and the lossless our→our path is a table-shaped CSV dump (headers =
-   real column names, same RFC 4180 writer), which invents no container and no type vocabulary. The
-   test that separates that from a lossy CSV export is **`gcrew` round-tripping** — Neptune CSV cannot
-   carry its meta-properties. Untyped GraphSON is a RESPONSE encoder, a different problem, and stays
-   where it is scoped. Plan §4/§4a/§4b.
+   **Format set is DECIDED, do not re-widen it** (2026-07-31): **TYPED GraphSON adjacency** (read v3,
+   write v4) + Neptune/Neo4j CSV for interop. **No homegrown format and nothing XML** — GraphML is a
+   refusal, its `attr.type` being more type-lossy than CSV anyway. **Typed GraphSON is ALSO the
+   lossless export/backup path — verified 17-for-17 against `CanonicalType` in `gremlin-core` at the
+   pinned gitlink**, plus nesting with per-leaf types, typed `g:Map` keys, and meta-properties
+   (`tinkerpop-crew-v3.json` nests them inside a VertexProperty, ids and all). So ONE codec serves
+   `io()`, seeding and backup, and no homegrown dump is needed — an earlier draft proposed one and it
+   was unnecessary. CSV is then interop-ONLY, and its losses (6 of our 17 scalars, one flat `[]`
+   level, `single|set`, no meta-properties — `gcrew` cannot round-trip it) stop mattering once it is
+   not the backup path. **`gcrew` round-tripping through GraphSON is the gate** that proves the type
+   channel survives a dump. Untyped GraphSON v4 is a RESPONSE encoder — a different artefact, cannot
+   carry `vtype` by definition, stays where it is scoped. Plan §4/§4a/§4b.
    → [bulk-transfer-and-io-substrate](./2026-07-31-bulk-transfer-and-io-substrate-plan.md)
 
 2. **Universal child-seam acceptance.** Element, scalar, list, count, branch, `repeat`,

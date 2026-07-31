@@ -236,9 +236,9 @@ applies with equal force here. §4b records what excluding them costs, because i
 
 | format | direction | unlocks | verdict |
 |---|---|---|---|
-| **GraphSON v3 adjacency (`.json`)** | read + write | 2 of 6 `io()` scenarios; **replaces `seed-graphson.ts` and the 5.9 s seed** | **first.** A TinkerPop standard, not homegrown — the typed v3 adjacency file (one vertex per line, embedded `inE`/`outE`), which is a *different artefact* from untyped GraphSON responses (§4a). The reader already exists as `test/fixtures/seed-graphson.ts`; promote it from test fixture to a real reader emitting row batches instead of Gremlin strings |
-| **Neptune/Neo4j CSV-with-typed-headers** | read + write | the interop story (`~id`,`~label`,`prop:type` / `:ID`,`:LABEL`,`:START_ID`) | **second.** Cross-vendor de-facto standard, RFC 4180, no deps. Lossy against our type channel — §4b quantifies it |
-| ~~our compact typed dump~~ | — | — | **EXCLUDED — homegrown.** See §4b for what this costs and for the one route that recovers it without inventing a format |
+| **TYPED GraphSON adjacency (`.json`)** | read + write | 2 of 6 `io()` scenarios; **replaces `seed-graphson.ts` and the 5.9 s seed**; **AND is the lossless export/backup path** (§4b) | **first, and it is now carrying three jobs.** A TinkerPop standard, not homegrown — the typed adjacency file (one vertex per line, embedded `inE`/`outE`), a *different artefact* from untyped GraphSON responses (§4a). Read v3 (what the corpus fixtures are), write v4 (our own type channel, 1:1 — §4b). The reader already exists as `test/fixtures/seed-graphson.ts`; promote it from test fixture to a real reader emitting row batches instead of Gremlin strings |
+| **Neptune/Neo4j CSV-with-typed-headers** | read + write | **interop only** (`~id`,`~label`,`prop:type` / `:ID`,`:LABEL`,`:START_ID`) | **second.** Cross-vendor de-facto standard, RFC 4180, no deps. Lossy against our type channel, which is fine once it is not also the backup path — §4b |
+| ~~our compact typed dump~~ | — | — | **EXCLUDED — homegrown, and it turns out to be UNNECESSARY too.** Typed GraphSON already covers all 17 `CanonicalType`s, nesting, typed map keys and meta-properties — §4b |
 | ~~GraphML (`.xml`)~~ | — | 2 of 6 `io()` scenarios | **EXCLUDED — XML.** Two independent reasons, and the type one is the stronger: GraphML's `attr.type` admits only `boolean/int/long/float/double/string`, so it is **more** lossy than CSV (no date, no uuid, no nesting, no meta-properties). Separately, Workers has no `DOMParser` and `HTMLRewriter` is an HTML streaming transformer, not an XML DOM — so it would also be the only format here that is new *code* rather than new plumbing |
 | **Gryo / `.kryo`** | — | 2 of 6 `io()` scenarios | **a genuine wall.** JVM serialization; not reimplementable without a dependency, and no dependency exists. Fail closed naming the format |
 
@@ -271,42 +271,59 @@ generic HTTP clients — already scoped in `2026-07-13-graphson-untyped-scope.md
 So: keep it as the response encoder it was scoped as. It is a good next piece of work — it makes the
 shipped `/docs` panel usable — and it is unrelated to this plan.
 
-### 4b. What excluding the homegrown dump costs — and the one route that recovers it
+### 4b. There is no lossless-export gap — TYPED GraphSON already is one
 
-Excluding it is defensible, but it should be an owned trade rather than a silent one, because
-**it leaves no lossless export path.** Measured against the two vocabularies:
+An earlier draft of this section treated "no homegrown dump" as a painful trade and proposed a
+table-shaped CSV dump to recover losslessness. **That was wrong, and the correction matters because
+it deletes a deliverable.** Checked against `gremlin-core` at the pinned gitlink:
 
-Our `CanonicalType` (`gremlin/types.ts:89`) is 17 names. Neptune CSV admits
-`Bool/Byte/Short/Int/Long/Float/Double/String/Date/Datetime`, plus `[]` arrays and a
-`(single|set)` cardinality suffix. So CSV cannot express:
+**Typed GraphSON covers our entire type channel, 17 for 17.** `CanonicalType`
+(`gremlin/types.ts:89`) maps onto GraphSON v4's two registries with nothing left over —
+`GraphSONModule.GraphSONModuleV4`'s `g:` typemap plus `GraphSONXModuleV4`'s `gx:` set, with
+`g:UUID` registered separately in `GraphSONMapper:118-120` under the V4 branch:
 
-- **6 of our scalar types** — `bigint`, `bigdecimal`, `uuid`, `char`, `duration` have no header
-  type, and `map` has no representation at all;
-- **nesting** — our collection values are a self-describing `{t,v}` tree with per-leaf types and
-  arbitrary depth; CSV has one flat `[]` level;
-- **TinkerPop's `list` cardinality** — Neptune's cardinality vocabulary is `single|set`, not
-  `single|list|set`;
-- **meta-properties — nothing at all.** This is the decisive one and it is checkable against our own
-  fixtures: `gcrew` (an official TinkerPop reference graph, `test/fixtures/seed-crew.ts`) gives every
-  `location` value `startTime`/`endTime` meta-properties. **`gcrew` cannot round-trip through Neptune
-  CSV**, and neither can our `meta BLOB` column in general.
+| ours | GraphSON v4 | | ours | GraphSON v4 |
+|---|---|---|---|---|
+| `string` | bare JSON string | | `bigdecimal` | `gx:BigDecimal` |
+| `boolean` | bare JSON bool | | `datetime` | `gx:DateTime` |
+| `byte` | `gx:Byte` | | `uuid` | `g:UUID` |
+| `short` | `gx:Int16` | | `char` | `gx:Char` |
+| `int` | `g:Int32` | | `duration` | `gx:Duration` |
+| `long` | `g:Int64` | | `list` | `g:List` |
+| `bigint` | `gx:BigInteger` | | `map` | `g:Map` |
+| `float` | `g:Float` | | `set` | `g:Set` |
+| `double` | `g:Double` | | | |
 
-Two honest ways forward:
+That is not luck — `CanonicalType` was derived from the v4 wire type channel, and GraphSON and
+GraphBinary are two encodings of the *same* type system. (V4 pruned `gx:` hard, dropping the eleven
+`java.time` variants for one `gx:DateTime`; it kept every name we need.)
 
-1. **Accept it.** Import/export is interop-only and lossy at the edges of our type system; there is
-   no backup/replication story pre-v1. Simple, and legitimate — but it means "export your graph" has
-   a caveat that bites exactly the fixtures we test against.
-2. **Recommended — and it satisfies the exclusion rather than working around it.** A **table-shaped
-   CSV dump is not a homegrown format.** Six RFC 4180 CSVs whose headers *are* the real column names
-   (`vertex_properties` → `id,node,key,value,vtype,meta`), written by the *same* CSV writer the
-   Neptune path uses with a different column mapping: `vtype` rides as a column, collection values
-   ride as the stored JSON text, `meta` rides as its stored JSON. **Nothing is invented — no
-   container, no type vocabulary, no envelope.** That is the distinction that matters: a homegrown
-   *format* invents a spec someone has to learn; a standard *encoding of our own schema* invents
-   nothing and is lossless by construction, because the schema is the source of truth.
+It also covers the three structural things CSV cannot:
 
-The plan takes route 2. If it reads as homegrown-by-the-back-door, route 1 is the fallback and only
-phase 6 changes — everything through phase 5 is unaffected either way.
+- **nesting with per-leaf types** — `g:List`/`g:Set` elements carry their own `@type`, which is
+  exactly our `{t,v}` `ValueNode` tree;
+- **typed map keys** — `g:Map` is a flat alternating `[k,v,k,v]` array *precisely so* keys can be
+  typed, which is what our `MapEntryType.key` fidelity needs;
+- **meta-properties** — verified directly in `tinkerpop-crew-v3.json`: a VertexProperty is
+  `{"id":{"@type":"g:Int64","@value":6},"value":"san diego","properties":{"startTime":…,"endTime":…}}`.
+  VertexProperty *ids* round-trip too, which our `vertex_properties.id` needs.
+
+**So the lossless our→our path is a TinkerPop standard we already have to build for `io()`.** One
+codec serves the graph file format, the export/backup story, and the fast seed. No homegrown format,
+no XML, and no second writer.
+
+**What CSV is for, then, is interop and only interop** — and its losses stop being a problem the
+moment it is not also the backup path. For the record, measured against Neptune's spec
+(`Bool/Byte/Short/Int/Long/Float/Double/String/Date/Datetime`, `[]` arrays, `(single|set)`): it
+cannot express `bigint`, `bigdecimal`, `uuid`, `char`, `duration` or `map`; it has one flat `[]`
+level; its cardinality vocabulary is `single|set` where TinkerPop's is `single|list|set`; and it has
+**no meta-property representation at all**, so `gcrew` cannot round-trip through it. None of that is
+our defect to fix — Neptune and Neo4j have the same limits natively, which is what makes the format
+interoperable in the first place. The rule is just: **a CSV export documents its lossy cases; a
+GraphSON export does not have any.**
+
+`gcrew` round-tripping is therefore **phase 4's** gate (GraphSON), not phase 6's, and it is the one
+assertion that proves the type channel survives a dump.
 
 ---
 
@@ -412,9 +429,9 @@ Each phase lands green and is useful alone.
 | **1** | `RowBatch` load/drain on the `Sql` seam; FTS row *construction* extracted from `indexProperty` | modern graph loads batched ≡ loads via write traversals, byte-identical incl. `property_fts` |
 | **2** | Fix §1d (`drop`) and §1c (`landForeignElements`, `jsonbArrayOf`) through `RowBatch` | phase 0's harness goes green; `g.V().drop()` on grateful-dead passes under it |
 | **3** | `mise run binds` static gate | at zero, fails the build (not a ratchet) |
-| **4** | GraphSON reader/writer over `RowBatch`; conformance host seeds through it | L3 count unchanged; seed ≤ 0.5 s; census unchanged |
+| **4** | **Typed GraphSON reader AND writer** over `RowBatch`; conformance host seeds through it | L3 count unchanged; seed ≤ 0.5 s; census unchanged; **`gcrew` round-trips** — the one assertion that proves the type channel, incl. meta-properties, survives a dump (§4b) |
 | **5** | `IoStore` (Bun FS / CF R2 / L3 host mapping) + `io()` as a barrier service | the 2 `.json` `Read.feature` scenarios pass; `.xml` and `.kryo` fail closed naming the format; `tags.ts` reclassified (§4) |
-| **6** | Neptune/Neo4j CSV reader/writer + the table-shaped CSV dump (§4b route 2, same writer); `io().write()` to R2 | round-trip: export a graph, load into an empty graph, compare — **and `gcrew` round-trips**, which is the assertion that separates route 2 from route 1 |
+| **6** | Neptune/Neo4j CSV reader/writer (**interop only**); `io().write()` to R2 | round-trip through CSV for the types CSV *can* carry, with the lossy cases documented and asserted as lossy rather than silently wrong |
 | **7** | remap pass (non-empty target, label re-interning, `uid` preservation) | load-into-non-empty round-trip |
 | — | federated *materialize* | scope after 5–7 land |
 
@@ -455,9 +472,10 @@ per-element `run`.
 - **Any XML format — GraphML included.** A decision (2026-07-31), not a scoping outcome: §4 shows
   GraphML is *more* type-lossy than CSV, and it would also be the only format needing a hand-rolled
   parser. Costs 2 `Read.feature` scenarios; they become a refusal, not a gap.
-- **Any homegrown format** — §4b. The lossless path is a standard *encoding* of our own table schema,
-  never an invented container or type vocabulary.
-- **Untyped GraphSON as a bulk format** — §4a. It stays the response encoder it was scoped as.
+- **Any homegrown format** — and §4b removes the last argument for one: typed GraphSON is already
+  lossless over our whole type channel, so there is nothing a homegrown dump would buy.
+- **Untyped GraphSON as a bulk format** — §4a. It stays the response encoder it was scoped as; the
+  TYPED sibling is what does the bulk job, and it is already format #1.
 - **Gryo/`.kryo`** — a platform wall, fails closed.
 - **Cross-DO transactions / snapshot consistency** across a load — best-effort, as federation
   already is.
