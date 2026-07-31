@@ -224,6 +224,28 @@ export function storedScalar(val: any, vtype: CanonicalType | null): any {
   }
 }
 
+/**
+ * What a property row's `value` column BINDS, for either storage shape — the one place that decides
+ * between the two.
+ *
+ * A COLLECTION (list/map/set) stores as a self-describing typed `{t,v}` tree, bound as its JSON
+ * *text* and wrapped `jsonb(?)` by the caller (both runtimes accept a string bind; a raw blob bind
+ * would diverge — storage.ts). Only the top node's bare `v` is stored, because `vtype` already names
+ * the outer shape. A SCALAR binds through `storedScalar`, keeping its SQLite storage class (so
+ * numeric order/range predicates stay correct) or its exact decimal tail as TEXT.
+ *
+ * Extracted so the per-element write path (`applyVertexProperty`, `insertEdgeProperty`) and the bulk
+ * loader (`src/bulk.ts`) cannot encode the same value two different ways — a bulk path that
+ * re-derives this is a silent storage divergence, which is the same class of defect as re-deriving
+ * the FTS rows (see `propertyFtsRows`).
+ */
+export function propertyValueBind(
+  val: any, vtype: CanonicalType | null, typeNode: TypeNode | null = null,
+): { stored: any; collection: boolean } {
+  const collection = isCollectionType(vtype);
+  return { collection, stored: collection ? JSON.stringify(valueNodeOf(val, typeNode).v) : storedScalar(val, vtype) };
+}
+
 /** Types without a bidirectional GraphBinary serializer. Formerly {bigdecimal, char,
  *  duration} — the client's three unchecked TODOs — now all three are served by our
  *  hand-rolled serializers (serializers.ts), so the set is empty: every canonical type

@@ -1,7 +1,7 @@
 import type { GraphStore } from '../../../storage.ts';
 import { q, value, list, raw, render, type Expression } from '../../../sql/kernel/q.ts';
 import { labelIn, labelNameFor, propHasFor, sqlElem, elemTable, type Elem, vertexLabelIn } from '../../plan/plan.ts';
-import { gremlinTypeOf, isCollectionType, storedScalar, mapEntryType, valueNodeOf, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
+import { gremlinTypeOf, mapEntryType, propertyValueBind, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
 import { stepChain, isNested, isCardinalityArg, isCardinalityValueArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
@@ -409,14 +409,6 @@ function insertRow(store: GraphStore, table: ElementTable, baseCols: string[], b
   return { id: row.id, extId: row.uid ?? row.id };
 }
 
-// The JSON text bound for a stored COLLECTION value: the self-describing {t,v} tree
-// (gremlin-types.valueNodeOf), stored as the TOP node's BARE `v` (the vtype column names
-// the outer shape). Leaves carry their canonical form (storedScalar) so precision + type
-// survive; nested nodes self-describe. Replaces the old flat collectionJson (which lost
-// element/key types, set-vs-list, and non-string keys).
-const collectionValueJson = (val: any, typeNode: TypeNode | null): string =>
-  JSON.stringify(valueNodeOf(val, typeNode).v);
-
 // Set/append ONE vertex property (W4). single = replace all rows for the key then insert
 // one; list = append; set = append unless an equal value already exists (then patch its
 // meta). Meta is a {metaKey:scalar} object stored as a JSONB blob. A single SQL statement
@@ -432,8 +424,9 @@ export function applyVertexProperty(
   // value column (bind the JSON text, wrap jsonb(?)) — a raw JS array/Map bind would throw at
   // the SQLite seam. A scalar binds through storedScalar so it keeps its storage class /
   // exact-tail TEXT (numeric order/range intact).
-  const collection = isCollectionType(vtype);
-  const storedVal = collection ? collectionValueJson(val, typeNode) : storedScalar(val, vtype);
+  // The value channel is propertyValueBind's (gremlin/types.ts) — shared with the bulk loader, so
+  // the two paths cannot encode the same value two different ways.
+  const { stored: storedVal, collection } = propertyValueBind(val, vtype, typeNode);
   const valPh = collection ? 'jsonb(?)' : '?';
   if (cardinality === 'single') {
     // single = replace all rows for the key: drop their FTS rows too, then the rows.
@@ -462,8 +455,7 @@ export function applyVertexProperty(
 export function insertEdgeProperty(store: GraphStore, edge: number, key: string, val: any, vtype: CanonicalType | null, typeNode: TypeNode | null = null): void {
   if (val && typeof val === 'object' && 'nested' in val) throw new Error('property() with a traversal value not yet supported');
   validatePropertyKey(key); // the waist, edge side (see applyVertexProperty)
-  const collection = isCollectionType(vtype);
-  const storedVal = collection ? collectionValueJson(val, typeNode) : storedScalar(val, vtype);
+  const { stored: storedVal, collection } = propertyValueBind(val, vtype, typeNode);
   const valPh = collection ? 'jsonb(?)' : '?';
   // Was there already a row for (edge,key)? The UNIQUE(edge,key) index serves this cheaply.
   // We ONLY delete stale FTS rows on a genuine overwrite — an FTS5 delete-by-UNINDEXED-column

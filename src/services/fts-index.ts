@@ -20,7 +20,7 @@
 // See docs/archive/2026-07-20-call-service-registry-plan.md ("FTS5 + proper JSON handling").
 import type { GraphStore } from '../storage.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../gremlin/types.ts';
-import { bindChunks, placeholders } from '../rowbatch.ts';
+import { bindChunks, insertRows, placeholders } from '../rowbatch.ts';
 
 /** Which normalized property table `pid` keys into — 'node' for vertex_properties,
  *  'edge' for edge_properties. Stored UNINDEXED so search can scope by element kind and
@@ -102,19 +102,37 @@ export function deleteFtsForOwners(store: GraphStore, ownerElem: OwnerElem, owne
     );
 }
 
-/** Index ONE property instance into property_fts. `pid` is the property row's id
- *  (vertex_properties.id / edge_properties.id), `owner` the owning nodes.id/edges.id. The
- *  value is tagged into a ValueNode via the SAME valueNodeOf the write path stores, so the
- *  index sees exactly the logical tree the reader reconstructs. Caller deletes stale rows
- *  first (single-cardinality replace) — this only inserts. */
+/** `property_fts`'s columns, in the order `propertyFtsRows` emits cells. */
+export const PROPERTY_FTS_COLUMNS = ['owner_elem', 'pid', 'owner', 'pk', 'kind', 'text'] as const;
+
+/**
+ * The `property_fts` rows for ONE property instance, as cell arrays in `PROPERTY_FTS_COLUMNS`
+ * order — row CONSTRUCTION, separated from row INSERTION.
+ *
+ * The separation is what lets the bulk loader (`src/bulk.ts`) land FTS rows through the same walk
+ * the per-element write path uses, and it is not a nicety: a probe's simplified re-derivation
+ * produced 9,023 rows for grateful-dead where this walk produces 8,936, because it skipped
+ * empty-text rows and the nested collection walk. **A bulk loader that writes its own FTS rows is a
+ * silent index divergence** (plan doc §2, invariant 3), so there is exactly one walk and both paths
+ * call it.
+ *
+ * `pid` is the property row's id (vertex_properties.id / edge_properties.id), `owner` the owning
+ * nodes.id/edges.id. The value is tagged into a ValueNode via the SAME `valueNodeOf` the write path
+ * stores, so the index sees exactly the logical tree the reader reconstructs.
+ */
+export function propertyFtsRows(
+  ownerElem: OwnerElem, pid: number, owner: number, key: string, val: unknown, typeNode: TypeNode | null,
+): unknown[][] {
+  return ftsRowsFor(valueNodeOf(val, typeNode)).map((r) => [ownerElem, pid, owner, key, r.kind, r.text]);
+}
+
+/** Index ONE property instance into property_fts. Caller deletes stale rows first
+ *  (single-cardinality replace) — this only inserts. Batched through RowBatch: a collection
+ *  property emits one row per nested key/leaf, so the statement count was a function of the
+ *  VALUE's size. */
 export function indexProperty(
   store: GraphStore, ownerElem: OwnerElem, pid: number, owner: number,
   key: string, val: unknown, typeNode: TypeNode | null,
 ): void {
-  const node = valueNodeOf(val, typeNode);
-  for (const r of ftsRowsFor(node))
-    store.query(
-      'INSERT INTO property_fts(owner_elem, pid, owner, pk, kind, text) VALUES(?, ?, ?, ?, ?, ?)',
-      [ownerElem, pid, owner, key, r.kind, r.text],
-    );
+  insertRows(store, 'property_fts', PROPERTY_FTS_COLUMNS, propertyFtsRows(ownerElem, pid, owner, key, val, typeNode));
 }

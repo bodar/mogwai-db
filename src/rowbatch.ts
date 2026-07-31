@@ -62,16 +62,18 @@ export function* bindChunks<T>(items: Iterable<T>, opts: ChunkOptions = {}): Gen
  *  blob bind would diverge — storage.ts). `conflict` appends an `ON CONFLICT …` tail.
  *
  *  Every row must have one value per column: a ragged row would shift the whole VALUES list
- *  silently, so it throws. */
+ *  silently, so it throws. Returns the number of statements issued — the figure a bulk path reports,
+ *  and the only one that says whether it is actually batching. */
 export function insertRows(
   w: RowWriter,
   table: string,
   columns: readonly string[],
   rows: Iterable<readonly unknown[]>,
   { cell = () => '?', conflict = '' }: { cell?: (column: string) => string; conflict?: string } = {},
-): void {
+): number {
   const tuple = `(${columns.map(cell).join(', ')})`;
   const tail = conflict ? ` ${conflict}` : '';
+  let statements = 0;
   for (const chunk of bindChunks(rows, { bindsPerItem: columns.length })) {
     const binds: unknown[] = [];
     for (const row of chunk) {
@@ -83,7 +85,9 @@ export function insertRows(
       `INSERT INTO ${table}(${columns.join(', ')}) VALUES ${chunk.map(() => tuple).join(', ')}${tail}`,
       binds,
     );
+    statements++;
   }
+  return statements;
 }
 
 /** `DELETE FROM <table> WHERE <column> IN (…)` — chunked. The delete-by-id-set half of every
