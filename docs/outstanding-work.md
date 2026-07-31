@@ -635,18 +635,22 @@ proves nothing — read the deferral clusters instead.
   existing stale-entry checks (`staleEntries`, and `capability.test.ts`'s `seenKnown` diff) should
   become one. **Low (maintainability), but it is the reason a P1 defect went unseen — so do it before
   the next refresh, not after.**
-- **Duplicate property→owner projection in `services/catalog/search.ts:73`** — `searchProperties`
-  hand-builds the payload join its own comment says is "mirroring `lowerProperties`"
-  (`tail/group.ts:648`). Zero deferrals; a schema change lands twice. The contrast worth keeping:
-  `degree-centrality.ts` calls `scopedMovementCount` and gets `where(call(…).is(n))` at arbitrary
-  depth for free. → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #8
-- **Fold the third scalar-child projector residue** (`compileScalarChildRows`, `steps/tail/child.ts`)
-  onto generic `PROJECTORS`. → [compiler-consolidation](./2026-07-16-compiler-consolidation-plan.md) §1
-- **Node/edge property-SQL duplication** (`plan/plan.ts` `nodeProp*`/`edgeProp*` pairs) — one
-  `propSource(elem)` descriptor would halve it. Do opportunistically.
+- **A scoped reducer after a GENERALIZED producer stays a clean deferral** — `map(__.format(…).count())`,
+  `map(__.math(…).max())` and friends. `SELF_ORDERING_PROJECTIONS` (`tail/child-shape.ts`) admits only
+  `values`/`id`/`label`/`constant`, because only those mint the per-origin emission order
+  `lowerScopedScalarReducer` partitions on; `call`/`math`/`sack`/`format` do not, and lifting the gate
+  without minting was measured to give the deferral, not an answer. The unlock is to let the
+  one-row-per-input producers mint like `oneRowEncounter` does — the same proof it already uses. A real
+  ceiling raise, and the residual left behind when the third scalar-child projector was deleted.
+  → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #7
 - **`write.ts` row-at-a-time nested read** (`steps/write/write.ts`) — imperative surface; could
-  materialize once via the child seam + a batch form.
-  → [writes-through-read-spine](./archive/2026-07-17-writes-through-read-spine-plan.md)
+  materialize once via the child seam + a batch form. **Re-measured 2026-07-30: there is no
+  hand-rolled SQL left in the merge region**, so this is purely the execution-model question (`run`
+  interleaves reads with INSERTs and reads back what it wrote, so a set-based form must decide
+  match-vs-create for the whole driver set before writing). Both set-based routes are already
+  verified; what is missing is the decision, not the rendering.
+  → [writes-through-read-spine](./archive/2026-07-17-writes-through-read-spine-plan.md),
+  [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #5
 - **Review-fix duplication residue (C1/C2/C3 + D)** — property-list framing / tie-break / `PARTITION
   BY ordinal` dups; the `execute.ts` pre-parsed-`pmeta` divergence is latent-correctness. Status
   unconfirmed — treat as open. → [review-fix-plan](./2026-07-22-review-fix-plan.md)
