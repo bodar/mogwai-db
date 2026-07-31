@@ -159,3 +159,8 @@ if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
     echo "export PATH=\"$MISE_BIN:\$PATH\""
   } >> "$CLAUDE_ENV_FILE"
 fi
+
+# 7. One line of confirmation, last. Everything above speaks up only when something is wrong,
+#    so a healthy bootstrap was indistinguishable from a hook that never fired. `$SECONDS` is
+#    the whole hook, cold submodule provisioning included, which is the number worth seeing.
+echo "[bootstrap] mogwai-db ready in ${SECONDS}s — bun ${BUN_PIN:-unpinned} linked, submodule + deps provisioned, 'mise run test' will run."

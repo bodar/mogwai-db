@@ -53,7 +53,7 @@ are not worth cleaning up — they cannot be pushed and they vanish with the con
 The bootstrap needs egress to `mise.run` and `npm.jsr.io` (the `@bodar/*` deps are JSR
 packages). Both `Default` environments block them, and without `@bodar/*` the `q` kernel and
 the executor do not import — so **only L1 runs** and everything above it is unverified rather
-than passing. `session-start.sh` preflights this and exits 2 with the fix.
+than passing. `session-start.sh` preflights this and stops the bootstrap, reporting the fix.
 
 It probes REACHABILITY rather than environment identity on purpose: no environment name or id
 is exposed to a session at all, and `CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE` reports only the
