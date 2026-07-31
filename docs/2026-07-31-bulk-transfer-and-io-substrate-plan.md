@@ -1,8 +1,9 @@
 # Bulk transfer + the `io()` substrate — one primitive under five threads
 
-**Build status (2026-07-31):** phases **0 and 2 have landed**, and with them phase 1's *chunking*
-half (`src/rowbatch.ts`) — every live wrong-answer wall on the production runtime is closed. What is
-left is phase 1's row-landing loader, phase 3's static gate, then 4–7. Two findings from building it
+**Build status (2026-07-31):** phases **0, 2 and 3 have landed**, and with them phase 1's *chunking*
+half (`src/rowbatch.ts`) — every live wrong-answer wall on the production runtime is closed, and
+`mise run binds` now fails the build on the idiom. What is left is phase 1's row-landing loader, then
+4–7. Two findings from building it
 are folded in below rather than appended: §5's "scratch relation, chunked" is **superseded** (a
 compiled read plan is ONE statement — see §5), and the whole-suite CF-parity run is **green** before
 any fix, which is itself the measurement that says why the ladder could not have found §1c/§1d (§2's
@@ -181,6 +182,22 @@ Formats are then *adapters over it*, and every one of them is additive. The inva
 Add a third in the same mould — **`mise run binds`**: statically reject a bind list whose length is
 a function of row count outside `RowBatch`. It is the gate that would have caught §1c and §1d, and
 without it §1e-style walls come back the next time someone writes `ids.map(() => '?')`.
+
+**Landed (`scripts/binds-check.ts`), and building it settled what the gate can honestly promise.**
+"Is this bind list bounded?" is dataflow over every `store.query` call, and
+`store.query(plan.sql, plan.binds)` is unbounded to any local analysis while being perfectly correct —
+so the general form would need an allowlist, which is only somewhere for a real violation to hide.
+What IS decidable is the **idiom**, and the idiom is what produced both walls. So two checks: no
+hand-rolled placeholder repetition outside `src/rowbatch.ts`, and every `placeholders(…)` call inside
+a function that also calls `bindChunks` (a placeholder list built without chunking is the same defect
+spelled with our own helper). Enclosing function extents come from the LSP's `documentSymbol`.
+
+One tooling fact worth recording, because it constrains every future check of this kind:
+**`typescript@7`'s npm package ships no JS AST API** — `node_modules/typescript/lib` holds `tsc.js` and
+a version stub, and `import ts from 'typescript'` yields `{version, versionMajorMinor}`. So a
+syntax-level gate is line-based (or LSP-based), and an exact tokenizer would mean a new dependency.
+That matters immediately here: several comments now quote `ids.map(() => '?')` in prose, so a naive
+grep gate fires on its own documentation.
 
 The complement is a **CF-parity harness** (outstanding-work item 11, filed *Low-Med*): a `Sql`
 decorator that throws when a statement carries > 100 binds or exceeds 100 KB, wrapped around the
@@ -544,7 +561,7 @@ Each phase lands green and is useful alone.
 | **0** ✅ | **CF-parity `Sql` decorator** (throws > 100 binds / > 100 KB) + one suite run under it | ~~the two §1c/§1d walls reproduce **on Bun**, as failures~~ — they had to be reproduced *deliberately*: the suite is green under the harness, because nothing in it reaches the cardinality (§2) |
 | **1** | `RowBatch` load/drain on the `Sql` seam; FTS row *construction* extracted from `indexProperty` | modern graph loads batched ≡ loads via write traversals, byte-identical incl. `property_fts` — **chunking half landed with phase 2; the loader is what remains** |
 | **2** ✅ | Fix §1d (`drop`) and §1c (`landForeignElements`, `within`) through `RowBatch` | done at 250–500 elements under the phase-0 store, which is what makes those tests gates rather than ordinary behaviour tests |
-| **3** | `mise run binds` static gate | at zero, fails the build (not a ratchet) |
+| **3** ✅ | `mise run binds` static gate | at zero, fails the build (not a ratchet) — scoped to the IDIOM, because "is this bind list bounded?" is undecidable locally (§2) |
 | **4** | **Typed GraphSON reader (v3 + v4) and writer (v4)** over `RowBatch`, line-oriented adjacency form; conformance host seeds through it | L3 count unchanged; seed ≤ 0.5 s; census unchanged; **`gcrew` round-trips** (the type channel incl. meta-properties survives a dump, §4b) **and `gzoo` round-trips** (multi-label survives — the assertion a v3 writer could not pass, §4c) |
 | **5** | `IoStore` (Bun FS / CF R2 / L3 host mapping) + `io()` as a barrier service | the 2 `.json` `Read.feature` scenarios pass; `.xml` and `.kryo` fail closed naming the format; `tags.ts` reclassified (§4) |
 | **6** | Neptune/Neo4j CSV reader/writer (**interop only**); `io().write()` to R2 | round-trip through CSV for the types CSV *can* carry, with the lossy cases documented and asserted as lossy rather than silently wrong |
