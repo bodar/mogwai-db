@@ -274,7 +274,19 @@ section's sketch: `mogwai.io` is registered in BOTH registries (`io()` is Tinker
 reference-exact context must serve it) and is `internal`, so `--list` is unchanged; `desugarIo` is
 one canonicalize Pass running before `absorbCallWith`, re-emitting io()'s `with()` steps after the
 call it mints so the modulators fold through the existing path; and format selection is by
-extension, checked BEFORE any io, so `.xml`/`.kryo` cost no read. Tests: `test/io.test.ts`.
+extension (or the `.with(IO.reader|IO.writer, …)` declaration when one is given), checked BEFORE
+any io, so `.xml`/`.kryo` cost no read. Tests: `test/io.test.ts`.
+
+**L3 1650 → 1652**, the two GraphSON scenarios of `sideEffect/Read.feature`. Three things stood
+between the service working and the corpus adjudicating it, and only one was foreseen here:
+the host had to define the `data/` namespace (foreseen — it maps onto `structure/io/graphson`
+through a temp root, so the real `FileIoStore` serves the scenarios unmodified); a DECLARED reader
+had to override the extension; and **`IO.reader`/`IO.graphson` were dropped by the front-end
+entirely** — each io option is its own `IoOptionsConstants_*` grammar context and the generic
+recursion emitted nothing, so `with(IO.reader, IO.graphson)` reached `absorbCallWith` with an
+undefined key. They now emit the canonical strings the JS GLV serializes them to, so a query typed
+at our server and the same query from a client are the same chain.
+The other four scenarios stay red NAMING the format — Gryo is the JVM wall, GraphML the decision.
 
 Checked while phases 0–4 landed, because it decides how phase 5 is shaped. The barrier seam gives
 `io()` the ASYNC half for free and **none of the MUTATION half**:
