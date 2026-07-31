@@ -589,11 +589,16 @@ proves nothing — read the deferral clusters instead.
   Also landed on the way: `isPred` (`gremlin/frontend.ts`), the narrowing guard beside the tagged-arg
   guards, so reading `.op`/`.values` off an `any[]` arg goes through a guard instead of an open-coded
   typeof chain. The `is` registration into item 17's tables is now unblocked.
-- **`classifyBy` says "no host should re-scan byArgs inline" — 4 hosts still do**
-  (`tail/list.ts:520`, `tail/select.ts:581`, `tail/group.ts:869,898`). Each hand-rolls
-  `by.find(a => 'order' in a)?.order`, the exact scan the classifier retired, and each silently sorts
-  by IDENTITY on an unrecognized arg. Was 5 — `tail/projection.ts`'s copy inside `MODIFIERS['order']`
-  has since gone, so this is a shrinking list. `isOrderArg` is already imported at `list.ts`.
+- ~~**`classifyBy` says "no host should re-scan byArgs inline" — 4 hosts still do**~~ — **LANDED
+  `d5d0b85`**, five of them counting `list.ts`'s `order(Scope.local)` loop. Behaviour-identical:
+  `by.find(a => 'order' in a)` IS `isOrderArg` plus a null check, which is what `classifyBy().dir`
+  already does. `propertyOrder` (`tail/group.ts`) gave up four hand-rolled scans (token, nested,
+  string-key, direction) for one call, and its duplicated shuffle deferral collapsed to one.
+  **The residue is one deliberate non-goal:** `mapLocalOrder`'s `by(Column.keys|values)` scan stays
+  hand-written (on the `isColumnArg` guard) because `ByClass` has NO `'column'` arm. Adding one is not
+  a cleanup — a `{column}` by() classifies as `{kind:'none'}` today, so every one of the 25 consumers
+  currently reads `by(Column.keys)` as a BARE by(), and a new arm silently reclassifies all of them.
+  Measure before widening.
 - **`NUMERIC_REDUCERS` re-declared despite `ir/step.ts` being the named base** (`tail/projection.ts`,
   and `BULK_REDUCERS` in `tail/bulk.ts`) — 8 consumers follow the "export BASES only, derive with a
   named difference" rule; these 2 hand-write the member list, so a new reducer lands in 10 places and
