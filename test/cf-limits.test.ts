@@ -3,6 +3,7 @@ import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { CfLimitedSql, CF_MAX_BINDS, CF_MAX_SQL_BYTES, cfLimitViolation } from '../src/cf-limits.ts';
 import { executeQuery } from './support/executor.ts';
+import { compile } from '../src/compiler/compiler.ts';
 import { landForeignElements } from '../src/compiler/steps/tail/foreign.ts';
 import { materializeRootStream } from '../src/compiler/steps/tail/materialize.ts';
 import { LoweringEngine } from '../src/compiler/engine/engine.ts';
@@ -10,17 +11,18 @@ import { createAppScope, createCompilerScope } from '../src/scopes.ts';
 import type { ForeignRow } from '../src/services/spi/types.ts';
 import type { LoweringState } from '../src/compiler/steps/context/context.ts';
 
-// The CF-parity harness (src/cf-limits.ts) and the two walls it exists to make visible.
+// The CF-parity harness (src/cf-limits.ts) and the walls it exists to make visible.
 //
 // Cloudflare DO SQLite rejects a statement carrying more than 100 bound parameters; bun:sqlite
 // accepts 65,535. So a bind list whose length scales with ROW COUNT is green in every suite here
 // and broken in production, on the ONE runtime we ship to. This file is where that asymmetry stops
-// being invisible: it asserts the decorator's own contract, and then pins the two shipped breaches
-// (docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md §1c/§1d) as failures ON BUN.
+// being invisible: it asserts the decorator's own contract, and then runs the two paths that were
+// breaching it (docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md §1c/§1d) at a cardinality
+// far past the cap, under a store that fails on the statement a DO would reject.
 //
-// Read the two "the wall" tests as measurements of a known defect, not as desired behaviour: each
-// asserts today's breach and names the phase that flips it. When one starts failing because the
-// path was fixed, the fix is to flip the assertion, not to widen the harness.
+// Both are now DO-legal — drop() chunks through RowBatch, and a federated landing rides one JSON
+// bind — so these read as ordinary behaviour tests. What makes them regression gates is the store
+// they run against: the same traversal under a plain BunSqlite would pass either way.
 
 const limited = () => new GraphStore(new CfLimitedSql(new BunSqlite(':memory:')));
 
@@ -52,32 +54,34 @@ describe('cfLimitViolation — the DO statement contract', () => {
   });
 });
 
-describe('the wall: g.V().drop() binds one ? per id (plan §1d, fixed in phase 2)', () => {
-  test('50 vertices is the ceiling — 51 breaches, because src IN (…) OR tgt IN (…) binds ids twice', () => {
-    const under = limited();
-    for (let i = 0; i < 50; i++) executeQuery(under, "g.addV('person')", {});
-    executeQuery(under, 'g.V().drop()', {});
-    expect(under.query<{ n: number }>('SELECT count(*) AS n FROM nodes')[0].n).toBe(0);
-
-    const over = limited();
-    for (let i = 0; i < 51; i++) executeQuery(over, "g.addV('person')", {});
-    expect(() => executeQuery(over, 'g.V().drop()', {})).toThrow(/bound-parameter limit: 102 binds/);
+// Was the wall of plan doc §1d: `ids.map(() => '?')`, spliced TWICE for `src IN (…) OR tgt IN (…)`,
+// so a DO refused the statement past 50 vertices — and the FTS owner sweep refused it past 99 edges.
+describe('drop() cascades in DO-legal chunks whatever the target count', () => {
+  test('250 vertices with properties and incident edges', () => {
+    const store = limited();
+    for (let i = 1; i <= 250; i++) executeQuery(store, `g.addV('person').property('name','p${i}')`, {});
+    for (let i = 2; i <= 250; i++) executeQuery(store, `g.addE('knows').from(__.V(1)).to(__.V(${i}))`, {});
+    executeQuery(store, 'g.V().drop()', {});
+    for (const t of ['nodes', 'edges', 'vertex_properties', 'vertex_labels', 'property_fts'])
+      expect([t, store.query<{ n: number }>(`SELECT count(*) AS n FROM ${t}`)[0].n]).toEqual([t, 0]);
   });
 
-  // The FTS cascade is the FIRST statement to blow on an edge drop — `deleteFtsForOwners`
-  // (services/fts-index.ts) binds the owner kind plus one ? per owner id, so its ceiling is 99
-  // edges where the `DELETE FROM edges` that follows it would reach 100.
-  test('an edge drop breaches past 99 edges, in the FTS cascade before the edge delete', () => {
+  test('250 edges dropped on their own leaves the vertices and sweeps their FTS rows', () => {
     const store = limited();
     executeQuery(store, "g.addV('person')", {});
     executeQuery(store, "g.addV('person')", {});
-    for (let i = 0; i < 101; i++) executeQuery(store, 'g.addE("knows").from(__.V(1)).to(__.V(2))', {});
-    expect(() => executeQuery(store, 'g.E().drop()', {}))
-      .toThrow(/bound-parameter limit: 102 binds in DELETE FROM property_fts/);
+    for (let i = 0; i < 250; i++) executeQuery(store, `g.addE('knows').from(__.V(1)).to(__.V(2)).property('note','n${i}')`, {});
+    executeQuery(store, 'g.E().drop()', {});
+    expect(store.query<{ n: number }>('SELECT count(*) AS n FROM edges')[0].n).toBe(0);
+    expect(store.query<{ n: number }>('SELECT count(*) AS n FROM edge_properties')[0].n).toBe(0);
+    expect(store.query<{ n: number }>('SELECT count(*) AS n FROM property_fts')[0].n).toBe(0);
+    expect(store.query<{ n: number }>('SELECT count(*) AS n FROM nodes')[0].n).toBe(2);
   });
 });
 
-describe('the wall: landForeignElements binds 4 ? per foreign row (plan §1c, fixed in phase 2)', () => {
+// Was the wall of plan doc §1c: four binds per landed cell, so a federated result of 26 vertices
+// could not execute on a DO. The whole set now rides as ONE bind and json_each explodes it.
+describe('a federated landing binds the whole result set once', () => {
   const vrow = (id: number): ForeignRow =>
     ({ kind: 'vertex', id, label: 'person', labels: ['person'], props: { name: [{ t: 'string', v: `v${id}` }] } });
 
@@ -90,14 +94,35 @@ describe('the wall: landForeignElements binds 4 ? per foreign row (plan §1c, fi
     return plan;
   };
 
-  test('a federated result of 25 vertices is the ceiling; 26 cannot execute on a DO', () => {
+  test('500 landed vertices are one bind, and the statement runs on a DO-legal store', () => {
     const store = limited();
-    const ok = landAndCount(25);
-    expect(ok.binds.length).toBe(100);
-    expect(store.query(ok.sql, ok.binds).length).toBe(25);
+    const plan = landAndCount(500);
+    expect(plan.binds.length).toBe(1);
+    expect(store.query(plan.sql, plan.binds).length).toBe(500);
+  });
 
-    const wall = landAndCount(26);
-    expect(wall.binds.length).toBe(104);
-    expect(() => store.query(wall.sql, wall.binds)).toThrow(/bound-parameter limit: 104 binds/);
+  test('an empty result set lands as a zero-row relation (no special-case branch)', () => {
+    const plan = landAndCount(0);
+    expect(limited().query(plan.sql, plan.binds)).toEqual([]);
+  });
+});
+
+// The third exposure of plan doc §1d: `within(<set>)` binds one ? per member, and the member count
+// is DATA-shaped for a bound-param collection and for a federate hop's distinct injected keys.
+describe('a data-sized within() set rides one JSON bind', () => {
+  test('within() over 300 values compiles to a DO-legal statement and still matches', () => {
+    const store = limited();
+    for (let i = 1; i <= 5; i++) executeQuery(store, `g.addV('person').property('name','p${i}')`, {});
+    const many = Array.from({ length: 300 }, (_, i) => `p${i + 1}`);
+    const plan = compile('g.V().has("name", within(names)).count()', { names: many });
+    if (plan.kind !== 'read') throw new Error('expected read plan');
+    expect(plan.binds.length).toBeLessThanOrEqual(CF_MAX_BINDS);
+    expect(store.query<{ v: number }>(plan.sql, plan.binds)[0].v).toBe(5);
+  });
+
+  test('a small set keeps the IN-list form (one bind per member)', () => {
+    const plan = compile('g.V().has("name", within("a","b","c")).count()', {});
+    if (plan.kind !== 'read') throw new Error('expected read plan');
+    expect(plan.binds.filter((b) => typeof b === 'string' && 'abc'.includes(b)).length).toBe(3);
   });
 });

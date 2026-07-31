@@ -1,9 +1,10 @@
 import { flattenListArgs, gtypeName, isNested, type Pred } from '../../gremlin/frontend.ts';
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from '../../sql/kernel/q.ts';
 import type { FastPath } from '../options/fast-paths.ts';
-import { normalizeTypeName, BigDecimal, Duration } from '../../gremlin/types.ts';
+import { normalizeTypeName, BigDecimal, Duration, coerceBindValue } from '../../gremlin/types.ts';
 import { nodes, edges, labels, vertexLabels, vertexProperties, edgeProperties } from '../../sql/schema.ts';
 import type { LabelRegime } from '../../api.ts';
+import { CF_MAX_BINDS } from '../../cf-limits.ts';
 import { sliceOf, type IRStep, type Slice } from '../ir/step.ts';
 import { type ElemShape, type ScalarType, type ValueType } from '../../sql/kernel/render.ts';
 
@@ -150,8 +151,36 @@ export const jsonbGroupArray = (expr: Expression, order?: Expression): Expressio
   q`jsonb(json_group_array(${expr}${order ? q` ORDER BY ${order}` : empty}))`;
 
 /** A JSONB array literal from constant values — inject([a,b,c]) → one list value.
- *  Values ride as bound tokens; an empty list yields `json_array()` → `[]`. */
+ *  Values ride as bound tokens; an empty list yields `json_array()` → `[]`.
+ *
+ *  One bind PER MEMBER, so the member count must be bounded by the QUERY TEXT (it is: an
+ *  `inject([…])` literal). For a set whose size is a function of DATA use `jsonbArrayBind`. */
 export const jsonbArrayOf = (xs: readonly any[]): Expression => q`jsonb(json_array(${values(xs)}))`;
+
+/** The same JSONB array as ONE bound parameter, whatever the member count — the DO-legal form for
+ *  a value set sized by DATA rather than by query text (a bound-param collection handed to
+ *  `within`, a federate hop's distinct injected keys). A Durable Object rejects a statement past
+ *  100 bound parameters, so a per-member bind is a production wall at exactly the cardinality that
+ *  makes a bind-join worth doing — plan doc §1d, third exposure.
+ *
+ *  Members are coerced through the same `coerceBindValue` a per-value bind would cross, so the two
+ *  forms compare identically: a big bigint is canonical decimal TEXT either way. */
+export const jsonbArrayBind = (xs: readonly any[]): Expression =>
+  q`jsonb(${value(JSON.stringify(xs.map(coerceBindValue)))})`;
+
+/** Can this set ride as one JSON bind? JSON has no BLOB literal, so a byte-array member has no
+ *  faithful representation — those sets keep the per-member IN-list (correct, and capped at the
+ *  DO budget, which is the pre-existing behaviour rather than a new limit). */
+const jsonBindableSet = (xs: readonly any[]): boolean =>
+  xs.every((x) => { const c = coerceBindValue(x); return c === null || typeof c === 'number' || typeof c === 'string'; });
+
+/** Above this many members, a vararg `within`/`without` set renders as one JSON bind instead of an
+ *  IN-list. A quarter of the DO bind budget: below it a value set is plainly query-text-shaped and
+ *  keeps the IN-list (which the planner serves off the value index, and which every L2 snapshot
+ *  pins); above it the set is data-shaped — a bound-param collection or an injected key set — and
+ *  its size must stop being the statement's bind count. Deliberately NOT a runtime-divergent
+ *  branch: the same threshold applies on both runtimes, so what CI compiles is what a DO runs. */
+const SET_BIND_LIMIT = Math.floor(CF_MAX_BINDS / 4);
 
 /** Optional ` AND e.label IN (…)` appended to a movement JOIN's ON, as a node
  *  (empty text when no labels). Replaces ~7 hand-rolled `?`-splice + bind-push copies. */
@@ -404,8 +433,14 @@ export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = TYP
     : q`${expr} ${P_OPS[op]} ${operandSql(vals[0])}`;
   // SQLite rejects an empty `IN ()` list, so fold the degenerate sets to their
   // constant truth value: within nothing = never, without nothing = always.
-  if (op === 'within') return vals.length ? q`${expr} in (${list(vals.map(operandSql), ', ')})` : q`0`;
-  if (op === 'without') return vals.length ? q`${expr} not in (${list(vals.map(operandSql), ', ')})` : q`1`;
+  if (op === 'within' || op === 'without') {
+    if (!vals.length) return op === 'within' ? q`0` : q`1`;
+    // A big set stops being N binds and becomes one JSON bind, reusing the withinList/withoutList
+    // membership form below (identical semantics — json_each over the same members).
+    if (vals.length > SET_BIND_LIMIT && jsonBindableSet(vals))
+      return predicateSql(expr, { op: `${op}List`, values: [jsonbArrayBind(vals)] } as Pred, typeCtx);
+    return q`${expr} ${raw(op === 'within' ? 'in' : 'not in')} (${list(vals.map(operandSql), ', ')})`;
+  }
   // within/without whose operand is ONE list-valued traversal (`within(__.V()…fold())`) rather
   // than a vararg set. The members are only known at run time, so membership is a json_each
   // scan of the operand list, not an IN-list. Minted by the operand layer (steps/tail/operand.ts)

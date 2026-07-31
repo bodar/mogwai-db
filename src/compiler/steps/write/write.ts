@@ -10,6 +10,7 @@ import type { Engine } from '../../engine/deps.ts';
 import type { ElementReadDriver } from '../../engine/deps.ts';
 import { compileInject } from './inject.ts';
 import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../../../services/fts-index.ts';
+import { bindChunks, deleteWhereIn, placeholders } from '../../../rowbatch.ts';
 import { layoutCols, type ElementStream } from '../context/context.ts';
 import { DEFAULT_VERTEX_LABEL, LABEL_MUTATION_UNSUPPORTED } from '../../../api.ts';
 import { validateLabel, validatePropertyKey } from './validate.ts';
@@ -168,24 +169,38 @@ function compileDrop(engine: Engine, steps: IRStep[]): WritePlan {
       // the edges table), silently leaving vertices behind. Snapshot, then delete.
       const ids = store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id);
       if (!ids.length) return [];
-      const ph = ids.map(() => '?').join(',');
+      // Every statement below goes through RowBatch, so no bind list is a function of the
+      // target count. `ids.map(() => '?')` here was a hard failure on Cloudflare past 50
+      // vertices (a DO caps a statement at 100 bound parameters) — the very idiom
+      // src/rowbatch.ts exists to replace. See the plan doc §1d.
       if (isEdge) {
         deleteFtsForOwners(store, 'edge', ids);
-        store.query(`DELETE FROM edge_properties WHERE edge IN (${ph})`, ids);
-        store.query(`DELETE FROM edges WHERE id IN (${ph})`, ids);
+        deleteWhereIn(store, 'edge_properties', 'edge', ids);
+        deleteWhereIn(store, 'edges', 'id', ids);
       } else {
         // Drop the incident edges' properties first (they reference the soon-deleted
         // edges), then the edges, then this vertex's own properties, then the vertex.
         // FTS rows for both the incident edges and this vertex's own props go with them.
-        const incidentEdges = store.query<{ id: number }>(`SELECT id FROM edges WHERE src IN (${ph}) OR tgt IN (${ph})`, [...ids, ...ids]).map((r) => r.id);
+        //
+        // The incident edge ids are materialized once and then deleted BY ID, rather than
+        // re-deriving `src IN (…) OR tgt IN (…)` in three statements: it is the same set (the
+        // snapshot discipline above already requires taking it before mutating), it is one
+        // splice per statement instead of two, and it drops the incidence predicate from the
+        // edge_properties delete's subquery.
+        const incidentEdges: number[] = [];
+        for (const chunk of bindChunks(ids, { bindsPerItem: 2 })) {
+          const ph = placeholders(chunk.length);
+          for (const r of store.query<{ id: number }>(`SELECT id FROM edges WHERE src IN (${ph}) OR tgt IN (${ph})`, [...chunk, ...chunk]))
+            incidentEdges.push(r.id);
+        }
         deleteFtsForOwners(store, 'edge', incidentEdges);
         deleteFtsForOwners(store, sqlElem('vertex'), ids);
-        store.query(`DELETE FROM edge_properties WHERE edge IN (SELECT id FROM edges WHERE src IN (${ph}) OR tgt IN (${ph}))`, [...ids, ...ids]);
-        store.query(`DELETE FROM edges WHERE src IN (${ph}) OR tgt IN (${ph})`, [...ids, ...ids]);
-        store.query(`DELETE FROM vertex_properties WHERE node IN (${ph})`, ids);
+        deleteWhereIn(store, 'edge_properties', 'edge', incidentEdges);
+        deleteWhereIn(store, 'edges', 'id', incidentEdges);
+        deleteWhereIn(store, 'vertex_properties', 'node', ids);
         // vertex_labels references nodes(id), so the label set goes before the vertex.
-        store.query(`DELETE FROM vertex_labels WHERE node IN (${ph})`, ids);
-        store.query(`DELETE FROM nodes WHERE id IN (${ph})`, ids);
+        deleteWhereIn(store, 'vertex_labels', 'node', ids);
+        deleteWhereIn(store, 'nodes', 'id', ids);
       }
       return [];
     },

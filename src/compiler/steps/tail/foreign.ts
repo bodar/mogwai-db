@@ -1,4 +1,4 @@
-import { q, value, list, empty, type Relation, type Expression } from '../../../sql/kernel/q.ts';
+import { q, value, list, empty, raw, type Relation, type Expression } from '../../../sql/kernel/q.ts';
 import { PER_ROW } from '../../../sql/kernel/render.ts';
 import { type Elem } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
@@ -16,7 +16,7 @@ export type { ForeignStream } from '../context/stream.ts';
 // ---------- detached foreign elements (federated call() results) ----------
 //
 // A barrier call() (mogwai.graph.federate) awaits a sibling graph, then LANDS the returned
-// rows here as DETACHED references — id + label + a property snapshot — in a VALUES CTE, NOT
+// rows here as DETACHED references — id + label + a property snapshot — in a landing CTE, NOT
 // as rows in the local nodes/edges tables. `landForeignElements` builds that CTE and lifts it
 // into a ForeignStream (stream.ts). Because a ForeignStream is a distinct stream kind that no
 // movement/filter StepFn ever receives, local graph movement over a detached element is
@@ -25,26 +25,27 @@ export type { ForeignStream } from '../context/stream.ts';
 //
 // The landed props column is JSON TEXT in the SAME per-key {t,v}-node shape vertexBuffer/
 // edgeBuffer already consume (execute.ts propsOf → JSON.parse), so root framing reuses the
-// ordinary vertex/edge path verbatim — only the SQL projection differs (literal VALUES columns
+// ordinary vertex/edge path verbatim — only the SQL projection differs (landed JSON columns
 // vs a framedProps join). Reads that need only the landed columns — id()/label()/values()/
 // valueMap() — read them directly, never joining a local table.
 
-/** One VALUES row for a foreign element: (fid, flabel[, fsrc, ftgt], fprops[, <carried…>]).
- *  `props` is stringified to JSON text so it lands as a bindable literal; framing JSON.parses
- *  it. Extra carried columns (e.g. a rejoin ordinal for mid-traversal) append after fprops. */
-function foreignValuesRow(r: ForeignRow, extra: readonly (string | number)[]): Expression {
-  const cells: Expression[] = [value(String(r.id)), value(r.label)];
-  if (r.kind === 'edge') cells.push(value(String(r.src)), value(String(r.tgt)));
-  else cells.push(value(JSON.stringify(r.labels)));
-  cells.push(value(JSON.stringify(r.props)));
-  for (const x of extra) cells.push(value(x));
-  return q`(${list(cells, ', ')})`;
+/** One landed row's cells, in `foreignPayload(elem)` order: (fid, flabel[, fsrc, ftgt], fprops
+ *  [, <carried…>]). `props` (and a vertex's label SET) are stringified to JSON text so each lands
+ *  as one scalar cell; framing JSON.parses it. Extra carried columns (e.g. a rejoin ordinal for
+ *  mid-traversal) append after fprops. */
+function foreignRowCells(r: ForeignRow, extra: readonly (string | number)[]): (string | number)[] {
+  const cells: (string | number)[] = [String(r.id), r.label];
+  if (r.kind === 'edge') cells.push(String(r.src), String(r.tgt));
+  else cells.push(JSON.stringify(r.labels));
+  cells.push(JSON.stringify(r.props));
+  return [...cells, ...extra];
 }
 
-/** Land `rows` as a ForeignStream over a VALUES CTE. `elem` is the element kind (the caller
- *  knows it from the sibling traversal's terminal shape). `extraCols` names any columns beyond
- *  the payload that each row carries (a rejoin ordinal for the mid-traversal path); pass the
- *  matching value per row via `extraOf`. An empty `rows` yields a typed empty relation. */
+/** Land `rows` as a ForeignStream over a CTE that explodes ONE JSON bind (see below). `elem` is
+ *  the element kind (the caller knows it from the sibling traversal's terminal shape). `extraCols`
+ *  names any columns beyond the payload that each row carries (a rejoin ordinal for the
+ *  mid-traversal path); pass the matching value per row via `extraOf`. An empty `rows` yields a
+ *  zero-row relation with the same columns. */
 export function landForeignElements(
   c: LoweringState,
   rows: readonly ForeignRow[],
@@ -53,11 +54,22 @@ export function landForeignElements(
   extraOf: (r: ForeignRow) => readonly (string | number)[] = () => [],
 ): ForeignStream {
   const cols = [...foreignPayload(elem), ...extraCols];
-  const rel: Relation = rows.length
-    ? c.q.cte(q`VALUES ${list(rows.map((r) => foreignValuesRow(r, extraOf(r))), ', ')}`, cols)
-    // Empty: a zero-row relation with the right column layout so downstream lowering is
-    // shape-correct (matches directory.ts's `SELECT NULL … WHERE 0` empty-list idiom).
-    : c.q.cte(q`SELECT ${list(cols.map((k) => q`NULL AS ${k}`), ', ')} WHERE 0`, cols);
+  // ONE bind for the whole result set, whatever its cardinality: the rows ride as a JSON array of
+  // cell arrays and json_each explodes them back into a relation.
+  //
+  // This was a `VALUES (?,?,?,?),(…)` CTE — one bind per CELL — which made a federated call of more
+  // than 25 vertices a hard failure on Cloudflare, where a statement may carry 100 bound parameters
+  // (plan doc §1c; nothing in the suite could see it, because bun:sqlite's cap is 65,535). Chunking
+  // is not available to a read: a compiled read plan is ONE statement, with nowhere to put the
+  // preceding INSERTs a scratch table would need — so the fix is to stop scaling binds with rows at
+  // all, which needs no scratch relation, no DDL and no executor change. The paths are compiler
+  // constants, so they splice literally and the statement text stays fixed too.
+  //
+  // The empty case needs no special branch: `json_each('[]')` is a zero-row relation with exactly
+  // these columns, which is what the old `SELECT NULL … WHERE 0` arm was hand-building.
+  const payload = JSON.stringify(rows.map((r) => foreignRowCells(r, extraOf(r))));
+  const projection = list(cols.map((k, i) => raw(`json_extract(je.value, '$[${i}]') AS ${k}`)), ', ');
+  const rel: Relation = c.q.cte(q`SELECT ${projection} FROM json_each(${value(payload)}) je`, cols);
   return { ...c, kind: 'foreign', rel, elem };
 }
 

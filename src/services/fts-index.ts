@@ -20,6 +20,7 @@
 // See docs/archive/2026-07-20-call-service-registry-plan.md ("FTS5 + proper JSON handling").
 import type { GraphStore } from '../storage.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../gremlin/types.ts';
+import { bindChunks, placeholders } from '../rowbatch.ts';
 
 /** Which normalized property table `pid` keys into — 'node' for vertex_properties,
  *  'edge' for edge_properties. Stored UNINDEXED so search can scope by element kind and
@@ -91,9 +92,14 @@ export function deleteFtsFor(store: GraphStore, ownerElem: OwnerElem, pid: numbe
 /** Remove every property_fts row owned by a set of owner elements (their vertex/edge ids) —
  *  the drop() cascade, where the property rows are deleted wholesale by owner. */
 export function deleteFtsForOwners(store: GraphStore, ownerElem: OwnerElem, ownerIds: readonly number[]): void {
-  if (!ownerIds.length) return;
-  const ph = ownerIds.map(() => '?').join(',');
-  store.query(`DELETE FROM property_fts WHERE owner_elem=? AND owner IN (${ph})`, [ownerElem, ...ownerIds]);
+  // Chunked through RowBatch: the owner list is a function of ROW COUNT, and this statement's
+  // 99-owner ceiling was the first one an edge drop() hit on a Durable Object (plan doc §1d).
+  // `fixedBinds: 1` is the leading owner_elem=?.
+  for (const chunk of bindChunks(ownerIds, { fixedBinds: 1 }))
+    store.query(
+      `DELETE FROM property_fts WHERE owner_elem=? AND owner IN (${placeholders(chunk.length)})`,
+      [ownerElem, ...chunk],
+    );
 }
 
 /** Index ONE property instance into property_fts. `pid` is the property row's id
