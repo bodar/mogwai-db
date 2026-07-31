@@ -7,14 +7,14 @@
 
 import { q, value, raw, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { predicateSql, scalarTx, compareKey, inferVtypeSql } from '../../plan/plan.ts';
-import { isNested, isOrderArg, isScopeArg, stepChain } from '../../../gremlin/frontend.ts';
+import { isColumnArg, isScopeArg, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from '../context/stream.ts';
 import { layoutProjection, layoutCols, type ElementStream } from '../context/context.ts';
 import { PER_ROW, STATIC, type Compiled, type ListOf, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf, type Engine } from '../../engine/deps.ts';
 import { firstOf, globalRowOps, lowerGlobalCount } from './barrier.ts';
-import { assertsGType, collectionAssert } from './child-shape.ts';
+import { assertsGType, classifyBy, collectionAssert } from './child-shape.ts';
 import { REDUCERS } from '../../ir/step.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
@@ -250,12 +250,12 @@ function listLocalTransform(s: ListStream, step: IRStep): ListStream {
     // Bare order(Scope.local) = ascending by element value. A direction-only
     // by(Order.desc/asc) flips it; a by(key)/by(traversal)/shuffle defers.
     let desc = false;
-    for (const by of step.modulators ?? []) {
-      if (by.some((a: any) => typeof a === 'string' || (isNested(a))))
+    for (const byArgs of step.modulators ?? []) {
+      const by = classifyBy(byArgs);
+      if (by.kind === 'key' || by.kind === 'nested')
         throw new Error('order(Scope.local).by(key/traversal) not yet supported');
-      const ord = by.find(isOrderArg);
-      if (ord?.order === 'shuffle') throw new Error('order(Scope.local) shuffle not yet supported');
-      desc = ord?.order === 'desc';
+      if (by.dir === 'shuffle') throw new Error('order(Scope.local) shuffle not yet supported');
+      desc = by.dir === 'desc';
     }
     // Order by the PAYLOAD (ordering raw {t,v} JSON text would sort by the type name),
     // but emit the whole member so the element keeps its type.
@@ -526,12 +526,12 @@ export function mapLocalOrder(step: IRStep): { col: 'keys' | 'values'; dir: 'asc
   if (step.name !== 'order' || !isLocal(step)) return null;
   const bys = step.modulators ?? [];
   if (bys.length !== 1) return null;
-  const by = bys[0];
-  const col = by.map((a: any) => a && typeof a === 'object' && a.column).find((c: any) => c === 'keys' || c === 'values') as 'keys' | 'values' | undefined;
+  const byArgs = bys[0];
+  const col = byArgs.filter(isColumnArg).map((a) => a.column).find((c) => c === 'keys' || c === 'values') as 'keys' | 'values' | undefined;
   if (!col) return null;
-  const order = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
-  if (order === 'shuffle') return null; // shuffle-local over a map defers (no worked-out form)
-  return { col, dir: order === 'desc' ? 'desc' : 'asc' };
+  const { dir } = classifyBy(byArgs); // the shared triage owns the direction scan
+  if (dir === 'shuffle') return null; // shuffle-local over a map defers (no worked-out form)
+  return { col, dir: dir === 'desc' ? 'desc' : 'asc' };
 }
 export const isMapLocalOrder = (step: IRStep): boolean => mapLocalOrder(step) !== null;
 

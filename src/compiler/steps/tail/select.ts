@@ -543,14 +543,14 @@ export function compileSelectProject(st: ElementStream, proj: IRStep, tail: Tail
  * a select-then-values (`__.select("v").values("name")`) modulator defer. */
 function recordOrderTerms(s: RecordStream, r: Relation, bys: any[][]): Expression[] {
   if (!bys.length) throw new Error('order() on a record requires a by(field) / by(__.select(field)) modulator');
-  return bys.map((by) => {
-    const dir = by.find((a) => a && typeof a === 'object' && 'order' in a)?.order;
+  return bys.map((byArgs) => {
+    const by = classifyBy(byArgs);
+    const dir = by.dir;
     if (dir === 'shuffle') return q`RANDOM()`;
-    const nested = by.find(isNested)?.nested;
     let key: string;
     let valuesKey: string | undefined; // by(__.select(field).values(key)) → order by that prop
-    if (nested) {
-      const chain = stepChain(nested, s.params);
+    if (by.kind === 'nested') {
+      const chain = stepChain(by.nested, s.params);
       if (!chain.length || chain[0].name !== 'select')
         throw new Error('order().by(traversal) on a record supports only by(__.select(field)[.values(key)])');
       const fk = chain[0].args.filter((a: any): a is string => typeof a === 'string');
@@ -563,10 +563,12 @@ function recordOrderTerms(s: RecordStream, r: Relation, bys: any[][]): Expressio
       } else if (chain.length > 1) {
         throw new Error('order().by(traversal) on a record supports only by(__.select(field)[.values(key)])');
       }
+    } else if (by.kind === 'key') {
+      key = by.key;
     } else {
-      const direct = by.find((a) => typeof a === 'string') as string | undefined;
-      if (direct === undefined) throw new Error('order().by() on a record requires a field selector');
-      key = direct;
+      // 'none' (bare by()) and 'token' (by(T.label)) alike: a record has no current element
+      // to sort by, so neither names a field. Fail closed rather than sorting by identity.
+      throw new Error('order().by() on a record requires a field selector');
     }
     const field = s.fields.find((f) => f.key === key);
     if (!field) throw new Error(`order().by(select("${key}")): record has no such field`);

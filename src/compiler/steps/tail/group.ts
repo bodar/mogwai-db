@@ -902,13 +902,11 @@ function propertyOrder(s: PropertyStream, step: IRStep): PropertyStream {
     throw new Error('properties().order() after as()/path() not yet supported (property order semantics)');
   const bys = step.modulators ?? [];
   if (bys.length > 1) throw new Error('properties().order() supports at most one by() modulator');
-  const by = bys[0] ?? [];
-  const token = by.find((a: any) => a && typeof a === 'object' && 'token' in a)?.token;
-  const nested = by.find(isNested)?.nested;
-  if (nested) {
-    const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
-    if (dir === 'shuffle') throw new Error('properties().order().by(shuffle) not yet supported');
-    const rows = tryCompileScalarValueRows(s, nested);
+  const by = classifyBy(bys[0]);
+  const dir = by.dir;
+  if (dir === 'shuffle') throw new Error('properties().order().by(shuffle) not yet supported');
+  if (by.kind === 'nested') {
+    const rows = tryCompileScalarValueRows(s, by.nested);
     if (!rows?.stream.traverserLayout.encounter) throw new Error('properties().order().by(traversal) requires a scalar child with encounter order');
     const c = rows.stream.rel.as('c');
     const ord = rows.frame.ordinal;
@@ -933,10 +931,10 @@ function propertyOrder(s: PropertyStream, step: IRStep): PropertyStream {
     );
     return toPropertyStream(loweringStateOf(s, layout), rel, s.ownerElem);
   }
-  if (token && token !== 'key' && token !== 'value') throw new Error(`properties().order().by(T.${token}) not yet supported`);
-  if (by.some((a: any) => typeof a === 'string')) throw new Error('properties().order().by(key) not yet supported');
-  const dir = by.find((a: any) => a && typeof a === 'object' && 'order' in a)?.order;
-  if (dir === 'shuffle') throw new Error('properties().order().by(shuffle) not yet supported');
+  if (by.kind === 'token' && by.token !== 'key' && by.token !== 'value')
+    throw new Error(`properties().order().by(T.${by.token}) not yet supported`);
+  if (by.kind === 'key') throw new Error('properties().order().by(key) not yet supported');
+  const token = by.kind === 'token' ? by.token : undefined;
   const suffix = dir === 'desc' ? ' DESC' : ' ASC';
   const p = s.rel.as('p');
   const valueKey = q`(${compareKey(p.c.pv, p.c.pvtype)})`;
