@@ -11,5 +11,52 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
+
+      # The pinned submodule commit, read from the superproject INDEX — the same source
+      # scripts/init-submodule.sh uses, so a staged-but-uncommitted pin bump keys the caches
+      # against the commit that will actually be provisioned.
+      - id: pin
+        run: echo "sha=$(git ls-files -s vendor/tinkerpop | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      # Bun's DOWNLOAD cache (`bun pm cache`), not node_modules. Two reasons it must be this and
+      # not the installed tree: `gremlin` is a `link:` dep resolving into the submodule, and
+      # antlr4ng carries a load-bearing `bun patch` — both are things `bun install` DOES, and a
+      # restored node_modules would skip them. With only the downloads cached, install still
+      # resolves, links and patches; it just stops re-fetching.
+      #
+      # This is the variance the cache exists to remove: measured on trunk, the same 62 packages
+      # against the same lockfile installed in 0.9s on one run and 51.6s on the next — a 57x swing
+      # on identical work, which read as a 50% CI regression attributable to nothing in the diff.
+      # It also serves the submodule's own 839-package workspace install, hence the gitlink in the
+      # key; the restore-keys make a lockfile bump a partial hit rather than a cold start.
+      - name: Cache bun downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}-${{ steps.pin.outputs.sha }}
+          restore-keys: |
+            bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}-
+            bun-${{ runner.os }}-
+
+      # The built gremlin client (~6.5MB, ~12s to build) for exactly this submodule commit.
+      #
+      # NO restore-keys, deliberately: a near-miss must be a MISS. The whole point of the `link:`
+      # dep is that the server frames responses with the same client the conformance suite tests
+      # it against, so adopting a build from a different gitlink would silently answer with the
+      # wrong client — the failure mode test/CLAUDE.md says the link exists to prevent. An exact
+      # key or nothing.
+      #
+      # Restored BESIDE the submodule rather than into it: on a fresh runner the provisioning
+      # script takes its clone branch, which `rm -rf`s vendor/tinkerpop before checking out. The
+      # script adopts this directory when GREMLIN_CLIENT_BUILD_CACHE points at one, and
+      # repopulates it after a real build.
+      - name: Cache the built gremlin client
+        uses: actions/cache@v4
+        with:
+          path: .cache/gremlin-client-build
+          key: gremlin-client-${{ runner.os }}-${{ steps.pin.outputs.sha }}-${{ hashFiles('scripts/init-submodule.sh') }}
+
       # mise installs the pinned bun, then runs the build graph (test + build).
       - run: mise run ci
+        env:
+          GREMLIN_CLIENT_BUILD_CACHE: ${{ github.workspace }}/.cache/gremlin-client-build

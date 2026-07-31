@@ -60,10 +60,32 @@ echo "[submodule] installing gremlin-js workspace deps (cucumber runner)"
 # package's `exports` map points at build/esm, so the build must exist before the
 # link is usable — `bun run build` (duel) emits both ESM and CJS. Skipped when the
 # build is already current, since it costs ~30s.
+#
+# GREMLIN_CLIENT_BUILD_CACHE (optional, CI only — unset locally, where the build survives in the
+# tree anyway) names a directory OUTSIDE the submodule holding a previously-built client. It has
+# to be outside: the fresh-clone branch above `rm -rf`s $SM, so anything a CI cache restored into
+# the submodule would be gone by the time we get here. The caller is responsible for keying that
+# cache on the gitlink SHA — this script adopts whatever it is given, exactly as it would trust a
+# build already present in the tree.
 GLV="$SM/gremlin-js/gremlin-javascript"
-if [ ! -f "$GLV/build/esm/structure/io/binary/GraphBinary.js" ]; then
+BUILT="$GLV/build/esm/structure/io/binary/GraphBinary.js"
+CACHE="${GREMLIN_CLIENT_BUILD_CACHE:-}"
+if [ ! -f "$BUILT" ] && [ -n "$CACHE" ] && [ -f "$CACHE/esm/structure/io/binary/GraphBinary.js" ]; then
+  echo "[submodule] adopting the cached gremlin client build from $CACHE"
+  mkdir -p "$GLV/build"
+  cp -a "$CACHE/." "$GLV/build/"
+fi
+if [ ! -f "$BUILT" ]; then
   echo "[submodule] building the gremlin client (needed by the gremlin/io export)"
   (cd "$GLV" && bun run build)
+  # Populate the cache for the next run. Write to a temp dir and move it into place so an
+  # interrupted copy cannot leave a HALF-BUILT client for the next run to adopt.
+  if [ -n "$CACHE" ] && [ -f "$BUILT" ]; then
+    rm -rf "$CACHE" "$CACHE.tmp"
+    mkdir -p "$CACHE.tmp"
+    cp -a "$GLV/build/." "$CACHE.tmp/"
+    mv "$CACHE.tmp" "$CACHE"
+  fi
 fi
 
 # REGISTER the link only. `bun link` inside the package publishes it to bun's global link
