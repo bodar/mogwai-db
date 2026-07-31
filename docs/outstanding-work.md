@@ -31,7 +31,8 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-**Ranked entry point.** Numbers are IDs, not an order. Correctness first: **2** → **21** →
+**Ranked entry point.** Numbers are IDs, not an order. Correctness first: **21** (a live
+wrong answer, re-sized — see below) → **2** →
 **17**'s `tail`/`sample` + **28** → **29** → **3**'s `times(n)` unroll. Both fail-closed
 VIOLATIONS landed 2026-07-31 — item 27's seven `Scope.local` slices (one argument decode,
 `sliceOf`) and item 22's 24 write-path non-validations (`steps/write/validate.ts`). So did the
@@ -129,13 +130,26 @@ size of the corpus's exposure to a defect that was large in SHAPES and small in 
      the `order().fold()` block looked exactly like test-side fragility and was a real defect.
    **Clearing these makes `test:perturbed` a gate**, which is the point of one item.
 
-21. **`union()` emits arm-major GLOBALLY; the reference is arm-major PER TRAVERSER.** `BranchStep`
-   drains every option for ONE traverser; our `arm_idx, arm_encounter` re-mint orders by arm across the
-   whole stream. Every corpus `union` scenario asserts *unordered*, so nothing catches it, and
-   `emission-order.feature`'s "arm 0 fully before arm 1" comment is right only for its single-traverser
-   scenario. One clause on a `ROW_NUMBER() OVER`, but it moves emission order for every branch shape —
-   use the census as the instrument. **No longer blocked**: the root now emits the order it was
-   handed, so arm order reaches the wire and a scenario can observe it. *Med.*
+21. **A `union`/`choose` ARM's barrier observes the branch's whole input; we lower every arm
+   per-origin — a wrong ANSWER with the wrong CARDINALITY, and the ordering divergence is only its
+   symptom.** `g.V().values('age').union(__.min(), __.max())` is `[27, 35]`; we return all four ages
+   twice. `g.V(1,4).union(__.outE().count(), …)` returns 6 rows where `Union.feature` asserts 3 —
+   **the corpus already pins both readings and we answer the `local()` one when asked the bare
+   one.** `BranchStep.standardAlgorithm`'s `hasBarrier` flag decides arm SCOPE and emission order
+   together; only `union`/`choose` extend `BranchStep`, so `coalesce`/`optional` are per-traverser by
+   class and our lowering of those is CORRECT.
+   **This item was filed as "one clause on a `ROW_NUMBER() OVER`" and that is wrong by an order of
+   magnitude** — the plan's own §6 records it as one of four mis-framings. Emission order is its T4
+   and comes LAST, after the arms batch; it needs the parent's encounter as a distinct carried role,
+   which does not exist today (the child ordinal is `ROW_NUMBER() OVER ()` — it identifies a
+   traverser without ordering them). Start at **T1, the scalar parent**, which the plan argues is
+   nearly free: the arm needs the branch's input `ScalarStream` and one existing
+   `lowerGlobalNumericReducer` call, not a child scope at all.
+   **The fail-closed gate the plan assumes has NOT landed** — nothing named
+   `verifyBranchArmBarrierScope` exists in `src/`, and `ir/step.ts`'s comment cited it as though it
+   did. **High** (it is a live wrong answer, not an ordering nicety).
+   → [branch-arm-barrier-scope](./2026-08-01-branch-arm-barrier-scope-plan.md) — **read §1 and §6
+   before proposing anything**
 
 5. **Non-element child bodies.** Map and record bodies compile. **Two premises that were FALSE — do not
    rebuild on them:** the element terminal does not need a relational form, and `project`/`group`/`path`
@@ -507,6 +521,10 @@ deferral clusters in 5c instead.
   template; live targets are `AliasShape` member shape (item 1) and front-end tagged-token accessors.
 - **[tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md)** — naming
   authority and rename map. The open `ir/rewrites.ts`/`ir/strategies.ts` partition needs a shared home.
+- **[branch-arm-barrier-scope](./2026-08-01-branch-arm-barrier-scope-plan.md)** — the build spec for
+  item 21, and the reason it is not the ordering item it was filed as. **This refresh had missed it
+  entirely**, which is how item 21 kept a sizing its own plan document refutes in §6. Its §1 is the
+  `BranchStep`/`FlatMapStep` class fact that decides which branch kinds can disagree with us at all.
 - **[property-based-testing-l5](./2026-07-28-property-based-testing-l5.md)** — L5's oracle design space.
   **Stale**: it lists four defects against the deleted item 0, all four of which probe clean (22b).
 - **[channel-preservation](./archive/2026-07-28-channel-preservation-refactoring-plan.md)** — closed;

@@ -86,11 +86,16 @@ export type ScalarReducer = 'count' | NumericReducer;
  *  there observes the whole FRONTIER at one iteration), a `match()` pattern body (a barrier there
  *  reduces over the whole BINDING TABLE, not per binding), and a BRANCH ARM (a barrier there
  *  observes every traverser reaching the branch, not one). The first two defer rather than
- *  mis-execute; the third did neither until `verifyBranchArmBarrierScope`.
+ *  mis-execute; **the third still does NEITHER** — it lowers the arm per-origin and returns a
+ *  differently-shaped answer, e.g. `g.V().values('age').union(__.min(), __.max())` yields all four
+ *  ages twice instead of `[27, 35]`. `verifyBranchArmBarrierScope` is the gate that would close it
+ *  and has not been written; the real fix is `docs/2026-08-01-branch-arm-barrier-scope-plan.md`, and
+ *  §1 there is the reason only `union`/`choose` are affected (`coalesce`/`optional` do not extend
+ *  `BranchStep`, so their arms genuinely are per-traverser and our lowering of them is right).
  *
  *  It lives HERE, in the IR's step vocabulary, and not beside its first consumer, because the
- *  branch-arm site is an `ir/` verify Pass — and `ir/` must not import from `steps/`. `child-shape.ts`
- *  re-exports it so no existing importer moved. */
+ *  branch-arm gate belongs in an `ir/` verify Pass — and `ir/` must not import from `steps/`.
+ *  `child-shape.ts` re-exports it so no existing importer moved. */
 export const GLOBAL_BARRIER_STEPS: ReadonlySet<string> = new Set([
   'dedup', 'order', 'limit', 'range', 'skip', 'tail', 'sample', 'barrier',
   'group', 'groupCount', 'aggregate', 'local', 'fold', ...REDUCERS,
