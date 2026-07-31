@@ -1,5 +1,13 @@
 # Bulk transfer + the `io()` substrate — one primitive under five threads
 
+**Build status (2026-07-31):** phases **0 and 2 have landed**, and with them phase 1's *chunking*
+half (`src/rowbatch.ts`) — every live wrong-answer wall on the production runtime is closed. What is
+left is phase 1's row-landing loader, phase 3's static gate, then 4–7. Two findings from building it
+are folded in below rather than appended: §5's "scratch relation, chunked" is **superseded** (a
+compiled read plan is ONE statement — see §5), and the whole-suite CF-parity run is **green** before
+any fix, which is itself the measurement that says why the ladder could not have found §1c/§1d (§2's
+gate section).
+
 **Status: research + build plan.** Origin: five separately-filed threads that turned out to be one
 missing primitive — the L3 `io()` exclusion, an R2/filesystem write side, import/export formats,
 the federated-call transfer format, and slow conformance seeding. Written after measuring, so the
@@ -103,11 +111,14 @@ On grateful-dead, `g.V().drop()` would emit **16,098 binds in one statement**. T
 runner cleans graphs with `g.V().drop()` between scenarios — on Bun, forever, so this has never
 been seen.
 
-`jsonbArrayOf` (`plan/plan.ts:154`) is the third exposure: it backs `within(collection)` **and the
-federated bind-join's `INJECT_VALUES_KEY` distinct set**, so a bind-join pushing more than 100
-distinct keys — precisely the optimization the federation prior-art calls "the hinge between a demo
-and something you'd run" — fails on DO. `hasLabel`'s `values(names)` (`plan.ts:38`) and `V(id…)` are
-bounded by the user's query text, so they are fine.
+The vararg `within`/`without` IN-list (`plan/plan.ts`) is the third exposure: it backs
+`within(collection)` **and the federated bind-join's `INJECT_VALUES_KEY` distinct set**, so a
+bind-join pushing more than 100 distinct keys — precisely the optimization the federation prior-art
+calls "the hinge between a demo and something you'd run" — fails on DO. (The plan first named
+`jsonbArrayOf` here; that builder's live callers are `inject([…])` list literals, which ARE query-text
+bounded. The unbounded set reaches SQL through `predicateSql`'s `within` arm instead — same defect,
+one layer along.) `hasLabel`'s `values(names)` (`plan.ts:38`) and `V(id…)` are bounded by the user's
+query text, so they are fine.
 
 ### 1e. The id-width question, measured
 
@@ -176,6 +187,22 @@ decorator that throws when a statement carries > 100 binds or exceeds 100 KB, wr
 Bun store for one suite run. That is a ~20-line instrument that converts every DO-only wall into a
 Bun-visible failure, and it is the highest-value item in this whole plan — it re-prices item 11
 upward on its own.
+
+**Landed (`src/cf-limits.ts`, `mise run test:cf-limits`), and it came with one finding worth keeping:
+the whole suite is GREEN under it, before any fix.** Both entry points share one `cfLimitViolation`
+— a `CfLimitedSql` decorator for a test that pins one statement, and `MOGWAI_CF_LIMITS=1` inside
+`BunSqlite` so a whole suite is perturbed without threading a parameter through 30 store
+constructions (the `MOGWAI_REVERSE_UNORDERED` precedent). Two things follow:
+
+- **The suite never reaches the walls, so "run the suite under the harness" was never going to find
+  them.** §1d predicted the conformance runner's `g.V().drop()` reset would trip it; it does not —
+  the runner cleans the *empty* named graph, which has nothing in it. Every other graph in the suite
+  is six vertices. So the harness earns its place as a **guard on statements the suite does execute**,
+  and the reproductions have to be written deliberately at 250–500 elements
+  (`test/cf-limits.test.ts`). A green instrument run is the expected steady state, not the gate.
+- **The text cap has to be measured in BYTES.** A `sql.length` check waves through a statement that
+  is under 100 KB in UTF-16 code units and over it in UTF-8 — the encode is skipped below
+  `100 KB / 3`, where the bound settles it.
 
 ---
 
@@ -408,19 +435,32 @@ that declares multi-label (item 19b). One reader with a label branch, one writer
 Almost nothing structural, and that is the point — the detached-reference merge was the right call
 and this plan does not reopen it.
 
-- `landForeignElements` stops building one `VALUES` CTE and lands through `RowBatch` into a
-  **scratch relation**, chunked. That is a mechanical change at one call site and it removes the
-  §1c wall. Measured for reference: 40,000 rows into a scratch table via chunked multi-row inserts
-  is 23 ms.
-- `jsonbArrayOf`'s bind-join set gets the same treatment, which is what makes the bind-join
-  pushdown usable at real cardinality rather than at 25 keys.
-- **A scratch relation is an ordinary `CREATE TABLE`**, not a SQLite `TEMP`/`:memory:` table — we
-  already create our whole schema through `Sql.exec` on both runtimes, so an ordinary table needs no
-  new capability, whereas DO `TEMP` support is unverified and DO storage is the DO's own SQLite with
-  no second database to attach. This is the direct answer to *"is there a way to do an in-memory
-  table for federated calls?"*: **yes, and we already ship it** — the `VALUES` CTE is that
-  mechanism, it simply needs to be chunked. Which means the id question's stated precondition
-  ("only if there is no way of doing it in memory") is not met.
+- ~~`landForeignElements` lands through `RowBatch` into a **scratch relation**, chunked.~~
+  **SUPERSEDED by something smaller, on a fact this section had wrong: chunking is not available to a
+  READ at all.** A compiled read plan is one `{sql, binds}` statement that the executor runs, with
+  nowhere to put the preceding INSERTs a scratch table needs — so "chunk it" would have meant a
+  scratch table, DDL at query time, a cleanup obligation, and a new pre-statement seam in the plan
+  model. **What landed instead removes the bind scaling rather than dividing it:** the whole result
+  set rides as ONE bound parameter (a JSON array of cell arrays) and `json_each` explodes it back
+  into exactly the same relation. One bind at any cardinality, no DDL, no executor change, no
+  cleanup — and the zero-row case stops needing the hand-built `SELECT NULL … WHERE 0` arm, because
+  `json_each('[]')` already is a zero-row relation with those columns. Measured for reference: the
+  chunked-scratch-table route would have been 23 ms for 40,000 rows; this is one statement.
+- `within`/`without` over a **data-sized** set gets the same treatment, which is what makes the
+  bind-join pushdown usable at real cardinality rather than at 25 keys. It reuses the `withinList`
+  membership form that already existed for `within(__.V()…fold())` — one JSON bind, `json_each`
+  membership — so this is a new *bind* strategy, not a new predicate. A query-text-sized set (under a
+  quarter of the bind budget) keeps its IN-list, which every L2 snapshot pins and which the planner
+  serves off the value index; the threshold is cardinality-based, so it is **not** a
+  runtime-divergent branch (what CI compiles is what a DO runs).
+- **So "is there a way to do an in-memory table for federated calls?" has a better answer than a
+  scratch table:** the landing CTE always was the in-memory relation; what was wrong with it was the
+  *bind* strategy, not the relation. Either way the id question's stated precondition ("only if there
+  is no way of doing it in memory") is not met. Recorded because the scratch-table route looks
+  obligatory until you notice a read plan has no place to put a second statement — and if a future
+  path genuinely needs one, note that a scratch relation would be an ordinary `CREATE TABLE` (we
+  already run our whole schema through `Sql.exec` on both runtimes), never a `TEMP`/`:memory:` table,
+  whose DO support is unverified.
 - Unchanged and still correct: no cross-graph edge traversal (graph-local identity — a category
   error, not a gap), no cross-DO transaction, no cost-based planning, no `ATTACH`.
 - **What federation gains that it did not have:** *materializing* a foreign subgraph locally. The
@@ -501,9 +541,9 @@ Each phase lands green and is useful alone.
 
 | # | deliverable | gate |
 |---|---|---|
-| **0** | **CF-parity `Sql` decorator** (throws > 100 binds / > 100 KB) + one suite run under it | the two §1c/§1d walls reproduce **on Bun**, as failures |
-| **1** | `RowBatch` load/drain on the `Sql` seam; FTS row *construction* extracted from `indexProperty` | modern graph loads batched ≡ loads via write traversals, byte-identical incl. `property_fts` |
-| **2** | Fix §1d (`drop`) and §1c (`landForeignElements`, `jsonbArrayOf`) through `RowBatch` | phase 0's harness goes green; `g.V().drop()` on grateful-dead passes under it |
+| **0** ✅ | **CF-parity `Sql` decorator** (throws > 100 binds / > 100 KB) + one suite run under it | ~~the two §1c/§1d walls reproduce **on Bun**, as failures~~ — they had to be reproduced *deliberately*: the suite is green under the harness, because nothing in it reaches the cardinality (§2) |
+| **1** | `RowBatch` load/drain on the `Sql` seam; FTS row *construction* extracted from `indexProperty` | modern graph loads batched ≡ loads via write traversals, byte-identical incl. `property_fts` — **chunking half landed with phase 2; the loader is what remains** |
+| **2** ✅ | Fix §1d (`drop`) and §1c (`landForeignElements`, `within`) through `RowBatch` | done at 250–500 elements under the phase-0 store, which is what makes those tests gates rather than ordinary behaviour tests |
 | **3** | `mise run binds` static gate | at zero, fails the build (not a ratchet) |
 | **4** | **Typed GraphSON reader (v3 + v4) and writer (v4)** over `RowBatch`, line-oriented adjacency form; conformance host seeds through it | L3 count unchanged; seed ≤ 0.5 s; census unchanged; **`gcrew` round-trips** (the type channel incl. meta-properties survives a dump, §4b) **and `gzoo` round-trips** (multi-label survives — the assertion a v3 writer could not pass, §4c) |
 | **5** | `IoStore` (Bun FS / CF R2 / L3 host mapping) + `io()` as a barrier service | the 2 `.json` `Read.feature` scenarios pass; `.xml` and `.kryo` fail closed naming the format; `tags.ts` reclassified (§4) |
