@@ -373,12 +373,30 @@ that declares multi-label (item 19b). One reader with a label branch, one writer
    that **`tinker-graph-v4.json`, the only whole-graph `-v4` file shipped, IS the `g:graph` form** —
    so "the v4 graph file" is ambiguous and the fixture on disk is the version we do not want. Name
    the line-oriented adjacency form explicitly wherever this is implemented.
-2. **v4's embedded edges carry endpoint labels** — `inV: {id, label}` rather than a bare id, and the
-   V4 serializer writes `writeLabels(…, v.labels())` for them. We do not produce that:
-   `graphson-untyped-scope.md` already lists it as a known deviation (*"Edge `inV`/`outV` = `{id}`
-   only, no endpoint label. Our edge row carries no endpoint labels"*). **That gap now has two
-   consumers**, the response encoder and this writer, which is a reason to fix it once rather than
-   deviate twice.
+2. **Endpoint labels are NOT part of the adjacency form, in either version — do not "fix" them for
+   this writer.** An earlier revision of this section claimed v4's embedded edges carry
+   `inV: {id, label}`. That was a misreading: `writeLabels(…, v.labels())` at
+   `GraphSONSerializersV4.java:163` is in the **Edge** serializer — the DETACHED form that `g:graph`
+   and query responses use. The *adjacency* serializer writes a **bare endpoint id** in both v3 and
+   v4 (`StarGraphGraphSONSerializerV4.java:136-137`, `writeWithType(IN|OUT, …vertices(direction)
+   .next().id())`). Structurally it has to: in an adjacency list every vertex is its own line, so a
+   reader resolves `inV: 11` against that vertex's own entry, and repeating the label would be
+   redundant.
+   So the deviation `graphson-untyped-scope.md` records (*"Edge `inV`/`outV` = `{id}` only, no
+   endpoint label"*) stays exactly what that doc scoped it as — a **response-encoder** matter with
+   **one** consumer — and this plan neither needs it nor should bundle it. **Measured cost of fixing
+   it anyway, so the trade is on the record:** `vertexLabelsJson` is already the right primitive (a
+   correlated scalar subquery — never joins, never multiplies the row), but two per edge row at leaf
+   materialization takes `g.E()` over grateful-dead's 8,049 edges from **6.0 ms to 17.2 ms (2.85×)**
+   and `g.V(1..10).outE()` from 0.14 ms to 0.47 ms — for a wire field that doc verified **no
+   conformance scenario asserts** (the Gherkin harness compares edges by id). Decided 2026-07-31:
+   **not rolled in.**
+3. **Open reader question, deliberately not answered here.** We read v3 + v4 *adjacency*, but
+   `tinker-graph-v4.json` is `g:graph` — so a caller handing us the only whole-graph `-v4` file the
+   corpus ships would be rejected. Whether the reader should also accept `g:graph` is a container
+   question (the element encodings are shared, so it is a wrapper, not a second codec) — and note
+   that `g:graph` **does** carry `{id, label}` endpoints, so that is where endpoint labels would
+   first actually matter, on the READ side rather than the write side.
 
 ---
 
@@ -552,11 +570,12 @@ Recorded so they get swept rather than rediscovered:
   supported. The one-statement-per-entry `SCHEMA` array is still the right shape (it is clearer and
   costs nothing), but the stated *reason* is stale. Not worth a behaviour change; worth not citing
   as a constraint.
-- **`2026-07-13-graphson-untyped-scope.md`'s "known deviations"** — *"Edge `inV`/`outV` = `{id}` only,
-  no endpoint label"* is still accurate, but its framing ("a separate enhancement that would improve
-  BOTH serializers") understates it now: GraphSON v4's graph form *requires* the endpoint label
-  (§4c), so it is no longer an enhancement to a single deviation but a prerequisite for one of two
-  consumers. Fix it once.
+- **`2026-07-13-graphson-untyped-scope.md`'s "known deviations"** — no correction after all, and this
+  entry is kept as a *retraction*. A revision of this plan claimed v4's graph form requires the
+  endpoint label and that the deviation therefore had two consumers; **both were wrong** (§4c·2 — the
+  adjacency form writes a bare endpoint id in v3 and v4 alike). That doc's framing was right as
+  written: one consumer, an enhancement, Low. Recorded because the wrong version was briefly on trunk
+  and would otherwise look like a live finding to the next reader.
 - **`feature-support-matrix.md`** already over-promises "no form is known to mis-execute"
   (a known debt). §1c/§1d add two DO-only entries to whatever replaces that claim — and they are
   the first entries that are runtime-specific, which the matrix has no column for.
