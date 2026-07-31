@@ -6,7 +6,7 @@ import {
 } from '../src/gremlin/frontend.ts';
 import { cardinalityOf } from '../src/compiler/steps/context/stream.ts';
 import {
-    LAYOUT_ROLE_POLICY, layoutCols, layoutGrewAliases, layoutOverAliases, mergeArmRelation, mergeLayouts, nonAliasCols, rigidCols,
+    BARRIER_ROLE_POLICY, barrierLayout, LAYOUT_ROLE_POLICY, layoutCols, layoutGrewAliases, layoutOverAliases, mergeArmRelation, mergeLayouts, nonAliasCols, rigidCols,
     type AliasEntry, type TraverserLayout,
 } from '../src/compiler/steps/context/context.ts';
 import { Query, q } from '../src/sql/kernel/q.ts';
@@ -145,6 +145,41 @@ describe('arm-merge authority', () => {
     for (const role of metadata) expect(layoutCols(c)).not.toContain(role);
     // nonAliasCols is the same set minus the `union` role, which is what an arm merge remaps.
     expect(nonAliasCols(c)).toEqual([...rigidCols(c), 'p0']);
+  });
+
+  test('every role agrees with its declared BARRIER policy', () => {
+    // The merge-side twin of the test above, and the one that matters more: `barrierLayout` builds a
+    // LITERAL, and a `drop` role appears in it as its own ABSENCE — so a role added to
+    // `TraverserLayout` tomorrow would be dropped at all fifteen barrier sites by omission, which is
+    // the right answer for most roles and therefore a silent wrong answer for the one it is not.
+    // The type checker forces the POLICY to be declared; this forces it to be IMPLEMENTED.
+    const full = layout({
+      aliases: new Map([['a', alias('a0')]]),
+      sack: 'sk', bulk: 'bulk', origins: ['o0'], fromV: 'fv', encounter: 'encounter',
+      path: { kind: 'cols', cols: [{ col: 'p0', elem: 'vertex' }] },
+      trackFromV: true, consumedAliases: ['gone'],
+    });
+    const after = barrierLayout(full) as unknown as Record<string, unknown>;
+    for (const [role, policy] of Object.entries(BARRIER_ROLE_POLICY)) {
+      switch (policy) {
+        case 'drop':
+          expect({ role, value: after[role] }).toEqual({ role, value: undefined });
+          break;
+        case 'empty':
+          expect({ role, value: after[role] }).toEqual({ role, value: [] });
+          break;
+        case 'consumed':
+          expect({ role, size: (after[role] as Map<string, unknown>).size }).toEqual({ role, size: 0 });
+          break;
+        case 'keep':
+          expect(after[role]).toBeDefined();
+          break;
+      }
+    }
+    // 'consumed' is not merely 'drop': the label names survive as metadata, so a later select() can
+    // tell "a barrier ate it" from "never bound". Both the pre-existing and the newly-eaten name.
+    expect(after.consumedAliases).toEqual(['gone', 'a']);
+    expect(after.trackFromV).toBe(true);
   });
 
   test('the shared merge core declares the minted encounter in its layoutCols slot', () => {

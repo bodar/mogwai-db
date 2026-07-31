@@ -297,6 +297,49 @@ export const LAYOUT_ROLE_POLICY: Readonly<Record<keyof TraverserLayout, LayoutRo
   consumedAliases: 'metadata',
 };
 
+/** What a global BARRIER does with one carried role — the other half of the carried-role contract,
+ *  and the half that had no table.
+ *
+ *  - `consumed` — the role's columns go, and the fact that they EXISTED is remembered. Only
+ *    `aliases`: a downstream `select(label)` must be able to tell "a barrier ate it" from "never
+ *    bound", which the alias Map alone cannot express, so the names move to `consumedAliases`.
+ *  - `empty` — the role has an empty VALUE rather than an absence. Only `origins`: a barrier result
+ *    sits in no child scope, and `[]` says that where `undefined` would be a different type.
+ *  - `drop` — the role is simply absent afterwards. A barrier result is a NEW traverser and cannot
+ *    honestly claim per-row state from any one input row; `bulk` is here for a sharper reason still
+ *    — the barrier CONSUMES it (SUM) and emits one fresh bulk-1 traverser.
+ *  - `keep` — never a physical column, so a barrier has nothing to drop. `trackFromV` is a
+ *    chain-level requirement and `consumedAliases` is the diagnosis this very table writes.
+ */
+export type BarrierRolePolicy = 'consumed' | 'empty' | 'drop' | 'keep';
+
+/** The barrier policy of EVERY carried role, and the reason it exists is the same one
+ *  `LAYOUT_ROLE_POLICY` gives from the merge side — except that omission is not safe here.
+ *
+ *  `dropLayoutAtBarrier` builds its result as a LITERAL, and every role but `aliases`/`origins`/the
+ *  two metadata ones is optional on `TraverserLayout` — so a role added tomorrow compiles clean and
+ *  is silently dropped at all fifteen barrier sites. Silently dropping happens to be the right answer
+ *  for most roles, which is exactly what makes it dangerous: the one role for which it is wrong would
+ *  produce a wrong answer with nothing to notice it. `Record<keyof TraverserLayout, …>` turns that
+ *  into a build failure until the new role's policy is DECLARED.
+ *
+ *  Declaring is not implementing, so `test/channel-contracts.test.ts` runs `dropLayoutAtBarrier` over
+ *  a fully-populated layout and checks the result against this table role by role — the same tie
+ *  `LAYOUT_ROLE_POLICY` has to the column accessors. A policy recorded here and a literal that
+ *  disagrees cannot both survive.
+ */
+export const BARRIER_ROLE_POLICY: Readonly<Record<keyof TraverserLayout, BarrierRolePolicy>> = {
+  aliases: 'consumed',
+  origins: 'empty',
+  path: 'drop',
+  sack: 'drop',
+  fromV: 'drop',
+  encounter: 'drop',
+  bulk: 'drop',
+  trackFromV: 'keep',
+  consumedAliases: 'keep',
+};
+
 /** How an arm merge treats the RIGID roles (sack/bulk/origins/fromV/encounter). This is a
  *  POLICY, not a strictness dial: the two cases describe genuinely different boundaries, so a
  *  caller states which one it is at and never picks the lenient one to make a call type-check.
@@ -650,18 +693,23 @@ export const withoutPath = <T extends LoweringState>(st: T): T =>
  * result — the two are indistinguishable from the alias Map alone, and `selectOneFromAlias`'s
  * drop-not-throw rule is only correct for a label that was genuinely never bound. Labels already
  * consumed upstream stay recorded, so the diagnosis survives a second barrier. */
-export const dropLayoutAtBarrier = <T extends LoweringState>(st: T): T => {
-  const consumed = [...st.traverserLayout.consumedAliases ?? [], ...st.traverserLayout.aliases.keys()];
+export const dropLayoutAtBarrier = <T extends LoweringState>(st: T): T =>
+  ({ ...st, traverserLayout: barrierLayout(st.traverserLayout) });
+
+/** `dropLayoutAtBarrier`'s layout half, split out so the contract test can run it on a layout
+ *  without inventing a whole `LoweringState` around one. Every line below is one row of
+ *  `BARRIER_ROLE_POLICY`; the `drop` roles appear as their own ABSENCE, which is precisely why the
+ *  table has to be checked against this rather than merely read beside it. */
+export function barrierLayout(c: TraverserLayout): TraverserLayout {
+  const consumed = [...c.consumedAliases ?? [], ...c.aliases.keys()];
   return {
-    ...st,
-    traverserLayout: {
-      aliases: new Map(),
-      origins: [],
-      trackFromV: st.traverserLayout.trackFromV,
-      ...(consumed.length ? { consumedAliases: [...new Set(consumed)] } : {}),
-    },
+    aliases: new Map(),                                              // 'consumed' — names kept below
+    origins: [],                                                     // 'empty'
+    trackFromV: c.trackFromV,                                        // 'keep'
+    ...(consumed.length ? { consumedAliases: [...new Set(consumed)] } : {}), // 'keep' (+ the consumed names)
+    // path / sack / fromV / encounter / bulk are 'drop' — absent by omission.
   };
-};
+}
 
 /**
  * Append `body` as the new id-relation and advance to it. Layout-column opts route through
