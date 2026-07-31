@@ -281,9 +281,23 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      **The general lesson: any chain-global demand computed by a flat scan is blind to child
      bodies.** Before adding a step to that scan, ask whether the same step can appear nested, and if
      so anchor on a top-level consumer instead of descending.
-   - **A child-scoped `order().fold()`** — `group().by(T.label).by(__.values('name').order().fold())`
-     (2). `lowerScopedFold` already emits `ORDER BY <encounter>`, so this is the child-scope analogue
-     of the chain-level demand fix: the child body's own analysis must demand one. *Low-Med.*
+   - **A GROUP VALUE body's barrier runs in the wrong SCOPE — a live silent wrong answer, and the
+     one entry here that is not an ordering fix.** `g.V().group().by(T.label).by(__.values('name').
+     order().by(Order.desc).fold())` returns `person: [marko, vadas, josh, peter]` — vertex-id order.
+     Ascending gives the same. The identical `order().by(Order.desc).fold()` at ROOT is correct
+     (`[vadas, peter, marko, josh]`), so the modulator is not mis-lowered; it is lowered in a scope
+     where it cannot do anything.
+     Read the SQL and it is unambiguous: the value body compiles into a PER-ORIGIN child scope, one
+     origin per input vertex, so `c3` re-mints `encounter = ROW_NUMBER() OVER (PARTITION BY o0 ORDER
+     BY <sortkey> DESC, …)` — correctly, but each vertex has exactly ONE name, so every partition has
+     one row and the sort is a no-op. The group's list is then built `ORDER BY gp.o0, gf.encounter`,
+     i.e. by PARENT SCAN ORDER, which is also why it is perturbation-fragile.
+     **The reference splits the value traversal**: `GroupStep` takes the LAST barrier as the group's
+     REDUCER and everything before it as a per-traverser pre-traversal — so `values('name')` is
+     per-traverser and `order().fold()` applies to the group's whole collection. We run all of it
+     per-origin. Fixing it is the group-value barrier scope, i.e. item 5's group-child-body ground,
+     not an ordering patch — **do not try to fix this by changing the ORDER BY.**
+     *Med — silent, and the corpus cannot see it: both scenarios assert `unordered`.*
    - **`aggregate('x').by(__.out().order().by('name'))`** — the by(traversal) arm with a FAN-OUT
      child body. The outer collection is ordered now, but the child's `first`-per-parent pick reads
      the child rows in scan order. Child-internal; adjacent to the child-scoped fold below. *Low-Med.*
