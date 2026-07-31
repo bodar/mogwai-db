@@ -9,7 +9,7 @@
 // asserting a returned vertex's label SET — `v[tux]` compares by id, which is exactly why the
 // official runner never noticed. The assertion has to deserialize through the real client, so the
 // level that can make it is an exec test. (Recorded as a third symptom in
-// docs/upstream-patches/03-multilabel-default-untestable.md.)
+// patches/upstream/tinkerpop-03-multilabel-default-untestable.md.)
 //
 // The one thing NOT to weaken here: assert `labels`, not `label`. The client always populates
 // `.label` from `labels[0]`, so a one-label wire frame passes any `.label` assertion — that is the

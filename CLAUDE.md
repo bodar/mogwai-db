@@ -209,6 +209,10 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
   another — in a DO, for every later request the isolate serves. Not upstream yet, so a bump
   re-exposes it; `package.json` also pins `overrides.antlr4ng` so only ONE copy exists to patch.
   `test/L1-corpus/parser-state.test.ts` fails if the patch goes missing. Detail: `docs/outstanding-work.md` 0f.
+- **`patches/` is bun's patch dir and the ONLY one — everything we owe someone else's repo lives in
+  `patches/upstream/`, never in `docs/`.** Bun applies only what `package.json`'s
+  `patchedDependencies` names, so `upstream/` nested inside is inert. `patches/upstream/README.md`
+  indexes each payload, its target project, and its submission state.
 - **Test via `mise run test`, NOT bare `bun test`** (bare skips `tsc --noEmit` + the submodule). See
   `test/CLAUDE.md`. Build graph: `submodule ─▶ install ─▶ {check, test, build} ─▶ ci`; CI just runs
   `mise run ci`. **`install` depends on `submodule` and that edge is load-bearing** — `gremlin` is a
