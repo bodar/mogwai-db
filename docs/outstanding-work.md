@@ -256,10 +256,14 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    already owns. **This is item 5c re-sorted by MECHANISM** (~30 of its 84 parent-shape failures are
    these copied row-ops), and it cuts ACROSS parent shapes, so it does four unrelated jobs at once
    instead of one shape at a time.
-   - **The precondition, and it is mechanical:** four of eleven shape arms are `if`-chains rather than
-     `dispatchShapeTail` Maps (`tail/list.ts` map + mapEntry, `tail/group.ts`, `tail/path.ts`). A
-     shared row-op cannot be REGISTERED into a switch, so transpose these four first and the lift
-     becomes "add 11 Map entries" instead of "edit 11 sites".
+   - ~~**The precondition**~~ — **DONE `f3c4606`.** All eleven shape arms now dispatch through a
+     `dispatchShapeTail` Map, so the lift is "add 11 Map entries" rather than "edit 11 sites". The
+     precondition's claim was verified before starting and was exactly accurate. Two things
+     deliberately stayed OUT of the tables and a row-op registration must not disturb them:
+     `compileFromGroup`'s `is()` THROWS rather than declining (a non-MAP `typeOf` over a group is
+     not a narrower version of the same question), and `compileFromPath`'s `PATH_LIST_OPS` retype
+     stays in the FALLBACK, because registering it per name would duplicate that membership set as
+     a second list.
    - **Why it is architectural, not just mechanical:** `cardinalityOf` (`context/stream.ts`) was named
      and has exactly ONE consumer. Spreading row-ops without routing them through it produces
      WRONG ANSWERS, not free coverage — a grouped `PathStream` has one row per *position*. The
