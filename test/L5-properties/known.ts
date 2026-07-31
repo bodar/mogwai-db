@@ -63,6 +63,24 @@ export interface KnownDivergence {
 }
 
 export const KNOWN: readonly KnownDivergence[] = [
+  {
+    query: 'g.V().repeat(__.both()).times(3).range(5, 11)',
+    fastPath: 'repeatBodyExpansion',
+    diagnosis:
+      "repeat()'s two body routes emit the walk in different orders, and a POSITIONAL consumer after "
+      + 'the walk then picks a different window from the same multiset. The flat expansion walks the '
+      + 'frontier inline; the keyed relation joins a precompiled (from_id, to_id) table, and SQLite '
+      + 'has no reason to visit the two in the same order. Neither is wrong ON ITS OWN — the walk has '
+      + 'no emission order to be faithful to, because a recursive CTE cannot window across iterations '
+      + '(the encounter demand pass returns false at repeat()/match() for exactly this reason, '
+      + 'ir/analyze.ts). So the defect is the UNDER-DETERMINATION, not either route, and it is already '
+      + 'filed as such: docs/outstanding-work.md item 20 names this traversal as EXPECTED under the '
+      + 'perturbation instrument, and item 4 owns the missing primitive. '
+      + 'THIS ENTRY IS WHY THE FLAG WAS ADDED: the flat expansion always won where it recognised a '
+      + 'body, so nothing could compare the two routes at all. The first sweep with the switch found '
+      + 'exactly one disagreement across the corpus, which is the useful result either way.',
+    family: { query: /^g\.V\(\)\.repeat\(__\.both\(\)\)\.times\(3\)\.range\(/ },
+  },
 ];
 
 /** Normalise the quote style / whitespace the corpus and the generator differ on. */

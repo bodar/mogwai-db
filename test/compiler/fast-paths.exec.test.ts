@@ -4,7 +4,7 @@
 // structurally-enforced obligation: a new fast-path flag added without its FastPath + equivalence
 // test fails HERE, at review time.
 import { test, expect, describe } from 'bun:test';
-import { DEFAULT_FAST_PATHS, type FastPath } from '../../src/compiler/options/fast-paths.ts';
+import { DEFAULT_FAST_PATHS, GATE_ONLY_FAST_PATHS, type FastPath } from '../../src/compiler/options/fast-paths.ts';
 import { BulkRepeatCountFastPath } from '../../src/compiler/steps/tail/bulk.ts';
 import { MovementCollapseFastPath } from '../../src/compiler/steps/prefix/movement.ts';
 import { SingleHopOptionalFastPath } from '../../src/compiler/steps/prefix/branch.ts';
@@ -21,12 +21,26 @@ const ALL: FastPath<any, any>[] = [
 ];
 
 describe('FastPath registry completeness', () => {
-  test('every FastPathConfig flag has exactly one FastPath', () => {
+  test('every FastPathConfig flag has exactly one FastPath, or is a declared gate-only switch', () => {
     const flagNames = Object.keys(DEFAULT_FAST_PATHS).sort();
-    const pathNames = ALL.map((p) => p.name as string).sort();
-    // Exact cover: no flag without a FastPath, no FastPath without a flag, no duplicates.
-    expect(pathNames).toEqual(flagNames);
-    expect(new Set(pathNames).size).toBe(pathNames.length);
+    const pathNames = ALL.map((p) => p.name as string);
+    const gateOnly = Object.keys(GATE_ONLY_FAST_PATHS);
+    // Exact cover, still: no flag uncovered, nothing covered twice, no FastPath without a flag.
+    // `repeatBodyExpansion` is the gate-only case — it chooses between two body PROVIDERS inside one
+    // recursive-CTE construction, so it has no separable artifact for a `tryLower` to return, and a
+    // `tryLower` that lowered nothing would model it falsely just to satisfy this assertion.
+    expect([...pathNames, ...gateOnly].sort()).toEqual(flagNames);
+    expect(new Set([...pathNames, ...gateOnly]).size).toBe(flagNames.length);
+  });
+
+  test('a gate-only switch still owes its equivalence', () => {
+    // The one thing a gate-only flag is NOT excused from: naming the committed test that proves
+    // enabled ≡ disabled. Same obligation as `equivalentWhen`, same reason.
+    for (const [name, equivalentWhen] of Object.entries(GATE_ONLY_FAST_PATHS)) {
+      expect(typeof equivalentWhen).toBe('string');
+      expect(equivalentWhen.length).toBeGreaterThan(0);
+      expect(name in DEFAULT_FAST_PATHS).toBe(true);
+    }
   });
 
   test('every FastPath declares a non-empty equivalentWhen', () => {

@@ -26,6 +26,26 @@ export interface FastPathConfig {
    *  no path/as/sack/branch/order/limit) — the reducer's SUM(bulk) makes it result-equivalent to
    *  the enumerated form. Disabling emits the plain UNION-ALL movement (same result, more rows). */
   readonly movementCollapse: boolean;
+  /**
+   * Expand a recognized `repeat()` BODY inline into the recursive term (movements + `has()` +
+   * `sack(op).by()` + a sack-reading `where()`) instead of precompiling it once into a keyed
+   * `(from_id, to_id)` relation the recursive term joins. The flat form walks the frontier lazily;
+   * the keyed form costs |V|×fanout up front but is the ordinary StepFns, which is what makes it the
+   * semantic authority.
+   *
+   * **This is the SEVENTH specialized lowering and it was the only one no differential could see.**
+   * The flat expansion always won where it recognised a body, so its agreement with the generic
+   * route was asserted by its own header comment and by nothing else — it is not a `FastPath`
+   * object, so it had no flag and no `equivalentWhen`. Disabling it routes every body the keyed
+   * relation can express through that relation, which is exactly the equivalence L5's per-switch
+   * sweep now runs (`FAST_PATH_NAMES` derives from this object, so the flag enters it for free).
+   *
+   * Two body shapes are NOT covered by the equivalence and stay flat whatever this says, because the
+   * keyed route cannot express them at all rather than expressing them differently: a per-iteration
+   * `sack()` fold (the accumulator depends on the running value, not just the hop) and a live path
+   * array (positions are recorded per iteration). Both are guarded at the same site.
+   */
+  readonly repeatBodyExpansion: boolean;
 }
 
 export interface CompileOptions {
@@ -53,6 +73,7 @@ export const DEFAULT_FAST_PATHS: FastPathConfig = Object.freeze({
   ftsSubstringPredicate: true,
   scalarPredicateInlining: true,
   movementCollapse: true,
+  repeatBodyExpansion: true,
 });
 
 export const resolveFastPaths = (options?: CompileOptions): FastPathConfig => ({
@@ -66,6 +87,28 @@ export const resolveRegistry = (options?: CompileOptions): ServiceRegistry =>
 /** The federation depth for this compile (0 at the top level). */
 export const resolveFederationDepth = (options?: CompileOptions): number =>
   options?.federationDepth ?? 0;
+
+/**
+ * The flags that are a SWITCH but not a `FastPath` OBJECT, with the equivalence each one owes.
+ *
+ * Six of the seven fast paths recognize a sub-shape and lower it to a separable artifact — an
+ * Expression, a Compiled, a gate builder, a Stream — which is what makes a `FastPath` object with a
+ * `tryLower` the honest model of them. `repeatBodyExpansion` chooses between two BODY PROVIDERS
+ * woven through one recursive-CTE construction; there is no separable artifact to return, and giving
+ * it a `tryLower` that lowers nothing would model it falsely just to satisfy a registry.
+ *
+ * So the registry stays TOTAL over the flags — every flag is either an object or listed here, and
+ * `test/compiler/fast-paths.exec.test.ts` checks that cover — and an entry here still owes the same
+ * `equivalentWhen` the object form owes. What it cannot owe is a `tryLower`, and saying so in one
+ * declared place is better than a flag quietly absent from the completeness check.
+ */
+export const GATE_ONLY_FAST_PATHS: Readonly<Record<string, string>> = Object.freeze({
+  repeatBodyExpansion:
+    "test/L5-properties/differential.test.ts — the per-switch sweep; every corpus repeat() body the "
+    + 'keyed relation can express, compiled both ways. Its first run found exactly one disagreement '
+    + '(known.ts: the walk has no emission order, so a positional consumer after it picks a different '
+    + 'window from the same multiset), which is what the switch existed to make visible.',
+});
 
 // ---------- the FastPath contract ----------
 //

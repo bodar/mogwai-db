@@ -823,7 +823,7 @@ export const repeat: StepFn = (s, st) => {
   // and the generic body relation is the fallback. A movement-free body is valid only when it folds
   // a sack (TinkerPop's on-the-spot accumulate, Repeat.feature:664) or collects a body aggregate
   // (repeat(aggregate('a')) revisits the seed each iteration); otherwise it never progresses.
-  const flatOk = core.every(REPEAT_BODY_OK) && !badHas && (moves.length > 0 || bodyFoldsSack || !!aggName);
+  const flatRecognized = core.every(REPEAT_BODY_OK) && !badHas && (moves.length > 0 || bodyFoldsSack || !!aggName);
   // The single-movement fast path only applies to a bare VERTEX movement with no sack fold /
   // edge step; any sack-folding or edge-step body routes through the general expansion.
   const singleMove = core.length === 1 && REPEAT_MOVES.has(core[0].name);
@@ -852,6 +852,16 @@ export const repeat: StepFn = (s, st) => {
   // path()/simplePath() with edge steps in the body (which visit edges AND vertices) needs the
   // edge-aware path regime — a separate piece. Defer rather than record only the vertices.
   if (trackArray && hasEdgeStep) throw new Error('path()/simplePath() with edge steps (outE()/inV()) in a repeat() body not yet supported');
+
+  // `repeatBodyExpansion` is the switch that makes the flat expansion a FAST PATH rather than an
+  // unexamined second implementation of what the StepFns already do. Disabled, a body the keyed
+  // relation can express takes that route instead — which is the equivalence L5's per-switch sweep
+  // now runs, and which nothing checked before, because the flat form always won where it
+  // recognised a body. Three shapes are exempt because the keyed route cannot express them AT ALL
+  // (so there is nothing to compare, and forcing them there would only manufacture a deferral): a
+  // per-iteration sack fold, a live path array, and a body-terminal `aggregate()`.
+  const flatOk = flatRecognized
+    && (engineOf(st).fastPaths.repeatBodyExpansion || bodyFoldsSack || trackArray || !!aggName);
 
   // Body strategy. The FLAT expansion is the fast path (frontier-lazy); when it does not recognize
   // the body, fall back to the GENERIC body relation — the ordinary StepFns compiled once into a
