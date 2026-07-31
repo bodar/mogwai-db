@@ -68,12 +68,22 @@ const POSITIONAL_CONSUMERS = new Set(['limit', 'range', 'skip', 'tail', 'fold'])
  *  cross yet — return false there (preserving today's behaviour, never a silent mis-order). */
 function computeDemandsEncounter(steps: IRStep[]): boolean {
   let sawFanout = false;
+  let sawOrder = false;
   for (const s of steps) {
     if (s.name === 'repeat' || s.name === 'match') return false;
     // A keyed/bare order() re-establishes a deterministic total order, so a following slice needs
     // no emission encounter — clear the fan-out (the same predicate collapseSafe's sawOrder gate
     // uses, so the two agree and movementCollapse stays enabled for <movement>.order().by(key).limit()).
-    if (isPlainOrder(s)) { sawFanout = false; continue; }
+    if (isPlainOrder(s)) { sawFanout = false; sawOrder = true; continue; }
+    // …but that reasoning is about a SLICE, and it does not extend to an AGGREGATE. `LIMIT` reads
+    // the ordered relation inside the SAME query, so the ORDER BY genuinely satisfies it. A fold
+    // reads its rows across a relation boundary, and SQL does not carry a subquery's ORDER BY over
+    // one — `json_group_array` takes whatever scan order SQLite picks. So an ordered fold needs a
+    // column to order BY *inside* the aggregate, whatever established that order.
+    // Measured: 13 L3 scenarios (`…order().fold().<local op>`) passed only because the default
+    // planner happened to scan the ordered CTE in order; all 13 fail under
+    // `mise run test:perturbed`. Do NOT "simplify" this back by folding it into the branch above.
+    if (sawOrder && s.name === 'fold') return true;
     if (sawFanout && POSITIONAL_CONSUMERS.has(s.name)) return true;
     // dedup(labels) keeps the FIRST traverser per key — first-in-emission, so it needs the
     // encounter. Bare dedup() collapses a multiset regardless of order (never triggers).
