@@ -6,7 +6,7 @@ import { elemCtx, elementPayload, elemTable, labelNameFor, propScalarFor, P_OPS,
 import { aliasId, aliasPop, aliasPresent, aliasScalar, entryTypeTag, shapeElem } from '../context/alias.ts';
 import { aliasElem, aliasIsElement, layoutCols, layoutProjection, scalarTypeFromAlias, type AliasMap, type ElementStream } from '../context/context.ts';
 import { continueLowering, dispatchShapeTail, loweringStateOf, recordFieldColumns, toElementStream, toListStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type LoweringResult, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
-import { lowerGlobalCount, reprojectRows } from './barrier.ts';
+import { globalRowOps, lowerGlobalCount, reprojectRows } from './barrier.ts';
 import { byAt, childCtx, childSteps, classifyBy, classifyElementChild, classifyListChild, classifyRecordChildRows, classifyScalarChild, reuseCurrentFrame, ROOT_SCOPE, type ChildFrameStack, type ChildParent, type ChildUse } from './child-shape.ts';
 import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
 import { emptyElementLike, historyPropertyValues, historyScalarValues, historyValues, popEnd, popIsListResult, selectKeyFromAlias, selectOneFromAlias } from './labelselect.ts';
@@ -749,6 +749,9 @@ const RECORD_DISPATCH = new Map<string, ShapeTailFn<RecordStream>>([
   ['where', recordFilter], ['not', recordFilter], ['filter', recordFilter],
   ['count', (s, _step, _steps, at) => continueLowering(lowerGlobalCount(s), at + 1)],
   ['order', recordOrder],
+  // `recordSlice` owns limit/range/skip/tail because it ALSO serves Scope.local (a field slice),
+  // which the shared row ops deliberately decline. Only `dedup` comes from the shared set.
+  ...globalRowOps<RecordStream>().filter(([name]) => name === 'dedup'),
   ['limit', recordSlice], ['range', recordSlice], ['skip', recordSlice], ['tail', recordSlice],
   ['select', recordSelect],
 ]);

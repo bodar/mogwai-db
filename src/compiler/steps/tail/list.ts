@@ -13,7 +13,7 @@ import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toM
 import { layoutProjection, layoutCols, type ElementStream } from '../context/context.ts';
 import { PER_ROW, STATIC, type Compiled, type ListOf, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf, type Engine } from '../../engine/deps.ts';
-import { lowerGlobalCount } from './barrier.ts';
+import { firstOf, globalRowOps, lowerGlobalCount } from './barrier.ts';
 import { collectionTypeOf } from './scalar.ts';
 import { REDUCERS } from '../../ir/step.ts';
 
@@ -178,6 +178,10 @@ function listNoneFilter(s: ListStream, pred: any): ListStream {
 /** The Scope.local collection transforms that keep a list a list (per-list, not a
  *  whole-stream reduction). Each rebuilds each row's list via a correlated json_each. */
 const LIST_LOCAL_TX = new Set(['order', 'dedup', 'limit', 'skip', 'range', 'tail']);
+
+/** The shared global row ops keyed by step name, so a LIST_LOCAL_TX name can compose with its
+ *  shared twin instead of replacing it. */
+const SHARED_ROW_OPS = new Map(globalRowOps<ListStream>());
 
 /** Scalar string transforms that, on a list, apply to EACH element (Scope.local) —
  *  toUpper(local)/trim(local)/length(local)/… over a folded list. Reuse scalarTx per
@@ -484,7 +488,15 @@ const LIST_DISPATCH = new Map<string, ShapeTailFn<ListStream>>([
   ['all', (s, step, _steps, at) => continueLowering(listAllAny(s, step), at + 1)],
   ['any', (s, step, _steps, at) => continueLowering(listAllAny(s, step), at + 1)],
   ['conjoin', listConjoin],
-  ...[...LIST_LOCAL_TX].map((n): [string, ShapeTailFn<ListStream>] => [n, listLocalTx]),
+  // Every LIST_LOCAL_TX name is ALSO a shared global row op, so the two must COMPOSE rather than
+  // one shadowing the other: the shared op runs first and declines a Scope.local step, leaving
+  // `listLocalTx` to slice MEMBERS. Spreading both into the Map instead let the later entry win and
+  // stopped 42 corpus traversals executing — see `firstOf`. `order`/`tail` have no shared form, so
+  // they stay `listLocalTx` alone.
+  ...[...LIST_LOCAL_TX].map((n): [string, ShapeTailFn<ListStream>] => {
+    const shared = SHARED_ROW_OPS.get(n);
+    return [n, shared ? firstOf(shared, listLocalTx) : listLocalTx];
+  }),
   ...[...STRING_LOCAL_TX].map((n): [string, ShapeTailFn<ListStream>] => [n, listStringTx]),
   ...[...LIST_REDUCERS].map((n): [string, ShapeTailFn<ListStream>] => [n, listReducer]),
   ...[...LIST_OPERAND_OPS].map((n): [string, ShapeTailFn<ListStream>] => [n, listSetOp]),
@@ -643,6 +655,9 @@ function mapEntryColumn(s: MapEntryStream, sel: IRStep, at: number): LoweringRes
 }
 
 const MAP_ENTRY_DISPATCH = new Map<string, ShapeTailFn<MapEntryStream>>([
+  // One row per Map.Entry, so the shared row ops and the shared global count all apply directly.
+  ...globalRowOps<MapEntryStream>(),
+  ['count', (s, _step, _steps, at) => continueLowering(lowerGlobalCount(s), at + 1)],
   ['select', (s, step, _steps, at) => mapEntryColumn(s, step, at)],
   // The 1-to-1 `map(__.select(Column))` spelling of the same projection. `mapOfSelect` unwraps the
   // single-step body; any other map() body declines to the fallback.

@@ -697,6 +697,69 @@ test('multi-hop where executes: correlated EXISTS over the path', () => {
   expect(run(store, 'g.V().where(__.not(__.out("created"))).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple', 'vadas']);
 });
 
+// ---------- the shared row ops (item 17) ----------
+//
+// limit/skip/range/dedup are ONE implementation (`reprojectRows`, tail/barrier.ts) registered into
+// each shape's dispatch table, so these assert the SHAPES rather than the ops: before this the
+// (shape x row-op) matrix measured 17/50 gaps over these five ops and ten producers, and it is now
+// 4/50 — the four survivors being `group`, which declines by design (see the last case).
+test('the shared row ops slice every shape whose rows are its traversers', () => {
+  const store = seededStore();
+  const n = (g: string) => run(store, g).length;
+
+  // A LIST stream is one list VALUE per row, so a row slice selects whole lists. Six vertices →
+  // six lists; dedup collapses the three EMPTY ones (lop/vadas/ripple have no out) into one.
+  expect(n('g.V().local(__.out().fold())')).toBe(6);
+  expect(n('g.V().local(__.out().fold()).limit(2)')).toBe(2);
+  expect(n('g.V().local(__.out().fold()).skip(4)')).toBe(2);
+  expect(n('g.V().local(__.out().fold()).range(1,3)')).toBe(2);
+  expect(n('g.V().local(__.out().fold()).dedup()')).toBe(4);
+
+  // A Map.Entry stream is one row per entry — the shape item 17 measured at 0/10.
+  expect(n('g.V().valueMap().unfold()')).toBe(12);
+  expect(n('g.V().valueMap().unfold().limit(3)')).toBe(3);
+  expect(run(store, 'g.V().valueMap().unfold().count()').map((r) => r.v)).toEqual([12]);
+
+  // A PROPERTY stream is one row per Property/VertexProperty instance. Its `dedup` is NOT the
+  // shared one (it collapses on the property payload, not the whole row), so only the slices moved.
+  expect(n('g.V().properties()')).toBe(12);
+  expect(n('g.V().properties().limit(4)')).toBe(4);
+  expect(n('g.V().properties().range(2,5)')).toBe(3);
+
+  // A RECORD row is one traverser; only `dedup` came from the shared set, because `recordSlice`
+  // also serves Scope.local (a FIELD slice), which the shared ops decline.
+  expect(n("g.V().project('a').by('name')")).toBe(6);
+  expect(n("g.V().project('a').by('name').dedup()")).toBe(6);
+
+  // A LINEAR path is row-per-traverser, so it slices; the GROUPED (recursive) regime is one row per
+  // POSITION and is what `cardinalityOf` exists to keep out of here.
+  expect(n('g.V().out().path().limit(2)')).toBe(2);
+});
+
+test('a shared row op fails closed rather than answering a different question', () => {
+  const store = seededStore();
+  // wholeResult: a group() barrier is ONE map traverser, so slicing its ROWS is not the ask.
+  expect(() => run(store, "g.V().group().by('name').limit(2)")).toThrow('on a group value not yet supported');
+  // Carried label state makes a bare DISTINCT over the row the wrong collapse key.
+  expect(() => run(store, "g.V().as('x').local(__.out().fold()).dedup()"))
+    .toThrow('carried path/label state');
+  // A by()-scoped dedup is a different collapse key entirely.
+  expect(() => run(store, "g.V().local(__.out().fold()).dedup().by('x')")).toThrow('dedup().by()');
+  // Scope.local addresses MEMBERS, not rows, so the shared op declines and the list arm's OWN
+  // member-slice builder answers — six lists in, six lists out, each truncated to two members.
+  //
+  // This is the case that caught the shadowing bug, and it is asserted here rather than with the
+  // gains above because it is a NON-regression, not a new capability: `LIST_DISPATCH` already owned
+  // these four names, and a `new Map` keeps the LAST entry for a duplicate key, so spreading the
+  // shared ops after them REPLACED the local builder. A declining handler then fell to the fallback
+  // throw instead of to the owner it meant to defer to — `dispatchShapeTail` consults exactly one
+  // handler per name, so declining never "falls through" to a previous registration. It cost 42
+  // corpus traversals and only the census saw it; the global-form probe that measured the gains was
+  // blind to it by construction. `firstOf` composes them instead.
+  expect(run(store, 'g.V().local(__.out().fold()).range(Scope.local,0,2)')).toHaveLength(6);
+  expect(run(store, 'g.V().local(__.out().fold()).limit(Scope.local,1)')).toHaveLength(6);
+});
+
 test('sum() sums a value stream; fold() collects it', () => {
   const store = seededStore();
   expect(run(store, 'g.V().hasLabel("person").values("age").sum()').map((r) => r.v)).toEqual([123]);
