@@ -74,6 +74,19 @@ export class BunGraphManager implements GraphManager {
     return new Executor(this.resolve(id).store, this.registry, this);
   }
 
+  /**
+   * This graph's store, created on demand — the seam a BULK LOAD lands through (`src/bulk.ts`,
+   * `src/formats/*`), which by construction bypasses parse→compile→execute.
+   *
+   * Deliberately NOT on the `GraphManager` interface: a Cloudflare manager holds no local store (its
+   * graphs are Durable Objects reached over RPC), so a store accessor there would be a lie. On a DO a
+   * bulk load runs INSIDE the object, against its own `ctx.storage.sql`. So this is the local-runtime
+   * form of a capability both runtimes have, not a Bun-only capability.
+   */
+  storeOf(id: string): GraphStore {
+    return this.resolve(id).store;
+  }
+
   async create(id: string): Promise<void> {
     this.resolve(id); // idempotent: opening runs the schema, materializing an empty graph
   }

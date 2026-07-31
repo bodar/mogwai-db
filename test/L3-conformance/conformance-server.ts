@@ -19,15 +19,27 @@ import { CREW_SEED } from '../fixtures/seed-crew.ts';
 import { ZOO_SEED } from '../fixtures/seed-zoo.ts';
 import { LabelCardinality } from '../../src/api.ts';
 import { UID_SEED } from '../fixtures/seed-uid.ts';
-import { graphsonSeed } from '../fixtures/seed-graphson.ts';
+import { loadGraphson } from '../../src/formats/graphson.ts';
+import { readFileSync } from 'node:fs';
 
-// Reference graphs load from their canonical GraphSON v3 files in the pinned submodule
-// (sink 3 vertices) — turned into write traversals so the integer ids land exactly
-// (V(2000)/V(1000) scenarios).
+// Reference graphs load from their canonical GraphSON v3 files in the pinned submodule, through the
+// TYPED reader + bulk loader (src/formats/graphson.ts) rather than as write traversals. Two things
+// that buys, both measured: ggrateful's seed goes from 4.4s / 98,198 statements to ~0.14s / 1,482
+// (the whole `beforeAll` timing cliff this file used to document), and the file's TYPES survive — the
+// old string-building seed unwrapped every `@type` and re-emitted a bare literal, so a `g:Double` of
+// 1.0 re-entered as an int.
+//
+// The HAND-AUTHORED seeds below stay write traversals on purpose (plan doc §6): they go through the
+// same parse→compile→execute path a client uses, so a broken write path cannot produce a correct
+// fixture, and they are the reference the loader's equivalence test compares against (test/bulk.test.ts).
+// A bulk load is only trustworthy while that comparison exists.
 const GRAPHSON = 'vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/structure/io/graphson';
 const relToRepo = (p: string) => new URL(`../../${p}`, import.meta.url).pathname;
 
-const SEEDS: Record<string, string[]> = {
+/** A reference graph's seed: hand-authored write traversals, or a GraphSON adjacency file. */
+type Seed = readonly string[] | { readonly graphson: string };
+
+const SEEDS: Record<string, Seed> = {
   gmodern: MODERN_SEED,
   // gcrew: the multi/meta-property showcase (list-cardinality location + startTime/endTime meta).
   gcrew: CREW_SEED,
@@ -36,7 +48,7 @@ const SEEDS: Record<string, string[]> = {
   guid: UID_SEED,
   // gsink: the self-loop reference graph (loops/message vertices). Safe to seed — small
   // and acyclic-enough that no scenario explodes.
-  gsink: graphsonSeed(relToRepo(`${GRAPHSON}/tinkerpop-sink-v3.json`)),
+  gsink: { graphson: relToRepo(`${GRAPHSON}/tinkerpop-sink-v3.json`) },
   // ggrateful (808 v / 8049 e): now seeded. Its blocker was the whole-graph
   // `repeat(out()).times(N).count()` scenarios whose answers are astronomically large
   // (times(8) → 2.5e15); mogwai used to materialize each traverser as a UNION-ALL row
@@ -46,7 +58,7 @@ const SEEDS: Record<string, string[]> = {
   // scenario either works, or fails closed at compile with a clear "not yet supported"
   // (match/union-in-repeat/order-in-repeat), so none execute a runaway materialization
   // (verified by running all 39 grateful queries in isolation: zero hangs).
-  ggrateful: graphsonSeed(relToRepo(`${GRAPHSON}/grateful-dead-v3.json`)),
+  ggrateful: { graphson: relToRepo(`${GRAPHSON}/grateful-dead-v3.json`) },
   // gzoo: the TinkerPop 4 multi-label showcase. Hand-transcribed rather than loaded, because the
   // shipped .kryo cannot carry multi-label vertices — see test/fixtures/seed-zoo.ts.
   gzoo: ZOO_SEED,
@@ -60,14 +72,13 @@ const SEEDS: Record<string, string[]> = {
  * Start the host, seeding `graphs` (default: ALL of SEEDS — what the official cucumber runner
  * needs, since a scenario may select any reference graph).
  *
- * Seeding is the whole startup cost and it is dominated by ONE graph: ggrateful is 8,857 write
- * traversals ≈ 4.4s of a ≈5.0s total, because a seed runs one parse→compile→execute per
- * vertex/edge (the row-at-a-time write path — tracked debt, see docs/outstanding-work.md). A
- * caller that only reads gmodern therefore pays 4.4s for a graph it never touches, and — since
- * that put `beforeAll` within ~20ms of bun's DEFAULT 5000ms hook timeout — did so while flaking
- * about half the time. Naming the graphs you need is the fix: it is the honest statement of the
- * fixture a test depends on, and it removes the timing cliff rather than raising the ceiling
- * over it.
+ * Seeding used to be the whole startup cost, dominated by ONE graph: ggrateful was 8,857 write
+ * traversals ≈ 4.4s of a ≈5.0s total, because a seed ran one parse→compile→execute per vertex/edge.
+ * It now lands through the bulk loader (≈0.14s), so the `beforeAll` timing cliff that put this within
+ * ~20ms of bun's DEFAULT 5000ms hook timeout — and flaked about half the time — is gone.
+ *
+ * Naming the graphs you need is still worth doing: it is the honest statement of the fixture a test
+ * depends on. It is no longer load-bearing for the timeout.
  */
 export async function startConformanceServer(port = 45940, graphs: readonly string[] = Object.keys(SEEDS)) {
   // The conformance host emulates the REFERENCE provider exactly: only the tinker.* / --list
@@ -85,8 +96,11 @@ export async function startConformanceServer(port = 45940, graphs: readonly stri
   // Seed before serving so the first scenario sees a populated graph. Each write
   // traversal goes through the manager seam exactly as a client request would.
   for (const g of graphs) {
-    const queries = SEEDS[g] ?? (() => { throw new Error(`unknown reference graph "${g}" (have: ${Object.keys(SEEDS).join(', ')})`); })();
-    for (const q of queries) manager.executor(g).framed(q, {}); // sync — seeds are non-federated writes
+    const seed = SEEDS[g] ?? (() => { throw new Error(`unknown reference graph "${g}" (have: ${Object.keys(SEEDS).join(', ')})`); })();
+    // A GraphSON graph lands through the bulk loader against the graph's own store; a hand-authored
+    // one runs its write traversals through the manager seam exactly as a client request would.
+    if ('graphson' in seed) loadGraphson(manager.storeOf(g), readFileSync(seed.graphson, 'utf8'));
+    else for (const q of seed) manager.executor(g).framed(q, {}); // sync — non-federated writes
   }
   // L3 telemetry (always on): wrap the SERVED manager only — seed writes above go
   // through the raw manager, so they never pollute the capture. The decorator
