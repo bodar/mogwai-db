@@ -236,7 +236,7 @@ applies with equal force here. §4b records what excluding them costs, because i
 
 | format | direction | unlocks | verdict |
 |---|---|---|---|
-| **TYPED GraphSON adjacency (`.json`)** | read + write | 2 of 6 `io()` scenarios; **replaces `seed-graphson.ts` and the 5.9 s seed**; **AND is the lossless export/backup path** (§4b) | **first, and it is now carrying three jobs.** A TinkerPop standard, not homegrown — the typed adjacency file (one vertex per line, embedded `inE`/`outE`), a *different artefact* from untyped GraphSON responses (§4a). Read v3 (what the corpus fixtures are), write v4 (our own type channel, 1:1 — §4b). The reader already exists as `test/fixtures/seed-graphson.ts`; promote it from test fixture to a real reader emitting row batches instead of Gremlin strings |
+| **TYPED GraphSON adjacency (`.json`)** | read + write | 2 of 6 `io()` scenarios; **replaces `seed-graphson.ts` and the 5.9 s seed**; **AND is the lossless export/backup path** (§4b) | **first, and it is now carrying three jobs.** A TinkerPop standard, not homegrown — the typed adjacency file (one vertex per line, embedded `inE`/`outE`), a *different artefact* from untyped GraphSON responses (§4a). **Read v3 AND v4, write v4** — decided 2026-07-31, and §4c has the measured delta (it is one branch, not two codecs). The reader already exists as `test/fixtures/seed-graphson.ts`; promote it from test fixture to a real reader emitting row batches instead of Gremlin strings |
 | **Neptune/Neo4j CSV-with-typed-headers** | read + write | **interop only** (`~id`,`~label`,`prop:type` / `:ID`,`:LABEL`,`:START_ID`) | **second.** Cross-vendor de-facto standard, RFC 4180, no deps. Lossy against our type channel, which is fine once it is not also the backup path — §4b |
 | ~~our compact typed dump~~ | — | — | **EXCLUDED — homegrown, and it turns out to be UNNECESSARY too.** Typed GraphSON already covers all 17 `CanonicalType`s, nesting, typed map keys and meta-properties — §4b |
 | ~~GraphML (`.xml`)~~ | — | 2 of 6 `io()` scenarios | **EXCLUDED — XML.** Two independent reasons, and the type one is the stronger: GraphML's `attr.type` admits only `boolean/int/long/float/double/string`, so it is **more** lossy than CSV (no date, no uuid, no nesting, no meta-properties). Separately, Workers has no `DOMParser` and `HTMLRewriter` is an HTML streaming transformer, not an XML DOM — so it would also be the only format here that is new *code* rather than new plumbing |
@@ -298,6 +298,14 @@ That is not luck — `CanonicalType` was derived from the v4 wire type channel, 
 GraphBinary are two encodings of the *same* type system. (V4 pruned `gx:` hard, dropping the eleven
 `java.time` variants for one `gx:DateTime`; it kept every name we need.)
 
+**And this is the reason the untyped option was never really on the table.** The `vtype` channel is
+not a detail we could shed on the way out — it is the output of a whole family of landed plans
+(typed property values, typed merge values, full-fidelity typed collections, type-channel
+unification, and `ScalarType`'s vocabulary consolidation). An untyped dump would make the exported
+artefact **strictly weaker than the storage it came from**: byte-vs-long, datetime-vs-long,
+uuid-vs-string, char, `BigDecimal`, `Duration` and every nested collection leaf all collapse. A
+format that cannot round-trip our own reference fixtures is not an export path, it is a lossy report.
+
 It also covers the three structural things CSV cannot:
 
 - **nesting with per-leaf types** — `g:List`/`g:Set` elements carry their own `@type`, which is
@@ -324,6 +332,53 @@ GraphSON export does not have any.**
 
 `gcrew` round-tripping is therefore **phase 4's** gate (GraphSON), not phase 6's, and it is the one
 assertion that proves the type channel survives a dump.
+
+### 4c. v3 vs v4 — read both, write v4, and beware the third artefact
+
+**Decided 2026-07-31.** The versions differ in *shape*, not in fidelity, and the shape delta is one
+branch. Read from `gremlin-core` at the pinned gitlink:
+
+- **Type fidelity: identical for our purposes.** The v3→v4 registry diff is **all removals**, and
+  every removal is traversal machinery — `Metrics`, `TraversalMetrics`, `Traverser`, `Lambda`,
+  `InetAddress`, and the `Order`/`Pick`/`Pop`/`Scope`/`Column`/`Operator` enums — plus the `gx:`
+  pruning above. Nothing we store. Meta-properties, VertexProperty ids, nesting and typed `g:Map`
+  keys are present in both (verified in `tinkerpop-crew-v3.json` *and* `tinker-graph-v4.json`).
+- **The container is the same and it is line-oriented in BOTH.** `GraphSONWriter.writeGraph`
+  delegates to `writeVertices`, which emits one vertex per line (`writer.newLine()`) through
+  `DirectionalStarGraph` → `StarGraphGraphSONSerializerV{3,4}`. So the adjacency form streams: read
+  a line, emit a row batch, never hold the graph in memory. **That property is why the adjacency form
+  is the one we want on a DO** — same objection that ruled GraphBinary out for bulk (no cursor
+  streaming, bounded memory).
+- **The whole delta is the vertex label.** Diffing the two star-graph serializers is 165 → 177 lines:
+  one changed call plus a helper.
+  ```
+  - jsonGenerator.writeStringField(GraphSONTokens.LABEL, starGraph.starVertex.label());
+  + writeLabels(jsonGenerator, starGraph.starVertex.labels());
+  ```
+  v3 writes `"label": "person"`, v4 writes `"label": ["person"]`.
+
+**So: read both, write v4.** Reading v3 is not optional — **every whole-graph fixture the corpus
+ships is v3** (modern, crew, sink, classic, grateful-dead; every `-v4` file is a single-value or
+single-element *response* fixture). Writing v4 is not cosmetic either: **v3 cannot represent a
+multi-label vertex**, its `label` being one bare string, so a v3 writer is lossy for exactly the
+graph that exercises the feature (`gzoo`, `LabelCardinality.ZERO_OR_MORE`) — and we are the provider
+that declares multi-label (item 19b). One reader with a label branch, one writer, no second codec.
+
+**Two things to carry into the build:**
+
+1. **`g:graph` is a THIRD artefact and it is the wrong one.**
+   `{"@type":"g:graph","@value":{"vertices":[…],"edges":[…]}}` — separate top-level arrays, every
+   element `@type`-wrapped, and **not streamable** (the whole document must be materialized).
+   `writeVertices` can also produce a wrapped variant via its `wrapAdjacencyList` flag. The trap is
+   that **`tinker-graph-v4.json`, the only whole-graph `-v4` file shipped, IS the `g:graph` form** —
+   so "the v4 graph file" is ambiguous and the fixture on disk is the version we do not want. Name
+   the line-oriented adjacency form explicitly wherever this is implemented.
+2. **v4's embedded edges carry endpoint labels** — `inV: {id, label}` rather than a bare id, and the
+   V4 serializer writes `writeLabels(…, v.labels())` for them. We do not produce that:
+   `graphson-untyped-scope.md` already lists it as a known deviation (*"Edge `inV`/`outV` = `{id}`
+   only, no endpoint label. Our edge row carries no endpoint labels"*). **That gap now has two
+   consumers**, the response encoder and this writer, which is a reason to fix it once rather than
+   deviate twice.
 
 ---
 
@@ -429,7 +484,7 @@ Each phase lands green and is useful alone.
 | **1** | `RowBatch` load/drain on the `Sql` seam; FTS row *construction* extracted from `indexProperty` | modern graph loads batched ≡ loads via write traversals, byte-identical incl. `property_fts` |
 | **2** | Fix §1d (`drop`) and §1c (`landForeignElements`, `jsonbArrayOf`) through `RowBatch` | phase 0's harness goes green; `g.V().drop()` on grateful-dead passes under it |
 | **3** | `mise run binds` static gate | at zero, fails the build (not a ratchet) |
-| **4** | **Typed GraphSON reader AND writer** over `RowBatch`; conformance host seeds through it | L3 count unchanged; seed ≤ 0.5 s; census unchanged; **`gcrew` round-trips** — the one assertion that proves the type channel, incl. meta-properties, survives a dump (§4b) |
+| **4** | **Typed GraphSON reader (v3 + v4) and writer (v4)** over `RowBatch`, line-oriented adjacency form; conformance host seeds through it | L3 count unchanged; seed ≤ 0.5 s; census unchanged; **`gcrew` round-trips** (the type channel incl. meta-properties survives a dump, §4b) **and `gzoo` round-trips** (multi-label survives — the assertion a v3 writer could not pass, §4c) |
 | **5** | `IoStore` (Bun FS / CF R2 / L3 host mapping) + `io()` as a barrier service | the 2 `.json` `Read.feature` scenarios pass; `.xml` and `.kryo` fail closed naming the format; `tags.ts` reclassified (§4) |
 | **6** | Neptune/Neo4j CSV reader/writer (**interop only**); `io().write()` to R2 | round-trip through CSV for the types CSV *can* carry, with the lossy cases documented and asserted as lossy rather than silently wrong |
 | **7** | remap pass (non-empty target, label re-interning, `uid` preservation) | load-into-non-empty round-trip |
@@ -497,6 +552,11 @@ Recorded so they get swept rather than rediscovered:
   supported. The one-statement-per-entry `SCHEMA` array is still the right shape (it is clearer and
   costs nothing), but the stated *reason* is stale. Not worth a behaviour change; worth not citing
   as a constraint.
+- **`2026-07-13-graphson-untyped-scope.md`'s "known deviations"** — *"Edge `inV`/`outV` = `{id}` only,
+  no endpoint label"* is still accurate, but its framing ("a separate enhancement that would improve
+  BOTH serializers") understates it now: GraphSON v4's graph form *requires* the endpoint label
+  (§4c), so it is no longer an enhancement to a single deviation but a prerequisite for one of two
+  consumers. Fix it once.
 - **`feature-support-matrix.md`** already over-promises "no form is known to mis-execute"
   (a known debt). §1c/§1d add two DO-only entries to whatever replaces that claim — and they are
   the first entries that are runtime-specific, which the matrix has no column for.

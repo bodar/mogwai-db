@@ -89,8 +89,8 @@ Cloudflare** — which is why nothing above found it. Every level of the ladder 
    today, every statement ≤100 binds** (41×; only 17% of the current cost is inside SQLite at all).
    A bind-count static gate (`mise run binds`) is what stops the class recurring. **High** — two live
    production-runtime walls.
-   **Format set is DECIDED, do not re-widen it** (2026-07-31): **TYPED GraphSON adjacency** (read v3,
-   write v4) + Neptune/Neo4j CSV for interop. **No homegrown format and nothing XML** — GraphML is a
+   **Format set is DECIDED, do not re-widen it** (2026-07-31): **TYPED GraphSON adjacency — read v3
+   AND v4, write v4** + Neptune/Neo4j CSV for interop. **No homegrown format and nothing XML** — GraphML is a
    refusal, its `attr.type` being more type-lossy than CSV anyway. **Typed GraphSON is ALSO the
    lossless export/backup path — verified 17-for-17 against `CanonicalType` in `gremlin-core` at the
    pinned gitlink**, plus nesting with per-leaf types, typed `g:Map` keys, and meta-properties
@@ -99,8 +99,14 @@ Cloudflare** — which is why nothing above found it. Every level of the ladder 
    was unnecessary. CSV is then interop-ONLY, and its losses (6 of our 17 scalars, one flat `[]`
    level, `single|set`, no meta-properties — `gcrew` cannot round-trip it) stop mattering once it is
    not the backup path. **`gcrew` round-tripping through GraphSON is the gate** that proves the type
-   channel survives a dump. Untyped GraphSON v4 is a RESPONSE encoder — a different artefact, cannot
-   carry `vtype` by definition, stays where it is scoped. Plan §4/§4a/§4b.
+   channel survives a dump, **and `gzoo` is the gate for multi-label** — the v3→v4 delta is exactly
+   the vertex label (bare string vs array, 165→177 lines in the star-graph serializer), so a v3
+   WRITER would be lossy for the one graph that exercises the feature; reading v3 is non-optional
+   because every whole-graph corpus fixture is v3. **Write the LINE-ORIENTED adjacency form, not
+   `g:graph`** — `tinker-graph-v4.json`, the only whole-graph `-v4` file shipped, is the `g:graph`
+   document, which is not streamable, so the fixture on disk is the shape we do NOT want. Untyped
+   GraphSON v4 is a RESPONSE encoder — a different artefact, cannot carry `vtype` by definition, stays
+   where it is scoped. Plan §4/§4a/§4b/§4c.
    → [bulk-transfer-and-io-substrate](./2026-07-31-bulk-transfer-and-io-substrate-plan.md)
 
 2. **Universal child-seam acceptance.** Element, scalar, list, count, branch, `repeat`,
