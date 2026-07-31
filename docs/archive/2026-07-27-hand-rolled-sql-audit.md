@@ -8,7 +8,7 @@ which is not the same as ranking by lines._
 `layoutProjection`, `carriedCols` → `layoutCols`, `foldByModulators` → `absorbModulators`,
 `foldConnectives` → `canonicalizeConnectives`). The narrative is a record of closed sites and is
 left as written; the full map is in
-[tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md).
+[tinkerpop-core-engine-alignment](../2026-07-29-tinkerpop-core-engine-alignment.md).
 
 > ## STATUS 2026-07-30 (L3 1623) — **this audit is DONE. All nine sites are closed.**
 >

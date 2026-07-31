@@ -75,7 +75,7 @@ fails closed is better than a special-case that entrenches the non-generic path.
 - **Before adding a substrate, separate "the seam cannot EXPRESS this" from "the seam cannot be
   HANDED this."** Four times running, a site that looked like it needed new machinery needed only to
   be able to reach what already existed, and predicting otherwise was wrong every time (see the
-  STATUS block in `docs/2026-07-27-hand-rolled-sql-audit.md`). The two tells, both cheap:
+  STATUS block in `docs/archive/2026-07-27-hand-rolled-sql-audit.md`). The two tells, both cheap:
   a SCHEMA mismatch — `path()`'s `json_each` explode is `(id, pk, ord)` but an element stream is
   `['id', ...layoutCols]`, fixed by carrying `pk`/`ord` as `origins`, which is what that slot
   already means; and an ARGUMENT-TYPE mismatch — the scalar-child entry points demanded a `nested`

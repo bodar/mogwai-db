@@ -167,9 +167,22 @@ feed P1 (ceiling) and the internal-debt section.
 ### 5. Archive completed plans
 
 Move a plan to `docs/archive/` when it is either (a) fully COMPLETED/LANDED, or (b) has only MINOR
-tails AND those tails are now carried into the index with enough detail. **Keep** in top-level
-`docs/`: research/vision docs, and the design-of-record for any OPEN P1/P2 item (an agent picking
-that item will read it — even if the plan is partly landed).
+tails AND those tails are now carried into the index with enough detail.
+
+**Being cited by an open item is NOT a reason to keep a completed doc in top-level `docs/`.**
+Archiving relocates, it does not delete or hide — the `→` link still resolves once repointed, and an
+agent picking the item reads it exactly as before. The test is about the DOC's own state, not its
+inbound links: keep it top-level only when it describes work **not yet done**, i.e. it is the plan an
+agent would EXECUTE. A doc whose own work is finished goes to `archive/` even when several open items
+cite it as evidence, provenance or background — that is the normal case for a completed audit or
+survey, whose findings live on as index items while the document itself is history. (Worked example:
+`2026-07-27-hand-rolled-sql-audit.md` self-reported all nine sites closed while four open P1 items
+linked to it; it was kept once on the old reading, then archived.)
+
+**Keep** in top-level `docs/`: research/vision docs; a plan with UNBUILT phases; and any doc a
+`CLAUDE.md` names as a standing authority (naming, tooling, architecture) rather than as a plan.
+When genuinely torn, archive it — a stale plan sitting in top-level `docs/` reads as live work, which
+is the more expensive mistake.
 
 For each move: `git mv docs/X.md docs/archive/` then **repoint every inbound link** — search all
 `*.md` (docs + `CLAUDE.md` files), `src/` code-comment pointers, and `.claude/`. Forms to fix:

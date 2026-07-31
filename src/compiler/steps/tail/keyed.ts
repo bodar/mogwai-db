@@ -27,7 +27,7 @@ import { childCtx, isElementChildStep, mentionsLabel } from './child-shape.ts';
 // NON-recursive CTE — so compile the body once, seeded from every vertex, and join. That
 // turns `repeat()`'s vocabulary wall into a performance trade-off instead of a `throw`,
 // and it is why no third RENDERING mode was ever needed (measured:
-// `docs/2026-07-27-hand-rolled-sql-audit.md`).
+// `docs/archive/2026-07-27-hand-rolled-sql-audit.md`).
 //
 // The COST is the trade-off, not a defect: this materializes the body over the whole vertex
 // set (|V| x fanout) where a frontier walk expands lazily. So a caller that HAS a lazy fast

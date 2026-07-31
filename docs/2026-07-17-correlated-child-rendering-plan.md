@@ -126,7 +126,7 @@ branch. `until` has no generic fallback (recursive correlation) — correlated-o
 > (`steps/tail/keyed.ts`) and the recursive term reads `id IN <origin set>`. Inline stays first
 > because it alone reads the walk's per-iteration state (`loops()`, the sack), which is why it is a
 > capability rather than a disable-safe FastPath. The rest of this plan stands as written; see
-> `2026-07-27-hand-rolled-sql-audit.md` #1.
+> `archive/2026-07-27-hand-rolled-sql-audit.md` #1.
 
 ## Test / verify
 

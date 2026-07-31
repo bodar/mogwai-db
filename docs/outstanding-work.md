@@ -176,7 +176,7 @@ sites answerable) → **3**'s `times(n)` unroll, still the biggest single L3 mec
      it is a fold, not a projection — `as` stays out of the body vocabulary (fails closed). *Low-Med.*
    - `path()`/`simplePath()` + `sack()` bodies stay with the flat expansion (both are per-iteration
      state) — P3 recursive-path tails.
-   → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #1,
+   → [hand-rolled-sql-audit](./archive/2026-07-27-hand-rolled-sql-audit.md) #1,
    [deep-seam-migration-roadmap](./2026-07-18-deep-seam-migration-roadmap.md) #5,
    [path-history-substrate](./2026-07-18-path-history-substrate.md),
    [foldable-carried-column](./2026-07-24-foldable-carried-column-plan.md)
@@ -235,7 +235,7 @@ sites answerable) → **3**'s `times(n)` unroll, still the biggest single L3 mec
    unroll); 2 = `group().by(traversal)` needing `fold()`/`sideEffect()` in the key body (item 2);
    ~2 = a bare `groupCount()` child body (above); remainder = a nested group inside a value body,
    `sample()`, one-offs.
-   → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
+   → [hand-rolled-sql-audit](./archive/2026-07-27-hand-rolled-sql-audit.md),
    [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md)
 
 5c. **PARENT-SHAPE uniformity — the same step works over an element stream but not over a
@@ -280,7 +280,7 @@ sites answerable) → **3**'s `times(n)` unroll, still the biggest single L3 mec
    the (shape × row-op) matrix at 55/100 gaps and confirmed `RelationalCardinality` is the named axis
    that makes sharing safe, so that slice is no longer "per-step dispatch" work at all. What is left
    here after item 17 is the ~35 genuinely per-step cases plus the `ResultStream` residue (below).
-   → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
+   → [hand-rolled-sql-audit](./archive/2026-07-27-hand-rolled-sql-audit.md),
    [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md)
 
 6. **`order().by()` of paths (path natural-order comparability).** Unlocks the Orderability
@@ -596,7 +596,7 @@ sites answerable) → **3**'s `times(n)` unroll, still the biggest single L3 mec
    right: `cardinalityOf` now has a real second consumer, and it is what keeps `group` and a grouped
    `PathStream` out of a row slice. **Was High; now Low-Med** — the slice/dedup family is done, and
    what is left (`order` per shape, the 5c per-step residue) is not this mechanism.
-   → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md)
+   → [hand-rolled-sql-audit](./archive/2026-07-27-hand-rolled-sql-audit.md)
 
 ---
 
@@ -1048,7 +1048,7 @@ proves nothing — read the deferral clusters instead.
   match-vs-create for the whole driver set before writing). Both set-based routes are already
   verified; what is missing is the decision, not the rendering.
   → [writes-through-read-spine](./archive/2026-07-17-writes-through-read-spine-plan.md),
-  [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #5
+  [hand-rolled-sql-audit](./archive/2026-07-27-hand-rolled-sql-audit.md) #5
 - **Review-fix duplication residue (C1/C2/C3 + D)** — property-list framing / tie-break / `PARTITION
   BY ordinal` dups; the `execute.ts` pre-parsed-`pmeta` divergence is latent-correctness. Status
   unconfirmed — treat as open. → [review-fix-plan](./2026-07-22-review-fix-plan.md)
@@ -1147,7 +1147,7 @@ proves nothing — read the deferral clusters instead.
   would REGRESS the 5 sibling scenarios that pass today. Fix it in the fork's harness (debt item
   above), not in our serializer; net L3 gain likely ≤0 if "fixed" our side.
 
-Sources: [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
+Sources: [hand-rolled-sql-audit](./archive/2026-07-27-hand-rolled-sql-audit.md),
 [lazyrecords-cutover](./archive/2026-07-11-lazyrecords-cutover-plan.md),
 [phased-roadmap](./2026-07-11-phased-roadmap-plan.md),
 [path-tracking-prior-art](./2026-07-12-path-tracking-prior-art.md),
