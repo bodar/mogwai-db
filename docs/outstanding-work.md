@@ -247,30 +247,31 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    conformance cluster. **Medium.**
    → [path-history-substrate](./2026-07-18-path-history-substrate.md)
 
-20. **Results that are ordered only because SQLite scanned the convenient way — 20 of them, and 13
-   are L3 conformance scenarios.** Found by `mise run test:perturbed` (`82d011b`), which runs the
+20. **Results that are ordered only because SQLite scanned the convenient way — 20 at first run,
+   **17 today** after the `order().fold()` block below landed.** Found by `mise run test:perturbed` (`82d011b`), which runs the
    suite under `PRAGMA reverse_unordered_selects`; see `test/CLAUDE.md`. A failure there is never a
    flake — it is a result the emitted SQL does not actually determine. Three distinct mechanisms,
    and they are separate items of work:
-   - **`order().fold()` — the whole 13-scenario L3 block, and the one to take first.**
-     `lowerGlobalFold` DOES emit `json_group_array(… ORDER BY <encounter>)`, but only when the chain
-     carries an encounter, and an explicit `order()` CLEARS the encounter demand. That is sound for a
-     slice — `LIMIT` applies to the ordered relation inside the same query — and wrong for an
-     aggregate, because `json_group_array` reads rows in scan order, which SQLite chooses. So
-     `g.V().values('name').order().fold()` yields a list whose MEMBER order is arbitrary. Every one of
-     the 13 is `…order().fold().<local op>`. The fix is in the demand pass, not in `fold`: an
-     aggregate consumer must demand an encounter even behind an explicit `order()` (or `order()` must
-     MINT one from its own ordering rather than suppress it). *High — 13 conformance scenarios
-     currently pass by luck, and the same mechanism silently corrupts any `order().fold()` a user
-     writes.*
+   - ~~**`order().fold()` — the whole 13-scenario L3 block**~~ — **LANDED `9acd2f8`**, one line in
+     `computeDemandsEncounter`: `fold` now demands an encounter behind an explicit `order()`, not
+     only behind a fan-out. The slice path is deliberately untouched (the new condition names `fold`
+     alone), so `<movement>.order().by(key).limit()` keeps movementCollapse and `collapseSafe`'s
+     `sawOrder` gate still agrees with the demand pass. Nothing else was needed because `order()`
+     already re-mints the encounter as `ROW_NUMBER() OVER (ORDER BY <sortkey>, <prior encounter>)`.
+     L3 is 1623 by default AND 1623 perturbed. **The transferable lesson: "an upstream `order()`
+     satisfies this consumer" is true for a consumer reading the ordered relation in the SAME query
+     and false across a relation boundary — check which before reusing that reasoning for any other
+     aggregate.**
    - **A RECORD stream carries no `encounter`**, so `recordSlice`'s `orderByEncounter` is inert and a
      record slice picks an arbitrary window. The projection CTE's declared column list drops the
      channel. This is `TraverserLayout` role preservation across a shape transition — the
      channel-preservation ground the closed Phase 1 covered for merges, applied to projections.
      *Med.*
-   - The remaining ~6 are ordinary test-side order sensitivity in `test/compiler/` and
-     `test/L2-sql/`; each needs reading to decide whether the ASSERTION is over-strong or the
-     traversal genuinely under-determined. Do not bulk-relax them.
+   - The remaining ~15 are in `test/compiler/`, `test/L2-sql/` and the census. Each needs reading
+     to decide whether the ASSERTION is over-strong or the traversal genuinely under-determined —
+     **do not bulk-relax them**, since the `order().fold()` block looked exactly like test-side
+     fragility and was a real defect. The perturbed CENSUS is the most useful of the 15: it names
+     every order-fragile corpus traversal in one place, which is a ready-made worklist.
    **Clearing all three makes `test:perturbed` a gate**, which is the point of filing it as one item.
 
 21. **`union()` emits arm-major GLOBALLY; the reference is arm-major PER TRAVERSER.** Verified in
