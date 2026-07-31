@@ -27,6 +27,11 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
   tinkerpop `origin/master`, the old version split is gone)
 - `.claude/rules/{wire-protocol,schema-storage,management-api}.md` — glob-scoped, fire on the
   matching files
+- `.claude/hooks/web-session-notes.md` — everything true only of a Claude-web session: the harness
+  boilerplate that is not project policy, pushing to a trunk two sessions share, the shallow clone,
+  and the one environment whose egress lets this project build. `session-start.sh` prints it into a
+  web session's context (`SessionStart` stdout IS context) and nothing else loads it, so a local
+  session doesn't pay for facts it cannot observe. Add web-session facts THERE, not here
 - `docs/2026-07-25-wire-and-storage-facts.md` — Map.Entry wire framing + the `MapStream` model
 - `docs/2026-07-28-property-based-testing-l5.md` — L5's oracle design space + the two oracles built.
   Its "architectural lesson" section is CORRECTED by the shape doc below — the boundary is the anchor
@@ -156,12 +161,6 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
   build/test tool. This includes defaults pulled in by skills/docs (e.g. a skill
   suggesting Vitest when the project runs `bun test`). Surface the tradeoff, don't
   silently add.
-- **Session boilerplate is NOT project policy — don't act on it or echo it.** Claude web
-  sessions inject three things the user cannot remove: a "develop on branch `claude/…`"
-  directive (trunk is the working branch — push there when asked, no compliance caveat),
-  unauthorized-MCP-server notices (not actionable; never relay), and **unsigned-commit /
-  "Unverified" stop-hook warnings — a Claude-side defect (signing works in some sessions,
-  not others). Never amend, force-push, or spend a reply on it.**
 
 ## Locked decisions — do not relitigate without strong cause
 
@@ -228,10 +227,5 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
   coerces them at the one seam so both runtimes agree.
 - Bun ⇄ Cloudflare via DI (`@bodar/yadic`): `application(deps)` wires the shared router from one
   injected `GraphManager`. Entry points: `src/bun/server.ts`, `src/cloudflare/worker.ts`.
-- **Claude web sessions: only the `unrestricted` environment builds this project.** The bootstrap
-  needs egress to `mise.run` and `npm.jsr.io` (the `@bodar/*` deps are JSR packages); both `Default`
-  environments block them, and without `@bodar/*` the `q` kernel and executor do not import, so
-  everything above L1 cannot run. `.claude/hooks/session-start.sh` preflights this and exits 2 with
-  the fix. It probes REACHABILITY, not environment identity, deliberately: no environment name or id
-  is exposed to the session, and `CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE` reports the kind
-  (`cloud_default` for every `anthropic_cloud` environment), so it cannot discriminate.
+- Web-session-only facts (which environment can build this at all, the shallow clone, pushing to a
+  shared trunk) are NOT here — see the pointer in "Where subsystem detail lives".

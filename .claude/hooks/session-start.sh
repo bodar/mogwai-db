@@ -17,6 +17,19 @@ set -euo pipefail
 # Keep the bootstrap fast and deterministic — skip mise's self-update version pings.
 export MISE_VERSION_CHECK=0
 
+# Inject the web-session notes. For SessionStart (unlike most hook events) STDOUT is added to
+# Claude's context, so this `cat` is the entire delivery mechanism — which is why the notes
+# live in a file no `CLAUDE.md` references: a local session never loads facts that only hold
+# in a web session. Runs first so it does not depend on any step below succeeding.
+#
+# Guarded on existence because the notes are context, never a prerequisite: a missing file
+# must not cost the session its toolchain. (`if`, not `[ -f … ] && cat …` — the && form is
+# exempt from `set -e`, but it would leave a non-zero status for anything reading it.)
+WEB_SESSION_NOTES="$CLAUDE_PROJECT_DIR/.claude/hooks/web-session-notes.md"
+if [ -f "$WEB_SESSION_NOTES" ]; then
+  cat "$WEB_SESSION_NOTES"
+fi
+
 # 0. Repair the local view of the default branch. Runs BEFORE the egress preflight because
 #    it needs no network and is still worth having in a session that cannot build.
 #
