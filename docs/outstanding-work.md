@@ -289,15 +289,15 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
      the rigid roles, `'rehomed'` merges label sets only for child-scoped arms already re-homed),
      the assertion was not weakened, and `mergeAliasMaps` is module-local so the route is
      structural. `layoutGrewAliases` replaces the inline `.size !== .size` each copy spelled.
-   - **`unionScalarStreams`, `finishListMerge` and `mergeVariantParts` are still three copies of one
-     ALGORITHM** — per-arm payload + `arm_idx`/`arm_encounter` tag → inner CTE → `ROW_NUMBER() OVER
-     (partitionOver(…, arm_idx, arm_encounter))` re-minted into the carried `encounter` slot. Only
-     the payload column list differs, and `streamPayloadCols` already owns that. `finishElementMerge`
-     (`prefix/branch.ts`) is a fourth with one deliberate difference: it keeps the arm's encounter in
-     its declared slot instead of renaming it to `arm_encounter`. **One genuine asymmetry to preserve:
-     `unionScalarStreams` mints UNCONDITIONALLY** where list/variant mint only when the base
-     encounter is live — a scalar merge's positional consumers are reachable, a list-valued
-     `limit()` is not (yet). Shares the substrate question with item 17.
+   - ~~**three copies of one ALGORITHM**~~ — **LANDED `65e0fe8`.** `mergeArmRelation`
+     (`context/context.ts`) is the shared core, with `layoutArmProjection` and `nonAliasCols`
+     replacing one inline copy per merge, and the variant payload list moved to `streamPayloadCols`.
+     `mint` stayed the caller's decision: the scalar merge mints unconditionally (positional
+     consumers are reachable), list/variant only when an encounter is live. **`finishElementMerge`
+     (`prefix/branch.ts`) is deliberately NOT folded in** — it keeps the arm's encounter in its
+     declared `layoutCols` slot rather than renaming it to `arm_encounter`, and it is the only merge
+     that pads a ragged `path`. Folding it means changing element-merge SQL for no correctness gain;
+     do it only if a third spelling appears.
    - **`assertStreamColumns` DOES check declared layout-role columns** — `streamColumns` is
      `streamPayloadCols` + `layoutCols`, so the earlier "payload and per-row-type only" claim is
      withdrawn. The real hole is the CONSTRUCTION SITES THAT SKIP IT: `appendCte`

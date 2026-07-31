@@ -124,6 +124,19 @@ Phase 1 tranches (current names throughout):
   what a preservation route is supposed to look like. The real count of `TraverserLayout`-valued
   object spreads is ~13, and each one is a construction site.
 
+- `65e0fe8` — **the three arm merges become one algorithm with three payloads.** `mergeArmRelation`
+  (`context/context.ts`) owns the shared core — per-arm `arm_idx`/`arm_encounter` tag, UNION ALL,
+  inner CTE, `ROW_NUMBER()` re-mint into the carried slot — plus `layoutArmProjection` and
+  `nonAliasCols`, each replacing one inline copy per merge. `mint` stays the CALLER's decision
+  because the three genuinely disagree, and that asymmetry is now stated once instead of implied
+  three times: the scalar merge always establishes emission order (its positional consumers are
+  reachable), list and variant mint only when an encounter is already live. The variant payload
+  list moved to `streamPayloadCols`, the declared payload authority, so an arm merge and the stream
+  it builds cannot disagree; `variantArmSelect`/`variantCols` were orphan exports and are gone.
+  The exit gate's same-scope/child-scoped pair is pinned directly in
+  `test/channel-contracts.test.ts` (the `peer` policy fails closed on a diverging rigid role; the
+  `rehomed` policy never inherits the ordinal a child minted).
+
 ## North star
 
 Every compiler boundary must make one of three outcomes explicit:
