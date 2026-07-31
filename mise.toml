@@ -97,6 +97,22 @@ run = "bun test"
 # total sits at 18, mostly order-sensitive assertions in test/compiler/.
 # Not a gate because it is still red; the remainder are item 20 in docs/outstanding-work.md, and it
 # becomes a gate once they are cleared. A failure here is a REAL under-specification, never a flake.
+# The CF-PARITY instrument, and the second thing in the same mould as test:perturbed: run the whole
+# suite with every Bun statement asserted DO-legal (≤ 100 bound parameters, ≤ 100 KB of text — see
+# src/cf-limits.ts). bun:sqlite's bind cap is 65,535, so a bind list that scales with ROW COUNT is
+# green in every suite here and hard-fails on the one runtime we ship to; this is the switch that
+# makes that class of defect Bun-visible.
+#
+# Not a gate yet, for the same reason `test:perturbed` is not: it is still red, and the failures are
+# real (docs/2026-07-31-bulk-transfer-and-io-substrate-plan.md §1c/§1d — `drop()` and
+# `landForeignElements`). The two walls are pinned as failing-on-purpose assertions in
+# test/cf-limits.test.ts, so `mise run ci` sees them; this task is how you find the NEXT one.
+[tasks."test:cf-limits"]
+description = "Instrument: the full suite with every statement asserted Cloudflare-legal (≤100 binds)"
+depends = ["install", "check", "submodule"]
+env = { MOGWAI_CF_LIMITS = "1" }
+run = "bun test"
+
 [tasks."test:perturbed"]
 description = "Instrument: the full suite under reversed unordered scans (finds order-by-luck results)"
 depends = ["install", "check", "submodule"]

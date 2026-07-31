@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite';
 import type { Sql } from '../storage.ts';
+import { assertCfLimits } from '../cf-limits.ts';
 
 /**
  * A row order NOT fixed by an `ORDER BY` is SQLite's to choose, and on a small fixture it reliably
@@ -16,8 +17,17 @@ import type { Sql } from '../storage.ts';
  * get to influence. The census's one-off planner probe (docs, 2026-07-28) is the precedent; this
  * is that probe made permanent and reachable.
  */
-const REVERSE_UNORDERED = (globalThis as { process?: { env?: Record<string, string | undefined> } })
-  .process?.env?.MOGWAI_REVERSE_UNORDERED === '1';
+const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+
+const REVERSE_UNORDERED = env?.MOGWAI_REVERSE_UNORDERED === '1';
+
+/**
+ * The second suite-wide perturbation, and the same argument applies verbatim: `bun:sqlite` accepts
+ * 65,535 binds where a Durable Object accepts 100, so a bind list that scales with ROW COUNT is
+ * green here and broken in production. `MOGWAI_CF_LIMITS=1` makes every statement this driver runs
+ * assert DO legality — `mise run test:cf-limits`. See src/cf-limits.ts.
+ */
+const CF_LIMITS = env?.MOGWAI_CF_LIMITS === '1';
 
 /** `Sql` over `bun:sqlite` (dev / local runtime). Synchronous. */
 export class BunSqlite implements Sql {
@@ -34,6 +44,7 @@ export class BunSqlite implements Sql {
   }
 
   query<T = any>(sql: string, binds: readonly unknown[] = []): T[] {
+    if (CF_LIMITS) assertCfLimits(sql, binds);
     // db.query caches the prepared statement by SQL text.
     return this.db.query(sql).all(...(binds as any[])) as T[];
   }
