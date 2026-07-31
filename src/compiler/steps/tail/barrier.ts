@@ -368,22 +368,18 @@ export function lowerScopedScalarReducer(
 
 /** A numeric/comparable reduction carries SQLite's winning storage class as `vt`.
  * That is part of the physical scalar payload, so a following is()/order()/limit()
- * can remain relational without losing GraphBinary numeric framing. */
+ * can remain relational without losing GraphBinary numeric framing.
+ *
+ * The eligibility guard and the result type come from `numericReducerAggregate` above — the ONE
+ * reducer policy — rather than being re-derived here. They were, for 60 lines, with a `WHERE`
+ * instead of its `CASE WHEN`; that is equivalent for min/max/mean (a bare aggregate returns one row
+ * either way, and AVG ignores NULLs) but NOT for `sum`, which carried no guard at all. So
+ * `g.V().values('name').sum()` returned a fabricated **0** — SQLite coerces text to 0 inside SUM —
+ * where the other three arms of the same step correctly reported nothing eligible. */
 export function lowerGlobalNumericReducer(input: ScalarStream, reducer: NumericReducer): ScalarStream {
   const src = input.rel.as('s');
   const bulk = input.traverserLayout.bulk ? src.c[input.traverserLayout.bulk] : undefined;
-  let body;
-  if (reducer === 'sum') {
-    const sum = bulk ? q`SUM(${src.c.v} * ${bulk})` : q`SUM(${src.c.v})`;
-    body = q`SELECT ${sum} AS v, typeof(${sum}) AS vt FROM ${src}`;
-  } else if (reducer === 'mean') {
-    body = bulk
-      ? q`SELECT SUM(${src.c.v} * ${bulk}) * 1.0 / SUM(${bulk}) AS v, 'real' AS vt FROM ${src} WHERE typeof(${src.c.v}) in ('integer', 'real')`
-      : q`SELECT AVG(${src.c.v}) AS v, 'real' AS vt FROM ${src} WHERE typeof(${src.c.v}) in ('integer', 'real')`;
-  } else {
-    const fn = reducer === 'min' ? 'MIN' : 'MAX';
-    body = q`SELECT ${fn}(${src.c.v}) AS v, typeof(${fn}(${src.c.v})) AS vt FROM ${src} WHERE typeof(${src.c.v}) in ('integer', 'real', 'text')`;
-  }
-  const rel = input.q.cte(body, ['v', 'vt']);
+  const agg = numericReducerAggregate(src.c.v, reducer, bulk);
+  const rel = input.q.cte(q`SELECT ${agg.value} AS v, ${agg.type} AS vt FROM ${src}`, ['v', 'vt']);
   return toScalarStream(dropLayoutAtBarrier(loweringStateOf(input)), rel, undefined, { result: 'number', productiveNull: input.productiveNull });
 }

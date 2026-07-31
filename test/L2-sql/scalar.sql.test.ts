@@ -19,6 +19,14 @@ import { read, run, runWith, seededStore } from '../support/harness.ts';
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
 
+// Every GLOBAL numeric reducer renders `numericReducerAggregate`'s eligibility guard
+// (src/compiler/steps/tail/barrier.ts) — the one reducer policy, and the same text the
+// group-scoped reducers already emit. Named here so an assertion below says WHICH reducer it
+// pins instead of restating 60 characters of CASE. min/max range over text too (TinkerPop 4
+// Strings are Comparable); sum/mean are numeric-only.
+const eligible = (col: string, text = false): string =>
+  `CASE WHEN typeof(${col}) in ('integer', 'real'${text ? ", 'text'" : ''}) THEN ${col} END`;
+
 describe('scalar-parent / projection SQL', () => {
   test('order().by(key[, dir]) folds ORDER BY into the projection select', () => {
     const asc = read('g.V().hasLabel("person").order().by("age").values("name")');
@@ -110,17 +118,32 @@ describe('scalar-parent / projection SQL', () => {
     const mn = read('g.V().values("age").min()');
     // TinkerPop 4 Strings are Comparable, so min/max include text (numbers order first).
     expect(mn.sql).toContain("typeof(s.v) in ('integer', 'real', 'text')");
-    expect(mn.sql).toContain('MIN(s.v)');
+    expect(mn.sql).toContain(`MIN(${eligible('s.v', true)})`);
     expect(mn.shape).toEqual({ kind: 'scalar' });
-    expect(read('g.V().values("age").max()').sql).toContain('MAX(s.v)');
+    expect(read('g.V().values("age").max()').sql).toContain(`MAX(${eligible('s.v', true)})`);
     // mean stays numeric-only (never text).
     expect(read('g.V().values("age").mean()').sql).toContain("typeof(s.v) in ('integer', 'real')");
     // mean is always a Double (forced vt='real')
     const avg = read('g.V().values("age").mean()');
-    expect(avg.sql).toContain('SUM(s.v * s.bulk) * 1.0 / SUM(s.bulk)');
+    // The weighted-mean denominator counts only the ELIGIBLE rows' bulk, which is what the
+    // policy's nested CASE says and what the WHERE-clause form used to say positionally.
+    expect(avg.sql).toContain(`SUM(${eligible('s.v')} * s.bulk) * 1.0 / SUM(CASE WHEN ${eligible('s.v')} IS NOT NULL THEN s.bulk END)`);
     expect(avg.sql).toContain("'real' AS vt");
     // min(Scope.local) after fold() reduces the folded list per-list (list phase).
     expect(read('g.V().values("age").fold().min(Scope.local)').shape).toEqual({ kind: 'scalar' });
+
+    // "numeric only" is a RESULT claim, not just an SQL one, and it was false for sum() alone:
+    // the global arm carried no eligibility guard, so SQLite coerced each text value to 0 and
+    // an all-text sum() returned a fabricated 0. It must report nothing eligible, exactly as the
+    // same reducer over an EMPTY stream does — that equality is the pin.
+    const store = seededStore();
+    expect(run(store, 'g.V().values("name").sum()').map((r) => r.v))
+      .toEqual(run(store, 'g.V().hasLabel("nosuch").values("age").sum()').map((r) => r.v));
+    expect(run(store, 'g.V().values("name").sum()').map((r) => r.v)).toEqual([null]);
+    // A MIXED stream was always right (SQLite contributes 0 per text value), so the guard must
+    // not disturb it; min/max over the same mixed stream stay text-inclusive.
+    expect(run(store, 'g.V().union(__.values("age"), __.values("name")).sum()').map((r) => r.v)).toEqual([123]);
+    expect(run(store, 'g.V().union(__.values("age"), __.values("name")).min()').map((r) => r.v)).toEqual([27]);
   });
 
   test('collection literals parse as one array value; varargs-style steps flatten it', () => {
@@ -275,8 +298,8 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.inject(1,3).inject(100,300)').binds).toEqual([1, 3, 100, 300]);
     // reducers reuse the shared wrapper
     expect(read('g.inject(1,2,3).sum()').shape).toEqual({ kind: 'scalar' });
-    expect(read('g.inject(1,2,3).sum()').sql).toContain('SUM(s.v)');
-    expect(read('g.inject(1,2,3).mean()').sql).toContain('AVG(s.v)');
+    expect(read('g.inject(1,2,3).sum()').sql).toContain(`SUM(${eligible('s.v')})`);
+    expect(read('g.inject(1,2,3).mean()').sql).toContain(`AVG(${eligible('s.v')})`);
     expect(read('g.inject(1,2,3).count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.inject(1,2,3).fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
     // is() BEFORE count() filters the pre-count stream (WHERE inside the counted set)
@@ -581,7 +604,7 @@ describe('scalar-parent / projection SQL', () => {
   test('values(k).inject(c) appends constants to the value stream', () => {
     const p = read("g.V().values('age').inject(1000).sum()");
     expect(p.sql).toContain('UNION ALL');
-    expect(p.sql).toContain('SUM(s.v * s.bulk)');
+    expect(p.sql).toContain(`SUM(${eligible('s.v')} * s.bulk)`);
     expect(p.binds).toContain(1000);
     // append before a min() reducer
     expect(read("g.V().values('foo').inject(42).min()").sql).toContain('UNION ALL');
@@ -851,13 +874,13 @@ describe('scalar-parent / projection SQL', () => {
   test('sum() wraps a value stream in SQL SUM → scalar shape', () => {
     const p = read('g.V().values("age").sum()');
     expect(p.shape).toEqual({ kind: 'scalar' });
-    expect(p.sql).toContain('SELECT SUM(s.v * s.bulk) AS v, typeof(SUM(s.v * s.bulk)) AS vt FROM');
+    expect(p.sql).toContain(`SELECT SUM(${eligible('s.v')} * s.bulk) AS v, typeof(SUM(${eligible('s.v')} * s.bulk)) AS vt FROM`);
   });
 
   test('numeric reducers are scalar streams and preserve dynamic type past filters', () => {
     const summed = read('g.V().values("age").sum().is(P.gt(100))');
     expect(summed.shape).toEqual({ kind: 'scalar' });
-    expect(summed.sql).toContain('SUM(s.v * s.bulk) AS v');
+    expect(summed.sql).toContain(`SUM(${eligible('s.v')} * s.bulk) AS v`);
     expect(summed.sql).toContain('p.vt AS vt');
     expect(summed.sql).toContain('WHERE p.v > ?');
 
@@ -896,7 +919,7 @@ describe('scalar-parent / projection SQL', () => {
     const typedSum = read('g.V().values("age").asNumber(GType.DOUBLE).sum().is(P.gt(100))');
     expect(typedSum.shape).toEqual({ kind: 'scalar' });
     expect(typedSum.sql).toContain('CAST(p.v AS REAL) AS v');
-    expect(typedSum.sql).toContain('SUM(s.v * s.bulk) AS v');
+    expect(typedSum.sql).toContain(`SUM(${eligible('s.v')} * s.bulk) AS v`);
 
     const store = seededStore();
     expect(run(store, 'g.V().values("name").toUpper().is("MARKO")').map((r) => r.v)).toEqual(['MARKO']);
