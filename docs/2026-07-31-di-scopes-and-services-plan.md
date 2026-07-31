@@ -1,6 +1,6 @@
 # Dependencies vs arguments: a request tier, and services in DI
 
-**Status: in progress — steps 1-2 landed 2026-07-31, steps 3-6 outstanding (see §6).** Origin: phase 5 of
+**Status: in progress — steps 1-3 landed 2026-07-31, steps 4-6 outstanding (see §6).** Origin: phase 5 of
 `2026-07-31-bulk-transfer-and-io-substrate-plan.md` needed `io().read()` to reach a `GraphStore` and an
 `IoStore`, and the barrier contribution's signature had nowhere to put them. The first answer was to
 widen the signature into a context object. **That was the wrong shape**, and noticing why turned a
@@ -157,8 +157,19 @@ This is a **behaviour-preserving refactor**: no traversal changes its answer, so
    (`const app: AppScope = ….set('registry', () => provider(app))`) — the laziness constraint 1
    relies on, made explicit rather than cast away. Two dead things fell out: `MidBarrierPoint.registry`
    (nothing read it) and `Executor.source` as a field.
-3. The request tier: `CompilerScope` → `RequestScope`, `params`/`federationDepth`/`sourceOptions` move
-   up, nested compiles stop restating them.
+3. ~~The request tier: `CompilerScope` → `RequestScope`, `params`/`federationDepth`/`sourceOptions` move
+   up, nested compiles stop restating them.~~ **Landed**, as an App → Request → Compile split rather
+   than a two-tier one (see step 4 for why the compile tier survived this step). `RequestScope` holds
+   params/federationDepth/sourceOptions; `CompilerScope` holds `q`; the engine holds the request scope
+   so `child`/`subEngine`/`withQuery` restate nothing.
+   **The restating was hiding a bug**: no nested `createCompilerScope` call passed `sourceOptions`, so
+   it reset to an empty Map and a sub-compile computed a different `labelRegime` than its own root —
+   `g.with(multi/single-label)` never reached nested lowering. Inheritance fixes it; census unmoved,
+   so nothing in the corpus was relying on the reset.
+   One field did NOT simply move up: `params` stays OVERRIDABLE on the compiler scope, because
+   `compileInject` seeds its own source and lowers against an empty param table. The plan's table put
+   `params` in the request tier without noticing that; the difference that matters is that an absent
+   override now INHERITS instead of resetting to `{}`, which is what a mandatory argument did.
 4. `q` out of the scope (or a two-field compile tier), resolving the `LoweringState` duplication.
 5. `ServiceCallCtx` renamed to whatever it actually is.
 6. **Then** phase 5 of the bulk-transfer plan lands on top: `IoStore` in `AppScope`, an `io` service
