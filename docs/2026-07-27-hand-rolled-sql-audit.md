@@ -16,8 +16,7 @@ left as written; the full map is in
 > below — the original entry text still reflects the pre-fix state in each case). The last four
 > closed 2026-07-30._
 >
-> What remains under #5 is not
-> hand-rolled SQL and never was: a MAP-shaped merge driver (~22 of the ~25 real merge deferrals —
+> What remains under #5 is not hand-rolled SQL and never was: a MAP-shaped merge driver (~22 of the ~25 real merge deferrals —
 > tracked as `outstanding-work` item 0b) and a decision about the write path's row-at-a-time
 > execution model. **Neither is this doc's subject, so re-measure before treating #5 as open work
 > here** — its entry now records what is actually left.
@@ -697,11 +696,20 @@ second projector — the tail entry mints the per-origin encounter on the elemen
 (`mintChildEncounter`), which is exactly what the retired builder did inline. `lowerConstant`'s
 guard now states the precondition it really has rather than deferring the whole shape.
 
-`BESPOKE_PROJECTIONS` became `SELF_ORDERING_PROJECTIONS` — same four names, now a property of each
-projector rather than a list of what one builder could read. **Open, and a genuine ceiling raise:**
-lifting that gate so `call`/`math`/`sack`/`format` may also take a scoped reducer. Measured — it
-leaves a clean deferral (`scoped scalar reducer requires explicit encounter order`), not an answer;
-the one-row-per-input producers would have to mint like `oneRowEncounter` does. Not built.
+**Then `BESPOKE_PROJECTIONS` went entirely — and the ceiling rose, because the gate was guarding a
+mis-stated requirement.** It survived one round as `SELF_ORDERING_PROJECTIONS` ("the projections
+that carry a per-origin EMISSION ORDER, so a scoped reducer has something to partition on"), which
+is what `lowerScopedScalarReducer`'s own error message said. It reads the encounter in exactly ONE
+place — `COUNT(<marker>)`, to tell a real child row from the domain LEFT JOIN's null padding — and
+never as an order, because every aggregate under it is order-insensitive. The child row's own
+ORDINAL answers that question on every child stream by construction. So the projection's identity
+was never the axis: `map(__.format("%{name}").count())` and every other generalized producer
+(`call`/`math`/`sack`/`format`) now compose with a scoped reducer, and the classifier gate is gone
+rather than widened.
+
+**The tell, worth keeping:** the deferral message named the wrong requirement, and the classifier
+had been written to satisfy the message. Read what the consumer USES, not what it says it needs —
+one grep at the single read site settled a gate that had shaped a vocabulary.
 
 ---
 

@@ -635,14 +635,6 @@ proves nothing — read the deferral clusters instead.
   existing stale-entry checks (`staleEntries`, and `capability.test.ts`'s `seenKnown` diff) should
   become one. **Low (maintainability), but it is the reason a P1 defect went unseen — so do it before
   the next refresh, not after.**
-- **A scoped reducer after a GENERALIZED producer stays a clean deferral** — `map(__.format(…).count())`,
-  `map(__.math(…).max())` and friends. `SELF_ORDERING_PROJECTIONS` (`tail/child-shape.ts`) admits only
-  `values`/`id`/`label`/`constant`, because only those mint the per-origin emission order
-  `lowerScopedScalarReducer` partitions on; `call`/`math`/`sack`/`format` do not, and lifting the gate
-  without minting was measured to give the deferral, not an answer. The unlock is to let the
-  one-row-per-input producers mint like `oneRowEncounter` does — the same proof it already uses. A real
-  ceiling raise, and the residual left behind when the third scalar-child projector was deleted.
-  → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md) #7
 - **`write.ts` row-at-a-time nested read** (`steps/write/write.ts`) — imperative surface; could
   materialize once via the child seam + a batch form. **Re-measured 2026-07-30: there is no
   hand-rolled SQL left in the merge region**, so this is purely the execution-model question (`run`
