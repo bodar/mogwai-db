@@ -1,9 +1,10 @@
 # Bulk transfer + the `io()` substrate — one primitive under five threads
 
-**Build status (2026-07-31):** phases **0, 2 and 3 have landed**, and with them phase 1's *chunking*
-half (`src/rowbatch.ts`) — every live wrong-answer wall on the production runtime is closed, and
-`mise run binds` now fails the build on the idiom. What is left is phase 1's row-landing loader, then
-4–7. Two findings from building it
+**Build status (2026-07-31):** phases **0, 1, 2, 3 have landed, and 4's READER half**. Every live
+wrong-answer wall on the production runtime is closed, `mise run binds` fails the build on the idiom,
+the bulk loader is gated table-by-table against the write path, and the conformance host seeds its two
+GraphSON graphs through the reader (host startup 5.0s → 1.1s; ggrateful 4.4s → 0.14s; L3 unchanged at
+1650). What is left is phase 4's WRITER, then 5–7. Two findings from building it
 are folded in below rather than appended: §5's "scratch relation, chunked" is **superseded** (a
 compiled read plan is ONE statement — see §5), and the whole-suite CF-parity run is **green** before
 any fix, which is itself the measurement that says why the ladder could not have found §1c/§1d (§2's
@@ -283,7 +284,7 @@ GraphML is a decision, which is a different claim.
 
 | format | direction | unlocks | verdict |
 |---|---|---|---|
-| **TYPED GraphSON adjacency (`.json`)** | read + write | 2 of 6 `io()` scenarios; **replaces `seed-graphson.ts` and the 5.9 s seed**; **AND is the lossless export/backup path** (§4b) | **first, and it is now carrying three jobs.** A TinkerPop standard, not homegrown — the typed adjacency file (one vertex per line, embedded `inE`/`outE`), a *different artefact* from untyped GraphSON responses (§4a). **Read v3 AND v4, write v4** — decided 2026-07-31, and §4c has the measured delta (it is one branch, not two codecs). The reader already exists as `test/fixtures/seed-graphson.ts`; promote it from test fixture to a real reader emitting row batches instead of Gremlin strings |
+| **TYPED GraphSON adjacency (`.json`)** | read + write | 2 of 6 `io()` scenarios; **replaced `seed-graphson.ts` and the 5.9 s seed** ✅; **AND is the lossless export/backup path** (§4b) | **first, and it is now carrying three jobs.** A TinkerPop standard, not homegrown — the typed adjacency file (one vertex per line, embedded `inE`/`outE`), a *different artefact* from untyped GraphSON responses (§4a). **Read v3 AND v4, write v4** — decided 2026-07-31, and §4c has the measured delta (it is one branch, not two codecs). The reader already exists as `test/fixtures/seed-graphson.ts`; promote it from test fixture to a real reader emitting row batches instead of Gremlin strings |
 | **Neptune/Neo4j CSV-with-typed-headers** | read + write | **interop only** (`~id`,`~label`,`prop:type` / `:ID`,`:LABEL`,`:START_ID`) | **second.** Cross-vendor de-facto standard, RFC 4180, no deps. Lossy against our type channel, which is fine once it is not also the backup path — §4b |
 | ~~our compact typed dump~~ | — | — | **EXCLUDED — homegrown, and it turns out to be UNNECESSARY too.** Typed GraphSON already covers all 17 `CanonicalType`s, nesting, typed map keys and meta-properties — §4b |
 | ~~GraphML (`.xml`)~~ | — | 2 of 6 `io()` scenarios | **EXCLUDED — XML.** Two independent reasons, and the type one is the stronger: GraphML's `attr.type` admits only `boolean/int/long/float/double/string`, so it is **more** lossy than CSV (no date, no uuid, no nesting, no meta-properties). Separately, Workers has no `DOMParser` and `HTMLRewriter` is an HTML streaming transformer, not an XML DOM — so it would also be the only format here that is new *code* rather than new plumbing |
@@ -438,12 +439,21 @@ that declares multi-label (item 19b). One reader with a label branch, one writer
    and `g.V(1..10).outE()` from 0.14 ms to 0.47 ms — for a wire field that doc verified **no
    conformance scenario asserts** (the Gherkin harness compares edges by id). Decided 2026-07-31:
    **not rolled in.**
-3. **Open reader question, deliberately not answered here.** We read v3 + v4 *adjacency*, but
-   `tinker-graph-v4.json` is `g:graph` — so a caller handing us the only whole-graph `-v4` file the
-   corpus ships would be rejected. Whether the reader should also accept `g:graph` is a container
-   question (the element encodings are shared, so it is a wrapper, not a second codec) — and note
-   that `g:graph` **does** carry `{id, label}` endpoints, so that is where endpoint labels would
-   first actually matter, on the READ side rather than the write side.
+3. **Open reader question, deliberately not answered here — and the reader now REFUSES it by name.**
+   We read v3 + v4 *adjacency*, but `tinker-graph-v4.json` is `g:graph`, so a caller handing us the
+   only whole-graph `-v4` file the corpus ships is rejected with a message naming the artefact. That
+   refusal is not the open part; it is what stops the worse outcome, which is measured: read as an
+   adjacency line, a `g:Vertex`/`g:graph` document has no top-level `id`, so the vertex would land
+   under the uid `"undefined"` — a silent wrong answer, so the reader tests both documents for the
+   refusal. Whether to ACCEPT `g:graph` stays a container question (the element encodings are shared,
+   so it is a wrapper, not a second codec) — and note that `g:graph` **does** carry `{id, label}`
+   endpoints, so that is where endpoint labels would first actually matter, on the READ side rather
+   than the write side.
+4. **One shape fact for the writer, found while reading:** an adjacency file lists every edge TWICE —
+   once as its source vertex's `outE` and once as its target's `inE`. The reader reads only `outE`
+   (every edge appears there exactly once, so nothing is lost), and `tinkerpop-sink-v3.json` is the
+   fixture that would catch getting this wrong: its two self-loops appear as both `inE` and `outE` of
+   the SAME vertex, so a reader that took both would double them.
 
 ---
 
@@ -491,9 +501,19 @@ and this plan does not reopen it.
 ## 6. What changes for the test suite
 
 - `startConformanceServer` seeds via readers over `RowBatch` instead of 8,857 write traversals.
-  Measured 5,918 ms → 143 ms for `ggrateful` alone. That also removes the `beforeAll` timing cliff
-  the current header documents (within ~20 ms of bun's 5,000 ms hook default, flaking "about half
-  the time"), which the named-graphs workaround currently papers over.
+  **Landed:** measured 5,918 ms → ~140 ms for `ggrateful` (98,198 statements → 1,482), whole host
+  startup 5.0 s → 1.1 s, L3 unchanged at 1650. The `beforeAll` timing cliff the header documented
+  (within ~20 ms of bun's 5,000 ms hook default, flaking "about half the time") is gone, so the
+  named-graphs argument is now about honesty rather than about the timeout.
+  **One thing the switch changed on purpose, and it is not a regression:** the retired
+  `seed-graphson.ts` built write-traversal STRINGS and unwrapped every `@type` on the way, so a
+  `g:Double` of 1.0 re-entered the graph as the integer 1. The typed reader keeps the file's types, so
+  `gsink`/`ggrateful` now store what their files say. L3's count did not move, which says no scenario
+  depended on the loss.
+  **What the reader does NOT reproduce, also on purpose:** a file's own VertexProperty ids are
+  PRESERVED (crew's first `name` instance is id 0), where the write path mints 1..N. So a file load is
+  semantically equivalent to a hand-authored seed but not id-identical to it, and the byte-identity
+  gate lives where the inputs ARE the same — `test/bulk.test.ts`, loader vs write path.
 - **The seed must stay verifiable, and this is the one real risk of the change.** Today's seed is
   self-validating: it goes through the same `parse → compile → execute` path a client uses, so a
   broken write path cannot produce a correct fixture. A bulk loader bypasses that. So: keep
@@ -559,10 +579,10 @@ Each phase lands green and is useful alone.
 | # | deliverable | gate |
 |---|---|---|
 | **0** ✅ | **CF-parity `Sql` decorator** (throws > 100 binds / > 100 KB) + one suite run under it | ~~the two §1c/§1d walls reproduce **on Bun**, as failures~~ — they had to be reproduced *deliberately*: the suite is green under the harness, because nothing in it reaches the cardinality (§2) |
-| **1** | `RowBatch` load/drain on the `Sql` seam; FTS row *construction* extracted from `indexProperty` | modern graph loads batched ≡ loads via write traversals, byte-identical incl. `property_fts` — **chunking half landed with phase 2; the loader is what remains** |
+| **1** ✅ | `RowBatch` load/drain on the `Sql` seam; FTS row *construction* extracted from `indexProperty` | modern graph loads batched ≡ loads via write traversals, byte-identical incl. `property_fts` (`test/bulk.test.ts`), in 15 statements vs 137. `propertyValueBind` came out with it — the value channel was the SECOND thing a loader would have re-derived. DRAIN is not built: it is the writer's need, so it lands with phase 4's writer |
 | **2** ✅ | Fix §1d (`drop`) and §1c (`landForeignElements`, `within`) through `RowBatch` | done at 250–500 elements under the phase-0 store, which is what makes those tests gates rather than ordinary behaviour tests |
 | **3** ✅ | `mise run binds` static gate | at zero, fails the build (not a ratchet) — scoped to the IDIOM, because "is this bind list bounded?" is undecidable locally (§2) |
-| **4** | **Typed GraphSON reader (v3 + v4) and writer (v4)** over `RowBatch`, line-oriented adjacency form; conformance host seeds through it | L3 count unchanged; seed ≤ 0.5 s; census unchanged; **`gcrew` round-trips** (the type channel incl. meta-properties survives a dump, §4b) **and `gzoo` round-trips** (multi-label survives — the assertion a v3 writer could not pass, §4c) |
+| **4** ◐ | **Typed GraphSON reader (v3 + v4) and writer (v4)** over `RowBatch`, line-oriented adjacency form; conformance host seeds through it | READER done: L3 unchanged at 1650, ggrateful seeds in 0.14 s (statement count 98,198 → 1,482 is the deterministic half, so it is what the test asserts), census unchanged, and the reader's own gate is that the file's TYPES survive — the retired string-building fixture re-emitted a `g:Double` of 1.0 as an int. WRITER outstanding, with it the `gcrew`/`gzoo` round-trip gates |
 | **5** | `IoStore` (Bun FS / CF R2 / L3 host mapping) + `io()` as a barrier service | the 2 `.json` `Read.feature` scenarios pass; `.xml` and `.kryo` fail closed naming the format; `tags.ts` reclassified (§4) |
 | **6** | Neptune/Neo4j CSV reader/writer (**interop only**); `io().write()` to R2 | round-trip through CSV for the types CSV *can* carry, with the lossy cases documented and asserted as lossy rather than silently wrong |
 | **7** | remap pass (non-empty target, label re-interning, `uid` preservation) | load-into-non-empty round-trip |
