@@ -86,6 +86,21 @@ description = "Full suite: corpus + contract + L3 conformance (both runtimes)"
 depends = ["install", "check", "submodule"]
 run = "bun test"
 
+# An INSTRUMENT, not a gate, and deliberately absent from `ci` — same standing as `orphans`. It runs
+# the ENTIRE suite with `PRAGMA reverse_unordered_selects = ON`, SQLite's own switch for reversing
+# every scan whose order the query did not constrain (an ORDER BY is untouched). A result that only
+# holds under the default is pinned by SQLite's scan choice, not by the SQL we emit — and on a
+# six-vertex fixture that choice is reliably the flattering one, which is exactly why this cannot be
+# found by reading. Measured at first run: 20 failures, of which 13 are L3 CONFORMANCE scenarios,
+# all `order().fold()`. So ~0.8% of the conformance floor is luck. It is not a gate because it is
+# red today; the findings are tracked in docs/outstanding-work.md, and it should become a gate once
+# they are cleared. A failure here is a REAL under-specification, never a flake.
+[tasks."test:perturbed"]
+description = "Instrument: the full suite under reversed unordered scans (finds order-by-luck results)"
+depends = ["install", "check", "submodule"]
+env = { MOGWAI_REVERSE_UNORDERED = "1" }
+run = "bun test"
+
 # Conformance ladder — invoke a single level directly. Every level now provisions the submodule
 # whether it lists it or not, because `install` depends on it. The listing is kept where it is
 # SEMANTIC — "this level reads submodule content" (L3/L4's corpus, L5/census's real Executor) — and

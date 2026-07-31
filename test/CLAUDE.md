@@ -84,6 +84,23 @@ rejections, 3 raw `TypeError`s, 2 `RangeError`s, 1 `UNIQUE constraint`, and 1 ca
 syntactically invalid SQL). The gate holds that count from growing; each one should become a clear
 deferral or a fix.
 
+## The perturbation instrument — `mise run test:perturbed`
+
+Runs the WHOLE suite with `PRAGMA reverse_unordered_selects = ON`: SQLite reverses every scan whose
+order the query did not constrain, and leaves an `ORDER BY` alone. So a result that holds under both
+settings is pinned by the SQL we emit; one that holds only under the default is pinned by SQLite's
+scan choice — and on a six-vertex fixture that choice is reliably the flattering one, which is why
+this class of defect cannot be found by reading or by any assertion in the ladder.
+
+It is an **instrument, not a gate** (the `orphans` standing) and is absent from `ci`, because it is
+red today: 20 failures at first run, **13 of them L3 conformance scenarios**, all `order().fold()`.
+That is ~0.8% of the conformance floor passing by luck. A failure here is a real under-specification,
+never a flake — findings are tracked in `docs/outstanding-work.md`, and this becomes a gate when
+they are cleared. It is an ENV switch (`MOGWAI_REVERSE_UNORDERED=1`, read in `src/bun/BunSqlite.ts`)
+rather than a parameter precisely so the suite under test cannot know it is being perturbed.
+
+Related: an `ordered` L4 assertion is only worth writing if it survives this. Check before adding one.
+
 ## Guardrails
 
 - **Everything tracks tinkerpop `origin/master` — the version split is GONE** (2026-07-26). The

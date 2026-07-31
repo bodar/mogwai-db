@@ -156,6 +156,11 @@ function expectedCanon(tok: string, refs?: ReadonlyMap<string, unknown>): string
   if (t === 'null') return 'null';
   // v[marko].id — an element reference, resolved against the seeded store by the caller.
   if (refs?.has(t)) return canon(refs.get(t));
+  // v[marko] — the ELEMENT itself, not its id. Canonicalizes to the same `E<id>` a decoded vertex
+  // does, because upstream compares element results by identity. Vertices only: `elementRefs`
+  // caches by the `name` property, which edges in these fixtures do not carry.
+  const vref = t.match(/^v\[(.+)\]$/);
+  if (vref && refs?.has(`v[${vref[1]}].id`)) return 'E' + String(refs.get(`v[${vref[1]}].id`));
   // Match the JS client's actual GraphBinary decode: a bigint (`.n`, BigInteger 0x23) is ALWAYS a
   // JS BigInt; a long (`.l`, Int64 0x02) decodes to a Number within ±2^53 and a BigInt beyond
   // (the client's Long deserializer is magnitude-dependent) — so count()/groupCount() longs, which
@@ -231,7 +236,22 @@ function canon(v: unknown): string {
   // spelling the feature table uses rather than its JSON shape.
   if (v && typeof v === 'object' && (v as any).typeName === 'T' && typeof (v as any).elementName === 'string')
     return 'T' + (v as any).elementName;
+  // A decoded ELEMENT compares BY ID, which is upstream's rule for `v[marko]`/`e[marko-knows->vadas]`
+  // — its runner resolves the reference to a cached element and compares identity, so a label or
+  // property difference is deliberately NOT part of the comparison (see outstanding-work 19, where
+  // that is exactly why no corpus scenario could catch a wrong vertex label).
+  const el = elementId(v);
+  if (el !== null) return 'E' + String(el);
   return 'J' + JSON.stringify(v);
+}
+
+/** The id of a decoded Vertex/Edge/VertexProperty, or null for anything else. The client decodes
+ *  an element to a plain object carrying `id` plus `label`; a Path carries `objects` and a Map is a
+ *  real Map, so both are already claimed above and cannot be mistaken for one. */
+function elementId(v: unknown): unknown {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const o = v as { id?: unknown; label?: unknown };
+  return o.id !== undefined && o.label !== undefined ? o.id : null;
 }
 
 /** A fixture is a seed AND the capability the graph declares — `multilabel`/`zoo` need
