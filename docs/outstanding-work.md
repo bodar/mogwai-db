@@ -599,10 +599,20 @@ proves nothing — read the deferral clusters instead.
   a cleanup — a `{column}` by() classifies as `{kind:'none'}` today, so every one of the 25 consumers
   currently reads `by(Column.keys)` as a BARE by(), and a new arm silently reclassifies all of them.
   Measure before widening.
-- **`NUMERIC_REDUCERS` re-declared despite `ir/step.ts` being the named base** (`tail/projection.ts`,
-  and `BULK_REDUCERS` in `tail/bulk.ts`) — 8 consumers follow the "export BASES only, derive with a
-  named difference" rule; these 2 hand-write the member list, so a new reducer lands in 10 places and
-  misses 2. Two imports.
+- ~~**`NUMERIC_REDUCERS` re-declared despite `ir/step.ts` being the named base**~~ — **LANDED
+  `1e86fa0`**, and it was seven sites, not two. `NUMERIC_REDUCER_NAMES` (`ir/step.ts`) is now the one
+  member list; membership is byte-identical everywhere, which is why the L2 snapshots did not move.
+  **The part worth carrying forward is what deleting a set REVEALED**, twice:
+  - `NumericReducer`/`ScalarReducer` lived in `tail/barrier.ts` while the SET lived in `ir/step.ts` —
+    two independent spellings of four names with nothing making them agree. The type is now DERIVED
+    from the set's member list (`(typeof NAMES)[number]`) and cannot drift. This is the
+    `ScalarType` pattern applied to a step-name vocabulary; `barrier.ts` re-exports so no importer
+    moved. **The same question is open for every other name set in `ir/step.ts`** — none has a
+    derived member type yet, and the movement families are the obvious next.
+  - `BULK_REDUCERS` was `REDUCERS` verbatim, and its two readers wanted DIFFERENT halves — the local
+    set hid that behind `&& term.name !== 'count'`, i.e. `NUMERIC_REDUCERS` spelled as a subtraction.
+    A duplicate set does not merely duplicate; it lets a reader express its real membership as a
+    correction to the wrong base.
 - **`lowerGlobalNumericReducer` bypasses its own extracted policy helper** — `numericReducerAggregate`
   (`tail/barrier.ts`) is documented as the one shared reducer policy and owns the eligible-storage-class
   `CASE WHEN typeof(...)` guard; the root barrier 60 lines below re-derives sum/mean/min/max inline with
