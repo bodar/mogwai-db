@@ -34,10 +34,19 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 ## P1 — ceiling-raising generic-substrate lifts
 
 **Ranked entry point.** Numbers are IDs, not an order. **30**'s phase 0 (a ~20-line `Sql` decorator
-that makes two CF-only hard failures reproduce on Bun) → **2** → **21**'s T4 → **29** →
-**3**'s `times(n)` unroll. (**28** landed — and **it is now a precondition met** for 3's
-`times(n)` unroll, which the item said to do only after it.) (**17**'s cheap half landed; its remainder is the architectural
-current-object-aggregate authority, which is a bigger question than its neighbours.)
+that makes two CF-only hard failures reproduce on Bun) → **2** → **21**'s T4 → **29** → **3**'s
+`times(n)` unroll. **28** landed and was 3's stated precondition, so the unroll is unblocked;
+**17**'s cheap half landed and its remainder is the architectural current-object-aggregate
+authority, a bigger question than its neighbours.
+
+> **CLAIMED, 2026-07-31 — two agents are on this trunk.** Item **30** and the whole write /
+> bulk-import-export cluster it pulls in (`io()`, seeding, the chunked loader, and the write-path
+> items that route through them — **10**, **16**, **0b**, P2·11's import-a-graph, and the `write.ts`
+> row-at-a-time entry in Internal debt) belong to the OTHER agent. Do not pick them up; take the next
+> item in the ranking instead. This note is transient — delete it when the claim lapses.
+> Already landed on trunk and NOT part of that claim, but in the same file: item 22's merge
+> validation (`steps/write/validate.ts`, `MergeRole`, `validateNoOverrides`) touched `write.ts`
+> substantially and is upstream of anything started after `b878b29`.
 
 **Landed 2026-07-31, in this order, and each changed what came after it.** Item 27's seven
 `Scope.local` fail-closed violations (one argument decode, `sliceOf`). Item 22's 24 write-path
@@ -127,13 +136,17 @@ Cloudflare** — which is why nothing above found it. Every level of the ladder 
    (`scalar.ts:640`) is the one tail never transposed to a dispatch Map. **Medium** (was Low-Med; what
    is left is the architectural half).
 
-29. **The barrier side of the carried-role contract has no policy table.** `LAYOUT_ROLE_POLICY`
-   (`context/context.ts:288`) is total over `keyof TraverserLayout` — for ARM MERGE only.
-   `dropLayoutAtBarrier` (`:617`) hand-builds a literal with four fields and every other role is
-   optional, so **a role added tomorrow compiles clean and is silently dropped at all 15 barrier sites**
-   — the 33%-of-defects class. A `BARRIER_ROLE_POLICY` beside the merge table also makes the **17
-   `carried-state × barrier` deferral sites** answerable in one place. Not one of Phase 1's two
-   non-goals (both merge-side). *Medium.*
+29. **The 17 `carried-state × barrier` deferral sites still each re-derive their answer** — the
+   TABLE they can now cite landed 2026-07-31 but nothing was rewritten to cite it.
+   `BARRIER_ROLE_POLICY` (`context/context.ts`) is total over `keyof TraverserLayout` beside the merge
+   table, in four policies that turned out to be distinct — `consumed`/`empty`/`drop`/`keep` — and
+   `barrierLayout` is checked against it role by role in `test/channel-contracts.test.ts`, because a
+   `drop` role appears in the literal as its own ABSENCE and so table and code could disagree by
+   omission in either direction.
+   So each of the 17 sites can now cite a role's policy instead of re-deriving it, which is what the
+   item wanted — but that is a separate sweep and it should be folded into whichever site is next
+   touched, not done as a rename. **Do not "finish" this by mechanically rewriting all 17**: some of
+   them defer for a reason the table does not capture. *Low.*
 
 3. **`repeat()` residuals.** *(Its stated precondition — item 28's `repeatBodyExpansion` switch — is
    met as of 2026-07-31, so the `times(n)` unroll is unblocked.)* The body compiles through the ordinary StepFns into a keyed child relation
