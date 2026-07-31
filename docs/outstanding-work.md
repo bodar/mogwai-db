@@ -4,7 +4,10 @@ The de-duplicated index of open work across the `docs/` corpus. **Each line sets
 why, where to start — not a spec.** The linked doc holds the rationale; the picking agent does the
 detailed validation and design. Live per-step capability: `feature-support-matrix.md`.
 
-**Refreshed** 2026-07-30 against L3 **1598 / 2267**. The denominator moved twice this day, both
+**Refreshed** 2026-07-31 (channel-preservation Phase 1 closed; item 18 deleted, its two deliberate
+non-goals moved to won't-do). Conformance figures below are from the 2026-07-30 sweep against L3
+**1598 / 2267** — Phase 1 was a substrate tranche and moved no scenario. The denominator moved twice
+on 2026-07-30, both
 times to drop scenarios the harness cannot adjudicate rather than gaps of ours — see `tags.ts`,
 which now names which of three KINDS each exclusion is, and `runner-skips.test.ts`, which fails if
 the vendored runner's own skip set ever diverges from it. Item
@@ -274,65 +277,6 @@ impls are matrix-fill, lower. Impact: **High** (correctness / whole-family unblo
    step 4 sanctions ("name the cardinality axis, **then** share row-ops") — and the axis is now named,
    so the gate is open. **High — the largest single ceiling block measured.**
    → [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md)
-
-18. **Channel-preservation Phase 1 — deployment, not construction.** The largest MEASURED defect
-   category (carried-channel drops, 33%) and the index carried it only from 2026-07-30.
-   **The "113 spreads against 42 `patchLayout` sites" measurement was WRONG and is withdrawn**
-   (corrected 2026-07-31): it counted `...layoutCols(...)` expansions, which are the
-   single-source-of-truth column list — i.e. exactly what a correct preservation route looks like —
-   so it measured the opposite of the defect. `TraverserLayout`-valued object spreads number ~13,
-   every one a construction site, and the same grep run against `docs/`-era history is why the
-   earlier 104/32 reading looked like a trend. Do not re-derive a spread count without excluding
-   `layoutCols`.
-   - ~~**`mergeLayouts` … has ONE caller**~~ — **LANDED `66cb779`.** The missing concept was the
-     POLICY, as predicted: `mergeLayouts` now takes a REQUIRED `RigidRolePolicy` (`'peer'` asserts
-     the rigid roles, `'rehomed'` merges label sets only for child-scoped arms already re-homed),
-     the assertion was not weakened, and `mergeAliasMaps` is module-local so the route is
-     structural. `layoutGrewAliases` replaces the inline `.size !== .size` each copy spelled.
-   - ~~**three copies of one ALGORITHM**~~ — **LANDED `65e0fe8`.** `mergeArmRelation`
-     (`context/context.ts`) is the shared core, with `layoutArmProjection` and `nonAliasCols`
-     replacing one inline copy per merge, and the variant payload list moved to `streamPayloadCols`.
-     `mint` stayed the caller's decision: the scalar merge mints unconditionally (positional
-     consumers are reachable), list/variant only when an encounter is live. **`finishElementMerge`
-     (`prefix/branch.ts`) is deliberately NOT folded in** — it keeps the arm's encounter in its
-     declared `layoutCols` slot rather than renaming it to `arm_encounter`, and it is the only merge
-     that pads a ragged `path`. Folding it means changing element-merge SQL for no correctness gain;
-     do it only if a third spelling appears.
-   - **`assertStreamColumns` DOES check declared layout-role columns** — `streamColumns` is
-     `streamPayloadCols` + `layoutCols`, so the earlier "payload and per-row-type only" claim is
-     withdrawn. The hole was the CONSTRUCTION SITES THAT SKIP IT, and the worst one is closed:
-     **`appendCte`'s `cols:` override is deleted (`e1aa251`)**, which found a real defect —
-     `match()`'s seed declared a binding table while its layout still claimed `bulk`, surviving only
-     because the next step rebuilt the layout. Both `match()` seeds now go through `toElementStream`
-     via the named drop `layoutOverAliases`. **The method transfers: add the assertion, read the
-     failures, then prefer deleting the escape hatch over keeping the assertion.**
-     ~~Still hand-building an element/typed stream without an assertion~~ — **CLOSED `3657344`.**
-     `withRelationAndLayout` covers the mint-or-drop-a-role rebuild (both child-scope seeds, the
-     scalar one-row encounter, the label re-select), `finishMove` returns through `appendCte`, and
-     the write-driver re-entry goes through `toElementStream`. The one remaining spread is
-     `tail/scalar.ts:742`, which builds a THROWAWAY layout to ask `cols` a narrower question — the
-     same deliberate pattern as `rigidCols`, not a preservation route.
-     **Declared latent gap from the same tranche:** `bulk` is lost through `match()`, so a reducer
-     after one counts ROWS rather than traversers. No live wrong answer (`movementCollapse` does not
-     fire ahead of a `match()`; collapse-on ≡ collapse-off on
-     `g.V().both().both().match(…).select("a").count()`), so it is declared rather than banked.
-     Threading it means touching `applyPattern` and every pattern route. *Low.*
-   - ~~**The paired exit-gate regression tests are unwritten**~~ — **WRITTEN.** The barrier half was
-     already there (`branch.exec.test.ts` "a label bound AFTER fold() inside a branch arm survives
-     the merge", covering the list AND scalar merges, including the bound-BEFORE-the-fold twin that
-     must stay at 0 rows); the policy half is now `test/channel-contracts.test.ts` "arm-merge
-     authority" — `peer` fails closed on a diverging rigid role, `rehomed` never inherits the child's
-     ordinal, an arm-minted label joins the canonical set with a non-static bind count, the
-     binding-table drop states every role it loses, and the merge core declares the minted encounter
-     in its `layoutCols` slot.
-   - **What is actually LEFT of Phase 1** is one artifact: the role-by-role merge-policy table the
-     plan's design section asks for (unionable / preserving-identical / incompatible→deferral), as
-     something a reader can check rather than as the `peer`/`rehomed` split plus `rigidCols`. Small,
-     and mostly documentation of what the code already does. *Low — the mechanism is built.*
-   **Phase 6 is a committed NEGATIVE result — do not re-propose it** (IR shape annotation: 56.8%
-   unknown against a 10% ceiling). **Was High; now Low** — the substrate landed 2026-07-31 across
-   `66cb779`/`65e0fe8`/`e1aa251`/`3657344`.
-   → [channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md)
 
 ---
 
@@ -730,6 +674,28 @@ proves nothing — read the deferral clusters instead.
   scenarios). The four step scenarios come back as a give-back when item 8 lands.
   → [graph-algorithms](./2026-07-24-graph-algorithms-plan.md)
 - **Child-scope split-seed + 4-consumer migration** → superseded by the smaller carried-cols fix.
+- **Channel-preservation Phase 1 (was P1·18)** → **LANDED 2026-07-31**, and the whole plan closed
+  with it: `66cb779` the merge authority with the rigid check as a POLICY · `65e0fe8` one arm-merge
+  algorithm with three payloads · `e1aa251` `appendCte`'s `cols` override deleted and `match()`'s
+  binding-table drop named · `3657344` every construction route asserting its own carried contract ·
+  `264e32f` the role-policy table `Record<keyof TraverserLayout, …>` keeps total. Design of record:
+  [channel-preservation](./archive/2026-07-28-channel-preservation-refactoring-plan.md).
+  **Two DELIBERATE non-goals — do not re-file either as unfinished work.** `finishElementMerge`
+  (`prefix/branch.ts`) is not folded into `mergeArmRelation`: it keeps the arm's encounter in its
+  declared `layoutCols` slot rather than renaming it to `arm_encounter`, and it is the only merge
+  that pads a ragged `path`, so folding it changes element-merge SQL for no correctness gain
+  (revisit only if a THIRD spelling appears). And `bulk` is lost through `match()`, so a reducer
+  after one counts ROWS rather than traversers — declared at `layoutOverAliases` and probed for a
+  live wrong answer, of which there is none (`movementCollapse` does not fire ahead of a `match()`;
+  collapse-on ≡ collapse-off on `g.V().both().both().match(…).select("a").count()`).
+  **Two measurement corrections worth not repeating:** the "113 hand-written layout spreads" figure
+  counted `...layoutCols(...)` expansions — the single-source-of-truth column list, i.e. the
+  OPPOSITE of the defect — and `assertStreamColumns` always did check declared layout-role columns
+  (`streamColumns` is `streamPayloadCols` + `layoutCols`); the hole was the construction sites that
+  skipped it. **The method that found the one real defect transfers: add the assertion, read the
+  failures, then prefer DELETING the escape hatch over keeping the assertion.**
+- **Phase 6's IR shape annotation** → killed on its own pre-committed criterion (56.8% `unknown`
+  against a 10% ceiling). Lowering remains the sole owner of shape interpretation.
 - **"`asNumber(GType.BIGINT)` of a small value should downcast on the wire"** → **our framing is
   already correct; the blocker is a vendored-harness defect.** TinkerPop's
   `NumberSerializationStrategy` magnitude-dispatches only for `typeof item === 'number'`; for
@@ -761,8 +727,11 @@ Sources: [hand-rolled-sql-audit](./2026-07-27-hand-rolled-sql-audit.md),
 - **[path-tracking-prior-art](./2026-07-12-path-tracking-prior-art.md)** — path prior-art for P3 tails.
 - **[wire-and-storage-facts](./2026-07-25-wire-and-storage-facts.md)** — Map.Entry framing + MapStream
   model. Durable reference, not a plan.
-- **[channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md)** — design-of-record
-  for P1·18; Phase 6's IR-shape annotation is a committed negative result (56.8% ⊤ vs 10% ceiling).
+- **[channel-preservation](./archive/2026-07-28-channel-preservation-refactoring-plan.md)** — CLOSED
+  and archived 2026-07-31. Read it for the constitution a vocabulary migration passes (§"Constitution
+  for a vocabulary migration") — that part is reusable and is what the ScalarType, cardinality and
+  Phase 1 tranches were each measured against. Phase 6's IR-shape annotation is a committed negative
+  result (56.8% ⊤ vs 10% ceiling); the two deliberate non-goals are in won't-do.
 - **[correlated-child-rendering](./2026-07-17-correlated-child-rendering-plan.md)** — design-of-record
   for P2·7e, **now essentially BUILT** (verified 2026-07-30; only the E-form aggregate residue is
   left). Keep it for the spike (EXPLAIN + timings) that would be expensive to re-derive and for the

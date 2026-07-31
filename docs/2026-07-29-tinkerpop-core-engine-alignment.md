@@ -36,7 +36,7 @@ row below, and nothing else does:
 2. Can it be confused with a different thing?
 
 The structural half of the answer is **already in flight** — see
-[channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md), which this doc defers
+[channel-preservation](./archive/2026-07-28-channel-preservation-refactoring-plan.md), which this doc defers
 to rather than duplicates.
 
 ## 0. The rule
@@ -87,7 +87,7 @@ is not — that is a JVM monomorphisation trick with no analogue here.
 `Carried` (`steps/context/context.ts:160`) is the same object built the same way round: 8 typed roles
 declared, and the physical column list *derived* by `carriedCols` (`context.ts:351`), already the
 single source of truth. Two gaps remain, and **both are already Phase 1 of
-[channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md)**:
+[channel-preservation](./archive/2026-07-28-channel-preservation-refactoring-plan.md)**:
 
 - the ORDER RULE that makes the derivation correct is a prose comment (`context.ts:344-350`),
   enforced only after the fact by `assertStreamColumns`;
@@ -240,7 +240,7 @@ would preserve two abbreviations (`Frag`, `Opts`) and one outright inaccuracy (`
 Two members keep their names on merit: `withoutPath` and `trackFromV` both say exactly what they do.
 
 The one real sequencing constraint is unchanged and is not about size: this family is the same set of
-call sites the in-flight [channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md)
+call sites the in-flight [channel-preservation](./archive/2026-07-28-channel-preservation-refactoring-plan.md)
 work is editing, so it lands after that, or it produces conflicts in every file it touches.
 
 ### 4.4 A phase-named field that already drifted (fixed in `bd6dfaf`)
@@ -479,7 +479,7 @@ Ordering is by dependency and edit-conflict only — a group is not "later" for 
 |---|---|---|
 | 1 | §2/§3 comment-only: retire `Seam`/`Layer`, fix the `FastPath` row | Nothing depends on it and it depends on nothing. §4.4's comment fix already landed in `bd6dfaf`. |
 | 2 | `CompileScope` → `ChildFrameStack`; `*_TAIL` → `*_DISPATCH`; `materializeFinal` → `materializeRootStream`; `analyze` → `analyzeChain`; `steps/resource.ts` → `steps/graph-source.ts` | Five independent names, no shared files with any other group. |
-| 3 | The whole `carry*` family (§4.3) | Must follow the in-flight [channel-preservation](./2026-07-28-channel-preservation-refactoring-plan.md) work, which is editing these exact call sites. A real conflict, not a cost. |
+| 3 | The whole `carry*` family (§4.3) | Must follow the in-flight [channel-preservation](./archive/2026-07-28-channel-preservation-refactoring-plan.md) work, which is editing these exact call sites. A real conflict, not a cost. |
 | 4 | `advance` → `appendCte`; `cluster` → `repeatRegion`; `bys` → `modulators`; `options` → `optionArms` | `appendCte`'s signature takes the patch type group 3 renames, and both edit `context.ts` — adjacent to 3 so that file is touched once per concern. |
 | 5 | `PStep` → `IRStep` | The three field renames in group 4 are fields *of* this type; doing the fields first keeps each commit's diff about one name. |
 | 6 | §5 rewrite verbs + `PassCategory` `fold` → `canonicalize` + §4.5 file split | The split creates `ir/step.ts` around `IRStep`, so it needs group 5's name to exist. |

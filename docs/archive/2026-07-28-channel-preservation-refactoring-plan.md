@@ -1,6 +1,7 @@
 # Channel-preservation refactoring plan
 
-**Status: in progress, 2026-07-28.** This is a broad application of
+**Status: Phases 1–6 all closed as of 2026-07-31** (Phase 6 as a committed NEGATIVE result — see the
+execution log). This is a broad application of
 the pattern distilled in [the `ScalarType` retrospective](./2026-07-28-scalartype-refactoring-pattern.md).
 It is deliberately not a proposal for a universal shape algebra: the evidence in
 [the shape vocabulary architecture](./2026-07-28-shape-vocabulary-architecture.md)
@@ -162,13 +163,23 @@ Phase 1 tranches (current names throughout):
   through `toElementStream`. None of these was wrong — each derived its columns from the same
   `layoutCols` call it patched — so this closes routes rather than fixing defects.
 
-**Phase 1 status.** The merge authority, the shared merge algorithm, and the construction/runtime
-contract are all done. What is left of Phase 1 is the `TraverserLayout` role-by-role merge-policy
-table (unionable / preserving / declared-deferral) as an explicit artifact rather than as the
-`peer`/`rehomed` split plus `rigidCols`, and the `finishElementMerge` fold-in — deliberately NOT
-done, because it keeps the arm's encounter in its declared slot rather than renaming it to
-`arm_encounter` and it is the only merge that pads a ragged `path`. Folding it changes element-merge
-SQL for no correctness gain.
+- `264e32f` — **the roles' merge policies become a table the type checker keeps total.**
+  `LAYOUT_ROLE_POLICY` classifies every carried role as `union` / `pad` / `identical` / `metadata`,
+  and `Record<keyof TraverserLayout, …>` is the enforcement: adding a role fails the build until its
+  policy is declared. Before this a new role fell into `identical` by ACCIDENT, because `rigidCols`
+  derives the rigid set by exclusion — the safe default, but nothing said it was a default at all.
+
+**Phase 1 is COMPLETE.** The merge authority, the shared merge algorithm, the
+construction/runtime contract, the explicit role-policy classification and the paired exit-gate
+regressions are all in. Two things are deliberately NOT done and should not be re-proposed as
+unfinished work:
+
+- **`finishElementMerge` is not folded into `mergeArmRelation`.** It keeps the arm's encounter in its
+  declared `layoutCols` slot rather than renaming it to `arm_encounter`, and it is the only merge
+  that pads a ragged `path`. Folding it changes element-merge SQL for no correctness gain.
+- **`bulk` is not threaded through `match()`.** The drop is declared (`layoutOverAliases`) and
+  probed for a live wrong answer, which there is none of; threading it means touching
+  `applyPattern` and every pattern route.
 
 ## North star
 
