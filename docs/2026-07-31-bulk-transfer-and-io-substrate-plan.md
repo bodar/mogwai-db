@@ -224,15 +224,18 @@ path" error for a federated traversal; `io()` joins that set. No new failure mod
 
 ---
 
-## 4. Formats — which, in what order, and the two genuine walls
+## 4. Formats — which, in what order, and the one genuine wall
 
 `RowBatch` is format-free. Each format is a reader (bytes → row batches) and/or a writer (rows →
-bytes). Ranked by ratio of capability unlocked to work:
+bytes). Ranked by ratio of capability unlocked to work.
 
 **Two formats are excluded by decision, ahead of any scoping** (2026-07-31): **no homegrown format,
 and nothing XML.** The first is not a new rule — `2026-07-13-graphson-untyped-scope.md` already made
 "target the **standard** format, not a homegrown one" the policy for the response encoder, and it
-applies with equal force here. §4b records what excluding them costs, because it is not nothing.
+applies with equal force here. **Neither exclusion costs us a capability** — §4b is the measurement
+that shows why: typed GraphSON already covers everything a homegrown dump would have, and GraphML is
+strictly more type-lossy than the CSV we are keeping. **Exactly one genuine wall remains** (`.kryo`);
+GraphML is a decision, which is a different claim.
 
 | format | direction | unlocks | verdict |
 |---|---|---|---|
@@ -246,8 +249,8 @@ applies with equal force here. §4b records what excluding them costs, because i
 vocabulary: `.json` is *NOT YET*; `.xml` and `.kryo` are both *WE REFUSE* — the kryo pair a platform
 wall (like the regex UDFs), the graphml pair a **format decision**, which is a first for that file
 and worth spelling out as such. Four scenarios should therefore never be counted as a gap in our
-engine. (This supersedes the "4 of 6" figure in the item-30 index line and in `outstanding-work.md`'s
-`io()` bullet — both were written before the XML exclusion.)
+engine. (An earlier revision said "4 of 6", written before the XML exclusion; `outstanding-work.md`'s
+item-30 line and `io()` bullet were both swept to 2 at the same time as this, so all three agree.)
 
 **Not a bulk format, and this stays decided:** GraphBinary. It is a row-oriented, per-value
 self-describing *wire* protocol — every cell carries `type_code+type_info+value_flag`, no shared
@@ -555,7 +558,7 @@ per-element `run`.
 
 ---
 
-## 11. Corrections this plan makes to existing docs
+## 11. Corrections — to other docs, and to this one
 
 Recorded so they get swept rather than rediscovered:
 
