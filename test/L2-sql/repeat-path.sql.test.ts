@@ -300,8 +300,12 @@ describe('repeat / path SQL', () => {
     // both() + has() → cartesian over both directions = 2 recursive SELECTs.
     const b = read('g.V().repeat(__.both().has("age",P.lt(30))).times(2)');
     expect((b.sql.match(/EXISTS\(SELECT 1 FROM vertex_properties/g) || []).length).toBe(2);
-    // barrier/collection body steps (order/dedup/limit/…) still defer (can't live in a recursive term).
-    expect(() => compile('g.V().repeat(__.out().dedup()).times(2)', {})).toThrow('not yet supported');
+    // Barrier/collection body steps still defer — they cannot live in a recursive term. `dedup` is no
+    // longer one of them: a fixed times(n) UNROLLS it into n ordinary phases (unrollFixedRepeat,
+    // ir/strategies.ts), so the example here is a barrier that stays on the far side of that line.
+    expect(() => compile('g.V().repeat(__.out().order()).times(2)', {})).toThrow('not yet supported');
+    // …and the dedup body reaches SQL now, with no recursive term at all — n spliced phases.
+    expect(read('g.V().repeat(__.out().dedup()).times(2)').sql).not.toContain('RECURSIVE');
     expect(() => compile('g.V().repeat(__.local(__.out())).times(2)', {})).toThrow('not yet supported');
     // multi-hop body + path() defers (intermediate positions lost).
     expect(() => compile('g.V(1).repeat(__.in().out()).times(2).path()', {})).toThrow('multi-hop repeat() body');

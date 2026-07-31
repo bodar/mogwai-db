@@ -27,8 +27,11 @@
 // relation IS — which is the very property fact 1 shows the interpreter had to special-case to get.
 // But the equivalence has to be argued per barrier and pinned, not assumed from the corpus count.
 //
-// What this file therefore pins is the BOUNDARY, not the unroll: the bodies the reference does unroll
-// already compile here, and the ones it refuses defer identically however the strategy is spelled.
+// What this file pins is the BOUNDARY, which has since MOVED once: `dedup` is now unrolled
+// (`UNROLLABLE_BARRIERS`, ir/strategies.ts) because its argument is airtight — a bare `dedup()` is a
+// stateless collapse of the set it is handed, so n phase-local collapses and n per-iteration
+// collapses agree row for row. Every other barrier is still on the far side, and the file's job is to
+// keep the line visible rather than to bless a direction.
 import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { run, seededStore } from '../support/harness.ts';
@@ -44,6 +47,32 @@ describe('the repeat() unroll boundary', () => {
     expect(vals("g.V(1).repeat(__.out().has('name')).times(2)")).toEqual([3, 5]);
     // …so unrolling them would buy nothing. Every traversal item 3 counts is a BARRIER body, which is
     // the set the reference strategy refuses — that gap is the item, and it is not a free rewrite.
+  });
+
+  test('the one barrier we DO unroll agrees with the hand-written phases', () => {
+    // The equivalence is the whole licence for going past `RepeatUnrollStrategy`, so it is asserted
+    // as an identity rather than as an expected value: `repeat(B).times(n)` must equal B written out
+    // n times. If a future name joins `UNROLLABLE_BARRIERS`, add its pair here — that is the pin the
+    // set's comment demands.
+    const pairs: readonly [string, string][] = [
+      ['g.V().repeat(__.dedup()).times(2).count()', 'g.V().dedup().dedup().count()'],
+      ['g.V().repeat(__.dedup().both()).times(2).count()', 'g.V().dedup().both().dedup().both().count()'],
+      ['g.V().repeat(__.both().dedup()).times(2).count()', 'g.V().both().dedup().both().dedup().count()'],
+      ['g.V().repeat(__.dedup().both()).times(3).count()', 'g.V().dedup().both().dedup().both().dedup().both().count()'],
+      ["g.V().repeat(__.both().dedup()).times(1).values('name')", "g.V().both().dedup().values('name')"],
+    ];
+    for (const [rolled, written] of pairs) expect(vals(rolled)).toEqual(vals(written));
+  });
+
+  test('the run must be exactly repeat + times — emit, until and a named loop all decline', () => {
+    // Each declines for its own reason: emit() publishes intermediate frontiers (so the result is not
+    // n applications of the body), until() is a predicate rather than a count, and a named
+    // repeat("a", …) carries a counter loops("a") can read. All three keep today's deferral.
+    for (const q of [
+      'g.V().repeat(__.dedup().both()).times(2).emit()',
+      'g.V().emit().repeat(__.dedup().both()).times(2)',
+      "g.V().repeat(__.dedup().both()).until(__.has('name','lop'))",
+    ]) expect(() => compile(q, {})).toThrow();
   });
 
   test('a barrier body defers, and identically however RepeatUnrollStrategy is spelled', () => {
@@ -66,8 +95,13 @@ describe('the repeat() unroll boundary', () => {
   test('the deferral names the per-iteration frontier, which is the reference reading', () => {
     // The wording is load-bearing: it is the claim RepeatStep.java:217 supports, and the reason the
     // generic StepFns cannot be handed the body (they would lower it per-ORIGIN, answering a
-    // different question). If an unroll lands, THIS is the sentence it has to earn.
-    for (const q of ['g.V().repeat(__.dedup()).times(2).count()', 'g.V().repeat(__.dedup().both()).times(2)']) {
+    // different question). Every barrier still on the far side of the line has to earn this sentence
+    // before it moves — `dedup` earned it and is gone from this list.
+    for (const q of [
+      'g.V().repeat(__.order()).times(2).count()',
+      'g.V().repeat(__.groupCount().out()).times(2).count()',
+      'g.V().repeat(__.both().sample(1)).times(2)',
+    ]) {
       expect(() => compile(q, {})).toThrow('per-iteration GLOBAL barrier over the whole frontier');
       expect(() => compile(q, {})).toThrow('A fixed times(n) body could be unrolled instead (not built)');
     }

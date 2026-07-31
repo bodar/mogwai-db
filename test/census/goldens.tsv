@@ -511,6 +511,8 @@ ran	1	1	bc156f904bcb95f0	6fc35467db5cbb57	g.V().repeat(__.both()).times(5).value
 ran	1	1	740404317cc6f0e0	c6f7c72273862755	g.V().repeat(__.both()).times(5).values("age").min()
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().repeat(__.both().has("not", "productive")).times(3).constant(1)
 ran	18	18	1164c60eddcef258	24f22466e47405f0	g.V().repeat(__.both().simplePath()).times(3).path()
+ran	1	1	9fe914df746aacef	710dd45af8e7ce35	g.V().repeat(__.dedup()).times(2).count()
+ran	6	6	18b8873e8020dafe	21c409acd1141f6d	g.V().repeat(__.dedup().both()).times(2)
 ran	1	1	926eecc5fb73063f	d2dc4420cb2bde1e	g.V().repeat(__.out("knows")).until(__.repeat(__.out("created")).emit(__.has("name", "lop"))).path().by("name")
 ran	2	2	d37477f9ec2fc605	a21e1e31dbe42070	g.V().repeat(__.out()).times(2)
 ran	8	4	126b9a31e5d1aa80	fc95b747a4478ed1	g.V().repeat(__.out()).times(2).emit()

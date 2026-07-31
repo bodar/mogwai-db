@@ -750,6 +750,96 @@ export function canonicalizeConnectives(steps: Step[], params: Record<string, an
   return canonicalizeConnectivesLevel(anyChild ? mapped : steps) as IRStep[];
 }
 
+/** The barriers whose per-iteration meaning an UNROLLED phase reproduces exactly, so
+ *  `unrollFixedRepeat` may admit them. Deliberately ONE name.
+ *
+ *  A barrier in a repeat body observes the whole frontier at that iteration — that is the
+ *  reference's own behaviour, not our reading of it: `RepeatStep.standardAlgorithm`
+ *  (gremlin-core) tests `hasStepOfAssignableClassRecursively(Barrier.class, …)` and, when it holds,
+ *  drains EVERY start into the body before iterating it, "so that RepeatStep always has 'global'
+ *  children". Unrolled, phase k's relation IS the frontier at iteration k, so a phase-local barrier
+ *  asks the same question.
+ *
+ *  That argument is not uniform across barriers, which is why this set is not
+ *  `COLLAPSING_BARRIERS` or `GLOBAL_BARRIER_STEPS`. `dedup` is the case where it is airtight: a bare
+ *  `dedup()` is a stateless collapse of the set it is handed, with nothing carried between
+ *  invocations, so n phase-local collapses and n per-iteration collapses agree row for row.
+ *  `order`/`limit`/`range`/`tail`/`sample` all interact with an emission order the walk does not
+ *  have (a recursive CTE cannot window across iterations), and the reducers change the stream's
+ *  shape mid-body. **Each additional name needs its own argument and its own pin** — and note that
+ *  TinkerPop's `RepeatUnrollStrategy` admits NO barrier at all, its comment recording
+ *  "unintentional traversal semantics changes in the past when allowing a large variety of steps
+ *  (especially barriers)". We go further than it deliberately, one name at a time.
+ *  Boundary pinned in `test/compiler/repeat-unroll-boundary.exec.test.ts`. */
+const UNROLLABLE_BARRIERS = new Set(['dedup']);
+
+/** A body step an unrolled phase may contain: a bare `dedup()`, or a row-local movement/filter the
+ *  main chain already lowers. A modulator host is excluded because this pass runs BEFORE
+ *  `absorbModulators` — a spliced `order().by(k)` would arrive with its `by()` still a loose step. */
+const unrollableBodyStep = (s: Step): boolean =>
+  (UNROLLABLE_BARRIERS.has(s.name) && (s.args ?? []).length === 0)
+  || VERTEX_MOVES.has(s.name) || EDGE_MOVES.has(s.name) || ENDPOINT_MOVES.has(s.name)
+  || s.name === 'has' || s.name === 'hasLabel' || s.name === 'hasId' || s.name === 'identity';
+
+/**
+ * `repeat(body).times(n)` → the body spliced n times, when every step in the body is one an
+ * unrolled phase reproduces exactly.
+ *
+ * This is TinkerPop's `RepeatUnrollStrategy` widened by exactly one step name, and the widening is
+ * the whole point: the bodies that strategy admits (movement + `has()`) already compile here through
+ * the flat expansion, so unrolling THOSE buys nothing. What does not compile is a body with a
+ * barrier, because a recursive CTE cannot window across iterations — and an unrolled body has no
+ * iterations to window across. See `UNROLLABLE_BARRIERS` for why the admitted set is one name.
+ *
+ * Runs BEFORE `formRepeatRegions` and on the FLAT chain, which is what makes it cheap: the spliced
+ * steps are ordinary chain steps and every later pass — modulator absorption, the simplify group,
+ * the verifies — sees them exactly as if the user had written them out. Rewriting the region instead
+ * would hand the lowering a body that had skipped half the pipeline.
+ *
+ * Declines, leaving today's clear deferral in place, unless the run is exactly `repeat` + `times`:
+ * an `emit()` publishes intermediate frontiers (so the result is not n applications of the body), an
+ * `until()` is a predicate rather than a count, and a named `repeat("a", …)` carries a loop counter
+ * the phases would have to reproduce.
+ */
+export function unrollFixedRepeat(steps: Step[], params: Record<string, any>): Step[] {
+  const out: Step[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    if (!REPEAT_CLUSTER.has(steps[i].name)) { out.push(steps[i]); continue; }
+    const region: Step[] = [];
+    const seen = new Set<string>();
+    let j = i;
+    while (j < steps.length && REPEAT_CLUSTER.has(steps[j].name) && !seen.has(steps[j].name)) {
+      seen.add(steps[j].name); region.push(steps[j]); j++;
+    }
+    const unrolled = tryUnroll(region, params);
+    out.push(...(unrolled ?? region));
+    i = j - 1;
+  }
+  return out;
+}
+
+/** One repeat run → its unrolled steps, or null to leave the run alone. */
+function tryUnroll(region: Step[], params: Record<string, any>): Step[] | null {
+  if (region.length !== 2) return null;
+  const rep = region.find((s) => s.name === 'repeat');
+  const times = region.find((s) => s.name === 'times');
+  if (!rep || !times) return null;
+  const n = (times.args ?? [])[0];
+  if (typeof n !== 'number' || !Number.isInteger(n) || n < 1) return null;
+  // A named repeat("a", body) carries a loop counter loops("a") can read; only the single-arg form
+  // is a plain n applications.
+  const args = rep.args ?? [];
+  if (args.length !== 1 || !isNested(args[0])) return null;
+  const body = stepChain(args[0].nested, params);
+  if (!body.length || !body.every(unrollableBodyStep)) return null;
+  // Nothing to gain unless a barrier is what was blocking it: a barrier-free body already lowers
+  // through the flat expansion, and unrolling it would change the SQL for no capability.
+  if (!body.some((s) => UNROLLABLE_BARRIERS.has(s.name))) return null;
+  const phases: Step[] = [];
+  for (let k = 0; k < n; k++) phases.push(...body.map((s) => ({ ...s })));
+  return phases;
+}
+
 /**
  * Gather each contiguous repeat/emit/times/until run into ONE step carrying the
  * cluster. The modulators can sit either side of repeat(); the run stops at the

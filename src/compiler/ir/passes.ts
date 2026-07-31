@@ -1,7 +1,7 @@
 import { isNested, type Step, type StrategyUse } from '../../gremlin/frontend.ts';
 import { PASS_CATEGORIES, type Pass, type PassCategory, type PassContext } from './pass.ts';
 import {
-    stripTerminal, desugarMatchString, formRepeatRegions, absorbModulators, absorbOptionArms, absorbCallWith,
+    stripTerminal, desugarMatchString, formRepeatRegions, unrollFixedRepeat, absorbModulators, absorbOptionArms, absorbCallWith,
     canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
     verifyReadOnlyChildren,
     absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
@@ -96,6 +96,11 @@ const FOLD: Pass[] = group('canonicalize', [
   // it mints is `normalize()`d again when compiled as a child, so a by()/repeat cluster inside a
   // folded operand still canonicalizes.
   { name: 'ConnectiveStrategy', run: (steps, ctx) => canonicalizeConnectives(steps, ctx.params) },
+  // BEFORE formRepeatRegions and on the FLAT chain: an unrolled `repeat(body).times(n)` becomes
+  // ordinary chain steps, so every later pass sees them as if the user had written them out. Placed
+  // in canonicalize rather than simplify because it is not a no-op removal — it changes the chain's
+  // shape so a body the recursive CTE cannot express becomes one the main chain can.
+  { name: 'unrollFixedRepeat', applies: (steps) => steps.some((s) => s.name === 'times'), run: (steps, ctx) => unrollFixedRepeat(steps, ctx.params) },
   { name: 'formRepeatRegions', run: (steps) => formRepeatRegions(steps) },
   // Desugar valueMap().with(WithOptions.tokens) → valueMap(true) BEFORE absorbModulators, so a
   // following by() (e.g. the selective-token form's by(unfold)) folds onto the host once landed.

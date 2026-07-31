@@ -458,9 +458,12 @@ describe('repeat() body: the generic body relation', () => {
     // StepFns would happily lower it (bare dedup emits SELECT DISTINCT id, <carried>, and with an
     // origin column in the tuple that silently becomes PER-ORIGIN), so the gate is the row-local
     // vocabulary, not "whatever lowerElementSteps accepts". This test is that guard.
+    // `dedup` has since MOVED off this list — a fixed times(n) unrolls it into n ordinary phases,
+    // where a phase-local collapse is exactly the per-iteration one (unrollFixedRepeat,
+    // ir/strategies.ts; the equivalence is pinned as an identity in repeat-unroll-boundary). The wall
+    // stands for every barrier whose phase-local reading is NOT the per-iteration one.
     const store = seededStore();
     for (const [g, step] of [
-      ['g.V(1).repeat(__.out().dedup()).times(2).count()', 'dedup'],
       ['g.V(1).repeat(__.out().limit(1)).times(2).count()', 'limit'],
       ['g.V(1).repeat(__.out().order().by("name")).times(2).count()', 'order'],
       ['g.V(1).repeat(__.out().aggregate("x").out()).times(2).count()', 'aggregate'],
