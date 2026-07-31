@@ -4,8 +4,8 @@ The de-duplicated index of open work across the `docs/` corpus. **Each item sets
 why, where to start — not a spec.** The linked doc holds the rationale; the picking agent does the
 validation and design. Live per-step capability: `feature-support-matrix.md`.
 
-**Refreshed** 2026-07-31 · **L3 1647 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
-collision is expected, see won't-do) · census **0 `crashed`** · `known.ts` empty (intended) ·
+**Refreshed** 2026-07-31 · **L3 1650 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
+collision is expected, see won't-do) · census **0 `crashed`, 4 `nondet`** (sample() landed) · `known.ts` empty (intended) ·
 `capability-baseline.ts` 2 entries, one stale (22c).
 
 Item numbers are stable IDs; landed items are DELETED and their numbers not reused, because code
@@ -31,8 +31,9 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-**Ranked entry point.** Numbers are IDs, not an order. **2** → **21**'s T4 → **17**'s `tail`/`sample`
-+ **28** → **29** → **3**'s `times(n)` unroll.
+**Ranked entry point.** Numbers are IDs, not an order. **2** → **21**'s T4 → **28** → **29** →
+**3**'s `times(n)` unroll. (**17**'s cheap half landed; its remainder is the architectural
+current-object-aggregate authority, which is a bigger question than its neighbours.)
 
 **Landed 2026-07-31, in this order, and each changed what came after it.** Item 27's seven
 `Scope.local` fail-closed violations (one argument decode, `sliceOf`). Item 22's 24 write-path
@@ -40,7 +41,8 @@ non-validations (`steps/write/validate.ts`, L3 1623 → 1647). The root-material
 (was 26) — `rootOrder` is now the one place the wire's row order is decided, all eleven roots ask it,
 and **that is what made 21 measurable at all**. Then 21's T1/T2/T3, the branch-arm batching family
 (L3 → 1648). Two of item 2's four named wrong answers turned out to be the reference's own answers
-and are now L4-pinned rather than open.
+and are now L4-pinned rather than open. Then item 17's `tail`/`sample` (L3 → 1650), which also gave
+the census its first four `nondet` rows.
 
 **What that leaves.** No item below is a known wrong answer except 20's residuals and 21's T4 — the
 rest fail closed. Read that as the index's centre of gravity moving from correctness to ceiling.
@@ -79,23 +81,26 @@ rest fail closed. Read that as the index's centre of gravity moving from correct
    → [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md),
    [group-value-generic-seam](./2026-07-18-group-value-generic-seam-plan.md)
 
-17. **Share the row-ops — slice/dedup family LANDED; `tail`+`sample` are the cheap remainder.**
-   `reprojectRows` + `globalRowOps()` (`tail/barrier.ts`) took those five ops from 17/50 gaps to 4/50.
-   Re-measured at 15 ops × 10 producers = **150 cells, 86 gaps**, of which **`tail`+`sample` are 19 and
-   fall to ONE lift of the mechanism already built** — `tail` is the one window `sliceOf` (`ir/step.ts`)
-   deliberately does NOT decode, because "the last n" is an offset only once something supplies the member
-   COUNT; supply that and `tail` joins `SLICE_STEPS` and `limitOffset` renders it. `select.ts`'s
-   `recordWindow` is the shape of the answer for the one stream whose count is static.
-   **`tail()` does not exist on the ELEMENT stream at all** though `filter/Tail.feature` has 22
-   scenarios; `sample()` exists nowhere. The other 63: 42 current-object aggregates (ARCHITECTURAL —
-   they need an "expression denoting the traverser's value" authority), 7 `order`, 6 `is` (mechanical
-   now), 5 `unfold` (correctly per-shape forever).
-   **The trap that cost 42 corpus traversals:** a shape table is a Map where the LAST duplicate key wins
-   and `dispatchShapeTail` consults ONE handler per name, so spreading a shared op into a table that
-   already owns that name REPLACES the incumbent — and a handler that "declines" falls to the FALLBACK
-   THROW rather than through. Compose with `firstOf`. The variant tail now takes `globalRowOps()` verbatim
-   (its re-declared copy was the one missing the `Scope.local` decline); `lowerScalarRows`
-   (`scalar.ts:640`) is the one tail never transposed to a dispatch Map. **Low-Med.**
+17. **Share the row-ops — `tail`+`sample` LANDED 2026-07-31; what is left is the ARCHITECTURAL 42.**
+   `reprojectRows` + `globalRowOps()` (`tail/barrier.ts`) took the slice/dedup family from 17/50 gaps to
+   4/50; `tail`+`sample` were the cheap 19 and went in as one entry each — `tail` is `limit` read from
+   the far end (`RowOpts.descending`), `sample` is `ORDER BY RANDOM() LIMIT n`, exact for the unweighted
+   case because `SampleGlobalStep`'s weights come from a `by()` and with none every weight is 1. The
+   element prefix got its own pair, since an element stream is not dispatched through
+   `dispatchShapeTail`. L3 1648 → 1650.
+   **A third reason to seed an emission encounter came out of it**, now in `analyze.ts` beside the other
+   two: `tail` needs one with NO fan-out upstream, because `ORDER BY <encounter> DESC LIMIT n` IS its
+   implementation, where `limit(n)` can free-ride on SQLite's forward scan.
+   **The remaining 63, and only the middle two are ordinary work:** 42 current-object aggregates
+   (ARCHITECTURAL — they need an "expression denoting the traverser's value" authority), 7 `order`,
+   6 `is` (mechanical), 5 `unfold` (correctly per-shape forever). **The 42 are the item now**, and they
+   are not a matrix-fill.
+   **The trap that cost 42 corpus traversals, still live:** a shape table is a Map where the LAST
+   duplicate key wins and `dispatchShapeTail` consults ONE handler per name, so spreading a shared op
+   into a table that already owns that name REPLACES the incumbent — and a handler that "declines" falls
+   to the FALLBACK THROW rather than through. Compose with `firstOf`. `lowerScalarRows`
+   (`scalar.ts:640`) is the one tail never transposed to a dispatch Map. **Medium** (was Low-Med; what
+   is left is the architectural half).
 
 28. **`expandRepeatBody` is a SEVENTH specialized lowering and the only one the differential cannot
    see.** `branch.ts:800`'s gate means the flat expansion always wins where it recognises the body, and
