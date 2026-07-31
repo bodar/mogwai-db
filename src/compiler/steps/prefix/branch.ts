@@ -5,11 +5,11 @@ import { edges } from '../../../sql/schema.ts';
 import { engineOf, fastPathContextOf, type Engine } from '../../engine/deps.ts';
 import { analyzeChain, type ChainFacts } from '../../ir/analyze.ts';
 import { normalize } from '../../ir/passes.ts';
-import { armCollapses, VERTEX_MOVES } from '../../ir/step.ts';
+import { armBatches, VERTEX_MOVES } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
 import { aliasCtx, dirsFor, edgeLabelFilter, elemCtx, hasProp, jsonbGroupArray, labelIn, predicateSql, scalarProp, vertexLabelIn, vertexLabelName, vertexLabelsJson, type EdgeEnd, type Elem, type ScalarCtx } from '../../plan/plan.ts';
-import { aliasColsOf, appendCte, collapsedArmAdmissible, elemRel, labelScope, layoutCols, layoutProjection, layoutProjectionMinting, mergeLayouts, partitionOver, patchLayout, prevRel, rehomeLayout, rigidCols, type AliasMap, type ElementStream, type LoweringState, type PathState, type SideEffectDef, type StepFn, type TraverserLayout } from '../context/context.ts';
+import { aliasColsOf, appendCte, armBatchAdmissible, collapsedArmAdmissible, elemRel, labelScope, layoutCols, layoutProjection, layoutProjectionMinting, mergeLayouts, partitionOver, patchLayout, prevRel, rehomeLayout, rigidCols, type AliasMap, type ElementStream, type LoweringState, type PathState, type SideEffectDef, type StepFn, type TraverserLayout } from '../context/context.ts';
 import { loweringStateOf, toElementStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isGlobalBarrier, optionMapMerge, optionMapNeedsPassthrough, readOptionMapArms, ROOT_SCOPE, type ChildCtx, type ChildPlan } from '../tail/child-shape.ts';
 import { pushChildScope, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
@@ -250,10 +250,35 @@ export const union: StepFn = (s, st) => {
   // arity guard and()/or() carried: it broke the metamorphic law `union(q) === q`. ZERO branches
   // still throws (nothing to merge).
   if (branches.length === 0) throw new Error('union() needs at least one branch');
-  const ends = branches.map((b) => tryCompileElementTraversal(st, b.nested)
+  const ends = branches.map((b) => tryBatchedElementArm(st, b.nested) ?? tryCompileElementTraversal(st, b.nested)
     ?? (() => { throw new Error(`union() branch __.${armDescription(b.nested, st.params)} not yet supported (scalar/projection body)`); })());
   return mergeElementArms(loweringStateOf(st), ends);
 };
+
+/**
+ * A BATCHING branch's element arm, lowered over the branch's whole input — T3 of the branch-arm plan.
+ *
+ * `union(__.out().limit(2))` took two out-neighbours PER VERTEX (5 on the modern graph); the reference
+ * takes two in total, because `RangeGlobalStepContract extends FilteringBarrier extends Barrier` sets
+ * `hasBarrier` exactly as a reducer does. Same for `dedup` (4 distinct out-neighbours, not 6) and for
+ * `order`/`tail`/`sample`/`range`/`skip`.
+ *
+ * The routing is a PREFERENCE, not new machinery: `tryCompileElementTraversal` tries the per-origin
+ * child scope first and only falls back to the root-scope fold, so a slice arm took the child scope
+ * merely because it was offered first. Asking `armBatches` before that reverses the order for the arms
+ * the reference batches, and every other arm is untouched — which also means the merge needs nothing:
+ * a root-scope arm carries the parent's layout exactly, so `mergeElementArms`' carried-column
+ * agreement holds by construction rather than by padding.
+ *
+ * `armBatchAdmissible` is the one gate. Inside a child scope the branch's input is one parent's SHARE
+ * of the stream, so a global slice across the shares would answer a different question — that case
+ * keeps the per-origin lowering, which is what `local(union(…))` means anyway.
+ */
+function tryBatchedElementArm(st: ElementStream, nested: any): ElementStream | null {
+  if (!armBatchAdmissible(st.traverserLayout) || !nested) return null;
+  const body = childSteps(nested, st.params);
+  return armBatches(body) ? engineOf(st).tryLowerElementSteps(body, st) : null;
+}
 
 /** Homogeneous scalar union through the generic child compiler. Every arm applies
  * `all` to the same incoming parent stream; UNION ALL then concatenates their
@@ -305,7 +330,7 @@ export function tryLowerScalarUnion(s: Step, st: ElementStream): ScalarStream | 
 function tryCompileBatchedElementArm(st: ElementStream, nested: any, plan: ReturnType<typeof classifyScalarChild>): ScalarStream | null {
   if (!plan || !collapsedArmAdmissible(st.traverserLayout)) return null;
   const body = childSteps(nested, st.params);
-  if (!armCollapses(body)) return null;
+  if (!armBatches(body)) return null;
   const end = engineOf(st).lowerStepsStrict(st, body, 0);
   return end.kind === 'scalar' ? gateArmOnNonEmptyInput(end, st.rel) : null;
 }
@@ -1059,7 +1084,9 @@ export const choose: StepFn = (s, st) => {
 
   const arm = (arg: any, seed: ElementStream): ElementStream => {
     const body = stepChain(arg.nested, st.params);
-    const end = tryCompileElementTraversal(seed, arg.nested);
+    // Batched over the GATED seed, not the raw input: `hasBarrier` changes how many starts
+    // `ChooseStep` injects, not which option each start picks (same reasoning as the scalar arm's).
+    const end = tryBatchedElementArm(seed, arg.nested) ?? tryCompileElementTraversal(seed, arg.nested);
     if (!end)
       throw new Error(`choose() branch __.${body.map((c) => c.name + '()').join('.')} not yet supported (scalar/projection body)`);
     return end;

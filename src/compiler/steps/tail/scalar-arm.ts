@@ -33,7 +33,7 @@ import { gateArmOnNonEmptyInput } from './barrier.ts';
 import { gateScalar, tryInlineScalarPredicate, unionScalarStreams } from './scalar.ts';
 import { predicateSql, TYPE_PER_ROW, TYPE_UNKNOWN } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { armCollapses } from '../../ir/step.ts';
+import { armBatches } from '../../ir/step.ts';
 import {
     CHILD_SCALAR_REDUCERS, isResourceHead, pushChildScope, resourceElement,
     tryCompileListChild, tryCompileScalarValueChild, tryCompileScalarValueRows,
@@ -344,7 +344,7 @@ export function tryScalarUnionChild(s: ScalarStream, step: IRStep): ScalarStream
 function tryCompileBatchedScalarArm(parent: ScalarStream, nested: any): ScalarStream | null {
   if (!collapsedArmAdmissible(parent.traverserLayout)) return null;
   const body = childSteps(nested, parent.params);
-  if (!armCollapses(body) || !scalarArmClassifies(body, parent.params)) return null;
+  if (!armBatches(body) || !scalarArmClassifies(body, parent.params)) return null;
   const end = engineOf(parent).lowerStepsStrict(parent, body, 0);
   return end.kind === 'scalar' ? gateArmOnNonEmptyInput(end, parent.rel) : null;
 }

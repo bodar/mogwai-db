@@ -410,11 +410,19 @@ export function layoutArmProjection(out: TraverserLayout, arm: TraverserLayout, 
   return cols.length ? list(cols.map((e) => q`, ${e}`), '') : empty;
 }
 
-/** The carried roles a COLLAPSING arm can honestly fill — asked of the branch's INPUT layout,
- *  before any arm is lowered, because that is the only place a decline is still free. The roles it
- *  names are exactly the ones `layoutArmProjection` refuses to invent. */
+/** Can a BATCHED arm be lowered over this branch's input at all? Only when that input IS the whole
+ *  stream. Inside a child scope it is one parent's SHARE of the stream, and a barrier applied across
+ *  the shares answers a different question — which is the same fact `isStreamBarrier` encodes for the
+ *  `repeat()`/`match()` gates, seen from the branch side. */
+export const armBatchAdmissible = (input: TraverserLayout): boolean => !input.origins.length;
+
+/** A COLLAPSING arm needs more than `armBatchAdmissible`: `dropLayoutAtBarrier` destroys its
+ *  per-traverser state, so a live `path`/`sack`/`fromV` has no honest value on the other side — and
+ *  those are exactly the roles `layoutArmProjection` refuses to invent. A SLICE arm keeps all of
+ *  them, which is why the two predicates are not one. Asked of the branch's INPUT, before any arm is
+ *  lowered, because that is the only place a decline is still free. */
 export const collapsedArmAdmissible = (input: TraverserLayout): boolean =>
-  !input.origins.length && !input.path && !input.sack && !input.fromV;
+  armBatchAdmissible(input) && !input.path && !input.sack && !input.fromV;
 
 /** The relation an arm merge produces, plus the carried schema it declares.
  *  `mergeArmRelation` owns both, so a caller cannot take one without the other. */

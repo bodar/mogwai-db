@@ -198,8 +198,36 @@ export const COLLAPSING_BARRIERS: ReadonlySet<string> = REDUCERS;
 export const BATCHING_BRANCHES: ReadonlySet<string> = new Set(['union', 'choose']);
 
 /**
- * Does this arm body COLLAPSE — does a barrier in it reduce the branch's whole input to a single
- * traverser?
+ * The barriers that PRESERVE cardinality but choose or reorder a subset of the whole stream. Every
+ * one is a `Barrier` in the reference — `RangeGlobalStepContract`/`TailGlobalStepContract extends
+ * FilteringBarrier`, `OrderGlobalStep`/`SampleGlobalStep extends CollectingBarrierStep`,
+ * `DedupGlobalStep extends FilteringBarrier` — so each sets `hasBarrier` exactly as a reducer does.
+ *
+ * Separate from `COLLAPSING_BARRIERS` because the two differ in what they do to the merge, not in
+ * whether they batch: a collapsing arm loses its carried per-traverser state to
+ * `dropLayoutAtBarrier`, a slice arm keeps it.
+ */
+export const SLICE_BARRIERS: ReadonlySet<string> =
+  new Set(['limit', 'range', 'skip', 'tail', 'order', 'sample', 'dedup']);
+
+/**
+ * The barriers whose presence in an arm makes that arm see the branch's WHOLE input.
+ *
+ * `GLOBAL_BARRIER_STEPS` minus four, and each exclusion is a reason rather than an oversight:
+ * `fold`/`group`/`groupCount`/`aggregate` change the stream's SHAPE, so batching one turns a
+ * homogeneous merge into a mixed-shape merge (that is the branch-arm plan's own open ground, and
+ * bundling it here would hide a shape change inside a scope change); `local` is in
+ * `GLOBAL_BARRIER_STEPS` because two other gates want "not row-local" from it and is not a `Barrier`
+ * in the reference at all; `barrier` itself is a no-op for us.
+ *
+ * So this is the set whose arms we can hand to the ordinary engine over the branch's input and get
+ * the same SHAPE back. That is the whole criterion, and it is why the set is spelled here rather
+ * than derived by subtraction at a call site.
+ */
+export const BATCHED_BARRIERS: ReadonlySet<string> = unionOf(COLLAPSING_BARRIERS, SLICE_BARRIERS);
+
+/**
+ * Does this arm body BATCH — does a barrier in it make the arm observe the branch's whole input?
  *
  * Position-INDEPENDENT on purpose. `hasBarrier` is set by
  * `getStepsOfAssignableClassRecursively(Barrier.class, …)`, which asks whether the option CONTAINS
@@ -208,11 +236,11 @@ export const BATCHING_BRANCHES: ReadonlySet<string> = new Set(['union', 'choose'
  * committed test caught, and it is a real 4-vs-2 row difference.
  *
  * The scan is flat, so a barrier that sits only inside a NESTED branch arm is not seen here and that
- * arm keeps its per-origin lowering. The reference's scan recurses; matching it is the same widening
- * that T3 needs and is deliberately not bundled in.
+ * arm keeps its per-origin lowering. The reference's scan recurses; matching it is a separate
+ * widening, deliberately not bundled in.
  */
-export const armCollapses = (body: readonly { readonly name: string }[]): boolean =>
-  body.some((s) => COLLAPSING_BARRIERS.has(s.name));
+export const armBatches = (body: readonly { readonly name: string }[]): boolean =>
+  body.some((s) => BATCHED_BARRIERS.has(s.name));
 
 /** The four steps that fork a traverser into arms and merge the results. */
 export type BranchKind = 'union' | 'choose' | 'coalesce' | 'optional';
