@@ -22,12 +22,19 @@ export MISE_VERSION_CHECK=0
 #
 #    Two recurring artifacts of a web-session clone, both of which have already cost real
 #    time in a session:
-#      - `trunk` (the LOCAL branch) can point at a lineage sharing NO history with
-#        `origin/trunk`. `git checkout trunk` then silently swaps the working tree for a
-#        stale copy of the repo — the failure looks like your edits vanished — and
-#        `git merge --ff-only` refuses with "unrelated histories". Measured 2026-07-31:
-#        local trunk was 50 commits divergent with NO merge base, while origin/trunk was
-#        correct.
+#      - `trunk` (the LOCAL branch) can be left at a SUPERSEDED tip while `origin/trunk`
+#        is correct. `git checkout trunk` then silently swaps the working tree for a stale
+#        copy of the repo — the failure looks like your edits vanished — and
+#        `git merge --ff-only` refuses with "unrelated histories".
+#        The clone being SHALLOW is the whole mechanism, and the "unrelated" part is a
+#        MISREADING worth not repeating: the harness fetches the default branch more than
+#        once at `--depth 50`, and each fetch cuts its own 50-commit window with its own
+#        graft in `.git/shallow`. `origin/trunk` advances to the later window's tip — git
+#        logs that fetch as a plain `fast-forward`, so upstream it is one ordinary branch —
+#        while local `trunk` stays at the earlier one. The two windows do not overlap, so
+#        there is no merge base IN THIS CLONE: not two lineages, two truncated views of one.
+#        Measured 2026-07-31: local trunk 50 commits back, no merge base, two grafts in
+#        `.git/shallow`, and `origin/trunk`'s own reflog recording the fast-forward.
 #      - `refs/remotes/origin/HEAD` is unset, so every "what is the default branch" probe
 #        (`git symbolic-ref refs/remotes/origin/HEAD`, `git rev-parse --abbrev-ref
 #        origin/HEAD`) fails and tooling falls back to guessing.
