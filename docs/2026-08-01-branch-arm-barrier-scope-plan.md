@@ -1,6 +1,6 @@
 # A branch arm's barrier observes the branch's whole input — doing it properly
 
-**Status: T1 LANDED 2026-07-31. T2/T3/T4 open. The fail-closed gate has NOT been written** — nothing
+**Status: T1 and T2 LANDED 2026-07-31. T3/T4 open. The fail-closed gate has NOT been written** — nothing
 named `verifyBranchArmBarrierScope` exists in `src/`, so anything T2/T3 have not reached still
 mis-executes rather than deferring.
 **T1's outcome, and it revises T1's own prediction.** "Probably nearly free" was right about the
@@ -13,6 +13,18 @@ a GENERATED traverser: no labels, bulk 1), and `collapsedArmAdmissible` refuses 
 inherits** — §T2's "the merge must tolerate arms whose layouts differ in that specific way" now has a
 name. `choose` also lands: the batched arm lowers over the GATED seed, because `hasBarrier` changes
 how many starts are injected, not which option each start picks.
+**T2's outcome, and it corrected two things T1 got wrong.** The lowering half was the same
+one-liner — the arm goes through the ordinary engine over the branch's ELEMENT input — but two gates
+were wrong. (1) `armCollapses` must scan the WHOLE body, not the terminal step: `hasBarrier` comes from
+`getStepsOfAssignableClassRecursively`, so `union(__.out().count().is(gt(0)), …)` batches, and gating on
+the last step was a real 4-vs-2 row difference a committed test caught. (2) `collapsedArmProjection` is
+GONE, subsumed into `layoutArmProjection`, which now resolves the merged schema per COLUMN — because
+"is this arm collapsed?" has no answer for `union(__.out().count().as("x"), …)`, an arm that has lost
+`bulk` and gained an alias. Asking once emitted a trailing comma where `a.bulk` resolved to nothing.
+**A third piece was missing from the plan entirely:** an arm that received NO traversers must emit
+nothing even though its barrier has a seed value (`count()` over empty is 0 as a main chain, but
+`ChooseStep` never runs an unrouted option). `gateArmOnNonEmptyInput` (`tail/barrier.ts`) is that, and a
+`V()` re-source arm is what makes it visible, since its rows do not come from the arm's input at all.
 **Two tests asserted the old answer and both said so in a comment** ("matches the element-parent
 branch convention"). They did; the convention was wrong. `test/compiler/scalar.exec.test.ts` and
 `test/L4-addendum/scalar-reentry.feature` now carry the reference's answer plus a cardinality-MIXING
