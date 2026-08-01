@@ -621,8 +621,27 @@ export const layoutCols = (c: TraverserLayout): string[] =>
  *  and path positions ride forward. */
 export function layoutProjection(c: TraverserLayout, p: Relation): Expression {
   const cols = layoutCols(c);
-  return cols.length ? list(cols.map((x) => q`, ${p.c[x]}`), '') : empty;
+  return cols.length ? list(cols.map((x) => q`, ${carried(p, x)}`), '') : empty;
 }
+
+/** Read ONE declared carried column off `p`, or say which channel is missing.
+ *
+ *  Every rejoin in the tree projects some layout off some relation, and the two can disagree in
+ *  exactly one direction that nothing else catches: a PARENT's layout projected off a CHILD-derived
+ *  relation whose body RETYPED a carried channel. The child stream is self-consistent and the
+ *  parent's layout is self-consistent — the mismatch exists only across the rejoin — so
+ *  `assertStreamColumns` cannot see it. Before the kernel's own column guard it splices an empty
+ *  string and ships malformed SQL (`SELECT …, b0.bulk,  FROM c6 b0`) for the database to reject.
+ *
+ *  This is that guard at the layer that knows what the column MEANS, so the deferral names the
+ *  channel rather than a CTE alias. Live case: a `repeat()` under a live `simplePath()` retypes the
+ *  linear path positions (`p0`, `p1`, …) to its own recursive accumulator — see
+ *  docs/outstanding-work.md, P3 recursive-path tails. */
+const carried = (p: Relation, col: string): Expression => {
+  if (!p.cols.includes(col))
+    throw new Error(`carried '${col}' is not present on the relation being rejoined — a child body that retypes or drops carried state cannot rejoin at parent cardinality`);
+  return p.c[col];
+};
 
 /** Like layoutProjection, but ONE named carried column is computed fresh (`mint`) rather than
  *  projected unchanged from `p` — the generalization of the ordinal special-case already
@@ -647,7 +666,7 @@ export function layoutProjectionMintingMany(
   const cols = layoutCols(c);
   return cols.length ? list(cols.map((x) => {
     const mint = mints.get(x);
-    return mint ? q`, ${mint} AS ${x}` : q`, ${p.c[x]}`;
+    return mint ? q`, ${mint} AS ${x}` : q`, ${carried(p, x)}`;
   }), '') : empty;
 }
 

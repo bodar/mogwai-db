@@ -79,3 +79,44 @@ describe('the cardinality proof is the gate — a many-valued local() body stays
     expect(vals('g.V().local(__.out().count())')).toEqual(vals('g.V().map(__.out().count())'));
   });
 });
+
+// A branch in a scalar child body carries a scalar-row TAIL, and a reducer in that tail is
+// per-ORIGIN — the same rule the element-row route below it has always followed.
+//
+// The branch route used to hand its WHOLE body to `lowerStepsStrict`, so the reducer reached
+// `SCALAR_DISPATCH` and lowered as a GLOBAL barrier: it dropped the carried layout, and the
+// parent's rejoin then projected an ordinal the relation no longer had, splicing an empty
+// expression into the SQL (`SELECT r.v AS v,  FROM c8 r`). Both halves are now closed — the route
+// continues the tail through the same `continueScalarChildTail` the element-row route uses, and
+// `layoutProjection` refuses to project a carried column a relation does not declare.
+//
+// Invisible to every instrument at the time: the two corpus witnesses were `unbound` (never
+// executed), neither L5 ratchet drew it, and `assertStreamColumns` cannot see it because the merged
+// stream is self-consistent — the mismatch only exists ACROSS the rejoin.
+describe('a reducer after a multi-arm branch in a child scope is per-origin', () => {
+  test('the arms are merged per traverser, not collapsed globally', () => {
+    // Each vertex counts ITS OWN name+age values: the four people have both, the two software
+    // vertices only a name. A global count would answer one row of 10.
+    expect(vals("g.V().local(__.union(__.values('name'), __.values('age')).count())"))
+      .toEqual([2, 2, 1, 2, 1, 2]);
+    // Same body, same arm twice, so the per-origin sum is exactly twice the vertex's own age —
+    // an equivalence that cannot drift with the fixture.
+    expect(vals("g.V().local(__.union(__.values('age'), __.values('age')).sum())"))
+      .toEqual(vals("g.V().local(__.values('age').sum())").map((v) => v * 2));
+    // max() over two copies of one value is that value.
+    expect(vals("g.V().local(__.union(__.values('age'), __.values('age')).max())"))
+      .toEqual(vals("g.V().local(__.values('age').max())"));
+  });
+
+  test('the same body reaches the filter positions', () => {
+    // Every vertex has at least one of name/age, so the count is productive for all six.
+    expect(bag("g.V().where(__.union(__.values('name'), __.values('age')).count().is(P.gt(0)))"))
+      .toEqual(bag('g.V()'));
+  });
+
+  test('the shapes that already worked are unchanged', () => {
+    // ONE arm still defers (the child-shape decline), and an ELEMENT-armed union still counts rows.
+    expect(() => compile("g.V().local(__.union(__.values('name')).count())", {})).toThrow();
+    expect(vals('g.V().local(__.union(__.out(), __.in()).count())')).toEqual([3, 1, 3, 3, 1, 1]);
+  });
+});

@@ -16,8 +16,13 @@ export const KNOWN_RAW_WITNESSES: ReadonlyMap<string, string> = new Map([
     // …) to its own recursive `array` accumulator, because the live `simplePath()` makes the walk
     // path-tracking. The parent's layout still declares the POSITION columns, and the cardinality
     // rejoin projects the parent's declared carried schema off the CHILD relation — which now
-    // carries `path` and no `p0`. `rel.c.p0` resolves to `undefined`, splicing an empty string into
-    // the record rejoin: `c7(…, p0) as (SELECT …, b0.bulk, FROM c6 b0)`.
+    // carries `path` and no `p0`.
+    //
+    // It used to SPLICE AN EMPTY STRING there (`c7(…, p0) as (SELECT …, b0.bulk, FROM c6 b0)`) and
+    // ship malformed SQL for the database to reject — the one fail-closed VIOLATION in P3. It now
+    // DEFERS: `layoutProjection` (steps/context/context.ts) checks that a relation declares each
+    // carried column it is asked to project, which is the same rejoin-crossing mismatch nothing
+    // else could assert. The capability gap below is unchanged; only its failure mode is.
     //
     // Minimal repro — none of `elementMap`, `filter` or the second `by()` is load-bearing:
     //   g.V(1).simplePath().project('a').by(__.repeat(__.in('knows')).times(2))
@@ -29,6 +34,6 @@ export const KNOWN_RAW_WITNESSES: ReadonlyMap<string, string> = new Map([
     // real fix is for a child body to restore the parent's path regime across the rejoin, which is
     // path-history-substrate work. Tracked in docs/outstanding-work.md P3 "Recursive-path tails".
     "g.V(1).simplePath().hasId(2).has('lang').project('a', 'b').by(__.filter(__.elementMap().fold()).repeat(__.in('knows')).times(2)).by(__.not(__.out('knows')).hasId(7).has('age', P.lt(2)))",
-    'near "FROM": syntax error',
+    "carried 'p0' is not present on the relation being rejoined — a child body that retypes or drops carried state cannot rejoin at parent cardinality",
   ],
 ]);

@@ -564,34 +564,54 @@ function elementOptionMapScalarBranch(branch: IRStep, ctx: ChildCtx): boolean {
 /** PURE. An element-parent scalar child whose value comes from a nested branch step — the
  * recursive extension of classifyScalarChild. Grammar: an ELEMENT_CHILD_STEPS prefix, a branch
  * step (choose/coalesce/union, predicate-form choose only) whose VALUE arms are each recursively
- * classifyScalarChild-compatible, then a scalar-row suffix. When true, lowerSteps re-dispatches
- * the branch to the element-parent branch compilers, which recurse per arm — so the emitter needs
- * no bespoke reader. Precise (all arms scalar) so it never claims a list/variant-armed branch. */
-export function elementScalarBranchArm(body: ReturnType<typeof stepChain>, ctx: ChildCtx): boolean {
+ * classifyScalarChild-compatible, then a scalar-row suffix. When it qualifies, lowerSteps
+ * re-dispatches the branch to the element-parent branch compilers, which recurse per arm — so the
+ * emitter needs no bespoke reader. Precise (all arms scalar) so it never claims a list/variant-armed
+ * branch.
+ *
+ * Returns the SPLIT, not a boolean, for the same reason `scalarRowParts` does: the emitter must
+ * lower the head (`prefix` + `branch`) and CONTINUE the suffix itself, because a terminal reducer in
+ * that suffix is per-ORIGIN in a child scope and global in the engine's dispatch. Handing the whole
+ * body to `lowerStepsStrict` — which is what a boolean answer invited, and what the branch route did
+ * — routes `count()`/`sum()`/`max()` to `lowerGlobalCount`/`lowerGlobalNumericReducer`, which drop
+ * the carried layout at the barrier and leave the parent's rejoin projecting an ordinal the relation
+ * no longer has. That spliced an EMPTY expression list (`SELECT r.v AS v,  FROM c8 r`) rather than
+ * failing closed. */
+export function elementScalarBranchParts(
+  body: ReturnType<typeof stepChain>,
+  ctx: ChildCtx,
+): { prefix: ReturnType<typeof stepChain>; branch: IRStep; suffix: ReturnType<typeof stepChain> } | null {
   const at = body.findIndex((s) => ELEMENT_ARM_BRANCH.has(s.name)
     && (!(s as IRStep).optionArms || elementOptionMapScalarBranch(s as IRStep, ctx)));
-  if (at < 0) return false;
+  if (at < 0) return null;
   const prefix = body.slice(0, at);
   const branch = body[at];
   const suffix = body.slice(at + 1);
+  const parts = { prefix, branch: branch as IRStep, suffix };
   // The prefix is element-preserving, so it threads the label env into the ARMS: a label bound
   // before the branch (or up the chain) is visible inside every arm body, at any depth.
   const scoped = elementRun(prefix, ctx);
-  if (!scoped) return false;
+  if (!scoped) return null;
   const armCtx = scoped.ctx ?? ctx;
-  if (!scalarRowRun(suffix, armCtx)) return false;
+  if (!scalarRowRun(suffix, armCtx)) return null;
   if (branch.name === 'choose' && (branch as IRStep).optionArms)
-    return elementOptionMapScalarBranch(branch as IRStep, armCtx);
+    return elementOptionMapScalarBranch(branch as IRStep, armCtx) ? parts : null;
   const kids = (branch.args ?? []).filter(isNested);
   if (branch.name === 'choose') {
     // predicate-form choose(pred, then, else): only the two value arms must be scalar (the
     // predicate is a gate). Other arities defer to tryLowerScalarChoose's own decline.
-    if (kids.length !== 3) return false;
-    return classifyScalarChild(kids[1].nested, armCtx) !== null && classifyScalarChild(kids[2].nested, armCtx) !== null;
+    if (kids.length !== 3) return null;
+    return classifyScalarChild(kids[1].nested, armCtx) !== null && classifyScalarChild(kids[2].nested, armCtx) !== null
+      ? parts : null;
   }
   const min = branch.name === 'union' ? 2 : 1; // union needs ≥2 arms; coalesce ≥1
-  return kids.length >= min && kids.every((a: any) => classifyScalarChild(a.nested, armCtx) !== null);
+  return kids.length >= min && kids.every((a: any) => classifyScalarChild(a.nested, armCtx) !== null) ? parts : null;
 }
+
+/** The boolean view of `elementScalarBranchParts`, for the two callers that only ask whether a body
+ *  qualifies (the shape classifier and the group value-body gate). */
+export const elementScalarBranchArm = (body: ReturnType<typeof stepChain>, ctx: ChildCtx): boolean =>
+  elementScalarBranchParts(body, ctx) !== null;
 
 /** PURE. An element-parent scalar child (the strict isScalarChild shape): a movement-only
  * total count(), a values/id/label/constant projection with a scalar-row tail, or a nested

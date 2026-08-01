@@ -63,6 +63,29 @@ const quote = (n: string) => SAFE.test(n) ? n : `"${n.replace(/"/g, '""')}"`;
 /** A column reference `qualifier.name`, each part safe-quoted. A Text (no binds). */
 const colRef = (qualifier: string, name: string): Text => raw(`${quote(qualifier)}.${quote(name)}`);
 
+/** `rel.c` with an UNDECLARED column made a throw rather than `undefined`.
+ *
+ *  `relation()` catches this in the TYPE for a base table, but a `derived()`/`cte()` relation is
+ *  `Relation<string>` — its column list is computed at runtime, so `rel.c[name]` type-checks for
+ *  every string and a name the relation does not carry read as `undefined`. A `q` hole of
+ *  `undefined` used to splice NOTHING, so the mistake surfaced as malformed SQL at the database
+ *  (`SELECT r.v AS v,  FROM c8 r`) rather than at the site that made it. Measured: that is exactly
+ *  how a child-scope rejoin projecting an ordinal a global barrier had already dropped escaped
+ *  every compile-time instrument (outstanding-work item 32).
+ *
+ *  A Proxy, not a per-read check, because the whole point is that the ~1,600 existing `rel.c.x`
+ *  sites gain the guard without being touched. Only STRING keys are guarded — symbol lookups
+ *  (`Symbol.toPrimitive`, inspection hooks) must stay silent — and inherited `Object.prototype`
+ *  names still resolve normally, so `in`/`Object.keys` behave as before. */
+const guardColumns = <K extends string>(cols: Record<string, Text>, qualifier: string, declared: readonly K[]): Record<K, Text> =>
+  new Proxy(cols, {
+    get(target, prop, receiver) {
+      if (typeof prop === 'string' && !(prop in target))
+        throw new Error(`relation ${qualifier} has no column '${prop}' (declares: ${declared.join(', ') || '<none>'})`);
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as Record<K, Text>;
+
 /** A base table OR a generated CTE. `${rel}` renders the FROM form (`nodes`, or
  *  `nodes n` when aliased); `rel.c.x` renders `qualifier.x`. `.as()` rebinds the
  *  column qualifier — the one trick that makes columns follow the alias. */
@@ -76,7 +99,7 @@ export class Relation<K extends string = string> {
     this.from = body
       ? q`(${body}) ${raw(quote(qualifier))}`
       : raw(alias ? `${quote(name)} ${quote(alias)}` : quote(name));
-    this.c = Object.fromEntries(cols.map((col) => [col, colRef(qualifier, col)])) as Record<K, Text>;
+    this.c = guardColumns(Object.fromEntries(cols.map((col) => [col, colRef(qualifier, col)])), qualifier, cols);
   }
   as(alias: string): Relation<K> { return new Relation<K>(this.name, this.cols, alias, this.body); }
 }
@@ -102,6 +125,11 @@ type Hole = Expression | Relation | string | number;
 const node = (h: Hole): Expression => {
   if (h instanceof Relation) return h.from;
   if (typeof h === 'string' || typeof h === 'number') return raw(String(h));
+  // `Hole` excludes undefined, so a nullish one is always a caller bug — and one that renders as
+  // an EMPTY string, i.e. malformed SQL discovered by the database instead of by the compiler.
+  // `empty` is the deliberate way to splice nothing. (The column guard above catches the common
+  // source; this is the backstop for every other hole.)
+  if (h === undefined || h === null) throw new Error('a q`` template hole is undefined — use `empty` to splice nothing');
   return h;
 };
 

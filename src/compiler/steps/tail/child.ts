@@ -15,7 +15,7 @@ import { predicateSql, elemTable } from '../../plan/plan.ts';
 import { sliceOf } from '../../ir/step.ts';
 import { elementOrderDrop, elementOrderSql } from './modulation.ts';
 import {
-    childCtx, childSteps, classifyCountChild, isOneRowProjection, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
+    childCtx, childSteps, classifyCountChild, isOneRowProjection, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchParts, labelSelectOf,
     CHILD_SCALAR_REDUCERS,
     ELEMENT_CHILD_STEPS, isBareBranchChildAllCard,
     reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
@@ -300,6 +300,8 @@ export function applyChildCardinality<S extends Exclude<Stream, { kind: 'result'
 ): { stream: S; frame: ChildFrame } {
   const payload = streamPayloadCols(lowered);
   const parentCols = layoutCols(parent.traverserLayout);
+  // This rejoin projects the PARENT's layout off the CHILD relation; `layoutProjection` is where a
+  // body that retyped a carried channel is caught, for every rejoin at once.
   const cols = [...payload, ...parentCols];
   const project = (r: Relation) => list(payload.map((c) => q`${r.c[c]} AS ${c}`), ', ');
   const rehome = (rel: Relation): S => ({ ...lowered, ...loweringStateOf(parent), rel });
@@ -426,6 +428,61 @@ export function scopedMovementCount(parent: ElementStream, scope: ChildFrameStac
   return scopedElementRowCount(moved, pushed).stream;
 }
 
+/** Continue a scalar child body's ROW TAIL by hand, inside the pushed child scope.
+ *
+ * This is the ONE thing `lowerStepsStrict` cannot be handed the body for: everything in the tail
+ * except a reducer is identical to what the engine's own scalar loop does (it calls the same
+ * `lowerScalarRows`), but a terminal `count()`/`sum()`/`min()`/`max()`/`mean()` is per-ORIGIN in a
+ * child scope and GLOBAL in `SCALAR_DISPATCH`. So the split is not "a private lowering" — the head
+ * still goes through the engine, and only the reducer is routed to its scoped twin.
+ *
+ * Both scalar-child routes that can carry such a tail share this: the element-row route (an element
+ * prefix + a scalar projection) and the branch route (`union`/`choose`/`coalesce` arms). The branch
+ * route did NOT, which is what made `local(__.union(values('name'), values('age')).count())` emit
+ * malformed SQL — see `elementScalarBranchParts`. */
+function continueScalarChildTail(
+  base: ScalarStream,
+  suffix: ReturnType<typeof stepChain>,
+  scope: ChildScope,
+): ScalarStream {
+  let stream = base;
+  let at = 0;
+  while (at < suffix.length) {
+    const lowered = lowerScalarRows(stream, suffix, at);
+    stream = lowered.stream;
+    at = lowered.stop;
+    if (at === suffix.length) break;
+    const reducer = suffix[at].name;
+    // A scalar row-run deliberately stops at an as(): binding a label is shape-agnostic, so at
+    // root the engine's alias dispatch owns it. There is no engine loop here, so apply the ONE
+    // implementation it would have used (asOnStream) and keep going — the same reuse the
+    // element-body fold makes for select(). Without it the classifier (which admits as() in the
+    // scalar row vocabulary) would claim a body this builder then threw on, mid-CTE.
+    if (reducer === 'as') {
+      const bound = asOnStream(stream, suffix[at]);
+      if (bound.kind !== 'scalar') throw new Error('as() over a scalar child row did not stay scalar');
+      stream = bound;
+      at++;
+      continue;
+    }
+    const label = labelSelectOf(suffix[at]);
+    if (label !== null) {
+      const selected = selectOneFromAlias(stream, suffix[at], label, popOf(suffix[at]));
+      if (selected.kind !== 'scalar')
+        throw new Error(`select("${label}") in a scalar child continuation must hold a value`);
+      stream = selected;
+      at++;
+      continue;
+    }
+    if (!CHILD_SCALAR_REDUCERS.has(reducer))
+      throw new Error(`scalar child continuation ${reducer}() not yet supported`);
+
+    stream = lowerScopedScalarReducer(stream, reducer as ScalarReducer, scope);
+    at++;
+  }
+  return stream;
+}
+
 function compileScalarChildRows(
   parent: ChildParent,
   nested: any,
@@ -459,17 +516,24 @@ function compileScalarChildRows(
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
 
-  // Nested scalar-armed branch (choose/coalesce/union) as the WHOLE body: parent-agnostic —
-  // lowerSteps re-dispatches the branch step to the branch compilers, which recurse back here
-  // per arm. Lowered over a pushed scope, the branch merge (unionScalarStreams) mints the
-  // per-origin emission encounter, so the 'first' cardinality policy can take the first emitted
-  // result (map(__.union(...)) / by(__.choose(...))). Checked before the scalar-parent families
-  // below (a bare branch body is neither a value-op nor a re-source). elementScalarBranchArm is
-  // precise (all arms scalar), so a non-scalar result is a contradiction.
-  if (elementScalarBranchArm(body, childCtx(parent))) {
+  // Nested scalar-armed branch (choose/coalesce/union) in the body: parent-agnostic — lowerSteps
+  // re-dispatches the branch step to the branch compilers, which recurse back here per arm.
+  // Lowered over a pushed scope, the branch merge (unionScalarStreams) mints the per-origin
+  // emission encounter, so the 'first' cardinality policy can take the first emitted result
+  // (map(__.union(...)) / by(__.choose(...))). Checked before the scalar-parent families below (a
+  // bare branch body is neither a value-op nor a re-source). elementScalarBranchParts is precise
+  // (all arms scalar), so a non-scalar result is a contradiction.
+  //
+  // The HEAD (element prefix + branch) goes through the engine; the scalar-row SUFFIX is continued
+  // by hand, exactly as the element-row route below does and for exactly the same reason — a
+  // reducer there is per-origin. Handing the whole body to the engine instead is item 32's
+  // malformed SQL.
+  const branchParts = elementScalarBranchParts(body, childCtx(parent));
+  if (branchParts) {
     const pushed = pushChildScope(parent, scope);
-    const stream = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, body, 0);
-    if (stream.kind !== 'scalar') throw new Error('scalar-branch child classified scalar but lowered to ' + stream.kind);
+    const head = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, [...branchParts.prefix, branchParts.branch], 0);
+    if (head.kind !== 'scalar') throw new Error('scalar-branch child classified scalar but lowered to ' + head.kind);
+    const stream = continueScalarChildTail(head, branchParts.suffix, pushed.scope);
     return applyScalarChildCardinality(parent, pushed, stream, use, retainChildScope);
   }
 
@@ -570,45 +634,7 @@ function compileScalarChildRows(
   // classify proved the head scalar, so a non-scalar is a classify↔lowerSteps contradiction.
   if (head.kind !== 'scalar') throw new Error('scalar child projection classified scalar but lowered to ' + head.kind);
 
-  const continueScalar = (base: ScalarStream): ScalarStream => {
-    let stream = base;
-    let at = 0;
-    while (at < suffix.length) {
-      const lowered = lowerScalarRows(stream, suffix, at);
-      stream = lowered.stream;
-      at = lowered.stop;
-      if (at === suffix.length) break;
-      const reducer = suffix[at].name;
-      // A scalar row-run deliberately stops at an as(): binding a label is shape-agnostic, so at
-      // root the engine's alias dispatch owns it. There is no engine loop here, so apply the ONE
-      // implementation it would have used (asOnStream) and keep going — the same reuse the
-      // element-body fold makes for select(). Without it the classifier (which admits as() in the
-      // scalar row vocabulary) would claim a body this builder then threw on, mid-CTE.
-      if (reducer === 'as') {
-        const bound = asOnStream(stream, suffix[at]);
-        if (bound.kind !== 'scalar') throw new Error('as() over a scalar child row did not stay scalar');
-        stream = bound;
-        at++;
-        continue;
-      }
-      const label = labelSelectOf(suffix[at]);
-      if (label !== null) {
-        const selected = selectOneFromAlias(stream, suffix[at], label, popOf(suffix[at]));
-        if (selected.kind !== 'scalar')
-          throw new Error(`select("${label}") in a scalar child continuation must hold a value`);
-        stream = selected;
-        at++;
-        continue;
-      }
-      if (!CHILD_SCALAR_REDUCERS.has(reducer))
-        throw new Error(`scalar child continuation ${reducer}() not yet supported`);
-
-      stream = lowerScopedScalarReducer(stream, reducer as ScalarReducer, pushed.scope);
-      at++;
-    }
-    return stream;
-  };
-  const lowered = continueScalar(oneRowEncounter(head, terminal, childCtx(parent)));
+  const lowered = continueScalarChildTail(oneRowEncounter(head, terminal, childCtx(parent)), suffix, pushed.scope);
   return applyScalarChildCardinality(parent, pushed, lowered, use, retainChildScope);
 }
 
