@@ -15,11 +15,11 @@ import { predicateSql, elemTable } from '../../plan/plan.ts';
 import { sliceOf } from '../../ir/step.ts';
 import { elementOrderDrop, elementOrderSql } from './modulation.ts';
 import {
-    childCtx, childSteps, classifyCountChild, isKeyModulatedLabelSelect, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
+    childCtx, childSteps, classifyCountChild, isOneRowProjection, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchArm, labelSelectOf,
     CHILD_SCALAR_REDUCERS,
     ELEMENT_CHILD_STEPS, isBareBranchChildAllCard,
     reuseCurrentFrame, ROOT_SCOPE, scalarChildPrefixOk,
-    type ChildFrame, type ChildParent, type ChildPlan, type ChildScope, type ChildUse, type ChildFrameStack
+    type ChildCtx, type ChildFrame, type ChildParent, type ChildPlan, type ChildScope, type ChildUse, type ChildFrameStack
 } from './child-shape.ts';
 // The scope-construction trio (pushChildScope/popChildScope below + reuseCurrentFrame) is the
 // compiler's public scope vocabulary; re-export reuseCurrentFrame (defined as a pure spread in the
@@ -326,13 +326,12 @@ export function mintChildEncounter(end: ElementStream): ElementStream {
  *  mints its own key (`values()` carries `encounterKey` through the projector, since a multi-valued
  *  property genuinely yields several rows).
  *
- *  `select(label).by(key)` mints none, because it cannot fan out: one alias column, one property
- *  read, exactly one row per input. So `first` and `all` are the same stream and the ranking is
- *  vacuous — which is precisely why minting here is safe where relaxing the guard would not be.
+ *  Which terminals qualify — and WHY each one cannot fan out — is `isOneRowProjection`
+ *  (tail/child-shape.ts), so the proof lives beside the classifier that decides the same shapes.
  *  Gated on that proof rather than on "the stream happens to have no encounter", which is the
  *  condition the guard is meant to catch. */
-function oneRowEncounter(stream: ScalarStream, terminal: IRStep): ScalarStream {
-  if (stream.traverserLayout.encounter || !isKeyModulatedLabelSelect(terminal)) return stream;
+function oneRowEncounter(stream: ScalarStream, terminal: IRStep, ctx?: ChildCtx): ScalarStream {
+  if (stream.traverserLayout.encounter || !isOneRowProjection(terminal, ctx)) return stream;
   const p = stream.rel.as('oe');
   const layout = patchLayout(stream.traverserLayout, { encounter: 'encounter' });
   const payload = streamPayloadCols(stream);
@@ -537,7 +536,7 @@ function compileScalarChildRows(
     const stream = engineOf(pushed.seed).lowerStepsStrict(pushed.seed, body, 0);
     // As above: classify proved scalar, so a non-scalar is a contradiction — fail loud.
     if (stream.kind !== 'scalar') throw new Error('scalar child classified scalar but lowered to ' + stream.kind);
-    return applyScalarChildCardinality(parent, pushed, oneRowEncounter(stream, terminal), use, retainChildScope);
+    return applyScalarChildCardinality(parent, pushed, oneRowEncounter(stream, terminal, childCtx(parent)), use, retainChildScope);
   }
 
   // A scoped reducer / a `constant()` terminal in the row tail is the ONE thing the generic
@@ -595,7 +594,7 @@ function compileScalarChildRows(
     }
     return stream;
   };
-  const lowered = continueScalar(oneRowEncounter(head, terminal));
+  const lowered = continueScalar(oneRowEncounter(head, terminal, childCtx(parent)));
   return applyScalarChildCardinality(parent, pushed, lowered, use, retainChildScope);
 }
 

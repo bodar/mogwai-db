@@ -337,7 +337,57 @@ const SCALAR_PRODUCER = new Set(['values', 'id', 'label', 'constant', 'call', 'm
  *  scalar — the read-a-label twin of read-a-property). A mutate sack(op) is element-preserving,
  *  never a producer. */
 const isScalarProducer = (s: IRStep, ctx: ChildCtx | undefined): boolean =>
-  (SCALAR_PRODUCER.has(s.name) && !isSackMutate(s)) || selectShape(s, ctx) === 'scalar';
+  (SCALAR_PRODUCER.has(s.name) && !isSackMutate(s)) || selectShape(s, ctx) === 'scalar'
+  || isScalarProducingScope(s, ctx);
+
+/**
+ * PURE. A `map(B)`/`local(B)` that yields ONE scalar per input because its BODY does — the
+ * recursive case of a scalar producer, and the reason a scoped aggregate composes at every child
+ * position instead of only at the root.
+ *
+ * Root lowering has always accepted `g.V().out().local(__.count())` (`tailMap`/`tailLocal` →
+ * `lowerMapScalar`); what was missing is that the CHILD classifier never called the scope a
+ * producer, so the identical body one level in — `local(__.out().local(__.count()))`,
+ * `order().by(__.local(__.out().count()))`, `group().by(__.map(__.out().count()))` — fell to a
+ * deferral. Recognising it here reaches all of them at once, and the emit side needs nothing new:
+ * the child scope is pushed and the SAME engine lowers the body, exactly as it does at root.
+ *
+ * **The two arms are different predicates, and that is the whole correctness argument.**
+ * `map(B)` is `TraversalMapStep` — it takes the FIRST result and filters an unproductive body — so
+ * one scalar per input holds for ANY scalar-shaped body, which is the same productivity contract
+ * `values('x')` already has here. `local(B)` emits EVERY result, so it is one-per-input only when
+ * the body is single-valued; `classifyTotalScalarChild` (a movement prefix reduced by `count()`) is
+ * the shape we can state that for. A `local(__.out().values('name'))` is many-per-input and stays
+ * out — admitting it would silently change this classifier's cardinality contract, which every
+ * scalar consumer downstream relies on.
+ */
+function isScalarProducingScope(s: IRStep, ctx: ChildCtx | undefined): boolean {
+  if (!ctx || (s.name !== 'map' && s.name !== 'local')) return false;
+  const nested = (s.args ?? [])[0]?.nested;
+  if (!nested) return false;
+  // Recursion terminates on body length: each step strictly shrinks the chain being classified.
+  return s.name === 'map'
+    ? classifyScalarChild(nested, ctx) !== null
+    : classifyTotalScalarChild(nested, ctx) !== null;
+}
+
+/**
+ * PURE. A terminal projection that provably yields AT MOST ONE row per input.
+ *
+ * This is the PROOF `oneRowEncounter` (`tail/child.ts`) requires before minting the trivial
+ * `encounter` that `first` cardinality ranks on — and the proof is the whole point. Relaxing the
+ * guard to "the stream happens to carry no encounter" would let `first` over a FAN-OUT body pick an
+ * arbitrary row, which is the silent-arbitrary-answer the canonical-emission-order work exists to
+ * prevent. So each member states its own reason:
+ *   · `select(label).by(key)` — one alias column, one property read.
+ *   · a scalar-producing `map(B)` — `TraversalMapStep` takes the FIRST result and filters an
+ *     unproductive body, so at most one by construction whatever B does.
+ *   · a scalar-producing `local(B)` — admitted only for a `count()`-reduced body, which yields
+ *     exactly one (`0` for an empty child).
+ * For all three, `first` and `all` are the same stream and the ranking is vacuous.
+ */
+export const isOneRowProjection = (s: IRStep, ctx?: ChildCtx): boolean =>
+  isKeyModulatedLabelSelect(s) || isScalarProducingScope(s, ctx);
 
 /** A sack step in its MUTATE form (`sack(Operator.x)` — carries an operator arg). This is
  *  element-PRESERVING (element→element, folds the carried sack), so it belongs in an element
