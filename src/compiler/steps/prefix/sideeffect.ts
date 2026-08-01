@@ -97,16 +97,28 @@ export const aggregate: StepFn = (s, st) => {
         if (!elements)
           throw new Error('aggregate().by(traversal) child shape not yet supported by generic child lowering');
         const c = elements.stream.rel.as('c');
+        // A collection's member order is fully observable (the members ride inside the collected
+        // traverser's own GraphBinary buffer — `jsonbGroupArray` states the rule), and these rows
+        // ARE the members. One row per parent here (`tryCompileFirstElementValueRows` keeps the
+        // first), so the parent order IS the member order — and the child scope's ORDINAL is the
+        // parent-order key, since `pushChildScope` mints it ordered by the parent's encounter.
+        // Its SCALAR twin above bakes the same order in at build time via `memberOrder`; a variant
+        // def is a relation rather than a collected list, so the order rides as a column that
+        // `cap()` declares and the wire applies.
+        const ord = elements.frame.ordinal;
         if (productive) {
           const d = elements.frame.domain.as('d');
           const rel = st.q.cte(
-            q`SELECT CASE WHEN ${c.c.id} IS NULL THEN 0 ELSE 2 END AS vk, NULL AS v, ${c.c.id} AS rid FROM ${d} LEFT JOIN ${c} ON ${c.c[elements.frame.ordinal]}=${d.c[elements.frame.ordinal]}`,
-            ['vk', 'v', 'rid'],
+            q`SELECT CASE WHEN ${c.c.id} IS NULL THEN 0 ELSE 2 END AS vk, NULL AS v, ${c.c.id} AS rid, ROW_NUMBER() OVER (ORDER BY ${d.c[ord]}) AS encounter FROM ${d} LEFT JOIN ${c} ON ${c.c[ord]}=${d.c[ord]}`,
+            ['vk', 'v', 'rid', 'encounter'],
           );
-          def = { kind: 'variant', rel, elem: elements.stream.elem };
+          def = { kind: 'variant', rel, elem: elements.stream.elem, order: 'encounter' };
         } else {
-          const rel = st.q.cte(q`SELECT 2 AS vk, NULL AS v, ${c.c.id} AS rid FROM ${c}`, ['vk', 'v', 'rid']);
-          def = { kind: 'variant', rel, elem: elements.stream.elem };
+          const rel = st.q.cte(
+            q`SELECT 2 AS vk, NULL AS v, ${c.c.id} AS rid, ROW_NUMBER() OVER (ORDER BY ${c.c[ord]}) AS encounter FROM ${c}`,
+            ['vk', 'v', 'rid', 'encounter'],
+          );
+          def = { kind: 'variant', rel, elem: elements.stream.elem, order: 'encounter' };
         }
       }
     } else {

@@ -143,7 +143,11 @@ export function scopePathCols<C extends { col: string }>(
  *  this state outlives the current traverser stream. */
 export type SideEffectDef =
   | { kind: 'list'; rel: Relation; of: ListOf }
-  | { kind: 'variant'; rel: Relation; scalarAs?: ValueType; elem?: Elem }
+  /** `order` names a column on `rel` carrying the members' emission order, for the shapes that
+   *  cannot bake it in at build time. A `list` def collects with `jsonbGroupArray(…, memberOrder)`
+   *  and so is ordered when it is built; a `variant` def is a RELATION whose rows ARE the members,
+   *  read back by `cap()`, so the order has to ride as a column and be applied at the wire. */
+  | { kind: 'variant'; rel: Relation; scalarAs?: ValueType; elem?: Elem; order?: string }
   | { kind: 'group'; isCount: boolean; modulators: any[][]; parent: ElementStream; productiveBy?: boolean };
 export type SideEffectMap = ReadonlyMap<string, SideEffectDef>;
 

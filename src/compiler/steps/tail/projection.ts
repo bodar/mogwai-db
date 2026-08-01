@@ -1223,8 +1223,16 @@ function compileCap(st: ElementStream | ScalarStream, steps: IRStep[], stop: num
     const ls = toListStream(dropLayoutAtBarrier(loweringStateOf(st)), def.rel, def.of);
     return continueLowering(ls, stop + 1);
   }
-  if (def.kind === 'variant')
-    return continueLowering(toVariantStream(dropLayoutAtBarrier(loweringStateOf(st)), def.rel, { scalarAs: def.scalarAs, node: def.elem === 'vertex' || undefined, edge: def.elem === 'edge' || undefined }, 'list'), stop + 1);
+  if (def.kind === 'variant') {
+    // The collection's own carried state is gone (a barrier result is a fresh traverser), but its
+    // MEMBER order is not part of that: when the def carries an order column, declare it as the
+    // stream's encounter so the wire emits the members in it (`rootOrder`, materialize.ts).
+    const barrier = dropLayoutAtBarrier(loweringStateOf(st));
+    const state = def.order
+      ? { ...barrier, traverserLayout: patchLayout(barrier.traverserLayout, { encounter: def.order }) }
+      : barrier;
+    return continueLowering(toVariantStream(state, def.rel, { scalarAs: def.scalarAs, node: def.elem === 'vertex' || undefined, edge: def.elem === 'edge' || undefined }, 'list'), stop + 1);
+  }
   // group('a')/groupCount('a') side-effect → re-emit the same rich GroupStream as an
   // inline group; terminal framing and Column consumers share its dispatch. The stashed
   // def.parent carries the element source, so the SAME elementGroupSource that built the
