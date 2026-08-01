@@ -174,6 +174,13 @@ expects the throw before touching any merge refusal; item 23 landed a family of 
 - `optional(__.addV())`, `repeat(__.addV().property())` — a write inside a branch/loop body.
 - `addE` after `select()`; `addE from/to` with an unknown `as()` label; an endpoint read tail past a
   movement.
+- **`drop()` over a PROPERTY stream — landed 2026-08-01 (`c55119e`), L3 +2.** It belongs in this
+  tranche after all (the survey filed it nowhere): a write in a position the driver could not reach,
+  because `buildPrefixFresh` types its result as an ELEMENT and a property prefix is not one.
+  Compiling the prefix as an ordinary read instead is what makes every property filter narrow the
+  drop for free. The meta-property form (`properties().properties(k).drop()`) stays open and fails
+  closed — it removes a key from a JSONB bag rather than a row, and the metaProperty stream projects
+  `(mk, mv)` with no owner to address, so it is a STREAM-PAYLOAD gap and not a drop gap.
 - `addE(label)` with a nested-traversal label (2).
 - **addV mid-chain + read-tails-after-write** — `outstanding-work.md` item 10, linked to
   `2026-07-16-compiler-consolidation-plan.md` §6.1(c). This is the one that gates the others: a
