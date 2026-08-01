@@ -153,7 +153,7 @@ trap 4 from the other side.
 |---|---|---|
 | whole-arg map traversal (`__.identity()`, `__.select(…).limit().unfold()`, `__.sideEffect(…)`) | 10 | item 0b's **map-valued driver** — the declared blocker |
 | `mergeE option(Merge.outV)` | 8 | |
-| step not implemented after `mergeV()` (`property()`, `as()`) | 8 | a read/write TAIL after an upsert (§4's item 10 overlaps) |
+| step not implemented after `mergeV()` (`property()`, `as()`) | 8 | the `property()` half **landed 2026-08-01 (`3d9222f`)**, L3 +3 — it was not a merge feature at all, just an AddPropertyStep over whatever the merge emitted, so it reuses the mutation tail's parser and the same storage waists. `as()` remains: it needs the write CHAIN (§4's item 10) |
 | `PartitionStrategy` + `mergeV`/`mergeE` (partition-aware upsert) | 7 | also `outstanding-work.md` line 534 |
 | "Out Vertex not specified in onCreate — edge cannot be created" | 3 | we refuse where the reference creates |
 | bare `mergeV()`/`mergeE()` (incoming traverser IS the map) | 3 | needs the same map-valued driver |
@@ -256,6 +256,14 @@ W1 and W4 are independent of each other and of W2/W3. W3's mid-chain item is the
 several of W2's tails, so if only one large thing gets done, do W3's first item. **With W1 closed the
 next call is W3's `addV` mid-chain / read-tail-after-write**, on that prerequisite argument alone —
 W4 is cheaper but unblocks only the perturbed gate.
+
+**One defect the W1 work EXPOSED, now fixed (`3d9222f`) — and the shape to expect more of.** A write
+RESPONSE kept only the first value per key, so `g.addV("a").property("name","x").property("name","y")`
+returned one name while `g.V()` returned two: the same element framed two different ways depending
+on which path produced it. It was harmless while the default cardinality was `single` and became a
+silent wrong answer the moment it was `list`. Anywhere else the write path assumes a vertex property
+is single-valued is now suspect; the census caught this one because 8 corpus traversals write several
+values under one key.
 
 **Start each tranche by re-measuring its numbers.** This document is a snapshot, and
 `docs/outstanding-work.md`'s own warning applies double here: the index has been stale in both
