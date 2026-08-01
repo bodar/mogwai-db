@@ -1,5 +1,5 @@
 {
-  "passing": 1684,
+  "passing": 1686,
   "total": 2267,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -277,7 +277,9 @@
     "g_VXvid1X_propertyXcreatorCount_VXvid1X_inXcreatedX_countX",
     "g_VXvid1X_propertyXcreator_inXcreatedX_valuesXnameXX",
     "g_VXvid1X_propertyXknownCount_outXknowsX_countX",
+    "g_VXvid1X_propertyXlist_friends_outXknowsX_valuesXnameXX",
     "g_VXvid1X_propertyXset_langs_outXcreatedX_valuesXlangXX",
+    "g_VXvid1X_propertyXsingle_friend_outXknowsX_valuesXnameXX",
     "g_VXvid2X_propertyXalias_VXvid1X_valuesXnameXX",
     "g_V_EX11X",
     "g_V_EXaddVXxX_idX_rejected",
@@ -1795,8 +1797,6 @@
     "g_VXvid1X_outEXknowsX_filterXinV_hasXname_withinXunionXV_hasXname_lopX_inXcreatedX_valuesXnameX_V_hasXname_rippleX_inXcreatedX_valuesXnameXX_foldXXXX",
     "g_VXvid1X_outEXknowsX_hasXinV_name_vadasX_id_EXidentityX",
     "g_VXvid1X_outXknowsX_valuesXageX_fold_anyXeqXconstantX32XXX",
-    "g_VXvid1X_propertyXlist_friends_outXknowsX_valuesXnameXX",
-    "g_VXvid1X_propertyXsingle_friend_outXknowsX_valuesXnameXX",
     "g_VXvid1_vid2X_id_VXidentityX_name",
     "g_VXvid2X_propertyXVXvid1X_projectXfriendCount_softwareCreatedXX",
     "g_VXvid2X_propertyXVXvid1X_projectXoriginalName_originalLabelX_byXnameX_byXlabelXX",

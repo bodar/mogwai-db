@@ -79,10 +79,17 @@ function runNested(
 // bool/date). null = infer from the JS value. The correspondence lives in gremlin/types.ts —
 // this local copy used to omit bigdecimal/char/duration, so those wrote an inferred vtype.
 
-// The scalar value a nested property()-value traversal produces: the FIRST result row's
-// value (single-cardinality write), or has:false for an empty traversal (→ no property).
-// The stored vtype comes from the read spine's own type (count→long, a typed value→its
-// `as`), else null → inferred from the value. Fails closed on a non-scalar result shape.
+// EVERY value a nested property()-value traversal produces, in emission order, or an empty
+// array for an empty traversal (→ no property at all: TinkerPop's `results.isEmpty()` skips the
+// mutation rather than writing a null). This used to return only the FIRST row, which is right
+// under `single` and silently lossy under list/set — `property(list, "friends", __.out("knows").
+// values("name"))` stored one friend where the reference stores both. What the LIST means is
+// decided downstream by the cardinality (applyVertexProperty), exactly as in
+// `AddPropertyStep.handleTraversalValue`.
+//
+// The stored vtype comes from the read spine's own type (count→long, a typed value→its `as`),
+// else null → inferred from the value; it is one type for the whole result set because the shape
+// is one compiled read. Fails closed on a non-scalar result shape.
 function nestedScalar(
   engine: Engine,
   store: GraphStore,
@@ -90,16 +97,17 @@ function nestedScalar(
   params: Record<string, any>,
   seed?: { id: number; elem: Elem },
   driver?: ElementReadDriver,
-): { has: boolean; value: any; vtype: CanonicalType | null } {
+): { values: any[]; vtype: CanonicalType | null } {
   const { rows, shape } = runNested(engine, store, nestedNode, params, seed, driver);
   if (shape.kind !== 'value' && shape.kind !== 'scalar')
     throw new Error(`property() traversal value producing a ${shape.kind} not yet supported`);
-  if (!rows.length || rows[0].v == null) return { has: false, value: undefined, vtype: null };
+  // A leading NULL row is TinkerPop's "no value" (an unproductive by()/values()), not a value to
+  // store — the pre-multi-value code keyed the whole decision off rows[0], and that stays the rule.
+  if (!rows.length || rows[0].v == null) return { values: [], vtype: null };
   // Only a STATIC type can be written as the literal's vtype; a per-row/unknown type is
   // not a compile-time fact, so the write channel records nothing and storage class rules.
   const staticAs = shape.kind === 'value' ? staticTypeOf(shape.type) : undefined;
-  const vt = staticAs ? staticAs : null;
-  return { has: true, value: rows[0].v, vtype: vt };
+  return { values: rows.map((r) => r.v), vtype: staticAs ? staticAs : null };
 }
 
 // The nested-value authority: a compile-time invariant (constFromNested), else a scalar
@@ -115,20 +123,24 @@ function nestedScalarValue(
   seed?: { id: number; elem: Elem },
   sideEffects?: Map<string, any>,
   driver?: ElementReadDriver,
-): { has: boolean; value: any; vtype: CanonicalType | null } {
+): { has: boolean; value: any; values: any[]; vtype: CanonicalType | null } {
   const c = constFromNested(nested, sideEffects, params);
-  if (c.has) return c;
+  if (c.has) return { ...c, values: [c.value] };
   const r = nestedScalar(engine, store, nested.nested, params, seed, driver);
-  return { has: r.has, value: r.value, vtype: r.vtype ?? (r.has ? gremlinTypeOf(r.value, null) : null) };
+  // `value` is the first of `values` — the single-valued view every OTHER caller (an addV label,
+  // a merge map value) wants, kept here rather than re-derived at each of them.
+  return { has: r.values.length > 0, value: r.values[0], values: r.values, vtype: r.vtype ?? (r.values.length ? gremlinTypeOf(r.values[0], null) : null) };
 }
 
 // Resolve a PropSpec's value for one target element: a literal passes through with its
 // captured vtype; a nested traversal is evaluated correlated at the element.
-function resolveSpecValue(engine: Engine, store: GraphStore, sp: PropSpec, id: number, elem: Elem, params: Record<string, any>, sideEffects?: Map<string, any>, driver?: ElementReadDriver): { has: boolean; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null } {
+function resolveSpecValue(engine: Engine, store: GraphStore, sp: PropSpec, id: number, elem: Elem, params: Record<string, any>, sideEffects?: Map<string, any>, driver?: ElementReadDriver): { has: boolean; value: any; values: any[]; vtype: CanonicalType | null; typeNode: TypeNode | null } {
   // A literal keeps its full typeNode (collection element/key fidelity); a nested traversal
   // resolves to a SCALAR (nested collection values are deferred), so its scalar vtype IS a
   // valid TypeNode (a bare CanonicalType), used directly as typeNode.
-  if (!isNested(sp.value)) return { has: true, value: sp.value, vtype: sp.vtype, typeNode: sp.typeNode };
+  // A literal is always exactly ONE value — including a literal `null`, which is the removal
+  // rule and must stay distinguishable from a traversal that produced nothing.
+  if (!isNested(sp.value)) return { has: true, value: sp.value, values: [sp.value], vtype: sp.vtype, typeNode: sp.typeNode };
   const r = nestedScalarValue(engine, store, sp.value, params, driver ? undefined : { id, elem }, sideEffects, driver);
   return { ...r, typeNode: r.vtype };
 }
@@ -245,6 +257,9 @@ function compileSetProperty(engine: Engine, steps: IRStep[], params: Record<stri
       run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
         for (const sp of specs) {
           const r = resolveSpecValue(engine, store, sp, id, 'edge', params, sideEffects);
+          // An EDGE takes the FIRST result: `handleTraversalValue`'s multi-result branch computes
+          // `effectiveCard` as null for a non-Vertex, so neither the single-throw nor the
+          // per-result loop fires and it falls through to `results.get(0)`.
           if (r.has) insertEdgeProperty(store, id, resolveSpecKey(engine, store, sp, id, 'edge', params, sideEffects), r.value, r.vtype, r.typeNode);
         }
         const cur = store.query<any>(readCur, [id])[0];
@@ -259,7 +274,7 @@ function compileSetProperty(engine: Engine, steps: IRStep[], params: Record<stri
     run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
       for (const sp of specs) {
         const r = resolveSpecValue(engine, store, sp, id, 'vertex', params, sideEffects);
-          if (r.has) applyVertexProperty(store, id, resolveSpecKey(engine, store, sp, id, 'vertex', params, sideEffects), r.value, r.vtype, sp.meta, sp.cardinality, r.typeNode);
+          if (r.has) applyVertexProperty(store, id, resolveSpecKey(engine, store, sp, id, 'vertex', params, sideEffects), r.values, r.vtype, sp.meta, sp.cardinality, r.typeNode);
       }
       const cur = store.query<any>(readCur, [id])[0];
       return { vertex: { id: cur.uid ?? id, labels: store.vertexLabels(id), props: readVertexProps(store, id) } };
@@ -465,18 +480,34 @@ function effectiveCardinality(store: GraphStore, node: number, key: string, decl
   )[0]?.cardinality ?? DEFAULT_VERTEX_CARDINALITY;
 }
 
-// Set/append ONE vertex property (W4). single = replace all rows for the key then insert
+/** Write ONE key's values onto a vertex — the storage waist every host reaches. `values` is a
+ *  LIST because a traversal-valued `property()` may produce several and the cardinality decides
+ *  what that means, which is the whole of `AddPropertyStep.handleTraversalValue`: under list/set
+ *  each result becomes its own VertexProperty; under `single` more than one is an error, not a
+ *  last-one-wins. A literal is always exactly one value (possibly `null`, the removal rule); an
+ *  empty list never reaches here — an unproductive traversal skips the mutation upstream. */
+export function applyVertexProperty(
+  store: GraphStore, node: number, key: string, values: readonly any[], vtype: CanonicalType | null,
+  meta: Record<string, any> | null, declared: Cardinality, typeNode: TypeNode | null = null,
+): void {
+  validatePropertyKey(key); // the waist: every vertex property key reaches storage through here
+  if (values.length === 1 && isPropertyRemoval(values[0])) return removeProperties(store, 'vertex', node, key);
+  const cardinality = effectiveCardinality(store, node, key, declared);
+  // Wording is TinkerPop's (`AddPropertyStep.handleTraversalValue`) — the corpus matches on it.
+  if (values.length > 1 && cardinality === 'single')
+    throw new Error(`Single-cardinality property requires exactly one value, but traversal produced ${values.length} results`);
+  for (const val of values) writeVertexPropertyValue(store, node, key, val, vtype, meta, cardinality, typeNode);
+}
+
+// Set/append ONE vertex property VALUE (W4). single = replace all rows for the key then insert
 // one; list = append; set = append unless an equal value already exists (then patch its
 // meta). Meta is a {metaKey:scalar} object stored as a JSONB blob. A single SQL statement
 // each (locked #3). A traversal-valued property defers to a later stage.
-export function applyVertexProperty(
+function writeVertexPropertyValue(
   store: GraphStore, node: number, key: string, val: any, vtype: CanonicalType | null,
-  meta: Record<string, any> | null, declared: Cardinality, typeNode: TypeNode | null = null,
+  meta: Record<string, any> | null, cardinality: VertexCardinality, typeNode: TypeNode | null,
 ): void {
   if (val && typeof val === 'object' && 'nested' in val) throw new Error('property() with a traversal value not yet supported');
-  validatePropertyKey(key); // the waist: every vertex property key reaches storage through here
-  if (isPropertyRemoval(val)) return removeProperties(store, 'vertex', node, key);
-  const cardinality = effectiveCardinality(store, node, key, declared);
   const metaJson = meta ? JSON.stringify(meta) : null;
   // A collection value (list/map/set) is stored as a self-describing typed-JSON tree in the
   // value column (bind the JSON text, wrap jsonb(?)) — a raw JS array/Map bind would throw at
@@ -588,7 +619,7 @@ function insertVertex(
   // later read frames, and the reader orders by label id, not by argument order.
   for (const p of spec.props) {
     const r = resolveSpecValue(engine, store, p, row.id, 'vertex', params, sideEffects, driver);
-    if (r.has) applyVertexProperty(store, row.id, resolveSpecKey(engine, store, p, row.id, 'vertex', params, sideEffects, driver), r.value, r.vtype, p.meta, p.cardinality, r.typeNode);
+    if (r.has) applyVertexProperty(store, row.id, resolveSpecKey(engine, store, p, row.id, 'vertex', params, sideEffects, driver), r.values, r.vtype, p.meta, p.cardinality, r.typeNode);
   }
   return { ...row, labels: store.vertexLabels(row.id) };
 }
@@ -1184,7 +1215,9 @@ function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, a
               assertLabelCount(engine, store.vertexLabels(m.id).length, 'mergeV');
             }
             if (om) for (const [k, v] of Object.entries(om.props))
-              applyVertexProperty(store, m.id, k, v, gremlinTypeOf(v, om.propTypes[k] ?? null), null, om.propCardinalities[k] ?? 'single', om.propTypes[k] ?? null);
+              // A merge map value is one value (a CardinalityValueTraversal carries exactly one),
+              // and `?? null` keeps "the map declared no cardinality" reaching the waist intact.
+              applyVertexProperty(store, m.id, k, [v], gremlinTypeOf(v, om.propTypes[k] ?? null), null, om.propCardinalities[k] ?? null, om.propTypes[k] ?? null);
             // Read the labels back AFTER any onMatch addition, not off the match row.
             out.push({ vertex: { id: m.uid ?? m.id, labels: store.vertexLabels(m.id), props: readVertexProps(store, m.id) } });
           }

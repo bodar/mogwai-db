@@ -390,8 +390,16 @@ test('mergeV mid-chain runs per incoming traverser (g.V().mergeV([:]) → N×mat
 
 test('mergeV option(onMatch) patches props on the matched vertex', () => {
   const store = seededStore();
+  // An onMatch map that names NO cardinality gets the graph default, which is `list` — MergeVertexStep
+  // reads `features().vertex().getCardinality(key)` exactly as property() does, so a patch APPENDS.
+  // `Cardinality.single(…)` in the map is how upstream says "replace" (CHANGELOG: "Allowed mergeV()
+  // and property(Map) to more easily define Cardinality values for … onMatch and onCreate").
   run(store, 'g.mergeV([(T.label): "person", name: "marko"]).option(Merge.onMatch, [age: 30])');
-  expect(run(store, 'g.V().has("name","marko").values("age")').map((r) => r.v)).toEqual([30]);
+  expect(run(store, 'g.V().has("name","marko").values("age")').map((r) => r.v).sort((a, b) => a - b)).toEqual([29, 30]);
+
+  const replaced = seededStore();
+  run(replaced, 'g.mergeV([(T.label): "person", name: "marko"]).option(Merge.onMatch, [age: Cardinality.single(30)])');
+  expect(run(replaced, 'g.V().has("name","marko").values("age")').map((r) => r.v)).toEqual([30]);
 });
 
 test('mergeV option maps preserve CardinalityValueTraversal and the option default', () => {
@@ -427,7 +435,8 @@ test('mergeV/mergeE map from withSideEffect + __.select(key) constant', () => {
   const s2 = new GraphStore(new BunSqlite(':memory:'));
   run(s2, 'g.addV("person").property("name","marko").property("age",29)');
   run(s2, 'g.withSideEffect("c",[(T.label):"person","name":"marko"]).withSideEffect("m",["age":19]).mergeV(__.select("c")).option(Merge.onMatch, __.select("m"))');
-  expect(run(s2, 'g.V().has("person","name","marko").values("age")').map((r) => r.v)).toEqual([19]);
+  // …appending, per the graph's default cardinality — see the onMatch test above.
+  expect(run(s2, 'g.V().has("person","name","marko").values("age")').map((r) => r.v).sort((a, b) => a - b)).toEqual([19, 29]);
   // mergeE match map from a side-effect constant
   const s3 = new GraphStore(new BunSqlite(':memory:'));
   run(s3, 'g.addV().property(T.id, 1).as("a").addV().property(T.id, 2).as("b")');
