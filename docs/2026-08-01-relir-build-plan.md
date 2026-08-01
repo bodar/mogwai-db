@@ -1,6 +1,6 @@
 # RelIR — the build plan
 
-**Status: BUILD PLAN, decided 2026-08-01. This is happening.** The analysis that argued for it is
+**Status: BUILDING, started 2026-08-01.** The analysis that argued for it is
 [codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a; this
 doc is the construction, and it does not re-argue the direction. Every constraint below was measured
 this session against SQLite 3.51.2, not assumed — the five probes are recorded in §1 because each one
@@ -339,6 +339,12 @@ rows. **No Gremlin is involved in any Phase-1 test.**
 traversals taken from `test/L2-sql/`. If the emitter cannot reproduce existing SQL byte-for-byte, the
 object model is wrong and Phase 1 is not finished — this is the cheapest possible falsification and
 it comes before any integration.
+
+**Progress — 2026-08-01:** the clean-room foundation landed in `773c63a`: full read/write data
+unions, checker (column, expression-placement, recursive-self-reference, layout and bind-budget
+contracts), kernel-backed emitter, `fuse`/`prune`/`name`, and pure SQLite tests. The naming analysis
+now drives CTE emission. The ten byte-identical L2 representatives remain the Phase-1 exit gate;
+no compiler integration has started.
 
 ### Phase 2 — the write wedge
 
