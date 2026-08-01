@@ -186,9 +186,11 @@ expects the throw before touching any merge refusal; item 23 landed a family of 
   `2026-07-16-compiler-consolidation-plan.md` §6.1(c). This is the one that gates the others: a
   write that is not the last step needs its output to re-enter the read spine as an ordinary element
   stream.
-- One WORDING mismatch left over from item 23: we say `addE needs both endpoints — supply from()/to()
-  or an incoming traverser` where the reference says `must resolve to a Vertex or the ID of a Vertex
-  present in the graph`.
+- ~~One WORDING mismatch left over from item 23~~ — **FIXED 2026-08-01 (`393cfb8`), L3 +1.** Two
+  details the survey did not have: the reference's tail splits two ways (`but null was specified
+  instead` for an endpoint nobody supplied vs `does not match any vertices in the graph` for one
+  supplied and unresolvable), and TO is checked BEFORE from — which endpoint a user hears about for
+  a traversal missing both is observable, and upstream's error scenarios are written against it.
 
 ## 5. W4 — the execution model, and a measurement that changes its priority
 
