@@ -101,6 +101,53 @@ export function reprojectRows<T extends RelationalStream>(s: T, opts: RowOpts = 
  * traversals executing** (`limit()/range()/skip()/dedup() on a list value not yet supported`), which
  * the census caught as its headline "support lost" gate. Compose, never shadow.
  */
+/** What a ranked row-window keeps. `over` is the window the rank is computed in; `keep` is the
+ *  predicate over the ranked relation, which is where a caller reads `rn` (and anything it asked
+ *  for in `windows`). Both take the relation they read from, so no caller has to know the aliases
+ *  this builder happens to use. */
+export interface RankSpec {
+  readonly over: (p: Relation) => Expression;
+  /** Extra WINDOW columns beside `rn` — `tail(n)` at root needs `COUNT(*) OVER ()` to name the
+   *  trailing window without a second pass. */
+  readonly windows?: readonly (readonly [string, Expression])[];
+  readonly keep: (ranked: Relation) => Expression;
+}
+
+/**
+ * RANK the rows, then keep the ones the window names — the per-origin twin of `reprojectRows`,
+ * and the skeleton four scalar-only builders each wrote out in full (`partitionedSlice`,
+ * `partitionedTail`, `rootTail`, `partitionedDedup`, `tail/scalar.ts`). They differed in the order
+ * key and the `rn` predicate and in nothing else; the column list they spelled by hand is what
+ * `streamColumns` already owns, which is why the four were identical.
+ *
+ * A `derived` pair rather than two named CTEs: the ranked relation exists only to be filtered, so
+ * naming it would put a materialization boundary where the planner does not want one.
+ *
+ * `over` and `keep` are CALLBACKS, and that is what lets a caller that needs the traverser's VALUE
+ * (a per-origin dedup partitions by it) use this without the shape-generic layer having to know
+ * what a value is. That authority does not exist — the callback is how the scalar site keeps its
+ * own knowledge of `v` while sharing the skeleton.
+ */
+export function rankedRows<S extends RelationalStream>(s: S, spec: RankSpec): S {
+  const cardinality = cardinalityOf(s);
+  if (cardinality.kind !== 'perRow')
+    throw new Error(`a row operation over a ${cardinality.kind} relation is not yet supported (its rows are not its traversers, so ranking them would answer a different question)`);
+  const p = s.rel.as('p');
+  const cols = streamColumns(s);
+  const extra = spec.windows ?? [];
+  const ranked = derived(
+    q`SELECT ${list(cols.map((c) => p.c[c]), ', ')}, ROW_NUMBER() OVER (${spec.over(p)}) AS rn${list(extra.map(([n, e]) => q`, ${e} AS ${n}`), '')} FROM ${p}`,
+    [...cols, 'rn', ...extra.map(([n]) => n)],
+    'ranked',
+  );
+  const rel = derived(
+    q`SELECT ${list(cols.map((c) => ranked.c[c]), ', ')} FROM ${ranked} WHERE ${spec.keep(ranked)}`,
+    cols,
+    'ranked_rows',
+  );
+  return withRelation(s, rel);
+}
+
 /** `where("a", P…("b"))` / `not(...)` over ANY per-row stream that physically carries the alias
  *  columns — scalar, list, variant, property, path and record all do, and all deferred.
  *

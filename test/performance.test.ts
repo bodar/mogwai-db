@@ -91,8 +91,11 @@ describe('property indexes: static vp indexes engage (no full scan)', () => {
 
   test('correlated ordered slice keeps its derived rank boundary lazy', () => {
     const d = explain(plan('g.V().local(__.out().values("name").order().limit(2))'));
-    expect(d).toContain('CO-ROUTINE r');
-    expect(d).not.toContain('MATERIALIZE r');
+    // The rank boundary is the shared `rankedRows` skeleton (tail/barrier.ts), which names its
+    // derived relation `ranked`. What is asserted is the PLAN — a co-routine, not a materialized
+    // temp table — so the name is incidental and only the laziness is the property.
+    expect(d).toContain('CO-ROUTINE ranked');
+    expect(d).not.toContain('MATERIALIZE ranked');
     expect(usesVpIndex(d)).toBe(true);
   });
 });

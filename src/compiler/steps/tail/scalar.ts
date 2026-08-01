@@ -1,4 +1,4 @@
-import { derived, empty, list, paren, q, raw, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
+import { empty, list, paren, q, raw, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { hasUnresolvedOperand, operandDeps, resolveTraversalOperands } from './operand.ts';
 import { compareKey, limitOffset, predicateSql, scalarTx, TYPE_PER_ROW, TYPE_STATIC, TYPE_UNKNOWN, typeCtxOf } from '../../plan/plan.ts';
 import { isNested, isOperatorArg, isOrderArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
@@ -9,7 +9,7 @@ import { loweringStateOf, rebuildScalar, toListStream, toMapStream, toScalarStre
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec, SCALAR_TRANSFORMS } from './coerce.ts';
 import { perRowColumnOf, perRowCols, STATIC, staticTypeOf, UNKNOWN, type ScalarType, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf } from '../../engine/deps.ts';
-import { reprojectRows } from './barrier.ts';
+import { reprojectRows, rankedRows } from './barrier.ts';
 import { collectionAssert } from './child-shape.ts';
 
 // `is(typeOf(GType.LIST|SET))` RETYPES a scalar value stream into a ListStream (the stored
@@ -179,61 +179,37 @@ function fuseScalarSegment(s: ScalarStream, steps: readonly IRStep[], from: numb
   };
 }
 
-function partitionedSlice(s: ScalarStream, offset: number, limit: number | null): ScalarStream {
-  if (!s.traverserLayout.encounter) throw new Error('correlated scalar slice requires explicit encounter order');
+/** The per-origin window every scoped row op ranks in: partition by the child-scope origins (none
+ *  at root) and order by the carried emission encounter. `dir` is the one axis they differ on —
+ *  `tail(n)` is the same window read backwards. */
+const byEncounter = (s: ScalarStream, op: string, dir: 'asc' | 'desc' = 'asc') => (p: Relation): Expression => {
   const enc = s.traverserLayout.encounter;
-  const p = s.rel.as('p');
+  if (!enc) throw new Error(`correlated scalar ${op} requires explicit encounter order`);
   const partitions = s.traverserLayout.origins.map((name) => p.c[name]);
-  const over = partitions.length ? q`PARTITION BY ${list(partitions, ', ')} ORDER BY ${p.c[enc]}` : q`ORDER BY ${p.c[enc]}`;
-  const rankedCols = [...cols(s), 'rn'];
-  const r = derived(q`SELECT ${payload(s, p)}${layoutProjection(s.traverserLayout, p)}, ROW_NUMBER() OVER (${over}) AS rn FROM ${p}`, rankedCols, 'r');
-  const hi = limit == null ? empty : q` AND ${r.c.rn}<=${offset + limit}`;
-  const rel = derived(q`SELECT ${payload(s, r)}${layoutProjection(s.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn}>${offset}${hi}`, cols(s), 'slice');
-  return rebuildScalar(s, rel);
-}
+  const order = q`ORDER BY ${p.c[enc]}${dir === 'desc' ? raw(' DESC') : empty}`;
+  return partitions.length ? q`PARTITION BY ${list(partitions, ', ')} ${order}` : order;
+};
 
-function partitionedTail(s: ScalarStream, limit: number): ScalarStream {
-  if (!s.traverserLayout.encounter) throw new Error('scalar tail requires explicit encounter order');
-  const enc = s.traverserLayout.encounter;
-  const p = s.rel.as('p');
-  const partitions = s.traverserLayout.origins.map((name) => p.c[name]);
-  const over = partitions.length
-    ? q`PARTITION BY ${list(partitions, ', ')} ORDER BY ${p.c[enc]} DESC`
-    : q`ORDER BY ${p.c[enc]} DESC`;
-  const r = derived(
-    q`SELECT ${payload(s, p)}${layoutProjection(s.traverserLayout, p)}, ROW_NUMBER() OVER (${over}) AS rn FROM ${p}`,
-    [...cols(s), 'rn'],
-    'r',
-  );
-  const rel = derived(
-    q`SELECT ${payload(s, r)}${layoutProjection(s.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn}<=${limit}`,
-    cols(s),
-    'tail_rows',
-  );
-  return rebuildScalar(s, rel);
-}
+const partitionedSlice = (s: ScalarStream, offset: number, limit: number | null): ScalarStream =>
+  rankedRows(s, {
+    over: byEncounter(s, 'slice'),
+    keep: (r) => q`${r.c.rn}>${offset}${limit == null ? empty : q` AND ${r.c.rn}<=${offset + limit}`}`,
+  });
+
+const partitionedTail = (s: ScalarStream, limit: number): ScalarStream =>
+  rankedRows(s, { over: byEncounter(s, 'tail', 'desc'), keep: (r) => q`${r.c.rn}<=${limit}` });
 
 /** Root-scope tail(N): the last N rows of the relation's natural order. Unlike a child scope
  *  (partitionedTail, keyed on the explicit encounter), the root stream has no per-origin
- *  partition, so `COUNT(*) OVER ()` + `ROW_NUMBER() OVER ()` select the trailing window
- *  directly — no encounter column required (mirrors the root LIMIT/OFFSET of limit/skip). */
-function rootTail(s: ScalarStream, limit: number): ScalarStream {
-  const p = s.rel.as('p');
-  // With emission order (Stage B) the trailing window is the last N BY encounter; otherwise it
-  // is the last N of the relation's incidental order (an empty window).
-  const over = s.traverserLayout.encounter ? q`ORDER BY ${p.c[s.traverserLayout.encounter]}` : empty;
-  const r = derived(
-    q`SELECT ${payload(s, p)}${layoutProjection(s.traverserLayout, p)}, ROW_NUMBER() OVER (${over}) AS rn, COUNT(*) OVER () AS cnt FROM ${p}`,
-    [...cols(s), 'rn', 'cnt'],
-    'r',
-  );
-  const rel = derived(
-    q`SELECT ${payload(s, r)}${layoutProjection(s.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn} > ${r.c.cnt} - ${limit}`,
-    cols(s),
-    'tail_rows',
-  );
-  return rebuildScalar(s, rel);
-}
+ *  partition, so `COUNT(*) OVER ()` names the trailing window directly — no encounter column
+ *  required (mirrors the root LIMIT/OFFSET of limit/skip). With emission order (Stage B) that
+ *  window is the last N BY encounter; otherwise it is the last N of the incidental order. */
+const rootTail = (s: ScalarStream, limit: number): ScalarStream =>
+  rankedRows(s, {
+    over: (p) => (s.traverserLayout.encounter ? q`ORDER BY ${p.c[s.traverserLayout.encounter]}` : empty),
+    windows: [['cnt', q`COUNT(*) OVER ()`]],
+    keep: (r) => q`${r.c.rn} > ${r.c.cnt} - ${limit}`,
+  });
 
 function partitionedOrder(s: ScalarStream, order: Expression): ScalarStream {
   if (!s.traverserLayout.encounter) throw new Error('correlated scalar order requires explicit encounter order');
@@ -250,19 +226,20 @@ function partitionedOrder(s: ScalarStream, order: Expression): ScalarStream {
   return rebuildScalar(s, rel);
 }
 
-function partitionedDedup(s: ScalarStream): ScalarStream {
-  if (!s.traverserLayout.encounter) throw new Error('correlated scalar dedup requires explicit encounter order');
-  const enc = s.traverserLayout.encounter;
-  const p = s.rel.as('p');
-  const partitions = [...s.traverserLayout.origins.map((name) => p.c[name]), p.c.v, ...(s.result === 'number' ? [p.c.vt] : [])];
-  const r = derived(
-    q`SELECT ${payload(s, p)}${layoutProjection(s.traverserLayout, p)}, ROW_NUMBER() OVER (PARTITION BY ${list(partitions, ', ')} ORDER BY ${p.c[enc]}) AS rn FROM ${p}`,
-    [...cols(s), 'rn'],
-    'r',
-  );
-  const rel = derived(q`SELECT ${payload(s, r)}${layoutProjection(s.traverserLayout, r)} FROM ${r} WHERE ${r.c.rn}=1`, cols(s), 'dedup_rows');
-  return rebuildScalar(s, rel);
-}
+/** Per-origin dedup: the same ranked window, partitioned ALSO by the traverser's value, keeping the
+ *  first encounter of each. The value is why this could not be hoisted into a shape-generic row op —
+ *  there is no authority denoting "the traverser's value" across shapes — but `rankedRows` takes the
+ *  window as a CALLBACK, so the skeleton is shared and only the value expression stays here. */
+const partitionedDedup = (s: ScalarStream): ScalarStream =>
+  rankedRows(s, {
+    over: (p) => {
+      const enc = s.traverserLayout.encounter;
+      if (!enc) throw new Error('correlated scalar dedup requires explicit encounter order');
+      const partitions = [...s.traverserLayout.origins.map((name) => p.c[name]), p.c.v, ...(s.result === 'number' ? [p.c.vt] : [])];
+      return q`PARTITION BY ${list(partitions, ', ')} ORDER BY ${p.c[enc]}`;
+    },
+    keep: (r) => q`${r.c.rn}=1`,
+  })
 
 /** mean(Scope.local) on a scalar stream: each value is a one-element list whose mean is
  *  the value AS A DOUBLE (mean is always Double, even of one element — d[29.0].d). Drops
