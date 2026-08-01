@@ -9,6 +9,15 @@ The compiler builds all SQL through a template-first `q` kernel + typed `Relatio
 
 - **Only `kernel/q.ts` may import raw lazyrecords `Text`/`Compound`.** Do not reintroduce the
   retired ansi builders (`select`/`from`/`join`/`cte`/…) — build through the kernel.
+- **The kernel FAILS CLOSED on an absent column and on an undefined hole — do not weaken either.**
+  `rel.c` is a Proxy that throws on a column the relation does not declare, and a `q` template hole of
+  `undefined` throws instead of rendering as nothing (`empty` is the way to splice nothing). Both
+  exist because the failure they replace is invisible: a `derived()`/`cte()` relation is
+  `Relation<string>`, so `rel.c[name]` type-checks for every string, and an absent one used to splice
+  an EMPTY expression — shipping malformed SQL for SQLite to reject rather than raising at the site
+  that built it. Two separate defects reached production that way. The compiler-side twin, which
+  names the carried CHANNEL rather than a CTE alias, is `layoutProjection`
+  (`compiler/steps/context/context.ts`).
 - **Prefer `q.derived` (non-CTE subquery) over a named CTE.** Reach for a named CTE only when the
   relation is shared/reused or the planner needs a deliberate materialization boundary.
 - **The kernel owns BOTH rendering modes, and there are exactly two.** `Query` NAMES relations

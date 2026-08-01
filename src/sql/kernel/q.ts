@@ -70,8 +70,8 @@ const colRef = (qualifier: string, name: string): Text => raw(`${quote(qualifier
  *  every string and a name the relation does not carry read as `undefined`. A `q` hole of
  *  `undefined` used to splice NOTHING, so the mistake surfaced as malformed SQL at the database
  *  (`SELECT r.v AS v,  FROM c8 r`) rather than at the site that made it. Measured: that is exactly
- *  how a child-scope rejoin projecting an ordinal a global barrier had already dropped escaped
- *  every compile-time instrument (outstanding-work item 32).
+ *  how a child-scope rejoin projecting an ordinal a global barrier had already dropped escaped every
+ *  compile-time instrument — the compiler's own assertions all passed and SQLite raised the error.
  *
  *  A Proxy, not a per-read check, because the whole point is that the ~1,600 existing `rel.c.x`
  *  sites gain the guard without being touched. Only STRING keys are guarded — symbol lookups

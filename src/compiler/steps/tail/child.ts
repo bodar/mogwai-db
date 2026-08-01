@@ -526,8 +526,9 @@ function compileScalarChildRows(
   //
   // The HEAD (element prefix + branch) goes through the engine; the scalar-row SUFFIX is continued
   // by hand, exactly as the element-row route below does and for exactly the same reason — a
-  // reducer there is per-origin. Handing the whole body to the engine instead is item 32's
-  // malformed SQL.
+  // reducer there is per-origin. Handing the whole body to the engine instead routes that reducer to
+  // its GLOBAL twin, which drops the carried layout and leaves the parent's rejoin projecting an
+  // ordinal the relation no longer has.
   const branchParts = elementScalarBranchParts(body, childCtx(parent));
   if (branchParts) {
     const pushed = pushChildScope(parent, scope);

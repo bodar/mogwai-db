@@ -30,7 +30,7 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-**Ranked entry point.** Numbers are IDs, not an order. **32** (a live crash) →
+**Ranked entry point.** Numbers are IDs, not an order.
 **[write-path](./2026-08-01-write-path-plan.md) §2** (silent wrong answers) → **2** → **17**'s
 partitioned row-ops seam → **33** → **34** → **29** → **3**'s `times(n)` unroll (unblocked; its
 precondition landed).
@@ -47,21 +47,6 @@ refusals, 31, 36 — **and the WRITE path, which this line denied until 2026-08-
 eleven L3 scenarios fail at a `the graph should return N` step (three reproduced in
 [write-path](./2026-08-01-write-path-plan.md) §2). Everything else fails closed, and the index's centre
 of gravity is ceiling, not correctness.
-
-32. **A multi-arm SCALAR `union()` in a child scope, followed by a reducer, emits MALFORMED SQL — a
-   fail-closed VIOLATION.** `g.V().local(__.union(__.values('name'), __.values('age')).count())` →
-   `near "FROM": syntax error`; same for `.sum()`/`.max()`, and `where(…)`/`filter(…)` hosting it give
-   `near "=":`. ONE arm defers cleanly and an element-armed union runs, so the trigger is ≥2 SCALAR arms.
-   **Mechanism, off the emitted SQL:** `unionScalarStreams` (`tail/scalar.ts`) merges arms with
-   `mergeLayouts(…, {rigid:'rehomed'})`, dropping the branch's child ordinal `o1`; the following
-   `count()` then sees no `origins` and takes `lowerGlobalCount` instead of `lowerScopedScalarReducer`,
-   so the `local()` rejoin projects the parent ordinal off a global relation and `rel.c.o0` splices
-   empty: `SELECT r.v AS v,  FROM c8 r`. Architectural — the wrong thing is the scoped-vs-global reducer
-   ROUTING; adjacent to the `layoutArmProjection` substrate.
-   **Invisible to every instrument:** absent from both L5 ratchets, and its two corpus witnesses
-   (`deferrals.tsv`) are `unbound` so they never execute. `assertStreamColumns` cannot see it — the
-   merged stream is self-consistent and the mismatch is child-frame-ordinal vs merged layout, which
-   nothing asserts. **That missing assertion is the reusable half of the fix. High.**
 
 22. **Validation the spec MANDATES and we do not perform — 7 scenarios left, and they need a RUNTIME
    type channel we do not have.** Of the 22 L3 scenarios failing AT an error-assertion step, **7
@@ -466,14 +451,16 @@ Each fails closed. Do only when a concrete scenario demands it.
 - **Recursive-path tails** — `cyclicPath`/`until`/`emit(pred)` with path, edge-inclusive bodies, mixed
   linear+repeat, recursive-regime `from()`/`to()`, multiple `by()`s, `order()` before a movement while a
   path is live. *Low-Med.*
-  · **A path-REGIME change inside a child body emits malformed SQL — the one fail-closed VIOLATION here,
-  so take it first.** `g.V(1).simplePath().project('a').by(__.repeat(__.in('knows')).times(2))` →
-  `near "FROM": syntax error`: the child's `repeat()` retypes the carried path from linear `cols` to its
-  own recursive accumulator while the parent still DECLARES the position columns, so `rel.c.p0` is
-  `undefined` and splices an empty string. **Do not fix by declining at the repeat** — measured, the same
+  · **A path-REGIME change inside a child body still has no answer — but it now DEFERS.**
+  `g.V(1).simplePath().project('a').by(__.repeat(__.in('knows')).times(2))`: the child's `repeat()`
+  retypes the carried path from linear `cols` to its own recursive accumulator while the parent still
+  DECLARES the position columns. It emitted malformed SQL (`rel.c.p0` was `undefined` and spliced an
+  empty string) and was the one fail-closed VIOLATION here; `layoutProjection`
+  (`steps/context/context.ts`) now refuses to project a carried column the relation does not declare,
+  so it throws naming the channel. **Do not fix by declining at the repeat** — measured, the same
   condition holds for `local(__.repeat(…))` and `where(__.repeat(…))` under `simplePath()` and BOTH
   execute correctly, so a guard there regresses two working shapes. The fix is for a child body to
-  restore the parent's path regime across the rejoin. *Med.*
+  restore the parent's path regime across the rejoin. *Med, and no longer urgent.*
   → [path-history-substrate](./2026-07-18-path-history-substrate.md)
 - **Group re-entry matrix-fill** — element/property-valued inner keys+values, composite `project()` keys,
   `elementMap()` followers, `keys→SET`, `as()`/`order()` on a group. Extend `tail/group.ts` (item 2),
@@ -560,7 +547,7 @@ deferral clusters in 5c instead.
   ignored.*
 - **`feature-support-matrix.md` over-promises.** (a) Generate the capability ratchet's per-step shape
   strip into it so its ✅ matches 5c. (b) It states "There are currently NO 🐞 rows — no form is known to
-  mis-execute", which is false (items 20, 31, 32 and 36), and the legend points at `known.ts` for the
+  mis-execute", which is false (items 20, 31 and 36), and the legend points at `known.ts` for the
   mark's source of truth.
 - **The `ResultStream` residue is the one worthwhile `Shape` retirement** — six orphan `Shape` kinds
   across 13 `toResultStream` sites, and ~14 of 5c's failures. Zero corpus demand, so it is a give-back.
