@@ -61,7 +61,7 @@ describe('ServiceRegistry', () => {
   });
 
   test('internal is a FLAG, not the directory name — any service can opt out of --list', () => {
-    // What constraint 3 of docs/2026-07-31-di-scopes-and-services-plan.md buys: a service that
+    // What constraint 3 of docs/archive/2026-07-31-di-scopes-and-services-plan.md buys: a service that
     // backs a sugar step (io()) can exist in the production registry and stay out of the
     // reference provider surface the official g_call/g_callXlistX scenarios assert.
     const r = createRegistry([stubService('mogwai.io', true), stubService('tinker.search')]);

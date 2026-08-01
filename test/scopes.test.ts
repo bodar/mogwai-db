@@ -36,7 +36,7 @@ describe('DI scopes', () => {
   });
 
   test('the registry provider is LAZY and sees the whole scope it lives in', () => {
-    // Constraint 1 of docs/2026-07-31-di-scopes-and-services-plan.md: `registry` is a function of
+    // Constraint 1 of docs/archive/2026-07-31-di-scopes-and-services-plan.md: `registry` is a function of
     // its own container, so its services take dependencies (source, and the registry itself) at
     // construction. That is only not-a-cycle because the provider runs on first READ.
     let built = 0;

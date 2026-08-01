@@ -37,7 +37,7 @@ while what they operate on keeps TinkerPop's.
   **There are TWO scopes, not three, and the missing one is deliberate:** what a single compile owns
   (its fresh CTE `Query`, and inject()'s empty-param-table override) is per-compile STATE, held by
   the one-per-compile `LoweringEngine`. A compile scope only duplicated `q` into DI. Rationale:
-  `docs/2026-07-31-di-scopes-and-services-plan.md`.
+  `docs/archive/2026-07-31-di-scopes-and-services-plan.md`.
 - **One engine, families are free functions.** The `LoweringEngine` (`engine/engine.ts`) holds the
   recursive surface; step families reach it via `engineOf(stream)` and import only the leaf
   interface `engine/deps.ts`. This one-way DAG (deps ◂ families ◂ engine ◂ compiler) is what keeps

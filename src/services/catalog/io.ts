@@ -19,7 +19,7 @@ import { csvPaths, loadCsv, writeCsv } from '../../formats/csv.ts';
 //
 // Both dependencies arrive at CONSTRUCTION off the app scope — the IoStore (where documents live)
 // and this graph's rows. That is the whole point of the DI consolidation
-// (docs/2026-07-31-di-scopes-and-services-plan.md): `apply` needs no wider contract, because a
+// (docs/archive/2026-07-31-di-scopes-and-services-plan.md): `apply` needs no wider contract, because a
 // service is not a module-level constant that can depend on nothing.
 
 // The name itself lives in spi/types.ts (a dependency-free leaf), so the desugaring Pass in the

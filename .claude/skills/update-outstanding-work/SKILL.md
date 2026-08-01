@@ -82,9 +82,10 @@ Then read the telemetry (NOT the raw run log — it's huge):
 
 ### 1b. Probe the ceiling with L5-random (the instrument L3 structurally cannot be)
 
-**L3 measures the floor; L5 measures what COMPOSES.** CI runs L5 at a fixed seed, which is by design
-(a flaky property test gets disabled) but means it is *a deterministic generated corpus* that discovers
-nothing after its first run. So this skill must run the exploration:
+**L3 measures the floor; L5 measures what COMPOSES.** The standard build already rotates its seed —
+`test/L5-properties/seed.ts` derives it from `HEAD`, so every commit draws a fresh generated corpus —
+but one draw per commit at the committed depth is a thin sweep. So this skill still runs the deeper
+exploration:
 
 ```
 mise run L5-random   # random seed, 3000 traversals; the deep sweep, not the build gate — expect red
@@ -123,12 +124,11 @@ Reading the output, in this order:
    than failing anything), so file it as instrument integrity. Check arity against
    `vendor/tinkerpop/gremlin-language/src/main/antlr4/Gremlin.g4`.
 
-File each cause as ONE item (never one per seed or per traversal), and note in the index that the
-process gap — generated-input discovery not running in the STANDARD BUILD — is itself the item, since
-otherwise this rots again. The intended fix is a rotating seed inside `mise run test` gated by the
-committed witness ratchets (only a NEW signature fails), **not** a scheduled/nightly job: an
-out-of-band report is one nobody reads, which is how this rotted the first time. See
-`docs/2026-07-28-property-based-testing-l5.md` "Seeds" and index item 0d.
+File each cause as ONE item (never one per seed or per traversal). **If the sweep finds nothing, that is
+itself a finding and it has an item**: the rotating seed landed, so a green sweep means the GENERATOR is
+saturated, not that the compiler is correct — file the lattice gap (which corpus step names the
+transition table cannot emit) rather than reporting "L5 clean". See
+`docs/2026-07-28-property-based-testing-l5.md` "Seeds"; the index carries this as item 34.
 
 ### 2. Sweep newer docs (subagent, `general-purpose`)
 
@@ -260,10 +260,9 @@ the failure mode of this step is dropping a live item along with the narration a
   `test/CLAUDE.md`).
 - Read telemetry JSON, never tail the full L3 log into context. L5's logs ARE small enough to grep —
   filter to `^\(fail\)` and `Counterexample`.
-- **`mise run L5-random` being red is the expected state, not a blocker** — it draws seeds the pinned
-  build never reaches (until item 0d's rotating seed lands, at which point a NEW signature is fatal in
-  the ordinary build and this run is just the deeper sweep). Diagnose and file; do not "fix" it by
-  adding ratchet entries, and never add an entry to
+- **`mise run L5-random` being red is not a blocker** — a NEW signature is already fatal in the ordinary
+  build (the seed rotates per commit), so this run is the deeper sweep at a bigger sample. Diagnose and
+  file; do not "fix" it by adding ratchet entries, and never add an entry to
   `known.ts` / `capability-baseline.ts` without a diagnosis (the header of each forbids it) or without
   a matching index line.
 - **Never silence a baseline to make a run green.** Do not hand-edit `l3-state.json`'s `passed`, and do

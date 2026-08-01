@@ -306,7 +306,7 @@ needs the opposite: mutate this graph's tables (through `BulkLoader`) and return
 "return nothing" half is already right, since the Gherkin scenarios assert an empty result.
 
 **SUPERSEDED 2026-07-31 — the answer is DI, and it is its own piece of work:
-`docs/2026-07-31-di-scopes-and-services-plan.md`.** Widening the barrier signature (either positionally
+`docs/archive/2026-07-31-di-scopes-and-services-plan.md`.** Widening the barrier signature (either positionally
 or into a context object) is a *third* copy of a workaround the codebase already has twice: `source` is
 already in `AppScope` and `depth` already in `CompilerScope`, and they are threaded positionally anyway
 because a service — a module-level constant in a registry of module-level constants — has no way to

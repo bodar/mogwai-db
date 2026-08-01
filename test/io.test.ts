@@ -19,7 +19,7 @@ import { runPasses } from '../src/compiler/ir/passes.ts';
 // io() over the REAL stack: a rooted FileIoStore, the internal mogwai.io service, and the barrier
 // seam it desugars onto. `io()` is TinkerPop's own step; what makes it work here is entirely DI —
 // the service takes the IoStore and this graph's store at construction, so the barrier contract
-// (`apply(rows)`) never widened. See docs/2026-07-31-di-scopes-and-services-plan.md.
+// (`apply(rows)`) never widened. See docs/archive/2026-07-31-di-scopes-and-services-plan.md.
 
 /** A temp io namespace holding one typed-GraphSON dump of the modern graph. */
 function ioDir(): string {
