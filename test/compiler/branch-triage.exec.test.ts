@@ -13,6 +13,7 @@ import {
 } from '../../src/compiler/steps/tail/child-shape.ts';
 import { type IRStep } from '../../src/compiler/ir/strategies.ts';
 import { compile } from '../../src/compiler/compiler.ts';
+import { bagOf } from '../support/harness.ts';
 import { seeded } from '../support/graph.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 
@@ -217,32 +218,34 @@ describe('classifyScalarChild admits what the scalar-child emitter lowers', () =
   };
 
   test('a projection-with-reducer body lowers in EVERY consumer position, with one answer', () => {
-    // 4 persons have an age (1 value each), 2 software vertices have none (0). TWO orderings are
-    // in play here and they used to look identical, which is why they were one constant:
-    //  - a per-traverser consumer (map/local/project/coalesce/path) emits in g.V() order, i.e. the
-    //    modern graph's VERTEX order — marko, vadas, lop, josh, ripple, peter;
-    //  - choose() emits ARM by arm (every matched traverser, then every unmatched one), so on this
-    //    predicate it groups the four with an age ahead of the two without.
-    // They coincided while g.V() was scanned through the old n_label index and so came back
-    // grouped by label. Labels now live in vertex_labels, the scan is rowid order (TinkerPop's),
-    // and the two orderings separate. Only the first constant moved.
-    const expected = [1, 1, 0, 1, 0, 1];
-    const expectedByArm = [1, 1, 1, 1, 0, 0];
+    // 4 persons have an age (1 value each), 2 software vertices have none (0) — so every consumer
+    // position must answer with the same six counts. That is the whole claim, and it is a MULTISET
+    // claim: none of these traversals fixes an order (no order(), no positional consumer), so the
+    // sequence they arrive in is unspecified by design.
+    //
+    // This test used to carry TWO constants — a per-traverser order and a by-arm one, differing
+    // only in position — which made it a pin on `g.V()`'s scan order, and it flipped under
+    // `mise run test:perturbed`. The by-arm reading is a real property, but since 21's T4 it is
+    // observable only where nothing demands an order, i.e. it is INTERNAL — and it is already
+    // pinned where internals belong: `test/L2-sql/branch.sql.test.ts` asserts the merge window is
+    // `ROW_NUMBER() OVER (… arm_idx, arm_ordinal, arm_encounter)`. Asserting it a second time
+    // through result position bought nothing and cost the instrument.
+    const counts = bagOf([1, 1, 1, 1, 0, 0]);
     expect(isScalarChild(nestedOf("g.V().map(__.values('age').count())"), CTX)).toBe(true);
     // the emitter-direct consumers (these already worked)
-    expect(scalars("g.V().map(__.values('age').count())")).toEqual(expected);
-    expect(scalars("g.V().project('a').by(__.values('age').count())")).toEqual(expected);
+    expect(bagOf(scalars("g.V().map(__.values('age').count())"))).toEqual(counts);
+    expect(bagOf(scalars("g.V().project('a').by(__.values('age').count())"))).toEqual(counts);
     // the classifier-gated consumers (these failed closed: "not yet supported (scalar/projection
     // body)" for the branches, "local() child shape not yet supported" for local)
-    expect(scalars("g.V().local(__.values('age').count())")).toEqual(expected);
-    expect(scalars("g.V().choose(__.has('age'), __.values('age').count(), __.values('age').count())")).toEqual(expectedByArm);
-    expect(scalars("g.V().coalesce(__.values('age').count(), __.constant(-1))")).toEqual(expected);
-    expect(scalars("g.V().path().by(__.values('age').count())")).toEqual(expected);
+    expect(bagOf(scalars("g.V().local(__.values('age').count())"))).toEqual(counts);
+    expect(bagOf(scalars("g.V().choose(__.has('age'), __.values('age').count(), __.values('age').count())"))).toEqual(counts);
+    expect(bagOf(scalars("g.V().coalesce(__.values('age').count(), __.constant(-1))"))).toEqual(counts);
+    expect(bagOf(scalars("g.V().path().by(__.values('age').count())"))).toEqual(counts);
     // …and the movement-count reading of a count terminal still works next to it, in both
     // positions — the two arms are disjoint, so admitting one never shadows the other.
-    expect(scalars("g.V().local(__.out().count())")).toEqual([3, 0, 0, 2, 0, 1]);
-    expect(scalars("g.V().choose(__.has('age'), __.out().count(), __.values('age').count())"))
-      .toEqual([3, 0, 2, 1, 0, 0]); // by arm, as above
+    const degrees = bagOf([3, 2, 1, 0, 0, 0]);
+    expect(bagOf(scalars("g.V().local(__.out().count())"))).toEqual(degrees);
+    expect(bagOf(scalars("g.V().choose(__.has('age'), __.out().count(), __.values('age').count())"))).toEqual(degrees);
   });
 
   test('EVERY scalar producer may carry a scoped reducer — the projection is not the axis', () => {
