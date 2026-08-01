@@ -53,7 +53,7 @@ g.addV("animal").property("name","mateo").property("name","gateo").property("nam
   ours:      values("name") → ["cateo"]          — each property() OVERWRITES
   reference: all three survive (the scenario asserts has(name,mateo) AND (…,gateo) AND (…,cateo))
 
-g.V().outE().property("weight", null)
+g.V().outE().property("weight", null)                                    — FIXED 2026-08-01
   ours:      E().properties("weight").count() → 6   — the property is kept
   reference: 0 — a null value REMOVES the property
   (same shape: g.V().hasLabel("person").property("name", null), and
@@ -75,8 +75,18 @@ multi-property, and we take the first value where a traversal yields several. Tr
 substrate for W1 rather than a separate item; the wrong answers are its visible face and are what
 justify the schema work.
 
-The null-removal case is independent and small: it is a semantic rule (`null` value ⇒ remove), not a
-schema question, and it has three hosts (vertex `property`, edge `property`, `mergeE(onMatch)`).
+**The null-removal case is DONE (2026-08-01, `15ceefa`).** It was independent and small, as
+predicted: a semantic rule (`null` value ⇒ remove), not a schema question. What the estimate got
+wrong is that it does not have "three hosts" — it has **two**, and they are the storage waists
+(`applyVertexProperty` / `insertEdgeProperty`), because removal is cardinality-independent AND
+lifecycle-independent, so vertex `property()`, edge `property()`, addV/addE creation and
+`mergeE(onMatch)` all reach it there. The `single`-cardinality replace turned out to BE that same
+delete, so the two now share `removeProperties`. L3 1679 → 1682; census moved 5 rows, all this rule.
+
+That change also grew L4 a step it did not have: upstream's
+`And the graph should return N for count of "<traversal>"`. **Every remaining tranche in this
+document needs it** — without it an L4 write scenario can only pin what the write RETURNED, which is
+trap 4 from the other side.
 
 ## 3. W2 — the upsert cluster: 41 of the 66 failures
 
@@ -178,7 +188,7 @@ on it.
 
 | # | Tranche | Verified by |
 |---|---|---|
-| W1 | the three (five) silent wrong answers + W4 schema | the reproductions in §2 become L4 pins; census `goldens.tsv` moves with a reason |
+| W1 | the three (five) silent wrong answers + W4 schema — **null-removal landed** | the reproductions in §2 become L4 pins; census `goldens.tsv` moves with a reason |
 | W2 | the map-valued driver, then the five upsert rows that follow it | L3 ratchet (expect ~41 candidates, not all reachable) |
 | W3 | addV mid-chain / read-tail-after-write first, then the positions it unblocks | L3 ratchet + the matrix rows 207–209 |
 | W4 | driver input in emission order | `mise run test:perturbed` — 3 census rows, and with the `repeat` exemption the instrument becomes a GATE |
