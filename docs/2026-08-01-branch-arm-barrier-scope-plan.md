@@ -1,6 +1,9 @@
 # A branch arm's barrier observes the branch's whole input — doing it properly
 
-**Status: T1, T2 and T3 LANDED 2026-07-31. T4 open. The fail-closed gate has NOT been written** — nothing
+**Status: T1, T2 and T3 LANDED 2026-07-31. T4 open, and RECLASSIFIED 2026-08-01** — it is a wrong
+SUBSET under a downstream slice, not the ordering item it was filed as, which also means it can be
+pinned with a multiset assertion rather than an ordered one (§T4, §6.5).
+**The fail-closed gate has NOT been written** — nothing
 named `verifyBranchArmBarrierScope` exists in `src/`, so anything T2/T3 have not reached still
 mis-executes rather than deferring.
 **T1's outcome, and it revises T1's own prediction.** "Probably nearly free" was right about the
@@ -136,16 +139,89 @@ witness. **T3 needs an L4 pin derived from the reference by hand, before any cod
 with its derivation spelled out. The child-scope guard has no pin: every spelling that would exercise
 it defers today.)*
 
-**T4 — emission order.** Once an arm is batched, arm-major over the whole stream is CORRECT, which is
-what we already emit — so T1–T3 fix the ordering for those cases for free. What remains is the
-BARRIER-FREE case, where the reference is traverser-major and we are arm-major globally (filed as
-outstanding-work item 21). That needs a lexicographic `(input traverser, arm_idx, arm_encounter)` key,
-and the input traverser's identity is **not** available today: `arm_encounter` is the arm's own
-encounter, which a fan-out arm re-mints per-origin, and the child ordinal is `ROW_NUMBER() OVER ()`
-— it identifies a traverser without ordering them. So T4 needs the parent's encounter preserved as a
-distinct carried role. Do T4 last, and only with an L4 pin first: **the census cannot see a pure
-reorder** (`ms` is order-insensitive on the outer multiset, `ord` is telemetry) and every `union`
-scenario in the corpus asserts `unordered`.
+**T4 — the barrier-FREE case, and it is a WRONG SUBSET rather than a reorder.** Once an arm is
+batched, arm-major over the whole stream is CORRECT, which is what we already emit — so T1–T3 fixed
+the ordering for those cases for free. What remains is the barrier-free case, where the reference is
+traverser-major and we are arm-major globally (filed as outstanding-work item 21). **Re-measured
+2026-08-01, and the "emission order" framing this section shipped with is §6.1 happening a second
+time:** put any positional consumer after the branch and the arm-major key selects a different
+WINDOW, so the answer is a different multiset.
+
+```
+g.V(1,4).union(__.out(), __.in()).values('name').limit(4)
+  ours      → [vadas, lop, lop, ripple]                                        (measured)
+  reference → the first three results are v1's three arm outputs {vadas, josh, lop};
+              the fourth is v4's first — hasBarrier false injects ONE start at a time (§1)
+```
+
+Ours omits `josh` and pulls v4's `lop` into the window. Nothing in that reading depends on
+within-arm movement order, which the reference leaves implementation-defined — only on the GROUPING
+by input traverser, which the class hierarchy fixes. Two consequences:
+
+- **T4 does not need an ordered pin, correcting this section's own original claim and item 21's.** A
+  multiset assertion witnesses the slice half, so an L4 pin can be written exactly as T3's five were
+  (order-insensitive, derivation spelled out). An ordered pin is needed only for the residual PURE
+  reorder — a barrier-free branch with no positional consumer after it — which the census still
+  cannot see (`ms` is order-insensitive on the outer multiset, `ord` is telemetry) and which every
+  corpus `union` scenario asserts `unordered`.
+- **It is a silent wrong answer, which is the one thing the root CLAUDE.md's "correct by design, fail
+  closed" rule says we do not ship.** That, not the ordering, is T4's justification.
+
+**Exposure, measured over all 2,298 L1 traversals** (parse → `stepChain` → `armBatches` per arm +
+`analyzeChain`): 96 contain `union`/`choose`; 16 have a batching arm (T1–T3 ground); 81 are entirely
+barrier-free, 78 of those with multi-traverser input, and 10 of THOSE already demand an emission
+encounter — **none of which is a slice after the branch** (they are `local(union(…).fold())`,
+`groupCount`/`cap`, and source unions). So the corpus has ZERO witnesses, the census cannot ratchet
+this, and L3 will not move. Do not read that silence as "the shape is rare": the shape is 78
+traversals; it is the CONSUMER that is absent, and users write it.
+
+**The dependency: the branch input's encounter, frozen, as its own carried role.** The key wants to
+be `(input encounter, arm_idx, arm_encounter)` and the first term does not exist:
+
+- `TraverserLayout.encounter` is ONE slot (`context/context.ts`), and each fan-out inside the arm
+  re-mints it in place (`finishMove`, `prefix/movement.ts`). The result is monotone in the parent's
+  value but is a RANK, and two arms rank independently over different row counts, so the parent key
+  is unrecoverable from it.
+- The child ordinal is `ROW_NUMBER() OVER ()` (`tail/child.ts`) — it identifies a traverser without
+  ordering them, and `popChildScope` projects it away. A mid-traversal `union` does not even push a
+  child scope: its arms compile over the current relation (`tryCompileElementTraversal`).
+
+**This does not relitigate the one-encounter decision, and the discriminator has to be written down
+next to the role or someone will smuggle the refused design back in.** What Stage C and
+outstanding-work item 4 refused is two representations of the SAME question — a stream-level
+encounter beside the layout's, both answering "what is *this* stream's emission order". A frozen copy
+of an OUTER scope's order is a different question, and the layout already carries that kind of thing:
+`origins` is a stack of outer-scope identity columns. The rule: **the new role is never consulted as
+"this stream's order" — only as a partition/sort key at a merge or a pop.** Any consumer that would
+read both it and `encounter` for the same purpose IS the refused reconciliation.
+
+The decision T4 actually pushes on is Crux 1 of `2026-07-19-canonical-emission-order.md` ("single
+running ROW_NUMBER vs composite tuple → single"). The answer is not to reopen it for a growing tuple:
+it is a BOUNDED composite — one frozen copy per open branch, depth bounded by branch nesting, the
+same shape `origins` already has.
+
+**What it unlocks beyond itself — modest, and worth stating so it is not oversold.** Real: correct
+slices after any barrier-free branch; §5's metamorphic law becomes assertable; `group()`'s `valOrder`
+("parent encounter then child encounter", `tail/group.ts`) stops being bespoke and becomes an
+instance of the composition. Partial: item 20's ordered-child-read residuals
+(`aggregate('x').by(__.out().order().by('name'))`) are the same order-dies-at-`popChildScope` shape.
+NOT unlocked, and deliberately not bundled: the take-first guards (`armFansOut`,
+`positionArmFansOut`) need item 4's re-source encounter mint, a different primitive; a RECORD stream
+carrying no encounter is a third; item 20's group-value-body bug is a SCOPE bug, not an order one.
+
+**Scope the mint to `demandsEncounter`.** Mint the frozen role only where an encounter is already
+live. Widening `computeDemandsEncounter` to every barrier-free branch would cost `movementCollapse`
+and a ROW_NUMBER at every upstream movement to fix an order nothing observes — Crux 4 already decided
+the final result stays unordered unless a consumer asks. Bounded cost, in one place each: the role +
+its `LAYOUT_ROLE_POLICY`/barrier-policy entries, the key at `finishElementMerge` and
+`mergeArmRelation` (two sites, deliberately — channel-preservation Phase 1 keeps them separate), the
+`inject()` benign set, and L2 snapshot churn.
+
+**Do NOT fail closed in the meantime.** §7 paid that price once for T1/T2 and it cost real
+capability; here it would withdraw 78 corpus shapes of which nearly all are answered correctly,
+because their results are unordered and nothing slices them. Pin, then fix — and note the sequencing
+constraint L4 imposes: every scenario there must PASS, so the pins are written first but land in the
+same commit as the fix, exactly as T3's did.
 
 ## 5. The duplication to remove while doing it
 
@@ -166,7 +242,7 @@ scenario in the corpus asserts `unordered`.
   message points users at. When T1/T2 land, that equivalence becomes a metamorphic law worth adding to
   `laws.ts`: `union(barrier-arm…)` over a single-traverser input ≡ `local(union(…))`.
 
-## 6. Four things I got wrong writing this — check each before proposing a change
+## 6. Five things I got wrong writing this — check each before proposing a change
 
 1. **"It's an ordering divergence."** It is a cardinality error; ordering is a symptom. Filed as an
    ordering item first, which understated it.
@@ -177,6 +253,11 @@ scenario in the corpus asserts `unordered`.
    never considers it. Including it cost five L3 scenarios in the first draft of the gate, every one a
    barrier in the SELECTOR (`choose(__.out().count()).option(…)`), where a barrier is an ordinary
    correlated sub-read that emits nothing.
+5. **"T4 is emission order"** — added 2026-08-01, and it is #1 recurring one tranche later, in the
+   section written to record #1. A wrong ORDER under a downstream slice is a wrong WINDOW, so the
+   answer is a different multiset (§T4's witness). The tell that catches both: ask what a POSITIONAL
+   CONSUMER downstream does with the key, not what the key looks like. It also flipped the plan for
+   T4 — the pin it "needs an ordered L4 pin first" is a multiset assertion.
 
 ## 7. What the fail-closed gate does and does not buy
 

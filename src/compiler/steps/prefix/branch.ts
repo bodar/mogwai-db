@@ -193,17 +193,25 @@ function armProjection(arm: ElementStream, out: TraverserLayout, armIdx?: number
 
 /** Merge the element arms' UNION ALL. When emission order is live, re-mint the encounter as
  *  ROW_NUMBER() OVER (<partition> ORDER BY arm_idx, arm_encounter) — arm 0 fully before arm 1,
- *  superseding the per-arm
+ *  superseding the per-arm encounters `armProjection` tagged. Otherwise a plain UNION ALL (hot path
+ *  unchanged). `parts` are the per-arm SELECTs (each already carrying `arm_idx` when
+ *  `out.encounter` is live).
  *  ---
  *  That key is arm-major over the WHOLE stream, and it matches the reference only when the branch
  *  batches: `BranchStep.standardAlgorithm` injects one start at a time unless `hasBarrier` is set,
  *  so for several traversers and no barrier arm the reference is traverser-major, arm-minor. Do not
- *  read the comment above as "matching TinkerPop" unqualified — it did say that, and it is true for
- *  one input traverser only. Filed as outstanding-work item 21;
- *  docs/2026-08-01-branch-arm-barrier-scope-plan.md T4 has the design (it needs the parent's
- *  encounter as a distinct carried role, which is why it is not a one-clause change here).
- *  encounters `armProjection` tagged. Otherwise a plain UNION ALL (hot path unchanged). `parts`
- *  are the per-arm SELECTs (each already carrying `arm_idx` when `out.encounter` is live).
+ *  read the line above as "matching TinkerPop" unqualified — it did say that, and it is true for
+ *  one input traverser only.
+ *
+ *  **That is a wrong SUBSET, not a reorder**, whenever a positional consumer follows the branch —
+ *  the key picks a different window, so `g.V(1,4).union(__.out(), __.in()).values('name').limit(4)`
+ *  returns [vadas, lop, lop, ripple] where the reference's first three results are v1's three arm
+ *  outputs {vadas, josh, lop}. Filed as outstanding-work item 21;
+ *  docs/2026-08-01-branch-arm-barrier-scope-plan.md T4 has the design and the exposure measurement.
+ *  It is not a one-clause change here: the traverser-major key needs the branch INPUT's encounter
+ *  frozen as its own carried role, and there is no column for it — the one `encounter` slot is
+ *  re-minted in place by each fan-out inside the arm (finishMove), and the child ordinal is
+ *  ROW_NUMBER() OVER (), which identifies a traverser without ordering them.
  *
  *  Takes a bare `LoweringState`, like its three siblings (unionScalarStreams / finishListMerge /
  *  mergeVariantArms): the arms' PARENT is not part of a merge, only the carried schema they
