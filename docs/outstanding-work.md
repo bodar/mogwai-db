@@ -4,7 +4,7 @@ The de-duplicated index of open work across the `docs/` corpus. **Each item sets
 why, where to start — not a spec.** The linked doc holds the rationale; the picking agent does the
 validation and design. Live per-step capability: `feature-support-matrix.md`.
 
-**Refreshed** 2026-07-31, **L3 line updated 2026-08-01** · **L3 1669 / 2267** (`l3-state.json`; fewer
+**Refreshed** 2026-07-31, **L3 line updated 2026-08-01** · **L3 1671 / 2267** (`l3-state.json`; fewer
 UNIQUE names than that — the collision is expected, see won't-do) · census **0 `crashed`, 4
 `nondet`** (`sample()` landed) ·
 `known.ts` **1 entry** — repeat's two body routes disagree on a positional window, found by the
@@ -69,7 +69,8 @@ unordered", not open work. Also item 23's wording family, as three reference-sou
 a rename sweep — the `by()` arity table + verify Pass, `StandardVerificationStrategy` modelled whole,
 and the list-input refusals (L3 1652 → 1666). It closed item 22's `groupCount()` pair, which were
 real wrong answers, and it deleted four per-host arity checks it dominates. Then item 2's scalar
-child-in-child (L3 → 1669), which was a classifier gap rather than missing machinery.
+child-in-child (L3 → 1669), which was a classifier gap rather than missing machinery; then item 20's
+group-value barrier scope (L3 → 1671), the last of the three known wrong answers outside 21's T4.
 
 **What that leaves.** No item below is a known wrong answer except 20's residuals and item
 22's six remaining per-member type refusals — the rest fail closed. Read that as the index's centre of gravity moving from correctness to ceiling.
@@ -201,12 +202,22 @@ cardinality, which is the measurement that says the ladder could not have found 
 20. **Results ordered only because SQLite scanned the convenient way.** `mise run test:perturbed`
    (`PRAGMA reverse_unordered_selects`) — a failure there is never a flake. Perturbed census **41 → 8**,
    suite **21** (measured 2026-08-01). Three mechanisms landed; left:
-   - **A GROUP VALUE body's barrier runs in the wrong SCOPE — a live silent wrong answer, not an
-     ordering fix.** `group().by(T.label).by(__.values('name').order().by(desc).fold())` returns
-     vertex-id order while the same `order().fold()` at ROOT is correct: the value body compiles
-     per-origin, so each partition holds ONE name and the sort is a no-op. The reference splits the
-     value traversal — last barrier is the group's REDUCER, everything before it per-traverser. Item 5's
-     ground; **do not fix it by changing the ORDER BY.** *Med — both scenarios assert `unordered`.*
+   - **A GROUP VALUE body's barrier runs in the wrong SCOPE — `dedup()`/`order()` LANDED 2026-08-01
+     (L3 1669 → 1671); `limit`/`range` are what is left.** The rule is
+     `Grouping.determineBarrierStep`: the first non-local barrier in a value traversal is the group's
+     REDUCER, and `projectTraverser` feeds that traversal one traverser at a time — which is exactly
+     our child scope, so a barrier compiled there observes one origin. The two with an EXACT aggregate
+     form are hoisted out of the child scope (`partitionBarriers`, `tail/group.ts`): `order()` → the
+     aggregate's `ORDER BY`, `dedup()` → `DISTINCT`. It fixed a wrong answer the corpus COULD see
+     (`…bothE().values('weight').dedup().order().by(asc).fold()` was leaving each weight repeated once
+     per incident vertex) and one it could not (every group scenario asserts `unordered`, which
+     compares the map's entries and never the order inside a value list — hence
+     `test/L4-addendum/group-value-partition-barrier.feature`).
+     **`limit`/`range` before the terminal have no aggregate form** — a partition-wide window inside an
+     aggregate — so they stay child-scoped and silently observe one origin. Same for an ELEMENT value
+     body's `order().by(key)`. A bare `dedup().fold()` is now correct but its member order is
+     first-occurrence over a scan-determined sequence, so it is NOT L4-pinnable until that order is
+     fixed. *Med.*
    - **A CHILD-SCOPED body's rows have no order ACROSS parents, and this is the mechanism under
      several of the rows below.** A per-origin projection mints
      `encounter = ROW_NUMBER() OVER (PARTITION BY <ordinal> ORDER BY <local key>)` (child.ts,
