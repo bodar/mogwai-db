@@ -3,7 +3,7 @@
 What you can rely on. Each step gets one mark based on how much of it works and how
 freely it composes — a ✅ step works **anywhere in a traversal**, however deeply nested,
 not just at the top. Notes call out **only the cases that don't work yet**; if a row has
-no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,695<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,696<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 | Mark | Meaning |
 |---|---|
@@ -207,6 +207,7 @@ characters, `null` → whitespace runs); `format("…%{key}…%{_}…")` reads p
 | `addV()`, `.property(k,v)`, `property(T.id/T.label)` | ✅ | user-supplied ids; inline property VALUES + nested-traversal LABEL + constant nested KEY. ❌ a live-read nested property KEY |
 | `addE()`, `from`/`to` | 🟡 | endpoints via `as()` alias, `__.select(label)`, nested `__.V(…)` (incl. folded `repeat().times()`), or `__.addV(…)`; edge uid; inline property VALUES + constant nested KEY; multi-addE. ❌ a nested-traversal edge label; an endpoint read tail past a movement; a live-read nested property KEY; `addE` after some prefixes |
 | `mergeV`, `mergeE` | 🟡 | id-aware upsert, onCreate/onMatch, start + mid-chain; map label/id/VALUES may be nested traversals; prop VALUES keep their type. ❌ whole-arg map-valued driver traversals; nested map KEYS; bare `mergeV()`/`mergeE()` |
+| read tail after `property()`/`addLabel()` | ✅ | the element is preserved, so the suffix is an ordinary read over the mutated elements (`property(k,v).valueMap()`, `.out().values()`). ❌ a GLOBAL barrier (`count`/`fold`/`order`/a slice) over MORE THAN ONE element — the continuation reads once per element, so it fails closed rather than answering per element; ❌ a mutating tail |
 | `mergeV/mergeE().property(…)` tail | ✅ | an ordinary property() over whatever the merge emitted, matched or created alike — same cardinality, meta-properties and correlated traversal values as a `g.V(…)` tail |
 | `property()` update | ✅ | vertex single/list/set + meta; edge UPSERT (single, no meta). With NO cardinality named the graph default applies and it is **`list`** (TinkerPop's `getCardinality`), so a repeat write APPENDS — unless an explicit `Cardinality.x` was declared for that (vertex, key), which is remembered. `property(k, null)` REMOVES every value under k |
 | `property(Cardinality.list/set,…)` | ✅ | list appends, set dedups by value; an explicit cardinality also DECLARES the key for later undeclared writes on that vertex |

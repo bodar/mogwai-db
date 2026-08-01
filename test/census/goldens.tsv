@@ -1322,6 +1322,7 @@ ran	1	1	9fa44f01e28b7416	ed1b860b55f142dc	g.withSack(32767s).inject(1s).sack(sum
 ran	1	1	5e496c8d2830a8a1	ce2ba656a804950f	g.withSack(32767s).inject(2s).sack(mult).sack()
 ran	1	1	745bc1c771310b4d	4acb791e01e3701f	g.withSideEffect("a", "marko").addV().property("name", __.select("a")).values("name")
 ran	1	1	745bc1c771310b4d	4acb791e01e3701f	g.withSideEffect("a", "name").addV().property(__.select("a"), "marko").values("name")
+ran	2	2	9eece54c0c33bd87	0ec34e0f4897c2eb	g.withSideEffect("a", "test").V().hasLabel("software").property("temp", __.select("a")).valueMap("name", "temp")
 ran	1	1	5e54c621df10eddb	76fc2f09e6ecaa67	g.withSideEffect("a", 1, Operator.max).V().aggregate("a").by("age").cap("a")
 ran	1	1	5e54c621df10eddb	76fc2f09e6ecaa67	g.withSideEffect("a", 1, Operator.max).V().local(aggregate("a").by("age")).cap("a")
 ran	1	1	5e54c621df10eddb	76fc2f09e6ecaa67	g.withSideEffect("a", 1, Operator.min).V().aggregate("a").by("age").cap("a")

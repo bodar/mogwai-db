@@ -4,6 +4,7 @@ import { labelIn, labelNameFor, propHasFor, sqlElem, elemTable, type Elem, verte
 import { gremlinTypeOf, mapEntryType, propertyValueBind, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
 import { stepChain, isNested, isCardinalityArg, isCardinalityValueArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
+import { isStreamBarrier } from '../../ir/step.ts';
 import { normalize } from '../../ir/passes.ts';
 import { staticTypeOf, renderFrom, type Compiled, type WritePlan, type WriteResult, type Shape } from '../../../sql/kernel/render.ts';
 import type { Engine } from '../../engine/deps.ts';
@@ -295,48 +296,54 @@ function compilePropertyDrop(engine: Engine, steps: IRStep[], params: Record<str
   };
 }
 
-// g.V(x).<filters>.property(k, v)[.property(...)] — set properties on the matched
-// existing element(s), single cardinality (last write wins).
+// g.V(x).<filters>.property(k, v)[.property(...)][.<read tail>] — set properties on the matched
+// existing element(s), then optionally keep traversing from them.
 function compileSetProperty(engine: Engine, steps: IRStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const firstProp = steps.findIndex((s) => s.name === 'property');
   const prefix = steps.slice(0, firstProp);
   const { st, stop } = engine.buildPrefixFresh(prefix, params);
   if (stop !== prefix.length) throw new Error(`property() after ${steps[stop].name}() not yet supported`);
   const elem = st.elem;
-  const specs = parsePropertyTail(steps.slice(firstProp), 'property()', sideEffects, params);
-  const target = renderDriverRows(st);
-  if (elem === 'edge') {
-    // Edge props are normalized rows with no cardinality/meta (TinkerPop Property):
-    // UPSERT each into edge_properties, then read the bag back for the response.
-    for (const sp of specs) assertEdgePropertySpec(sp);
-    const readCur = `SELECT uid, src, tgt, (SELECT name FROM labels WHERE id=edges.label) AS label FROM edges WHERE id=?`;
-    return {
-      kind: 'write',
-      run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
+  // property() is element-PRESERVING — it mutates and passes the same traverser on — so anything
+  // after the run of property() steps is an ordinary read tail over the mutated elements, exactly
+  // as it is after addLabel(). The run ends at the first non-property step.
+  let afterProps = firstProp;
+  while (afterProps < steps.length && steps[afterProps].name === 'property') afterProps++;
+  const suffix = steps.slice(afterProps);
+  if (suffix.some((s) => MUTATING_TAIL.has(s.name)))
+    throw new Error(`write continuation after property() not yet supported: ${suffix.find((s) => MUTATING_TAIL.has(s.name))!.name}()`);
+  const specs = parsePropertyTail(steps.slice(firstProp, afterProps), 'property()', sideEffects, params);
+  if (elem === 'edge') for (const sp of specs) assertEdgePropertySpec(sp);
+  const tail = elementTailContinuation(engine, st, suffix, params);
+  // Edge props are normalized rows with no cardinality/meta (TinkerPop Property): UPSERT each into
+  // edge_properties. Vertex props apply with their cardinality (+ meta) through the storage waist.
+  const readCur = elem === 'edge'
+    ? 'SELECT uid, src, tgt, (SELECT name FROM labels WHERE id=edges.label) AS label FROM edges WHERE id=?'
+    : 'SELECT uid FROM nodes WHERE id=?';
+  let touched: ElementReadDriver[] = [];
+  return {
+    kind: 'write',
+    run: (store) => {
+      touched = materializeElementDrivers(store, st);
+      tail.assertDrivers(touched);
+      return touched.map(({ id }) => {
         for (const sp of specs) {
-          const r = resolveSpecValue(engine, store, sp, id, 'edge', params, sideEffects);
+          const r = resolveSpecValue(engine, store, sp, id, elem, params, sideEffects);
+          if (!r.has) continue;
+          const key = resolveSpecKey(engine, store, sp, id, elem, params, sideEffects);
           // An EDGE takes the FIRST result: `handleTraversalValue`'s multi-result branch computes
           // `effectiveCard` as null for a non-Vertex, so neither the single-throw nor the
           // per-result loop fires and it falls through to `results.get(0)`.
-          if (r.has) insertEdgeProperty(store, id, resolveSpecKey(engine, store, sp, id, 'edge', params, sideEffects), r.value, r.vtype, r.typeNode);
+          if (elem === 'edge') insertEdgeProperty(store, id, key, r.value, r.vtype, r.typeNode);
+          else applyVertexProperty(store, id, key, r.values, r.vtype, sp.meta, sp.cardinality, r.typeNode);
         }
         const cur = store.query<any>(readCur, [id])[0];
-        return { edge: { id: cur.uid ?? id, label: cur.label, src: nodeExtId(store, cur.src), tgt: nodeExtId(store, cur.tgt), props: readEdgeProps(store, id) } };
-      }),
-    };
-  }
-  // Vertex props are normalized rows: apply each with its cardinality (+ meta).
-  const readCur = `SELECT uid FROM nodes WHERE id=?`;
-  return {
-    kind: 'write',
-    run: (store) => store.query<{ id: number }>(target.sql, target.binds).map((r) => r.id).map((id) => {
-      for (const sp of specs) {
-        const r = resolveSpecValue(engine, store, sp, id, 'vertex', params, sideEffects);
-          if (r.has) applyVertexProperty(store, id, resolveSpecKey(engine, store, sp, id, 'vertex', params, sideEffects), r.values, r.vtype, sp.meta, sp.cardinality, r.typeNode);
-      }
-      const cur = store.query<any>(readCur, [id])[0];
-      return { vertex: { id: cur.uid ?? id, labels: store.vertexLabels(id), props: readVertexProps(store, id) } };
-    }),
+        return elem === 'edge'
+          ? { edge: { id: cur.uid ?? id, label: cur.label, src: nodeExtId(store, cur.src), tgt: nodeExtId(store, cur.tgt), props: readEdgeProps(store, id) } }
+          : { vertex: { id: cur.uid ?? id, labels: store.vertexLabels(id), props: readVertexProps(store, id) } };
+      });
+    },
+    ...tail.plan(() => touched),
   };
 }
 
@@ -752,6 +759,61 @@ function materializeElementDrivers(store: GraphStore, st: ElementStream): Elemen
     traverserLayout: st.traverserLayout,
     carried: Object.fromEntries(cols.map((col) => [col, row[col]])),
   }));
+}
+
+/** A read TAIL after an element-preserving write — the steps that mutate an element and pass the
+ *  SAME traverser on: `addLabel`/`dropLabel(s)` and `property()`. There is no new element to re-root
+ *  on (unlike mid-traversal addV), so the tail is simply the suffix re-read per driver AFTER the
+ *  mutation, through the ordinary read compiler.
+ *
+ *  It exists as one helper because the two hosts had no way to share it otherwise: `addLabel` grew
+ *  the whole pattern and `property()` answered "step not implemented after property()" for every
+ *  read tail, which is the "the seam cannot be HANDED this" tell in `steps/CLAUDE.md` — the
+ *  substrate was there, the second site could not reach it.
+ *
+ *  `plan()` takes a THUNK for the drivers because they do not exist until `run` has executed; the
+ *  probe compile that fixes the continuation's SHAPE happens now, against a zero-id driver carrying
+ *  the same layout, so an unsupported tail still fails at compile time rather than mid-write.
+ *
+ *  **A GLOBAL barrier in the tail is refused once there is more than ONE driver, and that is a FIX,
+ *  not a restriction.** The tail runs the suffix per driver and concatenates, which is only the right
+ *  answer while every step is per-traverser. It was not checked, so
+ *  `g.V().hasLabel("person").addLabel("emp").count()` answered `[1,1,1,1]` instead of `[4]`,
+ *  `.fold()` gave one list per driver and `.limit(2)` gave four rows — silent wrong answers that had
+ *  nothing to do with labels and everything to do with this shape.
+ *
+ *  The guard is on the DRIVER COUNT rather than on the step, because with exactly one driver
+ *  per-driver IS global and the answer is right — which is not a technicality: every corpus scenario
+ *  that reaches this shape (`g.V().addLabel("a","b").labels().count()` and nine siblings) builds a
+ *  one-vertex graph, so a blanket refusal would have turned ten correct answers into errors to
+ *  prevent an eleventh wrong one. A cross-driver barrier needs the drivers in ONE relation, which is
+ *  the mid-chain-write question (write-path plan §4); until then this fails closed rather than
+ *  approximating. It fires BEFORE any mutation — the drivers are materialized first — so a refused
+ *  traversal leaves the graph untouched rather than half-written.
+ *
+ *  `isStreamBarrier` is the existing authority and already exempts `Scope.local`, which slices a
+ *  VALUE's members rather than the stream's rows. */
+function elementTailContinuation(engine: Engine, st: ElementStream, suffix: IRStep[], params: Record<string, any>) {
+  const barrier = suffix.find(isStreamBarrier);
+  const carried = Object.fromEntries(layoutCols(st.traverserLayout).map((col) => [col, null]));
+  const probeDriver: ElementReadDriver = { id: 0, elem: st.elem, traverserLayout: st.traverserLayout, carried };
+  const probe = suffix.length ? engine.compileReadFromElementDriver(suffix, params, probeDriver) : null;
+  return {
+    /** Call after materializing the drivers and BEFORE mutating. */
+    assertDrivers: (drivers: readonly ElementReadDriver[]) => {
+      if (barrier && drivers.length > 1)
+        throw new Error(`${barrier.name}() after a write is not yet supported over more than one element: the continuation reads once per element, so it cannot observe the whole stream`);
+    },
+    plan: (drivers: () => readonly ElementReadDriver[]) => probe ? {
+      continuation: {
+        shape: probe.shape,
+        run: (store: GraphStore) => drivers().flatMap((driver) => {
+          const read = engine.compileReadFromElementDriver(suffix, params, driver);
+          return store.query(read.sql, read.binds);
+        }),
+      },
+    } : {},
+  };
 }
 
 /** Mid-traversal addV is a write fan-out over a materialized element prefix. Its parameters use
@@ -1545,14 +1607,13 @@ function compileLabelMutation(engine: Engine, steps: IRStep[], params: Record<st
     return out;
   };
 
-  const carried = Object.fromEntries(layoutCols(st.traverserLayout).map((col) => [col, null]));
-  const probeDriver: ElementReadDriver = { id: 0, elem: 'vertex', traverserLayout: st.traverserLayout, carried };
-  const probe = suffix.length ? engine.compileReadFromElementDriver(suffix, params, probeDriver) : null;
+  const tail = elementTailContinuation(engine, st, suffix, params);
   let touched: ElementReadDriver[] = [];
   return {
     kind: 'write',
     run: (store) => {
       touched = materializeElementDrivers(store, st);
+      tail.assertDrivers(touched);
       const names = step.name === 'dropLabels' ? null : argNames(store);
       for (const d of touched) {
         if (step.name === 'addLabel') store.addVertexLabels(d.id, names!);
@@ -1564,15 +1625,7 @@ function compileLabelMutation(engine: Engine, steps: IRStep[], params: Record<st
       // `g.V().hasLabel("person").addLabel("employee")` iterating to an empty list.
       return [];
     },
-    ...(probe ? {
-      continuation: {
-        shape: probe.shape,
-        run: (store: GraphStore) => touched.flatMap((driver) => {
-          const read = engine.compileReadFromElementDriver(suffix, params, driver);
-          return store.query(read.sql, read.binds);
-        }),
-      },
-    } : {}),
+    ...tail.plan(() => touched),
   };
 }
 
