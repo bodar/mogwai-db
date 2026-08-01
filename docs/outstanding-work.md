@@ -8,7 +8,7 @@ validation and design. Live per-step capability: `feature-support-matrix.md`.
 about finished work cannot be picked up, so it does not belong here. A refresh that lands items
 should make this file SHORTER.
 
-**Refreshed** 2026-08-01 · **L3 1679 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
+**Refreshed** 2026-08-01 · **L3 1682 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
 collision is expected, see won't-do) · census **0 `crashed`, 4 `nondet`**, perturbed census **4** ·
 `known.ts` **1 entry** (repeat's two body routes disagree on a positional window) ·
 `capability-baseline.ts` **1 entry** · L5 `L5-random` plus fixed seeds 5/11/27/91/143 at
@@ -32,11 +32,11 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 **Ranked entry point.** Numbers are IDs, not an order.
 **[write-path](./2026-08-01-write-path-plan.md) §2** (silent wrong answers) → **2** → **17**'s
-partitioned row-ops seam → **33** → **34** → **29** → **3**'s `times(n)` unroll (unblocked; its
+partitioned row-ops seam → **34** → **29** → **3**'s `times(n)` unroll (unblocked; its
 precondition landed).
 
-The write cluster — **10**, **16**, **0b**, the `write.ts` row-at-a-time entry in Internal debt — was
-claimed by a second agent until 2026-08-01 and is now UNCLAIMED, so it re-enters the ranking. It has
+The write cluster — **10**, **16**, **0b**, the `write.ts` row-at-a-time entry in Internal debt — is
+CLAIMED by a second agent again as of 2026-08-01; leave it alone. It has
 one plan covering all of it: [write-path](./2026-08-01-write-path-plan.md), whose §2 is ranked second
 here because it is wrong answers rather than gaps. P2·11's import-a-graph is deliberately NOT part of
 it (different machine — `BulkLoader`, not the traversal write driver).
@@ -277,17 +277,15 @@ of gravity is ceiling, not correctness.
    **Low-Med as the primitive, Medium as what it unblocks.**
    → [canonical-emission-order](./2026-07-19-canonical-emission-order.md)
 
-33. **`by(T.token) → Expression` has 12 hand-written resolvers and 11 identical deferrals.** The arity
-   table settled how MANY `by()`s a step takes; nothing settled what ONE resolves to. `classifyBy`
-   (`tail/child-shape.ts`) is the one DECODE, so twelve sites write the same 2–3-arm switch and throw
-   on the rest: `prefix/branch.ts` (×2), `prefix/sack.ts`, `prefix/predicate.ts`, `prefix/filter.ts`,
-   `tail/group.ts` (×2), `tail/path.ts`, `tail/select.ts`, `tail/modulation.ts`, `tail/projection.ts`,
-   `tail/mapscalar.ts`. The best-developed already calls itself the authority — `directOrderExpr`
-   (`tail/projection.ts`), *"the one place a direct order key is built"* — but is element-only and
-   private. **Mechanical: hoist it to `tokenExpr(ctx, token): Expression | null` beside `classifyBy`**,
-   clearing 11 `by(T.${token}) not yet supported` sites and unblocking `by(T.id)`/`by(T.label)` at every
-   host at once. Three arity checks outside the table also survive (`sack.ts`, `group.ts` ×2) and should
-   route through it. **Do NOT add a `'column'` arm to `ByClass`** — recorded won't-do. **Medium-high.**
+33b. **`select(…).by(T.token)` is the ONE by()-token host left, and it is NOT a resolver gap.**
+   `tokenExpr` (`plan/plan.ts`) is now the single resolution of what a `T` token denotes, and every
+   other host routes through it — including the tail accumulator, whose three order-term renderers
+   collapsed into `tailOrderTerm` on the way. `byToEntry` (`tail/select.ts`) does not, because it
+   answers a record FIELD's shape — `{sub: 'vertex' | 'value', key?}` — not an expression, so
+   admitting a token means widening that field vocabulary and teaching the record builder to render
+   it. `lowerRecordSelectProject` ALREADY renders `spec.token` for the project-arg spelling, so two
+   readers in one file disagree about the same token; **start by asking whether `byToEntry` should
+   exist.** *Low-Med.* **Do NOT add a `'column'` arm to `ByClass`** — recorded won't-do.
 
 34. **Alias-compare `where("a", P…("b"))` has two near-verbatim copies and works on 2 of 8 shapes.**
    `where` (`prefix/filter.ts`, alias branch) and `recordWhere` (`tail/select.ts`) are ~28 identical
