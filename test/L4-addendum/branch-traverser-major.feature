@@ -175,3 +175,20 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | result |
       | d[6].l |
       | d[32].i |
+
+  @gap:branch-traverser-major
+  Scenario: g_V_hasLabelXpersonX_order_byXnameX_valuesXageX_unionXmathX_plus_1X_mathX_times_2XX_limitX3X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").order().by("name").values("age").union(__.math("_+1"), __.math("_*2")).limit(3)
+      """
+    # A scalar PARENT, whose branches live in scalar-arm.ts and take the same key. Ages in input
+    # order are 32, 29, 35, 27, so josh's two derived values come before marko's first.
+    # Arm-major returns every +1 before any *2 — [33, 30, 36].
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[33].d |
+      | d[64].d |
+      | d[30].d |
