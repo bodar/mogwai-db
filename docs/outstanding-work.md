@@ -4,7 +4,7 @@ The de-duplicated index of open work across the `docs/` corpus. **Each item sets
 why, where to start — not a spec.** The linked doc holds the rationale; the picking agent does the
 validation and design. Live per-step capability: `feature-support-matrix.md`.
 
-**Refreshed** 2026-07-31, **L3 line updated 2026-08-01** · **L3 1666 / 2267** (`l3-state.json`; fewer
+**Refreshed** 2026-07-31, **L3 line updated 2026-08-01** · **L3 1669 / 2267** (`l3-state.json`; fewer
 UNIQUE names than that — the collision is expected, see won't-do) · census **0 `crashed`, 4
 `nondet`** (`sample()` landed) ·
 `known.ts` **1 entry** — repeat's two body routes disagree on a positional window, found by the
@@ -63,7 +63,8 @@ sweep found one real disagreement (now diagnosed in `known.ts`) where nothing co
 **Landed 2026-08-01.** Item 23's wording family, as three reference-sourced authorities rather than
 a rename sweep — the `by()` arity table + verify Pass, `StandardVerificationStrategy` modelled whole,
 and the list-input refusals (L3 1652 → 1666). It closed item 22's `groupCount()` pair, which were
-real wrong answers, and it deleted four per-host arity checks it dominates.
+real wrong answers, and it deleted four per-host arity checks it dominates. Then item 2's scalar
+child-in-child (L3 → 1669), which was a classifier gap rather than missing machinery.
 
 **What that leaves.** No item below is a known wrong answer except 20's residuals, 21's T4, and item
 22's six remaining per-member type refusals — the rest fail closed. Read that as the index's centre of gravity moving from correctness to ceiling.
@@ -108,13 +109,24 @@ cardinality, which is the measurement that says the ladder could not have found 
      (`pickBranches` falls back to `Pick.none` whenever nothing matched). The only-`Pick.none` spelling
      the item named DEFERS with a clear message rather than answering, so nothing in that family
      mis-executes.
-   **What is genuinely open, all of it fail-closed:** map/group/record child bodies (→ 5);
-   `group().by(project(…))` composite keys; a child-in-child body whose inner child is not
-   element-shaped (`local(__.local(__.out().values('n')))`); and the only-`Pick.none` option-map
-   deferral above.
-   Start `steps/tail/{child-shape,child,scalar-arm}.ts`. **Two invariants:** the ONE arm triage is
+   **The SCALAR child-in-child landed 2026-08-01** (L3 1666 → 1669): `isScalarProducingScope`
+   (`tail/child-shape.ts`) makes a `map(B)`/`local(B)` with a scalar body a scalar PRODUCER, so
+   `local(__.out().local(__.count()))` and every by()/filter/branch spelling of it compose. It was a
+   pure classifier gap — root lowering already accepted the identical body — and the two arms carry
+   different predicates on purpose: `map` takes the FIRST result so any scalar B qualifies, `local`
+   emits all of them so only a `count()`-reduced B does. `oneRowEncounter`'s proof
+   (`isOneRowProjection`) gained the same two shapes, which is what let the `first`-cardinality
+   consumers stop saying *"child first cardinality requires explicit encounter order"*.
+   **What is still open, all of it fail-closed:** map/group/record child bodies (→ 5);
+   `group().by(project(…))` composite keys; the MANY-valued child-in-child
+   (`local(__.local(__.out().values('n')))`) — deliberately excluded above, since admitting it would
+   change the classifier's cardinality contract, so it needs an all-cardinality child-in-child route
+   rather than a wider producer; and the only-`Pick.none` option-map deferral above.
+   Start `steps/tail/{child-shape,child,scalar-arm}.ts`. **Three invariants:** the ONE arm triage is
    `classifyBranchArms` (two documented exceptions); a renderer that cannot carry alias columns must
-   DECLINE, not answer. **Medium** (was High — the wrong-answer half evaporated on measurement).
+   DECLINE, not answer; and a `first`-cardinality consumer may skip the encounter ranking only on a
+   PROOF that the body cannot fan out, never because the stream happens to carry no encounter.
+   **Medium** (was High — the wrong-answer half evaporated on measurement).
    → [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md),
    [group-value-generic-seam](./2026-07-18-group-value-generic-seam-plan.md)
 
