@@ -1,6 +1,6 @@
 ---
 name: update-outstanding-work
-description: Refresh docs/outstanding-work.md — the project's open-work index. Re-runs L3 for current conformance candidates, probes the ceiling with L5-random across several seeds, reads the five committed test baselines (l3-state, census TSVs, the two L5 ratchets) for parked defects, fans out agents to sweep newer docs and audit technical-debt/generic-substrate opportunities, merges findings into the index, reprioritizes, and archives completed plans. Use when the user asks to update/refresh/re-sweep the outstanding work, backlog, or work index, or after a batch of work lands and the index has gone stale.
+description: Refresh docs/outstanding-work.md — the project's open-work index. Re-runs L3 for current conformance candidates, probes the ceiling with L5-random across several seeds, reads the five committed test baselines (l3-state, census TSVs, the two L5 ratchets) for parked defects, fans out agents to sweep newer docs and audit technical-debt/generic-substrate opportunities, merges findings into the index, reprioritizes, archives completed plans, and finally COMPACTS the file — deleting the accumulated record of what landed so only what is LEFT to do remains. Use when the user asks to update/refresh/re-sweep the outstanding work, backlog, or work index, or after a batch of work lands and the index has gone stale.
 ---
 
 # Update the outstanding-work index
@@ -11,6 +11,14 @@ it unblocks · where to start) and links to its source doc; the agent that later
 does the detailed validation and design. This skill refreshes it.
 
 Keep the same voice and structure the file already has. Read it first — do not restructure it.
+
+**The file records what is LEFT, not what was done.** Every refresh arrives with a batch of landed
+work and the pull is to narrate it — what shipped, in what order, what it changed. That is how this
+file grows without ever getting more useful: the reader of a work index is an agent choosing what to
+pick up next, and a paragraph about finished work cannot be picked up. The done-work record already
+exists in `git log` and in the archived plan docs. So a refresh that lands five items and adds five
+paragraphs about them has *failed* — the file should have gotten SHORTER. § 6 is where you enforce
+that, and it is not optional.
 
 ## The prime directive — floor vs ceiling
 
@@ -161,7 +169,9 @@ feed P1 (ceiling) and the internal-debt section.
   doc, cut it. (We deliberately shrank this file once; don't re-inflate it.)
 - **Correct stale self-reports** the sweep/audit surfaced in passing (e.g. an item marked open that
   a cheap check showed landed) — but don't go hunting; a full doc-vs-code reconciliation is not part
-  of this refresh. Mark freshly-landed work `✅` with residual follow-ons left listed.
+  of this refresh. Mark freshly-landed work `✅` with residual follow-ons left listed — but a `✅` is
+  **scratch bookkeeping for THIS refresh only**, so you can see what moved while you reprioritize.
+  § 6 deletes every one of them. Never leave a `✅` in the committed file.
 - Update the **last-refreshed** line (date + L3 count) and the restructure-path note if paths moved.
 
 ### 5. Archive completed plans
@@ -193,6 +203,57 @@ For each move: `git mv docs/X.md docs/archive/` then **repoint every inbound lin
 Then verify **zero broken links** before finishing (resolve every `](./…​.md)` relative to its
 file's own dir; check every `docs/…​.md` prose path exists).
 
+### 6. Compact — delete the record of what landed (do this LAST, every time)
+
+Steps 1–5 are additive; this one is subtractive, and without it the file only ever grows. Do it as
+one pass over the WHOLE file, not just the parts you touched — the accretion you are cutting was
+left by earlier refreshes, not only by this one.
+
+Measure first, so the result is a number and not a feeling:
+```
+git show HEAD:docs/outstanding-work.md | wc -l   # before
+wc -l docs/outstanding-work.md                   # after your merge, before compaction
+```
+
+**The test, applied line by line: could an agent picking an item ACT on this sentence?** If the
+sentence's subject is work already finished, it goes. Not "summarize it more tightly" — delete it.
+The default is deletion; keeping is what needs a reason.
+
+**Cut on sight** (each of these is a real shape this file has grown):
+- *"Landed <date>, in this order, and each changed what came after it…"* — a chronology of shipped
+  items. Whole paragraph, every time. `git log` holds it.
+- Per-refresh narration: *"Two instrument facts that shaped this refresh"*, *"What that leaves"*,
+  *"read that as the index's centre of gravity moving…"*. Write the conclusion into the ranking or
+  drop it; the reasoning behind a past refresh is not work.
+- Every `✅` entry. Either its residual is already its own open item — then the `✅` line is
+  redundant — or the residual isn't listed yet, in which case write the residual as a plain open
+  item and delete the rest. A landed item's number is retired, not memorialized.
+- Transient coordination notes (`CLAIMED, <date> — two agents are on this trunk`) once the claim has
+  lapsed. They are stale by the next refresh by construction.
+- Inside a surviving item: sentences about what *has* been built underneath it, the history of how
+  it was reclassified, and which earlier item unblocked it. Keep the precondition only as a bare
+  dependency (`needs 21's T4`), never as its story.
+- Anything restating a linked doc. The link is the pointer; that is the whole design.
+
+**Keep — the four exceptions, and they are the only ones:**
+1. The **Superseded / won't-do** section. It exists precisely to stop closed questions reopening, so
+   it earns its lines — but one line each, the verdict and its reason, never the argument.
+2. A landed fact a REMAINING item genuinely depends on — folded INTO that item's line as a clause,
+   never left standing as its own landed-work paragraph.
+3. Stable-ID bookkeeping: numbers are retired, not reused, and a deletion sweeps its citations.
+4. The header block: refreshed date, measured L3 count, baseline counts. Overwrite these in place —
+   they are current state, so they never accumulate.
+
+**Then check the budget.** The file should be **no longer than at the previous refresh** unless open
+items were genuinely added. If it grew, name the new open items that account for the growth in your
+hand-off; if you cannot, you have not finished cutting. A refresh where a lot landed and nothing new
+was found should come out visibly shorter — that is the healthy outcome, not a sign something was
+lost.
+
+Report the before/after line count and roughly what you cut. `git diff` is the check that nothing
+open went with it: **read every deletion in the diff and confirm each one is finished work**, since
+the failure mode of this step is dropping a live item along with the narration around it.
+
 ## Guardrails
 
 - Run **`mise run L3`** / **`mise run L5-random`**, never bare `bun test` as the entry point (see
@@ -211,7 +272,12 @@ file's own dir; check every `docs/…​.md` prose path exists).
   regression it exists to catch. This skill READS baselines; only real work changes them.
 - The index tracks compiler features AND the product/ops track AND internal debt/give-backs AND a
   Superseded/won't-do section (so nobody re-opens a closed question) AND a research/vision section.
-  Preserve all of them.
+  Preserve all of them — that means the SECTIONS survive § 6's compaction, not that their contents
+  are exempt from it. A section with no open items left is deleted with its items.
+- **§ 6 is a required step, not a tidy-up you skip when short on time.** A refresh that leaves the
+  landed-work narration in place has made the file worse, because the next refresh will narrate on
+  top of it. If you are tempted to keep a "what landed" paragraph because it shows progress: progress
+  is what `git log` and `docs/archive/` are for, and this file's reader is choosing what to do next.
 - Report counts you actually measured, and say which instrument measured them. "L3 1511" and "the
   matrix is 55/100" are useful; an unattributed number is how this index went stale in both directions
   before.
