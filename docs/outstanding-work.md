@@ -211,28 +211,30 @@ cardinality, which is the measurement that says the ladder could not have found 
    carried schema per COLUMN; `armBatchAdmissible`/`collapsedArmAdmissible`; and
    `gateArmOnNonEmptyInput`, because an arm that received no traversers emits nothing even though
    `count()` over an empty stream is 0.
-   **T4 — all that is left, and RECLASSIFIED 2026-08-01 from the emission-order framing this item was
-   filed under.** Once an arm batches, arm-major over the whole stream is CORRECT and is what we
-   already emit; what remains is the barrier-FREE case, where the reference is traverser-major and we
-   are arm-major globally. **Put a positional consumer after the branch and that key selects a
-   different WINDOW, so it is a wrong multiset, not a reorder:**
-   `g.V(1,4).union(__.out(), __.in()).values('name').limit(4)` returns `[vadas, lop, lop, ripple]`
-   where the reference's first three results are v1's three arm outputs `{vadas, josh, lop}` —
-   `hasBarrier` false injects ONE start at a time. Ours omits `josh`. A silent wrong answer, so it is
-   a correctness item, not a polish one.
-   **Two things follow.** (1) The pin is a MULTISET assertion, not an ordered one — the census still
-   cannot see the residual pure reorder, but it does not have to for the slice half. (2) The
-   dependency is the branch input's encounter FROZEN as its own carried role: the one `encounter`
-   slot is re-minted in place by each fan-out inside the arm, and the child ordinal is
-   `ROW_NUMBER() OVER ()`, which identifies a traverser without ORDERING them. That is a bounded
-   composite — one frozen copy per open branch, `origins`-shaped — and NOT the "two encounters"
-   reconciliation item 4 refuses: the role is only ever a merge/pop sort key, never "this stream's
-   order".
-   **Measured over all 2,298 corpus traversals:** 96 contain `union`/`choose`, 16 with a batching arm,
-   81 entirely barrier-free (78 multi-start), and 10 of those already demand an encounter — none a
-   slice after the branch. **Zero corpus witnesses, so L3 cannot move**; the payoff is a wrong-answer
-   class with an L4-only ratchet. Do NOT fail closed in the meantime — that would withdraw 78 corpus
-   shapes that are answered correctly today because nothing slices them. *Medium.*
+   **T4 — RECLASSIFIED from its emission-order framing and its ELEMENT half LANDED 2026-08-01.**
+   Once an arm batches, arm-major over the whole stream is CORRECT and is what we emit; the
+   barrier-FREE case is traverser-major in the reference, and **with a positional consumer after the
+   branch that key selects a different WINDOW — a wrong multiset, not a reorder.** Was:
+   `g.V(1,4).union(__.out(), __.in()).values('name').limit(4)` → `[vadas, lop, lop, ripple]`, omitting
+   `josh`, where the reference's first three results are v1's three arm outputs. A silent wrong
+   answer, so a correctness item; and pinnable by a MULTISET assertion, which is what made it
+   testable at all (the census cannot see a pure reorder).
+   **The substrate that landed: `TraverserLayout.branchOrders`** — the input's emission order frozen
+   at branch entry, a STACK like `origins`, threaded through the arms and consumed by the merge as
+   its leading sort key. NOT the "two encounters" reconciliation item 4 refuses: it holds an OUTER
+   scope's order and is only ever read as a merge sort key. `freezeBranchOrder` (`tail/barrier.ts`,
+   shape-generic via `streamPayloadCols`) / `enterBranch` (`prefix/branch.ts`, the one gate) /
+   `finishElementMerge`. Five pins in `test/L4-addendum/branch-traverser-major.feature`.
+   **§1's "only union/choose can disagree" is about arm SCOPE and does NOT carry to emission order** —
+   `coalesce`/`optional` merged arm-major too and are fixed by the same key. Do not re-read §1 as
+   "coalesce is fine".
+   **What is left.** (a) The scalar/list/variant merges (`mergeArmRelation` and its three callers) —
+   the substrate is already shape-generic, so it is the freeze at those entry points plus one key
+   change. (b) `enterBranch` declines when an arm holds a batched barrier; for `union`/`choose` that
+   is the reference's own rule, for `coalesce`/`optional` it is a conservative gate (such an arm can
+   consume the column the merge would sort by) that keeps today's answer. (c) The residual PURE
+   reorder stays as Crux 4 left it. **Zero corpus witnesses, so L3 does not move** — the ratchet is
+   L4. *Medium.*
    **Two things deliberately NOT done, so they are not mistaken for oversights:** `armBatches` scans
    an arm body FLAT, so a barrier sitting only inside a NESTED branch arm sets `hasBarrier` in the
    reference and not here; and the child-scope guard (`armBatchAdmissible`) has no end-to-end pin,

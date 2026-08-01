@@ -1,8 +1,9 @@
 # A branch arm's barrier observes the branch's whole input — doing it properly
 
-**Status: T1, T2 and T3 LANDED 2026-07-31. T4 open, and RECLASSIFIED 2026-08-01** — it is a wrong
-SUBSET under a downstream slice, not the ordering item it was filed as, which also means it can be
-pinned with a multiset assertion rather than an ordered one (§T4, §6.5).
+**Status: T1, T2 and T3 LANDED 2026-07-31. T4 RECLASSIFIED and its ELEMENT half LANDED 2026-08-01**
+— it is a wrong SUBSET under a downstream slice, not the ordering item it was filed as, which also
+means it is pinned with multiset assertions rather than ordered ones (§T4, §6.5, §T4-outcome). What
+is left of T4 is the scalar/list/variant merge family and one declared corner.
 **The fail-closed gate has NOT been written** — nothing
 named `verifyBranchArmBarrierScope` exists in `src/`, so anything T2/T3 have not reached still
 mis-executes rather than deferring.
@@ -222,6 +223,46 @@ capability; here it would withdraw 78 corpus shapes of which nearly all are answ
 because their results are unordered and nothing slices them. Pin, then fix — and note the sequencing
 constraint L4 imposes: every scenario there must PASS, so the pins are written first but land in the
 same commit as the fix, exactly as T3's did.
+
+### T4's outcome (element family, 2026-08-01), and the one thing the plan above got wrong
+
+**The substrate is `TraverserLayout.branchOrders`**, and it went in as designed: the emission order
+frozen at branch entry, a STACK like `origins`, threaded through the arms as an ordinary carried
+column, consumed by the merge as the leading sort key. `freezeBranchOrder` (`tail/barrier.ts`) is the
+entry half and is shape-generic through `streamPayloadCols`; `enterBranch` (`prefix/branch.ts`) is the
+ONE gate; `finishElementMerge` is the exit. Five L4 pins in
+`test/L4-addendum/branch-traverser-major.feature`, all five red without the fix. L3 unchanged, census
+unchanged except the one `ord` digest this is about — exactly the "zero corpus witnesses" the
+exposure measurement predicted.
+
+**What the plan got wrong: "only `union`/`choose` can disagree with a per-origin arm" (§1) is about
+arm SCOPE, and it does not carry over to emission ORDER.** `coalesce`/`optional` are per-traverser by
+class, so T1–T3 correctly left their scope alone — but our merge sorted their arms arm-major too, so
+they diverged in exactly the same way, and one of the five pins is a `coalesce`. Measured before the
+fix, with `order().by('name')` fixing the input sequence:
+`g.V().hasLabel('person').order().by('name').coalesce(__.out('knows'), __.out('created')).values('name').limit(2)`
+returned josh's arm-0 peers `[vadas, josh]` where the reference returns josh's own two rows
+`[ripple, lop]`. **Reading §1 as "coalesce/optional are fine" is the trap**: it says their SCOPE is
+fine. `optional`'s single-hop fast path was already correct, because a LEFT JOIN keeps the parent's
+encounter rather than re-minting one.
+
+Two smaller findings worth keeping:
+
+- **The pop is free.** `finishElementMerge` already derives its output layout from `base` (the state
+  the arms forked from) rather than from the merged arm layout, so a role the merge consumes
+  disappears by construction — the only edit was to project the arms' rows through the popped schema.
+- **Sequencing the gate matters more than the gate.** `enterBranch` declines on `armBatches`, which
+  for `union`/`choose` is the reference's own `hasBarrier` rule (arm-major IS correct there) and for
+  `coalesce`/`optional` is a conservative compiler gate: such an arm's tail can consume the column the
+  merge would sort by, and a merge whose arms disagree on a rigid role fails closed. That corner keeps
+  today's answer rather than a new deferral.
+
+**What is left of T4.** (1) The scalar/list/variant merges (`mergeArmRelation`, `unionScalarStreams`,
+`finishListMerge`, `mergeVariantArms`) take the same key by the same route — the substrate is already
+shape-generic, so this is the freeze at each of those branch entry points plus one key change in
+`mergeArmRelation`. (2) The declined `coalesce`/`optional` batching-arm corner above. (3) The residual
+PURE reorder — a barrier-free branch with no positional consumer after it — which stays as Crux 4
+left it: unordered out, unordered on the wire.
 
 ## 5. The duplication to remove while doing it
 
