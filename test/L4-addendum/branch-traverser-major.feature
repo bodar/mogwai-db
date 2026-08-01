@@ -192,3 +192,20 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | d[33].d |
       | d[64].d |
       | d[30].d |
+
+  @gap:branch-traverser-major
+  Scenario: g_V_hasLabelXpersonX_order_byXnameX_coalesceXoutXknowsX_limitX1X_outXcreatedXX_valuesXnameX_limitX2X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").order().by("name").coalesce(__.out("knows").limit(1), __.out("created")).values("name").limit(2)
+      """
+    # A BATCHED barrier inside a coalesce arm, which is the case the batching rule does NOT reach:
+    # `hasBarrier` is a `BranchStep` field and CoalesceStep is a FlatMapStep, so the arm still runs
+    # per traverser and the merge is still traverser-major. josh has no knows(), so its created()
+    # arm's two rows come first; arm-major would lead with marko's single knows() row.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | ripple |
+      | lop |

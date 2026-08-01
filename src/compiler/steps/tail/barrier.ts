@@ -1,7 +1,7 @@
 import { derived, empty, list, q, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { perRowColumnOf, staticTypeOf, type ListOf } from '../../../sql/kernel/render.ts';
 import { sliceSuffix, typedScalarNode } from '../../plan/plan.ts';
-import { armBatches, isLocalScope, type NumericReducer, type ScalarReducer } from '../../ir/step.ts';
+import { armBatches, isLocalScope, BATCHING_BRANCHES, type BranchKind, type NumericReducer, type ScalarReducer } from '../../ir/step.ts';
 
 import { cardinalityOf, continueLowering, loweringStateOf, streamColumns, streamPayloadCols, toListStream, toScalarStream, withRelation, withRelationAndLayout, type ListStream, type RelationalStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { layoutCols, layoutProjection, layoutProjectionMinting, patchLayout, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
@@ -132,17 +132,19 @@ export const gateArmOnNonEmptyInput = <T extends RelationalStream>(arm: T, input
  * Enter a branch whose arms the reference runs PER INPUT TRAVERSER: freeze the input's emission
  * order so the merge can lead with it (see `freezeBranchOrder` and `TraverserLayout.branchOrders`).
  *
- * Declines — leaving today's arm-major key — in exactly two cases:
- *  - no live encounter, so there is no order to be major in;
- *  - an arm holds a BATCHED barrier. For `union`/`choose` that is the reference's own rule
- *    (`BranchStep.hasBarrier`, §1 of the branch-arm plan): the arms then observe the whole input
- *    and arm-major IS correct. `coalesce`/`optional` never batch — they are not `BranchStep`s —
- *    but they decline on the same test for a compiler reason: such an arm's tail can consume the
- *    carried column the merge would sort by, and a merge whose arms disagree on a rigid role fails
- *    closed. That leaves those spellings answering exactly what they answer today.
+ * Declines — leaving the arm-major key — in exactly two cases:
+ *  - no live encounter, so there is no order to be major in, and nothing downstream can observe one;
+ *  - a BATCHING branch (`union`/`choose`) with a batched barrier in an arm. That is the reference's
+ *    own rule and not a conservatism: `BranchStep.hasBarrier` (§1 of the branch-arm plan) then
+ *    injects every start at once, the arms observe the whole input, and arm-major IS the answer.
+ *
+ * `coalesce`/`optional` are NOT `BranchStep`s — `hasBarrier` does not exist for them — so they take
+ * the traverser-major key whatever their arms hold, which is why the kind is a parameter rather
+ * than something derived from the bodies.
  */
-export function enterBranch<T extends RelationalStream>(st: T, bodies: readonly (readonly { readonly name: string }[])[]): { seed: T; branchOrder?: string } {
-  if (!st.traverserLayout.encounter || bodies.some(armBatches)) return { seed: st };
+export function enterBranch<T extends RelationalStream>(st: T, kind: BranchKind, bodies: readonly (readonly { readonly name: string }[])[]): { seed: T; branchOrder?: string } {
+  if (!st.traverserLayout.encounter) return { seed: st };
+  if (BATCHING_BRANCHES.has(kind) && bodies.some(armBatches)) return { seed: st };
   const seed = freezeBranchOrder(st);
   return { seed, branchOrder: seed.traverserLayout.branchOrders.at(-1) };
 }

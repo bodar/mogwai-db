@@ -291,7 +291,7 @@ export function tryScalarChooseChild(s: ScalarStream, step: IRStep): ScalarStrea
 
   // Freeze the input's emission order for the merge to lead with (traverser-major, arm-minor —
   // see enterBranch). After the classify gate above, so a declining arm never orphans its CTE.
-  const { seed: forked } = enterBranch(s, elseBody ? [thenBody, elseBody] : [thenBody]);
+  const { seed: forked } = enterBranch(s, 'choose', elseBody ? [thenBody, elseBody] : [thenBody]);
   const gate = buildScalarGate(forked, [predIsTraversal ? { nested: args[0].nested } : { p: args[0] }]);
   if (!gate) return null;
   // A collapsing arm reduces over the traversers ROUTED TO IT, not over the branch's whole input:
@@ -313,7 +313,7 @@ export function tryScalarChooseChild(s: ScalarStream, step: IRStep): ScalarStrea
 export function tryScalarUnionChild(s: ScalarStream, step: IRStep): ScalarStream | null {
   const branches = (step.args ?? []).filter(isNested);
   if (branches.length < 2) return null;
-  const { seed } = enterBranch(s, branches.map((b: any) => childSteps(b.nested, s.params)));
+  const { seed } = enterBranch(s, 'union', branches.map((b: any) => childSteps(b.nested, s.params)));
   const arms: ScalarStream[] = [];
   for (const b of branches) {
     const end = tryCompileBatchedScalarArm(seed, b.nested) ?? tryCompileScalarArm(seed, b.nested);
@@ -363,7 +363,7 @@ export function tryScalarCoalesceChild(s: ScalarStream, step: IRStep): ScalarStr
   const bodies = branches.map((b: any) => childSteps(b.nested, s.params));
   // Classify-then-emit: every arm must lower before the shared gate commits its CTEs.
   if (bodies.some((body: IRStep[]) => !scalarArmClassifies(body, s.params))) return null;
-  const { seed: forked } = enterBranch(s, bodies);
+  const { seed: forked } = enterBranch(s, 'coalesce', bodies);
   const gate = buildScalarGate(forked, branches.map((b: any) => ({ nested: b.nested })));
   if (!gate) return null;
   const arms: ScalarStream[] = [];
