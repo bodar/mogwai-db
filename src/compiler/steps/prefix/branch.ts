@@ -206,12 +206,12 @@ function armProjection(arm: ElementStream, out: TraverserLayout, armIdx?: number
  *  **That is a wrong SUBSET, not a reorder**, whenever a positional consumer follows the branch —
  *  the key picks a different window, so `g.V(1,4).union(__.out(), __.in()).values('name').limit(4)`
  *  returns [vadas, lop, lop, ripple] where the reference's first three results are v1's three arm
- *  outputs {vadas, josh, lop}. Filed as outstanding-work item 21;
- *  docs/2026-08-01-branch-arm-barrier-scope-plan.md T4 has the design and the exposure measurement.
- *  It is not a one-clause change here: the traverser-major key needs the branch INPUT's encounter
- *  frozen as its own carried role, and there is no column for it — the one `encounter` slot is
- *  re-minted in place by each fan-out inside the arm (finishMove), and the child ordinal is
- *  ROW_NUMBER() OVER (), which identifies a traverser without ordering them.
+ *  outputs {vadas, josh, lop}. FIXED 2026-08-01 (docs/2026-08-01-branch-arm-barrier-scope-plan.md
+ *  T4): `enterBranch` freezes the input's emission order into `TraverserLayout.branchOrders` and the
+ *  key below leads with it, so the merge is traverser-major whenever the arms ran per input
+ *  traverser. It needed a carried role because there is no other column for it — the one
+ *  `encounter` slot is re-minted in place by each fan-out inside the arm (finishMove), and the child
+ *  ordinal is ROW_NUMBER() OVER (), which identifies a traverser without ordering them.
  *
  *  Takes a bare `LoweringState`, like its three siblings (unionScalarStreams / finishListMerge /
  *  mergeVariantArms): the arms' PARENT is not part of a merge, only the carried schema they

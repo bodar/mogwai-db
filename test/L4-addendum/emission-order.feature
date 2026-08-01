@@ -62,8 +62,9 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
   # contract", unqualified) is not. Verified in gremlin-core: `BranchStep.standardAlgorithm` injects
   # ONE start and drains each arm for it unless `hasBarrier` is set, so with several traversers the
   # reference is traverser-major, arm-minor, and we are arm-major GLOBALLY. That divergence is real
-  # and separately filed (outstanding-work item 21 / the branch-arm plan); do NOT add a
-  # multi-traverser union case here expecting it to hold.
+  # and was fixed by the branch-arm plan's T4 — the multi-traverser cases live in
+  # branch-traverser-major.feature, where the slice falls on a traverser boundary. Keep this one
+  # single-traverser: it is pinning the branch-merge encounter re-mint, not the merge's key.
   # josh(4): out={lop,ripple} (arm 0), in={marko} (arm 1); limit(2) is the two out-neighbours, never
   # marko. Guards the branch-merge encounter re-mint.
   @gap:emission-order

@@ -46,7 +46,7 @@ describe('a scalar-bodied map()/local() composes as a scalar producer in a child
       .toEqual(vals('g.V().where(__.out().count().is(P.gt(1)))'));
     // NOT compared against `union(__.out().count(), __.in().count())`: a bare count() in a branch
     // arm is a GLOBAL barrier over the whole branch input (it answers [6,6]), which is a different
-    // question — that asymmetry is item 21, not this lift. The per-traverser spelling is the one
+    // question — that asymmetry is the branch-arm plan's T1, not this lift. The per-traverser spelling is the one
     // this change unlocks, so it is asserted directly.
     expect(bag('g.V().union(__.local(__.out().count()), __.local(__.in().count()))'))
       .toEqual([...vals('g.V().local(__.out().count())'), ...vals('g.V().local(__.in().count())')].sort());

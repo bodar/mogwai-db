@@ -1,9 +1,10 @@
 # A branch arm's barrier observes the branch's whole input — doing it properly
 
-**Status: T1, T2 and T3 LANDED 2026-07-31. T4 RECLASSIFIED and LANDED 2026-08-01, all four merge
-families** — it is a wrong SUBSET under a downstream slice, not the ordering item it was filed as,
-which also means it is pinned with multiset assertions rather than ordered ones (§T4, §6.5,
-§T4-outcome). One declared corner is left; the plan is otherwise closed.
+**Status: CLOSED 2026-08-01.** T1–T3 landed 2026-07-31; T4 was RECLASSIFIED (a wrong SUBSET under a
+downstream slice, not the ordering item it was filed as — §T4, §6.5) and landed across all four merge
+families plus the scalar-parent branches. Outstanding-work item 21 is deleted. What is left is not
+open work: Crux 4's deliberate "unordered out stays unordered" for a branch with no positional
+consumer after it.
 **The fail-closed gate has NOT been written** — nothing
 named `verifyBranchArmBarrierScope` exists in `src/`, so anything T2/T3 have not reached still
 mis-executes rather than deferring.
@@ -274,9 +275,17 @@ at the top of those would leave a dangling CTE in every element branch. `tryLowe
 classifies every arm up front for exactly this reason (which also lifted a per-arm classify out of
 its compile loop).
 
-**What is left of T4.** (1) The declined `coalesce`/`optional` batching-arm corner above. (2) The
-residual PURE reorder — a barrier-free branch with no positional consumer after it — which stays as
-Crux 4 left it: unordered out, unordered on the wire.
+**The last corner, closed the same day: the gate is now exactly the reference's rule.** `enterBranch`
+first declined the traverser-major key for ANY branch with a batched barrier in an arm. For
+`union`/`choose` that is `BranchStep.hasBarrier` and is correct. For `coalesce`/`optional` it was a
+conservatism, and the worry behind it — that such an arm's tail consumes the column the merge sorts
+by — does not materialise, because those arms are CHILD-SCOPED: the barrier there is a per-origin
+slice or reduction that preserves the layout, not the global barrier that empties it. So the gate
+takes the branch KIND and applies `hasBarrier` only where the reference has it.
+`coalesce(__.out('knows').limit(1), __.out('created'))` was the witness.
+
+**What is left is not open work**: the residual PURE reorder — a barrier-free branch with no
+positional consumer after it — stays as Crux 4 left it, unordered out and unordered on the wire.
 
 ## 5. The duplication to remove while doing it
 

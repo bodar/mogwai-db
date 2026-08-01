@@ -34,7 +34,7 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-**Ranked entry point.** Numbers are IDs, not an order. **2** → **21**'s T4 → **29** → **3**'s
+**Ranked entry point.** Numbers are IDs, not an order. **2** → **29** → **3**'s
 `times(n)` unroll. **28** landed and was 3's stated precondition, so the unroll is unblocked;
 **17**'s cheap half landed and its remainder is the architectural current-object-aggregate
 authority, a bigger question than its neighbours. (Item **30** headed this list and is now DELETED —
@@ -60,13 +60,18 @@ and are now L4-pinned rather than open. Then item 17's `tail`/`sample` (L3 → 1
 the census its first four `nondet` rows; and item 28's `repeatBodyExpansion` switch, whose first
 sweep found one real disagreement (now diagnosed in `known.ts`) where nothing could look before.
 
-**Landed 2026-08-01.** Item 23's wording family, as three reference-sourced authorities rather than
+**Landed 2026-08-01.** Item 21's T4 — a barrier-free branch merges traverser-major, which with a
+positional consumer after it was a wrong SUBSET rather than the reorder the item was filed as. All
+four merge families plus the scalar-parent branches take the key; the substrate is
+`TraverserLayout.branchOrders` (the input order frozen at branch entry) and `branchFork` derives it
+per merge. Item 21 is DELETED — what is left of it is Crux 4's deliberate "unordered out stays
+unordered", not open work. Also item 23's wording family, as three reference-sourced authorities rather than
 a rename sweep — the `by()` arity table + verify Pass, `StandardVerificationStrategy` modelled whole,
 and the list-input refusals (L3 1652 → 1666). It closed item 22's `groupCount()` pair, which were
 real wrong answers, and it deleted four per-host arity checks it dominates. Then item 2's scalar
 child-in-child (L3 → 1669), which was a classifier gap rather than missing machinery.
 
-**What that leaves.** No item below is a known wrong answer except 20's residuals, 21's T4, and item
+**What that leaves.** No item below is a known wrong answer except 20's residuals and item
 22's six remaining per-member type refusals — the rest fail closed. Read that as the index's centre of gravity moving from correctness to ceiling.
 **The one exception is now CLOSED: item 30's two breaches were hard FAILURES rather than fail-closed
 deferrals, and only on Cloudflare** — which is why nothing in the ladder found them, since every level
@@ -210,58 +215,6 @@ cardinality, which is the measurement that says the ladder could not have found 
      whether the ASSERTION is over-strong or the traversal under-determined. **Do not bulk-relax them**:
      the `order().fold()` block looked exactly like test-side fragility and was a real defect.
    **Clearing these makes `test:perturbed` a gate**, which is the point of one item.
-
-21. **A `union`/`choose` ARM's barrier observes the branch's whole input. T1+T2+T3 LANDED
-   2026-07-31 (L3 1647 → 1648); T4 LANDED 2026-08-01 and what is left of this item is one declared
-   corner.** `BranchStep.standardAlgorithm`'s `hasBarrier` decides arm SCOPE and emission order
-   together, and only `union`/`choose` extend `BranchStep` — `coalesce`/`optional` are
-   per-traverser by class and our SCOPE for those is CORRECT. **That is a statement about scope
-   only: on emission ORDER all four diverged the same way, which is T4.**
-   **The vocabulary is `ir/step.ts`:** `BATCHING_BRANCHES`, `COLLAPSING_BARRIERS` (reduce to one
-   traverser), `SLICE_BARRIERS` (choose or reorder a subset), `BATCHED_BARRIERS` = their union =
-   `GLOBAL_BARRIER_STEPS` minus the four that change SHAPE or are not `Barrier`s, and `armBatches`.
-   None of the three tranches needed new lowering substrate — each arm goes through the ordinary
-   engine over the branch's input. What they did need: `layoutArmProjection` resolving the merged
-   carried schema per COLUMN; `armBatchAdmissible`/`collapsedArmAdmissible`; and
-   `gateArmOnNonEmptyInput`, because an arm that received no traversers emits nothing even though
-   `count()` over an empty stream is 0.
-   **T4 — RECLASSIFIED from its emission-order framing, and LANDED 2026-08-01 across all four
-   merge families.**
-   Once an arm batches, arm-major over the whole stream is CORRECT and is what we emit; the
-   barrier-FREE case is traverser-major in the reference, and **with a positional consumer after the
-   branch that key selects a different WINDOW — a wrong multiset, not a reorder.** Was:
-   `g.V(1,4).union(__.out(), __.in()).values('name').limit(4)` → `[vadas, lop, lop, ripple]`, omitting
-   `josh`, where the reference's first three results are v1's three arm outputs. A silent wrong
-   answer, so a correctness item; and pinnable by a MULTISET assertion, which is what made it
-   testable at all (the census cannot see a pure reorder).
-   **The substrate that landed: `TraverserLayout.branchOrders`** — the input's emission order frozen
-   at branch entry, a STACK like `origins`, threaded through the arms and consumed by the merge as
-   its leading sort key. NOT the "two encounters" reconciliation item 4 refuses: it holds an OUTER
-   scope's order and is only ever read as a merge sort key. `freezeBranchOrder` + `enterBranch`
-   (`tail/barrier.ts`, generic over any relational stream) are the entry; `branchFork`
-   (`context/context.ts`) is how each merge DERIVES the fork point and the key off its own arms
-   rather than taking a threaded argument — the variant merge is the one exception, since a
-   `VariantArm` carries no layout, so its callers hand the fork in. Ten pins in
-   `test/L4-addendum/branch-traverser-major.feature`, one of them the COMPLEMENT (a batching arm,
-   where arm-major is the reference's own answer and the gate must decline).
-   **§1's "only union/choose can disagree" is about arm SCOPE and does NOT carry to emission order** —
-   `coalesce`/`optional` merged arm-major too and are fixed by the same key. Do not re-read §1 as
-   "coalesce is fine".
-   **What is left, and both are declared rather than forgotten.** (a) `enterBranch` declines when
-   an arm holds a batched barrier; for `union`/`choose` that is the reference's own rule and
-   arm-major is CORRECT, but for `coalesce`/`optional` it is a conservative compiler gate (such an
-   arm's tail can consume the very column the merge would sort by, and a merge whose arms disagree
-   on a rigid role fails closed), so those spellings keep today's arm-major answer. (b) The residual
-   PURE reorder — a barrier-free branch with no positional consumer after it — stays as Crux 4 left
-   it: unordered out, unordered on the wire. **Zero corpus witnesses either way, so L3 does not
-   move** — the ratchet is L4. *Low, and only (a) is a wrong answer.*
-   **Two things deliberately NOT done, so they are not mistaken for oversights:** `armBatches` scans
-   an arm body FLAT, so a barrier sitting only inside a NESTED branch arm sets `hasBarrier` in the
-   reference and not here; and the child-scope guard (`armBatchAdmissible`) has no end-to-end pin,
-   because every spelling that would exercise it — `local(union(…))` and its map/flatMap twins —
-   defers today.
-   → [branch-arm-barrier-scope](./2026-08-01-branch-arm-barrier-scope-plan.md) — **read §1 and §6
-   before proposing anything**
 
 5. **Non-element child bodies.** Map and record bodies compile. **Two premises that were FALSE — do not
    rebuild on them:** the element terminal does not need a relational form, and `project`/`group`/`path`
@@ -685,10 +638,11 @@ deferral clusters in 5c instead.
   template; live targets are `AliasShape` member shape (item 1) and front-end tagged-token accessors.
 - **[tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md)** — naming
   authority and rename map. The open `ir/rewrites.ts`/`ir/strategies.ts` partition needs a shared home.
-- **[branch-arm-barrier-scope](./2026-08-01-branch-arm-barrier-scope-plan.md)** — the build spec for
-  item 21, and the reason it is not the ordering item it was filed as. **This refresh had missed it
-  entirely**, which is how item 21 kept a sizing its own plan document refutes in §6. Its §1 is the
-  `BranchStep`/`FlatMapStep` class fact that decides which branch kinds can disagree with us at all.
+- **[branch-arm-barrier-scope](./2026-08-01-branch-arm-barrier-scope-plan.md)** — CLOSED 2026-08-01
+  (was item 21, now deleted): all four tranches landed, including T4's traverser-major merge key and
+  the `branchOrders` carried role behind it. Read it for two durable things — §1's
+  `BranchStep`/`FlatMapStep` class fact, which decides which branch kinds can disagree with us and in
+  WHICH respect (arm SCOPE for two of them, emission ORDER for all four), and §6's five wrong turns.
 - **[property-based-testing-l5](./2026-07-28-property-based-testing-l5.md)** — L5's oracle design space.
   **Stale**: it lists four defects against the deleted item 0, all four of which probe clean (22b).
 - **[channel-preservation](./archive/2026-07-28-channel-preservation-refactoring-plan.md)** — closed;
