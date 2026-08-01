@@ -322,6 +322,11 @@ function operandList(engine: Engine, arg: any, op: string, params: Record<string
     if (!folded) throw new Error(`${op}() operand traversal must fold a scalar list (values/id/label)`);
     return folded;
   }
+  // A MAP argument gets `MergeStep`'s own wording (gremlin-core .../step/map/MergeStep.java:95):
+  // over a LIST receiver the argument must be Iterable, and a Map is the one non-Iterable the
+  // reference names explicitly because `merge()`'s other overload — a Map receiver — takes one.
+  if (arg instanceof Map || (typeof arg === 'object' && Object.getPrototypeOf(arg) === Object.prototype))
+    throw new Error(`${op} step type mismatch: expected argument to be Iterable but got Map`);
   throw new Error(`${op} step can only take an array or an Iterable as an argument, encountered ${jsGtype(arg)}`);
 }
 

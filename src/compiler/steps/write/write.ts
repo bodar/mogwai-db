@@ -1177,7 +1177,11 @@ function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, a
     run: (store) => {
       const endpoint = (spec: any, oc: any, cur: number | null, role: string): number => {
         const raw = spec?.incoming !== undefined ? cur : spec ?? (oc?.incoming !== undefined ? cur : oc);
-        if (raw == null) throw new Error(`mergeE: missing ${role} endpoint (need Direction.${role === 'outV' ? 'OUT' : 'IN'} or an incoming traverser)`);
+        // MergeEdgeStep's own wording (gremlin-core .../step/map/MergeEdgeStep.java:314) for the
+        // same refusal. Ours fires EARLIER than the reference's — it checks on the create path,
+        // after the search found nothing, while we need both endpoints to build the match query at
+        // all — so the message names onCreate, which is the branch that reaches it in the corpus.
+        if (raw == null) throw new Error(`${role === 'outV' ? 'Out' : 'In'} Vertex not specified in onCreate - edge cannot be created`);
         return resolveMergeEndpoint(store, raw);
       };
       const out: any[] = [];
@@ -1251,11 +1255,15 @@ const ADDV_FOLLOWERS = new Set(['property', 'addLabel']);
 const MUTATING_TAIL = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop', ...LABEL_MUTATIONS]);
 
 /** Reject a label count the declared cardinality forbids, naming the step so the error says which
- *  operation overstepped. `min` is checked by dropLabel/dropLabels, `max` by addV/addLabel. */
+ *  operation overstepped. `min` is checked by dropLabel/dropLabels, `max` by addV/addLabel.
+ *  Wording is `LabelCardinality.validateCreation`'s (gremlin-core .../structure/util/
+ *  LabelCardinalityValidator.java:96) — the same refusal for the same reason, so it says so in the
+ *  same words. The step prefix is ours and is kept: the reference's message cannot say WHICH
+ *  operation overstepped, and that is the first thing you want to know. */
 function assertLabelCount(engine: Engine, n: number, step: string): void {
   const c = engine.labelCardinality;
-  if (n > c.max) throw new Error(`${step}(): this graph allows at most ${c.max} label(s) per vertex`);
-  if (n < c.min) throw new Error(`${step}(): this graph requires at least ${c.min} label(s) per vertex`);
+  if (n > c.max) throw new Error(`${step}(): Element creation allows at most ${c.max} label(s), got ${n}`);
+  if (n < c.min) throw new Error(`${step}(): Element creation requires at least ${c.min} label(s), got ${n}`);
 }
 
 /** addLabel/dropLabel/dropLabels over the elements a read prefix selects.

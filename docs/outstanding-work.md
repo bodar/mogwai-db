@@ -4,7 +4,7 @@ The de-duplicated index of open work across the `docs/` corpus. **Each item sets
 why, where to start — not a spec.** The linked doc holds the rationale; the picking agent does the
 validation and design. Live per-step capability: `feature-support-matrix.md`.
 
-**Refreshed** 2026-07-31, **L3 line updated 2026-08-01** · **L3 1671 / 2267** (`l3-state.json`; fewer
+**Refreshed** 2026-07-31, **L3 line updated 2026-08-01** · **L3 1679 / 2267** (`l3-state.json`; fewer
 UNIQUE names than that — the collision is expected, see won't-do) · census **0 `crashed`, 4
 `nondet`** (`sample()` landed) ·
 `known.ts` **1 entry** — repeat's two body routes disagree on a positional window, found by the
@@ -289,16 +289,20 @@ cardinality, which is the measurement that says the ladder could not have found 
    - **`LIST_INPUT_REFUSALS`** (`tail/list.ts`) for the steps whose input contract excludes a
      collection at every scope. `concat` LEFT `STRING_LOCAL_TX` on the way — TinkerPop ships no
      `ConcatLocalStep`, so `fold().concat('x')` was answering where it must refuse.
-   **The 22 that remain split three ways, and only the first is renaming.** (a) **10 are the WRITE
-   family** — `mergeE`'s missing endpoints (5), the merge argument-shape pair, the hidden-key check,
-   and `mergeV` on a single-label graph (2); same reason, reference's wording, but they live in
-   `write.ts`/`steps/write/validate.ts`. (b) **7 are item 22's runtime-type-channel group.** (c) **5
-   are real gaps that merely coincide with an error assertion**: `choose().option()`'s Pick token,
-   `fail(msg)` (item 25), `addE`'s ambiguous endpoint, and
-   `withStrategies(VertexProgramRestrictionStrategy, VertexProgramStrategy)` — which wants
+   The WRITE family followed the same day (L3 1671 → 1679): `mergeE`'s missing endpoints take
+   `MergeEdgeStep`'s wording, `addV`/`addLabel`'s label count takes `LabelCardinalityValidator`'s,
+   and a MAP argument to a list-receiver set op takes `MergeStep`'s.
+   **14 error-assertion scenarios remain and NONE of them is renaming.** (a) **7 are item 22's
+   runtime-type-channel group.** (b) **7 are real gaps that merely coincide with an error
+   assertion** — the reason differs, so the message is the least of it: `choose().option()`'s Pick
+   token, `fail(msg)` (item 25), `addE`'s ambiguous endpoint,
+   `merge(__.constant('a'))` over an `elementMap()` receiver (we cannot consume a MAP receiver at
+   all; the reference is complaining about the ARGUMENT), `mergeE`'s `option(Merge.outV, select)`,
+   and `withStrategies(VertexProgramRestrictionStrategy, VertexProgramStrategy)` — which wants
    `VertexProgramRestrictionStrategy` moved OUT of `NO_OP_STRATEGIES` into a real verify strategy.
    **One divergence is deliberate and will not be closed:** `Can't parse type ArrayList as number.`
-   asserts the JVM CLASS of the offending value; we say `list`. *Low — what is left is (a).*
+   asserts the JVM CLASS of the offending value; we say `list`. *Low, and the item is nearly done —
+   what is left belongs to the items that own each gap.*
 
 0b. **Apply-contract consumers.** `ModulationContract` covers nested property keys/values, merge-map
    keys/values and `AddVertexStep` labels/parameters via `ElementReadDriver`. Remaining:
