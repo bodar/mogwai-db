@@ -152,7 +152,7 @@ trap 4 from the other side.
 | Cause | Failing | Note |
 |---|---|---|
 | whole-arg map traversal (`__.identity()`, `__.select(…).limit().unfold()`, `__.sideEffect(…)`) | 10 | item 0b's **map-valued driver** — the declared blocker |
-| `mergeE option(Merge.outV)` | 8 | |
+| `mergeE option(Merge.outV)` | 8 | the blocker is NOT the option: **merge drivers are bare rowids while every other write driver carries the traverser's aliases.** `mergeDrivers` renders `SELECT id`, where the mutation/label hosts use `materializeElementDrivers` and get the whole carried layout. That is why `option(Merge.outV, select("v"))` cannot resolve — `select("v")` needs an alias the driver never had. Making `mergeDrivers` return `ElementReadDriver`s and threading it through `resolveMergeSpec` (which takes a bare `{id, elem}` seed today) is the unlock, and it is the same one several W2 rows want |
 | step not implemented after `mergeV()` (`property()`, `as()`) | 8 | the `property()` half **landed 2026-08-01 (`3d9222f`)**, L3 +3 — it was not a merge feature at all, just an AddPropertyStep over whatever the merge emitted, so it reuses the mutation tail's parser and the same storage waists. `as()` remains: it needs the write CHAIN (§4's item 10) |
 | `PartitionStrategy` + `mergeV`/`mergeE` (partition-aware upsert) | 7 | also `outstanding-work.md` line 534 |
 | "Out Vertex not specified in onCreate — edge cannot be created" | 3 | we refuse where the reference creates |
