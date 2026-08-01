@@ -59,7 +59,7 @@ g.V().outE().property("weight", null)                                    — FIX
   (same shape: g.V().hasLabel("person").property("name", null), and
    g.mergeE(…).option(onMatch, [weight: null]))
 
-g.V(1).property(Cardinality.list, "friends", __.out("knows").values("name"))
+g.V(1).property(Cardinality.list, "friends", __.out("knows").values("name"))  — FIXED 2026-08-01
   ours:      properties("friends").count() → 1   — only the first value is stored
   reference: 2 — marko knows vadas and josh, and list cardinality appends BOTH
 ```
@@ -67,7 +67,8 @@ g.V(1).property(Cardinality.list, "friends", __.out("knows").values("name"))
 Two more in the same family, not yet characterised, so verify before designing:
 `g.addV().property(["name":"foo","age":42])` and
 `g.V().has('name','foo').property(["name": Cardinality.set("bar"), "age": 43])` — the whole-MAP
-argument form of `property()` (corpus lines 442, 1493, 1514).
+argument form of `property()` (corpus lines 442, 1493, 1514). **Still open**; the other three landed
+2026-08-01, see below.
 
 **What ties the first and third together is item 16's W4** — the multi/meta-property schema rework.
 We implement `single` semantics where the reference's default for a NEW vertex property is a
@@ -96,11 +97,25 @@ errors were about where a fact lives rather than about the fact:
   `'single'` at PARSE time, so the graph never got asked. Carrying `null` to the storage waist is the
   whole fix, and it is the same shape as `insertVertex` applying the default LABEL.
 
-**Still open in this family (unchanged):** the third wrong answer — a traversal value under
-`Cardinality.list` stores only the first result — plus the whole-MAP argument form. Those are about
-a MULTI-VALUED nested-traversal value (`AddPropertyStep.handleTraversalValue` collects ALL results
-and applies one mutation per result under list/set, and throws under `single`), which is the
-`nestedScalarValue` "first row wins" seam, not the schema.
+**The third wrong answer landed too (`ebc3fa6`), L3 1684 → 1686.** It was the
+`nestedScalarValue` "first row wins" seam and not the schema, as predicted:
+`AddPropertyStep.handleTraversalValue` collects ALL results and branches on the effective
+cardinality, so `nestedScalar` now returns the whole list and `applyVertexProperty` takes a
+`values` list. Three branches the survey did not enumerate, each of which is now a pin: an EMPTY
+result skips the mutation (not a null, not a removal); `single` with several results REJECTS rather
+than keeping one; and a non-Vertex element has no cardinality at all, so an edge legitimately takes
+the first result.
+
+Its one non-obvious consequence: a `mergeV().option(onMatch, [k: v])` map that names no cardinality
+now APPENDS, because `MergeVertexStep` reads `getCardinality(key)` exactly as `property()` does. The
+corpus does not discriminate — every onMatch assertion is `has(k, v)`, which matches ANY value — so
+check the reference implementation rather than L3 before touching that arm.
+
+**Still open in this family:** the whole-MAP argument form of `property()` (corpus lines 442, 1493,
+1514). `handleTraversalValue`'s `mapForm` branch is a separate arm from everything above: it requires
+the traversal to produce exactly one Map, expands it into per-entry mutations, and throws
+`property(traversal) requires the traversal to produce a Map` otherwise. It is closer to W2's
+map-valued driver than to anything in W1.
 
 **One fidelity gap this opens, and it is real:** `io()`/`BulkLoader` round-trips do not carry the
 declarations, so a graph exported and reimported loses a `single` and reverts that (vertex, key) to
@@ -220,7 +235,7 @@ on it.
 
 | # | Tranche | Verified by |
 |---|---|---|
-| W1 | the three (five) silent wrong answers + W4 schema — **null-removal landed** | the reproductions in §2 become L4 pins; census `goldens.tsv` moves with a reason |
+| W1 | the three (five) silent wrong answers + W4 schema — **all three landed 2026-08-01; the two MAP-argument forms remain** | the reproductions in §2 become L4 pins; census `goldens.tsv` moves with a reason |
 | W2 | the map-valued driver, then the five upsert rows that follow it | L3 ratchet (expect ~41 candidates, not all reachable) |
 | W3 | addV mid-chain / read-tail-after-write first, then the positions it unblocks | L3 ratchet + the matrix rows 207–209 |
 | W4 | driver input in emission order | `mise run test:perturbed` — 3 census rows, and with the `repeat` exemption the instrument becomes a GATE |
