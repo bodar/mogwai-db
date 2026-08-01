@@ -2,11 +2,15 @@
 // deliberately separate from the corpus census: this table covers generated,
 // well-typed compositions the corpus may never contain. Additions require a
 // diagnosis; removals are improvements.
+//
+// Every entry is a FIXED QUERY STRING and `capability.test.ts` runs all of them unconditionally,
+// which is what makes "this no longer reproduces" a statement the ratchet can actually make. It
+// used to check the list only against the queries the SEED happened to draw, so a fixed entry and
+// an undrawn one were the same observation — and one entry sat here fixed while every run printed
+// the ambiguous "not drawn by this seed". That entry
+// ("no such column: edges.label" on a repeat().dedup() witness) is deleted with this note as its
+// only trace: it also carried no diagnosis, which the header above already forbade.
 export const KNOWN_RAW_WITNESSES: ReadonlyMap<string, string> = new Map([
-  [
-    "g.V(1).where(__.identity()).has('age').hasId(2).repeat(__.both('created').in('created')).times(1).dedup()",
-    'no such column: edges.label',
-  ],
   [
     // A repeat() in a CHILD scope RETYPES the carried path from the linear `cols` regime (p0, p1,
     // …) to its own recursive `array` accumulator, because the live `simplePath()` makes the walk

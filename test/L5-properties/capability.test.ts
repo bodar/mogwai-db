@@ -33,9 +33,16 @@ describe('L5 capability ratchet', () => {
     }
     console.log(`L5 capability: ${witnesses.length} transition witnesses + ${samples.length} generated compositions — ${ran} ran, ${deferred} declared deferrals`);
     expect(raw).toEqual([]);
-    // A baseline row that no longer occurs is an improvement, not a failure. Keep it
-    // visible so the next intentional update can delete the stale diagnosis.
-    const stale = [...KNOWN_RAW_WITNESSES.keys()].filter((query) => !seenKnown.has(query));
-    if (stale.length) console.log(`L5 capability: ${stale.length} known raw witness(es) not drawn by this seed`);
+    // Every baseline entry is run UNCONDITIONALLY, not merely looked for among the queries this
+    // seed drew. That distinction is the whole check: computed over the drawn set, "stale" also
+    // meant "not drawn", so a FIXED entry was indistinguishable from an unlucky sample and the
+    // ratchet printed the same ambiguous line on every run while one entry sat here already fixed.
+    // Run directly, a stale entry can only mean fixed — so it FAILS, and deleting it is the fix.
+    const stale = [...KNOWN_RAW_WITNESSES].filter(([query, message]) => {
+      if (seenKnown.has(query)) return false;
+      const outcome = outcomeOf(seeded(MODERN_SEED), query, ALL_GENERIC);
+      return outcome.kind === 'rows' || outcome.message !== message;
+    }).map(([query]) => query);
+    expect(stale).toEqual([]);
   }, 120_000);
 });

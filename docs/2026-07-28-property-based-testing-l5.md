@@ -44,9 +44,10 @@ coverage, since nothing had ever run the generic path.
 **Why 3 mattered most, and what it found.** It is the only oracle that can see a defect the two
 lowerings share, and it justified itself on its first deep run: two silent wrong answers the
 differential is structurally blind to — `otherV()` miscounting under live path tracking, and a
-non-terminal `fold()` after `dedup()` folding the un-deduplicated multiset. Both are in
-`outstanding-work` item 0, and both are diagnosed as `knownBroken` entries on their laws (same
-discipline as `known.ts`: a tracked bug, never an acceptable exception).
+non-terminal `fold()` after `dedup()` folding the un-deduplicated multiset. Both were carried as
+`knownBroken` entries on their laws (same discipline as `known.ts`: a tracked bug, never an
+acceptable exception) and **both are now FIXED** — `knownBroken` is empty, and the `otherV()` half
+went with `POSITION_MOVEMENTS` gaining `OTHER_V` (`tail/path.ts`). Re-probed 2026-08-01.
 
 Two design points worth keeping. **A law is instantiated over a GENERATED prefix** — `out(l) ≡
 outE(l).inV()` as a fixed pair is one assertion; over a few hundred generated vertex-shaped contexts it
@@ -68,21 +69,25 @@ The differential compares the two lowerings *against each other*. It can therefo
 **disagreement**. A defect present in both, or one whose two halves cancel, is invisible to it by
 construction. This is not a gap to patch; it is what the design is.
 
-Four such defects are now known. The first two were found by hand while diagnosing the differential's
-output; the last two by oracle 3, which exists precisely to find them:
+Four such defects were found this way. The first two were found by hand while diagnosing the
+differential's output; the last two by oracle 3, which exists precisely to find them. **All four are
+now fixed** — re-probed 2026-08-01, one traversal each, and the outcome is recorded per entry below
+rather than as a blanket note, because the value of the list is the FAILURE MODE each one names.
+They also all cited `outstanding-work` item 0, which no longer exists (its number was retired when
+it landed), so the citations are dropped rather than repointed:
 
 - **Non-productive `by(key)` was not applied at `order()`.** `g.V().order().by('age')` returned all
   six modern-graph vertices; TinkerPop returns four (the two software vertices have no `age`). Both
   configs agreed. Fixed.
 - **An unproductive `sum()`/`min()`/`max()`/`mean()` body in a filter position still keeps the
-  traverser.** `g.V().where(__.out().values('age').sum())` returns all six; TinkerPop returns one.
-  Both configs agree. **Still open** — `docs/outstanding-work.md` item 0.
-
+  traverser.** `g.V().where(__.out().values('age').sum())` returned all six; TinkerPop returns one.
+  Both configs agreed. **Fixed** — it answers 1.
 - **`otherV()` miscounts while path tracking is live** — `g.V().out().simplePath().bothE('created')
-  .otherV()` disagrees with `.both('created')`, though the `simplePath()` is provably a no-op there.
-  **Open.**
-- **A non-terminal `fold()` after `dedup()` folds the un-deduplicated multiset** — `dedup()` gives 4,
-  `dedup().fold().unfold()` gives 6. The terminal fold is correct. **Open.**
+  .otherV()` disagreed with `.both('created')`, though the `simplePath()` is provably a no-op there.
+  **Fixed** — the two agree; `POSITION_MOVEMENTS` includes `OTHER_V`.
+- **A non-terminal `fold()` after `dedup()` folds the un-deduplicated multiset** — `dedup()` gave 4,
+  `dedup().fold().unfold()` 6. **Fixed** — they agree on every prefix probed (`V()`, `out()`,
+  `both()`).
 
 Worse than invisible: the first of the four **cancelled** one of the differential's own findings on the
 traversal that surfaced it, so the corresponding L3 scenario *passed for entirely the wrong reason*

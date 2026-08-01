@@ -35,9 +35,12 @@ export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optio
 // So this module exports BASES only. Every consuming set keeps its own name, its own home and its
 // own call sites, and spells its membership relative to these — which turns an omission into
 // something you can SEE (`COLLAPSE_MOVES` visibly excludes `OTHER_V`) instead of something you have
-// to notice is absent. That absence is a real open bug for `POSITION_MOVEMENTS`
-// (docs/outstanding-work.md item 0); making it visible is the point, and FIXING it is a separate
-// change that needs its own test.
+// to notice is absent. That visibility is what got `POSITION_MOVEMENTS` fixed: its omission of
+// `OTHER_V` WAS a real bug (a `bothE().otherV()` projected the edge position, not the reached
+// vertex, while path tracking was live) and it now includes it — `tail/path.ts`, tested by
+// `test/L4-addendum/where-under-otherv-context.feature` and pinned in
+// `test/compiler/step-vocabulary.exec.test.ts`. `COLLAPSE_MOVES`'s exclusion is NOT a bug and must
+// stay: otherV carries the per-traverser entering-vertex context a GROUP BY-id collapse destroys.
 //
 // Rule for anything added here: a base is a vocabulary with ONE meaning. If two consumers want
 // different members, that is two bases, not one base plus an exception.

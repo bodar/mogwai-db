@@ -26,9 +26,11 @@ has. Parsing and compiling are submodule-free; running is not.
 *law*, which is the only way to see a defect both lowerings share.
 
 - **The differential ratchet (`known.ts`) is EMPTY.** No known fast-path divergence.
-- **Laws: 19, all holding**, except two diagnosed contexts carried as `knownBroken` on their law
-  (`otherV()` under live path tracking; a non-terminal `fold()` after `dedup()`) — both real, both
-  open in `docs/outstanding-work.md` item 0, both found BY the laws.
+- **Laws: 19, all holding, and `knownBroken` is EMPTY.** It carried two diagnosed contexts —
+  `otherV()` under live path tracking, and a non-terminal `fold()` after `dedup()` — both found BY
+  the laws and both since fixed; `POSITION_MOVEMENTS` now includes `otherV` (`tail/path.ts`). The
+  field stays declared because the next finding needs somewhere to go, but an entry here is a
+  DEFECT, so an empty list is the correct state and this line is what says so.
 - Corpus: 2,298 traversals, **~1,368 executable**, 0 unexplained divergences.
 - Generated: 300 @ seed 42, **~203 executable**, 0 unexplained divergences.
 - Verified at a larger scale than CI runs: 4,000 generated traversals with every switch off, plus 900

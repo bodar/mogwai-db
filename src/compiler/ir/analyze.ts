@@ -126,7 +126,7 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
 // excluded (its fromV context is per-traverser identity).
 // NOTE the absent OTHER_V: otherV carries fromV (per-traverser identity), which a
 // GROUP BY-id collapse would destroy. Excluded deliberately, and now visibly so.
-const COLLAPSE_MOVES = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES);
+export const COLLAPSE_MOVES = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES);
 const COLLAPSE_FILTERS = new Set(['has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or']);
 const COLLAPSE_PROJ = new Set(['values', 'id', 'label']); // a scalar projection feeding a numeric reducer
 const COLLAPSE_REDUCERS = REDUCERS;

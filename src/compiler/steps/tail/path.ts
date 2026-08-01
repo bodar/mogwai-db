@@ -46,7 +46,7 @@ function positionScalar(ctx: ScalarCtx, byArgs: any[] | undefined): Expression |
 // nevertheless recognize it exactly like every other path-appending movement; otherwise
 // bothE().otherV() projects the edge position instead of the reached vertex while path tracking
 // is live.
-const POSITION_MOVEMENTS = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V);
+export const POSITION_MOVEMENTS = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V);
 const ELEMENT_POSITION_BRANCH = new Set(['choose', 'coalesce', 'union']);
 
 /** PURE. Does this branch-arm body produce MORE than one value per input element? A path

@@ -9,10 +9,12 @@ UNIQUE names than that — the collision is expected, see won't-do) · census **
 `nondet`** (`sample()` landed) ·
 `known.ts` **1 entry** — repeat's two body routes disagree on a positional window, found by the
 `repeatBodyExpansion` switch on its first sweep ·
-`capability-baseline.ts` 2 entries, one stale (22c).
+`capability-baseline.ts` **1 entry** (was 2; the stale one is deleted, and the ratchet can now
+tell a FIXED entry from an undrawn one).
 
 Item numbers are stable IDs; landed items are DELETED and their numbers not reused, because code
-cites them. **A deletion must sweep its citations** — item 0 was deleted with four left standing (22b).
+cites them. **A deletion must sweep its citations** — item 0 was deleted with four left standing, and
+that sweep (`ir/step.ts`, the vocabulary test, the L5 README + design doc) was itself a whole item.
 
 > **Verify an item's premise before picking it — this index has been stale in BOTH directions.** A
 > 10-line probe that compiles the traversal and greps the SQL is usually enough. If it is partly
@@ -272,20 +274,6 @@ cardinality, which is the measurement that says the ladder could not have found 
    which is item 17's matrix. Then E repeat-body 26/66 (3), G write 31/92 (10), K label 17/11, B
    child-seam 13/32 (2/5).
    → [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md)
-
-22b. **Item 0 was deleted while four citations still point at it — and the defect it named is FIXED.**
-   `POSITION_MOVEMENTS` (`tail/path.ts:49`) includes `OTHER_V`, with
-   `test/L4-addendum/where-under-otherv-context.feature` as its test. Still asserting otherwise:
-   `src/compiler/ir/step.ts:38`, `test/compiler/step-vocabulary.exec.test.ts:11` (whose test now asserts
-   a locally rebuilt set, not the real `POSITION_MOVEMENTS`), `test/L5-properties/README.md:29`, and
-   `docs/2026-07-28-property-based-testing-l5.md`. *Low as code, Medium as integrity.*
-
-22c. **The capability ratchet cannot tell "fixed" from "not drawn".** `capability.test.ts` computes
-   `stale` only over witnesses the seed DREW, and logs rather than fails — all six runs this refresh
-   printed *"2 known raw witness(es) not drawn by this seed"*. Re-run directly, entry 1 of
-   `KNOWN_RAW_WITNESSES` now executes cleanly; entry 2 still reproduces. The list is TWO fixed strings —
-   run both unconditionally. Entry 1 also carries no diagnosis, which its own header forbids. *Low, but
-   it is the ratchet-rots-silently mechanism.*
 
 23. **The wording family — 36 error-assertion scenarios on 2026-07-31, 22 now, and the residue is
    NOT more renaming.** The premise held: a permanent refusal spelled *"…not yet supported"* is both
@@ -670,7 +658,8 @@ deferral clusters in 5c instead.
   `BranchStep`/`FlatMapStep` class fact, which decides which branch kinds can disagree with us and in
   WHICH respect (arm SCOPE for two of them, emission ORDER for all four), and §6's five wrong turns.
 - **[property-based-testing-l5](./2026-07-28-property-based-testing-l5.md)** — L5's oracle design space.
-  **Stale**: it lists four defects against the deleted item 0, all four of which probe clean (22b).
+  Its four blind-spot defects all cited the deleted item 0 and all four are now FIXED — re-probed
+  2026-08-01, recorded per entry, citations dropped.
 - **[channel-preservation](./archive/2026-07-28-channel-preservation-refactoring-plan.md)** — closed;
   read it for the constitution a vocabulary migration passes.
 - **[hand-rolled-sql-audit](./archive/2026-07-27-hand-rolled-sql-audit.md)** — closed; the measured
