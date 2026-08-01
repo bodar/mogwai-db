@@ -42,8 +42,10 @@ describe('a scalar-bodied map()/local() composes as a scalar producer in a child
   });
 
   test('it reaches the filter, branch and group positions too', () => {
-    expect(vals('g.V().where(__.local(__.out().count()).is(P.gt(1)))'))
-      .toEqual(vals('g.V().where(__.out().count().is(P.gt(1)))'));
+    // `bag`, not `vals`: neither spelling constrains the order of the vertices that survive the
+    // filter, and `mise run test:perturbed` reverses exactly that scan.
+    expect(bag('g.V().where(__.local(__.out().count()).is(P.gt(1)))'))
+      .toEqual(bag('g.V().where(__.out().count().is(P.gt(1)))'));
     // NOT compared against `union(__.out().count(), __.in().count())`: a bare count() in a branch
     // arm is a GLOBAL barrier over the whole branch input (it answers [6,6]), which is a different
     // question — that asymmetry is the branch-arm plan's T1, not this lift. The per-traverser spelling is the one

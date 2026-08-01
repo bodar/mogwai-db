@@ -44,17 +44,9 @@ Feature: mogwai addendum — a group VALUE body's barrier observes the whole par
       | result |
       | m[{"person":["josh","marko","peter","vadas"],"software":["lop","ripple"]}] |
 
-  @gap:group-value-partition-barrier
-  Scenario: g_V_group_byXlabelX_byXbothE_weight_dedup_foldX
-    Given the modern graph
-    And the traversal of
-      """
-      g.V().group().by(T.label).by(__.bothE().values("weight").dedup().fold())
-      """
-    # A bare dedup() keeps the FIRST occurrence, so the partition's order is the emission order it
-    # already had — 0.5 (marko-knows-vadas) before 1.0, 0.4, then peter's 0.2. Per-origin dedup left
-    # each of those repeated once per incident vertex.
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | m[{"person":[0.5,1.0,0.4,0.2],"software":[0.4,0.2,1.0]}] |
+  # A BARE `dedup().fold()` group value is deduped across the partition too (DISTINCT with no
+  # hoisted sort key keeps the first occurrence), but it is deliberately NOT pinned here: which
+  # occurrence is first depends on the scan order of the underlying bothE() rows, so the assertion
+  # fails under `mise run test:perturbed` — and test/CLAUDE.md is explicit that an ordered
+  # assertion is only worth writing if it survives that. The deduped CONTENT is already pinned by
+  # the vendored Dedup.feature:145 scenario, which sorts. See docs/outstanding-work.md item 20.
