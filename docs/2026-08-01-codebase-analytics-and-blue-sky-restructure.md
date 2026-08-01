@@ -10,6 +10,10 @@ method. Read §4a and §5a before acting on §4 or §5: the first *weakens* this
 says so, and the second is the only forward-reasoned structural prediction in this repo's history to
 have been confirmed rather than falsified.
 
+**§6a is the sharpest test of §6 and was added after the first push**, in response to the question
+*"isn't `repeat()`'s mini-compiler the same smell?"* — it is, for half the body vocabulary, and the
+other half is a measured platform wall that kills an attractive idea.
+
 This doc answers four questions asked together: where is the duplication, where are the overly
 complex paths, what large refactor is worth doing, and — using `gremlin-core` as the reference —
 where have we split a concept the reference keeps whole. It ends with the blue-sky restructure.
@@ -453,6 +457,77 @@ lowering, and `Compiled.shape` still rides out to the wire layer unchanged.
   `RelationalCardinality`) and which today has one consumer. On a plan it is a property of the input
   relation, so `Aggregate{count}` reads it instead of ten handlers each knowing it privately.
 
+### 6a. `repeat()`'s mini-compiler — measured, because it is the sharpest test of the whole idea
+
+The question put to this analysis: *`expandRepeatBody` is a second movement compiler, so isn't that a
+smell RelIR dissolves — you'd take the body's existing plan and lift it into the recursive term?*
+
+**Yes for one half, and a measured no for the other.** The dividing line is not our compiler's; it is
+SQLite's recursive-term law, and it turns out to be narrower and stranger than "SQLite has no
+`LATERAL`". Probed directly (SQLite 3.51.2 via `bun:sqlite`; the rules are core CTE semantics, but a
+DO re-check belongs with `test:cf-limits` before anything ships on this):
+
+**The law, precisely.** The recursive reference must appear **exactly once, at the top level of the
+recursive term's `FROM`**. Wrapping it in a derived table fails with `circular reference` *even as the
+only reference* — so the rule is positional, not a count. Once it is there, a **correlated scalar
+subquery may reference its alias freely**. That confirms `src/sql/CLAUDE.md`'s existing claim ("the
+lateral rule is positional, not absent") by direct measurement. Additionally: **no aggregates**
+(`recursive aggregate queries not supported`) and **no window functions** (`cannot use window
+functions in recursive queries`) anywhere in the term.
+
+**Half one — the vocabulary wall is ours, and RelIR dissolves it.** `REPEAT_BODY_OK`
+(`prefix/branch.ts:869`) admits movement + `has` + a sack fold + a sack `where` guard. Every one of
+these is **legal SQLite in a recursive term** and refused by us:
+
+| shape | Gremlin | legal? |
+|---|---|---|
+| `NOT EXISTS` anti-join | `not()`, `where()` | ✅ |
+| join against a derived `UNION` | a `union()` arm | ✅ |
+| `IN (SELECT …)` | set-valued predicate operand | ✅ |
+| `LEFT JOIN`, walk on the left | `optional()` | ✅ |
+| correlated scalar subquery on the walk alias | a `by()` / nested read | ✅ |
+| multi-hop join chains | `out().out()`, edge steps | ✅ |
+
+So `expandRepeatBody` is not compensating for a platform limit here — it is a **hand-written
+join-flattener**, and it exists because nothing in the pipeline can flatten. Substituting the walk
+relation for the body plan's scan and then **normalizing into the legal envelope is textbook
+join-flattening / subquery decorrelation** — the canonical mid-end pass, and unavailable today for
+exactly the §6 reason: the body's SQL is already text in an append-only `Query` by the time anyone
+could rewrite it. This is item 3's *"adjacent row-local gate"* (8 queries) plus the generality behind
+it, and it is the strongest single argument in this document for the missing middle.
+
+**Half two — an attractive idea, measured and DEAD. Do not build it.** I expected the bigger prize to
+be re-lowering barriers: `dedup()` lowers to a `ROW_NUMBER` window here, but raw `DISTINCT` is legal
+in a recursive term, so a RelIR could *choose the legal lowering per position*. The legality holds —
+and the semantics do not:
+
+```
+diamond 1->2, 1->3, 2->4, 3->4        LIMIT/ORDER BY in the recursive term
+UNION ALL          → [1,2,3,4,4]      LIMIT 2      → 2 rows TOTAL, not per iteration
+SELECT DISTINCT    → [1,2,3,4,4]      ORDER BY+LIMIT 2 → 2 rows TOTAL
+UNION (not ALL)    → [1,2,3,4]
+```
+
+`DISTINCT` in a recursive term is **legal but semantically inert** — SQLite feeds the term one queue
+row at a time, so it never sees two frontier rows together. `LIMIT`/`ORDER BY` are **global caps on
+the whole CTE**, not per-iteration barriers. `UNION` does dedup, but whole-walk on the entire row
+tuple — which violates the multiset rule the root `CLAUDE.md` names as a semantics trap.
+
+> **Therefore: a per-iteration barrier is not expressible inside a SQLite recursive term in ANY
+> lowering.** Not as an aggregate, not as a window, not as `DISTINCT`, not as `ORDER BY`/`LIMIT`.
+
+This is a **platform wall**, and it is a materially stronger statement than "no `LATERAL`". It means
+item 3's 41 barrier-body queries (`order` 15, `limit` 7, `local` 5, `dedup` 4, `range` 4,
+`groupCount` 3, `sample` 2, `group` 1) **cannot be unlocked by inlining, RelIR or not** — the two
+routes that remain are the ones item 3 already names: the keyed-relation materialization (built) and
+the `times(n)` unroll (which sidesteps recursion entirely, and is why it is the right route). It also
+independently explains *why* TinkerPop's own `RepeatUnrollStrategy` is "intentionally conservative …
+especially barriers".
+
+**So item 3 should be re-framed as two items, not one**, because they have different answers: the
+row-local gate is a compiler limitation worth dissolving, and the barrier bodies are a platform wall
+whose only route is the unroll. Filing them together is what makes the 41 look like one prize.
+
 ### The honest counter-argument
 
 This is a large forward-reasoned structural proposal, which is the exact species this repo has
@@ -583,6 +658,11 @@ writing §6, and none of them is what §6 says.
   reason.
 - **Merging the movement vocabulary sets.** They differ on `otherV` and those differences are
   load-bearing; derive with a named difference, never merge.
+- **Re-lowering a `repeat()` body barrier to reach a legal recursive-term form.** §6a: measured and
+  dead. `DISTINCT` there is legal but inert, `LIMIT`/`ORDER BY` are global caps, aggregates and window
+  functions are rejected outright. **No per-iteration barrier is expressible in a SQLite recursive
+  term in any lowering** — so item 3's 41 barrier-body queries are a platform wall, and the unroll is
+  the only route. Recorded so the idea is not re-derived from the legality result alone.
 - **Naively spreading a shared `countRows` into every shape table.** §2 — five of the ten `count`
   handlers legitimately differ, and blind spreading produces wrong answers, not free coverage.
 
@@ -614,10 +694,14 @@ concepts.* §3b. Pure restructuring of one function plus its classifier calls; t
 untouched. **Kill criterion:** if the table needs more than ~12 rows or any row needs a predicate that
 is not `(key-shape, value-shape)`, the gates are not a relation and this is the wrong shape — stop.
 
-**4 — Split `repeat`'s admission control from its lowering.** *Medium.* §3a. A `classifyRepeat(region)
-→ RepeatPlan | Deferral` leaf, then two lowerings that consume a validated plan. **Kill criterion:**
-if the extracted classifier still needs ≥10 fields on `RepeatPlan`, the complexity was essential and
-the split only moved it — revert and record that.
+**4 — Split `repeat`'s admission control from its lowering, and split item 3 in two.** *Medium.* §3a
++ §6a. A `classifyRepeat(region) → RepeatPlan | Deferral` leaf, then two lowerings that consume a
+validated plan. **Kill criterion:** if the extracted classifier still needs ≥10 fields on
+`RepeatPlan`, the complexity was essential and the split only moved it — revert and record that.
+**Do the index change regardless of the code change**: item 3 currently files a compiler limitation
+(the row-local vocabulary gate, 8 queries, dissolvable) and a platform wall (41 barrier bodies, not
+dissolvable by any lowering) as one item, which is what makes the 41 read as a prize. §6a has the
+measurement; the two halves have different answers and belong apart.
 
 **5 — Prove or kill RelIR on the row-op matrix, before writing any of it.** *The gate for §6, and
 cheap.* Item 17 has already measured the matrices: root scope **66 gaps / 150**, child scope **41 /
