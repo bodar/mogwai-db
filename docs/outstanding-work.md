@@ -4,8 +4,9 @@ The de-duplicated index of open work across the `docs/` corpus. **Each item sets
 why, where to start — not a spec.** The linked doc holds the rationale; the picking agent does the
 validation and design. Live per-step capability: `feature-support-matrix.md`.
 
-**Refreshed** 2026-07-31 · **L3 1652 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
-collision is expected, see won't-do) · census **0 `crashed`, 4 `nondet`** (`sample()` landed) ·
+**Refreshed** 2026-07-31, **L3 line updated 2026-08-01** · **L3 1666 / 2267** (`l3-state.json`; fewer
+UNIQUE names than that — the collision is expected, see won't-do) · census **0 `crashed`, 4
+`nondet`** (`sample()` landed) ·
 `known.ts` **1 entry** — repeat's two body routes disagree on a positional window, found by the
 `repeatBodyExpansion` switch on its first sweep ·
 `capability-baseline.ts` 2 entries, one stale (22c).
@@ -59,8 +60,13 @@ and are now L4-pinned rather than open. Then item 17's `tail`/`sample` (L3 → 1
 the census its first four `nondet` rows; and item 28's `repeatBodyExpansion` switch, whose first
 sweep found one real disagreement (now diagnosed in `known.ts`) where nothing could look before.
 
-**What that leaves.** No item below is a known wrong answer except 20's residuals and 21's T4 — the
-rest fail closed. Read that as the index's centre of gravity moving from correctness to ceiling.
+**Landed 2026-08-01.** Item 23's wording family, as three reference-sourced authorities rather than
+a rename sweep — the `by()` arity table + verify Pass, `StandardVerificationStrategy` modelled whole,
+and the list-input refusals (L3 1652 → 1666). It closed item 22's `groupCount()` pair, which were
+real wrong answers, and it deleted four per-host arity checks it dominates.
+
+**What that leaves.** No item below is a known wrong answer except 20's residuals, 21's T4, and item
+22's six remaining per-member type refusals — the rest fail closed. Read that as the index's centre of gravity moving from correctness to ceiling.
 **The one exception is now CLOSED: item 30's two breaches were hard FAILURES rather than fail-closed
 deferrals, and only on Cloudflare** — which is why nothing in the ladder found them, since every level
 of it runs on Bun. All eight phases landed 2026-07-31, so what is left of that thread is two
@@ -68,15 +74,25 @@ instruments that keep the class from returning: `mise run binds` statically, and
 `mise run test:cf-limits` at runtime (green, and green BEFORE the fixes — the suite never reaches the
 cardinality, which is the measurement that says the ladder could not have found this).
 
-22. **Validation the spec MANDATES and we do not perform — the write family LANDED; 9 scenarios of
-   three unrelated causes are left.** 60 L3 scenarios fail AT the error-assertion step because we
-   returned a result where a throw is required. The 24 write ones went in one change (2026-07-31,
-   L3 1623 → 1647): `steps/write/validate.ts` holds TinkerPop's `ElementHelper` identifier rules and
-   is reached from the four storage waists; a `MergeRole` on `MergeSpec` lets one check cover all
-   three maps; `validateNoOverrides` runs statically AND in the create branch. The remainder is not
-   one family — **6 = a string step in `Scope.local` over a LIST passes the list through** (the same
-   missing "member count" authority as item 17's `tail`), **2 = `groupCount()` taking two `by()`s**
-   (a modulator-arity rule, item 23's ground), **1 = `property(single,k,traversal)`**. *Low each.*
+22. **Validation the spec MANDATES and we do not perform — the write family and the arity family
+   LANDED; 7 scenarios are left and they need a RUNTIME type channel we do not have.** 60 L3
+   scenarios fail AT the error-assertion step because we returned a result where a throw is
+   required. The 24 write ones went in one change (2026-07-31, L3 1623 → 1647):
+   `steps/write/validate.ts` holds TinkerPop's `ElementHelper` identifier rules and is reached from
+   the four storage waists; a `MergeRole` on `MergeSpec` lets one check cover all three maps;
+   `validateNoOverrides` runs statically AND in the create branch. The `groupCount()` pair went with
+   item 23's arity table (2026-08-01).
+   **What is left is ONE cause, and it is not the "member count" authority this line used to name.**
+   `trim/lTrim/rTrim(Scope.local)` over `[1,2]` and `asString()`/`asString(local)` over a null must
+   throw PER MEMBER — `StringLocalStep.map` inspects each element's runtime class — and our
+   `listStringTransform` renders one `json_group_array` over `json_each`, where a member's type is a
+   SQL expression and there is no way to raise from one. **The blocker is that SQLite cannot raise a
+   message from an expression**, so the honest routes are (a) an error CHANNEL — a sentinel column
+   the framer turns into the throw — or (b) a static check where the member types are known, which
+   covers every corpus spelling (all are `inject()` literals) but not the general stream. Neither is
+   built; (b) is cheap and sound, (a) is the general answer and would also serve any other
+   per-row runtime refusal. Plus **1 = `property(single,k,traversal)`**, unrelated. *Low each, but
+   the six share a substrate question.*
 
 2. **Universal child-seam acceptance.** Element, scalar, list, count, branch, `repeat`,
    `as()`/`select(label)` and option-map bodies compose everywhere. **Two of the four things this item
@@ -270,13 +286,30 @@ cardinality, which is the measurement that says the ladder could not have found 
    run both unconditionally. Entry 1 also carries no diagnosis, which its own header forbids. *Low, but
    it is the ratchet-rots-silently mechanism.*
 
-23. **27 scenarios where we DO reject and only the WORDING differs — several are deferrals mis-phrased
-   as permanent gaps.** We refuse `aggregate('x').by('name').by('age')` but say *"…not yet supported"*
-   where the spec asserts *"Aggregate step can only have one by modulator"*. **The wording is cheap; the
-   defect is "not yet supported"** — two `by()`s is invalid Gremlin forever, and spelling it as a
-   deferral puts it in the telemetry that RANKS THIS INDEX. **Not all 27 are free:** where we reject for
-   the same reason it is a rename; where the reason differs it is a real gap that merely coincides
-   (`choose().option()`, `asBool`/`asDate`/`asNumber` over a list). *Medium.*
+23. **The wording family — 36 error-assertion scenarios on 2026-07-31, 22 now, and the residue is
+   NOT more renaming.** The premise held: a permanent refusal spelled *"…not yet supported"* is both
+   false and mis-filed, because it competes with real gaps in the telemetry that RANKS THIS INDEX.
+   Three groups landed 2026-08-01 (L3 1652 → 1666):
+   - **`BY_MODULATOR_ARITY` + the `byModulatorArity` verify Pass** (`ir/strategies.ts`,
+     `ir/passes.ts`) — one table off the reference's `modulateBy` overrides, counting the contiguous
+     `by()` run on `ctx.originalChain` at every depth. It DOMINATED four per-host checks, which are
+     deleted; a host must not re-check. Pinned in `test/compiler/by-modulator-arity.exec.test.ts`.
+   - **`StandardVerificationStrategy` modelled as the strategy** rather than one clause of it
+     (`verifyStandard`): the read-only child rule plus inject-under-repeat, plus RepeatStep's own
+     wording for an `emit()`/`until()`/`times()` with nothing to repeat.
+   - **`LIST_INPUT_REFUSALS`** (`tail/list.ts`) for the steps whose input contract excludes a
+     collection at every scope. `concat` LEFT `STRING_LOCAL_TX` on the way — TinkerPop ships no
+     `ConcatLocalStep`, so `fold().concat('x')` was answering where it must refuse.
+   **The 22 that remain split three ways, and only the first is renaming.** (a) **10 are the WRITE
+   family** — `mergeE`'s missing endpoints (5), the merge argument-shape pair, the hidden-key check,
+   and `mergeV` on a single-label graph (2); same reason, reference's wording, but they live in
+   `write.ts`/`steps/write/validate.ts`. (b) **7 are item 22's runtime-type-channel group.** (c) **5
+   are real gaps that merely coincide with an error assertion**: `choose().option()`'s Pick token,
+   `fail(msg)` (item 25), `addE`'s ambiguous endpoint, and
+   `withStrategies(VertexProgramRestrictionStrategy, VertexProgramStrategy)` — which wants
+   `VertexProgramRestrictionStrategy` moved OUT of `NO_OP_STRATEGIES` into a real verify strategy.
+   **One divergence is deliberate and will not be closed:** `Can't parse type ArrayList as number.`
+   asserts the JVM CLASS of the offending value; we say `list`. *Low — what is left is (a).*
 
 0b. **Apply-contract consumers.** `ModulationContract` covers nested property keys/values, merge-map
    keys/values and `AddVertexStep` labels/parameters via `ElementReadDriver`. Remaining:
@@ -299,6 +332,17 @@ cardinality, which is the measurement that says the ladder could not have found 
 
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member shape,
    so a path/element-list label cannot frame its members as vertices. *Low-Med.*
+
+31. **A MIXED `inject()` FLATTENS its list arguments — a live wrong answer, not a deferral.**
+   `g.inject(["a","b"],"c")` yields three traversers where the reference yields two (the list, then
+   the string): `seedInject` (`steps/write/inject.ts`) takes the all-arrays path only when EVERY
+   argument is an array, and otherwise falls to `flattenListArgs`. The single-argument spelling
+   `g.inject(["a","b"])` is correct, so the defect is exactly the mixed call. Its own code comment
+   names the blocker — "until ScalarStream gains a per-row shape/type discriminant" — which is the
+   VariantStream question, so this is not a local fix. Found 2026-08-01 while landing item 23: it is
+   what still fails `g_injectXListXa_bXcX_concat_XdX` now that `concat()` over a list correctly
+   refuses, so the scenario's remaining cause is here and NOT in the string family. *Med — one
+   scenario, but a wrong answer, and it shares its substrate with item 1.*
 
 4. **Canonical-emission-order Stage C — residual.** A bare re-source `V()`/`E()` arm carries no
    `encounter`, so `armFansOut` and `positionArmFansOut` fail closed; minting `encounter = new element
