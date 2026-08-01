@@ -49,7 +49,7 @@ wrong answers, then refusals of legal traversals, then unreachable positions, th
 Three reproduced on the modern graph (probe: run the write, then query the graph):
 
 ```
-g.addV("animal").property("name","mateo").property("name","gateo").property("name","cateo")
+g.addV("animal").property("name","mateo").property("name","gateo").property("name","cateo")  — FIXED 2026-08-01
   ours:      values("name") → ["cateo"]          — each property() OVERWRITES
   reference: all three survive (the scenario asserts has(name,mateo) AND (…,gateo) AND (…,cateo))
 
@@ -74,6 +74,38 @@ We implement `single` semantics where the reference's default for a NEW vertex p
 multi-property, and we take the first value where a traversal yields several. Treat W4 as the
 substrate for W1 rather than a separate item; the wrong answers are its visible face and are what
 justify the schema work.
+
+**The DEFAULT half of that landed 2026-08-01 (`a9f4c0c`), and the schema it needed was one small
+table, not a rework.** L3 1682 → 1684. What the survey got wrong is worth keeping, because both
+errors were about where a fact lives rather than about the fact:
+
+- *"We implement `single` where the reference's default is multi"* is right, but a CONSTANT default
+  cannot be the fix either way. The corpus pins the same graph in both directions — one
+  `@MultiProperties` scenario needs an undeclared repeat write to APPEND, and
+  `g_V_hasXperson_name_aliceX_propertyXsingle_age_…` needs one to REPLACE on a key its initializer
+  wrote as `property(single, …)`. TinkerPop's javadoc for `getCardinality(key)` splits providers on
+  exactly this ("implementations that employ a schema can consult it" vs "return their default …
+  for every key") and the corpus needs the schema-bearing kind. Flipping the constant to `list`
+  measures +2/−1; the recorded declaration measures +2/−0.
+- The declaration is scoped to **(node, key)**, not to the key, which is a deliberate divergence
+  from TinkerPop's signature. Graph scope was built first and measured wrong: the conformance runner
+  empties the shared graph with `g.V().drop()`, which clears data and not schema, so one scenario's
+  declaration silently changed a later scenario's undeclared write. No corpus scenario distinguishes
+  element scope from graph scope.
+- The real thread was not schema at all: `readCardinality` collapsed "the step declared none" to
+  `'single'` at PARSE time, so the graph never got asked. Carrying `null` to the storage waist is the
+  whole fix, and it is the same shape as `insertVertex` applying the default LABEL.
+
+**Still open in this family (unchanged):** the third wrong answer — a traversal value under
+`Cardinality.list` stores only the first result — plus the whole-MAP argument form. Those are about
+a MULTI-VALUED nested-traversal value (`AddPropertyStep.handleTraversalValue` collects ALL results
+and applies one mutation per result under list/set, and throws under `single`), which is the
+`nestedScalarValue` "first row wins" seam, not the schema.
+
+**One fidelity gap this opens, and it is real:** `io()`/`BulkLoader` round-trips do not carry the
+declarations, so a graph exported and reimported loses a `single` and reverts that (vertex, key) to
+the `list` default. Nothing in L3 reaches it; decide it with the meta-property VALUE typing in §6,
+since both are "what the adjacency format does not carry".
 
 **The null-removal case is DONE (2026-08-01, `15ceefa`).** It was independent and small, as
 predicted: a semantic rule (`null` value ⇒ remove), not a schema question. What the estimate got
