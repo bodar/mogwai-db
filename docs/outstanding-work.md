@@ -86,38 +86,37 @@ of gravity is ceiling, not correctness.
    → [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md),
    [group-value-generic-seam](./2026-07-18-group-value-generic-seam-plan.md)
 
-17. **Share the row-ops — the GLOBAL half landed; the PARTITIONED (per-origin) twin has no seam at
-   all.** `reprojectRows` + `globalRowOps()` (`tail/barrier.ts`) are spread into 5 of 11 dispatch tables.
-   Their per-origin twin is **five private scalar-only functions** — `partitionedSlice`,
-   `partitionedTail`, `rootTail`, `partitionedOrder`, `partitionedDedup` (`tail/scalar.ts`) — consumed by
-   the 100-line if-chain `lowerScalarRows`, the one tail never transposed to a dispatch Map. All five
-   share ONE skeleton: rank with `ROW_NUMBER() OVER (PARTITION BY origins ORDER BY <key>)`, filter on
-   `rn`, rebuild, differing only in the order key and the `rn` predicate. **Four are a mechanical lift**
-   onto authorities `reprojectRows` already uses (`streamPayloadCols`/`streamColumns`, `withRelation`);
-   **`partitionedDedup` alone is architectural** — `PARTITION BY …, p.c.v` needs an expression denoting
-   the traverser's VALUE, the same missing authority as the 42 aggregates below and as `Scope.local` in
-   Internal debt.
+17. **Share the row-ops — the SKELETONS are shared now; what is left is the ELEMENT tail and the
+   matrices.** `reprojectRows` + `globalRowOps()` (the global half) and `rankedRows` (the per-origin
+   half — rank, filter on `rn`, rebuild) both live in `tail/barrier.ts` and both gate on
+   `cardinalityOf`. `partitionedSlice`/`partitionedTail`/`rootTail`/`partitionedDedup` are now four
+   call sites of one builder; `partitionedOrder` stays separate on its merits (it MINTS an encounter
+   in place rather than ranking and filtering). **The value authority is still missing** — an
+   expression denoting the traverser's VALUE, which `partitionedDedup` supplies via a callback, and
+   which the 42 current-object aggregates and `Scope.local` in Internal debt still need outright.
+   **What did NOT change: `lowerScalarRows` is still a 100-line if-chain**, the one tail never
+   transposed to a dispatch Map.
    **Two measured matrices.** Child scope (7 body shapes × 9 row ops, hosts `local()` and `map()`,
    identical): **41 gaps / 63**, but 36 are the single `ChildShape` decline (→ 2), so the seam is what
    unblocks every child-scope slice on list/record/variant/property/path. Root scope (10 shapes × 15
    tail ops, via `outcomeOf`/`ALL_GENERIC`): **66 / 150**, row-algebraic sub-matrix 21/80 — of which
    **`group` is 7 by itself**, and `cardinalityOf` correctly refuses it (`wholeResult`), so that is a
-   *cardinality* question and NOT row-op sharing; do not fold it in here.
+   *cardinality* question and NOT row-op sharing; do not fold it in here. **Both predate the seam —
+   re-measure before working from them.**
    **The ELEMENT tail is the one shape not on the dispatch substrate:** `ELEMENT_DISPATCH`
    (`tail/projection.ts`) does not spread `globalRowOps`, routing through the `TailAcc` accumulator, so
    `limit()` has **three** implementations. Converting the accumulator is architectural, not a spread —
-   its fusion into one SELECT is what makes `order()`+`limit()` correct in a single statement — so
-   sequence it after the partitioned seam. Same seam from the wire end: `materializeStream`
-   (`tail/materialize.ts`) excludes `ElementStream` from its 11-kind dispatch and calls that "the final
-   materialization-boundary slice", while six other arms differ only in which column authority supplies
-   `<cols>` and collapse to one `materializeSimpleRoot`.
+   its fusion into one SELECT is what makes `order()`+`limit()` correct in a single statement. Same seam
+   from the wire end: `materializeStream` (`tail/materialize.ts`) excludes `ElementStream` from its
+   11-kind dispatch and calls that "the final materialization-boundary slice", while six other arms
+   differ only in which column authority supplies `<cols>` and collapse to one `materializeSimpleRoot`.
    **The trap that cost 42 corpus traversals, still live:** a shape table is a Map where the LAST
    duplicate key wins and `dispatchShapeTail` consults ONE handler per name, so spreading a shared op
    into a table that already owns that name REPLACES the incumbent — and a handler that "declines" falls
    to the FALLBACK THROW rather than through. Compose with `firstOf`.
-   **Remaining per-step gaps:** 42 current-object aggregates (architectural, above), 7 `order`, 6 `is`
-   (mechanical), 5 `unfold` (correctly per-shape forever). **`tail`/`sample` are NOT here — the shared
-   op exists and their residual is item 4's missing encounter.** **Medium.**
+   **Remaining per-step gaps:** 42 current-object aggregates (the value authority, above), 7 `order`, 6
+   `is` (mechanical), 5 `unfold` (correctly per-shape forever). **`tail`/`sample` are NOT here — the
+   shared op exists and their residual is item 4's missing encounter.** **Medium.**
 
 29. **The 17 `carried-state × barrier` deferral sites still each re-derive their answer**, though the
    TABLE they can cite exists: `BARRIER_ROLE_POLICY` (`context/context.ts`) is total over
