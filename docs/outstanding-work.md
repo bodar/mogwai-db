@@ -8,7 +8,7 @@ validation and design. Live per-step capability: `feature-support-matrix.md`.
 about finished work cannot be picked up, so it does not belong here. A refresh that lands items
 should make this file SHORTER.
 
-**Refreshed** 2026-08-01 · **L3 1682 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
+**Refreshed** 2026-08-01 · **L3 1684 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
 collision is expected, see won't-do) · census **0 `crashed`, 4 `nondet`**, perturbed census **4** ·
 `known.ts` **1 entry** (repeat's two body routes disagree on a positional window) ·
 `capability-baseline.ts` **1 entry** · L5 `L5-random` plus fixed seeds 5/11/27/91/143 at
@@ -32,7 +32,7 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 **Ranked entry point.** Numbers are IDs, not an order.
 **[write-path](./2026-08-01-write-path-plan.md) §2** (silent wrong answers) → **2** → **17**'s
-partitioned row-ops seam → **34** → **29** → **3**'s `times(n)` unroll (unblocked; its
+partitioned row-ops seam → **29** → **3**'s `times(n)` unroll (unblocked; its
 precondition landed).
 
 The write cluster — **10**, **16**, **0b**, the `write.ts` row-at-a-time entry in Internal debt — is
@@ -287,17 +287,15 @@ of gravity is ceiling, not correctness.
    readers in one file disagree about the same token; **start by asking whether `byToEntry` should
    exist.** *Low-Med.* **Do NOT add a `'column'` arm to `ByClass`** — recorded won't-do.
 
-34. **Alias-compare `where("a", P…("b"))` has two near-verbatim copies and works on 2 of 8 shapes.**
-   `where` (`prefix/filter.ts`, alias branch) and `recordWhere` (`tail/select.ts`) are ~28 identical
-   lines each — same `P.not` unwrap+flip, same `P_OPS` guard, same `where().by(key) on an edge-typed
-   label` message verbatim in both, same `productiveBy` → `IS`/`IS NOT`. They differ **only** in how a
-   label resolves to `{id, elem}` — `aliasIdExpr(label, aliases, prevRel)` vs
-   `aliasId(r.c[entry.col], 'last')`, the ARGUMENT-TYPE tell from `steps/CLAUDE.md`. Measured:
-   `g.V().as('a').out().as('b')<shape>.where('a', P.neq('b'))` runs on element and record, defers on
-   **scalar, list, variant, property, path** — all of which physically carry the alias columns.
-   **Mechanical**: parameterize the body on a `(label) => {id, elem}` resolver; several duplicated
-   deferral strings retire with it. Also what P2·7's `where(var,P)` scalar-bound tail is waiting on.
-   **Medium.**
+34b. **`fold()` cannot carry `as()`/path/branch state into a list value — the ONE shape the alias
+   comparison still cannot reach.** `aliasCompareTest` + `aliasCompareRows` (`context/context.ts`,
+   `tail/barrier.ts`) made the comparison shape-uniform across element, record, scalar, variant,
+   property and path; `list` is not a gap in that seam at all — the traversal never gets there,
+   because `g.V().as('a').out().as('b').fold()` refuses first. So this is a FOLD question (what a
+   list value does with the carried alias columns), and `map`/`group` are correct refusals (their
+   rows are not their traversers — `cardinalityOf` says so).
+   Also what P2·7's `where(var,P)` scalar-bound tail was waiting on, and that half is now unblocked.
+   *Low-Med.*
 
 35. **The L5 generator's lattice covers 54 of the corpus's 131 step names — growing it now beats running
    it.** Six runs this refresh were 36 pass / 0 fail every time, so the oracles are SATURATED at the

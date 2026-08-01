@@ -1,6 +1,6 @@
 import { q, list, empty, raw, Query, Relation, type Expression } from '../../../sql/kernel/q.ts';
 import { aliasCtx, type Elem, type ScalarCtx, elemTable, P_OPS, propScalarFor } from '../../plan/plan.ts';
-import { aliasId, aliasPresent, type AliasShape } from './alias.ts';
+import { aliasId, aliasPresent, aliasScalar, type AliasShape } from './alias.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import type { ValueType, ListOf, ScalarType } from '../../../sql/kernel/render.ts';
 
@@ -857,17 +857,32 @@ export function appendCte(
 // itself is parameterized by nothing but the relation holding the alias columns, and any shape that
 // physically carries them can be filtered by it.
 
-/** A resolved operand of an alias comparison: the traverser's rowid + which element kind it is. */
-export interface AliasOperand { id: Expression; elem: Elem }
+/** A resolved operand of an alias comparison. A label's history holds objects, not rows, so what it
+ *  compares AS is a property of the label: an element compares by rowid, a value by its stored
+ *  scalar. One total union rather than an optional `elem` beside an id that sometimes is not one. */
+export type AliasOperand =
+  | { readonly kind: 'element'; readonly id: Expression; readonly elem: Elem }
+  | { readonly kind: 'value'; readonly value: Expression };
+
+/** The SQL a resolved operand compares as. */
+const operandExpr = (o: AliasOperand): Expression => (o.kind === 'element' ? o.id : o.value);
 
 /** Resolve a label to its operand off `rel` — the relation that physically holds the alias
  *  columns. An unbound label THROWS here rather than dropping the row: `where()` names a label the
  *  author believes is bound, and silently comparing against nothing is the wrong answer.
- *  (`select()` of an unbound label drops, which is a different step and a different rule.) */
+ *  (`select()` of an unbound label drops, which is a different step and a different rule.)
+ *
+ *  A VALUE-shaped label is admitted, which is what `match(__.as('a').values('age').as('b'))` binds —
+ *  this used to throw `alias holds a value, not an element` from `aliasElem`, and the index read
+ *  that as a downstream shape gap when it is really the operand vocabulary. A MIXED history has no
+ *  single comparison and fails closed. */
 export const aliasOperandsOf = (aliases: AliasMap, rel: Relation) => (label: string): AliasOperand => {
   const entry = aliases.get(label);
   if (!entry) throw new Error(`where("${label}"): no such label — as("${label}") was not seen`);
-  return { id: aliasId(rel.c[entry.col], 'last'), elem: aliasElem(entry) };
+  if (aliasIsElement(entry)) return { kind: 'element', id: aliasId(rel.c[entry.col], 'last'), elem: aliasElem(entry) };
+  if (entry.shapes.size === 1 && entry.shapes.has('value'))
+    return { kind: 'value', value: aliasScalar(rel.c[entry.col], 'last') };
+  throw new Error(`where("${label}"): comparing a ${[...entry.shapes].join('/')} label is not yet supported`);
 };
 
 /** The WHERE test for one alias comparison, negation already applied.
@@ -894,6 +909,9 @@ export function aliasCompareTest(
   const byKey = step.modulators?.[0]?.find((x: unknown) => typeof x === 'string') as string | undefined;
   let test: Expression;
   if (byKey !== undefined) {
+    // by(key) reads a PROPERTY off each side, so both must be elements at all.
+    if (left.kind !== 'element' || right.kind !== 'element')
+      throw new Error('where().by(key) on a value-typed label not yet supported');
     // Both sides read as VERTEX properties; an edge-typed operand would silently read a vertex's
     // props (rowids collide across the two spaces) → refuse.
     if (left.elem === 'edge' || right.elem === 'edge')
@@ -903,7 +921,12 @@ export function aliasCompareTest(
       : P_OPS[pred.op];
     test = q`${propScalarFor(left.id, 'vertex', byKey)} ${op} ${propScalarFor(right.id, 'vertex', byKey)}`;
   } else {
-    test = q`${left.id} ${P_OPS[pred.op]} ${right.id}`;
+    // An element compared to a value is never equal in the reference (different types), but
+    // answering `false` here would mean comparing a rowid against a stored scalar and hoping they
+    // never collide. Fail closed instead — the honest answer needs the operands' runtime types.
+    if (left.kind !== right.kind)
+      throw new Error('where(): comparing an element-typed label to a value-typed one is not yet supported');
+    test = q`${operandExpr(left)} ${P_OPS[pred.op]} ${operandExpr(right)}`;
   }
   // A NULL (a missing property under by(key)) counts as "no output" → kept by not(), which is what
   // makes this compose with the not(traversal) reading.

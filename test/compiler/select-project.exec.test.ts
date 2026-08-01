@@ -401,6 +401,26 @@ describe('the alias comparison is shape-uniform', () => {
       .toThrow('where("a"): no such label');
   });
 
+  test('a VALUE-shaped label compares as its value, not as a rowid', () => {
+    // `match(__.as('a').values('age').as('b'))` binds a VALUE to `b`, and the comparison used to
+    // throw `alias holds a value, not an element` from `aliasElem` — read as a downstream shape gap
+    // when it is the operand vocabulary. Two labels bound to the same value are equal and never
+    // unequal, whatever that value is, so the property holds without naming the fixture's names.
+    const twoNames = "g.V().match(__.as('a').values('name').as('b'), __.as('a').values('name').as('c'))";
+    expect(count(`${twoNames}.where('b', P.eq('c'))`)).toBe(count('g.V()'));
+    expect(count(`${twoNames}.where('b', P.neq('c'))`)).toBe(0);
+  });
+
+  test('an element compared to a VALUE fails closed rather than comparing a rowid to a scalar', () => {
+    // The reference answers `false` (different types). Answering that here would mean comparing a
+    // rowid against a stored scalar and trusting they never collide, so it defers instead.
+    expect(() => compile("g.V().as('a').values('age').as('b').where('a', P.eq('b'))", {}))
+      .toThrow('comparing an element-typed label to a value-typed one');
+    // by(key) reads a property off each side, so a value-typed label has nothing to read.
+    expect(() => compile("g.V().as('a').values('age').as('b').where('b', P.eq('b')).by('name')", {}))
+      .toThrow('where().by(key) on a value-typed label not yet supported');
+  });
+
   test('a record still refuses the forms that have no reading over a map', () => {
     expect(() => compile("g.V().as('a').project('x').by('name').where(P.neq('a'))", {}))
       .toThrow('where() on a record supports only the alias-compare form');

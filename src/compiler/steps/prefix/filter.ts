@@ -182,7 +182,7 @@ export const where: StepFn = (s, st) => {
   // CURRENT traverser as the left operand — `where(P.neq("a"))` — because only it joins the element
   // table; every other shape reaches the same test through `aliasCompareRows`.
   const resolve = aliasOperandsOf(st.traverserLayout.aliases, prevRel(st, 'p'));
-  const left = typeof arg0 === 'string' ? resolve(arg0) : { id: q`n.id`, elem: st.elem };
+  const left = typeof arg0 === 'string' ? resolve(arg0) : { kind: 'element' as const, id: q`n.id`, elem: st.elem };
   const rawPred = typeof arg0 === 'string' ? s.args[1] : arg0;
   return filterCte(st, aliasCompareTest(s, left, rawPred, resolve));
 };
