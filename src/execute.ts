@@ -560,10 +560,10 @@ function* frameResolved(store: GraphStore, plan: Compiled | WritePlan): Generato
       return;
     }
     for (const r of plan.run(store)) {
-      // Write responses carry a flat {key:value} prop bag; vertexBuffer wants
-      // {key:[values]}, so wrap each value in a 1-list (single-cardinality write).
-      if ('vertex' in r) yield { buf: vertexBuffer(r.vertex.id, r.vertex.labels,
-        Object.fromEntries(Object.entries(r.vertex.props as Record<string, any>).map(([k, v]) => [k, [v]]))), bulk: 1n };
+      // A write response's vertex prop bag is already {key:[values]} — the shape vertexBuffer wants.
+      // It used to be flat and get wrapped in a 1-list here, which silently truncated a
+      // multi-property to its first value on the write path only.
+      if ('vertex' in r) yield { buf: vertexBuffer(r.vertex.id, r.vertex.labels, r.vertex.props), bulk: 1n };
       else {
         const e = r.edge;
         // Frame via edgeBuffer so edge properties materialize — routing through

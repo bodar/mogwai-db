@@ -62,8 +62,12 @@ const ADDENDUM = new URL('./', import.meta.url).pathname;
  *    empty             — no results
  *    count             — only the cardinality is pinned
  *    of                — every result must be ONE OF the table's rows (alternatives), which
- *                        upstream pairs with `count` when several answers are all correct */
-type Assertion = 'unordered' | 'ordered' | 'empty' | 'count' | 'of';
+ *                        upstream pairs with `count` when several answers are all correct
+ *    error             — the traversal must THROW, optionally with a message the assertion
+ *                        constrains. A refusal is a real answer here (a third of the write-path
+ *                        messages belong to scenarios that pass BECAUSE they assert the throw), so
+ *                        it needs to be pinnable without leaving the .feature format. */
+type Assertion = 'unordered' | 'ordered' | 'empty' | 'count' | 'of' | 'error';
 
 interface Scenario {
   feature: string; name: string; graph: string;
@@ -73,6 +77,9 @@ interface Scenario {
   assertion: Assertion;
   /** `Then the result should have a count of N`. */
   count: number | null;
+  /** `Then the traversal will raise an error [with message <containing|starting|ending> text of "…"]`.
+   *  Upstream compares case-INSENSITIVELY, and so do we. `null` text = any error will do. */
+  error: { comparison: 'containing' | 'starting' | 'ending'; text: string } | null;
   expected: string[];
   /** `And the graph should return N for count of "<traversal>"` — upstream's own Then-step for
    *  asserting GRAPH STATE after a write, which is the only thing that can catch a write that
@@ -100,7 +107,7 @@ function parseFeature(featureName: string, text: string): Scenario[] {
     const tags = featureTags + pending; pending = '';
     const s: Scenario = {
       feature: featureName, name: m[1].trim(), graph: 'empty',
-      initializer: null, gremlin: '', assertion: 'unordered', count: null, expected: [], graphChecks: [],
+      initializer: null, gremlin: '', assertion: 'unordered', count: null, expected: [], graphChecks: [], error: null,
     };
     // The routing the official runner does (`feature-steps.js`): a @MultiLabel scenario's EMPTY
     // graph is the multi-label source, not the plain one. Mirrored here so a scenario can be
@@ -119,6 +126,12 @@ function parseFeature(featureName: string, text: string): Scenario[] {
       // escaped, so unescaping is part of reading the step, not a courtesy.
       const gc = l.match(/^(?:Then|And)\s+the\s+graph\s+should\s+return\s+(\d+)\s+for\s+count\s+of\s+"(.*)"$/);
       if (gc) { s.graphChecks.push({ count: Number(gc[1]), gremlin: gc[2].replace(/\\"/g, '"') }); continue; }
+      const err = l.match(/^(?:Then|And)\s+the\s+traversal\s+will\s+raise\s+an\s+error(?:\s+with\s+message\s+(containing|starting|ending)\s+text\s+of\s+"(.*)")?$/);
+      if (err) {
+        s.assertion = 'error';
+        s.error = err[1] ? { comparison: err[1] as 'containing' | 'starting' | 'ending', text: err[2].replace(/\\"/g, '"') } : null;
+        continue;
+      }
       const cnt = l.match(/^(?:Then|And)\s+the\s+result\s+should\s+have\s+a\s+count\s+of\s+(\d+)$/);
       if (cnt) { s.assertion = 'count'; s.count = Number(cnt[1]); }
       else if (/^(?:Then|And)\s+the\s+result\s+should\s+be\s+unordered$/.test(l)) s.assertion = 'unordered';
@@ -306,6 +319,22 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
       // A scenario's own `graph initializer` runs after the fixture seed and before its traversal,
       // exactly as upstream orders them.
       if (s.initializer) executeQuery(store, s.initializer, {}, {}, standardRegistry);
+      // An `error` scenario asserts the REFUSAL, so it runs the traversal expecting a throw and
+      // nothing below it applies. Upstream compares the message case-insensitively; so do we.
+      if (s.assertion === 'error') {
+        let thrown: unknown;
+        try { await decodeAll(executeQuery(store, s.gremlin, {}, {}, standardRegistry)); }
+        catch (e) { thrown = e; }
+        expect(thrown).toBeInstanceOf(Error);
+        if (s.error) {
+          const msg = String((thrown as Error).message).toUpperCase();
+          const want = s.error.text.toUpperCase();
+          if (s.error.comparison === 'containing') expect(msg).toContain(want);
+          else if (s.error.comparison === 'starting') expect(msg.startsWith(want)).toBe(true);
+          else expect(msg.endsWith(want)).toBe(true);
+        }
+        return;
+      }
       // The standard service registry is injected so call() scenarios (tinker.search / degree)
       // resolve; a non-call scenario is unaffected (it never looks a service up).
       const decoded = await decodeAll(executeQuery(store, s.gremlin, {}, {}, standardRegistry));
@@ -326,6 +355,7 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
         // already checked above, and that pair is how upstream pins a legitimately ambiguous answer.
         case 'of': for (const g of got) expect(want).toContain(g); break;
         case 'count': break; // the count above IS the assertion
+        // 'error' returned above, before the traversal was run for results — TS narrows it out here.
       }
       // Graph-state checks last: they read the store the traversal just mutated.
       for (const g of s.graphChecks)

@@ -203,7 +203,9 @@ export interface Compiled {
 }
 
 export type WriteResult =
-  | { readonly vertex: { readonly id: any; readonly labels: readonly string[]; readonly props: Record<string, ValueNode> } }
+  // A vertex's props are multi-valued per key (cardinality list/set); an EDGE's are not — TinkerPop's
+  // edge `Property` is single by spec. The asymmetry is the schema's, so the type carries it.
+  | { readonly vertex: { readonly id: any; readonly labels: readonly string[]; readonly props: Record<string, ValueNode[]> } }
   | { readonly edge: { readonly id: any; readonly label: string; readonly src: any; readonly tgt: any; readonly props: Record<string, ValueNode> } };
 
 /** A mutation may continue as a normal read traversal (e.g. `addV(...).label()`). The

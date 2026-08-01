@@ -231,26 +231,12 @@ function compileSetProperty(engine: Engine, steps: IRStep[], params: Record<stri
   const { st, stop } = engine.buildPrefixFresh(prefix, params);
   if (stop !== prefix.length) throw new Error(`property() after ${steps[stop].name}() not yet supported`);
   const elem = st.elem;
-  const specs: PropSpec[] = [];
-  for (const s of steps.slice(firstProp)) {
-    if (s.name !== 'property') throw new Error(`step not implemented after property(): ${s.name}()`);
-    const { cardinality, rest, off } = readCardinality(s.args);
-    let [key] = rest; const [, val, ...metaArgs] = rest;
-    { const ck = constFromNested(key, sideEffects, params); if (ck.has) key = ck.value; }
-    // null/map-form property() is a no-op (see parseVertexSpec).
-    if (key == null || (typeof key === 'object' && !isNested(key) && !('token' in key))) continue;
-    if (typeof key === 'object' && 'token' in key)
-      throw new Error(`property(T.${key.token}) on an existing element not yet supported`);
-    specs.push({ key, value: val, vtype: propVtype(s, val, off), typeNode: propTypeNode(s, off), meta: metaOf(metaArgs), cardinality });
-  }
+  const specs = parsePropertyTail(steps.slice(firstProp), 'property()', sideEffects, params);
   const target = renderFrom(st.q, st.rel);
   if (elem === 'edge') {
     // Edge props are normalized rows with no cardinality/meta (TinkerPop Property):
     // UPSERT each into edge_properties, then read the bag back for the response.
-    for (const sp of specs) {
-      if (sp.cardinality !== null) throw new Error('Cardinality is not valid on an edge property');
-      if (sp.meta) throw new Error('meta-properties are not valid on an edge property');
-    }
+    for (const sp of specs) assertEdgePropertySpec(sp);
     const readCur = `SELECT uid, src, tgt, (SELECT name FROM labels WHERE id=edges.label) AS label FROM edges WHERE id=?`;
     return {
       kind: 'write',
@@ -321,6 +307,65 @@ const propVtype = (step: Step, val: any, off: number): CanonicalType | null =>
  *  losslessly by valueNodeOf. null for an untyped channel (infer per element at storage). */
 const propTypeNode = (step: Step, off: number): TypeNode | null => step.argTypes?.[off + 1] ?? null;
 
+/** One `property()` step, parsed. The three hosts differ ONLY in what they do with a T token —
+ *  addV consumes `T.id`/`T.label` into the vertex it is about to create, a mutation on an existing
+ *  element refuses (ids and labels are immutable there, which is TinkerPop's own rule), and a merge
+ *  tail refuses for the same reason — so the token is REPORTED here rather than decided here. This
+ *  loop existed twice before the merge tail needed it a third time; the copies had already drifted
+ *  (only one of them collapsed a `__.select(sideEffectConst)` VALUE). */
+type ParsedProperty =
+  | { kind: 'prop'; spec: PropSpec }
+  | { kind: 'token'; token: string; value: any; meta: boolean }
+  /** `property(null, …)` — a null KEY adds nothing, which is TinkerPop's null case. (The map form
+   *  never reaches here: `desugarPropertyMap` expanded it before lowering ever saw the chain.) */
+  | { kind: 'none' };
+
+function parseProperty(s: Step, sideEffects: Map<string, any> | undefined, params: Record<string, any>): ParsedProperty {
+  const { cardinality, rest, off } = readCardinality(s.args);
+  let [key, val] = rest; const metaArgs = rest.slice(2);
+  { const ck = constFromNested(key, sideEffects, params); if (ck.has) key = ck.value; }
+  { const cv = constFromSelect(val, sideEffects, params); if (cv.has) val = cv.value; }
+  if (key == null || (typeof key === 'object' && !isNested(key) && !('token' in key))) return { kind: 'none' };
+  if (typeof key === 'object' && 'token' in key) return { kind: 'token', token: key.token, value: val, meta: metaArgs.length > 0 };
+  return { kind: 'prop', spec: { key, value: val, vtype: propVtype(s, val, off), typeNode: propTypeNode(s, off), meta: metaOf(metaArgs), cardinality } };
+}
+
+/** What an EDGE property may not carry. TinkerPop's edge `Property` has neither a cardinality nor
+ *  meta-properties (it is single-valued by spec — the `UNIQUE(edge,key)` constraint is the same
+ *  rule at the schema level), so both are refusals wherever an edge property is written. */
+function assertEdgePropertySpec(sp: PropSpec): void {
+  if (sp.cardinality !== null) throw new Error('Cardinality is not valid on an edge property');
+  if (sp.meta) throw new Error('meta-properties are not valid on an edge property');
+}
+
+/** Apply a parsed `property()` tail to ONE element the enclosing step just emitted. Both merge
+ *  compilers reach the SAME storage waists through this, so a meta-property or a declared
+ *  cardinality in a merge tail behaves exactly as it does after `g.V(…)` — neither merge lowering
+ *  learns that either exists. Values resolve per element (`resolveSpecValue`), so a correlated
+ *  `property(k, __.trav)` in the tail is seeded at the merged element, not at the driver. */
+function applyPropertyTail(engine: Engine, store: GraphStore, specs: readonly PropSpec[], id: number, elem: Elem, params: Record<string, any>, sideEffects?: Map<string, any>): void {
+  for (const sp of specs) {
+    const r = resolveSpecValue(engine, store, sp, id, elem, params, sideEffects);
+    if (!r.has) continue;
+    const key = resolveSpecKey(engine, store, sp, id, elem, params, sideEffects);
+    if (elem === 'edge') insertEdgeProperty(store, id, key, r.value, r.vtype, r.typeNode);
+    else applyVertexProperty(store, id, key, r.values, r.vtype, sp.meta, sp.cardinality, r.typeNode);
+  }
+}
+
+/** A run of `property()` steps → their specs, for a host on an element that ALREADY EXISTS (a
+ *  mutation tail, a merge tail). A T token is immutable on such an element, so it is the refusal. */
+function parsePropertyTail(steps: readonly Step[], what: string, sideEffects: Map<string, any> | undefined, params: Record<string, any>): PropSpec[] {
+  const specs: PropSpec[] = [];
+  for (const s of steps) {
+    if (s.name !== 'property') throw new Error(`step not implemented after ${what}: ${s.name}()`);
+    const p = parseProperty(s, sideEffects, params);
+    if (p.kind === 'token') throw new Error(`property(T.${p.token}) on an existing element not yet supported`);
+    if (p.kind === 'prop') specs.push(p.spec);
+  }
+  return specs;
+}
+
 // Trailing property() args after (key, value) are meta-property key/value pairs
 // (VertexProperty meta-properties). A meta value must be a scalar (no traversal / no
 // meta-of-meta).
@@ -375,22 +420,16 @@ function parseVertexSpec(addV: Step, propSteps: Step[], sideEffects?: Map<string
   let uid: string | number | null = null;
   for (const s of propSteps) {
     if (s.name === 'addLabel') { labels.push(...s.args.map(asLabel)); continue; }
-    const { cardinality, rest, off } = readCardinality(s.args);
-    let [key, val, ...metaArgs] = rest;
-    { const ck = constFromNested(key, sideEffects, params); if (ck.has) key = ck.value; }
-    { const cv = constFromSelect(val, sideEffects, params); if (cv.has) val = cv.value; }
-    // property(null) / property([:]) / property([map]) — a null or map-form key adds
-    // nothing (map-form property() is a no-op for now, matching TinkerPop's null/empty
-    // cases; a populated map would add its entries, not yet implemented).
-    if (key == null || (typeof key === 'object' && !isNested(key) && !('token' in key))) continue;
-    if (typeof key === 'object' && 'token' in key) {
-      if (metaArgs.length) throw new Error(`property(T.${key.token}) does not take meta-properties`);
-      if (key.token === 'id') uid = val;
-      else if (key.token === 'label') labels = [String(val)];
-      else throw new Error(`property(T.${key.token}) not supported`);
+    const p = parseProperty(s, sideEffects, params);
+    // A T token on a vertex being CREATED is not immutable — it IS the id/label being supplied.
+    if (p.kind === 'token') {
+      if (p.meta) throw new Error(`property(T.${p.token}) does not take meta-properties`);
+      if (p.token === 'id') uid = p.value;
+      else if (p.token === 'label') labels = [String(p.value)];
+      else throw new Error(`property(T.${p.token}) not supported`);
       continue;
     }
-    props.push({ key, value: val, vtype: propVtype(s, val, off), typeNode: propTypeNode(s, off), meta: metaOf(metaArgs), cardinality });
+    if (p.kind === 'prop') props.push(p.spec);
   }
   return { labels, props, uid };
 }
@@ -571,13 +610,17 @@ function readEdgeProps(store: GraphStore, edge: number): Record<string, ValueNod
 // Read a vertex's properties back as a flat {key:value} bag (first value under a key)
 // for a write response. Multi-valued keys collapse to the first here — the write
 // response shape is flat; full multi framing is on the read path.
-function readVertexProps(store: GraphStore, node: number): Record<string, ValueNode> {
-  const out: Record<string, ValueNode> = {};
+function readVertexProps(store: GraphStore, node: number): Record<string, ValueNode[]> {
+  const out: Record<string, ValueNode[]> = {};
+  // EVERY value under a key, not the first: a vertex property is multi-valued (the graph's default
+  // cardinality is `list`), and keeping only the first made a write RESPONSE disagree with a READ of
+  // the same vertex — `g.addV("a").property("name","x").property("name","y")` returned one name and
+  // `g.V()` returned two.
   // A collection value is a JSONB blob — return json() TEXT so valueNodeFromStored can JSON.parse it
   // to its {t,v} item tree (a raw blob would frame as a byte Map).
   for (const r of store.query<{ key: string; value: any; vtype: string | null }>(
     "SELECT key, CASE WHEN vtype IN ('list','map','set') THEN json(value) ELSE value END AS value, vtype FROM vertex_properties WHERE node=? ORDER BY id", [node]))
-    if (!(r.key in out)) out[r.key] = valueNodeFromStored(r.value, r.vtype);
+    (out[r.key] ??= []).push(valueNodeFromStored(r.value, r.vtype));
   return out;
 }
 
@@ -1145,9 +1188,20 @@ function mergeMatchQuery(spec: MergeSpec): { sql: string; binds: any[] } {
   return render(q`SELECT id, uid FROM nodes WHERE ${where}`);
 }
 
-function parseMergeOptions(mods: Step[], step: MergeRole['op'], sideEffects: Map<string, any> | undefined, params: Record<string, any>): { onCreate: MergeSpec | null; onMatch: MergeSpec | null } {
+/** The `option()`s a merge carries, plus the `property()` TAIL that may follow them.
+ *
+ *  The tail is not a merge feature: `mergeV(map).property(k, v)` is an ordinary AddPropertyStep over
+ *  whatever the merge emitted, matched or created alike, and TinkerPop compiles it as exactly that.
+ *  So it parses through the same `parsePropertyTail` a mutation tail uses, and the merge compilers
+ *  apply it through the same storage waist — which is what makes a meta-property or a declared
+ *  cardinality in that position work without the merge lowering knowing either exists.
+ *
+ *  `option()` must come first: it modulates the merge, while the tail acts on its OUTPUT. */
+function parseMergeOptions(mods: Step[], step: MergeRole['op'], sideEffects: Map<string, any> | undefined, params: Record<string, any>): { onCreate: MergeSpec | null; onMatch: MergeSpec | null; tail: PropSpec[] } {
   let onCreate: MergeSpec | null = null, onMatch: MergeSpec | null = null;
-  for (const s of mods) {
+  const optionCount = mods.findIndex((s) => s.name !== 'option');
+  const tail = optionCount < 0 ? [] : parsePropertyTail(mods.slice(optionCount), `${step}()`, sideEffects, params);
+  for (const s of optionCount < 0 ? mods : mods.slice(0, optionCount)) {
     if (s.name !== 'option') throw new Error(`step not implemented after ${step}(): ${s.name}()`);
     const [sel, mapArg, cardinalityArg] = s.args;
     if (!sel || typeof sel !== 'object' || !('merge' in sel))
@@ -1162,7 +1216,7 @@ function parseMergeOptions(mods: Step[], step: MergeRole['op'], sideEffects: Map
     const spec = normalizeMergeMap({ op: step, kind }, mapArg, s.argTypes?.[1] ?? null, sideEffects, params, defaultCardinality);
     if (kind === 'onCreate') onCreate = spec; else onMatch = spec;
   }
-  return { onCreate, onMatch };
+  return { onCreate, onMatch, tail };
 }
 
 // The incoming traversers a merge runs once per, evaluated at run time.
@@ -1181,7 +1235,7 @@ function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, a
   if (steps[mvIdx].args.length === 0)
     throw new Error('mergeV() with no argument (uses the incoming traverser as the map) not yet supported');
   const matchSpecRaw = normalizeMergeMap({ op: 'mergeV', kind: 'merge' }, steps[mvIdx].args[0], steps[mvIdx].argTypes?.[0] ?? null, sideEffects, params);
-  const { onCreate, onMatch } = parseMergeOptions(steps.slice(mvIdx + 1), 'mergeV', sideEffects, params);
+  const { onCreate, onMatch, tail } = parseMergeOptions(steps.slice(mvIdx + 1), 'mergeV', sideEffects, params);
   // Statically, before anything runs — TinkerPop's `validateStaticNoOverrides`, which is why the
   // corpus expects a contradicting onCreate to raise even when the merge argument MATCHES and no
   // create would have happened. The create branch re-checks the RESOLVED specs, for the slots that
@@ -1218,6 +1272,7 @@ function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, a
               // A merge map value is one value (a CardinalityValueTraversal carries exactly one),
               // and `?? null` keeps "the map declared no cardinality" reaching the waist intact.
               applyVertexProperty(store, m.id, k, [v], gremlinTypeOf(v, om.propTypes[k] ?? null), null, om.propCardinalities[k] ?? null, om.propTypes[k] ?? null);
+            applyPropertyTail(engine, store, tail, m.id, 'vertex', params, sideEffects);
             // Read the labels back AFTER any onMatch addition, not off the match row.
             out.push({ vertex: { id: m.uid ?? m.id, labels: store.vertexLabels(m.id), props: readVertexProps(store, m.id) } });
           }
@@ -1228,6 +1283,9 @@ function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, a
           const propTypes = { ...matchSpec.propTypes, ...(oc?.propTypes ?? {}) };
           const propCardinalities = { ...matchSpec.propCardinalities, ...(oc?.propCardinalities ?? {}) };
           const v = insertVertex(engine, store, { labels, props: singleProps(props, propTypes, propCardinalities), uid: matchSpec.id ?? oc?.id ?? null }, params, sideEffects);
+          // The tail runs on a CREATED vertex too — it acts on whatever the merge emitted, and the
+          // merge emits one element either way.
+          applyPropertyTail(engine, store, tail, v.id, 'vertex', params, sideEffects);
           // Echo typed props read back from storage ({t,v}), not the raw resolved values.
           out.push({ vertex: { id: v.extId, labels: v.labels, props: readVertexProps(store, v.id) } });
         }
@@ -1259,7 +1317,8 @@ function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, a
   if (steps[meIdx].args.length === 0)
     throw new Error('mergeE() with no argument (uses the incoming traverser as the map) not yet supported');
   const matchSpecRaw = normalizeMergeMap({ op: 'mergeE', kind: 'merge' }, steps[meIdx].args[0], steps[meIdx].argTypes?.[0] ?? null, sideEffects, params);
-  const { onCreate, onMatch } = parseMergeOptions(steps.slice(meIdx + 1), 'mergeE', sideEffects, params);
+  const { onCreate, onMatch, tail } = parseMergeOptions(steps.slice(meIdx + 1), 'mergeE', sideEffects, params);
+  for (const sp of tail) assertEdgePropertySpec(sp);
   if (onCreate) validateNoOverrides(matchSpecRaw, onCreate);
   const drivers = mergeDrivers(engine, steps.slice(0, meIdx), params);
   return {
@@ -1293,6 +1352,7 @@ function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, a
         if (matches.length) {
           for (const m of matches) {
             if (om) for (const [k, v] of Object.entries(om.props)) insertEdgeProperty(store, m.id, k, v, gremlinTypeOf(v, om.propTypes[k] ?? null), om.propTypes[k] ?? null);
+            applyPropertyTail(engine, store, tail, m.id, 'edge', params, sideEffects);
             out.push({ edge: { id: m.uid ?? m.id, label: m.label, src: nodeExtId(store, m.src), tgt: nodeExtId(store, m.tgt), props: readEdgeProps(store, m.id) } });
           }
         } else {
@@ -1304,7 +1364,10 @@ function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, a
           if (!label) throw new Error('mergeE cannot create an edge without a label');
           const props = { ...matchSpec.props, ...(oc?.props ?? {}) };
           const propTypes = { ...matchSpec.propTypes, ...(oc?.propTypes ?? {}) };
-          out.push(insertEdge(engine, store, { label, fromSpec: undefined, toSpec: undefined, edgeUid: matchSpec.id ?? oc?.id ?? null, props: singleProps(props, propTypes), next: 0 }, outV, inV, params, sideEffects));
+          // On the CREATE branch the tail is simply more inline props: an edge property has no
+          // cardinality and no meta (asserted above), so a tail spec and an addE-style inline spec
+          // are the same thing, resolved correlated at the same new edge.
+          out.push(insertEdge(engine, store, { label, fromSpec: undefined, toSpec: undefined, edgeUid: matchSpec.id ?? oc?.id ?? null, props: [...singleProps(props, propTypes), ...tail], next: 0 }, outV, inV, params, sideEffects));
         }
       }
       return out;

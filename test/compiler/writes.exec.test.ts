@@ -59,7 +59,9 @@ test('property() updates existing vertices (overwrite + new key, single cardinal
   // (api.ts, DEFAULT_VERTEX_CARDINALITY), so an undeclared write would append a second age —
   // which is the next test.
   const res = run(store, 'g.V(1).property(single, "age", 30).property("city", "London")');
-  expect(bare((res[0] as any).vertex)).toEqual({ id: 1, labels: ['person'], props: { name: 'marko', age: 30, city: 'London' } });
+  // A write response's VERTEX prop bag is per-key multi-valued (cardinality list/set), so each
+  // value is a list — the same shape a read of the vertex frames. An edge's stays flat (below).
+  expect(bare((res[0] as any).vertex)).toEqual({ id: 1, labels: ['person'], props: { name: ['marko'], age: [30], city: ['London'] } });
   expect(run(store, 'g.V(1).values("age")').map((r) => r.v)).toEqual([30]);
   expect(run(store, 'g.V(1).values("city")').map((r) => r.v)).toEqual(['London']);
   // untouched vertices keep their props
@@ -209,7 +211,7 @@ test('addV inline property NESTED value routes through resolveSpecValue', () => 
   const store = new GraphStore(new BunSqlite(':memory:'));
   // __.constant(v) as an inline property value — evaluated at the new vertex.
   const res = run(store, 'g.addV("person").property("age", __.constant(29)).property("name", "marko")');
-  expect(bare((res[0] as any).vertex)).toMatchObject({ labels: ['person'], props: { name: 'marko', age: 29 } });
+  expect(bare((res[0] as any).vertex)).toMatchObject({ labels: ['person'], props: { name: ['marko'], age: [29] } });
   expect(run(store, 'g.V().has("person","age",29).values("name")').map((r) => r.v)).toEqual(['marko']);
 });
 
@@ -314,7 +316,7 @@ test('addV property value __.constant(UUID(...)) keeps the uuid vtype (not strin
 test('mergeV creates when no match, matches when it exists (inline map)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   const a = run(store, 'g.mergeV([(T.label): "person", name: "marko"])');
-  expect(bare((a[0] as any).vertex)).toMatchObject({ labels: ['person'], props: { name: 'marko' } });
+  expect(bare((a[0] as any).vertex)).toMatchObject({ labels: ['person'], props: { name: ['marko'] } });
   // second identical merge matches the first → still one vertex
   run(store, 'g.mergeV([(T.label): "person", name: "marko"])');
   expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([1]);
