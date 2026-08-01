@@ -360,14 +360,35 @@ over read plans that already work.**
   `resolveEndpoint`, `materializeElementDrivers`, and `WritePlan`.** The phase is not done while a
   second step dispatcher exists.
 
-**Coordination:** the write cluster is claimed by another agent as of 2026-08-01. **Phase 2 does not
-start without sequencing with them.** The honest options are to land their in-flight tranches first
-and start Phase 2 from the result, or to split at a tranche boundary. Starting in parallel produces
-conflicts in every file both touch.
+**Phase 2 supersedes [write-path](./2026-08-01-write-path-plan.md), and inherits its requirements.**
+That plan's agent was stopped 2026-08-01; the plan is not discarded, it is re-pointed. Precisely:
 
-**Exit criteria:** every write L3 scenario at least as good as before; census identical or better;
-`store.*` call sites in the write path reduced from 44 to O(write steps); `test:perturbed` write rows
-still absent.
+- **W1 and W4 are LANDED and must not regress.** Five silent wrong answers closed (L3 1679 → 1689,
+  four new L4 `.feature` pins) and driver input consumed in emission order (perturbed census 4 → 1).
+  P5b is why the second survives set-based writes by construction; the first is guarded by the L4
+  pins, which Phase 2 must keep green rather than re-derive.
+- **W2 §3 and W3 §4 are the acceptance criteria for this phase** — the best requirements spec that
+  exists for it, and they should be re-measured at the start of Phase 2 per that document's own
+  closing instruction. What is superseded is only their *approach* (widen the driver contract).
+- **W2/W3's two declared blockers dissolve by construction rather than being solved.** W2's
+  `mergeE option(Merge.outV)` blocker is *"merge drivers are bare rowids while every other write
+  driver carries the traverser's aliases"* — under RelIR `Insert.source` **is** a read plan carrying
+  the layout, so there is no driver to widen. W2's map-valued driver is a source relation whose rows
+  are maps. W3's unreachable positions (`union(__.addV())`, `optional(__.addV())`,
+  `repeat(__.addV())`) are plan composition. **Do not build a driver abstraction to satisfy them.**
+- **W3 derived Phase 2's answer independently, before RelIR existed**, and it is the same convergence
+  §5a of the analytics doc records for `rankedRows`: its global-barrier-in-the-tail entry reads
+  *"Closing it properly means landing all drivers in ONE relation … after which the guard deletes
+  itself."* Two routes, one conclusion.
+- **write-path §6 (deliberately not in this plan) and §7 (the traps) carry over UNCHANGED and are
+  binding here.** Especially trap 3 — *check whether a refusal is the reference's answer before
+  removing it*, since a third of the write messages in L3 telemetry belong to scenarios that PASS by
+  asserting the throw — and trap 5, that a moved census row needs a written reason.
+
+**Exit criteria:** every write L3 scenario at least as good as before, and W2/W3's ~41 + ~15
+candidates measurably moved; W1's four L4 pins green; census identical or better with every moved row
+explained; `store.*` call sites in the write path reduced from 44 to O(write steps); `test:perturbed`
+still free of write rows; `mise run test:cf-limits` green including `RETURNING`/`ON CONFLICT`.
 
 ### Phase 3 — the repeat wedge
 
@@ -415,7 +436,8 @@ when the shape tables are gone.
 | **The layout contract erodes during migration** | §3.5's per-node obligations are `Record<keyof TraverserLayout, …>`, so a new node or role fails the build until declared — the same enforcement the two existing tables already have |
 | **Scope creep into a general query engine** | The node set in §3 is closed. Adding a kind requires the same bar as a new substrate today: show the seam cannot EXPRESS it, not that it cannot be HANDED it |
 | **DO-only walls (`RETURNING`, `ON CONFLICT`)** | `test:cf-limits` gate before Phase 2 ships (§1) |
-| **Another agent owns the write path** | Phase 2 is sequenced with them, explicitly, before it starts (§6 Phase 2) |
+| **Losing W1/W4's landed gains in the rewrite** | W1's four L4 pins and the perturbed census are Phase 2 exit criteria, not afterthoughts; P5b makes emission-ordered id assignment structural rather than incidental |
+| **Rebuilding the driver abstraction inside RelIR** | W2/W3's blockers are listed as *dissolving*, with an explicit "do not build a driver abstraction" (§6 Phase 2). If Phase 2 grows an `ElementReadDriver` analogue, it has failed |
 
 ---
 

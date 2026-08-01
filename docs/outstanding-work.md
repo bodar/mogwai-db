@@ -36,10 +36,13 @@ partitioned row-ops seam → **29** → **3**'s `times(n)` unroll (unblocked; it
 precondition landed).
 
 The write cluster — **10**, **16**, **0b**, the `write.ts` row-at-a-time entry in Internal debt — is
-CLAIMED by a second agent again as of 2026-08-01; leave it alone. It has
-one plan covering all of it: [write-path](./2026-08-01-write-path-plan.md), whose §2 is ranked second
-here because it is wrong answers rather than gaps. P2·11's import-a-graph is deliberately NOT part of
-it (different machine — `BulkLoader`, not the traversal write driver).
+**no longer claimed** (the second agent was stopped 2026-08-01) and is **no longer its own build
+order**. [write-path](./2026-08-01-write-path-plan.md) W1 and W4 LANDED; its W2/W3 measurements stay
+live as the acceptance criteria for
+[relir-build-plan](./2026-08-01-relir-build-plan.md) **Phase 2**, which replaces the row-at-a-time
+driver with `Insert`/`Update`/`Delete`/`Sequence` plan nodes rather than widening it. Read the
+supersession banner at the top of write-path before picking any of it up. P2·11's import-a-graph is
+still deliberately NOT part of it (different machine — `BulkLoader`, not the traversal write driver).
 
 **No item below is a known wrong answer** except 20's group-value residual, 22's six per-member type
 refusals, 31, 36 — **and the WRITE path, which this line denied until 2026-08-01**. The write half was

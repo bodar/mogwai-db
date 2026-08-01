@@ -13,6 +13,29 @@ scenarios fail at a `the graph should return N for count of …` step, meaning t
 the graph wrong. Three are reproduced in §2. **Those come first**, because a silent wrong answer is
 the one thing the root `CLAUDE.md` says we do not ship.
 
+> **SUPERSEDED IN APPROACH, 2026-08-01 — read this first.**
+> **W1 and W4 are LANDED and stay landed** (§2, §5): five silent wrong answers closed, L3 1679 → 1689,
+> and driver input in emission order taking the perturbed census 4 → 1. Nothing below reverts them,
+> and [relir-build-plan](./2026-08-01-relir-build-plan.md) Phase 2 is required to preserve both.
+>
+> **W2 and W3 remain OPEN, and their MEASUREMENTS are live — but their approach is superseded.**
+> They are written as *widen the driver contract*; the write path is instead being replaced by RelIR
+> `Insert`/`Update`/`Delete`/`Sequence` nodes over ordinary read plans. So §3 and §4 are no longer a
+> build order — **they are the acceptance criteria for RelIR Phase 2**, and they are the best
+> requirements spec that exists for it. §6 (deliberately not in this plan) and §7 (the traps) carry
+> over UNCHANGED and are binding on Phase 2.
+>
+> **Two of their declared blockers dissolve by construction rather than being solved:** W2's
+> `mergeE option(Merge.outV)` blocker is *"merge drivers are bare rowids while every other write
+> driver carries the traverser's aliases"* — under RelIR `Insert.source` **is** a read plan carrying
+> the layout, so there is no driver to widen; and W2's map-valued driver is just a source relation
+> whose rows are maps. W3's positions the driver cannot reach (`union(__.addV())`,
+> `optional(__.addV())`, `repeat(__.addV())`) are plan composition.
+>
+> **W3 independently derived the RelIR answer before RelIR existed**, and that is worth recording:
+> its global-barrier-in-the-tail entry says *"Closing it properly means landing all drivers in ONE
+> relation … after which the guard deletes itself."* That is Phase 2, written down from the other end.
+
 ## 0. What the write path already is — read this before adding anything
 
 - **One nested-argument seam, and it is the sole authority.** `resolveSpecValue` / `resolveSpecKey` /
@@ -278,14 +301,15 @@ on it.
 | # | Tranche | Verified by |
 |---|---|---|
 | W1 | ✅ **DONE 2026-08-01** — all five silent wrong answers + the W4 default. L3 1679 → 1689 | the reproductions in §2 became L4 pins (4 new `.feature` files); census `goldens.tsv` moved 9 rows, each named in its commit |
-| W2 | the map-valued driver, then the five upsert rows that follow it | L3 ratchet (expect ~41 candidates, not all reachable) |
-| W3 | addV mid-chain / read-tail-after-write first, then the positions it unblocks | L3 ratchet + the matrix rows 207–209 |
+| W2 | **superseded in approach** — §3's 41 failures are RelIR Phase 2 acceptance criteria, not a driver-widening order | L3 ratchet (expect ~41 candidates, not all reachable) |
+| W3 | **superseded in approach** — §4's positions are plan composition under Phase 2 | L3 ratchet + the matrix rows 207–209 |
 | W4 | ✅ **DONE 2026-08-01** — driver input in emission order | `mise run test:perturbed` — the 3 write census rows are gone; 1 row left (item 4's `repeat`/`range`), after which the perturbed census can be a GATE |
 
-W1 and W4 are independent of each other and of W2/W3. W3's mid-chain item is the prerequisite for
-several of W2's tails, so if only one large thing gets done, do W3's first item. **With W1 closed the
-next call is W3's `addV` mid-chain / read-tail-after-write**, on that prerequisite argument alone —
-W4 is cheaper but unblocks only the perturbed gate.
+W1 and W4 are independent of each other and of W2/W3, and both are done. **The next call is no
+longer W3's mid-chain item**: that ordering argument assumed the driver was being extended. Under
+[relir-build-plan](./2026-08-01-relir-build-plan.md) the mid-chain case is not a prerequisite to
+build — it is a consequence of `Insert.source` being an ordinary read plan, so it arrives with
+Phase 2.4 rather than gating it.
 
 **One defect the W1 work EXPOSED, now fixed (`3d9222f`) — and the shape to expect more of.** A write
 RESPONSE kept only the first value per key, so `g.addV("a").property("name","x").property("name","y")`
