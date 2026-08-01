@@ -128,3 +128,38 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
       | l[lop] |
       | l[] |
       | l[] |
+
+  # A slice with NO fan-out before it. `LIMIT n` over an unconstrained relation used to take
+  # whichever n SQLite scanned first — an accident that reads like the source's first n and stops
+  # doing so the moment the scan reverses, which is a wrong SUBSET rather than a reorder. Every row
+  # slice now demands the emission encounter, and the source seeds it as the element id, so these
+  # take the id order the reference iterates in. Ordered assertions, stable under
+  # `mise run test:perturbed`.
+
+  @gap:emission-order
+  Scenario: g_V_limitX2X_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().limit(2).values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | marko |
+      | vadas |
+
+  @gap:emission-order
+  Scenario: g_V_hasLabelXpersonX_projectXnX_byXnameX_limitX2X_selectXnX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").project("n").by("name").limit(2).select("n")
+      """
+    # The RECORD shape's slice: `recordSlice` has always asked for `orderByEncounter`, and it was
+    # inert because a record stream carried none. The demand rule is what makes it live.
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | marko |
+      | vadas |

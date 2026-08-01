@@ -27,9 +27,21 @@ describe('ChainFacts.demandsEncounter', () => {
     expect(facts('g.V().out().limit(2)').demandsEncounter).toBe(true);
     expect(facts('g.V().values("name").range(0,2)').demandsEncounter).toBe(true);
   });
-  test('false with no fan-out before the slice, or no slice', () => {
-    expect(facts('g.V().limit(2)').demandsEncounter).toBe(false);
+  test('true for a slice with NO fan-out too — the source order is still an order', () => {
+    // This read `false` until 2026-08-01, on the reasoning that SQLite's forward scan makes an
+    // unconstrained `LIMIT 2` the source's first two anyway. It does — by accident, and reversing
+    // the scan takes a different SUBSET, which `mise run test:perturbed` reports. A slice needs a
+    // column to slice by whatever precedes it; the source seeds `encounter = id`, so this costs a
+    // carried column and an ORDER BY the rowid order satisfies.
+    expect(facts('g.V().limit(2)').demandsEncounter).toBe(true);
+    expect(facts('g.V().hasLabel("person").range(0,2)').demandsEncounter).toBe(true);
+  });
+  test('false with no slice at all', () => {
     expect(facts('g.V().out().count()').demandsEncounter).toBe(false);
+    // A Scope.local slice addresses a VALUE's members rather than the stream's rows, so it does
+    // not demand one either — not assertable through `fold()`, which is a COLLECTING consumer and
+    // demands the encounter in its own right (a collection's member order is observable).
+    expect(facts('g.inject(1, 2, 3).limit(2)').demandsEncounter).toBe(true);
   });
   test('a plain order() between the fan-out and the slice clears the demand', () => {
     // order() re-establishes a total order, so the following limit needs no emission encounter.

@@ -82,12 +82,17 @@ const COLLECTING_CONSUMERS = new Set(['fold', 'aggregate', 'cap']);
  *  cross yet — return false there (preserving today's behaviour, never a silent mis-order). */
 function computeDemandsEncounter(steps: IRStep[]): boolean {
   let sawFanout = false;
+  // A keyed/bare order() has already put the rows in a deterministic total order, so a slice after
+  // it reads that order inside the SAME query and needs no emission encounter. Tracked separately
+  // from `sawFanout` because the two answer different questions: this one is "is the order already
+  // established", and a slice needs an encounter whenever it is NOT — fan-out or no fan-out.
+  let ordered = false;
   for (const s of steps) {
     if (s.name === 'repeat' || s.name === 'match') return false;
-    // A keyed/bare order() re-establishes a deterministic total order, so a following slice needs
-    // no emission encounter — clear the fan-out (the same predicate collapseSafe's sawOrder gate
-    // uses, so the two agree and movementCollapse stays enabled for <movement>.order().by(key).limit()).
-    if (isPlainOrder(s)) { sawFanout = false; continue; }
+    // (Clearing `sawFanout` too keeps the dedup(labels) rule below reading as it always has: the
+    // same predicate collapseSafe's sawOrder gate uses, so the two agree and movementCollapse stays
+    // enabled for <movement>.order().by(key).limit().)
+    if (isPlainOrder(s)) { sawFanout = false; ordered = true; continue; }
     // …but that reasoning is about a SLICE, and it does not extend to a COLLECTION. `LIMIT` reads
     // the ordered relation inside the SAME query, so the ORDER BY genuinely satisfies it. A
     // fold/aggregate reads its rows across a relation boundary, and SQL does not carry a
@@ -99,18 +104,27 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
     // their answer under a reversed scan. Do NOT "simplify" this into the fan-out branch below —
     // that is the shape that was wrong.
     if (COLLECTING_CONSUMERS.has(s.name)) return true;
-    // `tail` is the one SLICE that needs the encounter with NO fan-out at all, and for a reason
-    // neither set above covers: it reads from the FAR END. `limit(n)` over an unconstrained relation
-    // is "some n", and SQLite's forward scan quietly makes that the source's first n — there is no
-    // equivalent accident available for the last n. Without a column to sort by, `tail` cannot be
-    // rendered at all: `ORDER BY <encounter> DESC LIMIT n` IS the implementation, at every shape.
-    // `Scope.local` is exempt because that form slices a VALUE's members, not the stream's rows.
-    if (s.name === 'tail' && !isLocalScope(s)) return true;
-    if (sawFanout && POSITIONAL_CONSUMERS.has(s.name)) return true;
+    // EVERY row slice needs a column to slice BY, whether or not a fan-out preceded it — this rule
+    // used to require one, and `tail` was carved out of it as "the one slice that needs the
+    // encounter with no fan-out at all". That carve-out had the right reasoning and the wrong
+    // scope. `limit(n)` over an unconstrained relation is "some n", and SQLite's forward scan
+    // quietly makes that the source's first n — an ACCIDENT, not an implementation, and reversing
+    // the scan takes a different subset: `g.V().limit(2)`, `project(…).limit(2)` and
+    // `valueMap(…).limit(2)` all changed their answer under `mise run test:perturbed`. A wrong
+    // SUBSET, not a reorder. `tail` merely had no accident available to hide behind, reading from
+    // the far end.
+    //
+    // The cost is a carried column on chains that had none, and it is small by construction: a
+    // chain with no fan-out is source + filters + a projection, where the source seeds
+    // `encounter = id` and SQLite reads that in rowid order. `movementCollapse` is untouched
+    // because a movement IS a fan-out, so those chains were already demanding.
+    //
+    // `Scope.local` is exempt throughout: that form slices a VALUE's members, not the stream's rows.
+    if (!ordered && POSITIONAL_CONSUMERS.has(s.name) && !isLocalScope(s)) return true;
     // dedup(labels) keeps the FIRST traverser per key — first-in-emission, so it needs the
     // encounter. Bare dedup() collapses a multiset regardless of order (never triggers).
     if (sawFanout && s.name === 'dedup' && (s.args ?? []).some((a: any) => typeof a === 'string')) return true;
-    if (FANOUT_STEPS.has(s.name)) sawFanout = true;
+    if (FANOUT_STEPS.has(s.name)) { sawFanout = true; ordered = false; }
   }
   return false;
 }

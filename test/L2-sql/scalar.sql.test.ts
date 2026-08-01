@@ -59,9 +59,14 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().order().by("age").skip(1)').sql).toContain('LIMIT -1 OFFSET 1');
   });
 
-  test('range/skip/limit compose as CTEs when no order() is present', () => {
-    expect(read('g.V().range(1,3)').sql).toContain('SELECT p.id, p.bulk FROM c0 p LIMIT 2 OFFSET 1');
-    expect(read('g.V().skip(2)').sql).toContain('SELECT p.id, p.bulk FROM c0 p LIMIT -1 OFFSET 2');
+  test('range/skip/limit compose as CTEs, ordered by the source encounter when no order() is present', () => {
+    // The `ORDER BY p.encounter` is the point, and it arrived 2026-08-01: a bare LIMIT/OFFSET took
+    // whatever subset SQLite scanned first, which is a WRONG SUBSET rather than a reorder and
+    // changed answer under `mise run test:perturbed`. The source seeds `encounter = id`, so the
+    // window is now the id order the reference iterates in — and it is a rowid read, not a sort.
+    expect(read('g.V().range(1,3)').sql).toContain('SELECT p.id, p.bulk, p.encounter FROM c0 p ORDER BY p.encounter LIMIT 2 OFFSET 1');
+    expect(read('g.V().skip(2)').sql).toContain('SELECT p.id, p.bulk, p.encounter FROM c0 p ORDER BY p.encounter LIMIT -1 OFFSET 2');
+    expect(read('g.V().range(1,3)').sql).toContain('SELECT id, 1 AS bulk, id AS encounter FROM nodes');
   });
 
   test('illegal range is rejected', () => {
@@ -614,7 +619,7 @@ describe('scalar-parent / projection SQL', () => {
 
   test('limit before count wraps the counted id-relation', () => {
     const sql = read('g.V().limit(2).count()').sql;
-    expect(sql).toContain('c1(id, bulk) as (SELECT p.id, p.bulk FROM c0 p LIMIT 2)');
+    expect(sql).toContain('c1(id, bulk, encounter) as (SELECT p.id, p.bulk, p.encounter FROM c0 p ORDER BY p.encounter LIMIT 2)');
     expect(sql).toContain('SELECT COALESCE(SUM(s.bulk), 0) AS v FROM c1 s');
   });
 

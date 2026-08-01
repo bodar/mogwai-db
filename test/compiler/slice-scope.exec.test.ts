@@ -13,7 +13,7 @@
 import { describe, expect, test } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { sliceOf } from '../../src/compiler/ir/step.ts';
-import { run, seededStore } from '../support/harness.ts';
+import { bagOf, run, seededStore } from '../support/harness.ts';
 
 const step = (name: string, ...args: any[]) => ({ name, args } as any);
 const LOCAL = { scope: 'local' };
@@ -48,23 +48,28 @@ describe('Scope.local slices no longer emit malformed SQL (item 27)', () => {
   const store = seededStore();
   const ids = (q: string) => run(store, q).map((r: any) => r.id);
   const all = ids('g.V()');
+  // `all` is scan-ordered — `g.V()` fixes no order, so it is a multiset. The GLOBAL slices below
+  // ARE ordered (a slice demands the source encounter since 2026-08-01, so it takes the id order
+  // the reference iterates in), which is why their expectations are the sorted ids and not a
+  // slice of `all`: comparing against `all` compared a determined answer with an undetermined one.
+  const byId = [...all].sort((a: number, b: number) => a - b);
 
   test('on an ELEMENT stream a local slice is IDENTITY, per RangeLocalStep.applyRange', () => {
     // A vertex is not a Map, an Iterable or an array, so the reference returns it unchanged.
     // These three used to bind NaN and die with `no such column: NaN`.
-    expect(ids('g.V().limit(Scope.local,1)')).toEqual(all);
-    expect(ids('g.V().skip(Scope.local,1)')).toEqual(all);
-    expect(ids('g.V().range(Scope.local,0,1)')).toEqual(all);
+    expect(bagOf(ids('g.V().limit(Scope.local,1)'))).toEqual(bagOf(all));
+    expect(bagOf(ids('g.V().skip(Scope.local,1)'))).toEqual(bagOf(all));
+    expect(bagOf(ids('g.V().range(Scope.local,0,1)'))).toEqual(bagOf(all));
     // …and mid-chain, where the slice is a prefix CTE rather than the last step. Compared by
     // COUNT, not by rows: the flat chain scans that gate movementCollapse key on the step NAME, so
     // a Scope.local limit still costs the collapse and the two plans differ in physical form (one
     // row with `bulk` 3 vs three rows) while denoting the same traverser multiset. Teaching those
     // scans that this one form is identity would need shape knowledge a flat scan does not have.
     expect(run(store, 'g.V().limit(Scope.local,1).out().count()')).toEqual(run(store, 'g.V().out().count()'));
-    // The GLOBAL forms are untouched.
-    expect(ids('g.V().limit(2)')).toEqual(all.slice(0, 2));
-    expect(ids('g.V().skip(2)')).toEqual(all.slice(2));
-    expect(ids('g.V().range(1,3)')).toEqual(all.slice(1, 3));
+    // The GLOBAL forms still slice rows — and now do it in the source's id order.
+    expect(ids('g.V().limit(2)')).toEqual(byId.slice(0, 2));
+    expect(ids('g.V().skip(2)')).toEqual(byId.slice(2));
+    expect(ids('g.V().range(1,3)')).toEqual(byId.slice(1, 3));
   });
 
   test('on a VARIANT stream a local slice DECLINES to the fail-closed throw', () => {
