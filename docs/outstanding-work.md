@@ -30,13 +30,16 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-**Ranked entry point.** Numbers are IDs, not an order. **32** (a live crash) → **2** → **17**'s
+**Ranked entry point.** Numbers are IDs, not an order. **32** (a live crash) →
+**[write-path](./2026-08-01-write-path-plan.md) §2** (silent wrong answers) → **2** → **17**'s
 partitioned row-ops seam → **33** → **34** → **29** → **3**'s `times(n)` unroll (unblocked; its
 precondition landed).
 
-> **Two agents are on this trunk.** The write / bulk-import-export cluster — **10**, **16**, **0b**,
-> P2·11's import-a-graph and the `write.ts` row-at-a-time entry in Internal debt — belongs to the
-> other one. Take the next item in the ranking instead. Transient: delete when the claim lapses.
+The write cluster — **10**, **16**, **0b**, the `write.ts` row-at-a-time entry in Internal debt — was
+claimed by a second agent until 2026-08-01 and is now UNCLAIMED, so it re-enters the ranking. It has
+one plan covering all of it: [write-path](./2026-08-01-write-path-plan.md), whose §2 is ranked second
+here because it is wrong answers rather than gaps. P2·11's import-a-graph is deliberately NOT part of
+it (different machine — `BulkLoader`, not the traversal write driver).
 
 **No item below is a known wrong answer** except 20's group-value residual, 22's six per-member type
 refusals, 31, 36 — **and the WRITE path, which this line denied until 2026-08-01**. The write half was
