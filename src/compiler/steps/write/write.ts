@@ -889,13 +889,27 @@ function insertEdge(engine: Engine, store: GraphStore, c: EdgeCluster, src: numb
   return { edge: { id: extId, label: c.label, src: nodeExtId(store, src), tgt: nodeExtId(store, tgt), props: readEdgeProps(store, id) } };
 }
 
+/** The refusal when an addE endpoint is missing or unresolvable, in TinkerPop's own wording
+ *  (`AddEdgeStartStep` .../step/map/AddEdgeStartStep.java:134,142,154 and `AddEdgeStep`:124,134) —
+ *  the corpus matches on "must resolve to a Vertex or the ID of a Vertex present in the graph".
+ *  The reference splits the tail two ways and so do we: an endpoint nobody supplied is `null was
+ *  specified instead`, while one that WAS supplied and resolved to nothing is `does not match any
+ *  vertices in the graph`. Ours used to say "addE needs both endpoints — supply from()/to() or an
+ *  incoming traverser", which named our implementation rather than the rule. */
+const endpointRefusal = (label: string, side: 'from' | 'to', supplied: boolean): Error => new Error(
+  `The value given to addE(${label}).${side}() must resolve to a Vertex or the ID of a Vertex present in the graph`
+  + (supplied ? '. The provided value does not match any vertices in the graph' : ', but null was specified instead'));
+
 // Resolve a cluster's from()/to() and insert the edge.
 function applyEdgeCluster(engine: Engine, store: GraphStore, c: EdgeCluster, aliases: Map<string, number>, fallback: number | null, params: Record<string, any>, sideEffects?: Map<string, any>): any {
   // Resolve endpoints from-then-to, once per driver row, BEFORE inserting the edge —
   // a to(__.addV()) endpoint CREATES a vertex as a side effect (see nestedElementRowid).
   const src = c.fromSpec !== undefined ? resolveEndpoint(engine, store, c.fromSpec, { aliases }, params, sideEffects) : fallback;
   const tgt = c.toSpec !== undefined ? resolveEndpoint(engine, store, c.toSpec, { aliases }, params, sideEffects) : fallback;
-  if (src == null || tgt == null) throw new Error('addE needs both endpoints — supply from()/to() or an incoming traverser');
+  // TO is reported first, as the reference checks it first — which endpoint a user hears about for a
+  // traversal missing both is observable, and the corpus's error scenarios are written against it.
+  if (tgt == null) throw endpointRefusal(c.label, 'to', c.toSpec !== undefined);
+  if (src == null) throw endpointRefusal(c.label, 'from', c.fromSpec !== undefined);
   return insertEdge(engine, store, c, src, tgt, params, sideEffects);
 }
 
