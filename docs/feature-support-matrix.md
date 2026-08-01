@@ -3,7 +3,7 @@
 What you can rely on. Each step gets one mark based on how much of it works and how
 freely it composes — a ✅ step works **anywhere in a traversal**, however deeply nested,
 not just at the top. Notes call out **only the cases that don't work yet**; if a row has
-no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,692<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,694<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 | Mark | Meaning |
 |---|---|
@@ -211,7 +211,7 @@ characters, `null` → whitespace runs); `format("…%{key}…%{_}…")` reads p
 | `property()` update | ✅ | vertex single/list/set + meta; edge UPSERT (single, no meta). With NO cardinality named the graph default applies and it is **`list`** (TinkerPop's `getCardinality`), so a repeat write APPENDS — unless an explicit `Cardinality.x` was declared for that (vertex, key), which is remembered. `property(k, null)` REMOVES every value under k |
 | `property(Cardinality.list/set,…)` | ✅ | list appends, set dedups by value; an explicit cardinality also DECLARES the key for later undeclared writes on that vertex |
 | `property([k:v,…])` map form | ✅ | expands to one `property()` per entry in a Pass, so every write host gets it. `property(Cardinality.x, [k:v])` applies x to each entry; a `Cardinality.y(v)` map VALUE overrides for its own entry; an empty map adds nothing. ❌ `property(__.trav)` where the TRAVERSAL produces the map (needs the map-valued driver) |
-| `drop()` (vertices + edges) | ✅ | after movement/filter/`where`, cascades props. ❌ after `properties()` / `order()` |
+| `drop()` (vertices, edges + properties) | ✅ | after movement/filter/`where`, cascades props. Over a PROPERTY stream it removes the property rows and leaves the elements, and every property filter (`hasKey`/`hasValue`/a key argument) narrows it. ❌ after `properties().properties()` (a meta-property key, not a row) / `order()` |
 
 ## 12. Side-effect state
 

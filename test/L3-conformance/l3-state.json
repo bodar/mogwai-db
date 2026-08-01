@@ -1,5 +1,5 @@
 {
-  "passing": 1692,
+  "passing": 1694,
   "total": 2267,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -138,6 +138,7 @@
     "g_E_label_deprecated_multilabel_graph",
     "g_E_labels",
     "g_E_labels_single_label_graph",
+    "g_E_propertiesXweightX_drop",
     "g_E_properties_element",
     "g_E_properties_hasKeyXnull_weightX_value",
     "g_E_properties_order_byXdescX_value",
@@ -839,6 +840,7 @@
     "g_V_propertiesXname_age_nullX_value",
     "g_V_properties_dedup_byXvalueX_count",
     "g_V_properties_dedup_count",
+    "g_V_properties_drop",
     "g_V_properties_element",
     "g_V_properties_hasKeyXnull_ageX_value",
     "g_V_properties_hasValueXnullX",
@@ -1723,7 +1725,6 @@
     "g_E_properties",
     "g_E_propertiesXsinceX",
     "g_E_propertiesXweightX",
-    "g_E_propertiesXweightX_drop",
     "g_E_properties_hasKeyXnullX",
     "g_E_properties_hasKeyXnull_nullX",
     "g_E_properties_multi_edges",
@@ -2029,7 +2030,6 @@
     "g_V_propertiesXageX_hasKeyXeqXconstantXageXXX",
     "g_V_propertiesXageX_hasValueXconstantX29XX",
     "g_V_propertiesXageX_hasValueXeqXconstantX29XXX",
-    "g_V_properties_drop",
     "g_V_properties_hasKeyXnullX",
     "g_V_properties_hasKeyXnull_nullX",
     "g_V_properties_hasLabelXnullX",

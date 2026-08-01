@@ -168,7 +168,12 @@ function resolveSpecKey(engine: Engine, store: GraphStore, sp: PropSpec, id: num
 // drop() — remove the target elements. Vertices (g.V()…drop()) take their
 // incident edges with them; edges (g.E()…drop(), g.V().outE()…drop()) delete
 // only the matched edge rows.
-function compileDrop(engine: Engine, steps: IRStep[]): WritePlan {
+function compileDrop(engine: Engine, steps: IRStep[], params: Record<string, any> = {}): WritePlan {
+  // A PROPERTY prefix drops property ROWS, not elements — `g.V().properties().drop()` leaves both
+  // vertices standing and removes their properties. It routes separately because the two differ in
+  // every respect that matters: the prefix is a property stream (so it is compiled as a read, not
+  // through buildPrefixFresh, which types its result as an element), and the delete has no cascade.
+  if (steps.slice(0, -1).some((s) => s.name === 'properties')) return compilePropertyDrop(engine, steps, params);
   const { st, stop } = engine.buildPrefixFresh(steps.slice(0, -1));
   if (stop !== steps.length - 1) throw new Error(`drop() after ${steps[stop].name}() not yet supported`);
   const isEdge = st.elem === 'edge';
@@ -218,6 +223,59 @@ function compileDrop(engine: Engine, steps: IRStep[]): WritePlan {
         deleteWhereIn(store, 'vertex_labels', 'node', ids);
         deleteWhereIn(store, 'nodes', 'id', ids);
       }
+      return [];
+    },
+  };
+}
+
+/** `g.V().properties().drop()` / `g.E().properties("weight").drop()` — delete the PROPERTY rows a
+ *  property stream names, and the FTS text each owns. The prefix compiles through the ordinary read
+ *  spine, so every filter a property stream admits (`hasKey`, `hasValue`, a key argument, a slice)
+ *  narrows the drop for free rather than each becoming a case here.
+ *
+ *  Which physical rows those are is decided by the OWNER element kind, taken from the element prefix
+ *  ahead of `properties()` — not from the projected `vpid` being NULL, which is how an edge property
+ *  happens to be framed (TinkerPop's edge `Property` has no id) and is a framing fact, not an
+ *  identity one. A vertex property is one row addressed by its own rowid; an edge property is one
+ *  row per (edge, key), so it is addressed by that pair.
+ *
+ *  Both deletes go through `bindChunks`, because the row set is a function of ROW COUNT and a DO
+ *  caps a statement at 100 bound parameters (`mise run binds` is the gate). */
+function compilePropertyDrop(engine: Engine, steps: IRStep[], params: Record<string, any>): WritePlan {
+  const prefix = steps.slice(0, -1);
+  const propsAt = prefix.findIndex((s) => s.name === 'properties');
+  // A META-property stream (`properties().properties(k)`) is a key inside the owning property's
+  // JSONB bag, not a row — a different delete, deliberately not guessed at here.
+  if (prefix.slice(propsAt + 1).some((s) => s.name === 'properties'))
+    throw new Error('drop() after properties().properties() (a meta-property) not yet supported');
+  const { st, stop } = engine.buildPrefixFresh(prefix.slice(0, propsAt), params);
+  if (stop !== propsAt) throw new Error(`drop() after ${prefix[stop].name}() not yet supported`);
+  const elem = st.elem;
+  const target = engine.compileReadCompiled(prefix, params);
+  if (target.shape.kind !== 'property')
+    throw new Error(`drop() after a ${target.shape.kind} stream not yet supported`);
+  return {
+    kind: 'write',
+    run: (store) => {
+      // Snapshot before mutating, exactly as the element drop does.
+      const rows = store.query<{ vpid: number | null; owner: number; pk: string }>(target.sql, target.binds);
+      if (!rows.length) return [];
+      if (elem === 'edge') {
+        // One row per (edge, key): the pair IS the identity, so delete by it. `fixedBinds: 0`,
+        // two binds per item.
+        for (const chunk of bindChunks(rows, { bindsPerItem: 2 })) {
+          const pairs = chunk.flatMap((r) => [r.owner, r.pk]);
+          for (const r of store.query<{ id: number }>(
+            `SELECT id FROM edge_properties WHERE (edge, key) IN (VALUES ${chunk.map(() => '(?, ?)').join(', ')})`, pairs))
+            deleteFtsFor(store, 'edge', r.id);
+          store.query(`DELETE FROM edge_properties WHERE (edge, key) IN (VALUES ${chunk.map(() => '(?, ?)').join(', ')})`, pairs);
+        }
+      } else {
+        const ids = rows.map((r) => r.vpid!).filter((id) => id != null);
+        for (const id of ids) deleteFtsFor(store, sqlElem('vertex'), id);
+        deleteWhereIn(store, 'vertex_properties', 'id', ids);
+      }
+      // drop() produces no traversers, property rows or elements alike.
       return [];
     },
   };
@@ -1502,7 +1560,7 @@ const WRITE_RULES: WriteRule[] = [
   // source constructor. It threads withSack() so a sack-carrying value stream
   // (withSack(x).inject(v).sack(...)) seeds its `sk` column like the V()/E() path.
   { match: (s) => s[0].name === 'inject', compile: (e, s, _p, sackInit) => compileInject(e, s, sackInit) },
-  { match: (s) => s[s.length - 1].name === 'drop', compile: (e, s) => compileDrop(e, s) },
+  { match: (s) => s[s.length - 1].name === 'drop', compile: (e, s, p) => compileDrop(e, s, p) },
   { match: (s) => s.some((x) => x.name === 'property'), compile: (e, s, p, _sk, se) => compileSetProperty(e, s, p, se) },
 ];
 
