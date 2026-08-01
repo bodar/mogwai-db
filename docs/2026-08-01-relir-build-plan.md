@@ -1,7 +1,7 @@
 # RelIR — the build plan
 
 **Status: BUILD PLAN, decided 2026-08-01. This is happening.** The analysis that argued for it is
-[codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a/§6b; this
+[codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a; this
 doc is the construction, and it does not re-argue the direction. Every constraint below was measured
 this session against SQLite 3.51.2, not assumed — the five probes are recorded in §1 because each one
 kills or shapes a design choice, and a reader who skips them will re-derive a dead idea.
@@ -320,7 +320,7 @@ migrates or removes a hazard that a large migration would amplify.
 - **0.2 — the 61 `'<tag>' in ` sites → the 15 existing guards** (analytics §7a/§9·2). This is a
   **rename-safety prerequisite, not tidying**: `'nested' in a` survives a field rename silently, and
   Phase 2 moves a great deal of code. Token by token, `isNested` (~27) then `isTokenArg` (~20).
-- **0.3 — split item 3 into three index entries** (analytics §6b): a dissolvable row-local vocabulary
+- **0.3 — split item 3 into three index entries** (§1 P3/P4 above): a dissolvable row-local vocabulary
   gate, a `times(n)` barrier majority, and a 5-traversal platform wall. Docs only; it is what stops
   the 41 reading as one prize.
 - **0.4 — sweep `outstanding-work` item 16**, which still asserts a defect closed on 2026-08-01.

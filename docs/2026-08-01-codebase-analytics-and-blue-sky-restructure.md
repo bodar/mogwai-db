@@ -10,9 +10,12 @@ method. Read §4a and §5a before acting on §4 or §5: the first *weakens* this
 says so, and the second is the only forward-reasoned structural prediction in this repo's history to
 have been confirmed rather than falsified.
 
-**§6a is the sharpest test of §6 and was added after the first push**, in response to the question
-*"isn't `repeat()`'s mini-compiler the same smell?"* — it is, for half the body vocabulary, and the
-other half is a measured platform wall that kills an attractive idea.
+**What this doc owns, now that RelIR is decided.** It owns the *measurements of the codebase as it
+stands*: where the duplication is (§1–§2), where the complexity is (§3), which concepts are split
+against `gremlin-core` (§4–§5), and the diagnosis that follows (§6). It **stops at the diagnosis**.
+The design, the measured SQLite envelope, the object model and the build order are
+[relir-build-plan](./2026-08-01-relir-build-plan.md), which supersedes §6's design half and §9's
+ranking. Nothing about RelIR's construction is repeated here, so the two cannot drift.
 
 This doc answers four questions asked together: where is the duplication, where are the overly
 complex paths, what large refactor is worth doing, and — using `gremlin-core` as the reference —
@@ -407,181 +410,50 @@ has independently discovered and documented as an oddity:
    is an accumulator here because there is no plan to peep at.
 
 3. **Row-ops split global from partitioned** (§5) because the partition key is not a *value* anywhere
-   — it is implicit in which function you called. In a relational IR, `Slice`, `Sort`, `Distinct`,
-   `Tail` and `Sample` are five operators each carrying `partitionBy: Column[]`, and `globalRowOps` is
-   the case where that array is empty. **The 5-vs-5 duplication does not need to be shared; it needs
-   to stop existing.**
+   — it is implicit in which function you called. Given a `partitionBy` parameter, global is the case
+   where it is empty and per-origin is the case where it is the origins. **The duplication does not
+   need to be shared; it needs to stop existing.** (`rankedRows` had to take that parameter as a
+   *callback* because, in its own words, "that authority does not exist" — §5a.)
 
 So the blue-sky restructure is a three-stage compiler instead of a two-stage one:
 
 ```
-Gremlin text
-   │  parse
-   ▼
-Step[]  ──────────── Pass pipeline (unchanged: extract/decoration/canonicalize/simplify/verify)
-   │  lower
-   ▼
-RelIR   ──────────── plan rewrites: fusion, fast paths, partition-key assignment, dead-column pruning
-   │  emit
-   ▼
-SQL text (via the q kernel, unchanged)
+Gremlin text  ──parse──▶  Step[]  ──lower──▶  RelIR  ──emit──▶  SQL text
+                            │                   │                  │
+                     Pass pipeline        plan rewrites:      the q kernel,
+                      (unchanged)      fusion, unrolling,      unchanged
+                                      partition keys, pruning
 ```
 
-`RelIR` is a small relational algebra — `Scan`, `Filter`, `Project`, `Join`, `Union`, `Aggregate`,
-`Window`, `Slice`, `RecursiveCTE`, and (this is the point of §4) `Insert` / `Update` / `Delete`. Ten
-to fifteen node kinds. It is *not* Gremlin-shaped and carries no Gremlin shape vocabulary.
+**One sentence on why this is not the refuted "typed core IR", because §8 would otherwise seem
+contradicted:** that refutation is about putting **Gremlin shape** into the **`Step[]` IR**, which
+every consumer would then have to construct; RelIR sits on the *other side* of lowering — it is what
+lowering *produces*, no Pass ever sees it, and it carries no Gremlin shape vocabulary at all. Stated
+in full, with the falsifier that would prove it violated, in the build plan §2.
 
-**This is emphatically not the refuted "typed core IR".**
-[shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md) §6 refutes putting
-**Gremlin shape** into the **`Step[]` IR** — turning "the shape is knowable" into "here is a `Core[]`
-every consumer must construct", which is structurally the reverted `{t,v}` envelope move. RelIR sits
-on the *other side* of lowering: it is what lowering *produces*, not an annotation on what lowering
-*consumes*. The anchor rule ("a Pass may CONSULT shape, never CONSTRUCT it") is untouched, because
-RelIR is not visible to any Pass. Shape stays exactly where §6 puts it — in `steps/`, owned by
-lowering, and `Compiled.shape` still rides out to the wire layer unchanged.
+**The node set, the passes, the emitter and the phases are the build plan.** An abbreviated sketch
+of them used to sit here and has been removed rather than maintained in two places — a partial node
+list competing with the authoritative one is worse than no list.
 
-### What it would buy, concretely
+### 6a. `repeat()` is the sharpest test of the diagnosis, and it passes
 
-- **`tail/`'s 11,177 LOC is the thing that shrinks.** The 11 dispatch tables exist because a step's
-  lowering depends on the traverser's shape. Much of that dependence is *how to find the value's
-  column*, not *what relational operation to perform* — which is precisely the criterion
-  `applyChildCardinality` already generalises on (it needs only payload column **names**, never an
-  expression denoting the traverser's value, `child.ts:204-243`). Steps that pass that criterion —
-  the row-algebraic class — become one RelIR construction each, and the shape tables keep only the
-  shape-interpreting class, which is per-shape forever and correctly so.
-- **The write path rejoins the traversal machine** as `Insert`/`Update`/`Delete` nodes over the same
-  plan, killing the interpreter, the four private `Step[]` parsers, and `WritePlan`'s separate result
-  type — and with them the three consequence-clusters in §4.
-- **The `count` question §2 could not answer becomes decidable.** `COUNT(*)` vs `COUNT(DISTINCT pk)`
-  is exactly the row→traverser cardinality axis the shape doc §7 named (`cardinalityOf`,
-  `RelationalCardinality`) and which today has one consumer. On a plan it is a property of the input
-  relation, so `Aggregate{count}` reads it instead of ten handlers each knowing it privately.
+Asked whether `expandRepeatBody` is the same smell, I probed SQLite directly rather than reasoning
+about it. Two findings, both now owned by the build plan (§1 P1–P4) and stated here only as
+conclusions:
 
-### 6a. `repeat()`'s mini-compiler — measured, because it is the sharpest test of the whole idea
+- **`expandRepeatBody` is a hand-written join-flattener, not a platform workaround.** Everything
+  `REPEAT_BODY_OK` refuses — anti-joins, a join against a derived `UNION`, `IN (SELECT …)`, `LEFT
+  JOIN` with the walk on the left, correlated scalar subqueries — is **legal SQLite in a recursive
+  term**. The vocabulary wall is ours. It exists because nothing in the pipeline can flatten, which
+  is this section's claim in its purest form.
+- **No per-iteration barrier is expressible in a recursive term in any lowering** — a platform wall,
+  and a stronger statement than "no `LATERAL`". But it binds only 5 of 53 corpus barrier bodies: the
+  other 48 are `times(n)`-bounded and unroll, and unrolling removes the recursive term rather than
+  working around it.
 
-The question put to this analysis: *`expandRepeatBody` is a second movement compiler, so isn't that a
-smell RelIR dissolves — you'd take the body's existing plan and lift it into the recursive term?*
-
-**Yes for one half, and a measured no for the other.** The dividing line is not our compiler's; it is
-SQLite's recursive-term law, and it turns out to be narrower and stranger than "SQLite has no
-`LATERAL`". Probed directly (SQLite 3.51.2 via `bun:sqlite`; the rules are core CTE semantics, but a
-DO re-check belongs with `test:cf-limits` before anything ships on this):
-
-**The law, precisely.** The recursive reference must appear **exactly once, at the top level of the
-recursive term's `FROM`**. Wrapping it in a derived table fails with `circular reference` *even as the
-only reference* — so the rule is positional, not a count. Once it is there, a **correlated scalar
-subquery may reference its alias freely**. That confirms `src/sql/CLAUDE.md`'s existing claim ("the
-lateral rule is positional, not absent") by direct measurement. Additionally: **no aggregates**
-(`recursive aggregate queries not supported`) and **no window functions** (`cannot use window
-functions in recursive queries`) anywhere in the term.
-
-**Half one — the vocabulary wall is ours, and RelIR dissolves it.** `REPEAT_BODY_OK`
-(`prefix/branch.ts:869`) admits movement + `has` + a sack fold + a sack `where` guard. Every one of
-these is **legal SQLite in a recursive term** and refused by us:
-
-| shape | Gremlin | legal? |
-|---|---|---|
-| `NOT EXISTS` anti-join | `not()`, `where()` | ✅ |
-| join against a derived `UNION` | a `union()` arm | ✅ |
-| `IN (SELECT …)` | set-valued predicate operand | ✅ |
-| `LEFT JOIN`, walk on the left | `optional()` | ✅ |
-| correlated scalar subquery on the walk alias | a `by()` / nested read | ✅ |
-| multi-hop join chains | `out().out()`, edge steps | ✅ |
-
-So `expandRepeatBody` is not compensating for a platform limit here — it is a **hand-written
-join-flattener**, and it exists because nothing in the pipeline can flatten. Substituting the walk
-relation for the body plan's scan and then **normalizing into the legal envelope is textbook
-join-flattening / subquery decorrelation** — the canonical mid-end pass, and unavailable today for
-exactly the §6 reason: the body's SQL is already text in an append-only `Query` by the time anyone
-could rewrite it. This is item 3's *"adjacent row-local gate"* (8 queries) plus the generality behind
-it, and it is the strongest single argument in this document for the missing middle.
-
-**Half two — an attractive idea, measured and DEAD. Do not build it.** I expected the bigger prize to
-be re-lowering barriers: `dedup()` lowers to a `ROW_NUMBER` window here, but raw `DISTINCT` is legal
-in a recursive term, so a RelIR could *choose the legal lowering per position*. The legality holds —
-and the semantics do not:
-
-```
-diamond 1->2, 1->3, 2->4, 3->4        LIMIT/ORDER BY in the recursive term
-UNION ALL          → [1,2,3,4,4]      LIMIT 2      → 2 rows TOTAL, not per iteration
-SELECT DISTINCT    → [1,2,3,4,4]      ORDER BY+LIMIT 2 → 2 rows TOTAL
-UNION (not ALL)    → [1,2,3,4]
-```
-
-`DISTINCT` in a recursive term is **legal but semantically inert** — SQLite feeds the term one queue
-row at a time, so it never sees two frontier rows together. `LIMIT`/`ORDER BY` are **global caps on
-the whole CTE**, not per-iteration barriers. `UNION` does dedup, but whole-walk on the entire row
-tuple — which violates the multiset rule the root `CLAUDE.md` names as a semantics trap.
-
-> **Therefore: a per-iteration barrier is not expressible inside a SQLite recursive term in ANY
-> lowering.** Not as an aggregate, not as a window, not as `DISTINCT`, not as `ORDER BY`/`LIMIT`.
-
-This is a **platform wall for the recursive term specifically**, and it is a materially stronger
-statement than "no `LATERAL`". It also independently explains *why* TinkerPop's own
-`RepeatUnrollStrategy` is "intentionally conservative … especially barriers".
-
-### 6b. But the wall is small, because almost nothing needs the recursion — measured
-
-The obvious reading of §6a is "barrier bodies are dead". **That reading is wrong, and the corpus says
-so.** Of 125 corpus traversals mentioning `repeat()`, **53 have a barrier in the body**, and they
-split:
-
-```
-48   times(n)-bounded   → UNROLLABLE, no recursive CTE involved at all
- 5   until()/emit()     → recursion required → the genuine wall
-```
-
-(Denominator note: this counts *all* corpus traversals whose repeat body holds a barrier, passing or
-failing. Item 3's 41 counts L3-failing ones. Different instruments — do not diff them. The
-times-vs-until ratio is the transferable signal.)
-
-**Unrolling removes the constraint entirely rather than working around it.** With no recursive CTE
-there is no recursive term, so every prohibition in §6a evaporates: each phase is an ordinary
-relation and a barrier over it is an ordinary barrier, windows and aggregates included. This is
-exactly the argument item 3 already makes and credits to our architecture rather than to
-TinkerPop's — *"our phases are set-at-a-time by construction, so 'the whole frontier at iteration k'
-IS phase k's relation — the property `:217` had to special-case to obtain."*
-
-**And unrolling is a plan transformation** — replicate a subplan `n` times and chain it — which is
-precisely the operation an inspectable plan makes trivial and an append-only SQL builder makes
-impossible. Today `tryUnroll` (`ir/strategies.ts:949`) has to work on `Step[]` *before* lowering,
-which is why it is bounded by a step-name allowlist rather than by what the relational form can
-express.
-
-Unroll depth is not a practical obstacle: corpus `times(n)` is **83× `times(2)`, 16× `times(1)`, 9×
-`times(3)`, 8× `times(5)`, one each of 8 and 10 — maximum 10**. It does need a declared ceiling,
-because DO caps statement text at 100 KB and a hand-written `times(1000)` would blow it; above the
-ceiling, fall back to the recursive CTE, which then refuses a barrier body as a clean deferral.
-
-**So the corrected picture, and it is much more favourable to RelIR than §6a alone suggests:**
-
-| repeat body | route | RelIR helps? |
-|---|---|---|
-| row-local vocabulary beyond `REPEAT_BODY_OK` (`not`/`where`/`union`/`optional`/`IN`) | inline into the recursive term | **yes** — join-flattening is the missing pass |
-| barrier body + `times(n)` — **48 of 53** | unroll; no recursion, so no prohibition | **yes** — unrolling is subplan replication |
-| barrier body + `until()`/`emit()` — **5 of 53** | none | **no** — genuine platform wall |
-
-**So item 3 should be re-framed as three items, not one.** A compiler limitation worth dissolving, a
-transformation that is cheap once plans are data, and a five-traversal platform wall. Filing them
-together is what makes the 41 read as one prize and what has made the unroll look like a big bet
-rather than the majority route.
-
-### The honest counter-argument
-
-This is a large forward-reasoned structural proposal, which is the exact species this repo has
-falsified twelve times. Three specific risks:
-
-1. **It could be a re-encoding, not a simplification** — 11 shape tables becoming 11 shape-aware RelIR
-   *builders*, with a new layer added and nothing removed. This is the `{t,v}` failure mode.
-2. **SQLite is the optimizer.** Locked decision #3 says the planner does the traversal. A mid-end that
-   starts making cost decisions duplicates work SQLite does better. RelIR must stay a *structural*
-   layer (fusion, partition keys, pruning), never a cost-based one.
-3. **The census is the only thing that could tell you it went wrong**, and most of the work would show
-   L3 delta = 0 — the caveat the shape doc already flags for its own step 2.
-
-§9 turns these into a gate.
-
----
+**→ The design, the measured envelope, the object model and the build order are
+[relir-build-plan](./2026-08-01-relir-build-plan.md).** This document deliberately stops at the
+diagnosis; everything downstream of "the middle is missing" lives there, so the two do not drift.
 
 ## 7. If we rebuilt from scratch
 
@@ -589,17 +461,10 @@ Keeping every locked decision (TinkerPop 4, generated parser, compile-never-inte
 client's GraphBinary, front-end/compiler boundary) and every hard-won semantic in `test/`, the
 structure I would choose:
 
-**Four layers, one direction.**
-
-1. **Front end** — `parse → Step[]`, plus the tagged-token vocabulary. Unchanged in role. The work
-   here is already half done and is §7a below.
-2. **Pass pipeline** — unchanged. Categorized, ordered, `Step[] → Step[]`. This part is good and the
-   measurement gives no reason to touch it.
-3. **Lowering** — `Step[] → RelIR`. Shape lives here and only here. **One table per step name, not one
-   per (step, shape)**: a `StepFn` receives the stream and returns RelIR, and the row-algebraic
-   majority stops caring which shape it got. Writes are steps like any other.
-4. **Emission** — `RelIR → SQL`, the `q` kernel essentially as it stands, plus the plan rewrites that
-   today are fast paths and accumulators.
+**The layer structure is the build plan's** ([relir-build-plan](./2026-08-01-relir-build-plan.md)
+§2–§5: the clean-room boundary, the complete object model, the passes, the emitter). Not repeated
+here. What follows is the part that is *not* about RelIR — what a rebuild should carry over
+untouched, and one thing neither codebase has.
 
 **What I would keep verbatim**, because the measurement says it is working and because most of it was
 paid for in bugs:
@@ -696,87 +561,37 @@ writing §6, and none of them is what §6 says.
   reason.
 - **Merging the movement vocabulary sets.** They differ on `otherV` and those differences are
   load-bearing; derive with a named difference, never merge.
-- **Re-lowering a `repeat()` body barrier to reach a legal recursive-term form.** §6a: measured and
-  dead. (Note this kills the *inlining* route only — §6b measures that 48 of 53 such bodies are
-  `times(n)`-bounded and unroll instead, where no prohibition applies.) `DISTINCT` there is legal but inert, `LIMIT`/`ORDER BY` are global caps, aggregates and window
-  functions are rejected outright. **No per-iteration barrier is expressible in a SQLite recursive
-  term in any lowering** — so item 3's 41 barrier-body queries are a platform wall, and the unroll is
-  the only route. Recorded so the idea is not re-derived from the legality result alone.
+- **Re-lowering a `repeat()` body barrier to reach a legal recursive-term form.** Measured and dead:
+  `DISTINCT` in a recursive term is legal but *inert*, `LIMIT`/`ORDER BY` are global caps on the whole
+  CTE, aggregates and window functions are rejected outright. **No per-iteration barrier is
+  expressible there in any lowering.** Recorded because the *legality* result alone makes the idea
+  look alive — it is the semantics that kill it. This bounds the inlining route only; the majority
+  route is the unroll (build plan §1 P3/P4, Phase 3.3).
 - **Naively spreading a shared `countRows` into every shape table.** §2 — five of the ten `count`
   handlers legitimately differ, and blind spreading produces wrong answers, not free coverage.
 
 ---
 
-## 9. Ranked, each with a kill criterion
+## 9. Where each finding went
 
-> **SUPERSEDED IN PART, 2026-08-01.** RelIR was **decided** rather than gated — see
-> [relir-build-plan](./2026-08-01-relir-build-plan.md), which absorbs items 1, 2, 4 and 5–6 into its
-> Phase 0/2/3 and adds the complete object model, the measured SQLite envelope (five probes) and the
-> phase gates. Items 3 and 7 are unaffected and stay here. The kill criterion in item 5 below was
-> not run: §6b's corpus measurement (48 of 53 barrier bodies unroll) and the write envelope probe
-> answered the same question more directly and more favourably.
+**This section was a ranked build order. It is now a disposition map**, because RelIR was decided
+rather than gated and four of the seven items became phases of
+[relir-build-plan](./2026-08-01-relir-build-plan.md). Keeping the ranking here as well would be two
+build orders for one body of work — exactly the drift this restructure exists to remove.
 
-Ordered by (evidence × payoff) ÷ risk. Every one gates on `mise run ci` including the census.
-
-**1 — Finish `globalRowOps` into `ELEMENT` and `SCALAR`.** *Small, mechanical, measured.* §2: the two
-largest tables (45 of 94 entries) do not use the shared table. Compose with `firstOf`, never spread
-over an owned key. **Kill criterion:** none needed — the census is a sufficient gate.
-**Re-scoped 2026-08-01:** the per-origin lifts this item originally also called for are **done**
-(`f9597ca`, §5a) — `rankedRows` now backs four of the five. What is left here is the *element tail*,
-which item 17's updated text also now names as the remainder, and it is architectural rather than a
-spread: `ELEMENT_DISPATCH` routes through the `TailAcc` accumulator whose `order()`+`limit()` fusion
-is what makes a single statement correct. **Sequence it after 3, and read §6.2 first — this is the
-item RelIR would most change the shape of.**
-
-**2 — Convert the 61 `'<tag>' in ` sites to the guards that already exist.** *Small, mechanical,
-closes a rename hole.* §7a. The `TaggedArg` union and all 15 guards are built; the consumers were
-never moved. Token by token (`isNested` ~27, then `isTokenArg` ~20), one commit each. **Kill criterion:**
-none — but note it *will* surface real bugs where a site's hand-rolled check is subtly wider or
-narrower than the guard, and those are findings, not obstacles. Sweep shape-doc §3's three stale
-sentences in the same change.
-
-**3 — Turn `tryLowerGroupChildSource`'s eight booleans into a triage table.** *Medium, local, no new
-concepts.* §3b. Pure restructuring of one function plus its classifier calls; the emitters are
-untouched. **Kill criterion:** if the table needs more than ~12 rows or any row needs a predicate that
-is not `(key-shape, value-shape)`, the gates are not a relation and this is the wrong shape — stop.
-
-**4 — Split `repeat`'s admission control from its lowering, and split item 3 in two.** *Medium.* §3a
-+ §6a. A `classifyRepeat(region) → RepeatPlan | Deferral` leaf, then two lowerings that consume a
-validated plan. **Kill criterion:** if the extracted classifier still needs ≥10 fields on
-`RepeatPlan`, the complexity was essential and the split only moved it — revert and record that.
-**Do the index change regardless of the code change**: item 3 currently files three different
-answers as one item — a dissolvable row-local vocabulary gate, a barrier-body majority that unrolls
-(48 of 53 corpus bodies), and a five-traversal platform wall. §6a/§6b have the measurements.
-
-**5 — Prove or kill RelIR on the row-op matrix, before writing any of it.** *The gate for §6, and
-cheap.* Item 17 has already measured the matrices: root scope **66 gaps / 150**, child scope **41 /
-63**. The question RelIR lives or dies on is answerable by reading those gaps, not by building
-anything:
-
-> Of the gaps, what fraction is *"the same relational operator with a different partition key or a
-> different column authority"* versus *"a genuinely different relational operation"*?
-
-**Pre-committed criterion: above 60% same-operator → RelIR is the right layer and step 6 follows.
-Below 30% → RelIR is a re-encoding; record the number and close §6 permanently.** In between →
-inconclusive, and the default is not to build it. This mirrors the shape doc's step-5 discipline,
-which is the only structural question in this repo's history that got a clean answer, and it costs a
-reading pass rather than a migration.
-
-**6 — Conditional on 5: RelIR, write path first.** Not "add a layer then migrate everything" — the
-write path is the slice that (a) has the clearest payoff, (b) is bounded, (c) already has a plan
-covering its semantics ([write-path](./2026-08-01-write-path-plan.md)), and (d) is where the known
-silent wrong answers are (items 16, 20's three write rows). If `Insert`/`Update`/`Delete` plan nodes
-kill the interpreter and item 16's multi-property loss without a new shape vocabulary, the layer has
-earned the read side. If it does not, nothing else was disturbed. **Note the coordination
-constraint:** the write cluster is CLAIMED by a second agent as of 2026-08-01 — this must be
-sequenced with them, not started alongside.
-
-**7 — The typed deferral taxonomy.** *Medium, independent of everything above.* §7. Its real payoff is
-that it makes the backlog's own telemetry trustworthy, which every other item on this list is ranked
-by.
+| # | Finding | Where it lives now |
+|---|---|---|
+| 1 | Finish `globalRowOps` into `ELEMENT`/`SCALAR` (§2) | **build plan Phase 0.1** — reframed as a prerequisite that shrinks the Phase-4 migration surface |
+| 2 | The 61 `'<tag>' in ` sites → the 15 existing guards (§7a) | **build plan Phase 0.2** — reframed as a *rename-safety* prerequisite, not tidying: `'nested' in a` survives a rename silently, and Phase 2 moves a great deal of code |
+| 3 | `tryLowerGroupChildSource`'s eight eager booleans → a triage table (§3b) | **stays here.** Independent of RelIR, local, and the only item on this list RelIR does not touch. Kill criterion unchanged: if the table needs >~12 rows, or a row needs a predicate that is not `(key-shape, value-shape)`, the gates are not a relation — stop |
+| 4 | Split `repeat`'s admission control from its lowering (§3a) | **build plan Phase 3.4** — deliberately sequenced *after* `flatten` and `unroll`, so the deletion is the measurement rather than a prediction |
+| 4b | Split item 3 of `outstanding-work` into three (§6a) | **build plan Phase 0.3** |
+| 5 | Prove or kill RelIR on the row-op matrix | **not run, and superseded.** §6a's corpus measurement and the write-envelope probe answered the same question more directly and more favourably. Recorded so nobody re-derives the gate and thinks it was skipped |
+| 6 | RelIR, write path first | **the build plan**, Phases 1–4 |
+| 7 | The typed deferral taxonomy (§7) | **stays here.** Independent of RelIR; 627 throws, ~218 saying "not yet supported", and its payoff is making the backlog telemetry trustworthy — which every other item is ranked by |
 
 **Not ranked, but free:** the four substantive textual clones in §1. Three are ten minutes each. The
-fourth is not free and should be folded into item 3 instead: `lowerChooseOptions` /
-`lowerChooseOptionsScalar` duplicate *twice* (`mapscalar.ts:445`≡`:521` and `:475`≡`:541`), which
-makes them one `choose().option()` lowering written once per parent shape — the same
-one-copy-per-shape disease as §2, at whole-function granularity rather than adapter granularity.
+fourth is not free and belongs with item 3: `lowerChooseOptions` / `lowerChooseOptionsScalar`
+duplicate *twice* (`mapscalar.ts:445`≡`:521` and `:475`≡`:541`) — one `choose().option()` lowering
+written once per parent shape, the same one-copy-per-shape disease as §2 at whole-function
+granularity.
