@@ -1,9 +1,9 @@
 # A branch arm's barrier observes the branch's whole input — doing it properly
 
-**Status: T1, T2 and T3 LANDED 2026-07-31. T4 RECLASSIFIED and its ELEMENT half LANDED 2026-08-01**
-— it is a wrong SUBSET under a downstream slice, not the ordering item it was filed as, which also
-means it is pinned with multiset assertions rather than ordered ones (§T4, §6.5, §T4-outcome). What
-is left of T4 is the scalar/list/variant merge family and one declared corner.
+**Status: T1, T2 and T3 LANDED 2026-07-31. T4 RECLASSIFIED and LANDED 2026-08-01, all four merge
+families** — it is a wrong SUBSET under a downstream slice, not the ordering item it was filed as,
+which also means it is pinned with multiset assertions rather than ordered ones (§T4, §6.5,
+§T4-outcome). One declared corner is left; the plan is otherwise closed.
 **The fail-closed gate has NOT been written** — nothing
 named `verifyBranchArmBarrierScope` exists in `src/`, so anything T2/T3 have not reached still
 mis-executes rather than deferring.
@@ -257,12 +257,26 @@ Two smaller findings worth keeping:
   merge would sort by, and a merge whose arms disagree on a rigid role fails closed. That corner keeps
   today's answer rather than a new deferral.
 
-**What is left of T4.** (1) The scalar/list/variant merges (`mergeArmRelation`, `unionScalarStreams`,
-`finishListMerge`, `mergeVariantArms`) take the same key by the same route — the substrate is already
-shape-generic, so this is the freeze at each of those branch entry points plus one key change in
-`mergeArmRelation`. (2) The declined `coalesce`/`optional` batching-arm corner above. (3) The residual
-PURE reorder — a barrier-free branch with no positional consumer after it — which stays as Crux 4
-left it: unordered out, unordered on the wire.
+**The scalar/list/variant half, and the plumbing question it turned on.** Those three merges took the
+same key the same day. The question was how to tell a merge that its arms carry a frozen order
+without threading an argument through ~18 call sites, and the answer is `branchFork(base, armLayout)`
+(`context/context.ts`): **derive it from the arms.** An arm carries exactly one more branch order than
+the pre-branch state when this branch froze one, and never more than one, because a nested branch's
+own merge pops its own before the arm ends. `mergeArmRelation` and `finishElementMerge` both read it
+that way, and the explicit parameter the element tranche threaded is gone. The ONE family that cannot
+derive it is the variant merge — a `VariantArm` is a bare `(rel, vk)` pair with no layout — so its
+callers hand the fork in.
+
+**Where the freeze goes is load-bearing: AFTER each lowerer's classify gate, never before.** The
+freeze emits a projection CTE, and the shape cascade tries list → scalar → variant → element, so an
+element-armed `union` reaches three lowerers that will decline before the one that answers. Freezing
+at the top of those would leave a dangling CTE in every element branch. `tryLowerScalarUnion`
+classifies every arm up front for exactly this reason (which also lifted a per-arm classify out of
+its compile loop).
+
+**What is left of T4.** (1) The declined `coalesce`/`optional` batching-arm corner above. (2) The
+residual PURE reorder — a barrier-free branch with no positional consumer after it — which stays as
+Crux 4 left it: unordered out, unordered on the wire.
 
 ## 5. The duplication to remove while doing it
 

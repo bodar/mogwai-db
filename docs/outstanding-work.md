@@ -199,10 +199,12 @@ cardinality, which is the measurement that says the ladder could not have found 
      the `order().fold()` block looked exactly like test-side fragility and was a real defect.
    **Clearing these makes `test:perturbed` a gate**, which is the point of one item.
 
-21. **A `union`/`choose` ARM's barrier observes the branch's whole input. T1+T2+T3 LANDED 2026-07-31
-   (L3 1647 → 1648); T4 alone is open.** `BranchStep.standardAlgorithm`'s `hasBarrier` decides arm
-   SCOPE and emission order together, and only `union`/`choose` extend `BranchStep` —
-   `coalesce`/`optional` are per-traverser by class and our lowering of those is CORRECT.
+21. **A `union`/`choose` ARM's barrier observes the branch's whole input. T1+T2+T3 LANDED
+   2026-07-31 (L3 1647 → 1648); T4 LANDED 2026-08-01 and what is left of this item is one declared
+   corner.** `BranchStep.standardAlgorithm`'s `hasBarrier` decides arm SCOPE and emission order
+   together, and only `union`/`choose` extend `BranchStep` — `coalesce`/`optional` are
+   per-traverser by class and our SCOPE for those is CORRECT. **That is a statement about scope
+   only: on emission ORDER all four diverged the same way, which is T4.**
    **The vocabulary is `ir/step.ts`:** `BATCHING_BRANCHES`, `COLLAPSING_BARRIERS` (reduce to one
    traverser), `SLICE_BARRIERS` (choose or reorder a subset), `BATCHED_BARRIERS` = their union =
    `GLOBAL_BARRIER_STEPS` minus the four that change SHAPE or are not `Barrier`s, and `armBatches`.
@@ -211,7 +213,8 @@ cardinality, which is the measurement that says the ladder could not have found 
    carried schema per COLUMN; `armBatchAdmissible`/`collapsedArmAdmissible`; and
    `gateArmOnNonEmptyInput`, because an arm that received no traversers emits nothing even though
    `count()` over an empty stream is 0.
-   **T4 — RECLASSIFIED from its emission-order framing and its ELEMENT half LANDED 2026-08-01.**
+   **T4 — RECLASSIFIED from its emission-order framing, and LANDED 2026-08-01 across all four
+   merge families.**
    Once an arm batches, arm-major over the whole stream is CORRECT and is what we emit; the
    barrier-FREE case is traverser-major in the reference, and **with a positional consumer after the
    branch that key selects a different WINDOW — a wrong multiset, not a reorder.** Was:
@@ -222,19 +225,24 @@ cardinality, which is the measurement that says the ladder could not have found 
    **The substrate that landed: `TraverserLayout.branchOrders`** — the input's emission order frozen
    at branch entry, a STACK like `origins`, threaded through the arms and consumed by the merge as
    its leading sort key. NOT the "two encounters" reconciliation item 4 refuses: it holds an OUTER
-   scope's order and is only ever read as a merge sort key. `freezeBranchOrder` (`tail/barrier.ts`,
-   shape-generic via `streamPayloadCols`) / `enterBranch` (`prefix/branch.ts`, the one gate) /
-   `finishElementMerge`. Five pins in `test/L4-addendum/branch-traverser-major.feature`.
+   scope's order and is only ever read as a merge sort key. `freezeBranchOrder` + `enterBranch`
+   (`tail/barrier.ts`, generic over any relational stream) are the entry; `branchFork`
+   (`context/context.ts`) is how each merge DERIVES the fork point and the key off its own arms
+   rather than taking a threaded argument — the variant merge is the one exception, since a
+   `VariantArm` carries no layout, so its callers hand the fork in. Ten pins in
+   `test/L4-addendum/branch-traverser-major.feature`, one of them the COMPLEMENT (a batching arm,
+   where arm-major is the reference's own answer and the gate must decline).
    **§1's "only union/choose can disagree" is about arm SCOPE and does NOT carry to emission order** —
    `coalesce`/`optional` merged arm-major too and are fixed by the same key. Do not re-read §1 as
    "coalesce is fine".
-   **What is left.** (a) The scalar/list/variant merges (`mergeArmRelation` and its three callers) —
-   the substrate is already shape-generic, so it is the freeze at those entry points plus one key
-   change. (b) `enterBranch` declines when an arm holds a batched barrier; for `union`/`choose` that
-   is the reference's own rule, for `coalesce`/`optional` it is a conservative gate (such an arm can
-   consume the column the merge would sort by) that keeps today's answer. (c) The residual PURE
-   reorder stays as Crux 4 left it. **Zero corpus witnesses, so L3 does not move** — the ratchet is
-   L4. *Medium.*
+   **What is left, and both are declared rather than forgotten.** (a) `enterBranch` declines when
+   an arm holds a batched barrier; for `union`/`choose` that is the reference's own rule and
+   arm-major is CORRECT, but for `coalesce`/`optional` it is a conservative compiler gate (such an
+   arm's tail can consume the very column the merge would sort by, and a merge whose arms disagree
+   on a rigid role fails closed), so those spellings keep today's arm-major answer. (b) The residual
+   PURE reorder — a barrier-free branch with no positional consumer after it — stays as Crux 4 left
+   it: unordered out, unordered on the wire. **Zero corpus witnesses either way, so L3 does not
+   move** — the ratchet is L4. *Low, and only (a) is a wrong answer.*
    **Two things deliberately NOT done, so they are not mistaken for oversights:** `armBatches` scans
    an arm body FLAT, so a barrier sitting only inside a NESTED branch arm sets `hasBarrier` in the
    reference and not here; and the child-scope guard (`armBatchAdmissible`) has no end-to-end pin,
