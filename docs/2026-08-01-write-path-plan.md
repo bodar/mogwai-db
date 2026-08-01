@@ -44,7 +44,7 @@ the one thing the root `CLAUDE.md` says we do not ship.
 The 66 cluster into four tranches below. They are ordered by *kind of wrongness*, not by count:
 wrong answers, then refusals of legal traversals, then unreachable positions, then determinism.
 
-## 2. W1 — the SILENT WRONG ANSWERS. Do these first.
+## 2. W1 — the SILENT WRONG ANSWERS. Do these first.  ✅ CLOSED 2026-08-01
 
 Three reproduced on the modern graph (probe: run the write, then query the graph):
 
@@ -67,8 +67,11 @@ g.V(1).property(Cardinality.list, "friends", __.out("knows").values("name"))  �
 Two more in the same family, not yet characterised, so verify before designing:
 `g.addV().property(["name":"foo","age":42])` and
 `g.V().has('name','foo').property(["name": Cardinality.set("bar"), "age": 43])` — the whole-MAP
-argument form of `property()` (corpus lines 442, 1493, 1514). **Still open**; the other three landed
-2026-08-01, see below.
+argument form of `property()` (corpus lines 442, 1493, 1514). **Also FIXED 2026-08-01 (`80cbec6`),
+and they were the cheapest of the five**: the form wrote nothing at all, because the write compilers
+saw a map-shaped key and skipped it. It is not a write-step feature —
+`GraphTraversal.property(Map)` loops the entries calling `property(null, k, v)` in the DSL — so it
+is one `extract` Pass (`desugarPropertyMap`) and no write host learns the form exists. L3 +3.
 
 **What ties the first and third together is item 16's W4** — the multi/meta-property schema rework.
 We implement `single` semantics where the reference's default for a NEW vertex property is a
@@ -111,11 +114,20 @@ now APPENDS, because `MergeVertexStep` reads `getCardinality(key)` exactly as `p
 corpus does not discriminate — every onMatch assertion is `has(k, v)`, which matches ANY value — so
 check the reference implementation rather than L3 before touching that arm.
 
-**Still open in this family:** the whole-MAP argument form of `property()` (corpus lines 442, 1493,
-1514). `handleTraversalValue`'s `mapForm` branch is a separate arm from everything above: it requires
-the traversal to produce exactly one Map, expands it into per-entry mutations, and throws
-`property(traversal) requires the traversal to produce a Map` otherwise. It is closer to W2's
-map-valued driver than to anything in W1.
+**W1 IS CLOSED — all five, L3 1679 → 1689.** What remains of the map form is the arm this survey
+did not separate: `property(__.trav)` where the TRAVERSAL produces the Map.
+`handleTraversalValue`'s `mapForm` branch requires exactly one Map result, expands it into per-entry
+mutations, and throws `property(traversal) requires the traversal to produce a Map` otherwise. That
+needs a map-valued driver, so it belongs with **W2**, not here — file it there when W2 starts.
+
+**The tranche's real lesson, and it generalizes past writes.** Four of the five were the same defect
+shape: a fact the reference resolves LATE was being collapsed EARLY, by the layer that first saw it.
+`readCardinality` turned "declared none" into `'single'` at parse time; `nestedScalar` turned "the
+traversal's results" into "the first row"; the write compilers turned a map argument into a no-op.
+In each case the fix was to carry the honest value one layer further in and let the authority decide
+— which is the same rule `src/compiler/steps/CLAUDE.md` states for shapes. When probing the
+remaining tranches, look for that shape first: not "which host is missing a feature", but "which
+layer answered a question that was not its to answer".
 
 **One fidelity gap this opens, and it is real:** `io()`/`BulkLoader` round-trips do not carry the
 declarations, so a graph exported and reimported loses a `single` and reverts that (vertex, key) to
@@ -235,13 +247,15 @@ on it.
 
 | # | Tranche | Verified by |
 |---|---|---|
-| W1 | the three (five) silent wrong answers + W4 schema — **all three landed 2026-08-01; the two MAP-argument forms remain** | the reproductions in §2 become L4 pins; census `goldens.tsv` moves with a reason |
+| W1 | ✅ **DONE 2026-08-01** — all five silent wrong answers + the W4 default. L3 1679 → 1689 | the reproductions in §2 became L4 pins (4 new `.feature` files); census `goldens.tsv` moved 9 rows, each named in its commit |
 | W2 | the map-valued driver, then the five upsert rows that follow it | L3 ratchet (expect ~41 candidates, not all reachable) |
 | W3 | addV mid-chain / read-tail-after-write first, then the positions it unblocks | L3 ratchet + the matrix rows 207–209 |
 | W4 | driver input in emission order | `mise run test:perturbed` — 3 census rows, and with the `repeat` exemption the instrument becomes a GATE |
 
 W1 and W4 are independent of each other and of W2/W3. W3's mid-chain item is the prerequisite for
-several of W2's tails, so if only one large thing gets done, do W3's first item.
+several of W2's tails, so if only one large thing gets done, do W3's first item. **With W1 closed the
+next call is W3's `addV` mid-chain / read-tail-after-write**, on that prerequisite argument alone —
+W4 is cheaper but unblocks only the perturbed gate.
 
 **Start each tranche by re-measuring its numbers.** This document is a snapshot, and
 `docs/outstanding-work.md`'s own warning applies double here: the index has been stale in both
