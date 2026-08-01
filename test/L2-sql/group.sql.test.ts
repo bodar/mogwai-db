@@ -11,7 +11,7 @@ import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decode, decodeAll } from '../support/decode.ts';
-import { read, run, seededStore } from '../support/harness.ts';
+import { bagOf, read, run, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -567,11 +567,16 @@ describe('group / properties SQL', () => {
     expect(p.sql).toContain('gp.owner AS v_owner'); // the tail() value frames the property element from the domain
     // Result: each vertex property grouped by {owner name, key, value}, value = the property.
     const store = seededStore();
-    const rows = run(store, "g.V().hasLabel('person').properties().group().by(__.key()).by(__.value().fold())");
-    expect(rows).toEqual([
-      { gk: 'age', gv: JSON.stringify([29, 27, 32, 35]) },
-      { gk: 'name', gv: JSON.stringify(['marko', 'vadas', 'josh', 'peter']) },
-    ]);
+    // The GROUPING is what this pins. The member order inside each group follows the emission
+    // order of the group's inputs, and `g.V().hasLabel('person').properties()` fixes none — so the
+    // members compare as a multiset (an exact list here was pinning SQLite's scan order, which
+    // `mise run test:perturbed` reports).
+    const rows = run(store, "g.V().hasLabel('person').properties().group().by(__.key()).by(__.value().fold())")
+      .map((r: any) => ({ gk: r.gk, gv: bagOf(JSON.parse(r.gv)) }));
+    expect(bagOf(rows)).toEqual(bagOf([
+      { gk: 'age', gv: bagOf([29, 27, 32, 35]) },
+      { gk: 'name', gv: bagOf(['marko', 'vadas', 'josh', 'peter']) },
+    ]));
   });
 
   test("properties() group keys use the VertexProperty's OWN T.id/T.label/by(String), not the owner's", () => {

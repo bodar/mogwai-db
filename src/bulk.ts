@@ -298,10 +298,14 @@ export class BulkLoader {
 
   private assertFree(table: string, column: 'id' | 'uid', values: readonly unknown[], remedy: string): void {
     for (const chunk of bindChunks(values)) {
+      // `MIN` rather than `LIMIT 1`: which colliding id the message NAMES is user-visible, and a
+      // bare LIMIT 1 names whichever the scan reached first — so the same failed load reported a
+      // different id depending on SQLite's scan direction (`mise run test:perturbed`). The lowest
+      // one is stable and is the one a user re-running the load will hit first anyway.
       const clash = this.store.query<{ v: unknown }>(
-        `SELECT ${column} AS v FROM ${table} WHERE ${column} IN (${placeholders(chunk.length)}) LIMIT 1`, chunk)[0];
+        `SELECT MIN(${column}) AS v FROM ${table} WHERE ${column} IN (${placeholders(chunk.length)})`, chunk)[0];
       this.counts.statements++;
-      if (clash !== undefined)
+      if (clash !== undefined && clash.v !== null)
         throw new Error(`bulk load: ${table} ${column} ${JSON.stringify(clash.v)} already exists in this graph — ${remedy}`);
     }
   }

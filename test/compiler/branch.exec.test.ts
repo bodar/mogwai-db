@@ -4,7 +4,7 @@
 import { test, expect, describe } from 'bun:test';
 import { executeQuery } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
-import { run, runWith, seededStore } from '../support/harness.ts';
+import { bagOf, run, runWith, seededStore } from '../support/harness.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -502,8 +502,10 @@ test('a union() SOURCE carries as(), the path, emission order and the sack throu
     .toEqual(['marko', 'marko', 'marko']); // v2's arm never bound "a" → that traverser drops
   // PATH: each rooted arm seeds its own p0; ragged arms pad, so a short arm's path is shorter.
   const paths = run(store, 'g.union(__.V(1).out().out(), __.V().hasLabel("software")).path().by("name")');
-  expect(paths.map((r: any) => [r.x0_v, r.x1_at && r.x1_v, r.x2_at && r.x2_v].filter((x) => x != null)))
-    .toEqual([['marko', 'josh', 'lop'], ['marko', 'josh', 'ripple'], ['lop'], ['ripple']]);
+  // path() is not a positional consumer, so no encounter is demanded and the rows are unordered
+  // by design — what this pins is the RAGGED padding, not a sequence.
+  expect(bagOf(paths.map((r: any) => [r.x0_v, r.x1_at && r.x1_v, r.x2_at && r.x2_v].filter((x) => x != null))))
+    .toEqual(bagOf([['marko', 'josh', 'lop'], ['marko', 'josh', 'ripple'], ['lop'], ['ripple']]));
   // EMISSION ORDER: a positional consumer downstream of the fan-out mints the arm-merge
   // encounter — arm 0 fully before arm 1, so limit() takes arm 0's first rows.
   expect(run(store, 'g.union(__.V(2), __.V(4)).limit(1).values("name")').map((r: any) => r.v)).toEqual(['vadas']);
@@ -541,8 +543,8 @@ test('option-map choose() routes every arm shape, incl. the implicit pass-throug
     .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
   // LIST bodies inside a local() child: the child classifier now admits the option-map form, and
   // the body reaches the same list/variant merges through the ordinary generic lowering.
-  expect(run(store, 'g.V().hasLabel("person").local(__.choose(__.values("age")).option(P.between(26,30), __.values("name").fold()).option(Pick.none, __.values("name").fold()))')
-    .map((r: any) => JSON.parse(r.list))).toEqual([['marko'], ['vadas'], ['josh'], ['peter']]);
+  expect(bagOf(run(store, 'g.V().hasLabel("person").local(__.choose(__.values("age")).option(P.between(26,30), __.values("name").fold()).option(Pick.none, __.values("name").fold()))')
+    .map((r: any) => JSON.parse(r.list)))).toEqual(bagOf([['marko'], ['vadas'], ['josh'], ['peter']]));
 });
 
 });

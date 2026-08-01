@@ -292,13 +292,26 @@ export function lowerElementDedup(st: ElementStream, s: IRStep, order?: IRStep):
   if (!order && !modulators.length) {
     const p = prevRel(st, 'p');
     // dedup yields ONE traverser per distinct id → RESET bulk to 1: a collapsed (v, N) becomes
-    // (v, 1). Its preceding encounter is per-row unique, so carrying it through SELECT DISTINCT
-    // would make every duplicate distinct; the set barrier therefore clears it, matching the
-    // child-scope dedup implementation. At bulk≡1 this is identical to carrying p.bulk.
-    const layout = patchLayout(st.traverserLayout, { encounter: null });
-    const cols = layoutCols(layout).map((c) => c === layout.bulk ? q`1 AS bulk` : q`${p.c[c]}`);
-    const cf = cols.length ? q`, ${list(cols, ', ')}` : q``;
-    return appendCte(st, q`SELECT DISTINCT ${p.c.id} AS id${cf} FROM ${p}`, { encounter: null });
+    // (v, 1). At bulk≡1 this is identical to carrying p.bulk.
+    //
+    // The survivor is the FIRST occurrence, not an arbitrary one: `DedupGlobalStep` keeps the
+    // traverser it saw first, so `order().by('name').dedup()` still emits in name order. A
+    // per-row-unique encounter cannot ride through `SELECT DISTINCT` (every duplicate would stay
+    // distinct), so where one is live this is a GROUP BY with `MIN(encounter)` — the same set
+    // barrier, plus the first-occurrence order the reference keeps. Clearing it instead is what
+    // docs/2026-07-22-review-fix-plan.md A3 chose, and that judgement was wrong: it made
+    // `order().dedup()` order-free, which `mise run test:perturbed` then caught.
+    const enc = st.traverserLayout.encounter;
+    if (!enc) {
+      const layout = st.traverserLayout;
+      const cols = layoutCols(layout).map((c) => c === layout.bulk ? q`1 AS bulk` : q`${p.c[c]}`);
+      const cf = cols.length ? q`, ${list(cols, ', ')}` : q``;
+      return appendCte(st, q`SELECT DISTINCT ${p.c.id} AS id${cf} FROM ${p}`);
+    }
+    const cols = layoutCols(st.traverserLayout).map((c) =>
+      c === enc ? q`MIN(${p.c[c]}) AS ${c}` : c === st.traverserLayout.bulk ? q`1 AS bulk` : q`${p.c[c]}`);
+    const groupBy = [q`${p.c.id}`, ...layoutCols(st.traverserLayout).filter((c) => c !== enc && c !== st.traverserLayout.bulk).map((c) => q`${p.c[c]}`)];
+    return appendCte(st, q`SELECT ${p.c.id} AS id, ${list(cols, ', ')} FROM ${p} GROUP BY ${list(groupBy, ', ')}`);
   }
 
   const p = prevRel(st, 'p');

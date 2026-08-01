@@ -54,3 +54,19 @@ export const bare = (v: any): any =>
   : v && typeof v === 'object' && 't' in v && 'v' in v ? bare(v.v)
   : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, bare(x)]))
   : v;
+
+/**
+ * A result MULTISET, for a traversal whose order nothing determines.
+ *
+ * No `order()` and no positional consumer means the rows come out unordered by design (Crux 4 of
+ * docs/2026-07-19-canonical-emission-order.md: we order only when a consumer asks), so an exact
+ * `toEqual([...])` on such a result pins SQLite's scan choice rather than our semantics — and
+ * `mise run test:perturbed` is the instrument that says so out loud. Sorting by JSON compares rows
+ * of any shape, including arrays of arrays.
+ *
+ * Use it ONLY after checking the traversal really is order-free. When the traversal DOES fix an
+ * order — an `order()`, a slice, a branch's arm order — the exact assertion is the point and a
+ * failure under perturbation is a defect, not fragility.
+ */
+export const bagOf = <T>(xs: readonly T[]): T[] =>
+  [...xs].sort((a, b) => (JSON.stringify(a) < JSON.stringify(b) ? -1 : 1));

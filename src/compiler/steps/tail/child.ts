@@ -1058,13 +1058,18 @@ function compileElementChildRows(
       continue;
     }
     if (step.name === 'dedup') {
-      // A preceding order() mints a per-row-unique encounter into carried; keeping it in the
-      // DISTINCT projection would defeat the collapse (every row stays distinct). dedup()
-      // re-establishes set semantics and legitimately discards the prior emission order, so
-      // drop encounter here — a following slice then falls back to ORDER BY id (the ternary
-      // below already handles the cleared case).
-      const deduped = patchLayout(end.traverserLayout, { encounter: null });
-      end = appendCte(end, q`SELECT DISTINCT ${p.c.id} AS id${layoutProjection(deduped, p)} FROM ${p}`, { encounter: null });
+      // The child-scope twin of the root dedup (prefix/filter.ts), and the same reference rule:
+      // the survivor is the FIRST occurrence, so an ordered body keeps its order through the
+      // collapse. A per-row-unique encounter cannot ride through DISTINCT, so where one is live
+      // this is a GROUP BY with MIN(encounter); with none it stays the plain DISTINCT.
+      const enc = end.traverserLayout.encounter;
+      if (!enc) {
+        end = appendCte(end, q`SELECT DISTINCT ${p.c.id} AS id${layoutProjection(end.traverserLayout, p)} FROM ${p}`);
+        continue;
+      }
+      const cols = layoutCols(end.traverserLayout).map((c) => c === enc ? q`MIN(${p.c[c]}) AS ${c}` : q`${p.c[c]}`);
+      const groupBy = [q`${p.c.id}`, ...layoutCols(end.traverserLayout).filter((c) => c !== enc).map((c) => q`${p.c[c]}`)];
+      end = appendCte(end, q`SELECT ${p.c.id} AS id, ${list(cols, ', ')} FROM ${p} GROUP BY ${list(groupBy, ', ')}`);
       continue;
     }
     const slice = sliceOf(step);

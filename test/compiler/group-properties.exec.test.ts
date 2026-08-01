@@ -6,7 +6,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
-import { run, seededStore } from '../support/harness.ts';
+import { bagOf, run, seededStore } from '../support/harness.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -118,8 +118,10 @@ test('groupCount().by(label) counts per label', () => {
   expect(degree).toEqual({ 0: 3, 1: 1, 2: 1, 3: 1 });
   expect(run(store, 'g.V(1).union(__.identity(),__.identity()).groupCount().by(__.out().count())'))
     .toEqual([{ gk: 3, gv: 2 }]);
+  // The GROUPS are sorted by key here; the MEMBERS of a group follow the emission order of the
+  // group's inputs, which a bare `g.V()` does not fix — so the member list is a multiset too.
   const firstOut = run(store, 'g.V().group().by(__.out().values("name")).by("name")')
-    .map((r) => [r.gk, JSON.parse(r.gv)]).sort((a, b) => a[0].localeCompare(b[0]));
+    .map((r) => [r.gk, bagOf(JSON.parse(r.gv))]).sort((a, b) => (a[0] as string).localeCompare(b[0] as string));
   expect(firstOut).toEqual([
     ['lop', ['josh', 'peter']], ['vadas', ['marko']],
   ]);
@@ -309,9 +311,15 @@ describe('a valueMap() child body', () => {
       .map((v: any) => (v instanceof Map ? (Object.values(Object.fromEntries(v))[0] as any[])?.[0] : v));
     expect(await raw('g.V(1).local(__.out().valueMap("name"))'))
       .toEqual(await raw('g.V(1).local(__.out().values("name"))'));
-    // …and both differ from the root order, which is the gap itself.
-    expect(await raw('g.V(1).local(__.out().values("name"))'))
-      .not.toEqual(await raw('g.V(1).out().values("name")'));
+    // The second half of this test used to assert that both DIFFER from the root form, as the gap
+    // itself. Measured 2026-08-01 and replaced: neither side's order is determined there (no
+    // order(), no positional consumer, so per Crux 4 the rows are unordered by design), which made
+    // it a pin on SQLite's scan choice — it fails under `mise run test:perturbed` when the two
+    // arbitrary orders happen to coincide. Where the order IS observable, the child and root forms
+    // AGREE, and that is worth pinning instead.
+    const sliced = async (g: string) => (await raw(g)).slice(0, 2);
+    expect(await sliced('g.V(1).local(__.out().values("name")).limit(2)'))
+      .toEqual(await sliced('g.V(1).out().values("name").limit(2)'));
   });
 
   test('there is ONE blob encoding: typed key, BARE value array', () => {

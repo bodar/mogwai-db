@@ -69,9 +69,15 @@ export const vertexLabelName = (nodeIdExpr: Expression): Expression =>
 
 /** ALL of a vertex's labels as a JSON array of names, ordered like `vertexLabelName`'s pick so the
  *  two agree on which label comes first. The multi-label rendering of `T.label` in
- *  elementMap()/valueMap(true); it is a scalar subquery, so it still never multiplies the row. */
+ *  elementMap()/valueMap(true); it is a scalar subquery, so it still never multiplies the row.
+ *
+ *  The `ORDER BY` sits INSIDE `json_group_array`, and that is the whole of the ordering: a relation's
+ *  own ORDER BY does not survive into an enclosing aggregate (the rule `jsonbGroupArray` states),
+ *  so the outer form collected labels in scan order while `vertexLabelName` picked by label id —
+ *  and the two disagreed on which label came first exactly when the scan disagreed with the id
+ *  order. `mise run test:perturbed` is what surfaced it. */
 export const vertexLabelNames = (nodeIdExpr: Expression): Expression =>
-  q`(SELECT json_group_array(${labels.c.name}) FROM ${vertexLabels} JOIN ${labels} ON ${labels.c.id}=${vertexLabels.c.label} WHERE ${vertexLabels.c.node}=${nodeIdExpr} ORDER BY ${vertexLabels.c.label})`;
+  q`(SELECT json_group_array(${labels.c.name} ORDER BY ${vertexLabels.c.label}) FROM ${vertexLabels} JOIN ${labels} ON ${labels.c.id}=${vertexLabels.c.label} WHERE ${vertexLabels.c.node}=${nodeIdExpr})`;
 
 /** `vertexLabelNames` made TOTAL: a vertex with no labels at all (LabelCardinality.ZERO_OR_MORE)
  *  has no `vertex_labels` rows, and `json_group_array` over no rows is NULL, not `[]`. */

@@ -34,7 +34,7 @@
 // keep the line visible rather than to bless a direction.
 import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
-import { run, seededStore } from '../support/harness.ts';
+import { bagOf, run, seededStore } from '../support/harness.ts';
 
 const store = seededStore();
 const vals = (q: string) => (run(store, q) as any[]).map((r) => r.v ?? r.id);
@@ -42,9 +42,11 @@ const vals = (q: string) => (run(store, q) as any[]).map((r) => r.v ?? r.id);
 describe('the repeat() unroll boundary', () => {
   test("the bodies RepeatUnrollStrategy admits — movement and has() — already compile", () => {
     // ALLOWED_STEP_CLASSES exactly: a vertex step, an edge-vertex step, and has().
-    expect(vals('g.V(1).repeat(__.out()).times(2)')).toEqual([3, 5]);
-    expect(vals('g.V(1).repeat(__.outE().inV()).times(2)')).toEqual([3, 5]);
-    expect(vals("g.V(1).repeat(__.out().has('name')).times(2)")).toEqual([3, 5]);
+    // repeat() is deliberately outside the emission-order substrate (analyze.ts returns false for
+    // it), so these are multisets.
+    expect(bagOf(vals('g.V(1).repeat(__.out()).times(2)'))).toEqual([3, 5]);
+    expect(bagOf(vals('g.V(1).repeat(__.outE().inV()).times(2)'))).toEqual([3, 5]);
+    expect(bagOf(vals("g.V(1).repeat(__.out().has('name')).times(2)"))).toEqual([3, 5]);
     // …so unrolling them would buy nothing. Every traversal item 3 counts is a BARRIER body, which is
     // the set the reference strategy refuses — that gap is the item, and it is not a free rewrite.
   });

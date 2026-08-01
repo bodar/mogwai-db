@@ -4,7 +4,7 @@
 import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
-import { read, run, seededStore } from '../support/harness.ts';
+import { bagOf, read, run, seededStore } from '../support/harness.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -59,7 +59,9 @@ test('multi-label select yields the paired elements per traverser', () => {
   expect(lists.map((r) => JSON.parse(r.e0_list))).toEqual([
     ['vadas', 'lop', 'josh'], ['vadas', 'lop', 'josh'],
   ]);
-  expect(lists.map((r) => JSON.parse(r.e1_list))).toEqual([[], ['lop', 'ripple']]);
+  // Two record rows with no order() and no slice — which row is which is not determined, so the
+  // assertion is over the pair.
+  expect(bagOf(lists.map((r) => JSON.parse(r.e1_list)))).toEqual(bagOf([[], ['lop', 'ripple']]));
 });
 
 test('project builds columns from the current traverser', () => {
@@ -109,7 +111,7 @@ test('RecordStream fields compose back into ordinary streams', () => {
   const store = seededStore();
   expect(run(store, 'g.V().hasLabel("person").project("n","a").by("name").by("age").select("a").is(P.gt(30)).count()').map((r) => r.v))
     .toEqual([2]);
-  expect(run(store, 'g.V(1).as("a").out("knows").as("b").select("a","b").select("b").out("created").values("name")').map((r) => r.v))
+  expect(bagOf(run(store, 'g.V(1).as("a").out("knows").as("b").select("a","b").select("b").out("created").values("name")').map((r) => r.v)))
     .toEqual(['lop', 'ripple']);
   expect(run(store, 'g.V().hasLabel("person").project("n","a").by("name").by("age").select(Column.values).unfold().count()').map((r) => r.v))
     .toEqual([8]);
@@ -233,7 +235,7 @@ test('match() reduces PER BINDING, agreeing with the per-parent child route', ()
     expect(vals(m)).toEqual(vals(ref));
   }
   // Only marko knows anyone, so a GLOBAL count would collapse this to a single row of 2.
-  expect(vals('g.V().match(__.as("a").out("knows").count().as("b")).select("b")')).toEqual([2, 0, 0, 0, 0, 0]);
+  expect(bagOf(vals('g.V().match(__.as("a").out("knows").count().as("b")).select("b")'))).toEqual([0, 0, 0, 0, 0, 2]);
 });
 
 test('match() deferrals fail closed', () => {

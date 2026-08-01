@@ -8,7 +8,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
 import { rawVertex } from '../support/graph.ts';
-import { bare, read, run, runWith, seededStore } from '../support/harness.ts';
+import { bagOf, bare, read, run, runWith, seededStore } from '../support/harness.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -371,7 +371,9 @@ describe('unified lowering characterization', () => {
     const lists = run(seededStore(), 'g.V(1).local(__.out().fold())').map((r) => JSON.parse(r.list));
     expect(lists).toHaveLength(1);
     expect(lists[0].map((v: any) => v.id)).toEqual([2, 3, 4]);
-    expect(run(seededStore(), 'g.V().where(__.out().order().by("name").limit(1)).values("name")').map((r) => r.v))
+    // The order() is inside where(), which is a FILTER — it decides which vertices survive, not
+    // what order the survivors leave in, and nothing downstream asks for one. Multiset.
+    expect(bagOf(run(seededStore(), 'g.V().where(__.out().order().by("name").limit(1)).values("name")').map((r) => r.v)))
       .toEqual(['josh', 'marko', 'peter']);
   });
 
@@ -593,7 +595,9 @@ test('dedup() after order() in a child still collapses duplicates', () => {
   // out().in() from marko revisits marko 3× (via lop/josh/vadas co-authors). order() before
   // dedup() must not defeat the collapse — the minted encounter is per-row unique, so a
   // naive SELECT DISTINCT that carried it would never dedup.
-  expect(run(store, 'g.V(1).local(__.out().in().dedup()).values("name")').map((r) => r.v))
+  // No order() in this one, so the collapse is all that is asserted — multiset. Its ordered twin
+  // below IS order-asserting, and holds: dedup keeps the first occurrence.
+  expect(bagOf(run(store, 'g.V(1).local(__.out().in().dedup()).values("name")').map((r) => r.v)))
     .toEqual(['josh', 'marko', 'peter']);
   expect(run(store, 'g.V(1).local(__.out().in().order().by("name").dedup()).values("name")').map((r) => r.v))
     .toEqual(['josh', 'marko', 'peter']);

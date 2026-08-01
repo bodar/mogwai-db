@@ -7,7 +7,7 @@ import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decode, decodeAll } from '../support/decode.ts';
 import { rawVertex } from '../support/graph.ts';
-import { run, seededStore } from '../support/harness.ts';
+import { bagOf, run, seededStore } from '../support/harness.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -113,7 +113,9 @@ test('path() emits the ordered walk (one Path per distinct route)', () => {
   const store = seededStore();
   // marko(1)→josh(4)→{lop(3),ripple(5)} — two length-3 paths, in traversal order.
   const paths = run(store, 'g.V(1).out().out().path()').map((r) => [r.x0_id, r.x1_id, r.x2_id]);
-  expect(paths).toEqual([[1, 4, 3], [1, 4, 5]]);
+  // Two distinct routes and nothing asking for an order between them: the assertion is the SET of
+  // walks, which is what "one Path per distinct route" means.
+  expect(bagOf(paths)).toEqual(bagOf([[1, 4, 3], [1, 4, 5]]));
 });
 
 test('simplePath() drops repeated-vertex walks; cyclicPath() keeps only them', () => {
@@ -129,7 +131,7 @@ test('path().by(key) projects each element; a missing key drops the whole path',
   const store = seededStore();
   // marko(age29)→{vadas27,josh32, lop(no age)}: lop path drops (non-productive by).
   const rows = run(store, 'g.V(1).out().path().by("age")').map((r) => [r.x0_v, r.x1_v]);
-  expect(rows).toEqual([[29, 27], [29, 32]]); // three out-neighbours, only two survive
+  expect(bagOf(rows)).toEqual(bagOf([[29, 27], [29, 32]])); // three out-neighbours, only two survive
 });
 
 test('the SAME path().by() answers identically in both regimes (one position projector)', () => {
@@ -149,7 +151,7 @@ test('the SAME path().by() answers identically in both regimes (one position pro
     .toEqual(['marko', 'josh', 'lop', 'marko', 'josh', 'ripple']);
   // …and the LINEAR regime is byte-for-byte unaffected, including an EDGE position (which
   // reads its label/id off the joined edges table, not nodes).
-  expect(linear('g.V(1).out().path().by(T.id)')).toEqual([[1, 2, undefined], [1, 4, undefined], [1, 3, undefined]]);
+  expect(bagOf(linear('g.V(1).out().path().by(T.id)'))).toEqual(bagOf([[1, 2, undefined], [1, 4, undefined], [1, 3, undefined]]));
   expect(linear('g.V(1).outE("created").inV().path().by(T.label)')).toEqual([['person', 'created', 'software']]);
 });
 
