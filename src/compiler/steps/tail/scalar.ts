@@ -4,7 +4,7 @@ import { compareKey, limitOffset, predicateSql, scalarTx, TYPE_PER_ROW, TYPE_STA
 import { isNested, isOperatorArg, isOrderArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { isLocalScope, REDUCERS, sliceOf } from '../../ir/step.ts';
-import { layoutProjection, layoutProjectionMinting, layoutCols, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
+import { branchFork, layoutProjection, layoutProjectionMinting, layoutCols, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
 import { loweringStateOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec, SCALAR_TRANSFORMS } from './coerce.ts';
 import { perRowColumnOf, perRowCols, STATIC, staticTypeOf, UNKNOWN, type ScalarType, type ValueType } from '../../../sql/kernel/render.ts';
@@ -529,11 +529,15 @@ export function unionScalarStreams(base: LoweringState, arms: readonly ScalarStr
   // never bound the label) instead of a flat layoutProjection of the base's.
   // `rigid: 'rehomed'`, like its list/variant siblings: a scalar arm is compiled over a pushed
   // child scope, so its ordinal stack is not the base's and the rigid-role comparison is false.
-  const mergedLayout = mergeLayouts(base.traverserLayout, arms.map((a) => a.traverserLayout), { rigid: 'rehomed' });
+  // The arms forked from the branch's seed, which carries one more frozen input order than `base`
+  // when the branch froze one (freezeBranchOrder) — project THAT schema, or the column the merge
+  // sorts by never reaches the merged relation. `mergeArmRelation` consumes and pops it.
+  const { fork } = branchFork(base.traverserLayout, arms[0].traverserLayout);
+  const mergedLayout = mergeLayouts(fork, arms.map((a) => a.traverserLayout), { rigid: 'rehomed' });
   const mergedAliases = mergedLayout.aliases;
-  const armsGrewAlias = layoutGrewAliases(base.traverserLayout, mergedLayout);
+  const armsGrewAlias = layoutGrewAliases(fork, mergedLayout);
   // Forward the base carried EXCEPT any prior encounter — the merge supersedes it.
-  const out = patchLayout(base.traverserLayout, { encounter: null, aliases: mergedAliases });
+  const out = patchLayout(fork, { encounter: null, aliases: mergedAliases });
   // The merged relation projects only `v` (+ `vt`), so a per-row type column cannot cross the
   // union: this payload list is also why an arm carrying one degrades to `unknown` below.
   const payload = ['v', ...(numeric ? ['vt'] : [])];

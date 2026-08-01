@@ -13,7 +13,7 @@ import { q, list, empty, type Expression, type Relation } from '../../../sql/ker
 import { type ValueType } from '../../../sql/kernel/render.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { continueLowering, variantPayloadCols, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
-import { layoutProjection, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, type LoweringState } from '../context/context.ts';
+import { branchFork, layoutProjection, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, type LoweringState, type TraverserLayout } from '../context/context.ts';
 import { globalRowOps, lowerGlobalCount } from './barrier.ts';
 
 // ---------- variant-arm merge builders (parent-agnostic; element- and scalar-parent share) ----------
@@ -67,12 +67,15 @@ export function finishListMerge(
   // `rigid: 'rehomed'` and not 'peer': these arms are child-scoped and tryCompileListChild has
   // already re-homed them onto the parent, so the rigid-role comparison is false here (a child
   // scope pushed an ordinal the base lacks) — asserting it breaks coalesce outright.
-  const merged = mergeLayouts(base.traverserLayout, arms.map((a) => a.traverserLayout), { rigid: 'rehomed' });
-  const grew = layoutGrewAliases(base.traverserLayout, merged);
+  // See unionScalarStreams: the arms' schema is the branch's fork point, which carries the frozen
+  // input order when this branch froze one; mergeArmRelation consumes it.
+  const { fork } = branchFork(base.traverserLayout, arms[0].traverserLayout);
+  const merged = mergeLayouts(fork, arms.map((a) => a.traverserLayout), { rigid: 'rehomed' });
+  const grew = layoutGrewAliases(fork, merged);
   // Keep the SEED's entries when the merge added no column: a rebuilt entry re-derives binds/
   // shapes/scalarType from the arms, which is right for a label an arm introduced and wrong for
   // one the seed already owned.
-  const out = patchLayout(grew ? merged : base.traverserLayout, mint ? { encounter: null } : {});
+  const out = patchLayout(grew ? merged : fork, mint ? { encounter: null } : {});
   const parts = arms.map((arm, k) => {
     const a = arm.rel.as('a');
     const tag = mint
@@ -126,10 +129,14 @@ const variantArmPayload = (arm: VariantArm, a: Relation, hasList: boolean): Expr
  *  Unlike its scalar/list siblings the arms do NOT grow the label set here: a mixed-shape merge is
  *  reached only from the branch triage, which classifies each arm's shape and has no route for an
  *  arm-minted alias column, so the base's carried schema rides through unchanged. */
-export function mergeVariantArms(base: LoweringState, arms: readonly VariantArm[], meta: VariantArms, gateFor?: (a: Relation, k: number) => Expression | undefined): VariantStream {
+export function mergeVariantArms(base: LoweringState, arms: readonly VariantArm[], meta: VariantArms, gateFor?: (a: Relation, k: number) => Expression | undefined, fork?: TraverserLayout): VariantStream {
   const hasList = !!meta.listOf;
   const enc = base.traverserLayout.encounter;
-  const out = patchLayout(base.traverserLayout, enc ? { encounter: null } : {});
+  // A `VariantArm` is a bare (rel, vk) pair with no layout of its own, so unlike the scalar and
+  // list merges this one cannot DERIVE the branch's fork point from its arms — the caller that
+  // froze an input order hands it in. Everything downstream is the same: `out` declares it, the
+  // arms project it, `mergeArmRelation` sorts by it and pops it.
+  const out = patchLayout(fork ?? base.traverserLayout, enc ? { encounter: null } : {});
   const parts = arms.map((arm, k) => {
     const a = arm.rel.as('a');
     const cols = variantArmPayload(arm, a, hasList);
@@ -137,7 +144,7 @@ export function mergeVariantArms(base: LoweringState, arms: readonly VariantArm[
     const gate = gateFor?.(a, k);
     return q`SELECT ${list(cols, ', ')}${layoutProjection(out, a)} FROM ${a}${gate ? q` WHERE ${gate}` : empty}`;
   });
-  return mergeVariantParts(base, parts, meta);
+  return mergeVariantParts(base, parts, meta, fork);
 }
 
 /** The merge CORE, over per-arm SELECTs already built by the caller: a plain UNION ALL when
@@ -147,10 +154,10 @@ export function mergeVariantArms(base: LoweringState, arms: readonly VariantArm[
  *  pushed DOMAIN — reuses the identical mint rather than hand-rolling a second copy. When the
  *  encounter is live, every `part` MUST carry trailing `arm_idx, arm_encounter` columns (the
  *  no-encounter form must not); a mismatch trips assertStreamColumns immediately. */
-export function mergeVariantParts(base: LoweringState, parts: readonly Expression[], meta: VariantArms): VariantStream {
+export function mergeVariantParts(base: LoweringState, parts: readonly Expression[], meta: VariantArms, fork?: TraverserLayout): VariantStream {
   const hasList = !!meta.listOf;
   const mint = !!base.traverserLayout.encounter;
-  const out = patchLayout(base.traverserLayout, mint ? { encounter: null } : {});
+  const out = patchLayout(fork ?? base.traverserLayout, mint ? { encounter: null } : {});
   const armMerge = mergeArmRelation(base, out, variantPayloadCols(hasList), parts, mint);
   return toVariantStream(stateWithLayout(base, armMerge.traverserLayout), armMerge.rel, meta);
 }

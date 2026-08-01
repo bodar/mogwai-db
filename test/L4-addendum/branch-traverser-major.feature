@@ -98,3 +98,80 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | result |
       | ripple |
       | lop |
+
+  @gap:branch-traverser-major
+  Scenario: g_V_hasLabelXpersonX_order_byXnameX_unionXvaluesXnameX_valuesXageXX_limitX3X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").order().by("name").union(__.values("name"), __.values("age")).limit(3)
+      """
+    # The SCALAR merge takes the same key. Input order josh, marko, peter, vadas; each traverser
+    # emits its name then its age, so the first three are josh's two plus marko's name. Arm-major
+    # returns every name first — [josh, marko, peter].
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | josh |
+      | d[32].i |
+      | marko |
+
+  @gap:branch-traverser-major
+  Scenario: g_V_hasLabelXpersonX_order_byXnameX_chooseXhasXname_markoX_valuesXnameX_valuesXageXX_limitX1X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").order().by("name").choose(__.has("name","marko"), __.values("name"), __.values("age")).limit(1)
+      """
+    # One row, and which row it is IS the divergence: josh comes first and takes the else-arm, so
+    # the answer is its age. Arm-major puts the then-arm first and answers "marko".
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[32].i |
+
+  @gap:branch-traverser-major
+  Scenario: g_V_hasLabelXpersonX_order_byXnameX_unionXvaluesXnameX_foldX_valuesXageX_foldX_limitX2X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").order().by("name").union(__.values("name").fold(), __.values("age").fold()).limit(2)
+      """
+    # The LIST merge. Each arm folds per traverser (a scoped fold, not a batched barrier), so josh
+    # contributes [josh] then [32] before marko's pair.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | l[josh] |
+      | l[d[32].i] |
+
+  @gap:branch-traverser-major
+  Scenario: g_V_hasLabelXpersonX_order_byXnameX_unionXvaluesXnameX_valuesXageX_foldX_limitX2X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").order().by("name").union(__.values("name"), __.values("age").fold()).limit(2)
+      """
+    # The MIXED-SHAPE (variant) merge, whose arms carry no layout of their own — the fork is handed
+    # to it explicitly. Same answer shape: josh's scalar then josh's list.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | josh |
+      | l[d[32].i] |
+
+  @gap:branch-traverser-major
+  Scenario: g_V_hasLabelXpersonX_order_byXnameX_unionXoutXcountX_valuesXageXX_limitX2X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").order().by("name").union(__.out().count(), __.values("age")).limit(2)
+      """
+    # The COMPLEMENT, and the reason the gate is not "always freeze": arm 0 holds a batched barrier,
+    # so `hasBarrier` is set and the reference runs BOTH arms over the whole input — arm-major is
+    # then its own answer. One count of all six out-edges, then the ages in input order.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+      | d[32].i |

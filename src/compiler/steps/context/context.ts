@@ -527,8 +527,13 @@ export function mergeArmRelation(
   const body = list(parts, ' UNION ALL ');
   if (!mint) return { rel: base.q.cte(body, [...payload, ...layoutCols(out)]), traverserLayout: out };
   const m = base.q.cte(body, [...payload, 'arm_idx', 'arm_encounter', ...layoutCols(out)]).as('m');
-  const merged = patchLayout(out, { encounter: 'encounter' });
-  const over = partitionOver(out, m, q`${m.c.arm_idx}, ${m.c.arm_encounter}`);
+  // The frozen input order (when this branch pushed one) LEADS the key — traverser-major,
+  // arm-minor, which is what the reference emits unless the branch batched — and is consumed here,
+  // so the merged schema pops back to the enclosing stack.
+  const branchOrder = out.branchOrders.length > base.traverserLayout.branchOrders.length ? out.branchOrders[out.branchOrders.length - 1] : undefined;
+  const merged = patchLayout(out, { encounter: 'encounter', branchOrders: base.traverserLayout.branchOrders });
+  const armKey = q`${m.c.arm_idx}, ${m.c.arm_encounter}`;
+  const over = partitionOver(out, m, branchOrder ? q`${m.c[branchOrder]}, ${armKey}` : armKey);
   const projected = list(payload.map((c) => q`${m.c[c]} AS ${c}`), ', ');
   return {
     rel: base.q.cte(
@@ -684,6 +689,26 @@ export function patchLayout(c: TraverserLayout, o: LayoutPatch): TraverserLayout
  *  what is new is that the declaration says so instead of claiming a column the relation lacks. */
 export const layoutOverAliases = (c: TraverserLayout, aliases: AliasMap): TraverserLayout =>
   ({ aliases, origins: [], branchOrders: [], trackFromV: c.trackFromV, consumedAliases: c.consumedAliases });
+
+/**
+ * The fork point as the ARMS see it, plus the frozen input order this merge owes its sort key —
+ * both DERIVED from the arms rather than threaded down from the branch that froze it.
+ *
+ * `base` is the state before the branch; `arm` is any arm's finished layout. An arm carries exactly
+ * one more branch order than `base` when this branch called `freezeBranchOrder`, and never more than
+ * one: a nested branch inside the arm pushes its own and its own merge pops it again, so an arm's
+ * END layout is always back at the fork's stack.
+ *
+ * Derived because the alternative is the same argument threaded through four merge families and
+ * their ~18 call sites, every one of which would be a place to forget it. The two questions a merge
+ * asks — "what schema did the arms fork from" and "is there an input order to lead with" — have one
+ * answer each, and the arms already carry it.
+ */
+export function branchFork(base: TraverserLayout, arm: TraverserLayout): { fork: TraverserLayout; branchOrder?: string } {
+  const bos = arm.branchOrders;
+  if (bos.length <= base.branchOrders.length) return { fork: base };
+  return { fork: patchLayout(base, { branchOrders: bos }), branchOrder: bos[bos.length - 1] };
+}
 
 /** The carried schema of a traverser that carries NOTHING — a root seed (`V()`/`E()`/`inject()`),
  *  a correlated sub-render with no labels in scope, a service's own row source. Eleven sites spelled
