@@ -10,7 +10,8 @@ UNIQUE names than that — the collision is expected, see won't-do) · census **
 `known.ts` **1 entry** — repeat's two body routes disagree on a positional window, found by the
 `repeatBodyExpansion` switch on its first sweep ·
 `capability-baseline.ts` **1 entry** (was 2; the stale one is deleted, and the ratchet can now
-tell a FIXED entry from an undrawn one).
+tell a FIXED entry from an undrawn one) · L5 `L5-random` plus fixed seeds 5/11/27/91/143 at
+`L5_RUNS=3000`: **36 pass / 0 fail on every run** (35).
 
 Item numbers are stable IDs; landed items are DELETED and their numbers not reused, because code
 cites them. **A deletion must sweep its citations** — item 0 was deleted with four left standing, and
@@ -23,10 +24,8 @@ that sweep (`ir/step.ts`, the vocabulary test, the L5 README + design doc) was i
 **Two instrument facts that shaped this refresh.** (1) The L3 telemetry's deferral buckets only rank
 traversals that THREW — they are blind to a scenario that failed because we returned rows where the
 spec demands an error. Read `scenarios[].firstFailingStep` too; that blind spot hid 60 scenarios
-(item 22). (2) **L5 found nothing**: `L5-random` plus five fixed seeds (5/11/27/91/143 at
-`L5_RUNS=3000`) were 35 pass / 0 fail every run. The generated oracles are saturated at the current
-generator depth — the lattice covers 54 of the corpus's 131 step names — so **growing the generator
-now beats running it**.
+(item 22). (2) **L5 found nothing** across six runs — the generated oracles are saturated at the
+current generator depth, so **growing the generator now beats running it** (item 35).
 
 **Ordering — floor vs ceiling.** L3 is the floor; the ceiling is generic lowering that composes the
 full nested grammar at any depth (`src/compiler/steps/CLAUDE.md`). P1 raises the ceiling — each item
@@ -36,7 +35,8 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-**Ranked entry point.** Numbers are IDs, not an order. **2** → **29** → **3**'s
+**Ranked entry point.** Numbers are IDs, not an order. **32** (a live crash) → **2** → **17**'s
+partitioned row-ops seam → **33** → **34** → **29** → **3**'s
 `times(n)` unroll. **28** landed and was 3's stated precondition, so the unroll is unblocked;
 **17**'s cheap half landed and its remainder is the architectural current-object-aggregate
 authority, a bigger question than its neighbours. (Item **30** headed this list and is now DELETED —
@@ -83,10 +83,29 @@ instruments that keep the class from returning: `mise run binds` statically, and
 `mise run test:cf-limits` at runtime (green, and green BEFORE the fixes — the suite never reaches the
 cardinality, which is the measurement that says the ladder could not have found this).
 
+32. **A multi-arm SCALAR `union()` in a child scope, followed by a reducer, emits MALFORMED SQL — a
+   fail-closed VIOLATION.** `g.V().local(__.union(__.values('name'), __.values('age')).count())` →
+   `near "FROM": syntax error`; same for `.sum()`/`.max()`, and `where(…)`/`filter(…)` hosting it give
+   `near "=":`. ONE arm defers cleanly and an element-armed union runs, so the trigger is ≥2 SCALAR arms.
+   Re-probed against trunk 2026-08-01 (after T4 and the ordinal/encounter pair landed): still reproduces.
+   **Mechanism, off the emitted SQL:** `unionScalarStreams` (`tail/scalar.ts`) merges arms with
+   `mergeLayouts(…, {rigid:'rehomed'})`, dropping the branch's child ordinal `o1`; the following
+   `count()` then sees no `origins` and takes `lowerGlobalCount` instead of `lowerScopedScalarReducer`,
+   so the `local()` rejoin projects the parent ordinal off a global relation and `rel.c.o0` splices
+   empty: `SELECT r.v AS v,  FROM c8 r`. Architectural — the wrong thing is the scoped-vs-global reducer
+   ROUTING; adjacent to the `layoutArmProjection` substrate the branch work built.
+   **Invisible to every instrument:** absent from both L5 ratchets, and its two corpus witnesses
+   (`deferrals.tsv`) are `unbound` so they never execute. `assertStreamColumns` cannot see it — the
+   merged stream is self-consistent and the mismatch is child-frame-ordinal vs merged layout, which
+   nothing asserts. **That missing assertion is the reusable half of the fix. High.**
+
 22. **Validation the spec MANDATES and we do not perform — the write family and the arity family
-   LANDED; 7 scenarios are left and they need a RUNTIME type channel we do not have.** 60 L3
-   scenarios fail AT the error-assertion step because we returned a result where a throw is
-   required. The 24 write ones went in one change (2026-07-31, L3 1623 → 1647):
+   LANDED; 7 scenarios are left and they need a RUNTIME type channel we do not have.** Re-measured
+   2026-08-01: of the 22 L3 scenarios failing AT an error-assertion step, **7 mis-execute and 15 only
+   differ in WORDING** (→ 23). The split is not in the deferral buckets — those rank only traversals
+   that THREW — so read `scenarios[].firstFailingStep` and `errorMessage`; the recipe is *"`expected …
+   to be an instance of Error`" ⇒ mis-execute, anything else ⇒ wording*.
+   The 24 write ones went in one change (2026-07-31, L3 1623 → 1647):
    `steps/write/validate.ts` holds TinkerPop's `ElementHelper` identifier rules and is reached from
    the four storage waists; a `MergeRole` on `MergeSpec` lets one check cover all three maps;
    `validateNoOverrides` runs statically AND in the create branch. The `groupCount()` pair went with
@@ -129,7 +148,9 @@ cardinality, which is the measurement that says the ladder could not have found 
    `group().by(project(…))` composite keys; the MANY-valued child-in-child
    (`local(__.local(__.out().values('n')))`) — deliberately excluded above, since admitting it would
    change the classifier's cardinality contract, so it needs an all-cardinality child-in-child route
-   rather than a wider producer; and the only-`Pick.none` option-map deferral above.
+   rather than a wider producer; and the only-`Pick.none` option-map deferral above. Also **36 of 17's
+   41 child-scope matrix gaps**, which are the `ChildShape` decline; `local()` is still the
+   third-largest L3 deferral bucket at 10.
    Start `steps/tail/{child-shape,child,scalar-arm}.ts`. **Three invariants:** the ONE arm triage is
    `classifyBranchArms` (two documented exceptions); a renderer that cannot carry alias columns must
    DECLINE, not answer; and a `first`-cardinality consumer may skip the encounter ranking only on a
@@ -138,26 +159,27 @@ cardinality, which is the measurement that says the ladder could not have found 
    → [carried-schema-and-projection-reentry](./2026-07-14-carried-schema-and-projection-reentry-plan.md),
    [group-value-generic-seam](./2026-07-18-group-value-generic-seam-plan.md)
 
-17. **Share the row-ops — `tail`+`sample` LANDED 2026-07-31; what is left is the ARCHITECTURAL 42.**
-   `reprojectRows` + `globalRowOps()` (`tail/barrier.ts`) took the slice/dedup family from 17/50 gaps to
-   4/50; `tail`+`sample` were the cheap 19 and went in as one entry each — `tail` is `limit` read from
-   the far end (`RowOpts.descending`), `sample` is `ORDER BY RANDOM() LIMIT n`, exact for the unweighted
-   case because `SampleGlobalStep`'s weights come from a `by()` and with none every weight is 1. The
-   element prefix got its own pair, since an element stream is not dispatched through
-   `dispatchShapeTail`. L3 1648 → 1650.
-   **A third reason to seed an emission encounter came out of it**, now in `analyze.ts` beside the other
-   two: `tail` needs one with NO fan-out upstream, because `ORDER BY <encounter> DESC LIMIT n` IS its
-   implementation, where `limit(n)` can free-ride on SQLite's forward scan.
-   **The remaining 63, and only the middle two are ordinary work:** 42 current-object aggregates
-   (ARCHITECTURAL — they need an "expression denoting the traverser's value" authority), 7 `order`,
-   6 `is` (mechanical), 5 `unfold` (correctly per-shape forever). **The 42 are the item now**, and they
-   are not a matrix-fill.
+17. **Share the row-ops — the GLOBAL half landed; the PARTITIONED (per-origin) twin has no seam at
+   all.** `reprojectRows` + `globalRowOps()` (`tail/barrier.ts`) are spread into 5 of 11 dispatch tables.
+   Their per-origin twin is **five private scalar-only functions** — `partitionedSlice`,
+   `partitionedTail`, `rootTail`, `partitionedOrder`, `partitionedDedup` (`tail/scalar.ts`) — consumed by
+   the 100-line if-chain `lowerScalarRows`, the one tail never transposed to a dispatch Map. All five
+   share ONE skeleton: rank with `ROW_NUMBER() OVER (PARTITION BY origins ORDER BY <key>)`, filter on
+   `rn`, rebuild, differing only in the order key and the `rn` predicate. **Four are a mechanical lift**
+   onto authorities `reprojectRows` already uses (`streamPayloadCols`/`streamColumns`, `withRelation`);
+   **`partitionedDedup` alone is architectural** — `PARTITION BY …, p.c.v` needs an expression denoting
+   the traverser's VALUE, the same missing authority as the 42 aggregates below and as `Scope.local` in
+   Internal debt.
+   **Measured child-scope matrix** (7 body shapes × 9 row ops, hosts `local()` and `map()`, identical):
+   **41 gaps / 63** — but 36 are the single `ChildShape` decline (→ 2), not the op, so the seam is what
+   unblocks every child-scope slice on list/record/variant/property/path.
    **The trap that cost 42 corpus traversals, still live:** a shape table is a Map where the LAST
    duplicate key wins and `dispatchShapeTail` consults ONE handler per name, so spreading a shared op
    into a table that already owns that name REPLACES the incumbent — and a handler that "declines" falls
-   to the FALLBACK THROW rather than through. Compose with `firstOf`. `lowerScalarRows`
-   (`scalar.ts:640`) is the one tail never transposed to a dispatch Map. **Medium** (was Low-Med; what
-   is left is the architectural half).
+   to the FALLBACK THROW rather than through. Compose with `firstOf`.
+   **Remaining per-step gaps:** 42 current-object aggregates (architectural, above), 7 `order`, 6 `is`
+   (mechanical), 5 `unfold` (correctly per-shape forever). **`tail`/`sample` are NOT here — they landed
+   2026-07-31 and their residual is item 4's missing encounter.** **Medium.**
 
 29. **The 17 `carried-state × barrier` deferral sites still each re-derive their answer** — the
    TABLE they can now cite landed 2026-07-31 but nothing was rewritten to cite it.
@@ -303,15 +325,35 @@ cardinality, which is the measurement that says the ladder could not have found 
    ~10 set-drift, ~14 `ResultStream` residue, ~30 row-ops copied per shape (**item 17 first**), ~35
    genuinely per-step — the first three cut ACROSS parent shapes, so the old "one shape at a time" axis
    is wrong.
-   **The deferral surface by root cause** (258 typed deferral throws of 488 `throw` sites; sites/L3
-   scenarios), ranked by "one lift, most sites cleared": **D carried-state × barrier 17 → item 29** ·
-   **C's `path()` through a mixed shape, 8 of branch triage's 20 → one lift** · **F `by()`/modulator
-   42/21, the highest site count here → ~24 collapse into a shared "resolve a by() to a sort/projection
-   Expression over any stream" seam** (`classifyBy` is the one decode but its `ByClass` has no
-   `'column'` arm, so every host re-decides) · **A shape-tail ceiling 14/85**, the highest ratio at 6:1,
-   which is item 17's matrix. Then E repeat-body 26/66 (3), G write 31/92 (10), K label 17/11, B
-   child-seam 13/32 (2/5).
+   **The deferral surface by root cause** (sites/L3 scenarios), ranked by "one lift, most sites
+   cleared": **F `by()`/modulator — the ARITY half landed as item 23's table, but the `by(T.token)`
+   half did not, and it is item 33** · **D carried-state × barrier 17 → item 29** · **C's `path()`
+   through a mixed shape, 8 of branch triage's 20 → one lift** · **A shape-tail ceiling 14/85**, the
+   highest ratio at 6:1, which is item 17's matrix. Then E repeat-body 26/66 (3), G write 31/92 (10),
+   K label 17/11, B child-seam 13/32 (2/5). A–E/G–K are the 2026-07-28 measurement and were not
+   re-derived; F was, and the whole-tree `throw ` count is **533** by grep across `src/compiler`,
+   `src/sql` and `src/execute.ts` — a different instrument from the 488 this line used to cite, so read
+   it as a fresh baseline rather than a delta.
    → [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md)
+
+**The measured root shape × row-op matrix — 66 gaps / 150** (10 root shapes × 15 tail ops, executed
+2026-08-01 via `outcomeOf`/`ALL_GENERIC`; row-algebraic sub-matrix 21/80). Two readings prose did not
+give. **`group` is 7 of the 21 row-algebraic gaps by itself**, and `cardinalityOf` correctly refuses it
+(`wholeResult`) — a *cardinality* item, NOT row-op sharing; do not fold it into 17. And the **ELEMENT
+tail is the one shape not on the dispatch substrate**: `ELEMENT_DISPATCH` (`tail/projection.ts`) does
+not spread `globalRowOps`, routing through the `TailAcc` accumulator, so `limit()` has **three**
+implementations. Converting the accumulator is architectural, not a spread — its fusion into one SELECT
+is what makes `order()`+`limit()` correct in a single statement; sequence it AFTER 17. Same seam from
+the wire end: `materializeStream` (`tail/materialize.ts`) excludes `ElementStream` from its 11-kind
+dispatch and calls that "the final materialization-boundary slice", while six other arms differ only in
+which column authority supplies `<cols>` and collapse to one `materializeSimpleRoot`. *Maintainability
+alone; a precondition for 17 reaching the element stream.*
+
+**Three instrument self-reports are stale, all in the L5 tier** (swept 2026-08-01, none fixed):
+`test/L5-properties/README.md:28` claims `known.ts` is EMPTY (it has one entry) and line 29 that
+`laws.ts` carries two `knownBroken` entries (it has zero); and `known.ts:14` shouts *"THE LIST IS
+CURRENTLY EMPTY, AND THAT IS THE INTENDED STATE"* above a non-empty list. *Low as code, Medium as
+integrity — a ratchet whose banner denies its own contents is how one gets ignored.*
 
 23. **The wording family — 36 error-assertion scenarios on 2026-07-31, 22 now, and the residue is
    NOT more renaming.** The premise held: a permanent refusal spelled *"…not yet supported"* is both
@@ -375,11 +417,71 @@ cardinality, which is the measurement that says the ladder could not have found 
    refuses, so the scenario's remaining cause is here and NOT in the string family. *Med — one
    scenario, but a wrong answer, and it shares its substrate with item 1.*
 
-4. **Canonical-emission-order Stage C — residual.** A bare re-source `V()`/`E()` arm carries no
-   `encounter`, so `armFansOut` and `positionArmFansOut` fail closed; minting `encounter = new element
-   id` at a re-source is the one missing primitive. `repeat()`/`match()` stay outside by design. ONE
-   slot, `TraverserLayout.encounter` — do not derive a "two encounters" reconciliation. **Low-Med.**
+4. **Encounter minting — the one missing primitive, and it owns three residuals.** A bare re-source
+   `V()`/`E()` arm carries no `encounter`, so `armFansOut`/`positionArmFansOut` fail closed; minting
+   `encounter = new element id` at a re-source is the primitive. ONE slot, `TraverserLayout.encounter` —
+   do not derive a "two encounters" reconciliation; `repeat()`/`match()` stay outside by design.
+   **Re-homed here 2026-08-01:** `tail`/`sample` are the two widest gaps in the root shape × row-op
+   matrix (6/10 each) and item 17 records both as LANDED — both true, the shared op exists and then
+   declines for want of a carried encounter (`g.V().project('a').by('name').tail(1)` → *"needs explicit
+   encounter-order metadata"*, still reproducing on trunk after the ordinal/encounter pair landed, and
+   an upstream `order()` does NOT supply it on any shape tried). And **5 of the 28 `by(traversal)`
+   deferral sites are this, not a child-seam gap** — they say *"requires child encounter order"*
+   (`sack.ts`, `sideeffect.ts`, `filter.ts`, `group.ts`, `barrier.ts`), re-derived per host; the other 12
+   stay with 2/5. Also item 20's record slice.
+   **Low-Med as the primitive, Medium as what it unblocks.**
    → [canonical-emission-order](./2026-07-19-canonical-emission-order.md)
+
+33. **`by(T.token) → Expression` has 12 hand-written resolvers and 11 identical deferrals.** Item 23's
+   `BY_MODULATOR_ARITY` settled how MANY `by()`s a step takes; nothing settled what ONE resolves to.
+   `classifyBy` (`tail/child-shape.ts`) is the one DECODE, so twelve sites write the same 2–3-arm switch
+   and throw on the rest: `prefix/branch.ts` (×2), `prefix/sack.ts`, `prefix/predicate.ts`,
+   `prefix/filter.ts`, `tail/group.ts` (×2), `tail/path.ts`, `tail/select.ts`, `tail/modulation.ts`,
+   `tail/projection.ts`, `tail/mapscalar.ts`. The best-developed already calls itself the authority —
+   `directOrderExpr` (`tail/projection.ts`), *"the one place a direct order key is built"* — but is
+   element-only and private. **Mechanical: hoist it to `tokenExpr(ctx, token): Expression | null` beside
+   `classifyBy`**, clearing 11 `by(T.${token}) not yet supported` sites and unblocking
+   `by(T.id)`/`by(T.label)` at every host at once. Three arity checks outside the new table also survive
+   (`sack.ts`, `group.ts` ×2) and should route through it. **Do NOT add a `'column'` arm to `ByClass`** —
+   recorded won't-do. **Medium-high.**
+
+34. **Alias-compare `where("a", P…("b"))` has two near-verbatim copies and works on 2 of 8 shapes.**
+   `where` (`prefix/filter.ts`, alias branch) and `recordWhere` (`tail/select.ts`) are ~28 identical
+   lines each — same `P.not` unwrap+flip, same `P_OPS` guard, same `where().by(key) on an edge-typed
+   label` message verbatim in both, same `productiveBy` → `IS`/`IS NOT`. They differ **only** in how a
+   label resolves to `{id, elem}` — `aliasIdExpr(label, aliases, prevRel)` vs
+   `aliasId(r.c[entry.col], 'last')`, the ARGUMENT-TYPE tell from `steps/CLAUDE.md`. Measured:
+   `g.V().as('a').out().as('b')<shape>.where('a', P.neq('b'))` runs on element and record, defers on
+   **scalar, list, variant, property, path** — all of which physically carry the alias columns.
+   **Mechanical**: parameterize the body on a `(label) => {id, elem}` resolver; several duplicated
+   deferral strings retire with it. Also what P2·7's `where(var,P)` scalar-bound tail is waiting on.
+   **Medium.**
+
+35. **The L5 generator's lattice covers 54 of the corpus's 131 step names — growing it now beats running
+   it.** Six runs this refresh were 36 pass / 0 fail every time, so the oracles are SATURATED at the
+   current generator depth and another seed buys nothing. Top unmodelled steps in table-growth order
+   (corpus occurrences): `property` 467, `inject` 420, `as` 388, `addV` 278, `option` 155, `cap` 143,
+   `addE` 82, `to` 80, `from` 76, `aggregate` 70. Start at `test/L5-properties/generate.ts`'s transition
+   table (108 transitions, 7 shapes, 63 names emitted). The rotating seed is NOT the gap — `seed.ts`
+   derives it from `HEAD`, so every commit already draws a fresh corpus inside the standard build.
+   **Medium — the instrument that finds the next ceiling item.**
+   → [property-based-testing-l5](./2026-07-28-property-based-testing-l5.md)
+
+36. **Shape-changing barriers are excluded from arm batching — the branch-scope class T4 did not
+   cover.** `fold`/`group`/`groupCount`/`aggregate` are out of `BATCHED_BARRIERS` (`ir/step.ts:217`)
+   because batching one turns a homogeneous merge into a mixed-shape merge — but each IS a `Barrier`
+   upstream (`FoldStep extends ReducingBarrierStep`), so `union(__.out().fold(), …)` batches in the
+   reference and lowers per-origin here. Start at `BATCHED_BARRIERS` + the arm routing in
+   `prefix/branch.ts`. **Three smaller tails from the same plan, none carried elsewhere:**
+   `GLOBAL_BARRIER_STEPS` carries two meanings (§5·1); three spellings of *"is there a whole-stream
+   barrier in this body"* — `repeat()`'s body gate, `match()`'s pattern body, and the FLAT `armBatches`
+   — want one recursion (§5·2), which is also the nested-arm gap the branch item declared; and the
+   `union(barrier-arm…)` ≡ `local(union(…))` law (§5·4) is absent from `laws.ts` and now due.
+   Also **`ir/step.ts:86-92` is STALE on its live half** — it still says the branch-arm case "does
+   NEITHER", citing `g.V().values('age').union(__.min(), __.max())`, which T1 landed and pinned at
+   `test/L4-addendum/scalar-reentry.feature`. *Med.*
+   → [branch-arm-barrier-scope](./2026-08-01-branch-arm-barrier-scope-plan.md) — **read §1 and §6
+   before proposing anything**
 
 4d. **`within()`/`without()` folded-traversal residuals.** A UNION-rooted operand (~4 queries) —
    widening the rooted test to admit an all-rooted union was tried and **REVERTED**: it compiles but
@@ -399,7 +501,7 @@ cardinality, which is the measurement that says the ladder could not have found 
 
 7. **`match()` generic patterns.** What remains is STRUCTURAL, not shape: a pattern not starting with
    `as()` (6), 0-root-variable patterns (3), `or`/`not`/nested-match, a LIST-shaped end var, and
-   `where(var,P)` on a scalar-bound var (a downstream alias-compare gap, not a match one). **Medium.**
+   `where(var,P)` on a scalar-bound var (a downstream alias-compare gap → 34, not a match one). **Medium.**
    → [conformance-structural-bets](./2026-07-12-conformance-structural-bets.md)
 
 7c. **Predicate operands that are TRAVERSALS — narrow tails.** `within`/`without` over a MULTI-VALUE
@@ -454,7 +556,10 @@ cardinality, which is the measurement that says the ladder could not have found 
     → [side-effect-state](./2026-07-13-side-effect-state-plan.md)
 
 16. **W4 — multi/meta-property schema rework → `Cardinality.list/set` writes.** Only meta-property
-    *typing* is touched today. **Medium.**
+    *typing* is touched today. **Adjacent, from the io work:** meta-property VALUES have no per-value
+    type in storage — `vertex_properties.meta` is a flat `{metaKey: scalar}` JSONB bag, so a meta value
+    round-trips through GraphSON as whatever JSON returns. The format can carry more than storage gives.
+    **Medium.**
     → [conformance-structural-bets](./2026-07-12-conformance-structural-bets.md) (W4)
 
 19. **Multi-label vertices — LANDED except two narrow tails** (60 of 67 in-scope scenarios pass).
@@ -478,7 +583,8 @@ cardinality, which is the measurement that says the ladder could not have found 
     won't-do said the JS GLV stubs `DataType.TREE`; it does not — the vendored client ships a full
     bidirectional `TreeSerializer.js`, so the result decodes end to end. `tree()` is a path-history
     consumer, so scope it against P3's recursive-path tails and item 6: the wire half is free, the path
-    half is not. **Medium.**
+    half is not. **`feature-support-matrix.md` still carries the refuted premise in two places** — the
+    `tree()` 🚫 row and the Locked non-goals table; sweep both. **Medium.**
 
 25. **Unimplemented-step matrix-fill, with L3 counts.** `subgraph()` 6 · `branch()` 5 · `discard()` 4 ·
     `sideEffect()` 4 · `sample()` 3 · `index()` 2 (14) · `with()` 2 (13) · `asString()` 2 · `fail()` 2 ·
