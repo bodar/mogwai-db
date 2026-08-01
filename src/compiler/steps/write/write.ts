@@ -1,5 +1,5 @@
 import type { GraphStore } from '../../../storage.ts';
-import { q, value, list, raw, render, type Expression } from '../../../sql/kernel/q.ts';
+import { q, value, list, raw, render, type Expression, type Query, type Relation } from '../../../sql/kernel/q.ts';
 import { labelIn, labelNameFor, propHasFor, sqlElem, elemTable, type Elem, vertexLabelIn } from '../../plan/plan.ts';
 import { gremlinTypeOf, mapEntryType, propertyValueBind, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
 import { stepChain, isNested, isCardinalityArg, isCardinalityValueArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
@@ -11,9 +11,23 @@ import type { ElementReadDriver } from '../../engine/deps.ts';
 import { compileInject } from './inject.ts';
 import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../../../services/fts-index.ts';
 import { bindChunks, deleteWhereIn, placeholders } from '../../../rowbatch.ts';
-import { layoutCols, type ElementStream } from '../context/context.ts';
+import { layoutCols, type ElementStream, type TraverserLayout } from '../context/context.ts';
 import { DEFAULT_VERTEX_CARDINALITY, DEFAULT_VERTEX_LABEL, LABEL_MUTATION_UNSUPPORTED, type VertexCardinality } from '../../../api.ts';
 import { validateLabel, validatePropertyKey } from './validate.ts';
+
+/** The driver row set a write consumes, IN EMISSION ORDER when the chain carries one.
+ *
+ *  A write assigns ids as it walks its drivers, and those ids are observable, so which row it sees
+ *  first is part of the answer — the same argument `fold`/`aggregate`/`cap` make about member order.
+ *  `analyzeChain` seeds the encounter for a write chain (WRITE_STEPS, ir/analyze.ts); this is the
+ *  one place that READS it back, so every write host orders identically or not at all.
+ *
+ *  Absent an encounter the render is byte-identical to the bare `renderFrom` it replaced — an
+ *  order-free chain pays nothing.  */
+function renderDriverRows(st: { q: Query; rel: Relation; traverserLayout: TraverserLayout }, cols = 'id'): { sql: string; binds: any[] } {
+  const enc = st.traverserLayout.encounter;
+  return enc ? st.q.render(q`SELECT ${raw(cols)} FROM ${st.rel} ORDER BY ${st.rel.c[enc]}`) : renderFrom(st.q, st.rel, cols);
+}
 
 // ---------- nested-traversal write arguments (read spine reuse) ----------
 //
@@ -177,7 +191,7 @@ function compileDrop(engine: Engine, steps: IRStep[], params: Record<string, any
   const { st, stop } = engine.buildPrefixFresh(steps.slice(0, -1));
   if (stop !== steps.length - 1) throw new Error(`drop() after ${steps[stop].name}() not yet supported`);
   const isEdge = st.elem === 'edge';
-  const target = renderFrom(st.q, st.rel);
+  const target = renderDriverRows(st);
   return {
     kind: 'write',
     run: (store) => {
@@ -290,7 +304,7 @@ function compileSetProperty(engine: Engine, steps: IRStep[], params: Record<stri
   if (stop !== prefix.length) throw new Error(`property() after ${steps[stop].name}() not yet supported`);
   const elem = st.elem;
   const specs = parsePropertyTail(steps.slice(firstProp), 'property()', sideEffects, params);
-  const target = renderFrom(st.q, st.rel);
+  const target = renderDriverRows(st);
   if (elem === 'edge') {
     // Edge props are normalized rows with no cardinality/meta (TinkerPop Property):
     // UPSERT each into edge_properties, then read the bag back for the response.
@@ -731,7 +745,7 @@ function insertVertex(
  * lowering with the same current object and aliases the prefix produced. */
 function materializeElementDrivers(store: GraphStore, st: ElementStream): ElementReadDriver[] {
   const cols = layoutCols(st.traverserLayout);
-  const read = renderFrom(st.q, st.rel, ['id', ...cols].join(', '));
+  const read = renderDriverRows(st, ['id', ...cols].join(', '));
   return store.query<Record<string, unknown>>(read.sql, read.binds).map((row) => ({
     id: Number(row.id),
     elem: st.elem,
@@ -902,7 +916,7 @@ function compileAddE(engine: Engine, steps: IRStep[], params: Record<string, any
   // (a vertex). Extract its rowid in SQL so resolveEndpoint sees a plain id.
   const aliasCols: [string, string][] = [...st.traverserLayout.aliases].map(([lbl, a]) => [lbl, a.col]);
   const idExtract = (c: string) => `CAST(${c} ->> '$[#-1].v' AS INTEGER) AS ${c}`;
-  const read = renderFrom(st.q, st.rel, ['id', ...aliasCols.map(([, c]) => idExtract(c))].join(', '));
+  const read = renderDriverRows(st, ['id', ...aliasCols.map(([, c]) => idExtract(c))].join(', '));
   return {
     kind: 'write',
     run: (store) => store.query<any>(read.sql, read.binds).map((r) =>
@@ -969,7 +983,7 @@ function resolveEndpoint(engine: Engine, store: GraphStore, spec: any, d: { alia
     // A V()/E()-rooted read: the movement/filter prefix's id-relation carries rowids.
     const { st, stop } = engine.buildPrefixFresh(inner, params);
     if (stop !== inner.length) throw new Error(`addE endpoint traversal not supported past ${inner[stop].name}()`);
-    const sel = renderFrom(st.q, st.rel);
+    const sel = renderDriverRows(st);
     const rows = store.query<{ id: number }>(sel.sql, sel.binds);
     if (!rows.length) throw new Error('addE endpoint traversal matched no vertex');
     return rows[0].id;
@@ -1283,7 +1297,7 @@ function mergeDrivers(engine: Engine, prefix: IRStep[], params: Record<string, a
   if (prefix.length === 1 && prefix[0].name === 'inject') { const nulls = prefix[0].args.map(() => null); return () => nulls; }
   const { st, stop } = engine.buildPrefixFresh(prefix, params);
   if (stop !== prefix.length) throw new Error(`merge after ${prefix[stop].name}() not yet supported`);
-  const sel = renderFrom(st.q, st.rel);
+  const sel = renderDriverRows(st);
   return (store) => store.query<{ id: number }>(sel.sql, sel.binds).map((r) => r.id);
 }
 

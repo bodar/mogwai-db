@@ -2,7 +2,7 @@ import { empty, q, value, list, Query, type Expression } from '../../sql/kernel/
 import { type Elem, elemTable } from '../plan/plan.ts';
 import { flattenListArgs, isColumnArg, isOperatorArg, isPopArg } from '../../gremlin/frontend.ts';
 import { type IRStep } from '../ir/strategies.ts';
-import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
+import { analyzeChain, canCarryEncounter, type ChainFacts } from '../ir/analyze.ts';
 import { layoutCols, rootLayout, trackFromV, type LoweringState, type ElementStream, type StepFn } from '../steps/context/context.ts';
 import { move, toEdge, toVertex, otherV, reSource } from '../steps/prefix/movement.ts';
 import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../steps/prefix/filter.ts';
@@ -537,9 +537,16 @@ export class LoweringEngine implements Engine {
    *  WITH and its own engine attached to the returned stream's Query (so a nested movement/filter
    *  reaches deps). Collapse is gated off (a write prefix is not a reducer-terminal read chain). */
   buildPrefixFresh(steps: IRStep[], params: Record<string, any> = {}): { st: ElementStream; stop: number } {
-    // A write prefix is not a reducer-terminal read chain: collapse is gated off (via child()'s
-    // fastPaths) and the emission encounter is forced off — honour the chain's own path tracking.
-    return this.child(params, steps).buildPrefix(steps, params, undefined, { ...analyzeChain(steps), demandsEncounter: false });
+    // A write prefix is not a reducer-terminal read chain, so collapse stays gated off (via
+    // child()'s fastPaths). The emission encounter is forced ON, and unconditionally: a write walks
+    // these rows one at a time assigning ids as it goes, and those ids are observable, so which row
+    // comes first is part of the answer (WRITE_STEPS, ir/analyze.ts). It cannot come from
+    // `analyzeChain(steps)` here because `steps` is the PREFIX — the write step that demands it has
+    // already been sliced off by the caller. It used to be forced OFF, which was correct only while
+    // nothing read it back; `renderDriverRows` (steps/write/write.ts) now does. `canCarryEncounter`
+    // is the one exception, and it is a CAPABILITY not a preference: a repeat()/match() prefix
+    // cannot thread one, so demanding it there declares a layout column the body never produces.
+    return this.child(params, steps).buildPrefix(steps, params, undefined, { ...analyzeChain(steps), demandsEncounter: canCarryEncounter(steps) });
   }
 
   /** A FRESH child engine (fresh Query, same request scope) — see the interface. An explicit

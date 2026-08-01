@@ -76,6 +76,26 @@ const POSITIONAL_CONSUMERS = new Set(['limit', 'range', 'skip', 'tail']);
  *  Scope.local family — is invisible to it. `cap` is the step that makes a collection's member
  *  order observable and it is always at the top level, so it is the one that cannot be missed. */
 const COLLECTING_CONSUMERS = new Set(['fold', 'aggregate', 'cap']);
+/** The WRITE steps, which are order-sensitive for a reason none of the read consumers share: a
+ *  write ASSIGNS ids, in the order it consumes its driver rows, and those ids are observable —
+ *  `g.V().as("a").in("created").addE("createdBy").from("a")` creates the same four edges under a
+ *  reversed scan and numbers them backwards. Reproducible ids are also something users notice.
+ *
+ *  This is the same argument COLLECTING_CONSUMERS makes, one step further: there, member order is
+ *  part of the answer; here, id assignment is. Measured with `mise run test:perturbed` — three
+ *  corpus traversals, all writes, all id-order-only (the graphs were identical). */
+const WRITE_STEPS = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop']);
+
+/** Can an encounter be threaded through this PREFIX at all? `repeat()`/`match()` are opaque
+ *  boundaries the substrate does not cross — `computeDemandsEncounter` returns false at one for
+ *  exactly that reason, and a caller that demands one anyway gets a layout declaring a column the
+ *  body never produces ("table c2 has 2 values for 3 columns").
+ *
+ *  Exported because the WRITE path's demand does not come from its own steps: `buildPrefixFresh` is
+ *  handed the prefix with the write step already sliced off, so it cannot ask `analyzeChain` and has
+ *  to ask this instead. Same rule, different question — "is one needed" vs "is one possible". */
+export const canCarryEncounter = (steps: readonly IRStep[]): boolean =>
+  !steps.some((s) => s.name === 'repeat' || s.name === 'match');
 
 /** Does this chain need a threaded emission-order encounter? True iff a positional consumer
  *  appears after a fan-out. repeat()/match() are opaque boundaries this substrate doesn't
@@ -104,6 +124,10 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
     // their answer under a reversed scan. Do NOT "simplify" this into the fan-out branch below —
     // that is the shape that was wrong.
     if (COLLECTING_CONSUMERS.has(s.name)) return true;
+    // A write consumes its driver rows one at a time and assigns ids as it goes — see WRITE_STEPS.
+    // Like a collection and unlike a slice, it needs the encounter with no fan-out at all: a bare
+    // `g.V().addE(…)` observes the source's order exactly as much as `g.V().out().addE(…)` does.
+    if (WRITE_STEPS.has(s.name)) return true;
     // EVERY row slice needs a column to slice BY, whether or not a fan-out preceded it — this rule
     // used to require one, and `tail` was carved out of it as "the one slice that needs the
     // encounter with no fan-out at all". That carve-out had the right reasoning and the wrong
