@@ -1,9 +1,14 @@
 # Codebase analytics: duplication, complexity, split concepts — and the rebuild that follows
 
-**Status: analysis session, 2026-08-01, against `c69d101`. No code landed.** Every number below comes
-from an instrument run in this session, not from a prior doc; where a finding restates one already in
-[outstanding-work](./outstanding-work.md) I say so and give the fresh measurement rather than the
-citation, because two of them have moved.
+**Status: analysis session, 2026-08-01, measured against `c69d101`, rebased onto `1299ff1`. No code
+landed.** Every number comes from an instrument run in this session, not from a prior doc.
+
+**Trunk moved 17 commits between the measurement and the push, and three findings changed as a
+result — all three corrections are kept in place rather than edited away** (§4a, §5a, and item 1 in
+§9). Two cited defects closed; one predicted consolidation landed independently and confirms the
+method. Read §4a and §5a before acting on §4 or §5: the first *weakens* this doc's biggest claim and
+says so, and the second is the only forward-reasoned structural prediction in this repo's history to
+have been confirmed rather than falsified.
 
 This doc answers four questions asked together: where is the duplication, where are the overly
 complex paths, what large refactor is worth doing, and — using `gremlin-core` as the reference —
@@ -32,8 +37,9 @@ The third matters most. The first two are standard; the third is the one shaped 
 because in a compiler that dispatches on shape, duplication does not look like duplicated text — it
 looks like the same step name appearing in eleven tables with eleven handlers.
 
-**Scale, for calibration.** 28,732 hand-written LOC in `src/` (the generated `parser/` excluded),
-1,238 functions. `compiler/steps/tail/` alone is **11,177 LOC — 39% of everything hand-written**, and
+**Scale, for calibration.** 29,049 hand-written LOC in `src/` (the generated `parser/` excluded, at
+`1299ff1`), ~1,240 functions. `compiler/steps/tail/` alone is **11,201 LOC — 39% of everything
+hand-written**, and
 that concentration is the single most important number in this document. It is where every finding
 below lands.
 
@@ -60,7 +66,7 @@ The identifier-blind (type-2) pass adds nothing structural: its top hits are loo
 (`gremlin/types.ts:183-199`, `context/context.ts:295-368`, `gremlin/math.ts:32-42`), which are
 supposed to look alike.
 
-**Four substantive clones in 28.7k lines is an exceptionally clean result**, and it is worth stating
+**Four substantive clones in 29k lines is an exceptionally clean result**, and it is worth stating
 plainly because it forecloses a whole class of proposal. There is no "extract the duplicated helper"
 refactor available here. Whatever duplication costs this codebase, it is not costing it in text.
 
@@ -117,8 +123,7 @@ So the honest finding is narrower and sharper than "count is implemented ten tim
 > once per table per shared op.
 
 `globalRowOps()` (`tail/barrier.ts:227`) is the fix already built for exactly this, and an LSP
-reference query shows it reaching **5 sites in 4 files**: `group.ts:1072`, `list.ts:184` and `:696`,
-`select.ts:730`, `variant.ts:186`. **`ELEMENT_DISPATCH` (18 keys) and `SCALAR_DISPATCH` (27 keys) —
+reference query shows it reaching **7 sites** (5 at the time of measurement, 2 added since). **`ELEMENT_DISPATCH` (18 keys) and `SCALAR_DISPATCH` (27 keys) —
 the two largest tables, 45 of the 94 entries — do not use it at all.** That is item 17's claim,
 independently re-derived, and the fresh number is that the un-shared half of the dispatch surface is
 not a minority: it is the majority of it.
@@ -204,10 +209,10 @@ else; group is where it was not applied.
 
 ### 3c. The deferral surface, freshly counted
 
-`throw` sites across `src/` excluding `parser/`: **621**, of which **218** say *"not yet supported"*.
+`throw` sites across `src/` excluding `parser/`: **627**, of which ~218 say *"not yet supported"*.
 The tree-wide count in outstanding-work item 5c is **533** by its own instrument (`src/compiler`,
-`src/sql`, `src/execute.ts`), so these are different denominators and should not be diffed — but 621
-against 28.7k LOC is **one throw every 46 lines**, and that is the real texture of this codebase. It
+`src/sql`, `src/execute.ts`), so these are different denominators and should not be diffed — but 627
+against 29k LOC is **one throw every 46 lines**, and that is the real texture of this codebase. It
 is a *correct* texture given "fail closed, never mis-execute", and it is also why complexity
 concentrates in triage functions rather than in lowering functions: the hard part here is deciding
 what you are willing to answer.
@@ -266,19 +271,48 @@ that the write path does a row-at-a-time read, it is that **the write path is a 
 machine**, with its own step dispatch, its own argument parsers, its own composition rules, and its
 own result type.
 
-And the consequences are already visible in the conformance record, filed under other items:
+### 4a. Two of the three consequences closed while this was being written — read that carefully
 
-- **Silent wrong answers.** Item 16, measured 2026-08-01:
-  `addV('animal').property('name','mateo').property('name','gateo').property('name','cateo')` keeps
-  only `cateo`. A set-based writer expressing cardinality as a relational operation could not lose
-  two rows this way.
-- **The composition wall.** Item 10 — `addV` mid-chain, read-tails-after-write — is a whole
-  conformance cluster, and it exists because the interpreter has no way to be *in the middle of* a
-  compiled relation. `compileMidAddV` (`:645`) is the workaround: materialize drivers to JS, loop,
-  then re-compile a read per driver (`:680-683`).
-- **The determinism gap.** Item 20's four remaining perturbed-census failures: three are the write
-  driver, and they are id-assignment order — an artifact of consuming rows in whatever order the
-  drainage produced.
+I first wrote this section citing three live defects. Between the analysis and the push, trunk moved
+17 commits and **two of the three closed**. Both the correction and what it does to the argument are
+recorded here rather than quietly edited out, because the direction of the update is the interesting
+part.
+
+- **Silent wrong answers — ✅ CLOSED, and my citation was stale.**
+  `addV('animal').property('name','mateo').property('name','gateo').property('name','cateo')` keeping
+  only `cateo` was **fixed 2026-08-01**; `write-path.md:47-54` marks W1 closed, all five silent wrong
+  answers, L3 1679 → 1689. **Note that `outstanding-work.md` item 16 still asserts this defect as
+  live** — the index is stale in the *pessimistic* direction here, which is the rarer of the two it
+  warns about, and worth a sweep.
+- **The determinism gap — ✅ CLOSED.** Item 20's three write rows were id-assignment order; `04b5080`
+  made the driver consume its input in emission order and the perturbed census went **4 → 1**. The
+  one row left is item 4's `repeat`/`range` boundary, not a write row.
+- **The composition wall — still open.** Item 10 (`addV` mid-chain, read-tails-after-write) remains,
+  and it is the one that is *structural* rather than a defect: the interpreter has no way to be *in
+  the middle of* a compiled relation. `compileMidAddV` (`:645`) is the workaround — materialize
+  drivers to JS, loop, re-compile a read per driver (`:680-683`).
+
+**What this does to §4's argument, honestly.** It weakens the urgency and it strengthens the
+strongest counter-position: *the interpreter is incrementally fixable, and it is being incrementally
+fixed, fast.* Five silent wrong answers and three determinism rows closed in a day is not the profile
+of a structure that has to be replaced. Anyone reading §4 as "this must be rewritten now" is reading
+it wrong, and the measurement above is why.
+
+What survives is narrower and does not depend on any open bug:
+
+1. The structural facts are unchanged — a second step dispatcher, four private `Step[]` parsers, an
+   interpreter loop with sibling index arithmetic, a separate result type.
+2. **The defect rate is the signal, not any single defect.** `write-path.md:290` records *"One defect
+   the W1 work EXPOSED, now fixed (`3d9222f`) — **and the shape to expect more of**"* — the plan's own
+   words. Extending the interpreter keeps producing defects of the same shape, each cheap, each found
+   by the census. That is a *tax*, not a crisis, and the question a rewrite has to answer is whether
+   its one-time cost is below the integral of that tax. I do not have that number and neither does
+   anyone else yet.
+3. Item 10 is the one consequence a contract widening cannot reach, because it is about *position in
+   a relation* rather than about what a driver can resolve.
+
+So §9 ranks the write-path RelIR slice **behind** a measurement, not ahead of one — and the tranche
+owner's incremental route is winning on evidence at the time of writing.
 
 Item 0b's `ModulationContract`/`ElementReadDriver` work is the right direction and is real progress;
 the point of this section is that it is being pursued as *contract widening on an interpreter* rather
@@ -295,22 +329,45 @@ duplication to a fresh reader and both have already been proposed and rejected.
 | Concept | `gremlin-core` | Here | Verdict |
 |---|---|---|---|
 | **Mutation** | a marker interface on an ordinary map step (`Mutating`, `Writing`) | a separate module, result type and execution model | **Split that should be one** (§4) |
-| **Row operations** | `Ranging` / `Barrier` / `LocalBarrier` interfaces; `Scope` chooses global vs local at builder time | `globalRowOps()` (4 files) **plus** five private per-origin functions — `partitionedSlice`, `partitionedTail`, `rootTail`, `partitionedOrder`, `partitionedDedup` (`tail/scalar.ts`) | **Split that should be one** — and §6 says what the missing parameter is |
+| **Row operations** | `Ranging` / `Barrier` / `LocalBarrier` interfaces; `Scope` chooses global vs local at builder time | `globalRowOps()` (global) + `rankedRows()` (per-origin), both in `tail/barrier.ts`, both gating on `cardinalityOf` | **Was a split; closed on trunk 2026-08-01 — and the way it closed is §5a** |
 | **Step organization** | by semantic category (`map` 124, `filter` 30, `sideEffect` 22, `branch` 6) | by **position** (`prefix/` 2,984 LOC, `tail/` 11,177) | **Correct as-is.** The prefix fold's stop-boundary is a structural fact of the compiler, not a filing convention — it is what decides `range`/`limit` before-vs-after `order()`. Already argued and settled in [tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md) §4.6; the measurement here does not disturb it. |
 | **Capability dispatch** | ~35 marker interfaces + `instanceof` chains | registration in a `Map` | **Correct as-is, and better here.** A Map lookup is total and a missing key fails closed; an `instanceof` chain falls through silently. Same doc, §7. |
 
-The second row is the one worth expanding, because it is where §6 comes from. TinkerPop expresses
-"the same operation, global or per-partition" as one step class plus a `Scope` token consumed at
-builder time. We express it as **two unrelated code paths**: a shared `globalRowOps` table, and five
-private scalar-only functions consumed by `lowerScalarRows` — a 101-line, 42-decision if-chain
-(`tail/scalar.ts:629`), and per item 17 *"the one tail never transposed to a dispatch Map."*
+### 5a. This one closed mid-analysis, and it closed *as predicted* — which is the useful part
 
-All five share one skeleton: rank with `ROW_NUMBER() OVER (PARTITION BY origins ORDER BY <key>)`,
-filter on `rn`, rebuild. They differ only in the order key and the `rn` predicate. And the global
-versions differ from them in exactly one respect: **the `PARTITION BY` clause is empty.**
+My first draft of this row said we express "the same operation, global or per-partition" as **two
+unrelated code paths**: a shared `globalRowOps` table, and five private scalar-only functions
+(`partitionedSlice`, `partitionedTail`, `rootTail`, `partitionedOrder`, `partitionedDedup`). The
+argument was that all five share one skeleton — rank with `ROW_NUMBER() OVER (PARTITION BY origins
+ORDER BY <key>)`, filter on `rn`, rebuild — differing only in the order key and the `rn` predicate,
+and that the global versions differ in exactly one respect: **the `PARTITION BY` clause is empty**. So
+it is not five functions' worth of concept; it is one operator with a partition parameter.
 
-That is not a coincidence and it is not five functions' worth of concept. It is one operator with a
-partition parameter.
+**`f9597ca` landed `rankedRows` on trunk while this was being written, and that is exactly what it
+is.** Four of the five are now call sites of one builder; `partitionedOrder` stays separate on merit
+(it *mints* an encounter in place rather than ranking and filtering, which is a different operation,
+not a variant of the same one). The row above is corrected accordingly.
+
+I am leaving the reasoning in rather than deleting it, because **the independent convergence is
+evidence about the method, not about the row.** The prediction was derived from a duplication
+measurement plus the `gremlin-core` comparison; the implementation was derived from the row-op matrix.
+They arrived at the same operator within hours of each other. That is the first time in this repo's
+recorded history that a forward-reasoned structural claim was confirmed rather than falsified — the
+base rate is ~12 falsifications — and it is a meaningful (if single) data point for §9's step 5,
+which asks the same *kind* of question one layer up.
+
+**Two things the landed version teaches that my draft did not anticipate**, both of which sharpen §6:
+
+- **The partition parameter had to be a CALLBACK, not a column list.** `barrier.ts:126-129` states
+  why: a per-origin dedup partitions by *the traverser's value*, and *"that authority does not
+  exist — the callback is how the scalar site keeps its own knowledge of `v` while sharing the
+  skeleton."* This is the same missing authority the shape doc §7 identified, item 17 still names,
+  and `Scope.local` needs. **A callback is the honest workaround for a missing concept, not the
+  concept.** RelIR does not fix this by itself and §6 should not pretend otherwise.
+- **`lowerScalarRows` is untouched** — still the ~100-line if-chain, still the one tail never
+  transposed to a dispatch Map (item 17 says so explicitly in its updated text). Sharing the
+  *skeleton* did not dissolve the *dispatch*, which is precisely the "re-encoding, not
+  simplification" risk §6 lists against itself.
 
 ---
 
@@ -464,7 +521,7 @@ now false.** `gremlin/frontend.ts:83-108,245` declares a `TaggedArg` union and *
 over one `tagged()` helper. The vocabulary was built.
 
 **What was never done is converting the consumers.** Measured this session, `'<tag>' in ` detection
-still appears at **63 sites across `src/` (excluding `parser/`)**, and only **1** of them is in
+still appears at **61 sites across `src/` (excluding `parser/`)**, and only **1** of them is in
 `frontend.ts` — so this is entirely a *compiler-side* residue, not a front-end one:
 
 ```
@@ -478,7 +535,7 @@ by file                          by token
 ```
 
 Every one of the nine tokens in that right-hand column has a declared guard. `nested` and `token`
-alone are 47 of the 63.
+alone are ~47 of the 61.
 
 This is a **fourth instance of the exact pattern shape-doc §4 names as this repo's recurring failure
 mode** — *"The designs already exist, are already written down, and are already right. What failed
@@ -499,7 +556,7 @@ one commit, census after each — because a `'token' in a` site that also reads 
 read converted with it, and mixing two tokens in one commit is what makes that review not scale.
 
 **One thing I would add that does not exist in either codebase:** a declared, machine-checkable
-**deferral taxonomy**. 621 throws, 218 of them "not yet supported", and the only way to know today
+**deferral taxonomy**. 627 throws, ~218 of them "not yet supported", and the only way to know today
 which are permanent walls versus unbuilt features is prose — which is why item 23 exists as an
 ongoing wording cleanup and why the same message competes with real gaps in the telemetry that ranks
 the backlog. A typed deferral (`throw new Deferral({kind: 'platform-wall' | 'unbuilt' | 'shape-gap', …})`)
@@ -537,13 +594,17 @@ Ordered by (evidence × payoff) ÷ risk. Every one gates on `mise run ci` includ
 
 **1 — Finish `globalRowOps` into `ELEMENT` and `SCALAR`.** *Small, mechanical, measured.* §2: the two
 largest tables (45 of 94 entries) do not use the shared table. Compose with `firstOf`, never spread
-over an owned key. **Kill criterion:** none needed — this is item 17's mechanical half and the census
-is a sufficient gate. Do the four `partitionedSlice`/`Tail`/`rootTail`/`Order` lifts here too; leave
-`partitionedDedup` (it needs the traverser-value authority).
+over an owned key. **Kill criterion:** none needed — the census is a sufficient gate.
+**Re-scoped 2026-08-01:** the per-origin lifts this item originally also called for are **done**
+(`f9597ca`, §5a) — `rankedRows` now backs four of the five. What is left here is the *element tail*,
+which item 17's updated text also now names as the remainder, and it is architectural rather than a
+spread: `ELEMENT_DISPATCH` routes through the `TailAcc` accumulator whose `order()`+`limit()` fusion
+is what makes a single statement correct. **Sequence it after 3, and read §6.2 first — this is the
+item RelIR would most change the shape of.**
 
-**2 — Convert the 63 `'<tag>' in ` sites to the guards that already exist.** *Small, mechanical,
+**2 — Convert the 61 `'<tag>' in ` sites to the guards that already exist.** *Small, mechanical,
 closes a rename hole.* §7a. The `TaggedArg` union and all 15 guards are built; the consumers were
-never moved. Token by token (`isNested` 27, then `isTokenArg` 20), one commit each. **Kill criterion:**
+never moved. Token by token (`isNested` ~27, then `isTokenArg` ~20), one commit each. **Kill criterion:**
 none — but note it *will* surface real bugs where a site's hand-rolled check is subtly wider or
 narrower than the guard, and those are findings, not obstacles. Sweep shape-doc §3's three stale
 sentences in the same change.
