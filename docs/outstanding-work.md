@@ -8,7 +8,7 @@ validation and design. Live per-step capability: `feature-support-matrix.md`.
 about finished work cannot be picked up, so it does not belong here. A refresh that lands items
 should make this file SHORTER.
 
-**Refreshed** 2026-08-01 · **L3 1684 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
+**Refreshed** 2026-08-01 · **L3 1686 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
 collision is expected, see won't-do) · census **0 `crashed`, 4 `nondet`**, perturbed census **4** ·
 `known.ts` **1 entry** (repeat's two body routes disagree on a positional window) ·
 `capability-baseline.ts` **1 entry** · L5 `L5-random` plus fixed seeds 5/11/27/91/143 at
@@ -294,7 +294,6 @@ of gravity is ceiling, not correctness.
    because `g.V().as('a').out().as('b').fold()` refuses first. So this is a FOLD question (what a
    list value does with the carried alias columns), and `map`/`group` are correct refusals (their
    rows are not their traversers — `cardinalityOf` says so).
-   Also what P2·7's `where(var,P)` scalar-bound tail was waiting on, and that half is now unblocked.
    *Low-Med.*
 
 35. **The L5 generator's lattice covers 54 of the corpus's 131 step names — growing it now beats running
@@ -340,7 +339,9 @@ of gravity is ceiling, not correctness.
 
 7. **`match()` generic patterns.** What remains is STRUCTURAL, not shape: a pattern not starting with
    `as()` (6), 0-root-variable patterns (3), `or`/`not`/nested-match, a LIST-shaped end var, and
-   `where(var,P)` on a scalar-bound var (a downstream alias-compare gap → 34, not a match one). **Medium.**
+   `where(var,P)` on a scalar-bound var — **this half LANDED**: a value-shaped label now compares as
+   its value (`AliasOperand`, `context/context.ts`); what is left of it is only the MIXED
+   element-vs-value comparison, which fails closed on purpose. **Medium.**
    → [conformance-structural-bets](./2026-07-12-conformance-structural-bets.md)
 
 7c. **Predicate operands that are TRAVERSALS — narrow tails.** `within`/`without` over a MULTI-VALUE
