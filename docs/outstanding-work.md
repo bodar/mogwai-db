@@ -39,7 +39,11 @@ precondition landed).
 > other one. Take the next item in the ranking instead. Transient: delete when the claim lapses.
 
 **No item below is a known wrong answer** except 20's group-value residual, 22's six per-member type
-refusals, 31 and 36 — the rest fail closed. The index's centre of gravity is ceiling, not correctness.
+refusals, 31, 36 — **and the WRITE path, which this line denied until 2026-08-01**. The write half was
+"measured clean" on 2026-07-31 about its validation REFUSALS; nobody had looked at graph STATE, and
+eleven L3 scenarios fail at a `the graph should return N` step (three reproduced in
+[write-path](./2026-08-01-write-path-plan.md) §2). Everything else fails closed, and the index's centre
+of gravity is ceiling, not correctness.
 
 32. **A multi-arm SCALAR `union()` in a child scope, followed by a reducer, emits MALFORMED SQL — a
    fail-closed VIOLATION.** `g.V().local(__.union(__.values('name'), __.values('age')).count())` →
@@ -241,7 +245,9 @@ refusals, 31 and 36 — the rest fail closed. The index's centre of gravity is c
    keys/values and `AddVertexStep` labels/parameters via `ElementReadDriver`. Remaining:
    `ListFunction`/`ConjoinStep`, plus whole-map `MergeStep`/`MergeElementStep`/`MergeEdgeStep` bodies,
    which need a map-shaped rather than scalar driver. *Medium-High — extend the declared contract, not
-   another argument evaluator.*
+   another argument evaluator.* **It is the shared substrate under six of the merge rows**, so it is
+   the entry point to that cluster rather than one item beside it.
+   → [write-path](./2026-08-01-write-path-plan.md) §3
 
 0f. **We carry a patch against antlr4ng's prediction DFA — WATCH ONLY.** antlr4ng keys a decision's DFA
    states on `ATNConfigSet.hashCode()` with no equality check, so a collision conflates two
@@ -375,8 +381,10 @@ refusals, 31 and 36 — the rest fail closed. The index's centre of gravity is c
    dedup idiom; no aggregate-readback exists. **Medium.**
    → [side-effect-state](./2026-07-13-side-effect-state-plan.md)
 
-10. **`addV` mid-chain + read-tails-after-write.** Gates a write-conformance cluster. **Medium.**
-    → [compiler-consolidation](./2026-07-16-compiler-consolidation-plan.md) §6
+10. **`addV` mid-chain + read-tails-after-write.** Gates a write-conformance cluster, and is the
+    prerequisite inside it — several of the merge TAILS wait on it. **Medium.**
+    → [write-path](./2026-08-01-write-path-plan.md) §4 (the whole write cluster in one place),
+    [compiler-consolidation](./2026-07-16-compiler-consolidation-plan.md) §6
 
 11. **Federation tail:** map-valued injection for mid-traversal federation (Med); async
     failure/timeout/retry policy (Low-Med); federated *traversal* via local scratch (Large).
@@ -402,8 +410,12 @@ refusals, 31 and 36 — the rest fail closed. The index's centre of gravity is c
 15. **Multi-key `cap('x','y')` + cap-of-group unfold.** **Low-Medium.**
     → [side-effect-state](./2026-07-13-side-effect-state-plan.md)
 
-16. **W4 — multi/meta-property schema rework → `Cardinality.list/set` writes.** Only meta-property
-    *typing* is touched today. **Adjacent, from the io work:** meta-property VALUES have no per-value
+16. **W4 — multi/meta-property schema rework → `Cardinality.list/set` writes. It is not a
+    capability gap: it is a SILENT WRONG ANSWER.** Measured 2026-08-01 —
+    `addV('animal').property('name','mateo').property('name','gateo').property('name','cateo')` keeps
+    only `cateo`, and `property(Cardinality.list,'friends',__.out('knows').values('name'))` stores one
+    value where the reference appends both. → [write-path](./2026-08-01-write-path-plan.md) §2.
+    Only meta-property *typing* is touched today. **Adjacent, from the io work:** meta-property VALUES have no per-value
     type in storage — `vertex_properties.meta` is a flat `{metaKey: scalar}` JSONB bag, so a meta value
     round-trips through GraphSON as whatever JSON returns. The format can carry more than storage gives.
     **Medium.**
@@ -566,6 +578,9 @@ deferral clusters in 5c instead.
   purely the execution-model question: `run` interleaves reads with INSERTs and reads back what it wrote,
   so a set-based form must decide match-vs-create for the whole driver set before writing. Both routes
   are verified; what is missing is the decision, not the rendering.
+  **Measured 2026-08-01: the perturbed instrument does NOT depend on this.** Its three write rows are
+  id-ASSIGNMENT order — the same graph, different ids — so consuming the driver's input in emission
+  order closes them without the rewrite. → [write-path](./2026-08-01-write-path-plan.md) §5
 - **Review-fix duplication residue (C1/C2/C3 + D)** — property-list framing / tie-break / `PARTITION BY
   ordinal` dups; the `execute.ts` pre-parsed-`pmeta` divergence is latent-correctness. Status
   unconfirmed — treat as open. → [review-fix-plan](./2026-07-22-review-fix-plan.md)
@@ -646,6 +661,11 @@ deferral clusters in 5c instead.
   template; live targets are `AliasShape` member shape (item 1) and front-end tagged-token accessors.
 - **[tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md)** — naming
   authority and rename map. The open `ir/rewrites.ts`/`ir/strategies.ts` partition needs a shared home.
+- **[write-path](./2026-08-01-write-path-plan.md)** — every open write problem in one place, measured
+  2026-08-01: the eleven L3 scenarios that leave the GRAPH wrong (three reproduced), the upsert cluster
+  and the one substrate under six of its rows, the positions the driver cannot reach, and the
+  determinism question. Items 10, 16 and 0b are its tranches; item 11 is deliberately NOT (different
+  machine).
 - **[branch-arm-barrier-scope](./2026-08-01-branch-arm-barrier-scope-plan.md)** — closed; read for §1's
   `BranchStep`/`FlatMapStep` class fact, which decides which branch kinds can disagree with us and in
   WHICH respect (arm SCOPE for two of them, emission ORDER for all four), and §6's five wrong turns.
