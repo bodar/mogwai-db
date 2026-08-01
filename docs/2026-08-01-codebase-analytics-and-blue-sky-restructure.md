@@ -516,17 +516,55 @@ tuple — which violates the multiset rule the root `CLAUDE.md` names as a seman
 > **Therefore: a per-iteration barrier is not expressible inside a SQLite recursive term in ANY
 > lowering.** Not as an aggregate, not as a window, not as `DISTINCT`, not as `ORDER BY`/`LIMIT`.
 
-This is a **platform wall**, and it is a materially stronger statement than "no `LATERAL`". It means
-item 3's 41 barrier-body queries (`order` 15, `limit` 7, `local` 5, `dedup` 4, `range` 4,
-`groupCount` 3, `sample` 2, `group` 1) **cannot be unlocked by inlining, RelIR or not** — the two
-routes that remain are the ones item 3 already names: the keyed-relation materialization (built) and
-the `times(n)` unroll (which sidesteps recursion entirely, and is why it is the right route). It also
-independently explains *why* TinkerPop's own `RepeatUnrollStrategy` is "intentionally conservative …
-especially barriers".
+This is a **platform wall for the recursive term specifically**, and it is a materially stronger
+statement than "no `LATERAL`". It also independently explains *why* TinkerPop's own
+`RepeatUnrollStrategy` is "intentionally conservative … especially barriers".
 
-**So item 3 should be re-framed as two items, not one**, because they have different answers: the
-row-local gate is a compiler limitation worth dissolving, and the barrier bodies are a platform wall
-whose only route is the unroll. Filing them together is what makes the 41 look like one prize.
+### 6b. But the wall is small, because almost nothing needs the recursion — measured
+
+The obvious reading of §6a is "barrier bodies are dead". **That reading is wrong, and the corpus says
+so.** Of 125 corpus traversals mentioning `repeat()`, **53 have a barrier in the body**, and they
+split:
+
+```
+48   times(n)-bounded   → UNROLLABLE, no recursive CTE involved at all
+ 5   until()/emit()     → recursion required → the genuine wall
+```
+
+(Denominator note: this counts *all* corpus traversals whose repeat body holds a barrier, passing or
+failing. Item 3's 41 counts L3-failing ones. Different instruments — do not diff them. The
+times-vs-until ratio is the transferable signal.)
+
+**Unrolling removes the constraint entirely rather than working around it.** With no recursive CTE
+there is no recursive term, so every prohibition in §6a evaporates: each phase is an ordinary
+relation and a barrier over it is an ordinary barrier, windows and aggregates included. This is
+exactly the argument item 3 already makes and credits to our architecture rather than to
+TinkerPop's — *"our phases are set-at-a-time by construction, so 'the whole frontier at iteration k'
+IS phase k's relation — the property `:217` had to special-case to obtain."*
+
+**And unrolling is a plan transformation** — replicate a subplan `n` times and chain it — which is
+precisely the operation an inspectable plan makes trivial and an append-only SQL builder makes
+impossible. Today `tryUnroll` (`ir/strategies.ts:949`) has to work on `Step[]` *before* lowering,
+which is why it is bounded by a step-name allowlist rather than by what the relational form can
+express.
+
+Unroll depth is not a practical obstacle: corpus `times(n)` is **83× `times(2)`, 16× `times(1)`, 9×
+`times(3)`, 8× `times(5)`, one each of 8 and 10 — maximum 10**. It does need a declared ceiling,
+because DO caps statement text at 100 KB and a hand-written `times(1000)` would blow it; above the
+ceiling, fall back to the recursive CTE, which then refuses a barrier body as a clean deferral.
+
+**So the corrected picture, and it is much more favourable to RelIR than §6a alone suggests:**
+
+| repeat body | route | RelIR helps? |
+|---|---|---|
+| row-local vocabulary beyond `REPEAT_BODY_OK` (`not`/`where`/`union`/`optional`/`IN`) | inline into the recursive term | **yes** — join-flattening is the missing pass |
+| barrier body + `times(n)` — **48 of 53** | unroll; no recursion, so no prohibition | **yes** — unrolling is subplan replication |
+| barrier body + `until()`/`emit()` — **5 of 53** | none | **no** — genuine platform wall |
+
+**So item 3 should be re-framed as three items, not one.** A compiler limitation worth dissolving, a
+transformation that is cheap once plans are data, and a five-traversal platform wall. Filing them
+together is what makes the 41 read as one prize and what has made the unroll look like a big bet
+rather than the majority route.
 
 ### The honest counter-argument
 
@@ -659,7 +697,8 @@ writing §6, and none of them is what §6 says.
 - **Merging the movement vocabulary sets.** They differ on `otherV` and those differences are
   load-bearing; derive with a named difference, never merge.
 - **Re-lowering a `repeat()` body barrier to reach a legal recursive-term form.** §6a: measured and
-  dead. `DISTINCT` there is legal but inert, `LIMIT`/`ORDER BY` are global caps, aggregates and window
+  dead. (Note this kills the *inlining* route only — §6b measures that 48 of 53 such bodies are
+  `times(n)`-bounded and unroll instead, where no prohibition applies.) `DISTINCT` there is legal but inert, `LIMIT`/`ORDER BY` are global caps, aggregates and window
   functions are rejected outright. **No per-iteration barrier is expressible in a SQLite recursive
   term in any lowering** — so item 3's 41 barrier-body queries are a platform wall, and the unroll is
   the only route. Recorded so the idea is not re-derived from the legality result alone.
@@ -698,10 +737,9 @@ is not `(key-shape, value-shape)`, the gates are not a relation and this is the 
 + §6a. A `classifyRepeat(region) → RepeatPlan | Deferral` leaf, then two lowerings that consume a
 validated plan. **Kill criterion:** if the extracted classifier still needs ≥10 fields on
 `RepeatPlan`, the complexity was essential and the split only moved it — revert and record that.
-**Do the index change regardless of the code change**: item 3 currently files a compiler limitation
-(the row-local vocabulary gate, 8 queries, dissolvable) and a platform wall (41 barrier bodies, not
-dissolvable by any lowering) as one item, which is what makes the 41 read as a prize. §6a has the
-measurement; the two halves have different answers and belong apart.
+**Do the index change regardless of the code change**: item 3 currently files three different
+answers as one item — a dissolvable row-local vocabulary gate, a barrier-body majority that unrolls
+(48 of 53 corpus bodies), and a five-traversal platform wall. §6a/§6b have the measurements.
 
 **5 — Prove or kill RelIR on the row-op matrix, before writing any of it.** *The gate for §6, and
 cheap.* Item 17 has already measured the matrices: root scope **66 gaps / 150**, child scope **41 /
