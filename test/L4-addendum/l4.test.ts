@@ -74,6 +74,13 @@ interface Scenario {
   /** `Then the result should have a count of N`. */
   count: number | null;
   expected: string[];
+  /** `And the graph should return N for count of "<traversal>"` — upstream's own Then-step for
+   *  asserting GRAPH STATE after a write, which is the only thing that can catch a write that
+   *  ran and left the graph wrong. Several per scenario; each runs against the post-traversal
+   *  store. Without it a write scenario can only pin what the write RETURNED, and the returned
+   *  element is a consequence of the mutation rather than the mutation itself (write-path plan,
+   *  trap 4). */
+  graphChecks: { gremlin: string; count: number }[];
 }
 
 // A minimal Gherkin reader for our own feature files: name + `Given the X graph` + the
@@ -93,7 +100,7 @@ function parseFeature(featureName: string, text: string): Scenario[] {
     const tags = featureTags + pending; pending = '';
     const s: Scenario = {
       feature: featureName, name: m[1].trim(), graph: 'empty',
-      initializer: null, gremlin: '', assertion: 'unordered', count: null, expected: [],
+      initializer: null, gremlin: '', assertion: 'unordered', count: null, expected: [], graphChecks: [],
     };
     // The routing the official runner does (`feature-steps.js`): a @MultiLabel scenario's EMPTY
     // graph is the multi-label source, not the plain one. Mirrored here so a scenario can be
@@ -108,6 +115,10 @@ function parseFeature(featureName: string, text: string): Scenario[] {
       if (g) s.graph = multiLabel && g[1] === 'empty' ? 'multilabel' : g[1];
       if (/^(?:Given|And)\s+the\s+graph\s+initializer\s+of$/.test(l)) docTarget = 'initializer';
       else if (/^(?:Given|And)\s+the\s+traversal\s+of$/.test(l)) docTarget = 'gremlin';
+      // Upstream writes the traversal as a double-quoted string with its own quotes backslash-
+      // escaped, so unescaping is part of reading the step, not a courtesy.
+      const gc = l.match(/^(?:Then|And)\s+the\s+graph\s+should\s+return\s+(\d+)\s+for\s+count\s+of\s+"(.*)"$/);
+      if (gc) { s.graphChecks.push({ count: Number(gc[1]), gremlin: gc[2].replace(/\\"/g, '"') }); continue; }
       const cnt = l.match(/^(?:Then|And)\s+the\s+result\s+should\s+have\s+a\s+count\s+of\s+(\d+)$/);
       if (cnt) { s.assertion = 'count'; s.count = Number(cnt[1]); }
       else if (/^(?:Then|And)\s+the\s+result\s+should\s+be\s+unordered$/.test(l)) s.assertion = 'unordered';
@@ -316,6 +327,11 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
         case 'of': for (const g of got) expect(want).toContain(g); break;
         case 'count': break; // the count above IS the assertion
       }
+      // Graph-state checks last: they read the store the traversal just mutated.
+      for (const g of s.graphChecks)
+        expect(
+          (await decodeAll(executeQuery(store, g.gremlin, {}, {}, standardRegistry))).length,
+        ).toBe(g.count);
     });
   }
 });

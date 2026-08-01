@@ -409,6 +409,31 @@ function insertRow(store: GraphStore, table: ElementTable, baseCols: string[], b
   return { id: row.id, extId: row.uid ?? row.id };
 }
 
+/** Remove EVERY property row under one key, and the FTS text each row owns. Both the
+ *  `single`-cardinality replace (drop the key, then insert one) and the null-value rule
+ *  below are exactly this delete, which is why they share it rather than spelling the two
+ *  statements twice per element kind. */
+function removeProperties(store: GraphStore, elem: Elem, owner: number, key: string): void {
+  const table = elem === 'edge' ? 'edge_properties' : 'vertex_properties';
+  const ownerCol = elem === 'edge' ? 'edge' : 'node';
+  for (const r of store.query<{ id: number }>(`SELECT id FROM ${table} WHERE ${ownerCol}=? AND key=?`, [owner, key]))
+    deleteFtsFor(store, sqlElem(elem), r.id);
+  store.query(`DELETE FROM ${table} WHERE ${ownerCol}=? AND key=?`, [owner, key]);
+}
+
+/** TinkerPop's null-VALUE rule, the value-side twin of validate.ts's key rules: on a graph that
+ *  does not declare `supportsNullPropertyValues` — ours does not — `property(k, null)` REMOVES
+ *  every property under `k` instead of storing a null. `ElementHelper.attachProperties` is the
+ *  authority and it spells it three times identically, once per overload
+ *  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/util/ElementHelper.java:326,352,378`):
+ *  `!allowNullPropertyValues && null == value` → `element.properties(key).forEachRemaining(Property::remove)`.
+ *  Note it removes regardless of the declared cardinality, and regardless of whether the element
+ *  was just created — so this belongs at the storage waist, where every host (vertex/edge
+ *  `property()`, addV/addE creation, a merge option map) reaches it and cannot answer differently.
+ *  The corpus's `@AllowNullPropertyValues` scenarios describe the OTHER provider choice; the
+ *  vendored runner skips them (test/L3-conformance/tags.ts), so they are not in L3's denominator. */
+const isPropertyRemoval = (val: any): boolean => val === null;
+
 // Set/append ONE vertex property (W4). single = replace all rows for the key then insert
 // one; list = append; set = append unless an equal value already exists (then patch its
 // meta). Meta is a {metaKey:scalar} object stored as a JSONB blob. A single SQL statement
@@ -419,6 +444,7 @@ export function applyVertexProperty(
 ): void {
   if (val && typeof val === 'object' && 'nested' in val) throw new Error('property() with a traversal value not yet supported');
   validatePropertyKey(key); // the waist: every vertex property key reaches storage through here
+  if (isPropertyRemoval(val)) return removeProperties(store, 'vertex', node, key);
   const metaJson = meta ? JSON.stringify(meta) : null;
   // A collection value (list/map/set) is stored as a self-describing typed-JSON tree in the
   // value column (bind the JSON text, wrap jsonb(?)) — a raw JS array/Map bind would throw at
@@ -428,12 +454,8 @@ export function applyVertexProperty(
   // the two paths cannot encode the same value two different ways.
   const { stored: storedVal, collection } = propertyValueBind(val, vtype, typeNode);
   const valPh = collection ? 'jsonb(?)' : '?';
-  if (cardinality === 'single') {
-    // single = replace all rows for the key: drop their FTS rows too, then the rows.
-    for (const r of store.query<{ id: number }>('SELECT id FROM vertex_properties WHERE node=? AND key=?', [node, key]))
-      deleteFtsFor(store, sqlElem('vertex'), r.id);
-    store.query('DELETE FROM vertex_properties WHERE node=? AND key=?', [node, key]);
-  }
+  // single = replace all rows for the key: drop their FTS rows too, then the rows.
+  if (cardinality === 'single') removeProperties(store, 'vertex', node, key);
   if (cardinality === 'set') {
     const existing = store.query<{ id: number }>(`SELECT id FROM vertex_properties WHERE node=? AND key=? AND value=${valPh}`, [node, key, storedVal]);
     if (existing.length) {
@@ -455,6 +477,7 @@ export function applyVertexProperty(
 export function insertEdgeProperty(store: GraphStore, edge: number, key: string, val: any, vtype: CanonicalType | null, typeNode: TypeNode | null = null): void {
   if (val && typeof val === 'object' && 'nested' in val) throw new Error('property() with a traversal value not yet supported');
   validatePropertyKey(key); // the waist, edge side (see applyVertexProperty)
+  if (isPropertyRemoval(val)) return removeProperties(store, 'edge', edge, key);
   const { stored: storedVal, collection } = propertyValueBind(val, vtype, typeNode);
   const valPh = collection ? 'jsonb(?)' : '?';
   // Was there already a row for (edge,key)? The UNIQUE(edge,key) index serves this cheaply.
