@@ -186,6 +186,18 @@ expects the throw before touching any merge refusal; item 23 landed a family of 
   `2026-07-16-compiler-consolidation-plan.md` §6.1(c). This is the one that gates the others: a
   write that is not the last step needs its output to re-enter the read spine as an ordinary element
   stream.
+  **The read-tail half landed 2026-08-01 (`dcaa413`), and it split in two.** For an
+  element-PRESERVING write (`property()`, `addLabel()`) there is no new element to re-root on, so
+  the tail is the suffix re-read per driver — substrate `addLabel()` already had and `property()`
+  simply could not reach (the "cannot be HANDED this" tell). What is LEFT, and what the survey did
+  not separate, is the case that genuinely needs the mid-chain machinery: a GLOBAL BARRIER in the
+  tail. The per-driver read cannot observe the whole stream, so `…addLabel("emp").count()` had been
+  answering `[1,1,1,1]` instead of `[4]` — a silent wrong answer that predates this work. It now
+  fails closed, guarded on the DRIVER COUNT rather than the step name, because with one driver
+  per-driver IS global and every corpus scenario in that shape uses a one-vertex graph (refusing by
+  step name measured +1/−10). Closing it properly means landing all drivers in ONE relation — the
+  same substrate `landForeignElements`/`jsonbArrayBind` already provides for a read — after which
+  the guard deletes itself.
 - ~~One WORDING mismatch left over from item 23~~ — **FIXED 2026-08-01 (`393cfb8`), L3 +1.** Two
   details the survey did not have: the reference's tail splits two ways (`but null was specified
   instead` for an endpoint nobody supplied vs `does not match any vertices in the graph` for one
