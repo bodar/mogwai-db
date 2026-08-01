@@ -204,15 +204,24 @@ The graph is identical; only which new element got which id differs, and the cen
 ids. So **the perturbed gate does not require the driver rewrite.** Two ways to close it, and the
 first is now cheap:
 
-1. **Make the driver consume its input in emission order.** The substrate exists as of 2026-08-01:
-   the source seeds `encounter = id`, every row slice already demands it, and a child scope's ordinal
-   is order-bearing. A write's assigned ids are observable, so a write chain demanding an encounter
-   is the same argument `COLLECTING_CONSUMERS` already makes for `fold`/`aggregate`/`cap`.
-   Reproducible ids are also something users notice.
-2. Exempt the three rows in the perturbed runner, naming the reason.
+1. **Make the driver consume its input in emission order.** ✅ **DONE 2026-08-01 (`04b5080`)** —
+   and it was cheap, as predicted. The write steps join `COLLECTING_CONSUMERS` in demanding an
+   encounter; `renderDriverRows` is the one place a write host reads it back. **Perturbed census
+   4 → 1.**
+   The half the estimate missed: `buildPrefixFresh` FORCED `demandsEncounter: false`, and it cannot
+   ask `analyzeChain` for the right answer because it is handed the prefix with the write step
+   already sliced off. It now forces it ON, gated by a new `canCarryEncounter` — a CAPABILITY, not a
+   preference: a `repeat()`/`match()` prefix cannot thread an encounter, and demanding one there
+   declares a layout column the body never produces.
+   One census row moved in the NORMAL run: its old digest was the unordered scan's, which happened
+   not to be emission order.
+2. ~~Exempt the three rows in the perturbed runner~~ — moot; there are no write rows left.
 
 `g.V().repeat(__.both()).times(3).range(5,11)` needs an exemption either way — it is item 4's
-`repeat`/`match` boundary and expected.
+`repeat`/`match` boundary and expected. **It is now the ONLY perturbed-census row.** Deliberately
+not exempted here: a one-row exemption mechanism is not substrate, and the reason belongs with item
+4, which will remove the row rather than annotate it. Whoever closes item 4 turns the perturbed
+census into a gate in the same change.
 
 **The row-at-a-time rewrite stays a separate, later question.** It is an execution-model decision
 (match-vs-create for the whole set before writing), not a correctness bug, and nothing above depends
@@ -257,7 +266,7 @@ on it.
 | W1 | ✅ **DONE 2026-08-01** — all five silent wrong answers + the W4 default. L3 1679 → 1689 | the reproductions in §2 became L4 pins (4 new `.feature` files); census `goldens.tsv` moved 9 rows, each named in its commit |
 | W2 | the map-valued driver, then the five upsert rows that follow it | L3 ratchet (expect ~41 candidates, not all reachable) |
 | W3 | addV mid-chain / read-tail-after-write first, then the positions it unblocks | L3 ratchet + the matrix rows 207–209 |
-| W4 | driver input in emission order | `mise run test:perturbed` — 3 census rows, and with the `repeat` exemption the instrument becomes a GATE |
+| W4 | ✅ **DONE 2026-08-01** — driver input in emission order | `mise run test:perturbed` — the 3 write census rows are gone; 1 row left (item 4's `repeat`/`range`), after which the perturbed census can be a GATE |
 
 W1 and W4 are independent of each other and of W2/W3. W3's mid-chain item is the prerequisite for
 several of W2's tails, so if only one large thing gets done, do W3's first item. **With W1 closed the
