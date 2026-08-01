@@ -73,6 +73,9 @@ export interface GroupSource {
    * child encounter, so folding never relies on incidental join order. */
   valFold?: boolean;
   valOrder?: Expression;
+  /** The value body's trailing `dedup()`, hoisted onto the group aggregate as `DISTINCT` — the
+   *  reference dedups across the whole PARTITION, where a child-scoped dedup sees one origin. */
+  valDistinct?: boolean;
   valElement?: { elem: 'vertex' | 'edge'; ctx: ScalarCtx };
   productiveBy?: boolean;
   /** The live parent traverser stream the group folds over — an element (node/edge) OR
@@ -299,6 +302,58 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   const genericGroupVal = nestedElementMove || nestedPropertiesMove;
   if (!genericKey && !genericProjectKey && !genericVal && !genericReducer && !genericFold && !genericElementFold && !genericElementImplicitFold && !genericGroupVal) return null;
 
+  /**
+   * A group VALUE body's trailing `dedup()`/`order()` run observes the WHOLE PARTITION, not one
+   * traverser — so it is hoisted out of the child scope and into the group aggregate.
+   *
+   * TinkerPop's rule is `Grouping.determineBarrierStep`: the FIRST non-local `Barrier` in the value
+   * traversal becomes the group's REDUCER (`GroupStep` sets its bi-operator from that barrier), so
+   * the barrier accumulates across every traverser that landed on the key and the steps after it
+   * run on the reduced value. `projectTraverser` feeds the value traversal ONE traverser at a time,
+   * which is exactly our child scope — and that is why these had to move: compiled in the child
+   * scope they observe a single origin's rows, and for
+   * `by(__.values('name').order().by(desc).fold())` that is ONE name, so the sort was a silent
+   * no-op and the list came out in vertex-id order.
+   *
+   * Both hoisted barriers have an exact aggregate form, which is why only these two are taken:
+   * `dedup()` is `DISTINCT` and `order()` is the aggregate's `ORDER BY` (measured: SQLite accepts
+   * `json_group_array(DISTINCT v ORDER BY …)` with a FILTER, and with a NON-matching sort key it
+   * keeps first-occurrence order — which is what a bare `dedup()` means). `limit`/`range` before
+   * the terminal have no such form (a partition-wide window inside an aggregate) and stay
+   * child-scoped, recorded rather than guessed at — docs/outstanding-work.md item 20.
+   *
+   * Scoped to a SCALAR body with a bare/direction-only `by()`, which is the whole space for one: a
+   * scalar stream has no property to sort on, so `by(key)`/`by(traversal)`/shuffle can only arrive
+   * on an element body, and those keep today's behaviour and their own deferrals.
+   */
+  const partitionBarriers = ((): { distinct: boolean; desc?: boolean; body: ReturnType<typeof stepChain> } | null => {
+    if (!genericFold) return null;
+    const terminal = valBody.at(-1)!;                 // the fold(), stripped by the row compiler
+    const before = valBody.slice(0, -1);
+    let cut = before.length;
+    let distinct = false;
+    let desc: boolean | undefined;
+    // Walk the run BACKWARDS from the terminal, taking at most one of each. `dedup().order()` and
+    // `order().dedup()` hoist to the same aggregate: dedup keeps the first occurrence, so sorting
+    // either side of it yields the same sorted distinct set.
+    for (let i = before.length - 1; i >= 0; i--) {
+      const s = before[i] as IRStep;
+      if (s.name === 'dedup' && !distinct && !(s.modulators ?? []).length && !(s.args ?? []).length) { distinct = true; cut = i; continue; }
+      if (s.name === 'order' && desc === undefined) {
+        const mods = s.modulators ?? [[]];
+        if (mods.length !== 1) break;
+        const by = classifyBy(mods[0]);
+        if (by.kind !== 'none' || by.dir === 'shuffle') break;
+        desc = by.dir === 'desc';
+        cut = i;
+        continue;
+      }
+      break;
+    }
+    if (!distinct && desc === undefined) return null;
+    return { distinct, desc, body: [...before.slice(0, cut), terminal] };
+  })();
+
   const outer = pushChildScope(parent);
   const p = outer.seed.rel.as('gp');
   const joins: Expression[] = [];
@@ -309,6 +364,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   let valMarker: Expression | undefined;
   let valFold = false;
   let valOrder: Expression | undefined;
+  let valDistinct: boolean | undefined;
   let valElement: GroupSource['valElement'];
   let valBulk: Expression | undefined;
   const reuse = () => reuseCurrentFrame(outer.scope, outer.frame);
@@ -364,13 +420,20 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
     valBulk = rows.stream.traverserLayout.bulk ? c.c[rows.stream.traverserLayout.bulk] : undefined;
   }
   if (genericFold) {
-    const rows = tryCompileScalarRowsBeforeFold(outer.seed, valArg.nested, reuse(), valBody)!;
+    const rows = tryCompileScalarRowsBeforeFold(outer.seed, valArg.nested, reuse(), partitionBarriers?.body ?? valBody)!;
     const c = rows.stream.rel.as('gf');
     joins.push(q` LEFT JOIN ${c} ON ${c.c[outer.frame.ordinal]}=${p.c[outer.frame.ordinal]}`);
     valExpr = c.c.v;
     valMarker = c.c[childEncounter(rows.stream, 'group value fold')];
     valFold = true;
-    valOrder = q`${p.c[outer.frame.ordinal]}, ${valMarker}`;
+    valDistinct = partitionBarriers?.distinct;
+    // A hoisted order() sorts the whole PARTITION (see partitionBarriers); the parent ordinal and
+    // per-origin encounter stay behind it as the deterministic tie-break, which is what an
+    // unhoisted body orders by outright — and which, under DISTINCT with no hoisted order, is
+    // exactly dedup()'s keep-the-first-occurrence rule.
+    const fallbackOrder = q`${p.c[outer.frame.ordinal]}, ${valMarker}`;
+    valOrder = partitionBarriers?.desc === undefined ? fallbackOrder
+      : q`${c.c.v}${raw(partitionBarriers.desc ? ' DESC' : ' ASC')}, ${fallbackOrder}`;
   }
   if (genericElementFold || genericElementImplicitFold) {
     const rows = (genericElementFold
@@ -422,7 +485,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   // The pushed domain `p` re-projects the parent traverser's bulk, so a source-level count
   // (bare groupCount() over a by(traversal) key) weights by it just like the direct path.
   const bulk = parent.traverserLayout.bulk ? p.c[parent.traverserLayout.bulk] : undefined;
-  const common = { keyExpr, keyParts, valExpr, valReducer, valMarker, valFold, valOrder, valElement, valNestedMap, valBulk, bulk, productiveBy: src.productiveBy };
+  const common = { keyExpr, keyParts, valExpr, valReducer, valMarker, valFold, valOrder, valDistinct, valElement, valNestedMap, valBulk, bulk, productiveBy: src.productiveBy };
   // Property parent: the pushed domain `p` already carries owner/pk/pv, so the source is
   // `p` itself (plus the child joins) — no element table to rejoin. Element parent rejoins
   // nodes/edges `n` on the domain id so key/value ctx reads its columns.
@@ -489,7 +552,7 @@ export function lowerGroup(st: LoweringState, isCount: boolean, bys: any[][], sr
   }
   else if (src.valFold) {
     val = { kind: 'list' };
-    valNode = q`COALESCE(json_group_array(${src.valExpr!} ORDER BY ${src.valOrder!}) FILTER (WHERE ${src.valMarker!} IS NOT NULL), json('[]')) AS gv`;
+    valNode = q`COALESCE(json_group_array(${src.valDistinct ? raw('DISTINCT ') : empty}${src.valExpr!} ORDER BY ${src.valOrder!}) FILTER (WHERE ${src.valMarker!} IS NOT NULL), json('[]')) AS gv`;
   }
   else if (src.valElement) {
     val = { kind: 'elementList', elem: src.valElement.elem };
