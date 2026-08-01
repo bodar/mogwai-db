@@ -161,20 +161,29 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | l[d[32].i] |
 
   @gap:branch-traverser-major
-  Scenario: g_V_hasLabelXpersonX_order_byXnameX_unionXoutXcountX_valuesXageXX_limitX2X
+  Scenario: g_V_hasLabelXpersonX_order_byXnameX_unionXoutXcountX_valuesXageXX
     Given the modern graph
     And the traversal of
       """
-      g.V().hasLabel("person").order().by("name").union(__.out().count(), __.values("age")).limit(2)
+      g.V().hasLabel("person").order().by("name").union(__.out().count(), __.values("age"))
       """
     # The COMPLEMENT, and the reason the gate is not "always freeze": arm 0 holds a batched barrier,
-    # so `hasBarrier` is set and the reference runs BOTH arms over the whole input — arm-major is
-    # then its own answer. One count of all six out-edges, then the ages in input order.
+    # so `hasBarrier` is set and the reference runs BOTH arms over the whole input. ONE count of all
+    # six out-edges — not four per-traverser counts — and then every age.
+    #
+    # Deliberately NOT sliced, unlike its siblings. A batched arm's rows carry a PER-ORIGIN
+    # encounter (`ROW_NUMBER() OVER (PARTITION BY o0 …)` in the child projection), so every arm-1
+    # row ties at 1 in the merge's window and their relative order is SQLite's scan order — a
+    # `limit(2)` here would be pinned by luck, which `mise run test:perturbed` says out loud. That
+    # is the child-scope half of the emission-order substrate, filed under outstanding-work item 20.
     When iterated to list
     Then the result should be unordered
       | result |
       | d[6].l |
       | d[32].i |
+      | d[29].i |
+      | d[35].i |
+      | d[27].i |
 
   @gap:branch-traverser-major
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_valuesXageX_unionXmathX_plus_1X_mathX_times_2XX_limitX3X

@@ -200,13 +200,28 @@ cardinality, which is the measurement that says the ladder could not have found 
 
 20. **Results ordered only because SQLite scanned the convenient way.** `mise run test:perturbed`
    (`PRAGMA reverse_unordered_selects`) — a failure there is never a flake. Perturbed census **41 → 8**,
-   suite 18. Three mechanisms landed; left:
+   suite **21** (measured 2026-08-01). Three mechanisms landed; left:
    - **A GROUP VALUE body's barrier runs in the wrong SCOPE — a live silent wrong answer, not an
      ordering fix.** `group().by(T.label).by(__.values('name').order().by(desc).fold())` returns
      vertex-id order while the same `order().fold()` at ROOT is correct: the value body compiles
      per-origin, so each partition holds ONE name and the sort is a no-op. The reference splits the
      value traversal — last barrier is the group's REDUCER, everything before it per-traverser. Item 5's
      ground; **do not fix it by changing the ORDER BY.** *Med — both scenarios assert `unordered`.*
+   - **A CHILD-SCOPED body's rows have no order ACROSS parents, and this is the mechanism under
+     several of the rows below.** A per-origin projection mints
+     `encounter = ROW_NUMBER() OVER (PARTITION BY <ordinal> ORDER BY <local key>)` (child.ts,
+     projection.ts, mapscalar.ts, group.ts all do), and the ordinal itself is
+     `ROW_NUMBER() OVER ()` — identity without order. So every parent's first child row ties at 1,
+     and anything that reads those rows back in one stream falls to SQLite's scan order. Witnessed
+     while landing item 21's T4: in a BATCHING branch (where the traverser-major freeze correctly
+     does not apply) a per-origin arm's rows tie in the merge window, so
+     `union(__.out().count(), __.values('age')).limit(2)` is pinned by luck — the L4 pin for that
+     spelling is deliberately unsliced and says so. **Two candidate fixes, and the second is the
+     generic one:** tag the arm's ordinal into the merge key, or make the ordinal ORDER-BEARING
+     (`ROW_NUMBER() OVER (ORDER BY <parent encounter>)`, still unique, which is all the identity
+     contract needs) and mint the child encounter globally over it — monotone within each partition,
+     so per-origin consumers are unaffected. The second touches every per-origin mint site, so it
+     wants doing as one tranche with the perturbed suite as its measurement. *Med.*
    - **A RECORD stream carries no `encounter`**, so `recordSlice`'s `orderByEncounter` is inert and a
      record slice picks an arbitrary window. *Med.* · `aggregate('x').by(__.out().order().by('name'))`
      reads child rows in scan order. *Low-Med.* · Three WRITE traversals via row-at-a-time `write.ts`.
