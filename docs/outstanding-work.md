@@ -225,8 +225,9 @@ cardinality, which is the measurement that says the ladder could not have found 
 
 20. **Results ordered only because SQLite scanned the convenient way.** `mise run test:perturbed`
    (`PRAGMA reverse_unordered_selects`) — a failure there is never a flake. Perturbed census
-   **41 → 8 → 5**, suite **21 → 2** (measured 2026-08-01). **Two failures from a gate**, which is the
-   point of the item. Five mechanisms landed; left:
+   **41 → 8 → 4**, suite **21 → 1** (measured 2026-08-01), and the ONE remaining suite failure IS the
+   census. **So the gate is four corpus traversals away**, and three of them are the write driver.
+   Seven mechanisms landed; left:
    - **A GROUP VALUE body's barrier runs in the wrong SCOPE — `dedup()`/`order()` LANDED 2026-08-01
      (L3 1669 → 1671); `limit`/`range` are what is left.** The rule is
      `Grouping.determineBarrierStep`: the first non-local barrier in a value traversal is the group's
@@ -261,48 +262,37 @@ cardinality, which is the measurement that says the ladder could not have found 
      outside `json_group_array`, which orders the subquery and not the aggregate, so the array and
      `vertexLabelName`'s pick disagreed on the first label. And a bulk-load id collision named
      whichever id the scan reached first (`MIN` now, so the message is stable).
-   - **WHAT IS LEFT, all measured 2026-08-01, and the first two are the ones to take.**
-     1. An ELEMENT-shaped `aggregate('x').by(traversal)` builds a side-effect relation carrying no
-        order channel at all (`prefix/sideeffect.ts` — the SCALAR branch orders via
-        `jsonbGroupArray(…, memberOrder)`, the element branch has nowhere to put it), so `cap('x')`
-        reads it in scan order. A collection's member order is FULLY OBSERVABLE (the members ride
-        inside the collected traverser's own GraphBinary buffer — `jsonbGroupArray` says so), which
-        is what makes this a wrong answer rather than a nicety. Probe first: whether the order rides
-        as a column on the `SideEffectDef` for `cap` to sort by (general — serves `store` too), or
-        whether the element branch should collect at aggregate time like its scalar twin.
-        *Med, and the last real defect in this item.*
-     2. A RECORD stream carries no `encounter`, so `recordSlice`'s `orderByEncounter` is inert.
-        **Re-rated 2026-08-01 from polish to CORRECTNESS:** with a slice after it that is a wrong
-        SUBSET, not a reorder — `project(…).limit(n)` returns an arbitrary n — which is exactly the
-        shape 21's T4 turned out to have. Likely small: declare the role on the record layout and
-        the existing `orderByEncounter` becomes live. *Med.*
-     3. Three WRITE traversals via row-at-a-time `write.ts` — a driver rewrite, not an ordering fix;
-        leave with the write cluster. · `g.V().repeat(__.both()).times(3).range(5,11)` is EXPECTED
-        (item 4's boundary), so it needs an exemption rather than a fix when the gate lands.
+   - **LANDED 2026-08-01 — a named side-effect's members keep their collected order.** An
+     ELEMENT-shaped `aggregate('x').by(traversal)` builds a RELATION whose rows ARE the members, and
+     a relation's own ORDER BY does not survive into its reader — so the channel is declared:
+     `SideEffectDef`'s variant kind carries `order`, the producer mints it from the child scope's
+     ORDINAL (the parent-order key), and `cap()` declares it as the stream's encounter so the wire
+     applies it. Its scalar twin still bakes the order in at build time via `memberOrder`; TinkerPop
+     4 dropped `store()`, so aggregate is the only producer of this def kind today.
+   - **LANDED 2026-08-01 — EVERY row slice demands the encounter, and this subsumed the RECORD
+     item.** The demand pre-pass required a fan-out before a positional consumer; without one the
+     slice emitted a bare `LIMIT` and took whatever SQLite scanned first. `g.V().limit(2)`,
+     `project(…).limit(2)` and `valueMap(…).limit(2)` all took a different SUBSET under a reversed
+     scan — the shape T4 had. `tail` was already carved out with exactly this reasoning, and the
+     carve-out's scope was the only thing wrong with it. The record stream needed no work of its
+     own: `recordSlice` has always asked for `orderByEncounter` and the rule is what made it live.
+   - **WHAT IS LEFT — four corpus traversals, and none is an ordering bug in the compiler.** Three
+     WRITE traversals via row-at-a-time `write.ts` (a driver rewrite; leave with the write cluster)
+     and `g.V().repeat(__.both()).times(3).range(5,11)`, which is EXPECTED per item 4's
+     `repeat`/`match` boundary and so needs an exemption rather than a fix when the gate lands.
    - **The assertion sweep is DONE and the rule it used is worth keeping.** Thirteen exact-array
      assertions across seven files were pinning scan order for traversals that fix none; they now
      compare as multisets through `bagOf` (`test/support/harness.ts`), which states the rule and its
      limit.
-   - **The ONE test left red, and the decision taken on it 2026-08-01: rewrite it as a PAIRING, and
-     only exempt it if that cannot reach the branch arms.** `branch-triage.exec.test.ts`'s
-     projection-with-reducer test asserts `[1,1,0,1,0,1]` (per-traverser) against `[1,1,1,1,0,0]`
-     (by-arm) — the same multiset, so `bagOf` erases exactly what it is testing, and the order it
-     reads is `g.V()`'s SCAN order. Ordering the source is not the fix either: that makes the
-     encounter live, which makes the branch traverser-major (21's T4) and deletes the distinction.
-     **Do this instead:** pair each result with the input that produced it —
-     `project('v','c').by('name').by(__.values('age').count())` or an `as()`/`select` — so the
-     assertion is *which vertex produced which count*, which is what the test means and what
-     position was only ever a proxy for. If the pairing cannot express the branch-arm reading, add
-     ONE named exemption in the perturbed runner with the reason beside it; a single documented
-     exception costs far less than a permanently red instrument.
-     **And the prior question, worth asking before doing either:** by-arm emission is now observable
-     ONLY where nothing demands an order — a barrier-free branch nobody slices, folds or orders —
-     which is an unordered result by design (Crux 4), i.e. an internal. Internals belong in L2, and
-     that half is ALREADY pinned there: `test/L2-sql/branch.sql.test.ts` asserts the merge window is
-     `ROW_NUMBER() OVER (ORDER BY … arm_idx, arm_ordinal, arm_encounter)`. So the pairing rewrite
-     loses nothing — the observable half moves to a stable assertion, the internal half is already
-     covered by the SQL snapshot. Deleting the positional assertion outright is defensible on the
-     same reasoning; what is NOT defensible is keeping a scan-order pin and calling it coverage.
+   - **RESOLVED 2026-08-01 — the last red test, and the rule it settles.** `branch-triage`'s
+     projection-with-reducer test carried two constants differing only in POSITION (per-traverser vs
+     by-arm), which made it a scan-order pin. The decision taken: by-arm emission is observable only
+     where nothing demands an order, i.e. it is an INTERNAL, and internals belong in L2 — where it
+     was already pinned (`branch.sql.test.ts` asserts the merge window). So the positional
+     assertion went and the test now makes the multiset claim its own name makes ("with one
+     answer"). **The rule worth keeping: an exec test asserts what a client can observe; an internal
+     claim belongs in an L2 SQL assertion, and asserting it a second time through result position
+     buys nothing and costs the instrument.**
 
 5. **Non-element child bodies.** Map and record bodies compile. **Two premises that were FALSE — do not
    rebuild on them:** the element terminal does not need a relational form, and `project`/`group`/`path`

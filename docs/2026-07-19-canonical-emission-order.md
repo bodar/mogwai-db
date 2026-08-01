@@ -99,6 +99,13 @@ order is needed and threads it only then:
   fan-out body, or a root `fold()` whose order is observable. (A source-only `limit`
   — `g.V().limit(10)` — orders cheaply by id, no window; the expensive frontier-sort only
   when a fan-out precedes.)
+  **CORRECTED 2026-08-01 — the parenthesis above describes an intent that was never implemented,
+  and the fan-out condition is gone.** A source-only slice emitted a bare `LIMIT` with no ORDER BY
+  at all, so it took whatever SQLite scanned first: `g.V().limit(2)`, `project(…).limit(2)` and
+  `valueMap(…).limit(2)` each returned a different SUBSET under a reversed scan. EVERY row slice
+  now demands the encounter unless a plain `order()` already established one. The cheapness the
+  parenthesis promised is real and is where it lands: the source seeds `encounter = id`, so the
+  ORDER BY is a rowid read, and `movementCollapse` is untouched because a movement IS a fan-out.
 - **Not needed** → no encounter, hot path (index-only movement, `movementCollapse`) unchanged.
   Reducers (`count`/`sum`/…), existence gates, and bare `dedup()` are order-irrelevant and
   never trigger it.
