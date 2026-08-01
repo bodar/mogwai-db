@@ -1,7 +1,7 @@
 import { isNested, type Step, type StrategyUse } from '../../gremlin/frontend.ts';
 import { PASS_CATEGORIES, type Pass, type PassCategory, type PassContext } from './pass.ts';
 import {
-    stripTerminal, desugarMatchString, formRepeatRegions, unrollFixedRepeat, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
+    stripTerminal, desugarMatchString, desugarPropertyMap, formRepeatRegions, unrollFixedRepeat, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
     canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
     verifyStandard, verifyByModulatorArity,
     absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
@@ -68,6 +68,10 @@ const EXTRACT: Pass[] = group('extract', [
     applies: (steps) => steps.some((s) => s.name === 'match' && typeof (s.args ?? [])[0] === 'string'),
     run: desugarMatchString,
   },
+  // Also before decoration, and for the same reason: a map VALUE may be a nested traversal, and
+  // the Subgraph/Partition injectors recurse into `{nested}` ARGS rather than into a Map's values.
+  // Independent of desugarMatchString (disjoint step names), so the order between them is free.
+  { name: 'desugarPropertyMap', applies: (steps) => steps.some((s) => s.name === 'property'), run: desugarPropertyMap },
 ]);
 
 // ---------- fold (canonicalize multi-step shapes into carried fields) ----------

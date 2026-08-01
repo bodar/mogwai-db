@@ -1,6 +1,7 @@
-import { stepChain, isNested, isPred, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
+import { stepChain, isCardinalityArg, isCardinalityValueArg, isNested, isPred, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
+import { mapEntryType } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope } from './step.ts';
@@ -397,6 +398,59 @@ export function verify(spec: StrategySpec, steps: Step[]): void {
  *  (`__.constant(...)`); both are carried verbatim and resolved to a constant later
  *  (call-params.ts). A `with()` NOT preceded by a call() is left untouched (it is not a
  *  supported step elsewhere, so it will fail closed at dispatch if it ever appears). */
+/** Is this a `property()` whose whole argument is a literal MAP — `property([k:v, …])` or
+ *  `property(Cardinality.x, [k:v, …])`? The map form takes exactly one map (plus the optional
+ *  leading cardinality), which is what distinguishes it from `property(k, v, …meta)`. A
+ *  `property(__.trav)` whose traversal PRODUCES a map is a different arm (it needs the driver's
+ *  current object) and is deliberately not matched here. */
+function isPropertyMapForm(s: IRStep): boolean {
+  const args = s.args ?? [];
+  const off = isCardinalityArg(args[0]) && !isCardinalityValueArg(args[0]) ? 1 : 0;
+  return s.name === 'property' && args.length === off + 1 && args[off] instanceof Map;
+}
+
+/** `property([k1:v1, k2:v2])` → `property(k1,v1).property(k2,v2)`, and
+ *  `property(Cardinality.x, [k:v])` → `property(Cardinality.x, k, v)` — with a
+ *  `Cardinality.set(v)` map VALUE overriding the enclosing cardinality for its own entry.
+ *
+ *  This is precisely what TinkerPop does, and it does it in the DSL rather than in a step:
+ *  `GraphTraversal.property(Map)` loops the entries calling `property(null, k, v)`, and
+ *  `property(Cardinality, Map)` loops them calling `property(cardinality, k, v)` unless the value
+ *  is a `CardinalityValueTraversal` (gremlin-core .../dsl/graph/GraphTraversal.java:4074-4132). So
+ *  the map form is SUGAR with no semantics of its own, which makes it a chain rewrite and not a
+ *  write-step feature — the three write hosts (addV, a mutation tail, a mergeV tail) get it at
+ *  once, and none of them learns the form exists. Before this it was silently a NO-OP: the write
+ *  compilers skipped a map-shaped key and the properties were never written.
+ *
+ *  An empty map expands to nothing, which is also upstream's answer (`property([:])` adds no step
+ *  at all, so `g.V().property([:])` is `g.V()`).
+ *
+ *  Runs in `extract`, before decoration, for the same reason desugarMatchString does: a map VALUE
+ *  may be a nested traversal (`[k: __.trav]` is legal — `mapEntry : mapKey COLON genericLiteral`
+ *  admits `nestedTraversal`), and the Subgraph/Partition injectors recurse into `{nested}` ARGS,
+ *  not into a Map's values. Expanding first is what puts such a body where they can see it. */
+export function desugarPropertyMap(steps: IRStep[]): IRStep[] {
+  if (!steps.some(isPropertyMapForm)) return steps;
+  const out: IRStep[] = [];
+  for (const s of steps) {
+    if (!isPropertyMapForm(s)) { out.push(s); continue; }
+    const off = isCardinalityArg(s.args[0]) && !isCardinalityValueArg(s.args[0]) ? 1 : 0;
+    const outer = off ? (s.args[0] as { cardinality: string }).cardinality : null;
+    const entryType = s.argTypes?.[off] ?? null;
+    for (const [k, v] of s.args[off] as Map<any, any>) {
+      const cv = isCardinalityValueArg(v) ? v : null;
+      const card = cv ? cv.cardinality : outer;
+      // The entry's captured value TYPE. A CardinalityValue entry has none (the parser records
+      // `value: null` for it), which is the honest answer — its inner value is typed by inference.
+      const vt = mapEntryType(entryType, String(k));
+      out.push(card === null
+        ? { ...s, args: [k, cv ? cv.value : v], argTypes: [null, vt] }
+        : { ...s, args: [{ cardinality: card }, k, cv ? cv.value : v], argTypes: [null, null, vt] });
+    }
+  }
+  return out;
+}
+
 /** `g.io(path)[.with(k,v)…].read()|.write()` → `g.call("mogwai.io", {path, direction})[.with(k,v)…]`.
  *
  *  io() is a barrier service, not a step: it is async, it collects, and it lowers to nothing at
