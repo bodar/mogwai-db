@@ -14,7 +14,7 @@ import { type ValueType } from '../../../sql/kernel/render.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { continueLowering, variantPayloadCols, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
 import { armOrderKey, branchFork, layoutProjection, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, type LoweringState, type TraverserLayout } from '../context/context.ts';
-import { globalRowOps, lowerGlobalCount } from './barrier.ts';
+import { globalRowOps, lowerGlobalCount, aliasCompareRows } from './barrier.ts';
 
 // ---------- variant-arm merge builders (parent-agnostic; element- and scalar-parent share) ----------
 //
@@ -166,6 +166,11 @@ export function mergeVariantParts(base: LoweringState, parts: readonly Expressio
 }
 
 const VARIANT_DISPATCH = new Map<string, ShapeTailFn<VariantStream>>([
+  // where("a", P…("b")) — the ONE alias comparison (barrier.ts `aliasCompareRows`), which any
+  // per-row stream carrying the alias columns takes unchanged. Only `where`: `not`/`filter`
+  // have no string-argument spelling in the grammar, so registering them would be a handler
+  // that can only ever decline.
+  ['where', aliasCompareRows],
   // count is a relational barrier over any shaped row stream → one Long scalar.
   ['count', (s, _step, _steps, at) => continueLowering(lowerGlobalCount(s), at + 1)],
   // unfold() only re-opens a cap()'d aggregate (result:'list') back into member rows;

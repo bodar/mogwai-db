@@ -164,14 +164,16 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
 
   test('where() on a record stream compares two carried alias labels', () => {
     const eq = read('g.V().as("a").out().in().as("b").select("a","b").where("a", P.eq("b"))');
-    // the record CTE still carries a0/a1; where filters rows by their history-last ids
-    expect(eq.sql).toContain('WHERE CAST(r.a0 ->> ? AS INTEGER) = CAST(r.a1 ->> ? AS INTEGER)');
+    // The record CTE still carries a0/a1; where filters rows by their history-last ids. The source
+    // relation is aliased `p` because this is now the SHARED row re-projection (`aliasCompareRows`)
+    // rather than a record-local copy — same rows, same predicate, one implementation.
+    expect(eq.sql).toContain('WHERE CAST(p.a0 ->> ? AS INTEGER) = CAST(p.a1 ->> ? AS INTEGER)');
     const neq = read('g.V().as("a").out().in().as("b").select("a","b").where("a", P.neq("b"))');
-    expect(neq.sql).toContain('WHERE CAST(r.a0 ->> ? AS INTEGER) != CAST(r.a1 ->> ? AS INTEGER)');
+    expect(neq.sql).toContain('WHERE CAST(p.a0 ->> ? AS INTEGER) != CAST(p.a1 ->> ? AS INTEGER)');
     // P.not on a record where negates; a missing label still throws (drop-not-throw is
     // for select, an unknown label in a comparison is a real error).
     expect(read('g.V().as("a").out().in().as("b").select("a","b").where("a", P.not(P.eq("b")))').sql)
-      .toContain('WHERE NOT COALESCE((CAST(r.a0 ->> ? AS INTEGER) = CAST(r.a1 ->> ? AS INTEGER)), 0)');
+      .toContain('WHERE NOT COALESCE((CAST(p.a0 ->> ? AS INTEGER) = CAST(p.a1 ->> ? AS INTEGER)), 0)');
     expect(() => compile('g.V().as("a").out().as("b").select("a","b").where(__.as("a").out())', {}))
       .toThrow('where() on a record supports only the alias-compare form');
   });

@@ -24,7 +24,7 @@ import {
 } from '../../plan/plan.ts';
 import { dropLayoutAtBarrier, elemRel, layoutCols, layoutProjection, layoutProjectionMinting, partitionOver, patchLayout, type ElementStream, type LoweringState, type TraverserLayout } from '../context/context.ts';
 import { continueLowering, dispatchShapeTail, groupColumns, loweringStateOf, PROPERTY_PAYLOAD, toElementStream, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
-import { globalRowOps, lowerGlobalCount, numericReducerAggregate, type NumericReducer } from './barrier.ts';
+import { globalRowOps, lowerGlobalCount, numericReducerAggregate, type NumericReducer, aliasCompareRows } from './barrier.ts';
 import { assertsGType, childCtx, childSteps, classifyBy, classifyCountChild, classifyElementChildRows, classifyMapChildRows, classifyScalarChildRows, elementScalarBranchArm, reuseCurrentFrame, ROOT_SCOPE, type ChildFrameStack, type ChildParent, type ChildUse } from './child-shape.ts';
 import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementImplicitFoldRows, tryCompileElementRowsBeforeFold, tryCompileRowsBeforeReducer, tryCompileScalarRowsBeforeFold, tryCompileScalarValueChild, tryCompileScalarValueRows } from './child.ts';
 import { isMapLocalOrder } from './list.ts';
@@ -1061,6 +1061,11 @@ const propertyElement: ShapeTailFn<PropertyStream> = (s, _step, _steps, at) => {
 };
 
 const PROPERTY_DISPATCH = new Map<string, ShapeTailFn<PropertyStream>>([
+  // where("a", P…("b")) — the ONE alias comparison (barrier.ts `aliasCompareRows`), which any
+  // per-row stream carrying the alias columns takes unchanged. Only `where`: `not`/`filter`
+  // have no string-argument spelling in the grammar, so registering them would be a handler
+  // that can only ever decline.
+  ['where', aliasCompareRows],
   ['has', propertyFilter], ['hasKey', propertyFilter], ['hasValue', propertyFilter],
   // One row per Property/VertexProperty instance. `dedup` is NOT taken from the shared set: the
   // property arm has its own, which collapses on the property payload rather than the whole row.

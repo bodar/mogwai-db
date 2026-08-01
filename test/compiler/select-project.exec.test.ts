@@ -348,3 +348,61 @@ test('a token by() over a value-shaped parent still fails closed', () => {
 });
 
 });
+
+// The alias comparison is ONE test over ONE row re-projection, so it composes with every shape
+// that physically carries the alias columns — not just the two that happened to implement it.
+//
+// It was two ~28-line copies (`where`'s alias branch in prefix/filter.ts and `recordWhere` here),
+// identical down to the `where().by(key) on an edge-typed label` message being written out twice,
+// and it ran on element and record only. The index read them as differing in "how a label resolves
+// to {id, elem}"; they do not — that is one function over a different RELATION.
+describe('the alias comparison is shape-uniform', () => {
+  const store = seededStore();
+  // Every shape's rows are the same 6 traversers' worth of a→b pairs, so the property under test is
+  // stated as a PARTITION rather than a value table: eq and neq must split the unfiltered rows, on
+  // every shape, without anyone having to say what the rows contain.
+  const count = (q: string) => (run(store, q) as any[]).length;
+
+  test('eq and neq partition the rows on every shape that carries the labels', () => {
+    for (const tail of [
+      '',                                     // element
+      ".project('x').by('name')",             // record
+      ".values('name')",                      // scalar
+      '.union(__.values(\'name\'), __.out())', // variant
+      '.properties()',                        // property
+      '.path()',                              // path
+    ]) {
+      const g = `g.V().has('age').as('a').out().in().has('age').as('b')${tail}`;
+      const all = count(g);
+      expect(all).toBeGreaterThan(0);
+      expect(count(`${g}.where('a', P.eq('b'))`) + count(`${g}.where('a', P.neq('b'))`)).toBe(all);
+      // P.not(eq) is the complement of eq, on each shape, through the same unwrap-and-flip.
+      expect(count(`${g}.where('a', P.not(P.eq('b')))`)).toBe(count(`${g}.where('a', P.neq('b'))`));
+    }
+  });
+
+  test('a by(key) comparison reads the same property on a scalar as on an element', () => {
+    const g = "g.V().has('age').as('a').out().in().has('age').as('b')";
+    expect(count(`${g}.where('a', P.eq('b')).by('name')`))
+      .toBe(count(`${g}.values('name').where('a', P.eq('b')).by('name')`));
+  });
+
+  test('it fails CLOSED where the rows are not the traversers', () => {
+    // A grouped (recursive) path has one row per RUN and a group() is one whole result — filtering
+    // their rows would answer a different question, so `cardinalityOf` refuses inside the shared
+    // re-projection rather than each shape having to remember.
+    expect(() => compile("g.V().as('a').repeat(__.out()).times(2).as('b').path().where('a', P.neq('b'))", {}))
+      .toThrow('rows are not its traversers');
+    expect(() => compile("g.V().as('a').out().as('b').group().by('name').where('a', P.neq('b'))", {}))
+      .toThrow('where() on a group value not yet supported');
+    // An unbound label is an error, not a silently-empty answer — on every shape, since there is
+    // one resolver.
+    expect(() => compile("g.V().values('name').where('a', P.neq('b'))", {}))
+      .toThrow('where("a"): no such label');
+  });
+
+  test('a record still refuses the forms that have no reading over a map', () => {
+    expect(() => compile("g.V().as('a').project('x').by('name').where(P.neq('a'))", {}))
+      .toThrow('where() on a record supports only the alias-compare form');
+  });
+});

@@ -8,7 +8,7 @@ import { aliasCtx, elemCtx, elemTable, elementPayload, predicateSql, scalarProp,
 import { dropLayoutAtBarrier, layoutCols, layoutProjection, scopePathCols, withoutPath, type ElementStream, type TraverserLayout } from '../context/context.ts';
 import { continueLowering, dispatchShapeTail, loweringStateOf, pathColumns, toListStream, toPathStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { tryLowerScalarChoose, tryLowerScalarCoalesce } from '../prefix/branch.ts';
-import { lowerGlobalCount } from './barrier.ts';
+import { lowerGlobalCount, aliasCompareRows } from './barrier.ts';
 import { byAt, childCtx, childSteps, classifyBy, classifyScalarChild, reuseCurrentFrame, typeOfAssert, type ChildFrame, type ChildScope } from './child-shape.ts';
 import { pushChildScope, tryCompileScalarValueChild } from './child.ts';
 import { compileFromList } from './list.ts';
@@ -371,6 +371,11 @@ function linearScalarList(s: PathStream): ListStream | null {
  * engine for the collection ops (set-ops/reverse/unfold/…). select(Column)/whole-stream
  * order still defer (they need the path's as()-label history — separate slices). */
 const PATH_DISPATCH = new Map<string, ShapeTailFn<PathStream>>([
+  // where("a", P…("b")) — the ONE alias comparison (barrier.ts `aliasCompareRows`), which any
+  // per-row stream carrying the alias columns takes unchanged. Only `where`: `not`/`filter`
+  // have no string-argument spelling in the grammar, so registering them would be a handler
+  // that can only ever decline.
+  ['where', aliasCompareRows],
   // count() is a relational barrier over any shaped row stream. It reads `cardinalityOf`, so a
   // GROUPED (recursive) path counts its runs rather than its positions.
   ['count', (s, _step, _steps, at) => continueLowering(lowerGlobalCount(s), at + 1)],

@@ -22,7 +22,7 @@ import { lowerReSource } from '../graph-source.ts';
 import { choose as lowerElementChoose, coalesce as lowerElementCoalesce, flatMap as lowerElementFlatMap, union as lowerElementUnion, tryLowerListChoose, tryLowerListCoalesce, tryLowerListUnion, tryLowerOptionMapBranch, tryLowerScalarChoose, tryLowerScalarCoalesce, tryLowerScalarUnion, tryLowerVariantChoose, tryLowerVariantCoalesce, tryLowerVariantOptional, tryLowerVariantUnion } from '../prefix/branch.ts';
 import { lowerElementDedup } from '../prefix/filter.ts';
 import { lowerScalarAggregate, tryLowerLocalAggregate } from '../prefix/sideeffect.ts';
-import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer } from './barrier.ts';
+import { lowerGlobalCount, lowerGlobalFold, lowerGlobalNumericReducer, type NumericReducer, aliasCompareRows, firstOf } from './barrier.ts';
 import { isLocalScope, NUMERIC_REDUCERS, sliceOf } from '../../ir/step.ts';
 import { lowerCall } from './call.ts';
 import { assertsGType, BRANCH_SHAPE_ORDER, childCtx, childSteps, classifyBy, collectionAssert, classifyListChild, classifyTotalScalarChild, isScalarChild, ROOT_SCOPE, type BranchKind, type ByClass } from './child-shape.ts';
@@ -866,7 +866,10 @@ const scalarBranch = (fn: (s: ScalarStream, step: IRStep) => ScalarStream | null
 
 const SCALAR_DISPATCH = new Map<string, ShapeTailFn<ScalarStream>>([
   ['is', scalarIsCollectionRetype],
-  ['and', scalarFilter], ['or', scalarFilter], ['not', scalarFilter], ['filter', scalarFilter], ['where', scalarFilter],
+  // `where`/`not` already own the traversal-predicate form here, so the alias comparison is
+  // COMPOSED behind it (firstOf), never spread in — the last duplicate key would silently win.
+  ['and', scalarFilter], ['or', scalarFilter], ['filter', scalarFilter],
+  ['not', scalarFilter], ['where', firstOf(scalarFilter, aliasCompareRows)],
   // constant(x) rebinds every traverser to the literal x — the scalar form preserves the
   // encounter/origins so it composes inside a child scope (option/project/modulation bodies).
   ['constant', (s, step, _steps, at) => continueLowering(lowerScalarConstant(s, step.args), at + 1)],

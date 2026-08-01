@@ -1,5 +1,5 @@
 import { q, list, empty, raw, Query, Relation, type Expression } from '../../../sql/kernel/q.ts';
-import { aliasCtx, type Elem, type ScalarCtx, elemTable } from '../../plan/plan.ts';
+import { aliasCtx, type Elem, type ScalarCtx, elemTable, P_OPS, propScalarFor } from '../../plan/plan.ts';
 import { aliasId, aliasPresent, type AliasShape } from './alias.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import type { ValueType, ListOf, ScalarType } from '../../../sql/kernel/render.ts';
@@ -841,4 +841,71 @@ export function appendCte(
 ): ElementStream {
   const layout = patchLayout(st.traverserLayout, opts);
   return { ...st, traverserLayout: layout, elem: opts.elem ?? st.elem, rel: st.q.cte(body, ['id', ...layoutCols(layout)]) };
+}
+
+// ---------- the alias comparison: ONE test, for every shape that carries the columns ----------
+//
+// `where("a", P.neq("b"))` compares two labelled traversers, and `where(P.neq("a"))` compares the
+// current one against a label. It had two near-verbatim implementations — the alias branch of
+// `where` (prefix/filter.ts) and `recordWhere` (tail/select.ts): the same `P.not` unwrap and flip,
+// the same `P_OPS` guard, the same by() arity guard, the same edge-typed-label refusal spelled the
+// same way, the same `productiveBy` → `IS`/`IS NOT`.
+//
+// The index recorded them as differing in "how a label resolves to `{id, elem}`" —
+// `aliasIdExpr(label, aliases, prevRel)` against `aliasId(r.c[entry.col], 'last')`. They do not:
+// that is ONE function over a different RELATION, which is `aliasOperandsOf` below. So the compare
+// itself is parameterized by nothing but the relation holding the alias columns, and any shape that
+// physically carries them can be filtered by it.
+
+/** A resolved operand of an alias comparison: the traverser's rowid + which element kind it is. */
+export interface AliasOperand { id: Expression; elem: Elem }
+
+/** Resolve a label to its operand off `rel` — the relation that physically holds the alias
+ *  columns. An unbound label THROWS here rather than dropping the row: `where()` names a label the
+ *  author believes is bound, and silently comparing against nothing is the wrong answer.
+ *  (`select()` of an unbound label drops, which is a different step and a different rule.) */
+export const aliasOperandsOf = (aliases: AliasMap, rel: Relation) => (label: string): AliasOperand => {
+  const entry = aliases.get(label);
+  if (!entry) throw new Error(`where("${label}"): no such label — as("${label}") was not seen`);
+  return { id: aliasId(rel.c[entry.col], 'last'), elem: aliasElem(entry) };
+};
+
+/** The WHERE test for one alias comparison, negation already applied.
+ *
+ *  `left` is the comparison's left operand — a resolved label, or the CURRENT traverser for the
+ *  `where(P.neq("a"))` spelling, which only a host that has the current element in scope can supply.
+ *  `pred` is the raw predicate as written; `P.not(<inner>)` is unwrapped here and flips the outer
+ *  negation, so it composes with a `not()` step. */
+export function aliasCompareTest(
+  step: IRStep,
+  left: AliasOperand,
+  rawPred: any,
+  resolve: (label: string) => AliasOperand,
+): Expression {
+  let negate = step.name === 'not';
+  let pred = rawPred;
+  if (pred?.op === 'not') { negate = !negate; pred = pred.values[0]; }
+  if (!(pred?.op in P_OPS)) throw new Error(`where(P.${pred?.op}) alias comparison not yet supported`);
+  const right = resolve(pred.values[0]);
+  // At most one by(key): `absorbModulators` absorbs every contiguous by(), and a second one is not
+  // a valid modulator here — fail closed rather than silently answer a different question.
+  if ((step.modulators?.length ?? 0) > 1)
+    throw new Error('by() is only supported as an order() or select()/project() modulator');
+  const byKey = step.modulators?.[0]?.find((x: unknown) => typeof x === 'string') as string | undefined;
+  let test: Expression;
+  if (byKey !== undefined) {
+    // Both sides read as VERTEX properties; an edge-typed operand would silently read a vertex's
+    // props (rowids collide across the two spaces) → refuse.
+    if (left.elem === 'edge' || right.elem === 'edge')
+      throw new Error('where().by(key) on an edge-typed label not yet supported');
+    const op = step.productiveBy && pred.op === 'eq' ? 'IS'
+      : step.productiveBy && pred.op === 'neq' ? 'IS NOT'
+      : P_OPS[pred.op];
+    test = q`${propScalarFor(left.id, 'vertex', byKey)} ${op} ${propScalarFor(right.id, 'vertex', byKey)}`;
+  } else {
+    test = q`${left.id} ${P_OPS[pred.op]} ${right.id}`;
+  }
+  // A NULL (a missing property under by(key)) counts as "no output" → kept by not(), which is what
+  // makes this compose with the not(traversal) reading.
+  return negate ? q`NOT COALESCE((${test}), 0)` : test;
 }

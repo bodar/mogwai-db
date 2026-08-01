@@ -1,10 +1,10 @@
 import { derived, empty, list, q, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { perRowColumnOf, staticTypeOf, type ListOf } from '../../../sql/kernel/render.ts';
 import { sliceSuffix, typedScalarNode } from '../../plan/plan.ts';
-import { armBatches, isLocalScope, BATCHING_BRANCHES, type BranchKind, type NumericReducer, type ScalarReducer } from '../../ir/step.ts';
+import { armBatches, isLocalScope, BATCHING_BRANCHES, type BranchKind, type IRStep, type NumericReducer, type ScalarReducer } from '../../ir/step.ts';
 
-import { cardinalityOf, continueLowering, loweringStateOf, streamColumns, streamPayloadCols, toListStream, toScalarStream, withRelation, withRelationAndLayout, type ListStream, type RelationalStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
-import { layoutCols, layoutProjection, layoutProjectionMinting, patchLayout, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
+import { cardinalityOf, continueLowering, type LoweringResult, loweringStateOf, streamColumns, streamPayloadCols, toListStream, toScalarStream, withRelation, withRelationAndLayout, type ListStream, type RelationalStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
+import { aliasCompareTest, aliasOperandsOf, layoutCols, layoutProjection, layoutProjectionMinting, patchLayout, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
 import { type ChildScope } from './child-shape.ts';
 
 const currentFrame = (scope: ChildScope) => {
@@ -39,8 +39,10 @@ export function lowerGlobalCount(input: RelationalStream): ScalarStream {
 export interface RowOpts {
   readonly distinct?: boolean;
   /** A row FILTER, applied before any ORDER BY/LIMIT — so it composes with a slice the way a
-   *  `WHERE` does and not the way a second `LIMIT` would. */
-  readonly where?: Expression;
+   *  `WHERE` does and not the way a second `LIMIT` would. A FUNCTION form is handed the aliased
+   *  source relation, so a filter that reads the stream's own COLUMNS does not have to know (and
+   *  cannot get wrong) the alias this re-projection happens to use. */
+  readonly where?: Expression | ((p: Relation) => Expression);
   readonly suffix?: Expression;
   readonly orderByEncounter?: boolean;
   /** Read the encounter order BACKWARDS. Only meaningful with `orderByEncounter`, and it exists for
@@ -82,7 +84,7 @@ export function reprojectRows<T extends RelationalStream>(s: T, opts: RowOpts = 
   const order = opts.orderByEncounter && s.traverserLayout.encounter
     ? q` ORDER BY ${p.c[s.traverserLayout.encounter]}${opts.descending ? raw(' DESC') : empty}`
     : empty;
-  const where = opts.where ? q` WHERE ${opts.where}` : empty;
+  const where = opts.where ? q` WHERE ${typeof opts.where === 'function' ? opts.where(p) : opts.where}` : empty;
   const body = q`SELECT ${opts.distinct ? q`DISTINCT ` : empty}${list(cols.map((c) => p.c[c]), ', ')} FROM ${p}${where}${order}${opts.suffix ?? empty}`;
   return withRelation(s, s.q.cte(body, cols));
 }
@@ -99,6 +101,31 @@ export function reprojectRows<T extends RelationalStream>(s: T, opts: RowOpts = 
  * traversals executing** (`limit()/range()/skip()/dedup() on a list value not yet supported`), which
  * the census caught as its headline "support lost" gate. Compose, never shadow.
  */
+/** `where("a", P…("b"))` / `not(...)` over ANY per-row stream that physically carries the alias
+ *  columns — scalar, list, variant, property, path and record all do, and all deferred.
+ *
+ *  There is nothing shape-specific left once `aliasCompareTest` owns the comparison and
+ *  `reprojectRows` owns the rebuild, so this is one handler registered into six tables rather than
+ *  six copies. `cardinalityOf` inside `reprojectRows` is what keeps that safe: a group or a grouped
+ *  path is not one-row-per-traverser, so filtering its rows would answer a different question, and
+ *  it fails closed there instead of here.
+ *
+ *  Declines (returns null) for a non-string first argument: `where(P.neq("a"))` compares the CURRENT
+ *  traverser, which needs the element in scope, and `where(traversal)` is the child seam's question.
+ *  Both stay with the hosts that can answer them. */
+export const aliasCompareRows = <S extends RelationalStream>(
+  s: S, step: IRStep, _steps: IRStep[], at: number,
+): LoweringResult | null => {
+  const arg0 = step.args[0];
+  if (typeof arg0 !== 'string') return null;
+  return continueLowering(reprojectRows(s, {
+    where: (p) => {
+      const resolve = aliasOperandsOf(s.traverserLayout.aliases, p);
+      return aliasCompareTest(step, resolve(arg0), step.args[1], resolve);
+    },
+  }), at + 1);
+};
+
 export const firstOf = <T>(...fns: readonly ShapeTailFn<T>[]): ShapeTailFn<T> => (s, step, steps, at) => {
   for (const fn of fns) {
     const result = fn(s, step, steps, at);

@@ -13,7 +13,7 @@ import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toM
 import { layoutProjection, layoutCols, type ElementStream } from '../context/context.ts';
 import { PER_ROW, STATIC, type Compiled, type ListOf, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf, type Engine } from '../../engine/deps.ts';
-import { firstOf, globalRowOps, lowerGlobalCount } from './barrier.ts';
+import { firstOf, globalRowOps, lowerGlobalCount, aliasCompareRows } from './barrier.ts';
 import { assertsGType, classifyBy, collectionAssert } from './child-shape.ts';
 import { isLocalScope, REDUCERS } from '../../ir/step.ts';
 
@@ -511,6 +511,11 @@ const listSetOp: ShapeTailFn<ListStream> = (s, step, steps, at) => {
 };
 
 const LIST_DISPATCH = new Map<string, ShapeTailFn<ListStream>>([
+  // where("a", P…("b")) — the ONE alias comparison (barrier.ts `aliasCompareRows`), which any
+  // per-row stream carrying the alias columns takes unchanged. Only `where`: `not`/`filter`
+  // have no string-argument spelling in the grammar, so registering them would be a handler
+  // that can only ever decline.
+  ['where', aliasCompareRows],
   ['unfold', (s, _step, _steps, at) => continueLowering(compileUnfold(s), at + 1)],
   // none(pred): keep each list where NO element satisfies pred (a collection filter).
   ['none', (s, step, _steps, at) => continueLowering(listNoneFilter(s, step.args[0]), at + 1)],

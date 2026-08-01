@@ -1,16 +1,17 @@
-import { derived, q, list, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
+import { derived, q, list, raw, type Expression } from '../../../sql/kernel/q.ts';
 import { isNested, stepChain, type Pred } from '../../../gremlin/frontend.ts';
 import {
-    P_OPS,
-    predicateSql, propScalarFor, hasProp, elemCtx,
+    predicateSql,
+    hasProp, elemCtx,
     idPredFromArgs, scalarProp,
-    FtsSubstringFastPath, type Elem, labelMatchFor,
+    FtsSubstringFastPath,
+    labelMatchFor,
     labelPredicateFor, tokenExpr
 } from '../../plan/plan.ts';
 import { runFastPath } from '../../options/fast-paths.ts';
 import { tryInlinePredicate, combineBranchPreds, PredicateInliningFastPath } from './predicate.ts';
-import { appendCte, aliasElem, layoutCols, patchLayout, layoutProjection, elemRel, labelCtx, labelScope, prevRel, scopePathCols, withShape, type AliasEntry, type AliasMap, type ElementStream, type StepFn } from '../context/context.ts';
-import { aliasAppend, aliasId, aliasSeed, elemEntry, elemShape } from '../context/alias.ts';
+import { aliasCompareTest, aliasOperandsOf, appendCte, layoutCols, patchLayout, layoutProjection, elemRel, labelCtx, labelScope, prevRel, scopePathCols, withShape, type AliasEntry, type ElementStream, type StepFn } from '../context/context.ts';
+import { aliasAppend, aliasSeed, elemEntry, elemShape } from '../context/alias.ts';
 import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from '../tail/child.ts';
 import { operandDeps, resolveTraversalOperands } from '../tail/operand.ts';
 import { directElementModulation, elementOrderSql } from '../tail/modulation.ts';
@@ -23,14 +24,6 @@ import { engineOf, fastPathContextOf } from '../../engine/deps.ts';
 /** `NOT COALESCE((<pred>), 0)` — negate a predicate so a NULL (missing prop)
  *  counts as "no output" → kept, matching not(traversal) semantics. */
 const notCoalesce = (expr: Expression): Expression => q`NOT COALESCE((${expr}), 0)`;
-
-/** The SQL expr holding a labelled traverser's id — the last element in its carried
- *  JSONB history column (default Pop = last). */
-function aliasIdExpr(label: string, aliases: AliasMap, p: Relation): { id: Expression; elem: Elem } {
-  const entry = aliases.get(label);
-  if (!entry) throw new Error(`where("${label}"): no such label — as("${label}") was not seen`);
-  return { id: aliasId(p.c[entry.col], 'last'), elem: aliasElem(entry) };
-}
 
 /** The scalar context a current-element predicate correlates on (aliased `n`). */
 const currentCtx = (st: ElementStream) => elemCtx(elemRel(st), st.elem);
@@ -185,39 +178,13 @@ export const where: StepFn = (s, st) => {
   // (current traverser vs label), optionally .by(key) (folded onto s.bys) to
   // compare a property instead of element identity.
   if (s.name === 'filter') throw new Error('filter(predicate) not supported; use filter(traversal)');
-  const pw = prevRel(st, 'p');
-  const [left, rawPred, leftElem]: [Expression, Pred, Elem] = typeof arg0 === 'string'
-    ? [aliasIdExpr(arg0, st.traverserLayout.aliases, pw).id, s.args[1] as Pred, aliasIdExpr(arg0, st.traverserLayout.aliases, pw).elem]
-    : [q`n.id`, arg0 as Pred, st.elem];
-  // P.not(<inner>) negates the alias comparison — unwrap it and flip the outer negation
-  // (composing with a not() step). The inner predicate then resolves normally.
-  let negate = s.name === 'not';
-  let pred = rawPred;
-  if (pred?.op === 'not') { negate = !negate; pred = pred.values[0] as Pred; }
-  if (!(pred?.op in P_OPS)) throw new Error(`where(P.${pred?.op}) alias comparison not yet supported`);
-  const rightRes = aliasIdExpr(pred.values[0], st.traverserLayout.aliases, pw);
-  const right = rightRes.id;
-  const rightElem = rightRes.elem;
-  // An alias-compare where() takes at most one by(key). absorbModulators absorbs
-  // every contiguous by(); a second one is not a valid modulator here — fail
-  // closed rather than silently answer a different question (matches group()'s
-  // bys.length>2 guard; the original consumed exactly one by() and let the rest throw).
-  if ((s.modulators?.length ?? 0) > 1) throw new Error('by() is only supported as an order() or select()/project() modulator');
-  const byKey = s.modulators?.[0]?.find((x: any) => typeof x === 'string') as string | undefined;
-  let testNode: Expression;
-  if (byKey !== undefined) {
-    // Both sides are read as VERTEX properties below; an edge-typed operand would silently
-    // read a vertex's props (ids collide across spaces) → reject.
-    if (leftElem === 'edge' || rightElem === 'edge') throw new Error('where().by(key) on an edge-typed label not yet supported');
-    const productiveBy = (s as IRStep).productiveBy;
-    const op = productiveBy && pred.op === 'eq' ? 'IS'
-      : productiveBy && pred.op === 'neq' ? 'IS NOT'
-      : P_OPS[pred.op];
-    testNode = q`${propScalarFor(left, 'vertex', byKey)} ${op} ${propScalarFor(right, 'vertex', byKey)}`;
-  } else {
-    testNode = q`${left} ${P_OPS[pred.op]} ${right}`;
-  }
-  return filterCte(st, negate ? notCoalesce(testNode) : testNode);
+  // The one alias comparison (context/context.ts). This host is the only one that can offer the
+  // CURRENT traverser as the left operand — `where(P.neq("a"))` — because only it joins the element
+  // table; every other shape reaches the same test through `aliasCompareRows`.
+  const resolve = aliasOperandsOf(st.traverserLayout.aliases, prevRel(st, 'p'));
+  const left = typeof arg0 === 'string' ? resolve(arg0) : { id: q`n.id`, elem: st.elem };
+  const rawPred = typeof arg0 === 'string' ? s.args[1] : arg0;
+  return filterCte(st, aliasCompareTest(s, left, rawPred, resolve));
 };
 
 /** and()/or(): keep the traverser when ALL / ANY branch predicates hold. The inline

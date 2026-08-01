@@ -3,11 +3,11 @@ import { empty, list, q, value, type Expression, type Relation } from '../../../
 import { PER_ROW, perRowColumnOf, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isLocalScope, SLICE_STEPS, sliceOf, type Slice } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { elemCtx, elementPayload, elemTable, labelNameFor, limitOffset, propScalarFor, P_OPS, predicateSql, propExtract, storedPropFor } from '../../plan/plan.ts';
+import { elemCtx, elementPayload, elemTable, labelNameFor, limitOffset, propScalarFor, predicateSql, propExtract, storedPropFor } from '../../plan/plan.ts';
 import { aliasId, aliasPop, aliasPresent, aliasScalar, entryTypeTag, shapeElem } from '../context/alias.ts';
 import { aliasElem, aliasIsElement, layoutCols, layoutProjection, scalarTypeFromAlias, type AliasMap, type ElementStream } from '../context/context.ts';
 import { continueLowering, dispatchShapeTail, loweringStateOf, recordFieldColumns, toElementStream, toListStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type LoweringResult, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
-import { globalRowOps, lowerGlobalCount, reprojectRows } from './barrier.ts';
+import { globalRowOps, lowerGlobalCount, reprojectRows, aliasCompareRows } from './barrier.ts';
 import { byAt, childCtx, childSteps, classifyBy, classifyElementChild, classifyListChild, classifyRecordChildRows, classifyScalarChild, reuseCurrentFrame, ROOT_SCOPE, type ChildFrameStack, type ChildParent, type ChildUse } from './child-shape.ts';
 import { applyChildCardinality, lowerElementBody, mintChildEncounter, pushChildScope, tryCompileElementChild, tryCompileListChild, tryCompileScalarValueChild } from './child.ts';
 import { emptyElementLike, historyPropertyValues, historyScalarValues, historyValues, popEnd, popIsListResult, selectKeyFromAlias, selectOneFromAlias } from './labelselect.ts';
@@ -589,47 +589,17 @@ function recordOrderTerms(s: RecordStream, r: Relation, bys: any[][]): Expressio
   });
 }
 
-/** where("a", P…["b"]) over a record: filter the record rows by an alias comparison
- * of two path labels. The record stream still carries the alias history columns (a0,a1,…),
- * so the labels resolve exactly as on an element stream — element identity by default, or
- * a property with a trailing by(key). P.not unwraps + negates. Traversal-predicate and
- * whole-map single-predicate forms defer (they'd need re-rooting a child on the map). */
-function recordWhere(s: RecordStream, step: IRStep, at: number): LoweringResult {
-  const arg0 = step.args[0];
-  if (typeof arg0 !== 'string')
-    throw new Error('where() on a record supports only the alias-compare form where("a", P.eq/neq(...)["b"])');
-  let negate = step.name === 'not';
-  let pred: any = step.args[1];
-  if (pred?.op === 'not') { negate = !negate; pred = pred.values[0]; }
-  if (!(pred?.op in P_OPS)) throw new Error(`where(P.${pred?.op}) alias comparison on a record not yet supported`);
-  const r = s.rel.as('r');
-  const resolve = (label: string) => {
-    const entry = s.traverserLayout.aliases.get(label);
-    if (!entry) throw new Error(`where("${label}"): no such label — as("${label}") was not seen`);
-    return { id: aliasId(r.c[entry.col], 'last'), elem: aliasElem(entry) };
-  };
-  const leftRes = resolve(arg0);
-  const rightRes = resolve(pred.values[0]);
-  if ((step.modulators?.length ?? 0) > 1) throw new Error('by() is only supported as an order() or select()/project() modulator');
-  const byKey = step.modulators?.[0]?.find((x: any) => typeof x === 'string') as string | undefined;
-  let test: Expression;
-  if (byKey !== undefined) {
-    if (leftRes.elem === 'edge' || rightRes.elem === 'edge') throw new Error('where().by(key) on an edge-typed label not yet supported');
-    const op = step.productiveBy && pred.op === 'eq' ? 'IS' : step.productiveBy && pred.op === 'neq' ? 'IS NOT' : P_OPS[pred.op];
-    test = q`${propScalarFor(leftRes.id, 'vertex', byKey)} ${op} ${propScalarFor(rightRes.id, 'vertex', byKey)}`;
-  } else {
-    test = q`${leftRes.id} ${P_OPS[pred.op]} ${rightRes.id}`;
-  }
-  const names = s.rel.cols;
-  const whereExpr = negate ? q`NOT COALESCE((${test}), 0)` : test;
-  const rel = s.q.cte(q`SELECT ${list(names.map((name) => r.c[name]), ', ')} FROM ${r} WHERE ${whereExpr}`, names);
-  return continueLowering(toRecordStream(loweringStateOf(s), rel, s.fields), at + 1);
-}
-
-/** Continue from a per-traverser record. Selecting a named field retypes it to the
- * ordinary scalar/element stream, while Column.keys/values produces one list value
- * per record. This is intentionally distinct from MapStream's whole-group columns. */
-const recordFilter: ShapeTailFn<RecordStream> = (s, step, _steps, at) => recordWhere(s, step, at);
+/** where("a", P…["b"]) over a record. The record stream carries the alias history columns
+ *  (a0, a1, …) exactly as an element stream does, so this is the SHARED comparison over the shared
+ *  row re-projection — it used to be a ~28-line copy of `where`'s alias branch (prefix/filter.ts),
+ *  down to the `where().by(key) on an edge-typed label` message being written out twice.
+ *
+ *  A non-string first argument keeps the record's own message, because a record is precisely the
+ *  shape for which `where(P…)` and `where(traversal)` have no reading: both would need a child
+ *  re-rooted on the map. */
+const recordFilter: ShapeTailFn<RecordStream> = (s, step, steps, at) =>
+  aliasCompareRows(s, step, steps, at)
+  ?? (() => { throw new Error('where() on a record supports only the alias-compare form where("a", P.eq/neq(...)["b"])'); })();
 
 const recordOrder: ShapeTailFn<RecordStream> = (s, step, steps, at) => {
     const r = s.rel.as('r');
