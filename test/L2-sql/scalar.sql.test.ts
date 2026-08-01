@@ -935,7 +935,9 @@ describe('scalar-parent / projection SQL', () => {
     expect(() => compile('g.V().group().by("name").by(__.tail()).select(Column.values)', {})).toThrow('single-element (tail) values not yet supported');
     expect(() => compile('g.V().groupCount().by("name").cap("x")', {})).toThrow('cap() on a group value not yet supported');
     expect(() => compile('g.V().properties().group().by()', {})).toThrow('group().by() on a property element is not yet supported');
-    expect(() => compile('g.V().group().by("name").by("age").by("x")', {})).toThrow('more than two by() modulators');
+    // group() fills a key slot then a value slot; a third by() is invalid Gremlin, refused with
+    // GroupStep's own wording by the byModulatorArity verify Pass (test/compiler/by-modulator-arity).
+    expect(() => compile('g.V().group().by("name").by("age").by("x")', {})).toThrow('already been set');
     expect(read('g.V().count().fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', as: 'long' } });
     expect(() => compile('g.V().sum()', {})).toThrow('sum() of vertex not yet supported');
   });

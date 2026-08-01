@@ -187,7 +187,11 @@ const SHARED_ROW_OPS = new Map(globalRowOps<ListStream>());
  *  toUpper(local)/trim(local)/length(local)/… over a folded list. Reuse scalarTx per
  *  element (list.ts is the only per-element caller besides the scalar tail). reverse
  *  is NOT here: on a list it reverses element ORDER (listReverse), not each string. */
-const STRING_LOCAL_TX = new Set(['toUpper', 'toLower', 'trim', 'lTrim', 'rTrim', 'asString', 'length', 'substring', 'replace', 'concat']);
+// `concat` is deliberately NOT here: TinkerPop ships no ConcatLocalStep, so `concat()` over a
+// collection is invalid at every scope (`ConcatStep.map` rejects any non-String receiver outright)
+// — it gets its own always-refusing entry below. Having it here made
+// `g.inject(["a","b"],"c").concat("d")` answer ['ad','bd','cd'] where the spec demands a throw.
+const STRING_LOCAL_TX = new Set(['toUpper', 'toLower', 'trim', 'lTrim', 'rTrim', 'asString', 'length', 'substring', 'replace']);
 
 /** A per-element string transform over a list value (Scope.local): rebuild each row's
  *  list applying scalarTx to every element, preserving position order. Null elements
@@ -422,6 +426,29 @@ const listStringTx: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
   return continueLowering(listStringTransform(s, step), at + 1);
 };
 
+/**
+ * Steps whose input contract EXCLUDES a collection at every scope — so a list receiver is a
+ * permanent type error, not a capability we have yet to build. Messages are the reference step
+ * classes' own (`ConcatStep:74`, `SplitGlobalStep:53`, `AsBoolStep:53`, `AsDateStep:76`,
+ * `AsNumberStep:71`), which is what the corpus asserts.
+ *
+ * The sibling family — `trim`/`toUpper`/`length`/… — is NOT here, because those DO have a
+ * `Scope.local` form that maps over the members; `listStringTx` refuses only their global spelling.
+ * The line between the two tables is exactly "does TinkerPop ship a `…LocalStep` for it".
+ *
+ * Two deliberate wording divergences, both one scenario each and both a refusal to state something
+ * untrue: the reference names the JVM CLASS of the offending value (`ArrayList`), and we say `list`.
+ * That is the observable contract for `Can't parse type ArrayList as number.`, which we therefore do
+ * not satisfy — a JVM implementation detail reaching into a language-level assertion.
+ */
+const LIST_INPUT_REFUSALS: ReadonlyMap<string, string> = new Map([
+  ['concat', 'String concat() can only take string as argument, encountered a list'],
+  ['split', 'The split() step can only take string as argument, encountered a list'],
+  ['asBool', "Can't parse a list as Boolean."],
+  ['asDate', "Can't parse a list as OffsetDateTime."],
+  ['asNumber', "Can't parse type list as number."],
+]);
+
 // Scope.local per-list reducers (count/sum/min/max/mean) — reduce each list to a scalar
 // stream, so a trailing filter/transform/reducer continues normally.
 const listReducer: ShapeTailFn<ListStream> = (s, step, _steps, at) =>
@@ -498,6 +525,13 @@ const LIST_DISPATCH = new Map<string, ShapeTailFn<ListStream>>([
     return [n, shared ? firstOf(shared, listLocalTx) : listLocalTx];
   }),
   ...[...STRING_LOCAL_TX].map((n): [string, ShapeTailFn<ListStream>] => [n, listStringTx]),
+  ...[...LIST_INPUT_REFUSALS].map(([n, message]): [string, ShapeTailFn<ListStream>] => [n, (_s, step) => {
+    // `split(Scope.local)` IS a reference step (SplitLocalStep) we have simply not built — so its
+    // local spelling keeps the ordinary deferral (decline → fallback) rather than borrowing the
+    // global form's permanent type error. Every other name here has no local form at all.
+    if (n === 'split' && isLocal(step)) return null;
+    throw new Error(message);
+  }]),
   ...[...LIST_REDUCERS].map((n): [string, ShapeTailFn<ListStream>] => [n, listReducer]),
   ...[...LIST_OPERAND_OPS].map((n): [string, ShapeTailFn<ListStream>] => [n, listSetOp]),
   // Overrides the LIST_REDUCERS 'count' entry above (Map keeps the last) so a GLOBAL count()

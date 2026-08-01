@@ -445,7 +445,6 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
  * framed), so we emit rows ORDER BY the key and the handler folds runs into the Map.
  */
 export function lowerGroup(st: LoweringState, isCount: boolean, bys: any[][], src: GroupSource): GroupStream {
-  if (bys.length > 2) throw new Error('group() with more than two by() modulators not yet supported');
   src = tryLowerGroupChildSource(bys, src) ?? src;
   const key = buildGroupKey(bys[0], src, st.params);
 

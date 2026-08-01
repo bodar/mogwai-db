@@ -3,7 +3,7 @@ import { bodyAlwaysProduces } from './productivity.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { type IRStep } from './step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
-import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf } from './step.ts';
+import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope } from './step.ts';
 
 // IRStep moved to ir/step.ts (it is needed by both halves of ir/). Re-exported here so the
 // ~36 existing importers keep working and can move to ./step.ts independently.
@@ -85,8 +85,12 @@ export const NO_OP_STRATEGIES = new Set([
   'GraphFilterStrategy', 'ComputerFinalizationStrategy', 'MessagePassingReductionStrategy',
   'ComputerVerificationStrategy', 'VertexProgramRestrictionStrategy', 'HaltedTraverserStrategy',
   // Lambda ban: our string grammar (locked decision #2/#5) has no lambda production, so the
-  // condition these verify can never occur — a true no-op, not a skipped check.
-  'LambdaRestrictionStrategy', 'StandardVerificationStrategy',
+  // condition this verifies can never occur — a true no-op, not a skipped check.
+  'LambdaRestrictionStrategy',
+  // Already applied, unconditionally, by the always-on `StandardVerificationStrategy` verify Pass
+  // (ir/passes.ts) — so NAMING it changes nothing. A different reason from the lambda ban above,
+  // and the distinction matters: this entry means "redundant", not "vacuous".
+  'StandardVerificationStrategy',
   // Metadata-only; we consult no provider hints. CAVEAT: OptionsStrategy/ProfileStrategy/
   // SeedStrategy stop being no-ops the day with()/profile()/coin()-sample() land — revisit then.
   'OptionsStrategy', 'ProfileStrategy', 'SeedStrategy',
@@ -568,22 +572,36 @@ function valueArgTraversals(s: Step): any[] {
   return out;
 }
 
-/** StandardVerificationStrategy's read-only child rule: a child traversal evaluated for a VALUE
- *  must not mutate. TinkerPop rejects `has("name", __.addV("x").values("name"))`,
- *  `is(P.gt(__.addV("x").values("age")))`, `V(__.addV("x").id())`, `property(__.addV("t")…)` and
- *  friends with a message containing "mutating step" (StandardVerificationStrategy.feature).
+/**
+ * TinkerPop's `StandardVerificationStrategy`, as much of it as our language surface can violate.
  *
- *  Deliberately scoped to VALUE-argument positions, NOT "every child traversal": a write is
- *  perfectly legal in a branch/side-effect body (`union(__.addV("person"), …)`,
- *  `choose(p, __.addV(…), …)`), and rejecting those would break working write traversals. The
- *  rule is about arguments that must resolve to a value, which is why it shares
- *  VALUE_OPERAND_SLOTS with the constant fold — one declaration of "this slot holds a value".
+ * ONE walk, because the reference is one strategy: every clause below is a `throw` in
+ * `StandardVerificationStrategy.apply` (`vendor/tinkerpop/gremlin-core/.../verification/
+ * StandardVerificationStrategy.java:68-84`), and each message is that throw's, verbatim. The clauses
+ * it has that we cannot violate are absent rather than stubbed — lambdas have no production in our
+ * string grammar (locked decision #2), and `VertexComputing` steps have no execution surface.
  *
- *  ALWAYS ON, like TinkerPop's: it is a standard strategy, not opt-in, so the Pass carries no
- *  `applies` gate. Naming it in withStrategies() stays a no-op (it is already applied). */
-export function verifyReadOnlyChildren(steps: IRStep[], params: Record<string, any>): void {
-  const scan = (chain: Step[]) => {
+ * **Read-only children.** A child traversal evaluated for a VALUE must not mutate: TinkerPop rejects
+ * `has("name", __.addV("x").values("name"))`, `is(P.gt(__.addV("x").values("age")))`,
+ * `V(__.addV("x").id())`, `property(__.addV("t")…)`. Deliberately scoped to VALUE-argument
+ * positions, NOT "every child traversal": a write is perfectly legal in a branch/side-effect body
+ * (`union(__.addV("person"), …)`, `choose(p, __.addV(…), …)`), and rejecting those would break
+ * working write traversals. That is why the slot list is shared with the constant fold — one
+ * declaration of "this slot holds a value".
+ *
+ * **No `inject()` under a `repeat()`.** `hasRepeatStepParent` walks EVERY ancestor, so the rule is
+ * "anywhere below a repeat", not "a direct body step" — `repeat(__.union(__.inject('y'), …))`
+ * violates it too. Without this clause the body simply misses our row-local vocabulary and reports
+ * "not yet supported", which is false: no lowering will ever accept it.
+ *
+ * ALWAYS ON, like TinkerPop's: it is a standard strategy, not opt-in, so the Pass carries no
+ * `applies` gate. Naming it in withStrategies() stays a no-op (it is already applied).
+ */
+export function verifyStandard(steps: IRStep[], params: Record<string, any>): void {
+  const scan = (chain: Step[], underRepeat: boolean) => {
     for (const s of chain) {
+      if (underRepeat && s.name === 'inject')
+        throw new Error('The parent of inject()-step can not be repeat()-step');
       for (const nested of valueArgTraversals(s)) {
         let body: Step[];
         try { body = stepChain(nested, params); } catch { continue; }
@@ -591,7 +609,80 @@ export function verifyReadOnlyChildren(steps: IRStep[], params: Record<string, a
           ?? (someStepDeep(body, params, (x) => MUTATING_STEPS.has(x.name)) ? { name: 'a nested write' } as Step : undefined);
         if (m) throw new Error(`The child traversal of ${s.name}() contains a mutating step (${m.name}) and thus is not read only: a mutating step is not allowed in a value-argument child traversal`);
       }
-      // recurse into every OTHER nested body so a bad operand nested deep still trips
+      // recurse into every OTHER nested body so a bad operand nested deep still trips. The flag is
+      // STICKY once set, mirroring the ancestor walk: a body two branches inside a repeat is still
+      // inside it. `until`/`emit` bodies count as well — the reference reaches them by the same
+      // parent walk, and they are arguments of the same cluster here.
+      const repeatHost = underRepeat || REPEAT_CLUSTER.has(s.name);
+      for (const a of s.args ?? []) {
+        if (!isNested(a)) continue;
+        try { scan(stepChain(a.nested, params), repeatHost); } catch (e) { if (isVerificationFailure(e)) throw e; /* unparseable without params — skip */ }
+      }
+    }
+  };
+  scan(steps as Step[], false);
+}
+
+/** The `catch` around a speculative `stepChain` exists to skip a body that cannot be PARSED without
+ *  its bound params — it must not also swallow a verdict thrown from inside the recursion. Keyed on
+ *  the messages this file owns, so a parse failure still falls through silently and a real
+ *  violation still propagates. (Before this, a violation nested two levels deep vanished.) */
+const isVerificationFailure = (e: unknown): boolean =>
+  e instanceof Error && (e.message.startsWith('The parent of inject()-step') || e.message.startsWith('The child traversal of '));
+
+/**
+ * How many `by()` modulators each host ACCEPTS, and the reference's wording when it is handed one
+ * too many. Read off the `modulateBy` overrides in `vendor/tinkerpop/gremlin-core` — every entry is
+ * a class whose `modulateBy` throws once its slots are full, and the message is that throw's,
+ * verbatim (see e.g. `step/filter/DedupGlobalStep.java:126`, `step/map/GroupStep.java:98`).
+ *
+ * **This is an arity rule, not a capability gap, and the distinction is the point of the table.**
+ * `dedup().by("lang").by("name")` is invalid Gremlin forever — no lowering will ever accept it — so
+ * spelling the refusal as "not yet supported" both says something false and files the traversal in
+ * the deferral telemetry that ranks `docs/outstanding-work.md` (item 23). One table, checked once,
+ * keeps every host's answer identical and keeps all of them out of that ranking.
+ *
+ * A host absent here has NO arity limit worth asserting: `order()`/`select()`/`project()`/`path()`
+ * genuinely take one by() per key or comparator, so counting them means nothing.
+ */
+const BY_MODULATOR_ARITY: ReadonlyMap<string, { readonly max: number; readonly message: string }> = new Map([
+  ['aggregate', { max: 1, message: 'Aggregate step can only have one by modulator' }],
+  ['dedup', { max: 1, message: 'Dedup step can only have one by modulator' }],
+  ['groupCount', { max: 1, message: 'GroupCount step can only have one by modulator' }],
+  ['sack', { max: 1, message: 'Sack step can only have one by modulator' }],
+  ['sample', { max: 1, message: 'Sample step can only have one by modulator' }],
+  ['valueMap', { max: 1, message: 'valueMap()/propertyMap() step can only have one by modulator' }],
+  ['propertyMap', { max: 1, message: 'valueMap()/propertyMap() step can only have one by modulator' }],
+  // group() fills a KEY slot then a VALUE slot, so two is legal and three is not; its message names
+  // the slots rather than the count (GroupStep.java:98).
+  ['group', { max: 2, message: 'The key and value traversals for group()-step have already been set' }],
+]);
+
+/**
+ * TinkerPop's `by()` arity rule, applied to the authored chain at every depth.
+ *
+ * `by()` binds to `getEndStep()` (`GraphTraversal.by`), so the modulators of a host are the
+ * CONTIGUOUS run of `by()` steps that follows it — the same reading `absorbModulators` folds on, and
+ * the reason this counts the run itself rather than reading `.modulators`: a verify Pass asserts
+ * against `ctx.originalChain`, which is pre-fold, and two of the hosts here (`sample`, `valueMap`)
+ * are not `BY_HOSTS` at all, so their by()s never become a field.
+ *
+ * `dedup(Scope.local)`/`sample(Scope.local)` are DIFFERENT reference classes (`DedupLocalStep`,
+ * `SampleLocalStep`) and neither is `ByModulating`, so the arity message would be the wrong
+ * complaint about them — they are skipped and keep whatever their own lowering says.
+ *
+ * ALWAYS ON, like `verifyReadOnlyChildren`: an arity violation is invalid Gremlin, not a strategy.
+ */
+export function verifyByModulatorArity(steps: IRStep[], params: Record<string, any>): void {
+  const scan = (chain: Step[]) => {
+    for (let i = 0; i < chain.length; i++) {
+      const s = chain[i];
+      const rule = BY_MODULATOR_ARITY.get(s.name);
+      if (rule && !isLocalScope(s as IRStep)) {
+        let n = 0;
+        while (chain[i + 1 + n]?.name === 'by') n++;
+        if (n > rule.max) throw new Error(rule.message);
+      }
       for (const a of s.args ?? []) {
         if (!isNested(a)) continue;
         try { scan(stepChain(a.nested, params)); } catch { /* unparseable without params — skip */ }

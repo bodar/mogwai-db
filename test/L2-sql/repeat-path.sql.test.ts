@@ -282,7 +282,9 @@ describe('repeat / path SQL', () => {
     // its counter namespace is deferred explicitly until named loops are modeled.
     expect(() => compile('g.V().repeat("a", __.out()).times(2)', {}))
       .toThrow('named-loop form not yet supported');
-    expect(() => compile('g.V().emit().times(2)', {})).toThrow('without repeat()');
+    // …and a cluster with NO repeat at all is invalid Gremlin, not a deferral — refused with
+    // StandardVerificationStrategy's own wording (see test/compiler/by-modulator-arity).
+    expect(() => compile('g.V().emit().times(2)', {})).toThrow('The repeat()-traversal was not defined');
     // a second repeat is NOT swallowed — it compiles as a chained cluster (two walks)
     const chained = read('g.V().repeat(__.out()).times(1).repeat(__.out()).times(1).values("name")');
     expect((chained.sql.match(/UNION ALL SELECT e\.tgt/g) || []).length).toBe(2); // two walk CTEs

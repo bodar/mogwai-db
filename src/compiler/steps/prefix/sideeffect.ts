@@ -41,8 +41,9 @@ const memberOrder = (s: { traverserLayout: { encounter?: string } }, rel: Relati
 
 export const aggregate: StepFn = (s, st) => {
   const name = aggregateName(s);
+  // Arity (at most one by()) is asserted once, by the `byModulatorArity` verify Pass — see
+  // BY_MODULATOR_ARITY in ir/strategies.ts. A second check here could only disagree with it.
   const modulators = (s as IRStep).modulators ?? [];
-  if (modulators.length > 1) throw new Error('aggregate() with more than one by() modulator not yet supported');
   const by = classifyBy(modulators[0]);
   let def: SideEffectDef;
   if (by.kind === 'none') {

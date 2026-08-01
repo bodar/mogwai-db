@@ -248,8 +248,7 @@ export const dedup: StepFn = (s, st) => {
  *  projects a property / T.token off each label's element (bare → element identity). Layout
  *  state (path, other aliases) rides through, so `as(a)…as(b)…dedup("a","b").path()` composes. */
 function dedupByLabels(st: ElementStream, s: IRStep, labels: string[]): ElementStream {
-  const modulators = s.modulators ?? [];
-  if (modulators.length > 1) throw new Error('dedup(labels) supports at most one by() modulator');
+  const modulators = s.modulators ?? []; // arity asserted by the byModulatorArity verify Pass
   const by = modulators[0]?.[0];
   const scope = labelScope(st);
   const keyOf = (label: string): Expression => {
@@ -289,8 +288,7 @@ export function lowerElementDedup(st: ElementStream, s: IRStep, order?: IRStep):
   if (s.args.length > 0) throw new Error('dedup(Scope.local, …) over an element stream not yet supported');
   if (st.traverserLayout.aliases.size > 0) throw new Error('dedup() after as() not yet supported (path-distinct semantics)');
   if (st.traverserLayout.path) throw new Error('dedup() with path tracking not yet supported (path-distinct semantics)');
-  const modulators = s.modulators ?? [];
-  if (modulators.length > 1) throw new Error('dedup() supports at most one by() modulator');
+  const modulators = s.modulators ?? []; // arity asserted by the byModulatorArity verify Pass
   if (!order && !modulators.length) {
     const p = prevRel(st, 'p');
     // dedup yields ONE traverser per distinct id → RESET bulk to 1: a collapsed (v, N) becomes

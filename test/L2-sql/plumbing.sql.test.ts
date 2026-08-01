@@ -409,7 +409,9 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     // dedup: dedup(labels) is supported (see the dedup(labels) test); bare dedup after as()
     // stays deferred rather than answered wrongly (path-distinct semantics).
     expect(() => compile('g.V().as("a").out().dedup()', {})).toThrow('dedup() after as() not yet supported');
-    expect(() => compile('g.V().dedup().by("age").by("name")', {})).toThrow('at most one by()');
+    // …and a second by() on dedup is an ARITY violation, not a deferral — DedupGlobalStep's own
+    // wording, from the byModulatorArity verify Pass.
+    expect(() => compile('g.V().dedup().by("age").by("name")', {})).toThrow('Dedup step can only have one by modulator');
   });
 
   test('review-fix regressions: no silent mis-execution', () => {

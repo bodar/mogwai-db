@@ -761,7 +761,13 @@ export const repeat: StepFn = (s, st) => {
   // bodies still defer there rather than here.
   const region = s.repeatRegion ?? [s];
   const rep = region.find((c) => c.name === 'repeat');
-  if (!rep) throw new Error(`${s.name}() without repeat() not yet supported`);
+  // Not a deferral: `g.V().emit()` / `until(…)` / `times(n)` with nothing to repeat is invalid
+  // Gremlin forever — TinkerPop builds a RepeatStep with a null repeat traversal and
+  // StandardVerificationStrategy refuses it ("prevents silly stuff like g.V().emit()",
+  // StandardVerificationStrategy.java:83). Its message, so the refusal reads as permanent here too.
+  // The check stays at the region rather than moving to the verify Pass because `formRepeatRegions`
+  // is the one authority on which cluster a stray emit/until/times belongs to.
+  if (!rep) throw new Error(`The repeat()-traversal was not defined: ${s.name}() has nothing to repeat`);
   // `repeat(name, body)` carries a counter namespace which loops(name) can read
   // from nested predicates. The ordinary recursive walk has one anonymous depth
   // column, not a stack of named counters, so accept the common body layout from

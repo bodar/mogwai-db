@@ -3,7 +3,7 @@ import { PASS_CATEGORIES, type Pass, type PassCategory, type PassContext } from 
 import {
     stripTerminal, desugarMatchString, formRepeatRegions, unrollFixedRepeat, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
     canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
-    verifyReadOnlyChildren,
+    verifyStandard, verifyByModulatorArity,
     absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
     injectSubgraphRec, injectPartitionRec, markProductiveBy, isAlwaysProductiveFilterNoOp, verify,
     NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
@@ -170,9 +170,21 @@ const VERIFY: Pass[] = group('verify', [
   // ALWAYS ON (no `applies`), matching TinkerPop: StandardVerificationStrategy is a standard
   // strategy, not opt-in. Naming it in withStrategies() is therefore a genuine no-op.
   {
-    name: 'readOnlyChildTraversals',
-    run: function readOnlyChildTraversalsPass(steps, ctx) {
-      verifyReadOnlyChildren(ctx.originalChain as IRStep[], ctx.params);
+    name: 'StandardVerificationStrategy',
+    run: function standardVerificationPass(steps, ctx) {
+      verifyStandard(ctx.originalChain as IRStep[], ctx.params);
+      return steps;
+    },
+  },
+  // Also always on, and for the same reason: a second by() on a one-slot host is invalid Gremlin,
+  // not an opt-in strategy. The cheap gate reads ctx.originalChain, NOT the live `steps` — by verify
+  // time `absorbModulators` has folded every by() on a BY_HOST into `.modulators`, so a gate that
+  // looks for a step NAMED `by` in the live chain is false exactly when the violation exists.
+  {
+    name: 'byModulatorArity',
+    applies: (_steps, ctx) => ctx.originalChain.some((s) => s.name === 'by' || (s.args ?? []).some(isNested)),
+    run: function byModulatorArityPass(steps, ctx) {
+      verifyByModulatorArity(ctx.originalChain as IRStep[], ctx.params);
       return steps;
     },
   },
