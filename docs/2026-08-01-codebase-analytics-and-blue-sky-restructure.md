@@ -709,6 +709,13 @@ writing §6, and none of them is what §6 says.
 
 ## 9. Ranked, each with a kill criterion
 
+> **SUPERSEDED IN PART, 2026-08-01.** RelIR was **decided** rather than gated — see
+> [relir-build-plan](./2026-08-01-relir-build-plan.md), which absorbs items 1, 2, 4 and 5–6 into its
+> Phase 0/2/3 and adds the complete object model, the measured SQLite envelope (five probes) and the
+> phase gates. Items 3 and 7 are unaffected and stay here. The kill criterion in item 5 below was
+> not run: §6b's corpus measurement (48 of 53 barrier bodies unroll) and the write envelope probe
+> answered the same question more directly and more favourably.
+
 Ordered by (evidence × payoff) ÷ risk. Every one gates on `mise run ci` including the census.
 
 **1 — Finish `globalRowOps` into `ELEMENT` and `SCALAR`.** *Small, mechanical, measured.* §2: the two
