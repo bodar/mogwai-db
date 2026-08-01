@@ -186,8 +186,13 @@ function armProjection(arm: ElementStream, out: TraverserLayout, armIdx?: number
   }
   // When emission order is live, tag the arm with its index so the merge can re-mint a
   // canonical encounter (arm a before arm b) — each arm carried its OWN 1..k encounter, which
-  // is meaningless across arms until re-numbered.
-  if (armIdx !== undefined) parts.push(`${armIdx} AS arm_idx`);
+  // is meaningless across arms until re-numbered. A CHILD-SCOPED arm (coalesce/optional push an
+  // ordinal the merged schema does not keep) also carries `arm_ordinal`, because its encounter is
+  // per-origin and ties across parents without it — see `armOrderKey`.
+  if (armIdx !== undefined) {
+    const deeper = arm.traverserLayout.origins.length > out.origins.length ? arm.traverserLayout.origins.at(-1) : undefined;
+    parts.push(`${armIdx} AS arm_idx`, `${deeper ?? 1} AS arm_ordinal`);
+  }
   return parts.join(', ');
 }
 
@@ -225,11 +230,11 @@ function finishElementMerge(base: LoweringState, out: TraverserLayout, parts: Ex
   const { branchOrder } = branchFork(base.traverserLayout, out);
   const layout = patchLayout(base.traverserLayout, { aliases: opts.aliases, origins: opts.origins, path: opts.path });
   if (out.encounter) {
-    const inner = base.q.cte(body, ['id', ...layoutCols(out), 'arm_idx']);
+    const inner = base.q.cte(body, ['id', ...layoutCols(out), 'arm_idx', 'arm_ordinal']);
     const m = inner.as('m');
     // Traverser-major, arm-minor when the arms ran per input traverser; plain arm-major when the
     // branch BATCHED (no frozen order to lead with) — which is the reference's own key there.
-    const armKey = q`${m.c.arm_idx}, ${m.c[out.encounter]}`;
+    const armKey = q`${m.c.arm_idx}, ${m.c.arm_ordinal}, ${m.c[out.encounter]}`;
     const over = partitionOver(out, m, branchOrder ? q`${m.c[branchOrder]}, ${armKey}` : armKey);
     // The frozen column is consumed HERE: the arms carry it (it is in `out`), the merged relation
     // does not (it is in `layout`), so project through the popped schema.
@@ -450,7 +455,9 @@ export function tryLowerVariantOptional(s: Step, st: ElementStream): VariantStre
   // order is live so mergeVariantParts re-mints the canonical encounter once.
   const enc = seed.traverserLayout.encounter;
   const baseNoEnc = enc ? patchLayout(seed.traverserLayout, { encounter: null }) : seed.traverserLayout;
-  const armTag = (k: number, r: Relation) => enc ? q`, ${k} AS arm_idx, ${r.c[enc]} AS arm_encounter` : empty;
+  // Both parts are keyed on the pushed ordinal (the hit rows come from the child, the miss rows
+  // from its domain), so that ordinal IS the cross-parent order — see `armOrderKey`.
+  const armTag = (k: number, r: Relation) => enc ? q`, ${k} AS arm_idx, ${r.c[rows.frame.ordinal]} AS arm_ordinal, ${r.c[enc]} AS arm_encounter` : empty;
   const hit = q`SELECT 1 AS vk, ${c.c.v} AS v, NULL AS rid${armTag(0, c)}${layoutProjection(baseNoEnc, c)} FROM ${c}`;
   const miss = q`SELECT 2 AS vk, NULL AS v, ${d.c.id} AS rid${armTag(1, d)}${layoutProjection(baseNoEnc, d)} FROM ${d} WHERE NOT EXISTS (SELECT 1 FROM ${c} WHERE ${c.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]})`;
   return mergeVariantParts(loweringStateOf(st), [hit, miss], meta, seed.traverserLayout);

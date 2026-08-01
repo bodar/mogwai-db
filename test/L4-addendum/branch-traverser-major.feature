@@ -161,29 +161,27 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | l[d[32].i] |
 
   @gap:branch-traverser-major
-  Scenario: g_V_hasLabelXpersonX_order_byXnameX_unionXoutXcountX_valuesXageXX
+  Scenario: g_V_hasLabelXpersonX_order_byXnameX_unionXoutXcountX_valuesXageXX_limitX2X
     Given the modern graph
     And the traversal of
       """
-      g.V().hasLabel("person").order().by("name").union(__.out().count(), __.values("age"))
+      g.V().hasLabel("person").order().by("name").union(__.out().count(), __.values("age")).limit(2)
       """
     # The COMPLEMENT, and the reason the gate is not "always freeze": arm 0 holds a batched barrier,
-    # so `hasBarrier` is set and the reference runs BOTH arms over the whole input. ONE count of all
-    # six out-edges — not four per-traverser counts — and then every age.
+    # so `hasBarrier` is set and the reference runs BOTH arms over the whole input — arm-major is
+    # then its own answer. ONE count of all six out-edges (not four per-traverser counts), then the
+    # ages in input order, so the first two are the count and josh's age.
     #
-    # Deliberately NOT sliced, unlike its siblings. A batched arm's rows carry a PER-ORIGIN
-    # encounter (`ROW_NUMBER() OVER (PARTITION BY o0 …)` in the child projection), so every arm-1
-    # row ties at 1 in the merge's window and their relative order is SQLite's scan order — a
-    # `limit(2)` here would be pinned by luck, which `mise run test:perturbed` says out loud. That
-    # is the child-scope half of the emission-order substrate, filed under outstanding-work item 20.
+    # This slice is only determined because the merge key carries the arm's ORDINAL between
+    # `arm_idx` and `arm_encounter`: arm 1 is a child-scoped projection whose encounter is
+    # per-origin, so without the ordinal every age ties at 1 and the window picked whatever SQLite
+    # scanned first. `mise run test:perturbed` is what says that out loud, and this scenario is
+    # stable under it.
     When iterated to list
     Then the result should be unordered
       | result |
       | d[6].l |
       | d[32].i |
-      | d[29].i |
-      | d[35].i |
-      | d[27].i |
 
   @gap:branch-traverser-major
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_valuesXageX_unionXmathX_plus_1X_mathX_times_2XX_limitX3X

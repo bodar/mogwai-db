@@ -63,9 +63,23 @@ export function pushChildScope<P extends ChildParent>(
   const base = patchLayout(parent.traverserLayout, { origins: [...parent.traverserLayout.origins, ordinal] });
   const seedCarried = needEnc ? patchLayout(base, { encounter: 'encounter' }) : base;
   const seedCols = layoutCols(seedCarried);
+  // The ordinal identifies a parent traverser, and when the parent also carries an emission ORDER
+  // it costs nothing to make it order-bearing: `ROW_NUMBER() OVER (ORDER BY <encounter>)` is still
+  // unique per parent row — all the identity contract asks — and is now monotone in the parent's
+  // own order.
+  //
+  // That is what makes a child stream's emission order expressible at all. Inside the scope it is
+  // the per-origin `encounter`; ACROSS parents it is the PAIR (ordinal, encounter), and the pair is
+  // only meaningful if the first element orders. Without this the ordinal is `ROW_NUMBER() OVER ()`
+  // and every parent's first child row ties, which is how a branch arm's rows fell to SQLite's scan
+  // order (outstanding-work item 20). The encounter itself stays per-origin on purpose — a scoped
+  // slice reads it as `encounter > offset AND encounter <= stop` (projection.ts), which is a
+  // per-parent window and would be a different question globally.
+  const parentOrder = parent.traverserLayout.encounter;
+  const ordinalMint = parentOrder ? q`ROW_NUMBER() OVER (ORDER BY ${p.c[parentOrder]}) AS ${ordinal}` : q`ROW_NUMBER() OVER () AS ${ordinal}`;
   const carriedSelect = list(
     seedCols.map((c) =>
-      c === ordinal ? q`ROW_NUMBER() OVER () AS ${ordinal}`
+      c === ordinal ? ordinalMint
         : (needEnc && c === 'encounter') ? q`1 AS ${c}`
         : q`${p.c[c]}`),
     ', ',

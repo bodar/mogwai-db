@@ -509,6 +509,9 @@ export interface ArmMergeRelation {
  * incoming encounter rather than adding a second one, and `layoutProjectionMinting` requires the
  * replacement column to be declared, so the two halves have to be sequenced this way.
  *
+ * When `mint` is true every `part` MUST carry trailing `arm_idx, arm_ordinal, arm_encounter`
+ * columns (`armOrderKey` builds the last two), and when it is false none may.
+ *
  * `mint` is the CALLER's decision, not derived from `out`, because the three disagree for a real
  * reason: the scalar merge always establishes emission order (its positional consumers —
  * `limit()`/`range()` over a scalar stream — are reachable today), while the list and variant
@@ -526,13 +529,16 @@ export function mergeArmRelation(
 ): ArmMergeRelation {
   const body = list(parts, ' UNION ALL ');
   if (!mint) return { rel: base.q.cte(body, [...payload, ...layoutCols(out)]), traverserLayout: out };
-  const m = base.q.cte(body, [...payload, 'arm_idx', 'arm_encounter', ...layoutCols(out)]).as('m');
+  const m = base.q.cte(body, [...payload, 'arm_idx', 'arm_ordinal', 'arm_encounter', ...layoutCols(out)]).as('m');
   // The frozen input order (when this branch pushed one) LEADS the key — traverser-major,
   // arm-minor, which is what the reference emits unless the branch batched — and is consumed here,
   // so the merged schema pops back to the enclosing stack.
   const branchOrder = out.branchOrders.length > base.traverserLayout.branchOrders.length ? out.branchOrders[out.branchOrders.length - 1] : undefined;
   const merged = patchLayout(out, { encounter: 'encounter', branchOrders: base.traverserLayout.branchOrders });
-  const armKey = q`${m.c.arm_idx}, ${m.c.arm_encounter}`;
+  // `arm_ordinal` before `arm_encounter`: a child-scoped arm's encounter is per-origin, so the
+  // ordinal is what orders its rows ACROSS parents (see `armOrderKey`). Without it every parent's
+  // first row ties and SQLite's scan order decides.
+  const armKey = q`${m.c.arm_idx}, ${m.c.arm_ordinal}, ${m.c.arm_encounter}`;
   const over = partitionOver(out, m, branchOrder ? q`${m.c[branchOrder]}, ${armKey}` : armKey);
   const projected = list(payload.map((c) => q`${m.c[c]} AS ${c}`), ', ');
   return {
@@ -708,6 +714,28 @@ export function branchFork(base: TraverserLayout, arm: TraverserLayout): { fork:
   const bos = arm.branchOrders;
   if (bos.length <= base.branchOrders.length) return { fork: base };
   return { fork: patchLayout(base, { branchOrders: bos }), branchOrder: bos[bos.length - 1] };
+}
+
+/**
+ * An arm's own emission order AS THE MERGE SEES IT — the pair `(ordinal, encounter)`.
+ *
+ * A child-scoped arm's `encounter` is PER-ORIGIN (`ROW_NUMBER() OVER (PARTITION BY <ordinal> …)`,
+ * which a scoped slice reads as a per-parent window and so must stay that way). Across parents it
+ * is therefore ambiguous on its own: every parent's first row is 1. The ordinal disambiguates, and
+ * `pushChildScope` mints it ordered by the parent's encounter when there is one, so the pair is the
+ * arm's true emission order.
+ *
+ * `out` is the merge's declared schema, which no longer holds the arm's own ordinal (the merge
+ * re-homes onto the parent), so the extra origin is exactly what the arm has and `out` does not.
+ * An arm with no deeper scope and no encounter contributes constants, which sort as a single tie —
+ * correct, since all its rows then genuinely have the same standing.
+ */
+export function armOrderKey(out: TraverserLayout, arm: TraverserLayout, r: Relation): { ordinal: Expression; encounter: Expression } {
+  const deeper = arm.origins.length > out.origins.length ? arm.origins[arm.origins.length - 1] : undefined;
+  return {
+    ordinal: deeper ? q`${r.c[deeper]}` : q`1`,
+    encounter: arm.encounter ? q`${r.c[arm.encounter]}` : q`1`,
+  };
 }
 
 /** The carried schema of a traverser that carries NOTHING — a root seed (`V()`/`E()`/`inject()`),

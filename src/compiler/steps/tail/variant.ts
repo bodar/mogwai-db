@@ -13,7 +13,7 @@ import { q, list, empty, type Expression, type Relation } from '../../../sql/ker
 import { type ValueType } from '../../../sql/kernel/render.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { continueLowering, variantPayloadCols, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
-import { branchFork, layoutProjection, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, type LoweringState, type TraverserLayout } from '../context/context.ts';
+import { armOrderKey, branchFork, layoutProjection, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, type LoweringState, type TraverserLayout } from '../context/context.ts';
 import { globalRowOps, lowerGlobalCount } from './barrier.ts';
 
 // ---------- variant-arm merge builders (parent-agnostic; element- and scalar-parent share) ----------
@@ -78,9 +78,8 @@ export function finishListMerge(
   const out = patchLayout(grew ? merged : fork, mint ? { encounter: null } : {});
   const parts = arms.map((arm, k) => {
     const a = arm.rel.as('a');
-    const tag = mint
-      ? q`, ${k} AS arm_idx, ${arm.traverserLayout.encounter ? a.c[arm.traverserLayout.encounter] : q`1`} AS arm_encounter`
-      : empty;
+    const key = armOrderKey(out, arm.traverserLayout, a);
+    const tag = mint ? q`, ${k} AS arm_idx, ${key.ordinal} AS arm_ordinal, ${key.encounter} AS arm_encounter` : empty;
     const gate = gateFor?.(a, k);
     return q`SELECT ${a.c.list} AS list${tag}${layoutArmProjection(out, arm.traverserLayout, a, grew)} FROM ${a}${gate ? q` WHERE ${gate}` : empty}`;
   });
@@ -137,10 +136,14 @@ export function mergeVariantArms(base: LoweringState, arms: readonly VariantArm[
   // froze an input order hands it in. Everything downstream is the same: `out` declares it, the
   // arms project it, `mergeArmRelation` sorts by it and pops it.
   const out = patchLayout(fork ?? base.traverserLayout, enc ? { encounter: null } : {});
+  const armOrd = (fork ?? base.traverserLayout).origins.length > base.traverserLayout.origins.length
+    ? (fork ?? base.traverserLayout).origins.at(-1) : undefined;
   const parts = arms.map((arm, k) => {
     const a = arm.rel.as('a');
     const cols = variantArmPayload(arm, a, hasList);
-    if (enc) cols.push(q`${k} AS arm_idx`, q`${a.c[enc]} AS arm_encounter`);
+    // A VariantArm is a bare (rel, vk) pair, so the pair-key helper has no arm layout to read: the
+    // caller's `fork` already says which ordinal the arms carry, and `out` is what the merge keeps.
+    if (enc) cols.push(q`${k} AS arm_idx`, armOrd ? q`${a.c[armOrd]} AS arm_ordinal` : q`1 AS arm_ordinal`, q`${a.c[enc]} AS arm_encounter`);
     const gate = gateFor?.(a, k);
     return q`SELECT ${list(cols, ', ')}${layoutProjection(out, a)} FROM ${a}${gate ? q` WHERE ${gate}` : empty}`;
   });

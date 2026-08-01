@@ -35,7 +35,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // as() inside a branch resolves through the merge's alias union; a positional consumer
     // downstream of the fan-out mints the arm-merge encounter (arm 0 fully before arm 1).
     expect(read("g.union(__.V().as('a').out(),__.V()).select('a').values('name')").shape.kind).toBe('value');
-    expect(read('g.union(__.V(),__.V()).limit(3)').sql).toContain('ROW_NUMBER() OVER (ORDER BY m.arm_idx, m.encounter)');
+    expect(read('g.union(__.V(),__.V()).limit(3)').sql).toContain('ROW_NUMBER() OVER (ORDER BY m.arm_idx, m.arm_ordinal, m.encounter)');
     // An arm whose shape no merge in the family covers fails closed, naming that shape.
     expect(() => compile("g.union(__.V().group().by('name'),__.V())", {})).toThrow('union() source branch producing a group value');
   });
@@ -195,17 +195,19 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // their UNION ALL, replicating mergeVariantArms' NO-encounter branch — so with a LIVE
     // encounter (a positional consumer downstream of a fan-out) the arm ordering was silently
     // dropped and the slice picked rows in incidental SQLite order. Routing them through the
-    // shared builder mints `ROW_NUMBER() OVER (… ORDER BY arm_idx, arm_encounter)`, i.e. arm 0
-    // fully before arm 1 — TinkerPop's union/coalesce/choose emission order.
+    // shared builder mints `ROW_NUMBER() OVER (… ORDER BY arm_idx, arm_ordinal, arm_encounter)`,
+    // i.e. arm 0 fully before arm 1 — TinkerPop's union/coalesce/choose emission order — with the
+    // arm's own ordinal between them, because a child-scoped arm's encounter is per-origin and
+    // ties across parents on its own (armOrderKey).
     //
     // Asserted at the SQL level deliberately: a RESULT-level scenario cannot distinguish the two
     // (with these arm shapes incidental row order coincides with arm order), so only the emitted
     // window function proves the ordering is specified rather than accidental.
     const mixedUnion = read('g.V().values("age").union(__.constant("x"), __.V()).limit(2)');
     expect(mixedUnion.sql).toContain('arm_idx');
-    expect(mixedUnion.sql).toMatch(/ROW_NUMBER\(\) OVER \(ORDER BY [\w.]*arm_idx, [\w.]*arm_encounter\)/);
+    expect(mixedUnion.sql).toMatch(/ROW_NUMBER\(\) OVER \(ORDER BY [\w.]*arm_idx, [\w.]*arm_ordinal, [\w.]*arm_encounter\)/);
     const mixedCoalesce = read('g.V().values("name").coalesce(__.V(), __.constant("z")).limit(1)');
-    expect(mixedCoalesce.sql).toMatch(/ROW_NUMBER\(\) OVER \(ORDER BY [\w.]*arm_idx, [\w.]*arm_encounter\)/);
+    expect(mixedCoalesce.sql).toMatch(/ROW_NUMBER\(\) OVER \(ORDER BY [\w.]*arm_idx, [\w.]*arm_ordinal, [\w.]*arm_encounter\)/);
     // …and NOT minted when no consumer demands emission order (the hot path is untouched:
     // no window, no arm tags).
     expect(read('g.V().values("age").union(__.constant("x"), __.V())').sql).not.toContain('arm_idx');
