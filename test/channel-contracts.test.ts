@@ -51,7 +51,7 @@ describe('channel contracts', () => {
 const alias = (col: string): AliasEntry => ({ col, shapes: new Set(['vertex']), binds: 1 });
 
 const layout = (over: Partial<TraverserLayout> = {}): TraverserLayout =>
-  ({ aliases: new Map(), origins: [], ...over });
+  ({ aliases: new Map(), origins: [], branchOrders: [], ...over });
 
 describe('arm-merge authority', () => {
   test('the peer policy fails closed when an arm diverges on a rigid role', () => {
@@ -126,14 +126,16 @@ describe('arm-merge authority', () => {
     // recorded there and a column list that disagrees cannot both survive.
     const c = layout({
       aliases: new Map([['a', alias('a0')]]),
-      sack: 'sk', bulk: 'bulk', origins: ['o0'], fromV: 'fv', encounter: 'encounter',
+      sack: 'sk', bulk: 'bulk', origins: ['o0'], branchOrders: ['bo0'], fromV: 'fv', encounter: 'encounter',
       path: { kind: 'cols', cols: [{ col: 'p0', elem: 'vertex' }] },
       trackFromV: true, consumedAliases: ['gone'],
     });
     const identical = Object.entries(LAYOUT_ROLE_POLICY).filter(([, p]) => p === 'identical').map(([r]) => r);
-    expect(identical.sort()).toEqual(['bulk', 'encounter', 'fromV', 'origins', 'sack']);
+    expect(identical.sort()).toEqual(['branchOrders', 'bulk', 'encounter', 'fromV', 'origins', 'sack']);
     // `rigidCols` IS the identical set: same size, and every column belongs to one of those roles.
-    expect(rigidCols(c)).toEqual(['sk', 'bulk', 'o0', 'fv', 'encounter']);
+    // The two scope STACKS sit next to each other: the ordinal a child scope pushed, then the
+    // emission order a branch froze one scope out.
+    expect(rigidCols(c)).toEqual(['sk', 'bulk', 'o0', 'bo0', 'fv', 'encounter']);
     expect(rigidCols(c).length).toBe(identical.length);
     // The two non-identical COLUMN roles are exactly what layoutCols adds beyond the rigid set:
     // `union` contributes the alias columns, `pad` the path positions.
@@ -155,7 +157,7 @@ describe('arm-merge authority', () => {
     // The type checker forces the POLICY to be declared; this forces it to be IMPLEMENTED.
     const full = layout({
       aliases: new Map([['a', alias('a0')]]),
-      sack: 'sk', bulk: 'bulk', origins: ['o0'], fromV: 'fv', encounter: 'encounter',
+      sack: 'sk', bulk: 'bulk', origins: ['o0'], branchOrders: ['bo0'], fromV: 'fv', encounter: 'encounter',
       path: { kind: 'cols', cols: [{ col: 'p0', elem: 'vertex' }] },
       trackFromV: true, consumedAliases: ['gone'],
     });

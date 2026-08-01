@@ -246,7 +246,7 @@ function tryBulkRepeat(engine: Engine, steps: IRStep[], params: Record<string, a
   // every reduction by SUM(bulk). No bulk arithmetic lives here — this is the fast MIDDLE only.
   const seed: ElementStream = {
     kind: 'elements', q: query, params, rel: cur, elem: 'vertex',
-    traverserLayout: { aliases: new Map(), origins: [], bulk: 'bulk' },
+    traverserLayout: { aliases: new Map(), origins: [], branchOrders: [], bulk: 'bulk' },
   };
   return materializeRootStream(eng.lowerStepsStrict(seed, steps, plan.suffixAt));
 }

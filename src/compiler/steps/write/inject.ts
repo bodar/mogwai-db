@@ -3,7 +3,7 @@ import { jsonbArrayOf } from '../../plan/plan.ts';
 import { flattenListArgs, isNested, type SackSpec } from '../../../gremlin/frontend.ts';
 import { flatType, type CanonicalType } from '../../../gremlin/types.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { patchLayout, type LoweringState } from '../context/context.ts';
+import { patchLayout, rootLayout, type LoweringState } from '../context/context.ts';
 import { toListStream, toScalarStream, type Stream } from '../context/stream.ts';
 import type { Engine } from '../../engine/deps.ts';
 import { materializeRootStream } from '../tail/materialize.ts';
@@ -160,7 +160,7 @@ export function compileInject(engine: Engine, steps: IRStep[], sackInit?: SackSp
   // seeds its own relation on this Query and lowers the chain through the same engine — which the
   // seed stream reaches via `q.engine`.
   const eng = engine.subEngine({});
-  const carry: LoweringState = { q: eng.q, params: {}, traverserLayout: { aliases: new Map(), origins: [] } };
+  const carry: LoweringState = { q: eng.q, params: {}, traverserLayout: rootLayout() };
   const { stream, at } = seedInject(carry, steps, sackInit);
   return materializeRootStream(eng.lowerStepsStrict(stream, steps, at));
 }

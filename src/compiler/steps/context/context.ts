@@ -160,6 +160,22 @@ export interface TraverserLayout {
   readonly aliases: AliasMap;
   readonly path?: PathState;             // present iff the chain tracks a linear path
   readonly origins: readonly string[];   // coalesce/optional input-ordinal columns — a STACK (nested branches each push their own unique ordinal; the innermost is last)
+  /** The emission order of the traverser that entered each enclosing BRANCH, frozen at entry — a
+   *  STACK, exactly like `origins` (nested branches each push their own; the innermost is last).
+   *
+   *  It exists because a branch merge's canonical key is `(input traverser, arm, arm encounter)`
+   *  and the first term is otherwise unrecoverable: `encounter` is ONE slot which every fan-out
+   *  inside an arm re-mints in place (`finishMove`), so an arm's encounter is a RANK, and two arms
+   *  rank independently. `origins` identifies an input traverser (`ROW_NUMBER() OVER ()`) without
+   *  ORDERING them. Frozen at branch entry, threaded through the arms like any carried column,
+   *  consumed and dropped by the merge.
+   *
+   *  NOT a second `encounter`, and the distinction is load-bearing (the one-slot decision is
+   *  `docs/2026-07-19-canonical-emission-order.md` Stage C + outstanding-work item 4): this is an
+   *  OUTER scope's order, and it is only ever read as a merge sort key — never as "what order is
+   *  THIS stream in". A consumer that wants both for the same purpose is the reconciliation that
+   *  was refused. */
+  readonly branchOrders: readonly string[];
   readonly sack?: string;                // sack: the carried per-traverser scalar column (e.g. 'sk')
   readonly fromV?: string;               // edge context: the vertex an edge was entered from (for otherV())
   readonly encounter?: string;           // explicit provider order retained across a barrier/dedup boundary
@@ -289,6 +305,9 @@ export const LAYOUT_ROLE_POLICY: Readonly<Record<keyof TraverserLayout, LayoutRo
   aliases: 'union',
   path: 'pad',
   origins: 'identical',
+  // Every arm forked from the same branch entry, so they carry the same frozen column; a merge
+  // that finds them disagreeing is looking at arms from different branches and must fail closed.
+  branchOrders: 'identical',
   sack: 'identical',
   fromV: 'identical',
   encounter: 'identical',
@@ -331,6 +350,10 @@ export type BarrierRolePolicy = 'consumed' | 'empty' | 'drop' | 'keep';
 export const BARRIER_ROLE_POLICY: Readonly<Record<keyof TraverserLayout, BarrierRolePolicy>> = {
   aliases: 'consumed',
   origins: 'empty',
+  // Same reading as `origins`, one scope out: a barrier result is a fresh traverser that no
+  // longer stands for any one of the branch's inputs, so there is no input order to hold. `[]`
+  // rather than absent, because the role is a stack.
+  branchOrders: 'empty',
   path: 'drop',
   sack: 'drop',
   fromV: 'drop',
@@ -576,7 +599,7 @@ export const elemRel = (st: ElementStream, alias = 'n'): Relation => elemTable(s
  *  ordered after the site that physically appends it desyncs declared vs physical columns
  *  (the coalesce/optional+path() / +bulk bug). */
 export const layoutCols = (c: TraverserLayout): string[] =>
-  [...aliasColsOf(c.aliases), ...(c.sack ? [c.sack] : []), ...(c.bulk ? [c.bulk] : []), ...c.origins, ...(c.fromV ? [c.fromV] : []), ...(c.encounter ? [c.encounter] : []), ...pathColsOf(c.path)];
+  [...aliasColsOf(c.aliases), ...(c.sack ? [c.sack] : []), ...(c.bulk ? [c.bulk] : []), ...c.origins, ...c.branchOrders, ...(c.fromV ? [c.fromV] : []), ...(c.encounter ? [c.encounter] : []), ...pathColsOf(c.path)];
 
 /** `, p.a0, p.p0, …` — the carried columns qualified by `p`; empty when nothing is
  *  live. Movement/filter CTEs splice this after the moved id so labelled traversers
@@ -623,7 +646,7 @@ export function partitionOver(c: TraverserLayout, p: Relation, orderKey: Express
   return parts.length ? q`PARTITION BY ${list(parts, ', ')} ORDER BY ${orderKey}` : q`ORDER BY ${orderKey}`;
 }
 
-type LayoutPatch = { aliases?: AliasMap; path?: PathState; origins?: readonly string[]; sack?: string | null; fromV?: string | null; encounter?: string | null; bulk?: string | null };
+type LayoutPatch = { aliases?: AliasMap; path?: PathState; origins?: readonly string[]; branchOrders?: readonly string[]; sack?: string | null; fromV?: string | null; encounter?: string | null; bulk?: string | null };
 
 /** Apply a carried-column patch: aliases/path/origins — a value overrides, undefined
  *  keeps; sack/fromV/encounter — `null` CLEARS, undefined keeps, a string sets. `origins` is the
@@ -634,6 +657,7 @@ export function patchLayout(c: TraverserLayout, o: LayoutPatch): TraverserLayout
     aliases: o.aliases ?? c.aliases,
     path: o.path ?? c.path,
     origins: o.origins ?? c.origins,
+    branchOrders: o.branchOrders ?? c.branchOrders,
     sack: o.sack === null ? undefined : (o.sack ?? c.sack),
     fromV: o.fromV === null ? undefined : (o.fromV ?? c.fromV),
     encounter: o.encounter === null ? undefined : (o.encounter ?? c.encounter),
@@ -659,7 +683,15 @@ export function patchLayout(c: TraverserLayout, o: LayoutPatch): TraverserLayout
  *  rather than traversers. That was already true physically — the seed has never projected `bulk`;
  *  what is new is that the declaration says so instead of claiming a column the relation lacks. */
 export const layoutOverAliases = (c: TraverserLayout, aliases: AliasMap): TraverserLayout =>
-  ({ aliases, origins: [], trackFromV: c.trackFromV, consumedAliases: c.consumedAliases });
+  ({ aliases, origins: [], branchOrders: [], trackFromV: c.trackFromV, consumedAliases: c.consumedAliases });
+
+/** The carried schema of a traverser that carries NOTHING — a root seed (`V()`/`E()`/`inject()`),
+ *  a correlated sub-render with no labels in scope, a service's own row source. Eleven sites spelled
+ *  this literal out, so each of them was a place a newly-added role could be forgotten; the two
+ *  scope STACKS have exactly one empty value and it belongs here, next to the roles themselves.
+ *  A seed that carries something (bulk, a label map, `path()`'s pk/ord pair) still builds its own
+ *  literal — those say something, and the type checker keeps them total. */
+export const rootLayout = (): TraverserLayout => ({ aliases: new Map(), origins: [], branchOrders: [] });
 
 /** Re-home child-scoped carried state onto its parent schema. This is deliberately
  * narrower than `mergeLayouts`: a child ordinal is meaningful only inside the child
@@ -705,6 +737,7 @@ export function barrierLayout(c: TraverserLayout): TraverserLayout {
   return {
     aliases: new Map(),                                              // 'consumed' — names kept below
     origins: [],                                                     // 'empty'
+    branchOrders: [],                                                // 'empty'
     trackFromV: c.trackFromV,                                        // 'keep'
     ...(consumed.length ? { consumedAliases: [...new Set(consumed)] } : {}), // 'keep' (+ the consumed names)
     // path / sack / fromV / encounter / bulk are 'drop' — absent by omission.

@@ -75,7 +75,7 @@ export function compileCorrelatedChild(
   const inlineQ = new DerivedQuery();
   const inlineEngine = engine.withQuery(inlineQ);
   const aliasCols = labels ? aliasColsOf(labels.aliases) : [];
-  const layout: TraverserLayout = { aliases: labels?.aliases ?? new Map(), origins: [] };
+  const layout: TraverserLayout = { aliases: labels?.aliases ?? new Map(), origins: [], branchOrders: [] };
   // The alias columns correlate OUTWARD exactly as `idExpr` does: a FROM-clause derived table is
   // not laterally visible to its siblings, so `p.a0` here resolves through the EXISTS boundary to
   // the true outer scope, never to an intermediate the child's own StepFns introduce. From the

@@ -15,6 +15,7 @@ import { executeQuery } from '../support/executor.ts';
 import { DerivedQuery, Query, q, render } from '../../src/sql/kernel/q.ts';
 import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toRecordStream, toScalarStream, toVariantStream } from '../../src/compiler/steps/context/stream.ts';
 import { popChildScope, pushChildScope, reuseCurrentFrame } from '../../src/compiler/steps/tail/child.ts';
+import { rootLayout } from '../../src/compiler/steps/context/context.ts';
 import { readdirSync, readFileSync } from 'node:fs';
 import { read, run, seededStore } from '../support/harness.ts';
 
@@ -24,7 +25,7 @@ import { read, run, seededStore } from '../support/harness.ts';
 describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
   test('stream physical schemas are exact and fail immediately on column drift', () => {
     const q = new Query();
-    const state = { q, params: {}, traverserLayout: { aliases: new Map(), origins: [] } };
+    const state = { q, params: {}, traverserLayout: rootLayout() };
     expect(assertStreamColumns(toScalarStream(state, q.cte({} as any, ['v']))).kind).toBe('scalar');
     expect(() => toScalarStream(state, q.cte({} as any, ['value']))).toThrow(
       'scalar stream column mismatch: expected [v], got [value]',
@@ -90,7 +91,7 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     const q = new Query();
     const parent = {
       kind: 'elements' as const, elem: 'vertex' as const, q, params: {},
-      rel: q.cte({} as any, ['id']), traverserLayout: { aliases: new Map(), origins: [] as string[] },
+      rel: q.cte({} as any, ['id']), traverserLayout: { aliases: new Map(), origins: [] as string[], branchOrders: [] },
     };
     const { frame, scope, seed } = pushChildScope(parent);
     expect(frame.domain).toBe(seed.rel);

@@ -3,7 +3,7 @@ import { propertyFts } from '../../sql/schema.ts';
 import { elemTable, propOwnerCol, propRel, sqlElem, type Elem } from '../../compiler/plan/plan.ts';
 import { propertyPayload } from '../../compiler/steps/tail/group.ts';
 import { PROPERTY_PAYLOAD, toPropertyStream, type PropertyStream } from '../../compiler/steps/context/stream.ts';
-import type { TraverserLayout } from '../../compiler/steps/context/context.ts';
+import { rootLayout, type TraverserLayout } from '../../compiler/steps/context/context.ts';
 import type { Service, CallSite, CallParams } from '../spi/types.ts';
 
 // ---------- tinker.search — full-text search over property values (pure, Start) ----------
@@ -60,7 +60,7 @@ function searchPattern(params: CallParams): string {
 /** The empty PropertyStream (type=VertexProperty, or a genuinely unmatched scope): a
  *  PROPERTY_PAYLOAD CTE with no rows. */
 function emptyProperties(ctx: CallSite, ownerElem: Elem): PropertyStream {
-  const layout: TraverserLayout = { aliases: new Map(), origins: [] };
+  const layout: TraverserLayout = rootLayout();
   // The column names are the fixed PROPERTY_PAYLOAD list (SQL identifiers, never user data),
   // so a raw `NULL AS <col>` projection with a WHERE 0 guard yields the empty relation.
   const proj = raw(PROPERTY_PAYLOAD.map((c) => `NULL AS ${c}`).join(', '));
@@ -72,7 +72,7 @@ function emptyProperties(ctx: CallSite, ownerElem: Elem): PropertyStream {
  *  (kind='value', the searched scope, text LIKE %term%) back to the property table for the
  *  full payload (pk/pv/pvtype/meta) and to the owner + its label. */
 function searchProperties(ctx: CallSite, ownerElem: Elem, pattern: string): PropertyStream {
-  const layout: TraverserLayout = { aliases: new Map(), origins: [] };
+  const layout: TraverserLayout = rootLayout();
   const f = propertyFts.as('f');
   const likeMatch = q`${f.c.text} LIKE ${value(pattern)} ESCAPE ${value('\\')}`;
   const scope = q`${f.c.owner_elem}=${value(sqlElem(ownerElem))} AND ${f.c.kind}=${value('value')} AND ${likeMatch}`;

@@ -9,7 +9,7 @@ import { materializeRootStream } from '../src/compiler/steps/tail/materialize.ts
 import { LoweringEngine } from '../src/compiler/engine/engine.ts';
 import { createAppScope, createRequestScope } from '../src/scopes.ts';
 import type { ForeignRow } from '../src/services/spi/types.ts';
-import type { LoweringState } from '../src/compiler/steps/context/context.ts';
+import { rootLayout, type LoweringState } from '../src/compiler/steps/context/context.ts';
 
 // The CF-parity harness (src/cf-limits.ts) and the walls it exists to make visible.
 //
@@ -87,7 +87,7 @@ describe('a federated landing binds the whole result set once', () => {
 
   const landAndCount = (n: number) => {
     const engine = new LoweringEngine(createRequestScope(createAppScope(), { params: {} }));
-    const c: LoweringState = { q: engine.q, params: {}, traverserLayout: { aliases: new Map(), origins: [] } };
+    const c: LoweringState = { q: engine.q, params: {}, traverserLayout: rootLayout() };
     const seed = landForeignElements(c, Array.from({ length: n }, (_, i) => vrow(i + 1)), 'vertex');
     const plan = materializeRootStream(engine.lowerStepsStrict(seed, [], 0));
     if (plan.kind !== 'read') throw new Error('expected read plan');

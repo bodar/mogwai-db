@@ -1,6 +1,6 @@
 import { q, value, list } from '../../sql/kernel/q.ts';
 import { toScalarStream } from '../../compiler/steps/context/stream.ts';
-import type { LoweringState } from '../../compiler/steps/context/context.ts';
+import { rootLayout, type LoweringState } from '../../compiler/steps/context/context.ts';
 import type { Service, CallSite } from '../spi/types.ts';
 import { DIRECTORY_SERVICE_NAME } from '../spi/types.ts';
 import type { AppScope } from '../../scopes.ts';
@@ -16,7 +16,7 @@ import type { AppScope } from '../../scopes.ts';
 /** Build a scalar-string stream from a list of already-computed string rows, seeded from
  *  a VALUES CTE exactly like inject() does. An empty list yields the empty stream. */
 function scalarStrings(ctx: CallSite, rows: string[]) {
-  const carry: LoweringState = { q: ctx.q, params: ctx.boundParams, traverserLayout: { aliases: new Map(), origins: [] } };
+  const carry: LoweringState = { q: ctx.q, params: ctx.boundParams, traverserLayout: rootLayout() };
   const rel = rows.length
     ? ctx.q.cte(q`VALUES ${list(rows.map((r) => q`(${value(r)})`), ', ')}`, ['v'])
     : ctx.q.cte(q`SELECT NULL AS v WHERE 0`, ['v']);

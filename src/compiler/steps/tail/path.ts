@@ -219,7 +219,7 @@ export function lowerPath(st: ElementStream, proj: IRStep, acc: TailAcc): PathSt
   // via layoutProjection. The recursive/grouped regime (compilePathArray) explodes one path into
   // (pk, ord) rows and so is NOT row-preserving — it keeps dropping them.
   const outCarried: TraverserLayout = {
-    aliases: st.traverserLayout.aliases, origins: [], trackFromV: st.traverserLayout.trackFromV,
+    aliases: st.traverserLayout.aliases, origins: [], branchOrders: [], trackFromV: st.traverserLayout.trackFromV,
     ...(st.traverserLayout.consumedAliases ? { consumedAliases: st.traverserLayout.consumedAliases } : {}),
   };
   const aliasCols = layoutCols(outCarried);
@@ -263,7 +263,7 @@ function groupedPositionChild(st: ElementStream, paths: Relation, nested: any, p
   // consumed by this barrier — the same reason the linear regime strips `path` from its child seed.
   const elemStream: ElementStream = {
     ...st, rel: elemRows, elem: 'vertex',
-    traverserLayout: { aliases: new Map(), origins: ['pk', 'ord'] },
+    traverserLayout: { aliases: new Map(), origins: ['pk', 'ord'], branchOrders: [] },
   };
   const outer = pushChildScope(elemStream);
   const child = lowerPathPositionChild(outer.seed, nested, outer, st.params);

@@ -9,11 +9,11 @@ import { armBatches, VERTEX_MOVES } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
 import { aliasCtx, dirsFor, edgeLabelFilter, elemCtx, hasProp, jsonbGroupArray, labelIn, predicateSql, scalarProp, vertexLabelIn, vertexLabelName, vertexLabelsJson, type EdgeEnd, type Elem, type ScalarCtx } from '../../plan/plan.ts';
-import { aliasColsOf, appendCte, armBatchAdmissible, collapsedArmAdmissible, elemRel, labelScope, layoutCols, layoutProjection, layoutProjectionMinting, mergeLayouts, partitionOver, patchLayout, prevRel, rehomeLayout, rigidCols, type AliasMap, type ElementStream, type LoweringState, type PathState, type SideEffectDef, type StepFn, type TraverserLayout } from '../context/context.ts';
+import { aliasColsOf, appendCte, armBatchAdmissible, collapsedArmAdmissible, elemRel, rootLayout, labelScope, layoutCols, layoutProjection, layoutProjectionMinting, mergeLayouts, partitionOver, patchLayout, prevRel, rehomeLayout, rigidCols, type AliasMap, type ElementStream, type LoweringState, type PathState, type SideEffectDef, type StepFn, type TraverserLayout } from '../context/context.ts';
 import { loweringStateOf, toElementStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isGlobalBarrier, optionMapMerge, optionMapNeedsPassthrough, readOptionMapArms, ROOT_SCOPE, type ChildCtx, type ChildPlan } from '../tail/child-shape.ts';
 import { pushChildScope, tryCompileElementTraversal, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, tryCompileScalarValueRows, tryGateByChildExistence } from '../tail/child.ts';
-import { gateArmOnNonEmptyInput } from '../tail/barrier.ts';
+import { freezeBranchOrder, gateArmOnNonEmptyInput } from '../tail/barrier.ts';
 import { keyedChildRelation, keyedKeySet } from '../tail/keyed.ts';
 import { emptyElementLike } from '../tail/labelselect.ts';
 import { combineSack, SACK_OPS, unionScalarStreams } from '../tail/scalar.ts';
@@ -217,16 +217,45 @@ function armProjection(arm: ElementStream, out: TraverserLayout, armIdx?: number
  *  mergeVariantArms): the arms' PARENT is not part of a merge, only the carried schema they
  *  forked from — which lets a `union()` SOURCE, whose arms are rooted and have no parent at all,
  *  reuse it with a synthesized base (sourceUnion, below). */
-function finishElementMerge(base: LoweringState, out: TraverserLayout, parts: Expression[], opts: { elem: Elem; aliases: AliasMap; origins?: readonly string[]; path?: PathState }): ElementStream {
+function finishElementMerge(base: LoweringState, out: TraverserLayout, parts: Expression[], opts: { elem: Elem; aliases: AliasMap; origins?: readonly string[]; path?: PathState; branchOrder?: string }): ElementStream {
   let body = list(parts, ' UNION ALL ');
+  // `base` is the state the arms FORKED FROM, so its stack already holds the frozen order this
+  // branch pushed (when it pushed one); the merge consumes it, so the output pops back to the
+  // enclosing stack. Exactly the shape of `opts.origins`, one scope out.
+  const branchOrders = opts.branchOrder ? base.traverserLayout.branchOrders.slice(0, -1) : base.traverserLayout.branchOrders;
+  const layout = patchLayout(base.traverserLayout, { aliases: opts.aliases, origins: opts.origins, path: opts.path, branchOrders });
   if (out.encounter) {
     const inner = base.q.cte(body, ['id', ...layoutCols(out), 'arm_idx']);
     const m = inner.as('m');
-    const over = partitionOver(out, m, q`${m.c.arm_idx}, ${m.c[out.encounter]}`);
-    body = q`SELECT ${m.c.id} AS id${layoutProjectionMinting(out, m, out.encounter, q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`;
+    // Traverser-major, arm-minor when the arms ran per input traverser; plain arm-major when the
+    // branch BATCHED (no frozen order to lead with) — which is the reference's own key there.
+    const armKey = q`${m.c.arm_idx}, ${m.c[out.encounter]}`;
+    const over = partitionOver(out, m, opts.branchOrder ? q`${m.c[opts.branchOrder]}, ${armKey}` : armKey);
+    // The frozen column is consumed HERE: the arms carry it (it is in `out`), the merged relation
+    // does not (it is in `layout`), so project through the popped schema.
+    const projected = patchLayout(out, { branchOrders });
+    body = q`SELECT ${m.c.id} AS id${layoutProjectionMinting(projected, m, out.encounter, q`ROW_NUMBER() OVER (${over})`)} FROM ${m}`;
   }
-  const layout = patchLayout(base.traverserLayout, opts);
   return toElementStream({ ...base, traverserLayout: layout }, base.q.cte(body, ['id', ...layoutCols(layout)]), opts.elem);
+}
+
+/**
+ * Enter a branch whose arms the reference runs PER INPUT TRAVERSER: freeze the input's emission
+ * order so the merge can lead with it (see `freezeBranchOrder` and `TraverserLayout.branchOrders`).
+ *
+ * Declines — leaving today's arm-major key — in exactly two cases:
+ *  - no live encounter, so there is no order to be major in;
+ *  - an arm holds a BATCHED barrier. For `union`/`choose` that is the reference's own rule
+ *    (`BranchStep.hasBarrier`, §1 of the branch-arm plan): the arms then observe the whole input
+ *    and arm-major IS correct. `coalesce`/`optional` never batch — they are not `BranchStep`s —
+ *    but they decline on the same test for a compiler reason: such an arm's tail can consume the
+ *    carried column the merge would sort by, and a merge whose arms disagree on a rigid role fails
+ *    closed. That leaves those spellings answering exactly what they answer today.
+ */
+function enterBranch(st: ElementStream, bodies: readonly (readonly IRStep[])[]): { seed: ElementStream; branchOrder?: string } {
+  if (!st.traverserLayout.encounter || bodies.some(armBatches)) return { seed: st };
+  const seed = freezeBranchOrder(st);
+  return { seed, branchOrder: seed.traverserLayout.branchOrders.at(-1) };
 }
 
 /** Merge a set of ELEMENT arms into one element stream — the ungated entry to the element merge,
@@ -235,12 +264,12 @@ function finishElementMerge(base: LoweringState, out: TraverserLayout, parts: Ex
  *  unions with theirs (a label bound in only one arm NULL-pads), and its path — when live — pads
  *  to the longest arm. The gated merges (coalesce/optional/choose) call finishElementMerge
  *  directly: they add a per-arm WHERE and pop their own ordinal, which this shape has no room for. */
-export function mergeElementArms(base: LoweringState, arms: readonly ElementStream[]): ElementStream {
+export function mergeElementArms(base: LoweringState, arms: readonly ElementStream[], branchOrder?: string): ElementStream {
   const elem = arms[0].elem;
   if (arms.some((e) => e.elem !== elem)) throw new Error('union() branches produce different element kinds (mixed-shape) not yet supported');
   const out = mergeBranchCarried(base.traverserLayout, arms.map((e) => e.traverserLayout)); // merges alias sets, pads ragged path arms
   const selects = arms.map((e, k) => q`SELECT ${armProjection(e, out, out.encounter ? k : undefined)} FROM ${e.rel}`);
-  return finishElementMerge(base, out, selects, { elem, aliases: out.aliases, path: out.path });
+  return finishElementMerge(base, out, selects, { elem, aliases: out.aliases, path: out.path, branchOrder });
 }
 
 /** union(): UNION ALL of each branch, each folded from the CURRENT relation (so the
@@ -258,9 +287,10 @@ export const union: StepFn = (s, st) => {
   // arity guard and()/or() carried: it broke the metamorphic law `union(q) === q`. ZERO branches
   // still throws (nothing to merge).
   if (branches.length === 0) throw new Error('union() needs at least one branch');
-  const ends = branches.map((b) => tryBatchedElementArm(st, b.nested) ?? tryCompileElementTraversal(st, b.nested)
+  const { seed, branchOrder } = enterBranch(st, branches.map((b) => childSteps(b.nested, st.params)));
+  const ends = branches.map((b) => tryBatchedElementArm(seed, b.nested) ?? tryCompileElementTraversal(seed, b.nested)
     ?? (() => { throw new Error(`union() branch __.${armDescription(b.nested, st.params)} not yet supported (scalar/projection body)`); })());
-  return mergeElementArms(loweringStateOf(st), ends);
+  return mergeElementArms(loweringStateOf(seed), ends, branchOrder);
 };
 
 /**
@@ -387,7 +417,8 @@ export const optional: StepFn = (s, st) => {
   if (fast) return fast;
   // Nesting is supported: originSeed mints a UNIQUE ordinal (o0, o1, …) per depth and
   // carries the outer ordinals through, so optional()/coalesce() compose.
-  const { base, seedSt, ord } = originSeed(st);
+  const { seed: forked, branchOrder } = enterBranch(st, [body]);
+  const { base, seedSt, ord } = originSeed(forked);
   const end = tryCompileElementTraversal(seedSt, s.args[0].nested)
     ?? (() => { throw new Error(`optional() branch __.${armDescription(s.args[0].nested, st.params)} not yet supported (scalar/projection body)`); })();
   if (end.elem !== st.elem)
@@ -400,7 +431,7 @@ export const optional: StepFn = (s, st) => {
   const baseSt: ElementStream = { ...seedSt, rel: base };
   const hit = q`SELECT ${armProjection(end, out, out.encounter ? 0 : undefined)} FROM ${end.rel}`;
   const miss = q`SELECT ${armProjection(baseSt, out, out.encounter ? 1 : undefined)} FROM ${base} WHERE ${ord} NOT IN (SELECT ${ord} FROM ${end.rel})`;
-  return finishElementMerge(loweringStateOf(st), out, [hit, miss], { elem: end.elem, aliases: out.aliases, origins: st.traverserLayout.origins, path: out.path });
+  return finishElementMerge(loweringStateOf(forked), out, [hit, miss], { elem: end.elem, aliases: out.aliases, origins: st.traverserLayout.origins, path: out.path, branchOrder });
 };
 
 /** Shape-changing optional: productive scalar child rows win; an unproductive
@@ -440,7 +471,8 @@ export const coalesce: StepFn = (s, st) => {
   assertForkSafe('coalesce', st);
   const branches = s.args.filter(isNested);
   if (branches.length < 1) throw new Error('coalesce() needs at least one branch');
-  const { seedSt, ord } = originSeed(st); // unique ordinal — nests inside optional/coalesce
+  const { seed: forked, branchOrder } = enterBranch(st, branches.map((b) => childSteps(b.nested, st.params)));
+  const { seedSt, ord } = originSeed(forked); // unique ordinal — nests inside optional/coalesce
   const ends = branches.map((b) => tryCompileElementTraversal(seedSt, b.nested)
     ?? (() => { throw new Error(`coalesce() branch __.${armDescription(b.nested, st.params)} not yet supported (scalar/projection body)`); })());
   const elem = ends[0].elem;
@@ -454,7 +486,7 @@ export const coalesce: StepFn = (s, st) => {
     const notPrior = list(ends.slice(0, k).map((pr) => q`${ord} NOT IN (SELECT ${ord} FROM ${pr.rel})`), ' AND ');
     return q`SELECT ${sel} FROM ${end.rel} WHERE ${notPrior}`;
   });
-  return finishElementMerge(loweringStateOf(st), out, parts, { elem, aliases: out.aliases, origins: st.traverserLayout.origins, path: out.path });
+  return finishElementMerge(loweringStateOf(forked), out, parts, { elem, aliases: out.aliases, origins: st.traverserLayout.origins, path: out.path, branchOrder });
 };
 
 /** Homogeneous scalar coalesce: compile every arm from one ordinal-tagged seed, then
@@ -1104,7 +1136,10 @@ export const choose: StepFn = (s, st) => {
   if (args.length < 2 || args.length > 3)
     throw new Error('choose(): only the predicate form choose(pred, then[, else]) is supported (option-map form not yet supported)');
   const [predArg, thenArg, elseArg] = args;
-  const seedFor = chooseGate(st, predArg.nested);
+  // The PREDICATE is not an arm (`branchTraversal`, not a global child — §6.4 of the branch-arm
+  // plan), so only the option bodies decide whether the arms run per input traverser.
+  const { seed: forked, branchOrder } = enterBranch(st, [thenArg, ...(elseArg ? [elseArg] : [])].map((a) => childSteps(a.nested, st.params)));
+  const seedFor = chooseGate(forked, predArg.nested);
 
   const arm = (arg: any, seed: ElementStream): ElementStream => {
     const body = stepChain(arg.nested, st.params);
@@ -1122,12 +1157,12 @@ export const choose: StepFn = (s, st) => {
   if (thenEnd.elem !== elseEnd.elem)
     throw new Error('choose() branches produce different element kinds (mixed-shape) not yet supported');
 
-  const out = mergeBranchCarried(st.traverserLayout, [thenEnd.traverserLayout, elseEnd.traverserLayout]); // merges alias sets, pads ragged path arms
+  const out = mergeBranchCarried(forked.traverserLayout, [thenEnd.traverserLayout, elseEnd.traverserLayout]); // merges alias sets, pads ragged path arms
   const parts = [
     q`SELECT ${armProjection(thenEnd, out, out.encounter ? 0 : undefined)} FROM ${thenEnd.rel}`,
     q`SELECT ${armProjection(elseEnd, out, out.encounter ? 1 : undefined)} FROM ${elseEnd.rel}`,
   ];
-  return finishElementMerge(loweringStateOf(st), out, parts, { elem: thenEnd.elem, aliases: out.aliases, path: out.path });
+  return finishElementMerge(loweringStateOf(forked), out, parts, { elem: thenEnd.elem, aliases: out.aliases, path: out.path, branchOrder });
 };
 
 /** Predicate choose with two homogeneous scalar result arms. The predicate gates
@@ -1200,7 +1235,7 @@ function sourceBaseCarried(arms: readonly ArmStream[]): TraverserLayout {
       throw new Error('union() source branches disagree on carried columns (sack/bulk/emission order) — a branch whose tail consumes per-traverser state cannot merge with one that keeps it');
   }
   const c = arms[0].traverserLayout;
-  return { aliases: new Map(), origins: c.origins, sack: c.sack, bulk: c.bulk, encounter: c.encounter, path: c.path };
+  return { aliases: new Map(), origins: c.origins, branchOrders: c.branchOrders, sack: c.sack, bulk: c.bulk, encounter: c.encounter, path: c.path };
 }
 
 /** One lowered source branch as a variant arm, tagged by its natural shape. The kind-dispatch twin
@@ -1216,7 +1251,7 @@ const isVariantArmKind = (s: Stream): s is ArmStream =>
 
 /** Lower `union(b1, b2, …)` in SOURCE position to one merged Stream. */
 export function sourceUnion(engine: Engine, step: IRStep, params: Record<string, any>, sackInit: SackSpec | undefined, facts: ChainFacts): Stream {
-  const seed: LoweringState = { q: engine.q, params, traverserLayout: { aliases: new Map(), origins: [] } };
+  const seed: LoweringState = { q: engine.q, params, traverserLayout: rootLayout() };
   const branches = (step.args ?? []).filter(isNested);
   // union() with no branches emits nothing (TinkerPop: the result is empty). Not an arity error —
   // g.union() is a legal traversal, and one arm is legal too (there is nothing to disagree about).

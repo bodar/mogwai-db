@@ -3,7 +3,7 @@ import { perRowColumnOf, staticTypeOf, type ListOf } from '../../../sql/kernel/r
 import { sliceSuffix, typedScalarNode } from '../../plan/plan.ts';
 import { isLocalScope, type NumericReducer, type ScalarReducer } from '../../ir/step.ts';
 
-import { cardinalityOf, continueLowering, loweringStateOf, streamColumns, toListStream, toScalarStream, withRelation, type ListStream, type RelationalStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
+import { cardinalityOf, continueLowering, loweringStateOf, streamColumns, streamPayloadCols, toListStream, toScalarStream, withRelation, withRelationAndLayout, type ListStream, type RelationalStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { layoutCols, layoutProjection, layoutProjectionMinting, patchLayout, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
 import { type ChildScope } from './child-shape.ts';
 
@@ -127,6 +127,33 @@ export const gateArmOnNonEmptyInput = <T extends RelationalStream>(arm: T, input
   const src = input.as('armin');
   return reprojectRows(arm, { where: q`EXISTS (SELECT 1 FROM ${src})` });
 };
+
+/**
+ * FREEZE the current emission order into a fresh branch-order column — the entry half of the
+ * `branchOrders` role (`context/context.ts`), whose exit half is the merge's leading sort key.
+ *
+ * A branch whose arms run PER INPUT TRAVERSER emits traverser-major, arm-minor, so its merge has to
+ * sort by the input traverser first. Nothing in an arm can answer "which input am I?" afterwards:
+ * `encounter` is one slot and every fan-out inside the arm re-mints it in place, so the arm's value
+ * is a rank over the arm's own rows. Freezing a COPY at entry is what survives that, and it rides
+ * the arms as an ordinary carried column — no per-arm plumbing, at any nesting depth.
+ *
+ * Shape-generic on purpose: the element merge and the scalar/list/variant merges all need it, and
+ * `streamPayloadCols` already owns what each shape's own columns are. A stream with no live
+ * encounter is returned UNCHANGED — there is no order to freeze, and an order-free chain cannot
+ * observe the difference (`materialize` only sorts by an encounter that exists).
+ */
+export function freezeBranchOrder<T extends RelationalStream>(s: T): T {
+  const enc = s.traverserLayout.encounter;
+  if (!enc) return s;
+  const bos = s.traverserLayout.branchOrders;
+  const layout = patchLayout(s.traverserLayout, { branchOrders: [...bos, `bo${bos.length}`] });
+  const col = layout.branchOrders[bos.length]!;
+  const p = s.rel.as('p');
+  const payload = streamPayloadCols(s);
+  const body = q`SELECT ${list(payload.map((c) => q`${p.c[c]}`), ', ')}${layoutProjectionMinting(layout, p, col, q`${p.c[enc]}`)} FROM ${p}`;
+  return withRelationAndLayout(s, layout, s.q.cte(body, [...payload, ...layoutCols(layout)]));
+}
 
 /**
  * The GLOBAL row ops as `dispatchShapeTail` entries, for any shape whose rows are its traversers.

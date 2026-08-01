@@ -93,7 +93,7 @@ export function keyedChildRelation(
   // carried slot designed for "which traverser did this row come from" and rides through
   // movement/filter/branch via layoutProjection, so nothing here threads it by hand. Column ORDER
   // must match layoutCols (aliases, sack, bulk, origins, …) or assertStreamColumns trips.
-  const seedCarried: TraverserLayout = { aliases: new Map(), origins: ['o'], bulk: 'bulk' };
+  const seedCarried: TraverserLayout = { aliases: new Map(), origins: ['o'], branchOrders: [], bulk: 'bulk' };
   const seed: ElementStream = {
     kind: 'elements', q: st.q, params: st.params, elem: 'vertex',
     rel: st.q.cte(q`SELECT id, 1 AS bulk, id AS o FROM ${nodes}`, ['id', 'bulk', 'o']),

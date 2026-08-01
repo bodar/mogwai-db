@@ -10,7 +10,7 @@ import { materializeRootStream } from '../src/compiler/steps/tail/materialize.ts
 import { normalize } from '../src/compiler/ir/passes.ts';
 import { stepChain, parseGremlin } from '../src/gremlin/frontend.ts';
 import type { ForeignRow } from '../src/services/spi/types.ts';
-import type { LoweringState } from '../src/compiler/steps/context/context.ts';
+import { rootLayout, type LoweringState } from '../src/compiler/steps/context/context.ts';
 import type { Elem } from '../src/compiler/plan/plan.ts';
 import type { ForeignStream } from '../src/compiler/steps/context/stream.ts';
 
@@ -40,7 +40,7 @@ const erow = (id: number, label: string, src: number, tgt: number, props: Record
 // execute against the empty store, return raw rows.
 function landAndRun(rows: readonly ForeignRow[], elem: Elem, trailing = '') {
   const engine = freshEngine();
-  const c: LoweringState = { q: engine.q, params: {}, traverserLayout: { aliases: new Map(), origins: [] } };
+  const c: LoweringState = { q: engine.q, params: {}, traverserLayout: rootLayout() };
   const seed: ForeignStream = landForeignElements(c, rows, elem);
   const steps = trailing ? normalize(stepChain(parseGremlin(`g.V()${trailing}`), {})).steps.slice(1) : [];
   const plan = materializeRootStream(engine.lowerStepsStrict(seed, steps, 0));
