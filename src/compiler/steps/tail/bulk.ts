@@ -1,7 +1,7 @@
 import { q, list } from '../../../sql/kernel/q.ts';
 import { edges } from '../../../sql/schema.ts';
 import { dirsFor, edgeLabelFilter, type EdgeEnd } from '../../plan/plan.ts';
-import { stepChain, type SackSpec } from '../../../gremlin/frontend.ts';
+import { isNested, isTokenArg, stepChain, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { type Compiled } from '../../../sql/kernel/render.ts';
 import { materializeRootStream } from './materialize.ts';
@@ -64,7 +64,7 @@ function nonFanoutGroupCount(step: IRStep): boolean {
   if (bys.length === 0) return true;
   if (bys.length !== 1) return false;
   const a = bys[0]?.[0];
-  return a === undefined || typeof a === 'string' || (a && typeof a === 'object' && 'token' in a);
+  return a === undefined || typeof a === 'string' || isTokenArg(a);
 }
 
 /** A `group()` whose (optional, non-fan-out) key is paired with a `by(__.count())` value.
@@ -79,11 +79,11 @@ function bulkCountGroup(step: IRStep, params: Record<string, any>): boolean {
   // Key by (bys[0]) must be non-fan-out: bare, a property string, or a token.
   const keyArg = bys[0]?.[0];
   const keyOk = keyArg === undefined || typeof keyArg === 'string'
-    || (keyArg && typeof keyArg === 'object' && 'token' in keyArg);
+    || isTokenArg(keyArg);
   if (!keyOk) return false;
   // Value by (bys[1]) must be exactly __.count().
   const valArg = bys[1]?.[0];
-  if (!valArg || typeof valArg !== 'object' || !('nested' in valArg)) return false;
+  if (!isNested(valArg)) return false;
   const vsteps = stepChain(valArg.nested, params);
   return vsteps.length === 1 && vsteps[0].name === 'count' && (vsteps[0].args?.length ?? 0) === 0;
 }

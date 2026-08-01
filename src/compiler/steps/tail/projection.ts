@@ -485,7 +485,7 @@ const tailSelectProject: ShapeTailFn<ElementStream> = (st, step, _steps, stop) =
   if (step.name === 'select'
     && step.args.filter((a) => typeof a === 'string').length === 1
     && !step.args.some(isNested)
-    && !step.args.some((a) => a && typeof a === 'object' && 'column' in a))
+    && !step.args.some(isColumnArg))
     return continueLowering(lowerSingleSelect(st, step), stop + 1);
   return continueLowering(lowerRecordSelectProject(st, step), stop + 1);
 };
@@ -920,7 +920,7 @@ const SCALAR_DISPATCH = new Map<string, ShapeTailFn<ScalarStream>>([
   // register that passes the value through — equivalent to a bare aggregate at this position.
   ['local', (s, step, _steps, at) => {
     const nested = (step.args ?? [])[0];
-    if (nested && typeof nested === 'object' && 'nested' in nested) {
+    if (isNested(nested)) {
       const body = childSteps(nested.nested, s.params);
       if (body.length === 1 && body[0].name === 'aggregate') {
         const r = lowerScalarAggregate(s, body[0]);

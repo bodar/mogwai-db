@@ -773,7 +773,7 @@ export const classifyMapChildRows = (body: ReturnType<typeof stepChain>, ctx?: C
 export const classifyRecordChildRows = (body: ReturnType<typeof stepChain>, ctx?: ChildCtx) =>
   classifyProjectionChildRows(body, (p) =>
     (p.name === 'project' || (p.name === 'select' && p.args.filter((a: any) => typeof a === 'string').length > 1))
-    && !p.args.some((a: any) => a && typeof a === 'object' && 'column' in a), ctx);
+    && !p.args.some(isColumnArg), ctx);
 
 /** PURE. The element-row shape decision shared by compileElementChildRows and the three
  * element predicates. `firstPolicy` keeps a trailing order() as an explicit ordering

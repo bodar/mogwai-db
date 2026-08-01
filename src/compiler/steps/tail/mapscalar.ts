@@ -3,7 +3,7 @@ import {
     elemCtx, scalarProp, aliasCtx,
     predicateSql, scalarTx, type ScalarCtx, tokenExpr
 } from '../../plan/plan.ts';
-import { isNested } from '../../../gremlin/frontend.ts';
+import { isNested, isPickArg, isTokenArg } from '../../../gremlin/frontend.ts';
 import { mathToSql, mathVars } from '../../../gremlin/math.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { aliasElem, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, type ElementStream } from '../context/context.ts';
@@ -20,7 +20,7 @@ import { engineOf } from '../../engine/deps.ts';
  * fast path (or its clear deferral) should handle it. */
 export function tryLowerMapElement(st: ElementStream, step: IRStep): ElementStream | null {
   const arg = step.args[0];
-  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  if (!isNested(arg)) return null;
   return tryCompileElementChild(st, arg.nested, 'first')?.stream ?? null;
 }
 
@@ -29,7 +29,7 @@ export function tryLowerMapElement(st: ElementStream, step: IRStep): ElementStre
  * no longer needs a movement-only parser or a private window implementation. */
 export function tryLowerLocalElement(st: ElementStream, step: IRStep): ElementStream | null {
   const arg = step.args[0];
-  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  if (!isNested(arg)) return null;
   return tryCompileElementChild(st, arg.nested, 'all')?.stream ?? null;
 }
 
@@ -38,7 +38,7 @@ export function tryLowerLocalElement(st: ElementStream, step: IRStep): ElementSt
  * element and scalar output shapes. */
 export function tryLowerFlatMap(st: ElementStream, step: IRStep): Stream | null {
   const arg = step.args[0];
-  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  if (!isNested(arg)) return null;
   return tryCompileElementChild(st, arg.nested, 'all')?.stream
     ?? tryCompileScalarValueChild(st, arg.nested, 'all')
     ?? tryCompileListChild(st, arg.nested)
@@ -47,7 +47,7 @@ export function tryLowerFlatMap(st: ElementStream, step: IRStep): Stream | null 
 
 export function tryLowerListChild(st: ElementStream, step: IRStep): ListStream | null {
   const arg = step.args[0];
-  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  if (!isNested(arg)) return null;
   return tryCompileListChild(st, arg.nested);
 }
 
@@ -61,7 +61,7 @@ export function tryLowerListChild(st: ElementStream, step: IRStep): ListStream |
 export function lowerMapScalar(st: ElementStream, steps: IRStep[], stop: number): ScalarStream {
   const name = steps[stop].name; // 'map' or a scalar-reduction 'local'
   const arg = steps[stop].args[0];
-  if (!arg || typeof arg !== 'object' || !('nested' in arg)) throw new Error(`${name}(traversal) required`);
+  if (!isNested(arg)) throw new Error(`${name}(traversal) required`);
   const child = tryCompileScalarValueChild(st, arg.nested, name === 'local' ? 'all' : 'first');
   if (child) return child;
   throw new Error(`${name}() child not supported by generic scalar lowering`);
@@ -431,23 +431,23 @@ export function lowerChooseOptions(st: ElementStream, steps: IRStep[], stop: num
   // is gated on group-over-a-variant. See docs/outstanding-work.md item 2.
   const specs: ScalarModulationSpec[] = [];
   let choiceMod: number | undefined;
-  if (a0 && typeof a0 === 'object' && 'nested' in a0) {
+  if (isNested(a0)) {
     choiceMod = specs.length;
     // An unproductive choice is still routed to Pick.none; it does not drop the
     // parent. The LEFT join therefore differs deliberately from by()-productivity.
     specs.push({ nested: a0.nested, contract: 'presence' });
-  } else if (!(a0 && typeof a0 === 'object' && 'token' in a0))
+  } else if (!isTokenArg(a0))
     throw new Error('choose() choice must be a traversal or a T token');
 
   const options: { key: any; mod: number; isNone: boolean }[] = [];
   let sawNone = false;
   for (const opt of cs.optionArms!) {
-    const bodyArg = opt.args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
+    const bodyArg = opt.args.find(isNested);
     if (!bodyArg) return null;
     const keyArg = opt.args.find((x: any) => x !== bodyArg);
     let isNone = false;
-    if (keyArg === undefined || (keyArg && typeof keyArg === 'object' && 'pick' in keyArg)) {
-      const pick = keyArg && typeof keyArg === 'object' && 'pick' in keyArg ? keyArg.pick : 'none';
+    if (keyArg === undefined || isPickArg(keyArg)) {
+      const pick = isPickArg(keyArg) ? keyArg.pick : 'none';
       if (pick !== 'none') return null;
       isNone = true;
       if (sawNone) continue; // first Pick.none wins
@@ -471,7 +471,12 @@ export function lowerChooseOptions(st: ElementStream, steps: IRStep[], stop: num
   const ctx = elemCtx(n, st.elem);
   const choice = choiceMod !== undefined
     ? p.c[mods.values[choiceMod].value]
-    : tokenExpr(ctx, a0.token) ?? (() => { throw new Error(`choose(T.${a0.token}) not yet supported`); })();
+    : (() => {
+      // `choiceMod` is absent only on the token branch above. Spell that proof again here
+      // instead of relying on control-flow across the mutable index.
+      if (!isTokenArg(a0)) throw new Error('choose() choice must be a traversal or a T token');
+      return tokenExpr(ctx, a0.token) ?? (() => { throw new Error(`choose(T.${a0.token}) not yet supported`); })();
+    })();
   const keyed = options.filter((x) => !x.isNone);
   const fallback = options.find((x) => x.isNone)!;
   const whens = keyed.map((x) => q`WHEN ${predicateSql(choice, x.key)} THEN ${p.c[mods.values[x.mod].value]}`);
@@ -511,19 +516,19 @@ export function lowerChooseOptionsScalar(s: ScalarStream, steps: IRStep[], stop:
   const cs = steps[stop];
   const a0 = cs.args[0];
   const specs: ScalarModulationSpec[] = [];
-  if (!(a0 && typeof a0 === 'object' && 'nested' in a0)) return null; // scalar choice must be a traversal over the value
+  if (!isNested(a0)) return null; // scalar choice must be a traversal over the value
   const choiceMod = specs.length;
   specs.push({ nested: a0.nested, contract: 'presence' });
 
   const options: { key: any; mod: number; isNone: boolean }[] = [];
   let sawNone = false;
   for (const opt of cs.optionArms ?? []) {
-    const bodyArg = opt.args.find((x: any) => x && typeof x === 'object' && 'nested' in x);
+    const bodyArg = opt.args.find(isNested);
     if (!bodyArg) return null;
     const keyArg = opt.args.find((x: any) => x !== bodyArg);
     let isNone = false;
-    if (keyArg === undefined || (keyArg && typeof keyArg === 'object' && 'pick' in keyArg)) {
-      const pick = keyArg && typeof keyArg === 'object' && 'pick' in keyArg ? keyArg.pick : 'none';
+    if (keyArg === undefined || isPickArg(keyArg)) {
+      const pick = isPickArg(keyArg) ? keyArg.pick : 'none';
       if (pick !== 'none') return null;
       isNone = true;
       if (sawNone) continue; // first Pick.none wins

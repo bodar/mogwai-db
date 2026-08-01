@@ -2,7 +2,7 @@ import type { GraphStore } from '../../../storage.ts';
 import { q, value, list, raw, render, type Expression, type Query, type Relation } from '../../../sql/kernel/q.ts';
 import { labelIn, labelNameFor, propHasFor, sqlElem, elemTable, type Elem, vertexLabelIn } from '../../plan/plan.ts';
 import { gremlinTypeOf, mapEntryType, propertyValueBind, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
-import { stepChain, isNested, isCardinalityArg, isCardinalityValueArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
+import { stepChain, isNested, isTokenArg, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isMergeArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { isStreamBarrier } from '../../ir/step.ts';
 import { normalize } from '../../ir/passes.ts';
@@ -370,7 +370,7 @@ interface VertexSpec { labels: (string | string[] | { nested: any })[]; props: P
 // the storage waist). Returns it plus the remaining [key, value, ...metaArgs], and `off` — how
 // many leading args were consumed (0 or 1) so the caller can index the parallel argTypes.
 function readCardinality(args: any[]): { cardinality: Cardinality; rest: any[]; off: number } {
-  if (args[0] && typeof args[0] === 'object' && 'cardinality' in args[0])
+  if (isCardinalityArg(args[0]))
     return { cardinality: args[0].cardinality as Cardinality, rest: args.slice(1), off: 1 };
   return { cardinality: null, rest: args, off: 0 };
 }
@@ -404,8 +404,8 @@ function parseProperty(s: Step, sideEffects: Map<string, any> | undefined, param
   let [key, val] = rest; const metaArgs = rest.slice(2);
   { const ck = constFromNested(key, sideEffects, params); if (ck.has) key = ck.value; }
   { const cv = constFromSelect(val, sideEffects, params); if (cv.has) val = cv.value; }
-  if (key == null || (typeof key === 'object' && !isNested(key) && !('token' in key))) return { kind: 'none' };
-  if (typeof key === 'object' && 'token' in key) return { kind: 'token', token: key.token, value: val, meta: metaArgs.length > 0 };
+  if (key == null || (typeof key === 'object' && !isNested(key) && !isTokenArg(key))) return { kind: 'none' };
+  if (isTokenArg(key)) return { kind: 'token', token: key.token, value: val, meta: metaArgs.length > 0 };
   return { kind: 'prop', spec: { key, value: val, vtype: propVtype(s, val, off), typeNode: propTypeNode(s, off), meta: metaOf(metaArgs), cardinality } };
 }
 
@@ -456,7 +456,7 @@ function metaOf(metaArgs: any[]): Record<string, any> | null {
     const mk = metaArgs[i];
     if (typeof mk !== 'string') throw new Error('property() meta-property key must be a string');
     const mv = metaArgs[i + 1];
-    if (mv && typeof mv === 'object' && 'nested' in mv) throw new Error('property() meta-property value must be a scalar');
+    if (isNested(mv)) throw new Error('property() meta-property value must be a scalar');
     m[mk] = mv;
   }
   return m;
@@ -625,7 +625,7 @@ function writeVertexPropertyValue(
   store: GraphStore, node: number, key: string, val: any, vtype: CanonicalType | null,
   meta: Record<string, any> | null, cardinality: VertexCardinality, typeNode: TypeNode | null,
 ): void {
-  if (val && typeof val === 'object' && 'nested' in val) throw new Error('property() with a traversal value not yet supported');
+  if (isNested(val)) throw new Error('property() with a traversal value not yet supported');
   const metaJson = meta ? JSON.stringify(meta) : null;
   // A collection value (list/map/set) is stored as a self-describing typed-JSON tree in the
   // value column (bind the JSON text, wrap jsonb(?)) — a raw JS array/Map bind would throw at
@@ -656,7 +656,7 @@ function writeVertexPropertyValue(
 // row per (edge,key): UPSERT on the UNIQUE(edge,key) constraint. Collections serialize
 // to JSONB like vertex properties; scalars bind raw (storage class preserved).
 export function insertEdgeProperty(store: GraphStore, edge: number, key: string, val: any, vtype: CanonicalType | null, typeNode: TypeNode | null = null): void {
-  if (val && typeof val === 'object' && 'nested' in val) throw new Error('property() with a traversal value not yet supported');
+  if (isNested(val)) throw new Error('property() with a traversal value not yet supported');
   validatePropertyKey(key); // the waist, edge side (see applyVertexProperty)
   if (isPropertyRemoval(val)) return removeProperties(store, 'edge', edge, key);
   const { stored: storedVal, collection } = propertyValueBind(val, vtype, typeNode);
@@ -919,7 +919,7 @@ function parseEdgeCluster(steps: Step[], addEIdx: number): EdgeCluster {
       const [k, v, ...metaArgs] = rest;
       if (cardinality !== null) throw new Error('Cardinality is not valid on an edge property');
       if (metaArgs.length) throw new Error('meta-properties are not valid on an edge property');
-      if (k && typeof k === 'object' && 'token' in k) { if (k.token === 'id') edgeUid = v; else throw new Error(`property(T.${k.token}) on an edge not supported`); }
+      if (isTokenArg(k)) { if (k.token === 'id') edgeUid = v; else throw new Error(`property(T.${k.token}) on an edge not supported`); }
       else if (typeof k === 'string' || isNested(k))
         props.push({ key: k, value: v, vtype: gremlinTypeOf(v, propTypeNode(m, off)), typeNode: propTypeNode(m, off), meta: null, cardinality: null });
       else throw new Error('addE property() key must be a string or traversal');
@@ -1107,9 +1107,9 @@ interface MergeSpec {
 
 function classifyMergeKey(k: any): { kind: 'label' | 'id' | 'outV' | 'inV' | 'prop'; name?: string } {
   const enumName = (typeName: string) => k && typeof k === 'object' && k.typeName === typeName ? String(k.elementName).toLowerCase() : null;
-  const t = enumName('T') ?? (k && typeof k === 'object' && 'token' in k ? k.token : null);
+  const t = enumName('T') ?? (isTokenArg(k) ? k.token : null);
   if (t) { if (t === 'label') return { kind: 'label' }; if (t === 'id') return { kind: 'id' }; throw new Error(`merge map key T.${t} not supported`); }
-  const d = enumName('Direction') ?? (k && typeof k === 'object' && 'direction' in k ? k.direction : null);
+  const d = enumName('Direction') ?? (isDirectionArg(k) ? k.direction : null);
   if (d) {
     if (d === 'out' || d === 'from') return { kind: 'outV' };
     if (d === 'in' || d === 'to') return { kind: 'inV' };
@@ -1119,7 +1119,7 @@ function classifyMergeKey(k: any): { kind: 'label' | 'id' | 'outV' | 'inV' | 'pr
 }
 
 function classifyMergeVal(v: any): any {
-  const m = v && typeof v === 'object' ? (v.typeName === 'Merge' ? String(v.elementName).toLowerCase() : ('merge' in v ? v.merge : null)) : null;
+  const m = v && typeof v === 'object' ? (v.typeName === 'Merge' ? String(v.elementName).toLowerCase() : (isMergeArg(v) ? v.merge : null)) : null;
   return m ? { incoming: m } : v;
 }
 
@@ -1352,7 +1352,7 @@ function parseMergeOptions(mods: Step[], step: MergeRole['op'], sideEffects: Map
   for (const s of optionCount < 0 ? mods : mods.slice(0, optionCount)) {
     if (s.name !== 'option') throw new Error(`step not implemented after ${step}(): ${s.name}()`);
     const [sel, mapArg, cardinalityArg] = s.args;
-    if (!sel || typeof sel !== 'object' || !('merge' in sel))
+    if (!isMergeArg(sel))
       throw new Error(`${step} option() selector must be Merge.onCreate/onMatch`);
     if (cardinalityArg != null && (!isCardinalityArg(cardinalityArg) || isCardinalityValueArg(cardinalityArg)))
       throw new Error(`${step} option() third argument must be Cardinality.single/list/set`);

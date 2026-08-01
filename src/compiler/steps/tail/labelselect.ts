@@ -1,4 +1,5 @@
 import { q, list, raw, empty, value, type Expression } from '../../../sql/kernel/q.ts';
+import { isTokenArg } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { aliasElem, aliasIsElement, aliasScalarTypeOf, layoutCols, patchLayout, layoutProjection, scalarTypeFromAlias, withShape, type AliasEntry, type AliasScalarType, type TraverserLayout, type LoweringState, type ElementStream } from '../context/context.ts';
 import {
@@ -252,7 +253,7 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
     }
     const by = step.modulators?.[0]?.[0];
     if (by === undefined) return selectPropertyAlias(s, entry, col, end);
-    if (!(by && typeof by === 'object' && 'token' in by && (by.token === 'key' || by.token === 'value' || by.token === 'id')))
+    if (!(isTokenArg(by) && (by.token === 'key' || by.token === 'value' || by.token === 'id')))
       throw new Error('select(property).by() supports only T.key, T.value, or T.id');
     const selected = end === 'first' ? q`${col} -> '$[0]'` : q`${col} -> '$[#-1]'`;
     const field = by.token === 'key' ? 'pk' : by.token === 'value' ? 'pv' : 'vpid';

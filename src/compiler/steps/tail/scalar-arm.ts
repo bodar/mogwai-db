@@ -177,7 +177,7 @@ function armFansOut(body: IRStep[], params: Record<string, any>): boolean {
  *  coalesce/reducer) is identical under map/flatMap/local. */
 export function tryScalarMapChild(s: ScalarStream, step: IRStep, allowFanout = true): ScalarStream | null {
   const arg = step.args?.[0];
-  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  if (!isNested(arg)) return null;
   if (!allowFanout && armFansOut(childSteps(arg.nested, s.params), s.params))
     return tryCompileScalarValueChild(s, arg.nested, 'first');
   return tryCompileScalarArm(s, arg.nested);
@@ -208,7 +208,7 @@ interface ScalarGate {
 /** Inline gate: every spec's boolean is a WHERE over the value. Declines (null) if a traversal
  *  spec is outside the inline scalar-predicate vocabulary → the caller falls to the generic gate. */
 function inlineScalarGate(s: ScalarStream, specs: readonly ScalarGateSpec[]): ScalarGate | null {
-  const bodies = specs.map((sp) => 'nested' in sp ? childSteps(sp.nested, s.params) : null);
+  const bodies = specs.map((sp) => isNested(sp) ? childSteps(sp.nested, s.params) : null);
   // Probe inlineability independent of the concrete value; a non-inline body → use the generic gate.
   if (bodies.some((b) => b && tryInlineScalarPredicate(b, value(0), s.params) === null)) return null;
   return {
@@ -279,7 +279,7 @@ export function tryScalarChooseChild(s: ScalarStream, step: IRStep): ScalarStrea
   if (step.optionArms) return null; // option-map form is a later stage (modulator consumer)
   const args = step.args ?? [];
   const nested = args.filter(isNested);
-  const predIsTraversal = args[0] && typeof args[0] === 'object' && 'nested' in args[0];
+  const predIsTraversal = isNested(args[0]);
   const [thenArg, elseArg] = predIsTraversal ? nested.slice(1) : nested;
   if (!thenArg) return null;
   // Classify-then-emit: prove both arms lower (value, reducer, or nested-branch) BEFORE the
@@ -468,7 +468,7 @@ export function tryScalarVariantChoose(s: ScalarStream, step: IRStep): VariantSt
   if (s.traverserLayout.path || s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const args = step.args ?? [];
   const nested = args.filter(isNested);
-  const predIsTraversal = args[0] && typeof args[0] === 'object' && 'nested' in args[0];
+  const predIsTraversal = isNested(args[0]);
   const [thenArg, elseArg] = predIsTraversal ? nested.slice(1) : nested;
   if (!thenArg || !elseArg) return null; // 2-arg (identity else) is not a mixed pair here
   const thenShape = scalarArmShape(thenArg.nested, s.params);
@@ -507,7 +507,7 @@ export function tryScalarVariantCoalesce(s: ScalarStream, step: IRStep): Variant
 export function tryScalarOptionalChild(s: ScalarStream, step: IRStep): ScalarStream | null {
   if (s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const arg = step.args?.[0];
-  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  if (!isNested(arg)) return null;
   if (!scalarArmClassifies(childSteps(arg.nested, s.params), s.params)) return null;
   const { frame, seed } = pushChildScope(s);
   const ord = frame.ordinal;
@@ -534,7 +534,7 @@ export function tryScalarOptionalChild(s: ScalarStream, step: IRStep): ScalarStr
 export function tryScalarVariantOptional(s: ScalarStream, step: IRStep): VariantStream | null {
   if (s.traverserLayout.path || s.traverserLayout.sack || s.traverserLayout.fromV) return null;
   const arg = step.args?.[0];
-  if (!arg || typeof arg !== 'object' || !('nested' in arg)) return null;
+  if (!isNested(arg)) return null;
   const shape = scalarArmShape(arg.nested, s.params);
   if (shape === null || shape === 'scalar') return null; // scalar arm → tryScalarOptionalChild
   const { frame, seed } = pushChildScope(s);

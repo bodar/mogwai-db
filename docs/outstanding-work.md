@@ -397,12 +397,9 @@ of gravity is ceiling, not correctness.
 15. **Multi-key `cap('x','y')` + cap-of-group unfold.** **Low-Medium.**
     → [side-effect-state](./2026-07-13-side-effect-state-plan.md)
 
-16. **W4 — multi/meta-property schema rework → `Cardinality.list/set` writes. It is not a
-    capability gap: it is a SILENT WRONG ANSWER.** Measured 2026-08-01 —
-    `addV('animal').property('name','mateo').property('name','gateo').property('name','cateo')` keeps
-    only `cateo`, and `property(Cardinality.list,'friends',__.out('knows').values('name'))` stores one
-    value where the reference appends both. → [write-path](./2026-08-01-write-path-plan.md) §2.
-    Only meta-property *typing* is touched today. **Adjacent, from the io work:** meta-property VALUES have no per-value
+16. **Meta-property value typing.** The W4 cardinality/schema defect is closed: vertex property
+    declarations and `Cardinality.list/set` writes now preserve the reference's multiplicity rules.
+    **What remains:** meta-property VALUES have no per-value
     type in storage — `vertex_properties.meta` is a flat `{metaKey: scalar}` JSONB bag, so a meta value
     round-trips through GraphSON as whatever JSON returns. The format can carry more than storage gives.
     **Medium.**

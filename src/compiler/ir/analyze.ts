@@ -1,4 +1,5 @@
 import { type IRStep } from './strategies.ts';
+import { isTokenArg } from '../../gremlin/frontend.ts';
 import { isLocalScope, PATH_FAMILY, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, unionOf } from './step.ts';
 
 // ---------- whole-chain analysis: annotate, never rewrite ----------
@@ -184,7 +185,7 @@ function groupCountCollapseTerminal(step: IRStep): boolean {
   if (modulators.length === 0) return true;
   if (modulators.length !== 1) return false;
   const a = modulators[0]?.[0];
-  return a === undefined || typeof a === 'string' || (a && typeof a === 'object' && 'token' in a);
+  return a === undefined || typeof a === 'string' || isTokenArg(a);
 }
 
 function computeCollapseSafe(steps: IRStep[]): boolean {

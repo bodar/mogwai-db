@@ -1,4 +1,4 @@
-import { isNested, stepChain, type SackSpec, type Step } from '../../../gremlin/frontend.ts';
+import { isNested, isOperatorArg, isTokenArg, stepChain, type SackSpec, type Step } from '../../../gremlin/frontend.ts';
 import { empty, list, paren, q, raw, Relation, value, type Expression } from '../../../sql/kernel/q.ts';
 import { staticTypeOf } from '../../../sql/kernel/render.ts';
 import { edges } from '../../../sql/schema.ts';
@@ -653,7 +653,7 @@ export function repeatSackByValue(byArgs: any[] | undefined, curId: Expression, 
   const a = byArgs?.[0];
   if (a === undefined) throw new Error('sack(Operator.x) in a repeat() body requires a by() modulator');
   if (typeof a === 'string') return scalarProp(aliasCtx(curId, curElem), a);
-  if (a && typeof a === 'object' && 'token' in a) {
+  if (isTokenArg(a)) {
     const expr = tokenExpr(aliasCtx(curId, curElem), a.token);
     if (!expr) throw new Error(`sack().by(T.${a.token}) in a repeat() body not yet supported`);
     return expr;
@@ -740,7 +740,7 @@ function expandRepeatBody(
       } else if (step.name === 'sack') {
         // Mutate sack(op).by(v): fold the by-value (over the current position/kind) into the
         // accumulator. Reuses combineSack verbatim (boundary-agnostic operator semantics).
-        const op = (step.args ?? []).find((a: any) => a && typeof a === 'object' && 'operator' in a)?.operator;
+        const op = (step.args ?? []).find(isOperatorArg)?.operator;
         if (!op) throw new Error('bare sack() (read) inside a repeat() body is not a fold — use where(__.sack()...) to guard');
         if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
         sackExpr = combineSack(op, repeatSackByValue((step as IRStep).modulators?.[0], curId, curElem), sackExpr);
@@ -864,7 +864,7 @@ export const repeat: StepFn = (s, st) => {
   const moves = core.filter((c) => REPEAT_MOVES.has(c.name) || TO_EDGE.has(c.name));
   const hasEdgeStep = core.some((c) => TO_EDGE.has(c.name) || TO_VERTEX.has(c.name));
   // A body sack fold is a mutate sack(op) step; a sack-reading where guard is where(__.sack().is(P)).
-  const isSackFold = (c: Step): boolean => c.name === 'sack' && (c.args ?? []).some((a: any) => a && typeof a === 'object' && 'operator' in a);
+  const isSackFold = (c: Step): boolean => c.name === 'sack' && (c.args ?? []).some(isOperatorArg);
   const bodyFoldsSack = core.some(isSackFold);
   const REPEAT_BODY_OK = (c: Step): boolean => REPEAT_MOVE_ALL.has(c.name) || c.name === 'has' || isSackFold(c) || sackWhereGuard(c) !== null;
   // has() in the FLAT expansion: only has(key, value|P) — a 3-arg or T-token form is beyond it.
@@ -1315,7 +1315,7 @@ export function sourceUnion(engine: Engine, step: IRStep, params: Record<string,
  *  the two agree on what a choice can be. */
 function chooseChoiceDomain(st: ElementStream, a0: any): Relation | null {
   const cols = ['id', 'ch', 'ch_at', ...layoutCols(st.traverserLayout)];
-  if (a0 && typeof a0 === 'object' && 'nested' in a0) {
+  if (isNested(a0)) {
     // Not `required`: an unproductive choice routes to Pick.unproductive/none, it never drops the
     // parent — so the modulation is a LEFT join and `present` is the signal, not a filter.
     const mods = tryCompileScalarModulations(st, [{ nested: a0.nested, contract: 'presence' }]);
@@ -1323,7 +1323,7 @@ function chooseChoiceDomain(st: ElementStream, a0: any): Relation | null {
     const p = mods.rel.as('p');
     return st.q.cte(q`SELECT ${p.c.id} AS id, ${p.c[mods.values[0].value]} AS ch, ${p.c[mods.values[0].present]} AS ch_at${layoutProjection(st.traverserLayout, p)} FROM ${p}`, cols);
   }
-  if (!(a0 && typeof a0 === 'object' && 'token' in a0)) return null;
+  if (!isTokenArg(a0)) return null;
   const n = elemRel(st);
   const ctx = elemCtx(n, st.elem);
   const ch = tokenExpr(ctx, a0.token);

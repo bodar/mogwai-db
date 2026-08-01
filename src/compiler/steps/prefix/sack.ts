@@ -1,4 +1,4 @@
-import { isNested } from '../../../gremlin/frontend.ts';
+import { isNested, isOperatorArg, isTokenArg } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { derived, q, list, type Expression } from '../../../sql/kernel/q.ts';
 import { scalarProp, predicateSql, elemCtx, tokenExpr } from '../../plan/plan.ts';
@@ -25,7 +25,7 @@ function sackByValue(byArgs: any[] | undefined, st: ElementStream): Expression {
   if (a === undefined)
     throw new Error('sack(Operator.x) without a by() modulator over an element stream not yet supported');
   if (typeof a === 'string') return scalarProp(elemCtx(elemRel(st), st.elem), a);
-  if (a && typeof a === 'object' && 'token' in a) {
+  if (isTokenArg(a)) {
     const expr = tokenExpr(elemCtx(elemRel(st), st.elem), a.token);
     if (!expr) throw new Error(`sack().by(T.${a.token}) not yet supported`);
     return expr;
@@ -40,7 +40,7 @@ function sackByValue(byArgs: any[] | undefined, st: ElementStream): Expression {
  *  via withSack() or a prior sack(assign)). One by() modulator only (TinkerPop's rule);
  *  div forces REAL division (SQLite `/` is integer division on integer operands). */
 export const sack: StepFn = (s, st) => {
-  const op = (s.args ?? []).find((a: any) => a && typeof a === 'object' && 'operator' in a)?.operator;
+  const op = (s.args ?? []).find(isOperatorArg)?.operator;
   if (!op) throw new Error('sack() read form should not dispatch as a prefix step'); // guarded in lowerElementSteps
   if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
   const modulators = (s as IRStep).modulators ?? [];

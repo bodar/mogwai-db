@@ -1,4 +1,4 @@
-import { stepChain, isCardinalityArg, isCardinalityValueArg, isNested, isPred, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
+import { stepChain, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPred, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { mapEntryType } from '../../gremlin/types.ts';
@@ -370,7 +370,7 @@ export function verify(spec: StrategySpec, steps: Step[]): void {
       if (s.args.some((a) => typeof a === 'string')) return false; // has an edge label → fine
       // `to` is a vertex step ONLY in the to(Direction[,labels]) form; the addE endpoint
       // modulators to(__.V(...))/to('alias') are NOT vertex steps → never flag them.
-      if (s.name === 'to') return s.args.some((a) => a && typeof a === 'object' && 'direction' in a);
+      if (s.name === 'to') return s.args.some(isDirectionArg);
       return true;
     });
     if (bad) throw new Error(`The provided traversal contains a vertex step without any specified edge label: ${bad.name}()`);

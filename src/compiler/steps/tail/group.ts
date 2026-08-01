@@ -1,4 +1,4 @@
-import { isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { isNested, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
 import { empty, list, q, raw, value, values, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { NUMERIC_REDUCERS, REDUCERS } from '../../ir/step.ts';
@@ -177,14 +177,14 @@ function nestedInnerKeyVal(
   const innerBys: any[][] = innerGroup.modulators ?? [];
   const keyArg = innerBys[0]?.[0];
   let key: Expression | null = null;
-  if (keyArg && typeof keyArg === 'object' && 'token' in keyArg) key = tokenExpr(ctx, keyArg.token);
+  if (isTokenArg(keyArg)) key = tokenExpr(ctx, keyArg.token);
   else if (typeof keyArg === 'string') key = scalarProp(ctx, keyArg);
   if (!key) return null; // bare/element inner key deferred
   const countVal = bulk ? q`SUM(${bulk})` : q`COUNT(*)`;
   if (innerGroup.name === 'groupCount') return { key, val: countVal, kind: 'count' };
   // group().by(ik).by(__.count()) or by(__.values(x).<numeric>())
   const reduceArg = innerBys[1]?.[0];
-  if (!reduceArg || typeof reduceArg !== 'object' || !('nested' in reduceArg)) return null;
+  if (!isNested(reduceArg)) return null;
   const rsteps = childSteps(reduceArg.nested, params);
   const reducer = rsteps.at(-1)?.name;
   if (rsteps.length === 1 && reducer === 'count') return { key, val: countVal, kind: 'count' };
@@ -253,7 +253,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   const projectBys = projectStep ? keySteps.slice(1) : [];
   const projectKeys = projectStep?.args.filter((x: any): x is string => typeof x === 'string') ?? [];
   const projectByNested = projectBys.map((step) => step.name === 'by'
-    ? step.args.find((x: any) => x && typeof x === 'object' && 'nested' in x)?.nested
+    ? step.args.find(isNested)?.nested
     : undefined);
   const projectKeyBodies = projectByNested.map((n) => n ? childSteps(n, parent.params) : null);
   const genericProjectKey = !!projectStep
@@ -928,7 +928,7 @@ function propertyDedup(s: PropertyStream, step: IRStep): PropertyStream {
   let key: Expression;
   if (by === undefined) {
     key = s.ownerElem === 'vertex' ? q`p.vpid` : q`p.pk, p.pv`;
-  } else if (by && typeof by === 'object' && 'token' in by && by.token === 'value') {
+  } else if (isTokenArg(by) && by.token === 'value') {
     key = q`p.pv`;
   } else {
     throw new Error('properties().dedup().by() supports only value');

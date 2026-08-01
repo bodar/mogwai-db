@@ -1,6 +1,6 @@
 import { derived, empty, list, paren, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { perRowCols } from '../../../sql/kernel/render.ts';
-import { isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { isNested, isPopArg, stepChain } from '../../../gremlin/frontend.ts';
 import { appendCte, patchLayout, layoutProjection, layoutProjectionMinting, layoutCols, partitionOver, prevRel, withLayout, type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
@@ -388,7 +388,7 @@ export const lowerElementBody = (seed: ElementStream, steps: IRStep[]): ElementS
 
 /** The Pop mode of a select(Pop, label) — default last, matching the root dispatch. */
 const popOf = (step: IRStep): string =>
-  (step.args.find((a: any) => a && typeof a === 'object' && 'pop' in a) as { pop: string } | undefined)?.pop ?? 'last';
+  step.args.find(isPopArg)?.pop ?? 'last';
 
 /** PURE. A scalar child body that RE-SOURCES the graph: a `V()`/`E()` head (with no
  *  nested-traversal id argument, which is a different shape) over which the pushed scalar seed

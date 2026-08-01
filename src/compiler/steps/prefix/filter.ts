@@ -1,5 +1,5 @@
 import { derived, q, list, raw, type Expression } from '../../../sql/kernel/q.ts';
-import { isNested, stepChain, type Pred } from '../../../gremlin/frontend.ts';
+import { isNested, isTokenArg, stepChain, type Pred } from '../../../gremlin/frontend.ts';
 import {
     predicateSql,
     hasProp, elemCtx,
@@ -136,7 +136,7 @@ export const has: StepFn = (s, st) => {
     const vals = injectedValues(st.params);
     if (vals) val = { op: 'within', values: vals } as Pred;
   }
-  if (key && typeof key === 'object' && 'token' in key) {
+  if (isTokenArg(key)) {
     // has(T.label|T.id, v|P): predicate over the label name / external id. Routing
     // through predicateSql accepts both a bare value (→ equality) and a P/TextP.
     const n = elemRel(st);
@@ -165,7 +165,7 @@ export const has: StepFn = (s, st) => {
  *  alias comparison). not() negates via notCoalesce. */
 export const where: StepFn = (s, st) => {
   const arg0 = s.args[0];
-  if (arg0 && typeof arg0 === 'object' && 'nested' in arg0) {
+  if (isNested(arg0)) {
     const pred = runFastPath(PredicateInliningFastPath, fastPathContextOf(st),
       () => tryInlinePredicate(engineOf(st), stepChain(arg0.nested, st.params), currentCtx(st), st.params, labelScope(st)));
     if (pred)
@@ -222,7 +222,7 @@ function dedupByLabels(st: ElementStream, s: IRStep, labels: string[]): ElementS
     const ctx = labelCtx(scope, label);
     if (by === undefined) return ctx.idExpr; // dedup by element identity
     if (typeof by === 'string') return scalarProp(ctx, by);
-    if (by && typeof by === 'object' && 'token' in by) {
+    if (isTokenArg(by)) {
       const expr = tokenExpr(ctx, by.token);
       if (!expr) throw new Error(`dedup(labels).by(T.${by.token}) not yet supported`);
       return expr;

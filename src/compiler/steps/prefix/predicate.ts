@@ -1,5 +1,5 @@
 import { q, list, paren, value, raw, type Expression } from '../../../sql/kernel/q.ts';
-import { isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
+import { isNested, isTokenArg, stepChain, type Step } from '../../../gremlin/frontend.ts';
 import { edgeProperties } from '../../../sql/schema.ts';
 import {
     predicateSql,
@@ -276,7 +276,7 @@ function compileInlinePredicate(
     const [key, val] = args;
     // has(T.label|T.id, v|P): predicate over the label name / external id (mirrors
     // filter.ts has()'s token branch, so choose(__.has(T.label,'person')) etc work).
-    if (key && typeof key === 'object' && 'token' in key) {
+    if (isTokenArg(key)) {
       const expr: Expression = tokenExpr(ctx, key.token) ?? decline(`has(T.${key.token}) has no inline form`);
       return predicateSql(expr, val);
     }

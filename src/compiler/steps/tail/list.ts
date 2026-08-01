@@ -302,7 +302,7 @@ const jsGtype = (v: any): string => (typeof v === 'number' ? (Number.isInteger(v
 function operandList(engine: Engine, arg: any, op: string, params: Record<string, any>): Expression {
   if (arg === null || arg === undefined) throw new Error(`Argument provided for ${op} step can't be null`);
   if (Array.isArray(arg)) return q`jsonb(${value(JSON.stringify(arg))})`;
-  if (typeof arg === 'object' && 'nested' in arg) {
+  if (isNested(arg)) {
     const inner = stepChain(arg.nested, params);
     const last = inner[inner.length - 1];
     if (last?.name !== 'fold') {

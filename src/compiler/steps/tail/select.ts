@@ -231,14 +231,14 @@ export function lowerSingleSelect(st: ElementStream, proj: IRStep): Stream {
   if (!selected) return emptyElementLike(st); // label bound nowhere → drop every traverser
   // A non-last Pop reads the label's history (first/all/mixed); the by()-less forms lower
   // through the shared shape-agnostic resolver. by()-modulated non-last Pop is uncommon.
-  const hasNestedBy = !!(proj.modulators?.[0]?.[0] && typeof proj.modulators[0][0] === 'object' && 'nested' in proj.modulators[0][0]);
+  const hasNestedBy = isNested(proj.modulators?.[0]?.[0]);
   if (popMode !== 'last' && !hasNestedBy && !(proj.modulators?.length))
     return selectOneFromAlias(st, proj, keys[0], popMode);
   if (popMode !== 'last') throw new Error(`select(Pop.${popMode}).by(...) not yet supported`);
   const p = st.rel.as('p');
   const productive = proj.productiveBy === true;
   const nested = proj.modulators?.[0]?.[0];
-  if (nested && typeof nested === 'object' && 'nested' in nested) {
+  if (isNested(nested)) {
     if (productive) throw new Error('ProductiveByStrategy with a traversal-valued single select is not yet supported');
     const seed = reRootElement(st, p, aliasId(p.c[selected.col], 'last'), aliasElem(selected));
     // Classify once (pure) → emit reusing the parsed body; each classify guarantees its
