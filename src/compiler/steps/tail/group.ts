@@ -20,7 +20,7 @@ import {
     vertexLabelIn,
     vertexLabelsJson,
     type Elem,
-    type ScalarCtx
+    type ScalarCtx, tokenExpr
 } from '../../plan/plan.ts';
 import { dropLayoutAtBarrier, elemRel, layoutCols, layoutProjection, layoutProjectionMinting, partitionOver, patchLayout, type ElementStream, type LoweringState, type TraverserLayout } from '../context/context.ts';
 import { continueLowering, dispatchShapeTail, groupColumns, loweringStateOf, PROPERTY_PAYLOAD, toElementStream, toGroupStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, type GroupStream, type LoweringResult, type MapOf, type MapStream, type PropertyStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
@@ -143,12 +143,8 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
     const pe = scalarProp(src.ctx, by.key);
     return { desc: scalarGroupKey(src.productiveBy), cols: q`${pe} AS gk`, group: 'gk' };
   }
-  if (by.kind === 'token') { // by(T.label)/by(T.id)
-    // A VertexProperty's T.label is its key (pk); its T.id is vpid (ctx.idExpr). For an
-    // element, T.label resolves the interned label id to its name.
-    const expr = by.token === 'label'
-      ? (src.elem === 'property' ? src.ctx.pkExpr! : src.ctx.labelNameExpr)
-      : by.token === 'id' ? src.ctx.idExpr : null;
+  if (by.kind === 'token') { // by(T.label)/by(T.id)/by(T.key)/by(T.value)
+    const expr = tokenExpr(src.ctx, by.token);
     if (!expr) throw new Error(`group().by(T.${by.token}) not yet supported`);
     return { desc: scalarGroupKey(src.productiveBy), cols: q`${expr} AS gk`, group: 'gk' };
   }
@@ -181,9 +177,7 @@ function nestedInnerKeyVal(
   const innerBys: any[][] = innerGroup.modulators ?? [];
   const keyArg = innerBys[0]?.[0];
   let key: Expression | null = null;
-  if (keyArg && typeof keyArg === 'object' && 'token' in keyArg)
-    key = keyArg.token === 'label' ? (ctx.elem === 'property' ? ctx.pkExpr! : ctx.labelNameExpr)
-      : keyArg.token === 'id' ? ctx.idExpr : null;
+  if (keyArg && typeof keyArg === 'object' && 'token' in keyArg) key = tokenExpr(ctx, keyArg.token);
   else if (typeof keyArg === 'string') key = scalarProp(ctx, keyArg);
   if (!key) return null; // bare/element inner key deferred
   const countVal = bulk ? q`SUM(${bulk})` : q`COUNT(*)`;

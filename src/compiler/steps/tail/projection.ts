@@ -14,7 +14,7 @@ import {
     propSortKeyFor,
     scalarPropSortKey,
     storedValueExpr,
-    valueMapProps
+    valueMapProps, tokenExpr
 } from '../../plan/plan.ts';
 import { appendCte, dropLayoutAtBarrier, elemRel, layoutCols, layoutProjection, layoutProjectionMinting, partitionOver, patchLayout, type ElementStream } from '../context/context.ts';
 import { continueLowering, dispatchShapeTail, loweringStateOf, toElementStream, toListStream, toResultStream, toScalarStream, toVariantStream, type ListStream, type LoweringResult, type ResultStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
@@ -42,7 +42,7 @@ import { compileSelectProject, lowerRecordSelectProject, lowerScalarProject, low
 // terminal reducers. group()/groupCount()/properties() are barriers that consume
 // the whole stream into one shape, so they short-circuit before the generic tail.
 
-interface OrderClause { key: string | null; dir: 'asc' | 'desc' | 'shuffle'; }
+interface OrderClause { key: string | null; token?: string; dir: 'asc' | 'desc' | 'shuffle'; }
 
 /** The tail modifiers accumulated left-to-right (a pure fold — no sibling peeking;
  *  by() modulators already live on their host step via strategies.absorbModulators). */
@@ -92,13 +92,16 @@ const MODIFIERS = new Map<string, ModFn>([
     const bys = s.modulators ?? [];
     if (bys.length === 0) { acc.orders.push({ key: null, dir: 'asc' }); return; }
     for (const byArgs of bys) {
-      // Reject deferred modulators rather than let a {token}/{nested} arg fall
-      // through to key=null and silently sort by id.
-      const bad = byArgs.find((a: unknown) => isTokenArg(a) || isNested(a));
-      if (bad) throw new Error(isTokenArg(bad) ? `by(T.${bad.token}) modulator not yet supported` : 'by(traversal) modulator not yet supported');
+      // A traversal term is a different machine (lowerElementOrderByTraversal); reject it here
+      // rather than let it fall through to key=null and silently sort by id. A `T` token is NOT
+      // rejected any more — it is carried to `tailOrderTerm`, which resolves it through the one
+      // token authority, so `order().by(T.label)` composes at this position like `by(key)`.
+      const nestedArg = byArgs.find(isNested);
+      if (nestedArg) throw new Error('by(traversal) modulator not yet supported');
+      const token = byArgs.find(isTokenArg);
       const key = byArgs.find((a: any) => typeof a === 'string') ?? null;
       const ord = byArgs.find(isOrderArg);
-      acc.orders.push({ key, dir: (ord?.order ?? 'asc') as OrderClause['dir'] });
+      acc.orders.push({ key, token: token?.token, dir: (ord?.order ?? 'asc') as OrderClause['dir'] });
     }
   }],
   // The three slices share ONE decode (`sliceOf`), which is also what keeps the Scope.local token
@@ -276,9 +279,9 @@ function lowerElementOrderByTraversal(st: ElementStream, step: IRStep): ElementS
 function directOrderExpr(by: ByClass, n: Relation, st: ElementStream): Expression {
   const dirSql = by.dir === 'desc' ? q` DESC` : q` ASC`;
   if (by.kind === 'token') {
-    if (by.token === 'label') return q`${labelNameFor(n, st.elem)}${dirSql}`;
-    if (by.token === 'id') return q`${elemCtx(n, st.elem).extIdExpr!}${dirSql}`;
-    throw new Error(`order().by(T.${by.token}) not yet supported`);
+    const expr = tokenExpr(elemCtx(n, st.elem), by.token);
+    if (!expr) throw new Error(`order().by(T.${by.token}) not yet supported`);
+    return q`${expr}${dirSql}`;
   }
   if (by.kind === 'key') return q`${scalarPropSortKey(elemCtx(n, st.elem), by.key)}${dirSql}`;
   return q`${n.c.id}${dirSql}`; // bare by()
@@ -663,11 +666,7 @@ function lowerScalarProjection(st: ElementStream, projStep: IRStep, acc: TailAcc
       return lowerScalarProjection({ ...st, rel: deduped }, projStep, { ...acc, distinct: false });
     }
     if (st.reSourced) {
-      const orderExprs = acc.orders.map((o) => {
-        if (o.dir === 'shuffle') return q`RANDOM()`;
-        const dir = o.dir === 'desc' ? ' DESC' : ' ASC';
-        return o.key !== null ? q`${nodePropOrderKey(st)(o.key)}${dir}` : q`${proj.scalarExpr ?? p.c.id}${dir}`;
-      });
+      const orderExprs = acc.orders.map((o) => tailOrderTerm(st, o, proj.scalarExpr ?? p.c.id));
       const layout = patchLayout(st.traverserLayout, { encounter: 'encounter' });
       const ranking = q`ROW_NUMBER() OVER (PARTITION BY ${p.c[origin]} ORDER BY ${list(orderExprs.length ? orderExprs : [proj.encounterKey ?? p.c.id], ', ')})`;
       const ranked = st.q.cte(
@@ -699,12 +698,7 @@ function lowerScalarProjection(st: ElementStream, projStep: IRStep, acc: TailAcc
   // apply in this projection CTE. Otherwise an upstream carried encounter (e.g.
   // order().dedup()) rides through unchanged via layoutProjection.
   if (acc.distinct) throw new Error('dedup() before a scalar projection not yet supported');
-  const orderExprs = acc.orders.map((o) => {
-    if (o.dir === 'shuffle') return q`RANDOM()`;
-    const dir = o.dir === 'desc' ? ' DESC' : ' ASC';
-    if (o.key !== null) return q`${nodePropOrderKey(st)(o.key)}${dir}`;
-    return q`${proj.scalarExpr ?? p.c.id}${dir}`;
-  });
+  const orderExprs = acc.orders.map((o) => tailOrderTerm(st, o, proj.scalarExpr ?? p.c.id));
   const hasNewEncounter = orderExprs.length > 0;
   // A pre-existing carried encounter (seeded by the emission-order demand pass) is SUPERSEDED
   // by order().by(key) — layoutProjectionMinting re-mints it in its declared slot below. Only a live path
@@ -760,7 +754,7 @@ function compileFold(st: ElementStream, acc: TailAcc): ListStream {
   // and element-stream order-before-fold defer.
   let orderDir: 'asc' | 'desc' | null = null;
   if (acc.orders.length) {
-    if (acc.orders.length > 1 || acc.orders[0].key !== null || acc.orders[0].dir === 'shuffle')
+    if (acc.orders.length > 1 || acc.orders[0].key !== null || acc.orders[0].token || acc.orders[0].dir === 'shuffle')
       throw new Error('order().by(key/traversal) before a non-terminal fold() not yet supported');
     if (!projName) throw new Error('order() before a non-terminal fold() of an element stream not yet supported');
     orderDir = acc.orders[0].dir === 'desc' ? 'desc' : 'asc';
@@ -1087,6 +1081,24 @@ const PROJECTORS = new Map<string, ProjFn>([
 export const nodePropOrderKey = (st: ElementStream) => (key: string): Expression =>
   propSortKeyFor(raw('n.id'), st.elem, key);
 
+/** ONE ORDER BY term for a folded tail-accumulator clause — the three sites that render `acc.orders`
+ *  (child-scope re-source, root scalar projection, the non-scalar element projection) had the same
+ *  four lines each, differing only in what a BARE by() falls back to. That `fallback` is the whole
+ *  difference, so it is the parameter.
+ *
+ *  The element table is aliased `n` in every projection FROM this feeds — the same assumption
+ *  `nodePropOrderKey` already encodes as `raw('n.id')`. */
+const tailOrderTerm = (st: ElementStream, o: OrderClause, fallback: Expression): Expression => {
+  if (o.dir === 'shuffle') return q`RANDOM()`;
+  const dir = o.dir === 'desc' ? q` DESC` : q` ASC`;
+  if (o.token !== undefined) {
+    const expr = tokenExpr(elemCtx(elemRel(st), st.elem), o.token);
+    if (!expr) throw new Error(`order().by(T.${o.token}) not yet supported`);
+    return q`${expr}${dir}`;
+  }
+  return q`${o.key !== null ? nodePropOrderKey(st)(o.key) : fallback}${dir}`;
+};
+
 /** Render the NON-scalar element tail — __element (vertex/edge), valueMap, elementMap,
  *  count, and element fold() — with only its element-shape modifiers (order().by(key)
  *  / carried encounter, dedup, range/limit). Scalar value machinery (transforms/is on a
@@ -1137,11 +1149,7 @@ function buildProjection(st: ElementStream, acc: TailAcc): ResultStream {
   const elemDrop = orderProductivityFilter(acc.orders, acc.productiveBy, nodePropOrderKey(st));
   let keyNodes: Expression[] = [];
   if (acc.orders.length) {
-    keyNodes = acc.orders.map((o) => {
-      if (o.dir === 'shuffle') return q`RANDOM()`;
-      const dir = o.dir === 'desc' ? ' DESC' : ' ASC';
-      return o.key !== null ? q`${nodePropOrderKey(st)(o.key)}${dir}` : q`n.id${dir}`;
-    });
+    keyNodes = acc.orders.map((o) => tailOrderTerm(st, o, raw('n.id')));
   } else if (st.traverserLayout.encounter) keyNodes = [q`${p.c[st.traverserLayout.encounter]}`];
   const orderNode = keyNodes.length ? q` ORDER BY ${list(keyNodes, ', ')}` : empty;
   const limitNode = (limit !== null || offset > 0) ? limitOffset({ scope: 'global', offset, limit }) : empty;

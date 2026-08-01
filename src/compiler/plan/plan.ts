@@ -625,6 +625,32 @@ export function elemCtx(n: Relation, elem: Elem): ScalarCtx {
   };
 }
 
+/** What a `T` token DENOTES over an element context — the one resolution, for every host.
+ *
+ *  `classifyBy` (steps/tail/child-shape.ts) is the one DECODE of a `by()` into a `ByClass`; this is
+ *  its expression-side twin, and it lives here rather than beside it because building SQL is exactly
+ *  what that classify leaf must not do. Twelve hosts wrote the same two-or-three-arm switch and threw
+ *  on the rest, so `by(T.id)`/`by(T.label)` was available at some positions and a
+ *  `by(T.<token>) not yet supported` deferral at eleven others. `null` = this context cannot denote
+ *  that token; the caller keeps its own deferral message, which is what makes the message say which
+ *  HOST declined.
+ *
+ *  **`T.id` is the OUTWARD-FACING id.** `extIdExpr` (`COALESCE(uid, id)`) is what `id()` frames and
+ *  what a user-supplied id round-trips as; the internal rowid is a join key, not an answer. Four of
+ *  the twelve returned the rowid, which is invisible until a graph actually sets `uid` — measured,
+ *  `g.V().group().by(T.id)` keyed on `1`/`2` where `g.V().id()` said `alice`/`bob`. A context with no
+ *  external id (a VertexProperty) keeps its own, which is that element's identity there.
+ *
+ *  A PROPERTY's `T.label` is its KEY — `VertexProperty.label()` returns the key — so the property
+ *  arm resolves `label` and `key` alike, and `T.value` becomes available at every host at once. */
+export function tokenExpr(ctx: ScalarCtx, token: string): Expression | null {
+  if (token === 'id') return ctx.extIdExpr ?? ctx.idExpr;
+  if (token === 'label') return ctx.elem === 'property' ? ctx.pkExpr ?? null : ctx.labelNameExpr;
+  if (token === 'key') return ctx.pkExpr ?? null;
+  if (token === 'value') return ctx.pvExpr ?? null;
+  return null;
+}
+
 /** `(SELECT name FROM labels WHERE id=<labelIdExpr>)` — resolve a label id to its
  *  name as a scalar subquery node. */
 export const labelNameSub = (labelIdExpr: Expression): Expression => q`(SELECT name FROM labels WHERE id=${labelIdExpr})`;

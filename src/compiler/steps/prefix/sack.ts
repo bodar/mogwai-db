@@ -1,7 +1,7 @@
 import { isNested } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { derived, q, list, type Expression } from '../../../sql/kernel/q.ts';
-import { scalarProp, predicateSql, elemCtx } from '../../plan/plan.ts';
+import { scalarProp, predicateSql, elemCtx, tokenExpr } from '../../plan/plan.ts';
 import { appendCte, elemRel, prevRel, layoutCols, patchLayout, type ElementStream, type StepFn } from '../context/context.ts';
 import { tryCompileScalarValueRows } from '../tail/child.ts';
 import { SACK_OPS, combineSack } from '../tail/scalar.ts';
@@ -26,10 +26,9 @@ function sackByValue(byArgs: any[] | undefined, st: ElementStream): Expression {
     throw new Error('sack(Operator.x) without a by() modulator over an element stream not yet supported');
   if (typeof a === 'string') return scalarProp(elemCtx(elemRel(st), st.elem), a);
   if (a && typeof a === 'object' && 'token' in a) {
-    const ctx = elemCtx(elemRel(st), st.elem);
-    if (a.token === 'label') return ctx.labelNameExpr;
-    if (a.token === 'id') return ctx.idExpr;
-    throw new Error(`sack().by(T.${a.token}) not yet supported`);
+    const expr = tokenExpr(elemCtx(elemRel(st), st.elem), a.token);
+    if (!expr) throw new Error(`sack().by(T.${a.token}) not yet supported`);
+    return expr;
   }
   if (isNested(a))
     throw new Error('sack().by(traversal) not supported by generic scalar child lowering');

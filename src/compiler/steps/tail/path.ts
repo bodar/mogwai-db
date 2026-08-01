@@ -4,7 +4,7 @@ import { type PathPos } from '../../../sql/kernel/render.ts';
 import { nodes } from '../../../sql/schema.ts';
 import { EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, REDUCERS, VERTEX_MOVES, unionOf } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { aliasCtx, elemCtx, elemTable, elementPayload, predicateSql, scalarProp, type ScalarCtx } from '../../plan/plan.ts';
+import { aliasCtx, elemCtx, elemTable, elementPayload, predicateSql, scalarProp, type ScalarCtx, tokenExpr } from '../../plan/plan.ts';
 import { dropLayoutAtBarrier, layoutCols, layoutProjection, scopePathCols, withoutPath, type ElementStream, type TraverserLayout } from '../context/context.ts';
 import { continueLowering, dispatchShapeTail, loweringStateOf, pathColumns, toListStream, toPathStream, type ListStream, type LoweringResult, type PathStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { tryLowerScalarChoose, tryLowerScalarCoalesce } from '../prefix/branch.ts';
@@ -34,9 +34,9 @@ function positionScalar(ctx: ScalarCtx, byArgs: any[] | undefined): Expression |
   if (by.kind === 'none') return undefined; // no by()/bare by() → the element
   if (by.kind === 'key') return scalarProp(ctx, by.key);
   if (by.kind === 'token') {
-    if (by.token === 'label') return ctx.labelNameExpr;
-    if (by.token === 'id') return ctx.extIdExpr!;
-    throw new Error(`path().by(T.${by.token}) modulator not yet supported`);
+    const expr = tokenExpr(ctx, by.token);
+    if (!expr) throw new Error(`path().by(T.${by.token}) modulator not yet supported`);
+    return expr;
   }
   throw new Error('unsupported path().by() modulator');
 }

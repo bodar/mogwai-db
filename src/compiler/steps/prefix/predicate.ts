@@ -5,7 +5,7 @@ import {
     predicateSql,
     hasProp, idPredFromArgs,
     aliasCtx,
-    type ScalarCtx
+    type ScalarCtx, tokenExpr
 } from '../../plan/plan.ts';
 import { compileCorrelatedChild } from '../tail/correlated.ts';
 import { resolveTraversalOperands } from '../tail/operand.ts';
@@ -277,9 +277,7 @@ function compileInlinePredicate(
     // has(T.label|T.id, v|P): predicate over the label name / external id (mirrors
     // filter.ts has()'s token branch, so choose(__.has(T.label,'person')) etc work).
     if (key && typeof key === 'object' && 'token' in key) {
-      const expr: Expression = key.token === 'label' ? ctx.labelNameExpr
-        : key.token === 'id' ? ctx.extIdExpr!
-        : decline(`has(T.${key.token}) has no inline form`);
+      const expr: Expression = tokenExpr(ctx, key.token) ?? decline(`has(T.${key.token}) has no inline form`);
       return predicateSql(expr, val);
     }
     if (typeof key === 'string') {

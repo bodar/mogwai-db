@@ -8,7 +8,7 @@ import { normalize } from '../../ir/passes.ts';
 import { armBatches, VERTEX_MOVES } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { runFastPath, type FastPath } from '../../options/fast-paths.ts';
-import { aliasCtx, dirsFor, edgeLabelFilter, elemCtx, hasProp, jsonbGroupArray, labelIn, predicateSql, scalarProp, vertexLabelIn, vertexLabelName, vertexLabelsJson, type EdgeEnd, type Elem, type ScalarCtx } from '../../plan/plan.ts';
+import { aliasCtx, dirsFor, edgeLabelFilter, elemCtx, hasProp, jsonbGroupArray, labelIn, predicateSql, scalarProp, vertexLabelIn, vertexLabelName, vertexLabelsJson, type EdgeEnd, type Elem, type ScalarCtx, tokenExpr } from '../../plan/plan.ts';
 import { aliasColsOf, appendCte, armBatchAdmissible, branchFork, collapsedArmAdmissible, elemRel, rootLayout, labelScope, layoutCols, layoutProjection, layoutProjectionMinting, mergeLayouts, partitionOver, patchLayout, prevRel, rehomeLayout, rigidCols, type AliasMap, type ElementStream, type LoweringState, type PathState, type SideEffectDef, type StepFn, type TraverserLayout } from '../context/context.ts';
 import { loweringStateOf, toElementStream, type ListStream, type ScalarStream, type Stream, type VariantStream } from '../context/stream.ts';
 import { childCtx, childSteps, classifyArmShape, classifyListChild, classifyScalarChild, isGlobalBarrier, optionMapMerge, optionMapNeedsPassthrough, readOptionMapArms, ROOT_SCOPE, type ChildCtx, type ChildPlan } from '../tail/child-shape.ts';
@@ -654,9 +654,9 @@ export function repeatSackByValue(byArgs: any[] | undefined, curId: Expression, 
   if (a === undefined) throw new Error('sack(Operator.x) in a repeat() body requires a by() modulator');
   if (typeof a === 'string') return scalarProp(aliasCtx(curId, curElem), a);
   if (a && typeof a === 'object' && 'token' in a) {
-    if (a.token === 'label') return aliasCtx(curId, curElem).labelNameExpr;
-    if (a.token === 'id') return curId;
-    throw new Error(`sack().by(T.${a.token}) in a repeat() body not yet supported`);
+    const expr = tokenExpr(aliasCtx(curId, curElem), a.token);
+    if (!expr) throw new Error(`sack().by(T.${a.token}) in a repeat() body not yet supported`);
+    return expr;
   }
   if (isNested(a)) {
     // A constant by() folds a fixed step (decay factor, per-hop increment); anything that
@@ -1326,7 +1326,7 @@ function chooseChoiceDomain(st: ElementStream, a0: any): Relation | null {
   if (!(a0 && typeof a0 === 'object' && 'token' in a0)) return null;
   const n = elemRel(st);
   const ctx = elemCtx(n, st.elem);
-  const ch = a0.token === 'label' ? ctx.labelNameExpr : a0.token === 'id' ? ctx.extIdExpr! : null;
+  const ch = tokenExpr(ctx, a0.token);
   if (!ch) return null;
   const p = prevRel(st, 'p');
   return st.q.cte(q`SELECT ${p.c.id} AS id, ${ch} AS ch, 1 AS ch_at${layoutProjection(st.traverserLayout, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${p.c.id}`, cols);

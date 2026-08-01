@@ -6,7 +6,7 @@
 // is read. Traversal-valued modulators still go through child.ts.
 
 import { empty, list, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { elemCtx, scalarProp, scalarPropSortKey, labelNameFor } from '../../plan/plan.ts';
+import { elemCtx, scalarProp, scalarPropSortKey, tokenExpr } from '../../plan/plan.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { type ElementStream } from '../context/context.ts';
 import { classifyBy } from './child-shape.ts';
@@ -20,9 +20,9 @@ export function directElementModulation(
   if (by.kind === 'none') return n.c.id;
   if (by.kind === 'key') return scalarProp(elemCtx(n, st.elem), by.key);
   if (by.kind === 'token') {
-    if (by.token === 'id') return elemCtx(n, st.elem).extIdExpr!;
-    if (by.token === 'label') return labelNameFor(n, st.elem);
-    throw new Error(`by(T.${by.token}) element modulation not yet supported`);
+    const expr = tokenExpr(elemCtx(n, st.elem), by.token);
+    if (!expr) throw new Error(`by(T.${by.token}) element modulation not yet supported`);
+    return expr;
   }
   return null; // nested → the caller lowers it through the generic child seam
 }
@@ -92,11 +92,13 @@ export function elementOrderSql(st: ElementStream, n: Relation, order?: IRStep):
   const terms = bys.map((byArgs) => {
     const by = classifyBy(byArgs);
     if (by.kind === 'nested') throw new Error('order().by(traversal) not yet supported');
-    if (by.kind === 'token') throw new Error(`order().by(T.${by.token}) not yet supported`);
     if (by.dir === 'shuffle') return q`RANDOM()`;
     // Sort key, not raw value: order().by(key) must sort a TEXT-stored big long /
     // bigdecimal / duration NUMERICALLY (compareKey), not lexically.
-    const expr = by.kind === 'key' ? scalarPropSortKey(elemCtx(n, st.elem), by.key) : n.c.id;
+    const expr = by.kind === 'token'
+      ? tokenExpr(elemCtx(n, st.elem), by.token)
+        ?? (() => { throw new Error(`order().by(T.${by.token}) not yet supported`); })()
+      : by.kind === 'key' ? scalarPropSortKey(elemCtx(n, st.elem), by.key) : n.c.id;
     return q`${expr}${by.dir === 'desc' ? q` DESC` : q` ASC`}`;
   });
   return terms.length ? list(terms, ', ') : empty;

@@ -5,7 +5,7 @@ import {
     predicateSql, propScalarFor, hasProp, elemCtx,
     idPredFromArgs, scalarProp,
     FtsSubstringFastPath, type Elem, labelMatchFor,
-    labelPredicateFor
+    labelPredicateFor, tokenExpr
 } from '../../plan/plan.ts';
 import { runFastPath } from '../../options/fast-paths.ts';
 import { tryInlinePredicate, combineBranchPreds, PredicateInliningFastPath } from './predicate.ts';
@@ -256,9 +256,9 @@ function dedupByLabels(st: ElementStream, s: IRStep, labels: string[]): ElementS
     if (by === undefined) return ctx.idExpr; // dedup by element identity
     if (typeof by === 'string') return scalarProp(ctx, by);
     if (by && typeof by === 'object' && 'token' in by) {
-      if (by.token === 'label') return ctx.labelNameExpr;
-      if (by.token === 'id') return ctx.extIdExpr!;
-      throw new Error(`dedup(labels).by(T.${by.token}) not yet supported`);
+      const expr = tokenExpr(ctx, by.token);
+      if (!expr) throw new Error(`dedup(labels).by(T.${by.token}) not yet supported`);
+      return expr;
     }
     throw new Error('dedup(labels).by(traversal) not yet supported');
   };

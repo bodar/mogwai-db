@@ -64,3 +64,49 @@ describe('every write reaches them through a waist', () => {
     expect(runWith(s, "g.addV('per~son').property('na~me','marko')")).toHaveLength(1);
   });
 });
+
+// `T.id` at a by()-modulator position must denote the SAME id `id()` frames.
+//
+// Twelve hosts each wrote their own two-arm `token === 'label' ? … : token === 'id' ? …` resolver,
+// and four of them returned the INTERNAL rowid. That is invisible on a graph whose ids are rowids —
+// which the modern fixture is, and which is why nothing caught it — and becomes a wrong answer the
+// moment a graph supplies its own ids. `tokenExpr` (plan/plan.ts) is now the one resolution, and it
+// returns the outward-facing `COALESCE(uid, id)`.
+describe('T.id is the outward-facing id at every by() position', () => {
+  const withIds = () => {
+    const s = store();
+    runWith(s, "g.addV('p').property(T.id,'alice').property('name','a')");
+    runWith(s, "g.addV('p').property(T.id,'bob').property('name','b')");
+    runWith(s, "g.addV('q').property(T.id,'carol').property('name','c')");
+    return s;
+  };
+  const vals = (s: GraphStore, q: string) => (runWith(s, q) as any[]).map((r) => r.v ?? r.id);
+  /** A group() plan's rows are the raw key/value pair columns — read them as the pairs they are
+   *  rather than through the wire framer, which is a different subject from the KEY resolution. */
+  const pairs = (s: GraphStore, q: string) => (runWith(s, q) as any[]).map((r) => [r.gk, r.gv]);
+
+  test('group().by(T.id) keys on the user id, not the rowid', () => {
+    const s = withIds();
+    // The keys `id()` frames — anything else means the group key and the element disagree.
+    expect(vals(s, 'g.V().id()')).toEqual(['alice', 'bob', 'carol']);
+    expect(pairs(s, 'g.V().group().by(T.id).by(__.count())'))
+      .toEqual([['alice', 1], ['bob', 1], ['carol', 1]]);
+  });
+
+  test('order().by(T.id)/by(T.label) sort by the resolved token, not by rowid', () => {
+    const s = withIds();
+    // Descending by LABEL puts the sole `q` first; ties keep their scan order, so only the
+    // partition is asserted, not the order within it.
+    expect(vals(s, 'g.V().order().by(T.label, Order.desc).values("name")')[0]).toBe('c');
+    expect(vals(s, 'g.V().order().by(T.id).values("name")')).toEqual(['a', 'b', 'c']);
+  });
+
+  test('a VertexProperty resolves T.label/T.key to its key and T.value to its value', () => {
+    // The property arm of the same authority — `VertexProperty.label()` IS the key. These were
+    // per-host gaps: `by(T.value)` had no resolver at any host before the hoist.
+    const s = withIds();
+    expect(pairs(s, 'g.V().properties().group().by(T.key).by(__.count())')).toEqual([['name', 3]]);
+    expect(pairs(s, 'g.V().properties().group().by(T.value).by(__.count())'))
+      .toEqual([['a', 1], ['b', 1], ['c', 1]]);
+  });
+});

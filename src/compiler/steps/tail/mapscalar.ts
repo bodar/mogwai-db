@@ -1,7 +1,7 @@
 import { q, list, value, type Expression } from '../../../sql/kernel/q.ts';
 import {
     elemCtx, scalarProp, aliasCtx,
-    predicateSql, scalarTx, type ScalarCtx
+    predicateSql, scalarTx, type ScalarCtx, tokenExpr
 } from '../../plan/plan.ts';
 import { isNested } from '../../../gremlin/frontend.ts';
 import { mathToSql, mathVars } from '../../../gremlin/math.ts';
@@ -471,9 +471,7 @@ export function lowerChooseOptions(st: ElementStream, steps: IRStep[], stop: num
   const ctx = elemCtx(n, st.elem);
   const choice = choiceMod !== undefined
     ? p.c[mods.values[choiceMod].value]
-    : a0.token === 'label' ? ctx.labelNameExpr
-      : a0.token === 'id' ? ctx.extIdExpr!
-      : (() => { throw new Error(`choose(T.${a0.token}) not yet supported`); })();
+    : tokenExpr(ctx, a0.token) ?? (() => { throw new Error(`choose(T.${a0.token}) not yet supported`); })();
   const keyed = options.filter((x) => !x.isNone);
   const fallback = options.find((x) => x.isNone)!;
   const whens = keyed.map((x) => q`WHEN ${predicateSql(choice, x.key)} THEN ${p.c[mods.values[x.mod].value]}`);

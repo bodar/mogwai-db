@@ -398,10 +398,12 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     expect(run(seededStore(), 'g.V().select("x")')).toEqual([]);
     expect(() => compile('g.V().as("a").select("a").by(T.id)', {})).toThrow('by(T.id) modulator not yet supported');
     expect(() => compile('g.V().as("a").out().as("b").select("a","b").order()', {})).toThrow('order() on a record requires a by(field)');
-    // order().by() deferred modulators must throw, not silently sort by id. A pure
-    // key/token order() with a T-token still defers (no traversal term → the acc.orders
-    // machinery, which has no token support yet).
-    expect(() => compile('g.V().order().by(T.label)', {})).toThrow('by(T.label) modulator not yet supported');
+    // order().by() deferred modulators must throw, not silently sort by id — but a `T` token is
+    // no longer one of them. The tail accumulator carries the token to `tailOrderTerm`, which
+    // resolves it through the ONE token authority (`tokenExpr`), so this sorts by the label NAME.
+    // Asserted on the SQL, because "did not throw" would also pass if it silently sorted by id.
+    expect(read('g.V().order().by(T.label)').sql).toContain('ORDER BY (SELECT labels.name');
+    expect(read('g.V().order().by(T.id)').sql).toContain('ORDER BY COALESCE(n.uid, n.id) ASC');
     // single AND multi-term order().by(traversal) are now supported (mixing keys/traversals),
     // lowered through the shared multi-modulator seam — see order-traversal-multi.feature (L4)
     // and the order().by() SQL tests. They must NOT throw.
