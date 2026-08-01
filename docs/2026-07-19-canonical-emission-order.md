@@ -70,6 +70,13 @@ each fan-out.** One representation (not a growing tuple):
   Child scope → per-origin (`PARTITION BY <ordinal> ORDER BY …`). Same expression, different
   partition. `group()`'s `valOrder` ("parent encounter then child encounter") is the existing
   composite precedent to generalize.
+  **REFINED 2026-08-01, and this is the part a reader needs:** the per-origin form is right INSIDE
+  the scope and ambiguous outside it — every parent's first row is encounter 1 — so a child-scoped
+  stream's emission order is the PAIR `(ordinal, encounter)`. `pushChildScope` therefore mints the
+  ordinal ordered by the parent's encounter, and a cross-parent reader (an arm merge, via
+  `armOrderKey`) sorts by both. The encounter stays per-origin because a scoped slice reads it as a
+  per-parent window. Making it global instead would answer a different question there —
+  outstanding-work item 20 has the measurement.
 
 **"First"/order semantics:** our sequence = rowid / edge-id / vp-id / arm-index order. It is
 **deterministic** and a **legitimate** traversal emission order. For `union` it matches

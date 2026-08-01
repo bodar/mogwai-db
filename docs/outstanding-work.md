@@ -202,8 +202,9 @@ cardinality, which is the measurement that says the ladder could not have found 
    [foldable-carried-column](./2026-07-24-foldable-carried-column-plan.md)
 
 20. **Results ordered only because SQLite scanned the convenient way.** `mise run test:perturbed`
-   (`PRAGMA reverse_unordered_selects`) — a failure there is never a flake. Perturbed census **41 → 8**,
-   suite **21** (measured 2026-08-01). Three mechanisms landed; left:
+   (`PRAGMA reverse_unordered_selects`) — a failure there is never a flake. Perturbed census
+   **41 → 8 → 5**, suite **21 → 2** (measured 2026-08-01). **Two failures from a gate**, which is the
+   point of the item. Five mechanisms landed; left:
    - **A GROUP VALUE body's barrier runs in the wrong SCOPE — `dedup()`/`order()` LANDED 2026-08-01
      (L3 1669 → 1671); `limit`/`range` are what is left.** The rule is
      `Grouping.determineBarrierStep`: the first non-local barrier in a value traversal is the group's
@@ -220,29 +221,39 @@ cardinality, which is the measurement that says the ladder could not have found 
      body's `order().by(key)`. A bare `dedup().fold()` is now correct but its member order is
      first-occurrence over a scan-determined sequence, so it is NOT L4-pinnable until that order is
      fixed. *Med.*
-   - **A CHILD-SCOPED body's rows have no order ACROSS parents, and this is the mechanism under
-     several of the rows below.** A per-origin projection mints
-     `encounter = ROW_NUMBER() OVER (PARTITION BY <ordinal> ORDER BY <local key>)` (child.ts,
-     projection.ts, mapscalar.ts, group.ts all do), and the ordinal itself is
-     `ROW_NUMBER() OVER ()` — identity without order. So every parent's first child row ties at 1,
-     and anything that reads those rows back in one stream falls to SQLite's scan order. Witnessed
-     while landing item 21's T4: in a BATCHING branch (where the traverser-major freeze correctly
-     does not apply) a per-origin arm's rows tie in the merge window, so
-     `union(__.out().count(), __.values('age')).limit(2)` is pinned by luck — the L4 pin for that
-     spelling is deliberately unsliced and says so. **Two candidate fixes, and the second is the
-     generic one:** tag the arm's ordinal into the merge key, or make the ordinal ORDER-BEARING
-     (`ROW_NUMBER() OVER (ORDER BY <parent encounter>)`, still unique, which is all the identity
-     contract needs) and mint the child encounter globally over it — monotone within each partition,
-     so per-origin consumers are unaffected. The second touches every per-origin mint site, so it
-     wants doing as one tranche with the perturbed suite as its measurement. *Med.*
-   - **A RECORD stream carries no `encounter`**, so `recordSlice`'s `orderByEncounter` is inert and a
-     record slice picks an arbitrary window. *Med.* · `aggregate('x').by(__.out().order().by('name'))`
-     reads child rows in scan order. *Low-Med.* · Three WRITE traversals via row-at-a-time `write.ts`.
-   - `g.V().repeat(__.both()).times(3).range(5,11)` is EXPECTED (item 4's `repeat`/`match` boundary).
-   - ~15 remain in `test/compiler/`, `test/L2-sql/` and the census — each needs reading to decide
-     whether the ASSERTION is over-strong or the traversal under-determined. **Do not bulk-relax them**:
-     the `order().fold()` block looked exactly like test-side fragility and was a real defect.
-   **Clearing these makes `test:perturbed` a gate**, which is the point of one item.
+   - **LANDED 2026-08-01, and the durable fact is the INVARIANT it established: a child-scoped
+     stream's emission order is the PAIR `(ordinal, encounter)`.** The encounter alone is per-origin
+     (`ROW_NUMBER() OVER (PARTITION BY <ordinal> …)`) and stays that way on purpose — a scoped slice
+     reads it as `encounter > offset AND encounter <= stop`, a per-parent window that would be a
+     different question globally — so across parents every first row ties at 1. `pushChildScope` now
+     mints the ordinal ORDERED by the parent's encounter (still unique, which is all the identity
+     contract asks), and `armOrderKey` (`context/context.ts`) reads the pair off an arm so all four
+     merges key on `arm_idx, arm_ordinal, arm_encounter`. **Any new cross-parent reader must use the
+     pair; anything inside the scope still uses the encounter alone.**
+   - **LANDED 2026-08-01 — `dedup()` keeps the FIRST occurrence.** `DedupGlobalStep` keeps the
+     traverser it saw first, so `order().by('name').dedup()` still emits in name order; we cleared
+     the encounter (a per-row-unique value defeats `SELECT DISTINCT`). Now a `GROUP BY` with
+     `MIN(encounter)` at both sites. `2026-07-22-review-fix-plan.md` A3 called the clearing
+     correct-by-design and was wrong; three ordered L4 pins hold under perturbation.
+   - **LANDED 2026-08-01 — two smaller ones.** A vertex's label ARRAY was built with the `ORDER BY`
+     outside `json_group_array`, which orders the subquery and not the aggregate, so the array and
+     `vertexLabelName`'s pick disagreed on the first label. And a bulk-load id collision named
+     whichever id the scan reached first (`MIN` now, so the message is stable).
+   - **WHAT IS LEFT, all measured 2026-08-01.** An ELEMENT-shaped `aggregate('x').by(traversal)`
+     builds a side-effect relation carrying no order channel at all (`prefix/sideeffect.ts` — the
+     SCALAR branch orders via `jsonbGroupArray(…, memberOrder)`, the element branch has nowhere to
+     put it), so `cap('x')` reads it in scan order. *Med, and the last real defect here.* · A RECORD
+     stream carries no `encounter`, so `recordSlice`'s `orderByEncounter` is inert. *Med.* · Three
+     WRITE traversals via row-at-a-time `write.ts`. · `g.V().repeat(__.both()).times(3).range(5,11)`
+     is EXPECTED (item 4's boundary).
+   - **The assertion sweep is DONE and the rule it used is worth keeping.** Thirteen exact-array
+     assertions across seven files were pinning scan order for traversals that fix none; they now
+     compare as multisets through `bagOf` (`test/support/harness.ts`), which states the rule and its
+     limit. **The one exception, deliberately left red:** `branch-triage.exec.test.ts`'s
+     projection-with-reducer test distinguishes per-traverser from by-arm order and needs the source
+     UNORDERED to do it — ordering the source would make the branch traverser-major (item 21's T4)
+     and change what the test distinguishes. Whoever makes `test:perturbed` a gate has to decide
+     that one on purpose.
 
 5. **Non-element child bodies.** Map and record bodies compile. **Two premises that were FALSE — do not
    rebuild on them:** the element terminal does not need a relational form, and `project`/`group`/`path`

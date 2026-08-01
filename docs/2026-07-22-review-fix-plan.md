@@ -57,6 +57,11 @@ Latent: no test exercises `order().dedup()` in a child.
 - **Test (failing first):** `g.V(1).local(__.out().order().by('name').dedup()).values('name')`
   or a `where(__.out().order().dedup())`-style existence case that would double-count.
   Assert the deduped count. Fails today.
+- **CORRECTED 2026-08-01 — the fix below landed and its rationale was wrong.** `DedupGlobalStep`
+  keeps the FIRST occurrence, so `order().by('name').dedup()` still emits in name order: clearing the
+  encounter did not "legitimately discard the prior emission order", it discarded an order the
+  reference keeps, and `mise run test:perturbed` caught it. Both sites are now a `GROUP BY` with
+  `MIN(encounter)` — the same set barrier, plus the order. Do not restore the clearing.
 - **Fix:** in the `dedup` branch, clear the encounter as part of the advance so DISTINCT sees
   only the real payload: `advance(end, q\`SELECT DISTINCT ... \`, { encounter: null })` and
   drop `end.carried.encounter` from the projected `carryFrag`. Rationale: a `dedup()`
