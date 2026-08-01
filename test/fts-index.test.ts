@@ -70,9 +70,32 @@ describe('collection property indexing (ValueNode-aware)', () => {
 });
 
 describe('cardinality maintenance', () => {
+  // `single` is spelled out, like its list/set siblings below. It used to be implicit, which
+  // stopped being the same test the moment the graph default became `list` (api.ts,
+  // DEFAULT_VERTEX_CARDINALITY) — this asserts the replace, not the default.
   test('single cardinality replaces the FTS row (no stale text)', () => {
     const store = freshStore([
+      "g.addV('person').property(single, 'name', 'marko')",
+      "g.V().has('name', 'marko').property(single, 'name', 'MARKO2')",
+    ]);
+    expect(fts(store, "WHERE pk='name'").map((r) => r.text)).toEqual(['MARKO2']);
+  });
+
+  // The DEFAULT is list, so an undeclared repeat write indexes BOTH — the FTS-side face of the
+  // multi-property default.
+  test('an undeclared repeat write appends a second indexed row', () => {
+    const store = freshStore([
       "g.addV('person').property('name', 'marko')",
+      "g.V().has('name', 'marko').property('name', 'MARKO2')",
+    ]);
+    expect(fts(store, "WHERE pk='name'").map((r) => r.text).sort()).toEqual(['MARKO2', 'marko']);
+  });
+
+  // …and a `single` DECLARATION sticks to the (node, key) it was made on: the later write names
+  // no cardinality and still replaces.
+  test('a declared single is remembered by a later undeclared write', () => {
+    const store = freshStore([
+      "g.addV('person').property(single, 'name', 'marko')",
       "g.V().has('name', 'marko').property('name', 'MARKO2')",
     ]);
     expect(fts(store, "WHERE pk='name'").map((r) => r.text)).toEqual(['MARKO2']);

@@ -94,6 +94,27 @@ export const LABEL_MUTATION_UNSUPPORTED = 'Label mutation is not supported';
  *  TinkerPop's `Vertex.DEFAULT_LABEL`. Also the name a zero-label vertex reports for `label()`. */
 export const DEFAULT_VERTEX_LABEL = 'vertex';
 
+/** How many values one vertex-property KEY may hold. An edge property has no cardinality at all
+ *  (TinkerPop `Property` is single by construction), which is why this is named for the vertex. */
+export type VertexCardinality = 'single' | 'list' | 'set';
+
+/**
+ * The cardinality a vertex property takes when the traversal declares none — TinkerPop's
+ * `Graph.Features.VertexFeatures.getCardinality(key)`, whose default is **`list`**
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Graph.java:671`).
+ * A graph that supports multi-properties therefore APPENDS on a repeated `property(k, v)` rather
+ * than replacing, and `g.addV("animal").property("name","mateo").property("name","gateo")` keeps
+ * both — which is what `@MultiProperties` scenarios assert and what we answered wrongly while this
+ * defaulted to `single`.
+ *
+ * It is a constant rather than a per-key function because we have no per-key schema to consult;
+ * TinkerPop's signature takes the key so a provider CAN vary it, and that is the hook, not a
+ * requirement. It is a graph capability like `LabelCardinality` and lives beside it for the same
+ * reason: only the storage waist may apply it, since only there is "the step declared none"
+ * (`null`) still distinguishable from an explicit `Cardinality.single`.
+ */
+export const DEFAULT_VERTEX_CARDINALITY: VertexCardinality = 'list';
+
 // ---- the federated-transfer row ----
 
 /** One row of a sibling graph's result, decoded to plain JS values (NOT GraphBinary — a

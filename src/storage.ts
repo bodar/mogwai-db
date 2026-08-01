@@ -61,6 +61,29 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS edge_properties(
      id INTEGER PRIMARY KEY, edge INTEGER NOT NULL REFERENCES edges(id),
      key TEXT NOT NULL, value, vtype TEXT, UNIQUE(edge, key))`,
+  // What cardinality a vertex-property key takes when a `property()` DECLARES none. TinkerPop asks
+  // the graph this (`Graph.Features.VertexFeatures.getCardinality(key)`) and its javadoc splits
+  // providers in two — "implementations that employ a schema can consult it", the rest "return their
+  // default Cardinality for every key". The official corpus needs the FIRST kind and cannot be
+  // satisfied by the second: `g_addVXanimalX_propertyXname_mateoX...` (@MultiProperties) requires an
+  // undeclared repeat write to APPEND, while `g_V_hasXperson_name_aliceX_propertyXsingle_age_...`
+  // requires one to REPLACE on a key whose initializer wrote `property(single, "age", 50)`. No single
+  // constant answers both.
+  //
+  // Scoped to (node, key) rather than to the key alone, which is the one deliberate divergence from
+  // TinkerPop's signature. Graph-scoped was built first and MEASURED wrong: the conformance runner
+  // empties the shared graph with `g.V().drop()`, which clears data and not schema, so one scenario's
+  // `property(single, k, ...)` silently changed how a later scenario's undeclared write behaved and
+  // the @MultiProperties gain never materialized. Element scope makes the declaration live and die
+  // with the element that carries it, and no corpus scenario distinguishes the two.
+  //
+  // Only an EXPLICIT `property(Cardinality.x, ...)` writes a row here, so the table stays empty for a
+  // graph that never names one; an absent row is the graph default (DEFAULT_VERTEX_CARDINALITY,
+  // api.ts). Edge properties are absent by construction — TinkerPop's edge `Property` is single by
+  // spec, which UNIQUE(edge,key) above already enforces.
+  `CREATE TABLE IF NOT EXISTS vertex_property_cardinality(
+     node INTEGER NOT NULL REFERENCES nodes(id), key TEXT NOT NULL, cardinality TEXT NOT NULL,
+     PRIMARY KEY (node, key))`,
   // Replaces n_label: (label, node) is the seek order hasLabel wants — find the label id,
   // read the node ids off the index without touching `nodes` at all.
   `CREATE INDEX IF NOT EXISTS vl_label ON vertex_labels(label, node)`,

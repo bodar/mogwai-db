@@ -55,8 +55,10 @@ test('g.E().drop() removes every edge but keeps all vertices', () => {
 
 test('property() updates existing vertices (overwrite + new key, single cardinality)', () => {
   const store = seededStore();
-  // overwrite marko's age, add a new key
-  const res = run(store, 'g.V(1).property("age", 30).property("city", "London")');
+  // overwrite marko's age, add a new key. `single` is SPELLED OUT: the graph default is `list`
+  // (api.ts, DEFAULT_VERTEX_CARDINALITY), so an undeclared write would append a second age —
+  // which is the next test.
+  const res = run(store, 'g.V(1).property(single, "age", 30).property("city", "London")');
   expect(bare((res[0] as any).vertex)).toEqual({ id: 1, labels: ['person'], props: { name: 'marko', age: 30, city: 'London' } });
   expect(run(store, 'g.V(1).values("age")').map((r) => r.v)).toEqual([30]);
   expect(run(store, 'g.V(1).values("city")').map((r) => r.v)).toEqual(['London']);
@@ -64,10 +66,33 @@ test('property() updates existing vertices (overwrite + new key, single cardinal
   expect(run(store, 'g.V(2).values("age")').map((r) => r.v)).toEqual([27]);
 });
 
+test('an UNDECLARED property() appends, because the graph default is list', () => {
+  const store = seededStore();
+  run(store, 'g.V(1).property("age", 30)');
+  expect(run(store, 'g.V(1).values("age")').map((r) => r.v).sort((a, b) => a - b)).toEqual([29, 30]);
+  // …and the declaration is per (node, key): vadas is untouched, and a `single` declared on her
+  // does not follow marko's key.
+  run(store, 'g.V(2).property(single, "age", 28)');
+  run(store, 'g.V(2).property("age", 26)');
+  expect(run(store, 'g.V(2).values("age")').map((r) => r.v)).toEqual([26]);
+  expect(run(store, 'g.V(1).values("age")').map((r) => r.v).sort((a, b) => a - b)).toEqual([29, 30]);
+});
+
 test('property() updates every matched vertex in the set', () => {
   const store = seededStore();
   run(store, 'g.V().hasLabel("person").property("kind", "human")');
   expect(run(store, 'g.V().has("kind","human").count()').map((r) => r.v)).toEqual([4]);
+});
+
+test('drop() forgets a vertex\'s cardinality declarations', () => {
+  const store = seededStore();
+  run(store, 'g.V(1).property(single, "nick", "okram")');
+  run(store, 'g.V().drop()');
+  // A fresh vertex must not inherit the dropped one's `single` declaration — the reason the
+  // declaration is scoped to (node, key) and deleted with the vertex.
+  run(store, 'g.addV("person").property("nick", "a").property("nick", "b")');
+  expect(run(store, 'g.V().values("nick")').map((r) => r.v).sort()).toEqual(['a', 'b']);
+  expect(store.query('SELECT COUNT(*) AS n FROM vertex_property_cardinality', [])[0].n).toBe(0);
 });
 
 test('property(k, __.trav): correlated value from the read spine', () => {

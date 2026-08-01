@@ -12,7 +12,7 @@ import { compileInject } from './inject.ts';
 import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../../../services/fts-index.ts';
 import { bindChunks, deleteWhereIn, placeholders } from '../../../rowbatch.ts';
 import { layoutCols, type ElementStream } from '../context/context.ts';
-import { DEFAULT_VERTEX_LABEL, LABEL_MUTATION_UNSUPPORTED } from '../../../api.ts';
+import { DEFAULT_VERTEX_CARDINALITY, DEFAULT_VERTEX_LABEL, LABEL_MUTATION_UNSUPPORTED, type VertexCardinality } from '../../../api.ts';
 import { validateLabel, validatePropertyKey } from './validate.ts';
 
 // ---------- nested-traversal write arguments (read spine reuse) ----------
@@ -198,6 +198,10 @@ function compileDrop(engine: Engine, steps: IRStep[]): WritePlan {
         deleteWhereIn(store, 'edge_properties', 'edge', incidentEdges);
         deleteWhereIn(store, 'edges', 'id', incidentEdges);
         deleteWhereIn(store, 'vertex_properties', 'node', ids);
+        // The per-element cardinality declarations go with the element — that is the whole point of
+        // scoping them to (node, key) rather than to the key: a dropped vertex leaves no schema
+        // behind for a later vertex to inherit.
+        deleteWhereIn(store, 'vertex_property_cardinality', 'node', ids);
         // vertex_labels references nodes(id), so the label set goes before the vertex.
         deleteWhereIn(store, 'vertex_labels', 'node', ids);
         deleteWhereIn(store, 'nodes', 'id', ids);
@@ -232,7 +236,7 @@ function compileSetProperty(engine: Engine, steps: IRStep[], params: Record<stri
     // Edge props are normalized rows with no cardinality/meta (TinkerPop Property):
     // UPSERT each into edge_properties, then read the bag back for the response.
     for (const sp of specs) {
-      if (sp.cardinality !== 'single') throw new Error('Cardinality is not valid on an edge property');
+      if (sp.cardinality !== null) throw new Error('Cardinality is not valid on an edge property');
       if (sp.meta) throw new Error('meta-properties are not valid on an edge property');
     }
     const readCur = `SELECT uid, src, tgt, (SELECT name FROM labels WHERE id=edges.label) AS label FROM edges WHERE id=?`;
@@ -267,7 +271,11 @@ function compileSetProperty(engine: Engine, steps: IRStep[], params: Record<stri
 // shared value tail in projection.ts (compileInject). WRITE_RULES routes it here
 // only because it has no V/E source; see the import at the top of this file.
 
-type Cardinality = 'single' | 'list' | 'set';
+/** What the STEP declared. `null` is a real state, not a missing one: it means the traversal
+ *  named no cardinality, so the graph's default applies — and only the storage waist may resolve
+ *  it, because collapsing `null` to `'single'` here is exactly the bug that made a repeated
+ *  `property(k, v)` overwrite. */
+type Cardinality = VertexCardinality | null;
 // `vtype` names the OUTER stored shape (the value column's sibling type); `typeNode` is
 // the FULL recursive type tree, threaded so a collection value tags each element/entry/key
 // losslessly (valueNodeOf). A scalar's typeNode is redundant with vtype; a nested-traversal
@@ -278,13 +286,13 @@ interface PropSpec { key: string | { nested: any }; value: any; vtype: Canonical
  *  with more than one is rejected at insert time rather than silently truncated. */
 interface VertexSpec { labels: (string | string[] | { nested: any })[]; props: PropSpec[]; uid: string | number | null; }
 
-// A leading Cardinality token on property() args (default single). Returns it plus
-// the remaining [key, value, ...metaArgs], and `off` — how many leading args were
-// consumed (0 or 1) so the caller can index the parallel argTypes for the value.
+// A leading Cardinality token on property() args, else null (= the graph's default, applied at
+// the storage waist). Returns it plus the remaining [key, value, ...metaArgs], and `off` — how
+// many leading args were consumed (0 or 1) so the caller can index the parallel argTypes.
 function readCardinality(args: any[]): { cardinality: Cardinality; rest: any[]; off: number } {
   if (args[0] && typeof args[0] === 'object' && 'cardinality' in args[0])
     return { cardinality: args[0].cardinality as Cardinality, rest: args.slice(1), off: 1 };
-  return { cardinality: 'single', rest: args, off: 0 };
+  return { cardinality: null, rest: args, off: 0 };
 }
 
 /** The canonical stored type of a property()'s VALUE arg: the type its carrying
@@ -322,7 +330,7 @@ function metaOf(metaArgs: any[]): Record<string, any> | null {
 const singleProps = (rec: Record<string, any>, types: Record<string, TypeNode | null> = {}, cardinalities: Record<string, Cardinality> = {}): PropSpec[] =>
   Object.entries(rec).map(([key, value]) => ({
     key, value, typeNode: types[key] ?? null,
-    vtype: gremlinTypeOf(value, types[key] ?? null), meta: null, cardinality: cardinalities[key] ?? 'single',
+    vtype: gremlinTypeOf(value, types[key] ?? null), meta: null, cardinality: cardinalities[key] ?? null,
   }));
 
 // An addV(...) step + its trailing property() steps → a vertex spec. A property key or
@@ -434,17 +442,41 @@ function removeProperties(store: GraphStore, elem: Elem, owner: number, key: str
  *  vendored runner skips them (test/L3-conformance/tags.ts), so they are not in L3's denominator. */
 const isPropertyRemoval = (val: any): boolean => val === null;
 
+/** The ONE place "the step declared no cardinality" becomes a cardinality — TinkerPop resolves it
+ *  at the same point (`AddPropertyStep.applyPropertyMutation` and `MergeVertexStep` both consult
+ *  `features().vertex().getCardinality(key)` only when their own is null).
+ *
+ *  We answer from `vertex_property_cardinality` rather than with a constant, because the corpus
+ *  needs a schema-bearing provider — the DDL comment in storage.ts names the two scenarios that pin
+ *  it in opposite directions, and why the scope is (node, key). An EXPLICIT cardinality both wins
+ *  and RECORDS, which is what makes `property(single, "age", 50)` change how a later undeclared
+ *  `property("age", …)` on that vertex behaves; an undeclared write only reads.
+ *
+ *  Fixed 2–3 binds either way, so the DO 100-parameter wall is out of reach by construction. */
+function effectiveCardinality(store: GraphStore, node: number, key: string, declared: Cardinality): VertexCardinality {
+  if (declared !== null) {
+    store.query(
+      `INSERT INTO vertex_property_cardinality(node, key, cardinality) VALUES(?, ?, ?)
+       ON CONFLICT(node, key) DO UPDATE SET cardinality=excluded.cardinality`, [node, key, declared]);
+    return declared;
+  }
+  return store.query<{ cardinality: VertexCardinality }>(
+    'SELECT cardinality FROM vertex_property_cardinality WHERE node=? AND key=?', [node, key],
+  )[0]?.cardinality ?? DEFAULT_VERTEX_CARDINALITY;
+}
+
 // Set/append ONE vertex property (W4). single = replace all rows for the key then insert
 // one; list = append; set = append unless an equal value already exists (then patch its
 // meta). Meta is a {metaKey:scalar} object stored as a JSONB blob. A single SQL statement
 // each (locked #3). A traversal-valued property defers to a later stage.
 export function applyVertexProperty(
   store: GraphStore, node: number, key: string, val: any, vtype: CanonicalType | null,
-  meta: Record<string, any> | null, cardinality: 'single' | 'list' | 'set', typeNode: TypeNode | null = null,
+  meta: Record<string, any> | null, declared: Cardinality, typeNode: TypeNode | null = null,
 ): void {
   if (val && typeof val === 'object' && 'nested' in val) throw new Error('property() with a traversal value not yet supported');
   validatePropertyKey(key); // the waist: every vertex property key reaches storage through here
   if (isPropertyRemoval(val)) return removeProperties(store, 'vertex', node, key);
+  const cardinality = effectiveCardinality(store, node, key, declared);
   const metaJson = meta ? JSON.stringify(meta) : null;
   // A collection value (list/map/set) is stored as a self-describing typed-JSON tree in the
   // value column (bind the JSON text, wrap jsonb(?)) — a raw JS array/Map bind would throw at
@@ -677,11 +709,11 @@ function parseEdgeCluster(steps: Step[], addEIdx: number): EdgeCluster {
     else {
       const { cardinality, rest, off } = readCardinality(m.args);
       const [k, v, ...metaArgs] = rest;
-      if (cardinality !== 'single') throw new Error('Cardinality is not valid on an edge property');
+      if (cardinality !== null) throw new Error('Cardinality is not valid on an edge property');
       if (metaArgs.length) throw new Error('meta-properties are not valid on an edge property');
       if (k && typeof k === 'object' && 'token' in k) { if (k.token === 'id') edgeUid = v; else throw new Error(`property(T.${k.token}) on an edge not supported`); }
       else if (typeof k === 'string' || isNested(k))
-        props.push({ key: k, value: v, vtype: gremlinTypeOf(v, propTypeNode(m, off)), typeNode: propTypeNode(m, off), meta: null, cardinality: 'single' });
+        props.push({ key: k, value: v, vtype: gremlinTypeOf(v, propTypeNode(m, off)), typeNode: propTypeNode(m, off), meta: null, cardinality: null });
       else throw new Error('addE property() key must be a string or traversal');
     }
   }
@@ -965,7 +997,7 @@ function validateNoOverrides(merge: MergeSpec, onCreate: MergeSpec): void {
     if (k in merge.props) clash(k, merge.props[k], v);
 }
 
-function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null, sideEffects?: Map<string, any>, params: Record<string, any> = {}, defaultCardinality: Cardinality = 'single'): MergeSpec {
+function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null, sideEffects?: Map<string, any>, params: Record<string, any> = {}, defaultCardinality: Cardinality = null): MergeSpec {
   raw = resolveMergeArg(raw, sideEffects, params);
   const spec: MergeSpec = { role, label: null, id: null, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {}, propCardinalities: {} };
   if (raw == null) return spec; // mergeV(null) — match anything
@@ -996,7 +1028,7 @@ function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null,
       const cardinalityValue = isCardinalityValueArg(v) ? v : null;
       const value = cardinalityValue ? cardinalityValue.value : v;
       const cardinality = cardinalityValue?.cardinality ?? defaultCardinality;
-      if (cardinality !== 'single' && cardinality !== 'list' && cardinality !== 'set')
+      if (cardinality !== null && cardinality !== 'single' && cardinality !== 'list' && cardinality !== 'set')
         throw new Error(`unsupported merge property cardinality '${cardinality}'`);
       spec.props[c.name!] = value;
       spec.propKeys[c.name!] = c.name!;
@@ -1038,7 +1070,9 @@ function resolveMergeSpec(engine: Engine, store: GraphStore, spec: MergeSpec, se
         })()
       : rawKey;
     const r = rv(v, slot, `value for '${k}'`);
-    props[k] = r.value; propTypes[k] = r.typeNode; propCardinalities[k] = spec.propCardinalities[slot] ?? 'single';
+    // `?? null` preserves "the map declared none" — collapsing an absent slot to 'single' here
+    // is the same mistake as defaulting in readCardinality, one layer further in.
+    props[k] = r.value; propTypes[k] = r.typeNode; propCardinalities[k] = spec.propCardinalities[slot] ?? null;
   }
   const resolved: MergeSpec = {
     role: spec.role,
@@ -1089,8 +1123,8 @@ function parseMergeOptions(mods: Step[], step: MergeRole['op'], sideEffects: Map
       throw new Error(`${step} option() selector must be Merge.onCreate/onMatch`);
     if (cardinalityArg != null && (!isCardinalityArg(cardinalityArg) || isCardinalityValueArg(cardinalityArg)))
       throw new Error(`${step} option() third argument must be Cardinality.single/list/set`);
-    const defaultCardinality = cardinalityArg?.cardinality ?? 'single';
-    if (defaultCardinality !== 'single' && defaultCardinality !== 'list' && defaultCardinality !== 'set')
+    const defaultCardinality = cardinalityArg?.cardinality ?? null;
+    if (defaultCardinality !== null && defaultCardinality !== 'single' && defaultCardinality !== 'list' && defaultCardinality !== 'set')
       throw new Error(`${step} option() has unsupported cardinality '${defaultCardinality}'`);
     const kind = sel.merge === 'oncreate' ? 'onCreate' : sel.merge === 'onmatch' ? 'onMatch' : null;
     if (!kind) throw new Error(`${step} option(Merge.${sel.merge}) not supported`);
@@ -1215,7 +1249,9 @@ function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, a
         const matchSpec = resolveMergeSpec(engine, store, matchSpecRaw, seed, params, sideEffects);
         const oc = onCreate ? resolveMergeSpec(engine, store, onCreate, seed, params, sideEffects) : null;
         const om = onMatch ? resolveMergeSpec(engine, store, onMatch, seed, params, sideEffects) : null;
-        if (Object.values(oc?.propCardinalities ?? {}).some((c) => c !== 'single') || Object.values(om?.propCardinalities ?? {}).some((c) => c !== 'single'))
+        // An EDGE property has no cardinality, so any DECLARED one is the refusal — `null` (the
+        // map named none) is the only acceptable state, exactly as on the addE/property() path.
+        if (Object.values(oc?.propCardinalities ?? {}).some((c) => c !== null) || Object.values(om?.propCardinalities ?? {}).some((c) => c !== null))
           throw new Error('mergeE option() does not support vertex-property cardinality');
         const outV = endpoint(matchSpec.outV, oc?.outV, cur, 'outV');
         const inV = endpoint(matchSpec.inV, oc?.inV, cur, 'inV');
