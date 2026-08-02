@@ -228,35 +228,43 @@ export function check(plan: Rel | Stmt): void {
       if (!pairs.length && what === 'Update') throw new Error('RelIR: Update requires at least one assignment');
       if (new Set(pairs.map(([name]) => name)).size !== pairs.length) throw new Error(`RelIR: duplicate ${what} name`);
     };
-    const returning = (pairs: readonly (readonly [string, Expr])[]): void => {
+    const returning = (pairs: readonly (readonly [string, Expr])[], scope: Scope): void => {
       if (new Set(pairs.map(([name]) => name)).size !== pairs.length) throw new Error('RelIR: duplicate RETURNING name');
-      // Table columns in RETURNING are physical-schema names, intentionally outside Rel's lexical
-      // scope. Embedded read plans remain checked when lowering gives them a relation boundary.
+      pairs.forEach(([, expression]) => checkExpr(expression, scope));
     };
     switch (s.kind) {
       case 'insert':
+        if (s.target.kind !== 'scan') throw new Error('RelIR: statement target must be a Scan');
         checkRel(s.source);
+        const insertScope = add(root(), s.target);
         if (s.cols.length !== s.source.type.cols.length) throw new Error(`RelIR: Insert has ${s.cols.length} target columns but source emits ${s.source.type.cols.length}`);
         if (new Set(s.cols).size !== s.cols.length) throw new Error('RelIR: Insert has duplicate target column');
         if (s.onConflict) {
           if (!s.onConflict.target.length) throw new Error('RelIR: Insert conflict target cannot be empty');
           if (new Set(s.onConflict.target).size !== s.onConflict.target.length) throw new Error('RelIR: Insert conflict target has duplicate column');
           assignments(s.onConflict.set, 'conflict update');
+          s.onConflict.set.forEach(([, expression]) => checkExpr(expression, insertScope));
         }
-        returning(s.returning);
+        returning(s.returning, insertScope);
         break;
       case 'update':
+        if (s.target.kind !== 'scan') throw new Error('RelIR: statement target must be a Scan');
         assignments(s.set, 'Update');
         if (s.from) checkRel(s.from);
-        returning(s.returning);
+        const updateScope = s.from ? add(add(root(), s.target), s.from) : add(root(), s.target);
+        s.set.forEach(([, expression]) => checkExpr(expression, updateScope));
+        if (s.where) checkExpr(s.where, updateScope);
+        returning(s.returning, add(root(), s.target));
         break;
       case 'delete':
+        if (s.target.kind !== 'scan') throw new Error('RelIR: statement target must be a Scan');
         if (s.using) {
           checkRel(s.using);
           if (!s.using.type.cols.some((column) => column.name === 'id'))
             throw new Error('RelIR: Delete.using must emit an id column');
         }
-        returning(s.returning);
+        if (s.where) checkExpr(s.where, add(root(), s.target));
+        returning(s.returning, add(root(), s.target));
         break;
       case 'sequence':
         if (!s.steps.length) throw new Error('RelIR: Sequence requires at least one statement');

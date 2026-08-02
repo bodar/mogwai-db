@@ -148,7 +148,7 @@ export function emitStmt(statement: Stmt): Emitted {
   if (!statement.using) throw new Error('RelIR Delete emission requires a using relation');
   if (statement.where || statement.returning.length) throw new Error('RelIR Delete emission currently supports only using-based membership');
   const using = emit(statement.using);
-  const tree = q`DELETE FROM ${ident(statement.table)} WHERE ${ident('id')} IN (SELECT ${ident('id')} FROM (${raw(using.sql)}) ${ident(statement.using.id)})`;
+  const tree = q`DELETE FROM ${ident(statement.target.table)} WHERE ${ident('id')} IN (SELECT ${ident('id')} FROM (${raw(using.sql)}) ${ident(statement.using.id)})`;
   const out = render(tree);
   return { sql: out.sql, binds: [...using.binds, ...out.binds] };
 }
