@@ -412,6 +412,30 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
   const withCtes = (ctes: readonly Expression[], body: Expression, recursive = false): Expression =>
     ctes.length ? q`WITH ${recursive ? raw('RECURSIVE ') : empty}${list(ctes)} ${body}` : body;
 
+  /**
+   * The whole program as ONE kernel `Expression` — a read plan's relational body, `WITH` list and
+   * all, with nothing rendered to a string yet.
+   *
+   * This is what a caller that COMPOSES RelIR output into a larger tree needs, and the framing
+   * layer is that caller: Gremlin shape is resolved above RelIR and rides to the wire as
+   * `Compiled.shape` (§2), so the algebra's output contract is a RELATION, not a finished
+   * statement. Handing back an `Expression` rather than `{sql, binds}` is what keeps binds in one
+   * `render` and stops a second bind-ordering authority existing.
+   *
+   * Read plans only: a `Stmt` binding is an execution step, which a relation cannot be.
+   */
+  const relational = (input: Plan): Expression => {
+    const ctes: Expression[] = [];
+    for (const binding of input.bindings) {
+      if (isStmt(binding.node))
+        throw new Error(`RelIR: binding '${binding.name}' is a statement; a program with effects has execution steps, so use emit()`);
+      ctes.push(q`${ident(binding.name)} AS (${renderBuilt(build(binding.node, EMPTY_SCOPE))})`);
+    }
+    return input.result.kind === 'recursive' && ctes.length
+      ? q`WITH RECURSIVE ${list([...ctes, recursiveDefinition(input.result, EMPTY_SCOPE)])} SELECT * FROM ${ident(input.result.name)}`
+      : withCtes(ctes, renderRel(input.result, EMPTY_SCOPE));
+  };
+
   const program = (input: Plan): readonly Step[] => {
     const steps: Step[] = [];
     const ctes: Expression[] = [];
@@ -436,7 +460,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
     return steps;
   };
 
-  return program;
+  return { program, relational };
 }
 
 /** The rendered bind list is the authority the DO cap is measured against: `check`'s static count
@@ -455,7 +479,18 @@ const emitted = (tree: Expression): Emitted => {
  */
 export function emit(program: Plan): readonly Step[] {
   checkPlan(program);
-  return assembler(new Map(program.bindings.map((binding) => [binding.name, binding])))(program);
+  return assembler(new Map(program.bindings.map((binding) => [binding.name, binding]))).program(program);
+}
+
+/**
+ * A checked read program as ONE kernel `Expression`, for a caller that composes it into a larger
+ * `q` tree instead of executing it. The framing layer is that caller — RelIR's output contract is a
+ * relation, and shape is resolved above it (§2) — and going through the kernel rather than a
+ * rendered string is what keeps bind ordering in one `render`.
+ */
+export function emitRelational(program: Plan): Expression {
+  checkPlan(program);
+  return assembler(new Map(program.bindings.map((binding) => [binding.name, binding]))).relational(program);
 }
 
 /** The single-step case, which every read plan is. A derived convenience over `emit`, deliberately

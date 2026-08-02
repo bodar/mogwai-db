@@ -7,6 +7,8 @@ import { routeWrite } from './steps/write/write.ts';
 import { type Compiled, type WritePlan } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
 import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './options/fast-paths.ts';
+import { resolveSpine } from './options/spine.ts';
+import { compileViaRel } from './rel/spine.ts';
 import { createAppScope, createRequestScope } from '../scopes.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
 export type { Compiled, WritePlan, WriteResult, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from '../sql/kernel/render.ts';
@@ -63,6 +65,16 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
     params, federationDepth: resolveFederationDepth(options), sourceOptions: extractSourceOptions(tree, params),
   });
   const engine = new LoweringEngine(request, { fastPaths: collapseSafeFastPaths(request.fastPaths, analyzeChain(steps)) });
+
+  // THE SPINE ROUTE (§10·4). A chain the RelIR lowering covers end-to-end compiles there; anything
+  // else — a step it has not learned, a write, a sack, a side effect — falls through to the legacy
+  // spine WHOLE. Never mixed inside one traversal, which is what keeps RelIR a real algebra rather
+  // than a wrapper around opaque SQL. `MOGWAI_RELIR=0` (or `options.spine`) is the differential's
+  // off position, and it and this branch are both deleted when the legacy spine is.
+  if (resolveSpine(options) === 'rel' && !sackInit && sideEffects.size === 0) {
+    const viaRel = compileViaRel(engine, steps, request.params);
+    if (viaRel) return { kind: 'sql', compiled: discard ? applyDiscard(viaRel) : viaRel };
+  }
 
   const write = routeWrite(engine, steps, params, sackInit ?? undefined, sideEffects);
   if (write) return { kind: 'sql', compiled: discard ? applyDiscard(write) : write };

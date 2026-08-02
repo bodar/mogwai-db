@@ -204,7 +204,11 @@ describe('RelIR ↔ L2 equivalence (Phase 1 exit gate)', () => {
 
   for (const family of FAMILIES) {
     test(`${family.gremlin} — same rows, same access path`, () => {
-      const legacy = read(family.gremlin);
+      // Pinned to the LEGACY spine, and that is the whole point of the gate rather than an
+      // inconvenience: this file exists to prove a hand-built RelIR plan reproduces what the
+      // pre-RelIR lowering does. Compiling the reference side with the ambient switch would, for
+      // a family the RelIR spine has already learned, compare RelIR against itself.
+      const legacy = read(family.gremlin, { spine: 'legacy' });
       const core = relationalCore(legacy.sql);
       if (!core) throw new Error(`no relational core in the compiled plan for ${family.gremlin}`);
 

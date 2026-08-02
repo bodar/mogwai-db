@@ -16,8 +16,13 @@ import { read } from '../support/harness.ts';
 
 describe('movement / edge sources SQL', () => {
   test('E() sources the edges table; default projection is the edge shape', () => {
-    const p = read('g.E()');
-    expect(p.sql).toContain('c0(id, bulk) as (SELECT id, 1 AS bulk FROM edges)');
+    // The bare element source is RelIR-routed (§10·4), so BOTH spellings of the id-relation are
+    // pinned here and each is pinned against the spine that produces it. Pinning the ambient one
+    // would make this assertion flip under `mise run test:legacy-spine`, which is the differential
+    // — and a differential that cannot run green is not one.
+    expect(read('g.E()', { spine: 'rel' }).sql).toContain('(SELECT re.id AS id, ? AS bulk FROM edges re) p');
+    expect(read('g.E()', { spine: 'legacy' }).sql).toContain('c0(id, bulk) as (SELECT id, 1 AS bulk FROM edges)');
+    const p = read('g.E()', { spine: 'legacy' });
     expect(p.shape).toEqual({ kind: 'edge' });
     // Endpoints resolve to the external id (COALESCE(uid,id)) so a materialized edge
     // reports the SAME endpoint ids as the write path — was raw rowid (n.src, n.tgt),

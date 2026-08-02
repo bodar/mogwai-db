@@ -66,6 +66,11 @@ export interface CompileOptions {
    *  are the legacy path (still honoured for callers that haven't adopted the scope). The
    *  store tier builds this once per Executor; see src/scopes.ts. */
   readonly app?: import('../../scopes.ts').AppScope;
+  /** Pin this compile's spine, overriding the ambient `MOGWAI_RELIR` switch (options/spine.ts).
+   *  `'legacy'` forces the pre-RelIR lowering even for a covered traversal; `'rel'` asks for the
+   *  RelIR route, which still declines to legacy for a chain it does not cover — coverage is a
+   *  property of the chain, never of the request. */
+  readonly spine?: import('../../sql/kernel/render.ts').Spine;
 }
 
 export const DEFAULT_FAST_PATHS: FastPathConfig = Object.freeze({

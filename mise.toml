@@ -148,6 +148,27 @@ run = "bun test"
 # written deliberately at 250-500 elements in test/cf-limits.test.ts, and `mise run binds` is the
 # gate that catches the IDIOM statically. This task is how you find the next wall in a path the
 # suite does exercise at scale.
+# The RelIR DIFFERENTIAL, in the same mould as test:perturbed and test:cf-limits: run the WHOLE
+# suite with the RelIR spine switched OFF, so every corpus traversal it covers is compiled by the
+# legacy lowering instead (docs/2026-08-01-relir-build-plan.md §10·4).
+#
+# Green here AND green in `ci` is the differential: the two spines agree on the L1–L5 ladder, the
+# census multisets and the L2 contract. That is strictly stronger than §5a's eleven hand-built
+# families, and it costs nothing to build because both oracles already existed.
+#
+# It must run GREEN, not "green except the SQL snapshots" — a differential that cannot pass in both
+# positions is not one. So an L2 test that pins a spine's SPELLING pins it with `{spine}` passed
+# explicitly, asserting BOTH forms rather than whichever the ambient switch produced.
+#
+# An ENV switch rather than a parameter, for test:perturbed's reason — the suite under test must
+# not be able to see which position it is in. DELETED with the legacy spine (§10·4·5): the
+# differential is scaffolding for the migration, never a load-bearing test.
+[tasks."test:legacy-spine"]
+description = "Differential: the full suite with the RelIR spine off (every covered traversal via legacy)"
+depends = ["install", "check", "submodule"]
+env = { MOGWAI_RELIR = "0" }
+run = "bun test"
+
 [tasks."test:cf-limits"]
 description = "Instrument: the full suite with every statement asserted Cloudflare-legal (≤100 binds)"
 depends = ["install", "check", "submodule"]

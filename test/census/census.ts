@@ -24,6 +24,8 @@
 //      failure surfaces as a throw anyway, so one pass yields both halves.
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { compile } from '../../src/compiler/compiler.ts';
+import type { Spine } from '../../src/sql/kernel/render.ts';
 import type { Framed } from '../../src/execute.ts';
 import { exec } from '../support/executor.ts';
 import { isNondeterministic, isWrite, seeded } from '../support/graph.ts';
@@ -54,6 +56,14 @@ export const EXECUTES: ReadonlySet<Status> = new Set<Status>(['ran', 'nondet']);
 export interface Row {
   readonly query: string;
   readonly status: Status;
+  /** WHICH LOWERING would compile this — the RelIR migration's COVERAGE counter (§10·4 of
+   *  docs/2026-08-01-relir-build-plan.md), one of its two ratchets.
+   *
+   *  Measured with the RelIR route FORCED ON, never with the ambient `MOGWAI_RELIR` switch, so the
+   *  column records what the new spine CAN do rather than which position the process happens to be
+   *  in. Otherwise the differential's off position would re-record the artifact as all-legacy and
+   *  the ratchet would measure the switch instead of the migration. */
+  readonly spine: Spine;
   /** Rows emitted, and distinct traverser values among them. Redundant with `ms` (equal multisets
    *  have equal counts) but kept so a diff is readable without decoding a hash. */
   readonly n?: number;
@@ -86,6 +96,24 @@ const FOREIGN_ORIGIN: readonly RegExp[] = [
   /\bconstraint failed\b/i,                               // SQLite integrity
   /\bno such (?:column|table)\b/i,                        // SQLite name resolution
 ];
+
+/**
+ * Which spine would compile this traversal, with the RelIR route forced on.
+ *
+ * A separate compile rather than a channel out of the executor, and deliberately: the question is
+ * about COMPILATION, so asking the compiler directly is both the honest form and the one that keeps
+ * an instrument's needs out of the data plane. A traversal that does not compile at all routes
+ * nowhere, so it reads `legacy` — the same answer as an uncovered one, which is correct: neither is
+ * coverage the migration has banked.
+ */
+function spineOf(query: string): Spine {
+  try {
+    const plan = compile(query, {}, { spine: 'rel' });
+    return plan.kind === 'read' ? plan.spine : 'legacy';
+  } catch {
+    return 'legacy';
+  }
+}
 
 /** Normalize a throw message to what is stable across refactors.
  *
@@ -141,13 +169,14 @@ function digest(framed: readonly Framed[]): Pick<Row, 'n' | 'd' | 'ms' | 'ord'> 
 export function runCensus(corpus: readonly string[]): Row[] {
   const shared = seeded(MODERN_SEED);
   return corpus.map((query) => {
+    const spine = spineOf(query);
     try {
       const framed = exec(isWrite(query) ? seeded(MODERN_SEED) : shared).framed(query, {});
       return isNondeterministic(query)
-        ? { query, status: 'nondet' as const, n: framed.length }
-        : { query, status: 'ran' as const, ...digest(framed) };
+        ? { query, spine, status: 'nondet' as const, n: framed.length }
+        : { query, spine, status: 'ran' as const, ...digest(framed) };
     } catch (e) {
-      return { query, ...classify(e) };
+      return { query, spine, ...classify(e) };
     }
   });
 }
@@ -167,10 +196,11 @@ const HEADER = [
   '# traversal returns a DIFFERENT multiset, or if a clean deferral becomes a crash.',
   '# Never re-record to make a red build green without a written reason — that is the one thing',
   '# this file exists to prevent. See test/census/README.md.',
+  '# `spine` is the RelIR migration COVERAGE ratchet: a traversal may move legacy -> rel, never back.',
 ].join('\n');
 
-const GOLDEN_COLS = 'status\tn\td\tms\tord\tquery';
-const DEFERRAL_COLS = 'status\tmessage\tquery';
+const GOLDEN_COLS = 'status\tspine\tn\td\tms\tord\tquery';
+const DEFERRAL_COLS = 'status\tspine\tmessage\tquery';
 
 const byQuery = (a: Row, b: Row) => (a.query < b.query ? -1 : a.query > b.query ? 1 : 0);
 
@@ -179,10 +209,10 @@ export function serialize(rows: readonly Row[]): { goldens: string; deferrals: s
   const threw = rows.filter((r) => !EXECUTES.has(r.status)).sort(byQuery);
   return {
     goldens: [HEADER, GOLDEN_COLS,
-      ...executed.map((r) => [r.status, r.n ?? '', r.d ?? '', r.ms ?? '', r.ord ?? '', r.query].join('\t')),
+      ...executed.map((r) => [r.status, r.spine, r.n ?? '', r.d ?? '', r.ms ?? '', r.ord ?? '', r.query].join('\t')),
     ].join('\n') + '\n',
     deferrals: [HEADER, DEFERRAL_COLS,
-      ...threw.map((r) => [r.status, r.message ?? '', r.query].join('\t')),
+      ...threw.map((r) => [r.status, r.spine, r.message ?? '', r.query].join('\t')),
     ].join('\n') + '\n',
   };
 }
@@ -194,9 +224,9 @@ function parseTsv(text: string): Row[] {
   return lines.map((line) => {
     const f = line.split('\t');
     return golden
-      ? { status: f[0] as Status, n: f[1] ? Number(f[1]) : undefined, d: f[2] ? Number(f[2]) : undefined,
-          ms: f[3] || undefined, ord: f[4] || undefined, query: f.slice(5).join('\t') }
-      : { status: f[0] as Status, message: f[1], query: f.slice(2).join('\t') };
+      ? { status: f[0] as Status, spine: f[1] as Spine, n: f[2] ? Number(f[2]) : undefined, d: f[3] ? Number(f[3]) : undefined,
+          ms: f[4] || undefined, ord: f[5] || undefined, query: f.slice(6).join('\t') }
+      : { status: f[0] as Status, spine: f[1] as Spine, message: f[2], query: f.slice(3).join('\t') };
   });
 }
 

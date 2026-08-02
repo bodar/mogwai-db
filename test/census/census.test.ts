@@ -66,6 +66,28 @@ describe('census — the refactor guard', () => {
     expect(crashes.length).toBeLessThanOrEqual([...baseline.values()].filter((r) => r.status === 'crashed').length);
   });
 
+  test('the RelIR spine covers at least as much as the baseline', () => {
+    // THE MIGRATION'S COVERAGE COUNTER (§10·4), and it is a RATCHET for the reason L3's is: a
+    // number that is merely printed drifts. The pair below fails differently on purpose — the
+    // per-traversal list names WHICH shape stopped routing, which is the finding; the aggregate
+    // catches a wholesale loss the per-row check would report as 2,000 lines.
+    //
+    // It ratchets UP, opposite to `mise run deletion`, and the two are not redundant: coverage says
+    // the new spine works, deletion says the old one is gone. Coverage at 100% with a non-empty §8
+    // list is a FAILED migration, so neither gate alone can declare this finished.
+    const lost = rows
+      .filter((r) => r.spine !== 'rel' && baseline.get(r.query)?.spine === 'rel')
+      .map((r) => `  ${r.query}\n    was rel, now ${r.spine}`);
+    expect(lost).toEqual([]);
+
+    const covered = rows.filter((r) => r.spine === 'rel').length;
+    const before = [...baseline.values()].filter((r) => r.spine === 'rel').length;
+    const pct = (n: number) => `${((n / rows.length) * 100).toFixed(1)}%`;
+    console.log(`census: RelIR spine covers ${covered}/${rows.length} (${pct(covered)}), baseline ${before}` +
+      `${covered > before ? ` — +${covered - before}, re-record to bank it` : ''}`);
+    expect(covered).toBeGreaterThanOrEqual(before);
+  });
+
   test('coverage floor', () => {
     const byStatus: Record<string, number> = {};
     for (const r of rows) byStatus[r.status] = (byStatus[r.status] ?? 0) + 1;

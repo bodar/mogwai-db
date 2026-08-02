@@ -195,11 +195,18 @@ export type Shape =
   | { kind: 'pathGrouped'; elem: ElemShape; byKey?: boolean } // recursive: N rows per path (pk, ord, element|value), grouped
   | { kind: 'discard' };
 
+/** Which lowering produced a compile. There are two only while the RelIR migration runs, and
+ *  `legacy` is scheduled for deletion with the spine it names (§10·4 — the dual spine is a harness
+ *  with an end date). It is a compile FACT, not a flag: the coverage ratchet reads it, and so does
+ *  anyone asking why a traversal's SQL looks the way it does. */
+export type Spine = 'legacy' | 'rel';
+
 export interface Compiled {
   kind: 'read';
   sql: string;
   binds: any[];
   shape: Shape;
+  spine: Spine;
 }
 
 export type WriteResult =
@@ -219,7 +226,10 @@ export interface WritePlan { kind: 'write'; run: (store: GraphStore) => WriteRes
  *  body or the tail, so binds fall out of the single render. */
 export function readCompiled(query: Query, tail: Expression, shape: Shape): Compiled {
   const { sql, binds } = query.render(tail);
-  return { kind: 'read', sql, binds, shape };
+  // Every caller of this boundary IS the legacy spine; the RelIR route composes its relation into
+  // the same framing and re-stamps the field. So the default is a statement about who is here, not
+  // an unknown.
+  return { kind: 'read', sql, binds, shape, spine: 'legacy' };
 }
 
 /** Render `SELECT <cols> FROM <current id-relation>` over a Query's CTE prefix to
