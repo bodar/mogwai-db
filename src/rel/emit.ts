@@ -182,3 +182,14 @@ export function emitStmt(statement: Stmt): Emitted {
   const out = render(tree);
   return { sql: out.sql, binds: out.binds };
 }
+
+/** SQLite executes mutation steps one at a time. Preserve that fact in the API rather than
+ * pretending a Sequence can be a data-modifying CTE; a later executor supplies PriorResult rows
+ * between these emitted statements. */
+export function emitSequence(sequence: Extract<Stmt, { readonly kind: 'sequence' }>): readonly Emitted[] {
+  check(sequence);
+  return sequence.steps.map((step) => {
+    if (step.kind === 'sequence') throw new Error('RelIR Sequence cannot contain a nested Sequence');
+    return emitStmt(step);
+  });
+}

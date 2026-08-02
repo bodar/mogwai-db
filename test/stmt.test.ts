@@ -2,10 +2,10 @@ import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
 import { check } from '../src/rel/check.ts';
 import { col, lit } from '../src/rel/expr.ts';
-import { emitStmt } from '../src/rel/emit.ts';
+import { emitSequence, emitStmt } from '../src/rel/emit.ts';
 import { scan, values } from '../src/rel/factory.ts';
 import { isStmt } from '../src/rel/stmt.ts';
-import { insert, remove, update } from '../src/rel/stmt-factory.ts';
+import { insert, remove, sequence, update } from '../src/rel/stmt-factory.ts';
 import { relId } from '../src/rel/types.ts';
 
 const layout = { aliases: new Map(), origins: [], branchOrders: [] } as const;
@@ -54,6 +54,21 @@ describe('RelIR statements', () => {
     db.run(insertSql.sql, ...insertSql.binds);
     db.run(updateSql.sql, ...updateSql.binds);
     expect(db.query('SELECT id, uid FROM nodes').all()).toEqual([{ id: 3, uid: 'updated' }]);
+    db.close();
+  });
+
+  test('emits a Sequence as ordered SQLite statements', () => {
+    const source = values({ id: relId('sequenceNode'), rows: [[lit(4, 'int'), lit('d', 'text')]], layout,
+      type: { cols: [{ name: 'id', type: 'int', nullable: false }, { name: 'uid', type: 'text', nullable: false }] },
+    });
+    const statements = emitSequence(sequence({ steps: [
+      insert({ target: nodes, cols: ['id', 'uid'], source, returning: [] }),
+      update({ target: nodes, set: [['uid', lit('sequenced', 'text')]], where: { kind: 'binary', op: '=', left: col(nodes.id, 'id'), right: lit(4, 'int') }, returning: [] }),
+    ] }));
+    const db = new Database(':memory:');
+    db.run('CREATE TABLE nodes (id INTEGER PRIMARY KEY, uid TEXT)');
+    for (const statement of statements) db.run(statement.sql, ...statement.binds);
+    expect(db.query('SELECT id, uid FROM nodes').all()).toEqual([{ id: 4, uid: 'sequenced' }]);
     db.close();
   });
 
