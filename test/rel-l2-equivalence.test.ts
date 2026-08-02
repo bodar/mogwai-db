@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { emit } from '../src/rel/emit.ts';
+import { emitQuery } from '../src/rel/emit.ts';
 import { col, lit, type Expr } from '../src/rel/expr.ts';
 import * as make from '../src/rel/factory.ts';
 import { name } from '../src/rel/passes/name.ts';
@@ -209,7 +209,7 @@ describe('RelIR ↔ L2 equivalence (Phase 1 exit gate)', () => {
 
       seq = 0;
       const plan = family.plan();
-      const mine = emit(plan, name(plan));
+      const mine = emitQuery(name(plan));
 
       expect(sorted(store.query(mine.sql, mine.binds))).toEqual(sorted(store.query(core, legacy.binds)));
       expect(accessPaths(store, mine.sql, mine.binds)).toEqual(accessPaths(store, core, legacy.binds));

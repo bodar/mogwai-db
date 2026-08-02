@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
-import { emit } from '../src/rel/emit.ts';
+import { emitQuery } from '../src/rel/emit.ts';
+import { planOf } from '../src/rel/plan.ts';
 import { col, lit } from '../src/rel/expr.ts';
 import type { Expr } from '../src/rel/expr.ts';
 import { aggregate, distinct, filter, join, limit, project, recursive, scan as scanRel, sort, union, values } from '../src/rel/factory.ts';
@@ -37,16 +38,16 @@ describe('RelIR relational-core SQL', () => {
     const u = union({ id: relId('u'), inputs: [n, m], all: true, layout, type: { cols } });
 
     expect([
-      emit(v).sql,
-      emit(p).sql,
-      emit(f).sql,
-      emit(a).sql,
-      emit(s).sql,
-      emit(l).sql,
-      emit(d).sql,
-      emit(j).sql,
-      emit(u).sql,
-      emit(recursive({ id: relId('walk'), name: 'walk', cols: ['id', 'name'], seed: v, layout, type: { cols }, step: (self) => self })).sql,
+      emitQuery(planOf(v)).sql,
+      emitQuery(planOf(p)).sql,
+      emitQuery(planOf(f)).sql,
+      emitQuery(planOf(a)).sql,
+      emitQuery(planOf(s)).sql,
+      emitQuery(planOf(l)).sql,
+      emitQuery(planOf(d)).sql,
+      emitQuery(planOf(j)).sql,
+      emitQuery(planOf(u)).sql,
+      emitQuery(planOf(recursive({ id: relId('walk'), name: 'walk', cols: ['id', 'name'], seed: v, layout, type: { cols }, step: (self) => self }))).sql,
     ]).toEqual([
       'SELECT v.column1 AS id, v.column2 AS name FROM (VALUES (?, ?)) v',
       'SELECT n.id AS id, n.name AS name FROM nodes n',
@@ -75,7 +76,7 @@ describe('RelIR relational-core SQL', () => {
     const kept = filter({ id: relId('kept'), input: joined, layout, type: joined.type, pred: eq(col(joined.id, 'name'), lit('marko', 'text')) });
     const out = project({ id: relId('out'), input: kept, layout, type: { cols: [{ name: 'id', type: 'int', nullable: false }] }, exprs: [['id', col(kept.id, 'tgt')]] });
 
-    expect(emit(out).sql).toBe('SELECT e.tgt AS id FROM edges e INNER JOIN nodes p ON (e.src = p.id) WHERE (p.name = ?)');
+    expect(emitQuery(planOf(out)).sql).toBe('SELECT e.tgt AS id FROM edges e INNER JOIN nodes p ON (e.src = p.id) WHERE (p.name = ?)');
   });
 
   test('a nested SELECT opens exactly where a slot is already occupied', () => {
@@ -83,11 +84,11 @@ describe('RelIR relational-core SQL', () => {
     const capped = limit({ id: relId('capped'), input: n, layout, type: { cols }, count: lit(2, 'int') });
     // LIMIT is the slot the outer LIMIT needs, so this one — and only this one — nests.
     const twice = limit({ id: relId('twice'), input: capped, layout, type: { cols }, count: lit(1, 'int') });
-    expect(emit(twice).sql).toBe('SELECT capped.id AS id, capped.name AS name FROM (SELECT n.id AS id, n.name AS name FROM nodes n LIMIT ?) capped LIMIT ?');
+    expect(emitQuery(planOf(twice)).sql).toBe('SELECT capped.id AS id, capped.name AS name FROM (SELECT n.id AS id, n.name AS name FROM nodes n LIMIT ?) capped LIMIT ?');
 
     // A filter over the same source needs only WHERE, which is free, so nothing nests.
     const named = filter({ id: relId('named'), input: n, layout, type: { cols }, pred: eq(col(n.id, 'name'), lit('marko', 'text')) });
-    expect(emit(named).sql).not.toContain('(SELECT');
+    expect(emitQuery(planOf(named)).sql).not.toContain('(SELECT');
   });
 
   test('a Filter over an Aggregate is HAVING, not a wrapping SELECT', () => {
@@ -98,7 +99,7 @@ describe('RelIR relational-core SQL', () => {
       groupBy: [col(n.id, 'name')], aggs: [['n', { kind: 'agg', fn: 'count', args: [] }]],
     });
     const popular = filter({ id: relId('popular'), input: byName, layout, type: byName.type, pred: { kind: 'binary', op: '>', left: col(byName.id, 'n'), right: lit(1, 'int') } });
-    const emitted = emit(popular);
+    const emitted = emitQuery(planOf(popular));
     expect(emitted.sql).toBe('SELECT n.name AS name, count() AS n FROM nodes n GROUP BY n.name HAVING (count() > ?)');
 
     const db = new Database(':memory:');

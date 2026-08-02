@@ -30,7 +30,10 @@ export const values = (init: WithId<'values'>): Node<'values'> => {
   for (const row of init.rows) if (row.length !== init.type.cols.length) throw new Error(`RelIR: Values row has ${row.length} columns; declared type has ${init.type.cols.length}`);
   return node('values', { ...init, rows: freeze(init.rows.map((row) => freeze([...row]))) });
 };
-export const priorResult = (init: WithId<'prior-result'>): Node<'prior-result'> => node('prior-result', init);
+/** A reference to a `Plan` binding (§3.0) — a named CTE when the binding is a `Rel`, an earlier
+ * statement's retained `RETURNING` rows when it is a `Stmt`. The one naming mechanism, so it
+ * replaces both `PriorResult` and the `Naming` side-table. */
+export const ref = (init: WithId<'ref'>): Node<'ref'> => node('ref', init);
 export const project = (init: WithId<'project'>): Node<'project'> => {
   outputNames(init.exprs, init.type, 'Project');
   return node('project', { ...init, exprs: freeze(init.exprs.map((pair) => freeze([...pair] as [string, Expr]))) });

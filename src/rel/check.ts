@@ -2,12 +2,21 @@ import type { Expr } from './expr.ts';
 import { joinWidth } from './factory.ts';
 import { checkLayout } from './layout.ts';
 import { isRel, type Rel, type RelKind } from './rel.ts';
+import type { Binding, Plan } from './plan.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import { exprChildren, exprRels, recursiveStep, relChildren, relExprs } from './walk.ts';
 
 export const DO_BIND_CAP = 100;
 
-interface Scope { readonly cols: ReadonlyMap<string, Rel>; readonly inAggregate: boolean; readonly inWindow: boolean; readonly recursive?: { readonly name: string; readonly self: string; readonly allowed: boolean }; readonly prior?: readonly import('./types.ts').RelType[]; }
+/** `bindings` is the PLAN scope (§3.0): every `Ref` resolves against a binding declared EARLIER,
+ * which is the same rule for a named CTE and for a statement's retained rows. */
+interface Scope {
+  readonly cols: ReadonlyMap<string, Rel>;
+  readonly inAggregate: boolean;
+  readonly inWindow: boolean;
+  readonly recursive?: { readonly name: string; readonly self: string; readonly allowed: boolean };
+  readonly bindings: ReadonlyMap<string, Rel | Stmt>;
+}
 
 /** A `RelId` is how an expression names a relation, so two relations sharing one inside a single
  * scope makes every `Col` against it ambiguous — and the last binding silently wins. Fail closed. */
@@ -16,7 +25,7 @@ const add = (scope: Scope, rel: Rel): Scope => {
   if (bound && bound !== rel) throw new Error(`RelIR: relation id '${rel.id}' names two different relations in one scope`);
   return { ...scope, cols: new Map(scope.cols).set(rel.id, rel) };
 };
-const root = (): Scope => ({ cols: new Map(), inAggregate: false, inWindow: false });
+const root = (bindings: ReadonlyMap<string, Rel | Stmt> = new Map()): Scope => ({ cols: new Map(), inAggregate: false, inWindow: false, bindings });
 const sameColumns = (left: Rel['type']['cols'], right: Rel['type']['cols']): boolean =>
   left.length === right.length && left.every((column, i) => {
     const other = right[i];
@@ -41,7 +50,6 @@ export function bindCount(plan: Rel | Stmt): number {
   if (!isRel(plan)) {
     if (!isStmt(plan)) throw new Error('RelIR: statement was not constructed by a Stmt factory');
     const stmt = (s: Stmt): void => {
-      if (s.kind === 'sequence') { s.steps.forEach(stmt); return; }
       if (s.kind === 'insert') { rel(s.source); s.onConflict?.set.forEach(([, e]) => expr(e)); }
       if (s.kind === 'update') { s.set.forEach(([, e]) => expr(e)); if (s.from) rel(s.from); if (s.where) expr(s.where); }
       if (s.kind === 'delete') { if (s.using) rel(s.using); if (s.where) expr(s.where); }
@@ -52,7 +60,7 @@ export function bindCount(plan: Rel | Stmt): number {
   return n;
 }
 
-export function check(plan: Rel | Stmt): void {
+export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt> = new Map()): void {
   /** SQLite's recursive-term law is positional, not merely a reference count. */
   const recursiveTerm = (term: Rel, name: string): { selfRefs: number; aggregate: boolean; window: boolean } => {
     let selfRefs = 0;
@@ -100,7 +108,7 @@ export function check(plan: Rel | Stmt): void {
    * arity assertion below, and `Record<RelKind, …>` means a new kind must declare its placement
    * before the build passes — the same enforcement the layout obligations have. */
   const EXPR_SCOPE: { readonly [K in RelKind]: (node: Extract<Rel, { readonly kind: K }>, inner: Scope) => readonly (readonly [Expr, Scope])[] } = {
-    scan: () => [], 'self-ref': () => [], 'prior-result': () => [], union: () => [], recursive: () => [],
+    scan: () => [], 'self-ref': () => [], ref: () => [], union: () => [], recursive: () => [],
     values: (node, inner) => node.rows.flat().map((e) => [e, inner] as const),
     project: (node, inner) => node.exprs.map(([, e]) => [e, inner] as const),
     filter: (node, inner) => [[node.pred, inner]],
@@ -135,10 +143,12 @@ export function check(plan: Rel | Stmt): void {
       if (!scope.recursive || !scope.recursive.allowed || node.name !== scope.recursive.name)
         throw new Error('RelIR: SelfRef is legal only in its Recursive step');
     },
-    'prior-result': (node, scope) => {
-      const prior = scope.prior?.[node.step];
-      if (!prior) throw new Error(`RelIR: PriorResult step ${node.step} is not an earlier Sequence result`);
-      if (!sameColumns(node.type.cols, prior.cols)) throw new Error(`RelIR: PriorResult step ${node.step} type must match that step's returningType`);
+    // A Ref is the plan's ONE naming mechanism, so it answers to the binding rather than to a
+    // second inferred type system: same columns, same nullability, or the reference is a lie.
+    ref: (node, scope) => {
+      const bound = scope.bindings.get(node.name);
+      if (!bound) throw new Error(`RelIR: Ref '${node.name}' is not a Plan binding declared before this point`);
+      if (!sameColumns(node.type.cols, bound.type.cols)) throw new Error(`RelIR: Ref '${node.name}' type must match its binding's`);
     },
     values: (node) => {
       for (const row of node.rows) if (row.length !== node.type.cols.length)
@@ -182,11 +192,11 @@ export function check(plan: Rel | Stmt): void {
     },
   };
 
-  const checkRel = (r: Rel, scope: Scope = root()): void => {
+  const checkRel = (r: Rel, scope: Scope): void => {
     if (!isRel(r)) throw new Error('RelIR: relation was not constructed by a Rel factory');
     checkLayout(r);
     (STRUCTURE[r.kind] as (node: Rel, s: Scope) => void)(r, scope);
-    if (r.kind === 'self-ref' || r.kind === 'prior-result') return;
+    if (r.kind === 'self-ref' || r.kind === 'ref') return;
     if (r.kind === 'recursive') {
       checkRel(r.seed, scope);
       checkRel(recursiveStep(r), { ...scope, recursive: { name: r.name, self: r.id, allowed: true } });
@@ -199,76 +209,78 @@ export function check(plan: Rel | Stmt): void {
       throw new Error(`RelIR: ${r.kind} has ${relExprs(r).length} expressions but declares a scope for ${placed.length}`);
     placed.forEach(([expression, where]) => checkExpr(expression, where));
   };
-  const checkStmt = (s: Stmt, prior: readonly import('./types.ts').RelType[] = []): void => {
+  const checkStmt = (s: Stmt): void => {
     if (!isStmt(s)) throw new Error('RelIR: statement was not constructed by a Stmt factory');
     const assignments = (pairs: readonly (readonly [string, Expr])[], what: string): void => {
       if (!pairs.length && what === 'Update') throw new Error('RelIR: Update requires at least one assignment');
       if (new Set(pairs.map(([name]) => name)).size !== pairs.length) throw new Error(`RelIR: duplicate ${what} name`);
     };
-    const returning = (pairs: readonly (readonly [string, Expr])[], scope: Scope): void => {
-      if (new Set(pairs.map(([name]) => name)).size !== pairs.length) throw new Error('RelIR: duplicate RETURNING name');
-      pairs.forEach(([, expression]) => checkExpr(expression, scope));
-    };
-    const returningType = (s: Exclude<Stmt, Extract<Stmt, { readonly kind: 'sequence' }>>): void => {
+    /** A statement's RESULT is a relation like any other, so `type` IS the RETURNING schema — the
+     * separate `returningType` this used to check was the same fact spelled twice. */
+    const returning = (scope: Scope): void => {
       const names = s.returning.map(([name]) => name);
-      if (!sameNames(names, s.returningType.cols.map((column) => column.name)))
-        throw new Error('RelIR: RETURNING expressions must declare exactly returningType columns');
+      if (new Set(names).size !== names.length) throw new Error('RelIR: duplicate RETURNING name');
+      if (!sameNames(names, s.type.cols.map((column) => column.name)))
+        throw new Error('RelIR: RETURNING expressions must declare exactly the statement type columns');
+      s.returning.forEach(([, expression]) => checkExpr(expression, scope));
     };
+    if (s.target.kind !== 'scan') throw new Error('RelIR: statement target must be a Scan');
+    const targetScope = add(root(bindings), s.target);
     switch (s.kind) {
-      case 'insert':
-        if (s.target.kind !== 'scan') throw new Error('RelIR: statement target must be a Scan');
+      case 'insert': {
         for (const column of s.cols) if (!s.target.type.cols.some((declared) => declared.name === column)) throw new Error(`RelIR: Insert target has no column '${column}'`);
-        checkRel(s.source, { ...root(), prior });
-        const insertScope = add(root(), s.target);
+        checkRel(s.source, root(bindings));
         if (s.cols.length !== s.source.type.cols.length) throw new Error(`RelIR: Insert has ${s.cols.length} target columns but source emits ${s.source.type.cols.length}`);
         if (new Set(s.cols).size !== s.cols.length) throw new Error('RelIR: Insert has duplicate target column');
         if (s.onConflict) {
           if (!s.onConflict.target.length) throw new Error('RelIR: Insert conflict target cannot be empty');
           if (new Set(s.onConflict.target).size !== s.onConflict.target.length) throw new Error('RelIR: Insert conflict target has duplicate column');
           assignments(s.onConflict.set, 'conflict update');
-          s.onConflict.set.forEach(([, expression]) => checkExpr(expression, insertScope));
+          s.onConflict.set.forEach(([, expression]) => checkExpr(expression, targetScope));
         }
-        returning(s.returning, insertScope);
-        returningType(s);
+        returning(targetScope);
         break;
-      case 'update':
-        if (s.target.kind !== 'scan') throw new Error('RelIR: statement target must be a Scan');
+      }
+      case 'update': {
         assignments(s.set, 'Update');
         for (const [column] of s.set) if (!s.target.type.cols.some((declared) => declared.name === column)) throw new Error(`RelIR: Update target has no column '${column}'`);
-        if (s.from) checkRel(s.from, { ...root(), prior });
-        const updateScope = s.from ? add(add(root(), s.target), s.from) : add(root(), s.target);
-        s.set.forEach(([, expression]) => checkExpr(expression, updateScope));
-        if (s.where) checkExpr(s.where, updateScope);
-        returning(s.returning, add(root(), s.target));
-        returningType(s);
+        if (s.from) checkRel(s.from, root(bindings));
+        const scope = s.from ? add(targetScope, s.from) : targetScope;
+        s.set.forEach(([, expression]) => checkExpr(expression, scope));
+        if (s.where) checkExpr(s.where, scope);
+        returning(targetScope);
         break;
-      case 'delete':
-        if (s.target.kind !== 'scan') throw new Error('RelIR: statement target must be a Scan');
+      }
+      case 'delete': {
         if (s.using) {
-          checkRel(s.using, { ...root(), prior });
+          checkRel(s.using, root(bindings));
           if (!s.using.type.cols.some((column) => column.name === 'id'))
             throw new Error('RelIR: Delete.using must emit an id column');
         }
-        if (s.where) checkExpr(s.where, add(root(), s.target));
-        returning(s.returning, add(root(), s.target));
-        returningType(s);
+        if (s.where) checkExpr(s.where, targetScope);
+        returning(targetScope);
         break;
-      case 'sequence':
-        if (!s.steps.length) throw new Error('RelIR: Sequence requires at least one statement');
-        {
-          const results: import('./types.ts').RelType[] = [];
-          for (const step of s.steps) {
-            if (step.kind === 'sequence') throw new Error('RelIR: Sequence cannot contain a nested Sequence');
-            checkStmt(step, results);
-            results.push(step.returningType);
-          }
-        }
-        break;
+      }
     }
   };
   if (!isRel(plan)) {
     if (!isStmt(plan)) throw new Error('RelIR: statement was not constructed by a Stmt factory');
     checkStmt(plan);
-  } else checkRel(plan);
+  } else checkRel(plan, root(bindings));
   if (bindCount(plan) > DO_BIND_CAP) throw new Error(`RelIR: ${bindCount(plan)} binds exceeds Durable Objects cap of ${DO_BIND_CAP}`);
+}
+
+/**
+ * The whole program (§3.0). Bindings are checked IN ORDER against the bindings declared before
+ * them, so a `Ref` forward-referencing — or self-referencing — fails closed rather than resolving
+ * by accident, and the ordering the executor relies on is the same ordering the checker proved.
+ */
+export function checkPlan({ bindings, result }: Plan): void {
+  const scope = new Map<string, Rel | Stmt>();
+  const declare = (binding: Binding): void => {
+    check(binding.node, scope);
+    scope.set(binding.name, binding.node);
+  };
+  bindings.forEach(declare);
+  check(result, scope);
 }

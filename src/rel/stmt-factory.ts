@@ -34,7 +34,3 @@ export const remove = (init: Init<'delete'>): Node<'delete'> => {
   names(init.returning, 'RETURNING');
   return node('delete', { ...init, returning: freeze(init.returning.map((pair) => freeze([...pair] as [string, Expr]))) });
 };
-export const sequence = (init: Init<'sequence'>): Node<'sequence'> => {
-  if (!init.steps.length) throw new Error('RelIR: Sequence requires at least one statement');
-  return node('sequence', { ...init, steps: freeze([...init.steps]) });
-};

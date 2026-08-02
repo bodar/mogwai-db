@@ -59,10 +59,9 @@ export const LAYOUT_OBLIGATION: { readonly [K in RelKind]: LayoutObligation<K> }
   scan: declares,
   values: declares,
   'self-ref': declares,
-  'prior-result': (node) => {
-    if (layoutCols(node.layout).length) throw new Error('RelIR: PriorResult carries no traverser layout — a statement result is rows, not traversers');
-    declares(node);
-  },
+  // A Ref answers for what its binding carries; `check` proves the two agree, which is where the
+  // binding's declared layout is available and here it is not.
+  ref: declares,
 
   // The only node that may DECLARE layout columns, so the rule is subset-of-output, not preservation.
   project: declares,

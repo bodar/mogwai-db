@@ -11,7 +11,7 @@ type RawRel =
   | (RelBase & { readonly kind: 'scan'; readonly id: RelId; readonly table: Table; readonly alias: string })
   | (RelBase & { readonly kind: 'values'; readonly id: RelId; readonly rows: readonly (readonly Expr[])[] })
   | (RelBase & { readonly kind: 'self-ref'; readonly id: RelId; readonly name: string })
-  | (RelBase & { readonly kind: 'prior-result'; readonly id: RelId; readonly step: number })
+  | (RelBase & { readonly kind: 'ref'; readonly id: RelId; readonly name: string })
   | (RelBase & { readonly kind: 'project'; readonly id: RelId; readonly input: Rel; readonly exprs: readonly (readonly [string, Expr])[] })
   | (RelBase & { readonly kind: 'filter'; readonly id: RelId; readonly input: Rel; readonly pred: Expr })
   | (RelBase & { readonly kind: 'aggregate'; readonly id: RelId; readonly input: Rel; readonly groupBy: readonly Expr[]; readonly aggs: readonly (readonly [string, Expr])[]; readonly having?: Expr })

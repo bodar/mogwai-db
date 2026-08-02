@@ -1,18 +1,21 @@
+import { ref } from '../factory.ts';
+import { plan, type Binding, type Plan } from '../plan.ts';
 import type { Rel } from '../rel.ts';
-import { relChildren } from '../walk.ts';
-
-export interface NamedRel { readonly name: string; readonly rel: Rel; }
-export interface Naming { readonly root: Rel; readonly named: readonly NamedRel[]; }
+import { relChildren, rewrite } from '../walk.ts';
 
 /**
- * Decide which DAG vertices deserve a named boundary. This is deliberately an analysis result,
- * not a Rel node: CTE spelling is an emitter policy and the algebra stays SQL-surface-neutral.
+ * Decide which DAG vertices deserve a named boundary, and REWRITE them into `Plan` bindings.
+ *
+ * This is §4.6, and a binding is now the only naming mechanism: the pass used to return a side
+ * table the emitter consulted, which meant "is this node a CTE?" was a question asked of a map
+ * carried beside the plan rather than of the plan. A binding plus a `Ref` says the same thing IN
+ * the algebra, and says it identically for a relation and for a statement's retained rows (§3.0).
  *
  * A node reached more than once is shared, which is only true if the passes upstream preserved
  * sharing — a rewrite that rebuilds per parent occurrence makes every count 1 and silently turns
  * this analysis off.
  */
-export function name(root: Rel): Naming {
+export function name(root: Rel): Plan {
   const counts = new Map<Rel, number>();
   const visit = (rel: Rel): void => {
     const seen = (counts.get(rel) ?? 0) + 1;
@@ -31,10 +34,16 @@ export function name(root: Rel): Naming {
     taken.add(candidate);
     return candidate;
   };
-  const named: NamedRel[] = [];
-  for (const [rel, count] of counts) {
-    if (rel === root || (count < 2 && rel.kind !== 'materialize')) continue;
-    named.push({ name: rel.kind === 'materialize' && rel.name ? rel.name : generate(), rel });
-  }
-  return { root, named };
+  const binds = (rel: Rel): boolean => rel !== root && ((counts.get(rel) ?? 0) > 1 || rel.kind === 'materialize');
+
+  const bindings: Binding[] = [];
+  // Bottom-up and memoised, so a binding is pushed after every binding it depends on, and the
+  // second occurrence of a shared node gets the SAME `Ref` — the ordering `checkPlan` then proves.
+  const result = rewrite(root, (mapped, original) => {
+    if (!binds(original)) return mapped;
+    const bound = original.kind === 'materialize' && original.name ? original.name : generate();
+    bindings.push({ name: bound, node: mapped });
+    return ref({ id: original.id, name: bound, layout: mapped.layout, type: mapped.type });
+  });
+  return plan({ bindings, result });
 }

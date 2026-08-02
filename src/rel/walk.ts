@@ -16,7 +16,7 @@ export const recursiveStep = (r: Extract<Rel, { readonly kind: 'recursive' }>): 
 /** Child relations, in declaration order. */
 export function relChildren(r: Rel): readonly Rel[] {
   switch (r.kind) {
-    case 'scan': case 'values': case 'self-ref': case 'prior-result': return [];
+    case 'scan': case 'values': case 'self-ref': case 'ref': return [];
     case 'project': case 'filter': case 'aggregate': case 'sort': case 'limit':
     case 'distinct': case 'window': case 'explode': case 'materialize': return [r.input];
     case 'join': return [r.left, r.right];
@@ -30,7 +30,7 @@ export function relChildren(r: Rel): readonly Rel[] {
 export function relExprs(r: Rel): readonly Expr[] {
   const some = (...maybe: readonly (Expr | undefined)[]): readonly Expr[] => maybe.filter((e): e is Expr => e !== undefined);
   switch (r.kind) {
-    case 'scan': case 'self-ref': case 'prior-result': return [];
+    case 'scan': case 'self-ref': case 'ref': return [];
     case 'values': return r.rows.flat();
     case 'project': return r.exprs.map(([, e]) => e);
     case 'filter': return [r.pred];
@@ -61,7 +61,7 @@ const specExprs = (spec: WindowSpec): readonly Expr[] => [
 export function exprChildren(e: Expr): readonly Expr[] {
   const some = (...maybe: readonly (Expr | undefined)[]): readonly Expr[] => maybe.filter((x): x is Expr => x !== undefined);
   switch (e.kind) {
-    case 'col': case 'lit': case 'param': case 'scalar': case 'exists': return [];
+    case 'col': case 'lit': case 'scalar': case 'exists': return [];
     case 'unary': case 'cast': return [e.arg];
     case 'binary': return [e.left, e.right];
     case 'case': return [...e.whens.flatMap(([when, then]) => [when, then]), ...some(e.else)];
@@ -78,7 +78,7 @@ export function exprChildren(e: Expr): readonly Expr[] {
 /** Relations an expression correlates against — the only way a subplan hangs off an Expr. */
 export function exprRels(e: Expr): readonly Rel[] {
   switch (e.kind) {
-    case 'col': case 'lit': case 'param': case 'unary': case 'binary': case 'case': case 'cast':
+    case 'col': case 'lit': case 'unary': case 'binary': case 'case': case 'cast':
     case 'call': case 'agg': case 'window-expr': case 'json-object': case 'json-array':
     case 'in-list': return [];
     case 'scalar': case 'exists': case 'in-query': return [e.plan];
@@ -99,7 +99,7 @@ const mapSpec = (spec: WindowSpec, f: (e: Expr) => Expr): WindowSpec => ({
 export function mapRelChildren(r: Rel, f: (child: Rel) => Rel): Rel {
   const { id, layout, type } = r;
   switch (r.kind) {
-    case 'scan': case 'values': case 'self-ref': case 'prior-result': return r;
+    case 'scan': case 'values': case 'self-ref': case 'ref': return r;
     case 'project': return make.project({ id, layout, type, input: f(r.input), exprs: r.exprs });
     case 'filter': return make.filter({ id, layout, type, input: f(r.input), pred: r.pred });
     case 'aggregate': return make.aggregate({ id, layout, type, input: f(r.input), groupBy: r.groupBy, aggs: r.aggs, having: r.having });
@@ -120,7 +120,7 @@ export function mapRelExprs(r: Rel, f: (e: Expr) => Expr): Rel {
   const { id, layout, type } = r;
   const pair = ([name, e]: readonly [string, Expr]) => [name, f(e)] as const;
   switch (r.kind) {
-    case 'scan': case 'self-ref': case 'prior-result': case 'materialize': case 'union': case 'recursive': return r;
+    case 'scan': case 'self-ref': case 'ref': case 'materialize': case 'union': case 'recursive': return r;
     case 'values': return make.values({ id, layout, type, rows: r.rows.map((row) => row.map(f)) });
     case 'project': return make.project({ id, layout, type, input: r.input, exprs: r.exprs.map(pair) });
     case 'filter': return make.filter({ id, layout, type, input: r.input, pred: f(r.pred) });
@@ -144,7 +144,7 @@ export function mapRelExprs(r: Rel, f: (e: Expr) => Expr): Rel {
 /** Replace sub-expressions, position for position. Correlated subplans are left to `rel`. */
 export function mapExprChildren(e: Expr, f: (child: Expr) => Expr, rel: (plan: Rel) => Rel = (plan) => plan): Expr {
   switch (e.kind) {
-    case 'col': case 'lit': case 'param': return e;
+    case 'col': case 'lit': return e;
     case 'unary': case 'cast': return { ...e, arg: f(e.arg) };
     case 'binary': return { ...e, left: f(e.left), right: f(e.right) };
     case 'case': return { ...e, whens: e.whens.map(([when, then]) => [f(when), f(then)] as const), else: e.else && f(e.else) };

@@ -1,14 +1,28 @@
 import { empty, identifier, list, q, raw, render, value, type Expression } from '../sql/kernel/q.ts';
-import { DO_BIND_CAP, check } from './check.ts';
+import { DO_BIND_CAP, checkPlan } from './check.ts';
 import type { Expr } from './expr.ts';
 import { recursiveSelf } from './factory.ts';
 import { explodeColumns } from './layout.ts';
-import type { Naming } from './passes/name.ts';
+import type { Binding, Plan } from './plan.ts';
 import type { Rel } from './rel.ts';
-import type { Stmt } from './stmt.ts';
+import { isStmt, type Stmt } from './stmt.ts';
 import type { FrameBound, SortTerm, WindowSpec } from './types.ts';
 
 export interface Emitted { readonly sql: string; readonly binds: readonly any[]; }
+
+/**
+ * A bind the EXECUTOR fills in: the retained `RETURNING` rows of an earlier statement binding,
+ * landed as ONE JSON bind exploded by `json_each` — never a row-count-sized placeholder list,
+ * which is the DO 100-parameter wall (§3.6). It travels in `Emitted.binds` in its own position, so
+ * `emit` never learns about chunking and the executor never parses SQL to find the slot.
+ */
+export interface RowsBind { readonly rowsOf: string; }
+export const isRowsBind = (bind: unknown): bind is RowsBind =>
+  typeof bind === 'object' && bind !== null && typeof (bind as RowsBind).rowsOf === 'string';
+
+/** One executable statement of a `Plan`, in execution order. A `Rel` binding is a CTE and produces
+ * no step of its own; a `Stmt` binding is a step whose `RETURNING` rows the executor retains. */
+export interface Step { readonly binding?: string; readonly result: boolean; readonly emitted: Emitted; }
 
 /**
  * The emitter is a SELECT BLOCK ASSEMBLER (§5 of the RelIR build plan).
@@ -88,8 +102,7 @@ interface Side {
   readonly scope: Scope;
 }
 
-function assembler(naming?: Naming) {
-  const named = new Map((naming?.named ?? []).map((binding) => [binding.rel, binding.name] as const));
+function assembler(bindings: ReadonlyMap<string, Binding>) {
 
   const expr = (e: Expr, scope: Scope): Expression => {
     const self = (x: Expr): Expression => expr(x, scope);
@@ -100,7 +113,6 @@ function assembler(naming?: Naming) {
         return column;
       }
       case 'lit': return value(e.value);
-      case 'param': throw new Error(`RelIR emitter requires parameter binding for '${e.name}'`);
       case 'unary': return e.op === 'not' ? q`NOT (${self(e.arg)})` : q`-(${self(e.arg)})`;
       case 'binary': return q`(${self(e.left)} ${raw(e.op.toUpperCase())} ${self(e.right)})`;
       case 'case': return q`CASE ${list(e.whens.map(([when, then]) => q`WHEN ${self(when)} THEN ${self(then)}`), ' ')}${e.else ? q` ELSE ${self(e.else)}` : empty} END`;
@@ -156,8 +168,7 @@ function assembler(naming?: Naming) {
   /** A relation that can stand in a FROM clause without a wrapping SELECT. A named CTE reference is
    * one of these, which is what makes `... FROM edges e INNER JOIN c2 p ON …` reachable at all. */
   const directSource = (r: Rel, outer: Scope): { item: FromItem; cols: Cols } | undefined => {
-    const cte = named.get(r);
-    if (cte) return { item: { text: ident(cte), alias: r.id }, cols: colsOf(r.id, r) };
+    if (r.kind === 'ref') return refSource(r);
     if (r.kind === 'scan') return { item: { text: ident(r.table), alias: r.alias }, cols: colsOf(r.alias, r) };
     // A recursive reference is a table source, never a derived relation: SQLite requires it exactly
     // once at the recursive term's top-level FROM and reports "circular reference" if it is wrapped.
@@ -227,17 +238,29 @@ function assembler(naming?: Naming) {
 
   // ---------- the per-kind arms ----------
 
-  function build(r: Rel, outer: Scope, inline = false): Built {
-    if (!inline) {
-      const cte = named.get(r);
-      if (cte) return leaf(r, { text: ident(cte), alias: r.id }, colsOf(r.id, r), outer);
-    }
+  /**
+   * A `Ref` is a table source either way, and that is the whole point of §3.0 collapsing the two
+   * mechanisms: a `Rel` binding is a CTE name, and a `Stmt` binding is its retained rows arriving
+   * as one JSON bind. Positional `$[i]` because a statement's result is a RELATION — the binding's
+   * declared type is the authority for every column, so there is nothing to infer here.
+   */
+  const refSource = (r: Extract<Rel, { readonly kind: 'ref' }>): { item: FromItem; cols: Cols } => {
+    const bound = bindings.get(r.name);
+    if (!bound) throw new Error(`RelIR emitter: Ref '${r.name}' has no Plan binding`);
+    if (!isStmt(bound.node)) return { item: { text: ident(r.name), alias: r.id }, cols: colsOf(r.id, r) };
+    const rows: RowsBind = { rowsOf: r.name };
+    return {
+      item: { text: q`json_each(${value(rows)})`, alias: r.id },
+      cols: new Map(r.type.cols.map((column, i) => [column.name, q`json_extract(${qualified(r.id, 'value')}, ${value(`$[${i}]`)})`])),
+    };
+  };
+
+  function build(r: Rel, outer: Scope): Built {
     switch (r.kind) {
-      case 'scan': case 'self-ref': case 'values': {
+      case 'scan': case 'self-ref': case 'values': case 'ref': {
         const source = directSource(r, outer)!;
         return leaf(r, source.item, source.cols, outer);
       }
-      case 'prior-result': throw new Error('RelIR PriorResult emits only inside a write Sequence');
 
       case 'project': {
         // A projection may always overwrite the select list, EXCEPT over a DISTINCT: dedup already
@@ -352,16 +375,70 @@ function assembler(naming?: Naming) {
   const recursiveDefinition = (r: Extract<Rel, { readonly kind: 'recursive' }>, outer: Scope): Expression =>
     q`${ident(r.name)}(${list(r.cols.map(ident))}) AS (${renderRel(r.seed, outer)} UNION ALL ${renderRel(r.step(recursiveSelf(r)), outer)})`;
 
-  const finish = (plan: Rel): Expression => {
-    const bindings = (naming?.named ?? []).map((binding) => q`${ident(binding.name)} AS (${renderBuilt(build(binding.rel, EMPTY_SCOPE, true))})`);
-    if (!bindings.length) return renderRel(plan, EMPTY_SCOPE);
-    // A recursive root must share ONE `WITH RECURSIVE` list with its named dependencies.
-    if (plan.kind === 'recursive')
-      return q`WITH RECURSIVE ${list([...bindings, recursiveDefinition(plan, EMPTY_SCOPE)])} SELECT * FROM ${ident(plan.name)}`;
-    return q`WITH ${list(bindings)} ${renderRel(plan, EMPTY_SCOPE)}`;
+  /** A statement is a scope whose target spells its columns bare: SQLite's UPDATE/DELETE do not
+   * alias theirs. Statements share this renderer entirely — no second expression path, and none of
+   * the `externalAliases`/`bareColumns` back channels a separate entry point needed. */
+  const statement = (s: Stmt): Expression => {
+    const target = s.target;
+    const scope: Scope = withRel(EMPTY_SCOPE, target.id, new Map(target.type.cols.map((column) => [column.name, ident(column.name)])));
+    const returning = (pairs: readonly (readonly [string, Expr])[]): Expression => pairs.length
+      ? q` RETURNING ${list(pairs.map(([name, expression]) => q`${expr(expression, scope)} AS ${ident(name)}`))}` : empty;
+    switch (s.kind) {
+      case 'insert':
+        return q`INSERT INTO ${ident(target.table)} (${list(s.cols.map(ident))}) ${renderRel(s.source, EMPTY_SCOPE)}${
+          s.onConflict
+            ? q` ON CONFLICT (${list(s.onConflict.target.map(ident))}) DO UPDATE SET ${list(s.onConflict.set.map(([name, expression]) => q`${ident(name)} = ${expr(expression, scope)}`))}`
+            : empty
+        }${returning(s.returning)}`;
+      case 'update': {
+        const source = s.from && fromItem(s.from, EMPTY_SCOPE);
+        const inner = source ? withRel(scope, s.from!.id, source.cols) : scope;
+        return q`UPDATE ${ident(target.table)} SET ${list(s.set.map(([name, expression]) => q`${ident(name)} = ${expr(expression, inner)}`))}${
+          source ? q` FROM ${fromText(source.item)}` : empty
+        }${s.where ? q` WHERE ${expr(s.where, inner)}` : empty}${returning(s.returning)}`;
+      }
+      case 'delete': {
+        // SQLite has no DELETE ... USING: `using` is the RelIR contract that supplies physical
+        // table ids, so it lowers to membership in a derived read.
+        const source = s.using && fromItem(s.using, EMPTY_SCOPE);
+        const membership = source ? q`${ident('id')} IN (SELECT ${source.cols.get('id')!} FROM ${fromText(source.item)})` : undefined;
+        const where = conjoin(membership, s.where ? expr(s.where, scope) : undefined);
+        if (!where) throw new Error('RelIR Delete emission requires using or where');
+        return q`DELETE FROM ${ident(target.table)} WHERE ${where}${returning(s.returning)}`;
+      }
+    }
   };
 
-  return { expr, renderRel, fromItem, finish };
+  /** A `Rel` binding is a CTE definition; the WITH list grows as bindings are declared, so a step
+   * sees exactly the relations declared before it — the ordering `checkPlan` already proved. */
+  const withCtes = (ctes: readonly Expression[], body: Expression, recursive = false): Expression =>
+    ctes.length ? q`WITH ${recursive ? raw('RECURSIVE ') : empty}${list(ctes)} ${body}` : body;
+
+  const program = (input: Plan): readonly Step[] => {
+    const steps: Step[] = [];
+    const ctes: Expression[] = [];
+    const resultRef = input.result.kind === 'ref' ? input.result.name : undefined;
+    // A plan whose RESULT is exactly a statement's rows has nothing left to run: the executor
+    // already holds them. Emitting a json_each read of rows it just retained would be a round trip
+    // to fetch what it already has.
+    const lastStatement = resultRef && isStmt(bindings.get(resultRef)?.node as never) ? resultRef : undefined;
+    for (const binding of input.bindings) {
+      if (isStmt(binding.node)) {
+        steps.push({ binding: binding.name, result: binding.name === lastStatement, emitted: emitted(withCtes(ctes, statement(binding.node))) });
+        continue;
+      }
+      ctes.push(q`${ident(binding.name)} AS (${renderBuilt(build(binding.node, EMPTY_SCOPE))})`);
+    }
+    if (lastStatement) return steps;
+    // A recursive root must share ONE `WITH RECURSIVE` list with the bindings beside it.
+    const body = input.result.kind === 'recursive' && ctes.length
+      ? q`WITH RECURSIVE ${list([...ctes, recursiveDefinition(input.result, EMPTY_SCOPE)])} SELECT * FROM ${ident(input.result.name)}`
+      : withCtes(ctes, renderRel(input.result, EMPTY_SCOPE));
+    steps.push({ result: true, emitted: emitted(body) });
+    return steps;
+  };
+
+  return program;
 }
 
 /** The rendered bind list is the authority the DO cap is measured against: `check`'s static count
@@ -372,61 +449,22 @@ const emitted = (tree: Expression): Emitted => {
   return { sql: out.sql, binds: out.binds };
 };
 
-/** Render a checked relational plan through the existing q kernel. */
-export function emit(plan: Rel, naming?: Naming): Emitted {
-  check(plan);
-  return emitted(assembler(naming).finish(plan));
+/**
+ * Render a checked PROGRAM (§3.0) to its executable steps, in order. ONE entry point: a write is
+ * not a second machine, it is a binding whose node is a statement, and the three-entry-point
+ * emitter this replaces (`emit`/`emitStmt`/`emitSequence`, with statement-only back channels) was
+ * the drift toward rebuilding write as a special case inside a new layer.
+ */
+export function emit(program: Plan): readonly Step[] {
+  checkPlan(program);
+  return assembler(new Map(program.bindings.map((binding) => [binding.name, binding])))(program);
 }
 
-/** Render the write statements. SQLite has no DELETE ... USING: `using` is the RelIR contract that
- * supplies physical table ids, so it lowers to membership in a derived read. */
-export function emitStmt(statement: Stmt): Emitted {
-  check(statement);
-  if (statement.kind === 'sequence') throw new Error('RelIR Sequence emission requires an executor');
-  const { expr, renderRel, fromItem } = assembler();
-  // A mutation target is never aliased: SQLite's UPDATE/DELETE name their own columns bare.
-  const target = statement.target;
-  const scope: Scope = withRel(EMPTY_SCOPE, target.id, new Map(target.type.cols.map((column) => [column.name, ident(column.name)])));
-  const returning = (pairs: readonly (readonly [string, Expr])[]): Expression => pairs.length
-    ? q` RETURNING ${list(pairs.map(([name, expression]) => q`${expr(expression, scope)} AS ${ident(name)}`))}` : empty;
-  let tree: Expression;
-  switch (statement.kind) {
-    case 'insert':
-      tree = q`INSERT INTO ${ident(target.table)} (${list(statement.cols.map(ident))}) ${renderRel(statement.source, EMPTY_SCOPE)}${
-        statement.onConflict
-          ? q` ON CONFLICT (${list(statement.onConflict.target.map(ident))}) DO UPDATE SET ${list(statement.onConflict.set.map(([name, expression]) => q`${ident(name)} = ${expr(expression, scope)}`))}`
-          : empty
-      }${returning(statement.returning)}`;
-      break;
-    case 'update': {
-      const source = statement.from && fromItem(statement.from, EMPTY_SCOPE);
-      const inner = source ? withRel(scope, statement.from!.id, source.cols) : scope;
-      tree = q`UPDATE ${ident(target.table)} SET ${list(statement.set.map(([name, expression]) => q`${ident(name)} = ${expr(expression, inner)}`))}${
-        source ? q` FROM ${q`${source.item.text} ${ident(source.item.alias)}`}` : empty
-      }${statement.where ? q` WHERE ${expr(statement.where, inner)}` : empty}${returning(statement.returning)}`;
-      break;
-    }
-    case 'delete': {
-      const source = statement.using && fromItem(statement.using, EMPTY_SCOPE);
-      const membership = source
-        ? q`${ident('id')} IN (SELECT ${source.cols.get('id')!} FROM ${q`${source.item.text} ${ident(source.item.alias)}`})`
-        : undefined;
-      const where = conjoin(membership, statement.where ? expr(statement.where, scope) : undefined);
-      if (!where) throw new Error('RelIR Delete emission requires using or where');
-      tree = q`DELETE FROM ${ident(target.table)} WHERE ${where}${returning(statement.returning)}`;
-      break;
-    }
-  }
-  return emitted(tree);
-}
-
-/** SQLite executes mutation steps one at a time. Preserve that fact in the API rather than
- * pretending a Sequence can be a data-modifying CTE; a later executor supplies PriorResult rows
- * between these emitted statements. */
-export function emitSequence(sequence: Extract<Stmt, { readonly kind: 'sequence' }>): readonly Emitted[] {
-  check(sequence);
-  return sequence.steps.map((step) => {
-    if (step.kind === 'sequence') throw new Error('RelIR Sequence cannot contain a nested Sequence');
-    return emitStmt(step);
-  });
+/** The single-step case, which every read plan is. A derived convenience over `emit`, deliberately
+ * not a second implementation. */
+export function emitQuery(program: Plan): Emitted {
+  const steps = emit(program);
+  const [only] = steps;
+  if (steps.length !== 1 || !only) throw new Error(`RelIR: this plan has ${steps.length} executable steps; use emit()`);
+  return only.emitted;
 }

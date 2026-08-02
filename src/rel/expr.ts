@@ -7,7 +7,6 @@ export type BinaryOp = '+' | '-' | '*' | '/' | '%' | '=' | '!=' | '<' | '<=' | '
 export type Expr =
   | { readonly kind: 'col'; readonly rel: import('./types.ts').RelId; readonly name: string }
   | { readonly kind: 'lit'; readonly value: unknown; readonly type: SqlType }
-  | { readonly kind: 'param'; readonly name: string }
   | { readonly kind: 'unary'; readonly op: 'not' | 'neg'; readonly arg: Expr }
   | { readonly kind: 'binary'; readonly op: BinaryOp; readonly left: Expr; readonly right: Expr }
   | { readonly kind: 'case'; readonly whens: readonly (readonly [Expr, Expr])[]; readonly else?: Expr }
@@ -27,4 +26,3 @@ export type WindowFn = 'row_number' | 'rank' | 'dense_rank' | 'count' | 'sum' | 
 
 export const col = (rel: import('./types.ts').RelId, name: string): Expr => ({ kind: 'col', rel, name });
 export const lit = (value: unknown, type: SqlType = 'any'): Expr => ({ kind: 'lit', value, type });
-export const param = (name: string): Expr => ({ kind: 'param', name });

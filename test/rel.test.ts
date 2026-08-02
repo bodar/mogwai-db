@@ -3,7 +3,8 @@ import { describe, expect, test } from 'bun:test';
 import { check } from '../src/rel/check.ts';
 import { col, lit } from '../src/rel/expr.ts';
 import { aggregate as aggregateRel, filter, join, materialize, project as projectRel, recursive as recursiveRel, scan as scanRel, explode, union, values as valuesRel, window as windowRel } from '../src/rel/factory.ts';
-import { emit } from '../src/rel/emit.ts';
+import { emitQuery } from '../src/rel/emit.ts';
+import { planOf } from '../src/rel/plan.ts';
 import { fuse } from '../src/rel/passes/fuse.ts';
 import { name } from '../src/rel/passes/name.ts';
 import { prune } from '../src/rel/passes/prune.ts';
@@ -35,7 +36,7 @@ describe('RelIR', () => {
       exprs: [['id', col(scan.id, 'id')], ['name', col(scan.id, 'name')]],
     });
     const filtered = filter({ id: relId('f'), input: plan, layout, type: { cols }, pred: { kind: 'binary', op: '=', left: col(plan.id, 'name'), right: lit('marko', 'text') } });
-    const emitted = emit(filtered);
+    const emitted = emitQuery(planOf(filtered));
     expect(emitted.binds).toEqual(['marko']);
     const db = new Database(':memory:');
     db.run('CREATE TABLE nodes (id INTEGER, name TEXT)');
@@ -70,7 +71,7 @@ describe('RelIR', () => {
       input: scan, layout, type: { cols: [{ name: 'n', type: 'int', nullable: false }] },
       groupBy: [], aggs: [['n', { kind: 'agg', fn: 'count', args: [] }]],
     });
-    expect(emit(aggregate).sql).toContain('count()');
+    expect(emitQuery(planOf(aggregate)).sql).toContain('count()');
     const invalid = projectRel({ id: relId('p'), input: scan, layout, type: { cols: [{ name: 'n', type: 'int', nullable: false }] }, exprs: [['n', { kind: 'agg', fn: 'count', args: [] }]] });
     expect(() => check(invalid)).toThrow('Agg is legal only in Aggregate.aggs');
   });
@@ -89,9 +90,9 @@ describe('RelIR', () => {
   test('names Values columns for downstream expressions', () => {
     const values = valuesRel({ id: relId('v'), rows: [[lit(1, 'int'), lit('marko', 'text')]], layout, type: { cols } });
     const plan = projectRel({ id: relId('p'), input: values, layout, type: { cols }, exprs: [['id', col(values.id, 'id')], ['name', col(values.id, 'name')]] });
-    expect(emit(plan).binds).toEqual([1, 'marko']);
+    expect(emitQuery(planOf(plan)).binds).toEqual([1, 'marko']);
     const db = new Database(':memory:');
-    expect(db.query(emit(plan).sql).all(...emit(plan).binds)).toEqual([{ id: 1, name: 'marko' }]);
+    expect(db.query(emitQuery(planOf(plan)).sql).all(...emitQuery(planOf(plan)).binds)).toEqual([{ id: 1, name: 'marko' }]);
     db.close();
   });
 
@@ -99,7 +100,7 @@ describe('RelIR', () => {
     const oneCol = [{ name: 'id', type: 'int', nullable: false }] as const;
     const seed = valuesRel({ id: relId('seed'), rows: [[lit(1, 'int')]], layout, type: { cols: oneCol } });
     const recursive = recursiveRel({ id: relId('walk'), name: 'walk', cols: ['id'], seed, layout, type: { cols: oneCol }, step: (self) => self });
-    expect(emit(recursive).sql).toContain('WITH RECURSIVE');
+    expect(emitQuery(planOf(recursive)).sql).toContain('WITH RECURSIVE');
   });
 
   test('renders SelfRef as a top-level recursive table source', () => {
@@ -108,7 +109,7 @@ describe('RelIR', () => {
     const recursive = recursiveRel({ id: relId('walk'), name: 'walk', cols: ['id'], seed, layout, type: { cols: oneCol },
       step: (self) => filter({ id: relId('step'), input: self, layout, type: { cols: oneCol }, pred: { kind: 'binary', op: '<', left: col(self.id, 'id'), right: lit(0, 'int') } }),
     });
-    const emitted = emit(recursive);
+    const emitted = emitQuery(planOf(recursive));
     expect(emitted.sql).toContain('FROM walk walk');
     const db = new Database(':memory:');
     expect(db.query(emitted.sql).all(...emitted.binds)).toEqual([{ id: 1 }]);
@@ -138,7 +139,7 @@ describe('RelIR', () => {
     const recursive = recursiveRel({ id: relId('walk'), name: 'walk', cols: ['id'], seed, layout, type: { cols: oneCol },
       step: (self) => filter({ id: relId('step'), input: self, layout, type: { cols: oneCol }, pred: { kind: 'binary', op: '<', left: col(self.id, 'id'), right: lit(0, 'int') } }),
     });
-    const emitted = emit(recursive, name(recursive));
+    const emitted = emitQuery(name(recursive));
     expect(emitted.sql).toContain('WITH RECURSIVE');
     expect(emitted.sql).toContain('seed AS');
     const db = new Database(':memory:');
@@ -161,8 +162,8 @@ describe('RelIR', () => {
 
   test('names shared DAG vertices and explicit materialization boundaries', () => {
     const joined = sharedUnderTwoSides();
-    expect(name(joined).named.map((binding) => binding.rel.id)).toEqual([relId('shared')]);
-    const emitted = emit(joined, name(joined));
+    expect(name(joined).bindings.map((binding) => binding.node.kind)).toEqual(['project']);
+    const emitted = emitQuery(name(joined));
     expect(emitted.sql).toContain('WITH');
     const db = new Database(':memory:');
     db.run('CREATE TABLE nodes (id INTEGER, name TEXT)');
@@ -181,7 +182,7 @@ describe('RelIR', () => {
     const first = filter({ id: relId('firstPerKey'), input: ranked, layout,
       type: { cols: [...cols, { name: 'rn', type: 'int', nullable: false }] },
       pred: { kind: 'binary', op: '=', left: col(ranked.id, 'rn'), right: lit(1, 'int') } });
-    const emitted = emit(first);
+    const emitted = emitQuery(planOf(first));
     const db = new Database(':memory:');
     db.run('CREATE TABLE nodes (id INTEGER, name TEXT)');
     db.run("INSERT INTO nodes VALUES (1, 'marko'), (2, 'marko'), (3, 'vadas')");
@@ -200,7 +201,7 @@ describe('RelIR', () => {
   test('Explode declares exactly the member columns it emits', () => {
     const withValue = [...cols, { name: 'v', type: 'any', nullable: true }] as const;
     const good = explode({ id: relId('members'), input: scan, layout, type: { cols: withValue }, expr: lit('[1,2]', 'json'), as: { value: 'v' } });
-    const emitted = emit(good);
+    const emitted = emitQuery(planOf(good));
     expect(emitted.sql).not.toContain('AS key');
     const db = new Database(':memory:');
     db.run('CREATE TABLE nodes (id INTEGER, name TEXT)');
@@ -235,7 +236,7 @@ describe('RelIR', () => {
     const joined = sharedUnderTwoSides();
     for (const pass of [fuse, (plan: typeof joined) => prune(plan)]) {
       const after = pass(joined);
-      expect(name(after).named.map((binding) => binding.rel.id)).toEqual([relId('shared')]);
+      expect(name(after).bindings.map((binding) => binding.name)).toEqual(['r0']);
       if (after.kind === 'join' && after.left.kind === 'filter' && after.right.kind === 'filter')
         expect(after.left.input).toBe(after.right.input);
     }
@@ -246,7 +247,7 @@ describe('RelIR', () => {
     const shared = filter({ id: relId('sharedTwice'), input: scan, layout, type: { cols }, pred: { kind: 'binary', op: '>', left: col(scan.id, 'id'), right: lit(0, 'int') } });
     const inner = join({ id: relId('innerJoin'), left: shared, right: shared, join: 'cross', layout, type: { cols: pairedCols } });
     const names = name(join({ id: relId('outerJoin'), left: pinned, right: inner, join: 'cross', layout,
-      type: { cols: [...cols, ...pairedCols.map((column) => ({ ...column, name: `${column.name}2` }))] } })).named.map((binding) => binding.name);
+      type: { cols: [...cols, ...pairedCols.map((column) => ({ ...column, name: `${column.name}2` }))] } })).bindings.map((binding) => binding.name);
     expect(new Set(names).size).toBe(names.length);
     expect(names).toContain('r0');
   });
@@ -268,7 +269,7 @@ describe('RelIR', () => {
     const db = new Database(':memory:');
     db.run('CREATE TABLE nodes (id INTEGER, name TEXT)');
     db.run("INSERT INTO nodes VALUES (1, 'marko'), (2, 'vadas')");
-    expect(db.query(emit(joined).sql).all()).toHaveLength(2);
+    expect(db.query(emitQuery(planOf(joined)).sql).all()).toHaveLength(2);
     db.close();
   });
 
@@ -282,7 +283,7 @@ describe('RelIR', () => {
     const db = new Database(':memory:');
     db.run('CREATE TABLE nodes (id INTEGER, name TEXT)');
     db.run("INSERT INTO nodes VALUES (1, 'marko'), (2, 'vadas')");
-    expect(db.query(emit(scalar).sql).all()).toEqual([{ id: 1, same: 'marko' }, { id: 2, same: 'vadas' }]);
+    expect(db.query(emitQuery(planOf(scalar)).sql).all()).toEqual([{ id: 1, same: 'marko' }, { id: 2, same: 'vadas' }]);
     db.close();
   });
 });
