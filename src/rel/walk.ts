@@ -170,13 +170,16 @@ export function rewriteExpr(e: Expr, f: (node: Expr) => Expr, rel: (plan: Rel) =
  * DAG (§3.4 of the build plan), and a pass that rebuilds per parent occurrence silently turns it
  * into a tree — which defeats `name`, and makes `unroll`'s replicated subplans multiply the SQL
  * text instead of sharing it.
+ *
+ * The callback receives the node with its children already rewritten AND the original node, so a
+ * pass that pre-computed an analysis over the input plan can still key it by the node it analysed.
  */
-export function rewrite(plan: Rel, f: (node: Rel) => Rel): Rel {
+export function rewrite(plan: Rel, f: (mapped: Rel, original: Rel) => Rel): Rel {
   const memo = new Map<Rel, Rel>();
   const go = (r: Rel): Rel => {
     const seen = memo.get(r);
     if (seen) return seen;
-    const out = f(mapRelChildren(r, go));
+    const out = f(mapRelChildren(r, go), r);
     memo.set(r, out);
     return out;
   };

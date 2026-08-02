@@ -1,45 +1,61 @@
 import { layoutCols } from '../../compiler/steps/context/context.ts';
 import type { Expr } from '../expr.ts';
+import { project } from '../factory.ts';
 import type { Rel } from '../rel.ts';
-import { distinct, explode, filter, limit, materialize, project, sort, window } from '../factory.ts';
+import type { RelId } from '../types.ts';
+import { forEachExpr, relChildren, rewrite } from '../walk.ts';
 
-const refs = (expr: Expr, relation: import('../types.ts').RelId, out: Set<string>): void => {
-  if (expr.kind === 'col') { if (expr.rel === relation) out.add(expr.name); return; }
-  switch (expr.kind) {
-    case 'unary': refs(expr.arg, relation, out); break;
-    case 'binary': refs(expr.left, relation, out); refs(expr.right, relation, out); break;
-    case 'case': expr.whens.forEach(([a,b]) => { refs(a,relation,out); refs(b,relation,out); }); if (expr.else) refs(expr.else,relation,out); break;
-    case 'cast': refs(expr.arg,relation,out); break;
-    case 'call': case 'agg': case 'window-expr': expr.args.forEach((arg) => refs(arg,relation,out)); break;
-    case 'json-object': expr.entries.forEach(([,value]) => refs(value,relation,out)); break;
-    case 'json-array': expr.items.forEach((value) => refs(value,relation,out)); break;
-    case 'in-list': refs(expr.expr,relation,out); expr.values.forEach((value) => refs(value,relation,out)); break;
-    case 'in-query': refs(expr.expr,relation,out); break;
-    default: break;
-  }
-};
+const refs = (expression: Expr, relation: RelId, out: Set<string>): void =>
+  forEachExpr(expression, (e) => { if (e.kind === 'col' && e.rel === relation) out.add(e.name); });
 
-/** Remove unobserved Project outputs while preserving every carried traverser channel. */
+/**
+ * Remove unobserved Project outputs while preserving every carried traverser channel.
+ *
+ * Two passes, because the plan is a DAG: a shared node has more than one consumer, and pruning it
+ * to what ONE parent reads breaks the other. Pass 1 accumulates each node's need as the UNION over
+ * its consumers, to a fixpoint; pass 2 rebuilds bottom-up through the sharing-preserving rewrite.
+ *
+ * Only `Project` outputs are pruned. Below a `Join`/`Union`/`Aggregate`/`Recursive` every declared
+ * column is required, so the walk continues but prunes nothing — the column-level rules for those
+ * nodes are the pass's declared remainder, not an accident of where the recursion stopped.
+ */
 export function prune(plan: Rel, required: readonly string[] = plan.type.cols.map((col) => col.name)): Rel {
-  const visit = (r: Rel, need: ReadonlySet<string>): Rel => {
-    switch (r.kind) {
-      case 'project': {
-        const keep = new Set([...need, ...layoutCols(r.layout)]);
-        const exprs = r.exprs.filter(([name]) => keep.has(name));
-        const inputNeed = new Set(layoutCols(r.input.layout));
-        exprs.forEach(([, expr]) => refs(expr, r.input.id, inputNeed));
-        const input = visit(r.input, inputNeed);
-        return project({ id: r.id, input, layout: r.layout, type: { cols: r.type.cols.filter((col) => keep.has(col.name)) }, exprs });
-      }
-      case 'filter': return filter({ id: r.id, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])), layout: r.layout, type: r.type, pred: r.pred });
-      case 'sort': return sort({ id: r.id, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])), layout: r.layout, type: r.type, terms: r.terms });
-      case 'limit': return limit({ id: r.id, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])), layout: r.layout, type: r.type, count: r.count, offset: r.offset });
-      case 'distinct': return distinct({ id: r.id, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])), layout: r.layout, type: r.type, on: r.on });
-      case 'window': return window({ id: r.id, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])), layout: r.layout, type: r.type, specs: r.specs });
-      case 'explode': return explode({ id: r.id, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])), layout: r.layout, type: r.type, expr: r.expr, as: r.as });
-      case 'materialize': return materialize({ id: r.id, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])), layout: r.layout, type: r.type, name: r.name });
-      default: return r;
-    }
+  const needs = new Map<Rel, Set<string>>();
+  const queue: Rel[] = [];
+  const require = (r: Rel, cols: Iterable<string>): void => {
+    const need = needs.get(r) ?? new Set<string>();
+    const before = need.size;
+    for (const col of cols) need.add(col);
+    if (!needs.has(r) || need.size !== before) { needs.set(r, need); queue.push(r); }
   };
-  return visit(plan, new Set(required));
+  const preserves = (r: Rel): boolean =>
+    r.kind === 'filter' || r.kind === 'sort' || r.kind === 'limit' || r.kind === 'distinct'
+    || r.kind === 'window' || r.kind === 'explode' || r.kind === 'materialize';
+
+  require(plan, required);
+  while (queue.length) {
+    const r = queue.pop()!;
+    const need = new Set(needs.get(r));
+    if (r.kind === 'project') {
+      const keep = new Set([...need, ...layoutCols(r.layout)]);
+      const inputNeed = new Set(layoutCols(r.input.layout));
+      r.exprs.filter(([name]) => keep.has(name)).forEach(([, expression]) => refs(expression, r.input.id, inputNeed));
+      require(r.input, inputNeed);
+      continue;
+    }
+    for (const child of relChildren(r)) {
+      require(child, preserves(r) ? [...need, ...layoutCols(child.layout)] : child.type.cols.map((col) => col.name));
+    }
+  }
+
+  return rewrite(plan, (mapped, original) => {
+    if (mapped.kind !== 'project') return mapped;
+    const keep = new Set([...(needs.get(original) ?? []), ...layoutCols(mapped.layout)]);
+    const exprs = mapped.exprs.filter(([name]) => keep.has(name));
+    if (exprs.length === mapped.exprs.length) return mapped;
+    return project({
+      id: mapped.id, input: mapped.input, layout: mapped.layout,
+      type: { cols: mapped.type.cols.filter((col) => keep.has(col.name)) }, exprs,
+    });
+  });
 }

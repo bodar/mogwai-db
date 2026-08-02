@@ -151,6 +151,25 @@ describe('RelIR', () => {
     expect(emit(joined, name(joined)).sql).toContain('WITH');
   });
 
+  test('a pass preserves DAG sharing, so naming still sees a shared node', () => {
+    const shared = filter({ id: relId('shared'), input: scan, layout, type: { cols }, pred: { kind: 'binary', op: '>', left: col(scan.id, 'id'), right: lit(0, 'int') } });
+    const joined = join({ id: relId('joined'), left: shared, right: shared, join: 'cross', layout, type: { cols } });
+    for (const pass of [fuse, (plan: typeof joined) => prune(plan)]) {
+      const after = pass(joined);
+      expect(name(after).named).toHaveLength(1);
+      if (after.kind === 'join') expect(after.left).toBe(after.right);
+    }
+  });
+
+  test('a generated CTE name never collides with an explicit Materialize name', () => {
+    const pinned = materialize({ id: relId('pinned'), input: scan, layout, type: { cols }, name: 'r0' });
+    const shared = filter({ id: relId('sharedTwice'), input: scan, layout, type: { cols }, pred: { kind: 'binary', op: '>', left: col(scan.id, 'id'), right: lit(0, 'int') } });
+    const inner = join({ id: relId('innerJoin'), left: shared, right: shared, join: 'cross', layout, type: { cols } });
+    const names = name(join({ id: relId('outerJoin'), left: pinned, right: inner, join: 'cross', layout, type: { cols } })).named.map((binding) => binding.name);
+    expect(new Set(names).size).toBe(names.length);
+    expect(names).toContain('r0');
+  });
+
   test('requires Union to use the layout merge contract', () => {
     const left = valuesRel({ id: relId('left'), rows: [[lit(1, 'int'), lit('marko', 'text')]], layout, type: { cols } });
     const right = valuesRel({ id: relId('right'), rows: [[lit(2, 'int'), lit('vadas', 'text')]], layout, type: { cols } });
