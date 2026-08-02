@@ -395,6 +395,12 @@ execution. `Delete.using` deliberately means physical `table.id` membership — 
 needed by `drop()`, not a new join/driver vocabulary. Emission, `PriorResult` materialization, and
 execution sequencing remain open; this is not yet a write-path migration.
 
+**Progress — 2026-08-02 (continued):** `8efb07e` makes that membership contract executable:
+`Delete{using}` emits SQLite's portable `DELETE … WHERE id IN (SELECT id FROM (<read plan>))` form,
+with the read plan's binds retained in order. The test both pins its SQL and executes it against
+SQLite. Target-scoped `Update`/`RETURNING` expressions remain deliberately un-emitted until their
+lexical target relation is represented in the statement contract.
+
 **Phase 2 supersedes [write-path](./2026-08-01-write-path-plan.md), and inherits its requirements.**
 That plan's agent was stopped 2026-08-01; the plan is not discarded, it is re-pointed. Precisely:
 
