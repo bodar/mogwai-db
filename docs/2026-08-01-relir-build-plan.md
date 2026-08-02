@@ -432,7 +432,9 @@ contract (§2).
 
 Deliverables: the full §3 object model; `check` (§4.1); `emit` (§5); `fuse`, `prune`, `name`.
 Tests are pure — build a plan by hand, assert the SQL, run it against an in-memory SQLite, assert the
-rows. **No Gremlin is involved in any Phase-1 test.**
+rows. **No Gremlin is involved in any Phase-1 test** — with one deliberate exception, the exit gate
+below, which compiles Gremlin only to obtain the legacy SQL it compares against. That is a property
+of the COMPARISON, not of `src/rel/`: the clean-room rule is about what the algebra imports.
 
 **Exit criterion (restated 2026-08-02):** for ten representative traversal families taken from
 `test/L2-sql/`, a hand-built plan must be **equivalent to the legacy SQL under §5a** — same results on
@@ -441,7 +443,37 @@ the reference fixture, same `EXPLAIN QUERY PLAN`. Result framing and Gremlin sha
 If the emitter cannot match those cores, the object model is wrong and Phase 1 is not finished — this
 is the cheapest possible falsification and it comes before any integration.
 
-**The gate is NOT met, and `test/rel-core-sql.test.ts` is not it** (audit, §9·1). That file pins ten
+**The gate is MET as of `38a58ba`** — `test/rel-l2-equivalence.test.ts`, eleven families, each
+asserting identical rows on the reference fixture and an identical `EXPLAIN QUERY PLAN` access
+path. Both sides are mechanical: `test/support/sql-core.ts` takes a compiled plan's relational
+CORE by structure (its CTE chain, with the framing `SELECT` replaced by `SELECT * FROM <last cte>`,
+because RelIR sits below framing) and reduces an EQP to its index DECISIONS, dropping object names
+(an alias is spelling) and CTE-materialization lines (CTE-versus-inline is `name`'s decision,
+§4.6). The families: element source · source-by-id · movement with bulk coalescing · the label
+filter · the property filter as a correlated `EXISTS` · value projection with its storage-class
+`CASE` · the reducing barrier · `Sort`+`Limit` · whole-row dedup · the branch `UNION` · `inject`'s
+`VALUES`. The interesting ones are three and four index decisions deep, so an access-path change
+fails rather than passing on a coincidence.
+
+**What the gate found on its first run — both invisible to every other test:**
+
+- **`Union` emitted a SQLite SYNTAX ERROR.** `(SELECT …) UNION ALL (SELECT …)` is `near "(":
+  syntax error` — a compound arm is a select-CORE, not a parenthesised select. No test had ever
+  EXECUTED a union; the pins only compared its string. An arm that fills a tail slot now takes a
+  derived table of its own, since `ORDER BY`/`LIMIT` belong to the compound and not to an arm.
+- **`Table` had no `vertex_labels`**, so `hasLabel()` was a shape the algebra could not express at
+  all. `Scan` is the one physical-schema node (§3.3), which makes an absent table an absent
+  capability rather than an inconvenience. `vertex_property_cardinality` was missing for the same
+  reason and lands with it.
+
+One expressiveness note the gate surfaced and did NOT resolve: movement's bulk coalescing
+(`SELECT id, SUM(bulk) … GROUP BY id`) is a grouped `Aggregate` that must KEEP carrying `bulk`,
+while §3.5's obligation makes every reducing aggregate a barrier and `BARRIER_ROLE_POLICY` drops
+`bulk`. The gate's plans carry the trivial layout, so it does not bite there — but Phase 4.3
+(`count` and the aggregates) has to answer it, and the answer is probably that bulk coalescing is
+a `recognize` rewrite (§4.7) rather than a barrier.
+
+**The superseded record** (audit, §9·1) — `test/rel-core-sql.test.ts` is not the gate. That file pins ten
 NODE KINDS against hand-written transcriptions of the emitter's own output; no `test/L2-sql/`
 expectation is referenced, no traversal family appears, and nothing in it fails if the object model is
 wrong. The original wording asked for byte-identity, which was (a) against `test/CLAUDE.md`'s own
@@ -687,13 +719,13 @@ gone. A constraint is kept because it is right, not because it is written down.
 
 | # | Constraint | What landed | Status |
 |---|---|---|---|
-| 9·1 | Phase 1's equivalence gate over ten L2 traversal **families** | ten node kinds pinned against the emitter's own output; no L2 expectation referenced | **open**, and both blockers are now GONE: §5a replaced the impossible byte-identity wording, and the block assembler landed (`b199a5f`), so the L2 core shape is reachable. The remaining work is the gate itself |
+| 9·1 | Phase 1's equivalence gate over ten L2 traversal **families** | ten node kinds pinned against the emitter's own output; no L2 expectation referenced | **CLOSED** (`38a58ba`): `test/rel-l2-equivalence.test.ts`, eleven families, mechanical on both sides. It found a `Union` emitting invalid SQLite and a missing `vertex_labels` table on its first run |
 | 9·2 | §5 "the emitter is total — an unrenderable node is a compile error, not a runtime throw" | `Param` and `PriorResult` are constructible and `throw` at emission | **open, decided** (§10·2): `Param` is deleted and `PriorResult` becomes `Ref` resolved by a pass, so no unrenderable node survives. These are the last two throwing arms — the block assembler's per-kind arms are all total |
 | 9·3 | §3.4 "the plan is a **DAG**; a node referenced twice is shared" | `fuse`/`prune` rebuilt per parent occurrence with no memo — measured: `left === right` true before `fuse`, false after, and `name` then named the wrong node | **FIXED** (`0ca0cd8`): one memoised `rewrite` in `walk.ts`; `prune` is now two-pass, taking each node's need as the UNION over consumers |
 | 9·4 | §4 "total, order-declared, mirroring the existing `Pass` pipeline's discipline — no switch growth" | 15 hand-written walkers (7 over `Expr`, 8 over `Rel`); 13 carried a `default:` arm, so a new node kind was silently skipped by the bind budget, recursive-term legality, pruning and sharing | **FIXED** (`5fd7c10`): `src/rel/walk.ts` declares the structure ONCE, with no `default` anywhere, so `noImplicitReturns` makes a new kind a compile error. It also closed two live holes the old walkers shared: an `Agg`'s `orderBy` and a `WindowExpr`'s `partitionBy`/`orderBy`/frame bounds were reached by NO analysis, so a `Lit` in a partition key was not counted against the bind budget |
 | 9·5 | §3.5 per-node layout obligations as a `Record`, "so a new node or role fails the build until declared" | no such table existed; `Join` had NO layout check at all, nor did grouped `Aggregate`, `Values`, `Scan`, or `Explode`'s output schema | **FIXED** (`80e8cd3`): `src/rel/layout.ts` — `Record<RelKind, LayoutObligation>`, executable and run by `check`. Includes §3.5's left-join rule (a rigid channel may not arrive from the nullable side) and extends the barrier contract to any reducing `Aggregate`, not just `groupBy: []`. `check` gained a second total table for expression PLACEMENT, with an arity assertion so a kind cannot forget one |
 | 9·6 | §2 `src/rel/` imports nothing from `src/compiler/` | the layout imports are now concentrated in `src/rel/layout.ts` (plus `passes/prune.ts`), which is the whole of the surface to move | **open, decided** (§10·3): the contract carries Gremlin's `AliasShape`/`Elem`, so it is DECOMPOSED into a neutral channel core rather than moved wholesale. The plan's "never redesign it" rule is withdrawn |
-| 9·7 | §3.3 `Scan` is the only physical-schema node | `'id'` is hardcoded in the emitter's delete membership and in `check`'s `Delete.using` rule | **broken** |
+| 9·7 | §3.3 `Scan` is the only physical-schema node | `'id'` is hardcoded in the emitter's delete membership and in `check`'s `Delete.using` rule | **broken**. The `Table` union itself was also incomplete (no `vertex_labels`), which §9·1's gate found and `38a58ba` fixed |
 | 9·8 | §3.6 the bind budget is a plan property with `RowBatch`/`json_each` as the remedy | `check` fails closed above 100 binds; no chunking or JSON-bind form exists, so a legitimate large `Values` is refused rather than lowered | **open, decided** (§10·2): the remedy is a pass that lands rows as one JSON bind exploded by `json_each`, so `emit` never learns about chunking |
 | 9·9 | Phase 0 "clear the deck… worth doing first" | 0.1 not done (`globalRowOps` still has 5 refs; `ELEMENT_DISPATCH`/`SCALAR_DISPATCH` do not use it); 0.2 partly done (61 → 21 sites) | **skipped**, while Phase 2 started — and 0.2 was declared a *rename-safety prerequisite* for exactly the code motion Phases 2 and 4 perform |
 | 9·10 | §5 "the **unchanged** `q` kernel" | kernel gained `identifier()` | **amended** in §5: additive-only is the rule, and this addition qualifies. The block assembler needed nothing further from the kernel |
