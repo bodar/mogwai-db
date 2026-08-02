@@ -880,6 +880,32 @@ One defect found by the port and worth recording as a class: `likePattern` crash
 and unreachable there because every other op is handled first — so re-expressing a function in a
 context that calls it more generally is itself an instrument.
 
+**Coverage 76 → 86 (`de5172a`): `is(P)` past the shape boundary, and a measured bind wall closed
+with it.** Re-measured from the new base, `is` had jumped to **+53** — the largest single win left,
+because `count().is(…)` and `values().is(…)` only become reachable once the terminal they follow is
+covered. Two increments earlier the same step was worth ZERO, which is the whole argument for
+re-measuring every round rather than working down a fixed list. The step is a `Filter` over the
+scalar relation using the SAME predicate module the source filters use — the payoff for building
+`P`/`TextP` as a module rather than a `has`-shaped helper.
+
+**The wall, and why it is worth recording rather than working around.** Fusing a `Filter` into its
+input's block means the input's outputs are spelled as the EXPRESSIONS that compute them (§5) — SQL
+leaves no choice, since a `WHERE` cannot name a select alias — so each `is` re-inlined the whole
+projection. With the vtype-aware ordering `CASE` in play that is ~20 binds apiece: measured **25 /
+45 / 65** for one, two and three range predicates against legacy's 2 / 3 / 4, and a fourth would
+have exceeded the DO 100-parameter cap and **failed closed where legacy answers**. Not a wrong
+answer — a support regression, which is the class this repo gates for. `Materialize` is the declared
+remedy (§3.3, *"a boundary hint … where the planner needs a fence"*) and lands the same
+CTE-then-filter shape legacy emits: **16 / 38 / 50**, linear, and shorter SQL than legacy in every
+case. Pinned as a test, because the failure mode is a plan that stops executing rather than one that
+answers wrong.
+
+What remains is **~13 binds per ordering predicate** — `compareKey`'s fixed type vocabulary, which
+the legacy emitter splices as SQL TEXT and RelIR cannot, because `Lit` renders as a bind by
+construction (§3.2). That is exactly the trade the rule was made for: a `check` that can PROVE the
+DO cap, paid for in binds a hand-written emitter would have inlined. It is linear and bounded, and
+the first thing to revisit if a real traversal ever approaches the cap.
+
 **Coverage growth, measured over the 2,298-traversal corpus.** Cumulative chains fully covered as
 each step name is admitted, so an increment can be chosen by what it BUYS rather than by what looks
 next: `V`/`E` 41 · `+hasLabel` 51 · `+has` 95 · all six movement steps + `inV`/`outV`/`otherV` 104 ·
@@ -887,12 +913,18 @@ next: `V`/`E` 41 · `+hasLabel` 51 · `+has` 95 · all six movement steps + `inV
 · `+filter` 366. (Measured with no bound parameters, so it excludes the 381 `unbound` rows; the
 census column is the real number.)
 
-**MARGINAL value from the current base of `V`/`E`/`hasLabel`/`has` — the number to choose the next
-increment by, since the cumulative figures above are order-dependent:** `+values` **19** · `+where`
-16 · `+movement` 9 · `+count` 9 · `+valueMap` 7 · `+order` 5 · `+hasId` 3 · `+limit`/`range`/`skip`
-2 · `+fold` 1 · **`+values` and `+count` together 28**. Everything else is 0 alone — `id`, `label`,
-`dedup`, `identity`, `is`, `not` add nothing until something else lands first, which is exactly the
-kind of fact that makes a plausible-looking increment worthless.
+**MARGINAL value is the number to choose the next increment by, and it MOVES — re-measure every
+round.** From `V`/`E`/`hasLabel`/`has` it read: `+values` 19 · `+where` 16 · `+movement` 9 ·
+`+count` 9 · `+valueMap` 7 · `+order` 5 · `+hasId` 3 · `+limit`/`range`/`skip` 2 · `+fold` 1, with
+everything else — `id`, `label`, `dedup`, `identity`, **`is`**, `not` — worth **zero alone**. Two
+increments later, from `V`/`E`/`hasLabel`/`has`/`count`/`values`, `is` was worth **53**: it had been
+gated behind the terminals it follows. So a step worth nothing is not a step worth nothing NEXT
+round, and a fixed worklist would have missed the largest win twice over.
+
+**Current marginal values, from base 123** (`V`/`E`/`hasLabel`/`has`/`count`/`values`/`is`):
+`+where` 38 · `+movement` 27 · `+order` 11 · `+valueMap` 7 · `+hasId` 5 · `+limit`/`range`/`skip` 2 ·
+`+dedup` 1 · `+fold` 2 · `id`/`label`/`identity` 0. **`movement` + the row-algebraic class together
+is 66** — and movement is the one that unblocks `where`, since most `where` bodies are movements.
 
 **LANDED (`986b056`): the shape boundary, coverage 62 → 75.** A lowering now returns a
 `RelFraming` — a UNION, not a widened record, because an element stream has no scalar type and a
