@@ -407,6 +407,13 @@ predicates and `RETURNING` expressions against the target's declared columns (an
 optional source relation). This keeps the physical schema at `Scan` — the sole storage node — and
 unblocks shared expression emission without stringly target columns.
 
+**Progress — 2026-08-02 (continued):** `da3e982` extracts the shared relational expression/
+relation renderer, and `c2ee365` uses it for executable `Insert`, `Update` and `Delete` SQL.
+Their target-column expressions, source relations, `WHERE`, `ON CONFLICT` assignments and
+`RETURNING` projections are all kernel-rendered in one tree; no statement arm reimplements
+expression SQL or bind ordering. SQLite execution tests cover insert, update and delete, and the
+checker rejects undeclared assignment/insert target columns.
+
 **Phase 2 supersedes [write-path](./2026-08-01-write-path-plan.md), and inherits its requirements.**
 That plan's agent was stopped 2026-08-01; the plan is not discarded, it is re-pointed. Precisely:
 
