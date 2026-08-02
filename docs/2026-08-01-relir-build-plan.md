@@ -580,7 +580,23 @@ an ordered `Sequence`, only for an earlier step, and only when its full column t
 matches that step's result schema. This is the type-preserving contract the runtime JSON transfer
 will carry, not a second inferred expression-type system.
 
-**Current handoff — 2026-08-02, RESTATED against §3.0.** Phase 2's remaining 2.1 seam is the
+**Progress — 2026-08-02, decision 10·2 landed (`3057e89`).** `Plan`/`Binding`/`Ref` exist;
+`Sequence`, `PriorResult`, `Param`, `returningType` and the `Naming` side-table are deleted.
+Statements share `RelBase`, so a statement's result is a relation like any other. `emit` is ONE
+entry point over a program returning its executable steps in order — the three it replaced
+(`emit`/`emitStmt`/`emitSequence`, with statement-only `externalAliases`/`bareColumns` back
+channels) are gone, and a statement is now a scope whose target spells its columns bare, sharing
+the whole renderer. `name` rewrites shared nodes into bindings; `checkPlan` walks them in order, so
+a forward or self reference fails closed. A `Ref` to a statement binding renders as `json_each(?)`
+over one JSON bind carried in `Emitted.binds` as a `RowsBind` marker, so `emit` never learns about
+chunking and the executor never parses SQL to find the slot; a plan whose result IS a statement's
+rows emits no extra step.
+
+**Remaining in this seam: the executor itself** — walk the steps, run each, retain its `RETURNING`
+rows, and substitute them for the matching `RowsBind`. It lives OUTSIDE `src/rel/` (§10·2), and it
+must preserve the pre-mutation snapshot a vertex-drop cascade requires.
+
+**Superseded handoff — 2026-08-02, RESTATED against §3.0.** Phase 2's remaining 2.1 seam is the
 **binding executor**, and it is no longer statement-shaped: walk `Plan.bindings` in order; a `Rel`
 binding is a CTE or is inlined per the `Name` pass; a `Stmt` binding is executed and its `RETURNING`
 rows retained, so that every later `Ref` to it renders from ONE JSON bind exploded by `json_each`
@@ -720,13 +736,13 @@ gone. A constraint is kept because it is right, not because it is written down.
 | # | Constraint | What landed | Status |
 |---|---|---|---|
 | 9·1 | Phase 1's equivalence gate over ten L2 traversal **families** | ten node kinds pinned against the emitter's own output; no L2 expectation referenced | **CLOSED** (`38a58ba`): `test/rel-l2-equivalence.test.ts`, eleven families, mechanical on both sides. It found a `Union` emitting invalid SQLite and a missing `vertex_labels` table on its first run |
-| 9·2 | §5 "the emitter is total — an unrenderable node is a compile error, not a runtime throw" | `Param` and `PriorResult` are constructible and `throw` at emission | **open, decided** (§10·2): `Param` is deleted and `PriorResult` becomes `Ref` resolved by a pass, so no unrenderable node survives. These are the last two throwing arms — the block assembler's per-kind arms are all total |
+| 9·2 | §5 "the emitter is total — an unrenderable node is a compile error, not a runtime throw" | `Param` and `PriorResult` are constructible and `throw` at emission | **CLOSED** (`3057e89`): `Param` is deleted, `PriorResult` is `Ref`, and every `Ref` renders — a `Rel` binding as a CTE name, a `Stmt` binding as `json_each` over one JSON bind. No relational arm throws |
 | 9·3 | §3.4 "the plan is a **DAG**; a node referenced twice is shared" | `fuse`/`prune` rebuilt per parent occurrence with no memo — measured: `left === right` true before `fuse`, false after, and `name` then named the wrong node | **FIXED** (`0ca0cd8`): one memoised `rewrite` in `walk.ts`; `prune` is now two-pass, taking each node's need as the UNION over consumers |
 | 9·4 | §4 "total, order-declared, mirroring the existing `Pass` pipeline's discipline — no switch growth" | 15 hand-written walkers (7 over `Expr`, 8 over `Rel`); 13 carried a `default:` arm, so a new node kind was silently skipped by the bind budget, recursive-term legality, pruning and sharing | **FIXED** (`5fd7c10`): `src/rel/walk.ts` declares the structure ONCE, with no `default` anywhere, so `noImplicitReturns` makes a new kind a compile error. It also closed two live holes the old walkers shared: an `Agg`'s `orderBy` and a `WindowExpr`'s `partitionBy`/`orderBy`/frame bounds were reached by NO analysis, so a `Lit` in a partition key was not counted against the bind budget |
 | 9·5 | §3.5 per-node layout obligations as a `Record`, "so a new node or role fails the build until declared" | no such table existed; `Join` had NO layout check at all, nor did grouped `Aggregate`, `Values`, `Scan`, or `Explode`'s output schema | **FIXED** (`80e8cd3`): `src/rel/layout.ts` — `Record<RelKind, LayoutObligation>`, executable and run by `check`. Includes §3.5's left-join rule (a rigid channel may not arrive from the nullable side) and extends the barrier contract to any reducing `Aggregate`, not just `groupBy: []`. `check` gained a second total table for expression PLACEMENT, with an arity assertion so a kind cannot forget one |
 | 9·6 | §2 `src/rel/` imports nothing from `src/compiler/` | the layout imports are now concentrated in `src/rel/layout.ts` (plus `passes/prune.ts`), which is the whole of the surface to move | **open, decided** (§10·3): the contract carries Gremlin's `AliasShape`/`Elem`, so it is DECOMPOSED into a neutral channel core rather than moved wholesale. The plan's "never redesign it" rule is withdrawn |
 | 9·7 | §3.3 `Scan` is the only physical-schema node | `'id'` is hardcoded in the emitter's delete membership and in `check`'s `Delete.using` rule | **broken**. The `Table` union itself was also incomplete (no `vertex_labels`), which §9·1's gate found and `38a58ba` fixed |
-| 9·8 | §3.6 the bind budget is a plan property with `RowBatch`/`json_each` as the remedy | `check` fails closed above 100 binds; no chunking or JSON-bind form exists, so a legitimate large `Values` is refused rather than lowered | **open, decided** (§10·2): the remedy is a pass that lands rows as one JSON bind exploded by `json_each`, so `emit` never learns about chunking |
+| 9·8 | §3.6 the bind budget is a plan property with `RowBatch`/`json_each` as the remedy | `check` fails closed above 100 binds; no chunking or JSON-bind form exists, so a legitimate large `Values` is refused rather than lowered | **half closed** (`3057e89`): a statement's retained rows now land as ONE JSON bind (`RowsBind`), so the write side never sizes a bind list by row count. A large literal `Values` is still refused rather than lowered — the same `json_each` remedy applies and is not written yet |
 | 9·9 | Phase 0 "clear the deck… worth doing first" | 0.1 not done (`globalRowOps` still has 5 refs; `ELEMENT_DISPATCH`/`SCALAR_DISPATCH` do not use it); 0.2 partly done (61 → 21 sites) | **skipped**, while Phase 2 started — and 0.2 was declared a *rename-safety prerequisite* for exactly the code motion Phases 2 and 4 perform |
 | 9·10 | §5 "the **unchanged** `q` kernel" | kernel gained `identifier()` | **amended** in §5: additive-only is the rule, and this addition qualifies. The block assembler needed nothing further from the kernel |
 
@@ -776,7 +792,7 @@ rewrites), §4.2 in Phase 4 (the assembler, not `fuse`, deletes `TailAcc`).
 §5a — same results plus same `EXPLAIN QUERY PLAN`. It was against `test/CLAUDE.md`'s own rule, it was
 unreachable for the emitter as built, and an unreachable gate is what invited 9·1's substitution.
 
-### 10·2 — DECIDED: the top of a plan is a program (§3.0)
+### 10·2 — DECIDED and LANDED (`3057e89`): the top of a plan is a program (§3.0)
 
 `Plan { bindings, result }`, `Binding { name, node: Rel | Stmt }`, and one `Ref` node. `Sequence`,
 `PriorResult`, `Naming`-as-a-side-table and `returningType` are all deleted: they were four spellings
@@ -807,7 +823,7 @@ Refused: making every RelIR node generic in an opaque layout type `L` (a large t
 node, factory and pass, for a dependency that is a vocabulary rather than a behaviour), and simply
 accepting the import (which would keep `src/rel/` untestable without the compiler).
 
-**Sequencing: 10·1 (landed) → 10·2 → 10·3.** The assembler rewrites every emitter arm while the `Plan` wrapper
+**Sequencing: 10·1 (landed) → 10·2 (landed) → 10·3.** The assembler rewrites every emitter arm while the `Plan` wrapper
 changes emit's *entry*, so the assembler goes first to avoid rebasing it; the layout decomposition
 changes no plan structure, so it goes last, when the §3.5 obligation table is the only RelIR consumer
 left to update. 10·2 first is acceptable if the write wedge needs to move sooner — the cost is small.
