@@ -232,17 +232,25 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     expect(nested.sql).toContain('PARTITION BY p.o0, p.o1');
   });
 
-  test('P.inside is exclusive-low (distinct from between)', () => {
-    // between = [lo,hi) ; inside = (lo,hi)
-    expect(read('g.V().has("age", P.between(29,35))').sql).toContain('END) >= ?');
-    expect(read('g.V().has("age", P.inside(29,35))').sql).toContain('END) > ?');
-    expect(read('g.V().has("age", P.inside(29,35))').sql).not.toContain('END) >= ?');
-  });
+  // `has()` is RelIR-routed (§10·4), so these two run on BOTH spines. What is asserted is the
+  // SEMANTIC distinction each test is about, not the spelling the spines legitimately differ over:
+  // both emit the vtype-aware compareKey CASE, one as `(CASE … END) >= ?` and the other — where
+  // every binary is parenthesised as a whole — as `(CASE … END >= ?)`. `compared` is that shared
+  // shape, so one assertion serves both and neither spine's parenthesisation is pinned.
+  const compared = (op: string) => new RegExp(`END\\)? ${op.replace(/[><=]/g, (c) => '\\' + c)} \\?`);
+  for (const spine of ['legacy', 'rel'] as const) {
+    test(`P.inside is exclusive-low (distinct from between) — ${spine} spine`, () => {
+      // between = [lo,hi) ; inside = (lo,hi)
+      expect(read('g.V().has("age", P.between(29,35))', { spine }).sql).toMatch(compared('>='));
+      expect(read('g.V().has("age", P.inside(29,35))', { spine }).sql).toMatch(compared('>'));
+      expect(read('g.V().has("age", P.inside(29,35))', { spine }).sql).not.toMatch(compared('>='));
+    });
 
-  test('has() still compiles all predicate forms after the predicateSql refactor', () => {
-    expect(read('g.V().has("age", 30)').sql).toContain('= ?');            // eq stays a raw exact compare
-    expect(read('g.V().has("age", P.gt(30))').sql).toContain('END) > ?'); // range → vtype-aware compareKey
-    expect(read('g.V().has("age", P.within(29,30))').sql).toContain('in (?, ?)');
-    expect(read('g.V().has("age", P.between(29,35))').sql).toContain('END) >= ?');
-  });
+    test(`has() compiles every predicate form — ${spine} spine`, () => {
+      expect(read('g.V().has("age", 30)', { spine }).sql).toContain('= ?');          // eq stays a raw exact compare
+      expect(read('g.V().has("age", P.gt(30))', { spine }).sql).toMatch(compared('>')); // range → vtype-aware compareKey
+      expect(read('g.V().has("age", P.within(29,30))', { spine }).sql).toMatch(/in \(\?, ?\?\)/i);
+      expect(read('g.V().has("age", P.between(29,35))', { spine }).sql).toMatch(compared('>='));
+    });
+  }
 });

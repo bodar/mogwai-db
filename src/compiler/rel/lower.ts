@@ -8,6 +8,7 @@ import { relId, type ColMeta, type RelType, type SqlType } from '../../rel/types
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../ir/strategies.ts';
+import { containsTextSearch, predicateExpr, storedCompare } from './predicate.ts';
 
 /**
  * THE SECOND LOWERING — `Step[] -> RelIR` (§10·4 of `docs/2026-08-01-relir-build-plan.md`).
@@ -72,12 +73,9 @@ const PROPERTIES = {
 } as const;
 
 const and = (left: Expr | undefined, right: Expr): Expr => (left ? { kind: 'binary', op: 'and', left, right } : right);
+
 const eq = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '=', left, right });
 
-/** A literal a `has(key, value)` can compare against with no predicate vocabulary at all. Anything
- *  else — a `P`, a token, a nested traversal, `null` — is a DECLINE, never a guess. */
-const literal = (arg: unknown): Expr | null =>
-  typeof arg === 'string' ? lit(arg, 'text') : typeof arg === 'number' ? lit(arg, 'real') : null;
 
 /** `SELECT id FROM labels WHERE name IN (…)` — the name→id indirection every label-aware step
  *  reaches through, and the reason `labels` is a `Scan` table rather than a string in an emitter. */
@@ -123,25 +121,32 @@ function sourceFilter(step: IRStep, scan: Rel, elem: Elem, fresh: Minter): Expr 
   }
 
   if (step.name === 'has') {
-    // `has(key)` and `has(key, <literal>)` only. `has(key, P…)` is 72 corpus occurrences and the
-    // largest single win left here, but it needs the `P` vocabulary as RelIR expressions — its own
-    // increment, and one that then serves `where`/`is`/`filter` too. `has(label, key, value)` and
-    // the `T`-token forms likewise decline rather than being half-answered.
+    // `has(key)` and `has(key, <value-or-predicate>)`. `has(label, key, value)` and the `T`-token
+    // forms decline rather than being half-answered — a token key is a different question (it
+    // reads the element's id or label, not a property row).
     const [key, val, extra] = args;
     if (typeof key !== 'string' || extra !== undefined) return null;
-    const value = val === undefined ? undefined : literal(val);
-    if (val !== undefined && !value) return null;
+    // A substring `TextP` over a STORED property is `ftsSubstringPredicate`'s, and taking it here
+    // would swap a trigram-index seek for a base-table LIKE scan — a regression the census cannot
+    // see, reported by the coverage number as progress. §4.7 lifts this.
+    if (containsTextSearch(val)) return null;
 
     const { table, owner } = PROPERTIES[elem];
     const props = make.scan({
       id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-      type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true)),
+      type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
     });
+    // The property row's own `vtype` is in scope here, so an ordering comparison gets the
+    // vtype-aware key — the whole reason `predicateExpr` takes `compare` as a parameter.
+    const matches = val === undefined ? undefined
+      : predicateExpr(col(props.id, 'value'), val, storedCompare(props.id));
+    if (val !== undefined && !matches) return null;
+
     const matching = make.filter({
       id: fresh('f'), input: props, channels: [], type: props.type,
-      pred: and(and(undefined, eq(col(props.id, owner), col(scan.id, 'id'))), value
-        ? and(eq(col(props.id, 'key'), lit(key, 'text')), eq(col(props.id, 'value'), value))
-        : eq(col(props.id, 'key'), lit(key, 'text'))),
+      pred: matches
+        ? and(and(eq(col(props.id, owner), col(scan.id, 'id')), eq(col(props.id, 'key'), lit(key, 'text'))), matches)
+        : and(eq(col(props.id, owner), col(scan.id, 'id')), eq(col(props.id, 'key'), lit(key, 'text'))),
     });
     // `EXISTS (SELECT 1 …)`, correlated on the outer scan — a property FILTER asks whether a row
     // exists, and joining instead would multiply the traverser once per matching property.

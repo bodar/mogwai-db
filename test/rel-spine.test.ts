@@ -33,6 +33,14 @@ const COVERED = [
   // redundant self-joins. RelIR conjoins them into one WHERE over one scan — measured, the same
   // index decisions with those SEARCH-by-rowid steps simply absent.
   "g.V().hasLabel('person').has('age',29)", "g.V().has('name','marko').has('age',29)",
+  // The P/TextP vocabulary as RelIR expressions. Range comparisons go through the vtype-aware
+  // ordering key, so a value stored as TEXT because it does not fit a numeric storage class (a
+  // long past 2^53, a bigint, a bigdecimal, a duration) still orders numerically — the one arm
+  // where a plausible-looking lowering is silently wrong.
+  "g.V().has('age',P.gt(30))", "g.V().has('age',P.lte(29))", "g.V().has('name',P.neq('marko'))",
+  "g.V().has('name',P.within('marko','josh'))", "g.V().has('name',P.without('marko'))",
+  "g.V().has('name',P.within())", "g.V().has('age',P.between(20,30))", "g.V().has('age',P.inside(20,35))",
+  "g.V().has('age',P.gt(20).and(P.lt(30)))", "g.V().has('age',P.not(P.gt(30)))", "g.E().has('weight',P.gte(0.5))",
 ];
 
 /**
@@ -46,7 +54,8 @@ const DECLINED = [
   'g.withSack(0).V()',                // a carried sack the source seed would have to declare
   'g.withSideEffect("a",1).V()',      // a side effect
   'g.addV("person")',                 // a write
-  "g.V().has('age',P.gt(30))",        // a P predicate — 72 corpus occurrences, its own increment
+  "g.V().has('name',TextP.containing('ark'))",  // ftsSubstringPredicate's — see below
+  "g.V().has('name',P.within(__.V().values('name').fold()))", // a run-time member list, not a set
   "g.V().has('person','age',29)",     // the three-argument (label, key, value) form
   'g.V().has(T.id,1)',                // a T-token key
   "g.V().has('name',null)",           // a null value: not a literal this route can compare
@@ -66,6 +75,19 @@ describe('the RelIR spine', () => {
       expect(plan.kind === 'read' ? plan.spine : 'legacy').toBe('legacy');
     });
   }
+
+  test('a fast path is never silently dropped', () => {
+    // THE RULE, and it is general: coverage measures whether the new spine can EXPRESS a
+    // traversal, not whether it should take it from a specialized lowering. `has(k, containing(t))`
+    // routes through the `property_fts` trigram index; expressing it here as a base-table LIKE scan
+    // would be a performance regression the census cannot see, reported by the coverage number as
+    // progress. §4.7 is where the fast paths become plan rewrites and this decline lifts.
+    expect(read("g.V().has('name',TextP.containing('ark'))", { spine: 'rel' }).spine).toBe('legacy');
+    expect(read("g.V().has('name',TextP.containing('ark'))").sql).toContain('property_fts');
+    // The decline is a function of the CHAIN alone, never of the fast-path config: making spine
+    // choice read `fastPaths` would couple two decisions that have to stay independent.
+    expect(read("g.V().has('name',TextP.containing('ark'))", { spine: 'rel', fastPaths: { ftsSubstringPredicate: false } }).spine).toBe('legacy');
+  });
 
   test('the switch is a preference, never a claim about coverage', () => {
     // Asking for RelIR does not make an uncovered chain route there, and asking for legacy always
