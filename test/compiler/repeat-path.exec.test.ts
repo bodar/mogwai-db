@@ -4,10 +4,11 @@
 import { test, expect, describe } from 'bun:test';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { executeQuery } from '../support/executor.ts';
+import { exec, executeQuery } from '../support/executor.ts';
 import { decode, decodeAll } from '../support/decode.ts';
 import { rawVertex } from '../support/graph.ts';
 import { bagOf, run, seededStore } from '../support/harness.ts';
+import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -38,6 +39,16 @@ test('repeat/times/emit execute (multiset + emit bands)', () => {
     .toEqual(['josh', 'lop', 'lop', 'marko', 'ripple', 'vadas']);
   // both() one hop from marko = 3 incident
   expect(run(store, 'g.V(1).repeat(__.both()).times(1).count()').map((r) => r.v)).toEqual([3]);
+});
+
+test('a prefix limit is consumed before repeat() drops its encounter column', () => {
+  const store = seededStore();
+  const q = "g.V().hasLabel('person').limit(1).repeat(__.out()).times(1)";
+  // The generic repeat route used to declare the prefix's encounter column after the walk had
+  // dropped it, producing SQLite's "table cN has 2 values for 3 columns".  Disable the bulking
+  // fast path so this exercises that semantic authority directly.
+  const generic = exec(store, undefined, { ...DEFAULT_FAST_PATHS, bulkRepeatCount: false });
+  expect(generic.framed(q, {})).toHaveLength(3);
 });
 
 test('a label bound before repeat() rides the walk (loop-invariant carried column)', () => {

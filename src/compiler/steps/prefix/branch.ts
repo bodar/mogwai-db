@@ -1052,6 +1052,11 @@ export const repeat: StepFn = (s, st) => {
   // Column ORDER on the SELECT must match layoutCols(out): sack, bulk, ORIGINS, then path.
   // The walk names its accumulator `sackCol`; the outbound carried name is always `sk`.
   const sackOut = sackCol ? q`, ${raw(sackCol)} AS sk` : empty;
+  // `limit()` before a repeat needs the input encounter, but the repeat output has no single
+  // continuation of that order: one input row can fan out to many recursive rows.  The limit has
+  // already consumed it, so drop it here rather than declaring a column the walk does not emit.
+  // A positional consumer after repeat is separately unsupported by analyzeChain's opaque-boundary
+  // rule; retaining this stale slot would only manufacture a CTE arity error.
   // Column ORDER must match layoutCols(out) EXACTLY: aliases, sack, bulk, origins, path. The two
   // ride-groups are therefore NOT contiguous here (bulk sits between them), unlike inside the walk.
   const aliasOut = ride(aliasCols, null);
@@ -1063,8 +1068,8 @@ export const repeat: StepFn = (s, st) => {
   // NOT carry it — a match() pattern seed, whose multiplicity is its row count — hit the skew.
   const bulkOut = { bulk: 'bulk' as const };
   const out = wantsPathOutput
-    ? appendCte(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut}, path FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, ...bulkOut, path: { kind: 'array', col: 'path', elem: 'vertex' } })
-    : appendCte(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut} FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, ...bulkOut });
+    ? appendCte(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut}, path FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, ...bulkOut, encounter: null, path: { kind: 'array', col: 'path', elem: 'vertex' } })
+    : appendCte(st, q`SELECT id${aliasOut}${sackOut}, 1 AS bulk${originOut} FROM ${walk} WHERE ${outWhere}`, { sack: sackCol ? 'sk' : null, ...bulkOut, encounter: null });
   if (!aggName) return out;
   // A body-terminal aggregate('x'): collect every vertex the body emitted — the walk rows at
   // depth ≥ 1 (the seed is the pre-body input, not a body output). If the name already holds a
