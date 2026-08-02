@@ -4,6 +4,7 @@ import type { Expr } from './expr.ts';
 import type { Rel } from './rel.ts';
 import type { Naming } from './passes/name.ts';
 import { recursiveSelf } from './factory.ts';
+import type { Stmt } from './stmt.ts';
 
 export interface Emitted { readonly sql: string; readonly binds: readonly any[]; }
 
@@ -135,4 +136,19 @@ export function emit(plan: Rel, naming?: Naming): Emitted {
     : bindings.length ? q`WITH ${list(bindings)} ${root}` : root;
   const out = render(tree);
   return { sql: out.sql, binds: out.binds };
+}
+
+/** Render the first executable write wedge. SQLite has no DELETE ... USING: `using` is the
+ * RelIR contract that supplies physical table ids, so it lowers to membership in a derived read.
+ * Other statement forms wait for their target-scope contract rather than accepting unscoped
+ * physical-column expressions. */
+export function emitStmt(statement: Stmt): Emitted {
+  check(statement);
+  if (statement.kind !== 'delete') throw new Error(`RelIR statement emitter does not yet support ${statement.kind}`);
+  if (!statement.using) throw new Error('RelIR Delete emission requires a using relation');
+  if (statement.where || statement.returning.length) throw new Error('RelIR Delete emission currently supports only using-based membership');
+  const using = emit(statement.using);
+  const tree = q`DELETE FROM ${ident(statement.table)} WHERE ${ident('id')} IN (SELECT ${ident('id')} FROM (${raw(using.sql)}) ${ident(statement.using.id)})`;
+  const out = render(tree);
+  return { sql: out.sql, binds: [...using.binds, ...out.binds] };
 }
