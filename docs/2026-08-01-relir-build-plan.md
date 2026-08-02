@@ -420,6 +420,12 @@ than concatenated into an invalid data-modifying CTE. Nested sequences are rejec
 materialization is the remaining part of this seam; it must preserve the pre-mutation snapshot for
 vertex-drop cascades rather than re-evaluating the source after an earlier delete.
 
+**Progress — 2026-08-02 (continued):** result typing is now explicit (`6ee500f`): each DML node
+declares `returningType`, exactly matching its `RETURNING` names. A `PriorResult` is legal only in
+an ordered `Sequence`, only for an earlier step, and only when its full column type/nullability
+matches that step's result schema. This is the type-preserving contract the runtime JSON transfer
+will carry, not a second inferred expression-type system.
+
 **Phase 2 supersedes [write-path](./2026-08-01-write-path-plan.md), and inherits its requirements.**
 That plan's agent was stopped 2026-08-01; the plan is not discarded, it is re-pointed. Precisely:
 
