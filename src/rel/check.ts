@@ -1,10 +1,11 @@
 import type { Expr } from './expr.ts';
+import { joinWidth } from './factory.ts';
 import { checkLayout } from './layout.ts';
 import { isRel, type Rel, type RelKind } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import { exprChildren, exprRels, recursiveStep, relChildren, relExprs } from './walk.ts';
 
-const DO_BIND_CAP = 100;
+export const DO_BIND_CAP = 100;
 
 interface Scope { readonly cols: ReadonlyMap<string, Rel>; readonly inAggregate: boolean; readonly inWindow: boolean; readonly recursive?: { readonly name: string; readonly self: string; readonly allowed: boolean }; readonly prior?: readonly import('./types.ts').RelType[]; }
 
@@ -122,7 +123,14 @@ export function check(plan: Rel | Stmt): void {
    * SQLite laws. Also `Record<RelKind, …>`, for the same reason. */
   const STRUCTURE: { readonly [K in RelKind]: (node: Extract<Rel, { readonly kind: K }>, scope: Scope) => void } = {
     scan: () => {}, filter: () => {}, sort: () => {}, limit: () => {}, distinct: () => {},
-    materialize: () => {}, explode: () => {}, window: () => {}, aggregate: () => {},
+    materialize: () => {}, explode: () => {}, window: () => {},
+    aggregate: (node) => {
+      const declared = node.type.cols.map((column) => column.name);
+      if (declared.length !== node.groupBy.length + node.aggs.length)
+        throw new Error(`RelIR: Aggregate declares ${declared.length} columns but emits ${node.groupBy.length} group keys and ${node.aggs.length} aggregates`);
+      if (node.aggs.some(([name], i) => name !== declared[node.groupBy.length + i]))
+        throw new Error('RelIR: Aggregate output must be its group keys followed by its aggregates');
+    },
     'self-ref': (node, scope) => {
       if (!scope.recursive || !scope.recursive.allowed || node.name !== scope.recursive.name)
         throw new Error('RelIR: SelfRef is legal only in its Recursive step');
@@ -149,6 +157,13 @@ export function check(plan: Rel | Stmt): void {
       const needsOn = node.join === 'inner' || node.join === 'left';
       if ((node.join === 'cross' && node.on) || (needsOn && !node.on))
         throw new Error(`RelIR: ${node.join} join ${node.join === 'cross' ? 'must not' : 'requires'} an ON expression`);
+      // The emitter names the join's output positionally from both sides, so the declared width and
+      // the uniqueness of those names are what make a `Col` against the join resolvable at all.
+      const width = joinWidth(node);
+      if (node.type.cols.length !== width)
+        throw new Error(`RelIR: a ${node.join} Join emits its sides' ${width} columns; its type declares ${node.type.cols.length}`);
+      const declared = node.type.cols.map((column) => column.name);
+      if (new Set(declared).size !== declared.length) throw new Error('RelIR: a Join declares a duplicate output name');
     },
     union: (node) => {
       if (node.inputs.length < 2) throw new Error('RelIR: Union requires at least two inputs');

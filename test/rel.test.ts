@@ -12,6 +12,8 @@ import { relId } from '../src/rel/types.ts';
 const layout = { aliases: new Map(), origins: [], branchOrders: [] } as const;
 const cols = [{ name: 'id', type: 'int', nullable: false }, { name: 'name', type: 'text', nullable: false }] as const;
 const scan = scanRel({ id: relId('n'), table: 'nodes', alias: 'n', layout, type: { cols } });
+/** A join emits both sides' columns positionally, so a two-column pair needs four distinct names. */
+const pairedCols = [...cols, ...cols.map((column) => ({ ...column, name: `${column.name}_r` }))] as const;
 
 /** The realistic sharing shape: one subplan feeding two DISTINCT sides of a join. Sharing the very
  * same relation on both sides is a construction error — one FROM cannot carry one alias twice. */
@@ -217,14 +219,15 @@ describe('RelIR', () => {
     const left = scanRel({ id: relId('l'), table: 'nodes', alias: 'l', layout, type: { cols } });
     const right = projectRel({ id: relId('r'), input: scan, layout: carried, type: { cols: bulked },
       exprs: [['id', col(scan.id, 'id')], ['name', col(scan.id, 'name')], ['bulk', lit(1, 'int')]] });
-    const invalid = join({ id: relId('outer'), left, right, join: 'left', layout: carried, type: { cols: bulked },
+    const invalid = join({ id: relId('outer'), left, right, join: 'left', layout: carried,
+      type: { cols: [...cols, { name: 'id_r', type: 'int', nullable: false }, { name: 'name_r', type: 'text', nullable: false }, { name: 'bulk', type: 'int', nullable: false }] },
       on: { kind: 'binary', op: '=', left: col(left.id, 'id'), right: col(right.id, 'id') } });
     expect(() => check(invalid)).toThrow("left Join cannot carry rigid channel 'bulk' from its nullable right side");
   });
 
   test('rejects a join whose two sides are the same relation', () => {
     const shared = filter({ id: relId('same'), input: scan, layout, type: { cols }, pred: { kind: 'binary', op: '>', left: col(scan.id, 'id'), right: lit(0, 'int') } });
-    const selfJoin = join({ id: relId('selfJoin'), left: shared, right: shared, join: 'cross', layout, type: { cols } });
+    const selfJoin = join({ id: relId('selfJoin'), left: shared, right: shared, join: 'cross', layout, type: { cols: pairedCols } });
     expect(() => check(selfJoin)).toThrow("a Join's sides must be distinct relations");
   });
 
@@ -241,8 +244,9 @@ describe('RelIR', () => {
   test('a generated CTE name never collides with an explicit Materialize name', () => {
     const pinned = materialize({ id: relId('pinned'), input: scan, layout, type: { cols }, name: 'r0' });
     const shared = filter({ id: relId('sharedTwice'), input: scan, layout, type: { cols }, pred: { kind: 'binary', op: '>', left: col(scan.id, 'id'), right: lit(0, 'int') } });
-    const inner = join({ id: relId('innerJoin'), left: shared, right: shared, join: 'cross', layout, type: { cols } });
-    const names = name(join({ id: relId('outerJoin'), left: pinned, right: inner, join: 'cross', layout, type: { cols } })).named.map((binding) => binding.name);
+    const inner = join({ id: relId('innerJoin'), left: shared, right: shared, join: 'cross', layout, type: { cols: pairedCols } });
+    const names = name(join({ id: relId('outerJoin'), left: pinned, right: inner, join: 'cross', layout,
+      type: { cols: [...cols, ...pairedCols.map((column) => ({ ...column, name: `${column.name}2` }))] } })).named.map((binding) => binding.name);
     expect(new Set(names).size).toBe(names.length);
     expect(names).toContain('r0');
   });
@@ -260,7 +264,7 @@ describe('RelIR', () => {
 
   test('renders join predicates as SQL expressions', () => {
     const right = scanRel({ id: relId('m'), table: 'nodes', alias: 'm', layout, type: { cols } });
-    const joined = join({ id: relId('j'), left: scan, right, join: 'inner', on: { kind: 'binary', op: '=', left: col(scan.id, 'id'), right: col(right.id, 'id') }, layout, type: { cols } });
+    const joined = join({ id: relId('j'), left: scan, right, join: 'inner', on: { kind: 'binary', op: '=', left: col(scan.id, 'id'), right: col(right.id, 'id') }, layout, type: { cols: pairedCols } });
     const db = new Database(':memory:');
     db.run('CREATE TABLE nodes (id INTEGER, name TEXT)');
     db.run("INSERT INTO nodes VALUES (1, 'marko'), (2, 'vadas')");

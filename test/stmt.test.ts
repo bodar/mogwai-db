@@ -34,7 +34,7 @@ describe('RelIR statements', () => {
   test('emits Delete.using as SQLite id membership', () => {
     const doomed = values({ id: relId('doomed'), rows: [[lit(2, 'int')]], layout, type: { cols: ids } });
     const emitted = emitStmt(remove({ target: nodes, using: doomed, returning: [], returningType: noReturning }));
-    expect(emitted.sql).toBe('DELETE FROM nodes WHERE id IN (SELECT id FROM (SELECT column1 AS id FROM (VALUES (?))) doomed)');
+    expect(emitted.sql).toBe('DELETE FROM nodes WHERE id IN (SELECT doomed.column1 FROM (VALUES (?)) doomed)');
     expect(emitted.binds).toEqual([2]);
     const db = new Database(':memory:');
     db.run('CREATE TABLE nodes (id INTEGER PRIMARY KEY)');

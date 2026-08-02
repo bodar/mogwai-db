@@ -36,7 +36,18 @@ export const project = (init: WithId<'project'>): Node<'project'> => {
   return node('project', { ...init, exprs: freeze(init.exprs.map((pair) => freeze([...pair] as [string, Expr]))) });
 };
 export const filter = (init: WithId<'filter'>): Node<'filter'> => node('filter', init);
-export const aggregate = (init: WithId<'aggregate'>): Node<'aggregate'> => { named(init.aggs); return node('aggregate', init); };
+/** A grouped relation emits its group KEYS and then its aggregates, and the emitter has to spell
+ * every output column by name — so the declared type is the naming authority for keys that are
+ * expressions, not just the aggregates that already carry one. */
+export const aggregate = (init: WithId<'aggregate'>): Node<'aggregate'> => {
+  named(init.aggs);
+  const declared = init.type.cols.map((column) => column.name);
+  if (declared.length !== init.groupBy.length + init.aggs.length)
+    throw new Error(`RelIR: Aggregate declares ${declared.length} columns but emits ${init.groupBy.length} group keys and ${init.aggs.length} aggregates`);
+  if (init.aggs.some(([name], i) => name !== declared[init.groupBy.length + i]))
+    throw new Error('RelIR: Aggregate output must be its group keys followed by its aggregates');
+  return node('aggregate', init);
+};
 export const sort = (init: WithId<'sort'>): Node<'sort'> => node('sort', { ...init, terms: freeze([...init.terms] as SortTerm[]) });
 export const limit = (init: WithId<'limit'>): Node<'limit'> => node('limit', init);
 /** Whole-row `SELECT DISTINCT`, and deliberately nothing else. A KEYED dedup (`dedup(by(x))`, which
@@ -55,9 +66,21 @@ export const window = (init: WithId<'window'>): Node<'window'> => {
 };
 export const explode = (init: WithId<'explode'>): Node<'explode'> => node('explode', init);
 export const materialize = (init: WithId<'materialize'>): Node<'materialize'> => node('materialize', init);
+/** A join's output is its sides' columns POSITIONALLY — left then right, or the left alone for the
+ * existence forms. The declared type supplies the names, because two sides routinely carry the same
+ * one and `Col{rel, name}` cannot say which it meant; a duplicate is a construction error rather
+ * than a silent last-write-wins, for the same reason two relations may not share a `RelId`. */
+export const joinWidth = (init: Pick<RelNode<'join'>, 'left' | 'right' | 'join'>): number =>
+  init.left.type.cols.length + (init.join === 'semi' || init.join === 'anti' ? 0 : init.right.type.cols.length);
+
 export const join = (init: WithId<'join'>): Node<'join'> => {
   if (init.join === 'cross' && init.on) throw new Error('RelIR: cross join must not have an ON expression');
   if ((init.join === 'inner' || init.join === 'left') && !init.on) throw new Error(`RelIR: ${init.join} join requires an ON expression`);
+  const width = joinWidth(init);
+  if (init.type.cols.length !== width)
+    throw new Error(`RelIR: a ${init.join} Join emits its sides' ${width} columns; its type declares ${init.type.cols.length}`);
+  const declared = init.type.cols.map((column) => column.name);
+  if (new Set(declared).size !== declared.length) throw new Error('RelIR: a Join declares a duplicate output name');
   return node('join', init);
 };
 export const union = (init: WithId<'union'>): Node<'union'> => {
