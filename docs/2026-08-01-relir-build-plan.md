@@ -572,31 +572,31 @@ to close.
 |---|---|---|---|
 | 9·1 | Phase 1's byte-identical gate over ten L2 traversal **families** | ten node kinds pinned against the emitter's own output; no L2 expectation referenced | **broken**, blocked on §10·1 |
 | 9·2 | §5 "the emitter is total — an unrenderable node is a compile error, not a runtime throw" | `Param` and `PriorResult` are constructible and `throw` at emission | **broken**; fix is a lowering pass, not an emitter arm (§10·2) |
-| 9·3 | §3.4 "the plan is a **DAG**; a node referenced twice is shared" | `fuse`/`prune` rebuild per parent occurrence with no memo — measured: `left === right` true before `fuse`, false after, and `name` then names the wrong node | **broken**; `unroll` cannot work until fixed |
-| 9·4 | §4 "total, order-declared, mirroring the existing `Pass` pipeline's discipline — no switch growth" | 15 hand-written walkers (7 over `Expr`, 8 over `Rel`); 13 carry a `default:` arm, so a new node kind is silently skipped by the bind budget, recursive-term legality, pruning and sharing | **broken**; needs one exhaustive child seam before `flatten`/`unroll`/`recognize` add three more |
-| 9·5 | §3.5 per-node layout obligations as a `Record`, "so a new node or role fails the build until declared" | no such table exists; `Join` has NO layout check at all (including the declared left-join nullability rule), nor do grouped `Aggregate`, `Values`, `Scan`, or `Explode`'s output schema | **broken**; this is the 33%-defect guardrail |
-| 9·6 | §2 `src/rel/` imports nothing from `src/compiler/steps/` | `types.ts`, `check.ts`, `passes/prune.ts` import `steps/context/context.ts` | **broken**, and the plan contradicted itself — resolved in §2 by moving the contract to a neutral module |
+| 9·3 | §3.4 "the plan is a **DAG**; a node referenced twice is shared" | `fuse`/`prune` rebuilt per parent occurrence with no memo — measured: `left === right` true before `fuse`, false after, and `name` then named the wrong node | **FIXED** (`0ca0cd8`): one memoised `rewrite` in `walk.ts`; `prune` is now two-pass, taking each node's need as the UNION over consumers |
+| 9·4 | §4 "total, order-declared, mirroring the existing `Pass` pipeline's discipline — no switch growth" | 15 hand-written walkers (7 over `Expr`, 8 over `Rel`); 13 carried a `default:` arm, so a new node kind was silently skipped by the bind budget, recursive-term legality, pruning and sharing | **FIXED** (`5fd7c10`): `src/rel/walk.ts` declares the structure ONCE, with no `default` anywhere, so `noImplicitReturns` makes a new kind a compile error. It also closed two live holes the old walkers shared: an `Agg`'s `orderBy` and a `WindowExpr`'s `partitionBy`/`orderBy`/frame bounds were reached by NO analysis, so a `Lit` in a partition key was not counted against the bind budget |
+| 9·5 | §3.5 per-node layout obligations as a `Record`, "so a new node or role fails the build until declared" | no such table existed; `Join` had NO layout check at all, nor did grouped `Aggregate`, `Values`, `Scan`, or `Explode`'s output schema | **FIXED** (`80e8cd3`): `src/rel/layout.ts` — `Record<RelKind, LayoutObligation>`, executable and run by `check`. Includes §3.5's left-join rule (a rigid channel may not arrive from the nullable side) and extends the barrier contract to any reducing `Aggregate`, not just `groupBy: []`. `check` gained a second total table for expression PLACEMENT, with an arity assertion so a kind cannot forget one |
+| 9·6 | §2 `src/rel/` imports nothing from `src/compiler/steps/` | the layout imports are now concentrated in `src/rel/layout.ts` (plus `passes/prune.ts`), which is the whole of the surface to move | **open — §10·3.** Measured as NOT mechanical: the contract carries Gremlin's `AliasShape`/`Elem` vocabulary, so the plan's two halves were never compatible and the resolution is a decision |
 | 9·7 | §3.3 `Scan` is the only physical-schema node | `'id'` is hardcoded in the emitter's delete membership and in `check`'s `Delete.using` rule | **broken** |
 | 9·8 | §3.6 the bind budget is a plan property with `RowBatch`/`json_each` as the remedy | `check` fails closed above 100 binds; no chunking or JSON-bind form exists, so a legitimate large `Values` is refused rather than lowered | **incomplete**; same fix as 9·2 |
 | 9·9 | Phase 0 "clear the deck… worth doing first" | 0.1 not done (`globalRowOps` still has 5 refs; `ELEMENT_DISPATCH`/`SCALAR_DISPATCH` do not use it); 0.2 partly done (61 → 21 sites) | **skipped**, while Phase 2 started — and 0.2 was declared a *rename-safety prerequisite* for exactly the code motion Phases 2 and 4 perform |
 | 9·10 | §5 "the **unchanged** `q` kernel" | kernel gained `identifier()` | **amended** in §5: additive-only is the rule, and this addition qualifies |
 
-Four defects the checker was supposed to make impossible, each with a measured failing case:
+Four defects the checker was supposed to make impossible, each found with a measured failing case and
+each now fixed with that case pinned as a test:
 
-- **`Distinct{on}` conflates a dedup key with a projection.** `distinct({type:(id,name), on:[name]})`
-  emits `SELECT DISTINCT n.name` — one column where two are declared — and a consumer of `id` fails at
-  runtime with `no such column`. §3.3 reads `on` as a KEY ("absent = whole row"), which is what
-  `dedup(by(…))` needs in 4.1. `check` verifies layout against the DECLARED type and never against
-  what the emitter will produce.
-- **A derived relation is aliased by its `RelId`, so a self-join emits one alias twice** —
-  `… INNER JOIN (SELECT * FROM r0) m ON (m.id = m.id)` → `ambiguous column name`. Occurrence-level
-  aliasing is the emitter's job; lexical identity cannot double as the SQL alias. `unroll` produces
-  exactly this shape.
-- **`RelId` uniqueness is an unstated invariant.** `check`'s scope and the emitter's alias map are both
-  last-write-wins, so two same-id relations under a join misattribute a column rejection — and, with
-  matching column sets, resolve silently to whichever alias was collected last.
-- **`name` can mint a colliding CTE name**: generated `r0…rN` do not reserve explicit `Materialize`
-  names (measured `["r0","r0","r1"]`).
+- **`Distinct{on}` conflated a dedup key with a projection** — `distinct({type:(id,name), on:[name]})`
+  emitted `SELECT DISTINCT n.name`, one column where two were declared, and a consumer of `id` failed
+  at runtime with `no such column`. **`on` is removed** (`e3f3a8a`); see the §3.3 row.
+- **A derived relation is aliased by its `RelId`, so a self-join emitted one alias twice** —
+  `… INNER JOIN (SELECT * FROM r0) m ON (m.id = m.id)` → `ambiguous column name`. Fixed as a
+  CONSTRUCTION error rather than by auto-aliasing (`c4bce7f`): a `Join`'s sides must be distinct
+  relations, because `Col{rel}` cannot say WHICH occurrence it means. A replicated subplan — what
+  `unroll` produces — must carry fresh ids, and now finds that out at `check` rather than in SQLite.
+- **`RelId` uniqueness was an unstated invariant** — `check`'s scope was last-write-wins, so two
+  same-id relations misattributed a column rejection and, with matching column sets, would have
+  resolved silently. Binding two different relations to one id in a scope now fails closed.
+- **`name` could mint a colliding CTE name**: generated `r0…rN` did not reserve explicit `Materialize`
+  names (measured `["r0","r0","r1"]`). Fixed in `0ca0cd8`.
 
 One altitude finding, not a constraint breach: **declare-and-verify where the project's own pattern
 says derive.** `Project.type` vs `exprs`, `Window.type` vs `input + specs`, `Recursive.cols` vs `type`,
@@ -644,3 +644,38 @@ The alternative — an executor inside `src/rel/` that special-cases statement s
 current three-entry-point emitter (`emit`, `emitStmt`, `emitSequence`, with statement-only
 `externalAliases`/`bareColumns` back channels) is already drifting toward, and it rebuilds write as a
 special case in a new layer.
+
+### 10·3 The layout contract cannot be extracted without deciding what "clean-room" meant
+
+9·6 looked mechanical — move the contract to a neutral module, repoint two imports. Measured, it is
+not, and the reason is worth recording rather than discovering twice.
+
+`TraverserLayout` is not a neutral vocabulary. Its `aliases` carry `AliasEntry`, whose `shapes` are
+`AliasShape` (`'vertex' | 'edge' | 'value' | 'list' | 'map' | 'property'`), and `PathState` positions
+are `Elem` (`'vertex' | 'edge'`). Both are Gremlin's words, defined under `src/compiler/`. So
+importing the contract verbatim — which §2 REQUIRES, for good reasons — imports Gremlin element
+vocabulary into `src/rel/` no matter which file it is spelled from. §2's "clean-room" and §2's
+"import the layout contract" were never fully compatible; the audit's 9·6 states the contradiction,
+and this is what the resolution costs.
+
+Three options, none of them free:
+
+- **(a) Extract and amend the claim.** Move the pure half of `context.ts` (~450 of its 934 lines:
+  the alias/path/layout types, the two policy tables, `mergeLayouts`/`patchLayout`/`layoutCols`/
+  `barrierLayout`/`rigidCols`, plus the two string unions) to a neutral `src/layout.ts` that both
+  `steps/` and `rel/` import. `ScalarType` already comes from the kernel, so the extracted module
+  would depend on nothing but the kernel. 47 files import `context.ts`; a re-export facade keeps
+  that churn at one line but leaves a migration facade behind. §2 then says: RelIR depends on the
+  carried-channel VOCABULARY and on no part of the lowering layer — which is the true and useful
+  version of the claim.
+- **(b) Invert it.** `src/rel/` declares a port (`cols`/`same`/`merge`/`barrier`/`rigid` over an
+  opaque `L`) and the compiler supplies the implementation. Genuinely clean-room, and it makes every
+  RelIR node generic in `L` — a large type-level cost paid on every node, factory and pass, for a
+  dependency that is a vocabulary rather than a behaviour.
+- **(c) Accept the import and delete the claim.** Cheapest, and honest, but it removes the property
+  that made `src/rel/` testable without the compiler.
+
+**(a) is the recommendation** — the dependency is real and worth admitting, and the extraction is the
+part that pays for itself when Phase 4 moves the read path. It is left undone here deliberately: it is
+a 450-line move across a 47-importer surface, and doing it as a silent side effect of a defect sweep
+is the same substitution §9 exists to stop.
