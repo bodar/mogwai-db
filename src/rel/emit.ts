@@ -22,7 +22,7 @@ interface Renderer {
 
 /** The one expression/relation renderer for both read plans and statements. External aliases are
  * lexical outer scopes for correlated statement expressions. */
-function buildRenderer(plan: Rel, naming?: Naming, externalAliases = new Map<string, string>()): Renderer {
+function buildRenderer(plan: Rel, naming?: Naming, externalAliases = new Map<string, string>(), bareColumns = new Set<string>()): Renderer {
   const named = new Map((naming?.named ?? []).map((binding) => [binding.rel, binding.name]));
   // RelId is lexical and stable under source-alias changes. Only scans introduce an SQL alias;
   // derived relations are introduced under their RelId by `from()`. Resolve Col qualifiers once
@@ -65,7 +65,7 @@ function buildRenderer(plan: Rel, naming?: Naming, externalAliases = new Map<str
   const qualifier = (id: string): Expression => ident(sourceAliases.get(id) ?? id);
   const expr = (e: Expr): Expression => {
     switch (e.kind) {
-      case 'col': return q`${qualifier(e.rel)}.${ident(e.name)}`;
+      case 'col': return bareColumns.has(e.rel) ? ident(e.name) : q`${qualifier(e.rel)}.${ident(e.name)}`;
       case 'lit': return value(e.value);
       case 'param': throw new Error(`RelIR emitter requires parameter binding for '${e.name}'`);
       case 'unary': return e.op === 'not' ? q`NOT (${expr(e.arg)})` : q`-(${expr(e.arg)})`;
@@ -154,12 +154,31 @@ export function emit(plan: Rel, naming?: Naming): Emitted {
  * physical-column expressions. */
 export function emitStmt(statement: Stmt): Emitted {
   check(statement);
-  if (statement.kind !== 'delete') throw new Error(`RelIR statement emitter does not yet support ${statement.kind}`);
-  if (!statement.using) throw new Error('RelIR Delete emission requires a using relation');
-  if (statement.where || statement.returning.length) throw new Error('RelIR Delete emission currently supports only using-based membership');
-  const renderer = buildRenderer(statement.target);
-  renderer.include(statement.using);
-  const tree = q`DELETE FROM ${ident(statement.target.table)} WHERE ${ident('id')} IN (SELECT ${ident('id')} FROM (${renderer.relation(statement.using)}) ${ident(statement.using.id)})`;
+  if (statement.kind === 'sequence') throw new Error('RelIR Sequence emission requires an executor');
+  const external = new Map<string, string>([[statement.target.id, statement.target.alias]]);
+  if (statement.kind === 'update' && statement.from) external.set(statement.from.id, statement.from.kind === 'scan' ? statement.from.alias : statement.from.id);
+  const renderer = buildRenderer(statement.target, undefined, external, new Set([statement.target.id]));
+  const returning = (pairs: readonly (readonly [string, Expr])[]) => pairs.length
+    ? q` RETURNING ${list(pairs.map(([name, expression]) => q`${renderer.expr(expression)} AS ${ident(name)}`))}` : empty;
+  let tree: Expression;
+  switch (statement.kind) {
+    case 'insert':
+      renderer.include(statement.source);
+      tree = q`INSERT INTO ${ident(statement.target.table)} (${list(statement.cols.map(ident))}) ${renderer.relation(statement.source)}${statement.onConflict ? q` ON CONFLICT (${list(statement.onConflict.target.map(ident))}) DO UPDATE SET ${list(statement.onConflict.set.map(([name, expression]) => q`${ident(name)} = ${renderer.expr(expression)}`))}` : empty}${returning(statement.returning)}`;
+      break;
+    case 'update':
+      if (statement.from) renderer.include(statement.from);
+      tree = q`UPDATE ${ident(statement.target.table)} SET ${list(statement.set.map(([name, expression]) => q`${ident(name)} = ${renderer.expr(expression)}`))}${statement.from ? q` FROM (${renderer.relation(statement.from)}) ${ident(statement.from.id)}` : empty}${statement.where ? q` WHERE ${renderer.expr(statement.where)}` : empty}${returning(statement.returning)}`;
+      break;
+    case 'delete': {
+      if (statement.using) renderer.include(statement.using);
+      const membership = statement.using ? q`${ident('id')} IN (SELECT ${ident('id')} FROM (${renderer.relation(statement.using)}) ${ident(statement.using.id)})` : empty;
+      const where = membership !== empty && statement.where ? q`${membership} AND ${renderer.expr(statement.where)}` : statement.where ? renderer.expr(statement.where) : membership;
+      if (where === empty) throw new Error('RelIR Delete emission requires using or where');
+      tree = q`DELETE FROM ${ident(statement.target.table)} WHERE ${where}${returning(statement.returning)}`;
+      break;
+    }
+  }
   const out = render(tree);
   return { sql: out.sql, binds: out.binds };
 }

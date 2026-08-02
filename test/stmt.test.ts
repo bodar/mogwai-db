@@ -10,7 +10,9 @@ import { relId } from '../src/rel/types.ts';
 
 const layout = { aliases: new Map(), origins: [], branchOrders: [] } as const;
 const ids = [{ name: 'id', type: 'int', nullable: false }] as const;
-const nodes = scan({ id: relId('nodes'), table: 'nodes', alias: 'nodes', layout, type: { cols: ids } });
+const nodes = scan({ id: relId('nodes'), table: 'nodes', alias: 'nodes', layout,
+  type: { cols: [{ name: 'id', type: 'int', nullable: false }, { name: 'uid', type: 'text', nullable: true }] },
+});
 
 describe('RelIR statements', () => {
   test('constructs branded named write nodes', () => {
@@ -41,6 +43,20 @@ describe('RelIR statements', () => {
     db.close();
   });
 
+  test('emits executable insert and update expressions', () => {
+    const source = values({ id: relId('newNode'), rows: [[lit(3, 'int'), lit('c', 'text')]], layout,
+      type: { cols: [{ name: 'id', type: 'int', nullable: false }, { name: 'uid', type: 'text', nullable: false }] },
+    });
+    const insertSql = emitStmt(insert({ target: nodes, cols: ['id', 'uid'], source, returning: [] }));
+    const updateSql = emitStmt(update({ target: nodes, set: [['uid', lit('updated', 'text')]], where: { kind: 'binary', op: '=', left: col(nodes.id, 'id'), right: lit(3, 'int') }, returning: [] }));
+    const db = new Database(':memory:');
+    db.run('CREATE TABLE nodes (id INTEGER PRIMARY KEY, uid TEXT)');
+    db.run(insertSql.sql, ...insertSql.binds);
+    db.run(updateSql.sql, ...updateSql.binds);
+    expect(db.query('SELECT id, uid FROM nodes').all()).toEqual([{ id: 3, uid: 'updated' }]);
+    db.close();
+  });
+
   test('checks statement source arity and local SQL names at construction', () => {
     const source = values({ id: relId('source'), rows: [[lit(1, 'int')]], layout, type: { cols: ids } });
     const wrongArity = insert({ target: nodes, cols: ['id', 'uid'], source, returning: [] });
@@ -55,7 +71,7 @@ describe('RelIR statements', () => {
   });
 
   test('counts statement-expression binds against the Durable Objects limit', () => {
-    const write = update({ target: nodes, set: [['name', lit('x', 'text')]],
+    const write = update({ target: nodes, set: [['uid', lit('x', 'text')]],
       returning: Array.from({ length: 100 }, (_, i) => [`r${i}`, lit(i, 'int')] as const),
     });
     expect(() => check(write)).toThrow('101 binds exceeds Durable Objects cap of 100');

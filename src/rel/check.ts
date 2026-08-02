@@ -235,6 +235,7 @@ export function check(plan: Rel | Stmt): void {
     switch (s.kind) {
       case 'insert':
         if (s.target.kind !== 'scan') throw new Error('RelIR: statement target must be a Scan');
+        for (const column of s.cols) if (!s.target.type.cols.some((declared) => declared.name === column)) throw new Error(`RelIR: Insert target has no column '${column}'`);
         checkRel(s.source);
         const insertScope = add(root(), s.target);
         if (s.cols.length !== s.source.type.cols.length) throw new Error(`RelIR: Insert has ${s.cols.length} target columns but source emits ${s.source.type.cols.length}`);
@@ -250,6 +251,7 @@ export function check(plan: Rel | Stmt): void {
       case 'update':
         if (s.target.kind !== 'scan') throw new Error('RelIR: statement target must be a Scan');
         assignments(s.set, 'Update');
+        for (const [column] of s.set) if (!s.target.type.cols.some((declared) => declared.name === column)) throw new Error(`RelIR: Update target has no column '${column}'`);
         if (s.from) checkRel(s.from);
         const updateScope = s.from ? add(add(root(), s.target), s.from) : add(root(), s.target);
         s.set.forEach(([, expression]) => checkExpr(expression, updateScope));
