@@ -439,6 +439,13 @@ migrates or removes a hazard that a large migration would amplify.
 
 - **0.1 — `globalRowOps` into `ELEMENT_DISPATCH` and `SCALAR_DISPATCH`** (analytics §9·1). 45 of 94
   dispatch entries. Compose with `firstOf`; never spread over an owned key.
+  **Measured 2026-08-02 and the premise is wrong for the ELEMENT half**, so this is not the cheap
+  deck-clearing it reads as: the element pipeline's `limit`/`skip`/`range`/`dedup`/`order` are not
+  MISSING from `ELEMENT_DISPATCH`, they are in `TailAcc` (`tail/projection.ts:85-114`), which folds
+  them into ONE projection's `ORDER BY`/`LIMIT`/`DISTINCT`. Spreading `globalRowOps` over them would
+  replace that fusion with a `reprojectRows` per op — a SQL-shape regression, and against the very
+  thing `TailAcc` exists for. The element half is therefore **Phase 4.2's**, after the block
+  assembler can fuse the run instead; the scalar half stands on its own merits.
 - **0.2 — the 61 `'<tag>' in ` sites → the 15 existing guards** (analytics §7a/§9·2). This is a
   **rename-safety prerequisite, not tidying**: `'nested' in a` survives a field rename silently, and
   Phase 2 moves a great deal of code. Token by token, `isNested` (~27) then `isTokenArg` (~20).
@@ -615,9 +622,16 @@ over one JSON bind carried in `Emitted.binds` as a `RowsBind` marker, so `emit` 
 chunking and the executor never parses SQL to find the slot; a plan whose result IS a statement's
 rows emits no extra step.
 
-**Remaining in this seam: the executor itself** — walk the steps, run each, retain its `RETURNING`
-rows, and substitute them for the matching `RowsBind`. It lives OUTSIDE `src/rel/` (§10·2), and it
-must preserve the pre-mutation snapshot a vertex-drop cascade requires.
+**The executor landed in `aa9a9ee`** — `src/program.ts`, `runProgram(store, plan)`. It walks the
+bindings in order, retains each statement's `RETURNING` rows, and substitutes them for the matching
+`RowsBind`; the retention IS the pre-mutation snapshot a vertex-drop cascade requires, and the test
+pins that case directly (an upsert that rewrites the rows its own predicate selected on, followed
+by a delete of what it returned). Rows travel positionally with the binding's declared `type` as
+the authority; a value JSON cannot carry losslessly fails closed naming the column.
+
+**2.1 is therefore complete.** What Phase 2 still needs is the LOWERING — no Gremlin step produces
+a RelIR plan yet, so 2.2 (`drop()` → `Delete{using}`) is the next cut and the first real
+integration.
 
 **Superseded handoff — 2026-08-02, RESTATED against §3.0.** Phase 2's remaining 2.1 seam is the
 **binding executor**, and it is no longer statement-shaped: walk `Plan.bindings` in order; a `Rel`
