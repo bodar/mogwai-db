@@ -52,7 +52,7 @@ export function bindCount(plan: Rel | Stmt): number {
     const stmt = (s: Stmt): void => {
       if (s.kind === 'insert') { rel(s.source); s.onConflict?.set.forEach(([, e]) => expr(e)); }
       if (s.kind === 'update') { s.set.forEach(([, e]) => expr(e)); if (s.from) rel(s.from); if (s.where) expr(s.where); }
-      if (s.kind === 'delete') { if (s.using) rel(s.using); if (s.where) expr(s.where); }
+      if (s.kind === 'delete') { if (s.using) rel(s.using.rel); if (s.where) expr(s.where); }
       s.returning.forEach(([, e]) => expr(e));
     };
     stmt(plan);
@@ -253,9 +253,13 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
       }
       case 'delete': {
         if (s.using) {
-          checkRel(s.using, root(bindings));
-          if (!s.using.type.cols.some((column) => column.name === 'id'))
-            throw new Error('RelIR: Delete.using must emit an id column');
+          checkRel(s.using.rel, root(bindings));
+          // The key must be a column of BOTH sides: `rel` supplies the values, the target is what
+          // they identify. Neither is a physical name the emitter may assume.
+          if (!s.using.rel.type.cols.some((column) => column.name === s.using!.key))
+            throw new Error(`RelIR: Delete.using relation does not emit its membership key '${s.using.key}'`);
+          if (!s.target.type.cols.some((column) => column.name === s.using!.key))
+            throw new Error(`RelIR: Delete target has no membership key column '${s.using.key}'`);
         }
         if (s.where) checkExpr(s.where, targetScope);
         returning(targetScope);

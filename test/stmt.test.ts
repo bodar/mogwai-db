@@ -38,17 +38,21 @@ describe('RelIR statements', () => {
     expect(() => check(write)).not.toThrow();
   });
 
-  test('requires Delete.using to identify physical rows by id', () => {
-    const noId = values({ id: relId('noId'), rows: [[lit('x', 'text')]], channels,
+  test('Delete.using names its membership key, and both sides must declare it', () => {
+    const named = values({ id: relId('noId'), rows: [[lit('x', 'text')]], channels,
       type: { cols: [{ name: 'name', type: 'text', nullable: false }] },
     });
-    const write = remove({ target: nodes, using: noId, returning: [], channels, type: noReturning });
-    expect(() => check(write)).toThrow('Delete.using must emit an id column');
+    // Local knowledge, so the factory answers: the source does not emit the key it was given.
+    expect(() => remove({ target: nodes, using: { rel: named, key: 'id' }, returning: [], channels, type: noReturning }))
+      .toThrow("Delete.using relation does not emit its membership key 'id'");
+    // The other half is not local — it is about the TARGET — so `check` is what catches it.
+    const write = remove({ target: nodes, using: { rel: named, key: 'name' }, returning: [], channels, type: noReturning });
+    expect(() => check(write)).toThrow("Delete target has no membership key column 'name'");
   });
 
   test('emits Delete.using as SQLite id membership', () => {
     const doomed = values({ id: relId('doomed'), rows: [[lit(2, 'int')]], channels, type: { cols: ids } });
-    const steps = emit(program({ name: 'drop', node: remove({ target: nodes, using: doomed, returning: [], channels, type: noReturning }) }));
+    const steps = emit(program({ name: 'drop', node: remove({ target: nodes, using: { rel: doomed, key: 'id' }, returning: [], channels, type: noReturning }) }));
     const emitted = steps[0]!.emitted;
     expect(emitted.sql).toBe('DELETE FROM nodes WHERE id IN (SELECT doomed.column1 FROM (VALUES (?)) doomed)');
     expect(emitted.binds).toEqual([2]);
@@ -84,7 +88,7 @@ describe('RelIR statements', () => {
     const added = insert({ target: nodes, cols: ['id'], source, returning: [['id', col(nodes.id, 'id')]], channels, type: { cols: ids } });
     const prior = ref({ id: relId('prior'), name: 'added', channels, type: { cols: ids } });
     const steps = emit(plan({
-      bindings: [{ name: 'added', node: added }, { name: 'removed', node: remove({ target: nodes, using: prior, returning: [], channels, type: noReturning }) }],
+      bindings: [{ name: 'added', node: added }, { name: 'removed', node: remove({ target: nodes, using: { rel: prior, key: 'id' }, returning: [], channels, type: noReturning }) }],
       result: nothing,
     }));
 

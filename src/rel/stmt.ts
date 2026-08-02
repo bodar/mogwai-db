@@ -17,7 +17,13 @@ export type StmtTarget = Extract<Rel, { readonly kind: 'scan' }>;
  */
 export interface Insert extends RelBase { readonly kind: 'insert'; readonly target: StmtTarget; readonly cols: readonly string[]; readonly source: Rel; readonly onConflict?: { readonly target: readonly string[]; readonly set: readonly (readonly [string, Expr])[] }; readonly returning: readonly (readonly [string, Expr])[]; }
 export interface Update extends RelBase { readonly kind: 'update'; readonly target: StmtTarget; readonly set: readonly (readonly [string, Expr])[]; readonly from?: Rel; readonly where?: Expr; readonly returning: readonly (readonly [string, Expr])[]; }
-export interface Delete extends RelBase { readonly kind: 'delete'; readonly target: StmtTarget; readonly where?: Expr; readonly using?: Rel; readonly returning: readonly (readonly [string, Expr])[]; }
+export interface Delete extends RelBase { readonly kind: 'delete'; readonly target: StmtTarget; readonly where?: Expr; readonly using?: Membership; readonly returning: readonly (readonly [string, Expr])[]; }
+
+/** SQLite has no `DELETE … USING`, so `using` is the RelIR contract that names the rows to remove:
+ * membership of `key` in what `rel` emits. `key` is a column BOTH the target and `rel` declare, and
+ * it is a field rather than a hardcoded `'id'` because `Scan` is the one physical-schema node
+ * (§3.3) — a literal column name in the emitter is a second place the schema leaks into. */
+export interface Membership { readonly rel: Rel; readonly key: string; }
 
 const stmtBrand: unique symbol = Symbol('RelIR.Stmt');
 type Branded<T> = T extends unknown ? T & { readonly [stmtBrand]: true } : never;
