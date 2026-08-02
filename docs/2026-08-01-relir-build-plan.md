@@ -510,9 +510,16 @@ fails rather than passing on a coincidence.
 One expressiveness note the gate surfaced and did NOT resolve: movement's bulk coalescing
 (`SELECT id, SUM(bulk) … GROUP BY id`) is a grouped `Aggregate` that must KEEP carrying `bulk`,
 while §3.5's obligation makes every reducing aggregate a barrier and `BARRIER_ROLE_POLICY` drops
-`bulk`. The gate's plans carry the trivial layout, so it does not bite there — but Phase 4.3
-(`count` and the aggregates) has to answer it, and the answer is probably that bulk coalescing is
-a `recognize` rewrite (§4.7) rather than a barrier.
+`bulk`. **ANSWERED 2026-08-02 (`5bb86db`), and the guess recorded here — that it would have to be
+a `recognize` rewrite (§4.7) firing outside the algebra — was wrong, because the PREMISE was
+wrong.** What makes a barrier is that the output row is a NEW traverser, not that the SQL groups.
+Summing the MULTIPLICITY channel under a grouping by traverser identity emits the SAME traverser
+multiset, run-length encoded: it reduces ROWS, not TRAVERSERS. So it is a clause of the obligation
+like any other (`isReEncoding`, decidable from the node alone) and the table stays total. Every
+clause is load-bearing — non-empty grouping, the sole aggregate exactly `SUM(bulk)` back into
+bulk's own column, and **bulk as the ONLY channel**, which is `collapseSafe`'s "no
+path/as/sack/branch/order" falling out of the channel list rather than a second vocabulary to keep
+in step.
 
 **The superseded record** (audit, §9·1) — `test/rel-core-sql.test.ts` is not the gate. That file pins ten
 NODE KINDS against hand-written transcriptions of the emitter's own output; no `test/L2-sql/`
@@ -905,6 +912,29 @@ the legacy emitter splices as SQL TEXT and RelIR cannot, because `Lit` renders a
 construction (§3.2). That is exactly the trade the rule was made for: a `check` that can PROVE the
 DO cap, paid for in binds a hand-written emitter would have inlined. It is linear and bounded, and
 the first thing to revisit if a real traversal ever approaches the cap.
+
+**Coverage 86 → 112 (`5bb86db`): MOVEMENT.** The nine adjacency steps as one direction table —
+which edge column matches the incoming id, which one the outgoing id comes from. `both`/`bothE`/
+`bothV` get no special case beyond being two entries, `UNION ALL` because traversers are a
+multiset. `otherV` declines: it reads the entering vertex a preceding edge step retained, which is
+carried state this route does not model, and a movement that quietly forgot which end it came from
+is a wrong answer. It also carried §3.5's open question to its answer — see the note in Phase 1
+above.
+
+**`movementCollapse` is the ONE fast path this route EXPRESSES rather than declines, and the
+difference from the FTS case is the whole rule, not an exception to it.** Routing a substring
+predicate through a base-table scan would LOSE an index seek the legacy spine performs — a
+different physical access path, which RelIR cannot state. The collapse is a plan REWRITE the
+algebra states exactly (a grouped `SUM(bulk)`), so expressing it keeps the optimization AND keeps
+the switch meaningful: L5's differential still has two positions to compare on a RelIR-routed
+traversal, where declining would have left it comparing legacy against legacy. Two details worth
+keeping:
+
+- **The flag arrives already CHAIN-GATED** (`collapseSafeFastPaths` runs before the engine is
+  built), so the route inherits legacy's safety analysis for free rather than re-deriving it. That
+  is why every collapse-unsafe chain agrees on the first run rather than after a round of fixes.
+- **Reading the flag does not make spine CHOICE depend on it.** Coverage is identical either way;
+  what the chosen spine emits is what changes, which is what a fast-path flag is for.
 
 **Coverage growth, measured over the 2,298-traversal corpus.** Cumulative chains fully covered as
 each step name is admitted, so an increment can be chosen by what it BUYS rather than by what looks
