@@ -18,13 +18,20 @@ describe('write SQL', () => {
     // with BOTH key and value bound. The static (key,value) index serves a bound key
     // fine (a plain B-tree column, not an expression index), so no literal splice — and
     // no injection surface for any key.
-    const safe = read('g.V().has("age",30)');
-    expect(safe.sql).toContain('EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value = ?)');
-    expect(safe.binds).toEqual(['age', 30]);
+    // Asserted on BOTH spines: this is a security property of the compiler, not of one lowering,
+    // and `has()` is RelIR-routed today. Each spine's own spelling of the EXISTS is pinned beside
+    // it, but the load-bearing half is the bind list — a key reaching the SQL TEXT is the defect.
+    expect(read('g.V().has("age",30)', { spine: 'legacy' }).sql)
+      .toContain('EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value = ?)');
+    expect(read('g.V().has("age",30)', { spine: 'rel' }).sql)
+      .toContain('EXISTS (SELECT ? AS one FROM vertex_properties rp2 WHERE ((rp2.node = rn.id) AND ((rp2.key = ?) AND (rp2.value = ?))))');
 
-    // an exotic key (space) is handled identically — bound, never spliced into SQL
-    const exotic = read('g.V().has("first name","x")');
-    expect(exotic.sql).not.toContain('first name');
-    expect(exotic.binds).toEqual(['first name', 'x']);
+    for (const spine of ['legacy', 'rel'] as const) {
+      expect(read('g.V().has("age",30)', { spine }).binds).toEqual(expect.arrayContaining(['age', 30]));
+      // an exotic key (space) is handled identically — bound, never spliced into SQL
+      const exotic = read('g.V().has("first name","x")', { spine });
+      expect(exotic.sql).not.toContain('first name');
+      expect(exotic.binds).toEqual(expect.arrayContaining(['first name', 'x']));
+    }
   });
 });

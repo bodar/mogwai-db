@@ -24,7 +24,16 @@ const rowsVia = (gremlin: string, spine: 'rel' | 'legacy') => {
 };
 
 /** Every shape the lowering covers today. Growing coverage means growing this list. */
-const COVERED = ['g.V()', 'g.E()', 'g.V(1)', 'g.V(1,2)', 'g.V([1,2])'];
+const COVERED = [
+  'g.V()', 'g.E()', 'g.V(1)', 'g.V(1,2)', 'g.V([1,2])',
+  "g.V().hasLabel('person')", "g.V().hasLabel('person','software')", "g.E().hasLabel('knows')",
+  "g.V().has('name')", "g.V().has('name','marko')", "g.V().has('age',29)", "g.E().has('weight',0.5)",
+  // A RUN of filters is the shape worth pinning: legacy gives each its own CTE that re-joins the
+  // element table to reach a column its predecessor projected away, so `has(a).has(b)` costs two
+  // redundant self-joins. RelIR conjoins them into one WHERE over one scan — measured, the same
+  // index decisions with those SEARCH-by-rowid steps simply absent.
+  "g.V().hasLabel('person').has('age',29)", "g.V().has('name','marko').has('age',29)",
+];
 
 /**
  * Shapes that must DECLINE, one per reason, so a decline lost to an over-eager lowering is caught
@@ -37,6 +46,10 @@ const DECLINED = [
   'g.withSack(0).V()',                // a carried sack the source seed would have to declare
   'g.withSideEffect("a",1).V()',      // a side effect
   'g.addV("person")',                 // a write
+  "g.V().has('age',P.gt(30))",        // a P predicate — 72 corpus occurrences, its own increment
+  "g.V().has('person','age',29)",     // the three-argument (label, key, value) form
+  'g.V().has(T.id,1)',                // a T-token key
+  "g.V().has('name',null)",           // a null value: not a literal this route can compare
 ];
 
 describe('the RelIR spine', () => {

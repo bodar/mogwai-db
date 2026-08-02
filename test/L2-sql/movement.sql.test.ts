@@ -66,8 +66,10 @@ describe('movement / edge sources SQL', () => {
   });
 
   test('has()/values() on edges filter/project the edges table', () => {
-    const h = read('g.E().has("weight",0.5)');
-    expect(h.sql).toContain('FROM edges n JOIN c0 p ON n.id=p.id');
+    // An edge `has()` is RelIR-routed, and the two spellings say the same thing two ways: legacy
+    // re-joins `edges` per filter CTE, RelIR conjoins into the source scan's own WHERE.
+    expect(read('g.E().has("weight",0.5)', { spine: 'legacy' }).sql).toContain('FROM edges n JOIN c0 p ON n.id=p.id');
+    expect(read('g.E().has("weight",0.5)', { spine: 'rel' }).sql).toContain('FROM edges re WHERE EXISTS (SELECT ? AS one FROM edge_properties rp2');
     expect(read('g.V(1).outE().values("weight")').sql).toContain('JOIN edge_properties ep ON ep.edge=n.id AND ep.key=?');
   });
 
