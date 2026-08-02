@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
 import { check } from '../src/rel/check.ts';
 import { col, lit } from '../src/rel/expr.ts';
-import { aggregate as aggregateRel, filter, join, materialize, project as projectRel, recursive as recursiveRel, scan as scanRel, union, values as valuesRel, window as windowRel } from '../src/rel/factory.ts';
+import { aggregate as aggregateRel, filter, join, materialize, project as projectRel, recursive as recursiveRel, scan as scanRel, explode, union, values as valuesRel, window as windowRel } from '../src/rel/factory.ts';
 import { emit } from '../src/rel/emit.ts';
 import { fuse } from '../src/rel/passes/fuse.ts';
 import { name } from '../src/rel/passes/name.ts';
@@ -73,7 +73,7 @@ describe('RelIR', () => {
     expect(() => check(invalid)).toThrow('Agg is legal only in Aggregate.aggs');
   });
 
-  test('requires a whole-relation Aggregate to consume row-associated layout', () => {
+  test('requires any reducing Aggregate to consume row-associated layout', () => {
     const carried = { ...layout, origins: ['origin'] } as const;
     const input = valuesRel({ id: relId('aggregateInput'), rows: [[lit(1, 'int'), lit('marko', 'text')]], layout: carried, type: { cols } });
     const invalid = aggregateRel({
@@ -81,7 +81,7 @@ describe('RelIR', () => {
       type: { cols: [{ name: 'n', type: 'int', nullable: false }] },
       groupBy: [], aggs: [['n', { kind: 'agg', fn: 'count', args: [] }]],
     });
-    expect(() => check(invalid)).toThrow('whole-relation Aggregate must apply the barrier layout contract');
+    expect(() => check(invalid)).toThrow('Aggregate must apply the barrier layout contract');
   });
 
   test('names Values columns for downstream expressions', () => {
@@ -187,6 +187,39 @@ describe('RelIR', () => {
       { id: 1, name: 'marko', rn: 1 }, { id: 3, name: 'vadas', rn: 1 },
     ]);
     db.close();
+  });
+
+  test('every node answers for the carried channels it claims', () => {
+    const claiming = { ...layout, bulk: 'bulk' } as const;
+    const invalid = scanRel({ id: relId('claims'), table: 'nodes', alias: 'c', layout: claiming, type: { cols } });
+    expect(() => check(invalid)).toThrow("scan declares layout column 'bulk' but does not emit it");
+  });
+
+  test('Explode declares exactly the member columns it emits', () => {
+    const withValue = [...cols, { name: 'v', type: 'any', nullable: true }] as const;
+    const good = explode({ id: relId('members'), input: scan, layout, type: { cols: withValue }, expr: lit('[1,2]', 'json'), as: { value: 'v' } });
+    const emitted = emit(good);
+    expect(emitted.sql).not.toContain('AS key');
+    const db = new Database(':memory:');
+    db.run('CREATE TABLE nodes (id INTEGER, name TEXT)');
+    db.run("INSERT INTO nodes VALUES (1, 'marko')");
+    expect(db.query(emitted.sql).all(...emitted.binds)).toEqual([
+      { id: 1, name: 'marko', v: 1 }, { id: 1, name: 'marko', v: 2 },
+    ]);
+    db.close();
+    const undeclared = explode({ id: relId('undeclared'), input: scan, layout, type: { cols }, expr: lit('[1]', 'json'), as: { value: 'v' } });
+    expect(() => check(undeclared)).toThrow('explode output must be its input columns followed by v');
+  });
+
+  test('a left join cannot carry a rigid channel from its nullable right side', () => {
+    const carried = { ...layout, bulk: 'bulk' } as const;
+    const bulked = [...cols, { name: 'bulk', type: 'int', nullable: false }] as const;
+    const left = scanRel({ id: relId('l'), table: 'nodes', alias: 'l', layout, type: { cols } });
+    const right = projectRel({ id: relId('r'), input: scan, layout: carried, type: { cols: bulked },
+      exprs: [['id', col(scan.id, 'id')], ['name', col(scan.id, 'name')], ['bulk', lit(1, 'int')]] });
+    const invalid = join({ id: relId('outer'), left, right, join: 'left', layout: carried, type: { cols: bulked },
+      on: { kind: 'binary', op: '=', left: col(left.id, 'id'), right: col(right.id, 'id') } });
+    expect(() => check(invalid)).toThrow("left Join cannot carry rigid channel 'bulk' from its nullable right side");
   });
 
   test('rejects a join whose two sides are the same relation', () => {

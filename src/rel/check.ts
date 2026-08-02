@@ -1,9 +1,8 @@
-import { barrierLayout, layoutCols, mergeLayouts } from '../compiler/steps/context/context.ts';
 import type { Expr } from './expr.ts';
-import { isRel, type Rel } from './rel.ts';
+import { checkLayout } from './layout.ts';
+import { isRel, type Rel, type RelKind } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
-import { recursiveSelf } from './factory.ts';
-import { exprChildren, exprRels, relChildren, relExprs } from './walk.ts';
+import { exprChildren, exprRels, recursiveStep, relChildren, relExprs } from './walk.ts';
 
 const DO_BIND_CAP = 100;
 
@@ -24,16 +23,6 @@ const sameColumns = (left: Rel['type']['cols'], right: Rel['type']['cols']): boo
   });
 const sameNames = (left: readonly string[], right: readonly string[]): boolean =>
   left.length === right.length && left.every((name, i) => name === right[i]);
-const layoutSnapshot = (layout: import('../compiler/steps/context/context.ts').TraverserLayout): unknown => ({
-  ...layout,
-  aliases: [...layout.aliases].map(([label, entry]) => [label, {
-    ...entry,
-    shapes: [...entry.shapes].sort(),
-  }]),
-});
-const sameLayout = (left: import('../compiler/steps/context/context.ts').TraverserLayout, right: import('../compiler/steps/context/context.ts').TraverserLayout): boolean =>
-  JSON.stringify(layoutSnapshot(left)) === JSON.stringify(layoutSnapshot(right));
-
 /** Occurrences, not distinct nodes: a shared node the `Name` pass decides to inline contributes
  * its binds twice, so counting the DAG once could under-report — and under-reporting is the failure
  * that only appears in production. Over-reporting a shared-and-named node merely fails closed. */
@@ -106,94 +95,94 @@ export function check(plan: Rel | Stmt): void {
     const child = (x: Expr) => checkExpr(x, scope);
     switch (e.kind) { case 'unary': child(e.arg); break; case 'binary': child(e.left); child(e.right); break; case 'case': e.whens.forEach(([a,b]) => { child(a); child(b); }); if (e.else) child(e.else); break; case 'cast': child(e.arg); break; case 'call': case 'agg': case 'window-expr': e.args.forEach(child); break; case 'json-object': e.entries.forEach(([,x]) => child(x)); break; case 'json-array': e.items.forEach(child); break; case 'scalar': case 'exists': checkRel(e.plan, scope); break; case 'in-list': child(e.expr); e.values.forEach(child); break; case 'in-query': child(e.expr); checkRel(e.plan, scope); break; default: break; }
   };
+  /** Where each of a node's expressions is EVALUATED. A kind that forgets one is caught by the
+   * arity assertion below, and `Record<RelKind, …>` means a new kind must declare its placement
+   * before the build passes — the same enforcement the layout obligations have. */
+  const EXPR_SCOPE: { readonly [K in RelKind]: (node: Extract<Rel, { readonly kind: K }>, inner: Scope) => readonly (readonly [Expr, Scope])[] } = {
+    scan: () => [], 'self-ref': () => [], 'prior-result': () => [], union: () => [], recursive: () => [],
+    values: (node, inner) => node.rows.flat().map((e) => [e, inner] as const),
+    project: (node, inner) => node.exprs.map(([, e]) => [e, inner] as const),
+    filter: (node, inner) => [[node.pred, inner]],
+    sort: (node, inner) => node.terms.map((term) => [term.expr, inner] as const),
+    limit: (node, inner) => [...(node.count ? [[node.count, inner] as const] : []), ...(node.offset ? [[node.offset, inner] as const] : [])],
+    distinct: () => [],
+    materialize: () => [],
+    explode: (node, inner) => [[node.expr, inner]],
+    join: (node, inner) => (node.on ? [[node.on, inner]] : []),
+    // An Agg is legal only here, and a groupBy key is NOT inside the aggregate.
+    aggregate: (node, inner) => [
+      ...node.groupBy.map((e) => [e, inner] as const),
+      ...node.aggs.map(([, e]) => [e, { ...inner, inAggregate: true }] as const),
+      ...(node.having ? [[node.having, { ...inner, inAggregate: true }] as const] : []),
+    ],
+    window: (node, inner) => node.specs.map(([, e]) => [e, { ...inner, inWindow: true }] as const),
+  };
+
+  /** Structure that is not layout and not expression placement: arity, duplicate names, and the
+   * SQLite laws. Also `Record<RelKind, …>`, for the same reason. */
+  const STRUCTURE: { readonly [K in RelKind]: (node: Extract<Rel, { readonly kind: K }>, scope: Scope) => void } = {
+    scan: () => {}, filter: () => {}, sort: () => {}, limit: () => {}, distinct: () => {},
+    materialize: () => {}, explode: () => {}, window: () => {}, aggregate: () => {},
+    'self-ref': (node, scope) => {
+      if (!scope.recursive || !scope.recursive.allowed || node.name !== scope.recursive.name)
+        throw new Error('RelIR: SelfRef is legal only in its Recursive step');
+    },
+    'prior-result': (node, scope) => {
+      const prior = scope.prior?.[node.step];
+      if (!prior) throw new Error(`RelIR: PriorResult step ${node.step} is not an earlier Sequence result`);
+      if (!sameColumns(node.type.cols, prior.cols)) throw new Error(`RelIR: PriorResult step ${node.step} type must match that step's returningType`);
+    },
+    values: (node) => {
+      for (const row of node.rows) if (row.length !== node.type.cols.length)
+        throw new Error(`RelIR: Values row has ${row.length} columns; declared type has ${node.type.cols.length}`);
+    },
+    project: (node) => {
+      const names = node.exprs.map(([name]) => name);
+      if (new Set(names).size !== names.length) throw new Error('RelIR: Project declares a duplicate output name');
+      if (!sameNames(names, node.type.cols.map((column) => column.name))) throw new Error('RelIR: Project expressions must declare exactly its output columns');
+    },
+    join: (node) => {
+      // Both sides land in ONE `FROM`, and a derived side is introduced under its RelId — so two
+      // sides sharing an id emit the same SQL alias twice ("ambiguous column name"). A replicated
+      // subplan (what `unroll` produces) must carry its own ids, not be the same node twice.
+      if (node.left.id === node.right.id) throw new Error(`RelIR: a Join's sides must be distinct relations; both are '${node.left.id}'`);
+      const needsOn = node.join === 'inner' || node.join === 'left';
+      if ((node.join === 'cross' && node.on) || (needsOn && !node.on))
+        throw new Error(`RelIR: ${node.join} join ${node.join === 'cross' ? 'must not' : 'requires'} an ON expression`);
+    },
+    union: (node) => {
+      if (node.inputs.length < 2) throw new Error('RelIR: Union requires at least two inputs');
+      for (const input of node.inputs) if (!sameColumns(input.type.cols, node.type.cols))
+        throw new Error('RelIR: Union inputs and output must have identical columns');
+    },
+    recursive: (node) => {
+      if (!sameNames(node.cols, node.type.cols.map((column) => column.name))) throw new Error('RelIR: Recursive CTE header must match its output columns');
+      const step = recursiveStep(node);
+      const term = recursiveTerm(step, node.name);
+      if (term.selfRefs !== 1) throw new Error(`RelIR: Recursive step must reference '${node.name}' exactly once (found ${term.selfRefs})`);
+      if (term.aggregate) throw new Error('RelIR: SQLite forbids aggregate queries in a recursive term');
+      if (term.window) throw new Error('RelIR: SQLite forbids window functions in a recursive term');
+      if (!topLevelSelf(step, node.name)) throw new Error(`RelIR: Recursive step must reference '${node.name}' at the top level of FROM; run flatten first`);
+      if (!sameColumns(node.seed.type.cols, step.type.cols)) throw new Error('RelIR: Recursive seed and step types must be identical');
+    },
+  };
+
   const checkRel = (r: Rel, scope: Scope = root()): void => {
     if (!isRel(r)) throw new Error('RelIR: relation was not constructed by a Rel factory');
-    if (r.kind === 'self-ref') { if (!scope.recursive || !scope.recursive.allowed || r.name !== scope.recursive.name) throw new Error('RelIR: SelfRef is legal only in its Recursive step'); return; }
-    if (r.kind === 'prior-result') {
-      const prior = scope.prior?.[r.step];
-      if (!prior) throw new Error(`RelIR: PriorResult step ${r.step} is not an earlier Sequence result`);
-      if (!sameColumns(r.type.cols, prior.cols)) throw new Error(`RelIR: PriorResult step ${r.step} type must match that step's returningType`);
+    checkLayout(r);
+    (STRUCTURE[r.kind] as (node: Rel, s: Scope) => void)(r, scope);
+    if (r.kind === 'self-ref' || r.kind === 'prior-result') return;
+    if (r.kind === 'recursive') {
+      checkRel(r.seed, scope);
+      checkRel(recursiveStep(r), { ...scope, recursive: { name: r.name, self: r.id, allowed: true } });
       return;
     }
-    const here = add(scope, r);
-    const preserve = (input: Rel) => {
-      checkRel(input, scope);
-      const output = new Set(r.type.cols.map((c) => c.name));
-      const inputLayout = layoutCols(input.layout);
-      const outputLayout = layoutCols(r.layout);
-      if (inputLayout.join('\0') !== outputLayout.join('\0')) throw new Error(`RelIR: ${r.kind} changed its traverser layout`);
-      for (const col of inputLayout) if (!output.has(col)) throw new Error(`RelIR: ${r.kind} dropped layout column '${col}'`);
-    };
-    switch (r.kind) {
-      case 'values':
-        r.rows.forEach((row) => {
-          if (row.length !== r.type.cols.length) throw new Error(`RelIR: Values row has ${row.length} columns; declared type has ${r.type.cols.length}`);
-          row.forEach((e) => checkExpr(e, scope));
-        });
-        break;
-      case 'project': {
-        checkRel(r.input, scope);
-        r.exprs.forEach(([, e]) => checkExpr(e, add(scope, r.input)));
-        const names = r.exprs.map(([name]) => name);
-        if (new Set(names).size !== names.length) throw new Error('RelIR: Project declares a duplicate output name');
-        if (!sameNames(names, r.type.cols.map((column) => column.name))) throw new Error('RelIR: Project expressions must declare exactly its output columns');
-        for (const col of layoutCols(r.layout)) if (!r.type.cols.some((c) => c.name === col)) throw new Error(`RelIR: Project does not declare layout column '${col}'`);
-        break;
-      }
-      case 'filter': preserve(r.input); checkExpr(r.pred, add(scope, r.input)); break;
-      case 'aggregate':
-        checkRel(r.input, scope);
-        r.groupBy.forEach((e) => checkExpr(e, add(scope, r.input)));
-        r.aggs.forEach(([,e]) => checkExpr(e, { ...add(scope, r.input), inAggregate: true }));
-        if (r.having) checkExpr(r.having, here);
-        if (!r.groupBy.length && !sameLayout(barrierLayout(r.input.layout), r.layout))
-          throw new Error('RelIR: whole-relation Aggregate must apply the barrier layout contract');
-        break;
-      case 'sort': preserve(r.input); r.terms.forEach((t) => checkExpr(t.expr, add(scope, r.input))); break;
-      case 'limit': preserve(r.input); if (r.count) checkExpr(r.count, add(scope,r.input)); if (r.offset) checkExpr(r.offset, add(scope,r.input)); break;
-      case 'distinct': preserve(r.input); break;
-      case 'materialize': preserve(r.input); break;
-      case 'window': {
-        preserve(r.input);
-        r.specs.forEach(([,e]) => checkExpr(e, { ...add(scope,r.input), inWindow:true }));
-        const expected = [...r.input.type.cols.map((column) => column.name), ...r.specs.map(([name]) => name)];
-        if (!sameNames(expected, r.type.cols.map((column) => column.name))) throw new Error('RelIR: Window output must be input columns followed by its specs');
-        break;
-      }
-      case 'explode': preserve(r.input); checkExpr(r.expr, add(scope,r.input)); break;
-      case 'join':
-        checkRel(r.left, scope); checkRel(r.right, scope);
-        // Both sides land in ONE `FROM`, and a derived side is introduced under its RelId — so two
-        // sides sharing an id emit the same SQL alias twice ("ambiguous column name"). A replicated
-        // subplan (what `unroll` produces) must carry its own ids, not be the same node twice.
-        if (r.left.id === r.right.id) throw new Error(`RelIR: a Join's sides must be distinct relations; both are '${r.left.id}'`);
-        const needsOn = r.join === 'inner' || r.join === 'left';
-        if ((r.join === 'cross' && r.on) || (needsOn && !r.on)) throw new Error(`RelIR: ${r.join} join ${r.join === 'cross' ? 'must not' : 'requires'} an ON expression`);
-        if (r.on) checkExpr(r.on, add(add(scope,r.left),r.right));
-        break;
-      case 'union': {
-        if (r.inputs.length < 2) throw new Error('RelIR: Union requires at least two inputs');
-        r.inputs.forEach((input) => checkRel(input,scope));
-        for (const input of r.inputs) if (!sameColumns(input.type.cols, r.type.cols)) throw new Error('RelIR: Union inputs and output must have identical columns');
-        const expected = mergeLayouts(r.inputs[0]!.layout, r.inputs.slice(1).map((input) => input.layout), { rigid: 'peer' });
-        if (!sameLayout(expected, r.layout)) throw new Error('RelIR: Union output layout must merge its inputs');
-        break;
-      }
-      case 'recursive': {
-        if (!sameNames(r.cols, r.type.cols.map((column) => column.name))) throw new Error('RelIR: Recursive CTE header must match its output columns');
-        checkRel(r.seed, scope);
-        const step = r.step(recursiveSelf(r));
-        const term = recursiveTerm(step, r.name);
-        if (term.selfRefs !== 1) throw new Error(`RelIR: Recursive step must reference '${r.name}' exactly once (found ${term.selfRefs})`);
-        if (term.aggregate) throw new Error('RelIR: SQLite forbids aggregate queries in a recursive term');
-        if (term.window) throw new Error('RelIR: SQLite forbids window functions in a recursive term');
-        if (!topLevelSelf(step, r.name)) throw new Error(`RelIR: Recursive step must reference '${r.name}' at the top level of FROM; run flatten first`);
-        checkRel(step, { ...scope, recursive: { name:r.name, self:r.id, allowed:true } });
-        if (JSON.stringify(r.seed.type.cols) !== JSON.stringify(step.type.cols)) throw new Error('RelIR: Recursive seed and step layouts/types must be identical');
-        break;
-      }
-      default: break;
-    }
+    relChildren(r).forEach((child) => checkRel(child, scope));
+    const inner = relChildren(r).reduce(add, scope);
+    const placed = (EXPR_SCOPE[r.kind] as (node: Rel, s: Scope) => readonly (readonly [Expr, Scope])[])(r, inner);
+    if (placed.length !== relExprs(r).length)
+      throw new Error(`RelIR: ${r.kind} has ${relExprs(r).length} expressions but declares a scope for ${placed.length}`);
+    placed.forEach(([expression, where]) => checkExpr(expression, where));
   };
   const checkStmt = (s: Stmt, prior: readonly import('./types.ts').RelType[] = []): void => {
     if (!isStmt(s)) throw new Error('RelIR: statement was not constructed by a Stmt factory');

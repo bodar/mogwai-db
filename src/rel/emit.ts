@@ -89,7 +89,10 @@ function buildRenderer(plan: Rel, naming?: Naming, externalAliases = new Map<str
       case 'limit': return q`SELECT * FROM ${from(r.input)}${r.count ? q` LIMIT ${expr(r.count)}` : empty}${r.offset ? q`${r.count ? raw(' ') : raw(' LIMIT -1 ')}OFFSET ${expr(r.offset)}` : empty}`;
       case 'distinct': return q`SELECT DISTINCT * FROM ${from(r.input)}`;
       case 'window': return q`SELECT ${relName(r.input)}.*, ${list(r.specs.map(([name,e]) => q`${expr(e)} AS ${ident(name)}`))} FROM ${from(r.input)}`;
-      case 'explode': return q`SELECT ${relName(r.input)}.*, je.key AS ${ident(r.as.key ?? 'key')}, je.value AS ${ident(r.as.value)}${r.as.ord ? q`, je.key AS ${ident(r.as.ord)}` : empty} FROM ${from(r.input)}, json_each(${expr(r.expr)}) je`;
+      // Exactly the columns `explodeColumns` declares, in that order — a member's key, its value,
+      // and its ordinal (for a JSON array `json_each.key` IS the index). An unrequested column
+      // would put the emitted row out of step with the node's declared type.
+      case 'explode': return q`SELECT ${relName(r.input)}.*${r.as.key ? q`, je.key AS ${ident(r.as.key)}` : empty}, je.value AS ${ident(r.as.value)}${r.as.ord ? q`, je.key AS ${ident(r.as.ord)}` : empty} FROM ${from(r.input)}, json_each(${expr(r.expr)}) je`;
       case 'materialize': return relation(r.input);
       case 'join': {
         if (r.join === 'semi' || r.join === 'anti') return q`SELECT ${relName(r.left)}.* FROM ${from(r.left)} WHERE ${r.join === 'anti' ? raw('NOT ') : empty}EXISTS (SELECT 1 FROM ${from(r.right)}${r.on ? q` WHERE ${expr(r.on)}` : empty})`;
