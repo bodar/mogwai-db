@@ -88,7 +88,16 @@ const PROPERTIES = {
   edge: { table: 'edge_properties', owner: 'edge' },
 } as const;
 
-const and = (left: Expr | undefined, right: Expr): Expr => (left ? { kind: 'binary', op: 'and', left, right } : right);
+function and(left: Expr | undefined, right: Expr): Expr;
+function and(left: Expr, right: Expr | undefined): Expr;
+function and(left: Expr | undefined, right: Expr | undefined): Expr {
+  if (!left || !right) {
+    const only = left ?? right;
+    if (!only) throw new Error('RelIR lowering: a conjunction of nothing');
+    return only;
+  }
+  return { kind: 'binary', op: 'and', left, right };
+}
 
 const eq = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '=', left, right });
 
@@ -246,12 +255,11 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): Omit<Rel
   }
 
   if (step.name === 'values') {
-    // ONE key only. `values()` (every key) and `values(k1, k2)` are declined here because the
-    // legacy spine ANSWERS THEM WRONG — measured — and this route would answer them right, which
-    // would put the differential permanently red against a defect rather than fixing it. It is its
-    // own change: see the build plan's note on the finding.
-    const [key, extra] = args;
-    if (typeof key !== 'string' || extra !== undefined) return null;
+    // TinkerPop's `PropertiesStep` is `element.properties(keys)`: no keys means EVERY key, several
+    // mean membership in the set. A non-string key is a decline rather than a guess — answering
+    // "every key" for one would be answering a different question.
+    const keys = args.filter((a): a is string => typeof a === 'string');
+    if (keys.length !== args.length) return null;
 
     const { table, owner } = PROPERTIES[elem];
     const props = make.scan({
@@ -263,7 +271,11 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): Omit<Rel
     const joined = make.join({
       id: fresh('j'), left: input, right: props, join: 'inner', channels: BULK,
       type: typeOf(meta('id', 'int'), meta('bulk', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-      on: and(eq(col(props.id, owner), col(input.id, 'id')), eq(col(props.id, 'key'), lit(key, 'text'))),
+      // The key set is bounded by the QUERY TEXT, never by row count, so an `InList` is right here
+      // and a JSON bind is not (root CLAUDE.md's rule is about data-sized sets).
+      on: and(eq(col(props.id, owner), col(input.id, 'id')), keys.length
+        ? { kind: 'in-list', expr: col(props.id, 'key'), values: keys.map((k) => lit(k, 'text')) }
+        : undefined),
     });
     return {
       rel: make.project({

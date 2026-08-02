@@ -1,5 +1,5 @@
 {
-  "passing": 1696,
+  "passing": 1701,
   "total": 2267,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -152,6 +152,7 @@
     "g_VX1X_asXaX_outXcreatedX_addEXcreatedByX_toXaX_propertyXweight_2X",
     "g_VX1X_asXaX_outXcreatedX_asXbX_inXcreatedX_asXcX_cyclicPath_fromXaX_toXbX_path",
     "g_VX1X_asXaX_outXcreatedX_inXcreatedX_asXbX_whereXa_neqXbXX_name",
+    "g_VX1X_asXaX_outXcreatedX_inXcreatedX_asXbX_whereXasXbX_outXcreatedX_hasXname_rippleXX_valuesXage_nameX",
     "g_VX1X_asXaX_outXcreatedX_inXcreatedX_whereXeqXaXX_name",
     "g_VX1X_asXaX_outXcreatedX_inXcreatedX_whereXneqXaXX_name",
     "g_VX1X_asXaX_outXknowsX_asXbX_selectXaX",
@@ -950,6 +951,7 @@
     "g_V_valuesXageX_isXtypeOfXGType_GRAPHXX",
     "g_V_valuesXageX_isXtypeOfXGType_INTXX",
     "g_V_valuesXageX_isXtypeOfXGType_INTXX_groupCount",
+    "g_V_valuesXageX_isXtypeOfXGType_INTXX_mathXincX",
     "g_V_valuesXageX_isXtypeOfXGType_INTXX_maxX",
     "g_V_valuesXageX_isXtypeOfXGType_INTXX_meanX",
     "g_V_valuesXageX_isXtypeOfXGType_INTXX_minX",
@@ -1094,6 +1096,7 @@
     "g_V_valuesXnameX_toUpperXlocalX",
     "g_V_valuesXnameX_trim",
     "g_V_valuesXnameX_whereXneqXconstantXmarkoXXX",
+    "g_V_valuesXname_age_nullX",
     "g_V_valuesXnonexistantX_fold_combineXV_valuesXnameX_foldX_unfold",
     "g_V_valuesXnonexistantX_fold_conjoinX_X",
     "g_V_valuesXnonexistantX_fold_differenceXV_valuesXnameX_foldX",
@@ -1105,6 +1108,7 @@
     "g_V_valuesXsetX_isXtypeOfXGType_SETXX_countXlocalX",
     "g_V_valuesXsetX_isXtypeOfXGType_SETXX_unfold",
     "g_V_valuesXsetX_isXtypeOfXGType_SETXX_unfold_limitX2X",
+    "g_V_values_order",
     "g_V_whereX_valueXnameX_isXmarkoXX_asXaX_selectXaX",
     "g_V_whereXcallXdcXX",
     "g_V_whereXinXcreatedX_count_isX1XX_valuesXnameX",
@@ -1692,6 +1696,7 @@
     "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXin_hasXage_gtX20XXX_timesX2X",
     "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXoutX_timesX2X",
     "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXout_hasXname_notStartingWithXzXXX_timesX2X",
+    "g_withoutStrategiesXReservedKeysVerificationStrategyX_addVXpersonX_propertyXid_123X_propertyXname_markoX",
     "g_withoutStrategiesXSeedStrategyX_V",
     "g_withoutStrategiesXStandardVerificationStrategyX_V",
     "g_withoutStrategiesXVertexProgramStrategyX_V",
@@ -1738,7 +1743,6 @@
     "g_VX1X_asXaX_V_valuesXageX_whereXgteXconstantX0XX_andXneqXaXXX_byX_byXageX",
     "g_VX1X_asXaX_V_valuesXageX_whereXneqXaX_andXgtXVXvid1X_valuesXageXXXX_byX_byXageX",
     "g_VX1X_asXaX_both_asXbX_both_asXcX_dedupXa_bX_age_selectXa_b_cX_name",
-    "g_VX1X_asXaX_outXcreatedX_inXcreatedX_asXbX_whereXasXbX_outXcreatedX_hasXname_rippleXX_valuesXage_nameX",
     "g_VX1X_asXaX_repeatXout_asXaXX_timesX2X_selectXfirst_aX",
     "g_VX1X_asXaX_repeatXout_asXaXX_timesX2X_selectXlast_aX",
     "g_VX1X_both_both_cyclicPath_byXageX",
@@ -2082,7 +2086,6 @@
     "g_V_valuesXageX_allXgtX32XX",
     "g_V_valuesXageX_anyXgtX32XX",
     "g_V_valuesXageX_isXoutsideX28_33XX",
-    "g_V_valuesXageX_isXtypeOfXGType_INTXX_mathXincX",
     "g_V_valuesXageX_noneXgtX32XX",
     "g_V_valuesXageX_order_byXdescX_fold_anyXeqX29XX",
     "g_V_valuesXageX_order_byXdescX_fold_combineXV_valuesXageX_order_byXdescX_foldX",
@@ -2098,7 +2101,6 @@
     "g_V_valuesXmapX_isXtypeOfXGType_MAPXX_foldX",
     "g_V_valuesXmapX_isXtypeOfXGType_MAPXX_whereX_countXlocalX_isXgtX1XXX",
     "g_V_valuesXnameX_flatMapXsplitXaX_unfoldX",
-    "g_V_valuesXname_age_nullX",
     "g_V_valuesXsetX_isXtypeOfXGType_SETXX_whereXcountXlocalX_isXeqX3XXX",
     "g_V_valuesXstrX_repeatXsplitXabcX_conjoinX_timesX2X",
     "g_V_valuesXuuidX_isXtypeOfXGType_UUIDXX",
@@ -2107,7 +2109,6 @@
     "g_V_valuesXuuidX_isXtypeOfXGType_UUIDXX_localXaggregateXaXX_capXaX",
     "g_V_valuesXuuidX_isXtypeOfXGType_UUIDXX_project_byXidentityX_byXconstantXuuidXX",
     "g_V_valuesXuuidX_isXtypeOfXGType_UUIDXX_whereXisXeqXuuidXX",
-    "g_V_values_order",
     "g_V_whereXgtXVXvid1X_valuesXageXXX_byXageX_valuesXnameX",
     "g_V_whereXtree_isXtypeOfXGType_TREEXXX_values_name",
     "g_addEXV_outE_label_groupCount_orderXlocalX_byXvalues_descX_selectXkeysX_unfold_limitX1XX_fromXV_hasXname_vadasXX_toXV_hasXname_lopXX",
@@ -2269,8 +2270,7 @@
     "g_withoutStrategiesXMatchAlgorithmStrategyX_V_matchXa_knows_b__a_created_cX",
     "g_withoutStrategiesXRepeatUnrollStrategyX_V_order_byXnameX_repeatXboth_order_byXnameX_aggregateXxXX_timesX2X_limitX10X",
     "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXboth_limitX1XX_timesX2X",
-    "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXboth_sampleX1XX_timesX2X",
-    "g_withoutStrategiesXReservedKeysVerificationStrategyX_addVXpersonX_propertyXid_123X_propertyXname_markoX"
+    "g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXboth_sampleX1XX_timesX2X"
   ],
   "_comment": "L3 conformance last-known run: the passing/failing scenario sets of the official TinkerPop cucumber suite (scoped by test/L3-conformance/tags.ts). `bun test` FAILS if a scenario in `passed` now fails (a regression) or the count drops; it auto-records the current run here on a clean local run (CI never rewrites). `passing` = passed.length is the ratchet floor. Commit this file with every bump. Never hand-edit `passed` to hide a regression."
 }

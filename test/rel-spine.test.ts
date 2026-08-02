@@ -45,6 +45,9 @@ const COVERED = [
   // bridge's second stream kind rather than one more step in the same one.
   'g.V().count()', 'g.E().count()', "g.V().hasLabel('person').count()", "g.V().has('age',P.gt(29)).count()",
   "g.V().values('name')", "g.V().values('age')", "g.E().values('weight')", "g.V().hasLabel('person').values('name')",
+  // `values()` is `element.properties(keys)`: no keys means EVERY key, several mean membership.
+  // Both spines answered these WRONG until 2026-08-02 — see the semantics test below.
+  "g.V().values('name','age')", "g.V().values('name','age',null)", 'g.V().values()', 'g.E().values()',
 ];
 
 /**
@@ -54,8 +57,6 @@ const COVERED = [
 const DECLINED = [
   'g.V().out()',                      // a step not learned yet: movement
   'g.V().count().is(P.gt(2))',        // a step AFTER a shape change is in the new shape's vocabulary
-  "g.V().values('name','age')",       // multi-key values — see the shape-boundary test below
-  'g.V().values()',                   // every key — likewise
   'g.inject(1)',                      // a source that is not V()/E()
   'g.withSack(0).V()',                // a carried sack the source seed would have to declare
   'g.withSideEffect("a",1).V()',      // a side effect
@@ -115,18 +116,24 @@ describe('the RelIR spine', () => {
     expect(read("g.V().values('name')", { spine: 'rel' }).shape).toEqual({ kind: 'value', type: { kind: 'perRow', column: 'vtype' } });
   });
 
-  test("values() and values(k1,k2) decline because LEGACY answers them wrong", () => {
-    // MEASURED, and it is a live silent wrong answer rather than a missing feature: legacy binds
-    // only the FIRST key, so `values('name','age')` returns just the names, and `values()` binds
-    // null and returns nothing at all. RelIR can express both correctly — which is exactly why it
-    // must NOT here: routing them would put `mise run test:legacy-spine` permanently red against a
-    // defect instead of fixing it. Its own change; this test pins the reason so the decline is not
-    // mistaken for a gap.
-    const store2 = seededStore();
-    const rows = (g: string) => (store2.query(read(g, { spine: 'legacy' }).sql, read(g, { spine: 'legacy' }).binds) as any[]).map((r) => r.v);
-    expect(rows("g.V().values('name','age')").sort()).toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
-    expect(rows('g.V().values()')).toEqual([]);
-    expect(read("g.V().values('name','age')", { spine: 'rel' }).spine).toBe('legacy');
+  test('values(k…) is the KEY SET, on both spines', () => {
+    // Both spines read only `args[0]` until 2026-08-02, so `values('name','age')` returned just the
+    // names and `values()` bound null and returned nothing — right arity, plausible rows, and the
+    // census recorded both as `ran`. Found by re-expressing the step in RelIR: a second
+    // implementation asks questions of the first that no test in the suite was asking.
+    //
+    // TinkerPop's `PropertiesStep` is `element.properties(keys)` — no keys means EVERY key, several
+    // mean membership in the set, and a null key never matches (`Properties.feature:91` pins
+    // `values("name","age",null)` as names AND ages). Asserted on both spines, because the fix
+    // landed in both and the differential requires them to agree.
+    for (const spine of ['legacy', 'rel'] as const) {
+      const rows = (g: string) => (store.query(read(g, { spine }).sql, read(g, { spine }).binds) as any[]).map((r) => r.v).sort();
+      expect(rows("g.V().values('name')")).toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+      expect(rows("g.V().values('name','age')")).toEqual([27, 29, 32, 35, 'josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+      expect(rows("g.V().values('name','age',null)")).toEqual([27, 29, 32, 35, 'josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+      expect(rows('g.V().values()')).toEqual([27, 29, 32, 35, 'java', 'java', 'josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+      expect(rows('g.E().values()')).toEqual([0.2, 0.4, 0.4, 0.5, 1, 1]);
+    }
   });
 
   test('the emitted SQL does not depend on how many traversals were compiled before it', () => {

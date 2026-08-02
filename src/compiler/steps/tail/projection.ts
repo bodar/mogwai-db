@@ -999,12 +999,40 @@ interface ProjCtx {
 export interface ProjResult { shape: Shape; colsNode: Expression; fromNode: Expression; scalarExpr?: Expression | null; baseWhere?: Expression | null; encounterKey?: Expression; vtypeExpr?: Expression | null; }
 type ProjFn = (c: ProjCtx) => ProjResult;
 
+/**
+ * `values(k…)`'s key restriction, as a join-condition fragment over the properties table's `key`.
+ *
+ * TinkerPop's `PropertiesStep` is `element.properties(keys)`: **no keys means EVERY key**, several
+ * keys mean membership in the set, and a `null` key simply never matches anything (the corpus pins
+ * this — `g.V().values("name", "age", null)` expects names AND ages, `Properties.feature:91`).
+ * The front-end already DROPS a null argument, so `values(null)` arrives here as `values()`; the
+ * empty-key-set branch below is therefore the fail-closed guard for a NON-STRING key a GLV could
+ * still send, where answering "every key" would be answering a different question.
+ *
+ * This read only `args[0]` until 2026-08-02, which was a SILENT WRONG ANSWER of the worst kind:
+ * `values("name","age")` returned just the names and `values()` bound `null` and returned nothing,
+ * both with the right arity and plausible rows, so the census recorded them as `ran` and every
+ * assertion passed. Found by re-expressing the step in RelIR — a second implementation asks
+ * questions of the first that no test in the suite was asking.
+ *
+ * The key set is bounded by the QUERY TEXT, never by row count, so an `IN`-list is the right form
+ * here and the DO bind cap is not in play (root CLAUDE.md's rule is about data-sized sets).
+ */
+function propertyKeyFilter(args: readonly unknown[]): (keyCol: Expression) => Expression {
+  if (!args.length) return () => empty;
+  const keys = args.filter((a): a is string => typeof a === 'string');
+  // Every key was a null: the step names a set, and nothing is in it.
+  if (!keys.length) return () => raw(' AND 0');
+  if (keys.length === 1) return (keyCol) => q` AND ${keyCol}=${value(keys[0])}`;
+  return (keyCol) => q` AND ${keyCol} IN (${list(keys.map(value), ', ')})`;
+}
+
 const PROJECTORS = new Map<string, ProjFn>([
   ['values', (c) => {
-    const key = c.projStep!.args[0] as string;
     // values() is a genuine flatMap — JOIN the normalized properties table so a
     // multi-valued key yields one row PER value (the INNER JOIN also drops missing-key
     // elements, so no separate IS NOT NULL). Edges are single-valued (one row per key).
+    const keyPred = propertyKeyFilter(c.projStep!.args ?? []);
     if (c.st.elem === 'edge') {
       const ep = edgeProperties.as('ep');
       return {
@@ -1012,14 +1040,14 @@ const PROJECTORS = new Map<string, ProjFn>([
         // a scalar stays raw. scalarExpr (order key) keeps the raw column (collections
         // as sort keys are degenerate either way).
         shape: { kind: 'value', type: PER_ROW('vtype') }, colsNode: q`${storedValueExpr(ep.c.value, ep.c.vtype)} AS v`,
-        fromNode: q`${c.vJoin} JOIN ${ep} ON ${ep.c.edge}=${c.n.c.id} AND ${ep.c.key}=${value(key)}`,
+        fromNode: q`${c.vJoin} JOIN ${ep} ON ${ep.c.edge}=${c.n.c.id}${keyPred(ep.c.key)}`,
         scalarExpr: ep.c.value, baseWhere: null, encounterKey: q`${c.p.c.id}, ${ep.c.id}`, vtypeExpr: ep.c.vtype,
       };
     }
     const vp = vertexProperties.as('vp');
     return {
       shape: { kind: 'value', type: PER_ROW('vtype') }, colsNode: q`${storedValueExpr(vp.c.value, vp.c.vtype)} AS v`,
-      fromNode: q`${c.vJoin} JOIN ${vp} ON ${vp.c.node}=${c.n.c.id} AND ${vp.c.key}=${value(key)}`,
+      fromNode: q`${c.vJoin} JOIN ${vp} ON ${vp.c.node}=${c.n.c.id}${keyPred(vp.c.key)}`,
       scalarExpr: vp.c.value, baseWhere: null, encounterKey: q`${c.p.c.id}, ${vp.c.id}`, vtypeExpr: vp.c.vtype,
     };
   }],

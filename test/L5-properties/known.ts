@@ -81,6 +81,35 @@ export const KNOWN: readonly KnownDivergence[] = [
       + 'exactly one disagreement across the corpus, which is the useful result either way.',
     family: { query: /^g\.V\(\)\.repeat\(__\.both\(\)\)\.times\(3\)\.range\(/ },
   },
+  {
+    query: "g.V().hasLabel('person').where(__.outE().union(__.identity(), __.identity())).repeat(__.identity()).times(1).hasLabel('person').outE().otherV()",
+    fastPath: 'predicateInlining',
+    diagnosis:
+      'A CHILD SCOPE INHERITS THE PARENT CHAIN\'S `fromV`, and a branch inside that child then '
+      + 'refuses. The generic route THROWS `otherV() context through union() not yet supported` where '
+      + 'the inlined predicate answers — so this is the worst shape of divergence the switch can find: '
+      + 'the semantic authority cannot compile a traversal its accelerator can. '
+      + 'Mechanism, measured: the OUTER chain ends `.outE().otherV()`, so `chainNeedsFromV` sets '
+      + '`trackFromV` at the source and every carried layout downstream holds `fv`. The `where(...)` '
+      + 'child is seeded through `pushChildScope`, which projects the parent\'s carried columns '
+      + 'verbatim, so the child body arrives holding a `fromV` that belongs to a traverser it is not '
+      + 'part of. `assertForkSafe` (prefix/branch.ts) then rejects the child\'s own `union()` — '
+      + 'correctly, for the state it can see, and wrongly for the question actually being asked: the '
+      + 'child of a `where()` is an EXISTENCE test whose result is a boolean, so nothing of the '
+      + 'parent\'s edge survives into it and nothing of the child\'s escapes. '
+      + 'THE FIX has a precedent one line away: `withoutPath` already exists for exactly this reason '
+      + '("a child derived from a path position must not inherit the outer path history: its '
+      + 'movements are implementation detail"). `fromV` wants the same treatment at the child-scope '
+      + 'seed, and `lowerElementSteps` already re-derives `trackFromV` per scope, so a child body that '
+      + 'genuinely needs `otherV()` mints its own. It is NOT a one-liner: `childExistenceGate` '
+      + 'projects the parent layout back off `child.frame.domain`, so the column has to stay in the '
+      + 'DOMAIN while the child SEED stops claiming it — a real change to pushChildScope\'s split '
+      + 'between the two, in the machinery that owns the largest measured defect category here (33%: '
+      + 'a carried field dropped at a barrier, merge or rejoin). Filed rather than rushed. '
+      + 'REACHED BY A NEW SEED, not by a regression: L5 derives its seed from HEAD, so a commit draws '
+      + 'a different generated corpus and this shape had simply never been generated before.',
+    family: { detail: /otherV\(\) context through \w+\(\) not yet supported/ },
+  },
 ];
 
 /** Normalise the quote style / whitespace the corpus and the generator differ on. */
