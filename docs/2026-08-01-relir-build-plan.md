@@ -100,6 +100,16 @@ The node set is deliberately **smaller than the SQL surface**, because SQL's red
 `group_concat`/`json_group_array` are aggregate *functions*, not nodes. Each of those collapses is a
 place the current code has a separate path.
 
+**Construction is not object-literal syntax.** Runtime nodes remain immutable plain records, but a
+module-private brand means a `Rel` can be minted only by its named, stateless kind factory:
+`scan({ id, table, alias, layout, type })`, `project({ id, input, exprs, layout, type })`, and so
+on. Factories take named objects rather than positional argument lists, validate their local shape,
+and freeze the result; `check` validates scope and whole-plan laws. `SelfRef` has no public factory:
+only `recursive` supplies it to its callback. Rewriters must rebuild through the appropriate kind
+factory, never spread a node — a spread can retain an obsolete field or lose the construction brand.
+There is deliberately no `src/rel/index.ts` barrel while this internal API is changing; imports name
+the specific RelIR module they use.
+
 ### 3.1 Types
 
 ```ts
