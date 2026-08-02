@@ -3,6 +3,7 @@ import type { Expr } from './expr.ts';
 import { isRel, type Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import { recursiveSelf } from './factory.ts';
+import { exprChildren, exprRels, relChildren, relExprs } from './walk.ts';
 
 const DO_BIND_CAP = 100;
 
@@ -27,44 +28,19 @@ const layoutSnapshot = (layout: import('../compiler/steps/context/context.ts').T
 const sameLayout = (left: import('../compiler/steps/context/context.ts').TraverserLayout, right: import('../compiler/steps/context/context.ts').TraverserLayout): boolean =>
   JSON.stringify(layoutSnapshot(left)) === JSON.stringify(layoutSnapshot(right));
 
+/** Occurrences, not distinct nodes: a shared node the `Name` pass decides to inline contributes
+ * its binds twice, so counting the DAG once could under-report — and under-reporting is the failure
+ * that only appears in production. Over-reporting a shared-and-named node merely fails closed. */
 export function bindCount(plan: Rel | Stmt): number {
   let n = 0;
   const expr = (e: Expr): void => {
-    if (e.kind === 'lit') { n++; return; }
-    switch (e.kind) {
-      case 'unary': expr(e.arg); break;
-      case 'binary': expr(e.left); expr(e.right); break;
-      case 'case': e.whens.forEach(([when, then]) => { expr(when); expr(then); }); if (e.else) expr(e.else); break;
-      case 'cast': expr(e.arg); break;
-      case 'call': case 'agg': case 'window-expr': e.args.forEach(expr); break;
-      case 'json-object': e.entries.forEach(([, value]) => expr(value)); break;
-      case 'json-array': e.items.forEach(expr); break;
-      case 'scalar': case 'exists': rel(e.plan); break;
-      case 'in-list': expr(e.expr); e.values.forEach(expr); break;
-      case 'in-query': expr(e.expr); rel(e.plan); break;
-      default: break;
-    }
+    if (e.kind === 'lit') n++;
+    exprRels(e).forEach(rel);
+    exprChildren(e).forEach(expr);
   };
   const rel = (r: Rel): void => {
-    switch (r.kind) {
-      case 'values': r.rows.flat().forEach(expr); break;
-      case 'project': r.exprs.forEach(([, e]) => expr(e)); rel(r.input); break;
-      case 'filter': expr(r.pred); rel(r.input); break;
-      case 'aggregate': r.groupBy.forEach(expr); r.aggs.forEach(([, e]) => expr(e)); if (r.having) expr(r.having); rel(r.input); break;
-      case 'sort': r.terms.forEach((t) => expr(t.expr)); rel(r.input); break;
-      case 'limit': if (r.count) expr(r.count); if (r.offset) expr(r.offset); rel(r.input); break;
-      case 'window': r.specs.forEach(([, e]) => expr(e)); rel(r.input); break;
-      case 'explode': expr(r.expr); rel(r.input); break;
-      case 'join': if (r.on) expr(r.on); rel(r.left); rel(r.right); break;
-      case 'union': r.inputs.forEach(rel); break;
-      case 'recursive': {
-        rel(r.seed);
-        rel(r.step(recursiveSelf(r)));
-        break;
-      }
-      case 'distinct': case 'materialize': rel(r.input); break;
-      default: break;
-    }
+    relExprs(r).forEach(expr);
+    relChildren(r).forEach(rel);
   };
   if (!isRel(plan)) {
     if (!isStmt(plan)) throw new Error('RelIR: statement was not constructed by a Stmt factory');
@@ -89,36 +65,15 @@ export function check(plan: Rel | Stmt): void {
     const expression = (e: Expr): void => {
       if (e.kind === 'agg') aggregate = true;
       if (e.kind === 'window-expr') window = true;
-      switch (e.kind) {
-        case 'unary': expression(e.arg); break;
-        case 'binary': expression(e.left); expression(e.right); break;
-        case 'case': e.whens.forEach(([a, b]) => { expression(a); expression(b); }); if (e.else) expression(e.else); break;
-        case 'cast': expression(e.arg); break;
-        case 'call': case 'agg': case 'window-expr': e.args.forEach(expression); break;
-        case 'json-object': e.entries.forEach(([, value]) => expression(value)); break;
-        case 'json-array': e.items.forEach(expression); break;
-        case 'scalar': case 'exists': relation(e.plan); break;
-        case 'in-list': expression(e.expr); e.values.forEach(expression); break;
-        case 'in-query': expression(e.expr); relation(e.plan); break;
-        default: break;
-      }
+      exprRels(e).forEach(relation);
+      exprChildren(e).forEach(expression);
     };
     const relation = (r: Rel): void => {
       if (r.kind === 'self-ref') { if (r.name === name) selfRefs++; return; }
-      switch (r.kind) {
-        case 'project': r.exprs.forEach(([, e]) => expression(e)); relation(r.input); break;
-        case 'filter': expression(r.pred); relation(r.input); break;
-        case 'aggregate': aggregate = true; r.groupBy.forEach(expression); r.aggs.forEach(([,e]) => expression(e)); if (r.having) expression(r.having); relation(r.input); break;
-        case 'sort': r.terms.forEach((t) => expression(t.expr)); relation(r.input); break;
-        case 'limit': if (r.count) expression(r.count); if (r.offset) expression(r.offset); relation(r.input); break;
-        case 'window': window = true; r.specs.forEach(([,e]) => expression(e)); relation(r.input); break;
-        case 'explode': expression(r.expr); relation(r.input); break;
-        case 'distinct': case 'materialize': relation(r.input); break;
-        case 'join': if (r.on) expression(r.on); relation(r.left); relation(r.right); break;
-        case 'union': r.inputs.forEach(relation); break;
-        case 'recursive': relation(r.seed); relation(r.step(recursiveSelf(r))); break;
-        default: break;
-      }
+      if (r.kind === 'aggregate') aggregate = true;
+      if (r.kind === 'window') window = true;
+      relExprs(r).forEach(expression);
+      relChildren(r).forEach(relation);
     };
     relation(term);
     return { selfRefs, aggregate, window };

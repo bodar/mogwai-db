@@ -4,6 +4,7 @@ import type { Expr } from './expr.ts';
 import type { Rel } from './rel.ts';
 import type { Naming } from './passes/name.ts';
 import { recursiveSelf } from './factory.ts';
+import { forEachRel } from './walk.ts';
 import type { Stmt } from './stmt.ts';
 
 export interface Emitted { readonly sql: string; readonly binds: readonly any[]; }
@@ -28,39 +29,8 @@ function buildRenderer(plan: Rel, naming?: Naming, externalAliases = new Map<str
   // derived relations are introduced under their RelId by `from()`. Resolve Col qualifiers once
   // from the plan rather than requiring callers to make id and alias accidentally identical.
   const sourceAliases = new Map<string, string>(externalAliases);
-  const collectExpr = (e: Expr): void => {
-    switch (e.kind) {
-      case 'unary': case 'cast': collectExpr(e.arg); break;
-      case 'binary': collectExpr(e.left); collectExpr(e.right); break;
-      case 'case': e.whens.forEach(([when, then]) => { collectExpr(when); collectExpr(then); }); if (e.else) collectExpr(e.else); break;
-      case 'call': case 'agg': case 'window-expr': e.args.forEach(collectExpr); break;
-      case 'json-object': e.entries.forEach(([, value]) => collectExpr(value)); break;
-      case 'json-array': e.items.forEach(collectExpr); break;
-      case 'scalar': case 'exists': collectAliases(e.plan); break;
-      case 'in-list': collectExpr(e.expr); e.values.forEach(collectExpr); break;
-      case 'in-query': collectExpr(e.expr); collectAliases(e.plan); break;
-      default: break;
-    }
-  };
-  const collectAliases = (r: Rel): void => {
-    if (r.kind === 'scan') sourceAliases.set(r.id, r.alias);
-    switch (r.kind) {
-      case 'project': r.exprs.forEach(([, e]) => collectExpr(e)); collectAliases(r.input); break;
-      case 'filter': collectExpr(r.pred); collectAliases(r.input); break;
-      case 'aggregate': r.groupBy.forEach(collectExpr); r.aggs.forEach(([, e]) => collectExpr(e)); if (r.having) collectExpr(r.having); collectAliases(r.input); break;
-      case 'sort': r.terms.forEach((term) => collectExpr(term.expr)); collectAliases(r.input); break;
-      case 'limit': if (r.count) collectExpr(r.count); if (r.offset) collectExpr(r.offset); collectAliases(r.input); break;
-      case 'distinct': r.on?.forEach(collectExpr); collectAliases(r.input); break;
-      case 'window': r.specs.forEach(([, e]) => collectExpr(e)); collectAliases(r.input); break;
-      case 'explode': collectExpr(r.expr); collectAliases(r.input); break;
-      case 'materialize': collectAliases(r.input); break;
-      case 'values': r.rows.forEach((row) => row.forEach(collectExpr)); break;
-      case 'join': collectAliases(r.left); collectAliases(r.right); break;
-      case 'union': r.inputs.forEach(collectAliases); break;
-      case 'recursive': collectAliases(r.seed); collectAliases(r.step(recursiveSelf(r))); break;
-      default: break;
-    }
-  };
+  const collectAliases = (r: Rel): void =>
+    forEachRel(r, (node) => { if (node.kind === 'scan') sourceAliases.set(node.id, node.alias); });
   collectAliases(plan);
   const qualifier = (id: string): Expression => ident(sourceAliases.get(id) ?? id);
   const expr = (e: Expr): Expression => {
