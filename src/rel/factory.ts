@@ -99,6 +99,6 @@ export const recursive = (init: WithId<'recursive'>): Node<'recursive'> => {
 
 /** Internal-only recursive callback argument. */
 export const recursiveSelf = (recursive: Node<'recursive'>): Node<'self-ref'> =>
-  brandRel({ kind: 'self-ref', id: recursive.id, name: recursive.name, layout: recursive.layout, type: recursive.type });
+  brandRel({ kind: 'self-ref', id: recursive.id, name: recursive.name, channels: recursive.channels, type: recursive.type });
 
 export type { Table };

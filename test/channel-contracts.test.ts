@@ -6,9 +6,10 @@ import {
 } from '../src/gremlin/frontend.ts';
 import { cardinalityOf } from '../src/compiler/steps/context/stream.ts';
 import {
-    BARRIER_ROLE_POLICY, barrierLayout, LAYOUT_ROLE_POLICY, layoutCols, layoutGrewAliases, layoutOverAliases, mergeArmRelation, mergeLayouts, nonAliasCols, rigidCols,
+    BARRIER_ROLE_POLICY, barrierLayout, channelsOf, LAYOUT_ROLE_POLICY, layoutCols, layoutGrewAliases, layoutOverAliases, mergeArmRelation, mergeLayouts, nonAliasCols, rigidCols,
     type AliasEntry, type TraverserLayout,
 } from '../src/compiler/steps/context/context.ts';
+import { barrierChannels, channelCols, mergeChannels, rigidChannels, ROLE_ORDER, sameChannels } from '../src/channels.ts';
 import { Query, q } from '../src/sql/kernel/q.ts';
 
 describe('channel contracts', () => {
@@ -199,5 +200,50 @@ describe('arm-merge authority', () => {
     const plain = mergeArmRelation(base, layout({ sack: 'sk' }), ['v'], [q`SELECT 1 AS v, 2 AS sk`], false);
     expect(plain.traverserLayout.encounter).toBeUndefined();
     expect(plain.rel.cols).toEqual(['v', 'sk']);
+  });
+
+  // ---------- the channel core, and its tie to the framing layer ----------
+  //
+  // `src/channels.ts` is the neutral vocabulary two layers share (§2/§10·3 of the RelIR build
+  // plan): the relational algebra needs which columns are channels and each one's role, and
+  // nothing about alias shapes or path element types. A projection with its own policy tables is
+  // only safe while it AGREES with the layout it projects — these are that tie, the same tie the
+  // two tables above have to the column accessors.
+
+  test('channelsOf is exactly layoutCols, tagged, and in the declared role order', () => {
+    const full = layout({
+      aliases: new Map([['a', alias('a0')], ['b', alias('a1')]]),
+      sack: 'sk', bulk: 'bulk', origins: ['o0'], branchOrders: ['bo0'], fromV: 'fv', encounter: 'enc',
+      path: { elems: ['vertex', 'vertex'], cols: ['p0', 'p1'] } as never,
+    });
+    const channels = channelsOf(full);
+    expect(channelCols(channels)).toEqual(layoutCols(full));
+    // The roles come out in ROLE_ORDER, which `mergeChannels` rebuilds in — a producer emitting
+    // them in another order would see a merge silently reorder its columns.
+    const seen = [...new Set(channels.map((channel) => channel.role))];
+    expect(seen).toEqual(ROLE_ORDER.filter((role) => seen.includes(role)));
+    expect(channelCols(rigidChannels(channels))).toEqual(rigidCols(full));
+    // Nothing survives a barrier at the CHANNEL level: the consumed/empty/drop distinction is
+    // framing-layer bookkeeping, and `barrierLayout` agrees by emitting no columns.
+    expect(barrierChannels(channels)).toEqual([]);
+    expect(layoutCols(barrierLayout(full))).toEqual([]);
+  });
+
+  test('the channel merge agrees with the layout merge on the columns it carries', () => {
+    const seed = layout({ aliases: new Map([['a', alias('a0')]]), bulk: 'bulk' });
+    const armWithOwnLabel = layout({ aliases: new Map([['a', alias('a0')], ['b', alias('a1')]]), bulk: 'bulk' });
+    const merged = mergeLayouts(seed, [armWithOwnLabel], { rigid: 'peer' });
+    expect(sameChannels(
+      mergeChannels(channelsOf(seed), [channelsOf(armWithOwnLabel)], { rigid: 'peer' }),
+      channelsOf(merged),
+    )).toBe(true);
+  });
+
+  test('the channel merge fails closed on the same divergence the layout merge does', () => {
+    const seed = layout({ bulk: 'bulk' });
+    const child = layout({ bulk: 'bulk', origins: ['o0'] });
+    expect(() => mergeLayouts(seed, [child], { rigid: 'peer' })).toThrow('branch arms disagree on carried columns');
+    expect(() => mergeChannels(channelsOf(seed), [channelsOf(child)], { rigid: 'peer' }))
+      .toThrow('branch arms disagree on carried channels');
   });
 });

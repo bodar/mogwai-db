@@ -4,6 +4,7 @@ import { col, lit, type Expr } from '../src/rel/expr.ts';
 import * as make from '../src/rel/factory.ts';
 import { name } from '../src/rel/passes/name.ts';
 import type { Rel, Table } from '../src/rel/rel.ts';
+import type { Channels } from '../src/channels.ts';
 import { relId, type ColMeta, type SqlType } from '../src/rel/types.ts';
 import { read, seededStore } from './support/harness.ts';
 import { accessPaths, relationalCore } from './support/sql-core.ts';
@@ -29,7 +30,7 @@ import { accessPaths, relationalCore } from './support/sql-core.ts';
  * tests in `test/rel.test.ts`.
  */
 
-const layout = { aliases: new Map(), origins: [], branchOrders: [] } as const;
+const channels: Channels = [];
 const meta = (name: string, type: SqlType = 'any', nullable = false): ColMeta => ({ name, type, nullable });
 const cols = (...names: readonly (string | ColMeta)[]) => ({ cols: names.map((n) => (typeof n === 'string' ? meta(n) : n)) });
 
@@ -37,16 +38,16 @@ let seq = 0;
 const fresh = (hint: string) => relId(`${hint}${seq++}`);
 
 const scan = (table: Table, alias: string, ...columns: readonly string[]) =>
-  make.scan({ id: relId(alias), table, alias, layout, ...{ type: cols(...columns) } });
+  make.scan({ id: relId(alias), table, alias, channels, ...{ type: cols(...columns) } });
 /** `Project` is the only node that may declare output columns, so it is also the shorthand for
  * narrowing a wide physical scan to the attributes a plan actually reads. */
 const project = (input: Rel, exprs: readonly (readonly [string, Expr])[], id = fresh('p')) =>
-  make.project({ id, input, layout, type: cols(...exprs.map(([n]) => n)), exprs });
+  make.project({ id, input, channels, type: cols(...exprs.map(([n]) => n)), exprs });
 const pick = (input: Rel, ...names: readonly string[]) => project(input, names.map((n) => [n, col(input.id, n)] as const));
-const filter = (input: Rel, pred: Expr) => make.filter({ id: fresh('f'), input, layout, type: input.type, pred });
+const filter = (input: Rel, pred: Expr) => make.filter({ id: fresh('f'), input, channels, type: input.type, pred });
 const join = (left: Rel, right: Rel, on: Expr, names: readonly string[]) =>
-  make.join({ id: fresh('j'), left, right, join: 'inner', on, layout, type: cols(...names) });
-const cte = (input: Rel, cteName: string) => make.materialize({ id: relId(`${cteName}_m`), input, layout, type: input.type, name: cteName });
+  make.join({ id: fresh('j'), left, right, join: 'inner', on, channels, type: cols(...names) });
+const cte = (input: Rel, cteName: string) => make.materialize({ id: relId(`${cteName}_m`), input, channels, type: input.type, name: cteName });
 
 const binary = (op: Extract<Expr, { kind: 'binary' }>['op'], left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
 const inList = (expr: Expr, values: readonly Expr[]): Expr => ({ kind: 'in-list', expr, values });
@@ -88,7 +89,7 @@ const FAMILIES: readonly Family[] = [
       const j = join(e, c0, binary('and', binary('=', col(e.id, 'src'), col(c0.id, 'id')), inQuery(col(e.id, 'label'), labelIds('knows'))), ['src', 'label', 'tgt', 'pid', 'bulk']);
       const moved = project(j, [['id', col(j.id, 'tgt')], ['bulk', col(j.id, 'bulk')]]);
       return make.aggregate({
-        id: fresh('agg'), input: moved, layout, type: cols('id', 'bulk'),
+        id: fresh('agg'), input: moved, channels, type: cols('id', 'bulk'),
         groupBy: [col(moved.id, 'id')], aggs: [['bulk', { kind: 'agg', fn: 'sum', args: [col(moved.id, 'bulk')] }]],
       });
     },
@@ -148,7 +149,7 @@ const FAMILIES: readonly Family[] = [
     plan: () => {
       const c0 = vertexSource();
       return make.aggregate({
-        id: fresh('agg'), input: c0, layout, type: cols(meta('v', 'int')), groupBy: [],
+        id: fresh('agg'), input: c0, channels, type: cols(meta('v', 'int')), groupBy: [],
         aggs: [['v', { kind: 'call', fn: 'COALESCE', args: [{ kind: 'agg', fn: 'sum', args: [col(c0.id, 'bulk')] }, lit(0, 'int')] }]],
       });
     },
@@ -160,8 +161,8 @@ const FAMILIES: readonly Family[] = [
     plan: () => {
       const n = scan('nodes', 'n', ...NODE);
       const c0 = cte(project(n, [['id', col(n.id, 'id')], ['bulk', lit(1, 'int')], ['encounter', col(n.id, 'id')]]), 'c0');
-      const ordered = make.sort({ id: fresh('s'), input: c0, layout, type: c0.type, terms: [{ expr: col(c0.id, 'encounter'), dir: 'asc' }] });
-      return make.limit({ id: fresh('l'), input: ordered, layout, type: c0.type, count: lit(2, 'int') });
+      const ordered = make.sort({ id: fresh('s'), input: c0, channels, type: c0.type, terms: [{ expr: col(c0.id, 'encounter'), dir: 'asc' }] });
+      return make.limit({ id: fresh('l'), input: ordered, channels, type: c0.type, count: lit(2, 'int') });
     },
   },
 
@@ -171,7 +172,7 @@ const FAMILIES: readonly Family[] = [
     plan: () => {
       const c0 = vertexSource();
       const projected = project(c0, [['id', col(c0.id, 'id')], ['bulk', lit(1, 'int')]]);
-      return make.distinct({ id: fresh('d'), input: projected, layout, type: projected.type });
+      return make.distinct({ id: fresh('d'), input: projected, channels, type: projected.type });
     },
   },
 
@@ -185,14 +186,14 @@ const FAMILIES: readonly Family[] = [
         return cte(project(chosen, [['id', col(chosen.id, 'id')], ['bulk', lit(1, 'int')]]), cteName);
       };
       const [left, right] = [arm('c0', 2), arm('c1', 4)];
-      return make.union({ id: fresh('u'), inputs: [left, right], all: true, layout, type: cols('id', 'bulk') });
+      return make.union({ id: fresh('u'), inputs: [left, right], all: true, channels, type: cols('id', 'bulk') });
     },
   },
 
   // 11 — the one construct measured emitting `VALUES`.
   {
     gremlin: 'g.inject(1,2)',
-    plan: () => make.values({ id: fresh('v'), rows: [[lit(1, 'int')], [lit(2, 'int')]], layout, type: cols('v') }),
+    plan: () => make.values({ id: fresh('v'), rows: [[lit(1, 'int')], [lit(2, 'int')]], channels, type: cols('v') }),
   },
 ];
 

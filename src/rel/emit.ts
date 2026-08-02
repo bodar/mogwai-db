@@ -2,7 +2,7 @@ import { empty, identifier, list, q, raw, render, value, type Expression } from 
 import { DO_BIND_CAP, checkPlan } from './check.ts';
 import type { Expr } from './expr.ts';
 import { recursiveSelf } from './factory.ts';
-import { explodeColumns } from './layout.ts';
+import { explodeColumns } from './obligations.ts';
 import type { Binding, Plan } from './plan.ts';
 import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';

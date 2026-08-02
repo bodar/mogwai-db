@@ -1,4 +1,4 @@
-import { layoutCols } from '../../compiler/steps/context/context.ts';
+import { channelCols } from '../../channels.ts';
 import type { Expr } from '../expr.ts';
 import { project } from '../factory.ts';
 import type { Rel } from '../rel.ts';
@@ -9,7 +9,7 @@ const refs = (expression: Expr, relation: RelId, out: Set<string>): void =>
   forEachExpr(expression, (e) => { if (e.kind === 'col' && e.rel === relation) out.add(e.name); });
 
 /**
- * Remove unobserved Project outputs while preserving every carried traverser channel.
+ * Remove unobserved Project outputs while preserving every carried channel.
  *
  * Two passes, because the plan is a DAG: a shared node has more than one consumer, and pruning it
  * to what ONE parent reads breaks the other. Pass 1 accumulates each node's need as the UNION over
@@ -37,24 +37,24 @@ export function prune(plan: Rel, required: readonly string[] = plan.type.cols.ma
     const r = queue.pop()!;
     const need = new Set(needs.get(r));
     if (r.kind === 'project') {
-      const keep = new Set([...need, ...layoutCols(r.layout)]);
-      const inputNeed = new Set(layoutCols(r.input.layout));
+      const keep = new Set([...need, ...channelCols(r.channels)]);
+      const inputNeed = new Set(channelCols(r.input.channels));
       r.exprs.filter(([name]) => keep.has(name)).forEach(([, expression]) => refs(expression, r.input.id, inputNeed));
       require(r.input, inputNeed);
       continue;
     }
     for (const child of relChildren(r)) {
-      require(child, preserves(r) ? [...need, ...layoutCols(child.layout)] : child.type.cols.map((col) => col.name));
+      require(child, preserves(r) ? [...need, ...channelCols(child.channels)] : child.type.cols.map((col) => col.name));
     }
   }
 
   return rewrite(plan, (mapped, original) => {
     if (mapped.kind !== 'project') return mapped;
-    const keep = new Set([...(needs.get(original) ?? []), ...layoutCols(mapped.layout)]);
+    const keep = new Set([...(needs.get(original) ?? []), ...channelCols(mapped.channels)]);
     const exprs = mapped.exprs.filter(([name]) => keep.has(name));
     if (exprs.length === mapped.exprs.length) return mapped;
     return project({
-      id: mapped.id, input: mapped.input, layout: mapped.layout,
+      id: mapped.id, input: mapped.input, channels: mapped.channels,
       type: { cols: mapped.type.cols.filter((col) => keep.has(col.name)) }, exprs,
     });
   });

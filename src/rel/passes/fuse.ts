@@ -18,6 +18,6 @@ export function fuse(plan: Rel): Rel {
     if (r.kind !== 'filter' || r.input.kind !== 'filter') return r;
     const input = r.input;
     const pred: Expr = { kind: 'binary', op: 'and', left: input.pred, right: rebind(r.pred, input.id, input.input.id) };
-    return filter({ id: r.id, input: input.input, layout: r.layout, type: r.type, pred });
+    return filter({ id: r.id, input: input.input, channels: r.channels, type: r.type, pred });
   });
 }

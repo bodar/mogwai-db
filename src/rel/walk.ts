@@ -97,36 +97,36 @@ const mapSpec = (spec: WindowSpec, f: (e: Expr) => Expr): WindowSpec => ({
 /** Replace a node's child relations, rebuilding through the kind's factory. Never a spread: a
  * spread keeps an obsolete field and loses the construction brand. */
 export function mapRelChildren(r: Rel, f: (child: Rel) => Rel): Rel {
-  const { id, layout, type } = r;
+  const { id, channels, type } = r;
   switch (r.kind) {
     case 'scan': case 'values': case 'self-ref': case 'ref': return r;
-    case 'project': return make.project({ id, layout, type, input: f(r.input), exprs: r.exprs });
-    case 'filter': return make.filter({ id, layout, type, input: f(r.input), pred: r.pred });
-    case 'aggregate': return make.aggregate({ id, layout, type, input: f(r.input), groupBy: r.groupBy, aggs: r.aggs, having: r.having });
-    case 'sort': return make.sort({ id, layout, type, input: f(r.input), terms: r.terms });
-    case 'limit': return make.limit({ id, layout, type, input: f(r.input), count: r.count, offset: r.offset });
-    case 'distinct': return make.distinct({ id, layout, type, input: f(r.input) });
-    case 'window': return make.window({ id, layout, type, input: f(r.input), specs: r.specs });
-    case 'explode': return make.explode({ id, layout, type, input: f(r.input), expr: r.expr, as: r.as });
-    case 'materialize': return make.materialize({ id, layout, type, input: f(r.input), name: r.name });
-    case 'join': return make.join({ id, layout, type, left: f(r.left), right: f(r.right), join: r.join, on: r.on });
-    case 'union': return make.union({ id, layout, type, inputs: r.inputs.map(f), all: r.all });
-    case 'recursive': return make.recursive({ id, layout, type, name: r.name, cols: r.cols, seed: f(r.seed), step: (self) => f(r.step(self)) });
+    case 'project': return make.project({ id, channels, type, input: f(r.input), exprs: r.exprs });
+    case 'filter': return make.filter({ id, channels, type, input: f(r.input), pred: r.pred });
+    case 'aggregate': return make.aggregate({ id, channels, type, input: f(r.input), groupBy: r.groupBy, aggs: r.aggs, having: r.having });
+    case 'sort': return make.sort({ id, channels, type, input: f(r.input), terms: r.terms });
+    case 'limit': return make.limit({ id, channels, type, input: f(r.input), count: r.count, offset: r.offset });
+    case 'distinct': return make.distinct({ id, channels, type, input: f(r.input) });
+    case 'window': return make.window({ id, channels, type, input: f(r.input), specs: r.specs });
+    case 'explode': return make.explode({ id, channels, type, input: f(r.input), expr: r.expr, as: r.as });
+    case 'materialize': return make.materialize({ id, channels, type, input: f(r.input), name: r.name });
+    case 'join': return make.join({ id, channels, type, left: f(r.left), right: f(r.right), join: r.join, on: r.on });
+    case 'union': return make.union({ id, channels, type, inputs: r.inputs.map(f), all: r.all });
+    case 'recursive': return make.recursive({ id, channels, type, name: r.name, cols: r.cols, seed: f(r.seed), step: (self) => f(r.step(self)) });
   }
 }
 
 /** Replace the expressions a node owns, position for position. */
 export function mapRelExprs(r: Rel, f: (e: Expr) => Expr): Rel {
-  const { id, layout, type } = r;
+  const { id, channels, type } = r;
   const pair = ([name, e]: readonly [string, Expr]) => [name, f(e)] as const;
   switch (r.kind) {
     case 'scan': case 'self-ref': case 'ref': case 'materialize': case 'union': case 'recursive': return r;
-    case 'values': return make.values({ id, layout, type, rows: r.rows.map((row) => row.map(f)) });
-    case 'project': return make.project({ id, layout, type, input: r.input, exprs: r.exprs.map(pair) });
-    case 'filter': return make.filter({ id, layout, type, input: r.input, pred: f(r.pred) });
-    case 'aggregate': return make.aggregate({ id, layout, type, input: r.input, groupBy: r.groupBy.map(f), aggs: r.aggs.map(pair), having: r.having && f(r.having) });
-    case 'sort': return make.sort({ id, layout, type, input: r.input, terms: r.terms.map((term) => mapTerm(term, f)) });
-    case 'limit': return make.limit({ id, layout, type, input: r.input, count: r.count && f(r.count), offset: r.offset && f(r.offset) });
+    case 'values': return make.values({ id, channels, type, rows: r.rows.map((row) => row.map(f)) });
+    case 'project': return make.project({ id, channels, type, input: r.input, exprs: r.exprs.map(pair) });
+    case 'filter': return make.filter({ id, channels, type, input: r.input, pred: f(r.pred) });
+    case 'aggregate': return make.aggregate({ id, channels, type, input: r.input, groupBy: r.groupBy.map(f), aggs: r.aggs.map(pair), having: r.having && f(r.having) });
+    case 'sort': return make.sort({ id, channels, type, input: r.input, terms: r.terms.map((term) => mapTerm(term, f)) });
+    case 'limit': return make.limit({ id, channels, type, input: r.input, count: r.count && f(r.count), offset: r.offset && f(r.offset) });
     case 'distinct': return r;
     case 'window': {
       const specs = r.specs.map(([name, spec]) => {
@@ -134,10 +134,10 @@ export function mapRelExprs(r: Rel, f: (e: Expr) => Expr): Rel {
         if (mapped.kind !== 'window-expr') throw new Error('RelIR: a Window spec must stay a WindowExpr');
         return [name, mapped] as const;
       });
-      return make.window({ id, layout, type, input: r.input, specs });
+      return make.window({ id, channels, type, input: r.input, specs });
     }
-    case 'explode': return make.explode({ id, layout, type, input: r.input, expr: f(r.expr), as: r.as });
-    case 'join': return make.join({ id, layout, type, left: r.left, right: r.right, join: r.join, on: r.on && f(r.on) });
+    case 'explode': return make.explode({ id, channels, type, input: r.input, expr: f(r.expr), as: r.as });
+    case 'join': return make.join({ id, channels, type, left: r.left, right: r.right, join: r.join, on: r.on && f(r.on) });
   }
 }
 

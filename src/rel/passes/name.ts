@@ -43,7 +43,7 @@ export function name(root: Rel): Plan {
     if (!binds(original)) return mapped;
     const bound = original.kind === 'materialize' && original.name ? original.name : generate();
     bindings.push({ name: bound, node: mapped });
-    return ref({ id: original.id, name: bound, layout: mapped.layout, type: mapped.type });
+    return ref({ id: original.id, name: bound, channels: mapped.channels, type: mapped.type });
   });
   return plan({ bindings, result });
 }

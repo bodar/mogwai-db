@@ -1,6 +1,6 @@
 import type { Expr } from './expr.ts';
 import { joinWidth } from './factory.ts';
-import { checkLayout } from './layout.ts';
+import { checkChannels } from './obligations.ts';
 import { isRel, type Rel, type RelKind } from './rel.ts';
 import type { Binding, Plan } from './plan.ts';
 import { isStmt, type Stmt } from './stmt.ts';
@@ -106,7 +106,7 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
   };
   /** Where each of a node's expressions is EVALUATED. A kind that forgets one is caught by the
    * arity assertion below, and `Record<RelKind, …>` means a new kind must declare its placement
-   * before the build passes — the same enforcement the layout obligations have. */
+   * before the build passes — the same enforcement the channels obligations have. */
   const EXPR_SCOPE: { readonly [K in RelKind]: (node: Extract<Rel, { readonly kind: K }>, inner: Scope) => readonly (readonly [Expr, Scope])[] } = {
     scan: () => [], 'self-ref': () => [], ref: () => [], union: () => [], recursive: () => [],
     values: (node, inner) => node.rows.flat().map((e) => [e, inner] as const),
@@ -127,7 +127,7 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
     window: (node, inner) => node.specs.map(([, e]) => [e, { ...inner, inWindow: true }] as const),
   };
 
-  /** Structure that is not layout and not expression placement: arity, duplicate names, and the
+  /** Structure that is not channels and not expression placement: arity, duplicate names, and the
    * SQLite laws. Also `Record<RelKind, …>`, for the same reason. */
   const STRUCTURE: { readonly [K in RelKind]: (node: Extract<Rel, { readonly kind: K }>, scope: Scope) => void } = {
     scan: () => {}, filter: () => {}, sort: () => {}, limit: () => {}, distinct: () => {},
@@ -194,7 +194,7 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
 
   const checkRel = (r: Rel, scope: Scope): void => {
     if (!isRel(r)) throw new Error('RelIR: relation was not constructed by a Rel factory');
-    checkLayout(r);
+    checkChannels(r);
     (STRUCTURE[r.kind] as (node: Rel, s: Scope) => void)(r, scope);
     if (r.kind === 'self-ref' || r.kind === 'ref') return;
     if (r.kind === 'recursive') {

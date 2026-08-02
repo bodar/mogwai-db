@@ -3,6 +3,7 @@ import { aliasCtx, type Elem, type ScalarCtx, elemTable, P_OPS, propScalarFor } 
 import { aliasId, aliasPresent, aliasScalar, type AliasShape } from './alias.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import type { ValueType, ListOf, ScalarType } from '../../../sql/kernel/render.ts';
+import { CHANNEL_BARRIER_POLICY, CHANNEL_MERGE_POLICY, type BarrierPolicy, type Channels, type MergePolicy, type RigidPolicy } from '../../../channels.ts';
 
 // ---------- prefix-compilation state ----------
 //
@@ -292,7 +293,7 @@ export const nonAliasCols = (c: TraverserLayout): string[] => layoutCols(patchLa
  *    unchanged. `trackFromV` is a chain-level requirement; `consumedAliases` is a barrier's
  *    diagnosis, which must survive every downstream patch or `select()` loses the ability to tell
  *    "never bound" from "a barrier ate it". */
-export type LayoutRolePolicy = 'union' | 'pad' | 'identical' | 'metadata';
+export type LayoutRolePolicy = MergePolicy;
 
 /** The merge policy of EVERY carried role — the explicit classification Phase 1's design section
  *  asks for, as a table the type checker keeps total rather than prose that goes stale.
@@ -306,16 +307,19 @@ export type LayoutRolePolicy = 'union' | 'pad' | 'identical' | 'metadata';
  *  `test/channel-contracts.test.ts` ties the table to the three column accessors, so a policy
  *  recorded here and a column list that disagrees cannot both survive. */
 export const LAYOUT_ROLE_POLICY: Readonly<Record<keyof TraverserLayout, LayoutRolePolicy>> = {
-  aliases: 'union',
-  path: 'pad',
-  origins: 'identical',
-  // Every arm forked from the same branch entry, so they carry the same frozen column; a merge
-  // that finds them disagreeing is looking at arms from different branches and must fail closed.
-  branchOrders: 'identical',
-  sack: 'identical',
-  fromV: 'identical',
-  encounter: 'identical',
-  bulk: 'identical',
+  // Every channel role reads its policy off the neutral core (`src/channels.ts`), so the two
+  // layers cannot disagree; only the two METADATA roles — never physical columns, so not channels
+  // at all — are declared here. Every arm forked from the same branch entry, so they carry the
+  // same frozen `branchOrders` column; a merge that finds them disagreeing is looking at arms from
+  // different branches and must fail closed.
+  aliases: CHANNEL_MERGE_POLICY.alias,
+  path: CHANNEL_MERGE_POLICY.path,
+  origins: CHANNEL_MERGE_POLICY.origin,
+  branchOrders: CHANNEL_MERGE_POLICY.branchOrder,
+  sack: CHANNEL_MERGE_POLICY.sack,
+  fromV: CHANNEL_MERGE_POLICY.fromV,
+  encounter: CHANNEL_MERGE_POLICY.encounter,
+  bulk: CHANNEL_MERGE_POLICY.bulk,
   trackFromV: 'metadata',
   consumedAliases: 'metadata',
 };
@@ -334,7 +338,7 @@ export const LAYOUT_ROLE_POLICY: Readonly<Record<keyof TraverserLayout, LayoutRo
  *  - `keep` — never a physical column, so a barrier has nothing to drop. `trackFromV` is a
  *    chain-level requirement and `consumedAliases` is the diagnosis this very table writes.
  */
-export type BarrierRolePolicy = 'consumed' | 'empty' | 'drop' | 'keep';
+export type BarrierRolePolicy = BarrierPolicy;
 
 /** The barrier policy of EVERY carried role, and the reason it exists is the same one
  *  `LAYOUT_ROLE_POLICY` gives from the merge side — except that omission is not safe here.
@@ -352,17 +356,18 @@ export type BarrierRolePolicy = 'consumed' | 'empty' | 'drop' | 'keep';
  *  disagrees cannot both survive.
  */
 export const BARRIER_ROLE_POLICY: Readonly<Record<keyof TraverserLayout, BarrierRolePolicy>> = {
-  aliases: 'consumed',
-  origins: 'empty',
-  // Same reading as `origins`, one scope out: a barrier result is a fresh traverser that no
-  // longer stands for any one of the branch's inputs, so there is no input order to hold. `[]`
-  // rather than absent, because the role is a stack.
-  branchOrders: 'empty',
-  path: 'drop',
-  sack: 'drop',
-  fromV: 'drop',
-  encounter: 'drop',
-  bulk: 'drop',
+  // As above, the channel roles read off the neutral core. `branchOrders` has the same reading as
+  // `origins`, one scope out: a barrier result is a fresh traverser that no longer stands for any
+  // one of the branch's inputs, so there is no input order to hold — `[]` rather than absent,
+  // because the role is a stack.
+  aliases: CHANNEL_BARRIER_POLICY.alias,
+  origins: CHANNEL_BARRIER_POLICY.origin,
+  branchOrders: CHANNEL_BARRIER_POLICY.branchOrder,
+  path: CHANNEL_BARRIER_POLICY.path,
+  sack: CHANNEL_BARRIER_POLICY.sack,
+  fromV: CHANNEL_BARRIER_POLICY.fromV,
+  encounter: CHANNEL_BARRIER_POLICY.encounter,
+  bulk: CHANNEL_BARRIER_POLICY.bulk,
   trackFromV: 'keep',
   consumedAliases: 'keep',
 };
@@ -378,7 +383,7 @@ export const BARRIER_ROLE_POLICY: Readonly<Record<keyof TraverserLayout, Barrier
  *    scope minted an ordinal the parent does not have, so the arms' rigid roles are not
  *    comparable with the parent's by construction and only the label sets merge. Asserting here
  *    would reject valid `coalesce`/`optional` forms outright — see `tail/variant.ts`. */
-export type RigidRolePolicy = 'peer' | 'rehomed';
+export type RigidRolePolicy = RigidPolicy;
 
 /**
  * THE merge authority — the one `context.ts:122` and `prefix/branch.ts:234` have cited all along
@@ -613,6 +618,24 @@ export const elemRel = (st: ElementStream, alias = 'n'): Relation => elemTable(s
  *  the old set, so layoutCols(old) has to stay a prefix of layoutCols(new). Any column
  *  ordered after the site that physically appends it desyncs declared vs physical columns
  *  (the coalesce/optional+path() / +bulk bug). */
+/**
+ * The same carried columns as `layoutCols`, each tagged with its NEUTRAL role — the projection of
+ * a `TraverserLayout` onto the channel core (`src/channels.ts`) that the relational algebra
+ * consumes. It is a projection and not a second source of truth: the framing-layer detail a role
+ * carries (an alias's shape set, a path position's element type) has no channel to live in, which
+ * is precisely the vocabulary boundary.
+ */
+export const channelsOf = (c: TraverserLayout): Channels => [
+  ...aliasColsOf(c.aliases).map((col) => ({ col, role: 'alias' as const })),
+  ...(c.sack ? [{ col: c.sack, role: 'sack' as const }] : []),
+  ...(c.bulk ? [{ col: c.bulk, role: 'bulk' as const }] : []),
+  ...c.origins.map((col) => ({ col, role: 'origin' as const })),
+  ...c.branchOrders.map((col) => ({ col, role: 'branchOrder' as const })),
+  ...(c.fromV ? [{ col: c.fromV, role: 'fromV' as const }] : []),
+  ...(c.encounter ? [{ col: c.encounter, role: 'encounter' as const }] : []),
+  ...pathColsOf(c.path).map((col) => ({ col, role: 'path' as const })),
+];
+
 export const layoutCols = (c: TraverserLayout): string[] =>
   [...aliasColsOf(c.aliases), ...(c.sack ? [c.sack] : []), ...(c.bulk ? [c.bulk] : []), ...c.origins, ...c.branchOrders, ...(c.fromV ? [c.fromV] : []), ...(c.encounter ? [c.encounter] : []), ...pathColsOf(c.path)];
 
