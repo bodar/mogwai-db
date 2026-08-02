@@ -894,7 +894,35 @@ increment by, since the cumulative figures above are order-dependent:** `+values
 `dedup`, `identity`, `is`, `not` add nothing until something else lands first, which is exactly the
 kind of fact that makes a plausible-looking increment worthless.
 
-**So the next increment is the SHAPE BOUNDARY, not another step.** `values` and `count` are worth
+**LANDED (`986b056`): the shape boundary, coverage 62 → 75.** A lowering now returns a
+`RelFraming` — a UNION, not a widened record, because an element stream has no scalar type and a
+scalar stream has no element kind, and pretending otherwise is how a shape vocabulary starts leaking
+into the algebra. `spine.ts` switches on it TOTALLY, so a stream kind the lowering learns to produce
+is a compile error at the seam until it knows how to frame it; the channel → `TraverserLayout`
+translation likewise fails closed on a role it cannot express rather than dropping one. `count()` is
+`SUM(bulk)` read off the carried channel (not `COUNT(*)`, which is only equal while bulk is 1
+everywhere) and is a barrier, so no channel survives it — `barrierChannels` says that already. A
+`values(k)` is a JOIN and not an `EXISTS`, because it emits one traverser per matching property:
+multiplying the row is the answer here and the bug in a filter. A new test asserts `Compiled.shape`
+agrees across spines at the boundary — rows agreeing is NOT enough there, since right values under
+the wrong shape round-trip as the wrong GraphBinary type with every row assertion still passing.
+
+**A LIVE SILENT WRONG ANSWER, found by porting `values` and deliberately NOT fixed in that commit.**
+Measured: the legacy spine binds only the FIRST key, so `g.V().values('name','age')` returns just
+the names, and `g.V().values()` binds `null` and returns nothing at all. Ten corpus traversals (6
+multi-key, 4 bare) — right arity, plausible rows, and the census blesses them because it compares
+against a baseline recorded from the same defect. RelIR expresses both correctly, which is precisely
+why the increment DECLINED them: routing a correct answer where legacy is wrong puts
+`mise run test:legacy-spine` permanently red against a defect instead of fixing it. **It is its own
+next change** — fix both spines together, re-record the census with the reason, add an L4 pin — and
+until then the decline plus the measured wrong answers are pinned in `test/rel-spine.test.ts` so it
+cannot be mistaken for a coverage gap.
+
+The general finding is worth more than the defect: **re-expressing a lowering in a second algebra is
+itself a defect instrument**, and this is the second one it has produced (the first was
+`likePattern` crashing on `P.not`). Neither was reachable by any test in the suite.
+
+**The superseded next-step note (kept because the reasoning is the method):** `values` and `count` are worth
 28 together and 28 apart is impossible, because both cross element → scalar: the framing bridge in
 `src/compiler/rel/spine.ts` builds an `ElementStream` and nothing else. Making it carry the
 lowering's output STREAM KIND is the substrate, and it is what every scalar-shaped terminal then
