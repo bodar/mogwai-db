@@ -41,6 +41,10 @@ const COVERED = [
   "g.V().has('name',P.within('marko','josh'))", "g.V().has('name',P.without('marko'))",
   "g.V().has('name',P.within())", "g.V().has('age',P.between(20,30))", "g.V().has('age',P.inside(20,35))",
   "g.V().has('age',P.gt(20).and(P.lt(30)))", "g.V().has('age',P.not(P.gt(30)))", "g.E().has('weight',P.gte(0.5))",
+  // THE SHAPE BOUNDARY: both of these retype element -> scalar, so they exercise the framing
+  // bridge's second stream kind rather than one more step in the same one.
+  'g.V().count()', 'g.E().count()', "g.V().hasLabel('person').count()", "g.V().has('age',P.gt(29)).count()",
+  "g.V().values('name')", "g.V().values('age')", "g.E().values('weight')", "g.V().hasLabel('person').values('name')",
 ];
 
 /**
@@ -48,8 +52,10 @@ const COVERED = [
  * by name. `g.V().count()` is the ordinary "step not learned yet"; the rest are the guards.
  */
 const DECLINED = [
-  'g.V().count()',                    // a step past the source
-  'g.V().out()',                      // ditto, movement
+  'g.V().out()',                      // a step not learned yet: movement
+  'g.V().count().is(P.gt(2))',        // a step AFTER a shape change is in the new shape's vocabulary
+  "g.V().values('name','age')",       // multi-key values — see the shape-boundary test below
+  'g.V().values()',                   // every key — likewise
   'g.inject(1)',                      // a source that is not V()/E()
   'g.withSack(0).V()',                // a carried sack the source seed would have to declare
   'g.withSideEffect("a",1).V()',      // a side effect
@@ -93,9 +99,34 @@ describe('the RelIR spine', () => {
     // Asking for RelIR does not make an uncovered chain route there, and asking for legacy always
     // works. Coverage is a property of the CHAIN; if these ever diverge the router has started
     // deciding something the lowering should own.
-    expect(read('g.V().count()', { spine: 'rel' }).spine).toBe('legacy');
+    expect(read('g.V().out()', { spine: 'rel' }).spine).toBe('legacy');
     expect(read('g.V()', { spine: 'legacy' }).spine).toBe('legacy');
     expect(read('g.V()', { spine: 'rel' }).spine).toBe('rel');
+  });
+
+  test('a retyping terminal frames as the same Shape on both spines', () => {
+    // Rows agreeing is not enough at the shape boundary: `Compiled.shape` is what the wire framer
+    // reads, so a lowering that produced the right VALUES under the wrong shape would round-trip
+    // as the wrong GraphBinary type and every row assertion would still pass.
+    for (const gremlin of ['g.V().count()', "g.V().values('name')", "g.E().values('weight')"]) {
+      expect(read(gremlin, { spine: 'rel' }).shape).toEqual(read(gremlin, { spine: 'legacy' }).shape);
+    }
+    expect(read('g.V().count()', { spine: 'rel' }).shape).toEqual({ kind: 'value', type: { kind: 'static', type: 'long' } });
+    expect(read("g.V().values('name')", { spine: 'rel' }).shape).toEqual({ kind: 'value', type: { kind: 'perRow', column: 'vtype' } });
+  });
+
+  test("values() and values(k1,k2) decline because LEGACY answers them wrong", () => {
+    // MEASURED, and it is a live silent wrong answer rather than a missing feature: legacy binds
+    // only the FIRST key, so `values('name','age')` returns just the names, and `values()` binds
+    // null and returns nothing at all. RelIR can express both correctly — which is exactly why it
+    // must NOT here: routing them would put `mise run test:legacy-spine` permanently red against a
+    // defect instead of fixing it. Its own change; this test pins the reason so the decline is not
+    // mistaken for a gap.
+    const store2 = seededStore();
+    const rows = (g: string) => (store2.query(read(g, { spine: 'legacy' }).sql, read(g, { spine: 'legacy' }).binds) as any[]).map((r) => r.v);
+    expect(rows("g.V().values('name','age')").sort()).toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+    expect(rows('g.V().values()')).toEqual([]);
+    expect(read("g.V().values('name','age')", { spine: 'rel' }).spine).toBe('legacy');
   });
 
   test('the emitted SQL does not depend on how many traversals were compiled before it', () => {

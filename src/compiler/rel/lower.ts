@@ -5,6 +5,7 @@ import { name as nameBindings } from '../../rel/passes/name.ts';
 import type { Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { relId, type ColMeta, type RelType, type SqlType } from '../../rel/types.ts';
+import { PER_ROW, STATIC, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../ir/strategies.ts';
@@ -35,11 +36,26 @@ import { containsTextSearch, predicateExpr, storedCompare } from './predicate.ts
  * shape-interpreting class stays per-shape forever and correctly so.
  */
 
-/** A covered chain, lowered. `elem` and `layout*` are what the framing layer needs to build its
- *  projection over the result relation; everything else about shape stays above RelIR. */
+/**
+ * WHAT THE FRAMING LAYER MUST BUILD over the result relation — the shape half of a lowering.
+ *
+ * Gremlin shape is resolved ABOVE RelIR and rides to the wire as `Compiled.shape` (§2), so a
+ * lowering hands back a relation plus the minimum the framing layer needs to pick its per-shape
+ * projection. This union is that minimum, and it is deliberately a union rather than a widened
+ * record: an element stream has no scalar type and a scalar stream has no element kind, and
+ * pretending otherwise is how a shape vocabulary starts leaking into the algebra.
+ *
+ * It grows one arm per stream kind the spine learns, and `spine.ts` switches on it TOTALLY — the
+ * shape-interpreting class stays per-shape forever and correctly so (§6, Phase 4).
+ */
+export type RelFraming =
+  | { readonly kind: 'elements'; readonly elem: Elem }
+  | { readonly kind: 'scalar'; readonly type: ScalarType; readonly result?: 'value' | 'count' | 'number' };
+
+/** A covered chain, lowered: a relation, its output columns, its channels, and what to frame. */
 export interface RelLowering {
   readonly plan: Plan;
-  readonly elem: Elem;
+  readonly framing: RelFraming;
   /** The result relation's output columns, in order — the framing layer's `Relation` header. */
   readonly cols: readonly string[];
   readonly channels: Channels;
@@ -192,6 +208,78 @@ function elementScan(step: IRStep, fresh: Minter): { scan: Rel; pred?: Expr; ele
   return { scan, pred, elem };
 }
 
+/** The storage-class recovery every stored value goes through on the way out: a JSON-typed value
+ *  comes back as JSON, everything else as itself. Shared by `values()` and, later, every other
+ *  reader of a property value. */
+const storedValue = (rel: import('../../rel/types.ts').RelId): Expr => ({
+  kind: 'case',
+  whens: [[{ kind: 'in-list', expr: col(rel, 'vtype'), values: ['list', 'map', 'set'].map((t) => lit(t, 'text')) },
+    { kind: 'call', fn: 'json', args: [col(rel, 'value')] }]],
+  else: col(rel, 'value'),
+});
+
+/**
+ * A TERMINAL that retypes the element relation into another shape — the SHAPE BOUNDARY, and the
+ * substrate every scalar-valued step then rides on.
+ *
+ * `null` declines, as everywhere here. What makes this the boundary rather than one more step is
+ * that both arms change the STREAM KIND: everything before produces elements and frames as the
+ * element payload, and these produce one scalar per row and frame through the value projection.
+ */
+function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): Omit<RelLowering, 'plan'> & { readonly rel: Rel } | null {
+  if (step.modulators?.length || step.optionArms) return null;
+  const args = step.args ?? [];
+
+  // count() is the RLE traverser TOTAL, not the row count: a collapse merges convergent walks into
+  // (row, N) pairs, so the answer is SUM(bulk) — identical to COUNT(*) only while bulk is 1
+  // everywhere. Reading it off the carried channel rather than off the step is what keeps the two
+  // in step when movement lands.
+  if (step.name === 'count') {
+    if (args.length) return null;
+    const total: Expr = { kind: 'call', fn: 'COALESCE', args: [{ kind: 'agg', fn: 'sum', args: [col(input.id, 'bulk')] }, lit(0, 'int')] };
+    // A reducing aggregate is a BARRIER: no channel survives it (§3.5), which is exactly what
+    // `barrierChannels` says and why the channels list is empty rather than trimmed by hand.
+    return {
+      rel: make.aggregate({ id: fresh('agg'), input, channels: [], type: typeOf(meta('v', 'int')), groupBy: [], aggs: [['v', total]] }),
+      framing: { kind: 'scalar', type: STATIC('long'), result: 'count' }, cols: ['v'], channels: [],
+    };
+  }
+
+  if (step.name === 'values') {
+    // ONE key only. `values()` (every key) and `values(k1, k2)` are declined here because the
+    // legacy spine ANSWERS THEM WRONG — measured — and this route would answer them right, which
+    // would put the differential permanently red against a defect rather than fixing it. It is its
+    // own change: see the build plan's note on the finding.
+    const [key, extra] = args;
+    if (typeof key !== 'string' || extra !== undefined) return null;
+
+    const { table, owner } = PROPERTIES[elem];
+    const props = make.scan({
+      id: fresh('vp'), table, alias: fresh('rp'), channels: [],
+      type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+    });
+    // A JOIN, not an EXISTS: `values()` emits one traverser PER matching property, so multiplying
+    // the row is the answer rather than the bug it would be in a filter.
+    const joined = make.join({
+      id: fresh('j'), left: input, right: props, join: 'inner', channels: BULK,
+      type: typeOf(meta('id', 'int'), meta('bulk', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+      on: and(eq(col(props.id, owner), col(input.id, 'id')), eq(col(props.id, 'key'), lit(key, 'text'))),
+    });
+    return {
+      rel: make.project({
+        id: fresh('sv'), input: joined, channels: BULK,
+        type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), meta('bulk', 'int')),
+        exprs: [['v', storedValue(joined.id)], ['vtype', col(joined.id, 'vtype')], ['bulk', col(joined.id, 'bulk')]],
+      }),
+      // The value's Gremlin type is PER ROW, off the stored `vtype` column — one compile-time tag
+      // would be a lie for an untyped property key.
+      framing: { kind: 'scalar', type: PER_ROW('vtype') }, cols: ['v', 'vtype', 'bulk'], channels: BULK,
+    };
+  }
+
+  return null;
+}
+
 /**
  * Lower a whole rooted chain, or decline.
  *
@@ -212,9 +300,10 @@ export function lowerToRel(steps: readonly IRStep[]): RelLowering | null {
   if (!seeded) return null;
 
   let pred = seeded.pred;
-  for (const step of steps.slice(1)) {
-    const clause = sourceFilter(step, seeded.scan, seeded.elem, fresh);
-    if (!clause) return null;
+  let at = 1;
+  for (; at < steps.length; at++) {
+    const clause = sourceFilter(steps[at], seeded.scan, seeded.elem, fresh);
+    if (!clause) break;
     pred = and(pred, clause);
   }
 
@@ -223,5 +312,15 @@ export function lowerToRel(steps: readonly IRStep[]): RelLowering | null {
     id: fresh('c'), input: source, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
     exprs: [['id', col(source.id, 'id')], ['bulk', lit(1, 'int')]],
   });
-  return { plan: nameBindings(projected), elem: seeded.elem, cols: [...SOURCE_COLS], channels: BULK };
+  if (at === steps.length)
+    return { plan: nameBindings(projected), framing: { kind: 'elements', elem: seeded.elem }, cols: [...SOURCE_COLS], channels: BULK };
+
+  // Exactly one terminal, and it must be last: a step after a shape change is a step in the NEW
+  // shape's vocabulary, which this route has not learned. Declining keeps that honest instead of
+  // half-answering it.
+  if (at !== steps.length - 1) return null;
+  const retyped = terminal(steps[at], projected, seeded.elem, fresh);
+  if (!retyped) return null;
+  const { rel, ...rest } = retyped;
+  return { plan: nameBindings(rel), ...rest };
 }

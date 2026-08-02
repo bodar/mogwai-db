@@ -1,7 +1,8 @@
 import { derived } from '../../sql/kernel/q.ts';
 import type { Compiled } from '../../sql/kernel/render.ts';
 import { emitRelational } from '../../rel/emit.ts';
-import type { ElementStream } from '../steps/context/context.ts';
+import type { TraverserLayout } from '../steps/context/context.ts';
+import type { Stream } from '../steps/context/stream.ts';
 import { materializeRootStream } from '../steps/tail/materialize.ts';
 import type { Engine } from '../engine/deps.ts';
 import type { IRStep } from '../ir/strategies.ts';
@@ -39,13 +40,24 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
   // `rir` deliberately does not collide with the framing aliases (`n`/`e`/`p`/`s`/`v`/`g`/`j`/`l`)
   // or with the `Query`'s minted `c0…cN`: the RelIR relation sits beside them, not among them.
   const rel = derived(emitRelational(lowered.plan), lowered.cols, 'rir');
-  const stream: ElementStream = {
-    kind: 'elements', q: engine.q, params, rel, elem: lowered.elem,
-    // The framing layer's own carried-state vocabulary. RelIR proved which columns are channels
-    // and what role each plays (`lowered.channels`); translating that into the struct the framing
-    // layer reads is this seam's job and no RelIR node's — §2's vocabulary boundary, in one place.
-    traverserLayout: { aliases: new Map(), origins: [], branchOrders: [], bulk: 'bulk' },
+  // The framing layer's own carried-state vocabulary. RelIR proved which columns are channels and
+  // what role each plays (`lowered.channels`); translating that into the struct the framing layer
+  // reads is this seam's job and no RelIR node's — §2's vocabulary boundary, in one place. The
+  // roles a lowering can currently produce are `bulk` or nothing, so the translation is that
+  // narrow; it widens with the roles, and a role RelIR carries that this cannot express must fail
+  // here rather than be dropped.
+  const carried = lowered.channels.map((channel) => channel.role);
+  if (carried.some((role) => role !== 'bulk')) throw new Error(`RelIR spine: no framing translation for channel role(s) ${[...new Set(carried)].join(', ')}`);
+  const traverserLayout: TraverserLayout = {
+    aliases: new Map(), origins: [], branchOrders: [], ...(carried.includes('bulk') ? { bulk: 'bulk' } : {}),
   };
+  // TOTAL over the framing union: a stream kind the lowering learns to produce is a compile error
+  // here until this seam knows how to frame it, which is the same discipline §3.5's obligation
+  // table applies inside the algebra.
+  const state = { q: engine.q, params, rel, traverserLayout };
+  const stream: Stream = lowered.framing.kind === 'elements'
+    ? { kind: 'elements', ...state, elem: lowered.framing.elem }
+    : { kind: 'scalar', ...state, type: lowered.framing.type, ...(lowered.framing.result ? { result: lowered.framing.result } : {}) };
   // Zero steps remain, so the loop runs the root element projection and nothing else. Going
   // through `lowerSteps` rather than calling the projection directly is the point: a step this
   // route grows tomorrow lands in the SAME loop, and there is no second orchestrator.
