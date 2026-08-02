@@ -13,14 +13,21 @@ const ident = (name: string): Expression => identifier(name);
 // are introduced under their RelId by `from()`.
 const relName = (rel: Rel): Expression => ident(rel.kind === 'scan' ? rel.alias : rel.id);
 
-/** Render a checked relational plan through the existing q kernel. */
-export function emit(plan: Rel, naming?: Naming): Emitted {
-  check(plan);
+interface Renderer {
+  readonly expr: (expression: Expr) => Expression;
+  readonly relation: (relation: Rel, inline?: boolean) => Expression;
+  readonly include: (relation: Rel) => void;
+  readonly finish: () => Emitted;
+}
+
+/** The one expression/relation renderer for both read plans and statements. External aliases are
+ * lexical outer scopes for correlated statement expressions. */
+function buildRenderer(plan: Rel, naming?: Naming, externalAliases = new Map<string, string>()): Renderer {
   const named = new Map((naming?.named ?? []).map((binding) => [binding.rel, binding.name]));
   // RelId is lexical and stable under source-alias changes. Only scans introduce an SQL alias;
   // derived relations are introduced under their RelId by `from()`. Resolve Col qualifiers once
   // from the plan rather than requiring callers to make id and alias accidentally identical.
-  const sourceAliases = new Map<string, string>();
+  const sourceAliases = new Map<string, string>(externalAliases);
   const collectExpr = (e: Expr): void => {
     switch (e.kind) {
       case 'unary': case 'cast': collectExpr(e.arg); break;
@@ -123,19 +130,22 @@ export function emit(plan: Rel, naming?: Naming): Emitted {
       case 'recursive': { const step = r.step(recursiveSelf(r)); return q`WITH RECURSIVE ${ident(r.name)}(${list(r.cols.map(ident))}) AS (${relation(r.seed)} UNION ALL ${relation(step)}) SELECT * FROM ${ident(r.name)}`; }
     }
   };
-  const root = relation(plan);
-  const bindings = naming?.named.map((binding) => q`${ident(binding.name)} AS (${relation(binding.rel, true)})`) ?? [];
-  // A recursive root owns a WITH RECURSIVE clause. Its named dependencies must be peers in that
-  // clause; prefixing a second plain WITH would produce invalid SQLite syntax.
-  const tree = plan.kind === 'recursive' && bindings.length
-    ? (() => {
-      const step = plan.step(recursiveSelf(plan));
-      const recursive = q`${ident(plan.name)}(${list(plan.cols.map(ident))}) AS (${relation(plan.seed)} UNION ALL ${relation(step)})`;
-      return q`WITH RECURSIVE ${list([...bindings, recursive])} SELECT * FROM ${ident(plan.name)}`;
-    })()
-    : bindings.length ? q`WITH ${list(bindings)} ${root}` : root;
-  const out = render(tree);
-  return { sql: out.sql, binds: out.binds };
+  const finish = (): Emitted => {
+    const root = relation(plan);
+    const bindings = naming?.named.map((binding) => q`${ident(binding.name)} AS (${relation(binding.rel, true)})`) ?? [];
+    const tree = plan.kind === 'recursive' && bindings.length
+      ? (() => { const step = plan.step(recursiveSelf(plan)); const recursive = q`${ident(plan.name)}(${list(plan.cols.map(ident))}) AS (${relation(plan.seed)} UNION ALL ${relation(step)})`; return q`WITH RECURSIVE ${list([...bindings, recursive])} SELECT * FROM ${ident(plan.name)}`; })()
+      : bindings.length ? q`WITH ${list(bindings)} ${root}` : root;
+    const out = render(tree);
+    return { sql: out.sql, binds: out.binds };
+  };
+  return { expr, relation, include: collectAliases, finish };
+}
+
+/** Render a checked relational plan through the existing q kernel. */
+export function emit(plan: Rel, naming?: Naming): Emitted {
+  check(plan);
+  return buildRenderer(plan, naming).finish();
 }
 
 /** Render the first executable write wedge. SQLite has no DELETE ... USING: `using` is the
@@ -147,8 +157,9 @@ export function emitStmt(statement: Stmt): Emitted {
   if (statement.kind !== 'delete') throw new Error(`RelIR statement emitter does not yet support ${statement.kind}`);
   if (!statement.using) throw new Error('RelIR Delete emission requires a using relation');
   if (statement.where || statement.returning.length) throw new Error('RelIR Delete emission currently supports only using-based membership');
-  const using = emit(statement.using);
-  const tree = q`DELETE FROM ${ident(statement.target.table)} WHERE ${ident('id')} IN (SELECT ${ident('id')} FROM (${raw(using.sql)}) ${ident(statement.using.id)})`;
+  const renderer = buildRenderer(statement.target);
+  renderer.include(statement.using);
+  const tree = q`DELETE FROM ${ident(statement.target.table)} WHERE ${ident('id')} IN (SELECT ${ident('id')} FROM (${renderer.relation(statement.using)}) ${ident(statement.using.id)})`;
   const out = render(tree);
-  return { sql: out.sql, binds: [...using.binds, ...out.binds] };
+  return { sql: out.sql, binds: out.binds };
 }
