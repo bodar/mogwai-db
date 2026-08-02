@@ -27,6 +27,11 @@ const node = <K extends RelKind>(kind: K, init: WithId<K>): Node<K> => {
 export const scan = (init: WithId<'scan'>): Node<'scan'> => node('scan', init);
 
 export const values = (init: WithId<'values'>): Node<'values'> => {
+  // SQLite has no empty `VALUES` and no empty select list, so neither shape is constructible.
+  // An empty relation is `Filter(false)` over something, which says what it means; `Values([])`
+  // rendered to `SELECT  FROM (VALUES )` — invalid SQL that only failed at the database.
+  if (!init.rows.length) throw new Error('RelIR: Values requires at least one row; an empty relation is a Filter, not an empty VALUES');
+  if (!init.type.cols.length) throw new Error('RelIR: Values requires at least one column');
   for (const row of init.rows) if (row.length !== init.type.cols.length) throw new Error(`RelIR: Values row has ${row.length} columns; declared type has ${init.type.cols.length}`);
   return node('values', { ...init, rows: freeze(init.rows.map((row) => freeze([...row]))) });
 };

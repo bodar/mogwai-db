@@ -151,6 +151,8 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
       if (!sameColumns(node.type.cols, bound.type.cols)) throw new Error(`RelIR: Ref '${node.name}' type must match its binding's`);
     },
     values: (node) => {
+      if (!node.rows.length) throw new Error('RelIR: Values requires at least one row; an empty relation is a Filter, not an empty VALUES');
+      if (!node.type.cols.length) throw new Error('RelIR: Values requires at least one column');
       for (const row of node.rows) if (row.length !== node.type.cols.length)
         throw new Error(`RelIR: Values row has ${row.length} columns; declared type has ${node.type.cols.length}`);
     },

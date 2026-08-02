@@ -17,7 +17,6 @@ const noReturning = { cols: [] } as const;
 const nodes = scan({ id: relId('nodes'), table: 'nodes', alias: 'nodes', channels,
   type: { cols: [{ name: 'id', type: 'int', nullable: false }, { name: 'uid', type: 'text', nullable: true }] },
 });
-const nothing = values({ id: relId('nothing'), rows: [], channels, type: noReturning });
 
 /** A write program: the statements are bindings, in order, and the plan's result is the last one's
  * retained rows — §3.0's "ordering IS the bindings list", with no `Sequence` node to own it. */
@@ -26,7 +25,7 @@ const program = (...steps: readonly { readonly name: string; readonly node: Bind
   const node = last.node;
   return plan({
     bindings: steps,
-    result: isStmt(node) ? ref({ id: relId(`${last.name}_ref`), name: last.name, channels: node.channels, type: node.type }) : nothing,
+    result: ref({ id: relId(`${last.name}_ref`), name: last.name, channels: node.channels, type: node.type }),
   });
 };
 
@@ -89,7 +88,7 @@ describe('RelIR statements', () => {
     const prior = ref({ id: relId('prior'), name: 'added', channels, type: { cols: ids } });
     const steps = emit(plan({
       bindings: [{ name: 'added', node: added }, { name: 'removed', node: remove({ target: nodes, using: { rel: prior, key: 'id' }, returning: [], channels, type: noReturning }) }],
-      result: nothing,
+      result: ref({ id: relId('removedRef'), name: 'removed', channels, type: noReturning }),
     }));
 
     const membership = steps[1]!.emitted;
