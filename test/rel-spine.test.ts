@@ -45,6 +45,12 @@ const COVERED = [
   // bridge's second stream kind rather than one more step in the same one.
   'g.V().count()', 'g.E().count()', "g.V().hasLabel('person').count()", "g.V().has('age',P.gt(29)).count()",
   "g.V().values('name')", "g.V().values('age')", "g.E().values('weight')", "g.V().hasLabel('person').values('name')",
+  // `is(P)` past the shape change — the SAME predicate module the source filters use, over the
+  // scalar's own `v`, which is the payoff for having built it as a module rather than a helper.
+  'g.V().count().is(P.gt(2))', 'g.V().count().is(2)', "g.V().values('age').is(P.gt(29))",
+  "g.V().values('name').is('marko')", "g.V().values('age').is(P.between(28,33))",
+  "g.V().values('name').is(P.within('marko','josh'))", "g.V().values('name').is(TextP.containing('ark'))",
+  "g.V().hasLabel('person').values('age').is(P.gte(30)).is(P.lt(40))", "g.E().values('weight').is(P.gt(0.3))",
   // `values()` is `element.properties(keys)`: no keys means EVERY key, several mean membership.
   // Both spines answered these WRONG until 2026-08-02 — see the semantics test below.
   "g.V().values('name','age')", "g.V().values('name','age',null)", 'g.V().values()', 'g.E().values()',
@@ -56,7 +62,7 @@ const COVERED = [
  */
 const DECLINED = [
   'g.V().out()',                      // a step not learned yet: movement
-  'g.V().count().is(P.gt(2))',        // a step AFTER a shape change is in the new shape's vocabulary
+  'g.V().count().fold()',             // a step after the shape change that is NOT in its vocabulary
   'g.inject(1)',                      // a source that is not V()/E()
   'g.withSack(0).V()',                // a carried sack the source seed would have to declare
   'g.withSideEffect("a",1).V()',      // a side effect

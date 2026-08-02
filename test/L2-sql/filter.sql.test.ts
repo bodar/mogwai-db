@@ -54,21 +54,40 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     expect(() => compile('g.V().values("age").is(P.typeOf("bogus-name"))', {})).toThrow('unregistered type');
   });
 
-  test('is(P) folds a predicate onto the projected scalar', () => {
-    const gt = read('g.V().values("age").is(P.gt(30))');
-    expect(gt.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
-    // is(gt) folds through the vtype-aware compareKey (numeric-correct for the exact tail)
-    expect(gt.sql).toContain("ELSE p.v END) > ?"); // the values() JOIN handles existence; is() adds a relational filter
-    expect(gt.binds).toContain(30);
-    // bare literal → equality
-    expect(read('g.V().values("age").is(29)').sql).toContain("p.v = ?");
-  });
+  // `values().is()` and `count().is()` are RelIR-routed, so both run on BOTH spines. Each spine's
+  // own spelling is pinned where it is the point of the test; everything else is asserted as the
+  // SEMANTIC fact, which is what a snapshot is allowed to hold (test/CLAUDE.md).
+  for (const spine of ['legacy', 'rel'] as const) {
+    test(`is(P) folds a predicate onto the projected scalar — ${spine} spine`, () => {
+      const gt = read('g.V().values("age").is(P.gt(30))', { spine });
+      expect(gt.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
+      // is(gt) folds through the vtype-aware compareKey (numeric-correct for the exact tail).
+      // `END` is that CASE's tail on both spines; only the parenthesisation differs.
+      expect(gt.sql).toMatch(/END\)? > \?/);
+      expect(gt.binds).toContain(30);
+      // bare literal → equality, with no compareKey (equality on canonical text is exact)
+      const eq = read('g.V().values("age").is(29)', { spine });
+      expect(eq.sql).toMatch(/\bv = \?/);
+      expect(eq.sql).not.toContain('CAST');
+    });
 
-  test('count().is(P) wraps the count in a value filter (0/1 rows)', () => {
-    const p = read('g.V().count().is(P.gt(3))');
-    expect(p.sql).toContain('SELECT COALESCE(SUM(s.bulk), 0) AS v FROM c0 s');
-    expect(p.sql).toContain('WHERE p.v > ?');
-    expect(p.shape).toEqual({ kind: 'value', type: STATIC('long') });
+    test(`count().is(P) wraps the count in a value filter (0/1 rows) — ${spine} spine`, () => {
+      const p = read('g.V().count().is(P.gt(3))', { spine });
+      expect(p.sql).toMatch(/COALESCE\(sum\(.*\), .*\) AS v/i);
+      expect(p.shape).toEqual({ kind: 'value', type: STATIC('long') });
+    });
+  }
+
+  test('a run of range is() stays inside the DO bind cap on both spines', () => {
+    // RelIR renders every `Lit` as a BIND by construction (§3.2), so the vtype-aware compareKey's
+    // fixed type vocabulary — which the legacy emitter splices as SQL text — costs ~13 binds per
+    // ordering predicate. Fusing the filter into its input's block made that ~20 and quadratic in
+    // the projection's size, because a WHERE cannot name a select alias so each `is` re-inlined the
+    // whole projection; a `Materialize` boundary before the filters lands the same CTE-then-filter
+    // shape legacy emits. This pins that the growth is LINEAR and bounded, since the failure mode
+    // is a plan that fails closed above 100 binds where legacy answers.
+    const many = 'g.V().values("age").is(P.gt(1)).is(P.lt(9)).is(P.gte(2)).is(P.neq(5)).is(P.gt(0))';
+    for (const spine of ['legacy', 'rel'] as const) expect(read(many, { spine }).binds.length).toBeLessThan(60);
   });
 
   test('is() on a non-scalar projection throws', () => {

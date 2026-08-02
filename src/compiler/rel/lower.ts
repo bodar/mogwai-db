@@ -327,12 +327,36 @@ export function lowerToRel(steps: readonly IRStep[]): RelLowering | null {
   if (at === steps.length)
     return { plan: nameBindings(projected), framing: { kind: 'elements', elem: seeded.elem }, cols: [...SOURCE_COLS], channels: BULK };
 
-  // Exactly one terminal, and it must be last: a step after a shape change is a step in the NEW
-  // shape's vocabulary, which this route has not learned. Declining keeps that honest instead of
-  // half-answering it.
-  if (at !== steps.length - 1) return null;
   const retyped = terminal(steps[at], projected, seeded.elem, fresh);
   if (!retyped) return null;
   const { rel, ...rest } = retyped;
-  return { plan: nameBindings(rel), ...rest };
+
+  // Past the shape change the vocabulary is the NEW shape's, and `is(P)` is the whole of it here.
+  // It is the same predicate module the source filters use, over the scalar's own `v` — which is
+  // the point of having built that module rather than a `has`-shaped helper.
+  const vtyped = rest.cols.includes('vtype');
+  // A BOUNDARY before the filters, and it is not cosmetic. Fusing a `Filter` into its input's
+  // block means the input's outputs are spelled as the EXPRESSIONS that compute them (§5) — SQL
+  // has no other option, since a `WHERE` cannot name a select alias. So each `is` re-inlines the
+  // whole projection, and with the vtype-aware ordering CASE in play that is ~20 binds apiece:
+  // measured 25 / 45 / 65 for one, two and three range predicates, against legacy's 2 / 3 / 4.
+  // Four would exceed the DO cap and fail closed where legacy answers — a support regression, not
+  // a wall worth shipping. `Materialize` is exactly the declared remedy (§3.3: "a boundary hint …
+  // where the planner needs a fence"), and it lands the same CTE-then-filter shape legacy emits.
+  let filtered: Rel = steps[at + 1]?.name === 'is'
+    ? make.materialize({ id: fresh('m'), input: rel, channels: rest.channels, type: rel.type })
+    : rel;
+  for (at++; at < steps.length; at++) {
+    const step = steps[at];
+    if (step.name !== 'is' || step.modulators?.length || step.optionArms) return null;
+    const args = step.args ?? [];
+    if (args.length !== 1) return null;
+    // A per-row `vtype` is in scope only where the value came from a stored property; a `count` is
+    // a compile-time long and needs no ordering key. Same distinction `predicateSql` draws as
+    // `typeCtx.kind === 'perRow'`.
+    const pred = predicateExpr(col(filtered.id, 'v'), args[0], vtyped ? storedCompare(filtered.id) : undefined);
+    if (!pred) return null;
+    filtered = make.filter({ id: fresh('f'), input: filtered, channels: rest.channels, type: filtered.type, pred });
+  }
+  return { plan: nameBindings(filtered), ...rest };
 }
