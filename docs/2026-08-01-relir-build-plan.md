@@ -388,6 +388,13 @@ over read plans that already work.**
   `resolveEndpoint`, `materializeElementDrivers`, and `WritePlan`.** The phase is not done while a
   second step dispatcher exists.
 
+**Progress — 2026-08-02:** 2.1's construction/checking half is landed (`9f5d800`). Statements now
+use the same named, branded factory boundary as relations; insert source arity, duplicate SQL names,
+the complete statement bind budget, and `Delete.using`'s required `id` key are enforced before
+execution. `Delete.using` deliberately means physical `table.id` membership — the narrow invariant
+needed by `drop()`, not a new join/driver vocabulary. Emission, `PriorResult` materialization, and
+execution sequencing remain open; this is not yet a write-path migration.
+
 **Phase 2 supersedes [write-path](./2026-08-01-write-path-plan.md), and inherits its requirements.**
 That plan's agent was stopped 2026-08-01; the plan is not discarded, it is re-pointed. Precisely:
 
