@@ -830,6 +830,33 @@ is a FAILED migration, not a finished one.**
   under the differential's off position would rewrite the artifact as all-legacy and the ratchet
   would be measuring the switch instead of the migration.
 
+**Coverage 38 → 51 (`eb71bac`): source-scope filters, and the first place the algebra PAYS.** The
+increment was chosen by measurement rather than by convenience — sweeping the corpus for what each
+candidate vocabulary would fully cover put `hasLabel`+`has` six times ahead of movement (+54 chains
+against +9). The structural finding is not the two steps but where the predicate goes:
+
+- legacy gives every filter its own CTE that re-joins the element table to reach a column its
+  predecessor projected away (`c2 as (SELECT n.id, p.bulk FROM nodes n JOIN c1 p ON n.id=p.id WHERE
+  EXISTS(…))`), so `has(a).has(b)` is three CTEs and two redundant self-joins;
+- RelIR conjoins the run into ONE `WHERE` over one scan, because the plan is DATA and a filter
+  changes neither cardinality nor a channel. **Measured on the reference fixture: identical index
+  decisions, with one `SEARCH nodes USING INTEGER PRIMARY KEY` step per filter simply absent.**
+
+That is the first evidence that this migration produces better SQL rather than the same SQL spelled
+differently — and it is the block assembler (§5) plus a rewritable plan doing it, not a new
+optimization. `has(key, P…)` is the next single largest win (72 corpus occurrences) and is its own
+increment, because it needs the `P` vocabulary as RelIR expressions — which then serves
+`where`/`is`/`filter` too.
+
+**Coverage growth, measured over the 2,298-traversal corpus.** Cumulative chains fully covered as
+each step name is admitted, so an increment can be chosen by what it BUYS rather than by what looks
+next: `V`/`E` 41 · `+hasLabel` 51 · `+has` 95 · all six movement steps + `inV`/`outV`/`otherV` 104 ·
+`+count` 118 · `+values` 150 · `+dedup` 163 · `+order` 187 · `+select` 233 · `+where` 272 · `+is` 351
+· `+filter` 366. (Measured with no bound parameters, so it excludes the 381 `unbound` rows; the
+census column is the real number.) Two things to read off it: `is` is worth 68 but only behind a long
+prerequisite tail, and the reducers (`count`, `values`) are the first increments that cross the SHAPE
+boundary — element → scalar — which is where the framing bridge has to carry a second stream kind.
+
 Two smaller facts worth not re-deriving. `Compiled` gained a `spine` field: it is a compile FACT,
 not instrumentation, and `readCompiled`'s default of `'legacy'` is a statement about who calls it
 rather than an unknown. And relation ids are minted PER LOWERING — a module-global counter made two
