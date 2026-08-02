@@ -356,6 +356,11 @@ contracts), kernel-backed emitter, `fuse`/`prune`/`name`, and pure SQLite tests.
 now drives CTE emission. The ten byte-identical L2 representatives remain the Phase-1 exit gate;
 no compiler integration has started.
 
+**Progress — 2026-08-02:** relation construction is now the named, branded factory surface rather
+than raw object literals. `Project` and `Window` reject locally knowable output-schema mismatches at
+construction; `check` remains the scope-aware whole-plan backstop. The emitter resolves lexical
+`RelId`s to scan aliases, so relation identity is no longer accidentally SQL spelling.
+
 ### Phase 2 — the write wedge
 
 The write path is the right first integration because it is bounded, it has a plan
