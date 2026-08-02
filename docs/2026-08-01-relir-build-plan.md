@@ -264,7 +264,7 @@ Every node carries `layout: TraverserLayout` (its output layout) and derives `ty
 |---|---|---|
 | `Insert` | `table, cols, source: Rel, onConflict?: { target, set }, returning: readonly [string, Expr][]` | `onConflict` is `mergeV`/`mergeE`'s upsert, one statement (P5) |
 | `Update` | `table, set: readonly [string, Expr][], from?: Rel, where?: Expr, returning` | |
-| `Delete` | `table, where?: Expr, using?: Rel, returning` | |
+| `Delete` | `table, where?: Expr, returning` | membership in another relation is `InQuery` in `where` — there is no `using`, and §10·6 records why a dedicated field was the thing that put a physical `'id'` in the emitter |
 
 `Sequence` is gone with `PriorResult`: ordering IS the `Plan.bindings` list (§3.0), so there is no node
 that privately owns execution order. Statements carry `RelBase`, so `returningType` is just `type`.
@@ -810,7 +810,7 @@ fusion had nowhere to happen, and the majority of a 11,201-line directory.
 
 **And a second list, of RelIR's own — the parts of it that the 2026-08-02 decisions delete** (§10),
 because a new layer accreting duplicate spellings is the same failure one layer in:
-`Sequence` · `PriorResult` · `Param` · `returningType` · `Distinct.on` · the `Naming` side-table ·
+`Sequence` · `PriorResult` · `Param` · `returningType` · `Distinct.on` · `Delete.using` · the `Naming` side-table ·
 `emitStmt`/`emitSequence` as separate entry points · the statement-only `externalAliases`/`bareColumns`
 back channels · fifteen hand-written walkers (done, `5fd7c10`) · `sameLayout`-by-`JSON.stringify`.
 
@@ -1034,10 +1034,9 @@ the cap: a deliberately wide 2,000-row insert was refused with `too many SQL var
 SQLite for real, in about a minute. Any future claim of the form "X is faster" about storage should
 be taken there before it is written down as a rule.
 
-### 10·6 — DECIDED 2026-08-02: `Delete.using` is deleted; membership is a predicate
+### 10·6 — DECIDED and LANDED 2026-08-02: `Delete.using` is deleted; membership is a predicate
 
-A worked example of §10·4's discipline applied inward — decided and verified, not yet landed.
-`using` was a second spelling of
+A worked example of §10·4's discipline applied inward. `using` was a second spelling of
 something the algebra already says: `Delete{ target, where: InQuery(Col(target,'id'), <rel>) }`
 emits identical SQL and executes identically — verified before the decision, not after. So the
 field, the `Membership` interface, the emitter arm and the two key-agreement checks all go, and

@@ -7,6 +7,8 @@ import { ref, scan, values } from '../src/rel/factory.ts';
 import { plan } from '../src/rel/plan.ts';
 import type { Binding } from '../src/rel/plan.ts';
 import { isStmt } from '../src/rel/stmt.ts';
+import type { Expr } from '../src/rel/expr.ts';
+import type { Rel } from '../src/rel/rel.ts';
 import { insert, remove, update } from '../src/rel/stmt-factory.ts';
 import type { Channels } from '../src/channels.ts';
 import { relId } from '../src/rel/types.ts';
@@ -29,6 +31,9 @@ const program = (...steps: readonly { readonly name: string; readonly node: Bind
   });
 };
 
+/** Membership in another relation — the whole of what `Delete.using` used to be a field for. */
+const memberOf = (key: string, rel: Rel): Expr => ({ kind: 'in-query', expr: col(nodes.id, key), plan: rel, negated: false });
+
 describe('RelIR statements', () => {
   test('constructs branded named write nodes', () => {
     const source = values({ id: relId('source'), rows: [[lit(1, 'int')]], channels, type: { cols: ids } });
@@ -37,23 +42,22 @@ describe('RelIR statements', () => {
     expect(() => check(write)).not.toThrow();
   });
 
-  test('Delete.using names its membership key, and both sides must declare it', () => {
+  test('a Delete has no membership vocabulary of its own — it is an ordinary predicate', () => {
     const named = values({ id: relId('noId'), rows: [[lit('x', 'text')]], channels,
       type: { cols: [{ name: 'name', type: 'text', nullable: false }] },
     });
-    // Local knowledge, so the factory answers: the source does not emit the key it was given.
-    expect(() => remove({ target: nodes, using: { rel: named, key: 'id' }, returning: [], channels, type: noReturning }))
-      .toThrow("Delete.using relation does not emit its membership key 'id'");
-    // The other half is not local — it is about the TARGET — so `check` is what catches it.
-    const write = remove({ target: nodes, using: { rel: named, key: 'name' }, returning: [], channels, type: noReturning });
-    expect(() => check(write)).toThrow("Delete target has no membership key column 'name'");
+    // No `using` field means no key to disagree about: a membership subplan is checked exactly like
+    // any other expression, so a column neither side declares fails in the ordinary place.
+    const write = remove({ target: nodes, channels, type: noReturning, returning: [],
+      where: { kind: 'in-query', expr: col(nodes.id, 'missing'), plan: named, negated: false } });
+    expect(() => check(write)).toThrow("has no declared column 'missing'");
   });
 
-  test('emits Delete.using as SQLite id membership', () => {
+  test('emits membership in another relation as an ordinary IN (SELECT …)', () => {
     const doomed = values({ id: relId('doomed'), rows: [[lit(2, 'int')]], channels, type: { cols: ids } });
-    const steps = emit(program({ name: 'drop', node: remove({ target: nodes, using: { rel: doomed, key: 'id' }, returning: [], channels, type: noReturning }) }));
+    const steps = emit(program({ name: 'drop', node: remove({ target: nodes, channels, type: noReturning, returning: [], where: memberOf('id', doomed) }) }));
     const emitted = steps[0]!.emitted;
-    expect(emitted.sql).toBe('DELETE FROM nodes WHERE id IN (SELECT doomed.column1 FROM (VALUES (?)) doomed)');
+    expect(emitted.sql).toBe('DELETE FROM nodes WHERE id IN (SELECT doomed.column1 AS id FROM (VALUES (?)) doomed)');
     expect(emitted.binds).toEqual([2]);
     const db = new Database(':memory:');
     db.run('CREATE TABLE nodes (id INTEGER PRIMARY KEY)');
@@ -87,12 +91,12 @@ describe('RelIR statements', () => {
     const added = insert({ target: nodes, cols: ['id'], source, returning: [['id', col(nodes.id, 'id')]], channels, type: { cols: ids } });
     const prior = ref({ id: relId('prior'), name: 'added', channels, type: { cols: ids } });
     const steps = emit(plan({
-      bindings: [{ name: 'added', node: added }, { name: 'removed', node: remove({ target: nodes, using: { rel: prior, key: 'id' }, returning: [], channels, type: noReturning }) }],
+      bindings: [{ name: 'added', node: added }, { name: 'removed', node: remove({ target: nodes, channels, type: noReturning, returning: [], where: memberOf('id', prior) }) }],
       result: ref({ id: relId('removedRef'), name: 'removed', channels, type: noReturning }),
     }));
 
     const membership = steps[1]!.emitted;
-    expect(membership.sql).toBe("DELETE FROM nodes WHERE id IN (SELECT json_extract(prior.value, ?) FROM json_each(?) prior)");
+    expect(membership.sql).toBe("DELETE FROM nodes WHERE id IN (SELECT json_extract(prior.value, ?) AS id FROM json_each(?) prior)");
     expect(membership.binds.filter(isRowsBind)).toEqual([{ rowsOf: 'added' }]);
   });
 

@@ -398,16 +398,11 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         }${s.where ? q` WHERE ${expr(s.where, inner)}` : empty}${returning(s.returning)}`;
       }
       case 'delete': {
-        // SQLite has no DELETE ... USING: `using` is the RelIR contract naming the rows to remove,
-        // so it lowers to membership of its declared key in a derived read. The key comes from the
-        // node — `Scan` is the one physical-schema node, so the emitter never spells a column.
-        const source = s.using && fromItem(s.using.rel, EMPTY_SCOPE);
-        const membership = source && s.using
-          ? q`${ident(s.using.key)} IN (SELECT ${source.cols.get(s.using.key)!} FROM ${fromText(source.item)})`
-          : undefined;
-        const where = conjoin(membership, s.where ? expr(s.where, scope) : undefined);
-        if (!where) throw new Error('RelIR Delete emission requires using or where');
-        return q`DELETE FROM ${ident(target.table)} WHERE ${where}${returning(s.returning)}`;
+        // SQLite has no DELETE ... USING, and RelIR needs no equivalent: membership in another
+        // relation is `InQuery` in `where`, which the shared expression renderer already emits as
+        // `<col> IN (SELECT …)`. There is nothing delete-shaped here at all.
+        if (!s.where) throw new Error('RelIR Delete emission requires a where predicate');
+        return q`DELETE FROM ${ident(target.table)} WHERE ${expr(s.where, scope)}${returning(s.returning)}`;
       }
     }
   };

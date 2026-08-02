@@ -17,13 +17,14 @@ export type StmtTarget = Extract<Rel, { readonly kind: 'scan' }>;
  */
 export interface Insert extends RelBase { readonly kind: 'insert'; readonly target: StmtTarget; readonly cols: readonly string[]; readonly source: Rel; readonly onConflict?: { readonly target: readonly string[]; readonly set: readonly (readonly [string, Expr])[] }; readonly returning: readonly (readonly [string, Expr])[]; }
 export interface Update extends RelBase { readonly kind: 'update'; readonly target: StmtTarget; readonly set: readonly (readonly [string, Expr])[]; readonly from?: Rel; readonly where?: Expr; readonly returning: readonly (readonly [string, Expr])[]; }
-export interface Delete extends RelBase { readonly kind: 'delete'; readonly target: StmtTarget; readonly where?: Expr; readonly using?: Membership; readonly returning: readonly (readonly [string, Expr])[]; }
-
-/** SQLite has no `DELETE … USING`, so `using` is the RelIR contract that names the rows to remove:
- * membership of `key` in what `rel` emits. `key` is a column BOTH the target and `rel` declare, and
- * it is a field rather than a hardcoded `'id'` because `Scan` is the one physical-schema node
- * (§3.3) — a literal column name in the emitter is a second place the schema leaks into. */
-export interface Membership { readonly rel: Rel; readonly key: string; }
+/**
+ * `where` is an ORDINARY PREDICATE over a scope holding the target, so membership in another
+ * relation is `InQuery(Col(target, k), rel)` and nothing more. The `using` field this used to carry
+ * was a second spelling of a predicate the algebra already had — and the spelling that made a
+ * physical `'id'` appear in the emitter, because a dedicated field has to name its own key while a
+ * predicate is simply written by the caller and checked against the scope like any other.
+ */
+export interface Delete extends RelBase { readonly kind: 'delete'; readonly target: StmtTarget; readonly where?: Expr; readonly returning: readonly (readonly [string, Expr])[]; }
 
 const stmtBrand: unique symbol = Symbol('RelIR.Stmt');
 type Branded<T> = T extends unknown ? T & { readonly [stmtBrand]: true } : never;

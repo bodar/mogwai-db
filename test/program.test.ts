@@ -62,7 +62,7 @@ describe('RelIR programs', () => {
     runProgram(source, plan({
       bindings: [
         { name: 'touched', node: touched },
-        { name: 'dropped', node: remove({ target: nodes, using: { rel: prior, key: 'id' }, channels, type: noReturning, returning: [] }) },
+        { name: 'dropped', node: remove({ target: nodes, channels, type: noReturning, returning: [], where: { kind: 'in-query', expr: col(nodes.id, 'id'), plan: prior, negated: false } }) },
       ],
       result: ref({ id: relId('dropped'), name: 'dropped', channels, type: noReturning }),
     }));
@@ -88,7 +88,7 @@ describe('RelIR programs', () => {
     expect(() => runProgram({ query: () => [{ id: 1, payload: new Uint8Array([1, 2]) }] as any }, plan({
       bindings: [
         { name: 'captured', node: captured },
-        { name: 'again', node: remove({ target: blobs, using: { rel: prior, key: 'id' }, channels, type: noReturning, returning: [] }) },
+        { name: 'again', node: remove({ target: blobs, channels, type: noReturning, returning: [], where: { kind: 'in-query', expr: col(blobs.id, 'id'), plan: prior, negated: false } }) },
       ],
       result: ref({ id: relId('again'), name: 'again', channels, type: noReturning }),
     }))).toThrow("column 'payload' holds a object that JSON transport cannot carry losslessly");

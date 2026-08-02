@@ -52,7 +52,7 @@ export function bindCount(plan: Rel | Stmt): number {
     const stmt = (s: Stmt): void => {
       if (s.kind === 'insert') { rel(s.source); s.onConflict?.set.forEach(([, e]) => expr(e)); }
       if (s.kind === 'update') { s.set.forEach(([, e]) => expr(e)); if (s.from) rel(s.from); if (s.where) expr(s.where); }
-      if (s.kind === 'delete') { if (s.using) rel(s.using.rel); if (s.where) expr(s.where); }
+      if (s.kind === 'delete') { if (s.where) expr(s.where); }
       s.returning.forEach(([, e]) => expr(e));
     };
     stmt(plan);
@@ -254,15 +254,8 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
         break;
       }
       case 'delete': {
-        if (s.using) {
-          checkRel(s.using.rel, root(bindings));
-          // The key must be a column of BOTH sides: `rel` supplies the values, the target is what
-          // they identify. Neither is a physical name the emitter may assume.
-          if (!s.using.rel.type.cols.some((column) => column.name === s.using!.key))
-            throw new Error(`RelIR: Delete.using relation does not emit its membership key '${s.using.key}'`);
-          if (!s.target.type.cols.some((column) => column.name === s.using!.key))
-            throw new Error(`RelIR: Delete target has no membership key column '${s.using.key}'`);
-        }
+        // Nothing delete-specific left: membership in another relation is `InQuery` in `where`, and
+        // `checkExpr` already validates a subplan against the scope the target is in.
         if (s.where) checkExpr(s.where, targetScope);
         returning(targetScope);
         break;

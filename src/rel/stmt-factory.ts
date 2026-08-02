@@ -32,7 +32,5 @@ export const update = (init: Init<'update'>): Node<'update'> => {
 };
 export const remove = (init: Init<'delete'>): Node<'delete'> => {
   names(init.returning, 'RETURNING');
-  if (init.using && !init.using.rel.type.cols.some((column) => column.name === init.using!.key))
-    throw new Error(`RelIR: Delete.using relation does not emit its membership key '${init.using.key}'`);
   return node('delete', { ...init, returning: freeze(init.returning.map((pair) => freeze([...pair] as [string, Expr]))) });
 };
