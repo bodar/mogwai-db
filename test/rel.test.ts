@@ -143,7 +143,7 @@ describe('RelIR', () => {
   });
 
   test('permits correlated scalar subqueries', () => {
-    const inner = rel.scan({ id: relId('inner'), table: 'nodes', alias: 'inner', layout, type: { cols } });
+    const inner = rel.scan({ id: relId('innerRel'), table: 'nodes', alias: 'i', layout, type: { cols } });
     const filtered = rel.filter({ id: relId('innerFiltered'), input: inner, layout, type: { cols }, pred: { kind: 'binary', op: '=', left: col(inner.id, 'id'), right: col(scan.id, 'id') } });
     const scalar = rel.project({ id: relId('outer'), input: scan, layout,
       type: { cols: [{ name: 'id', type: 'int', nullable: false }, { name: 'same', type: 'text', nullable: true }] },

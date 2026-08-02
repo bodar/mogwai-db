@@ -16,9 +16,48 @@ const relName = (rel: Rel): Expression => ident(rel.kind === 'scan' ? rel.alias 
 export function emit(plan: Rel, naming?: Naming): Emitted {
   check(plan);
   const named = new Map((naming?.named ?? []).map((binding) => [binding.rel, binding.name]));
+  // RelId is lexical and stable under source-alias changes. Only scans introduce an SQL alias;
+  // derived relations are introduced under their RelId by `from()`. Resolve Col qualifiers once
+  // from the plan rather than requiring callers to make id and alias accidentally identical.
+  const sourceAliases = new Map<string, string>();
+  const collectExpr = (e: Expr): void => {
+    switch (e.kind) {
+      case 'unary': case 'cast': collectExpr(e.arg); break;
+      case 'binary': collectExpr(e.left); collectExpr(e.right); break;
+      case 'case': e.whens.forEach(([when, then]) => { collectExpr(when); collectExpr(then); }); if (e.else) collectExpr(e.else); break;
+      case 'call': case 'agg': case 'window-expr': e.args.forEach(collectExpr); break;
+      case 'json-object': e.entries.forEach(([, value]) => collectExpr(value)); break;
+      case 'json-array': e.items.forEach(collectExpr); break;
+      case 'scalar': case 'exists': collectAliases(e.plan); break;
+      case 'in-list': collectExpr(e.expr); e.values.forEach(collectExpr); break;
+      case 'in-query': collectExpr(e.expr); collectAliases(e.plan); break;
+      default: break;
+    }
+  };
+  const collectAliases = (r: Rel): void => {
+    if (r.kind === 'scan') sourceAliases.set(r.id, r.alias);
+    switch (r.kind) {
+      case 'project': r.exprs.forEach(([, e]) => collectExpr(e)); collectAliases(r.input); break;
+      case 'filter': collectExpr(r.pred); collectAliases(r.input); break;
+      case 'aggregate': r.groupBy.forEach(collectExpr); r.aggs.forEach(([, e]) => collectExpr(e)); if (r.having) collectExpr(r.having); collectAliases(r.input); break;
+      case 'sort': r.terms.forEach((term) => collectExpr(term.expr)); collectAliases(r.input); break;
+      case 'limit': if (r.count) collectExpr(r.count); if (r.offset) collectExpr(r.offset); collectAliases(r.input); break;
+      case 'distinct': r.on?.forEach(collectExpr); collectAliases(r.input); break;
+      case 'window': r.specs.forEach(([, e]) => collectExpr(e)); collectAliases(r.input); break;
+      case 'explode': collectExpr(r.expr); collectAliases(r.input); break;
+      case 'materialize': collectAliases(r.input); break;
+      case 'values': r.rows.forEach((row) => row.forEach(collectExpr)); break;
+      case 'join': collectAliases(r.left); collectAliases(r.right); break;
+      case 'union': r.inputs.forEach(collectAliases); break;
+      case 'recursive': collectAliases(r.seed); collectAliases(r.step(recursiveSelf(r))); break;
+      default: break;
+    }
+  };
+  collectAliases(plan);
+  const qualifier = (id: string): Expression => ident(sourceAliases.get(id) ?? id);
   const expr = (e: Expr): Expression => {
     switch (e.kind) {
-      case 'col': return q`${ident(e.rel)}.${ident(e.name)}`;
+      case 'col': return q`${qualifier(e.rel)}.${ident(e.name)}`;
       case 'lit': return value(e.value);
       case 'param': throw new Error(`RelIR emitter requires parameter binding for '${e.name}'`);
       case 'unary': return e.op === 'not' ? q`NOT (${expr(e.arg)})` : q`-(${expr(e.arg)})`;
