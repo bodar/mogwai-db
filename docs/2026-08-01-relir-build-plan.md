@@ -907,20 +907,45 @@ multiplying the row is the answer here and the bug in a filter. A new test asser
 agrees across spines at the boundary — rows agreeing is NOT enough there, since right values under
 the wrong shape round-trip as the wrong GraphBinary type with every row assertion still passing.
 
-**A LIVE SILENT WRONG ANSWER, found by porting `values` and deliberately NOT fixed in that commit.**
-Measured: the legacy spine binds only the FIRST key, so `g.V().values('name','age')` returns just
-the names, and `g.V().values()` binds `null` and returns nothing at all. Ten corpus traversals (6
-multi-key, 4 bare) — right arity, plausible rows, and the census blesses them because it compares
-against a baseline recorded from the same defect. RelIR expresses both correctly, which is precisely
-why the increment DECLINED them: routing a correct answer where legacy is wrong puts
-`mise run test:legacy-spine` permanently red against a defect instead of fixing it. **It is its own
-next change** — fix both spines together, re-record the census with the reason, add an L4 pin — and
-until then the decline plus the measured wrong answers are pinned in `test/rel-spine.test.ts` so it
-cannot be mistaken for a coverage gap.
+**A LIVE SILENT WRONG ANSWER, found by porting `values` — and CLOSED in `514e5ce`, L3 1696 → 1701.**
+Both spines read only `args[0]`, so `g.V().values('name','age')` returned just the names and
+`g.V().values()` bound `null` and returned nothing at all. Right arity, plausible rows, no test
+failing — the census recorded them as `ran` and compared them against a baseline recorded from the
+same defect, which is exactly the blind spot its README documents. Four census rows changed answer,
+every one from wrong to right:
 
-The general finding is worth more than the defect: **re-expressing a lowering in a second algebra is
-itself a defect instrument**, and this is the second one it has produced (the first was
-`likePattern` crashing on `P.not`). Neither was reachable by any test in the suite.
+| traversal | was | now |
+|---|---|---|
+| `g.V().values("name","age").is(P.typeOf(GType.INT)).math("_ + 1")` | 0 rows | 4 |
+| `g.V().values("name","age",null)` | 6 rows (names only) | 10 |
+| `g.V().values().order()` | 0 rows | 12 |
+| `g.withoutStrategies(…).addV(…).property(…).property(…).values()` | 0 rows | 2 |
+
+**Fixed in BOTH spines in one commit, deliberately.** Landing the correct answer only in RelIR would
+have put `mise run test:legacy-spine` permanently red against a defect instead of closing it, and
+the differential is only worth having while it can be green. That is the general rule for a defect
+the migration exposes: **fix both sides, or decline in RelIR — never let the two disagree on
+purpose.**
+
+The mechanism is worth more than the defect: **re-expressing a lowering in a second algebra is
+itself a defect instrument.** Three so far, none reachable by any test in the suite —
+`likePattern` crashing on `P.not`, `values(k…)` reading `args[0]`, and (below) a child scope
+inheriting the parent's `fromV`.
+
+**An L5 finding, filed rather than rushed (`known.ts`, `514e5ce`).** With `predicateInlining` off, a
+`where()` child containing `union()` THROWS `otherV() context through union() not yet supported`
+where the inlined route answers — the worst shape the switch can find, since the generic path is the
+semantic authority and cannot compile what its accelerator can. Diagnosed: the outer chain's
+trailing `.outE().otherV()` sets `trackFromV` at the source, `pushChildScope` projects the parent's
+carried columns verbatim, and `assertForkSafe` then refuses the child's own `union()` for state
+belonging to a traverser the child is not part of. `withoutPath` — one line away in the same file,
+and written for exactly this reason about the path — is the precedent for the fix. It is not a
+one-liner (`childExistenceGate` projects the parent layout back off `child.frame.domain`, so the
+column must stay in the DOMAIN while the child SEED stops claiming it) and it is in the machinery
+owning the 33% defect category, so it is recorded with its diagnosis. **Reached by a NEW SEED**: L5
+derives its seed from `HEAD`, so every commit draws a different generated corpus — which means a
+local `mise run ci` green before a commit does not prove the commit itself green, and is the
+strongest argument yet for item 0d's rotating seed gated by witness ratchets.
 
 **The superseded next-step note (kept because the reasoning is the method):** `values` and `count` are worth
 28 together and 28 apart is impossible, because both cross element → scalar: the framing bridge in
