@@ -344,7 +344,7 @@ vocabulary it refuses is legal once flattened.
 **4.3 `unroll`** — replicate a subplan *n* times and chain it. The `times(n)` route from P4, covering
 **48 of 53** barrier bodies. With no `Recursive` node in the output there is no recursive term, so
 every P1/P3 prohibition evaporates and a barrier is an ordinary `Aggregate`/`Window` over an ordinary
-relation. This is item 3's own argument — *"our phases are set-at-a-time by construction, so 'the
+relation. This is item 3b's own argument — *"our phases are set-at-a-time by construction, so 'the
 whole frontier at iteration k' IS phase k's relation"* — finally cheap, because subplan replication
 against a DAG is trivial and against an append-only builder is impossible.
 
@@ -451,8 +451,11 @@ migrates or removes a hazard that a large migration would amplify.
   Phase 2 moves a great deal of code. Token by token, `isNested` (~27) then `isTokenArg` (~20).
 - **0.3 — split item 3 into three index entries** (§1 P3/P4 above): a dissolvable row-local vocabulary
   gate, a `times(n)` barrier majority, and a 5-traversal platform wall. Docs only; it is what stops
-  the 41 reading as one prize.
+  the 41 reading as one prize. **DONE 2026-08-02** — `outstanding-work` items 3 / 3b / 3c, each
+  pointing at the phase that owns it.
 - **0.4 — sweep `outstanding-work` item 16**, which still asserts a defect closed on 2026-08-01.
+  **Already done** — re-read 2026-08-02: the item now opens by recording the W4 defect as closed and
+  scopes itself to the meta-property VALUE typing that genuinely remains.
 
 ### Phase 1 — the clean-room core (no integration, nothing wired)
 
@@ -629,9 +632,39 @@ pins that case directly (an upsert that rewrites the rows its own predicate sele
 by a delete of what it returned). Rows travel positionally with the binding's declared `type` as
 the authority; a value JSON cannot carry losslessly fails closed naming the column.
 
-**2.1 is therefore complete.** What Phase 2 still needs is the LOWERING — no Gremlin step produces
-a RelIR plan yet, so 2.2 (`drop()` → `Delete{using}`) is the next cut and the first real
-integration.
+**2.1 is therefore complete.** Everything from §3.0 down to a program running against SQLite is
+built and tested. What is NOT built is the way in.
+
+**BLOCKED, and it re-orders the phases — 2026-08-02, needs a call.** 2.2 reads as "the smallest
+possible first cut, one statement", and it is not reachable as written. Two findings, measured
+against `compileDrop` (`steps/write/write.ts:186`):
+
+- **`Delete{using: <read plan>}` needs the read plan to BE a `Rel`, and nothing produces one.**
+  Phase 2's premise — *"the whole of it is `Insert`/`Update`/`Delete` bindings over read plans that
+  already work"* — assumed the existing read plans are usable as RelIR inputs. They are not: the
+  prefix arrives as `renderDriverRows(st)`, opaque `{sql, binds}` from the legacy spine. Making
+  `drop()` a RelIR statement therefore requires a `Step[] → Rel` lowering for the element source and
+  its filters, which is **Phase 4's** work. The alternatives are both bad: an escape node wrapping
+  opaque SQL re-opens the closed node set for a reason §7 explicitly refuses (the seam CAN express
+  it; we just have not written the lowering), and a lowering that handles `g.V()` and defers
+  everything else is a second dispatcher of exactly the kind 2.6 says must not exist.
+- **The cascade is expressible, and doing it would contradict a measured decision.** The rest of
+  `compileDrop` — eight statements over a snapshot of the target ids — IS pure RelIR, and expressing
+  it would delete `deleteWhereIn`, `deleteFtsForOwners` and the hand-rolled `bindChunks`/
+  `placeholders`. But §3.6's remedy for a row-count-sized bind list is ONE JSON bind, and the root
+  `CLAUDE.md` records the opposite answer for a WRITE: *"a WRITE chunks through `src/rowbatch.ts`
+  (`bindChunks` at `floor(100 / binds-per-row)`, FIXED shape so the prepared-statement cache hits —
+  **measured 4.6× faster** than inlining literals to dodge the cap)"*. A read cannot chunk because a
+  compiled plan is one statement; a write can, and measurably should. So RelIR's bind remedy is
+  READ-shaped, and applying it to a write cascade is a performance regression against a measured,
+  locked decision.
+
+**The call this needs.** Either (a) Phase 4.1's read lowering comes BEFORE Phase 2's integration —
+which makes the phase order 1 → 4.1 → 2 → 3 and is the honest reading of the first finding — or
+(b) a `Stmt` gains a chunked execution mode so a write binding can go through `RowBatch` while a
+read `Ref` stays a JSON bind, which means the executor learns about chunking and §3.6's "the
+lowering is a pass, so `emit` never learns about chunking" holds only for reads. **(a) costs
+sequencing, (b) costs a property.** Not mine to pick.
 
 **Superseded handoff — 2026-08-02, RESTATED against §3.0.** Phase 2's remaining 2.1 seam is the
 **binding executor**, and it is no longer statement-shaped: walk `Plan.bindings` in order; a `Rel`
@@ -694,7 +727,7 @@ still free of write rows; `mise run test:cf-limits` green including `RETURNING`/
   flatten it into the term. **`expandRepeatBody` is deleted.** The P2 vocabulary — `not`, `where`,
   `union` arms, `optional`, `IN` — arrives as a consequence, not as step work.
 - **3.3** `unroll` (§4.3) for `times(n)` bodies, with the §3.6 text ceiling. Take **`dedup` first** —
-  4 queries, and item 3 already identifies it as the easiest equivalence to state — with an L4 pin
+  4 queries, and item 3b already identifies it as the easiest equivalence to state — with an L4 pin
   per barrier before the next one. One barrier per commit; do not cash in all 48 at once.
 - **3.4** Split `repeat`'s admission control from its lowering (analytics §9·4) — with `flatten` and
   `unroll` carrying the vocabulary, the 296-line function's ~20 admission booleans mostly evaporate,

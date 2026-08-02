@@ -32,15 +32,21 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 **Ranked entry point.** Numbers are IDs, not an order.
 **[write-path](./2026-08-01-write-path-plan.md) §2** (silent wrong answers) → **2** → **17**'s
-partitioned row-ops seam → **29** → **3**'s `times(n)` unroll (unblocked; its
-precondition landed).
+partitioned row-ops seam → **29** → **3b**'s `times(n)` unroll, one barrier at a time.
+
+**Item 3 was one entry reading as a 41-query prize and is now three**, because the three have
+nothing in common but the word `repeat`: **3** is a vocabulary gate that DISSOLVES under a
+`flatten` pass, **3b** is a `times(n)` majority to be cashed one barrier at a time, and **3c** is a
+5-traversal PLATFORM WALL whose deliverable is a deferral message. Ranking them together is what
+made the mechanism look like the buy.
 
 The write cluster — **10**, **16**, **0b**, the `write.ts` row-at-a-time entry in Internal debt — is
 **no longer claimed** (the second agent was stopped 2026-08-01) and is **no longer its own build
 order**. [write-path](./2026-08-01-write-path-plan.md) W1 and W4 LANDED; its W2/W3 measurements stay
 live as the acceptance criteria for
 [relir-build-plan](./2026-08-01-relir-build-plan.md) **Phase 2**, which replaces the row-at-a-time
-driver with `Insert`/`Update`/`Delete`/`Sequence` plan nodes rather than widening it. Read the
+driver with `Insert`/`Update`/`Delete` bindings of a plan rather than widening it (there is no
+`Sequence` node — ordering is the binding list). Read the
 supersession banner at the top of write-path before picking any of it up. P2·11's import-a-graph is
 still deliberately NOT part of it (different machine — `BulkLoader`, not the traversal write driver).
 
@@ -130,30 +136,51 @@ of gravity is ceiling, not correctness.
    Fold a citation into whichever site is next touched. **Do not "finish" this by mechanically
    rewriting all 17**: some defer for a reason the table does not capture. *Low.*
 
-3. **`repeat()` residuals — and the `times(n)` unroll is NOT the free rewrite this item claimed.**
-   The body compiles through the ordinary StepFns into a keyed child relation (`tail/keyed.ts`).
-   **The gate is NOT "whatever `lowerElementSteps` accepts"**: a per-iteration GLOBAL barrier observes
-   the whole frontier and the generic StepFns would lower it per-origin, answering a different
-   question — the gate is the row-local vocabulary (`isElementChildStep`).
-   **Two reference facts, pinned in `test/compiler/repeat-unroll-boundary.exec.test.ts`. They pull
-   opposite ways:** our deferral message is the REFERENCE's reading —
-   `RepeatStep.standardAlgorithm:217` tests `hasStepOfAssignableClassRecursively(Barrier.class, …)` and
-   drains EVERY start into the body before iterating when it holds; and TinkerPop refuses to unroll
-   such a body on purpose — `RepeatUnrollStrategy.ALLOWED_STEP_CLASSES` is movement + `has()` only,
-   "intentionally conservative … (**especially barriers**)".
-   **So the 41 queries are not 41 free wins.** Every body they count is a barrier body — the set the
-   reference declines — and the bodies it DOES admit already compile here. The unroll may still be
-   right for us, for a reason that does not apply to an interpreter: our phases are set-at-a-time by
-   construction, so "the whole frontier at iteration k" IS phase k's relation — the property `:217` had
-   to special-case to obtain. **But that is an argument to make per barrier, with a pin each, not a
-   corpus count to cash in.** Breakdown, unchanged across four measurements: `order` 15, `limit` 7,
-   `local` 5, `dedup` 4, `range` 4, `groupCount` 3, `sample` 2, `group` 1; plus 8 on the adjacent
-   row-local gate. *Medium, and re-scoped: the cheapest honest slice is ONE barrier (`dedup`, 4
-   queries, the easiest equivalence to state) rather than the mechanism wholesale.*
-   Also: named-loop `repeat("a",…)` needs named loop counters; `as()` in the body rebinds per iteration
-   so it stays out; `path()`/`sack()` bodies stay with the flat expansion (→ P3).
-   → [deep-seam-migration-roadmap](./2026-07-18-deep-seam-migration-roadmap.md) #5,
-   [foldable-carried-column](./2026-07-24-foldable-carried-column-plan.md)
+3. **`repeat()` — the row-local vocabulary gate, and it DISSOLVES rather than being widened.**
+   8 queries. The body compiles through the ordinary StepFns into a keyed child relation
+   (`tail/keyed.ts`), and the gate is not "whatever `lowerElementSteps` accepts" but the row-local
+   vocabulary (`isElementChildStep`). Measured against SQLite 3.51.2
+   ([relir-build-plan](./2026-08-01-relir-build-plan.md) P2): `NOT EXISTS`, a join against a derived
+   `UNION`, `IN (SELECT …)`, `LEFT JOIN` with the walk on the left, correlated scalar subqueries and
+   multi-hop join chains are **all legal inside a recursive term** and all outside `REPEAT_BODY_OK`.
+   So `expandRepeatBody` is a hand-written join-flattener, not a platform workaround, and the
+   vocabulary arrives as a CONSEQUENCE of the `flatten` pass rather than as step work.
+   *Medium — and owned by [relir-build-plan](./2026-08-01-relir-build-plan.md) Phase 3.2, not by a
+   widening of the gate.*
+   → [deep-seam-migration-roadmap](./2026-07-18-deep-seam-migration-roadmap.md) #5
+
+3b. **`repeat()` with a per-iteration barrier — a `times(n)` majority, ONE barrier at a time.**
+   Of 125 corpus traversals mentioning `repeat()`, 53 have a barrier in the body and **48 of those
+   are `times(n)`-bounded** (83× `times(2)`, 16× `times(1)`, 9× `times(3)`, 8× `times(5)`, one each
+   of 8 and 10 — max 10). Unrolling *n* times leaves no recursive term, so every SQLite prohibition
+   evaporates and the barrier is an ordinary `Aggregate`/`Window`.
+   **Two reference facts pull opposite ways, pinned in
+   `test/compiler/repeat-unroll-boundary.exec.test.ts`:** our deferral message is the REFERENCE's
+   reading (`RepeatStep.standardAlgorithm:217` drains every start into the body before iterating when
+   a barrier is present), and TinkerPop refuses to unroll such a body on purpose
+   (`RepeatUnrollStrategy.ALLOWED_STEP_CLASSES` is movement + `has()` only, "intentionally
+   conservative … especially barriers"). The unroll may still be right for US, for a reason that does
+   not apply to an interpreter: our phases are set-at-a-time by construction, so "the whole frontier
+   at iteration k" IS phase k's relation — the property `:217` had to special-case to obtain.
+   **That is an argument to make per barrier, with a pin each, not a corpus count to cash in.**
+   Breakdown, unchanged across four measurements: `order` 15, `limit` 7, `local` 5, `dedup` 4,
+   `range` 4, `groupCount` 3, `sample` 2, `group` 1.
+   *Medium; the cheapest honest slice is ONE barrier — `dedup`, 4 queries, the easiest equivalence to
+   state.* → [relir-build-plan](./2026-08-01-relir-build-plan.md) Phase 3.3
+
+3c. **`repeat()` with an `until()`/`emit()` barrier — a PLATFORM WALL, 5 traversals, do not
+   re-propose a lowering.** Measured directly: **no per-iteration barrier is expressible in a SQLite
+   recursive term in any lowering.** `DISTINCT` is legal but INERT (the term is fed one queue row at
+   a time, so it never sees two frontier rows together — on a diamond it returns `[1,2,3,4,4]`,
+   identical to `UNION ALL`); `LIMIT` and `ORDER BY`+`LIMIT` are global caps on the whole CTE, not
+   per-iteration barriers; `UNION` dedups whole-walk on the entire row tuple, violating the multiset
+   rule. Unbounded iteration means 3b's unroll does not apply either. **The right answer is a
+   deferral that NAMES the wall.** *Won't-fix as a lowering; the deliverable is the message.*
+   → [relir-build-plan](./2026-08-01-relir-build-plan.md) §1 P3, Phase 3 exit criteria
+
+   Adjacent and unchanged: named-loop `repeat("a",…)` needs named loop counters; `as()` in the body
+   rebinds per iteration so it stays out; `path()`/`sack()` bodies stay with the flat expansion (→ P3).
+   → [foldable-carried-column](./2026-07-24-foldable-carried-column-plan.md)
 
 20. **Results ordered only because SQLite scanned the convenient way.** `mise run test:perturbed`
    (`PRAGMA reverse_unordered_selects`) — a failure there is never a flake. Perturbed census
