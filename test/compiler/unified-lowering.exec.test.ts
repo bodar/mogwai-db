@@ -20,7 +20,7 @@ describe('compiler execution semantics', () => {
 describe('unified lowering characterization', () => {
   test('every disable-safe fast path is result-equivalent to generic lowering', () => {
     const store = seededStore();
-    const cases: Array<{ key: keyof NonNullable<CompileOptions['fastPaths']>; query: string; fastSql: string; genericSql: string }> = [
+    const cases: Array<{ key: keyof NonNullable<CompileOptions['fastPaths']>; query: string; fastSql: string; fastPattern?: RegExp; genericSql: string; genericNot?: RegExp }> = [
       {
         // fast middle = the inline correlated movement child (a nested derived EXISTS,
         // no CTE); generic middle = the materialized child-existence gate (ROW_NUMBER
@@ -99,8 +99,15 @@ describe('unified lowering characterization', () => {
         // SUM(bulk) makes them the same total either way.
         key: 'movementCollapse',
         query: 'g.V().both().both().count()',
-        fastSql: 'SUM(bulk) AS bulk FROM (SELECT e.tgt AS id',
-        genericSql: 'c1(id, bulk) as (SELECT e.tgt AS id',
+        // RelIR-routed (§10·4), and `movementCollapse` is the one fast path the RelIR route
+        // EXPRESSES rather than declines — it is a plan rewrite the algebra can state exactly (a
+        // grouped SUM(bulk)) rather than a different physical access path, so the switch keeps
+        // both positions and this case keeps testing what it was written to test. Matched on the
+        // SHAPE both spines emit (`sum(<bulk>) … GROUP BY`) rather than on either one's aliases.
+        fastSql: 'GROUP BY',
+        fastPattern: /sum\(\w*\.?bulk\)[^]*GROUP BY/i,
+        genericSql: 'UNION ALL',
+        genericNot: /GROUP BY/i,
       },
       {
         // scalar predicate: inline = one WHERE over the value (filters c1 directly); generic
@@ -136,11 +143,13 @@ describe('unified lowering characterization', () => {
       },
     ];
 
-    for (const { key, query, fastSql, genericSql } of cases) {
+    for (const { key, query, fastSql, fastPattern, genericSql, genericNot } of cases) {
       const enabled = { fastPaths: { [key]: true } } as CompileOptions;
       const disabled = { fastPaths: { [key]: false } } as CompileOptions;
       expect(read(query, enabled).sql).toContain(fastSql);
+      if (fastPattern) expect(read(query, enabled).sql).toMatch(fastPattern);
       expect(read(query, disabled).sql).toContain(genericSql);
+      if (genericNot) expect(read(query, disabled).sql).not.toMatch(genericNot);
       expect(runWith(store, query, enabled)).toEqual(runWith(store, query, disabled));
     }
 

@@ -61,7 +61,9 @@ const COVERED = [
  * by name. `g.V().count()` is the ordinary "step not learned yet"; the rest are the guards.
  */
 const DECLINED = [
-  'g.V().out()',                      // a step not learned yet: movement
+  "g.V().bothE().otherV()",           // otherV reads the entering vertex — carried state not modelled
+  "g.V().as('a').out().select('a')",  // an alias: carried state not modelled
+  'g.V().out().order()',              // the row-algebraic class, not learned yet
   'g.V().count().fold()',             // a step after the shape change that is NOT in its vocabulary
   'g.inject(1)',                      // a source that is not V()/E()
   'g.withSack(0).V()',                // a carried sack the source seed would have to declare
@@ -106,7 +108,7 @@ describe('the RelIR spine', () => {
     // Asking for RelIR does not make an uncovered chain route there, and asking for legacy always
     // works. Coverage is a property of the CHAIN; if these ever diverge the router has started
     // deciding something the lowering should own.
-    expect(read('g.V().out()', { spine: 'rel' }).spine).toBe('legacy');
+    expect(read('g.V().out().order()', { spine: 'rel' }).spine).toBe('legacy');
     expect(read('g.V()', { spine: 'legacy' }).spine).toBe('legacy');
     expect(read('g.V()', { spine: 'rel' }).spine).toBe('rel');
   });

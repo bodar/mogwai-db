@@ -48,16 +48,21 @@ describe('movement / edge sources SQL', () => {
       .toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=gn.src) AS v_src');
   });
 
-  test('outE/inE go vertex→edge; outV/inV go edge→vertex', () => {
-    const oe = read('g.V(1).outE("knows")');
-    expect(oe.sql).toContain('SELECT e.id AS id, p.bulk FROM edges e JOIN c0 p ON e.src=p.id');
-    expect(oe.shape).toEqual({ kind: 'edge' });
+  // Movement is RelIR-routed (§10·4). What both spines must agree on is the DIRECTION table — which
+  // edge column matches the incoming id and which one the outgoing id comes from — so that is what
+  // is asserted, once per spine, rather than either one's aliases.
+  for (const spine of ['legacy', 'rel'] as const) {
+    test(`outE/inE go vertex→edge; outV/inV go edge→vertex — ${spine} spine`, () => {
+      const oe = read('g.V(1).outE("knows")', { spine });
+      expect(oe.sql).toMatch(/(\w+)\.id AS id[^]*edges \1[^]*\1\.src\s*=\s*\w+\.id|SELECT e\.id AS id, p\.bulk FROM edges e JOIN c0 p ON e\.src=p\.id/);
+      expect(oe.shape).toEqual({ kind: 'edge' });
 
-    const iv = read('g.V(1).outE("knows").inV()');
-    // edge → target vertex; back to vertex shape
-    expect(iv.sql).toContain('SELECT e.tgt AS id, p.bulk FROM edges e JOIN c1 p ON e.id=p.id');
-    expect(iv.shape).toEqual({ kind: 'vertex' });
-  });
+      const iv = read('g.V(1).outE("knows").inV()', { spine });
+      // edge → target vertex; back to vertex shape
+      expect(iv.sql).toMatch(/(\w+)\.tgt AS id[^]*edges \1[^]*\1\.id\s*=\s*\w+\.id|SELECT e\.tgt AS id, p\.bulk FROM edges e JOIN c1 p ON e\.id=p\.id/);
+      expect(iv.shape).toEqual({ kind: 'vertex' });
+    });
+  }
 
   test('edge steps reject the wrong element kind', () => {
     expect(() => compile('g.V().outV()', {})).toThrow('outV() expects an edge, not a vertex');
@@ -70,7 +75,8 @@ describe('movement / edge sources SQL', () => {
     // re-joins `edges` per filter CTE, RelIR conjoins into the source scan's own WHERE.
     expect(read('g.E().has("weight",0.5)', { spine: 'legacy' }).sql).toContain('FROM edges n JOIN c0 p ON n.id=p.id');
     expect(read('g.E().has("weight",0.5)', { spine: 'rel' }).sql).toContain('FROM edges re WHERE EXISTS (SELECT ? AS one FROM edge_properties rp2');
-    expect(read('g.V(1).outE().values("weight")').sql).toContain('JOIN edge_properties ep ON ep.edge=n.id AND ep.key=?');
+    expect(read('g.V(1).outE().values("weight")', { spine: 'legacy' }).sql).toContain('JOIN edge_properties ep ON ep.edge=n.id AND ep.key=?');
+    expect(read('g.V(1).outE().values("weight")', { spine: 'rel' }).sql).toMatch(/INNER JOIN edge_properties \w+ ON \(\(\w+\.edge = \w+\.id\) AND \w+\.key IN/);
   });
 
   test('single select and record projection preserve edge element typing', () => {

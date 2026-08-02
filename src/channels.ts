@@ -97,6 +97,37 @@ export const rigidChannels = (channels: Channels): Channels => channels.filter((
 export const barrierChannels = (channels: Channels): Channels =>
   channels.filter((channel) => CHANNEL_BARRIER_POLICY[channel.role] === 'keep');
 
+/**
+ * The MULTIPLICITY channel — the one whose value is a count of traversers rather than a property
+ * of one, and therefore the only one a grouping may combine without changing the answer.
+ *
+ * This is what distinguishes a BARRIER from a RE-ENCODING, and the distinction is not a detail of
+ * SQL. A barrier consumes the stream and emits a NEW traverser (`count`, `fold`, `group`), so no
+ * per-row state can honestly survive it. Summing `bulk` under a grouping by traverser identity
+ * emits the SAME traverser multiset, run-length encoded — it reduces ROWS, not TRAVERSERS, and it
+ * is how a movement keeps its frontier bounded by reachable |V| instead of by the (exponential)
+ * walk count.
+ *
+ * `isReEncoding` states the whole condition, and every clause is load-bearing:
+ *
+ *  - **bulk must be the ONLY channel.** A grouping discards per-row identity, so an alias, a path
+ *    position or a sack riding alongside would be silently picked from an arbitrary member of the
+ *    group. At the Gremlin level that is `collapseSafe`'s "no path/as/sack/branch/order"; here it
+ *    falls out of the channel list, with no second vocabulary to keep in step.
+ *  - **the grouping must be non-empty.** `groupBy: []` is a whole-relation reduction: one row out,
+ *    which is a new traverser however the aggregate is spelled.
+ *  - **the aggregate must be exactly `SUM(bulk)` into bulk's own column.** Anything else computes
+ *    something the traversers did not previously say.
+ *
+ * It answers the question §3.5 of the RelIR build plan left open ("bulk coalescing must KEEP
+ * carrying bulk while every reducing aggregate is a barrier") as a RULE rather than an exception,
+ * and it lives here rather than in `src/rel/` because it is a fact about channel ROLES.
+ */
+export const MULTIPLICITY_ROLE: ChannelRole = 'bulk';
+
+export const isMultiplicityOnly = (channels: Channels): boolean =>
+  channels.length === 1 && channels[0]!.role === MULTIPLICITY_ROLE;
+
 /** A LIST EQUALITY, which is the whole tell that this decomposition is the right one: the layout
  * comparison it replaces was a `JSON.stringify` of a struct whose alias shapes it had no reason to
  * touch beyond their being in the same object. */

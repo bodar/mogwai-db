@@ -34,7 +34,12 @@ import { lowerToRel } from './lower.ts';
  * a finished RelIR relation is consumed by framing — which is the direction §10·4 permits.
  */
 export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<string, any>): Compiled | null {
-  const lowered = lowerToRel(steps);
+  // `movementCollapse` is the one fast path this route EXPRESSES rather than declines, because it
+  // is a plan rewrite the algebra can state exactly (a grouped `SUM(bulk)`) rather than a different
+  // physical access path. Passing the flag through keeps the switch meaningful — L5's differential
+  // still has two positions to compare on a RelIR-routed traversal — while spine CHOICE stays a
+  // function of the chain alone: coverage is identical either way.
+  const lowered = lowerToRel(steps, engine.fastPaths.movementCollapse);
   if (!lowered) return null;
 
   // `rir` deliberately does not collide with the framing aliases (`n`/`e`/`p`/`s`/`v`/`g`/`j`/`l`)

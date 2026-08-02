@@ -125,7 +125,13 @@ function labelIds(names: readonly string[], fresh: Minter): Rel {
  * neither changes the relation's cardinality contract nor consumes a channel, and the plan is data
  * so a later step can still see the columns.
  */
-function sourceFilter(step: IRStep, scan: Rel, elem: Elem, fresh: Minter): Expr | null {
+/** What a filter may read about the element it is filtering. `label` is present only where the
+ *  relation physically carries it — an edge SCAN does, a moved id-relation does not — so the edge
+ *  label test can take the direct column read at the source and the membership form elsewhere,
+ *  without either position having to know which it is in. */
+interface Subject { readonly id: Expr; readonly label?: Expr; readonly rel: Rel; }
+
+function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter): Expr | null {
   if (step.modulators?.length || step.optionArms) return null;
   const args = step.args ?? [];
 
@@ -135,14 +141,20 @@ function sourceFilter(step: IRStep, scan: Rel, elem: Elem, fresh: Minter): Expr 
     const ids = labelIds(names as string[], fresh);
     // An EDGE carries its label inline; a VERTEX may hold several, in a side table. Two different
     // physical questions, which is exactly why `Scan` is the only node that names a table.
-    return elem === 'edge'
-      ? { kind: 'in-query', expr: col(scan.id, 'label'), plan: ids, negated: false }
-      : (() => {
-          const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-          const matching = make.filter({ id: fresh('f'), input: vl, channels: [], type: vl.type, pred: { kind: 'in-query', expr: col(vl.id, 'label'), plan: ids, negated: false } });
-          const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('node', 'int')), exprs: [['node', col(matching.id, 'node')]] });
-          return { kind: 'in-query', expr: col(scan.id, 'id'), plan: owners, negated: false };
-        })();
+    if (elem === 'edge') {
+      // Direct where the column is physically present (the source scan), and a membership test on
+      // the edge id where it is not (after a movement, the relation is `id` + channels). Same
+      // question, and the first form keeps the covering-index read the source position deserves.
+      if (subject.label) return { kind: 'in-query', expr: subject.label, plan: ids, negated: false };
+      const e = make.scan({ id: fresh('el'), table: 'edges', alias: fresh('rel'), channels: [], type: typeOf(meta('id', 'int'), meta('label', 'int')) });
+      const matching = make.filter({ id: fresh('f'), input: e, channels: [], type: e.type, pred: { kind: 'in-query', expr: col(e.id, 'label'), plan: ids, negated: false } });
+      const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
+      return { kind: 'in-query', expr: subject.id, plan: owners, negated: false };
+    }
+    const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
+    const matching = make.filter({ id: fresh('f'), input: vl, channels: [], type: vl.type, pred: { kind: 'in-query', expr: col(vl.id, 'label'), plan: ids, negated: false } });
+    const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('node', 'int')), exprs: [['node', col(matching.id, 'node')]] });
+    return { kind: 'in-query', expr: subject.id, plan: owners, negated: false };
   }
 
   if (step.name === 'has') {
@@ -170,8 +182,8 @@ function sourceFilter(step: IRStep, scan: Rel, elem: Elem, fresh: Minter): Expr 
     const matching = make.filter({
       id: fresh('f'), input: props, channels: [], type: props.type,
       pred: matches
-        ? and(and(eq(col(props.id, owner), col(scan.id, 'id')), eq(col(props.id, 'key'), lit(key, 'text'))), matches)
-        : and(eq(col(props.id, owner), col(scan.id, 'id')), eq(col(props.id, 'key'), lit(key, 'text'))),
+        ? and(and(eq(col(props.id, owner), subject.id), eq(col(props.id, 'key'), lit(key, 'text'))), matches)
+        : and(eq(col(props.id, owner), subject.id), eq(col(props.id, 'key'), lit(key, 'text'))),
     });
     // `EXISTS (SELECT 1 …)`, correlated on the outer scan — a property FILTER asks whether a row
     // exists, and joining instead would multiply the traverser once per matching property.
@@ -226,6 +238,99 @@ const storedValue = (rel: import('../../rel/types.ts').RelId): Expr => ({
     { kind: 'call', fn: 'json', args: [col(rel, 'value')] }]],
   else: col(rel, 'value'),
 });
+
+/**
+ * MOVEMENT — the graph algebra proper, as a join over `edges` and a re-projection.
+ *
+ * Six adjacency steps plus the three endpoint reads, each one direction table entry: which edge
+ * column matches the incoming id, and which column the outgoing id comes from. `both`/`bothE`/
+ * `bothV` are the UNION of their two halves and get no special case beyond being two entries — the
+ * multiset rule means UNION ALL, so a self-loop legitimately yields the vertex twice.
+ *
+ * `otherV` is absent, and deliberately: it reads the entering vertex a preceding edge step
+ * retained (`fromV`), which is carried state this route does not yet model. Declining is the whole
+ * contract — a movement that quietly forgot which end it came from is a wrong answer.
+ */
+interface Hop { readonly from: 'src' | 'tgt' | 'id'; readonly to: 'src' | 'tgt' | 'id'; readonly elem: Elem; }
+const HOPS: Readonly<Record<string, readonly Hop[]>> = {
+  out: [{ from: 'src', to: 'tgt', elem: 'vertex' }],
+  in: [{ from: 'tgt', to: 'src', elem: 'vertex' }],
+  both: [{ from: 'src', to: 'tgt', elem: 'vertex' }, { from: 'tgt', to: 'src', elem: 'vertex' }],
+  outE: [{ from: 'src', to: 'id', elem: 'edge' }],
+  inE: [{ from: 'tgt', to: 'id', elem: 'edge' }],
+  bothE: [{ from: 'src', to: 'id', elem: 'edge' }, { from: 'tgt', to: 'id', elem: 'edge' }],
+  inV: [{ from: 'id', to: 'tgt', elem: 'vertex' }],
+  outV: [{ from: 'id', to: 'src', elem: 'vertex' }],
+  bothV: [{ from: 'id', to: 'src', elem: 'vertex' }, { from: 'id', to: 'tgt', elem: 'vertex' }],
+};
+
+/** Steps whose input must already be an edge (`inV`/`outV`/`bothV`) vs a vertex. Mis-applying one
+ *  is a hard error in the legacy spine; here it is a decline, so that spine keeps owning the
+ *  message rather than this route inventing a second one. */
+const FROM_EDGE = new Set(['inV', 'outV', 'bothV']);
+
+function movement(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { rel: Rel; elem: Elem } | null {
+  const hops = HOPS[step.name];
+  if (!hops || step.modulators?.length || step.optionArms) return null;
+  if (FROM_EDGE.has(step.name) !== (elem === 'edge')) return null;
+
+  const labels = flattenListArgs(step.args ?? []);
+  if (labels.some((l) => typeof l !== 'string')) return null;
+  // A label restriction is meaningless on an endpoint read — the edge is already chosen — and
+  // TinkerPop's inV()/outV() take no arguments at all.
+  if (labels.length && FROM_EDGE.has(step.name)) return null;
+
+  const arms = hops.map((hop) => {
+    const e = make.scan({
+      id: fresh('mv'), table: 'edges', alias: fresh('rme'), channels: [],
+      type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
+    });
+    // `edges` on the LEFT, the incoming frontier on the right — the join order the legacy spine
+    // emits, so the access path stays the one the covering indexes were built for.
+    const on = labels.length
+      ? and(eq(col(e.id, hop.from), col(input.id, 'id')),
+        { kind: 'in-query', expr: col(e.id, 'label'), plan: labelIds(labels as string[], fresh), negated: false })
+      : eq(col(e.id, hop.from), col(input.id, 'id'));
+    const joined = make.join({
+      id: fresh('j'), left: e, right: input, join: 'inner', on, channels: BULK,
+      type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int'), meta('pid', 'int'), meta('bulk', 'int')),
+    });
+    return make.project({
+      id: fresh('m'), input: joined, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
+      exprs: [['id', col(joined.id, hop.to)], ['bulk', col(joined.id, 'bulk')]],
+    });
+  });
+  const [first, ...rest] = arms;
+  if (!first) return null;
+  // N-ary UNION ALL, minted once — and ALL, never distinct: traversers are a multiset, so a vertex
+  // reachable both ways is two traversers.
+  const rel = rest.length
+    ? make.union({ id: fresh('u'), inputs: arms, all: true, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')) })
+    : first;
+  return { rel, elem: hops[0]!.elem };
+}
+
+/**
+ * The convergent-walk COLLAPSE: `SELECT id, SUM(bulk) … GROUP BY id`, so the frontier stays bounded
+ * by reachable |V| instead of by the (exponential) walk count.
+ *
+ * It is the `movementCollapse` fast path, expressed IN the algebra rather than beside it — which
+ * is legitimate where the FTS one was not, and the difference is worth stating. Routing a substring
+ * predicate through a base-table scan would have LOST an index seek the legacy spine performs;
+ * here the specialized form is a plan rewrite RelIR can state exactly, so expressing it keeps the
+ * optimization AND keeps the switch meaningful: `fastPaths.movementCollapse` still selects between
+ * two forms, so L5's differential still has two positions to compare on a RelIR-routed traversal.
+ * Reading the flag here does NOT make spine choice depend on it — coverage is unchanged either way.
+ *
+ * `isReEncoding` (src/rel/obligations.ts) is what lets the result keep carrying `bulk`: this is a
+ * re-encoding of the same traverser multiset, not a barrier.
+ */
+const coalesce = (rel: Rel, fresh: Minter): Rel =>
+  make.aggregate({
+    id: fresh('cl'), input: rel, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
+    groupBy: [col(rel.id, 'id')],
+    aggs: [['bulk', { kind: 'agg', fn: 'sum', args: [col(rel.id, 'bulk')] }]],
+  });
 
 /**
  * A TERMINAL that retypes the element relation into another shape — the SHAPE BOUNDARY, and the
@@ -299,7 +404,7 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): Omit<Rel
  * growth list, and the measured order of what each is worth over the 2,298-traversal corpus is
  * recorded in the build plan — `has(key, P…)` is the next single largest, then the reducers.
  */
-export function lowerToRel(steps: readonly IRStep[]): RelLowering | null {
+export function lowerToRel(steps: readonly IRStep[], collapse = true): RelLowering | null {
   const first = steps[0];
   if (!first) return null;
   if (first.name !== 'V' && first.name !== 'E') return null;
@@ -311,25 +416,47 @@ export function lowerToRel(steps: readonly IRStep[]): RelLowering | null {
   const seeded = elementScan(first, fresh);
   if (!seeded) return null;
 
+  // PHASE 1 — the source scan and the filters that fuse into its own WHERE. Kept separate from the
+  // general fold below because only here is the physical row in scope: an edge's `label` is a
+  // column to read rather than a membership test, and a run of filters conjoins into ONE `WHERE`
+  // over one scan instead of the legacy CTE-per-filter with its re-join.
   let pred = seeded.pred;
   let at = 1;
+  let elem = seeded.elem;
   for (; at < steps.length; at++) {
-    const clause = sourceFilter(steps[at], seeded.scan, seeded.elem, fresh);
+    const clause = sourceFilter(steps[at], { id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan }, elem, fresh);
     if (!clause) break;
     pred = and(pred, clause);
   }
 
   const source = pred ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred }) : seeded.scan;
-  const projected = make.project({
+  let rel: Rel = make.project({
     id: fresh('c'), input: source, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
     exprs: [['id', col(source.id, 'id')], ['bulk', lit(1, 'int')]],
   });
-  if (at === steps.length)
-    return { plan: nameBindings(projected), framing: { kind: 'elements', elem: seeded.elem }, cols: [...SOURCE_COLS], channels: BULK };
 
-  const retyped = terminal(steps[at], projected, seeded.elem, fresh);
+  // PHASE 2 — movement and post-movement filtering, over the id-relation. A filter here reads only
+  // the traverser's id, which is why `Subject` carries no `label`: after a hop the relation is
+  // `(id, bulk)` and an edge-label test becomes the membership form.
+  for (; at < steps.length; at++) {
+    const step = steps[at];
+    const moved = movement(step, rel, elem, fresh);
+    if (moved) {
+      rel = collapse ? coalesce(moved.rel, fresh) : moved.rel;
+      elem = moved.elem;
+      continue;
+    }
+    const clause = sourceFilter(step, { id: col(rel.id, 'id'), rel }, elem, fresh);
+    if (!clause) break;
+    rel = make.filter({ id: fresh('f'), input: rel, channels: BULK, type: rel.type, pred: clause });
+  }
+
+  if (at === steps.length)
+    return { plan: nameBindings(rel), framing: { kind: 'elements', elem }, cols: [...SOURCE_COLS], channels: BULK };
+
+  const retyped = terminal(steps[at], rel, elem, fresh);
   if (!retyped) return null;
-  const { rel, ...rest } = retyped;
+  const { rel: retypedRel, ...rest } = retyped;
 
   // Past the shape change the vocabulary is the NEW shape's, and `is(P)` is the whole of it here.
   // It is the same predicate module the source filters use, over the scalar's own `v` — which is
@@ -344,8 +471,8 @@ export function lowerToRel(steps: readonly IRStep[]): RelLowering | null {
   // a wall worth shipping. `Materialize` is exactly the declared remedy (§3.3: "a boundary hint …
   // where the planner needs a fence"), and it lands the same CTE-then-filter shape legacy emits.
   let filtered: Rel = steps[at + 1]?.name === 'is'
-    ? make.materialize({ id: fresh('m'), input: rel, channels: rest.channels, type: rel.type })
-    : rel;
+    ? make.materialize({ id: fresh('m'), input: retypedRel, channels: rest.channels, type: retypedRel.type })
+    : retypedRel;
   for (at++; at < steps.length; at++) {
     const step = steps[at];
     if (step.name !== 'is' || step.modulators?.length || step.optionArms) return null;
@@ -354,9 +481,9 @@ export function lowerToRel(steps: readonly IRStep[]): RelLowering | null {
     // A per-row `vtype` is in scope only where the value came from a stored property; a `count` is
     // a compile-time long and needs no ordering key. Same distinction `predicateSql` draws as
     // `typeCtx.kind === 'perRow'`.
-    const pred = predicateExpr(col(filtered.id, 'v'), args[0], vtyped ? storedCompare(filtered.id) : undefined);
-    if (!pred) return null;
-    filtered = make.filter({ id: fresh('f'), input: filtered, channels: rest.channels, type: filtered.type, pred });
+    const pred2 = predicateExpr(col(filtered.id, 'v'), args[0], vtyped ? storedCompare(filtered.id) : undefined);
+    if (!pred2) return null;
+    filtered = make.filter({ id: fresh('f'), input: filtered, channels: rest.channels, type: filtered.type, pred: pred2 });
   }
   return { plan: nameBindings(filtered), ...rest };
 }
