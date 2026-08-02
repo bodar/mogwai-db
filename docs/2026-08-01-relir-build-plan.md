@@ -426,6 +426,24 @@ an ordered `Sequence`, only for an earlier step, and only when its full column t
 matches that step's result schema. This is the type-preserving contract the runtime JSON transfer
 will carry, not a second inferred expression-type system.
 
+**Current handoff — 2026-08-02:** Phase 2 is paused at the one remaining 2.1 seam: execute an
+ordered `Sequence` while materializing each statement's `RETURNING` rows for later `PriorResult`
+relations. This must be a real multi-statement executor, not a data-modifying CTE: run each emitted
+statement in order, retain its returned rows, and render every later prior relation from one JSON
+bind via `json_each` (never a row-count-sized placeholder list). The transfer keeps the already
+standard typed `{t,v}` value envelope where values need JSON transport, with `returningType` as the
+authority for every column's full type/nullability; no type inference or `as Rel` escape hatch is
+permitted. It must work at arbitrary relation nesting, not only a top-level `PriorResult`, and must
+preserve the pre-mutation snapshot required by a vertex-drop cascade.
+
+The incidental CI regression discovered while landing this work is fixed in `514e95b`: a `limit()`
+before `repeat()` had consumed its input encounter, but repeat's output layout still declared that
+column after the walk stopped emitting it, causing SQLite's “table cN has 2 values for 3 columns”.
+Repeat now explicitly drops the consumed encounter, and the generic (bulk fast path disabled)
+regression test plus the exact failed L5 seed pass. `mise run ci` was green on this state before the
+commit; the code commit is pushed to `trunk`. The preceding documentation commit `4fe7224` is local
+at this point and the next push should include this handoff update.
+
 **Phase 2 supersedes [write-path](./2026-08-01-write-path-plan.md), and inherits its requirements.**
 That plan's agent was stopped 2026-08-01; the plan is not discarded, it is re-pointed. Precisely:
 
