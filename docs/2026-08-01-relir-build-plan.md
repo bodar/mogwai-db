@@ -77,7 +77,14 @@ a new role fails the build until its merge policy and its barrier policy are dec
 encode the largest measured defect category in this repo's history (**33% of diagnosed defects: a
 carried field dropped at a barrier, merge or rejoin**). A clean-room redesign of that contract would
 be re-buying twelve bugs. Import the types, the tables, `mergeLayouts`, `patchLayout`, `layoutCols`,
-`dropLayoutAtBarrier`, and the `assertStreamColumns` discipline. Clean-room the *algebra* around them.
+`barrierLayout` (this doc first called it `dropLayoutAtBarrier`; the export's real name is
+`barrierLayout`), and the `assertStreamColumns` discipline. Clean-room the *algebra* around them.
+
+**"Imports nothing from `src/compiler/steps/`" and "import the layout contract verbatim" contradict
+each other while that contract LIVES in `steps/context/context.ts`.** Resolved the only way that keeps
+both halves: the contract MOVES to a neutral module which `steps/` and `rel/` both import, so the
+dependency runs from each into a shared vocabulary and never from `rel/` into the layer it replaces.
+`src/rel/` importing `src/compiler/…` at all is the violation — not the choice of symbols.
 
 **Shape does not enter RelIR at all.** RelIR sits downstream of lowering, so Gremlin shape is already
 resolved and rides to the wire as `Compiled.shape`, untouched. The anchor rule — *a Pass may CONSULT
@@ -301,7 +308,9 @@ recognition-vs-support code path.
 
 ## 5. The emitter
 
-`emit(plan: Rel) → { sql, binds }`, built on the **unchanged `q` kernel**. The kernel keeps its
+`emit(plan: Rel) → { sql, binds }`, built on the `q` kernel — **additively only**: the kernel gained
+`identifier()` (one identifier-spelling authority, so no caller concatenates a name), and that is the
+only permitted class of change. Nothing in the kernel may be reshaped to suit RelIR. The kernel keeps its
 fail-closed properties (undefined hole throws, absent column throws) and both rendering modes; the
 emitter is the only new caller. It is a fold over the DAG with a memo for shared nodes, and it is
 **total** — every node kind has an arm, and there is no fallback branch. A node the emitter cannot
@@ -351,6 +360,14 @@ outside `src/rel/`, so full legacy SQL strings are not this algebra's output con
 cannot reproduce those cores byte-for-byte, the object model is wrong and Phase 1 is not finished —
 this is the cheapest possible falsification and it comes before any integration.
 
+**This gate is NOT met, and `test/rel-core-sql.test.ts` is not it** (audit, §9·1). That file pins ten
+NODE KINDS against hand-written transcriptions of the emitter's own output; no `test/L2-sql/`
+expectation is referenced, no traversal family appears, and nothing in it fails if the object model is
+wrong. The real gate is blocked on the emitter's shape, not on missing test-writing effort: a genuine
+L2 core is ONE flat SELECT with carried columns (`SELECT e.tgt AS id, p.bulk, p.o0 FROM edges e JOIN
+c2 p ON e.src=p.id AND …`, `test/L2-sql/branch.sql.test.ts:78`), and a per-node renderer cannot emit
+that shape at any amount of hand-building. See §10·1 — the open design decision this depends on.
+
 **Progress — 2026-08-01:** the clean-room foundation landed in `773c63a`: full read/write data
 unions, checker (column, expression-placement, recursive-self-reference, layout and bind-budget
 contracts), kernel-backed emitter, `fuse`/`prune`/`name`, and pure SQLite tests. The naming analysis
@@ -364,9 +381,10 @@ construction; `check` remains the scope-aware whole-plan backstop. The emitter r
 The checker now also proves `Union`'s output layout is the declared peer merge and that a
 whole-relation `Aggregate` applies the barrier layout policy; both are tested with carried-state
 counterexamples.
-`test/rel-core-sql.test.ts` now pins ten byte-exact relational cores (values, projection, filter,
-aggregate, sort, limit, distinct, join, union and recursion); result framing is deliberately not
-part of that gate.
+`test/rel-core-sql.test.ts` pins ten byte-exact SQL strings, one per node kind (values, projection,
+filter, aggregate, sort, limit, distinct, join, union and recursion). **It was recorded here as the
+Phase-1 exit gate and it is not** — the gate is ten L2 traversal FAMILIES, and this file references
+no L2 expectation. It stands as a useful emitter snapshot; the gate stays open (§9·1).
 
 ### Phase 2 — the write wedge
 
@@ -536,3 +554,93 @@ dispatch tables · the recognition-vs-support split in the fast-path layer.
 
 Two second implementations of the traversal machine, one accumulator that exists only because
 fusion had nowhere to happen, and the majority of a 11,201-line directory.
+
+---
+
+## 9. Constraint audit — 2026-08-02
+
+The plan changed under construction, which is fine; the **architectural constraints did not**, and
+several were broken silently while the Progress entries above read as green. Every row was measured
+against `HEAD` (877 lines of `src/rel/`, 27 passing tests, `check`/`lint`/`arch`/`binds` all clean),
+so this is a record of where the build diverged from its own rules — not a re-litigation of RelIR.
+
+**A constraint that cannot be kept is a design discussion (§10), never a quiet substitution.** Two of
+the rows below were substituted rather than raised, and that is the process defect this section exists
+to close.
+
+| # | Constraint | What landed | Status |
+|---|---|---|---|
+| 9·1 | Phase 1's byte-identical gate over ten L2 traversal **families** | ten node kinds pinned against the emitter's own output; no L2 expectation referenced | **broken**, blocked on §10·1 |
+| 9·2 | §5 "the emitter is total — an unrenderable node is a compile error, not a runtime throw" | `Param` and `PriorResult` are constructible and `throw` at emission | **broken**; fix is a lowering pass, not an emitter arm (§10·2) |
+| 9·3 | §3.4 "the plan is a **DAG**; a node referenced twice is shared" | `fuse`/`prune` rebuild per parent occurrence with no memo — measured: `left === right` true before `fuse`, false after, and `name` then names the wrong node | **broken**; `unroll` cannot work until fixed |
+| 9·4 | §4 "total, order-declared, mirroring the existing `Pass` pipeline's discipline — no switch growth" | 15 hand-written walkers (7 over `Expr`, 8 over `Rel`); 13 carry a `default:` arm, so a new node kind is silently skipped by the bind budget, recursive-term legality, pruning and sharing | **broken**; needs one exhaustive child seam before `flatten`/`unroll`/`recognize` add three more |
+| 9·5 | §3.5 per-node layout obligations as a `Record`, "so a new node or role fails the build until declared" | no such table exists; `Join` has NO layout check at all (including the declared left-join nullability rule), nor do grouped `Aggregate`, `Values`, `Scan`, or `Explode`'s output schema | **broken**; this is the 33%-defect guardrail |
+| 9·6 | §2 `src/rel/` imports nothing from `src/compiler/steps/` | `types.ts`, `check.ts`, `passes/prune.ts` import `steps/context/context.ts` | **broken**, and the plan contradicted itself — resolved in §2 by moving the contract to a neutral module |
+| 9·7 | §3.3 `Scan` is the only physical-schema node | `'id'` is hardcoded in the emitter's delete membership and in `check`'s `Delete.using` rule | **broken** |
+| 9·8 | §3.6 the bind budget is a plan property with `RowBatch`/`json_each` as the remedy | `check` fails closed above 100 binds; no chunking or JSON-bind form exists, so a legitimate large `Values` is refused rather than lowered | **incomplete**; same fix as 9·2 |
+| 9·9 | Phase 0 "clear the deck… worth doing first" | 0.1 not done (`globalRowOps` still has 5 refs; `ELEMENT_DISPATCH`/`SCALAR_DISPATCH` do not use it); 0.2 partly done (61 → 21 sites) | **skipped**, while Phase 2 started — and 0.2 was declared a *rename-safety prerequisite* for exactly the code motion Phases 2 and 4 perform |
+| 9·10 | §5 "the **unchanged** `q` kernel" | kernel gained `identifier()` | **amended** in §5: additive-only is the rule, and this addition qualifies |
+
+Four defects the checker was supposed to make impossible, each with a measured failing case:
+
+- **`Distinct{on}` conflates a dedup key with a projection.** `distinct({type:(id,name), on:[name]})`
+  emits `SELECT DISTINCT n.name` — one column where two are declared — and a consumer of `id` fails at
+  runtime with `no such column`. §3.3 reads `on` as a KEY ("absent = whole row"), which is what
+  `dedup(by(…))` needs in 4.1. `check` verifies layout against the DECLARED type and never against
+  what the emitter will produce.
+- **A derived relation is aliased by its `RelId`, so a self-join emits one alias twice** —
+  `… INNER JOIN (SELECT * FROM r0) m ON (m.id = m.id)` → `ambiguous column name`. Occurrence-level
+  aliasing is the emitter's job; lexical identity cannot double as the SQL alias. `unroll` produces
+  exactly this shape.
+- **`RelId` uniqueness is an unstated invariant.** `check`'s scope and the emitter's alias map are both
+  last-write-wins, so two same-id relations under a join misattribute a column rejection — and, with
+  matching column sets, resolve silently to whichever alias was collected last.
+- **`name` can mint a colliding CTE name**: generated `r0…rN` do not reserve explicit `Materialize`
+  names (measured `["r0","r0","r1"]`).
+
+One altitude finding, not a constraint breach: **declare-and-verify where the project's own pattern
+says derive.** `Project.type` vs `exprs`, `Window.type` vs `input + specs`, `Recursive.cols` vs `type`,
+`returningType` vs `returning`, `PriorResult.type` vs the prior step's — each checked in its factory
+AND re-checked in `check`. Names and arity are fully derivable; only `SqlType`/nullability are not,
+which argues for a `typeOf(expr, scope)` rather than a hand-passed `type`
+(`docs/2026-07-28-scalartype-refactoring-pattern.md` is the template).
+
+---
+
+## 10. Open design decisions — mine to raise, not to settle
+
+### 10·1 The emitter renders node-at-a-time; byte-identity needs a SELECT block
+
+Every node gets its own `SELECT`, so `Project(Filter(Join))` is three nesting levels while every
+existing L2 core is one SELECT with slots filled. §5's byte-identical gate (Phases 1–3) and §4.4's
+"`fuse` deletes `TailAcc`" both depend on collapsing a run of nodes into one statement, and `fuse`
+today only conjoins adjacent filters — `Sort`+`Limit` stays nested. Two routes:
+
+- **(a) `emit` becomes a block assembler** — walk a maximal run of `Project`/`Filter`/`Sort`/`Limit`/
+  `Distinct`/`Join` above a source into one SELECT with slots. Consistent with §3's opening (SQL's
+  redundancy collapses at the boundary); the algebra stays closed; `fuse` shrinks to semantic
+  rewrites only, and `TailAcc` dies because the assembler, not a pass, owns fusion.
+- **(b) `fuse` collapses into a mega-node** — needs a `Select` node holding every slot, which §3
+  deliberately excluded, and re-opens the closed node set (§7).
+
+(a) is the recommendation. It decides what `fuse`, `prune` and `name` are each for, so it wants
+settling before Phase 4 and before the 9·1 gate is re-attempted.
+
+### 10·2 A write chain cannot end in a read, and unemittable nodes have no lowering
+
+`Sequence.steps` is `readonly Stmt[]` and `Stmt` carries no layout, so `addV().values('name')` has no
+representation. W3's "unreachable positions dissolve as plan composition" is therefore **not true of
+the model as built** — nothing hoists a write out of a read position. Proposed, and it also closes the
+paused 2.1 handoff and 9·2/9·8 at once:
+
+- `Sequence { steps, result?: Rel }` (or a last step permitted to be a `Rel`), plus a declared
+  write-hoist pass — so a write in a read position is plan composition rather than a driver.
+- `Param` and `PriorResult` become **passes**, not emitter arms: `bindParams: Rel → Rel` substitutes
+  `Lit`; `materializePrior(plan, rows)` rewrites a `PriorResult` into `Explode(json_each(Lit(json)))`,
+  which the algebra already expresses and which IS the one-JSON-bind rule the handoff requires. `emit`
+  stays total, and the executor stays OUTSIDE `src/rel/` so §2's no-store clean room survives.
+
+The alternative — an executor inside `src/rel/` that special-cases statement sequences — is what the
+current three-entry-point emitter (`emit`, `emitStmt`, `emitSequence`, with statement-only
+`externalAliases`/`bareColumns` back channels) is already drifting toward, and it rebuilds write as a
+special case in a new layer.
