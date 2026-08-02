@@ -6,7 +6,7 @@ import { recursiveSelf } from './factory.ts';
 
 const DO_BIND_CAP = 100;
 
-interface Scope { readonly cols: ReadonlyMap<string, ReadonlySet<string>>; readonly inAggregate: boolean; readonly inWindow: boolean; readonly recursive?: { readonly name: string; readonly self: string; readonly allowed: boolean }; }
+interface Scope { readonly cols: ReadonlyMap<string, ReadonlySet<string>>; readonly inAggregate: boolean; readonly inWindow: boolean; readonly recursive?: { readonly name: string; readonly self: string; readonly allowed: boolean }; readonly prior?: readonly import('./types.ts').RelType[]; }
 
 const add = (scope: Scope, rel: Rel): Scope => ({ ...scope, cols: new Map(scope.cols).set(rel.id, new Set(rel.type.cols.map((c) => c.name))) });
 const root = (): Scope => ({ cols: new Map(), inAggregate: false, inWindow: false });
@@ -143,6 +143,12 @@ export function check(plan: Rel | Stmt): void {
   const checkRel = (r: Rel, scope: Scope = root()): void => {
     if (!isRel(r)) throw new Error('RelIR: relation was not constructed by a Rel factory');
     if (r.kind === 'self-ref') { if (!scope.recursive || !scope.recursive.allowed || r.name !== scope.recursive.name) throw new Error('RelIR: SelfRef is legal only in its Recursive step'); return; }
+    if (r.kind === 'prior-result') {
+      const prior = scope.prior?.[r.step];
+      if (!prior) throw new Error(`RelIR: PriorResult step ${r.step} is not an earlier Sequence result`);
+      if (!sameColumns(r.type.cols, prior.cols)) throw new Error(`RelIR: PriorResult step ${r.step} type must match that step's returningType`);
+      return;
+    }
     const here = add(scope, r);
     const preserve = (input: Rel) => {
       checkRel(input, scope);
@@ -222,7 +228,7 @@ export function check(plan: Rel | Stmt): void {
       default: break;
     }
   };
-  const checkStmt = (s: Stmt): void => {
+  const checkStmt = (s: Stmt, prior: readonly import('./types.ts').RelType[] = []): void => {
     if (!isStmt(s)) throw new Error('RelIR: statement was not constructed by a Stmt factory');
     const assignments = (pairs: readonly (readonly [string, Expr])[], what: string): void => {
       if (!pairs.length && what === 'Update') throw new Error('RelIR: Update requires at least one assignment');
@@ -232,11 +238,16 @@ export function check(plan: Rel | Stmt): void {
       if (new Set(pairs.map(([name]) => name)).size !== pairs.length) throw new Error('RelIR: duplicate RETURNING name');
       pairs.forEach(([, expression]) => checkExpr(expression, scope));
     };
+    const returningType = (s: Exclude<Stmt, Extract<Stmt, { readonly kind: 'sequence' }>>): void => {
+      const names = s.returning.map(([name]) => name);
+      if (!sameNames(names, s.returningType.cols.map((column) => column.name)))
+        throw new Error('RelIR: RETURNING expressions must declare exactly returningType columns');
+    };
     switch (s.kind) {
       case 'insert':
         if (s.target.kind !== 'scan') throw new Error('RelIR: statement target must be a Scan');
         for (const column of s.cols) if (!s.target.type.cols.some((declared) => declared.name === column)) throw new Error(`RelIR: Insert target has no column '${column}'`);
-        checkRel(s.source);
+        checkRel(s.source, { ...root(), prior });
         const insertScope = add(root(), s.target);
         if (s.cols.length !== s.source.type.cols.length) throw new Error(`RelIR: Insert has ${s.cols.length} target columns but source emits ${s.source.type.cols.length}`);
         if (new Set(s.cols).size !== s.cols.length) throw new Error('RelIR: Insert has duplicate target column');
@@ -247,30 +258,40 @@ export function check(plan: Rel | Stmt): void {
           s.onConflict.set.forEach(([, expression]) => checkExpr(expression, insertScope));
         }
         returning(s.returning, insertScope);
+        returningType(s);
         break;
       case 'update':
         if (s.target.kind !== 'scan') throw new Error('RelIR: statement target must be a Scan');
         assignments(s.set, 'Update');
         for (const [column] of s.set) if (!s.target.type.cols.some((declared) => declared.name === column)) throw new Error(`RelIR: Update target has no column '${column}'`);
-        if (s.from) checkRel(s.from);
+        if (s.from) checkRel(s.from, { ...root(), prior });
         const updateScope = s.from ? add(add(root(), s.target), s.from) : add(root(), s.target);
         s.set.forEach(([, expression]) => checkExpr(expression, updateScope));
         if (s.where) checkExpr(s.where, updateScope);
         returning(s.returning, add(root(), s.target));
+        returningType(s);
         break;
       case 'delete':
         if (s.target.kind !== 'scan') throw new Error('RelIR: statement target must be a Scan');
         if (s.using) {
-          checkRel(s.using);
+          checkRel(s.using, { ...root(), prior });
           if (!s.using.type.cols.some((column) => column.name === 'id'))
             throw new Error('RelIR: Delete.using must emit an id column');
         }
         if (s.where) checkExpr(s.where, add(root(), s.target));
         returning(s.returning, add(root(), s.target));
+        returningType(s);
         break;
       case 'sequence':
         if (!s.steps.length) throw new Error('RelIR: Sequence requires at least one statement');
-        s.steps.forEach(checkStmt);
+        {
+          const results: import('./types.ts').RelType[] = [];
+          for (const step of s.steps) {
+            if (step.kind === 'sequence') throw new Error('RelIR: Sequence cannot contain a nested Sequence');
+            checkStmt(step, results);
+            results.push(step.returningType);
+          }
+        }
         break;
     }
   };
