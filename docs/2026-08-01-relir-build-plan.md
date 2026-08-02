@@ -401,6 +401,12 @@ with the read plan's binds retained in order. The test both pins its SQL and exe
 SQLite. Target-scoped `Update`/`RETURNING` expressions remain deliberately un-emitted until their
 lexical target relation is represented in the statement contract.
 
+**Progress — 2026-08-02 (continued):** `d8cf39a` supplies that contract: every mutation target is
+a typed `Scan`, rather than a duplicate bare table name. `check` now validates assignments,
+predicates and `RETURNING` expressions against the target's declared columns (and an `Update`'s
+optional source relation). This keeps the physical schema at `Scan` — the sole storage node — and
+unblocks shared expression emission without stringly target columns.
+
 **Phase 2 supersedes [write-path](./2026-08-01-write-path-plan.md), and inherits its requirements.**
 That plan's agent was stopped 2026-08-01; the plan is not discarded, it is re-pointed. Precisely:
 
