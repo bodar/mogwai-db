@@ -766,7 +766,33 @@ when the shape tables are gone.
 | Counter | What it counts | Instrument | Rule |
 |---|---|---|---|
 | **Coverage** | corpus traversals routed to the RelIR spine, of 2,298 | a `spine` column on the committed census artifact | a **RATCHET**: the floor can only rise, exactly as L3's does. A number that is merely printed drifts |
-| **Deletion** | §8 exports still reachable from a live caller | `mise run orphans` against the §8 list | must reach **zero**. Coverage says the new spine works; deletion says the old one is GONE |
+| **Deletion** | §8 names still present in the tree | `mise run deletion` — **BUILT, and in `ci`** | a ratchet DOWNWARD; must reach **zero**. Coverage says the new spine works; deletion says the old one is GONE |
+
+**The deletion counter LANDED (`1d8c939`).** `scripts/deletion-check.ts` + the committed floor
+`scripts/deletion-ratchet.tsv`, a `ci` dependency. Four things about it are worth recording because
+they were decisions, not mechanics:
+
+- **`orphans` was the wrong instrument** and this plan named it by reflex. `orphans` reports an
+  export nothing imports, which is a QUESTION — a DI leaf, a registry-resolved service and a
+  `.feature` step name all look dead to it, which is exactly why it is not a gate. "Is the thing the
+  plan promised to delete still here?" has a right answer, so it can be one.
+- **A ratchet, not a zero gate**, unlike `arch`/`lint`/`binds` — it is a countdown and cannot be at
+  zero today. Auto-`--record` is safe here for L3's reason and NOT the census's: the counter only
+  goes down, so recording can bank an improvement but cannot launder a regression, and a rise is
+  refused rather than written.
+- **Two measurement kinds**, because §8's list is not uniformly symbols. `symbol` is
+  `textDocument/references` including the declaration (0 means the declaration itself is gone, which
+  is what deleted means); `pattern` is a regex over `src/`, for the entries that name a SHAPE — "the
+  five-copy `count` adapter" is five copies of one expression whose shared callee is staying. That
+  row measures **7**, not 5: the analytics doc counted 5 and noted 2 added since.
+- **It is generic.** A row is `plan · kind · key · floor · note`; nothing about RelIR is in the
+  script. The next migration adds rows.
+
+Opening measurement, 2026-08-02: **110 remaining references across the 15 legacy rows** — `WritePlan`
+24, `runFastPath` 14, `TailAcc` 13, `globalRowOps` 10, `appliesWhen` 9, the two adapter patterns 7
+and 4, the seven write-path parsers 2–6 each. **The nine rows for RelIR's OWN deleted spellings
+(§8's second list) all read 0**, which converts that list from a claim in this doc into a stays-dead
+gate: reintroducing `PriorResult` or `Sequence` now fails the build.
 
 Coverage is necessary and deletion is the point. They fail differently, and the second is the one
 that stalls while the first looks finished — a traversal can route to RelIR while `write.ts` stays
@@ -794,9 +820,11 @@ is a FAILED migration, not a finished one.**
 ## 8. What this deletes
 
 **This list is the EXIT CRITERION, not a wish list.** It is the second of §10·4's two counters, it is
-checked with `mise run orphans`, and the migration is over when it is empty and not before. Every
-name below is a promise the plan has made; leaving one alive is the plan failing, however good the
-coverage number looks beside it.
+checked by **`mise run deletion`** against the committed floor in `scripts/deletion-ratchet.tsv`
+(which IS this list, machine-readable), and the migration is over when every floor is 0 and not
+before. Every name below is a promise the plan has made; leaving one alive is the plan failing,
+however good the coverage number looks beside it. **Editing this prose without editing the ratchet
+file changes nothing** — the file is the gate, this section is its rationale.
 
 The measure of success, stated up front so it can be checked rather than claimed:
 
@@ -839,8 +867,32 @@ gone. A constraint is kept because it is right, not because it is written down.
 | 9·6 | §2 `src/rel/` imports nothing from `src/compiler/` | the layout imports were concentrated in `src/rel/layout.ts` plus `passes/prune.ts` | **CLOSED** (`25e0b5f`): decomposed into the neutral channel core `src/channels.ts`, and **`mise run arch` now gates the boundary** — a textual import scan, because a clean-room breach is a dependency edge and is visible in the import statement itself |
 | 9·7 | §3.3 `Scan` is the only physical-schema node | `'id'` was hardcoded in the emitter's delete membership and in `check`'s `Delete.using` rule | **CLOSED** (`bedf49e`): `using` is `{ rel, key }` — the factory rejects a source that does not emit the key, `check` rejects a target that does not declare it. The `Table` union was also incomplete (no `vertex_labels`), which §9·1's gate found and `38a58ba` fixed |
 | 9·8 | §3.6 the bind budget is a plan property with `RowBatch`/`json_each` as the remedy | `check` failed closed above 100 binds with no JSON-bind form, so a legitimate large `Values` was refused rather than lowered | **CLOSED** (`3057e89`, `bedf49e`): a statement's retained rows land as ONE JSON bind (`RowsBind`), and `passes/land.ts` lowers an over-budget `Values` the same way. A row holding anything but a `Lit` has no compile-time JSON, so the pass declines it and the budget still fails closed |
-| 9·9 | Phase 0 "clear the deck… worth doing first" | 0.1 not done (`globalRowOps` still has 5 refs; `ELEMENT_DISPATCH`/`SCALAR_DISPATCH` do not use it); 0.2 partly done (61 → 21 sites) | **skipped**, while Phase 2 started — and 0.2 was declared a *rename-safety prerequisite* for exactly the code motion Phases 2 and 4 perform |
+| 9·9 | Phase 0 "clear the deck… worth doing first" | 0.1 not done (`globalRowOps` still has 5 refs; `ELEMENT_DISPATCH`/`SCALAR_DISPATCH` do not use it); 0.2 partly done (61 → 21 sites) | **0.1 is now WITHDRAWN as obsolete** and 0.2's remainder is a different family — see the two paragraphs below the table |
 | 9·10 | §5 "the **unchanged** `q` kernel" | kernel gained `identifier()` | **amended** in §5: additive-only is the rule, and this addition qualifies. The block assembler needed nothing further from the kernel |
+
+**9·9 resolved, 2026-08-02 — 0.1 is withdrawn, and the reason generalizes.** The §6 Phase-0 entry
+already records that the element half of 0.1 is wrong: `limit`/`skip`/`range`/`dedup`/`order` are not
+missing from `ELEMENT_DISPATCH`, they are in `TailAcc`, which FUSES them into one projection.
+Re-measured for the scalar half and it is the same fact with a different mechanism: `SCALAR_DISPATCH`
+does not carry them because `lowerScalarRows` consumes the whole row run first
+(`tail/scalar.ts:74` — `SCALAR_TRANSFORMS + is/limit/skip/range/tail/order/dedup`), and it carries
+BOTH the root form and the correlated per-origin form (`partitionedSlice`, `partitionedOrder`,
+`partitionedTail`, `rankedRows`). So spreading `globalRowOps` over either of the two largest tables
+would replace a fusion with an op-per-`reprojectRows`, in both cases. **0.1's whole premise — "45 of
+94 dispatch entries are un-shared duplication" — counts a table's ABSENCE of an entry as duplication,
+when in both tables the absence is a fusion.** The genuine finding underneath it survives and is
+Phase 4.1's: those two fused accumulators and `globalRowOps` are three spellings of `Sort`/`Limit`/
+`Distinct`/`Window`-with-a-`partitionBy`, and the scalar half's `partitionedOrder` is the clearest
+existing evidence that `partitionBy` (§3.2) is the missing parameter. Phase 0 no longer blocks
+anything; `globalRowOps` stays on the §8 list, where it was already.
+
+**0.2's remainder is a DIFFERENT family and is not a rename-safety risk.** 61 → 21 closed the tagged
+-argument family the item names (`isNested` ~27, `isTokenArg` ~20) and the 15 guards in
+`gremlin/frontend.ts` cover it. Of the 21 left, 11 are `'op' in x` — the `P` predicate structural
+test, which has no declared type and so no guard to reach for — and the other 10 are one-off shape
+probes (`'items'`, `'entries'`, `'injVal'`, `'p'`, `'vertex'`). Neither set is a field a rename would
+move silently under a `TaggedArg` union, which is what 0.2 was protecting. An `isPredicate` guard
+over the 11 is worth having on its own merits; it is not a prerequisite for anything here.
 
 Four defects the checker was supposed to make impossible, each found with a measured failing case and
 each now fixed with that case pinned as a test:
