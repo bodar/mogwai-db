@@ -848,14 +848,65 @@ optimization. `has(key, P…)` is the next single largest win (72 corpus occurre
 increment, because it needs the `P` vocabulary as RelIR expressions — which then serves
 `where`/`is`/`filter` too.
 
+**Coverage 51 → 62 (`3f6c2e4`): the `P`/`TextP` vocabulary as RelIR expressions**, in
+`src/compiler/rel/predicate.ts`. A module of its own because a predicate is the most reused thing
+in the language — `has`, `where`, `is`, `filter`, `not`, an edge criterion and a `by()`-modulated
+comparison are one question asked of different subjects — so growing it grows all of them at once.
+It is a MIGRATION of `plan.ts`'s `predicateSql`, not a duplicate: that one is deleted with the spine
+it serves. Two rules it holds:
+
+- **It never throws.** An op it cannot express declines. `predicateSql` throws and is right to,
+  because a throw is the only answer available at that point; here a throw would turn "not learned
+  yet" into a support regression.
+- **It never answers a DIFFERENT question.** The subtle arm is ordering: a property value stored as
+  TEXT because it does not fit a numeric storage class (a long past 2^53, a bigint, a bigdecimal, a
+  duration) orders LEXICALLY under a plain `>`, and after every numeric row. The four range ops go
+  through the vtype-aware `compareKey`, passed in as a `compare` parameter because only the caller
+  knows where the `vtype` column lives.
+
+**A FAST PATH IS NEVER SILENTLY DROPPED — the general rule this increment establishes, and it
+belongs in §7's risk table as much as here.** `has(k, containing(t))` routes through the
+`property_fts` trigram index. Expressing it in RelIR as a base-table LIKE scan would be a
+performance regression **the census cannot see** — same rows, same status, same digest — while the
+coverage counter reported it as progress. So a substring `TextP` over a stored property DECLINES,
+costing 7 of the 18 traversals this increment would otherwise have banked, until §4.7 makes the
+fast paths plan rewrites. Two corollaries worth keeping: coverage measures whether the new spine can
+EXPRESS a traversal, never whether it should take it from a specialized lowering; and the decline is
+a function of the CHAIN alone, never of the `fastPaths` config, because spine choice and fast-path
+choice must stay independent.
+
+One defect found by the port and worth recording as a class: `likePattern` crashes on `P.not(…)`
+(`op.startsWith('not')` with no fourth character to lower-case). It is latent in `plan.ts`'s copy
+and unreachable there because every other op is handled first — so re-expressing a function in a
+context that calls it more generally is itself an instrument.
+
 **Coverage growth, measured over the 2,298-traversal corpus.** Cumulative chains fully covered as
 each step name is admitted, so an increment can be chosen by what it BUYS rather than by what looks
 next: `V`/`E` 41 · `+hasLabel` 51 · `+has` 95 · all six movement steps + `inV`/`outV`/`otherV` 104 ·
 `+count` 118 · `+values` 150 · `+dedup` 163 · `+order` 187 · `+select` 233 · `+where` 272 · `+is` 351
 · `+filter` 366. (Measured with no bound parameters, so it excludes the 381 `unbound` rows; the
-census column is the real number.) Two things to read off it: `is` is worth 68 but only behind a long
-prerequisite tail, and the reducers (`count`, `values`) are the first increments that cross the SHAPE
-boundary — element → scalar — which is where the framing bridge has to carry a second stream kind.
+census column is the real number.)
+
+**MARGINAL value from the current base of `V`/`E`/`hasLabel`/`has` — the number to choose the next
+increment by, since the cumulative figures above are order-dependent:** `+values` **19** · `+where`
+16 · `+movement` 9 · `+count` 9 · `+valueMap` 7 · `+order` 5 · `+hasId` 3 · `+limit`/`range`/`skip`
+2 · `+fold` 1 · **`+values` and `+count` together 28**. Everything else is 0 alone — `id`, `label`,
+`dedup`, `identity`, `is`, `not` add nothing until something else lands first, which is exactly the
+kind of fact that makes a plausible-looking increment worthless.
+
+**So the next increment is the SHAPE BOUNDARY, not another step.** `values` and `count` are worth
+28 together and 28 apart is impossible, because both cross element → scalar: the framing bridge in
+`src/compiler/rel/spine.ts` builds an `ElementStream` and nothing else. Making it carry the
+lowering's output STREAM KIND is the substrate, and it is what every scalar-shaped terminal then
+rides on. Two things already known about that increment:
+
+- `count` is `Aggregate` with `SUM(bulk)` over the source, which is where §3.5's recorded open
+  question first bites — a reducing aggregate is a barrier and `BARRIER_ROLE_POLICY` drops `bulk`,
+  yet movement's bulk coalescing must KEEP carrying it. `count` consumes bulk rather than carrying
+  it, so it does not need the answer; movement will.
+- `movementCollapse` is a `FastPath` and fires on a collapse-safe chain (reducer-terminal, pure
+  movement/filter). Under the rule above, movement declines on exactly those chains until §4.7 —
+  which means `g.V().out().count()` stays legacy even once both halves are covered.
 
 Two smaller facts worth not re-deriving. `Compiled` gained a `spine` field: it is a compile FACT,
 not instrumentation, and `readCompiled`'s default of `'legacy'` is a statement about who calls it
@@ -875,6 +926,7 @@ snapshot and any text-keyed cache, only under a particular ordering.
 | **The layout contract erodes during migration** | §3.5's per-node obligations are `Record<keyof TraverserLayout, …>`, so a new node or role fails the build until declared — the same enforcement the two existing tables already have |
 | **Scope creep into a general query engine** | The node set in §3 is closed. Adding a kind requires the same bar as a new substrate today: show the seam cannot EXPRESS it, not that it cannot be HANDED it |
 | **DO-only walls (`RETURNING`, `ON CONFLICT`)** | `test:cf-limits` gate before Phase 2 ships (§1) |
+| **A fast path silently dropped by the new route.** A RelIR lowering that expresses a shape a `FastPath` already specializes is a PERFORMANCE regression no gate here can see — same rows, same status, same census digest — and the coverage counter reports it as progress. Found live: `has(k, containing(t))` routes through the `property_fts` trigram index, and the RelIR predicate vocabulary can express it as a base-table LIKE scan | **The covered shape DECLINES until §4.7 makes that fast path a plan rewrite.** Coverage measures whether the new spine can EXPRESS a traversal, never whether it is entitled to take it from a specialized lowering. The decline reads the CHAIN only — never `fastPaths` — so spine choice and fast-path choice stay independent, and it is pinned by name in `test/rel-spine.test.ts` rather than left to be noticed |
 | **Losing W1/W4's landed gains in the rewrite** | W1's four L4 pins and the perturbed census are Phase 2 exit criteria, not afterthoughts; P5b makes emission-ordered id assignment structural rather than incidental |
 | **Rebuilding the driver abstraction inside RelIR** | W2/W3's blockers are listed as *dissolving*, with an explicit "do not build a driver abstraction" (§6 Phase 2). If Phase 2 grows an `ElementReadDriver` analogue, it has failed |
 | **THE BIG ONE — the dual spine goes permanent.** Coverage reaches 80–90%, the remaining traversals are the awkward ones, the legacy route still works, and the migration quietly becomes an architecture with two engines in it forever | §10·4 is written to make that outcome legible rather than comfortable: two ratcheted counters, a deletion list that IS the exit, and an explicit statement that a stalled countdown is a failure with a name. **The pressure runs the right way and must be kept that way** — the legacy path's only remaining value at 100% coverage is being the differential's off position, so there is no engineering reason to keep it and no honest way to claim there is |
