@@ -7,9 +7,15 @@ import { exprChildren, exprRels, relChildren, relExprs } from './walk.ts';
 
 const DO_BIND_CAP = 100;
 
-interface Scope { readonly cols: ReadonlyMap<string, ReadonlySet<string>>; readonly inAggregate: boolean; readonly inWindow: boolean; readonly recursive?: { readonly name: string; readonly self: string; readonly allowed: boolean }; readonly prior?: readonly import('./types.ts').RelType[]; }
+interface Scope { readonly cols: ReadonlyMap<string, Rel>; readonly inAggregate: boolean; readonly inWindow: boolean; readonly recursive?: { readonly name: string; readonly self: string; readonly allowed: boolean }; readonly prior?: readonly import('./types.ts').RelType[]; }
 
-const add = (scope: Scope, rel: Rel): Scope => ({ ...scope, cols: new Map(scope.cols).set(rel.id, new Set(rel.type.cols.map((c) => c.name))) });
+/** A `RelId` is how an expression names a relation, so two relations sharing one inside a single
+ * scope makes every `Col` against it ambiguous — and the last binding silently wins. Fail closed. */
+const add = (scope: Scope, rel: Rel): Scope => {
+  const bound = scope.cols.get(rel.id);
+  if (bound && bound !== rel) throw new Error(`RelIR: relation id '${rel.id}' names two different relations in one scope`);
+  return { ...scope, cols: new Map(scope.cols).set(rel.id, rel) };
+};
 const root = (): Scope => ({ cols: new Map(), inAggregate: false, inWindow: false });
 const sameColumns = (left: Rel['type']['cols'], right: Rel['type']['cols']): boolean =>
   left.length === right.length && left.every((column, i) => {
@@ -89,7 +95,12 @@ export function check(plan: Rel | Stmt): void {
       && ((term.left.kind === 'self-ref' && term.left.name === name) || (term.right.kind === 'self-ref' && term.right.name === name));
   };
   const checkExpr = (e: Expr, scope: Scope): void => {
-    if (e.kind === 'col') { const cols = scope.cols.get(e.rel); if (!cols?.has(e.name)) throw new Error(`RelIR: relation ${e.rel} has no declared column '${e.name}'`); return; }
+    if (e.kind === 'col') {
+      const bound = scope.cols.get(e.rel);
+      if (!bound) throw new Error(`RelIR: no relation '${e.rel}' is in scope for column '${e.name}'`);
+      if (!bound.type.cols.some((column) => column.name === e.name)) throw new Error(`RelIR: relation ${e.rel} has no declared column '${e.name}'`);
+      return;
+    }
     if (e.kind === 'agg' && !scope.inAggregate) throw new Error('RelIR: Agg is legal only in Aggregate.aggs');
     if (e.kind === 'window-expr' && !scope.inWindow) throw new Error('RelIR: WindowExpr is legal only in Window.specs');
     const child = (x: Expr) => checkExpr(x, scope);
@@ -155,6 +166,10 @@ export function check(plan: Rel | Stmt): void {
       case 'explode': preserve(r.input); checkExpr(r.expr, add(scope,r.input)); break;
       case 'join':
         checkRel(r.left, scope); checkRel(r.right, scope);
+        // Both sides land in ONE `FROM`, and a derived side is introduced under its RelId — so two
+        // sides sharing an id emit the same SQL alias twice ("ambiguous column name"). A replicated
+        // subplan (what `unroll` produces) must carry its own ids, not be the same node twice.
+        if (r.left.id === r.right.id) throw new Error(`RelIR: a Join's sides must be distinct relations; both are '${r.left.id}'`);
         const needsOn = r.join === 'inner' || r.join === 'left';
         if ((r.join === 'cross' && r.on) || (needsOn && !r.on)) throw new Error(`RelIR: ${r.join} join ${r.join === 'cross' ? 'must not' : 'requires'} an ON expression`);
         if (r.on) checkExpr(r.on, add(add(scope,r.left),r.right));

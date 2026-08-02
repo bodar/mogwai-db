@@ -13,6 +13,19 @@ const layout = { aliases: new Map(), origins: [], branchOrders: [] } as const;
 const cols = [{ name: 'id', type: 'int', nullable: false }, { name: 'name', type: 'text', nullable: false }] as const;
 const scan = scanRel({ id: relId('n'), table: 'nodes', alias: 'n', layout, type: { cols } });
 
+/** The realistic sharing shape: one subplan feeding two DISTINCT sides of a join. Sharing the very
+ * same relation on both sides is a construction error — one FROM cannot carry one alias twice. */
+const sharedUnderTwoSides = () => {
+  const shared = projectRel({ id: relId('shared'), input: scan, layout, type: { cols }, exprs: [['id', col(scan.id, 'id')], ['name', col(scan.id, 'name')]] });
+  const left = filter({ id: relId('leftSide'), input: shared, layout, type: { cols }, pred: { kind: 'binary', op: '>', left: col(shared.id, 'id'), right: lit(0, 'int') } });
+  const right = filter({ id: relId('rightSide'), input: shared, layout, type: { cols }, pred: { kind: 'binary', op: '<', left: col(shared.id, 'id'), right: lit(99, 'int') } });
+  return join({
+    id: relId('joined'), left, right, join: 'inner', layout,
+    type: { cols: [...cols, ...cols.map((column) => ({ ...column, name: `${column.name}_r` }))] },
+    on: { kind: 'binary', op: '=', left: col(left.id, 'id'), right: col(right.id, 'id') },
+  });
+};
+
 describe('RelIR', () => {
   test('emits a checked, bound query through the SQL kernel', () => {
     const plan = projectRel({ id: relId('p'),
@@ -145,19 +158,30 @@ describe('RelIR', () => {
   });
 
   test('names shared DAG vertices and explicit materialization boundaries', () => {
-    const shared = filter({ id: relId('shared'), input: scan, layout, type: { cols }, pred: { kind: 'binary', op: '>', left: col(scan.id, 'id'), right: lit(0, 'int') } });
-    const joined = join({ id: relId('joined'), left: shared, right: shared, join: 'cross', layout, type: { cols } });
-    expect(name(joined).named.map((binding) => binding.rel.id)).toEqual([shared.id]);
-    expect(emit(joined, name(joined)).sql).toContain('WITH');
+    const joined = sharedUnderTwoSides();
+    expect(name(joined).named.map((binding) => binding.rel.id)).toEqual([relId('shared')]);
+    const emitted = emit(joined, name(joined));
+    expect(emitted.sql).toContain('WITH');
+    const db = new Database(':memory:');
+    db.run('CREATE TABLE nodes (id INTEGER, name TEXT)');
+    db.run("INSERT INTO nodes VALUES (1, 'marko')");
+    expect(db.query(emitted.sql).all(...emitted.binds)).toHaveLength(1);
+    db.close();
+  });
+
+  test('rejects a join whose two sides are the same relation', () => {
+    const shared = filter({ id: relId('same'), input: scan, layout, type: { cols }, pred: { kind: 'binary', op: '>', left: col(scan.id, 'id'), right: lit(0, 'int') } });
+    const selfJoin = join({ id: relId('selfJoin'), left: shared, right: shared, join: 'cross', layout, type: { cols } });
+    expect(() => check(selfJoin)).toThrow("a Join's sides must be distinct relations");
   });
 
   test('a pass preserves DAG sharing, so naming still sees a shared node', () => {
-    const shared = filter({ id: relId('shared'), input: scan, layout, type: { cols }, pred: { kind: 'binary', op: '>', left: col(scan.id, 'id'), right: lit(0, 'int') } });
-    const joined = join({ id: relId('joined'), left: shared, right: shared, join: 'cross', layout, type: { cols } });
+    const joined = sharedUnderTwoSides();
     for (const pass of [fuse, (plan: typeof joined) => prune(plan)]) {
       const after = pass(joined);
-      expect(name(after).named).toHaveLength(1);
-      if (after.kind === 'join') expect(after.left).toBe(after.right);
+      expect(name(after).named.map((binding) => binding.rel.id)).toEqual([relId('shared')]);
+      if (after.kind === 'join' && after.left.kind === 'filter' && after.right.kind === 'filter')
+        expect(after.left.input).toBe(after.right.input);
     }
   });
 
