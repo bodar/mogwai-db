@@ -60,6 +60,17 @@ describe('RelIR', () => {
     expect(() => check(invalid)).toThrow('Agg is legal only in Aggregate.aggs');
   });
 
+  test('requires a whole-relation Aggregate to consume row-associated layout', () => {
+    const carried = { ...layout, origins: ['origin'] } as const;
+    const input = rel.values({ id: relId('aggregateInput'), rows: [[lit(1, 'int'), lit('marko', 'text')]], layout: carried, type: { cols } });
+    const invalid = rel.aggregate({
+      id: relId('badAggregate'), input, layout: carried,
+      type: { cols: [{ name: 'n', type: 'int', nullable: false }] },
+      groupBy: [], aggs: [['n', { kind: 'agg', fn: 'count', args: [] }]],
+    });
+    expect(() => check(invalid)).toThrow('whole-relation Aggregate must apply the barrier layout contract');
+  });
+
   test('names Values columns for downstream expressions', () => {
     const values = rel.values({ id: relId('v'), rows: [[lit(1, 'int'), lit('marko', 'text')]], layout, type: { cols } });
     const plan = rel.project({ id: relId('p'), input: values, layout, type: { cols }, exprs: [['id', col(values.id, 'id')], ['name', col(values.id, 'name')]] });
@@ -138,6 +149,17 @@ describe('RelIR', () => {
     const joined = rel.join({ id: relId('joined'), left: shared, right: shared, join: 'cross', layout, type: { cols } });
     expect(name(joined).named.map((binding) => binding.rel.id)).toEqual([shared.id]);
     expect(emit(joined, name(joined)).sql).toContain('WITH');
+  });
+
+  test('requires Union to use the layout merge contract', () => {
+    const left = rel.values({ id: relId('left'), rows: [[lit(1, 'int'), lit('marko', 'text')]], layout, type: { cols } });
+    const right = rel.values({ id: relId('right'), rows: [[lit(2, 'int'), lit('vadas', 'text')]], layout, type: { cols } });
+    expect(() => check(rel.union({ id: relId('ok'), inputs: [left, right], all: true, layout, type: { cols } }))).not.toThrow();
+    const carried = { ...layout, origins: ['origin'] } as const;
+    const carriedLeft = rel.values({ id: relId('carriedLeft'), rows: [[lit(1, 'int'), lit('marko', 'text')]], layout: carried, type: { cols } });
+    const carriedRight = rel.values({ id: relId('carriedRight'), rows: [[lit(2, 'int'), lit('vadas', 'text')]], layout: carried, type: { cols } });
+    const invalid = rel.union({ id: relId('bad'), inputs: [carriedLeft, carriedRight], all: true, layout, type: { cols } });
+    expect(() => check(invalid)).toThrow('Union output layout must merge its inputs');
   });
 
   test('renders join predicates as SQL expressions', () => {

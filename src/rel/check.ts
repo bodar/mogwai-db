@@ -1,4 +1,4 @@
-import { layoutCols } from '../compiler/steps/context/context.ts';
+import { barrierLayout, layoutCols, mergeLayouts } from '../compiler/steps/context/context.ts';
 import type { Expr } from './expr.ts';
 import { isRel, type Rel } from './rel.ts';
 import type { Stmt } from './stmt.ts';
@@ -17,6 +17,15 @@ const sameColumns = (left: Rel['type']['cols'], right: Rel['type']['cols']): boo
   });
 const sameNames = (left: readonly string[], right: readonly string[]): boolean =>
   left.length === right.length && left.every((name, i) => name === right[i]);
+const layoutSnapshot = (layout: import('../compiler/steps/context/context.ts').TraverserLayout): unknown => ({
+  ...layout,
+  aliases: [...layout.aliases].map(([label, entry]) => [label, {
+    ...entry,
+    shapes: [...entry.shapes].sort(),
+  }]),
+});
+const sameLayout = (left: import('../compiler/steps/context/context.ts').TraverserLayout, right: import('../compiler/steps/context/context.ts').TraverserLayout): boolean =>
+  JSON.stringify(layoutSnapshot(left)) === JSON.stringify(layoutSnapshot(right));
 
 export function bindCount(plan: Rel | Stmt): number {
   let n = 0;
@@ -153,7 +162,14 @@ export function check(plan: Rel | Stmt): void {
         break;
       }
       case 'filter': preserve(r.input); checkExpr(r.pred, add(scope, r.input)); break;
-      case 'aggregate': checkRel(r.input, scope); r.groupBy.forEach((e) => checkExpr(e, add(scope, r.input))); r.aggs.forEach(([,e]) => checkExpr(e, { ...add(scope, r.input), inAggregate: true })); if (r.having) checkExpr(r.having, here); break;
+      case 'aggregate':
+        checkRel(r.input, scope);
+        r.groupBy.forEach((e) => checkExpr(e, add(scope, r.input)));
+        r.aggs.forEach(([,e]) => checkExpr(e, { ...add(scope, r.input), inAggregate: true }));
+        if (r.having) checkExpr(r.having, here);
+        if (!r.groupBy.length && !sameLayout(barrierLayout(r.input.layout), r.layout))
+          throw new Error('RelIR: whole-relation Aggregate must apply the barrier layout contract');
+        break;
       case 'sort': preserve(r.input); r.terms.forEach((t) => checkExpr(t.expr, add(scope, r.input))); break;
       case 'limit': preserve(r.input); if (r.count) checkExpr(r.count, add(scope,r.input)); if (r.offset) checkExpr(r.offset, add(scope,r.input)); break;
       case 'distinct':
@@ -179,6 +195,8 @@ export function check(plan: Rel | Stmt): void {
         if (r.inputs.length < 2) throw new Error('RelIR: Union requires at least two inputs');
         r.inputs.forEach((input) => checkRel(input,scope));
         for (const input of r.inputs) if (!sameColumns(input.type.cols, r.type.cols)) throw new Error('RelIR: Union inputs and output must have identical columns');
+        const expected = mergeLayouts(r.inputs[0]!.layout, r.inputs.slice(1).map((input) => input.layout), { rigid: 'peer' });
+        if (!sameLayout(expected, r.layout)) throw new Error('RelIR: Union output layout must merge its inputs');
         break;
       }
       case 'recursive': {
