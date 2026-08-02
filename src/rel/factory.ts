@@ -10,6 +10,13 @@ const freeze = <T>(value: T): T => Object.freeze(value);
 const named = (pairs: readonly (readonly [string, Expr])[]): void => {
   if (new Set(pairs.map(([name]) => name)).size !== pairs.length) throw new Error('RelIR: duplicate output name');
 };
+const outputNames = (pairs: readonly (readonly [string, Expr])[], type: { readonly cols: readonly { readonly name: string }[] }, kind: string): void => {
+  named(pairs);
+  const actual = pairs.map(([name]) => name);
+  const declared = type.cols.map((column) => column.name);
+  if (actual.length !== declared.length || actual.some((name, i) => name !== declared[i]))
+    throw new Error(`RelIR: ${kind} expressions must declare exactly its output columns`);
+};
 const node = <K extends RelKind>(kind: K, init: WithId<K>): Node<K> => {
   const { id, ...rest } = init;
   return brandRel({ kind, id, ...rest } as RelNode<K>);
@@ -25,7 +32,7 @@ export const values = (init: WithId<'values'>): Node<'values'> => {
 };
 export const priorResult = (init: WithId<'prior-result'>): Node<'prior-result'> => node('prior-result', init);
 export const project = (init: WithId<'project'>): Node<'project'> => {
-  named(init.exprs);
+  outputNames(init.exprs, init.type, 'Project');
   return node('project', { ...init, exprs: freeze(init.exprs.map((pair) => freeze([...pair] as [string, Expr]))) });
 };
 export const filter = (init: WithId<'filter'>): Node<'filter'> => node('filter', init);
@@ -33,7 +40,14 @@ export const aggregate = (init: WithId<'aggregate'>): Node<'aggregate'> => { nam
 export const sort = (init: WithId<'sort'>): Node<'sort'> => node('sort', { ...init, terms: freeze([...init.terms] as SortTerm[]) });
 export const limit = (init: WithId<'limit'>): Node<'limit'> => node('limit', init);
 export const distinct = (init: WithId<'distinct'>): Node<'distinct'> => node('distinct', init);
-export const window = (init: WithId<'window'>): Node<'window'> => { named(init.specs); return node('window', init); };
+export const window = (init: WithId<'window'>): Node<'window'> => {
+  named(init.specs);
+  const expected = [...init.input.type.cols.map((column) => column.name), ...init.specs.map(([name]) => name)];
+  const actual = init.type.cols.map((column) => column.name);
+  if (expected.length !== actual.length || expected.some((name, i) => name !== actual[i]))
+    throw new Error('RelIR: Window output must be input columns followed by its specs');
+  return node('window', init);
+};
 export const explode = (init: WithId<'explode'>): Node<'explode'> => node('explode', init);
 export const materialize = (init: WithId<'materialize'>): Node<'materialize'> => node('materialize', init);
 export const join = (init: WithId<'join'>): Node<'join'> => {

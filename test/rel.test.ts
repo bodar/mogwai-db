@@ -34,6 +34,14 @@ describe('RelIR', () => {
     expect(() => check(invalid)).toThrow("has no declared column 'missing'");
   });
 
+  test('factories reject locally inconsistent output schemas', () => {
+    expect(() => rel.project({
+      id: relId('badProject'), input: scan, layout,
+      type: { cols: [{ name: 'id', type: 'int', nullable: false }] },
+      exprs: [['name', col(scan.id, 'name')]],
+    })).toThrow('Project expressions must declare exactly its output columns');
+  });
+
   test('fuses adjacent filters structurally', () => {
     const first = rel.filter({ id: relId('a'), input: scan, layout, type: { cols }, pred: { kind: 'binary', op: '>', left: col(scan.id, 'id'), right: lit(0, 'int') } });
     const second = rel.filter({ id: relId('b'), input: first, layout, type: { cols }, pred: { kind: 'binary', op: '=', left: col(first.id, 'name'), right: lit('marko', 'text') } });
