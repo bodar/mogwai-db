@@ -345,10 +345,11 @@ Deliverables: the full §3 object model; `check` (§4.1); `emit` (§5); `fuse`, 
 Tests are pure — build a plan by hand, assert the SQL, run it against an in-memory SQLite, assert the
 rows. **No Gremlin is involved in any Phase-1 test.**
 
-**Exit criterion:** hand-built plans reproduce, byte-identical, the SQL of ten representative
-traversals taken from `test/L2-sql/`. If the emitter cannot reproduce existing SQL byte-for-byte, the
-object model is wrong and Phase 1 is not finished — this is the cheapest possible falsification and
-it comes before any integration.
+**Exit criterion:** hand-built plans reproduce, byte-identical, the **relational core** of ten
+representative traversal families taken from `test/L2-sql/`. Result framing and Gremlin shape stay
+outside `src/rel/`, so full legacy SQL strings are not this algebra's output contract. If the emitter
+cannot reproduce those cores byte-for-byte, the object model is wrong and Phase 1 is not finished —
+this is the cheapest possible falsification and it comes before any integration.
 
 **Progress — 2026-08-01:** the clean-room foundation landed in `773c63a`: full read/write data
 unions, checker (column, expression-placement, recursive-self-reference, layout and bind-budget
@@ -363,6 +364,9 @@ construction; `check` remains the scope-aware whole-plan backstop. The emitter r
 The checker now also proves `Union`'s output layout is the declared peer merge and that a
 whole-relation `Aggregate` applies the barrier layout policy; both are tested with carried-state
 counterexamples.
+`test/rel-core-sql.test.ts` now pins ten byte-exact relational cores (values, projection, filter,
+aggregate, sort, limit, distinct, join, union and recursion); result framing is deliberately not
+part of that gate.
 
 ### Phase 2 — the write wedge
 
