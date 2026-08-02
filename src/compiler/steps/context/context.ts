@@ -814,6 +814,39 @@ export const trackFromV = <T extends LoweringState>(st: T): T =>
 export const withoutPath = <T extends LoweringState>(st: T): T =>
   withLayout(st, { path: undefined });
 
+/**
+ * The `withoutPath` of the entering-vertex context, and it exists for the same reason.
+ *
+ * `trackFromV` is a demand of the CHAIN THAT ASKED — a trailing `otherV()` turns it on at the
+ * source, so every edge movement in that chain retains its entering vertex. A CHILD SCOPE is a
+ * different chain: its movements are implementation detail, and the parent's entering vertex means
+ * nothing inside it. Carrying the demand in anyway had two costs, both measured: the child's own
+ * edge steps minted an `fv` nobody reads, and `assertForkSafe` then refused a `union()` in the
+ * child for state belonging to a traverser the child is not part of — a fast-path disable-safety
+ * hole L5 found (`known.ts`), where the generic route THREW on a traversal the inlined predicate
+ * answered.
+ *
+ * Both halves must go together. Clearing the column alone leaves `trackFromV` set, so the first
+ * edge step in the body mints `fv` again and the refusal comes back one step later; the column is
+ * dropped by a re-projection (so the relation and the declared layout stay in agreement, which
+ * `assertStreamColumns` requires) and the demand by a layout-only patch.
+ *
+ * The caller must have established that the body does not READ the entering vertex — a body
+ * containing `otherV()` would then silently see its own scope's vertex instead of the parent's,
+ * which is a different answer rather than a deferral.
+ */
+export const withoutFromV = (st: ElementStream): ElementStream =>
+  st.traverserLayout.fromV || st.traverserLayout.trackFromV
+    ? withLayout(dropFromVColumn(st), { trackFromV: false })
+    : st;
+
+const dropFromVColumn = (st: ElementStream): ElementStream => {
+  if (!st.traverserLayout.fromV) return st;
+  const layout = patchLayout(st.traverserLayout, { fromV: null });
+  const p = st.rel.as('p');
+  return appendCte(st, q`SELECT ${p.c.id} AS id${layoutProjection(layout, p)} FROM ${p}`, { fromV: null });
+};
+
 /** Drop row-associated state at a global barrier while retaining ambient compile
  * context and chain requirements. A barrier result is a new traverser and cannot
  * honestly claim aliases/origins/path/sack/fromV/encounter/bulk from any one input row

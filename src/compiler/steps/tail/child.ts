@@ -1,7 +1,7 @@
 import { derived, empty, list, paren, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { perRowCols } from '../../../sql/kernel/render.ts';
 import { isNested, isPopArg, stepChain } from '../../../gremlin/frontend.ts';
-import { appendCte, patchLayout, layoutProjection, layoutProjectionMinting, layoutCols, partitionOver, prevRel, withLayout, type TraverserLayout, type ElementStream } from '../context/context.ts';
+import { appendCte, patchLayout, withoutFromV, layoutProjection, layoutProjectionMinting, layoutCols, partitionOver, prevRel, withLayout, type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
 import { loweringStateOf, streamPayloadCols, toScalarStream, withRelationAndLayout, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream, type RelationalStream } from '../context/stream.ts';
@@ -909,7 +909,10 @@ export function tryCompileElementValueRows(
   nested: any,
   scope: ChildFrameStack = ROOT_SCOPE,
 ): { stream: ElementStream; frame: ChildFrame } | null {
-  return compileElementChildRows(parent, nested, scope);
+  // The ONLY entry the existence gates use (both callers below), which is why `resultEscapes` is
+  // false exactly here: a `where()`/`not()` child is asked whether a row EXISTS, so nothing of its
+  // traverser state survives into the parent.
+  return compileElementChildRows(parent, nested, scope, undefined, false, undefined, false);
 }
 
 /** Generic traversal-filter fallback. The fast correlated predicate forms live in
@@ -1001,6 +1004,10 @@ function compileElementChildRows(
   stripTerminal?: string,
   firstPolicy = false,
   preParsed?: ReturnType<typeof stepChain>,
+  /** Do the child's rows BECOME the traverser (map/local/flatMap), or are they consumed as a
+   *  boolean (where/not)? Only the entering-vertex context reads it, and only to decide whether the
+   *  parent's `fromV` may be dropped for the body — see `withoutFromV` at the seed below. */
+  resultEscapes = true,
 ): { stream: ElementStream; frame: ChildFrame } | null {
   // Element-valued children are element-parent-only: a property has no adjacency, and an
   // `element()` head that re-roots on the owner is a SCALAR-child concern (compileScalar
@@ -1039,9 +1046,20 @@ function compileElementChildRows(
   if (!shape) return null;
   const { parts, orderStep } = shape;
   const pushed = pushChildScope(parent, scope);
-  // (trackFromV for an exploded otherV() body is derived inside lowerElementSteps, the single
-  // fold every scope passes through — see the note there.)
-  const prefixed = lowerElementBody(pushed.seed, parts.prefix);
+  // A child whose rows are consumed as a BOOLEAN drops the parent's entering-vertex context —
+  // both the column and the chain-level demand (`withoutFromV`, the `withoutPath` of `fromV`).
+  // Not tidiness: while it rode in, the child's own edge steps minted an `fv` nobody reads and
+  // `assertForkSafe` refused a `union()` inside the body for state belonging to a traverser the
+  // child is not part of. The generic route THREW where the inlined predicate answered — a
+  // fast-path disable-safety hole, and how L5 found it.
+  //
+  // `resultEscapes` is the load-bearing distinction and it is NOT "does the body read otherV". A
+  // `local(__.bothE('created').limit(1)).otherV()` body mentions no `otherV()` at all, yet its
+  // rows BECOME the traverser and the outer chain's `otherV()` reads the `fv` the body's own edge
+  // step has to mint — so clearing the demand there breaks it (measured: four L3 scenarios,
+  // `otherV() requires a preceding edge step`). Only an existence gate can drop it, because
+  // nothing of the child survives the EXISTS.
+  const prefixed = lowerElementBody(resultEscapes ? pushed.seed : withoutFromV(pushed.seed), parts.prefix);
   if (!prefixed) return null;
 
   // Rank rows per parent traverser: order/slice/first all window over the child's origin
