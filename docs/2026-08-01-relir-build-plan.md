@@ -48,8 +48,8 @@ body: **48 are `times(n)`-bounded, 5 are `until()`/`emit()`**. Corpus `times(n)`
 multi-row `INSERT … RETURNING`; `INSERT … ON CONFLICT DO UPDATE … RETURNING`; `UPDATE … FROM
 (subquery)`; `DELETE … WHERE … IN (SELECT …)`. **Not legal: the Postgres-style data-modifying CTE**
 (`WITH x AS (INSERT … RETURNING) SELECT …` → syntax error).
-→ *Decides: `Sequence` is a real node. A write chain is O(write steps) statements — not one, and not
-O(rows) as today.*
+→ *Decides: a write chain is a SEQUENCE of statements — O(write steps), not one, and not O(rows) as
+today. The ordering lives in `Plan.bindings` (§3.0); there is no `Sequence` node.*
 
 **P5b — RETURNING and determinism.** SQLite documents RETURNING's row order as undefined. Measured:
 **id assignment follows the source `SELECT`'s `ORDER BY`** (`INSERT … SELECT … ORDER BY ord DESC`
@@ -63,35 +63,45 @@ re-associate by carried key, never by RETURNING position.*
 
 ---
 
-## 2. The clean-room boundary — and the one thing that is not clean-room
+## 2. The clean-room boundary
 
-Build the algebra clean-room. `src/rel/` imports **nothing** from `src/compiler/steps/` and nothing
-from `src/gremlin/`. It is pure data plus total functions over it, testable with no graph, no store,
-and no Gremlin. That is the whole point: the reason the current SQL layer cannot be rewritten is that
-it is entangled with lowering, and reproducing that entanglement in a new layer buys nothing.
+Build the algebra clean-room. `src/rel/` imports **nothing** from `src/compiler/` and nothing from
+`src/gremlin/`. It is pure data plus total functions over it, testable with no graph, no store, and no
+Gremlin. That is the whole point: the reason the current SQL layer cannot be rewritten is that it is
+entangled with lowering, and reproducing that entanglement in a new layer buys nothing.
 
-**The exception, and it is deliberate: `TraverserLayout` and its two policy tables are imported
-verbatim, not redesigned.** `LAYOUT_ROLE_POLICY` and `BARRIER_ROLE_POLICY`
-(`steps/context/context.ts:295-368`) are `Record<keyof TraverserLayout, …>` — type-enforced total, so
-a new role fails the build until its merge policy and its barrier policy are declared — and they
-encode the largest measured defect category in this repo's history (**33% of diagnosed defects: a
-carried field dropped at a barrier, merge or rejoin**). A clean-room redesign of that contract would
-be re-buying twelve bugs. Import the types, the tables, `mergeLayouts`, `patchLayout`, `layoutCols`,
-`barrierLayout` (this doc first called it `dropLayoutAtBarrier`; the export's real name is
-`barrierLayout`), and the `assertStreamColumns` discipline. Clean-room the *algebra* around them.
+**`TraverserLayout` IS in scope, and is being decomposed** (decided 2026-08-02; this doc previously
+declared it off-limits, and that rule was cost-avoidance rather than design). What must be preserved is
+the *guarantee*, not the struct: `LAYOUT_ROLE_POLICY` and `BARRIER_ROLE_POLICY` are
+`Record<keyof TraverserLayout, …>` — type-enforced total, so a new role fails the build until its merge
+and barrier policies are declared — and they encode the largest measured defect category in this repo's
+history (**33% of diagnosed defects: a carried field dropped at a barrier, merge or rejoin**). Keep the
+tables and their totality; that is what a redesign must not lose.
 
-**"Imports nothing from `src/compiler/steps/`" and "import the layout contract verbatim" contradict
-each other while that contract LIVES in `steps/context/context.ts`.** Resolved the only way that keeps
-both halves: the contract MOVES to a neutral module which `steps/` and `rel/` both import, so the
-dependency runs from each into a shared vocabulary and never from `rel/` into the layer it replaces.
-`src/rel/` importing `src/compiler/…` at all is the violation — not the choice of symbols.
+**The boundary is a VOCABULARY boundary, not a file boundary.** Measured, RelIR needs exactly two
+things about carried state: which output columns are channels and in what order, and per channel its
+merge policy and its barrier policy. It does not need alias shape histories or path element types —
+`.shapes` is read only by `match`/`filter`/`labelselect`/`select`/`child-shape`, and `PathState`'s
+`Elem` only by `branch`/`movement`. So:
+
+- a neutral **channel core**: `Channels = readonly { col: string; role: ChannelRole }[]`, the two
+  policy tables keyed by role, and merge/barrier as total functions over it. **No Gremlin words in it.**
+- `TraverserLayout` becomes that core plus the role-specific detail the framing layer owns (alias
+  shape sets, the path's element list).
+- RelIR carries `Channels`; its obligations (§3.5) talk about roles and policies. A RelIR node cannot
+  know what a sack is.
+
+The tell that this decomposition is the right one: `sameLayout` currently compares two layouts by
+`JSON.stringify`, and touches `shapes` for no reason other than that they are in the struct. Over
+`Channels` the comparison is a list equality.
 
 **Shape does not enter RelIR at all.** RelIR sits downstream of lowering, so Gremlin shape is already
 resolved and rides to the wire as `Compiled.shape`, untouched. The anchor rule — *a Pass may CONSULT
 shape, never CONSTRUCT it* — is unaffected because no Pass ever sees a RelIR node. This is what makes
 RelIR categorically different from the refuted typed-core-IR, and the distinction must stay true: if
 a RelIR node ever acquires a `kind: 'scalar' | 'element' | …` field, the layer has failed and should
-be reverted.
+be reverted. `ChannelRole` is not that field: a role is per-COLUMN carried-state bookkeeping, never
+the stream's Gremlin type.
 
 ---
 
@@ -100,6 +110,34 @@ be reverted.
 Two algebras: **expressions** (scalar, produce a value per row) and **relations** (produce rows).
 Plus **statements** for writes. Nothing else. Every node is an immutable plain object with a `kind`
 discriminant, and every list is `readonly`.
+
+### 3.0 The top of a plan is a PROGRAM, not a tree
+
+```ts
+type Plan    = { readonly bindings: readonly Binding[]; readonly result: Rel }
+type Binding = { readonly name: string; readonly node: Rel | Stmt }
+// and one new source node:  Ref { name }   — a reference to a binding
+```
+
+Decided 2026-08-02, and it is the change that makes write stop being a special case. **A `PriorResult`
+and a named-CTE reference are the same concept** — a reference to a relation computed earlier — and the
+build had two mechanisms for it: a `Naming` side-table for reads and `PriorResult{step: number}` for
+writes. That duplication *is* why the write path reads as a second machine. One concept, one node:
+
+- a binding whose node is a `Rel`, referenced more than once → a **CTE**. That is the `Name` pass's
+  decision (§4.6), now a property OF THE PLAN rather than a map carried beside it.
+- a binding whose node is a `Stmt` → a **statement boundary**. The executor runs it, retains its
+  `RETURNING` rows, and the same `Ref` resolves to them — landed as ONE JSON bind exploded by
+  `json_each`, never a row-count-sized placeholder list. CTE-versus-materialize becomes one question
+  asked once, of one concept.
+- a write in a read position is a **hoist to a binding**, so `union(__.addV(), __.V())`,
+  `optional(__.addV())` and `repeat(__.addV())` are plan composition exactly as W3 predicted — and
+  there is no driver anywhere in it.
+- **Effects are legal only at a binding.** `Rel` positions stay pure: a `Stmt` cannot be a `Join`
+  input, and that is a type-level fact rather than a checker rule. `Stmt` and `Rel` stay separate
+  unions and share `RelBase`, so a statement's result is a relation like any other — which deletes
+  `returningType` (it is just `type`) and with it `PriorResult`'s duplicate-schema check.
+- `emit` is total again: there is no `PriorResult` arm left to throw from.
 
 The node set is deliberately **smaller than the SQL surface**, because SQL's redundancy collapses:
 `HAVING` is `Filter` over `Aggregate`; `UNION` (distinct) is `Distinct` over `Union{all:true}`;
@@ -134,7 +172,6 @@ never grow `vertex`/`edge`/`list`. Gremlin typing stays in `ScalarType`/`Canonic
 |---|---|---|
 | `Col` | `rel: RelId, name: string` | resolves against the node's input scope; **fails closed on an undeclared column**, mirroring the kernel's `rel.c` Proxy |
 | `Lit` | `value, type: SqlType` | rendered as a **bind**, never inlined — the bind budget is a plan property (§3.6) |
-| `Param` | `name` | a bound query parameter |
 | `Unary` | `op: 'not'\|'neg', arg` | |
 | `Binary` | `op, left, right` | arithmetic, comparison, `like`, `glob`, `is`, `is not`, `and`, `or`, `\|\|` |
 | `Case` | `whens: [cond, then][], else?` | |
@@ -175,7 +212,7 @@ Every node carries `layout: TraverserLayout` (its output layout) and derives `ty
 | `Scan` | `table: 'nodes'\|'edges'\|'vertex_properties'\|'edge_properties'\|'property_fts'\|'labels', alias` | the only physical-schema node; the storage seam |
 | `Values` | `rows: readonly (readonly Expr[])[], cols` | `g.inject()`; the one construct measured emitting `VALUES` |
 | `SelfRef` | `name` | the recursive CTE's self reference. **Constructible only by `Recursive`'s builder** and legal only in its `step`; the checker rejects it anywhere else |
-| `PriorResult` | `step: number, cols` | reads a previous `Sequence` step's `RETURNING` rows. Exists because P5 says data-modifying CTEs do not. Rendered as a chunked bound `VALUES` list via `RowBatch` |
+| `Ref` | `name` | a reference to a `Plan` binding (§3.0) — a named CTE when the binding is a `Rel`, an earlier statement's materialized `RETURNING` rows when it is a `Stmt`. **Replaces `PriorResult`**, which was the same concept spelled a second way for writes |
 
 **Unary**
 
@@ -211,35 +248,42 @@ Every node carries `layout: TraverserLayout` (its output layout) and derives `ty
 | `Insert` | `table, cols, source: Rel, onConflict?: { target, set }, returning: readonly [string, Expr][]` | `onConflict` is `mergeV`/`mergeE`'s upsert, one statement (P5) |
 | `Update` | `table, set: readonly [string, Expr][], from?: Rel, where?: Expr, returning` | |
 | `Delete` | `table, where?: Expr, using?: Rel, returning` | |
-| `Sequence` | `steps: readonly Stmt[]` | ordered; step *n* may contain `PriorResult{step: m}` for `m < n`. **The only node with execution order semantics** |
 
-**That is 20 relational/statement kinds and 18 expression kinds.** Nothing is elided. If a construct
+`Sequence` is gone with `PriorResult`: ordering IS the `Plan.bindings` list (§3.0), so there is no node
+that privately owns execution order. Statements carry `RelBase`, so `returningType` is just `type`.
+
+**That is 19 relational/statement kinds and 15 expression kinds.** Nothing is elided. If a construct
 is missing from this table it is because it is a derived form (§3, opening) — and if a real one is
 found missing during Phase 1, add it there, not in a step compiler.
 
 ### 3.4 What is deliberately NOT a node
 
-- **`With` / CTE definition.** The plan is a **DAG**; a node referenced twice is shared. Whether a
-  shared node becomes a named CTE or is inlined twice is the `Name` pass's decision (§4.6), which is
-  exactly the choice `src/sql/CLAUDE.md` says must belong to the Query and never to a per-site
-  caller. `Materialize` is the override, not the mechanism.
+- **`With` / CTE definition.** A `Plan` binding (§3.0) is the only naming mechanism, and whether a
+  binding becomes a named CTE or is inlined at its uses is the `Name` pass's decision (§4.6) — exactly
+  the choice `src/sql/CLAUDE.md` says must belong to the Query and never to a per-site caller. Within
+  a binding the relation is still a **DAG**, and a node referenced twice is shared. `Materialize` is
+  the override, not the mechanism.
+- **`Param`.** Deleted 2026-08-02: the front-end resolves wire parameters into `Step.args` before the
+  IR exists (`stepChain(tree, params)`), and no other layer has a parameter concept — so nothing
+  downstream could ever construct one. It existed only to throw at emission.
 - **`Correlate` / lateral.** Correlation is a property of an `Expr` referencing an outer `RelId`
   (`Scalar`, `Exists`), not a node. P1 is why: SQLite's lateral rule is positional, and modelling
   correlation as a node would invite constructing the one position it forbids.
 - **Shape, cardinality, productivity, bulk semantics.** All Gremlin-level. §2.
 
-### 3.5 Layout obligations, per node
+### 3.5 Channel obligations, per node
 
 The rule that keeps the 33% defect category dead: **every node declares what it does to each carried
-role, and a total checker verifies it.** Not prose — a `Record<keyof TraverserLayout, …>` per node
-class, exactly as the two existing tables do.
+channel, and a total checker verifies it.** Not prose — `Record<RelKind, …>`, so a new node kind fails
+the build until its obligation is declared, exactly as the two role-policy tables do for a new role.
+Landed 2026-08-02 in `src/rel/layout.ts`; it will speak in `ChannelRole` once §2's decomposition lands.
 
 - `Project` — the only node that may *declare* layout columns; `layoutCols(layout)` must be a subset
   of its output names, checked.
 - `Union` — merges arm layouts through `mergeLayouts`; `LAYOUT_ROLE_POLICY` decides per role
   (`union` for aliases, `pad` for path, `identical` for the rigid roles).
-- `Aggregate` with `groupBy: []`, and any reducing form — a **barrier**: applies
-  `dropLayoutAtBarrier`, which consumes aliases into `consumedAliases` and empties `origins`.
+- `Aggregate` — ANY reducing form, grouped or whole-relation, is a **barrier**: applies
+  `barrierLayout`, which consumes aliases into `consumedAliases` and empties `origins`.
 - `Join{kind:'left'}` — the right side's layout columns become nullable; a rigid role arriving
   nullable is an error, not a coercion.
 - `Window`, `Sort`, `Limit`, `Filter`, `Distinct`, `Explode` — layout-preserving, and the checker
@@ -247,12 +291,15 @@ class, exactly as the two existing tables do.
 - `Recursive` — `seed` and `step` layouts must be **identical**, including column order; this is the
   CTE header requirement and the check that catches a body that forgot a carried column (the exact
   shape of `4cefade`, `repeat()` emitting `1 AS bulk` without declaring it).
+- Every node — a channel it CLAIMS must be a column it actually emits. A source has no input, so this
+  subset rule is the whole of its obligation.
 
 ### 3.6 Two budgets the plan owns, not the emitter
 
 - **Binds.** `Lit` renders as a bind. A plan carries `bindCount()`, and the emitter **fails closed**
-  above the DO cap of 100 rather than emitting SQL that only fails in production. A `PriorResult` or
-  a large `Values` chunks through `RowBatch`. This makes `mise run binds` a *plan* property instead
+  above the DO cap of 100 rather than emitting SQL that only fails in production. A statement binding's
+  materialized rows (§3.0) or a large `Values` lands as ONE JSON bind exploded by `json_each` — the
+  lowering is a pass, so `emit` never learns about chunking. This makes `mise run binds` a *plan* property instead
   of a grep for an idiom.
 - **Statement text.** DO caps at 100 KB. `Unroll` (§4.3) multiplies plan size, so the unroll pass
   consults the rendered size and declines above a ceiling, falling back to `Recursive` — which then
@@ -284,11 +331,12 @@ relation. This is item 3's own argument — *"our phases are set-at-a-time by co
 whole frontier at iteration k' IS phase k's relation"* — finally cheap, because subplan replication
 against a DAG is trivial and against an append-only builder is impossible.
 
-**4.4 `fuse`** — operator fusion. `Sort` + `Limit` → one SELECT with `ORDER BY … LIMIT`; adjacent
-`Filter`s conjoin; `Project` over `Project` composes. **This pass deletes `TailAcc`**
-(`tail/projection.ts:153`), whose whole reason for existing is that `order()`+`limit()` must be fused
-*before* either is emitted, and which is the sole reason `ELEMENT_DISPATCH` is not on the shared
-dispatch substrate.
+**4.4 `fuse`** — SEMANTIC rewrites only, and deliberately small: adjacent `Filter`s conjoin,
+`Distinct(Distinct x)` collapses, `Limit` over `Limit` composes, a `Sort` dead before a barrier goes.
+**`Sort` + `Limit` is NOT this pass's job** — that is one SELECT's `ORDER BY … LIMIT`, a slot-filling
+fact, and it belongs to the emitter's block assembler (§5). This doc previously claimed `fuse` is what
+deletes `TailAcc` (`tail/projection.ts:153`); **the assembler is**, and the distinction matters because
+it decides whether the IR stays normalized.
 
 **4.5 `prune`** — column pruning. Drop projected columns no consumer reads. Load-bearing rather than
 cosmetic: it is what makes `Unroll`'s replicated subplans affordable, and it removes carried columns
@@ -306,20 +354,52 @@ recognition-vs-support code path.
 
 ---
 
-## 5. The emitter
+## 5. The emitter — a SELECT block assembler
 
-`emit(plan: Rel) → { sql, binds }`, built on the `q` kernel — **additively only**: the kernel gained
-`identifier()` (one identifier-spelling authority, so no caller concatenates a name), and that is the
-only permitted class of change. Nothing in the kernel may be reshaped to suit RelIR. The kernel keeps its
-fail-closed properties (undefined hole throws, absent column throws) and both rendering modes; the
-emitter is the only new caller. It is a fold over the DAG with a memo for shared nodes, and it is
-**total** — every node kind has an arm, and there is no fallback branch. A node the emitter cannot
-render is a missing arm and a compile error, not a runtime throw.
+Built on the `q` kernel — **additively only**: the kernel gained `identifier()` (one
+identifier-spelling authority, so no caller concatenates a name), and that is the only permitted class
+of change. Nothing in the kernel may be reshaped to suit RelIR. The kernel keeps its fail-closed
+properties (undefined hole throws, absent column throws) and both rendering modes; the emitter is the
+only new caller. It is **total** — every node kind has an arm, no fallback branch, so a node it cannot
+render is a compile error rather than a runtime throw.
 
-Golden SQL tests compare emitter output to the current `test/L2-sql/` snapshots during migration.
-**Byte-identical is the Phase-2/3 gate for anything not deliberately changed** — the same stricter
-gate §6 of the naming doc used for vocabulary sets, and for the same reason: it distinguishes "same
-semantics" from "same query", and only the second proves nothing moved.
+**The IR is normalized (one operator per node); SQL's `SELECT` is a COMPOSITION of operators with
+fixed slots. Converting between those two shapes is the emitter's whole job.** So the emitter does not
+render a node at a time — it accumulates a block:
+
+```
+SelectBlock = { select, from, joins, where, group, having, order, limit, distinct }
+```
+
+Walk down from a node filling slots, and open a nested `SELECT` only when the slot you need is already
+occupied (a second `WHERE` after a `GROUP BY`; a `LIMIT` under a `LIMIT`). Prior art is Calcite's
+`RelToSqlConverter`, which is the same algorithm and the same reason. This is why `Project(Filter(Join))`
+is one statement and not three, and it is what deletes `TailAcc` — not `fuse` (§4.4).
+
+The alternative was considered and **refused**: letting `fuse` collapse a run into a `Select`
+mega-node would put the SQL surface inside the IR, re-open the closed node set (§7), and force every
+downstream pass to handle two forms of the same thing.
+
+### 5a. The equivalence gate — results and access path, never spelling
+
+**Byte-identical SQL is NOT a gate here, and the earlier version of this plan was wrong to make it
+one** (removed 2026-08-02). `test/CLAUDE.md` already rules the other way — *"SQL snapshots assert
+semantic equivalence, NOT byte-identity … a refactor that moves the SQL string but means the same
+thing (same result set + plan shape) is fine"* — so the plan had invented a stricter gate than the
+repo's own policy, and it was then satisfied by a snapshot of the emitter against itself (§9·1). A
+gate that cannot be met invites exactly that substitution.
+
+The replacement is the two properties actually worth holding, and both are mechanically checkable
+against real `test/L2-sql/` traversals with nothing hand-transcribed:
+
+1. **Same results** on the reference fixture, for the traversal the plan came from.
+2. **Same `EXPLAIN QUERY PLAN`.** This is the real content of §7's *"SQLite is the optimizer"*: it
+   catches a rewrite that changed the access path, which string equality catches only by accident and
+   which result-equivalence misses entirely.
+
+Together they are a STRONGER falsification than byte-identity, because they fail on a plan that reads
+the same and executes differently — and they do not pin spelling, so an emitter improvement is not a
+test-churn event.
 
 ---
 
@@ -354,25 +434,27 @@ Deliverables: the full §3 object model; `check` (§4.1); `emit` (§5); `fuse`, 
 Tests are pure — build a plan by hand, assert the SQL, run it against an in-memory SQLite, assert the
 rows. **No Gremlin is involved in any Phase-1 test.**
 
-**Exit criterion:** hand-built plans reproduce, byte-identical, the **relational core** of ten
-representative traversal families taken from `test/L2-sql/`. Result framing and Gremlin shape stay
-outside `src/rel/`, so full legacy SQL strings are not this algebra's output contract. If the emitter
-cannot reproduce those cores byte-for-byte, the object model is wrong and Phase 1 is not finished —
-this is the cheapest possible falsification and it comes before any integration.
+**Exit criterion (restated 2026-08-02):** for ten representative traversal families taken from
+`test/L2-sql/`, a hand-built plan must be **equivalent to the legacy SQL under §5a** — same results on
+the reference fixture, same `EXPLAIN QUERY PLAN`. Result framing and Gremlin shape stay outside
+`src/rel/`, so a full legacy SQL string is not this algebra's output contract; the access path is.
+If the emitter cannot match those cores, the object model is wrong and Phase 1 is not finished — this
+is the cheapest possible falsification and it comes before any integration.
 
-**This gate is NOT met, and `test/rel-core-sql.test.ts` is not it** (audit, §9·1). That file pins ten
+**The gate is NOT met, and `test/rel-core-sql.test.ts` is not it** (audit, §9·1). That file pins ten
 NODE KINDS against hand-written transcriptions of the emitter's own output; no `test/L2-sql/`
 expectation is referenced, no traversal family appears, and nothing in it fails if the object model is
-wrong. The real gate is blocked on the emitter's shape, not on missing test-writing effort: a genuine
-L2 core is ONE flat SELECT with carried columns (`SELECT e.tgt AS id, p.bulk, p.o0 FROM edges e JOIN
-c2 p ON e.src=p.id AND …`, `test/L2-sql/branch.sql.test.ts:78`), and a per-node renderer cannot emit
-that shape at any amount of hand-building. See §10·1 — the open design decision this depends on.
+wrong. The original wording asked for byte-identity, which was (a) against `test/CLAUDE.md`'s own
+rule and (b) unreachable for a per-node renderer — a genuine L2 core is ONE flat SELECT with carried
+columns (`SELECT e.tgt AS id, p.bulk, p.o0 FROM edges e JOIN c2 p ON e.src=p.id AND …`,
+`test/L2-sql/branch.sql.test.ts:78`). Both halves are now fixed: §5 makes the emitter a block
+assembler, and §5a makes the gate the property worth holding.
 
 **Progress — 2026-08-01:** the clean-room foundation landed in `773c63a`: full read/write data
 unions, checker (column, expression-placement, recursive-self-reference, layout and bind-budget
 contracts), kernel-backed emitter, `fuse`/`prune`/`name`, and pure SQLite tests. The naming analysis
-now drives CTE emission. The ten byte-identical L2 representatives remain the Phase-1 exit gate;
-no compiler integration has started.
+now drives CTE emission. The ten L2 representatives remain the Phase-1 exit gate; no compiler
+integration has started.
 
 **Progress — 2026-08-02:** relation construction is now the named, branded factory surface rather
 than raw object literals. `Project` and `Window` reject locally knowable output-schema mismatches at
@@ -381,19 +463,20 @@ construction; `check` remains the scope-aware whole-plan backstop. The emitter r
 The checker now also proves `Union`'s output layout is the declared peer merge and that a
 whole-relation `Aggregate` applies the barrier layout policy; both are tested with carried-state
 counterexamples.
-`test/rel-core-sql.test.ts` pins ten byte-exact SQL strings, one per node kind (values, projection,
+`test/rel-core-sql.test.ts` pins ten exact SQL strings, one per node kind (values, projection,
 filter, aggregate, sort, limit, distinct, join, union and recursion). **It was recorded here as the
-Phase-1 exit gate and it is not** — the gate is ten L2 traversal FAMILIES, and this file references
-no L2 expectation. It stands as a useful emitter snapshot; the gate stays open (§9·1).
+Phase-1 exit gate and it is not** — the gate is ten L2 traversal FAMILIES, and this file references no
+L2 expectation. It survives only as an emitter snapshot, and the block assembler (§5) will rewrite
+every string in it; the gate stays open (§9·1).
 
 ### Phase 2 — the write wedge
 
 The write path is the right first integration because it is bounded, it has a plan
 ([write-path](./2026-08-01-write-path-plan.md)), its execution model is the thing being replaced
-rather than something being disturbed, and **the whole of it is `Insert`/`Update`/`Delete`/`Sequence`
+rather than something being disturbed, and **the whole of it is `Insert`/`Update`/`Delete` bindings
 over read plans that already work.**
 
-- **2.1** `Insert`/`Update`/`Delete`/`Sequence`/`PriorResult` + their emitter arms and checks.
+- **2.1** `Insert`/`Update`/`Delete` + `Plan`/`Binding`/`Ref` (§3.0) + their emitter arms and checks.
 - **2.2** `drop()` → `Delete{using: <read plan>}`. The smallest possible first cut, one statement.
 - **2.3** `property()` → `Update{from: <read plan>}` / `Insert … ON CONFLICT`. This is where the
   cardinality bug class lived; expressing `Cardinality.list` as an `Insert` of N rows rather than a
@@ -444,15 +527,20 @@ an ordered `Sequence`, only for an earlier step, and only when its full column t
 matches that step's result schema. This is the type-preserving contract the runtime JSON transfer
 will carry, not a second inferred expression-type system.
 
-**Current handoff — 2026-08-02:** Phase 2 is paused at the one remaining 2.1 seam: execute an
-ordered `Sequence` while materializing each statement's `RETURNING` rows for later `PriorResult`
-relations. This must be a real multi-statement executor, not a data-modifying CTE: run each emitted
-statement in order, retain its returned rows, and render every later prior relation from one JSON
-bind via `json_each` (never a row-count-sized placeholder list). The transfer keeps the already
-standard typed `{t,v}` value envelope where values need JSON transport, with `returningType` as the
-authority for every column's full type/nullability; no type inference or `as Rel` escape hatch is
-permitted. It must work at arbitrary relation nesting, not only a top-level `PriorResult`, and must
-preserve the pre-mutation snapshot required by a vertex-drop cascade.
+**Current handoff — 2026-08-02, RESTATED against §3.0.** Phase 2's remaining 2.1 seam is the
+**binding executor**, and it is no longer statement-shaped: walk `Plan.bindings` in order; a `Rel`
+binding is a CTE or is inlined per the `Name` pass; a `Stmt` binding is executed and its `RETURNING`
+rows retained, so that every later `Ref` to it renders from ONE JSON bind exploded by `json_each`
+(never a row-count-sized placeholder list). It must work at arbitrary relation nesting, not only at
+the top level, and must preserve the pre-mutation snapshot a vertex-drop cascade requires. The
+transfer keeps the standard typed `{t,v}` envelope where values need JSON transport, with the
+binding's declared `type` as the authority for every column's full type/nullability; no type
+inference and no `as Rel` escape hatch. The executor lives OUTSIDE `src/rel/` (§10·2) — RelIR
+supplies `Ref` and the pass that resolves it.
+
+Superseded by that restatement: the earlier handoff's `Sequence`-executor framing, and the work
+already landed on `Sequence`/`PriorResult`/`returningType` (`1155d2d`, `6ee500f`) — those nodes are
+deleted by §3.0, so their emission and checking code goes with them rather than being extended.
 
 The incidental CI regression discovered while landing this work is fixed in `514e95b`: a `limit()`
 before `repeat()` had consumed its input encounter, but repeat's output layout still declared that
@@ -511,13 +599,13 @@ pinned in L4; the 5 `until()`/`emit()` barrier traversals throw a deferral namin
 
 ### Phase 4 — the read migration
 
-Shape-by-shape, behind byte-identical SQL, in this order:
+Shape-by-shape, behind the §5a equivalence gate (results + `EXPLAIN QUERY PLAN`), in this order:
 
 - **4.1** The row-algebraic class — `limit`/`skip`/`range`/`tail`/`order`/`dedup`/`sample` across all
   11 dispatch tables collapse to `Sort`/`Limit`/`Distinct`/`Window` with a `partitionBy` (§3.2). This
   is where the 11-table dispatch surface actually shrinks.
-- **4.2** `fuse` replaces `TailAcc`; `ELEMENT_DISPATCH` joins the shared substrate. This is item 17's
-  declared remainder.
+- **4.2** The block assembler (§5) replaces `TailAcc`; `ELEMENT_DISPATCH` joins the shared substrate.
+  This is item 17's declared remainder.
 - **4.3** Aggregates and `count` — the ten handlers become one `Aggregate` reading row→traverser
   cardinality off the plan instead of ten handlers knowing it privately.
 - **4.4** `recognize` (§4.7): fast paths become plan rewrites.
@@ -532,9 +620,9 @@ when the shape tables are gone.
 
 | Risk | Response |
 |---|---|
-| **Re-encoding, not simplification** — 11 shape tables become 11 shape-aware plan builders | Phase 1's byte-identical exit criterion catches an inadequate model before integration; Phase 4.1 is measured by *dispatch entries deleted*, and if that number is not falling the phase is failing |
+| **Re-encoding, not simplification** — 11 shape tables become 11 shape-aware plan builders | Phase 1's exit criterion (§5a, over real L2 traversals) catches an inadequate model before integration; Phase 4.1 is measured by *dispatch entries deleted*, and if that number is not falling the phase is failing |
 | **SQLite is the optimizer** — a mid-end that costs plans duplicates its work | RelIR is **structural only**: fusion, partition keys, pruning, legality, naming. **No cost model, no statistics, no join reordering.** A cost-based rewrite is out of scope permanently, not merely for now |
-| **L3 delta ≈ 0 makes regressions invisible** | The census is the gate on every phase, and byte-identical SQL is the gate within Phases 2–3 |
+| **L3 delta ≈ 0 makes regressions invisible** | The census is the gate on every phase, and §5a (same results + same `EXPLAIN QUERY PLAN`) is the gate within Phases 2–3 |
 | **The layout contract erodes during migration** | §3.5's per-node obligations are `Record<keyof TraverserLayout, …>`, so a new node or role fails the build until declared — the same enforcement the two existing tables already have |
 | **Scope creep into a general query engine** | The node set in §3 is closed. Adding a kind requires the same bar as a new substrate today: show the seam cannot EXPRESS it, not that it cannot be HANDED it |
 | **DO-only walls (`RETURNING`, `ON CONFLICT`)** | `test:cf-limits` gate before Phase 2 ships (§1) |
@@ -555,6 +643,12 @@ dispatch tables · the recognition-vs-support split in the fast-path layer.
 Two second implementations of the traversal machine, one accumulator that exists only because
 fusion had nowhere to happen, and the majority of a 11,201-line directory.
 
+**And a second list, of RelIR's own — the parts of it that the 2026-08-02 decisions delete** (§10),
+because a new layer accreting duplicate spellings is the same failure one layer in:
+`Sequence` · `PriorResult` · `Param` · `returningType` · `Distinct.on` · the `Naming` side-table ·
+`emitStmt`/`emitSequence` as separate entry points · the statement-only `externalAliases`/`bareColumns`
+back channels · fifteen hand-written walkers (done, `5fd7c10`) · `sameLayout`-by-`JSON.stringify`.
+
 ---
 
 ## 9. Constraint audit — 2026-08-02
@@ -566,18 +660,20 @@ so this is a record of where the build diverged from its own rules — not a re-
 
 **A constraint that cannot be kept is a design discussion (§10), never a quiet substitution.** Two of
 the rows below were substituted rather than raised, and that is the process defect this section exists
-to close.
+to close. §10 now records the resolutions — and two of the constraints did not survive the discussion:
+byte-identical SQL and "never redesign the layout contract" were both cost-avoidance, and both are
+gone. A constraint is kept because it is right, not because it is written down.
 
 | # | Constraint | What landed | Status |
 |---|---|---|---|
-| 9·1 | Phase 1's byte-identical gate over ten L2 traversal **families** | ten node kinds pinned against the emitter's own output; no L2 expectation referenced | **broken**, blocked on §10·1 |
-| 9·2 | §5 "the emitter is total — an unrenderable node is a compile error, not a runtime throw" | `Param` and `PriorResult` are constructible and `throw` at emission | **broken**; fix is a lowering pass, not an emitter arm (§10·2) |
+| 9·1 | Phase 1's equivalence gate over ten L2 traversal **families** | ten node kinds pinned against the emitter's own output; no L2 expectation referenced | **open**, and both blockers are now decided: §5 (block assembler) makes the shape reachable and §5a replaces the impossible byte-identity wording |
+| 9·2 | §5 "the emitter is total — an unrenderable node is a compile error, not a runtime throw" | `Param` and `PriorResult` are constructible and `throw` at emission | **open, decided** (§10·2): `Param` is deleted and `PriorResult` becomes `Ref` resolved by a pass, so no unrenderable node survives |
 | 9·3 | §3.4 "the plan is a **DAG**; a node referenced twice is shared" | `fuse`/`prune` rebuilt per parent occurrence with no memo — measured: `left === right` true before `fuse`, false after, and `name` then named the wrong node | **FIXED** (`0ca0cd8`): one memoised `rewrite` in `walk.ts`; `prune` is now two-pass, taking each node's need as the UNION over consumers |
 | 9·4 | §4 "total, order-declared, mirroring the existing `Pass` pipeline's discipline — no switch growth" | 15 hand-written walkers (7 over `Expr`, 8 over `Rel`); 13 carried a `default:` arm, so a new node kind was silently skipped by the bind budget, recursive-term legality, pruning and sharing | **FIXED** (`5fd7c10`): `src/rel/walk.ts` declares the structure ONCE, with no `default` anywhere, so `noImplicitReturns` makes a new kind a compile error. It also closed two live holes the old walkers shared: an `Agg`'s `orderBy` and a `WindowExpr`'s `partitionBy`/`orderBy`/frame bounds were reached by NO analysis, so a `Lit` in a partition key was not counted against the bind budget |
 | 9·5 | §3.5 per-node layout obligations as a `Record`, "so a new node or role fails the build until declared" | no such table existed; `Join` had NO layout check at all, nor did grouped `Aggregate`, `Values`, `Scan`, or `Explode`'s output schema | **FIXED** (`80e8cd3`): `src/rel/layout.ts` — `Record<RelKind, LayoutObligation>`, executable and run by `check`. Includes §3.5's left-join rule (a rigid channel may not arrive from the nullable side) and extends the barrier contract to any reducing `Aggregate`, not just `groupBy: []`. `check` gained a second total table for expression PLACEMENT, with an arity assertion so a kind cannot forget one |
-| 9·6 | §2 `src/rel/` imports nothing from `src/compiler/steps/` | the layout imports are now concentrated in `src/rel/layout.ts` (plus `passes/prune.ts`), which is the whole of the surface to move | **open — §10·3.** Measured as NOT mechanical: the contract carries Gremlin's `AliasShape`/`Elem` vocabulary, so the plan's two halves were never compatible and the resolution is a decision |
+| 9·6 | §2 `src/rel/` imports nothing from `src/compiler/` | the layout imports are now concentrated in `src/rel/layout.ts` (plus `passes/prune.ts`), which is the whole of the surface to move | **open, decided** (§10·3): the contract carries Gremlin's `AliasShape`/`Elem`, so it is DECOMPOSED into a neutral channel core rather than moved wholesale. The plan's "never redesign it" rule is withdrawn |
 | 9·7 | §3.3 `Scan` is the only physical-schema node | `'id'` is hardcoded in the emitter's delete membership and in `check`'s `Delete.using` rule | **broken** |
-| 9·8 | §3.6 the bind budget is a plan property with `RowBatch`/`json_each` as the remedy | `check` fails closed above 100 binds; no chunking or JSON-bind form exists, so a legitimate large `Values` is refused rather than lowered | **incomplete**; same fix as 9·2 |
+| 9·8 | §3.6 the bind budget is a plan property with `RowBatch`/`json_each` as the remedy | `check` fails closed above 100 binds; no chunking or JSON-bind form exists, so a legitimate large `Values` is refused rather than lowered | **open, decided** (§10·2): the remedy is a pass that lands rows as one JSON bind exploded by `json_each`, so `emit` never learns about chunking |
 | 9·9 | Phase 0 "clear the deck… worth doing first" | 0.1 not done (`globalRowOps` still has 5 refs; `ELEMENT_DISPATCH`/`SCALAR_DISPATCH` do not use it); 0.2 partly done (61 → 21 sites) | **skipped**, while Phase 2 started — and 0.2 was declared a *rename-safety prerequisite* for exactly the code motion Phases 2 and 4 perform |
 | 9·10 | §5 "the **unchanged** `q` kernel" | kernel gained `identifier()` | **amended** in §5: additive-only is the rule, and this addition qualifies |
 
@@ -607,75 +703,58 @@ which argues for a `typeOf(expr, scope)` rather than a hand-passed `type`
 
 ---
 
-## 10. Open design decisions — mine to raise, not to settle
+## 10. Decisions of record — 2026-08-02
 
-### 10·1 The emitter renders node-at-a-time; byte-identity needs a SELECT block
+All three of the audit's open questions are settled, on one stated principle: **take the cleanest
+solution for each thing, and treat a constraint that only exists to avoid cost as a candidate for
+deletion.** Two of the three "constraints" turned out to be exactly that. The suite is the safety net
+(L1–L5 + the census + the perturbation instrument) and there are no users, so the bar is *cleanest*,
+not *smallest diff*.
 
-Every node gets its own `SELECT`, so `Project(Filter(Join))` is three nesting levels while every
-existing L2 core is one SELECT with slots filled. §5's byte-identical gate (Phases 1–3) and §4.4's
-"`fuse` deletes `TailAcc`" both depend on collapsing a run of nodes into one statement, and `fuse`
-today only conjoins adjacent filters — `Sort`+`Limit` stays nested. Two routes:
+### 10·1 — DECIDED: the emitter assembles a SELECT block (§5)
 
-- **(a) `emit` becomes a block assembler** — walk a maximal run of `Project`/`Filter`/`Sort`/`Limit`/
-  `Distinct`/`Join` above a source into one SELECT with slots. Consistent with §3's opening (SQL's
-  redundancy collapses at the boundary); the algebra stays closed; `fuse` shrinks to semantic
-  rewrites only, and `TailAcc` dies because the assembler, not a pass, owns fusion.
-- **(b) `fuse` collapses into a mega-node** — needs a `Select` node holding every slot, which §3
-  deliberately excluded, and re-opens the closed node set (§7).
+The IR stays normalized, one operator per node, and the emitter converts to SQL's clause-slotted
+`SELECT`. Refused: a `Select` mega-node produced by `fuse`, which would put the SQL surface inside the
+IR, re-open the closed node set, and give every pass two forms of the same thing to handle.
+Consequences already written into the plan: §5 (the assembler), §4.4 (`fuse` shrinks to semantic
+rewrites), §4.2 in Phase 4 (the assembler, not `fuse`, deletes `TailAcc`).
 
-(a) is the recommendation. It decides what `fuse`, `prune` and `name` are each for, so it wants
-settling before Phase 4 and before the 9·1 gate is re-attempted.
+**And the gate went with it.** Byte-identical SQL is deleted from this plan, everywhere, in favour of
+§5a — same results plus same `EXPLAIN QUERY PLAN`. It was against `test/CLAUDE.md`'s own rule, it was
+unreachable for the emitter as built, and an unreachable gate is what invited 9·1's substitution.
 
-### 10·2 A write chain cannot end in a read, and unemittable nodes have no lowering
+### 10·2 — DECIDED: the top of a plan is a program (§3.0)
 
-`Sequence.steps` is `readonly Stmt[]` and `Stmt` carries no layout, so `addV().values('name')` has no
-representation. W3's "unreachable positions dissolve as plan composition" is therefore **not true of
-the model as built** — nothing hoists a write out of a read position. Proposed, and it also closes the
-paused 2.1 handoff and 9·2/9·8 at once:
+`Plan { bindings, result }`, `Binding { name, node: Rel | Stmt }`, and one `Ref` node. `Sequence`,
+`PriorResult`, `Naming`-as-a-side-table and `returningType` are all deleted: they were four spellings
+of two concepts. `Param` is deleted outright — the front-end resolves wire parameters into `Step.args`
+before the IR exists, so nothing downstream could construct one.
 
-- `Sequence { steps, result?: Rel }` (or a last step permitted to be a `Rel`), plus a declared
-  write-hoist pass — so a write in a read position is plan composition rather than a driver.
-- `Param` and `PriorResult` become **passes**, not emitter arms: `bindParams: Rel → Rel` substitutes
-  `Lit`; `materializePrior(plan, rows)` rewrites a `PriorResult` into `Explode(json_each(Lit(json)))`,
-  which the algebra already expresses and which IS the one-JSON-bind rule the handoff requires. `emit`
-  stays total, and the executor stays OUTSIDE `src/rel/` so §2's no-store clean room survives.
+The load-bearing rule that comes out of it: **effects are legal only at a binding.** `Rel` positions
+stay pure, so a `Stmt` cannot be a `Join` input — a type-level fact rather than a checker rule. This is
+what makes `union(__.addV(), __.V())` plan composition instead of a driver, and it closes the paused
+2.1 handoff, 9·2 (emitter totality) and 9·8 (the bind remedy) together.
 
-The alternative — an executor inside `src/rel/` that special-cases statement sequences — is what the
-current three-entry-point emitter (`emit`, `emitStmt`, `emitSequence`, with statement-only
-`externalAliases`/`bareColumns` back channels) is already drifting toward, and it rebuilds write as a
-special case in a new layer.
+Refused: an executor inside `src/rel/` that special-cases statement sequences. That is what the
+three-entry-point emitter (`emit`/`emitStmt`/`emitSequence`, with statement-only `externalAliases` and
+`bareColumns` back channels) was drifting toward, and it rebuilds write as a special case in a new
+layer. The executor lives outside `src/rel/`; RelIR supplies the passes.
 
-### 10·3 The layout contract cannot be extracted without deciding what "clean-room" meant
+### 10·3 — DECIDED: `TraverserLayout` is decomposed, not imported (§2)
 
-9·6 looked mechanical — move the contract to a neutral module, repoint two imports. Measured, it is
-not, and the reason is worth recording rather than discovering twice.
+The plan's "import it verbatim, never redesign it" rule is withdrawn — it was cost-avoidance, and the
+thing worth protecting is the *guarantee* (two total `Record<role, policy>` tables encoding the 33%
+defect category), not the struct. Measured, RelIR needs only which columns are channels and each
+channel's merge and barrier policy; it needs nothing of `AliasShape` or `PathState`'s `Elem`, which are
+read only by `match`/`filter`/`labelselect`/`select`/`child-shape` and `branch`/`movement`
+respectively. So the boundary is a vocabulary boundary: a neutral **channel core** both sides import,
+with the Gremlin-specific detail staying in the framing layer. Full statement in §2.
 
-`TraverserLayout` is not a neutral vocabulary. Its `aliases` carry `AliasEntry`, whose `shapes` are
-`AliasShape` (`'vertex' | 'edge' | 'value' | 'list' | 'map' | 'property'`), and `PathState` positions
-are `Elem` (`'vertex' | 'edge'`). Both are Gremlin's words, defined under `src/compiler/`. So
-importing the contract verbatim — which §2 REQUIRES, for good reasons — imports Gremlin element
-vocabulary into `src/rel/` no matter which file it is spelled from. §2's "clean-room" and §2's
-"import the layout contract" were never fully compatible; the audit's 9·6 states the contradiction,
-and this is what the resolution costs.
+Refused: making every RelIR node generic in an opaque layout type `L` (a large type-level cost on every
+node, factory and pass, for a dependency that is a vocabulary rather than a behaviour), and simply
+accepting the import (which would keep `src/rel/` untestable without the compiler).
 
-Three options, none of them free:
-
-- **(a) Extract and amend the claim.** Move the pure half of `context.ts` (~450 of its 934 lines:
-  the alias/path/layout types, the two policy tables, `mergeLayouts`/`patchLayout`/`layoutCols`/
-  `barrierLayout`/`rigidCols`, plus the two string unions) to a neutral `src/layout.ts` that both
-  `steps/` and `rel/` import. `ScalarType` already comes from the kernel, so the extracted module
-  would depend on nothing but the kernel. 47 files import `context.ts`; a re-export facade keeps
-  that churn at one line but leaves a migration facade behind. §2 then says: RelIR depends on the
-  carried-channel VOCABULARY and on no part of the lowering layer — which is the true and useful
-  version of the claim.
-- **(b) Invert it.** `src/rel/` declares a port (`cols`/`same`/`merge`/`barrier`/`rigid` over an
-  opaque `L`) and the compiler supplies the implementation. Genuinely clean-room, and it makes every
-  RelIR node generic in `L` — a large type-level cost paid on every node, factory and pass, for a
-  dependency that is a vocabulary rather than a behaviour.
-- **(c) Accept the import and delete the claim.** Cheapest, and honest, but it removes the property
-  that made `src/rel/` testable without the compiler.
-
-**(a) is the recommendation** — the dependency is real and worth admitting, and the extraction is the
-part that pays for itself when Phase 4 moves the read path. It is left undone here deliberately: it is
-a 450-line move across a 47-importer surface, and doing it as a silent side effect of a defect sweep
-is the same substitution §9 exists to stop.
+**Sequencing: 10·1 → 10·2 → 10·3.** The assembler rewrites every emitter arm while the `Plan` wrapper
+changes emit's *entry*, so the assembler goes first to avoid rebasing it; the layout decomposition
+changes no plan structure, so it goes last, when the §3.5 obligation table is the only RelIR consumer
+left to update. 10·2 first is acceptable if the write wedge needs to move sooner — the cost is small.
