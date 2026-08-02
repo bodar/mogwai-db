@@ -82,6 +82,26 @@ description = "Report exports nothing imports (instrument, not a gate — findin
 depends = ["install"]
 run = "bun scripts/orphans.ts"
 
+# The DELETION ratchet — the second of the two counters a migration needs
+# (docs/2026-08-01-relir-build-plan.md §10·4). A gate, unlike `orphans`, because it asks a question
+# with a right answer: "is the thing the plan promised to delete still there?". `orphans` needs
+# judgement (a DI leaf with no references is alive); this reads a COMMITTED list of names a plan
+# has already committed to removing, so a rise is unambiguously a regression.
+#
+# Ratcheted rather than zero-gated, because unlike `arch`/`lint`/`binds` it cannot be at zero today
+# — it is a countdown. Same shape as L3's floor and the same argument for auto-recording: the
+# counter only goes down, so `--record` can bank an improvement but never launder a regression.
+# Same `depends` reasoning as the other static gates: LSP over source, no submodule, no graph.
+[tasks.deletion]
+description = "Deletion ratchet: names a plan promised to delete, and how much of each is left"
+depends = ["install"]
+run = "bun scripts/deletion-check.ts"
+
+[tasks.deletion-record]
+description = "Bank a lowered deletion floor (downward only; commit scripts/deletion-ratchet.tsv)"
+depends = ["install"]
+run = "bun scripts/deletion-check.ts --record"
+
 # The ROOT of the graph now — `install` depends on it, because `gremlin` is a link: dep. It runs its
 # own `bun install` inside the submodule (a separate bun project) and builds the client there, so it
 # needs bun but never the superproject's node_modules; that is what keeps the inverted edge
@@ -218,6 +238,6 @@ depends = ["install", "submodule"]
 run = "bunx wrangler deploy --dry-run --outdir dist"
 
 [tasks.ci]
-description = "CI gate: type-check + lint + architectural + bind-budget invariants + test + worker build"
-depends = ["check", "lint", "arch", "binds", "test", "build"]
+description = "CI gate: type-check + lint + architectural + bind-budget + deletion ratchet + test + worker build"
+depends = ["check", "lint", "arch", "binds", "deletion", "test", "build"]
 run = "echo 'CI passed'"
