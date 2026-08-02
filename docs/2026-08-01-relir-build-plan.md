@@ -360,6 +360,9 @@ no compiler integration has started.
 than raw object literals. `Project` and `Window` reject locally knowable output-schema mismatches at
 construction; `check` remains the scope-aware whole-plan backstop. The emitter resolves lexical
 `RelId`s to scan aliases, so relation identity is no longer accidentally SQL spelling.
+The checker now also proves `Union`'s output layout is the declared peer merge and that a
+whole-relation `Aggregate` applies the barrier layout policy; both are tested with carried-state
+counterexamples.
 
 ### Phase 2 — the write wedge
 
