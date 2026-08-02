@@ -1,7 +1,11 @@
 import type { Expr } from './expr.ts';
 import type { RelBase, RelId, SortTerm } from './types.ts';
 
-export type Table = 'nodes' | 'edges' | 'vertex_properties' | 'edge_properties' | 'property_fts' | 'labels';
+/** Every physical table in `src/storage.ts`'s schema. `Scan` is the ONE node that names one (§3.3),
+ * so a table absent here is a shape the algebra cannot express at all — `vertex_labels` was, which
+ * is `hasLabel()`, and the Phase-1 gate over real L2 families is what found it. */
+export type Table = 'nodes' | 'edges' | 'vertex_labels' | 'vertex_properties' | 'edge_properties'
+  | 'vertex_property_cardinality' | 'property_fts' | 'labels';
 
 type RawRel =
   | (RelBase & { readonly kind: 'scan'; readonly id: RelId; readonly table: Table; readonly alias: string })

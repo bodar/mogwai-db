@@ -333,7 +333,17 @@ function assembler(naming?: Naming) {
         };
       }
 
-      case 'union': return { kind: 'closed', body: list(r.inputs.map((input) => q`(${renderRel(input, outer)})`), r.all ? ' UNION ALL ' : ' UNION ') };
+      // SQLite's compound arms are select-CORES: a parenthesised arm is a syntax error, measured
+      // (`(SELECT 1) UNION ALL (SELECT 2)` → `near "(": syntax error`), and an arm may not carry
+      // its own ORDER BY/LIMIT either — those belong to the compound as a whole. So an arm that
+      // fills a tail slot, or is itself a set operation, gets a derived table of its own.
+      case 'union': return {
+        kind: 'closed',
+        body: list(
+          r.inputs.map((input) => renderBlock(inputBlock(input, outer, (arm) => arm.orderBy !== undefined || arm.limit !== undefined || arm.offset !== undefined))),
+          r.all ? ' UNION ALL ' : ' UNION ',
+        ),
+      };
 
       case 'recursive': return { kind: 'closed', body: q`WITH RECURSIVE ${recursiveDefinition(r, outer)} SELECT * FROM ${ident(r.name)}` };
     }

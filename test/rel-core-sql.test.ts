@@ -56,7 +56,9 @@ describe('RelIR relational-core SQL', () => {
       'SELECT n.id AS id, n.name AS name FROM nodes n LIMIT ?',
       'SELECT DISTINCT n.id AS id, n.name AS name FROM nodes n',
       'SELECT n.id AS id, n.name AS name, m.id AS id_r, m.name AS name_r FROM nodes n INNER JOIN nodes m ON (n.id = m.id)',
-      '(SELECT n.id AS id, n.name AS name FROM nodes n) UNION ALL (SELECT m.id AS id, m.name AS name FROM nodes m)',
+      // Unparenthesised on purpose: SQLite's compound arms are select-CORES, and `(SELECT …) UNION
+      // ALL (SELECT …)` is `near "(": syntax error`.
+      'SELECT n.id AS id, n.name AS name FROM nodes n UNION ALL SELECT m.id AS id, m.name AS name FROM nodes m',
       'WITH RECURSIVE walk(id, name) AS (SELECT v.column1 AS id, v.column2 AS name FROM (VALUES (?, ?)) v UNION ALL SELECT walk.id AS id, walk.name AS name FROM walk walk) SELECT * FROM walk',
     ]);
   });
