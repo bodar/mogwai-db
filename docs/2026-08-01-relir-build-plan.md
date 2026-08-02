@@ -414,6 +414,12 @@ Their target-column expressions, source relations, `WHERE`, `ON CONFLICT` assign
 expression SQL or bind ordering. SQLite execution tests cover insert, update and delete, and the
 checker rejects undeclared assignment/insert target columns.
 
+**Progress — 2026-08-02 (continued):** `1155d2d` gives `Sequence` its SQLite-true emission
+surface: a readonly ordered list of individually rendered statements, executed in order rather
+than concatenated into an invalid data-modifying CTE. Nested sequences are rejected. `PriorResult`
+materialization is the remaining part of this seam; it must preserve the pre-mutation snapshot for
+vertex-drop cascades rather than re-evaluating the source after an earlier delete.
+
 **Phase 2 supersedes [write-path](./2026-08-01-write-path-plan.md), and inherits its requirements.**
 That plan's agent was stopped 2026-08-01; the plan is not discarded, it is re-pointed. Precisely:
 
