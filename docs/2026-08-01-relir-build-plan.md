@@ -432,6 +432,14 @@ Each phase ends green on `mise run ci` including the census. The census is not a
 is the only instrument that distinguishes "behaviour preserved" from "twenty deferrals quietly became
 wrong answers", and every phase below will show L3 delta ≈ 0 for most of its work.
 
+**RE-ORDERED 2026-08-02 to `0 → 1 → 4.1 → 2 → 3 → 4.2–4.4`, and the reason is measured, not
+aesthetic.** Phase 2's premise was *"the whole of it is `Insert`/`Update`/`Delete` bindings over read
+plans that already work"* — which assumed the existing read plans are usable as RelIR INPUTS. They
+are not: a write's prefix arrives as `renderDriverRows(st)`, opaque `{sql, binds}` from the legacy
+spine, so `Delete{using: <read plan>}` has no `Rel` to be handed. **Writes consume reads, so reads
+go first.** §10·4 records the decision and the migration contract that governs all of it; read that
+before starting any phase below.
+
 ### Phase 0 — clear the deck (no RelIR code)
 
 Prerequisites from the analysis doc, worth doing first because each shrinks the surface Phase 2+
@@ -635,9 +643,9 @@ the authority; a value JSON cannot carry losslessly fails closed naming the colu
 **2.1 is therefore complete.** Everything from §3.0 down to a program running against SQLite is
 built and tested. What is NOT built is the way in.
 
-**BLOCKED, and it re-orders the phases — 2026-08-02, needs a call.** 2.2 reads as "the smallest
-possible first cut, one statement", and it is not reachable as written. Two findings, measured
-against `compileDrop` (`steps/write/write.ts:186`):
+**RE-ORDERED — 2026-08-02, decided in §10·4 and §10·5.** 2.2 reads as "the smallest possible first
+cut, one statement", and it is not reachable as written. Two findings, measured against `compileDrop`
+(`steps/write/write.ts:186`):
 
 - **`Delete{using: <read plan>}` needs the read plan to BE a `Rel`, and nothing produces one.**
   Phase 2's premise — *"the whole of it is `Insert`/`Update`/`Delete` bindings over read plans that
@@ -659,12 +667,11 @@ against `compileDrop` (`steps/write/write.ts:186`):
   READ-shaped, and applying it to a write cascade is a performance regression against a measured,
   locked decision.
 
-**The call this needs.** Either (a) Phase 4.1's read lowering comes BEFORE Phase 2's integration —
-which makes the phase order 1 → 4.1 → 2 → 3 and is the honest reading of the first finding — or
-(b) a `Stmt` gains a chunked execution mode so a write binding can go through `RowBatch` while a
-read `Ref` stays a JSON bind, which means the executor learns about chunking and §3.6's "the
-lowering is a pass, so `emit` never learns about chunking" holds only for reads. **(a) costs
-sequencing, (b) costs a property.** Not mine to pick.
+**How both were answered.** The first: **§10·4** — reads go first, through a second lowering grown
+step by step behind a differential switch, with the phase order becoming `4.1 → 2 → 3 → 4.2–4.4` and
+a two-counter contract that the migration finishes. The second: **§10·5** — the apparent conflict is
+probably not one (the 4.6× measurement compares chunked binds against INLINED LITERALS, not against
+a JSON bind), so it is one benchmark away from a single rule rather than a trade-off to split.
 
 **Superseded handoff — 2026-08-02, RESTATED against §3.0.** Phase 2's remaining 2.1 seam is the
 **binding executor**, and it is no longer statement-shaped: walk `Plan.bindings` in order; a `Rel`
@@ -736,9 +743,10 @@ still free of write rows; `mise run test:cf-limits` green including `RETURNING`/
 **Exit criteria:** `REPEAT_BODY_OK` deleted; the row-local gate's 8 queries pass; `dedup`-in-`repeat`
 pinned in L4; the 5 `until()`/`emit()` barrier traversals throw a deferral naming the platform wall.
 
-### Phase 4 — the read migration
+### Phase 4 — the read migration (4.1 runs BEFORE Phase 2; see §10·4)
 
-Shape-by-shape, behind the §5a equivalence gate (results + `EXPLAIN QUERY PLAN`), in this order:
+Shape-by-shape, behind the §5a equivalence gate (results + `EXPLAIN QUERY PLAN`) **and the RelIR
+differential switch (§10·4)**, in this order:
 
 - **4.1** The row-algebraic class — `limit`/`skip`/`range`/`tail`/`order`/`dedup`/`sample` across all
   11 dispatch tables collapse to `Sort`/`Limit`/`Distinct`/`Window` with a `partitionBy` (§3.2). This
@@ -752,6 +760,18 @@ Shape-by-shape, behind the §5a equivalence gate (results + `EXPLAIN QUERY PLAN`
 The shape-interpreting class (materialization, framing, JSON construction) stays per-shape forever
 and correctly so; Phase 4 is finished when the row-algebraic class is gone from the shape tables, not
 when the shape tables are gone.
+
+**Entry criteria for 4.1 — the two counters, and they are GATES, not reports (§10·4).**
+
+| Counter | What it counts | Instrument | Rule |
+|---|---|---|---|
+| **Coverage** | corpus traversals routed to the RelIR spine, of 2,298 | a `spine` column on the committed census artifact | a **RATCHET**: the floor can only rise, exactly as L3's does. A number that is merely printed drifts |
+| **Deletion** | §8 exports still reachable from a live caller | `mise run orphans` against the §8 list | must reach **zero**. Coverage says the new spine works; deletion says the old one is GONE |
+
+Coverage is necessary and deletion is the point. They fail differently, and the second is the one
+that stalls while the first looks finished — a traversal can route to RelIR while `write.ts` stays
+alive because some other entry point still reaches it. **Coverage at 100% with a non-empty §8 list
+is a FAILED migration, not a finished one.**
 
 ---
 
@@ -767,10 +787,16 @@ when the shape tables are gone.
 | **DO-only walls (`RETURNING`, `ON CONFLICT`)** | `test:cf-limits` gate before Phase 2 ships (§1) |
 | **Losing W1/W4's landed gains in the rewrite** | W1's four L4 pins and the perturbed census are Phase 2 exit criteria, not afterthoughts; P5b makes emission-ordered id assignment structural rather than incidental |
 | **Rebuilding the driver abstraction inside RelIR** | W2/W3's blockers are listed as *dissolving*, with an explicit "do not build a driver abstraction" (§6 Phase 2). If Phase 2 grows an `ElementReadDriver` analogue, it has failed |
+| **THE BIG ONE — the dual spine goes permanent.** Coverage reaches 80–90%, the remaining traversals are the awkward ones, the legacy route still works, and the migration quietly becomes an architecture with two engines in it forever | §10·4 is written to make that outcome legible rather than comfortable: two ratcheted counters, a deletion list that IS the exit, and an explicit statement that a stalled countdown is a failure with a name. **The pressure runs the right way and must be kept that way** — the legacy path's only remaining value at 100% coverage is being the differential's off position, so there is no engineering reason to keep it and no honest way to claim there is |
 
 ---
 
 ## 8. What this deletes
+
+**This list is the EXIT CRITERION, not a wish list.** It is the second of §10·4's two counters, it is
+checked with `mise run orphans`, and the migration is over when it is empty and not before. Every
+name below is a promise the plan has made; leaving one alive is the plan failing, however good the
+coverage number looks beside it.
 
 The measure of success, stated up front so it can be checked rather than claimed:
 
@@ -844,11 +870,15 @@ which argues for a `typeOf(expr, scope)` rather than a hand-passed `type`
 
 ## 10. Decisions of record — 2026-08-02
 
-All three of the audit's open questions are settled, on one stated principle: **take the cleanest
-solution for each thing, and treat a constraint that only exists to avoid cost as a candidate for
-deletion.** Two of the three "constraints" turned out to be exactly that. The suite is the safety net
+One stated principle governs all of these: **take the cleanest solution for each thing, and treat a
+constraint that only exists to avoid cost as a candidate for deletion.** The suite is the safety net
 (L1–L5 + the census + the perturbation instrument) and there are no users, so the bar is *cleanest*,
 not *smallest diff*.
+
+10·1–10·3 settled the audit's three open questions, and two of those three "constraints" turned out
+to be pure cost-avoidance. **10·4 is the one that governs everything after them** — how Gremlin
+reaches RelIR, and the contract that the migration finishes. 10·5 is open pending one benchmark.
+10·6 applies 10·4's discipline inward, to RelIR's own duplication.
 
 ### 10·1 — DECIDED and LANDED (`b199a5f`): the emitter assembles a SELECT block (§5)
 
@@ -893,7 +923,108 @@ Refused: making every RelIR node generic in an opaque layout type `L` (a large t
 node, factory and pass, for a dependency that is a vocabulary rather than a behaviour), and simply
 accepting the import (which would keep `src/rel/` untestable without the compiler).
 
-**Sequencing: 10·1 → 10·2 → 10·3 — all three landed (`b199a5f`, `3057e89`, `25e0b5f`).** The assembler rewrites every emitter arm while the `Plan` wrapper
+### 10·4 — DECIDED 2026-08-02: ONE SPINE. The dual spine is a harness with an end date.
+
+**The decision.** Gremlin reaches RelIR through a SECOND lowering that grows step by step. A
+traversal whose every step is covered routes RelIR end-to-end; anything else routes to the legacy
+spine. Never mixed inside one traversal, so no opaque node ever exists and RelIR stays a real
+algebra rather than a wrapper. `RelIR on` versus `RelIR off` becomes a **differential switch**, which
+makes the whole 2,298-traversal corpus plus L5's generated ones the oracle for every increment —
+strictly stronger than §5a's eleven hand-built families, and the instrument already exists.
+
+**Refused, with the reason each fails.**
+
+- *An opaque escape node* wrapping the legacy spine's `{sql, binds}` as a RelIR leaf. §7's bar is
+  exactly right: the seam CAN express these relations, we simply have not written the lowering yet.
+  A node kind added because the work is unfinished never gets removed. **No opaque node, ever — not
+  as a bridge, not "temporarily", not behind a flag.**
+- *Retargeting the existing spine in one movement* — `Query` becomes a `Plan` builder, `Relation`
+  becomes a `Ref`, every StepFn returns `Rel` nodes. This is the cleanest END STATE by a distance,
+  and the honest observation behind it is that `Query.ctes` already IS `Plan.bindings` with the data
+  thrown away. Refused **not on principle but because it is un-instrumentable**: 163 `q.cte` sites
+  convert at once, there is no "off" position, so no differential can catch a mistake and no
+  intermediate state is green. That is the one thing this codebase's method depends on.
+
+---
+
+**THE DUAL SPINE IS A HARNESS, NOT AN ARCHITECTURE. IT HAS AN END DATE.**
+
+The end date is the moment the legacy spine is deleted, and that deletion is a STEP OF THE PLAN, not
+an afterthought someone gets to later. The routing switch is deleted with it. Everything in §8 goes.
+
+**Leaving the legacy route in place is the failure mode, not the fallback.** It will not announce
+itself. It arrives as a series of individually reasonable decisions: coverage reaches 85%, the
+remainder are the awkward traversals, the legacy path still works, nothing is broken, and the next
+piece of work is more interesting than the last 15%. A year later the project has two engines, twice
+the surface, and every future change costs double — which is precisely the condition
+[codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6 diagnosed and
+this whole plan exists to end. **Stopping at 90% does not bank 90% of the value. It banks a
+liability.** The one thing worse than not starting this migration is starting it and not finishing.
+
+So, explicitly:
+
+1. **No permanent exceptions.** A traversal may be routed to legacy for exactly one reason: the
+   RelIR lowering does not yet cover a step in it. Not "this one is hard", not "this one is rare",
+   not "this one is fast enough already". There is no allowlist and no committed exception file. If
+   a shape genuinely cannot be expressed, that is a §3 node-set discussion under §7's bar, recorded
+   in this section — never a quiet second route left running.
+2. **Both counters ratchet.** Coverage can only rise; the §8 deletion list can only shrink. A ratchet
+   is what stops a report from drifting, and it is why L3 and L5 are ratcheted rather than printed.
+3. **A stalled countdown is a defect with a name**, reported like any other — not an ambient
+   condition. If coverage has not moved in a phase, that is the finding of the phase.
+4. **Coverage at 100% with a non-empty §8 list is a FAILED migration.** The new spine working is not
+   the same fact as the old one being gone, and only the second one ends this.
+5. **The last step costs something, and it is accepted here in advance.** Deleting the legacy spine
+   deletes the differential's off position, so the RelIR differential dies with it. That is a
+   one-time, deliberate trade at the point where the thing being compared against is dead code; what
+   remains is L5's METAMORPHIC oracle — which never needed two implementations — plus the census and
+   the L1–L4 ladder. Nobody may use "but we would lose the differential" as a reason to keep the
+   legacy spine alive. The differential is scaffolding for the migration, not a load-bearing test.
+
+**Order.** Reads first, because writes consume them (§6's re-order): `4.1` → `2` → `3` → `4.2–4.4`.
+Phase 2's W2/W3 acceptance criteria are unaffected; they simply happen later.
+
+### 10·5 — OPEN, pending ONE measurement: the row-transport rule
+
+`§3.6` says a row set too large to be binds lands as one JSON bind exploded by `json_each`. The root
+`CLAUDE.md` says a WRITE chunks through `src/rowbatch.ts`. These look like a conflict and **probably
+are not one.**
+
+The measurement `rowbatch.ts` cites is **chunked binds versus INLINED LITERALS** — 38 ms vs 176 ms
+for 20,000 rows — and the mechanism it identifies is prepared-statement cache hits versus a fresh
+parse that evicts the cache. A single JSON-bind statement is *also* fixed-shape with one bind, so it
+hits the same cache, and it is ONE execution rather than N. **The comparison that would actually
+decide this has never been run.** Note too that the project already applies the JSON rule to reads:
+`jsonbArrayBind` is documented for "a set whose size is a function of DATA", so today the same
+question has two answers depending on which side of the read/write line a caller sits.
+
+**The measurement:** `INSERT … SELECT … FROM json_each(?)` for 20,000 rows against the equivalent
+chunked `RowBatch` run, on Bun and under `test:cf-limits`.
+
+**If the JSON form wins or ties, adopt one rule everywhere:** *a row set whose size is a function of
+DATA crosses the `Sql` seam as ONE VALUE, never as N parameters — read or write, nothing to choose.*
+That collapses `bindChunks`/`placeholders`/`jsonbArrayBind`/`RowsBind` into one concept, and it turns
+the DO cap from an IDIOM that `mise run binds` greps for into a STRUCTURAL property `check` can
+prove: a RelIR plan's bind count is O(plan size) by construction. `binds-check.ts` becomes deletable
+and `RowBatch` shrinks to whatever JSON genuinely cannot carry. If the chunked form wins decisively,
+record the number here and give a `Stmt` binding a chunked execution mode — at the cost of the
+executor learning about chunking, which §3.6's "the lowering is a pass, so `emit` never learns about
+chunking" would then hold only for reads.
+
+### 10·6 — DECIDED 2026-08-02: `Delete.using` is deleted; membership is a predicate
+
+A worked example of §10·4's discipline applied inward — decided and verified, not yet landed.
+`using` was a second spelling of
+something the algebra already says: `Delete{ target, where: InQuery(Col(target,'id'), <rel>) }`
+emits identical SQL and executes identically — verified before the decision, not after. So the
+field, the `Membership` interface, the emitter arm and the two key-agreement checks all go, and
+9·7 closes BY CONSTRUCTION rather than by naming the key: there is no longer any place for a physical
+column name, because the caller writes the predicate and `check` validates it against the scope like
+any other expression. `Insert.source` and `Update.from` keep their places — a source relation and
+SQLite's `UPDATE … FROM` have no predicate spelling — and `using` never had one.
+
+**Sequencing: 10·1 → 10·2 → 10·3 — all three landed (`b199a5f`, `3057e89`, `25e0b5f`).** 10·4 is
+the decision that governs everything after them; 10·5 needs one benchmark; 10·6 is small and ready. The assembler rewrites every emitter arm while the `Plan` wrapper
 changes emit's *entry*, so the assembler goes first to avoid rebasing it; the layout decomposition
 changes no plan structure, so it goes last, when the §3.5 obligation table is the only RelIR consumer
 left to update. 10·2 first is acceptable if the write wedge needs to move sooner — the cost is small.
