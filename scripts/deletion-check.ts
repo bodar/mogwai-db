@@ -74,14 +74,29 @@ const serializeRatchet = (entries: readonly Entry[]): string =>
 
 // ---------- measurement ----------
 
-/** Lines in src/ matching a regex. `rg --count-matches` would count two hits on one line twice;
- *  a §8 "copy" is a line, so count lines. */
+/**
+ * Lines in src/ matching a regex. A §8 "copy" is a LINE, so two hits on one line count once.
+ *
+ * Scanned in-process rather than shelled out to `rg`: the CI runner has no ripgrep, and a gate that
+ * passes locally and dies on a missing binary is worse than no gate. `git grep` has the same
+ * problem in reverse — it would work here but reads the INDEX, so an unstaged edit is invisible to
+ * the very check that is meant to see it.
+ */
+const SRC = new Bun.Glob('**/*.ts');
+let srcFiles: string[] | undefined;
+
 async function patternCount(re: string): Promise<number> {
-  const proc = Bun.spawn(['rg', '--no-config', '-c', '--no-filename', '-e', re, 'src'],
-    { cwd: ROOT, stdout: 'pipe', stderr: 'ignore' });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
-  return out.split('\n').filter(Boolean).reduce((n, l) => n + Number(l), 0);
+  if (!srcFiles) {
+    srcFiles = [];
+    for await (const rel of SRC.scan({ cwd: `${ROOT}/src`, onlyFiles: true })) srcFiles.push(`src/${rel}`);
+    srcFiles.sort();
+  }
+  const rx = new RegExp(re);
+  let n = 0;
+  for (const rel of srcFiles) {
+    for (const line of (await Bun.file(`${ROOT}/${rel}`).text()).split('\n')) if (rx.test(line)) n++;
+  }
+  return n;
 }
 
 const COUNTED = (rel: string) =>
