@@ -91,9 +91,26 @@ merge policy and its barrier policy. It does not need alias shape histories or p
 - RelIR carries `Channels`; its obligations (§3.5) talk about roles and policies. A RelIR node cannot
   know what a sack is.
 
-The tell that this decomposition is the right one: `sameLayout` currently compares two layouts by
-`JSON.stringify`, and touches `shapes` for no reason other than that they are in the struct. Over
+The tell that this decomposition is the right one: `sameLayout` compared two layouts by
+`JSON.stringify`, and touched `shapes` for no reason other than that they are in the struct. Over
 `Channels` the comparison is a list equality.
+
+**LANDED 2026-08-02 (`25e0b5f`)** as `src/channels.ts`, with three things worth recording:
+
+- the framing layer's `LAYOUT_ROLE_POLICY`/`BARRIER_ROLE_POLICY` now READ their channel-role
+  policies off the core, so there is one authority rather than two tables to keep in step; only the
+  two METADATA roles are declared locally, because they are never physical columns and therefore
+  are not channels at all.
+- **at the channel level a barrier keeps NOTHING.** `consumed`/`empty`/`drop` is framing-layer
+  bookkeeping about what to REMEMBER, not about which column survives, so `barrierChannels` is a
+  filter over the table that is empty today and carries a surviving role the moment one is declared.
+- **the channel merge is deliberately weaker than the layout merge.** Arms fork from a common seed,
+  so at the column level a forkable role can only be extended: every arm's alias columns are a
+  prefix of the merged result's. Which LABEL sits at which column is the framing layer's business —
+  `mergeAliasMaps` may give an arm-minted label a different canonical column than the arm used —
+  and reproducing that algebra here would be the Gremlin leak the module exists to prevent.
+  `test/channel-contracts.test.ts` ties the two: same columns, same rigid set, same failure on the
+  same divergence.
 
 **Shape does not enter RelIR at all.** RelIR sits downstream of lowering, so Gremlin shape is already
 resolved and rides to the wire as `Compiled.shape`, untouched. The anchor rule — *a Pass may CONSULT
@@ -740,7 +757,7 @@ gone. A constraint is kept because it is right, not because it is written down.
 | 9·3 | §3.4 "the plan is a **DAG**; a node referenced twice is shared" | `fuse`/`prune` rebuilt per parent occurrence with no memo — measured: `left === right` true before `fuse`, false after, and `name` then named the wrong node | **FIXED** (`0ca0cd8`): one memoised `rewrite` in `walk.ts`; `prune` is now two-pass, taking each node's need as the UNION over consumers |
 | 9·4 | §4 "total, order-declared, mirroring the existing `Pass` pipeline's discipline — no switch growth" | 15 hand-written walkers (7 over `Expr`, 8 over `Rel`); 13 carried a `default:` arm, so a new node kind was silently skipped by the bind budget, recursive-term legality, pruning and sharing | **FIXED** (`5fd7c10`): `src/rel/walk.ts` declares the structure ONCE, with no `default` anywhere, so `noImplicitReturns` makes a new kind a compile error. It also closed two live holes the old walkers shared: an `Agg`'s `orderBy` and a `WindowExpr`'s `partitionBy`/`orderBy`/frame bounds were reached by NO analysis, so a `Lit` in a partition key was not counted against the bind budget |
 | 9·5 | §3.5 per-node layout obligations as a `Record`, "so a new node or role fails the build until declared" | no such table existed; `Join` had NO layout check at all, nor did grouped `Aggregate`, `Values`, `Scan`, or `Explode`'s output schema | **FIXED** (`80e8cd3`): `src/rel/layout.ts` — `Record<RelKind, LayoutObligation>`, executable and run by `check`. Includes §3.5's left-join rule (a rigid channel may not arrive from the nullable side) and extends the barrier contract to any reducing `Aggregate`, not just `groupBy: []`. `check` gained a second total table for expression PLACEMENT, with an arity assertion so a kind cannot forget one |
-| 9·6 | §2 `src/rel/` imports nothing from `src/compiler/` | the layout imports are now concentrated in `src/rel/layout.ts` (plus `passes/prune.ts`), which is the whole of the surface to move | **open, decided** (§10·3): the contract carries Gremlin's `AliasShape`/`Elem`, so it is DECOMPOSED into a neutral channel core rather than moved wholesale. The plan's "never redesign it" rule is withdrawn |
+| 9·6 | §2 `src/rel/` imports nothing from `src/compiler/` | the layout imports were concentrated in `src/rel/layout.ts` plus `passes/prune.ts` | **CLOSED** (`25e0b5f`): decomposed into the neutral channel core `src/channels.ts`, and **`mise run arch` now gates the boundary** — a textual import scan, because a clean-room breach is a dependency edge and is visible in the import statement itself |
 | 9·7 | §3.3 `Scan` is the only physical-schema node | `'id'` is hardcoded in the emitter's delete membership and in `check`'s `Delete.using` rule | **broken**. The `Table` union itself was also incomplete (no `vertex_labels`), which §9·1's gate found and `38a58ba` fixed |
 | 9·8 | §3.6 the bind budget is a plan property with `RowBatch`/`json_each` as the remedy | `check` fails closed above 100 binds; no chunking or JSON-bind form exists, so a legitimate large `Values` is refused rather than lowered | **half closed** (`3057e89`): a statement's retained rows now land as ONE JSON bind (`RowsBind`), so the write side never sizes a bind list by row count. A large literal `Values` is still refused rather than lowered — the same `json_each` remedy applies and is not written yet |
 | 9·9 | Phase 0 "clear the deck… worth doing first" | 0.1 not done (`globalRowOps` still has 5 refs; `ELEMENT_DISPATCH`/`SCALAR_DISPATCH` do not use it); 0.2 partly done (61 → 21 sites) | **skipped**, while Phase 2 started — and 0.2 was declared a *rename-safety prerequisite* for exactly the code motion Phases 2 and 4 perform |
@@ -809,7 +826,7 @@ three-entry-point emitter (`emit`/`emitStmt`/`emitSequence`, with statement-only
 `bareColumns` back channels) was drifting toward, and it rebuilds write as a special case in a new
 layer. The executor lives outside `src/rel/`; RelIR supplies the passes.
 
-### 10·3 — DECIDED: `TraverserLayout` is decomposed, not imported (§2)
+### 10·3 — DECIDED and LANDED (`25e0b5f`): `TraverserLayout` is decomposed, not imported (§2)
 
 The plan's "import it verbatim, never redesign it" rule is withdrawn — it was cost-avoidance, and the
 thing worth protecting is the *guarantee* (two total `Record<role, policy>` tables encoding the 33%
@@ -823,7 +840,7 @@ Refused: making every RelIR node generic in an opaque layout type `L` (a large t
 node, factory and pass, for a dependency that is a vocabulary rather than a behaviour), and simply
 accepting the import (which would keep `src/rel/` untestable without the compiler).
 
-**Sequencing: 10·1 (landed) → 10·2 (landed) → 10·3.** The assembler rewrites every emitter arm while the `Plan` wrapper
+**Sequencing: 10·1 → 10·2 → 10·3 — all three landed (`b199a5f`, `3057e89`, `25e0b5f`).** The assembler rewrites every emitter arm while the `Plan` wrapper
 changes emit's *entry*, so the assembler goes first to avoid rebasing it; the layout decomposition
 changes no plan structure, so it goes last, when the §3.5 obligation table is the only RelIR consumer
 left to update. 10·2 first is acceptable if the write wedge needs to move sooner — the cost is small.
