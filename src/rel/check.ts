@@ -1,7 +1,7 @@
 import { barrierLayout, layoutCols, mergeLayouts } from '../compiler/steps/context/context.ts';
 import type { Expr } from './expr.ts';
 import { isRel, type Rel } from './rel.ts';
-import type { Stmt } from './stmt.ts';
+import { isStmt, type Stmt } from './stmt.ts';
 import { recursiveSelf } from './factory.ts';
 
 const DO_BIND_CAP = 100;
@@ -67,7 +67,14 @@ export function bindCount(plan: Rel | Stmt): number {
     }
   };
   if (!isRel(plan)) {
-    const stmt = (s: Stmt): void => { if (s.kind === 'sequence') s.steps.forEach(stmt); else { if (s.kind === 'insert') rel(s.source); if (s.kind === 'update' && s.from) rel(s.from); if (s.kind === 'delete' && s.using) rel(s.using); s.returning.forEach(([, e]) => expr(e)); } };
+    if (!isStmt(plan)) throw new Error('RelIR: statement was not constructed by a Stmt factory');
+    const stmt = (s: Stmt): void => {
+      if (s.kind === 'sequence') { s.steps.forEach(stmt); return; }
+      if (s.kind === 'insert') { rel(s.source); s.onConflict?.set.forEach(([, e]) => expr(e)); }
+      if (s.kind === 'update') { s.set.forEach(([, e]) => expr(e)); if (s.from) rel(s.from); if (s.where) expr(s.where); }
+      if (s.kind === 'delete') { if (s.using) rel(s.using); if (s.where) expr(s.where); }
+      s.returning.forEach(([, e]) => expr(e));
+    };
     stmt(plan);
   } else rel(plan);
   return n;
@@ -215,6 +222,51 @@ export function check(plan: Rel | Stmt): void {
       default: break;
     }
   };
-  if (!isRel(plan)) { /* statement checking lands with Phase 2 */ } else checkRel(plan);
+  const checkStmt = (s: Stmt): void => {
+    if (!isStmt(s)) throw new Error('RelIR: statement was not constructed by a Stmt factory');
+    const assignments = (pairs: readonly (readonly [string, Expr])[], what: string): void => {
+      if (!pairs.length && what === 'Update') throw new Error('RelIR: Update requires at least one assignment');
+      if (new Set(pairs.map(([name]) => name)).size !== pairs.length) throw new Error(`RelIR: duplicate ${what} name`);
+    };
+    const returning = (pairs: readonly (readonly [string, Expr])[]): void => {
+      if (new Set(pairs.map(([name]) => name)).size !== pairs.length) throw new Error('RelIR: duplicate RETURNING name');
+      // Table columns in RETURNING are physical-schema names, intentionally outside Rel's lexical
+      // scope. Embedded read plans remain checked when lowering gives them a relation boundary.
+    };
+    switch (s.kind) {
+      case 'insert':
+        checkRel(s.source);
+        if (s.cols.length !== s.source.type.cols.length) throw new Error(`RelIR: Insert has ${s.cols.length} target columns but source emits ${s.source.type.cols.length}`);
+        if (new Set(s.cols).size !== s.cols.length) throw new Error('RelIR: Insert has duplicate target column');
+        if (s.onConflict) {
+          if (!s.onConflict.target.length) throw new Error('RelIR: Insert conflict target cannot be empty');
+          if (new Set(s.onConflict.target).size !== s.onConflict.target.length) throw new Error('RelIR: Insert conflict target has duplicate column');
+          assignments(s.onConflict.set, 'conflict update');
+        }
+        returning(s.returning);
+        break;
+      case 'update':
+        assignments(s.set, 'Update');
+        if (s.from) checkRel(s.from);
+        returning(s.returning);
+        break;
+      case 'delete':
+        if (s.using) {
+          checkRel(s.using);
+          if (!s.using.type.cols.some((column) => column.name === 'id'))
+            throw new Error('RelIR: Delete.using must emit an id column');
+        }
+        returning(s.returning);
+        break;
+      case 'sequence':
+        if (!s.steps.length) throw new Error('RelIR: Sequence requires at least one statement');
+        s.steps.forEach(checkStmt);
+        break;
+    }
+  };
+  if (!isRel(plan)) {
+    if (!isStmt(plan)) throw new Error('RelIR: statement was not constructed by a Stmt factory');
+    checkStmt(plan);
+  } else checkRel(plan);
   if (bindCount(plan) > DO_BIND_CAP) throw new Error(`RelIR: ${bindCount(plan)} binds exceeds Durable Objects cap of ${DO_BIND_CAP}`);
 }
