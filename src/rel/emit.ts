@@ -87,7 +87,7 @@ function buildRenderer(plan: Rel, naming?: Naming, externalAliases = new Map<str
       case 'aggregate': return q`SELECT ${list([...r.groupBy.map(expr), ...r.aggs.map(([name,e]) => q`${expr(e)} AS ${ident(name)}`)])} FROM ${from(r.input)}${r.groupBy.length ? q` GROUP BY ${list(r.groupBy.map(expr))}` : empty}${r.having ? q` HAVING ${expr(r.having)}` : empty}`;
       case 'sort': return q`SELECT * FROM ${from(r.input)} ORDER BY ${list(r.terms.map(sort))}`;
       case 'limit': return q`SELECT * FROM ${from(r.input)}${r.count ? q` LIMIT ${expr(r.count)}` : empty}${r.offset ? q`${r.count ? raw(' ') : raw(' LIMIT -1 ')}OFFSET ${expr(r.offset)}` : empty}`;
-      case 'distinct': return q`SELECT DISTINCT ${r.on?.length ? list(r.on.map(expr)) : raw('*')} FROM ${from(r.input)}`;
+      case 'distinct': return q`SELECT DISTINCT * FROM ${from(r.input)}`;
       case 'window': return q`SELECT ${relName(r.input)}.*, ${list(r.specs.map(([name,e]) => q`${expr(e)} AS ${ident(name)}`))} FROM ${from(r.input)}`;
       case 'explode': return q`SELECT ${relName(r.input)}.*, je.key AS ${ident(r.as.key ?? 'key')}, je.value AS ${ident(r.as.value)}${r.as.ord ? q`, je.key AS ${ident(r.as.ord)}` : empty} FROM ${from(r.input)}, json_each(${expr(r.expr)}) je`;
       case 'materialize': return relation(r.input);

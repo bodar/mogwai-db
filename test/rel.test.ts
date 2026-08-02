@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
 import { check } from '../src/rel/check.ts';
 import { col, lit } from '../src/rel/expr.ts';
-import { aggregate as aggregateRel, filter, join, materialize, project as projectRel, recursive as recursiveRel, scan as scanRel, union, values as valuesRel } from '../src/rel/factory.ts';
+import { aggregate as aggregateRel, filter, join, materialize, project as projectRel, recursive as recursiveRel, scan as scanRel, union, values as valuesRel, window as windowRel } from '../src/rel/factory.ts';
 import { emit } from '../src/rel/emit.ts';
 import { fuse } from '../src/rel/passes/fuse.ts';
 import { name } from '../src/rel/passes/name.ts';
@@ -166,6 +166,26 @@ describe('RelIR', () => {
     db.run('CREATE TABLE nodes (id INTEGER, name TEXT)');
     db.run("INSERT INTO nodes VALUES (1, 'marko')");
     expect(db.query(emitted.sql).all(...emitted.binds)).toHaveLength(1);
+    db.close();
+  });
+
+  test('a keyed dedup is a partitioned Window and a Filter, keeping the whole row', () => {
+    const ranked = windowRel({
+      id: relId('ranked'), input: scan, layout,
+      type: { cols: [...cols, { name: 'rn', type: 'int', nullable: false }] },
+      specs: [['rn', { kind: 'window-expr', fn: 'row_number', args: [],
+        spec: { partitionBy: [col(scan.id, 'name')], orderBy: [{ expr: col(scan.id, 'id'), dir: 'asc' }] } }]],
+    });
+    const first = filter({ id: relId('firstPerKey'), input: ranked, layout,
+      type: { cols: [...cols, { name: 'rn', type: 'int', nullable: false }] },
+      pred: { kind: 'binary', op: '=', left: col(ranked.id, 'rn'), right: lit(1, 'int') } });
+    const emitted = emit(first);
+    const db = new Database(':memory:');
+    db.run('CREATE TABLE nodes (id INTEGER, name TEXT)');
+    db.run("INSERT INTO nodes VALUES (1, 'marko'), (2, 'marko'), (3, 'vadas')");
+    expect(db.query(emitted.sql).all(...emitted.binds)).toEqual([
+      { id: 1, name: 'marko', rn: 1 }, { id: 3, name: 'vadas', rn: 1 },
+    ]);
     db.close();
   });
 

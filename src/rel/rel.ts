@@ -13,7 +13,7 @@ type RawRel =
   | (RelBase & { readonly kind: 'aggregate'; readonly id: RelId; readonly input: Rel; readonly groupBy: readonly Expr[]; readonly aggs: readonly (readonly [string, Expr])[]; readonly having?: Expr })
   | (RelBase & { readonly kind: 'sort'; readonly id: RelId; readonly input: Rel; readonly terms: readonly SortTerm[] })
   | (RelBase & { readonly kind: 'limit'; readonly id: RelId; readonly input: Rel; readonly count?: Expr; readonly offset?: Expr })
-  | (RelBase & { readonly kind: 'distinct'; readonly id: RelId; readonly input: Rel; readonly on?: readonly Expr[] })
+  | (RelBase & { readonly kind: 'distinct'; readonly id: RelId; readonly input: Rel })
   | (RelBase & { readonly kind: 'window'; readonly id: RelId; readonly input: Rel; readonly specs: readonly (readonly [string, Extract<Expr, { kind: 'window-expr' }>])[] })
   | (RelBase & { readonly kind: 'explode'; readonly id: RelId; readonly input: Rel; readonly expr: Expr; readonly as: { readonly key?: string; readonly value: string; readonly ord?: string } })
   | (RelBase & { readonly kind: 'materialize'; readonly id: RelId; readonly input: Rel; readonly name?: string })

@@ -186,7 +186,7 @@ Every node carries `layout: TraverserLayout` (its output layout) and derives `ty
 | `Aggregate` | `input, groupBy: readonly Expr[], aggs: readonly [string, Expr][], having?: Expr` | `groupBy: []` is a whole-relation aggregate |
 | `Sort` | `input, terms: readonly SortTerm[]` | |
 | `Limit` | `input, count?: Expr, offset?: Expr` | both optional; `count` absent = offset-only |
-| `Distinct` | `input, on?: readonly Expr[]` | `on` absent = whole row |
+| `Distinct` | `input` | whole row, and **only** whole row. `on` was removed 2026-08-02 (§9): it emitted a projection of the keys while the node's declared type still promised the full row, so a consumer of a dropped column failed at execution with the checker's blessing. A KEYED dedup is `Window(row_number PARTITION BY key)` + `Filter(rn = 1)` — the job §3.2 gives `partitionBy` — and `SELECT DISTINCT a, b` is `Distinct` over `Project`, one of §3's declared collapses |
 | `Window` | `input, specs: readonly [string, WindowExpr][]` | adds named window columns; input rows preserved |
 | `Explode` | `input, expr: Expr, as: { key?, value, ord? }` | `json_each` — the one table-valued function. Produces one row per member |
 | `Materialize` | `input, name?: string` | a **boundary hint**: force a named CTE here. Not semantic — the `Name` pass may add these, and a human may pin one where the planner needs a fence |

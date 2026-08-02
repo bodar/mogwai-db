@@ -151,10 +151,7 @@ export function check(plan: Rel | Stmt): void {
         break;
       case 'sort': preserve(r.input); r.terms.forEach((t) => checkExpr(t.expr, add(scope, r.input))); break;
       case 'limit': preserve(r.input); if (r.count) checkExpr(r.count, add(scope,r.input)); if (r.offset) checkExpr(r.offset, add(scope,r.input)); break;
-      case 'distinct':
-        preserve(r.input);
-        r.on?.forEach((e) => checkExpr(e, add(scope, r.input)));
-        break;
+      case 'distinct': preserve(r.input); break;
       case 'materialize': preserve(r.input); break;
       case 'window': {
         preserve(r.input);

@@ -37,7 +37,7 @@ export function relExprs(r: Rel): readonly Expr[] {
     case 'aggregate': return [...r.groupBy, ...r.aggs.map(([, e]) => e), ...some(r.having)];
     case 'sort': return r.terms.map((term) => term.expr);
     case 'limit': return some(r.count, r.offset);
-    case 'distinct': return r.on ?? [];
+    case 'distinct': return [];
     case 'window': return r.specs.map(([, e]) => e);
     case 'explode': return [r.expr];
     case 'materialize': return [];
@@ -105,7 +105,7 @@ export function mapRelChildren(r: Rel, f: (child: Rel) => Rel): Rel {
     case 'aggregate': return make.aggregate({ id, layout, type, input: f(r.input), groupBy: r.groupBy, aggs: r.aggs, having: r.having });
     case 'sort': return make.sort({ id, layout, type, input: f(r.input), terms: r.terms });
     case 'limit': return make.limit({ id, layout, type, input: f(r.input), count: r.count, offset: r.offset });
-    case 'distinct': return make.distinct({ id, layout, type, input: f(r.input), on: r.on });
+    case 'distinct': return make.distinct({ id, layout, type, input: f(r.input) });
     case 'window': return make.window({ id, layout, type, input: f(r.input), specs: r.specs });
     case 'explode': return make.explode({ id, layout, type, input: f(r.input), expr: r.expr, as: r.as });
     case 'materialize': return make.materialize({ id, layout, type, input: f(r.input), name: r.name });
@@ -127,7 +127,7 @@ export function mapRelExprs(r: Rel, f: (e: Expr) => Expr): Rel {
     case 'aggregate': return make.aggregate({ id, layout, type, input: r.input, groupBy: r.groupBy.map(f), aggs: r.aggs.map(pair), having: r.having && f(r.having) });
     case 'sort': return make.sort({ id, layout, type, input: r.input, terms: r.terms.map((term) => mapTerm(term, f)) });
     case 'limit': return make.limit({ id, layout, type, input: r.input, count: r.count && f(r.count), offset: r.offset && f(r.offset) });
-    case 'distinct': return make.distinct({ id, layout, type, input: r.input, on: r.on?.map(f) });
+    case 'distinct': return r;
     case 'window': {
       const specs = r.specs.map(([name, spec]) => {
         const mapped = f(spec);

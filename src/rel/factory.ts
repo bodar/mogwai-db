@@ -39,6 +39,11 @@ export const filter = (init: WithId<'filter'>): Node<'filter'> => node('filter',
 export const aggregate = (init: WithId<'aggregate'>): Node<'aggregate'> => { named(init.aggs); return node('aggregate', init); };
 export const sort = (init: WithId<'sort'>): Node<'sort'> => node('sort', { ...init, terms: freeze([...init.terms] as SortTerm[]) });
 export const limit = (init: WithId<'limit'>): Node<'limit'> => node('limit', init);
+/** Whole-row `SELECT DISTINCT`, and deliberately nothing else. A KEYED dedup (`dedup(by(x))`, which
+ * must keep the whole traverser) is `Window(row_number PARTITION BY x)` then `Filter(rn = 1)` — the
+ * job §3.2 gives `partitionBy`. The `on` field this node used to carry conflated the two: it emitted
+ * a projection of the keys while its declared type still promised the full row, so a consumer of a
+ * dropped column failed at execution with the checker's blessing. */
 export const distinct = (init: WithId<'distinct'>): Node<'distinct'> => node('distinct', init);
 export const window = (init: WithId<'window'>): Node<'window'> => {
   named(init.specs);
