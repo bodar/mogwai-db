@@ -466,8 +466,29 @@ counterexamples.
 `test/rel-core-sql.test.ts` pins ten exact SQL strings, one per node kind (values, projection,
 filter, aggregate, sort, limit, distinct, join, union and recursion). **It was recorded here as the
 Phase-1 exit gate and it is not** — the gate is ten L2 traversal FAMILIES, and this file references no
-L2 expectation. It survives only as an emitter snapshot, and the block assembler (§5) will rewrite
-every string in it; the gate stays open (§9·1).
+L2 expectation. It survives only as an emitter snapshot; the gate stays open (§9·1).
+
+**Progress — 2026-08-02, decision 10·1 landed (`b199a5f`):** the emitter is the SELECT block
+assembler. Slots are filled walking down from a node and a nested `SELECT` opens only where the
+slot is already occupied, so `Project(Filter(Join))` is ONE statement and `Filter` over `Aggregate`
+is `HAVING`. A named CTE is now a direct FROM item, which is what makes the genuine L2 core shape
+(`… FROM edges e INNER JOIN c2 p ON …`) reachable at all; the select list is always explicit, so a
+`Values` source binds its declared names straight to SQLite's `column1…columnN`; and the statement
+arms lost their private `externalAliases`/`bareColumns` back channels — a statement is a scope whose
+target spells its columns bare.
+
+Two node contracts had to become truthful for the assembler to name an output column at all, and
+each was a silent wrong answer waiting: **a `Join` emits its sides' columns POSITIONALLY** (the left
+alone for `semi`/`anti`), so its declared type must have that width and no duplicate name — else
+`Col{join, 'id'}` resolves to whichever side was written last, the same species as `c4bce7f`; and
+**an `Aggregate` emits its group keys then its aggregates**, so the declared type names the keys
+rather than leaving SQLite to infer them from a bare column reference. One new emission fact,
+measured: splicing a join side lifts ITS aliases into the join's `FROM`, and two sides reading the
+same shared relation lift the same alias twice (`FROM r0 shared INNER JOIN r0 shared` →
+`ambiguous column name`). That is not an error — the sides are different relations — so a collision
+keeps that side in its own `SELECT`, where its aliases are private again. Finally the bind cap is
+checked against the RENDERED bind list too, because a fused block can spell one `Lit` more than once
+and `check`'s count is over IR occurrences.
 
 ### Phase 2 — the write wedge
 
@@ -666,8 +687,8 @@ gone. A constraint is kept because it is right, not because it is written down.
 
 | # | Constraint | What landed | Status |
 |---|---|---|---|
-| 9·1 | Phase 1's equivalence gate over ten L2 traversal **families** | ten node kinds pinned against the emitter's own output; no L2 expectation referenced | **open**, and both blockers are now decided: §5 (block assembler) makes the shape reachable and §5a replaces the impossible byte-identity wording |
-| 9·2 | §5 "the emitter is total — an unrenderable node is a compile error, not a runtime throw" | `Param` and `PriorResult` are constructible and `throw` at emission | **open, decided** (§10·2): `Param` is deleted and `PriorResult` becomes `Ref` resolved by a pass, so no unrenderable node survives |
+| 9·1 | Phase 1's equivalence gate over ten L2 traversal **families** | ten node kinds pinned against the emitter's own output; no L2 expectation referenced | **open**, and both blockers are now GONE: §5a replaced the impossible byte-identity wording, and the block assembler landed (`b199a5f`), so the L2 core shape is reachable. The remaining work is the gate itself |
+| 9·2 | §5 "the emitter is total — an unrenderable node is a compile error, not a runtime throw" | `Param` and `PriorResult` are constructible and `throw` at emission | **open, decided** (§10·2): `Param` is deleted and `PriorResult` becomes `Ref` resolved by a pass, so no unrenderable node survives. These are the last two throwing arms — the block assembler's per-kind arms are all total |
 | 9·3 | §3.4 "the plan is a **DAG**; a node referenced twice is shared" | `fuse`/`prune` rebuilt per parent occurrence with no memo — measured: `left === right` true before `fuse`, false after, and `name` then named the wrong node | **FIXED** (`0ca0cd8`): one memoised `rewrite` in `walk.ts`; `prune` is now two-pass, taking each node's need as the UNION over consumers |
 | 9·4 | §4 "total, order-declared, mirroring the existing `Pass` pipeline's discipline — no switch growth" | 15 hand-written walkers (7 over `Expr`, 8 over `Rel`); 13 carried a `default:` arm, so a new node kind was silently skipped by the bind budget, recursive-term legality, pruning and sharing | **FIXED** (`5fd7c10`): `src/rel/walk.ts` declares the structure ONCE, with no `default` anywhere, so `noImplicitReturns` makes a new kind a compile error. It also closed two live holes the old walkers shared: an `Agg`'s `orderBy` and a `WindowExpr`'s `partitionBy`/`orderBy`/frame bounds were reached by NO analysis, so a `Lit` in a partition key was not counted against the bind budget |
 | 9·5 | §3.5 per-node layout obligations as a `Record`, "so a new node or role fails the build until declared" | no such table existed; `Join` had NO layout check at all, nor did grouped `Aggregate`, `Values`, `Scan`, or `Explode`'s output schema | **FIXED** (`80e8cd3`): `src/rel/layout.ts` — `Record<RelKind, LayoutObligation>`, executable and run by `check`. Includes §3.5's left-join rule (a rigid channel may not arrive from the nullable side) and extends the barrier contract to any reducing `Aggregate`, not just `groupBy: []`. `check` gained a second total table for expression PLACEMENT, with an arity assertion so a kind cannot forget one |
@@ -675,7 +696,7 @@ gone. A constraint is kept because it is right, not because it is written down.
 | 9·7 | §3.3 `Scan` is the only physical-schema node | `'id'` is hardcoded in the emitter's delete membership and in `check`'s `Delete.using` rule | **broken** |
 | 9·8 | §3.6 the bind budget is a plan property with `RowBatch`/`json_each` as the remedy | `check` fails closed above 100 binds; no chunking or JSON-bind form exists, so a legitimate large `Values` is refused rather than lowered | **open, decided** (§10·2): the remedy is a pass that lands rows as one JSON bind exploded by `json_each`, so `emit` never learns about chunking |
 | 9·9 | Phase 0 "clear the deck… worth doing first" | 0.1 not done (`globalRowOps` still has 5 refs; `ELEMENT_DISPATCH`/`SCALAR_DISPATCH` do not use it); 0.2 partly done (61 → 21 sites) | **skipped**, while Phase 2 started — and 0.2 was declared a *rename-safety prerequisite* for exactly the code motion Phases 2 and 4 perform |
-| 9·10 | §5 "the **unchanged** `q` kernel" | kernel gained `identifier()` | **amended** in §5: additive-only is the rule, and this addition qualifies |
+| 9·10 | §5 "the **unchanged** `q` kernel" | kernel gained `identifier()` | **amended** in §5: additive-only is the rule, and this addition qualifies. The block assembler needed nothing further from the kernel |
 
 Four defects the checker was supposed to make impossible, each found with a measured failing case and
 each now fixed with that case pinned as a test:
@@ -711,7 +732,7 @@ deletion.** Two of the three "constraints" turned out to be exactly that. The su
 (L1–L5 + the census + the perturbation instrument) and there are no users, so the bar is *cleanest*,
 not *smallest diff*.
 
-### 10·1 — DECIDED: the emitter assembles a SELECT block (§5)
+### 10·1 — DECIDED and LANDED (`b199a5f`): the emitter assembles a SELECT block (§5)
 
 The IR stays normalized, one operator per node, and the emitter converts to SQL's clause-slotted
 `SELECT`. Refused: a `Select` mega-node produced by `fuse`, which would put the SQL surface inside the
@@ -754,7 +775,7 @@ Refused: making every RelIR node generic in an opaque layout type `L` (a large t
 node, factory and pass, for a dependency that is a vocabulary rather than a behaviour), and simply
 accepting the import (which would keep `src/rel/` untestable without the compiler).
 
-**Sequencing: 10·1 → 10·2 → 10·3.** The assembler rewrites every emitter arm while the `Plan` wrapper
+**Sequencing: 10·1 (landed) → 10·2 → 10·3.** The assembler rewrites every emitter arm while the `Plan` wrapper
 changes emit's *entry*, so the assembler goes first to avoid rebasing it; the layout decomposition
 changes no plan structure, so it goes last, when the §3.5 obligation table is the only RelIR consumer
 left to update. 10·2 first is acceptable if the write wedge needs to move sooner — the cost is small.
