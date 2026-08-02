@@ -932,7 +932,24 @@ itself a defect instrument.** Three so far, none reachable by any test in the su
 `likePattern` crashing on `P.not`, `values(k…)` reading `args[0]`, and (below) a child scope
 inheriting the parent's `fromV`.
 
-**An L5 finding, filed rather than rushed (`known.ts`, `514e5ce`).** With `predicateInlining` off, a
+**That L5 finding is now FIXED (`d4fbf0d`), and the fix is the fourth defect this migration
+surfaced.** `withoutFromV` — the `withoutPath` of the entering-vertex context, written next to it
+for the same reason: `trackFromV` is a demand of the chain THAT ASKED, and a child scope is a
+different chain. Two things the attempt got wrong first, both worth keeping:
+
+- **Both halves must go together.** Clearing the `fv` COLUMN alone leaves `trackFromV` set, so the
+  first edge step in the body mints it again and the refusal returns one step later.
+- **The distinction is NOT "does the body mention `otherV()`" — it is whether the child's rows
+  BECOME the traverser.** `g.V().local(__.bothE('created').limit(1)).otherV()` names no `otherV()`
+  in its body, yet its rows are handed on and the outer chain reads the `fv` that body's own edge
+  step has to mint. Getting it backwards cost four L3 scenarios, which is how it was caught. Only an
+  existence gate may drop the context, because nothing of the child survives the `EXISTS` — so the
+  flag is `resultEscapes`, false at `tryCompileElementValueRows`, measured to be the sole entry both
+  `where`/`not` gates use.
+
+Two L4 scenarios pin it, one per side of that distinction (`child-scope-entering-vertex.feature`).
+
+**The original filing, kept because the diagnosis is the method (`known.ts`, `514e5ce`).** With `predicateInlining` off, a
 `where()` child containing `union()` THROWS `otherV() context through union() not yet supported`
 where the inlined route answers — the worst shape the switch can find, since the generic path is the
 semantic authority and cannot compile what its accelerator can. Diagnosed: the outer chain's
