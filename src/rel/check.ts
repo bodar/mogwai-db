@@ -1,7 +1,8 @@
 import { layoutCols } from '../compiler/steps/context/context.ts';
 import type { Expr } from './expr.ts';
-import type { Rel } from './rel.ts';
+import { isRel, type Rel } from './rel.ts';
 import type { Stmt } from './stmt.ts';
+import { recursiveSelf } from './factory.ts';
 
 const DO_BIND_CAP = 100;
 
@@ -9,6 +10,13 @@ interface Scope { readonly cols: ReadonlyMap<string, ReadonlySet<string>>; reado
 
 const add = (scope: Scope, rel: Rel): Scope => ({ ...scope, cols: new Map(scope.cols).set(rel.id, new Set(rel.type.cols.map((c) => c.name))) });
 const root = (): Scope => ({ cols: new Map(), inAggregate: false, inWindow: false });
+const sameColumns = (left: Rel['type']['cols'], right: Rel['type']['cols']): boolean =>
+  left.length === right.length && left.every((column, i) => {
+    const other = right[i];
+    return other?.name === column.name && other.type === column.type && other.nullable === column.nullable;
+  });
+const sameNames = (left: readonly string[], right: readonly string[]): boolean =>
+  left.length === right.length && left.every((name, i) => name === right[i]);
 
 export function bindCount(plan: Rel | Stmt): number {
   let n = 0;
@@ -42,22 +50,73 @@ export function bindCount(plan: Rel | Stmt): number {
       case 'union': r.inputs.forEach(rel); break;
       case 'recursive': {
         rel(r.seed);
-        const self = { ...r, kind: 'self-ref' as const, name: r.name } as Rel;
-        rel(r.step(self));
+        rel(r.step(recursiveSelf(r)));
         break;
       }
       case 'distinct': case 'materialize': rel(r.input); break;
       default: break;
     }
   };
-  if ('kind' in plan && ['insert', 'update', 'delete', 'sequence'].includes(plan.kind)) {
+  if (!isRel(plan)) {
     const stmt = (s: Stmt): void => { if (s.kind === 'sequence') s.steps.forEach(stmt); else { if (s.kind === 'insert') rel(s.source); if (s.kind === 'update' && s.from) rel(s.from); if (s.kind === 'delete' && s.using) rel(s.using); s.returning.forEach(([, e]) => expr(e)); } };
-    stmt(plan as Stmt);
-  } else rel(plan as Rel);
+    stmt(plan);
+  } else rel(plan);
   return n;
 }
 
 export function check(plan: Rel | Stmt): void {
+  /** SQLite's recursive-term law is positional, not merely a reference count. */
+  const recursiveTerm = (term: Rel, name: string): { selfRefs: number; aggregate: boolean; window: boolean } => {
+    let selfRefs = 0;
+    let aggregate = false;
+    let window = false;
+    const expression = (e: Expr): void => {
+      if (e.kind === 'agg') aggregate = true;
+      if (e.kind === 'window-expr') window = true;
+      switch (e.kind) {
+        case 'unary': expression(e.arg); break;
+        case 'binary': expression(e.left); expression(e.right); break;
+        case 'case': e.whens.forEach(([a, b]) => { expression(a); expression(b); }); if (e.else) expression(e.else); break;
+        case 'cast': expression(e.arg); break;
+        case 'call': case 'agg': case 'window-expr': e.args.forEach(expression); break;
+        case 'json-object': e.entries.forEach(([, value]) => expression(value)); break;
+        case 'json-array': e.items.forEach(expression); break;
+        case 'scalar': case 'exists': relation(e.plan); break;
+        case 'in-list': expression(e.expr); e.values.forEach(expression); break;
+        case 'in-query': expression(e.expr); relation(e.plan); break;
+        default: break;
+      }
+    };
+    const relation = (r: Rel): void => {
+      if (r.kind === 'self-ref') { if (r.name === name) selfRefs++; return; }
+      switch (r.kind) {
+        case 'project': r.exprs.forEach(([, e]) => expression(e)); relation(r.input); break;
+        case 'filter': expression(r.pred); relation(r.input); break;
+        case 'aggregate': aggregate = true; r.groupBy.forEach(expression); r.aggs.forEach(([,e]) => expression(e)); if (r.having) expression(r.having); relation(r.input); break;
+        case 'sort': r.terms.forEach((t) => expression(t.expr)); relation(r.input); break;
+        case 'limit': if (r.count) expression(r.count); if (r.offset) expression(r.offset); relation(r.input); break;
+        case 'window': window = true; r.specs.forEach(([,e]) => expression(e)); relation(r.input); break;
+        case 'explode': expression(r.expr); relation(r.input); break;
+        case 'distinct': case 'materialize': relation(r.input); break;
+        case 'join': if (r.on) expression(r.on); relation(r.left); relation(r.right); break;
+        case 'union': r.inputs.forEach(relation); break;
+        case 'recursive': relation(r.seed); relation(r.step(recursiveSelf(r))); break;
+        default: break;
+      }
+    };
+    relation(term);
+    return { selfRefs, aggregate, window };
+  };
+  const topLevelSelf = (term: Rel, name: string): boolean => {
+    if (term.kind === 'self-ref') return term.name === name;
+    // The emitter can place a direct source at the recursive term's FROM, but it may not
+    // unwrap a derived unary chain. `flatten` is the pass that makes broader bodies legal.
+    if (term.kind === 'project' || term.kind === 'filter' || term.kind === 'sort' || term.kind === 'limit'
+      || term.kind === 'distinct' || term.kind === 'window' || term.kind === 'explode' || term.kind === 'materialize')
+      return term.input.kind === 'self-ref' && term.input.name === name;
+    return term.kind === 'join'
+      && ((term.left.kind === 'self-ref' && term.left.name === name) || (term.right.kind === 'self-ref' && term.right.name === name));
+  };
   const checkExpr = (e: Expr, scope: Scope): void => {
     if (e.kind === 'col') { const cols = scope.cols.get(e.rel); if (!cols?.has(e.name)) throw new Error(`RelIR: relation ${e.rel} has no declared column '${e.name}'`); return; }
     if (e.kind === 'agg' && !scope.inAggregate) throw new Error('RelIR: Agg is legal only in Aggregate.aggs');
@@ -66,6 +125,7 @@ export function check(plan: Rel | Stmt): void {
     switch (e.kind) { case 'unary': child(e.arg); break; case 'binary': child(e.left); child(e.right); break; case 'case': e.whens.forEach(([a,b]) => { child(a); child(b); }); if (e.else) child(e.else); break; case 'cast': child(e.arg); break; case 'call': case 'agg': case 'window-expr': e.args.forEach(child); break; case 'json-object': e.entries.forEach(([,x]) => child(x)); break; case 'json-array': e.items.forEach(child); break; case 'scalar': case 'exists': checkRel(e.plan, scope); break; case 'in-list': child(e.expr); e.values.forEach(child); break; case 'in-query': child(e.expr); checkRel(e.plan, scope); break; default: break; }
   };
   const checkRel = (r: Rel, scope: Scope = root()): void => {
+    if (!isRel(r)) throw new Error('RelIR: relation was not constructed by a Rel factory');
     if (r.kind === 'self-ref') { if (!scope.recursive || !scope.recursive.allowed || r.name !== scope.recursive.name) throw new Error('RelIR: SelfRef is legal only in its Recursive step'); return; }
     const here = add(scope, r);
     const preserve = (input: Rel) => {
@@ -77,21 +137,66 @@ export function check(plan: Rel | Stmt): void {
       for (const col of inputLayout) if (!output.has(col)) throw new Error(`RelIR: ${r.kind} dropped layout column '${col}'`);
     };
     switch (r.kind) {
-      case 'values': r.rows.forEach((row) => row.forEach((e) => checkExpr(e, scope))); break;
-      case 'project': checkRel(r.input, scope); r.exprs.forEach(([, e]) => checkExpr(e, add(scope, r.input))); for (const col of layoutCols(r.layout)) if (!r.type.cols.some((c) => c.name === col)) throw new Error(`RelIR: Project does not declare layout column '${col}'`); break;
+      case 'values':
+        r.rows.forEach((row) => {
+          if (row.length !== r.type.cols.length) throw new Error(`RelIR: Values row has ${row.length} columns; declared type has ${r.type.cols.length}`);
+          row.forEach((e) => checkExpr(e, scope));
+        });
+        break;
+      case 'project': {
+        checkRel(r.input, scope);
+        r.exprs.forEach(([, e]) => checkExpr(e, add(scope, r.input)));
+        const names = r.exprs.map(([name]) => name);
+        if (new Set(names).size !== names.length) throw new Error('RelIR: Project declares a duplicate output name');
+        if (!sameNames(names, r.type.cols.map((column) => column.name))) throw new Error('RelIR: Project expressions must declare exactly its output columns');
+        for (const col of layoutCols(r.layout)) if (!r.type.cols.some((c) => c.name === col)) throw new Error(`RelIR: Project does not declare layout column '${col}'`);
+        break;
+      }
       case 'filter': preserve(r.input); checkExpr(r.pred, add(scope, r.input)); break;
       case 'aggregate': checkRel(r.input, scope); r.groupBy.forEach((e) => checkExpr(e, add(scope, r.input))); r.aggs.forEach(([,e]) => checkExpr(e, { ...add(scope, r.input), inAggregate: true })); if (r.having) checkExpr(r.having, here); break;
       case 'sort': preserve(r.input); r.terms.forEach((t) => checkExpr(t.expr, add(scope, r.input))); break;
       case 'limit': preserve(r.input); if (r.count) checkExpr(r.count, add(scope,r.input)); if (r.offset) checkExpr(r.offset, add(scope,r.input)); break;
-      case 'distinct': case 'materialize': preserve(r.input); break;
-      case 'window': preserve(r.input); r.specs.forEach(([,e]) => checkExpr(e, { ...add(scope,r.input), inWindow:true })); break;
+      case 'distinct':
+        preserve(r.input);
+        r.on?.forEach((e) => checkExpr(e, add(scope, r.input)));
+        break;
+      case 'materialize': preserve(r.input); break;
+      case 'window': {
+        preserve(r.input);
+        r.specs.forEach(([,e]) => checkExpr(e, { ...add(scope,r.input), inWindow:true }));
+        const expected = [...r.input.type.cols.map((column) => column.name), ...r.specs.map(([name]) => name)];
+        if (!sameNames(expected, r.type.cols.map((column) => column.name))) throw new Error('RelIR: Window output must be input columns followed by its specs');
+        break;
+      }
       case 'explode': preserve(r.input); checkExpr(r.expr, add(scope,r.input)); break;
-      case 'join': checkRel(r.left, scope); checkRel(r.right, scope); if (r.on) checkExpr(r.on, add(add(scope,r.left),r.right)); break;
-      case 'union': r.inputs.forEach((input) => checkRel(input,scope)); break;
-      case 'recursive': { checkRel(r.seed, scope); const step = r.step({ ...r, kind: 'self-ref', name:r.name } as Rel); checkRel(step, { ...scope, recursive: { name:r.name, self:r.id, allowed:true } }); if (JSON.stringify(r.seed.type.cols) !== JSON.stringify(step.type.cols)) throw new Error('RelIR: Recursive seed and step layouts/types must be identical'); break; }
+      case 'join':
+        checkRel(r.left, scope); checkRel(r.right, scope);
+        const needsOn = r.join === 'inner' || r.join === 'left';
+        if ((r.join === 'cross' && r.on) || (needsOn && !r.on)) throw new Error(`RelIR: ${r.join} join ${r.join === 'cross' ? 'must not' : 'requires'} an ON expression`);
+        if (r.on) checkExpr(r.on, add(add(scope,r.left),r.right));
+        break;
+      case 'union': {
+        if (r.inputs.length < 2) throw new Error('RelIR: Union requires at least two inputs');
+        r.inputs.forEach((input) => checkRel(input,scope));
+        for (const input of r.inputs) if (!sameColumns(input.type.cols, r.type.cols)) throw new Error('RelIR: Union inputs and output must have identical columns');
+        break;
+      }
+      case 'recursive': {
+        if (!sameNames(r.cols, r.type.cols.map((column) => column.name))) throw new Error('RelIR: Recursive CTE header must match its output columns');
+        checkRel(r.seed, scope);
+        const step = r.step(recursiveSelf(r));
+        const term = recursiveTerm(step, r.name);
+        if (term.selfRefs !== 1) throw new Error(`RelIR: Recursive step must reference '${r.name}' exactly once (found ${term.selfRefs})`);
+        if (term.aggregate) throw new Error('RelIR: SQLite forbids aggregate queries in a recursive term');
+        if (term.window) throw new Error('RelIR: SQLite forbids window functions in a recursive term');
+        if (!topLevelSelf(step, r.name)) throw new Error(`RelIR: Recursive step must reference '${r.name}' at the top level of FROM; run flatten first`);
+        checkRel(step, { ...scope, recursive: { name:r.name, self:r.id, allowed:true } });
+        if (JSON.stringify(r.seed.type.cols) !== JSON.stringify(step.type.cols)) throw new Error('RelIR: Recursive seed and step layouts/types must be identical');
+        break;
+      }
       default: break;
     }
   };
-  if ('kind' in plan && ['insert','update','delete','sequence'].includes(plan.kind)) { /* statement checking lands with Phase 2 */ } else checkRel(plan as Rel);
+  if (!isRel(plan)) { /* statement checking lands with Phase 2 */ } else checkRel(plan);
   if (bindCount(plan) > DO_BIND_CAP) throw new Error(`RelIR: ${bindCount(plan)} binds exceeds Durable Objects cap of ${DO_BIND_CAP}`);
 }

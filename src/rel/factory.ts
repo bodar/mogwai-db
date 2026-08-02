@@ -1,0 +1,59 @@
+import type { Expr } from './expr.ts';
+import { brandRel, type Rel, type RelInit, type RelKind, type RelNode, type Table } from './rel.ts';
+import type { RelId, SortTerm } from './types.ts';
+
+type Node<K extends RelKind> = Extract<Rel, { readonly kind: K }>;
+type Init<K extends RelKind> = RelInit<K>;
+type WithId<K extends RelKind> = Init<K> & { readonly id: RelId };
+
+const freeze = <T>(value: T): T => Object.freeze(value);
+const named = (pairs: readonly (readonly [string, Expr])[]): void => {
+  if (new Set(pairs.map(([name]) => name)).size !== pairs.length) throw new Error('RelIR: duplicate output name');
+};
+const node = <K extends RelKind>(kind: K, init: WithId<K>): Node<K> => {
+  const { id, ...rest } = init;
+  return brandRel({ kind, id, ...rest } as RelNode<K>);
+};
+
+/** One stateless constructor per relational shape. Named arguments preserve the schema at call
+ * sites; the factory is a contract, not a positional shorthand. */
+export const scan = (init: WithId<'scan'>): Node<'scan'> => node('scan', init);
+
+export const values = (init: WithId<'values'>): Node<'values'> => {
+  for (const row of init.rows) if (row.length !== init.type.cols.length) throw new Error(`RelIR: Values row has ${row.length} columns; declared type has ${init.type.cols.length}`);
+  return node('values', { ...init, rows: freeze(init.rows.map((row) => freeze([...row]))) });
+};
+export const priorResult = (init: WithId<'prior-result'>): Node<'prior-result'> => node('prior-result', init);
+export const project = (init: WithId<'project'>): Node<'project'> => {
+  named(init.exprs);
+  return node('project', { ...init, exprs: freeze(init.exprs.map((pair) => freeze([...pair] as [string, Expr]))) });
+};
+export const filter = (init: WithId<'filter'>): Node<'filter'> => node('filter', init);
+export const aggregate = (init: WithId<'aggregate'>): Node<'aggregate'> => { named(init.aggs); return node('aggregate', init); };
+export const sort = (init: WithId<'sort'>): Node<'sort'> => node('sort', { ...init, terms: freeze([...init.terms] as SortTerm[]) });
+export const limit = (init: WithId<'limit'>): Node<'limit'> => node('limit', init);
+export const distinct = (init: WithId<'distinct'>): Node<'distinct'> => node('distinct', init);
+export const window = (init: WithId<'window'>): Node<'window'> => { named(init.specs); return node('window', init); };
+export const explode = (init: WithId<'explode'>): Node<'explode'> => node('explode', init);
+export const materialize = (init: WithId<'materialize'>): Node<'materialize'> => node('materialize', init);
+export const join = (init: WithId<'join'>): Node<'join'> => {
+  if (init.join === 'cross' && init.on) throw new Error('RelIR: cross join must not have an ON expression');
+  if ((init.join === 'inner' || init.join === 'left') && !init.on) throw new Error(`RelIR: ${init.join} join requires an ON expression`);
+  return node('join', init);
+};
+export const union = (init: WithId<'union'>): Node<'union'> => {
+  if (init.inputs.length < 2) throw new Error('RelIR: Union requires at least two inputs');
+  return node('union', init);
+};
+export const recursive = (init: WithId<'recursive'>): Node<'recursive'> => {
+  const output = init.type.cols.map((column) => column.name);
+  if (init.cols.length !== output.length || init.cols.some((name, i) => name !== output[i])) throw new Error('RelIR: Recursive CTE header must match its output columns');
+  let built: Rel | undefined;
+  return node('recursive', { ...init, step: (self) => built ??= init.step(self) });
+};
+
+/** Internal-only recursive callback argument. */
+export const recursiveSelf = (recursive: Node<'recursive'>): Node<'self-ref'> =>
+  brandRel({ kind: 'self-ref', id: recursive.id, name: recursive.name, layout: recursive.layout, type: recursive.type });
+
+export type { Table };

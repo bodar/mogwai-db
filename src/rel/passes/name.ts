@@ -1,4 +1,5 @@
 import type { Rel } from '../rel.ts';
+import { recursiveSelf } from '../factory.ts';
 
 export interface NamedRel { readonly name: string; readonly rel: Rel; }
 export interface Naming { readonly root: Rel; readonly named: readonly NamedRel[]; }
@@ -21,7 +22,7 @@ export function name(root: Rel): Naming {
         visit(rel.seed);
         if (!seenRecursive.has(rel)) {
           seenRecursive.add(rel);
-          visit(rel.step({ ...rel, kind: 'self-ref' as const, name: rel.name } as Rel));
+          visit(rel.step(recursiveSelf(rel)));
         }
         break;
       default: break;

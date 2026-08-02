@@ -1,13 +1,16 @@
-import { empty, list, q, raw, render, value, type Expression } from '../sql/kernel/q.ts';
+import { empty, identifier, list, q, raw, render, value, type Expression } from '../sql/kernel/q.ts';
 import { check } from './check.ts';
 import type { Expr } from './expr.ts';
 import type { Rel } from './rel.ts';
 import type { Naming } from './passes/name.ts';
+import { recursiveSelf } from './factory.ts';
 
 export interface Emitted { readonly sql: string; readonly binds: readonly any[]; }
 
-const ident = (name: string): Expression => raw(`"${name.replaceAll('"', '""')}"`);
-const relName = (rel: Rel): Expression => ident(rel.id);
+const ident = (name: string): Expression => identifier(name);
+// A lexical relation id is not an SQL alias. Scans own their source alias; derived relations
+// are introduced under their RelId by `from()`.
+const relName = (rel: Rel): Expression => ident(rel.kind === 'scan' ? rel.alias : rel.id);
 
 /** Render a checked relational plan through the existing q kernel. */
 export function emit(plan: Rel, naming?: Naming): Emitted {
@@ -42,7 +45,13 @@ export function emit(plan: Rel, naming?: Naming): Emitted {
   const bound = (b: import('./types.ts').FrameBound): Expression => b.kind === 'preceding' || b.kind === 'following'
     ? q`${expr(b.count)} ${raw(b.kind.toUpperCase())}`
     : raw(b.kind.replaceAll('-', ' ').toUpperCase());
-  const from = (r: Rel): Expression => r.kind === 'scan' ? q`${ident(r.table)} ${ident(r.alias)}` : q`(${relation(r)}) ${relName(r)}`;
+  const from = (r: Rel): Expression => r.kind === 'scan'
+    ? q`${ident(r.table)} ${ident(r.alias)}`
+    // A recursive reference is a table source, never a derived relation. SQLite requires it
+    // exactly once at the recursive term's top-level FROM; wrapping it emits "circular reference".
+    : r.kind === 'self-ref'
+      ? q`${ident(r.name)} ${relName(r)}`
+      : q`(${relation(r)}) ${relName(r)}`;
   const relation = (r: Rel, inline = false): Expression => {
     const cte = named.get(r);
     if (!inline && cte) return q`SELECT * FROM ${ident(cte)}`;
@@ -68,16 +77,23 @@ export function emit(plan: Rel, naming?: Naming): Emitted {
       case 'join': {
         if (r.join === 'semi' || r.join === 'anti') return q`SELECT ${relName(r.left)}.* FROM ${from(r.left)} WHERE ${r.join === 'anti' ? raw('NOT ') : empty}EXISTS (SELECT 1 FROM ${from(r.right)}${r.on ? q` WHERE ${expr(r.on)}` : empty})`;
         const join = r.join === 'cross' ? raw('CROSS JOIN') : raw(`${r.join.toUpperCase()} JOIN`);
-        return q`SELECT * FROM ${from(r.left)} ${join} ${from(r.right)}${r.join === 'cross' ? empty : q` ON ${r.on!}`}`;
+        return q`SELECT * FROM ${from(r.left)} ${join} ${from(r.right)}${r.join === 'cross' ? empty : q` ON ${expr(r.on!)}`}`;
       }
       case 'union': return list(r.inputs.map((input) => q`(${relation(input)})`), r.all ? ' UNION ALL ' : ' UNION ');
-      case 'recursive': { const step = r.step({ ...r, kind:'self-ref', name:r.name } as Rel); return q`WITH RECURSIVE ${ident(r.name)}(${list(r.cols.map(ident))}) AS (${relation(r.seed)} UNION ALL ${relation(step)}) SELECT * FROM ${ident(r.name)}`; }
+      case 'recursive': { const step = r.step(recursiveSelf(r)); return q`WITH RECURSIVE ${ident(r.name)}(${list(r.cols.map(ident))}) AS (${relation(r.seed)} UNION ALL ${relation(step)}) SELECT * FROM ${ident(r.name)}`; }
     }
   };
   const root = relation(plan);
-  const tree = naming?.named.length
-    ? q`WITH ${list(naming.named.map((binding) => q`${ident(binding.name)} AS (${relation(binding.rel, true)})`))} ${root}`
-    : root;
+  const bindings = naming?.named.map((binding) => q`${ident(binding.name)} AS (${relation(binding.rel, true)})`) ?? [];
+  // A recursive root owns a WITH RECURSIVE clause. Its named dependencies must be peers in that
+  // clause; prefixing a second plain WITH would produce invalid SQLite syntax.
+  const tree = plan.kind === 'recursive' && bindings.length
+    ? (() => {
+      const step = plan.step(recursiveSelf(plan));
+      const recursive = q`${ident(plan.name)}(${list(plan.cols.map(ident))}) AS (${relation(plan.seed)} UNION ALL ${relation(step)})`;
+      return q`WITH RECURSIVE ${list([...bindings, recursive])} SELECT * FROM ${ident(plan.name)}`;
+    })()
+    : bindings.length ? q`WITH ${list(bindings)} ${root}` : root;
   const out = render(tree);
   return { sql: out.sql, binds: out.binds };
 }

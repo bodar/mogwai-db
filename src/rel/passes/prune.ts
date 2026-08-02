@@ -1,6 +1,7 @@
 import { layoutCols } from '../../compiler/steps/context/context.ts';
 import type { Expr } from '../expr.ts';
 import type { Rel } from '../rel.ts';
+import { distinct, explode, filter, limit, materialize, project, sort, window } from '../factory.ts';
 
 const refs = (expr: Expr, relation: import('../types.ts').RelId, out: Set<string>): void => {
   if (expr.kind === 'col') { if (expr.rel === relation) out.add(expr.name); return; }
@@ -28,10 +29,15 @@ export function prune(plan: Rel, required: readonly string[] = plan.type.cols.ma
         const inputNeed = new Set(layoutCols(r.input.layout));
         exprs.forEach(([, expr]) => refs(expr, r.input.id, inputNeed));
         const input = visit(r.input, inputNeed);
-        return { ...r, input, exprs, type: { cols: r.type.cols.filter((col) => keep.has(col.name)) } };
+        return project({ id: r.id, input, layout: r.layout, type: { cols: r.type.cols.filter((col) => keep.has(col.name)) }, exprs });
       }
-      case 'filter': return { ...r, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])) };
-      case 'sort': case 'limit': case 'distinct': case 'window': case 'explode': case 'materialize': return { ...r, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])) };
+      case 'filter': return filter({ id: r.id, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])), layout: r.layout, type: r.type, pred: r.pred });
+      case 'sort': return sort({ id: r.id, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])), layout: r.layout, type: r.type, terms: r.terms });
+      case 'limit': return limit({ id: r.id, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])), layout: r.layout, type: r.type, count: r.count, offset: r.offset });
+      case 'distinct': return distinct({ id: r.id, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])), layout: r.layout, type: r.type, on: r.on });
+      case 'window': return window({ id: r.id, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])), layout: r.layout, type: r.type, specs: r.specs });
+      case 'explode': return explode({ id: r.id, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])), layout: r.layout, type: r.type, expr: r.expr, as: r.as });
+      case 'materialize': return materialize({ id: r.id, input: visit(r.input, new Set([...need, ...layoutCols(r.input.layout)])), layout: r.layout, type: r.type, name: r.name });
       default: return r;
     }
   };

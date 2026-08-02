@@ -3,7 +3,7 @@ import type { RelBase, RelId, SortTerm } from './types.ts';
 
 export type Table = 'nodes' | 'edges' | 'vertex_properties' | 'edge_properties' | 'property_fts' | 'labels';
 
-export type Rel =
+type RawRel =
   | (RelBase & { readonly kind: 'scan'; readonly id: RelId; readonly table: Table; readonly alias: string })
   | (RelBase & { readonly kind: 'values'; readonly id: RelId; readonly rows: readonly (readonly Expr[])[] })
   | (RelBase & { readonly kind: 'self-ref'; readonly id: RelId; readonly name: string })
@@ -20,3 +20,19 @@ export type Rel =
   | (RelBase & { readonly kind: 'join'; readonly id: RelId; readonly left: Rel; readonly right: Rel; readonly join: 'inner' | 'left' | 'cross' | 'semi' | 'anti'; readonly on?: Expr })
   | (RelBase & { readonly kind: 'union'; readonly id: RelId; readonly inputs: readonly Rel[]; readonly all: boolean })
   | (RelBase & { readonly kind: 'recursive'; readonly id: RelId; readonly name: string; readonly cols: readonly string[]; readonly seed: Rel; readonly step: (self: Rel) => Rel });
+
+const relBrand: unique symbol = Symbol('RelIR.Rel');
+type Branded<T> = T extends unknown ? T & { readonly [relBrand]: true } : never;
+
+/** A checked construction token. Only the kind-specific functions in factory.ts mint one. */
+export type Rel = Branded<RawRel>;
+export type RelKind = RawRel['kind'];
+export type RelNode<K extends RelKind> = Extract<RawRel, { readonly kind: K }>;
+export type RelInit<K extends RelKind> = Omit<RelNode<K>, 'kind' | 'id'>;
+
+/** Factory implementation seam; deliberately not re-exported from a public surface. */
+export const brandRel = <K extends RelKind>(node: RelNode<K>): Extract<Rel, { readonly kind: K }> =>
+  Object.freeze({ ...node, [relBrand]: true }) as Extract<Rel, { readonly kind: K }>;
+
+export const isRel = (value: unknown): value is Rel =>
+  typeof value === 'object' && value !== null && (value as { readonly [relBrand]?: unknown })[relBrand] === true;

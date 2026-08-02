@@ -1,5 +1,6 @@
 import type { Expr } from '../expr.ts';
 import type { Rel } from '../rel.ts';
+import { aggregate, distinct, explode, filter, join, limit, materialize, project, recursive, sort, union, window } from '../factory.ts';
 
 const rebind = (expr: Expr, from: import('../types.ts').RelId, to: import('../types.ts').RelId): Expr => {
   switch (expr.kind) {
@@ -22,23 +23,23 @@ export function fuse(plan: Rel): Rel {
   const visit = (r: Rel): Rel => {
     const one = (input: Rel): Rel => visit(input);
     switch (r.kind) {
-      case 'project': return { ...r, input: one(r.input) };
+      case 'project': return project({ id: r.id, input: one(r.input), layout: r.layout, type: r.type, exprs: r.exprs });
       case 'filter': {
         const input = one(r.input);
-        if (input.kind !== 'filter') return { ...r, input };
+        if (input.kind !== 'filter') return filter({ id: r.id, input, layout: r.layout, type: r.type, pred: r.pred });
         const pred: Expr = { kind: 'binary', op: 'and', left: input.pred, right: rebind(r.pred, input.id, input.input.id) };
-        return { ...r, input: input.input, pred };
+        return filter({ id: r.id, input: input.input, layout: r.layout, type: r.type, pred });
       }
-      case 'aggregate': return { ...r, input: one(r.input) };
-      case 'sort': return { ...r, input: one(r.input) };
-      case 'limit': return { ...r, input: one(r.input) };
-      case 'distinct': return { ...r, input: one(r.input) };
-      case 'window': return { ...r, input: one(r.input) };
-      case 'explode': return { ...r, input: one(r.input) };
-      case 'materialize': return { ...r, input: one(r.input) };
-      case 'join': return { ...r, left: one(r.left), right: one(r.right) };
-      case 'union': return { ...r, inputs: r.inputs.map(one) };
-      case 'recursive': return { ...r, seed: one(r.seed), step: (self) => one(r.step(self)) };
+      case 'aggregate': return aggregate({ id: r.id, input: one(r.input), layout: r.layout, type: r.type, groupBy: r.groupBy, aggs: r.aggs, having: r.having });
+      case 'sort': return sort({ id: r.id, input: one(r.input), layout: r.layout, type: r.type, terms: r.terms });
+      case 'limit': return limit({ id: r.id, input: one(r.input), layout: r.layout, type: r.type, count: r.count, offset: r.offset });
+      case 'distinct': return distinct({ id: r.id, input: one(r.input), layout: r.layout, type: r.type, on: r.on });
+      case 'window': return window({ id: r.id, input: one(r.input), layout: r.layout, type: r.type, specs: r.specs });
+      case 'explode': return explode({ id: r.id, input: one(r.input), layout: r.layout, type: r.type, expr: r.expr, as: r.as });
+      case 'materialize': return materialize({ id: r.id, input: one(r.input), layout: r.layout, type: r.type, name: r.name });
+      case 'join': return join({ id: r.id, left: one(r.left), right: one(r.right), layout: r.layout, type: r.type, join: r.join, on: r.on });
+      case 'union': return union({ id: r.id, inputs: r.inputs.map(one), layout: r.layout, type: r.type, all: r.all });
+      case 'recursive': return recursive({ id: r.id, name: r.name, cols: r.cols, seed: one(r.seed), layout: r.layout, type: r.type, step: (self) => one(r.step(self)) });
       default: return r;
     }
   };
