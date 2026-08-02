@@ -235,16 +235,20 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
   the outside clone is typically at a SHA that is not even a valid object in our blobless history.
 - **DO SQLite caps a query at 100 BOUND PARAMETERS (and 100 KB of statement text) — Bun's cap is
   65,535, so a bind list that scales with ROW COUNT passes every test and fails only in production.**
-  Never write `ids.map(() => '?')`. Three answers, and which one applies is decided by whether the
-  statement can be split: a WRITE chunks through **`src/rowbatch.ts`** (`bindChunks` at
-  `floor(100 / binds-per-row)`, FIXED shape so the prepared-statement cache hits — measured 4.6×
-  faster than inlining literals to dodge the cap, so the portable form is also the fast one); a READ
-  cannot chunk at all (a compiled plan is ONE statement, with nowhere to put a preceding INSERT), so
-  it lands the whole set as **one JSON bind** exploded by `json_each` (`landForeignElements`,
-  `jsonbArrayBind`); and a set bounded by the QUERY TEXT may stay an IN-list. Two gates keep it that
-  way: `mise run binds` statically, `mise run test:cf-limits` at runtime (`src/cf-limits.ts` — the
-  `Sql` decorator that makes a DO-only wall fail on Bun).
-  Detail: `docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md`.
+  Never write `ids.map(() => '?')`. **A row set whose size is a function of DATA crosses the seam as
+  ONE VALUE — a single JSON bind exploded by `json_each` — read or write**; a set bounded by the
+  QUERY TEXT may stay an IN-list. Two gates keep it that way: `mise run binds` statically,
+  `mise run test:cf-limits` at runtime (`src/cf-limits.ts` — the `Sql` decorator that makes a DO-only
+  wall fail on Bun).
+  **This rule was measured on the runtime we SHIP to, and that is load-bearing: Bun and DO disagree
+  on its direction.** Chunking a write through `src/rowbatch.ts` is ~1.7× faster on `bun:sqlite` and
+  ~2× SLOWER on DO, because 607 `sql.exec` calls cross the host boundary where one does not. Picking
+  the form the dev runtime prefers is exactly the error `cf-limits.ts` exists to prevent. (The older
+  4.6× figure compared chunking against INLINING LITERALS — still true, still not the question.)
+  `src/rowbatch.ts` remains the LEGACY write path's mechanism and is correct until that path is
+  migrated; it is not the pattern to copy into new code, and it shrinks to whatever JSON cannot carry.
+  Numbers, method and caveats: `docs/2026-08-01-relir-build-plan.md` §10·5. Cap detail:
+  `docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md`.
 - Storage runtimes meet at the sync **`Sql` interface** (`src/storage.ts`): `bun:sqlite` (dev) and
   DO `ctx.storage.sql` (prod). Compiler + frame tier are storage-agnostic; the HTTP edge never
   touches a store. **Bind-type gotcha:** DO SQLite throws on `boolean`/`bigint` binds — `GraphStore`

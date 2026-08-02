@@ -6,10 +6,16 @@
 // test can see (src/cf-limits.ts is the instrument that makes it visible; this module is the
 // answer). Chunk at `floor(100 / binds-per-row)` with a FIXED-shape statement and one ragged tail.
 //
-// The chunked form is also the FAST one, which is what makes this a free invariant rather than a
-// portability tax: measured 4.6× faster than inlining literals to dodge the cap (38 ms vs 176 ms for
-// 20,000 rows), because a fixed-shape statement hits the prepared-statement cache (`bun:sqlite`
-// caches by SQL text, and so does DO) while a big inlined statement is a fresh parse that evicts it.
+// Chunking beats INLINING LITERALS on both runtimes — measured 4.6× (38 ms vs 176 ms for 20,000
+// rows), because a fixed-shape statement hits the prepared-statement cache (`bun:sqlite` caches by
+// SQL text, and so does DO) while a big inlined statement is a fresh parse that evicts it.
+//
+// **It does NOT beat one JSON bind, and the header used to imply it did.** Measured 2026-08-02 on
+// both runtimes (docs/2026-08-01-relir-build-plan.md §10·5): chunking is ~1.7× faster than a single
+// `json_each(?)` statement on `bun:sqlite` and ~2× SLOWER on DO, because 607 `sql.exec` calls cross
+// the host boundary where one does not. **DO is the runtime we ship to, so one JSON bind is the rule
+// for new code** — read or write. This module stays because it is what the LEGACY write path uses
+// and it is correct; it is not the pattern to copy, and it shrinks to whatever JSON cannot carry.
 //
 // Deliberately NOT built on the `q` kernel: these are constant-shape DML statements over the fixed
 // schema, with no predicates to compose and no relations to name. The kernel's job is compiling

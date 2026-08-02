@@ -669,9 +669,9 @@ cut, one statement", and it is not reachable as written. Two findings, measured 
 
 **How both were answered.** The first: **§10·4** — reads go first, through a second lowering grown
 step by step behind a differential switch, with the phase order becoming `4.1 → 2 → 3 → 4.2–4.4` and
-a two-counter contract that the migration finishes. The second: **§10·5** — the apparent conflict is
-probably not one (the 4.6× measurement compares chunked binds against INLINED LITERALS, not against
-a JSON bind), so it is one benchmark away from a single rule rather than a trade-off to split.
+a two-counter contract that the migration finishes. The second: **§10·5** — the apparent conflict was
+not one. Measured on both runtimes, the JSON bind is ~2× FASTER on DO (and slower on Bun), so there
+is one rule rather than a trade-off to split.
 
 **Superseded handoff — 2026-08-02, RESTATED against §3.0.** Phase 2's remaining 2.1 seam is the
 **binding executor**, and it is no longer statement-shaped: walk `Plan.bindings` in order; a `Rel`
@@ -877,8 +877,9 @@ not *smallest diff*.
 
 10·1–10·3 settled the audit's three open questions, and two of those three "constraints" turned out
 to be pure cost-avoidance. **10·4 is the one that governs everything after them** — how Gremlin
-reaches RelIR, and the contract that the migration finishes. 10·5 is open pending one benchmark.
-10·6 applies 10·4's discipline inward, to RelIR's own duplication.
+reaches RelIR, and the contract that the migration finishes. 10·5 settles the row-transport rule by
+measuring it on the runtime we ship to. 10·6 applies 10·4's discipline inward, to RelIR's own
+duplication.
 
 ### 10·1 — DECIDED and LANDED (`b199a5f`): the emitter assembles a SELECT block (§5)
 
@@ -984,32 +985,54 @@ So, explicitly:
 **Order.** Reads first, because writes consume them (§6's re-order): `4.1` → `2` → `3` → `4.2–4.4`.
 Phase 2's W2/W3 acceptance criteria are unaffected; they simply happen later.
 
-### 10·5 — OPEN, pending ONE measurement: the row-transport rule
+### 10·5 — DECIDED 2026-08-02 BY MEASUREMENT: one value, never N parameters
 
-`§3.6` says a row set too large to be binds lands as one JSON bind exploded by `json_each`. The root
-`CLAUDE.md` says a WRITE chunks through `src/rowbatch.ts`. These look like a conflict and **probably
-are not one.**
+`§3.6` said a large row set lands as one JSON bind exploded by `json_each`; the root `CLAUDE.md`
+said a WRITE chunks through `src/rowbatch.ts`. **Measured, and the answer depends on which runtime
+you ask — which is the whole point.**
 
-The measurement `rowbatch.ts` cites is **chunked binds versus INLINED LITERALS** — 38 ms vs 176 ms
-for 20,000 rows — and the mechanism it identifies is prepared-statement cache hits versus a fresh
-parse that evicts the cache. A single JSON-bind statement is *also* fixed-shape with one bind, so it
-hits the same cache, and it is ONE execution rather than N. **The comparison that would actually
-decide this has never been run.** Note too that the project already applies the JSON rule to reads:
-`jsonbArrayBind` is documented for "a set whose size is a function of DATA", so today the same
-question has two answers depending on which side of the read/write line a caller sits.
+The comparison `rowbatch.ts` cites is chunked binds against **INLINED LITERALS** (4.6×, 38 ms vs
+176 ms for 20,000 rows). That comparison still holds and inlining is still wrong. The comparison
+that had never been run is chunked binds against **ONE JSON BIND**, and it was run on both runtimes
+— Bun via `bun:sqlite`, Cloudflare via a throwaway DO under `wrangler dev` (local workerd), the same
+harness `test/cloudflare.test.ts` already uses. Median of 7, 20,000 rows of 3 columns:
 
-**The measurement:** `INSERT … SELECT … FROM json_each(?)` for 20,000 rows against the equivalent
-chunked `RowBatch` run, on Bun and under `test:cf-limits`.
+| | statements | Bun | **DO (workerd)** |
+|---|---|---|---|
+| INSERT, chunked at `floor(100/3)` | 607 | **12 ms** | 42 ms |
+| INSERT, one JSON bind + `json_each` | 1 | 20 ms | **20 ms** |
+| DELETE by id set, chunked at 100 | 200 | **20 ms** | 13 ms |
+| DELETE by id set, one JSON bind | 1 | 21 ms | **8 ms** |
 
-**If the JSON form wins or ties, adopt one rule everywhere:** *a row set whose size is a function of
-DATA crosses the `Sql` seam as ONE VALUE, never as N parameters — read or write, nothing to choose.*
-That collapses `bindChunks`/`placeholders`/`jsonbArrayBind`/`RowsBind` into one concept, and it turns
-the DO cap from an IDIOM that `mise run binds` greps for into a STRUCTURAL property `check` can
-prove: a RelIR plan's bind count is O(plan size) by construction. `binds-check.ts` becomes deletable
-and `RowBatch` shrinks to whatever JSON genuinely cannot carry. If the chunked form wins decisively,
-record the number here and give a `Stmt` binding a chunked execution mode — at the cost of the
-executor learning about chunking, which §3.6's "the lowering is a pass, so `emit` never learns about
-chunking" would then hold only for reads.
+**The direction REVERSES between the dev runtime and the production one.** On Bun the chunked form
+wins by ~1.7× on insert; on DO the JSON form wins by ~2× on insert and ~1.6× on delete, and the same
+holds at 1,000 rows (3 ms → 1 ms insert, 1 ms → 0 ms delete).
+
+The mechanism is measured too, and it explains the reversal rather than merely reporting it. On Bun,
+**statement count is not the cost**: the same 20,000 rows in 607 statements and in 10 statements are
+10.6 ms and 9.9 ms, so what the chunked form saves is the per-row JSON extraction, which is real and
+intrinsic. On DO that same per-row saving is still there — but 607 `sql.exec` calls now cross the
+host boundary, and that cost is larger. Nothing about the JSON payload got cheaper; the statement
+count got expensive.
+
+**So the rule is: a row set whose size is a function of DATA crosses the `Sql` seam as ONE VALUE,
+never as N parameters — read or write, nothing to choose.** It is the faster form on the runtime we
+ship to, and choosing the other one because the DEV runtime prefers it is precisely the class of
+error `src/cf-limits.ts` exists to prevent. That one rule collapses `bindChunks`/`placeholders`/
+`jsonbArrayBind`/`RowsBind` into a single concept, and it turns the DO cap from an IDIOM
+`mise run binds` greps for into a STRUCTURAL property `check` can prove: a RelIR plan's bind count
+is O(plan size) by construction. `RowBatch` shrinks to whatever JSON genuinely cannot carry (a blob),
+and `binds-check.ts` becomes deletable once the last hand-rolled placeholder site is gone.
+
+**Two caveats, recorded so nobody re-derives them.** workerd clamps timer resolution inside a DO, so
+read the DO column as ratios and orders of magnitude rather than exact milliseconds — the ratio is
+consistent across two sizes and two statement shapes, and the Bun column (opposite direction, same
+harness) is what rules out the numbers being noise. And the DO run also independently reconfirmed
+the cap: a deliberately wide 2,000-row insert was refused with `too many SQL variables`.
+
+**Method, worth reusing:** a throwaway `wrangler dev` worker with its own DO measures production
+SQLite for real, in about a minute. Any future claim of the form "X is faster" about storage should
+be taken there before it is written down as a rule.
 
 ### 10·6 — DECIDED 2026-08-02: `Delete.using` is deleted; membership is a predicate
 
@@ -1024,7 +1047,7 @@ any other expression. `Insert.source` and `Update.from` keep their places — a 
 SQLite's `UPDATE … FROM` have no predicate spelling — and `using` never had one.
 
 **Sequencing: 10·1 → 10·2 → 10·3 — all three landed (`b199a5f`, `3057e89`, `25e0b5f`).** 10·4 is
-the decision that governs everything after them; 10·5 needs one benchmark; 10·6 is small and ready. The assembler rewrites every emitter arm while the `Plan` wrapper
+the decision that governs everything after them; 10·5 is settled by measurement; 10·6 is small and ready. The assembler rewrites every emitter arm while the `Plan` wrapper
 changes emit's *entry*, so the assembler goes first to avoid rebasing it; the layout decomposition
 changes no plan structure, so it goes last, when the §3.5 obligation table is the only RelIR consumer
 left to update. 10·2 first is acceptable if the write wedge needs to move sooner — the cost is small.
