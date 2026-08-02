@@ -799,6 +799,43 @@ that stalls while the first looks finished — a traversal can route to RelIR wh
 alive because some other entry point still reaches it. **Coverage at 100% with a non-empty §8 list
 is a FAILED migration, not a finished one.**
 
+**BOTH COUNTERS EXIST AND BOTH GATE. The spine landed 2026-08-02 (`fda7e3a`).** Entry criteria for
+4.1 are therefore met, and the numbers to beat are **coverage 38/2,298 (1.7%)** and **deletion 110**.
+
+- `src/compiler/rel/lower.ts` is the second lowering: `Step[] → Plan | null`, where `null` is the
+  only decline and must stay cheap and total. Coverage today is the element source (`V`/`E`, with
+  or without an id list). Small on purpose — the value is the instrument, so every later increment
+  is a measured delta rather than a leap.
+- `src/compiler/rel/spine.ts` is the routing seam. **The RelIR plan is ONE RELATION to the framing
+  layer**: `emitRelational` returns the whole program as a kernel `Expression` and `derived()`
+  makes it a `Relation` the existing element projection selects from exactly as it selects from the
+  legacy `c0`. Three consequences, all of them the reason to do it this way rather than
+  re-encoding framing in RelIR (§7's named risk): binds stay in ONE `render`, so no second
+  bind-ordering authority exists; CTE-versus-inline stays the `name` pass's decision (§4.6) instead
+  of leaking into the framing `Query`'s `c0…cN` namespace, where two naming schemes would have to
+  agree; and no framing code is duplicated, because the payload projection and its `Shape` are
+  reached through the ordinary lowering loop with zero steps left — **the two routes frame
+  identically BY CONSTRUCTION rather than by comparison.** This is not an opaque escape node and
+  does not become one: the traffic is one-way, a finished RelIR relation consumed by framing, and
+  nothing legacy ever enters a `Rel`.
+- `mise run test:legacy-spine` is the differential — the whole suite with `MOGWAI_RELIR=0` — and it
+  is **green**, so the two spines agree on the L1–L5 ladder, the census multisets and the L2
+  contract. An ENV switch for `test:perturbed`'s reason: the suite must not be able to see which
+  position it is in. **It must pass in BOTH positions**, which is why the one L2 test that pins a
+  spine's spelling now pins both, each against the spine that produces it — a differential that
+  cannot run green is not one.
+- The census `spine` column is the coverage ratchet, with two assertions that fail differently: no
+  traversal moves `rel → legacy` (names WHICH shape stopped routing), and the total may not fall.
+  **Measured with the RelIR route FORCED ON**, never the ambient switch — otherwise a re-record
+  under the differential's off position would rewrite the artifact as all-legacy and the ratchet
+  would be measuring the switch instead of the migration.
+
+Two smaller facts worth not re-deriving. `Compiled` gained a `spine` field: it is a compile FACT,
+not instrumentation, and `readCompiled`'s default of `'legacy'` is a statement about who calls it
+rather than an unknown. And relation ids are minted PER LOWERING — a module-global counter made two
+compiles of one query emit different SQL depending on compile order, which would have broken every
+snapshot and any text-keyed cache, only under a particular ordering.
+
 ---
 
 ## 7. Risks, named, with the response
