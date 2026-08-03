@@ -3,6 +3,7 @@ import * as make from '../../rel/factory.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import type { Binding } from '../../rel/plan.ts';
 import type { Rel, Table } from '../../rel/rel.ts';
+import type { Channels } from '../../channels.ts';
 import { insert, remove } from '../../rel/stmt-factory.ts';
 import type { Stmt } from '../../rel/stmt.ts';
 import { EXCLUDED, type ColMeta, type RelType } from '../../rel/types.ts';
@@ -12,7 +13,7 @@ import { isNested } from '../../gremlin/frontend.ts';
 import { propertyValueBind } from '../../gremlin/types.ts';
 import { propertyFtsEntries } from '../../services/fts-index.ts';
 import { parseProperty, type ParsedProperty } from '../steps/write/write.ts';
-import { validatePropertyKey } from '../steps/write/validate.ts';
+import { validateLabel, validatePropertyKey } from '../steps/write/validate.ts';
 import { and, carriedCols, eq, meta, typeOf, type Minter } from './build.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 
@@ -401,23 +402,17 @@ export function elementProperty(target: Rel, elem: Elem, writes: readonly Proper
     exprs: cols.map((column) => [column.name, col(target.id, column.name)] as const),
   });
   const targetPlan = nameBindings(kept);
-  const bindings: Binding[] = [...targetPlan.bindings];
-  let n = 0;
-  const bind: Binder = (node, snapshot) => {
-    const name = `${fresh('pw')}`;
-    bindings.push({ name, node, ...(snapshot ? { snapshot: true } : {}) });
-    n++;
-    return make.ref({ id: fresh('r'), name, channels: [], type: node.type });
-  };
+  const { bindings, bind } = effectScope(fresh);
   const owners = bind(targetPlan.result, true);
   for (const write of writes) propertyStatements(elem, owners, write, bind, fresh);
-  if (!n) return null;
   // Back to an ELEMENT relation, re-declaring the channels the snapshot carried through.
   const result = make.project({
     id: fresh('c'), input: owners, channels: carried, type: typeOf(...cols),
     exprs: cols.map((column) => [column.name, col(owners.id, column.name)] as const),
   });
-  return { bindings, result };
+  // The target's own CTEs first: they are read by the snapshot's step alone, which is the case
+  // `checkSnapshots` leaves alone.
+  return { bindings: [...targetPlan.bindings, ...bindings], result };
 }
 
 /**
@@ -463,4 +458,129 @@ export function propertyWrites(steps: readonly IRStep[], elem: Elem, params: Rec
     });
   }
   return writes.length ? writes : null;
+}
+
+// ---------- addV() ----------
+
+const LABELS_COLS: readonly ColMeta[] = [meta('id', 'int'), meta('name', 'text')];
+const NODES_COLS: readonly ColMeta[] = [meta('id', 'int'), meta('uid', 'text', true)];
+const VERTEX_LABEL_COLS: readonly ColMeta[] = [meta('node', 'int'), meta('label', 'int')];
+
+/**
+ * `addV(label)` — ONE new vertex per incoming traverser, as statements.
+ *
+ * It is `property()`'s mirror and it reuses `property()` whole: the trailing `property()` run writes
+ * against the ids the node insert RETURNED, which is the same function that writes against the ids a
+ * read prefix selected. A vertex creation is therefore a LABEL resolution, a row, and then the
+ * property vocabulary — not a fourth write shape.
+ *
+ * Three things are load-bearing:
+ *
+ * - **The label name→id indirection is an UPSERT**, exactly as `GraphStore.labelId` does it: the
+ *   `labels` table is a set, so `ON CONFLICT (name) DO UPDATE SET name = excluded.name RETURNING id`
+ *   is the idiom that returns the id whether the row was new or already there. `DO NOTHING` would
+ *   return no row on the existing case, which is why it is not that.
+ * - **The new ids ARE the emission order.** SQLite assigns rowids in the insert's output order, so a
+ *   fresh vertex's `encounter` is its own id — exact, free, and not a window over rows whose order
+ *   is only conventionally the array's.
+ * - **The driver relation decides HOW MANY.** At the source that is one row (`Values`); mid-chain it
+ *   is the traverser stream, so `g.V().addV('x')` creates one per vertex, which is the semantics
+ *   rather than a special case.
+ */
+export function addVertex(drivers: Rel, label: string, writes: readonly PropertyWrite[], ordered: boolean, bind: Binder, fresh: Minter): Rel {
+  const labelTarget = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('wt'), channels: [], type: typeOf(...LABELS_COLS) });
+  const named = make.values({ id: fresh('lv'), channels: [], type: typeOf(meta('name', 'text')), rows: [[text(label)]] });
+  const labelRow = bind(insert({
+    target: labelTarget, cols: ['name'], source: named, channels: [], type: typeOf(meta('id', 'int')),
+    onConflict: { target: ['name'], set: [['name', col(EXCLUDED, 'name')]] },
+    returning: [['id', col(labelTarget.id, 'id')]],
+  }));
+
+  const nodesTarget = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('wt'), channels: [], type: typeOf(...NODES_COLS) });
+  const fresh_ = make.project({
+    id: fresh('p'), input: drivers, channels: [], type: typeOf(meta('uid', 'text', true)),
+    exprs: [['uid', lit(null, 'text')]],
+  });
+  const created = bind(insert({
+    target: nodesTarget, cols: ['uid'], source: fresh_, channels: [], type: ID_TYPE,
+    returning: [['id', col(nodesTarget.id, 'id')]],
+  }));
+
+  const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
+  const pairs = make.join({
+    id: fresh('j'), left: created, right: labelRow, join: 'cross', channels: [],
+    type: typeOf(meta('node', 'int'), meta('label', 'int')),
+  });
+  bind(insert({
+    target: labelTargetRows, cols: ['node', 'label'], source: pairs, channels: [], type: typeOf(), returning: [],
+  }));
+
+  for (const write of writes) propertyStatements('vertex', created, write, bind, fresh);
+
+  const channels: Channels = ordered ? [{ col: 'bulk', role: 'bulk' }, { col: 'encounter', role: 'encounter' }] : [{ col: 'bulk', role: 'bulk' }];
+  const cols: readonly ColMeta[] = [meta('id', 'int'), ...carriedCols(channels)];
+  return make.project({
+    id: fresh('c'), input: created, channels, type: typeOf(...cols),
+    exprs: [['id', col(created.id, 'id')], ['bulk', lit(1, 'int')],
+      ...(ordered ? [['encounter', col(created.id, 'id')] as const] : [])],
+  });
+}
+
+/** The bindings a write step accumulates, plus the `Binder` that pushes them — the shape every write
+ *  host opens with, so a name is minted in ONE place. */
+export function effectScope(fresh: Minter): { readonly bindings: Binding[]; readonly bind: Binder } {
+  const bindings: Binding[] = [];
+  const bind: Binder = (node, snapshot) => {
+    const name = `${fresh('pw')}`;
+    bindings.push({ name, node, ...(snapshot ? { snapshot: true } : {}) });
+    return make.ref({ id: fresh('r'), name, channels: [], type: node.type });
+  };
+  return { bindings, bind };
+}
+
+/** `addV(<label>)` and its trailing `property()` run → the effects and the new vertices.
+ *
+ *  `drivers` is what decides HOW MANY, and its two callers are the whole story: a `Values` row at
+ *  the source (`g.addV(…)` is one vertex), the traverser relation mid-chain (`g.V().addV(…)` is one
+ *  per vertex). A label that is a nested traversal, more than one label, or an invalid one declines —
+ *  the label validator is the shared waist, and a name it refuses is an ERROR legacy raises, not a
+ *  write this route may silently skip. */
+export function elementAddV(drivers: Rel, step: IRStep, propertySteps: readonly IRStep[], ordered: boolean, params: Record<string, any>, fresh: Minter): Effects | null {
+  if (step.modulators?.length || step.optionArms) return null;
+  const args = step.args ?? [];
+  // A BARE `addV()` is not a compile-time question: under `LabelCardinality.ZERO_OR_MORE` it creates a
+  // vertex with NO labels and under `ONE` it takes the graph default, and which one the graph declares
+  // is a property of the STORE. Declining is the honest answer — writing the default label would be a
+  // plausible wrong answer on a multi-label graph, which an L4 pin caught.
+  if (args.length !== 1) return null;
+  const label = args[0];
+  if (typeof label !== 'string') return null;
+  try { validateLabel(label); } catch { return null; }
+  const writes = propertySteps.length ? propertyWrites(propertySteps, 'vertex', params) : [];
+  if (!writes) return null;
+  // A MID-CHAIN driver is SNAPSHOTTED, and this one is not about a later statement: `INSERT INTO
+  // nodes … SELECT … FROM nodes` reads the table it is writing, which SQLite does not promise to
+  // evaluate before the first insert. The snapshot makes the source `json_each(?)`, so the question
+  // "which traversers were there" is answered once and cannot be changed by the answer.
+  // A `Values` source is one literal row and has nothing to snapshot.
+  const seeded = drivers.kind === 'values' ? null : driverOrder(drivers, fresh);
+  const { bindings, bind } = effectScope(fresh);
+  const result = addVertex(seeded ? bind(seeded.result, true) : drivers, label, writes, ordered, bind, fresh);
+  return { bindings: [...(seeded?.bindings ?? []), ...bindings], result };
+}
+
+/** The driver rows a creation walks, IN EMISSION ORDER where the chain has one — the same argument
+ *  the legacy write path makes about `renderDriverRows`: a write assigns ids as it goes and those
+ *  ids are OBSERVABLE, so which row it sees first is part of the answer. */
+function driverOrder(drivers: Rel, fresh: Minter): { readonly bindings: readonly Binding[]; readonly result: Rel } {
+  const encounter = drivers.channels.find((channel) => channel.role === 'encounter');
+  const cols: readonly ColMeta[] = encounter ? [meta('id', 'int'), meta(encounter.col, 'int')] : [meta('id', 'int')];
+  const kept = make.project({
+    id: fresh('w'), input: drivers, channels: [], type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, col(drivers.id, column.name)] as const),
+  });
+  const ordered = encounter
+    ? make.sort({ id: fresh('so'), input: kept, channels: [], type: kept.type, terms: [{ expr: col(kept.id, encounter.col), dir: 'asc' }] })
+    : kept;
+  return nameBindings(ordered);
 }

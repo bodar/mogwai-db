@@ -26,7 +26,7 @@ import type { AliasMap } from '../steps/context/context.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
-import { elementDrop, elementProperty, propertyWrites } from './write.ts';
+import { elementAddV, elementDrop, elementProperty, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listRetype, listSetOp, unfoldList, type ListCtx } from './list.ts';
 
 /**
@@ -182,7 +182,14 @@ interface FilterCtx { readonly params: Record<string, any>; readonly correlatedC
  *  movement collapse. One record rather than three positional arguments, because `elementTail` is now
  *  re-entered from three places and a re-entry that dropped one of them would silently pick a
  *  different lowering strategy. */
-interface ChainCtx extends FilterCtx { readonly collapse: boolean; }
+interface ChainCtx extends FilterCtx {
+  readonly collapse: boolean;
+  /** Does this chain have an EMISSION ORDER at all — `analyzeChain`'s chain-global answer, threaded
+   *  rather than re-derived. A step that MINTS a fresh traverser (`addV`) has to know: it seeds the
+   *  position channel exactly where the source would have, and a step-local re-derivation would be a
+   *  second authority on a fact the source already decided. */
+  readonly ordered: boolean;
+}
 
 /** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
  *  throw there is a deferral rather than a bug. */
@@ -1766,7 +1773,6 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  */
 function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Tail | null {
   const { params = {}, collapse = true, correlatedChildren = true } = opts;
-  const ctx: ChainCtx = { params, correlatedChildren, collapse };
   // EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step.
   // `analyzeChain` is the same authority the legacy source seeds from, so the two cannot disagree
   // about which chains have an order to take a window from. A chain that demands one and reaches a
@@ -1774,6 +1780,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   // not defer, it would pick a different window from the same multiset — right arity, plausible
   // rows, and a census that structurally cannot see it (`ord` is telemetry, `ms` is the gate).
   const ordered = analyzeChain(steps as IRStep[]).demandsEncounter;
+  const ctx: ChainCtx = { params, correlatedChildren, collapse, ordered };
   const seedChannels = ordered ? withChannel(BULK, ENCOUNTER) : BULK;
   const first = steps[0];
   if (!first) return null;
@@ -1786,6 +1793,17 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
     const injected = injectSource(steps, fresh);
     if (!injected) return null;
     return scalarTail(injected.rel, injected.framing, steps, injected.at, false, ctx, fresh);
+  }
+
+  // `addV` AT THE SOURCE is one vertex, and that is the only thing that differs from the mid-chain
+  // form: the driver relation is a single `Values` row instead of the traverser stream, and the same
+  // lowering runs. A one-row source is what "how many" means here, so there is no second arm.
+  if (first.name === 'addV') {
+    const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[lit(1, 'int')]] });
+    const added = addedVertices(one, steps, 0, ctx, fresh);
+    if (!added) return null;
+    const tail = elementTail(added.effects.result, 'vertex', steps, added.at, false, ctx, fresh, NO_ALIASES);
+    return tail && { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
   }
 
   if (first.name !== 'V' && first.name !== 'E') return null;
@@ -1908,6 +1926,13 @@ function elementTail(
       // At bulk 1 that is the same answer as the plain slice, so the cost is SQL shape and never
       // correctness — the same trade the movement loop already makes.
       return continueAs(merged.rel, merged.framing, steps, at + 1, bulked || ctx.collapse, ctx, fresh, labels);
+    }
+    if (step.name === 'addV') {
+      const added = addedVertices(rel, steps, at, ctx, fresh);
+      if (!added) return null;
+      const tail = elementTail(added.effects.result, 'vertex', steps, added.at, false, ctx, fresh, NO_ALIASES);
+      if (!tail) return null;
+      return { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
     }
     if (step.name === 'property') {
       // The whole RUN of property() steps, because they share one target: taking them one at a time
@@ -2125,3 +2150,22 @@ const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
 
 const sameColumns = (left: readonly ColMeta[], right: readonly ColMeta[]): boolean =>
   left.length === right.length && left.every((column, i) => column.name === right[i]!.name);
+
+/**
+ * `addV(…)` plus the `property()` run that belongs to it — the creation and its initializers as ONE
+ * step of the fold.
+ *
+ * The run is taken whole for the reason `property()`'s is: they share the elements they write, so
+ * lowering them one at a time would re-snapshot the same rows and let a later write read a graph an
+ * earlier one had already changed. `addLabel` after an `addV` is deliberately NOT absorbed here — it
+ * is more labels on the same vertex, which is a different statement and a further increment; the fold
+ * simply does not know the step and declines.
+ */
+function addedVertices(
+  drivers: Rel, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
+): { readonly effects: Effects; readonly at: number } | null {
+  let end = at + 1;
+  while (end < steps.length && steps[end]!.name === 'property') end++;
+  const effects = elementAddV(drivers, steps[at]!, steps.slice(at + 1, end), ctx.ordered, ctx.params, fresh);
+  return effects && { effects, at: end };
+}

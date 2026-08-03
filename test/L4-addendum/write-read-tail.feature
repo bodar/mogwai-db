@@ -76,14 +76,18 @@ Feature: mogwai addendum — a read tail after an element-preserving write
       | result |
       | d[4].l |
 
-  # A MUTATING tail is a different question again (the write driver would have to re-enter the write
-  # spine), and is refused with its own message.
+  # A MUTATING tail is the SAME question once a write is a program: `property()` hands its traversers
+  # back and `addV()` creates one vertex per traverser, so the two compose the way any two steps do.
+  # This scenario recorded the legacy write driver's inability to re-enter itself — a refusal that was
+  # ours, not TinkerPop's, and so one that moves when the limitation goes.
   @gap:write-read-tail
-  Scenario: g_V_propertyXtempX_addV_is_refused
+  Scenario: g_V_propertyXtempX_addV
     Given the modern graph
     And the traversal of
       """
       g.V(1).property(Cardinality.single, "temp", "x").addV("y")
       """
     When iterated to list
-    Then the traversal will raise an error with message containing text of "not yet supported"
+    Then the result should have a count of 1
+    And the graph should return 1 for count of "g.V().hasLabel(\"y\")"
+    And the graph should return 1 for count of "g.V(1).values(\"temp\")"

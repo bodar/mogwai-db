@@ -77,7 +77,10 @@ test('E()/hasLabel/count and edge values() over the edges table', () => {
 });
 test('user-supplied string ids: create, seed, traverse, expose (COALESCE uid,id)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
-  const w = (q: string) => { const p = compile(q, {}); if (p.kind !== 'write') throw new Error('want write'); return p.run(store); };
+  // `runWith` for BOTH, because which artifact a write compiles to is not what this test is about —
+  // a `T.id` write is the legacy closure, a plain `addV` is a RelIR program, and the id semantics are
+  // the same either way. Asserting the kind here made this fail the day one of them moved.
+  const w = (q: string) => runWith(store, q);
   const r = (q: string) => runWith(store, q);
   w('g.addV("person").property(T.id,"person:marko").property("name","marko")');
   w('g.addV("person").property(T.id,"person:vadas").property("name","vadas")');
@@ -86,8 +89,7 @@ test('user-supplied string ids: create, seed, traverse, expose (COALESCE uid,id)
   expect(r('g.V("person:marko").out("knows").id()').map((x: any) => x.v)).toEqual(['person:vadas']); // traverse + expose
   expect(r('g.V("person:marko").values("name")').map((x: any) => x.v)).toEqual(['marko']);
   // plain addV (no T.id) keeps its integer rowid as the id — mixed graph
-  const lop = w('g.addV("software").property("name","lop")');
-  expect(typeof (lop[0] as any).vertex.id).toBe('number');
+  w('g.addV("software").property("name","lop")');
   expect(r('g.V().has("name","lop").id()').map((x: any) => typeof x.v)).toEqual(['number']);
 });
 });
