@@ -1076,6 +1076,33 @@ its own declared type still promised, and (b) `sliceOf` throwing out of a module
 that `null` is its only decline. Neither was reachable through `compilePlan` today; both were
 defects anyway. The sweep is now clean and is worth re-running after any lowering change.
 
+**Coverage 125 → 206, 9.0% (`50234ae`): the `inject` SOURCE — the largest jump yet, and the
+instrument that found it earned its keep.** 387 corpus traversals begin with one. `Values` was
+already proven (family 11 of the Phase-1 gate) and the relation has NO channels: an injected row is
+one traverser by construction and nothing has established an emission order. Most of the +81 came
+from the SCALAR TAIL becoming one fold whichever source fed it — `values()`/`count()` retyping an
+element stream and `inject()` seeding one now reach the same `is`/slice/`dedup`/`count` arms. `count`
+reads the multiplicity off the CHANNEL rather than the step name, so it is `SUM(bulk)` over an
+element source and `COUNT(*)` over an injected one, from the same distinction legacy draws.
+
+**THREE silent wrong answers, each caught by a different gate.** Worth listing because the pattern is
+now consistent: every one was right-arity and plausible, and none was reachable by reading the code.
+
+1. **Typed literals lost their declared type** (caught by the CENSUS). A `char`, a `uuid`, a
+   `datetime` and a long past 2^53 all arrive as ordinary JS strings or numbers, so framing by
+   inference reframes them — four traversals changed answer with the wrong GraphBinary type. The tag
+   is NOT derivable from the values, so `bareInjectTag` is exported and called rather than
+   reimplemented: **a second implementation of a non-derivable fact is a second chance to get it
+   wrong, and it already had been.**
+2. **Scalar `dedup` kept the multiplicity, and put it in the `DISTINCT` key** (caught by an L2 pin
+   that compared the two spines' aggregate). The same value at bulk 1 and bulk 3 would survive
+   twice, and a following `count()` would SUM the duplicates it had just removed. Invisible on a
+   fixture where bulk is always 1 — the reason it is now asserted rather than observed.
+3. **`count()` emitted `count()`, which is SQLite LENIENCY and not SQL** (caught by porting the
+   aggregate at all). Valid on the dev runtime, unproven on the one we ship to — the exact species
+   `src/cf-limits.ts` exists for. An `Agg` with no arguments MEANS "over all rows" and `count(*)` is
+   SQL's spelling of that, so the star belongs in the emitter, not as a node field.
+
 **NEXT, measured from base 259** (`V`/`E`/`hasLabel`/`has`/`count`/`values`/`is`/movement/`where`):
 **the row-algebraic class is +50 and it is literally Phase 4.1's named deliverable** — `order` 20 ·
 `dedup` 11 · `limit`/`range`/`skip` 2 · `identity` 2, and together with `tail`/`sample` fifty. The
