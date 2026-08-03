@@ -10,6 +10,7 @@ import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs, isNested } from '../../gremlin/frontend.ts';
 import { childSteps } from '../steps/tail/child-shape.ts';
 import type { IRStep } from '../ir/strategies.ts';
+import { analyzeChain } from '../ir/analyze.ts';
 import { containsTextSearch, predicateExpr, storedCompare } from './predicate.ts';
 
 /**
@@ -372,6 +373,33 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
 }
 
 /**
+ * THE ROW-ALGEBRAIC CLASS over an element relation — Phase 4.1, and only the part of it that is a
+ * relation operator rather than a framing one.
+ *
+ * `dedup()` is `Distinct` over a projection that RESETS the multiplicity: collapsing duplicates
+ * means the survivor is one traverser, not the sum of the ones it stood for. `identity()` is the
+ * universal no-op and is here rather than nowhere because it composes — a chain is not less covered
+ * for containing one.
+ *
+ * `order`/`limit`/`range`/`skip`/`tail`/`sample` are ABSENT, and each for its own reason rather
+ * than one blanket "not yet". A slice needs the emission-order `encounter` channel, which the
+ * caller gates on (`demandsEncounter`) until this route models a carried role beyond `bulk`. An
+ * element `order()` is not a relation operator at all in the legacy lowering — `TailAcc` folds it
+ * into the FRAMING projection's `ORDER BY` (`… FROM nodes n JOIN c0 p ON n.id=p.id ORDER BY n.id`),
+ * which is Phase 4.2's block assembler and not this route's to take.
+ */
+function rowOp(step: IRStep, input: Rel, fresh: Minter): Rel | null {
+  if (step.modulators?.length || step.optionArms || (step.args ?? []).length) return null;
+  if (step.name === 'identity' || step.name === 'barrier') return input;
+  if (step.name !== 'dedup') return null;
+  const projected = make.project({
+    id: fresh('dd'), input, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
+    exprs: [['id', col(input.id, 'id')], ['bulk', lit(1, 'int')]],
+  });
+  return make.distinct({ id: fresh('d'), input: projected, channels: BULK, type: projected.type });
+}
+
+/**
  * The convergent-walk COLLAPSE: `SELECT id, SUM(bulk) … GROUP BY id`, so the frontier stays bounded
  * by reachable |V| instead of by the (exponential) walk count.
  *
@@ -478,6 +506,13 @@ export interface Lowering {
 export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLowering | null {
   const { params = {}, collapse = true, correlatedChildren = true } = opts;
   const ctx: FilterCtx = { params, correlatedChildren };
+  // FAIL CLOSED on emission order. A chain that DEMANDS the encounter channel — any slice, and
+  // `order()` where it composes — has an answer that depends on which rows come first, and this
+  // route carries no role but `bulk`. Silently omitting the channel would not defer, it would pick
+  // a different window from the same multiset: right arity, plausible rows, and a census that
+  // cannot tell (`ord` is telemetry, `ms` is the gate). Measured at zero covered traversals today,
+  // so the gate costs nothing and is here to keep it that way as the vocabulary grows.
+  if (analyzeChain(steps as IRStep[]).demandsEncounter) return null;
   const first = steps[0];
   if (!first) return null;
   if (first.name !== 'V' && first.name !== 'E') return null;
@@ -520,8 +555,10 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
       continue;
     }
     const clause = sourceFilter(step, { id: col(rel.id, 'id'), rel }, elem, fresh, ctx);
-    if (!clause) break;
-    rel = make.filter({ id: fresh('f'), input: rel, channels: BULK, type: rel.type, pred: clause });
+    if (clause) { rel = make.filter({ id: fresh('f'), input: rel, channels: BULK, type: rel.type, pred: clause }); continue; }
+    const row = rowOp(step, rel, fresh);
+    if (!row) break;
+    rel = row;
   }
 
   if (at === steps.length)

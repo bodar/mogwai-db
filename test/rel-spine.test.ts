@@ -76,6 +76,9 @@ const DECLINED = [
   "g.V().has('name',null)",           // a null value: not a literal this route can compare
   "g.V().where(__.has('name','marko'))", // a filter-only body is a predicate on the SAME traverser
   "g.V().where(__.out().order())",    // a body step the child fold has not learned
+  'g.V().order()',                    // element order() is TailAcc's, folded into the FRAMING SELECT
+  'g.V().limit(2)',                   // a slice demands the emission-order channel — see below
+  'g.V().range(1,3)', 'g.V().out().skip(1)',
 ];
 
 describe('the RelIR spine', () => {
@@ -92,6 +95,19 @@ describe('the RelIR spine', () => {
       expect(plan.kind === 'read' ? plan.spine : 'legacy').toBe('legacy');
     });
   }
+
+  test('a chain that demands emission order fails CLOSED', () => {
+    // The one decline that is a SAFETY property rather than a coverage gap. A slice's answer
+    // depends on which rows come first, and this route carries no channel but `bulk`; omitting the
+    // encounter would not defer, it would pick a different window from the same multiset — right
+    // arity, plausible rows, and a census that cannot see it (`ord` is telemetry, `ms` is the gate).
+    // So the gate is on `demandsEncounter`, the same chain fact the legacy source seeds from.
+    for (const gremlin of ['g.V().limit(2)', 'g.V().range(1,3)', "g.V().out().dedup().limit(1)"]) {
+      expect(read(gremlin, { spine: 'rel' }).spine).toBe('legacy');
+    }
+    // …and it is a GATE, not a blanket: the same steps' order-free neighbours still route.
+    expect(read('g.V().out().dedup()', { spine: 'rel' }).spine).toBe('rel');
+  });
 
   test('a fast-path switch selects a STRATEGY, and RelIR covers the side it implements', () => {
     // `predicateInlining` chooses between two lowerings of a `where()` body: the correlated EXISTS
