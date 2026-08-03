@@ -1948,7 +1948,11 @@ function elementTail(
     if (step.name === 'addV') {
       const added = addedVertices(rel, steps, at, ctx, fresh);
       if (!added) return null;
-      const tail = elementTail(added.effects.result, 'vertex', steps, added.at, false, ctx, fresh, NO_ALIASES);
+      // The LABELS carry, because the relation carries their columns: `addV` correlates its new rows
+      // back to the input row that made them, so a label bound before the creation is still bound
+      // after it. Re-entering with `NO_ALIASES` here made the next `as()` mint a column the relation
+      // already carried — a THROW from the lowering, which `rel-sweep`'s contract forbids.
+      const tail = elementTail(added.effects.result, 'vertex', steps, added.at, false, ctx, fresh, labels);
       if (!tail) return null;
       return { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
     }
@@ -1963,7 +1967,7 @@ function elementTail(
       if (!writes) return null;
       const written = elementProperty(rel, elem, writes, fresh);
       if (!written) return null;
-      const tail = elementTail(written.result, elem, steps, end, bulked, ctx, fresh, NO_ALIASES);
+      const tail = elementTail(written.result, elem, steps, end, bulked, ctx, fresh, labels);
       if (!tail) return null;
       // Effects run BEFORE anything the tail computes, and a tail of its own (a nested write) lands
       // after them — one flat list, in the order the fold produced it.

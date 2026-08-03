@@ -6,7 +6,7 @@ import { UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { bare, read, run, seededStore } from '../support/harness.ts';
+import { bare, read, relirOff, run, seededStore } from '../support/harness.ts';
 import { emit } from '../../src/rel/emit.ts';
 import { executeQuery } from '../support/executor.ts';
 import { CF_MAX_BINDS } from '../../src/cf-limits.ts';
@@ -91,7 +91,7 @@ test('drop() compiles to a RelIR program whose target is snapshotted, not a re-e
 // A count that is merely SMALL would not say this; a count that is IDENTICAL at ten elements and a
 // hundred does. Measured, not asserted from the shape of the code — the failure this guards against
 // is a future step quietly reintroducing a per-element loop behind the same API.
-test('a write program runs the same number of statements whatever the element count', () => {
+(relirOff ? test.skip : test)('a write program runs the same number of statements whatever the element count', () => {
   const runs = (n: number): number => {
     const inner = new BunSqlite(':memory:');
     let calls = 0;
@@ -218,6 +218,32 @@ test('property() updates edges too (materialized on the wire via edgeBuffer)', (
   expect(after[0]!.length).toBeGreaterThan(before[0]!.length);
   expect(run(store, 'g.V(1).outE("created").values("weight2")').map((r) => r.v)).toEqual([0.9]);
   expect(run(store, 'g.V(1).outE("created").values("weight")').map((r) => r.v)).toEqual([0.4]);
+});
+
+// THE CORRELATION, which is the only thing that makes a label bound BEFORE a creation still usable
+// after it. An `Insert`'s `RETURNING` carries the target table's columns and not its source's, so
+// nothing comes back saying which input row produced which output row; the two positions (the input
+// carries its own, the created rows recover theirs from their monotonic ids) are what join them.
+test('a label bound before addV() is still bound after it — the write chain', () => {
+  const store = new GraphStore(new BunSqlite(':memory:'));
+  run(store, 'g.addV("a").as("x").addV("b").as("y").addE("e").from("x").to("y")');
+  // The EDGE'S DIRECTION is the assertion: `from("x")` names the FIRST creation, which only survives
+  // the second one if the alias came through it.
+  expect(run(store, 'g.E().hasLabel("e").outV().label()').map((r: any) => r.v)).toEqual(['a']);
+  expect(run(store, 'g.E().hasLabel("e").inV().label()').map((r: any) => r.v)).toEqual(['b']);
+});
+
+(relirOff ? test.skip : test)('addV() over many traversers pairs each new element with ITS OWN input row', () => {
+  const store = seededStore();
+  // One clone per person, each edged back to the person it was cloned from. A cross join would give
+  // 16 edges; a correlation that paired wrongly would give a person with two incoming edges and
+  // another with none. (Which clone got which person is unobservable — clones carry nothing to tell
+  // them apart — so this is as strong as the assertion can honestly be.)
+  run(store, 'g.V().hasLabel("person").as("p").addV("clone").addE("of").to("p")');
+  expect(run(store, 'g.E().hasLabel("of").count()').map((r: any) => r.v)).toEqual([4]);
+  expect(run(store, 'g.E().hasLabel("of").inV().values("name").order()').map((r: any) => r.v))
+    .toEqual(['josh', 'marko', 'peter', 'vadas']);
+  expect(run(store, 'g.E().hasLabel("of").outV().dedup().count()').map((r: any) => r.v)).toEqual([4]);
 });
 
 test('addE start-step: from()/to() nested traversals + edge property', () => {

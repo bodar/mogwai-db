@@ -50,6 +50,17 @@ export const runWith = (store: GraphStore, q: string, options?: CompileOptions) 
 
 export const run = (store: GraphStore, q: string) => runWith(store, q, undefined);
 
+/**
+ * IS THE RELIR SPINE OFF — the differential's other position (`mise run test:legacy-spine`).
+ *
+ * The bun-test twin of L4's `@RelIR` tag, and the same rule governs both: a test asserting a
+ * property only the RelIR route HAS must skip when that route is off, or the differential reads a
+ * deliberate improvement as a regression. What it must NEVER cover is a property legacy answers
+ * DIFFERENTLY — that is a defect, and the census is what sees it. Every use today is a write shape
+ * the legacy driver refuses outright, so the skips disappear with `runWriteChainFull` (§8).
+ */
+export const relirOff = process.env.MOGWAI_RELIR === '0';
+
 // A write-response echo carries each prop value as a self-describing {t,v} typed node (so the wire
 // frames it exactly). Tests that assert the written VALUES, not their types, unwrap to plain values.
 export const bare = (v: any): any =>

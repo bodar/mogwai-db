@@ -367,7 +367,9 @@ function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind:
   // checker catches as "no relation in scope" (it did, on the first run).
   const seed = skippable
     ? make.filter({
-      id: fresh('f'), input: owners, channels: [], type: owners.type,
+      // The OWNERS relation carries the traverser's channels (a snapshot keeps them), and a `Filter`
+      // is channel-preserving by contract — naming a shorter list is the dropped-channel defect.
+      id: fresh('f'), input: owners, channels: owners.channels, type: owners.type,
       pred: { kind: 'binary', op: 'or', left: { kind: 'binary', op: '!=', left: cardinalityOf(col(owners.id, 'id'), write.key, write.cardinality, fresh), right: text('set') }, right: present() },
     })
     : owners;
@@ -390,7 +392,7 @@ function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind:
 
 /** Push a binding and hand back a `Ref` to it — the one place a name is minted, so a statement can
  *  read the rows of the statement before it without the caller threading names. */
-type Binder = (node: Stmt | Rel, snapshot?: boolean) => Rel;
+type Binder = (node: Stmt | Rel, snapshot?: boolean, channels?: Channels) => Rel;
 
 /**
  * A run of `property()` steps over the elements a read prefix selected — the effects, plus the SAME
@@ -407,25 +409,30 @@ type Binder = (node: Stmt | Rel, snapshot?: boolean) => Rel;
  * have to refuse at run time.
  */
 export function elementProperty(target: Rel, elem: Elem, writes: readonly PropertyWrite[], fresh: Minter): Effects | null {
-  const carried = target.channels;
-  if (carried.some((channel) => channel.role !== 'bulk' && channel.role !== 'encounter')) return null;
-  const cols: readonly ColMeta[] = [meta('id', 'int'), ...carriedCols(carried)];
-  const kept = make.project({
-    id: fresh('w'), input: target, channels: carried, type: typeOf(...cols),
-    exprs: cols.map((column) => [column.name, col(target.id, column.name)] as const),
-  });
-  const targetPlan = nameBindings(kept);
+  // A role this route cannot put through a snapshot is a DECLINE, not a dropped channel: a `sack` or
+  // a `path` would come back missing and the next reader of it would answer a different question.
+  const carried = writeInputChannels(target);
+  if (carried.length !== target.channels.filter((channel) => channel.role !== 'bulk').length) return null;
+  const seeded = inputRows(target, writeInputCols(target), fresh);
   const { bindings, bind } = effectScope(fresh);
-  const owners = bind(targetPlan.result, true);
+  const owners = bind(seeded.result, true, carried);
   for (const write of writes) propertyStatements(elem, owners, write, bind, fresh);
-  // Back to an ELEMENT relation, re-declaring the channels the snapshot carried through.
+  // Back to an ELEMENT relation. `property()` is element-PRESERVING, so this IS the snapshot — no
+  // correlation to do, unlike a creation, whose output rows say nothing about which input made them.
+  // `bulk` is re-minted at 1 because the snapshot did not carry it: a multiplicity is a fact about
+  // the stream that a write neither reads nor changes, and re-declaring it is cheaper than
+  // round-tripping it. The position column the snapshot carries is dropped here — it exists to
+  // correlate, and there is nothing to correlate with.
+  const channels: Channels = [...carried.filter((channel) => channel.role === 'alias'), BULK_CHANNEL,
+    ...carried.filter((channel) => channel.role === 'encounter')];
+  const cols: readonly ColMeta[] = [meta('id', 'int'), ...carriedCols(channels)];
   const result = make.project({
-    id: fresh('c'), input: owners, channels: carried, type: typeOf(...cols),
-    exprs: cols.map((column) => [column.name, col(owners.id, column.name)] as const),
+    id: fresh('c'), input: owners, channels, type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, column.name === 'bulk' ? lit(1, 'int') : col(owners.id, column.name)] as const),
   });
   // The target's own CTEs first: they are read by the snapshot's step alone, which is the case
   // `checkSnapshots` leaves alone.
-  return { bindings: [...targetPlan.bindings, ...bindings], result };
+  return { bindings: [...seeded.bindings, ...bindings], result };
 }
 
 /**
@@ -510,12 +517,20 @@ export function addVertex(input: Rel, label: string, writes: readonly PropertyWr
   }));
 
   const nodesTarget = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('wt'), channels: [], type: typeOf(...NODES_COLS) });
-  const fresh_ = make.project({
-    id: fresh('p'), input: input, channels: [], type: typeOf(meta('uid', 'text', true)),
+  // ORDERED BY THE INPUT'S OWN POSITION, explicitly. Rowids are assigned in the source's output
+  // order, so this is what makes the k-th created id the k-th input row — leaving it to `json_each`'s
+  // array order would be the same answer resting on a scan's convention instead of on a clause.
+  const inOrder = input.type.cols.some((column) => column.name === ORD)
+    // Channel-PRESERVING, so it declares the input's — a `Sort` that named a shorter list is the
+    // dropped-channel defect the obligation table exists to catch, and it caught this one.
+    ? make.sort({ id: fresh('so'), input, channels: input.channels, type: input.type, terms: [{ expr: col(input.id, ORD), dir: 'asc' }] })
+    : input;
+  const rowPerInput = make.project({
+    id: fresh('p'), input: inOrder, channels: [], type: typeOf(meta('uid', 'text', true)),
     exprs: [['uid', lit(null, 'text')]],
   });
   const created = bind(insert({
-    target: nodesTarget, cols: ['uid'], source: fresh_, channels: [], type: ID_TYPE,
+    target: nodesTarget, cols: ['uid'], source: rowPerInput, channels: [], type: ID_TYPE,
     returning: [['id', col(nodesTarget.id, 'id')]],
   }));
 
@@ -530,26 +545,66 @@ export function addVertex(input: Rel, label: string, writes: readonly PropertyWr
 
   for (const write of writes) propertyStatements('vertex', created, write, bind, fresh);
 
-  const channels: Channels = ordered ? [{ col: 'bulk', role: 'bulk' }, { col: 'encounter', role: 'encounter' }] : [{ col: 'bulk', role: 'bulk' }];
+  // WHAT THE NEW TRAVERSER CARRIES FORWARD. `addV` MINTS a traverser, so `bulk` is 1 and its
+  // `encounter` is its own id — the created rows ARE in emission order. Every OTHER carried channel
+  // belongs to the traverser that drove the creation, and an alias is the one that has to survive:
+  // `g.addV().as('a').addV().as('b').addE('e').from('a')` is the corpus's dominant write chain, and
+  // 'a' is bound BEFORE the second creation.
+  //
+  // Carrying it needs the correlation, because an `Insert`'s `RETURNING` says nothing about which
+  // input row produced a given output row. The two positions (`inputRows` materialized the input's,
+  // `positioned` recovers the created rows' from their own ids) are what make the join exact. With no
+  // alias to carry there is nothing to correlate WITH, so the created rows stand alone — that is not
+  // a second implementation, it is the join having no second side.
+  const carried = input.channels.filter((channel) => channel.role === 'alias');
+  const channels: Channels = [...carried, ...(ordered ? [BULK_CHANNEL, ENCOUNTER_CHANNEL] : [BULK_CHANNEL])];
   const cols: readonly ColMeta[] = [meta('id', 'int'), ...carriedCols(channels)];
+  const ranked = positioned(created, fresh);
+  const zipped = carried.length
+    ? make.join({
+      id: fresh('j'), left: ranked, right: input, join: 'inner', channels: [],
+      type: typeOf(...ranked.type.cols, ...input.type.cols.map((column) => meta(`in_${column.name}`, column.type, column.nullable))),
+      on: eq(col(ranked.id, ORD), col(input.id, ORD)),
+    })
+    : created;
   return make.project({
-    id: fresh('c'), input: created, channels, type: typeOf(...cols),
-    exprs: [['id', col(created.id, 'id')], ['bulk', lit(1, 'int')],
-      ...(ordered ? [['encounter', col(created.id, 'id')] as const] : [])],
+    id: fresh('c'), input: zipped, channels, type: typeOf(...cols),
+    // IN THE DECLARED ORDER — `cols` is the id followed by the channels in `ROLE_ORDER`, and a
+    // `Project` must emit exactly that sequence.
+    exprs: [
+      ['id', col(zipped.id, 'id')],
+      ...carried.map((channel) => [channel.col, col(zipped.id, `in_${channel.col}`)] as const),
+      ['bulk', lit(1, 'int')],
+      ...(ordered ? [['encounter', col(zipped.id, 'id')] as const] : []),
+    ],
   });
 }
+
+/** The two channels a MINTED traverser declares for itself. Written once because `addV` and `addE`
+ *  both mint, and a role list spelled at each site is a role list that can disagree. */
+const BULK_CHANNEL = { col: 'bulk', role: 'bulk' } as const;
+const ENCOUNTER_CHANNEL = { col: 'encounter', role: 'encounter' } as const;
 
 /** The bindings a write step accumulates, plus the `Binder` that pushes them — the shape every write
  *  host opens with, so a name is minted in ONE place. */
 export function effectScope(fresh: Minter): { readonly bindings: Binding[]; readonly bind: Binder } {
   const bindings: Binding[] = [];
-  const bind: Binder = (node, snapshot) => {
+  // A `Ref` DECLARES what it carries, like every other relation. Most of them carry nothing — a
+  // statement's `RETURNING` is a bare row set — but a snapshot of the input relation still holds that
+  // traverser's channels, and a channel a relation does not declare is one no later step can read.
+  const bind: Binder = (node, snapshot, channels = []) => {
     const name = `${fresh('pw')}`;
     bindings.push({ name, node, ...(snapshot ? { snapshot: true } : {}) });
-    return make.ref({ id: fresh('r'), name, channels: [], type: node.type });
+    return make.ref({ id: fresh('r'), name, channels, type: node.type });
   };
   return { bindings, bind };
 }
+
+/** The channels a write's input snapshot still carries — the twin of `writeInputCols`, which decides
+ *  the COLUMNS. Two views of one rule, so a column kept without its channel (or the reverse) is not
+ *  expressible. */
+const writeInputChannels = (input: Rel): Channels =>
+  input.channels.filter((channel) => channel.role === 'encounter' || channel.role === 'alias');
 
 /** `addV(<label>)` and its trailing `property()` run → the effects and the new vertices.
  *
@@ -578,7 +633,7 @@ export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IR
   // A `Values` source is one literal row and has nothing to snapshot.
   const seeded = input.kind === 'values' ? null : orderedInput(input, fresh);
   const { bindings, bind } = effectScope(fresh);
-  const result = addVertex(seeded ? bind(seeded.result, true) : input, label, writes, ordered, bind, fresh);
+  const result = addVertex(seeded ? bind(seeded.result, true, writeInputChannels(input)) : input, label, writes, ordered, bind, fresh);
   return { bindings: [...(seeded?.bindings ?? []), ...bindings], result };
 }
 
@@ -587,8 +642,26 @@ export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IR
  *  legacy write path: a write assigns ids as it goes and those ids are OBSERVABLE, so which row it
  *  sees first is part of the answer. */
 function orderedInput(input: Rel, fresh: Minter): { readonly bindings: readonly Binding[]; readonly result: Rel } {
-  const encounter = input.channels.find((channel) => channel.role === 'encounter');
-  return inputRows(input, encounter ? [meta('id', 'int'), meta(encounter.col, 'int')] : [meta('id', 'int')], fresh);
+  return inputRows(input, writeInputCols(input), fresh);
+}
+
+/**
+ * WHICH OF AN INPUT RELATION'S COLUMNS A WRITE HAS TO KEEP: its identity, its emission order, and
+ * every ALIAS it carries.
+ *
+ * Shared by `addV` and `addE` because they need the same set for different reasons — `addE` READS an
+ * alias (a `from("a")` endpoint) and `addV` CARRIES it (a label bound before the creation must still
+ * be bound after it). Deriving it in one place is what stops the two drifting into keeping different
+ * columns and then disagreeing about what survives a write.
+ *
+ * Every other role is deliberately absent, and absent means the chain DECLINES rather than losing it
+ * silently: a `sack` or a `path` is state this route does not carry through a creation, and the
+ * relation it hands back simply does not declare the channel, so a later reader of it fails closed.
+ */
+function writeInputCols(input: Rel): readonly ColMeta[] {
+  return [meta('id', 'int'), ...input.channels
+    .filter((channel) => channel.role === 'encounter' || channel.role === 'alias')
+    .map((channel) => meta(channel.col, channel.role === 'alias' ? 'json' : 'int', channel.role === 'alias'))];
 }
 
 // ---------- addE() ----------
@@ -612,7 +685,7 @@ type Endpoint =
 function endpointExpr(end: Endpoint, over: Rel, aliases: AliasMap, fresh: Minter): Expr | null {
   if (end.kind === 'traverser') return col(over.id, 'id');
   if (end.kind === 'read') {
-    const one = make.limit({ id: fresh('li'), input: end.rel, channels: [], type: end.rel.type, count: lit(1, 'int') });
+    const one = make.limit({ id: fresh('li'), input: end.rel, channels: end.rel.channels, type: end.rel.type, count: lit(1, 'int') });
     const only = make.project({ id: fresh('p'), input: one, channels: [], type: ID_TYPE, exprs: [['id', col(one.id, 'id')]] });
     return { kind: 'scalar', plan: only };
   }
@@ -669,9 +742,7 @@ export function elementAddE(
   const writes = propertySteps.length ? propertyWrites(propertySteps, 'edge', params) : [];
   if (!writes) return null;
 
-  const carried: readonly ColMeta[] = [meta('id', 'int'),
-    ...input.channels.filter((channel) => channel.role === 'encounter' || channel.role === 'alias').map((channel) => meta(channel.col, channel.role === 'alias' ? 'json' : 'int', channel.role === 'alias'))];
-  const seeded = input.kind === 'values' ? null : inputRows(input, carried, fresh);
+  const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
   const { bindings, bind } = effectScope(fresh);
   const selecting = seeded ? bind(seeded.result, true) : input;
 
@@ -750,10 +821,22 @@ export interface SubReads {
 const reScope = (e: Expr, from: RelId, to: RelId): Expr =>
   rewriteExpr(e, (node) => (node.kind === 'col' && node.rel === from ? { ...node, rel: to } : node));
 
-/** An input relation projected to the columns a write needs, IN EMISSION ORDER, and named.
- *  An ALIAS column crosses as `json(…)` TEXT: the retained-row transport carries what JSON carries
- *  losslessly, and a JSONB blob is not that (`src/program.ts` fails closed on one). `->>`/
- *  `json_extract` read the two identically, so nothing downstream learns which it got. */
+/**
+ * An input relation projected to the columns a write needs, IN EMISSION ORDER, carrying its own
+ * POSITION, and named.
+ *
+ * An ALIAS column crosses as `json(…)` TEXT: the retained-row transport carries what JSON carries
+ * losslessly, and a JSONB blob is not that (`src/program.ts` fails closed on one). `->>`/
+ * `json_extract` read the two identically, so nothing downstream learns which it got.
+ *
+ * **The position is MATERIALIZED here rather than recovered later, and that is what makes a write's
+ * result correlatable with its input.** An `Insert`'s `RETURNING` carries the TARGET table's columns
+ * and not its source's, so nothing comes back saying which input row produced it; SQLite also does
+ * not promise an order for `RETURNING` rows. What it does promise is that a rowid is assigned per
+ * inserted row, monotonically — so the created side recovers its position from its own `id`
+ * (`ORDER_BY_ID` below) and this side carries the position it was inserted IN. Two positions, joined:
+ * an exact correlation that depends on neither the transport's row order nor a spare column.
+ */
 function inputRows(input: Rel, cols: readonly ColMeta[], fresh: Minter): { readonly bindings: readonly Binding[]; readonly result: Rel } {
   const jsonOf = (column: ColMeta): Expr =>
     column.type === 'json' ? { kind: 'call', fn: 'json', args: [col(input.id, column.name)] } : col(input.id, column.name);
@@ -766,5 +849,28 @@ function inputRows(input: Rel, cols: readonly ColMeta[], fresh: Minter): { reado
   const ordered = encounter && cols.some((column) => column.name === encounter.col)
     ? make.sort({ id: fresh('so'), input: kept, channels: [], type: kept.type, terms: [{ expr: col(kept.id, encounter.col), dir: 'asc' }] })
     : kept;
-  return nameBindings(ordered);
+  // A chain with NO emission order still gets a position, and it is not a contradiction: the order is
+  // arbitrary but it is FIXED the moment these rows are retained, and every later reader sorts by the
+  // column rather than re-deriving it. An unordered chain has no answer to "which was first"; it must
+  // still have ONE answer to "which input row is this created row".
+  const positioned = make.window({
+    id: fresh('wn'), input: ordered, channels: [], type: typeOf(...ordered.type.cols, meta(ORD, 'int')),
+    specs: [[ORD, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: encounter && cols.some((column) => column.name === encounter.col) ? [{ expr: col(ordered.id, encounter.col), dir: 'asc' }] : [] } }]],
+  });
+  return nameBindings(positioned);
+}
+
+/** The column a write's input carries its POSITION in, and the created rows recover theirs into.
+ *  One name, because the join is between two relations that must agree on it. */
+const ORD = 'ord';
+
+/** The created rows with their position recovered from their own ids — `ROW_NUMBER() OVER (ORDER BY
+ *  id)`. SQLite assigns a rowid per inserted row in the source's order, so the k-th smallest id IS
+ *  the k-th input row; reading it off the DATA is what makes this independent of whatever order the
+ *  `RETURNING` rows happened to arrive in. */
+function positioned(created: Rel, fresh: Minter): Rel {
+  return make.window({
+    id: fresh('wn'), input: created, channels: [], type: typeOf(...created.type.cols, meta(ORD, 'int')),
+    specs: [[ORD, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: [{ expr: col(created.id, 'id'), dir: 'asc' }] } }]],
+  });
 }
