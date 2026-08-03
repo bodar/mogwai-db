@@ -1006,17 +1006,27 @@ how a carried field gets dropped at a seam. `alias`/`path`/`origin`/`branchOrder
 ABSENT rather than left to be forgotten — each needs a shape (a name→column map, a position list, a
 stack) the translation does not have.
 
-**A REAL GAP IN THE §3.5 OBLIGATION TABLE, filed rather than guessed at.** `dedup` under an
-emission order stops being a `Distinct`: the survivor must keep the FIRST occurrence's position, so
-legacy emits `SELECT id, 1 AS bulk, MIN(encounter) AS encounter … GROUP BY id`. That `Aggregate`'s
-channel obligation is **neither** the barrier contract **nor** `isReEncoding` — it keeps every
-channel, but recomputes each one rather than carrying it. So the two-way split that answered
-movement's bulk coalescing is incomplete, and the general shape is a THIRD case: *an aggregate
-grouped by the traverser IDENTITY, where each output channel is derived from its own input
-channel's column, is a per-traverser REDUCTION* — not a barrier, and not multiplicity-preserving
-either. What the obligation can check is the structural fact (no channel dropped, each derived from
-its own column); which aggregate is CORRECT for a role is Gremlin semantics and stays above. Worth
-settling before `order` lands, since `order` re-mints the same channel.
+**A REAL GAP IN THE §3.5 OBLIGATION TABLE — found here, CLOSED in `92c31d2`, and the lesson is
+worth more than the case.** `dedup` under an emission order stops being a `Distinct`: the survivor
+must keep the FIRST occurrence's position, so legacy emits `SELECT id, 1 AS bulk, MIN(encounter) AS
+encounter … GROUP BY id`. That `Aggregate` was neither the barrier contract nor `isReEncoding`.
+
+The obligation is **two contracts, not one**. A BARRIER emits a new traverser and no channel
+survives. A grouping by the traverser's own IDENTITY emits one row per SURVIVING traverser, so its
+channels must come out the other side or a later reducer counts the collapse away. The node
+DECLARES which it is under; the table checks it is allowed to.
+
+`CHANNEL_GROUP_POLICY` is the third total table in the channel core — which roles have a defined
+answer when N rows become one. `bulk` combines (multiplicity adds), `encounter` combines (the
+position is the earliest); an alias, path, origin and sack belong to ONE member and a grouping would
+take the value from whichever row SQLite reached first. Which aggregate is CORRECT for a role stays
+Gremlin semantics above the layer.
+
+**Why the shape mattered:** `isReEncoding` pattern-matched exactly one expression — a sole
+`SUM(bulk)` — so a second legitimate grouping had to WIDEN it rather than consult it. Stating the
+policy per role and checking only structure is what the two tables beside it already did. Three
+increments, three tables, one shape — and that is the argument for reaching for a total `Record`
+over a predicate the next time this comes up.
 
 The other decline is ordinary: a hop RE-MINTS the order (`ROW_NUMBER() OVER (ORDER BY encounter,
 id)`) because the join fans out and the incoming positions no longer number the outgoing rows.
