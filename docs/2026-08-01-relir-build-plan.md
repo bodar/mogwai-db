@@ -539,11 +539,12 @@ LOCAL reducers (`reducer.ts` over a member, not over a row). `jsonbList` plus th
 is the increment; the rest follow it.
 
 **The rest of the corpus ranking** (`mise run rel-blockers`, 729 routed — re-run it every round, it
-MOVES): side effects 95 (`aggregate` 65 · `group` 22 · `groupCount` 8) · the property shape 90
-(`properties` 46 · `valueMap` 37) · **the map shape 64** (`group*` 41 · `groupCount*` 23) · scalar
-transforms 64 (`math` 15 · `asNumber` 12) · branch 63 (`choose` 36 · `union` 20) · aliases 53 (all at
-`select`) · **writes down to 35** (`property` 15 · `mergeV` 6 · `mergeE` 6 · `addE` 5 · `addV` 3) · the
-list shape 30 (all at `fold`) · `sack` 25 · row ops 15.
+MOVES, and 732 routed as of the last measurement): side effects 95 (`aggregate` 65 · `group` 22 ·
+`groupCount` 8) · the property shape 90 (`properties` 46 · `valueMap` 37) · **the map shape 64**
+(`group*` 41 · `groupCount*` 23) · scalar transforms 64 (`math` 15 · `asNumber` 12) · branch 63
+(`choose` 36 · `union` 20) · aliases 53 (all at `select`) · **writes down to 32** (`property` 12 ·
+`mergeV` 6 · `mergeE` 6 · `addE` 5 · `addV` 3) · the list shape 30 (all at `fold`) · `sack` 25 ·
+row ops 15.
 
 **"Side effects 184, the largest family by a wide margin" was a MIS-ATTRIBUTION, and the correction is
 the more useful fact.** `group`/`groupCount` WITH a string label fills a named collection a later
@@ -911,11 +912,17 @@ traversers, as a relation. `input`/`incoming` is its only spelling, in code and 
   every one of them and deleting its dispatcher would turn each into a hard error. **2.6 is gated on
   write coverage being COMPLETE, not on the prerequisite** — which is worth stating because the
   prerequisite is the exciting-looking half and it is done. The remaining order is therefore
-  `property`'s 18 first (still the largest), then the three sixes. Its residue is now four NAMED causes
-  rather than one undifferentiated number: a NESTED value (~6), the `null` REMOVAL rule (~6), a
-  `T`-token key (3) and a meta-property (~4), plus three `withSideEffect` constants. Two of those are
-  cheap and one is not — `null` is a DELETE wearing a write's spelling, and a nested value is the
-  per-traverser evaluation this route does not do.
+  `property`'s remaining 12, then the three sixes.
+
+  **`property`'s residue is now the HARD part and it may not be closable inside this phase**, which
+  matters because 2.6 is gated on it: a NESTED value (~4) and three `withSideEffect` constants both need
+  per-traverser evaluation of a sub-traversal — the row-at-a-time surface this migration exists to
+  DELETE — and a `T`-token key (3) writes an element's id or label on an existing element, which legacy
+  refuses with a message it owns. So the honest statement is that Phase 2 closes to within ~10
+  traversals of complete and the last ones are a substrate question, not an increment. **Deciding
+  whether those become a pre-lowering VERIFY refusal, a genuine per-traverser substrate, or a permanent
+  documented exception is the open question 2.6 actually turns on** — and it is the same question the
+  migration spec's `refusal_belongs_to_legacy` records (`docs/spec/relir-migration.allium`).
 
   **`parseMergeOptions` is DELETED — absorbed into `mergeMaps` (0 references, floor banked).** It came
   off this list rather than down it, and the reason generalizes to any target a migration makes SHARED:
