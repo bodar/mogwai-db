@@ -232,6 +232,9 @@ export interface PropertySet {
    *  `vtype` because `propertyValueBind` is the authority on which types are collections and a second
    *  reading of that list is a second chance to disagree with it. */
   readonly collection: boolean;
+  /** The META-PROPERTY object as JSON TEXT, or `null` where the step named none. It crosses as
+   *  `jsonb(<text>)` for `stored`'s reason and lands in the property row's own `meta` column. */
+  readonly meta: string | null;
   /** What this value indexes as: (kind, text) pairs from the ONE shared walk. */
   readonly fts: readonly { readonly kind: string; readonly text: string }[];
   /** The DECLARED cardinality, or `null` for "the traversal named none" — a real state, since only
@@ -433,11 +436,13 @@ function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind:
     : owners;
   const source = make.project({
     id: fresh('p'), input: seed, channels: [],
-    type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-    exprs: [[spec.owner, col(seed.id, 'id')], ['key', text(write.key)], ['value', storedExpr(write)], ['vtype', write.vtype === null ? lit(null, 'text') : text(write.vtype)]],
+    type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true),
+      ...(write.meta === null ? [] : [meta('meta', 'blob', true)])),
+    exprs: [[spec.owner, col(seed.id, 'id')], ['key', text(write.key)], ['value', storedExpr(write)], ['vtype', write.vtype === null ? lit(null, 'text') : text(write.vtype)],
+      ...(write.meta === null ? [] : [['meta', { kind: 'call', fn: 'jsonb', args: [lit(write.meta, 'text')] }] as const])],
   });
   const rowsWritten = insert({
-    target, cols: [spec.owner, 'key', 'value', 'vtype'], source, channels: [], type: WRITTEN_TYPE,
+    target, cols: [spec.owner, 'key', 'value', 'vtype', ...(write.meta === null ? [] : ['meta'])], source, channels: [], type: WRITTEN_TYPE,
     ...(elem === 'edge'
       ? { onConflict: { target: ['edge', 'key'], set: [['value', col(EXCLUDED, 'value')], ['vtype', col(EXCLUDED, 'vtype')]] } }
       : {}),
@@ -538,19 +543,32 @@ export function propertyWrites(steps: readonly IRStep[], elem: Elem, params: Rec
  * reads back.
  */
 function writeOf(spec: PropSpec, elem: Elem): PropertyWrite | null {
-  if (typeof spec.key !== 'string' || spec.meta || isNested(spec.value)) return null;
-  if (elem === 'edge' && spec.cardinality !== null) return null;
+  if (typeof spec.key !== 'string' || isNested(spec.value)) return null;
   // The key waist, shared: an invalid key is an ERROR legacy raises, never a silently skipped write.
   try { validatePropertyKey(spec.key); } catch { return null; }
   // TinkerPop's null-VALUE rule, and the reason the return type is a union: a null value REMOVES every
   // property under the key. `undefined` is a different thing — an absent argument, which this route has
   // nothing to write for — so the test is `=== null` exactly as `isPropertyRemoval` spells it, never a
   // loose `== null` that would silently turn a missing value into a delete.
+  //
+  // ASKED BEFORE META AND BEFORE THE CARDINALITY, which is `ElementHelper`'s own order: a removal
+  // consults neither, so `property(k, null, 'acl', null)` is an ordinary removal and the meta pair is
+  // simply not part of the answer. Asking about meta first made that traversal decline for a reason
+  // that does not apply to it.
   if (spec.value === null) return { kind: 'remove', key: spec.key };
   if (spec.value === undefined) return null;
+  if (elem === 'edge' && (spec.cardinality !== null || spec.meta)) return null;
+  // A META-PROPERTY is a JSONB object on the property row, so it is `storedExpr`'s question again with
+  // a different column. It is admitted only where the cardinality is DECLARED `single` or `list`, and
+  // the excluded case is a real one rather than caution: under `set` — including the UNDECLARED write
+  // whose element turns out to be declared `set` — an equal value already present is not re-inserted
+  // and its meta is PATCHED instead, which is an UPDATE statement this route does not emit. Admitting
+  // it would silently drop the meta on that arm.
+  const meta = spec.meta ? JSON.stringify(spec.meta) : null;
+  if (meta !== null && spec.cardinality !== 'single' && spec.cardinality !== 'list') return null;
   const { stored, collection } = propertyValueBind(spec.value, spec.vtype, spec.typeNode);
   return {
-    kind: 'set', key: spec.key, stored, collection, vtype: spec.vtype, cardinality: spec.cardinality,
+    kind: 'set', key: spec.key, stored, collection, meta, vtype: spec.vtype, cardinality: spec.cardinality,
     fts: propertyFtsEntries(spec.value, spec.typeNode),
   };
 }

@@ -88,3 +88,38 @@ Feature: mogwai addendum — a COLLECTION property value stores as one typed tre
     When iterated to list
     Then the result should have a count of 1
     And the graph should return 1 for count of "g.V().properties(\"list\")"
+
+  # A META-PROPERTY lands in the property row's own `meta` column as a JSONB object — the same
+  # `jsonb(<text>)` question as a collection value, a different column. Pinned with a LIST cardinality
+  # because that is the case where two values of one key each carry their own meta, so a route that
+  # attached meta to the wrong row is visible.
+  @gap:property-collection-value
+  Scenario: g_addV_property_list_with_meta_keeps_meta_per_value
+    Given the empty graph
+    And the traversal of
+      """
+      g.addV().property("name","bob").
+        property(Cardinality.list, "location", "ny", "startTime", 2014, "endTime", 2016).
+        property(Cardinality.list, "location", "va", "startTime", 2016)
+      """
+    When iterated to list
+    Then the result should have a count of 1
+    And the graph should return 2 for count of "g.V().properties(\"location\")"
+    And the graph should return 1 for count of "g.V().properties(\"location\").has(\"startTime\", 2014)"
+    And the graph should return 1 for count of "g.V().properties(\"location\").has(\"startTime\", 2016)"
+    And the graph should return 1 for count of "g.V().properties(\"location\").has(\"endTime\", 2016)"
+
+  # A null value with meta args is a REMOVAL and the meta is not part of the answer — `ElementHelper`
+  # removes before it looks at either meta or the cardinality, so asking about meta first made this
+  # decline for a reason that does not apply to it.
+  @gap:property-collection-value
+  Scenario: g_addV_property_null_with_meta_args_is_still_a_removal
+    Given the empty graph
+    And the traversal of
+      """
+      g.addV("person").property("name","marko").property("friendWeight", null, "acl", null)
+      """
+    When iterated to list
+    Then the result should have a count of 1
+    And the graph should return 1 for count of "g.V().has(\"name\",\"marko\")"
+    And the graph should return 0 for count of "g.V().properties(\"friendWeight\")"
