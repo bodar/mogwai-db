@@ -77,7 +77,8 @@ const DECLINED = [
   "g.V().where(__.has('name','marko'))", // a filter-only body is a predicate on the SAME traverser
   "g.V().where(__.out().order())",    // a body step the child fold has not learned
   'g.V().order()',                    // element order() is TailAcc's, folded into the FRAMING SELECT
-  "g.V().out().values('name').limit(1)", // a slice PAST the shape change, in the scalar vocabulary
+  'g.V().tail(2)',                    // reads the order BACKWARDS — a descending window, not learned
+  'g.V().sample(2)',                  // ORDER BY RANDOM(): deliberately nondeterministic
 ];
 
 describe('the RelIR spine', () => {
@@ -100,7 +101,8 @@ describe('the RelIR spine', () => {
     // ORDER is the wrong ANSWER, so sorting before comparing would hide exactly the defect this
     // covers. `ms` (the census gate) would not see it either — same multiset size, different rows.
     for (const gremlin of ['g.V().limit(2)', 'g.V().range(1,3)', 'g.V().skip(2)', 'g.V().skip(1).limit(2)',
-      'g.V().out().limit(2)', 'g.V().both().limit(3)', 'g.V().out().out().limit(2)', 'g.V().out().range(1,3)']) {
+      'g.V().out().limit(2)', 'g.V().both().limit(3)', 'g.V().out().out().limit(2)', 'g.V().out().range(1,3)',
+      "g.V().values('name').limit(2)", "g.V().values('name').skip(1)", "g.V().out().values('name').limit(2)"]) {
       const rel = read(gremlin, { spine: 'rel' });
       const legacy = read(gremlin, { spine: 'legacy' });
       expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
@@ -117,9 +119,9 @@ describe('the RelIR spine', () => {
     // step this route cannot THREAD it through: a hop re-mints the order with a window function,
     // and `dedup` under an order stops being a `Distinct` at all.
     // What declines now is a chain that demands an order and reaches a step this route cannot
-    // THREAD it through — a slice past the shape change is in the SCALAR vocabulary, which the
-    // row-op fold (an element-relation fold) never sees.
-    for (const gremlin of ["g.V().out().values('name').limit(1)", "g.V().values('name').limit(1)"]) {
+    // THREAD it through: `tail()` reads the order backwards (a descending window) and `sample()`
+    // replaces it with `ORDER BY RANDOM()`.
+    for (const gremlin of ['g.V().tail(2)', 'g.V().sample(2)', "g.V().out().values('name').tail(1)"]) {
       expect(read(gremlin, { spine: 'rel' }).spine).toBe('legacy');
     }
     // …and it is a GATE, not a blanket: everything whose order the route DOES thread still routes,

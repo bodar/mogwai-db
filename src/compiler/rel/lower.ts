@@ -410,26 +410,46 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
  * into the FRAMING projection's `ORDER BY` (`… FROM nodes n JOIN c0 p ON n.id=p.id ORDER BY n.id`),
  * which is Phase 4.2's block assembler and not this route's to take.
  */
+/**
+ * `limit`/`skip`/`range` over ANY relation that carries an emission order — element or scalar, which
+ * is why it is its own function rather than an arm of the element fold. What it needs is not a
+ * SHAPE but a channel: a window is only a window if there is an order to take it from.
+ *
+ * A relation with no order still slices where the order cannot matter — after `count()`, whose one
+ * row makes `LIMIT 1` and `ORDER BY … LIMIT 1` the same question. Legacy emits the bare `LIMIT`
+ * there and this matches it, because emitting a sort over a single row would be a difference in
+ * the plan for no difference in the answer.
+ */
+function sliceOp(step: IRStep, input: Rel, fresh: Minter): Rel | null {
+  if (step.modulators?.length || step.optionArms || isLocalScope(step)) return null;
+  if (step.name !== 'limit' && step.name !== 'skip' && step.name !== 'range') return null;
+  // `sliceOf` REJECTS an illegal range (`range(2,1)`) by throwing, which is right where it is the
+  // only answer available — but this module's contract is that `null` is its only decline, and a
+  // throw from here would mean the RelIR route raising an error the legacy spine has not reached
+  // yet. Declining hands the traversal to the spine that owns the message, which raises the
+  // identical one. Found by sweeping every prefix of every corpus traversal under all four switch
+  // combinations, which is the only way a decline-contract violation shows up at all.
+  let slice;
+  try { slice = sliceOf(step); } catch { return null; }
+  const ordered = input.channels.some((channel) => channel.role === 'encounter');
+  const source = ordered
+    ? make.sort({
+      id: fresh('so'), input, channels: input.channels, type: input.type,
+      terms: [{ expr: col(input.id, 'encounter'), dir: 'asc' }],
+    })
+    : input;
+  return make.limit({
+    id: fresh('li'), input: source, channels: input.channels, type: input.type,
+    ...(slice.limit === null ? {} : { count: lit(slice.limit, 'int') }),
+    ...(slice.offset ? { offset: lit(slice.offset, 'int') } : {}),
+  });
+}
+
 function rowOp(step: IRStep, input: Rel, ordered: boolean, fresh: Minter): Rel | null {
   if (step.modulators?.length || step.optionArms) return null;
   if (step.name === 'identity' || step.name === 'barrier') return (step.args ?? []).length ? null : input;
-
-  if (step.name === 'limit' || step.name === 'skip' || step.name === 'range') {
-    // A slice is only a WINDOW if the relation has an order to take it from, and `demandsEncounter`
-    // is what guarantees one is threaded — so the caller's gate is this arm's precondition, not a
-    // belt-and-braces check.
-    if (!ordered || isLocalScope(step)) return null;
-    const slice = sliceOf(step);
-    const sorted = make.sort({
-      id: fresh('so'), input, channels: input.channels, type: input.type,
-      terms: [{ expr: col(input.id, 'encounter'), dir: 'asc' }],
-    });
-    return make.limit({
-      id: fresh('li'), input: sorted, channels: input.channels, type: input.type,
-      ...(slice.limit === null ? {} : { count: lit(slice.limit, 'int') }),
-      ...(slice.offset ? { offset: lit(slice.offset, 'int') } : {}),
-    });
-  }
+  const sliced = sliceOp(step, input, fresh);
+  if (sliced) return sliced;
 
   if (step.name !== 'dedup' || (step.args ?? []).length) return null;
   // `dedup()` RESETS the multiplicity: the survivor stands for itself, not for the sum of the
@@ -602,6 +622,15 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   // rows, and a census that structurally cannot see it (`ord` is telemetry, `ms` is the gate).
   const ordered = analyzeChain(steps as IRStep[]).demandsEncounter;
   const channels = elementChannels(ordered);
+  // COLLAPSE AND ORDER ARE MUTUALLY EXCLUSIVE, and this module says so itself rather than trusting
+  // its caller to. A collapse merges convergent walks by discarding which one arrived — exactly the
+  // per-row identity an emission order IS — so the two cannot both hold. `analyzeChain` already
+  // folds that in (`collapseSafe && !demandsEncounter`), so the engine never asks for both; but a
+  // lowering that produces an invalid plan when handed a combination it cannot honour is a defect
+  // whether or not today's caller can reach it. Found exactly that way: a sweep calling
+  // `lowerToRel` directly built a collapse that dropped the encounter column its own declared type
+  // still promised, and the factory caught it as a join-width mismatch three nodes later.
+  const collapsing = collapse && !ordered;
   const first = steps[0];
   if (!first) return null;
   if (first.name !== 'V' && first.name !== 'E') return null;
@@ -643,7 +672,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
     const step = steps[at];
     const moved: { rel: Rel; elem: Elem } | null = movement(step, { rel }, elem, fresh);
     if (moved) {
-      rel = collapse ? coalesce(moved.rel, fresh) : moved.rel;
+      rel = collapsing ? coalesce(moved.rel, fresh) : moved.rel;
       elem = moved.elem;
       continue;
     }
@@ -678,6 +707,13 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
     : retypedRel;
   for (at++; at < steps.length; at++) {
     const step = steps[at];
+    // The scalar vocabulary past the shape change. A slice reaches it through the SAME `sliceOp` the
+    // element fold uses — what a window needs is the emission-order channel, not a particular
+    // stream shape, and `values()` carries the parent's position through exactly as legacy does
+    // (a property fan-out shares its parent's position; it does not re-mint one).
+    if (step.name === 'identity' || step.name === 'barrier') { if ((step.args ?? []).length) return null; continue; }
+    const sliced = sliceOp(step, filtered, fresh);
+    if (sliced) { filtered = sliced; continue; }
     if (step.name !== 'is' || step.modulators?.length || step.optionArms) return null;
     const args = step.args ?? [];
     if (args.length !== 1) return null;
