@@ -22,12 +22,18 @@ use "./relir-algebra.allium" as algebra
 
 enum Spine { rel | legacy }
 
+-- Every reason but the LAST closes when the new spine learns to answer the traversal. The last one
+-- cannot close that way, because the traversal has no answer to learn — so it is the one decline the
+-- coverage counter structurally cannot retire. `DeleteLegacySpine` carries the obligation that falls
+-- out of that, and the open question at the foot of this file is where the refusal moves to.
 enum DeclineReason {
     step_not_covered            -- the ordinary case: the lowering has not learned a step
     | order_not_threadable      -- the chain demands an emission order this route cannot carry
     | specialised_lowering      -- a fast path expresses an access path the algebra cannot state
     | effect_not_covered        -- a sack, a side effect or a write
     | bind_budget_exceeded      -- the plan is over the platform's parameter cap
+    | argument_not_static       -- the step is covered; THIS argument's value is not a compile-time one
+    | refusal_belongs_to_legacy -- the answer is an ERROR whose message the other route owns
 }
 
 enum RatchetKind { symbol | pattern }
@@ -301,10 +307,14 @@ default PhaseGate decline_sweep = {
     phase: phase_4_1,
     status: green
 }
+-- BUILT and green: the reproductions became four `.feature` files in the addendum suite, which is a
+-- gate rather than an instrument (every scenario must pass), plus the perturbed census, whose write
+-- rows are gone. Recorded as `unbuilt` while it was described-but-not-written, which
+-- `AGateOnAnActivePhaseIsBuilt` had already made a contradiction with this phase being active.
 default PhaseGate write_pins = {
     name: "The landed write correctness pins stay green",
     phase: phase_2,
-    status: unbuilt
+    status: green
 }
 
 ------------------------------------------------------------
@@ -401,6 +411,46 @@ rule DeclineASpecialisedAccessPath {
         -- table scan is a performance regression no results-and-access-path gate on the new
         -- route can see, and the coverage number would report it as progress. The decline lifts
         -- when the fast paths become plan rewrites, and it is pinned by name until then.
+}
+
+-- THE STEP IS COVERED AND THIS ARGUMENT IS NOT. A step's coverage is a fact about the step; whether a
+-- particular argument's VALUE exists at compile time is a fact about the traversal that wrote it. A
+-- merge map may hold a nested traversal where a label, a key or a value belongs, and that traversal is
+-- resolved against the graph once per incoming traverser — so there is no value for an expression to
+-- carry, and the arguments beside it are perfectly expressible.
+--
+-- Distinguished from `step_not_covered` because the two close by DIFFERENT WORK, and conflating them
+-- misdirects it: `step_not_covered` closes when someone lowers the step, this closes only when the
+-- route can evaluate a sub-traversal per traverser — the row-at-a-time surface this migration exists
+-- to delete. Counted under one name, a step would read as unfinished long after its lowering was done.
+rule DeclineANonStaticArgument {
+    when: LowerChain(chain)
+    requires: lowering_covers(chain)
+    requires: chain_has_non_static_argument(chain)
+    ensures: LoweredPlan.created(chain: chain, covered: false, decline_reason: argument_not_static)
+}
+
+-- THE ANSWER IS AN ERROR, AND ITS MESSAGE IS NOT THIS ROUTE'S TO WRITE.
+--
+-- Some traversals are refused by the reference implementation, and the conformance suite matches on
+-- the refusal's TEXT — a creation whose label count the graph's declared cardinality forbids, an
+-- element identifier that must still be free when the row is written. Answering such a traversal is
+-- the defect; so is raising a different sentence for it. So the lowering declines and the route that
+-- owns the message raises it.
+--
+-- This is the inverse of the trap that costs a wrong answer the other way round: BEFORE removing a
+-- refusal, check whether it is the reference's answer rather than only ours. A third of the write
+-- messages in the conformance telemetry belong to traversals that PASS by asserting the throw.
+rule DeclineARefusalOwnedElsewhere {
+    when: LowerChain(chain)
+    requires: refusal_is_the_reference_answer(chain)
+    ensures: LoweredPlan.created(chain: chain, covered: false, decline_reason: refusal_belongs_to_legacy)
+
+    @guidance
+        -- The name says who owns it today ON PURPOSE, so that it becomes unwritable at the moment the
+        -- owner is deleted. A refusal cannot be "covered" in the sense the coverage counter means, so
+        -- this decline does not close the way the others do — see the invariant of the same shape and
+        -- the open question under it.
 }
 
 -- MEASUREMENT --------------------------------------------------------------
@@ -521,6 +571,10 @@ rule DeleteLegacySpine {
 
     requires: state.is_fully_covered
     requires: state.live_deletion_targets = 0
+    -- A refusal the deleted route was raising is a REQUIRED answer with no author left, and neither
+    -- counter above can see it: the traversal never becomes covered (there is nothing to cover) and it
+    -- is not a deletion target. So it is its own precondition.
+    requires: no_refusal_depends_on_legacy(state)
 
     ensures: LegacySpineDeleted(state: state)
     ensures: DifferentialSwitchDeleted(state: state)
@@ -582,6 +636,15 @@ invariant PhaseNumbersAreUnique {
 invariant AGateOnAnActivePhaseIsBuilt {
     for gate in PhaseGates:
         gate.phase.status = active implies gate.status != unbuilt
+}
+
+-- A refusal is not a coverage gap, so a traversal declined for one must never be counted as though
+-- learning a step would close it. It routes to legacy like any decline; what it must not do is claim
+-- the new spine could take it, because there is no answer for the new spine to produce.
+invariant ARefusalIsNeverClaimedAsCoverable {
+    for traversal in Traversals:
+        traversal.decline_reason = refusal_belongs_to_legacy
+            implies traversal.routed_to = legacy
 }
 
 ------------------------------------------------------------
@@ -653,3 +716,6 @@ open question "A class of traversal that only the unwired bind-landing pass coul
 
 
 open question "Coverage is censused per query against a committed baseline, but nothing asserts a floor on the TOTAL. A refactor that trades ten covered traversals for eleven new ones passes the per-query ratchet only if no individual query regresses — is that the intended strength?"
+
+
+open question "Where does a `refusal_belongs_to_legacy` refusal LIVE once the legacy spine is deleted? It cannot move into the lowering, because `DeclinesNeverThrows` forbids the lowering from raising, and it cannot stay where it is, because that route is deleted. The candidate answer is that a refusal on a traversal's own text is a pre-lowering VERIFY concern and belongs in the rewrite-pass pipeline, above both spines — which would make this decline temporary like the others and close it by MOVING the check rather than by learning a step. Confirm that placement, or name the alternative: today the refusal sits inside the surviving route by accident of which one was written first."
