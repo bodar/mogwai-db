@@ -1284,6 +1284,30 @@ alias to reuse in a select list), so a chain multiplies whatever the `values()` 
 all 308 rel-routed corpus traversals: **max 53 binds, none above 60**, and the worst case is a nested
 `P.not(P.and(…))` rather than a transform chain. Comfortably inside the DO's 100-parameter cap.
 
+**Coverage 308 → 349, 15.2%: the REDUCER family — Phase 4.3's named deliverable, landed early because
+§10·8 ranks by family and this one is four step names on one `Aggregate`.** +41, exactly the blocker
+table's prediction. Three shared policies, and one authority for each is the whole argument: getting any
+of them wrong once gets it wrong four times.
+
+- **ELIGIBILITY** is arithmetic-vs-comparable — `sum`/`mean` admit numbers, `min`/`max` admit strings too
+  because Gremlin's `Comparable` does — and the guard yields NULL otherwise, so an ineligible value
+  contributes NOTHING rather than coercing to 0 or `''`. That asymmetry is what a re-derived copy gets
+  wrong, so the lists moved to `gremlin/types.ts` as `REDUCER_CLASSES` and **legacy now reads them too**,
+  verified by its SQL being byte-identical after the swap.
+- **BULK WEIGHTING** for `sum`/`mean` only; `min`/`max` are bulk-invariant. Read off the CHANNEL exactly
+  as `countExpr` does, so an `inject` source gets the unweighted form with no step knowing which it is in.
+- **THE RESULT TYPE IS DYNAMIC**, so the framing reads a `vt` column rather than a compile-time tag.
+
+**AND A REAL LIMIT OF §3.2, worth recording as a constraint rather than a bug.** `mean` answered **30
+where the reference mean is 30.75**: every `Lit` is a BIND, and a JS `1.0` IS `1`, so legacy's `* 1.0`
+bound as an INTEGER and SQLite did integer division. **A bind cannot express a REAL literal whose value
+is integral** — legacy splices `1.0` as SQL text and RelIR structurally cannot. The remedy is to say what
+is meant: an explicit `Cast` to REAL. Generalize before reaching for a `Lit` to change a value's type —
+`Cast` is the node that states it, and the next place this bites will be any lowering that wants `× 1.0`,
+`/ 1.0` or a real-typed zero. Caught by the VALUE (a differential on rows), after the previous two rounds
+were caught by the shape and by L3 — three rounds, three different instruments, which is the argument
+for running all of them rather than the cheapest one.
+
 **PHASE 4.1's ENTRY FACT, measured 2026-08-03 — and it corrects this document twice.** §6 said the
 element row-ops are "fused into the framing projection by `TailAcc`, so a `Sort` on the CORE relation
 is a different plan (the framing join is 1:1 on `id`, so it is equivalent — but that is an argument to
