@@ -1046,6 +1046,36 @@ cannot see it — same multiset size, different rows. They also pass under
 `MOGWAI_REVERSE_UNORDERED=1`, so the window is pinned to the encounter rather than to SQLite's scan
 choice.
 
+**A SHARPER INSTRUMENT THAN THE MARGINAL SWEEP, and it changed the answer (`4087cb4`).** Counting
+what a step WOULD buy assumes the rest of its chain is covered. Counting where the fold actually
+GIVES UP does not — for every corpus traversal, take the longest prefix that lowers and name the
+step after it. Measured 2026-08-03, at 125 routed:
+
+| blocked at | traversals | | blocked at | traversals |
+|---|---|---|---|---|
+| `inject` | **403** | | `aggregate` | 57 |
+| `addV` | 145 | | `local` | 52 |
+| `as` | 131 | | `group` | 50 |
+| `is` | 79 | | `properties` | 46 |
+| `repeat` | 72 | | `where` | 39 |
+| `fold` | 71 | | `match` | 36 |
+| `order` | 70 | | `valueMap` | 35 |
+| `has` | 66 | | `choose` | 34 |
+
+**`inject` is the single largest prize by a factor of three, and the marginal sweep could not see
+it at all** — it only ever asked what an extra step name adds to a chain ROOTED at `V`/`E`.
+Confirmed directly: **387 of the 2,298 corpus traversals begin with `g.inject(...)`**, 17% of the
+corpus, against 1,368 beginning with `g.V()`/`g.E()`. The node is already proven — `Values` is
+family 11 of the Phase-1 equivalence gate — and what it needs is the SCALAR source and the scalar
+vocabulary above it, most of which (`is`, the slices, the predicate module) already exists.
+
+**The sweep also found two latent defects, which is the better argument for running it.** Sweeping
+every PREFIX under all four switch combinations — rather than the shapes one has in mind — caught
+(a) `collapse` and `ordered` being accepted together, where the collapse dropped an encounter column
+its own declared type still promised, and (b) `sliceOf` throwing out of a module whose contract is
+that `null` is its only decline. Neither was reachable through `compilePlan` today; both were
+defects anyway. The sweep is now clean and is worth re-running after any lowering change.
+
 **NEXT, measured from base 259** (`V`/`E`/`hasLabel`/`has`/`count`/`values`/`is`/movement/`where`):
 **the row-algebraic class is +50 and it is literally Phase 4.1's named deliverable** — `order` 20 ·
 `dedup` 11 · `limit`/`range`/`skip` 2 · `identity` 2, and together with `tail`/`sample` fifty. The
