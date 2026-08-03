@@ -1156,6 +1156,60 @@ Three things it produced that outlast it:
   phase and into the id-relation phase — which is the position that threads the channels. Zero IS the
   gate, deliberately not a ratchet.
 
+**Coverage 208 → 210, 9.1%: THE MODULATOR SEAM — chosen on family closure, per §10·7, and the +2 is
+the point rather than the disappointment.** `if (step.modulators?.length || step.optionArms) return
+null` guarded SIX handlers in `lower.ts` — one concept declined six times — and no single-step
+increment motivates fixing that, because each host only ever needs its own `by()` and would re-derive
+the parse, the projection and the productivity rule locally. `src/compiler/rel/modulator.ts` is the
+vocabulary, standing to `by()` exactly as `predicate.ts` stands to `P`/`TextP`: `order` and `dedup`
+read it today, and `group`/`groupCount`/`select`/`project`/`path`/`sack` get it for free the moment
+their host lands. Both census digests unchanged on the two rows that moved.
+
+**A `by()` is TWO things sharing a spelling, and conflating them is how a lowering sorts by the wrong
+value.** A PROJECTION — which value of the traverser the host operates on (`by()` identity,
+`by('name')` a property, `by(T.id|T.label)` a token, `by(__.out().count())` a sub-traversal, which
+declines because it is a child lowering and not an expression) — and a COMPARATOR, which only
+`order()` (a direction) and `sack()` (an `Operator`) have a meaning for. A comparator alone leaves the
+projection at identity, which is why `order().by(Order.desc)` is a complete `by()` rather than a
+malformed one. So one `by()` parses to a pair and each host reads the halves it can use.
+
+**PRODUCTIVITY belongs to the vocabulary, not to each host.** TinkerPop's default `by()` DROPS a
+traverser it yielded nothing for and `ProductiveByStrategy` keeps it
+(`vendor/tinkerpop/gremlin-core/…/DedupGlobalStep.java` → `product.isProductive()`); legacy spells
+that as a `WHERE <key> IS NOT NULL` present or absent at each of its hosts, which is one place per
+host to forget it. `productivityFilter` returns the predicate or `undefined`, and a forgotten one is a
+wrong answer with the RIGHT ARITY when the extra rows sort last — the census's blind spot, so it has
+its own absolute-count test rather than a differential.
+
+**`dedup().by(k)` is a ranked WINDOW, not a grouped aggregate**, and the reason is worth keeping: the
+survivor is the lowest-id row per key and every other column must be ITS values, which an `Aggregate`
+cannot say — it can produce `MIN(id)` but not "the encounter belonging to the row that had it". Same
+shape legacy emits.
+
+**Two findings from doing it.**
+
+- **The reference resets `bulk` to 1 on EVERY dedup and legacy does not**, for the modulated form —
+  `DedupGlobalStep.filter` calls `traverser.setBulk(1L)` before it even looks at the `by()`. It is not
+  a divergence to reconcile: `analyzeChain`'s collapse-safety rule excludes a `dedup` that has
+  modulators, so `movementCollapse` never fires upstream of one and the multiplicity is provably 1
+  where it arrives. CHECKED, not assumed — `g.V().both().both().dedup().by('lang')` emits no `GROUP BY`
+  on either spine. RelIR emits the reference form because it costs nothing and stays right if that
+  safety rule is ever relaxed.
+- **A `Join`'s outputs are addressed through the JOIN, never through its sides** — the sides are in
+  scope inside `on` and nowhere else — so a joined side's `id` must be declared under another name
+  (`lid`), exactly as `movement` renames the incoming id to `pid`. Two columns sharing a name in one
+  declared type shadow each other in the emitter's scope map. It failed loudly (`no relation 'lb2' is
+  in scope`), which is the factory's width and scope checks doing their job.
+
+**And one consolidation the seam forced, which is `ScalarType`'s pattern again** (see
+`docs/2026-07-28-scalartype-refactoring-pattern.md`): `storedCompare(rel, vtypeCol)` became
+`storedCompareOn(vtypeExpr)` with the relation-column form DERIVED from it, because `modulator.ts`
+builds the ordering key inside a scalar subquery where the vtype is an arbitrary expression. Two
+spellings of one cast policy is how one of them silently stops matching the other. `build.ts` is the
+matching move at the module level — the construction leaf (`meta`/`typeOf`/`minter`/`and`/`eq`/
+`labelIds`/`storedValue`/`PROPERTIES`/`firstOf`) that both lowering modules sit on, keeping the import
+graph a DAG: `build ◂ {predicate, modulator} ◂ lower ◂ spine`.
+
 **NEXT, measured from base 259** (`V`/`E`/`hasLabel`/`has`/`count`/`values`/`is`/movement/`where`):
 **the row-algebraic class is +50 and it is literally Phase 4.1's named deliverable** — `order` 20 ·
 `dedup` 11 · `limit`/`range`/`skip` 2 · `identity` 2, and together with `tail`/`sample` fifty. The
