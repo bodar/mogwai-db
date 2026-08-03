@@ -164,8 +164,8 @@ export function firstOf(rel: Rel, value: Expr, order: Expr, fresh: Minter): Expr
  * side by side is what makes that visible: a fan-out renumbers by *the incoming position* (several
  * outgoing rows share one, so the old numbers no longer number the new rows), a scalar `order()`
  * renumbers by *its own sort key* (the sort SUPERSEDES the arriving order, so a later slice must take
- * its window from the new positions and not the stale seed), and a `mergeV` numbers the driver-crossed
- * result, whose order is the driver's position and then the element's. Legacy has these as three
+ * its window from the new positions and not the stale seed), and a `mergeV` numbers the
+ * cross-joined result, whose order is the incoming position and then the element's. Legacy has these as three
  * hand-rolled window projections; here the difference is the `terms` argument and nothing else.
  *
  * It lives HERE rather than in `lower.ts` for this file's own stated reason: a second module (`write.ts`,

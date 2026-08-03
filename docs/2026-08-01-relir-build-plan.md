@@ -666,7 +666,7 @@ what that opened is the substrate every later write step inherits.
 - **`Program`** joins `Compiled` and `WritePlan` in the compile-output contract (`Executable` is the
   union), and `Shape` frames its rows exactly as it frames a read's — so the wire layer needs no write
   vocabulary at all. It is what REPLACES `WritePlan` (§8): data the algebra produced and one executor
-  runs, versus a JS closure that walks drivers and calls the store.
+  runs, versus a JS closure that reads its targets into JS and walks them, calling the store per row.
 - **`BindBudgetExceeded`** — the one emitter/checker failure a caller may answer by choosing the other
   route. Every other violation must escape (§11), so a `catch` that could not tell them apart would
   turn the failure `rel-sweep` exists to see into a silent decline.
@@ -698,8 +698,9 @@ element, because `materializeElementDrivers` reads its targets into JS and walks
 are an `Insert.source`; the only rows that cross into JS are a `snapshot`'s, as ONE JSON value.
 `test/compiler/writes.exec.test.ts` asserts the two counts are IDENTICAL rather than merely small,
 which is the only form of the assertion that says the right thing. **Nothing in `src/compiler/rel/`
-is called a driver, deliberately** — naming the new relation after the mechanism §8 deletes is how
-the two get confused, and the word cost a reader exactly that confusion once.
+is called a driver** — the word names the mechanism §8 deletes, and reusing it for the relation that
+replaces it cost a reader exactly that confusion once. The new thing is the INPUT: the incoming
+traversers, as a relation. `input`/`incoming` is its only spelling, in code and in prose.
 
 - **2.2** `drop()` → `Delete` with an `InQuery` membership predicate. **DONE.** What still declines is
   a PROPERTY drop (`g.V().properties().drop()`), which needs the property stream RelIR does not have —
@@ -731,7 +732,7 @@ the two get confused, and the word cost a reader exactly that confusion once.
   trailing initializer run is `property()`'s statements over the ids the node insert RETURNED, so a
   creation is a label resolution, a row, and then a vocabulary that already existed. **`addE` is DONE
   too, and it did NOT need P5b's correlation key.**
-  - The DRIVER relation decides how many, so `g.addV(…)` (a one-row `Values`) and `g.V().addV(…)`
+  - The INPUT relation decides how many, so `g.addV(…)` (a one-row `Values`) and `g.V().addV(…)`
     (the traverser stream) are one lowering.
   - The label name→id indirection is the `labels` UPSERT `GraphStore.labelId` already spells;
     `DO NOTHING` is wrong there because it returns no row on the existing case.
@@ -739,7 +740,7 @@ the two get confused, and the word cost a reader exactly that confusion once.
     fresh vertex's `encounter` is its own id rather than a window over rows whose order is only
     conventionally the array's. `ordered` rides `ChainCtx` now, because a step that MINTS a traverser
     seeds the position channel exactly where the source would have.
-  - A mid-chain driver is SNAPSHOTTED for an INTRA-statement reason: `INSERT INTO nodes … SELECT …
+  - A mid-chain input is SNAPSHOTTED for an INTRA-statement reason: `INSERT INTO nodes … SELECT …
     FROM nodes` reads the table it writes, which SQLite does not promise to evaluate first.
   - ~~**A bare `addV()` DECLINES, and the reason generalizes:**~~ **CORRECTED — it lowers now (+7), and
     the correction is the more useful lesson.** The original reasoning: under `LabelCardinality.ZERO_OR_MORE`
@@ -765,13 +766,13 @@ the two get confused, and the word cost a reader exactly that confusion once.
     Measured: `addV`'s own blockers 19 → 3, and the rest moved FORWARD into the steps that follow it,
     which is what closing a step looks like from the instrument. Pinned in L4 from BOTH regimes,
     because a route that hardcoded either one still passes the other half.
-  - **`addE`'s endpoints are two EXPRESSIONS in the driver's scope**, which is the whole of what makes
-    it `addV` with one more idea: `from("a")` is an alias column on the driver, `to(__.V(2))` a scalar
-    subquery over a sub-read, an omitted side the driver itself — one lowering, not three. At the
-    source the driver is a one-row `Values` and both ends must then be explicit (`rel-sweep` caught
+  - **`addE`'s endpoints are two EXPRESSIONS in the INPUT's scope**, which is the whole of what makes
+    it `addV` with one more idea: `from("a")` is an alias column the input carries, `to(__.V(2))` a
+    scalar subquery over a sub-read, an omitted side the incoming traverser itself — one lowering, not
+    three. At the source the input is a one-row `Values` and both ends must then be explicit (`rel-sweep` caught
     the throw where an implicit end asked the seed for an `id` it has not got).
   - **No correlation key was needed for the ENDPOINTS, and that is a fact about their FORMS**, not
-    luck: every one of them is decidable against the driver ROW. ~~The form that WOULD need one — an
+    luck: every one of them is decidable against the INCOMING ROW. ~~The form that WOULD need one — an
     alias bound to a vertex `addV()` created earlier in the same chain — declines… That is the one
     piece `runWriteChainFull` still owns, and it is 2.6's remaining prerequisite.~~ **DONE, and it was
     two asymmetries with `addV` rather than the missing substrate this predicted** (+13, 29.5% → 30.7%,
@@ -823,7 +824,7 @@ the two get confused, and the word cost a reader exactly that confusion once.
     writes run over the MATCH relation, which is empty on the create path and therefore writes nothing;
     the create runs over a source guarded by `NOT EXISTS <the match>`, which is empty on the match path
     and therefore inserts nothing. Two TOTAL statements, no branch taken anywhere — and it is the same
-    property that lets a driver of N rows need no loop. **This is the shape to reach for whenever a step
+    property that lets an input of N rows need no loop. **This is the shape to reach for whenever a step
     looks like it needs an `if`**: ask what predicate makes each arm's own statement a no-op.
   - **THE SEARCH IS `V().hasLabel(l)….has(k, v)…`, SPELLED AS THOSE STEPS.** A merge map's criteria
     are a `has()` chain and nothing else — `T.label` is `hasLabel` per name (one step listing them all
@@ -833,8 +834,8 @@ the two get confused, and the word cost a reader exactly that confusion once.
     written a second time; not making that copy is what makes the merge's search inherit whatever
     `has()` learns next (the vtype-aware compare it has, the FTS arm §4.7 lifts) and makes a divergence
     between "what mergeV searches for" and "what has() finds" inexpressible.
-  - **THE DRIVER CONTRIBUTES A COUNT, and the correlation is a CROSS JOIN.** A constant map poses the
-    same search for every incoming traverser, so the result is the driver crossed with the merged
+  - **THE INPUT CONTRIBUTES A COUNT, and the correlation is a CROSS JOIN.** A constant map poses the
+    same search for every incoming traverser, so the result is the input crossed with the merged
     element(s) — upstream's per-traverser loop, stated once. `crossed()` is the general form for **any
     step whose output does not correspond row-for-row with its input**: `addV` JOINS on the position
     because each input row made exactly one output row, and a merge emits what the SEARCH found, which
@@ -848,11 +849,11 @@ the two get confused, and the word cost a reader exactly that confusion once.
   - **A READ TAIL AFTER A MERGE comes free, and legacy refuses it outright** — it parses everything
     after `mergeV()` as the merge's own cluster. So `g.V().mergeV([:]).limit(2).values('name')` is
     `@RelIR`, pinned in both positions.
-  - Declines, each because the answer is not a compile-time one: a NESTED label/key/value (a per-driver
+  - Declines, each because the answer is not a compile-time one: a NESTED label/key/value (a per-traverser
     read, `resolveMergeSpec`'s row-at-a-time surface); **`T.id`**, because a numeric id is written as
     the ROWID after `assertAvailableElementId` asks whether it is still free — a runtime refusal an
     `Insert` cannot state, and declining the pair is what stops a create silently colliding; and
-    `option(onMatch, [(T.label): …])`, which is label MUTATION. The scalar-driver position
+    `option(onMatch, [(T.label): …])`, which is label MUTATION. The scalar-input position
     (`g.inject(0).mergeV(…)`, 3 traversals) is a `scalarTail` dispatch away and is the residue.
   - **Three reuse moves landed with it, and each removes a copy rather than adding a caller:**
     `mergeMaps` is now legacy's ONE merge parse, shared (§10·8 — five validation rules plus a
@@ -868,7 +869,7 @@ the two get confused, and the word cost a reader exactly that confusion once.
 
   **`mergeE` is the remaining half and its wall is named:** an endpoint that does not exist is
   `resolveMergeEndpoint`'s THROW ("Vertex does not exist for mergeE"), a runtime refusal on a
-  per-driver value. Guarding the insert with `EXISTS` would answer a different question (a silent
+  per-traverser value. Guarding the insert with `EXISTS` would answer a different question (a silent
   no-op where the reference raises), so the honest forms are the ones whose endpoints are provably
   present — which is where the alias-bound pair (`mergeV(…).as('outV')….mergeE(…)`) sits, and that
   needs 2.6's position-correlated `RETURNING`. Measure before building: it is 6 blockers.
@@ -887,7 +888,7 @@ the two get confused, and the word cost a reader exactly that confusion once.
 W1/W4 are landed and must not regress (four L4 pins + the perturbed census); W2 §3 and W3 §4 are this
 phase's acceptance criteria and should be re-measured at its start. **W2/W3's two declared blockers
 dissolve by construction — do NOT build a driver abstraction to satisfy them:** `Insert.source` IS a
-read plan carrying the channels, so there is no driver to widen, and W3's unreachable positions are plan
+read plan carrying the channels, so there is nothing to widen, and W3's unreachable positions are plan
 composition. write-path §6 and §7 (the traps) carry over unchanged — especially trap 3, *check whether a
 refusal is the reference's answer before removing it* (a third of the write messages in L3 telemetry
 belong to scenarios that PASS by asserting the throw).
@@ -1173,7 +1174,7 @@ reading the code.** They are grouped by what they teach.
 **`rel-blockers --step <name>` names the traversals, and the count alone picks the wrong increment.**
 A family total is the RANKING; the increment is a question about POSITION and ARGUMENT FORM that the
 number cannot answer. `mergeV`'s 26 are 18 at the source, 5 over an element stream and 3 over a scalar
-one — three different drivers, and only the first two share a lowering. That split was worth knowing
+one — three different inputs, and only the first two share a lowering. That split was worth knowing
 before writing any of it, and it used to be re-derived by a throwaway script each round.
 
 Corollary, learned the hard way: **a coverage increment is validated by the SHAPE assertions, not by the

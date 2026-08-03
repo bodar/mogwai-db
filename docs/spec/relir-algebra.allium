@@ -948,7 +948,7 @@ surface RelationalAlgebra {
     @guarantee EffectsOnlyAtABinding
         -- Relation positions are pure, so a statement cannot be a join input. This is a
         -- type-level fact rather than a checker rule, and it is what makes a write in a read
-        -- position plan composition instead of a driver.
+        -- position plan composition instead of a row-at-a-time loop.
 
     @guidance
         -- The clean-room rule is a VOCABULARY boundary: the algebra imports the neutral

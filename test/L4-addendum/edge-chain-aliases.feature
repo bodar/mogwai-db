@@ -5,7 +5,7 @@ Feature: mogwai addendum — a SECOND addE() reads the labels the first one carr
   # assert the END STATE of, so a route that got either wrong still builds the right graph for a
   # one-edge chain and the wrong one from the second edge on.
   #
-  #  1. An `addE()` CARRIES its driver's aliases. Its own output is an edge stream, and the labels bound
+  #  1. An `addE()` CARRIES its INPUT's aliases. Its own output is an edge stream, and the labels bound
   #     over the vertices before it are still live — so the next `addE().from("a")` must find them.
   #  2. An input whose element kind is EDGE is legal as long as both ends are named. An implicit end is
   #     the incoming traverser, so an edge stream would be one for neither side; with both named the
@@ -81,11 +81,11 @@ Feature: mogwai addendum — a SECOND addE() reads the labels the first one carr
     And the graph should return 1 for count of "g.V().has(\"name\",\"marko\").outE(\"created\").has(\"weight\",0.4d)"
     And the graph should return 1 for count of "g.V().has(\"name\",\"peter\").outE(\"created\").has(\"weight\",0.2d)"
 
-  # A SELF edge repeated: one label, both ends, six times. The driver of each `addE` after the first is
+  # A SELF edge repeated: one label, both ends, six times. The input of each `addE` after the first is
   # the previous edge, so this is the edge-kind input with both ends named — the case the kind check
   # used to refuse outright.
   @gap:edge-chain-aliases
-  Scenario: g_addV_repeated_self_addE_over_an_edge_driver
+  Scenario: g_addV_repeated_self_addE_over_an_edge_input
     Given the empty graph
     And the traversal of
       """

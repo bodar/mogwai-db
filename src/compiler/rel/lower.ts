@@ -1771,9 +1771,9 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   }
 
   // `addV` AT THE SOURCE is one vertex, and that is the only thing that differs from the mid-chain
-  // form: the driver relation is a single `Values` row instead of the traverser stream, and the same
+  // form: the input relation is a single `Values` row instead of the traverser stream, and the same
   // lowering runs. A one-row source is what "how many" means here, so there is no second arm.
-  // `addE` at the SOURCE is one edge with both ends named — the driver is a one-row `Values` and the
+  // `addE` at the SOURCE is one edge with both ends named — the input is a one-row `Values` and the
   // endpoints carry the whole answer, so the mid-chain lowering runs unchanged.
   if (first.name === 'addE') {
     const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[lit(1, 'int')]] });
@@ -1791,8 +1791,8 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
     return tail && { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
   }
 
-  // `mergeV` AT THE SOURCE is the same one-row driver the two creations take, and for the same reason:
-  // the driver is a MULTIPLIER, so one row means the search's answer is emitted once.
+  // `mergeV` AT THE SOURCE takes the same one-row input the two creations do, and for the same reason:
+  // the input is a MULTIPLIER, so one row means the search's answer is emitted once.
   if (first.name === 'mergeV') {
     const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[lit(1, 'int')]] });
     const merged = mergedVertices(one, steps, 0, ctx, fresh);
@@ -1926,7 +1926,7 @@ function elementTail(
       const added = addedEdges(rel, elem, steps, at, labels, ctx, fresh);
       if (!added) return null;
       // The LABELS carry, for `addV`'s reason and by its mechanism — the created edges correlate back
-      // to the driver row that made them. Re-entering with `NO_ALIASES` is what made a SECOND `addE`
+      // to the incoming row that made them. Re-entering with `NO_ALIASES` is what made a SECOND `addE`
       // decline: the relation still carried the alias columns, so the next `from("a")` was looking for
       // a label the fold had just forgotten it had.
       const tail = elementTail(added.effects.result, 'edge', steps, added.at, false, ctx, fresh, labels);
@@ -1937,7 +1937,7 @@ function elementTail(
       const merged = mergedVertices(rel, steps, at, ctx, fresh);
       if (!merged) return null;
       // The LABELS carry for `addV`'s reason and by `addV`'s mechanism, but the correlation is a cross
-      // join rather than a positional one: a merge emits the elements its SEARCH found, and no driver
+      // join rather than a positional one: a merge emits the elements its SEARCH found, and no incoming
       // row produced any of them.
       const tail = elementTail(merged.effects.result, 'vertex', steps, merged.at, false, ctx, fresh, labels);
       if (!tail) return null;
@@ -2184,13 +2184,13 @@ const sameColumns = (left: readonly ColMeta[], right: readonly ColMeta[]): boole
 /** `addE(…)` plus the `from`/`to`/`property` cluster that belongs to it — legacy's `parseEdgeCluster`
  *  scans the same run, and the members may come in any order. */
 function addedEdges(
-  drivers: Rel, elem: Elem, steps: readonly IRStep[], at: number, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
+  input: Rel, elem: Elem, steps: readonly IRStep[], at: number, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
 ): { readonly effects: Effects; readonly at: number } | null {
   const CLUSTER = new Set(['from', 'to', 'property']);
   let end = at + 1;
   while (end < steps.length && CLUSTER.has(steps[end]!.name)) end++;
   const effects = elementAddE(
-    drivers, elem, steps[at]!, steps.slice(at + 1, end), aliases, ctx.ordered, ctx.params, subReads(ctx, fresh), fresh,
+    input, elem, steps[at]!, steps.slice(at + 1, end), aliases, ctx.ordered, ctx.params, subReads(ctx, fresh), fresh,
   );
   return effects && { effects, at: end };
 }
@@ -2231,11 +2231,11 @@ function rootedBody(nested: unknown, params: Record<string, any>): readonly IRSt
 }
 
 function addedVertices(
-  drivers: Rel, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
+  input: Rel, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
 ): { readonly effects: Effects; readonly at: number } | null {
   let end = at + 1;
   while (end < steps.length && steps[end]!.name === 'property') end++;
-  const effects = elementAddV(drivers, steps[at]!, steps.slice(at + 1, end), ctx.ordered, ctx.params, ctx.labelCardinality, fresh);
+  const effects = elementAddV(input, steps[at]!, steps.slice(at + 1, end), ctx.ordered, ctx.params, ctx.labelCardinality, fresh);
   return effects && { effects, at: end };
 }
 
@@ -2243,14 +2243,14 @@ function addedVertices(
  *  that acts on its OUTPUT. The order is upstream's and it is load-bearing (an `option()` after a
  *  property tail is not a merge arm), so the two runs are taken in sequence rather than as one set. */
 function mergedVertices(
-  drivers: Rel, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
+  input: Rel, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
 ): { readonly effects: Effects; readonly at: number } | null {
   let options = at + 1;
   while (options < steps.length && steps[options]!.name === 'option') options++;
   let end = options;
   while (end < steps.length && steps[end]!.name === 'property') end++;
   const effects = elementMergeV(
-    drivers, steps[at]!, steps.slice(at + 1, options), steps.slice(options, end),
+    input, steps[at]!, steps.slice(at + 1, options), steps.slice(options, end),
     ctx.ordered, ctx.params, ctx.labelCardinality, subReads(ctx, fresh), fresh,
   );
   return effects && { effects, at: end };

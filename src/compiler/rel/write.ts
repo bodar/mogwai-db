@@ -26,17 +26,18 @@ import { DEFAULT_VERTEX_CARDINALITY, DEFAULT_VERTEX_LABEL, type LabelCardinality
  * Phase 2 of the RelIR build plan, and the seventh module on `build.ts`. The read modules answer
  * "what relation is this chain", this one answers "what does it CHANGE", and the two meet at one
  * place: a write consumes the relation the read fold already produced, so there is no second prefix
- * builder and no `renderDriverRows` opaque `{sql, binds}` handed across a seam.
+ * builder and nothing opaque handed across a seam.
  *
- * ## The INPUT relation is not a driver, and the difference is measurable
+ * ## THE INPUT IS A RELATION, and the difference is measurable
  *
- * `materializeElementDrivers` (§8, still legacy's) reads the target elements into JS and walks them,
- * so its statement count is a function of the ROW COUNT — measured at 8 store calls per element for
- * `property()`, 801 of them over a hundred vertices. Nothing here does that: the input relation is
- * an `Insert.source`, one statement writes N rows, and the count is a function of the PLAN — 7 calls
- * whether the stream holds ten elements or a hundred. The word `driver` is deliberately not used for
- * it: naming the new thing after the mechanism being deleted is how the two get confused, and the
- * only rows that ever cross into JS are a `snapshot`'s, as ONE JSON value (§10·5).
+ * Every write step here takes the INCOMING TRAVERSERS as a relation and makes it an `Insert.source`:
+ * one statement writes N rows, so the statement count is a function of the PLAN — 7 store calls for
+ * `g.V().hasLabel('person').property(single,'seen',1)` whether the stream holds ten elements or a
+ * hundred. The only rows that ever cross into JS are a `snapshot`'s, as ONE JSON value (§10·5).
+ *
+ * The legacy write path is the contrast and it is what §8 deletes: it reads its target elements into
+ * JS and walks them, so its count is a function of the ROW COUNT — 8 store calls per element for the
+ * same traversal, 801 over a hundred vertices.
  *
  * ## The pre-mutation snapshot is the whole design
  *
@@ -752,7 +753,7 @@ function endpointExpr(end: Endpoint, over: Rel, aliases: AliasMap, fresh: Minter
  *
  * **No correlation key is needed for the ENDPOINTS and that is not luck**: every endpoint form here is
  * decidable against the INPUT row, so `src` and `tgt` are columns of the insert's own source. One IS
- * needed to carry the driver's ALIASES forward, and it is `addV`'s — the created rows recover their
+ * needed to carry the INCOMING traversers' ALIASES forward, and it is `addV`'s — the created rows recover their
  * position from their own ids and join back to the input's. That is what makes a SECOND `addE` in the
  * same chain work, which is the corpus's dominant write shape (every standard-graph seeder is six
  * `addV`s and then six `addE`s reading the labels they bound).
@@ -787,7 +788,7 @@ export function elementAddE(
   // **The INPUT'S element kind only matters where an end is implicit**, and that is why it is asked
   // here rather than at the top: an implicit end IS the incoming traverser, so an edge stream would be
   // one for neither side. With both ends named the input is a multiplier and its kind is irrelevant —
-  // which is exactly the second `addE` of a seeder chain, whose driver is the first `addE`'s edge.
+  // which is exactly the second `addE` of a seeder chain, whose input is the first `addE`'s edge.
   // Refusing on the kind alone declined every one of them.
   const implicit = from.kind === 'traverser' || to.kind === 'traverser';
   if (sides === 0 || (implicit && (elem !== 'vertex' || !input.type.cols.some((column) => column.name === 'id')))) return null;
@@ -797,10 +798,10 @@ export function elementAddE(
   const carried = input.channels.filter((channel) => channel.role === 'alias');
   const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
   const { bindings, bind } = effectScope(fresh);
-  const selecting = seeded ? bind(seeded.result, true, writeInputChannels(input)) : input;
+  const incoming = seeded ? bind(seeded.result, true, writeInputChannels(input)) : input;
 
-  const src = endpointExpr(from, selecting, aliases, fresh);
-  const tgt = endpointExpr(to, selecting, aliases, fresh);
+  const src = endpointExpr(from, incoming, aliases, fresh);
+  const tgt = endpointExpr(to, incoming, aliases, fresh);
   if (!src || !tgt) return null;
 
   const labelTarget = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('wt'), channels: [], type: typeOf(...LABELS_COLS) });
@@ -814,9 +815,9 @@ export function elementAddE(
   // ORDERED BY THE INPUT'S OWN POSITION, for `addVertex`'s reason: rowids are assigned in the source's
   // output order, so this is what makes the k-th created edge the k-th input row — which is what the
   // alias carry below joins on. Channel-PRESERVING, so the `Sort` declares its input's list.
-  const inOrder = selecting.type.cols.some((column) => column.name === ORD)
-    ? make.sort({ id: fresh('so'), input: selecting, channels: selecting.channels, type: selecting.type, terms: [{ expr: col(selecting.id, ORD), dir: 'asc' }] })
-    : selecting;
+  const inOrder = incoming.type.cols.some((column) => column.name === ORD)
+    ? make.sort({ id: fresh('so'), input: incoming, channels: incoming.channels, type: incoming.type, terms: [{ expr: col(incoming.id, ORD), dir: 'asc' }] })
+    : incoming;
   const paired = make.join({
     id: fresh('j'), left: inOrder, right: labelRow, join: 'cross', channels: [],
     type: typeOf(...inOrder.type.cols, meta('lbl', 'int')),
@@ -824,7 +825,7 @@ export function elementAddE(
   const rows = make.project({
     id: fresh('p'), input: paired, channels: [],
     type: typeOf(meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
-    exprs: [['src', reScope(src, selecting.id, paired.id)], ['label', col(paired.id, 'lbl')], ['tgt', reScope(tgt, selecting.id, paired.id)]],
+    exprs: [['src', reScope(src, incoming.id, paired.id)], ['label', col(paired.id, 'lbl')], ['tgt', reScope(tgt, incoming.id, paired.id)]],
   });
   const edgesTarget = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('wt'), channels: [], type: typeOf(...EDGE_ROW_COLS) });
   const created = bind(insert({
@@ -845,9 +846,9 @@ export function elementAddE(
   const ranked = positioned(created, fresh);
   const zipped = carried.length
     ? make.join({
-      id: fresh('j'), left: ranked, right: selecting, join: 'inner', channels: [],
-      type: typeOf(...ranked.type.cols, ...selecting.type.cols.map((column) => meta(`in_${column.name}`, column.type, column.nullable))),
-      on: eq(col(ranked.id, ORD), col(selecting.id, ORD)),
+      id: fresh('j'), left: ranked, right: incoming, join: 'inner', channels: [],
+      type: typeOf(...ranked.type.cols, ...incoming.type.cols.map((column) => meta(`in_${column.name}`, column.type, column.nullable))),
+      on: eq(col(ranked.id, ORD), col(incoming.id, ORD)),
     })
     : created;
   const result = make.project({
@@ -974,7 +975,7 @@ function positioned(created: Rel, fresh: Minter): Rel {
  * RELATIONALLY it needs nothing at all: the `onMatch` writes run over the MATCH relation, which is
  * empty on the create path and therefore writes nothing; and the create runs over a source GUARDED by
  * `NOT EXISTS <the match>`, which is empty on the match path and therefore inserts nothing. Two total
- * statements, no branch taken anywhere — and the same reason a driver of N rows needs no loop.
+ * statements, no branch taken anywhere — and the same reason an input of N rows needs no loop.
  *
  * ## THE SEARCH IS `V().hasLabel(…).has(k, v)`, spelled as those steps
  *
@@ -987,13 +988,13 @@ function positioned(created: Rel, fresh: Minter): Rel {
  * does not make — every improvement to `has` (the FTS arm, a vtype-aware compare) serves the merge for
  * free, and a divergence between "what mergeV searches for" and "what has() finds" is not expressible.
  *
- * ## WHAT THE DRIVER CONTRIBUTES IS A COUNT
+ * ## WHAT THE INPUT CONTRIBUTES IS A COUNT
  *
- * A constant merge map poses the same search for every incoming traverser, so the driver decides how
- * MANY results there are and nothing else: the result is the driver CROSS JOIN the merged element(s),
+ * A constant merge map poses the same search for every incoming traverser, so the input decides how
+ * MANY results there are and nothing else: the result is the input CROSS JOIN the merged element(s),
  * which is upstream's per-traverser loop stated as a relation. `g.V().mergeV([:])` over two vertices
  * is FOUR traversers for exactly that reason and the scenario asserts it. The create takes `LIMIT 1`
- * off the driver because upstream's second iteration matches what its first one created — one vertex,
+ * off the input because upstream's second iteration matches what its first one created — one vertex,
  * N traversers, and the N comes from the join.
  *
  * **The result is the SNAPSHOT union the created ids, never the search re-run.** Re-reading the search
@@ -1003,7 +1004,7 @@ function positioned(created: Rel, fresh: Minter): Rel {
  *
  * ## WHAT DECLINES, each because the answer is not a compile-time one
  *
- * - a NESTED label/key/value anywhere in a map — resolved per driver against the graph, which is
+ * - a NESTED label/key/value anywhere in a map — resolved per incoming traverser against the graph, which is
  *   `resolveMergeSpec`'s row-at-a-time surface and not an expression. A `__.select(k)` whole-arg map
  *   is the same decline for a smaller reason: it needs the `withSideEffect` constants, which this seam
  *   is not handed.
@@ -1054,7 +1055,7 @@ export function elementMergeV(
   if (carried.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
   const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
   const { bindings, bind } = effectScope(fresh);
-  const driver = seeded ? bind(seeded.result, true, carried) : input;
+  const incoming = seeded ? bind(seeded.result, true, carried) : input;
 
   // SNAPSHOTTED for two reasons at once, and either alone would be enough: the create is guarded by
   // this relation's emptiness and would otherwise be a predicate over the very table its own statement
@@ -1063,15 +1064,15 @@ export function elementMergeV(
   const matched = bind(idsOf(searched, fresh), true);
   for (const write of matchWrites) propertyStatements('vertex', matched, write, bind, fresh);
 
-  // ONE row off the driver, because a create happens once however many traversers asked for it. The
-  // driver's own columns are dropped first: what the creation needs from it is its ROW COUNT, and
-  // carrying an alias through `addVertex` as well would correlate the created row back to a driver row
+  // ONE row off the input, because a create happens once however many traversers asked for it. The
+  // incoming columns are dropped first: what the creation needs from it is its ROW COUNT, and
+  // carrying an alias through `addVertex` as well would correlate the created row back to an incoming row
   // that the join below is about to cross it with anyway.
-  // A `Limit` is channel-PRESERVING by contract (§3.5), so it declares the driver's own list and the
+  // A `Limit` is channel-PRESERVING by contract (§3.5), so it declares the incoming relation's own list and the
   // projection below is where they are dropped — naming a shorter one here is the dropped-channel
   // defect the factory catches, and it caught this.
   const once = make.limit({
-    id: fresh('lm'), input: driver, channels: driver.channels, type: driver.type, count: lit(1, 'int'),
+    id: fresh('lm'), input: incoming, channels: incoming.channels, type: incoming.type, count: lit(1, 'int'),
   });
   const absent = make.project({
     id: fresh('p'), input: once, channels: [], type: typeOf(meta('n', 'int')),
@@ -1095,7 +1096,7 @@ export function elementMergeV(
   const emitted = tailWrites.length ? bind(merged, true) : merged;
   for (const write of tailWrites) propertyStatements('vertex', emitted, write, bind, fresh);
 
-  return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(driver, emitted, carried, ordered, fresh) };
+  return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(incoming, emitted, carried, ordered, fresh) };
 }
 
 /**
@@ -1126,8 +1127,8 @@ function mergeWrites(
 }
 
 /**
- * THE DRIVER CROSSED WITH WHAT A STEP PRODUCED — one traverser per (incoming row, produced element)
- * pair, carrying the driver's aliases and a freshly minted position.
+ * THE INCOMING TRAVERSERS CROSSED WITH WHAT A STEP PRODUCED — one traverser per (incoming row, produced
+ * element) pair, carrying the incoming aliases and a freshly minted position.
  *
  * This is what a step whose output does NOT correspond row-for-row with its input hands back, and
  * `mergeV` is the first: a creation returns one row per input row (so `addV` JOINS on the position),
@@ -1135,17 +1136,17 @@ function mergeWrites(
  * cross join by construction rather than an equality — the per-traverser loop upstream runs, stated
  * once.
  *
- * The minted order is the driver's position and then the element's id, which is the order the loop
+ * The minted order is the incoming position and then the element's id, which is the order the loop
  * would have emitted in: outer iteration first, and within one iteration the search's own rowid order.
- * A driver with no position of its own is a one-row seed, where the element order IS the whole order.
+ * An input with no position of its own is a one-row seed, where the element order IS the whole order.
  */
-function crossed(driver: Rel, produced: Rel, aliases: Channels, ordered: boolean, fresh: Minter): Rel {
+function crossed(incoming: Rel, produced: Rel, aliases: Channels, ordered: boolean, fresh: Minter): Rel {
   const carried = aliases.filter((channel) => channel.role === 'alias');
   const joined = make.join({
-    id: fresh('j'), left: produced, right: driver, join: 'cross', channels: [],
-    type: typeOf(...produced.type.cols, ...driver.type.cols.map((column) => meta(`in_${column.name}`, column.type, column.nullable))),
+    id: fresh('j'), left: produced, right: incoming, join: 'cross', channels: [],
+    type: typeOf(...produced.type.cols, ...incoming.type.cols.map((column) => meta(`in_${column.name}`, column.type, column.nullable))),
   });
-  const position = driver.type.cols.some((column) => column.name === ORD) ? `in_${ORD}` : null;
+  const position = incoming.type.cols.some((column) => column.name === ORD) ? `in_${ORD}` : null;
   const channels: Channels = [...carried, ...(ordered ? [BULK_CHANNEL, ENCOUNTER_CHANNEL] : [BULK_CHANNEL])];
   const cols: readonly ColMeta[] = [meta('id', 'int'), ...carriedCols(channels)];
   // The pre-mint projection carries the two sort keys as columns and NOT the encounter, which

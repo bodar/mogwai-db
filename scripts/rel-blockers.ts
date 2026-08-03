@@ -133,7 +133,7 @@ for (const query of CORPUS) {
   const name = blame(step);
   blockedAt.set(name, (blockedAt.get(name) ?? 0) + 1);
   // The POSITION is half the answer: the same step name at the source and mid-chain are two different
-  // increments (a one-row `Values` driver versus the traverser stream), and a list that omitted it
+  // increments (a one-row `Values` input versus the traverser stream), and a list that omitted it
   // would hide the split it exists to show.
   if (name === wanted) blockedTraversals.push(`  [${longest}/${steps.length}] ${query}`);
 }
