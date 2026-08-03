@@ -538,13 +538,14 @@ projection with an `ORDER BY` rather than a JSON aggregate, and `fold().max(Scop
 LOCAL reducers (`reducer.ts` over a member, not over a row). `jsonbList` plus the member-transform frame
 is the increment; the rest follow it.
 
-**The rest of the corpus ranking** (`mise run rel-blockers`, 577 routed — re-run it every round, it
-MOVES): writes 195 (`addV` 147 · `mergeV` 26) · side effects 183 (`aggregate` 64 · `group` 63 ·
-`groupCount` 31 · `sack` 25) · the property shape 90 (`properties` 46 · `valueMap` 37) · branch 63
-(`choose` 36 · `union` 20) · scalar transforms 64 (`math` 15 · `asNumber` 12) · aliases 53 (all at
-`select`) · the list shape 30 (all at `fold`) · row ops 15. In no family: `repeat` 85 · `local` 61 ·
-`where` 57 · `match` 57 · `path` 38 · `is` 31 · `has` 26 · `call` 23 · `inject` 20 · `or` 17 ·
-`project` 16 · `filter` 15 · `and` 15 · `shortestPath` 15 · `V` 12. **The residue is where the next
+**The rest of the corpus ranking** (`mise run rel-blockers`, 684 routed — re-run it every round, it
+MOVES): **side effects 184 is now the largest family by a wide margin** (`aggregate` 65 · `group` 63 ·
+`groupCount` 31 · `sack` 25) · the property shape 90 (`properties` 46 · `valueMap` 37) · writes 81
+(`property` 37 · `addE` 29 · `mergeV` 6 · `mergeE` 6 · `addV` 3) · scalar transforms 64 (`math` 15 ·
+`asNumber` 12) · branch 63 (`choose` 36 · `union` 20) · aliases 53 (all at `select`) · the list shape 30
+(all at `fold`) · row ops 15. In no family: `repeat` 86 · `local` 61 · `match` 57 · `where` 51 ·
+`path` 38 · `is` 31 · `has` 26 · `call` 23 · `inject` 20 · `or` 17 · `project` 16 · `filter` 15 ·
+`and` 15 · `shortestPath` 15 · `V` 12. **The residue is where the next
 family gets recognized** — `inject` sat in it for two rounds before being spotted as the largest prize
 on the board, and the set ops appeared in it the moment the list frame landed. Note `where`, `match`
 and `path` all ROSE as aliases fell: they are alias CONSUMERS, so closing `as`/`select` moved their
@@ -740,11 +741,30 @@ the two get confused, and the word cost a reader exactly that confusion once.
     seeds the position channel exactly where the source would have.
   - A mid-chain driver is SNAPSHOTTED for an INTRA-statement reason: `INSERT INTO nodes … SELECT …
     FROM nodes` reads the table it writes, which SQLite does not promise to evaluate first.
-  - **A bare `addV()` DECLINES, and the reason generalizes:** under `LabelCardinality.ZERO_OR_MORE` it
-    creates a vertex with no labels and under `ONE` it takes the graph default — a property of the
-    STORE, not of the chain. Writing the default was a plausible wrong answer on a multi-label graph
-    and cost three L3 scenarios before an L4 pin named it. **A compile-time answer to a runtime
-    configuration question is a decline, not a default.**
+  - ~~**A bare `addV()` DECLINES, and the reason generalizes:**~~ **CORRECTED — it lowers now (+7), and
+    the correction is the more useful lesson.** The original reasoning: under `LabelCardinality.ZERO_OR_MORE`
+    a bare `addV()` creates a vertex with no labels and under `ONE` it takes the graph default, which is
+    a property of the STORE and not of the chain — so "a compile-time answer to a runtime configuration
+    question is a decline, not a default". Writing the default unconditionally really is a wrong answer
+    on a multi-label graph, and an L4 pin really did catch it costing three L3 scenarios.
+
+    **The premise was true and the conclusion was wrong by one step: the cardinality is not a RUNTIME
+    question.** It is request-scope DI (`src/scopes.ts`, `engine.labelCardinality`), settled before a
+    compile begins — what was actually missing is that this seam had never been handed it. So the rule
+    to carry forward is the DIAGNOSTIC, not the verdict: **when a decline's stated cause is "that is a
+    property of the store", ask WHEN the store decides it.** Configuration fixed before the compile is
+    compile-time data; only a value that depends on the graph's CONTENTS is a genuine wall.
+    `Lowering.labelCardinality` threads it (defaulting to `ONE`, `createAppScope`'s own default, so an
+    instrument that lowers without an engine measures the default graph); `creationLabels` is the ONE
+    reduction of a creation's labels, shared with `mergeV`, and it **declines a label COUNT the
+    cardinality forbids** rather than throwing — `assertLabelCount`'s message is the reference's own
+    answer, so the spine that owns it must raise it (trap 3, again). `addVertex` takes a label LIST:
+    zero labels emit neither the intern nor the pairing, N are one `Values` plus a cross join, so a
+    multi-label creation is not a new statement shape and its bind count stays O(plan size).
+
+    Measured: `addV`'s own blockers 19 → 3, and the rest moved FORWARD into the steps that follow it,
+    which is what closing a step looks like from the instrument. Pinned in L4 from BOTH regimes,
+    because a route that hardcoded either one still passes the other half.
   - **`addE`'s endpoints are two EXPRESSIONS in the driver's scope**, which is the whole of what makes
     it `addV` with one more idea: `from("a")` is an alias column on the driver, `to(__.V(2))` a scalar
     subquery over a sub-read, an omitted side the driver itself — one lowering, not three. At the
@@ -776,7 +796,69 @@ the two get confused, and the word cost a reader exactly that confusion once.
   latent parser bug: scenario-level tags were silently dropped for every scenario but a file's first
   (the per-scenario inner loop consumed the tag lines), invisible while `@gap:` was documentation and
   `@MultiLabel` was a FEATURE tag.
-- **2.5** `mergeV`/`mergeE` → `Insert … ON CONFLICT DO UPDATE … RETURNING`, one statement.
+- **2.5** `mergeV` **is DONE (+19, 29.3% → 30.2%); `mergeE` is what is left.** The sketch above —
+  "`ON CONFLICT DO UPDATE`, one statement" — was wrong about the mechanism and the reason it was wrong
+  generalizes: **`ON CONFLICT` fires on a UNIQUE INDEX, and a merge map's criteria are an arbitrary
+  predicate over labels and property rows.** There is no constraint for SQLite to conflict against.
+
+  - **THE BRANCH IS NOT CONTROL FLOW, and that is the whole design.** Read as upstream writes it,
+    `mergeV` needs a row COUNT before its next statement can be chosen ("did the search find
+    anything"), which §3.0's program cannot ask for. Read RELATIONALLY it needs nothing: the `onMatch`
+    writes run over the MATCH relation, which is empty on the create path and therefore writes nothing;
+    the create runs over a source guarded by `NOT EXISTS <the match>`, which is empty on the match path
+    and therefore inserts nothing. Two TOTAL statements, no branch taken anywhere — and it is the same
+    property that lets a driver of N rows need no loop. **This is the shape to reach for whenever a step
+    looks like it needs an `if`**: ask what predicate makes each arm's own statement a no-op.
+  - **THE SEARCH IS `V().hasLabel(l)….has(k, v)…`, SPELLED AS THOSE STEPS.** A merge map's criteria
+    are a `has()` chain and nothing else — `T.label` is `hasLabel` per name (one step listing them all
+    is ANY, and a merge needs ALL), a property entry is the ANY-value `EXISTS` `has` already means, and
+    `T.id` is `V(id)`. `SubReads.matching` therefore hands those steps BACK to the read fold instead of
+    building a second predicate vocabulary. Legacy's `commonMergeConds` is the same three clauses
+    written a second time; not making that copy is what makes the merge's search inherit whatever
+    `has()` learns next (the vtype-aware compare it has, the FTS arm §4.7 lifts) and makes a divergence
+    between "what mergeV searches for" and "what has() finds" inexpressible.
+  - **THE DRIVER CONTRIBUTES A COUNT, and the correlation is a CROSS JOIN.** A constant map poses the
+    same search for every incoming traverser, so the result is the driver crossed with the merged
+    element(s) — upstream's per-traverser loop, stated once. `crossed()` is the general form for **any
+    step whose output does not correspond row-for-row with its input**: `addV` JOINS on the position
+    because each input row made exactly one output row, and a merge emits what the SEARCH found, which
+    no input row produced. `g.V().mergeV([:])` over two vertices is four traversers for exactly that
+    reason.
+  - **The result is the SNAPSHOT union the created ids, never the search re-run.** Re-reading the
+    search after the writes looks equivalent and is not: `option(onMatch, [name: 'allen'])` under a
+    `single` cardinality changes the very property the search asked about, so the re-read returns
+    nothing and the traversal emits no traverser at all. A corpus scenario does exactly this, and it
+    asserts a count of 1.
+  - **A READ TAIL AFTER A MERGE comes free, and legacy refuses it outright** — it parses everything
+    after `mergeV()` as the merge's own cluster. So `g.V().mergeV([:]).limit(2).values('name')` is
+    `@RelIR`, pinned in both positions.
+  - Declines, each because the answer is not a compile-time one: a NESTED label/key/value (a per-driver
+    read, `resolveMergeSpec`'s row-at-a-time surface); **`T.id`**, because a numeric id is written as
+    the ROWID after `assertAvailableElementId` asks whether it is still free — a runtime refusal an
+    `Insert` cannot state, and declining the pair is what stops a create silently colliding; and
+    `option(onMatch, [(T.label): …])`, which is label MUTATION. The scalar-driver position
+    (`g.inject(0).mergeV(…)`, 3 traversals) is a `scalarTail` dispatch away and is the residue.
+  - **Three reuse moves landed with it, and each removes a copy rather than adding a caller:**
+    `mergeMaps` is now legacy's ONE merge parse, shared (§10·8 — five validation rules plus a
+    per-argument type channel, and one of them had already drifted between two copies inside that
+    file); `writeOf` is the ONE `PropSpec` → emission reduction, so a merge arm and a `property()` step
+    cannot admit different values; and `renumber` moved to `build.ts`, which is that file's own stated
+    rule — a second module has to agree about what renumbering means.
+  - **A test that asserts one spine's write ECHO is asserting the ROUTE.** Two did, and both failed the
+    day the step migrated, having found no defect: the legacy closure returns `{vertex: {…}}` while a
+    program frames its rows through the read element projection (§2), and the wire serializes the two
+    identically. `written()` (`test/support/harness.ts`) reads either. Prefer it to deleting the
+    assertion — what those tests mean is "this is what got written".
+
+  **`mergeE` is the remaining half and its wall is named:** an endpoint that does not exist is
+  `resolveMergeEndpoint`'s THROW ("Vertex does not exist for mergeE"), a runtime refusal on a
+  per-driver value. Guarding the insert with `EXISTS` would answer a different question (a silent
+  no-op where the reference raises), so the honest forms are the ones whose endpoints are provably
+  present — which is where the alias-bound pair (`mergeV(…).as('outV')….mergeE(…)`) sits, and that
+  needs 2.6's position-correlated `RETURNING`. Measure before building: it is 6 blockers.
+
+  **`mergeV` with no `T.label` creates on `addV`'s rule, which is why the bare-`addV` fix is listed
+  here as its prerequisite** — see the `LabelCardinality` note under 2.4.
 - **2.6** **Delete `runWriteChainFull`, `parseEdgeCluster`, `parseVertexSpec`, `parseMergeOptions`,
   `resolveEndpoint`, `materializeElementDrivers`, `WritePlan`.** The phase is not done while a second
   step dispatcher exists.
@@ -1066,6 +1148,13 @@ reading the code.** They are grouped by what they teach.
 | **`rel-sweep`** | asserts the lowering does not THROW, and that a plan it ADMITS renders within the platform's bind cap — both the opposite property to "does not answer wrong" |
 | **`test:perturbed`** | nothing about values; it is the only thing that sees an order that was right by SQLite's scan luck |
 | **`test:cf-limits`** | anything that is not a DO wall |
+| **`rel-blockers`** | everything about correctness; it counts where the fold gives up and nothing else |
+
+**`rel-blockers --step <name>` names the traversals, and the count alone picks the wrong increment.**
+A family total is the RANKING; the increment is a question about POSITION and ARGUMENT FORM that the
+number cannot answer. `mergeV`'s 26 are 18 at the source, 5 over an element stream and 3 over a scalar
+one — three different drivers, and only the first two share a lowering. That split was worth knowing
+before writing any of it, and it used to be re-derived by a throwaway script each round.
 
 Corollary, learned the hard way: **a coverage increment is validated by the SHAPE assertions, not by the
 census** — the census answers "did anything change", and a wrong shape over an empty result changes
