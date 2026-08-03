@@ -989,6 +989,44 @@ list of step names that would drift from it. Measured at zero covered traversals
 nothing today and keeps it that way as the vocabulary grows — and the increment was green on its
 first run with no test to fix, which is the gate working rather than luck.
 
+**Coverage +0 (`321fd21`): the EMISSION-ORDER channel — slices, and a total channel→layout table.**
+Saying +0 plainly is the point: every corpus traversal that slices also moves or orders, so nothing
+new routed. What landed is substrate, and it is the prerequisite for movement-under-order, for
+`order()` once 4.2's assembler owns the tail, and for every role after it.
+`analyzeChain().demandsEncounter` decides ONCE whether a chain has an order at all — the same
+authority the legacy source seeds from, so the two cannot disagree about which chains have a window
+to take.
+
+**The reusable part is the translation table.** §2's vocabulary boundary — the neutral channel core
+a RelIR node speaks, turned into the `TraverserLayout` the framing layer reads — is now a
+`Record<ChannelRole, …>`, so a role added to the core fails the build until its framing translation
+is declared. The ad-hoc check it replaces threw correctly on `encounter` the first time it ran,
+which is the behaviour worth keeping and the wrong shape to keep it in: widening a check per role is
+how a carried field gets dropped at a seam. `alias`/`path`/`origin`/`branchOrder` are declared
+ABSENT rather than left to be forgotten — each needs a shape (a name→column map, a position list, a
+stack) the translation does not have.
+
+**A REAL GAP IN THE §3.5 OBLIGATION TABLE, filed rather than guessed at.** `dedup` under an
+emission order stops being a `Distinct`: the survivor must keep the FIRST occurrence's position, so
+legacy emits `SELECT id, 1 AS bulk, MIN(encounter) AS encounter … GROUP BY id`. That `Aggregate`'s
+channel obligation is **neither** the barrier contract **nor** `isReEncoding` — it keeps every
+channel, but recomputes each one rather than carrying it. So the two-way split that answered
+movement's bulk coalescing is incomplete, and the general shape is a THIRD case: *an aggregate
+grouped by the traverser IDENTITY, where each output channel is derived from its own input
+channel's column, is a per-traverser REDUCTION* — not a barrier, and not multiplicity-preserving
+either. What the obligation can check is the structural fact (no channel dropped, each derived from
+its own column); which aggregate is CORRECT for a role is Gremlin semantics and stays above. Worth
+settling before `order` lands, since `order` re-mints the same channel.
+
+The other decline is ordinary: a hop RE-MINTS the order (`ROW_NUMBER() OVER (ORDER BY encounter,
+id)`) because the join fans out and the incoming positions no longer number the outgoing rows.
+
+**Verified where it matters.** The slice tests compare against legacy row-for-row **unsorted**,
+because a slice is the one place the wrong ORDER is the wrong ANSWER and the census's `ms` gate
+cannot see it — same multiset size, different rows. They also pass under
+`MOGWAI_REVERSE_UNORDERED=1`, so the window is pinned to the encounter rather than to SQLite's scan
+choice.
+
 **NEXT, measured from base 259** (`V`/`E`/`hasLabel`/`has`/`count`/`values`/`is`/movement/`where`):
 **the row-algebraic class is +50 and it is literally Phase 4.1's named deliverable** — `order` 20 ·
 `dedup` 11 · `limit`/`range`/`skip` 2 · `identity` 2, and together with `tail`/`sample` fifty. The
