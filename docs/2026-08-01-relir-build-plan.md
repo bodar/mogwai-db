@@ -1241,6 +1241,49 @@ recognizing the assert again. That decode exists because FIVE shape arms had alr
 inline — a sixth copy in the RelIR route would have been the same mistake with a new spine's name on it,
 which is the §10·8 duplication sweep catching something it had already been built to catch.
 
+**Coverage 251 → 308, 13.4%: the SCALAR TRANSFORM family — 18 step names, one table, and the round
+where L3 earned its keep.** `src/compiler/rel/transform.ts` is the third vocabulary module after
+`predicate.ts` and `modulator.ts`, and the family is one lowering because it asks one question: an
+expression over the traverser's value, plus (for the casts) a framing retype. Nothing else about the
+relation moves — no channel, no cardinality, no shape.
+
+**THE DEFECT L3 CAUGHT, AND WHY NOTHING ELSE COULD.** Over an `inject` LITERAL,
+`asNumber`/`asDate`/`asBool` are not SQL casts at all — they are PARSES THAT MUST RAISE, with
+TinkerPop's exact messages (`Can't parse string '1,000' as number.`, `Can't convert number of type
+Integer to Byte due to overflow.`). SQL cannot raise those, which is precisely why legacy folds them at
+compile time. Lowered as a `CAST` they answered `1` for `'1,000'` and epoch 0 for an invalid date
+string: **a required error became a plausible value.** Six official scenarios assert the error, so L3
+went 1701 → 1695 — and every other instrument was blind by construction:
+
+| instrument | why it could not see it |
+|---|---|
+| the census | records a THROW as a deferral; a traversal that stops throwing and starts answering looks like coverage |
+| the row-for-row probe | comparing rows against legacy cannot see a MISSING throw |
+| the shape assertions | caught last round's defect; a wrong value has the right shape |
+| `rel-sweep` | asserts the lowering does not throw — the opposite property |
+
+The fix is a decline over a literal seed. The lesson generalizes: **a family whose members RAISE needs
+its error cases enumerated as tests, because no differential covers them** — so all six are now pinned
+by name in `rel-spine.test.ts`.
+
+**One judgement call, recorded because the reasoning is the method.** `dateAdd`/`dateDiff` are folded by
+legacy too, and including them in the decline was tried and REVERTED: their fold is an OPTIMIZATION (one
+bind instead of a literal plus an offset), not a semantic requirement, and the arithmetic answers
+identically. Constant folding is a `Pass` over `Values`+`Lit` (§4); declining because that pass is
+unwritten is exactly the reasoning that makes coverage stall. Measured cost of the wider rule: 7
+traversals.
+
+**What is SHARED with legacy rather than re-derived**, continuing §10·8's sweep: `numericSpec`,
+`dtFactor` and `JAVA_WHITESPACE` are imported. They are data and pure computation — a GType's numeric
+range, a DT unit's millisecond factor, Java's 24 whitespace code points — so only the EMISSION needed
+re-expressing. The whitespace list is the sharp case: Gremlin's `trim()` trims JAVA's set, not SQLite's
+space, and a re-derived list missing U+1680 would be wrong in a way no test would name.
+
+**The bind budget was measured, not assumed.** A transform re-inlines its input's expression (SQL has no
+alias to reuse in a select list), so a chain multiplies whatever the `values()` json-unwrap costs. Over
+all 308 rel-routed corpus traversals: **max 53 binds, none above 60**, and the worst case is a nested
+`P.not(P.and(…))` rather than a transform chain. Comfortably inside the DO's 100-parameter cap.
+
 **PHASE 4.1's ENTRY FACT, measured 2026-08-03 — and it corrects this document twice.** §6 said the
 element row-ops are "fused into the framing projection by `TailAcc`, so a `Sort` on the CORE relation
 is a different plan (the framing join is 1:1 on `id`, so it is equivalent — but that is an argument to
