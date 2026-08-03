@@ -538,12 +538,22 @@ projection with an `ORDER BY` rather than a JSON aggregate, and `fold().max(Scop
 LOCAL reducers (`reducer.ts` over a member, not over a row). `jsonbList` plus the member-transform frame
 is the increment; the rest follow it.
 
-**The rest of the corpus ranking** (`mise run rel-blockers`, 725 routed — re-run it every round, it
-MOVES): **side effects 184 is now the largest family by a wide margin** (`aggregate` 65 · `group` 63 ·
-`groupCount` 31 · `sack` 25) · the property shape 90 (`properties` 46 · `valueMap` 37) · scalar
+**The rest of the corpus ranking** (`mise run rel-blockers`, 729 routed — re-run it every round, it
+MOVES): side effects 95 (`aggregate` 65 · `group` 22 · `groupCount` 8) · the property shape 90
+(`properties` 46 · `valueMap` 37) · **the map shape 64** (`group*` 41 · `groupCount*` 23) · scalar
 transforms 64 (`math` 15 · `asNumber` 12) · branch 63 (`choose` 36 · `union` 20) · aliases 53 (all at
-`select`) · **writes down to 39** (`property` 18 · `addE` 6 · `mergeV` 6 · `mergeE` 6 · `addV` 3) · the
-list shape 30 (all at `fold`) · row ops 15. In no family: `repeat` 86 · `local` 61 · `match` 57 ·
+`select`) · **writes down to 35** (`property` 15 · `mergeV` 6 · `mergeE` 6 · `addE` 5 · `addV` 3) · the
+list shape 30 (all at `fold`) · `sack` 25 · row ops 15.
+
+**"Side effects 184, the largest family by a wide margin" was a MIS-ATTRIBUTION, and the correction is
+the more useful fact.** `group`/`groupCount` WITH a string label fills a named collection a later
+`cap()` reads back — a side effect. WITHOUT one it is an ordinary barrier whose RESULT is a map. The two
+need completely different things (a named-collection substrate versus the map traverser shape) and no
+part of one serves the other, so `blame()` now splits them and `sack` — a carried CHANNEL, neither a
+collection nor a shape — is its own family. 64 blockers moved out of the top family into a shape that is
+the third largest thing on the board. **Three families are now within 6 of each other at the top**, so
+the choice between them is a design question rather than a number: side effects 95, the property shape
+90, the map shape 64. In no family: `repeat` 86 · `local` 61 · `match` 57 ·
 `where` 51 · `path` 38 · `is` 31 · `has` 26 · `call` 23 · `inject` 20 · `or` 17 · `project` 16 ·
 `filter` 15 · `and` 15 · `shortestPath` 15 · `V` 12. **The residue is where the next
 family gets recognized** — `inject` sat in it for two rounds before being spotted as the largest prize
