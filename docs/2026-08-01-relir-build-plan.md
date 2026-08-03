@@ -715,11 +715,11 @@ relation left (its result IS its last statement), which is the `discard` arm.
   TinkerPop's answer — so when a barrier after a write became the barrier that was already built, the
   pin had to move to the count. Check whether a refusal is the REFERENCE's answer before removing it;
   check equally whether it is only ever ours before keeping it.
-- **2.4** `addV`/`addE` → `Insert … SELECT … RETURNING`. **The VERTEX half is DONE (+79, 25.2% →
-  28.6% — the largest single jump the spine has taken), and it cost almost no new machinery**: the
+- **2.4** `addV`/`addE` → `Insert … SELECT … RETURNING`. **DONE (+80, 25.0% → 28.7%, the largest
+  single jump the spine has taken), and it cost almost no new machinery**: the
   trailing initializer run is `property()`'s statements over the ids the node insert RETURNED, so a
-  creation is a label resolution, a row, and then a vocabulary that already existed. `addE` is what
-  remains, and it is the one that needs P5b's correlation key.
+  creation is a label resolution, a row, and then a vocabulary that already existed. **`addE` is DONE
+  too, and it did NOT need P5b's correlation key.**
   - The DRIVER relation decides how many, so `g.addV(…)` (a one-row `Values`) and `g.V().addV(…)`
     (the traverser stream) are one lowering.
   - The label name→id indirection is the `labels` UPSERT `GraphStore.labelId` already spells;
@@ -735,6 +735,37 @@ relation left (its result IS its last statement), which is the `discard` arm.
     STORE, not of the chain. Writing the default was a plausible wrong answer on a multi-label graph
     and cost three L3 scenarios before an L4 pin named it. **A compile-time answer to a runtime
     configuration question is a decline, not a default.**
+  - **`addE`'s endpoints are two EXPRESSIONS in the driver's scope**, which is the whole of what makes
+    it `addV` with one more idea: `from("a")` is an alias column on the driver, `to(__.V(2))` a scalar
+    subquery over a sub-read, an omitted side the driver itself — one lowering, not three. At the
+    source the driver is a one-row `Values` and both ends must then be explicit (`rel-sweep` caught
+    the throw where an implicit end asked the seed for an `id` it has not got).
+  - **No correlation key was needed, and that is a fact about the endpoint FORMS**, not luck: every
+    one of them is decidable against the driver ROW. The form that WOULD need one — an alias bound to
+    a vertex `addV()` created earlier in the same chain — declines, because an `Insert`'s `RETURNING`
+    carries the target table's columns and not its source's. **That is the one piece
+    `runWriteChainFull` still owns, and it is 2.6's remaining prerequisite.** Its shape is known: the
+    retained-rows transport would carry each row's POSITION, and position is what correlates a
+    write's `RETURNING` with its driver, since ids are assigned in the source's order.
+  - `SubReads` hands the read fold to the write vocabulary as two functions, which keeps the import
+    graph a DAG and the decline contract intact one level down. An endpoint's body is ROOTED, so it
+    goes through `normalize(stepChain(…))` and not `childSteps` — the latter strips a source and
+    answers the EMPTY chain, i.e. an endpoint that silently matched nothing.
+
+  **What the write route exposed in the READ path, and it is the general form worth keeping:** an
+  edge's property bag had no `ORDER BY`, so it came out in the `UNIQUE(edge, key)` index's order while
+  the vertex bag beside it states `GROUP BY key ORDER BY MIN(id)` and the write response read
+  `ORDER BY id` — two answers for one element, differing by which path reached it. Both are
+  insertion-ordered now. **A write that frames through the READ projection turns every read-path
+  order-by-accident into an observable disagreement**, which is a better instrument than the
+  perturbation sweep because it does not have to guess where to look.
+
+  **`@RelIR` is a new L4 tag** — this scenario's ANSWER needs the RelIR spine and legacy refuses it,
+  so `test:legacy-spine` is told which way round the two routes diverge rather than reading a
+  deliberate improvement as a regression. It disappears with `runWriteChainFull`. Adding it found a
+  latent parser bug: scenario-level tags were silently dropped for every scenario but a file's first
+  (the per-scenario inner loop consumed the tag lines), invisible while `@gap:` was documentation and
+  `@MultiLabel` was a FEATURE tag.
 - **2.5** `mergeV`/`mergeE` → `Insert … ON CONFLICT DO UPDATE … RETURNING`, one statement.
 - **2.6** **Delete `runWriteChainFull`, `parseEdgeCluster`, `parseVertexSpec`, `parseMergeOptions`,
   `resolveEndpoint`, `materializeElementDrivers`, `WritePlan`.** The phase is not done while a second
