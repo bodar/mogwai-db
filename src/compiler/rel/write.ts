@@ -21,12 +21,22 @@ import type { AliasMap } from '../steps/context/context.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 
 /**
- * THE WRITE VOCABULARY — an effect is a `Stmt` binding over a read plan, never a driver loop.
+ * THE WRITE VOCABULARY — an effect is a `Stmt` binding over a read plan, never a row-at-a-time loop.
  *
  * Phase 2 of the RelIR build plan, and the seventh module on `build.ts`. The read modules answer
  * "what relation is this chain", this one answers "what does it CHANGE", and the two meet at one
  * place: a write consumes the relation the read fold already produced, so there is no second prefix
  * builder and no `renderDriverRows` opaque `{sql, binds}` handed across a seam.
+ *
+ * ## The INPUT relation is not a driver, and the difference is measurable
+ *
+ * `materializeElementDrivers` (§8, still legacy's) reads the target elements into JS and walks them,
+ * so its statement count is a function of the ROW COUNT — measured at 8 store calls per element for
+ * `property()`, 801 of them over a hundred vertices. Nothing here does that: the input relation is
+ * an `Insert.source`, one statement writes N rows, and the count is a function of the PLAN — 7 calls
+ * whether the stream holds ten elements or a hundred. The word `driver` is deliberately not used for
+ * it: naming the new thing after the mechanism being deleted is how the two get confused, and the
+ * only rows that ever cross into JS are a `snapshot`'s, as ONE JSON value (§10·5).
  *
  * ## The pre-mutation snapshot is the whole design
  *
@@ -486,11 +496,11 @@ const VERTEX_LABEL_COLS: readonly ColMeta[] = [meta('node', 'int'), meta('label'
  * - **The new ids ARE the emission order.** SQLite assigns rowids in the insert's output order, so a
  *   fresh vertex's `encounter` is its own id — exact, free, and not a window over rows whose order
  *   is only conventionally the array's.
- * - **The driver relation decides HOW MANY.** At the source that is one row (`Values`); mid-chain it
+ * - **The INPUT relation decides HOW MANY.** At the source that is one row (`Values`); mid-chain it
  *   is the traverser stream, so `g.V().addV('x')` creates one per vertex, which is the semantics
  *   rather than a special case.
  */
-export function addVertex(drivers: Rel, label: string, writes: readonly PropertyWrite[], ordered: boolean, bind: Binder, fresh: Minter): Rel {
+export function addVertex(input: Rel, label: string, writes: readonly PropertyWrite[], ordered: boolean, bind: Binder, fresh: Minter): Rel {
   const labelTarget = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('wt'), channels: [], type: typeOf(...LABELS_COLS) });
   const named = make.values({ id: fresh('lv'), channels: [], type: typeOf(meta('name', 'text')), rows: [[text(label)]] });
   const labelRow = bind(insert({
@@ -501,7 +511,7 @@ export function addVertex(drivers: Rel, label: string, writes: readonly Property
 
   const nodesTarget = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('wt'), channels: [], type: typeOf(...NODES_COLS) });
   const fresh_ = make.project({
-    id: fresh('p'), input: drivers, channels: [], type: typeOf(meta('uid', 'text', true)),
+    id: fresh('p'), input: input, channels: [], type: typeOf(meta('uid', 'text', true)),
     exprs: [['uid', lit(null, 'text')]],
   });
   const created = bind(insert({
@@ -543,12 +553,12 @@ export function effectScope(fresh: Minter): { readonly bindings: Binding[]; read
 
 /** `addV(<label>)` and its trailing `property()` run → the effects and the new vertices.
  *
- *  `drivers` is what decides HOW MANY, and its two callers are the whole story: a `Values` row at
+ *  `input` is what decides HOW MANY, and its two callers are the whole story: a `Values` row at
  *  the source (`g.addV(…)` is one vertex), the traverser relation mid-chain (`g.V().addV(…)` is one
  *  per vertex). A label that is a nested traversal, more than one label, or an invalid one declines —
  *  the label validator is the shared waist, and a name it refuses is an ERROR legacy raises, not a
  *  write this route may silently skip. */
-export function elementAddV(drivers: Rel, step: IRStep, propertySteps: readonly IRStep[], ordered: boolean, params: Record<string, any>, fresh: Minter): Effects | null {
+export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IRStep[], ordered: boolean, params: Record<string, any>, fresh: Minter): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
   const args = step.args ?? [];
   // A BARE `addV()` is not a compile-time question: under `LabelCardinality.ZERO_OR_MORE` it creates a
@@ -561,24 +571,24 @@ export function elementAddV(drivers: Rel, step: IRStep, propertySteps: readonly 
   try { validateLabel(label); } catch { return null; }
   const writes = propertySteps.length ? propertyWrites(propertySteps, 'vertex', params) : [];
   if (!writes) return null;
-  // A MID-CHAIN driver is SNAPSHOTTED, and this one is not about a later statement: `INSERT INTO
+  // A MID-CHAIN input is SNAPSHOTTED, and this one is not about a later statement: `INSERT INTO
   // nodes … SELECT … FROM nodes` reads the table it is writing, which SQLite does not promise to
   // evaluate before the first insert. The snapshot makes the source `json_each(?)`, so the question
   // "which traversers were there" is answered once and cannot be changed by the answer.
   // A `Values` source is one literal row and has nothing to snapshot.
-  const seeded = drivers.kind === 'values' ? null : driverOrder(drivers, fresh);
+  const seeded = input.kind === 'values' ? null : orderedInput(input, fresh);
   const { bindings, bind } = effectScope(fresh);
-  const result = addVertex(seeded ? bind(seeded.result, true) : drivers, label, writes, ordered, bind, fresh);
+  const result = addVertex(seeded ? bind(seeded.result, true) : input, label, writes, ordered, bind, fresh);
   return { bindings: [...(seeded?.bindings ?? []), ...bindings], result };
 }
 
-/** A creation's driver rows: the identity plus the emission order, and nothing else — `addV` reads
- *  no other column of its driver. The ORDER is the argument the legacy write path makes about
- *  `renderDriverRows`: a write assigns ids as it goes and those ids are OBSERVABLE, so which row it
+/** A creation's input rows: the identity plus the emission order, and nothing else — `addV` reads no
+ *  other column of what it is inserting from. The ORDER is the one argument worth keeping from the
+ *  legacy write path: a write assigns ids as it goes and those ids are OBSERVABLE, so which row it
  *  sees first is part of the answer. */
-function driverOrder(drivers: Rel, fresh: Minter): { readonly bindings: readonly Binding[]; readonly result: Rel } {
-  const encounter = drivers.channels.find((channel) => channel.role === 'encounter');
-  return driverRows(drivers, encounter ? [meta('id', 'int'), meta(encounter.col, 'int')] : [meta('id', 'int')], fresh);
+function orderedInput(input: Rel, fresh: Minter): { readonly bindings: readonly Binding[]; readonly result: Rel } {
+  const encounter = input.channels.find((channel) => channel.role === 'encounter');
+  return inputRows(input, encounter ? [meta('id', 'int'), meta(encounter.col, 'int')] : [meta('id', 'int')], fresh);
 }
 
 // ---------- addE() ----------
@@ -586,11 +596,11 @@ function driverOrder(drivers: Rel, fresh: Minter): { readonly bindings: readonly
 const EDGE_ROW_COLS: readonly ColMeta[] = [meta('id', 'int'), meta('uid', 'text', true), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')];
 
 /** Where an edge endpoint comes from — the three forms `from()`/`to()` take that are decidable
- *  against the DRIVER relation, plus the implicit one. */
+ *  against the INPUT relation, plus the implicit one. */
 type Endpoint =
   /** No `from()`/`to()` on that side: the incoming traverser IS that end, which is what makes
    *  `g.V(1).addE('e').to(x)` an out-edge of the current vertex. */
-  | { readonly kind: 'driver' }
+  | { readonly kind: 'traverser' }
   /** An `as()` LABEL, spelled bare (`from("a")`) or as `__.select("a")` — the same thing, and the
    *  label's history holds the element, so the endpoint is its last entry's rowid. */
   | { readonly kind: 'alias'; readonly label: string }
@@ -598,9 +608,9 @@ type Endpoint =
    *  subquery. Legacy takes its FIRST row, so this takes one row of the same relation. */
   | { readonly kind: 'read'; readonly rel: Rel };
 
-/** The endpoint as an expression over the driver relation. */
-function endpointExpr(end: Endpoint, driver: Rel, aliases: AliasMap, fresh: Minter): Expr | null {
-  if (end.kind === 'driver') return col(driver.id, 'id');
+/** The endpoint as an expression over the relation the edge insert selects FROM. */
+function endpointExpr(end: Endpoint, over: Rel, aliases: AliasMap, fresh: Minter): Expr | null {
+  if (end.kind === 'traverser') return col(over.id, 'id');
   if (end.kind === 'read') {
     const one = make.limit({ id: fresh('li'), input: end.rel, channels: [], type: end.rel.type, count: lit(1, 'int') });
     const only = make.project({ id: fresh('p'), input: one, channels: [], type: ID_TYPE, exprs: [['id', col(one.id, 'id')]] });
@@ -610,7 +620,7 @@ function endpointExpr(end: Endpoint, driver: Rel, aliases: AliasMap, fresh: Mint
   // An UNBOUND label is a runtime error legacy raises with a message it owns ("unknown as() label"),
   // so it declines here rather than becoming a NULL endpoint — a silently unproductive write.
   if (!entry) return null;
-  return aliasIdAt(col(driver.id, entry.col), 'last');
+  return aliasIdAt(col(over.id, entry.col), 'last');
 }
 
 /**
@@ -619,26 +629,26 @@ function endpointExpr(end: Endpoint, driver: Rel, aliases: AliasMap, fresh: Mint
  * Its shape is `addV`'s and it reuses the same three pieces: the label UPSERT, an `Insert … SELECT …
  * RETURNING` whose SOURCE decides how many, and then `property()`'s statements over the returned
  * ids. What differs is that an edge has ENDPOINTS, and the whole of that difference is two
- * expressions written in the driver's scope — so `from("a")` (an alias column on the driver),
- * `to(__.V(2))` (a scalar subquery) and an omitted side (the driver itself) are one lowering.
+ * expressions written in the INPUT relation's scope — so `from("a")` (an alias column it carries),
+ * `to(__.V(2))` (a scalar subquery) and an omitted side (the incoming traverser) are one lowering.
  *
  * **No correlation key is needed and that is not luck**: every endpoint form here is decidable
- * against the DRIVER row, so `src` and `tgt` are columns of the insert's own source. The form that
+ * against the INPUT row, so `src` and `tgt` are columns of the insert's own source. The form that
  * would need one — an alias bound to a vertex `addV()` created EARLIER in the same chain — declines,
  * because `addV`'s `RETURNING` carries the target table's columns and not its source's.
  */
 export function elementAddE(
-  drivers: Rel, elem: Elem, step: IRStep, cluster: readonly IRStep[], aliases: AliasMap,
+  input: Rel, elem: Elem, step: IRStep, cluster: readonly IRStep[], aliases: AliasMap,
   ordered: boolean, params: Record<string, any>, reads: SubReads, fresh: Minter,
 ): Effects | null {
-  // An edge's ends are VERTICES; an edge-stream driver would be one for neither end.
+  // An edge's ends are VERTICES; an edge stream would be one for neither end.
   if (elem !== 'vertex' || step.modulators?.length || step.optionArms) return null;
   const label = (step.args ?? [])[0];
   if (typeof label !== 'string') return null;
   try { validateLabel(label); } catch { return null; }
 
-  let from: Endpoint = { kind: 'driver' };
-  let to: Endpoint = { kind: 'driver' };
+  let from: Endpoint = { kind: 'traverser' };
+  let to: Endpoint = { kind: 'traverser' };
   let sides = 0;
   const propertySteps: IRStep[] = [];
   for (const member of cluster) {
@@ -650,23 +660,23 @@ export function elementAddE(
     sides++;
   }
   // BOTH ends implicit is not a traversal the grammar means anything by, and both ends EXPLICIT is
-  // fine (the driver is then only a multiplier). At the SOURCE there is no incoming traverser at
+  // fine (the input is then only a multiplier). At the SOURCE there is no incoming traverser at
   // all, so an implicit end has nothing to be: the one-row seed carries no `id`, and asking it for
   // one is a throw rather than a decline unless it is asked here (`rel-sweep` found exactly that on
   // `addE.from`).
-  const implicit = from.kind === 'driver' || to.kind === 'driver';
-  if (sides === 0 || (implicit && !drivers.type.cols.some((column) => column.name === 'id'))) return null;
+  const implicit = from.kind === 'traverser' || to.kind === 'traverser';
+  if (sides === 0 || (implicit && !input.type.cols.some((column) => column.name === 'id'))) return null;
   const writes = propertySteps.length ? propertyWrites(propertySteps, 'edge', params) : [];
   if (!writes) return null;
 
   const carried: readonly ColMeta[] = [meta('id', 'int'),
-    ...drivers.channels.filter((channel) => channel.role === 'encounter' || channel.role === 'alias').map((channel) => meta(channel.col, channel.role === 'alias' ? 'json' : 'int', channel.role === 'alias'))];
-  const seeded = drivers.kind === 'values' ? null : driverRows(drivers, carried, fresh);
+    ...input.channels.filter((channel) => channel.role === 'encounter' || channel.role === 'alias').map((channel) => meta(channel.col, channel.role === 'alias' ? 'json' : 'int', channel.role === 'alias'))];
+  const seeded = input.kind === 'values' ? null : inputRows(input, carried, fresh);
   const { bindings, bind } = effectScope(fresh);
-  const driver = seeded ? bind(seeded.result, true) : drivers;
+  const selecting = seeded ? bind(seeded.result, true) : input;
 
-  const src = endpointExpr(from, driver, aliases, fresh);
-  const tgt = endpointExpr(to, driver, aliases, fresh);
+  const src = endpointExpr(from, selecting, aliases, fresh);
+  const tgt = endpointExpr(to, selecting, aliases, fresh);
   if (!src || !tgt) return null;
 
   const labelTarget = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('wt'), channels: [], type: typeOf(...LABELS_COLS) });
@@ -678,13 +688,13 @@ export function elementAddE(
   }));
 
   const paired = make.join({
-    id: fresh('j'), left: driver, right: labelRow, join: 'cross', channels: [],
-    type: typeOf(...driver.type.cols, meta('lbl', 'int')),
+    id: fresh('j'), left: selecting, right: labelRow, join: 'cross', channels: [],
+    type: typeOf(...selecting.type.cols, meta('lbl', 'int')),
   });
   const rows = make.project({
     id: fresh('p'), input: paired, channels: [],
     type: typeOf(meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
-    exprs: [['src', reScope(src, driver.id, paired.id)], ['label', col(paired.id, 'lbl')], ['tgt', reScope(tgt, driver.id, paired.id)]],
+    exprs: [['src', reScope(src, selecting.id, paired.id)], ['label', col(paired.id, 'lbl')], ['tgt', reScope(tgt, selecting.id, paired.id)]],
   });
   const edgesTarget = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('wt'), channels: [], type: typeOf(...EDGE_ROW_COLS) });
   const created = bind(insert({
@@ -740,19 +750,19 @@ export interface SubReads {
 const reScope = (e: Expr, from: RelId, to: RelId): Expr =>
   rewriteExpr(e, (node) => (node.kind === 'col' && node.rel === from ? { ...node, rel: to } : node));
 
-/** The driver rows a creation walks, projected to the columns it needs and IN EMISSION ORDER.
+/** An input relation projected to the columns a write needs, IN EMISSION ORDER, and named.
  *  An ALIAS column crosses as `json(…)` TEXT: the retained-row transport carries what JSON carries
  *  losslessly, and a JSONB blob is not that (`src/program.ts` fails closed on one). `->>`/
  *  `json_extract` read the two identically, so nothing downstream learns which it got. */
-function driverRows(drivers: Rel, cols: readonly ColMeta[], fresh: Minter): { readonly bindings: readonly Binding[]; readonly result: Rel } {
+function inputRows(input: Rel, cols: readonly ColMeta[], fresh: Minter): { readonly bindings: readonly Binding[]; readonly result: Rel } {
   const jsonOf = (column: ColMeta): Expr =>
-    column.type === 'json' ? { kind: 'call', fn: 'json', args: [col(drivers.id, column.name)] } : col(drivers.id, column.name);
+    column.type === 'json' ? { kind: 'call', fn: 'json', args: [col(input.id, column.name)] } : col(input.id, column.name);
   const declared = cols.map((column) => (column.type === 'json' ? meta(column.name, 'text', true) : column));
   const kept = make.project({
-    id: fresh('w'), input: drivers, channels: [], type: typeOf(...declared),
+    id: fresh('w'), input: input, channels: [], type: typeOf(...declared),
     exprs: cols.map((column) => [column.name, jsonOf(column)] as const),
   });
-  const encounter = drivers.channels.find((channel) => channel.role === 'encounter');
+  const encounter = input.channels.find((channel) => channel.role === 'encounter');
   const ordered = encounter && cols.some((column) => column.name === encounter.col)
     ? make.sort({ id: fresh('so'), input: kept, channels: [], type: kept.type, terms: [{ expr: col(kept.id, encounter.col), dir: 'asc' }] })
     : kept;

@@ -81,6 +81,30 @@ test('drop() compiles to a RelIR program whose target is snapshotted, not a re-e
   expect(emit(edge.program).filter((step) => step.emitted.sql.startsWith('DELETE')).length).toBe(3);
 });
 
+// THE PROPERTY THE WHOLE WRITE WEDGE EXISTS FOR, asserted rather than described.
+//
+// The legacy write path reads its target elements into JS and walks them, so its statement count is
+// a function of the ROW COUNT. A RelIR program's is a function of the PLAN: the elements are an
+// `Insert.source`, one statement writes N rows, and the only rows that cross into JS are a
+// snapshot's — as ONE JSON value, which is §10·5's rule.
+//
+// A count that is merely SMALL would not say this; a count that is IDENTICAL at ten elements and a
+// hundred does. Measured, not asserted from the shape of the code — the failure this guards against
+// is a future step quietly reintroducing a per-element loop behind the same API.
+test('a write program runs the same number of statements whatever the element count', () => {
+  const runs = (n: number): number => {
+    const inner = new BunSqlite(':memory:');
+    let calls = 0;
+    const counting = { exec: (...a: any[]) => (inner as any).exec(...a), query: (sql: string, binds?: any[]) => { calls++; return (inner as any).query(sql, binds); } } as any;
+    const store = new GraphStore(counting);
+    for (let i = 1; i <= n; i++) run(store, `g.addV('person').property('name','p${i}')`);
+    const before = calls;
+    run(store, "g.V().hasLabel('person').property(single,'seen',1)");
+    return calls - before;
+  };
+  expect(runs(10)).toBe(runs(100));
+});
+
 test('property() updates existing vertices (overwrite + new key, single cardinality)', () => {
   const store = seededStore();
   // overwrite marko's age, add a new key. `single` is SPELLED OUT: the graph default is `list`

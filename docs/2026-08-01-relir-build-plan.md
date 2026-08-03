@@ -690,6 +690,16 @@ SAME element projection a pure read reaches, and the composed query rides as `Pr
 stays resolved above RelIR (§2) and the wire layer still has no write vocabulary. A `drop()` has no
 relation left (its result IS its last statement), which is the `discard` arm.
 
+**AND THE THING THE PHASE IS FOR, MEASURED.** A write's statement count is a function of the PLAN,
+not of the row count: `g.V().hasLabel('person').property(single,'seen',1)` runs **7 statements over
+ten elements and 7 over a hundred**, where the legacy path runs 81 and 801 — eight store calls per
+element, because `materializeElementDrivers` reads its targets into JS and walks them. The elements
+are an `Insert.source`; the only rows that cross into JS are a `snapshot`'s, as ONE JSON value.
+`test/compiler/writes.exec.test.ts` asserts the two counts are IDENTICAL rather than merely small,
+which is the only form of the assertion that says the right thing. **Nothing in `src/compiler/rel/`
+is called a driver, deliberately** — naming the new relation after the mechanism §8 deletes is how
+the two get confused, and the word cost a reader exactly that confusion once.
+
 - **2.2** `drop()` → `Delete` with an `InQuery` membership predicate. **DONE.** What still declines is
   a PROPERTY drop (`g.V().properties().drop()`), which needs the property stream RelIR does not have —
   the property shape's 90 blockers, not this phase's.
