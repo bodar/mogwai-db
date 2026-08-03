@@ -149,13 +149,27 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
       .toEqual(['josh', 'lop', 'peter', 'ripple', 'vadas']);
   });
 
-  test('where(__.movement) → EXISTS filter CTE; not() → NOT COALESCE', () => {
-    const w = read('g.V().where(__.out("knows")).values("name")');
+  test('where(__.movement) → EXISTS filter CTE; not() → NOT COALESCE — legacy spine', () => {
     // The correlated child is the generic movement StepFn rendered as a nested derived
     // subquery seeded from the outer n.id (index-only; no bespoke xe/xn scheme).
+    const w = read('g.V().where(__.out("knows")).values("name")', { spine: 'legacy' });
     expect(w.sql).toContain('EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id AND e.label IN');
-    const n = read('g.V().not(__.out("created")).values("name")');
+    const n = read('g.V().not(__.out("created")).values("name")', { spine: 'legacy' });
     expect(n.sql).toContain('WHERE NOT COALESCE((EXISTS(');
+  });
+
+  test('where(__.movement) → a correlated EXISTS with no seed relation — rel spine', () => {
+    // RelIR compares the edge column to the OUTER id directly, where legacy seeds the child with
+    // `(SELECT n.id AS id) p` — a projection with no input, which the algebra has no node for and
+    // does not need. One derived table fewer, and no new node kind (§7's bar: the seam CAN express
+    // the shape).
+    const w = read('g.V().where(__.out("knows")).values("name")', { spine: 'rel' });
+    expect(w.sql).toMatch(/EXISTS \(SELECT \? AS one FROM edges \w+ WHERE \(\(\w+\.src = \w+\.id\) AND \w+\.label IN/);
+    // `NOT EXISTS`, not legacy's `NOT COALESCE(EXISTS(…), 0)`: an EXISTS is never NULL, so the
+    // COALESCE guards nothing.
+    const n = read('g.V().not(__.out("created")).values("name")', { spine: 'rel' });
+    expect(n.sql).toContain('NOT EXISTS (');
+    expect(n.sql).not.toContain('COALESCE((EXISTS');
   });
 
   test('where(__.count().is(P)) → correlated scalar compare over incident edges', () => {
@@ -199,27 +213,37 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
 
   test('where(__.<multi-hop chain>) → correlated EXISTS over the path', () => {
     // 2-hop path existence: the child fold nests one derived subquery per hop.
-    const two = read('g.V().where(__.out().out()).values("name")');
+    const two = read('g.V().where(__.out().out()).values("name")', { spine: 'legacy' });
     expect(two.sql).toContain('EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id) p ON e.src=p.id) c)');
     // terminal has() on the neighbour — the has() StepFn is consumed by the child fold,
     // correlating on the reached node (aliased n inside the child, isolated by the FROM
     // boundary from the outer n).
-    expect(read('g.V().where(__.out("knows").has("age", P.gt(30)))').sql)
+    expect(read('g.V().where(__.out("knows").has("age", P.gt(30)))', { spine: 'legacy' }).sql)
       .toContain("AND (CASE WHEN vtype IN ('byte'");
-    expect(read('g.V().where(__.out("knows").has("age", P.gt(30)))').sql)
+    expect(read('g.V().where(__.out("knows").has("age", P.gt(30)))', { spine: 'legacy' }).sql)
       .toContain("ELSE value END) > ?");
     // terminal hasLabel()
     // hasLabel is ANY-label membership over vertex_labels — a seek on vl_label(label, node).
-    expect(read('g.V().where(__.out("created").hasLabel("software"))').sql).toContain('n.id IN (SELECT vertex_labels.node FROM vertex_labels WHERE vertex_labels.label IN (SELECT id FROM labels');
+    expect(read('g.V().where(__.out("created").hasLabel("software"))', { spine: 'legacy' }).sql).toContain('n.id IN (SELECT vertex_labels.node FROM vertex_labels WHERE vertex_labels.label IN (SELECT id FROM labels');
     // a lone bare movement keeps the leaner single-hop EXISTS over the movement child
-    expect(read('g.V().where(__.out()).count()').sql).toContain('EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id) c)');
+    expect(read('g.V().where(__.out()).count()', { spine: 'legacy' }).sql).toContain('EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id) c)');
+
+    // Both spines reach the same vtype-aware compare and the same label membership; only the
+    // spelling differs, so the shared fragments are what is asserted across them.
+    for (const spine of ['legacy', 'rel'] as const) {
+      expect(read('g.V().where(__.out("knows").has("age", P.gt(30)))', { spine }).sql).toMatch(/END\)? > \?/);
+      expect(read('g.V().where(__.out("created").hasLabel("software"))', { spine }).sql).toMatch(/vertex_labels[^]*labels/);
+    }
   });
 
   test('where()/filter() deferred forms throw clearly', () => {
     // multi-hop both() now lowers inline through the correlated movement child (the
     // generic StepFns handle both()'s two-direction fan-out) — a nested-derived EXISTS,
     // not the materialized generic gate (`EXISTS (SELECT 1`, with a space).
-    expect(read('g.V().where(__.both().both())').sql).toContain('EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e');
+    expect(read('g.V().where(__.both().both())', { spine: 'legacy' }).sql).toContain('EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e');
+    // The RelIR route reaches the same shape from the other side: a UNION ALL of the two
+    // directions, correlated on the outer id, inside one EXISTS.
+    expect(read('g.V().where(__.both().both())', { spine: 'rel' }).sql).toMatch(/EXISTS \(SELECT[^]*UNION ALL/);
     expect(() => compile('g.V().filter(P.gt(1))', {})).toThrow('filter(predicate) not supported');
   });
 

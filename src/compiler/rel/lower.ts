@@ -7,7 +7,8 @@ import type { Rel } from '../../rel/rel.ts';
 import { relId, type ColMeta, type RelType, type SqlType } from '../../rel/types.ts';
 import { PER_ROW, STATIC, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
-import { flattenListArgs } from '../../gremlin/frontend.ts';
+import { flattenListArgs, isNested } from '../../gremlin/frontend.ts';
+import { childSteps } from '../steps/tail/child-shape.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { containsTextSearch, predicateExpr, storedCompare } from './predicate.ts';
 
@@ -131,7 +132,11 @@ function labelIds(names: readonly string[], fresh: Minter): Rel {
  *  without either position having to know which it is in. */
 interface Subject { readonly id: Expr; readonly label?: Expr; readonly rel: Rel; }
 
-function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter): Expr | null {
+/** What a filter needs beyond the step and its subject: the bound parameters a nested body parses
+ *  against, and whether the correlated-child form is this compile's to emit (see `Lowering`). */
+interface FilterCtx { readonly params: Record<string, any>; readonly correlatedChildren: boolean; }
+
+function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter, ctx: FilterCtx): Expr | null {
   if (step.modulators?.length || step.optionArms) return null;
   const args = step.args ?? [];
 
@@ -155,6 +160,41 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter)
     const matching = make.filter({ id: fresh('f'), input: vl, channels: [], type: vl.type, pred: { kind: 'in-query', expr: col(vl.id, 'label'), plan: ids, negated: false } });
     const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('node', 'int')), exprs: [['node', col(matching.id, 'node')]] });
     return { kind: 'in-query', expr: subject.id, plan: owners, negated: false };
+  }
+
+  // `where`/`filter`/`not` over a TRAVERSAL body: a correlated existence test, which is the same
+  // question `has` asks of a property row asked of a whole sub-traversal. The body folds through
+  // the SAME movement and filter vocabulary as the outer chain — that reuse is the point, and it
+  // is why growing movement grew this for free.
+  if (step.name === 'where' || step.name === 'filter' || step.name === 'not') {
+    const [nested, extra] = args;
+    if (extra !== undefined || !isNested(nested)) return null;
+    // The correlated EXISTS is `predicateInlining`'s form. With the switch OFF the legacy spine
+    // lowers a MATERIALIZED child-existence gate instead — a pushed ordinal, a LEFT JOIN and a
+    // rejoin — which is a lowering STRATEGY this route has not learned, so it declines exactly as
+    // it declines an unlearned step. That is not spine choice reading the fast-path config to dodge
+    // an optimization (the FTS rule): the flag selects between two strategies and RelIR implements
+    // one of them, so both positions stay live and L5's differential still compares two forms.
+    if (!ctx.correlatedChildren) return null;
+    const body = childSteps(nested.nested, ctx.params);
+    if (!body.length) return null;
+    // The body's FIRST step must be a movement: it is what makes the child a relation to test for
+    // rows at all. A filter-only body (`where(__.has('name','x'))`) is a predicate on the SAME
+    // traverser, not a sub-traversal — legacy inlines it directly and there is nothing to gain by
+    // wrapping it in an EXISTS here.
+    let child = movement(body[0]!, { correlated: subject.id }, elem, fresh);
+    if (!child) return null;
+    for (const inner of body.slice(1)) {
+      const hop = movement(inner, { rel: child.rel }, child.elem, fresh);
+      if (hop) { child = hop; continue; }
+      const clause = sourceFilter(inner, { id: col(child.rel.id, 'id'), rel: child.rel }, child.elem, fresh, ctx);
+      if (!clause) return null;
+      child = { rel: make.filter({ id: fresh('f'), input: child.rel, channels: BULK, type: child.rel.type, pred: clause }), elem: child.elem };
+    }
+    const probe = make.project({ id: fresh('p'), input: child.rel, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', lit(1, 'int')]] });
+    // `NOT EXISTS`, not legacy's `NOT COALESCE(EXISTS(…), 0)`: EXISTS is never NULL, so the
+    // COALESCE guards nothing here.
+    return { kind: 'exists', plan: probe, negated: step.name === 'not' };
   }
 
   if (step.name === 'has') {
@@ -269,7 +309,21 @@ const HOPS: Readonly<Record<string, readonly Hop[]>> = {
  *  message rather than this route inventing a second one. */
 const FROM_EDGE = new Set(['inV', 'outV', 'bothV']);
 
-function movement(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { rel: Rel; elem: Elem } | null {
+/**
+ * Where a hop starts from: an incoming id-RELATION (the ordinary case, joined) or a single
+ * correlated id EXPRESSION (a child body's first hop, compared).
+ *
+ * The correlated form is what lets a `where()` body be lowered with no seed node at all. The legacy
+ * spine writes `(SELECT n.id AS id) p` — a projection with no input, which RelIR has no node for —
+ * and §7's bar says a missing node needs proof the seam cannot EXPRESS the shape. It can: compare
+ * the edge column to the outer expression directly, which is one derived table FEWER than the form
+ * it replaces. Both arms produce the same `(id, bulk)` shape, so every hop after the first is the
+ * ordinary one and there is no second movement implementation.
+ */
+type Frontier = { readonly rel: Rel } | { readonly correlated: Expr };
+const frontierRel = (from: Frontier): Rel | undefined => ('rel' in from ? from.rel : undefined);
+
+function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { rel: Rel; elem: Elem } | null {
   const hops = HOPS[step.name];
   if (!hops || step.modulators?.length || step.optionArms) return null;
   if (FROM_EDGE.has(step.name) !== (elem === 'edge')) return null;
@@ -280,24 +334,31 @@ function movement(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { rel: R
   // TinkerPop's inV()/outV() take no arguments at all.
   if (labels.length && FROM_EDGE.has(step.name)) return null;
 
+  const input = frontierRel(from);
   const arms = hops.map((hop) => {
     const e = make.scan({
       id: fresh('mv'), table: 'edges', alias: fresh('rme'), channels: [],
       type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
     });
-    // `edges` on the LEFT, the incoming frontier on the right — the join order the legacy spine
-    // emits, so the access path stays the one the covering indexes were built for.
+    const incoming = input ? col(input.id, 'id') : (from as { readonly correlated: Expr }).correlated;
     const on = labels.length
-      ? and(eq(col(e.id, hop.from), col(input.id, 'id')),
+      ? and(eq(col(e.id, hop.from), incoming),
         { kind: 'in-query', expr: col(e.id, 'label'), plan: labelIds(labels as string[], fresh), negated: false })
-      : eq(col(e.id, hop.from), col(input.id, 'id'));
-    const joined = make.join({
-      id: fresh('j'), left: e, right: input, join: 'inner', on, channels: BULK,
-      type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int'), meta('pid', 'int'), meta('bulk', 'int')),
-    });
+      : eq(col(e.id, hop.from), incoming);
+    // A correlated hop FILTERS the edge table against the outer id; a rooted one JOINS the incoming
+    // frontier, `edges` on the LEFT — the join order the legacy spine emits, so the access path
+    // stays the one the covering indexes were built for. The projection is identical either way,
+    // which is what keeps the second hop from needing a second implementation. A correlated body's
+    // `bulk` is synthetic: an EXISTS asks whether a row is there, never how many traversers it is.
+    const source = input
+      ? make.join({
+        id: fresh('j'), left: e, right: input, join: 'inner', on, channels: BULK,
+        type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int'), meta('pid', 'int'), meta('bulk', 'int')),
+      })
+      : make.filter({ id: fresh('f'), input: e, channels: [], type: e.type, pred: on });
     return make.project({
-      id: fresh('m'), input: joined, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
-      exprs: [['id', col(joined.id, hop.to)], ['bulk', col(joined.id, 'bulk')]],
+      id: fresh('m'), input: source, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
+      exprs: [['id', col(source.id, hop.to)], ['bulk', input ? col(source.id, 'bulk') : lit(1, 'int')]],
     });
   });
   const [first, ...rest] = arms;
@@ -404,7 +465,19 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): Omit<Rel
  * growth list, and the measured order of what each is worth over the 2,298-traversal corpus is
  * recorded in the build plan — `has(key, P…)` is the next single largest, then the reducers.
  */
-export function lowerToRel(steps: readonly IRStep[], collapse = true): RelLowering | null {
+/** The compile-scoped facts a lowering reads beyond the chain itself: the bound parameters, and
+ *  which lowering STRATEGIES this compile has asked for. `collapse` and `correlatedChildren` are
+ *  the two fast-path switches RelIR implements a side of; a switch it cannot implement is never
+ *  read here, because coverage must not become a function of configuration. */
+export interface Lowering {
+  readonly params?: Record<string, any>;
+  readonly collapse?: boolean;
+  readonly correlatedChildren?: boolean;
+}
+
+export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLowering | null {
+  const { params = {}, collapse = true, correlatedChildren = true } = opts;
+  const ctx: FilterCtx = { params, correlatedChildren };
   const first = steps[0];
   if (!first) return null;
   if (first.name !== 'V' && first.name !== 'E') return null;
@@ -424,7 +497,7 @@ export function lowerToRel(steps: readonly IRStep[], collapse = true): RelLoweri
   let at = 1;
   let elem = seeded.elem;
   for (; at < steps.length; at++) {
-    const clause = sourceFilter(steps[at], { id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan }, elem, fresh);
+    const clause = sourceFilter(steps[at], { id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan }, elem, fresh, ctx);
     if (!clause) break;
     pred = and(pred, clause);
   }
@@ -440,13 +513,13 @@ export function lowerToRel(steps: readonly IRStep[], collapse = true): RelLoweri
   // `(id, bulk)` and an edge-label test becomes the membership form.
   for (; at < steps.length; at++) {
     const step = steps[at];
-    const moved = movement(step, rel, elem, fresh);
+    const moved = movement(step, { rel }, elem, fresh);
     if (moved) {
       rel = collapse ? coalesce(moved.rel, fresh) : moved.rel;
       elem = moved.elem;
       continue;
     }
-    const clause = sourceFilter(step, { id: col(rel.id, 'id'), rel }, elem, fresh);
+    const clause = sourceFilter(step, { id: col(rel.id, 'id'), rel }, elem, fresh, ctx);
     if (!clause) break;
     rel = make.filter({ id: fresh('f'), input: rel, channels: BULK, type: rel.type, pred: clause });
   }

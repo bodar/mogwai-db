@@ -74,6 +74,8 @@ const DECLINED = [
   "g.V().has('person','age',29)",     // the three-argument (label, key, value) form
   'g.V().has(T.id,1)',                // a T-token key
   "g.V().has('name',null)",           // a null value: not a literal this route can compare
+  "g.V().where(__.has('name','marko'))", // a filter-only body is a predicate on the SAME traverser
+  "g.V().where(__.out().order())",    // a body step the child fold has not learned
 ];
 
 describe('the RelIR spine', () => {
@@ -90,6 +92,31 @@ describe('the RelIR spine', () => {
       expect(plan.kind === 'read' ? plan.spine : 'legacy').toBe('legacy');
     });
   }
+
+  test('a fast-path switch selects a STRATEGY, and RelIR covers the side it implements', () => {
+    // `predicateInlining` chooses between two lowerings of a `where()` body: the correlated EXISTS
+    // (which RelIR emits) and a MATERIALIZED child-existence gate — a pushed ordinal, a LEFT JOIN
+    // and a rejoin — which it has not learned. With the switch off it therefore declines, exactly
+    // as it declines an unlearned step, and both positions stay live for L5's differential.
+    //
+    // This is NOT the FTS rule inverted. There, reading the flag would have let spine choice dodge
+    // an optimization RelIR cannot state at all (an index seek). Here the flag names two strategies
+    // and RelIR implements one; covering only what it implements is ordinary coverage.
+    expect(read("g.V().where(__.out('knows'))", { spine: 'rel' }).spine).toBe('rel');
+    expect(read("g.V().where(__.out('knows'))", { spine: 'rel', fastPaths: { predicateInlining: false } }).spine).toBe('legacy');
+    // `movementCollapse` is the other side of the same coin: RelIR states BOTH forms, so it covers
+    // the traversal either way and the flag only changes what it emits.
+    for (const movementCollapse of [true, false]) {
+      expect(read('g.V().out()', { spine: 'rel', fastPaths: { movementCollapse } }).spine).toBe('rel');
+    }
+    // Matched on `sum(…) AS bulk`, not on `GROUP BY`: the element framing projection has a GROUP BY
+    // of its own (the property aggregation), so that alone would pass either way. And not on
+    // `sum(p.bulk)` either — the assembler fuses the aggregate into the join's block, so the
+    // multiplicity is spelled as the expression that computes it, which here is the seed literal.
+    const collapsed = /sum\([^)]*\) AS bulk/i;
+    expect(read('g.V().out()', { spine: 'rel', fastPaths: { movementCollapse: true } }).sql).toMatch(collapsed);
+    expect(read('g.V().out()', { spine: 'rel', fastPaths: { movementCollapse: false } }).sql).not.toMatch(collapsed);
+  });
 
   test('a fast path is never silently dropped', () => {
     // THE RULE, and it is general: coverage measures whether the new spine can EXPRESS a
