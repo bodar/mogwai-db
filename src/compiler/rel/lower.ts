@@ -9,7 +9,7 @@ import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { isLocalScope, sliceOf } from '../ir/step.ts';
 import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
-import { flattenListArgs, isNested } from '../../gremlin/frontend.ts';
+import { flattenListArgs, isNested, isTokenArg } from '../../gremlin/frontend.ts';
 import { childSteps, collectionAssert } from '../steps/tail/child-shape.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain } from '../ir/analyze.ts';
@@ -153,23 +153,7 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
   if (step.name === 'hasLabel') {
     const names = flattenListArgs(args);
     if (!names.length || names.some((n) => typeof n !== 'string')) return null;
-    const ids = labelIds(names as string[], fresh);
-    // An EDGE carries its label inline; a VERTEX may hold several, in a side table. Two different
-    // physical questions, which is exactly why `Scan` is the only node that names a table.
-    if (elem === 'edge') {
-      // Direct where the column is physically present (the source scan), and a membership test on
-      // the edge id where it is not (after a movement, the relation is `id` + channels). Same
-      // question, and the first form keeps the covering-index read the source position deserves.
-      if (subject.label) return { kind: 'in-query', expr: subject.label, plan: ids, negated: false };
-      const e = make.scan({ id: fresh('el'), table: 'edges', alias: fresh('rel'), channels: [], type: typeOf(meta('id', 'int'), meta('label', 'int')) });
-      const matching = make.filter({ id: fresh('f'), input: e, channels: [], type: e.type, pred: { kind: 'in-query', expr: col(e.id, 'label'), plan: ids, negated: false } });
-      const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
-      return { kind: 'in-query', expr: subject.id, plan: owners, negated: false };
-    }
-    const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-    const matching = make.filter({ id: fresh('f'), input: vl, channels: [], type: vl.type, pred: { kind: 'in-query', expr: col(vl.id, 'label'), plan: ids, negated: false } });
-    const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('node', 'int')), exprs: [['node', col(matching.id, 'node')]] });
-    return { kind: 'in-query', expr: subject.id, plan: owners, negated: false };
+    return hasLabelClause(names as string[], subject, elem, fresh);
   }
 
   // `where`/`filter`/`not` over a TRAVERSAL body: a correlated existence test, which is the same
@@ -208,40 +192,134 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
   }
 
   if (step.name === 'has') {
-    // `has(key)` and `has(key, <value-or-predicate>)`. `has(label, key, value)` and the `T`-token
-    // forms decline rather than being half-answered — a token key is a different question (it
-    // reads the element's id or label, not a property row).
+    // THE THREE ARGUMENT SHAPES, all of one step: `has(key[, value-or-predicate])`,
+    // `has(label, key, value-or-predicate)` — which is the label constraint AND the property one,
+    // exactly as `HasStep` composes them — and a `T`-TOKEN key, which asks about the element's own
+    // id or label rather than about a property row. Each was a separate decline; each is a
+    // composition of clauses this module already builds, which is why they arrive together (§10·8).
+    if (args.length === 3) {
+      if (typeof args[0] !== 'string' || typeof args[1] !== 'string') return null;
+      const labelled = hasLabelClause([args[0]], subject, elem, fresh);
+      const valued = hasPropertyClause(args[1], args[2], subject, elem, fresh);
+      return labelled && valued ? and(labelled, valued) : null;
+    }
     const [key, val, extra] = args;
-    if (typeof key !== 'string' || extra !== undefined) return null;
-    // A substring `TextP` over a STORED property is `ftsSubstringPredicate`'s, and taking it here
-    // would swap a trigram-index seek for a base-table LIKE scan — a regression the census cannot
-    // see, reported by the coverage number as progress. §4.7 lifts this.
-    if (containsTextSearch(val)) return null;
+    if (extra !== undefined) return null;
+    if (isTokenArg(key)) return hasTokenClause(key.token, val, subject, elem, fresh);
+    if (typeof key !== 'string') return null;
+    return hasPropertyClause(key, val, subject, elem, fresh);
+  }
 
-    const { table, owner } = PROPERTIES[elem];
-    const props = make.scan({
-      id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-      type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-    });
-    // The property row's own `vtype` is in scope here, so an ordering comparison gets the
-    // vtype-aware key — the whole reason `predicateExpr` takes `compare` as a parameter.
-    const matches = val === undefined ? undefined
-      : predicateExpr(col(props.id, 'value'), val, { kind: 'perRow', vtype: col(props.id, 'vtype') });
-    if (val !== undefined && !matches) return null;
+  return null;
+}
 
-    const matching = make.filter({
-      id: fresh('f'), input: props, channels: [], type: props.type,
-      pred: matches
-        ? and(and(eq(col(props.id, owner), subject.id), eq(col(props.id, 'key'), lit(key, 'text'))), matches)
-        : and(eq(col(props.id, owner), subject.id), eq(col(props.id, 'key'), lit(key, 'text'))),
-    });
-    // `EXISTS (SELECT 1 …)`, correlated on the outer scan — a property FILTER asks whether a row
-    // exists, and joining instead would multiply the traverser once per matching property.
+/**
+ * `hasLabel(names…)`, as a clause — shared with the three-argument `has(label, key, value)`, whose
+ * label half asks the identical question.
+ *
+ * An EDGE carries its label inline; a VERTEX may hold several, in a side table. Two different
+ * physical questions, which is exactly why `Scan` is the only node that names a table.
+ */
+function hasLabelClause(names: readonly string[], subject: Subject, elem: Elem, fresh: Minter): Expr {
+  const ids = labelIds(names, fresh);
+  if (elem === 'edge') {
+    // Direct where the column is physically present (the source scan), and a membership test on
+    // the edge id where it is not (after a movement, the relation is `id` + channels). Same
+    // question, and the first form keeps the covering-index read the source position deserves.
+    if (subject.label) return { kind: 'in-query', expr: subject.label, plan: ids, negated: false };
+    const e = make.scan({ id: fresh('el'), table: 'edges', alias: fresh('rel'), channels: [], type: typeOf(meta('id', 'int'), meta('label', 'int')) });
+    const matching = make.filter({ id: fresh('f'), input: e, channels: [], type: e.type, pred: { kind: 'in-query', expr: col(e.id, 'label'), plan: ids, negated: false } });
+    const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
+    return { kind: 'in-query', expr: subject.id, plan: owners, negated: false };
+  }
+  const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
+  const matching = make.filter({ id: fresh('f'), input: vl, channels: [], type: vl.type, pred: { kind: 'in-query', expr: col(vl.id, 'label'), plan: ids, negated: false } });
+  const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('node', 'int')), exprs: [['node', col(matching.id, 'node')]] });
+  return { kind: 'in-query', expr: subject.id, plan: owners, negated: false };
+}
+
+/** `has(key[, value-or-predicate])` over a stored property, as a clause — an `EXISTS`, correlated on
+ *  the outer element, because a property FILTER asks whether a row is there and joining instead would
+ *  multiply the traverser once per matching property. */
+function hasPropertyClause(key: string, val: unknown, subject: Subject, elem: Elem, fresh: Minter): Expr | null {
+  // A substring `TextP` over a STORED property is `ftsSubstringPredicate`'s, and taking it here
+  // would swap a trigram-index seek for a base-table LIKE scan — a regression the census cannot
+  // see, reported by the coverage number as progress. §4.7 lifts this.
+  if (containsTextSearch(val)) return null;
+
+  const { table, owner } = PROPERTIES[elem];
+  const props = make.scan({
+    id: fresh('vp'), table, alias: fresh('rp'), channels: [],
+    type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+  });
+  // The property row's own `vtype` is in scope here, so an ordering comparison gets the
+  // vtype-aware key — the whole reason `predicateExpr` takes `compare` as a parameter.
+  const matches = val === undefined ? undefined
+    : predicateExpr(col(props.id, 'value'), val, { kind: 'perRow', vtype: col(props.id, 'vtype') });
+  if (val !== undefined && !matches) return null;
+
+  const matching = make.filter({
+    id: fresh('f'), input: props, channels: [], type: props.type,
+    pred: matches
+      ? and(and(eq(col(props.id, owner), subject.id), eq(col(props.id, 'key'), lit(key, 'text'))), matches)
+      : and(eq(col(props.id, owner), subject.id), eq(col(props.id, 'key'), lit(key, 'text'))),
+  });
+  const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', lit(1, 'int')]] });
+  return { kind: 'exists', plan: probe, negated: false };
+}
+
+/**
+ * `has(T.label, …)` / `has(T.id, …)` — a token key, which reads the ELEMENT rather than a property
+ * row, and is therefore a different question from every other `has`.
+ *
+ * **`T.label` is ANY label, not the first one.** A vertex may carry several, so the test is an
+ * `EXISTS` over its label rows with the predicate on the NAME — which is why this cannot reuse
+ * `modulator.ts`'s token projection: a `by(T.label)` takes the FIRST label (insertion order names
+ * it), and a `has` that did the same would drop a multi-label vertex whose match is not first.
+ *
+ * **`T.id` is the EXTERNAL id** — `COALESCE(uid, id)`, the id a client sees — read through a
+ * correlated scan so the clause is the same in the source position and after a movement (where the
+ * relation carries the rowid alone).
+ */
+function hasTokenClause(token: string, val: unknown, subject: Subject, elem: Elem, fresh: Minter): Expr | null {
+  const name = token.toLowerCase();
+  if (name !== 'label' && name !== 'id') return null;
+  if (val === undefined || containsTextSearch(val)) return null;
+
+  if (name === 'id') {
+    const cols = elem === 'edge' ? EDGE_COLS : NODE_COLS;
+    const scan = make.scan({ id: fresh('ti'), table: elem === 'edge' ? 'edges' : 'nodes', alias: fresh('rti'), channels: [], type: typeOf(...cols) });
+    const external: Expr = { kind: 'call', fn: 'COALESCE', args: [col(scan.id, 'uid'), col(scan.id, 'id')] };
+    const matches = predicateExpr(external, val, SUBJECT_UNKNOWN);
+    if (!matches) return null;
+    const matching = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: and(eq(col(scan.id, 'id'), subject.id), matches) });
     const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', lit(1, 'int')]] });
     return { kind: 'exists', plan: probe, negated: false };
   }
 
-  return null;
+  const labels = make.scan({ id: fresh('lb'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
+  const matches = predicateExpr(col(labels.id, 'name'), val, SUBJECT_UNKNOWN);
+  if (!matches) return null;
+  if (elem === 'edge') {
+    // An edge's label is a COLUMN, so the join is against whichever expression carries it — the scan's
+    // own where there is one, a correlated read of the edge row otherwise.
+    const edges = make.scan({ id: fresh('eg'), table: 'edges', alias: fresh('re'), channels: [], type: typeOf(meta('id', 'int'), meta('label', 'int')) });
+    const joined = make.join({
+      id: fresh('j'), left: edges, right: labels, join: 'inner', channels: [],
+      type: typeOf(meta('id', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
+      on: and(and(eq(col(edges.id, 'label'), col(labels.id, 'id')), eq(col(edges.id, 'id'), subject.id)), matches),
+    });
+    const probe = make.project({ id: fresh('p'), input: joined, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', lit(1, 'int')]] });
+    return { kind: 'exists', plan: probe, negated: false };
+  }
+  const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
+  const joined = make.join({
+    id: fresh('j'), left: vl, right: labels, join: 'inner', channels: [],
+    type: typeOf(meta('node', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
+    on: and(and(eq(col(vl.id, 'label'), col(labels.id, 'id')), eq(col(vl.id, 'node'), subject.id)), matches),
+  });
+  const probe = make.project({ id: fresh('p'), input: joined, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', lit(1, 'int')]] });
+  return { kind: 'exists', plan: probe, negated: false };
 }
 
 /**

@@ -201,6 +201,20 @@ const COVERED = [
   "g.inject('1').asNumber()", "g.inject('1','2').asNumber(GType.INT)", 'g.inject(1).asNumber(GType.LONG)',
   "g.inject('true').asBool()", "g.inject('2023-08-02T00:00:00Z').asDate()",
   "g.inject('1','2').asNumber(GType.INT).sum()", "g.inject('1').asNumber().is(P.gt(0))",
+  // `has()`'s three ARGUMENT SHAPES, all of one step. The 3-arg form is the label constraint AND the
+  // property one, exactly as `HasStep` composes them; a `T`-token key asks about the ELEMENT rather
+  // than a property row. Each was its own decline and each is a composition of clauses already built.
+  "g.V().has('person','name','marko')", "g.V().has('person','age',P.gt(30))",
+  "g.V().has('person','name',P.within('vadas','peter'))", "g.E().has('knows','weight',0.5)",
+  "g.V().out().has('person','name','josh')",
+  // `T.label` is ANY label, not the first — a vertex may carry several, so it is an EXISTS over its
+  // label rows and NOT `modulator.ts`'s token projection (which takes the first by insertion order).
+  "g.V().has(T.label,'person')", "g.V().has(T.label,P.eq('person'))",
+  "g.V().has(T.label,P.within('person','software'))", "g.E().has(T.label,'knows')",
+  "g.V().out().has(T.label,'software')", "g.V().has(T.label,'person').has('age',29)",
+  // `T.id` is the EXTERNAL id (`COALESCE(uid, id)`), read through a correlated scan so the clause is
+  // the same at the source and after a movement.
+  'g.V().has(T.id,1)', 'g.E().has(T.id,7)', 'g.V().has(T.id,P.gt(2))',
 ];
 
 /**
@@ -218,6 +232,8 @@ const DECLINED = [
   "g.inject(['a','b']).merge(__.V().values('name').fold())", // a TRAVERSAL operand is a child read
   "g.V().values('age').is(P.typeOf(GType.MAP))", // a MAP retype needs the map shape, not a decode
   "g.inject([1,2],3)",                // MIXED list/scalar args: the VARIANT shape, and legacy FLATTENS
+  'g.V().has(null)',                  // a null KEY is neither a property name nor a token
+  'g.V().has(T.label,null)',          // a null label VALUE: legacy owns what that means
   "g.inject('a').inject('b')",        // a second inject is a UNION with the first, not a source
   'g.inject(1,2).order(Scope.local)', // LOCAL scope: a per-traverser sort of a LIST, a different arm
   "g.V().dedup().by(__.out().count())", // a SUB-TRAVERSAL projection: a child lowering, not an expr
@@ -226,8 +242,6 @@ const DECLINED = [
   'g.addV("person")',                 // a write
   "g.V().has('name',TextP.containing('ark'))",  // ftsSubstringPredicate's — see below
   "g.V().has('name',P.within(__.V().values('name').fold()))", // a run-time member list, not a set
-  "g.V().has('person','age',29)",     // the three-argument (label, key, value) form
-  'g.V().has(T.id,1)',                // a T-token key
   "g.V().has('name',null)",           // a null value: not a literal this route can compare
   "g.V().where(__.has('name','marko'))", // a filter-only body is a predicate on the SAME traverser
   "g.V().where(__.out().order())",    // a body step the child fold has not learned

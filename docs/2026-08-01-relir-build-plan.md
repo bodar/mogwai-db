@@ -1,6 +1,6 @@
 # RelIR — the build plan
 
-**Status: BUILDING.** Coverage **517 / 2,298** corpus traversals on the RelIR spine; deletion counter
+**Status: BUILDING.** Coverage **526 / 2,298** corpus traversals on the RelIR spine; deletion counter
 **110** references left across the 15 legacy rows. Both are ratchets in `ci` (§10·4). The direction was
 argued in [codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a and
 is not re-argued here.
@@ -532,6 +532,24 @@ for `inject(datetime(…)).dateAdd(hour, 2)`.
 A MIXED `inject([1,2], 3)` still declines. Legacy FLATTENS it — its own comment calls that the
 historical representation, held until a scalar stream gains a per-row shape discriminant — and
 reproducing an approximation is not the same as reproducing an answer.
+
+### `has()`'s three ARGUMENT SHAPES — one step, and the residue is where it was found
+
+`has(key[, value])` was covered; `has(label, key, value)` and a `T`-TOKEN key were two separate
+declines worth ~31 blocked traversals between them, and both are COMPOSITIONS of clauses already
+built (+9 fully-covered chains; the rest of the 31 contain other uncovered steps). The 3-arg form is
+the label constraint AND the property one, exactly as `HasStep` composes them, so extracting
+`hasLabelClause`/`hasPropertyClause` from the existing arms was most of the work.
+
+**`T.label` is ANY label, not the first**, and that is why it cannot reuse `modulator.ts`'s token
+projection: a `by(T.label)` takes the FIRST label (insertion order names it), so a `has` built on it
+would drop a multi-label vertex whose match is not first. It is an `EXISTS` over the element's label
+rows with the predicate on the NAME. `T.id` is the EXTERNAL id (`COALESCE(uid, id)`), read through a
+correlated scan so the clause is identical at the source and after a movement.
+
+Found by asking the residue what SHAPE its `has` blockers were, not by reading the step list — 23 of
+them were the same three-argument form. The instrument keeps its job with a different question
+(§10·7).
 
 ### Phase 2 — the write wedge
 
