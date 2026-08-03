@@ -34,12 +34,13 @@ the work is never merged, and it sits orphaned until someone sweeps it. 29 such 
 deleted on 2026-08-03. **Now the push fails loudly instead — but the container is ephemeral, so
 commits that never reach `trunk` are gone with it.** Landing on trunk is the only durable move.
 
-`session-start.sh` step 0b therefore **switches to trunk and deletes the `claude/…` branch**, so
-in a healthy session it is already gone and `git branch` shows only `trunk`. If the harness
-recreates it after the hook, `remote.origin.push = HEAD:refs/heads/trunk` still sends a bare
-**`git push`** to trunk from whatever branch HEAD is on. Do not recreate it yourself, do not
-`git push origin claude/…`, and do not `checkout -b` to "keep work separate" — there is nowhere
-for that branch to go. Commit on trunk; `git push` is enough.
+`session-start.sh` step 0b therefore **switches to trunk and deletes the `claude/…` branch**,
+its remote-tracking stub included — measured 2026-08-03, this hook runs after the harness
+checkout, so `git branch -a` shows `trunk` and `origin/trunk` and nothing else. There is
+deliberately no push-refspec override: `git push` means what it says, and trunk is simply the
+branch you are on. Do not recreate the session branch, do not `git push origin claude/…`, and
+do not `checkout -b` to "keep work separate" — there is nowhere for such a branch to go. Commit
+on trunk and push.
 
 ## A rejected push to trunk is the normal case, not an incident
 

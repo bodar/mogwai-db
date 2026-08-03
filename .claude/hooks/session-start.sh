@@ -111,21 +111,43 @@ if git -C "$CLAUDE_PROJECT_DIR" rev-parse --verify -q origin/trunk >/dev/null 2>
   fi
   if [ "$(git -C "$CLAUDE_PROJECT_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "trunk" ]; then
     # Prefix pattern: `refs/heads/claude/` matches everything beneath it, nested names included.
+    # Both loops delete the REF DIRECTLY rather than via `branch -d/-D`: `branch -rd` exists but
+    # takes the short name and reports a stale-ref hint on stdout, and stdout IS Claude's context
+    # here. `update-ref -d` is silent, takes the full refname the same way in both loops, and
+    # `branch -D`'s side effect we DO want (dropping `branch.<name>.*` config) is a no-op for a
+    # remote-tracking ref anyway — so config cleanup rides along with the local loop only.
     for STALE in $(git -C "$CLAUDE_PROJECT_DIR" for-each-ref --format='%(refname:short)' 'refs/heads/claude/'); do
       git -C "$CLAUDE_PROJECT_DIR" branch -D "$STALE" >/dev/null 2>&1 &&
         echo "[git] deleted unpushable local branch '$STALE'" >&2
     done
   fi
 
-  #     Backstop, independent of everything above: if the harness re-creates or re-checks-out a
-  #     session branch AFTER this hook runs, the deletion silently stops helping. A per-remote
-  #     push refspec does not care which branch HEAD is on — `git push` with no arguments reads
-  #     `remote.<name>.push` before `push.default` is ever consulted, so it resolves to
-  #     `HEAD:refs/heads/trunk` from trunk and from any resurrected `claude/…` alike. Measured:
-  #     without it, `push.default=current` recreates the branch remotely and only the ruleset
-  #     stops it; `push.default=simple` instead aborts with a name-mismatch fatal. Neither is a
-  #     force-push — a non-fast-forward to trunk is still rejected as the notes describe.
-  git -C "$CLAUDE_PROJECT_DIR" config --local remote.origin.push HEAD:refs/heads/trunk
+  #     Leave no remote-tracking stub either. The local branch is gone but `origin/claude/<slug>`
+  #     survives it, and a leftover `origin/…` ref reads as "this branch exists upstream" to
+  #     anything that lists refs — which is false twice over: the ruleset means it cannot exist
+  #     upstream, and this is what made a session reason about the branch after it was deleted.
+  #     Done offline with `update-ref -d` rather than `git remote prune origin`, which needs the
+  #     network and prunes on the remote's answer; here the ref is known-bogus without asking.
+  for STALE in $(git -C "$CLAUDE_PROJECT_DIR" for-each-ref --format='%(refname)' 'refs/remotes/origin/claude/'); do
+    git -C "$CLAUDE_PROJECT_DIR" update-ref -d "$STALE" 2>/dev/null &&
+      echo "[git] deleted stale remote-tracking ref '${STALE#refs/remotes/}'" >&2
+  done
+
+  #     A single-branch clone can pin the session branch in a FETCH refspec, which would refetch
+  #     the ref just deleted. Strip only claude-specific refspecs, and only while another remains
+  #     — a remote with no fetch refspec at all cannot see origin/trunk, which is a worse break
+  #     than the stub. If it is the only one, say so instead of creating that state silently.
+  CLAUDE_FETCH="$(git -C "$CLAUDE_PROJECT_DIR" config --get-all remote.origin.fetch 2>/dev/null | grep -c 'claude/' || true)"
+  FETCH_TOTAL="$(git -C "$CLAUDE_PROJECT_DIR" config --get-all remote.origin.fetch 2>/dev/null | grep -c . || true)"
+  if [ "$CLAUDE_FETCH" -gt 0 ]; then
+    if [ "$FETCH_TOTAL" -gt "$CLAUDE_FETCH" ]; then
+      git -C "$CLAUDE_PROJECT_DIR" config --unset-all remote.origin.fetch '.*claude/.*' 2>/dev/null || true
+      echo "[git] dropped $CLAUDE_FETCH claude/* fetch refspec(s) that would refetch the deleted ref" >&2
+    else
+      echo "[git] NB remote.origin.fetch only matches claude/* — left in place (removing it would" >&2
+      echo "[git]    hide origin/trunk); \`git fetch\` may recreate origin/claude/*." >&2
+    fi
+  fi
 fi
 
 # 1. Preflight the egress policy, and do it by REACHABILITY rather than by environment
