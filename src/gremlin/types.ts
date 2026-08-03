@@ -237,6 +237,20 @@ export const STORAGE_CLASS: Readonly<Record<CanonicalType, string | null>> = {
   duration: null, list: null, map: null, set: null,
 };
 
+/**
+ * The storage classes a REDUCER may take a value from — the eligibility guard every barrier wraps its
+ * argument in, so an ineligible value contributes nothing rather than coercing to 0 or ''.
+ *
+ * Two sets because the question differs: `sum`/`mean` do ARITHMETIC and only numbers qualify, while
+ * `min`/`max` do ORDERING and Gremlin's `Comparable` admits strings too. That asymmetry is semantics,
+ * not an oversight, and it is the thing a re-derived copy gets wrong — which is why both lowerings read
+ * it from here (`STORAGE_CLASS`'s neighbours: the same SQLite-class vocabulary, a third question).
+ */
+export const REDUCER_CLASSES = {
+  arithmetic: ['integer', 'real'],
+  comparable: ['integer', 'real', 'text'],
+} as const;
+
 /** Collections are stored as JSONB in the value column (not a raw scalar bind). */
 export const COLLECTION_TYPES = new Set<CanonicalType>(['list', 'map', 'set']);
 export const isCollectionType = (t: string | null | undefined): boolean =>

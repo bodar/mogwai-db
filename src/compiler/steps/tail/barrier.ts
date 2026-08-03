@@ -6,6 +6,7 @@ import { armBatches, isLocalScope, BATCHING_BRANCHES, type BranchKind, type IRSt
 import { cardinalityOf, continueLowering, type LoweringResult, loweringStateOf, streamColumns, streamPayloadCols, toListStream, toScalarStream, withRelation, withRelationAndLayout, type ListStream, type RelationalStream, type ScalarStream, type ShapeTailFn } from '../context/stream.ts';
 import { aliasCompareTest, aliasOperandsOf, layoutCols, layoutProjection, layoutProjectionMinting, patchLayout, dropLayoutAtBarrier, type ElementStream } from '../context/context.ts';
 import { type ChildScope } from './child-shape.ts';
+import { REDUCER_CLASSES } from '../../../gremlin/types.ts';
 
 const currentFrame = (scope: ChildScope) => {
   const frame = scope.frames.at(-1);
@@ -438,9 +439,11 @@ export function numericReducerAggregate(
   reducer: NumericReducer,
   bulk?: Expression,
 ): { value: Expression; type: Expression; productive: Expression } {
-  const eligible = reducer === 'min' || reducer === 'max'
-    ? q`CASE WHEN typeof(${value}) in ('integer', 'real', 'text') THEN ${value} END`
-    : q`CASE WHEN typeof(${value}) in ('integer', 'real') THEN ${value} END`;
+  // The eligible class lists live in `gremlin/types.ts` as `REDUCER_CLASSES`, beside `STORAGE_CLASS`:
+  // the RelIR reducer needs the identical answer, and the arithmetic/comparable asymmetry (min/max
+  // admit strings because Gremlin's Comparable does) is exactly what a second copy gets wrong.
+  const classes = reducer === 'min' || reducer === 'max' ? REDUCER_CLASSES.comparable : REDUCER_CLASSES.arithmetic;
+  const eligible = q`CASE WHEN typeof(${value}) in (${list(classes.map((c) => raw(`'${c}'`)), ', ')}) THEN ${value} END`;
   if (bulk && reducer === 'sum') {
     const reduced = q`SUM(${eligible} * ${bulk})`;
     return { value: reduced, type: q`typeof(${reduced})`, productive: q`${reduced} IS NOT NULL` };

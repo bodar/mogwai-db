@@ -144,20 +144,40 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('min/max range over comparables (incl. text); mean/sum numeric only', () => {
-    const mn = read('g.V().values("age").min()');
+    const mn = read('g.V().values("age").min()', { spine: 'legacy' });
     // TinkerPop 4 Strings are Comparable, so min/max include text (numbers order first).
     expect(mn.sql).toContain("typeof(s.v) in ('integer', 'real', 'text')");
     expect(mn.sql).toContain(`MIN(${eligible('s.v', true)})`);
     expect(mn.shape).toEqual({ kind: 'scalar' });
-    expect(read('g.V().values("age").max()').sql).toContain(`MAX(${eligible('s.v', true)})`);
+    expect(read('g.V().values("age").max()', { spine: 'legacy' }).sql).toContain(`MAX(${eligible('s.v', true)})`);
     // mean stays numeric-only (never text).
-    expect(read('g.V().values("age").mean()').sql).toContain("typeof(s.v) in ('integer', 'real')");
+    expect(read('g.V().values("age").mean()', { spine: 'legacy' }).sql).toContain("typeof(s.v) in ('integer', 'real')");
     // mean is always a Double (forced vt='real')
-    const avg = read('g.V().values("age").mean()');
+    const avg = read('g.V().values("age").mean()', { spine: 'legacy' });
     // The weighted-mean denominator counts only the ELIGIBLE rows' bulk, which is what the
     // policy's nested CASE says and what the WHERE-clause form used to say positionally.
     expect(avg.sql).toContain(`SUM(${eligible('s.v')} * s.bulk) * 1.0 / SUM(CASE WHEN ${eligible('s.v')} IS NOT NULL THEN s.bulk END)`);
     expect(avg.sql).toContain("'real' AS vt");
+
+    // The RelIR spine states the same POLICY with the class lists BOUND rather than spliced (§3.2), so
+    // the bind values are what to assert — and they are the stronger assertion anyway, since a wrong
+    // class list is a wrong SET and not a wrong string. `min`/`max` admit three classes because
+    // Comparable does; `sum`/`mean` admit two.
+    for (const [gremlin, classes] of [
+      ['g.V().values("age").min()', ['integer', 'real', 'text']],
+      ['g.V().values("age").max()', ['integer', 'real', 'text']],
+      ['g.V().values("age").sum()', ['integer', 'real']],
+      ['g.V().values("age").mean()', ['integer', 'real']],
+    ] as const) {
+      const p = read(gremlin, { spine: 'rel' });
+      for (const cls of classes) expect(p.binds).toContain(cls);
+      if (classes.length === 2) expect(p.binds).not.toContain('text');
+      expect(p.shape).toEqual({ kind: 'scalar' });
+    }
+    // …and the mean is forced REAL by a CAST rather than legacy's `* 1.0`: every RelIR `Lit` is a bind
+    // and a JS `1.0` binds as an INTEGER, so the multiplier cannot carry the distinction (measured: the
+    // reference mean came back 30 instead of 30.75).
+    expect(read('g.V().values("age").mean()', { spine: 'rel' }).sql).toMatch(/CAST\(sum\([^]*AS REAL\) \//);
     // min(Scope.local) after fold() reduces the folded list per-list (list phase).
     expect(read('g.V().values("age").fold().min(Scope.local)').shape).toEqual({ kind: 'scalar' });
 
@@ -188,7 +208,11 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().hasId(P.within([1,2]))').sql).toContain('COALESCE(n.uid, n.id) in (?, ?)');
     // Scope.local is now captured on the step (was silently dropped) — a bare
     // reducer ignores the scope arg, so global sum() is unchanged (Scope.local lands later).
-    expect(read('g.inject(1,2,3).sum()').binds).toEqual([1, 2, 3]);
+    // What is under test is the FLATTENING — three values, not one array — so the three are asserted by
+    // presence on both spines. RelIR's bind list also carries the reducer's eligibility class names, and
+    // an exact-equality assertion here would be pinning that unrelated fact.
+    for (const spine of ['legacy', 'rel'] as const)
+      for (const value of [1, 2, 3]) expect(read('g.inject(1,2,3).sum()', { spine }).binds).toContain(value);
   });
 
   test('fold() as a value + unfold() re-enters the tail', () => {
@@ -327,8 +351,15 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.inject(1,3).inject(100,300)').binds).toEqual([1, 3, 100, 300]);
     // reducers reuse the shared wrapper
     expect(read('g.inject(1,2,3).sum()').shape).toEqual({ kind: 'scalar' });
-    expect(read('g.inject(1,2,3).sum()').sql).toContain(`SUM(${eligible('s.v')})`);
-    expect(read('g.inject(1,2,3).mean()').sql).toContain(`AVG(${eligible('s.v')})`);
+    // An injected row carries NO multiplicity by construction, so the reducer takes the UNWEIGHTED form
+    // — the same distinction `count()` draws between `COUNT(*)` and `SUM(bulk)`, read off the channel.
+    expect(read('g.inject(1,2,3).sum()', { spine: 'legacy' }).sql).toContain(`SUM(${eligible('s.v')})`);
+    expect(read('g.inject(1,2,3).sum()', { spine: 'rel' }).sql).toMatch(/sum\(CASE WHEN typeof\([^]*\) AS v/);
+    expect(read('g.inject(1,2,3).sum()', { spine: 'rel' }).sql).not.toMatch(/\* \?\)\) AS v/);
+    // Unweighted mean IS `AVG` — no bulk to weight by, so the weighted form's numerator/denominator
+    // pair collapses to the builtin, on both spines.
+    expect(read('g.inject(1,2,3).mean()', { spine: 'legacy' }).sql).toContain(`AVG(${eligible('s.v')})`);
+    expect(read('g.inject(1,2,3).mean()', { spine: 'rel' }).sql).toMatch(/avg\(CASE WHEN typeof\(/);
     expect(read('g.inject(1,2,3).count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.inject(1,2,3).fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
     // is() BEFORE count() filters the pre-count stream (WHERE inside the counted set)
@@ -994,17 +1025,29 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('sum() wraps a value stream in SQL SUM → scalar shape', () => {
-    const p = read('g.V().values("age").sum()');
+    const p = read('g.V().values("age").sum()', { spine: 'legacy' });
     expect(p.shape).toEqual({ kind: 'scalar' });
     expect(p.sql).toContain(`SELECT SUM(${eligible('s.v')} * s.bulk) AS v, typeof(SUM(${eligible('s.v')} * s.bulk)) AS vt FROM`);
+    // RelIR states the same three facts — the aggregate, the BULK weighting, and the dynamic `vt`
+    // column reading the result's own storage class — with the value inlined rather than aliased.
+    const rel = read('g.V().values("age").sum()', { spine: 'rel' });
+    expect(rel.shape).toEqual({ kind: 'scalar' });
+    expect(rel.sql).toMatch(/sum\([^]*\* \?\)\) AS v/);
+    expect(rel.sql).toMatch(/typeof\(sum\([^]*\)\) AS vt/);
   });
 
   test('numeric reducers are scalar streams and preserve dynamic type past filters', () => {
-    const summed = read('g.V().values("age").sum().is(P.gt(100))');
+    const summed = read('g.V().values("age").sum().is(P.gt(100))', { spine: 'legacy' });
     expect(summed.shape).toEqual({ kind: 'scalar' });
     expect(summed.sql).toContain(`SUM(${eligible('s.v')} * s.bulk) AS v`);
     expect(summed.sql).toContain('p.vt AS vt');
     expect(summed.sql).toContain('WHERE p.v > ?');
+    // A filter over a REDUCED value is a `HAVING` on the RelIR side — one of §3's declared collapses,
+    // and the same question legacy asks with a CTE plus a WHERE. Both keep the dynamic `vt` column.
+    const summedRel = read('g.V().values("age").sum().is(P.gt(100))', { spine: 'rel' });
+    expect(summedRel.shape).toEqual({ kind: 'scalar' });
+    expect(summedRel.sql).toMatch(/HAVING \(sum\(/);
+    expect(summedRel.sql).toMatch(/ AS vt/);
 
     const store = seededStore();
     expect(run(store, 'g.V().values("age").sum().is(P.gt(100))').map((r) => r.v)).toEqual([123]);
@@ -1058,8 +1101,12 @@ describe('scalar-parent / projection SQL', () => {
 
     const typedSum = read('g.V().values("age").asNumber(GType.DOUBLE).sum().is(P.gt(100))');
     expect(typedSum.shape).toEqual({ kind: 'scalar' });
-    expect(typedSum.sql).toMatch(/CAST\([^]*AS REAL\) AS v/);
-    expect(typedSum.sql).toContain(`SUM(${eligible('s.v')} * s.bulk) AS v`);
+    // The cast is inside the reducer's eligibility guard on the RelIR side (the transform is fused into
+    // the aggregate's argument), so what both spines must say is that the value was cast to REAL before
+    // being summed — not where the cast sits in the select list.
+    expect(typedSum.sql).toMatch(/CAST\([^]*AS REAL\)/);
+    // …and the sum is BULK-WEIGHTED over an element source, whichever spine emits it.
+    expect(typedSum.sql).toMatch(/(SUM|sum)\([^]*\* (s\.bulk|\?)\)?\)? AS v/);
 
     const store = seededStore();
     expect(run(store, 'g.V().values("name").toUpper().is("MARKO")').map((r) => r.v)).toEqual(['MARKO']);

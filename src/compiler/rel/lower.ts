@@ -20,6 +20,7 @@ import {
 } from './build.ts';
 import { byExpr, modulations, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
+import { isReducer, reducerAggregate } from './reducer.ts';
 
 /**
  * THE SECOND LOWERING — `Step[] -> RelIR` (§10·4 of `docs/2026-08-01-relir-build-plan.md`).
@@ -839,6 +840,26 @@ function scalarTail(
       });
       rel = make.distinct({ id: fresh('d'), input: projected, channels: [], type: projected.type });
       outCols = payload.map((column) => column.name);
+      outChannels = [];
+      continue;
+    }
+
+    // THE REDUCER FAMILY — one `Aggregate`, four step names, and the barrier that ENDS the tail's
+    // channels: a reducing aggregate collapses the whole multiset into one row, so nothing survives it
+    // (§3.5's `barrierChannels`), which is why the channels list is empty rather than trimmed by hand.
+    if (isReducer(step.name)) {
+      if (args.length || isLocalScope(step)) return null;
+      const bulk = outChannels.find((channel) => channel.role === 'bulk');
+      const reduced = reducerAggregate(col(rel.id, 'v'), step.name, bulk && col(rel.id, bulk.col));
+      rel = make.aggregate({
+        id: fresh('red'), input: rel, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
+        groupBy: [], aggs: [['v', reduced.value], ['vt', reduced.type]],
+      });
+      // `result: 'number'` is the framing arm that reads the `vt` column — the result's storage class is
+      // DYNAMIC (a sum of integers is an integer, of reals a real), so there is no compile-time tag to
+      // give and `UNKNOWN` would throw the second column away.
+      out = { kind: 'scalar', type: UNKNOWN, result: 'number' };
+      outCols = ['v', 'vt'];
       outChannels = [];
       continue;
     }

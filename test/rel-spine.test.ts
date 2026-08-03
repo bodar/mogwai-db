@@ -79,6 +79,13 @@ const COVERED = [
   "g.V().dedup().by(T.label)", "g.E().dedup().by(T.label)", "g.V().dedup().by(T.id)",
   "g.V().out().dedup().by('lang')", "g.V().dedup().by('lang').values('name')",
   "g.V().dedup().by('name').count()", "g.V().values('name').dedup().by()",
+  // THE REDUCER FAMILY — four step names, one `Aggregate`, and Phase 4.3's named deliverable. The
+  // `min`/`max` pair over a STRING stream is the arm a numeric-only guard would silently answer nothing
+  // for, so both are here.
+  "g.V().values('age').sum()", "g.V().values('age').min()", "g.V().values('age').max()",
+  "g.V().values('age').mean()", "g.V().values('name').min()", "g.V().values('name').max()",
+  "g.inject(1,2,3).sum()", "g.inject(1,2,3).mean()", "g.V().out().values('age').sum()",
+  "g.V().values('age').asNumber(GType.DOUBLE).sum()", "g.V().values('age').sum().is(P.gt(100))",
   // `ProductiveByStrategy` is the OTHER side of the productivity rule, and it must stay a live
   // position: with it on, a traverser whose `by()` yielded nothing is KEPT.
   "g.withStrategies(ProductiveByStrategy).V().dedup().by('lang')",
@@ -199,6 +206,45 @@ describe('the RelIR spine', () => {
     // One survivor per distinct `lang` (java) PLUS one for the null key — SQL groups NULLs together in
     // a `PARTITION BY`, which is what TinkerPop's "all non-productive traversers share a key" means.
     expect(store.query(kept.sql, kept.binds).length).toBe(2);
+  });
+
+  test("a reducer's three policies each have a witness the others cannot provide", () => {
+    // ELIGIBILITY, BULK WEIGHTING and the DYNAMIC result type are three independent rules, and the
+    // reference fixture makes each visible only under a different traversal — so each gets its own
+    // assertion rather than trusting one differential to cover all three.
+    //
+    // 1. ELIGIBILITY is arithmetic-vs-comparable: `min`/`max` admit TEXT because Gremlin's Comparable
+    //    does, and a numeric-only guard would answer NULL here rather than a wrong number.
+    const minText = read("g.V().values('name').min()", { spine: 'rel' });
+    expect(minText.spine).toBe('rel');
+    expect(store.query(minText.sql, minText.binds).map((row: any) => row.v)).toEqual(['josh']);
+
+    // 2. BULK WEIGHTING applies to sum/mean and NOT to min/max, and it is only observable once a
+    //    collapse upstream has made bulk anything but 1 — `both().both()` is that. A weighted min would
+    //    still be the min, which is why the pair is asserted together against legacy.
+    for (const gremlin of ["g.V().both().both().values('age').sum()", "g.V().both().both().values('age').mean()",
+      "g.V().both().both().values('age').min()", "g.V().both().both().values('age').max()"]) {
+      const rel = read(gremlin, { spine: 'rel' });
+      const legacy = read(gremlin, { spine: 'legacy' });
+      expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
+    }
+
+    // 3. THE MEAN IS FORCED REAL. Integer division answers 30 for the reference ages where the mean is
+    //    30.75 — right shape, plausible number, and the ONLY thing that catches it is the value. RelIR
+    //    forces it with a `Cast` because §3.2 makes every `Lit` a bind and a JS `1.0` binds as INTEGER,
+    //    so legacy's `* 1.0` is not expressible. This assertion is that limit's regression test.
+    const mean = read("g.V().values('age').mean()", { spine: 'rel' });
+    expect(store.query(mean.sql, mean.binds).map((row: any) => row.v)).toEqual([30.75]);
+    // The mechanism is the CAST, asserted directly — `* ?` also appears in this SQL and legitimately so
+    // (that is the bulk weighting), which is why the absence of a multiplier is not the thing to check.
+    expect(mean.sql).toMatch(/CAST\(sum\([^]*AS REAL\) \//);
+
+    // …and the result's storage class rides out as the `vt` column, because a sum of integers is an
+    // integer and of reals a real — there is no compile-time tag to give.
+    const sum = read("g.V().values('age').sum()", { spine: 'rel' });
+    expect(store.query(sum.sql, sum.binds)).toEqual([{ v: 123, vt: 'integer' }]);
+    const real = read("g.V().values('age').asNumber(GType.DOUBLE).sum()", { spine: 'rel' });
+    expect(store.query(real.sql, real.binds)).toEqual([{ v: 123, vt: 'real' }]);
   });
 
   test('a cast over a LITERAL must RAISE, so RelIR declines the constant-folded transforms', () => {
