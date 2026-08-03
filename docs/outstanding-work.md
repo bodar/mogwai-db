@@ -136,6 +136,28 @@ of gravity is ceiling, not correctness.
    Fold a citation into whichever site is next touched. **Do not "finish" this by mechanically
    rewriting all 17**: some defer for a reason the table does not capture. *Low.*
 
+37. **Three RelIR passes are declared, built, tested — and reachable from no route. There is no
+   pipeline that orders them.** `src/rel/passes/` holds `fuse`, `prune`, `land` and `name`; only
+   `name` has a production caller (`compiler/rel/lower.ts`). The plan's §4 says the passes are
+   "`Rel → Rel`, total, order-declared", and the declared order lives in that prose — no object
+   applies it, so "which passes ran" is answered per call site. **The three are not one job and pull
+   different ways:**
+   - **`land` is a CAPABILITY, and its absence is a coverage decision nobody took.** It lowers an
+     over-budget literal row set to ONE JSON bind exploded by `json_each` (§3.6). Unwired, that whole
+     class declines to legacy instead — verified: a 101-value `inject()` routes legacy, where it then
+     compiles to 101 binds and would be REFUSED by a Durable Object (below, item 38). So the class is
+     both parked on the spine this migration deletes *and* broken on the spine it is parked on.
+   - **`prune` is Phase 3.3's precondition** and prunes nothing below a `Join`/`Union`/`Aggregate`/
+     `Recursive` — its own declared remainder. `unroll` replicates repeat bodies, which are mostly
+     joins, and §4.5 is what calls pruning the thing that makes replicas affordable.
+   - **`fuse` is the opposite question — ask whether it is wanted at all.** The block assembler
+     already fuses a run into one `SELECT` (§5, and §10·1 records that `fuse` was deliberately NOT
+     given that job). One of its four declared rewrites exists (adjacent filters conjoin); before
+     writing the other three, establish which of them buys anything the assembler does not.
+   *Low each mechanically, Medium as a decision — and the decision is the deliverable: a declared
+   pipeline with an order, or three fewer files.*
+   → [relir-build-plan](./2026-08-01-relir-build-plan.md) §4
+
 3. **`repeat()` — the row-local vocabulary gate, and it DISSOLVES rather than being widened.**
    8 queries. The body compiles through the ordinary StepFns into a keyed child relation
    (`tail/keyed.ts`), and the gate is not "whatever `lowerElementSteps` accepts" but the row-local
@@ -278,6 +300,20 @@ of gravity is ceiling, not correctness.
 0e. **Nothing detects a stale `parser/`.** A byte-compare against a fresh generation must first resolve
    a ref mismatch: the generate script sources `origin/master` (moving) while the submodule pins a
    gitlink, so a naive comparison is only accidentally green today. *Medium — measurement integrity.*
+
+38. **The two write constructs whose PLATFORM behaviour has never been measured are the two already
+   in the code.** `src/cf-limits.ts` and `test/cf-limits.test.ts` mention neither `RETURNING` nor
+   `ON CONFLICT`, while `Insert`/`Update`/`Delete` emit both and `runProgram` executes them.
+   [relir-build-plan](./2026-08-01-relir-build-plan.md) §1 states the gate — re-run P5/P5b under DO
+   SQLite — and §7 lists it as the response to the DO-only-wall risk, so it is currently a risk whose
+   response is a sentence. Method exists and is cheap: the throwaway `wrangler dev` DO from §10·5,
+   harness `test/cloudflare.test.ts`, about a minute per probe.
+   **A second, unrelated wall the same instrument cannot see, found while probing this:** legacy
+   compiles `g.inject(v1…v101)` to **101 binds** and a Durable Object refuses at 100. No corpus
+   traversal injects that many, so `test:cf-limits` never runs it — the instrument covers what the
+   suite executes, which is the blind spot in its own row of §11's table. Item 37's `land` is the
+   remedy on the RelIR side; legacy needs its own answer or an honest refusal.
+   *Low-Med, and it is a PREREQUISITE for Phase 2 rather than one of its exit criteria.*
 
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member shape,
    so a path/element-list label cannot frame its members as vertices. *Low-Med.*
@@ -683,6 +719,12 @@ deferral clusters in 5c instead.
   `BranchStep`/`FlatMapStep` class fact, which decides which branch kinds can disagree with us and in
   WHICH respect (arm SCOPE for two of them, emission ORDER for all four), and §6's five wrong turns.
   Item 36 is its one open remainder.
+- **`docs/spec/relir-algebra.allium` + `docs/spec/relir-migration.allium`** — the RelIR contract as an
+  Allium spec: the checker's laws, the channel policies, the two budgets and the executor's transport in
+  the first; routing, the decline contract, both ratchets and the phase gates in the second. Reference,
+  not mechanism — the code and `docs/2026-08-01-relir-build-plan.md` remain the authorities. Worth
+  reading before proposing a RelIR change: writing it is what surfaced items 37 and 38, the bind-count
+  divergence in §11 and the recursive-term fence rule.
 - **[property-based-testing-l5](./2026-07-28-property-based-testing-l5.md)** — L5's oracle design space.
 - **[canonical-emission-order](./2026-07-19-canonical-emission-order.md)** — the emission-order model
   behind item 4.

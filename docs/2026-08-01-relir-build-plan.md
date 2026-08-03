@@ -8,6 +8,13 @@ is not re-argued here.
 **Section numbers are an API.** ~96 comments in `src/`, `scripts/` and `test/` cite `§3.5`, `§5a`,
 `§10·4`, `§10·5` and friends. Renumbering breaks them; content under a number may be rewritten freely.
 
+**The behavioural contract is also written down as a SPEC** — `docs/spec/relir-algebra.allium` (the
+algebra: construction, the checker's laws, the passes, the two budgets, the executor's row transport)
+and `docs/spec/relir-migration.allium` (routing, the decline contract, the two ratchets, the phase
+gates). It is a second reading of the same rules in a form a checker can hold, and it is where a rule
+this document states in prose becomes a named invariant; four of the findings below came out of writing
+it. Not a substitute for either the code or this doc: it carries no mechanism.
+
 **This document is DIRECTION + TRAPS, not history.** What landed, when, and at which SHA is `git log`'s
 job. What stays here: the model, the rules that must not be relitigated, the remaining work, and §11 —
 the traps, each of which cost a real defect to learn.
@@ -49,7 +56,8 @@ Measured against SQLite 3.51.2. **Do not re-derive.**
   source `SELECT`'s `ORDER BY`**, and RETURNING can project an inserted column.
   → *order the source and re-associate by carried key — NEVER by RETURNING position.*
 
-**Gate before Phase 2 ships:** re-run P5/P5b under DO SQLite via `mise run test:cf-limits`. `RETURNING`
+**Gate before Phase 2 ships — NOT BUILT YET** (§6 Phase 2 says why it therefore blocks nothing):
+re-run P5/P5b under DO SQLite via `mise run test:cf-limits`. `RETURNING`
 and `ON CONFLICT` are the exact species of "passes on Bun, walls in production" that seam exists for.
 
 ---
@@ -169,7 +177,9 @@ declaration cannot say:
 - **`Aggregate` emits its group keys then its aggregates**, so the declared type names the keys rather
   than leaving SQLite to infer them.
 - **`Recursive.step` is a FUNCTION** so the self-reference cannot leak, and `SelfRef` has no public
-  factory. Subject to P1.
+  factory. Subject to P1 — and P1 being POSITIONAL is why a `Materialize` may not sit between the term
+  and its own self reference: a fence forces the named-CTE boundary that P1 measured as fatal even as
+  the sole reference, so `check` admits a `Filter`/`Project`/`Sort` there and refuses a fence.
 - **`Agg` is legal only inside `Aggregate.aggs`** and `WindowExpr` only inside `Window.specs`, checked.
   `Agg.orderBy` is what `fold()` needs. An `Agg` with no arguments means "over all rows" — `count(*)`
   is the emitter's spelling of that, never a node field (§11).
@@ -262,6 +272,16 @@ silently skipped case. Rewriting is memoised, so the DAG stays a DAG (§3.4).
   `q.cte` sites.
 - **4.7 `recognize`** *(Phase 4 only)* — the fast paths as plan rewrites, so equivalence is structural
   and recognition failure is "no rewrite fired" rather than a separate code path.
+
+**DECLARED IS NOT WIRED, and the gap is worth stating because "order-declared" above implies a pipeline
+that does not exist.** Only `name` has a production caller (`lower.ts`). `fuse`, `prune` and `land` are
+built and tested and reachable from no route, and there is no object anywhere that orders them — the
+order above lives in this list. Two consequences, one per pass, and they pull different ways:
+`land` is the declared remedy for a row set sized by DATA, so while it is unwired that whole class
+DECLINES instead (§11's bind wall) — a capability parked on the spine this plan deletes. `fuse` is the
+opposite question: the assembler already fuses a run into one `SELECT`, so before wiring it, ask which
+of its four rewrites still buys anything the assembler does not (only one of the four is even
+implemented — adjacent filters). `prune` is Phase 3's prerequisite, below.
 
 ---
 
@@ -602,6 +622,13 @@ composition. write-path §6 and §7 (the traps) carry over unchanged — especia
 refusal is the reference's answer before removing it* (a third of the write messages in L3 telemetry
 belong to scenarios that PASS by asserting the throw).
 
+**The `RETURNING`/`ON CONFLICT` gate is UNBUILT, and it is a prerequisite rather than an exit
+criterion.** `src/cf-limits.ts` and `test/cf-limits.test.ts` mention neither construct, while the
+algebra already emits both and `runProgram` already executes them — so the two write constructs whose
+platform behaviour has never been measured are the two already shipping in code. §1 asks for P5/P5b
+re-run under DO SQLite; the throwaway-`wrangler dev` method in §10·5 is how, and `test/cloudflare.test.ts`
+is the harness. A gate described and not built cannot fail, so it blocks nothing until someone writes it.
+
 **Exit criteria:** every write L3 scenario at least as good as before; W2/W3's ~41 + ~15 candidates
 measurably moved; W1's four L4 pins green; census identical or better with every moved row explained;
 `store.*` call sites in the write path from 44 to O(write steps); `test:perturbed` still free of write
@@ -615,6 +642,9 @@ rows; `test:cf-limits` green including `RETURNING`/`ON CONFLICT`.
   term. **`expandRepeatBody` is deleted.** P2's vocabulary arrives as a consequence, not as step work.
 - **3.3** `unroll` for `times(n)`, with the §3.6 text ceiling. Take **`dedup` first** (4 queries, the
   easiest equivalence to state), one barrier per commit with an L4 pin each — do not cash in all 48.
+  **`prune` is a PRECONDITION here, and today it prunes nothing below a `Join`/`Union`/`Aggregate`/
+  `Recursive`** — its own declared remainder. §4.5 calls it what makes replicas affordable, and a
+  replicated repeat body is mostly joins, so the remainder has to close before or with this, not after.
 - **3.4** Split `repeat`'s admission control from its lowering, AFTER 3.2/3.3, and let the deletion of
   its ~20 admission booleans be the measurement.
 
@@ -865,7 +895,7 @@ reading the code.** They are grouped by what they teach.
 | the **row-for-row probe** vs legacy | a MISSING throw; a wrong ORDER where both spines share the defect |
 | the **L2 shape assertions** | a wrong VALUE with the right shape |
 | **L3 conformance** | anything the official corpus does not exercise — but it is the ONLY thing that sees a required error message |
-| **`rel-sweep`** | asserts the lowering does not THROW — the opposite property to "does not answer wrong" |
+| **`rel-sweep`** | asserts the lowering does not THROW, and that a plan it ADMITS renders within the platform's bind cap — both the opposite property to "does not answer wrong" |
 | **`test:perturbed`** | nothing about values; it is the only thing that sees an order that was right by SQLite's scan luck |
 | **`test:cf-limits`** | anything that is not a DO wall |
 
@@ -986,12 +1016,26 @@ drop). One extra `L5` is cheaper than a red trunk.
   `Limit`/`Distinct`/`Sort`/fence the assembler refuses to fuse into.
 - **A BIND BUDGET OVERRUN IS A DECLINE, NOT A THROW.** §3.6 makes the DO 100-parameter cap a plan
   property `check` proves, and `check` proves it by THROWING — correct inside the algebra, wrong at the
-  routing seam, where it turns a traversal legacy answers into a compile error. `lowerToRel` asks
-  `planBindCount` before handing the plan over and declines above the cap. It bites at a knowable
+  routing seam, where it turns a traversal legacy answers into a compile error. So `lowerToRel` asks the
+  budget before handing the plan over and declines above the cap. It bites at a knowable
   place: RelIR renders the vtype-aware compare key's class lists as BINDS where legacy inlines them as
-  literals, so one element `order().by(key)` is ~27 binds against legacy's 2 and three in one chain
-  would exceed the cap. Making the key cheaper is a separate increment; making the wall a decline is
+  literals, so one element `order().by(key)` is ~26 binds against legacy's 2 and four in one chain
+  exceed the cap. Making the key cheaper is a separate increment; making the wall a decline is
   what keeps it out of production.
+- **AND THE NUMBER IT ASKS FOR MUST BE THE NUMBER THE WALL MEASURES.** The decline above first read
+  `planBindCount`, which counts IR OCCURRENCES, while the platform counts the RENDERED bind list — and
+  the two differ whenever the assembler spells one `Lit` twice, which is what fusing a clause reader
+  into the block computing its subject does. In the algebra the gap reaches **2×** (91 counted, 181
+  rendered); swept over every corpus prefix, **50 distinct prefixes rendered more binds than were
+  counted, the widest 42 against 31**. None crossed 100 on today's corpus, so the cheap count looked
+  correct and would have kept looking correct until one did — at which point the refusal lands at
+  EMISSION, past the point where the seam could still have chosen the other route. `lowerToRel` now
+  RENDERS once (via `emitRelational` + the kernel's `render`, not `emitQuery`, whose own refusal would
+  have to be caught — and the same `catch` would swallow a checker violation, which is the one thing
+  `rel-sweep` exists to see). `rel-sweep` gained the property: **a plan the seam ADMITS renders within
+  the cap**, checked over all ~38k admitted prefixes. Generalizes past this budget: *a gate that admits
+  on a cheaper proxy than the wall enforces is not a gate, and the corpus will hide it for as long as
+  the proxy happens to agree.*
 - **A WINDOW may not read a WINDOWED column, and that is the ASSEMBLER's rule to know.** SQLite refuses
   a window function inside another window's `OVER (…)` outright (`misuse of window function
   row_number()`), which is the exact shape a minted emission order produces under any later ranking

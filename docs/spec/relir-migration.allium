@@ -1,0 +1,610 @@
+-- allium: 3
+-- relir-migration.allium
+--
+-- Distilled from docs/2026-08-01-relir-build-plan.md (§1, §6–§10) and src/compiler/rel/spine.ts,
+-- src/compiler/options/spine.ts, src/compiler/rel/lower.ts, scripts/deletion-check.ts,
+-- scripts/rel-sweep.ts, test/census/, test/rel-spine.test.ts.
+--
+-- Scope: the migration from the legacy lowering spine to RelIR — routing, the decline contract,
+-- the two ratcheted counters, the phase order and the gates.
+-- Includes: per-traversal spine choice, the differential switch, coverage as a censused property,
+--   the deletion ratchet, phase sequencing and each phase's stated exit criteria.
+-- Excludes:
+--   - the algebra itself (relir-algebra.allium)
+--   - Gremlin semantics and the framing layer
+--   - the legacy spine's internals: it is specified only as the thing being deleted
+
+use "./relir-algebra.allium" as algebra
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum Spine { rel | legacy }
+
+enum DeclineReason {
+    step_not_covered            -- the ordinary case: the lowering has not learned a step
+    | order_not_threadable      -- the chain demands an emission order this route cannot carry
+    | specialised_lowering      -- a fast path expresses an access path the algebra cannot state
+    | effect_not_covered        -- a sack, a side effect or a write
+    | bind_budget_exceeded      -- the plan is over the platform's parameter cap
+}
+
+enum StepFamily {
+    writes | side_effects | scalar_transforms | aliases | list_shape | property_shape
+    | branch | row_ops | reducers | unfamilied
+}
+
+enum RatchetKind { symbol | pattern }
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+-- The corpus of real traversals. Owned by the conformance ladder, not by this migration.
+external entity CorpusTraversal {
+    gremlin: String
+}
+
+------------------------------------------------------------
+-- Contracts
+------------------------------------------------------------
+
+contract DeclineContract {
+    lower: (chain: StepChain) -> LoweredPlan
+
+    @invariant DeclinesNeverThrows
+        -- The lowering returns a plan or nothing, and NEVER raises. A raise is neither a route
+        -- nor a deferral: it is the new spine erroring on a traversal the old one compiles,
+        -- which is a support REGRESSION. Nothing else in the suite can see it, because the
+        -- routing seam is only reached along paths the router already believes are covered.
+
+    @invariant DeclineIsAFunctionOfTheChainAlone
+        -- Spine choice reads the chain, never the fast-path configuration. Coupling the two
+        -- would let a coverage number claim a traversal the specialised lowering should own.
+
+    @guidance
+        -- The defects this contract catches live in the COMBINATION of a step with chain-global
+        -- state the step never mentions, so it is swept over the product of every corpus prefix
+        -- with every configuration the compiler can hand the lowering — not tested per step.
+}
+
+contract DifferentialOracle {
+    compare: (traversal: CorpusTraversal) -> RowMultiset
+
+    @invariant BothSpinesAgree
+        -- With the switch on and off, a covered traversal returns the same multiset. The whole
+        -- corpus plus the generated property suite is therefore the oracle for every increment,
+        -- strictly stronger than a hand-built family list.
+
+    @invariant ScaffoldingNotLoadBearing
+        -- The differential dies with the legacy spine, deliberately and once, at the point
+        -- where the thing compared against is dead code. "We would lose the differential" is
+        -- not an admissible reason to keep two engines alive.
+}
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+entity StepChain {
+    steps: List<String>
+    demands_emission_order: Boolean
+    contains_write: Boolean
+    contains_side_effect: Boolean
+    contains_sack: Boolean
+
+    -- The routing seam's precondition: an effectful chain is legacy's until the write wedge
+    -- lands, and never partly RelIR's.
+    is_effectful: contains_write or contains_side_effect or contains_sack
+}
+
+entity LoweredPlan {
+    chain: StepChain
+    program: algebra/Program
+    covered: Boolean
+    decline_reason: DeclineReason? when covered = false
+}
+
+entity Traversal {
+    gremlin: String
+    chain: StepChain
+    routed_to: Spine
+    decline_reason: DeclineReason? when routed_to = legacy
+
+    -- A traversal routes WHOLE or not at all. Mixing inside one traversal is what would make the
+    -- algebra a wrapper around opaque SQL instead of an algebra.
+    invariant RoutingIsWholeTraversal {
+        routed_to = rel implies not chain.is_effectful
+    }
+}
+
+-- The coverage ratchet is the censused spine column compared against its committed baseline.
+-- Monotonicity is only expressible because the baseline is STORED state, not a memory of a
+-- previous run.
+entity CensusEntry {
+    query: String
+    spine: Spine
+    baseline_spine: Spine
+    result_digest: String
+    baseline_digest: String
+
+    regressed: baseline_spine = rel and spine = legacy
+
+    invariant CoverageOnlyRises {
+        baseline_spine = rel implies spine = rel
+    }
+
+    invariant BehaviourIsUnchangedByRouting {
+        result_digest = baseline_digest
+    }
+}
+
+-- Every name a plan has promised to remove, and how much of it is left. This list IS the exit
+-- criterion; the prose that describes it is only its rationale.
+entity DeletionTarget {
+    name: String
+    kind: RatchetKind
+    remaining: Integer
+    committed_floor: Integer
+    owning_phase: MigrationPhase
+
+    is_gone: remaining = 0
+
+    invariant FloorNeverRises {
+        remaining <= committed_floor
+    }
+}
+
+entity MigrationPhase {
+    number: Integer
+    title: String
+    status: pending | active | complete
+    depends_on: MigrationPhase?
+
+    targets: DeletionTarget with owning_phase = this
+    gates: PhaseGate with phase = this
+
+    all_targets_gone: targets.all(t => t.is_gone)
+    all_gates_green: gates.all(g => g.status = green)
+
+    transitions status {
+        pending -> active
+        active -> complete
+        terminal: complete
+    }
+}
+
+-- A named, checkable precondition on shipping a phase. A gate that is described but not built is
+-- the failure mode this entity exists to make visible.
+entity PhaseGate {
+    name: String
+    phase: MigrationPhase
+    status: unbuilt | failing | green
+
+    transitions status {
+        unbuilt -> failing
+        failing -> green
+        green -> failing
+        terminal: green
+    }
+}
+
+-- The instrument that ranks the work: where does the fold give up, per step and per family.
+-- Deliberately not a gate, because every number in it is a question rather than an answer.
+entity BlockerReport {
+    routed_count: Integer
+    family: StepFamily
+    blocked_count: Integer
+    largest_member: String
+}
+
+entity MigrationState {
+    covered_traversals: Integer
+    total_traversals: Integer
+    live_deletion_targets: Integer
+    coverage_moved_this_phase: Boolean
+
+    is_fully_covered: covered_traversals = total_traversals
+    legacy_spine_deletable: is_fully_covered and live_deletion_targets = 0
+
+    -- Coverage says the new spine works. Deletion says the old one is gone, and only the second
+    -- one ends this.
+    is_failed_migration: is_fully_covered and live_deletion_targets > 0
+
+    invariant StoppingAtFullCoverageIsNotFinishing {
+        is_fully_covered and live_deletion_targets > 0 implies not legacy_spine_deletable
+    }
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    -- Default ON. A route that is off by default is a route nothing exercises, and an
+    -- unexercised second spine is the failure mode this plan exists to prevent.
+    relir_enabled_by_default: Boolean = true
+    -- Zero violations IS the gate for the decline sweep: deliberately not a ratchet, so a new
+    -- violation fails the build rather than widening an allowlist.
+    permitted_decline_contract_violations: Integer = 0
+    -- There is no allowlist of permanently legacy traversals and no committed exception file.
+    permitted_permanent_exceptions: Integer = 0
+}
+
+------------------------------------------------------------
+-- Defaults
+------------------------------------------------------------
+
+default MigrationPhase phase_1 = {
+    number: 1, title: "The clean-room core", status: complete
+}
+default MigrationPhase phase_4_1 = {
+    number: 2, title: "The row-algebraic read class and the shape vocabularies", status: active, depends_on: phase_1
+}
+default MigrationPhase phase_2 = {
+    number: 3, title: "The write wedge", status: pending, depends_on: phase_4_1
+}
+default MigrationPhase phase_3 = {
+    number: 4, title: "The repeat wedge", status: pending, depends_on: phase_2
+}
+default MigrationPhase phase_4_rest = {
+    number: 5, title: "The rest of the read migration", status: pending, depends_on: phase_3
+}
+
+-- §1's gate, stated as an obligation rather than as a sentence: the write constructs the platform
+-- has never been measured on are exactly the species of wall that passes on the dev runtime.
+default PhaseGate platform_write_constructs = {
+    name: "RETURNING and ON CONFLICT measured on the platform runtime",
+    phase: phase_2,
+    status: unbuilt
+}
+default PhaseGate equivalence_families = {
+    name: "Traversal families equivalent under results and access path",
+    phase: phase_1,
+    status: green
+}
+default PhaseGate decline_sweep = {
+    name: "The decline contract holds over every corpus prefix and configuration",
+    phase: phase_4_1,
+    status: green
+}
+default PhaseGate write_pins = {
+    name: "The landed write correctness pins stay green",
+    phase: phase_2,
+    status: unbuilt
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ROUTING ------------------------------------------------------------------
+
+rule RouteToRelIR {
+    when: CompileTraversal(gremlin, chain)
+
+    requires: config.relir_enabled_by_default
+    requires: not chain.is_effectful
+    requires: lowering_covers(chain)
+
+    ensures: Traversal.created(gremlin: gremlin, chain: chain, routed_to: rel)
+
+    @guidance
+        -- A covered chain becomes a finished read by handing the whole program to the framing
+        -- layer as ONE relation. Binds stay in one render, the CTE-or-inline decision stays with
+        -- the plan, and no framing code is duplicated: the element projection is reached through
+        -- the ordinary lowering loop with zero steps left, so this route frames identically to
+        -- the legacy one BY CONSTRUCTION rather than by comparison.
+}
+
+rule RouteToLegacy {
+    when: CompileTraversal(gremlin, chain)
+
+    requires: not lowering_covers(chain) or chain.is_effectful
+
+    ensures: Traversal.created(
+        gremlin: gremlin,
+        chain: chain,
+        routed_to: legacy,
+        decline_reason: decline_reason_for(chain)
+    )
+}
+
+rule DeclineRatherThanThrow {
+    when: LowerChain(chain)
+    requires: not lowering_covers(chain)
+    ensures: LoweredPlan.created(chain: chain, covered: false, decline_reason: decline_reason_for(chain))
+
+    @guidance
+        -- The decline is the contract that keeps "not learned yet" from becoming a support
+        -- regression. It must hold for every PREFIX of every corpus traversal under every
+        -- configuration, including the ordered shapes no authored traversal exhibits.
+}
+
+-- A BIND BUDGET OVERRUN IS A DECLINE, NOT A THROW. The budget is a plan property the checker
+-- proves, and it proves it by THROWING — correct inside the algebra, wrong at this seam, where it
+-- turns a traversal legacy answers into a compile error. So the seam asks the budget BEFORE handing
+-- the plan over.
+rule DeclineAnOverBudgetPlan {
+    when: LowerChain(chain)
+    requires: lowering_covers(chain)
+    requires: plan_bind_count(chain) > algebra/config.do_bind_cap
+    ensures: LoweredPlan.created(chain: chain, covered: false, decline_reason: bind_budget_exceeded)
+
+    @guidance
+        -- The count this rule reads MUST be the count the emitter enforces. The emitter refuses on
+        -- the RENDERED bind list, because a fused block can spell one literal more than once, so a
+        -- seam that admits on IR occurrences admits on a number that is not the wall — and the
+        -- refusal then arrives after the only point at which another route could have been chosen.
+        -- Reproduced at 2x: 91 IR occurrences, 181 rendered.
+}
+
+rule DeclineASpecialisedAccessPath {
+    when: LowerChain(chain)
+    requires: lowering_covers(chain)
+    requires: chain_has_specialised_lowering(chain)
+    ensures: LoweredPlan.created(chain: chain, covered: false, decline_reason: specialised_lowering)
+
+    @guidance
+        -- Coverage measures whether the new spine can EXPRESS a traversal, never whether it is
+        -- entitled to take it from a specialised lowering. Expressing an index seek as a base
+        -- table scan is a performance regression no results-and-access-path gate on the new
+        -- route can see, and the coverage number would report it as progress. The decline lifts
+        -- when the fast paths become plan rewrites, and it is pinned by name until then.
+}
+
+-- MEASUREMENT --------------------------------------------------------------
+
+rule RecordCensus {
+    when: RecordCensus(traversal)
+    ensures: CensusEntry.created(
+        query: traversal.gremlin,
+        spine: traversal.routed_to,
+        baseline_spine: baseline_spine_of(traversal),
+        result_digest: digest_of(traversal),
+        baseline_digest: baseline_digest_of(traversal)
+    )
+}
+
+rule ReportCoverageRegression {
+    when: entry: CensusEntry.created
+    requires: entry.regressed
+    ensures: CoverageRegressed(query: entry.query)
+
+    @guidance
+        -- A lowering that silently stopped firing is a failure with a name, not a coverage
+        -- number nobody read.
+}
+
+rule RecordDeletionFloor {
+    when: RecordDeletionFloor(target, measured)
+    requires: measured <= target.committed_floor
+    ensures: target.committed_floor = measured
+    ensures: target.remaining = measured
+
+    @guidance
+        -- The floor is re-recorded DOWNWARD only. A rise is the gate failing, and editing the
+        -- prose that describes this list changes nothing: the committed file is the gate.
+}
+
+rule ReportStalledCountdown {
+    when: phase: MigrationPhase.status transitions_to complete
+    requires: not phase.all_targets_gone
+    ensures: CountdownStalled(phase: phase)
+
+    @guidance
+        -- A stalled countdown is a defect with a name, reported like any other, never an
+        -- ambient condition. If coverage has not moved in a phase, that is the finding of the
+        -- phase.
+}
+
+-- SEQUENCING ---------------------------------------------------------------
+
+rule StartPhase {
+    when: StartPhase(phase)
+    requires: phase.status = pending
+    requires: phase.depends_on = null or phase.depends_on.status = complete
+    ensures: phase.status = active
+
+    @guidance
+        -- Reads before writes, because writes CONSUME reads: a write's prefix must arrive as a
+        -- relation, and while it arrives as opaque rendered SQL there is nothing for a statement
+        -- to be handed. That ordering was discovered by measurement, not chosen for symmetry.
+}
+
+rule CompletePhase {
+    when: CompletePhase(phase)
+    requires: phase.status = active
+    requires: phase.all_gates_green
+    requires: phase.all_targets_gone
+    ensures: phase.status = complete
+}
+
+rule RefusePhaseWithAnUnbuiltGate {
+    when: CompletePhase(phase)
+    requires: phase.status = active
+    requires: not phase.all_gates_green
+    ensures: PhaseBlocked(phase: phase, reason: gate_not_green)
+
+    @guidance
+        -- A gate described in prose and never built is indistinguishable from no gate at all,
+        -- and the constructs it would cover are already emitted by the algebra.
+}
+
+rule DeclareGate {
+    when: DeclareGate(name, phase)
+    ensures: PhaseGate.created(name: name, phase: phase, status: unbuilt)
+
+    @guidance
+        -- Naming a gate in a plan creates it in the UNBUILT state. That state is the finding:
+        -- a gate nobody has written cannot fail, so it cannot block anything.
+}
+
+rule BuildGate {
+    when: BuildGate(gate)
+    requires: gate.status = unbuilt
+    ensures: gate.status = failing
+    ensures: GateBuilt(gate: gate)
+
+    @guidance
+        -- Building a gate is a piece of work with an owner, not a sentence in a plan. A gate is
+        -- born failing: it earns green by running.
+}
+
+rule GatePasses {
+    when: RunGate(gate)
+    requires: gate.status = failing
+    requires: gate_passes(gate)
+    ensures: gate.status = green
+}
+
+rule GateFails {
+    when: RunGate(gate)
+    requires: gate.status != unbuilt
+    requires: not gate_passes(gate)
+    ensures: gate.status = failing
+    ensures: GateFailed(gate: gate)
+}
+
+rule DeleteLegacySpine {
+    when: DeleteLegacySpine(state)
+
+    requires: state.is_fully_covered
+    requires: state.live_deletion_targets = 0
+
+    ensures: LegacySpineDeleted(state: state)
+    ensures: DifferentialSwitchDeleted(state: state)
+
+    @guidance
+        -- The end date is a STEP OF THE PLAN. The switch is deleted with the spine, and the
+        -- differential's off position goes with it: a deliberate one-time trade at the point
+        -- where the thing being compared against is dead code. What remains is the metamorphic
+        -- oracle, which never needed two implementations, plus the census and the ladder.
+}
+
+rule RefuseAPermanentException {
+    when: RequestPermanentException(traversal, reason)
+    ensures: ExceptionRefused(traversal: traversal, reason: reason)
+
+    @guidance
+        -- A traversal may be routed to legacy for exactly one reason: the lowering does not yet
+        -- cover a step in it. Not "this one is hard", not "this one is rare", not "this one is
+        -- fast enough already". A shape that genuinely cannot be expressed is a node-set
+        -- discussion under the closed-set bar, recorded as a decision — never a quiet second
+        -- route left running.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant NoTraversalRoutesPartly {
+    for traversal in Traversals:
+        traversal.routed_to = rel implies traversal.decline_reason = null
+}
+
+invariant EveryLegacyRouteNamesItsReason {
+    for traversal in Traversals:
+        traversal.routed_to = legacy implies traversal.decline_reason != null
+}
+
+invariant DeletionFloorsNeverRise {
+    for target in DeletionTargets:
+        target.remaining <= target.committed_floor
+}
+
+invariant ACompletePhaseHasNoLiveTargets {
+    for phase in MigrationPhases:
+        phase.status = complete implies phase.all_targets_gone
+}
+
+invariant ACompletePhaseHasNoUnbuiltGate {
+    for phase in MigrationPhases:
+        phase.status = complete implies phase.all_gates_green
+}
+
+invariant PhaseNumbersAreUnique {
+    for a in MigrationPhases:
+        for b in MigrationPhases:
+            a != b implies a.number != b.number
+}
+
+invariant AGateOnAnActivePhaseIsBuilt {
+    for gate in PhaseGates:
+        gate.phase.status = active implies gate.status != unbuilt
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+surface SpineRouting {
+    exposes:
+        Spine
+        DeclineReason
+
+    provides:
+        CompileTraversal(gremlin, chain)
+        LowerChain(chain)
+
+    contracts:
+        fulfils DeclineContract
+        demands DifferentialOracle
+
+    @guarantee NoOpaqueEscapeNode
+        -- Nothing from the legacy spine ever enters a relation. The traffic is one-way: a
+        -- finished RelIR relation is consumed by framing. A node kind added because the work
+        -- is unfinished never gets removed.
+
+    @guarantee TheSwitchIsAPreferenceNotAClaim
+        -- Asking for RelIR does not make an uncovered chain route there, and asking for legacy
+        -- always works. Coverage is a property of the chain; if the two ever diverge, the
+        -- router has started deciding something the lowering should own.
+}
+
+surface MigrationProgress {
+    exposes:
+        MigrationState
+        BlockerReport
+        DeletionTarget
+
+    provides:
+        RecordCensus(traversal)
+        RecordDeletionFloor(target, measured)
+        DeclareGate(name, phase)
+        BuildGate(gate)
+        RunGate(gate)
+        StartPhase(phase)
+        CompletePhase(phase)
+        DeleteLegacySpine(state)
+        RequestPermanentException(traversal, reason)
+
+    @guarantee BothCountersRatchet
+        -- Coverage can only rise; the deletion list can only shrink. A ratchet is what stops a
+        -- report drifting, which is why both are committed rather than printed.
+
+    @guarantee TheUnitOfWorkIsTheFamily
+        -- Read the blocker table to find WHERE the fold gives up, then land the whole family
+        -- that step belongs to. A family closes; a step leaves a ragged edge, and the ragged
+        -- edge is what makes the next increment expensive. An increment is chosen by which
+        -- deletion target it unlocks, with marginal coverage as the tiebreak.
+
+    @guidance
+        -- The dual spine is a HARNESS, not an architecture, and it has an end date. Leaving
+        -- the legacy route in place is the failure mode, not the fallback: it arrives as a
+        -- series of individually reasonable decisions. Stopping at 90% does not bank 90% of
+        -- the value; it banks a liability.
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "The routing seam declines on the IR-occurrence bind count while the emitter refuses on the rendered count, and the two differ by the assembler's own clause-reader re-inlining. Should the seam render once and decline on the real number, or should an over-budget emission report a decline rather than raise?"
+
+open question "A class of traversal that only the unwired bind-landing pass could carry is declined instead, which parks it permanently on the route this migration exists to delete. Is that a coverage gap with an owner, or an accepted exception that has to be recorded as one?"
+
+open question "The platform gate for the write constructs already emitted by the algebra is unbuilt while the constructs are already reachable through the executor. Does the gate block the write wedge, or does it block any emission of those constructs at all?"
+
+open question "Coverage is censused per query against a committed baseline, but nothing asserts a floor on the TOTAL. A refactor that trades ten covered traversals for eleven new ones passes the per-query ratchet only if no individual query regresses — is that the intended strength?"
