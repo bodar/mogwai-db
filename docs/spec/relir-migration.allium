@@ -42,6 +42,21 @@ external entity CorpusTraversal {
 }
 
 ------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- A Gremlin LABEL and the carried column holding what it is bound to.
+--
+-- The alias role is the ONE carried role whose framing form is a name map rather than a single
+-- column, and it cannot be otherwise: a label name is Gremlin vocabulary and a channel may not know
+-- any. So the map cannot live on the relation, and the lowering hands it across the seam beside the
+-- plan (see `LoweredPlan.bound_labels`).
+value LabelBinding {
+    label: String
+    column: String
+}
+
+------------------------------------------------------------
 -- Contracts
 ------------------------------------------------------------
 
@@ -99,6 +114,28 @@ entity LoweredPlan {
     program: algebra/Program
     covered: Boolean
     decline_reason: DeclineReason? when covered = false
+
+    -- What crosses the seam BESIDE the plan, and the only thing that does. Empty where the chain
+    -- bound no labels.
+    bound_labels: List<LabelBinding>
+
+    alias_channels: program.result.channels where role = alias
+
+    -- The seam PROVES the two agree rather than assuming it, and a disagreement is a fault and not
+    -- a deferral. A map naming a column the relation does not emit makes the framing layer read a
+    -- column that is not there: an EMPTY result, silently, with the coverage counter reporting the
+    -- traversal as answered. A carried alias column no label names is the same fault from the other
+    -- side — state nothing can read.
+    --
+    -- Stating the agreement is also what makes the live label set DERIVED rather than remembered.
+    -- The algebra's role policy consumes the alias channels at a barrier, so a map carried across
+    -- one would violate this, and the only way to satisfy it is to read the labels that are still
+    -- live off the relation. There is no per-barrier clear to forget.
+    invariant BoundLabelsAndAliasChannelsAgree {
+        covered implies
+            bound_labels.all(b => alias_channels.any(c => c.column = b.column))
+            and alias_channels.all(c => bound_labels.any(b => b.column = c.column))
+    }
 }
 
 entity Traversal {
@@ -286,6 +323,12 @@ rule RouteToRelIR {
         -- the plan, and no framing code is duplicated: the element projection is reached through
         -- the ordinary lowering loop with zero steps left, so this route frames identically to
         -- the legacy one BY CONSTRUCTION rather than by comparison.
+        --
+        -- The framing layer is told the carried state by ROLE, and that translation is total: a
+        -- role the lowering learns to carry cannot reach framing until the seam knows how to
+        -- express it. The alias role is the one whose expression is a NAME MAP rather than a
+        -- column, so it is the one thing handed over beside the plan — and the seam proves the map
+        -- agrees with the relation before framing reads it (`BoundLabelsAndAliasChannelsAgree`).
 }
 
 rule RouteToLegacy {

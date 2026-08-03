@@ -82,6 +82,17 @@ contract EmitterTotality {
         -- decided by exactly one render call. A rendered string spliced into another
         -- statement would be a second authority.
 
+    @invariant OnlyDataSpendsAParameter
+        -- A bound parameter is spent only on a value that came from the QUERY or the STORE.
+        -- Text the compiler itself chose — the key of a JSON object it is constructing — is
+        -- spelled inline. This is a budget obligation, not a micro-optimisation: the platform
+        -- caps a statement at a hundred parameters, so a parameter spent on a compiler
+        -- constant is the difference between a plan the routing seam admits and one it
+        -- refuses. It also fixes the growth: the rendered bind count is a function of the DATA
+        -- a plan carries, never of how many structural constants its emission happens to
+        -- spell. Data must stay a parameter — inlining it would make the statement TEXT a
+        -- function of the data, defeating both the statement cache and the text budget.
+
     @guidance
         -- The IR is normalised (one operator per node); SQL's SELECT is a composition of
         -- operators with fixed slots. Walk down from a node filling slots, and open a nested
@@ -157,6 +168,12 @@ entity ChannelPolicy {
     merge: MergePolicy
     barrier: BarrierPolicy
     grouping: GroupPolicy
+
+    -- The COLUMN a channel of this role occupies, and a FOURTH totality for the same reason as the
+    -- three policies above: the type is a property of the role, never a choice made at the site
+    -- that happened to build the relation.
+    column_type: SqlType
+    column_nullable: Boolean
 
     -- A role a fork cannot reconcile: per-traverser physical state.
     is_rigid: merge = identical
@@ -454,29 +471,42 @@ config {
 -- Defaults
 ------------------------------------------------------------
 
+-- A label's value is a path HISTORY rather than a reference, so the column is a JSON array of
+-- tagged entries — and NULL on a row that reached here along a path which bound nothing.
 default ChannelPolicy alias_policy = {
-    role: alias, merge: union, barrier: consumed, grouping: undefined_for_group
+    role: alias, merge: union, barrier: consumed, grouping: undefined_for_group,
+    column_type: json, column_nullable: true
 }
+-- Either regime: per-position rowids on a linear walk, one array on a recursive one. JSON is the
+-- honest declaration for whichever arrives first.
 default ChannelPolicy path_policy = {
-    role: path, merge: pad, barrier: drop, grouping: undefined_for_group
+    role: path, merge: pad, barrier: drop, grouping: undefined_for_group,
+    column_type: json, column_nullable: true
 }
 default ChannelPolicy origin_policy = {
-    role: origin, merge: identical, barrier: empty, grouping: undefined_for_group
+    role: origin, merge: identical, barrier: empty, grouping: undefined_for_group,
+    column_type: int, column_nullable: false
 }
 default ChannelPolicy branch_order_policy = {
-    role: branch_order, merge: identical, barrier: empty, grouping: undefined_for_group
+    role: branch_order, merge: identical, barrier: empty, grouping: undefined_for_group,
+    column_type: int, column_nullable: false
 }
+-- A per-traverser scalar of whatever its seed was, so its storage class is not knowable here.
 default ChannelPolicy sack_policy = {
-    role: sack, merge: identical, barrier: drop, grouping: undefined_for_group
+    role: sack, merge: identical, barrier: drop, grouping: undefined_for_group,
+    column_type: any, column_nullable: true
 }
 default ChannelPolicy from_v_policy = {
-    role: from_v, merge: identical, barrier: drop, grouping: undefined_for_group
+    role: from_v, merge: identical, barrier: drop, grouping: undefined_for_group,
+    column_type: int, column_nullable: true
 }
 default ChannelPolicy encounter_policy = {
-    role: encounter, merge: identical, barrier: drop, grouping: combine
+    role: encounter, merge: identical, barrier: drop, grouping: combine,
+    column_type: int, column_nullable: false
 }
 default ChannelPolicy bulk_policy = {
-    role: bulk, merge: identical, barrier: drop, grouping: combine
+    role: bulk, merge: identical, barrier: drop, grouping: combine,
+    column_type: int, column_nullable: false
 }
 
 -- These record the pipeline AS BUILT, which is why three of them violate
@@ -784,6 +814,21 @@ invariant OneAuthorityPerChannelRole {
 invariant NoChannelSurvivesAGlobalBarrier {
     for policy in ChannelPolicies:
         policy.barrier != keep
+}
+
+-- A carried column's declared TYPE is a function of its role, and the node-local channel obligations
+-- cannot state this: they check column NAMES and channel membership, never storage class. So a node
+-- may declare a channel column as one type and emit another, and nothing above notices — the
+-- direction in which "every claimed channel is emitted" is satisfied while the schema is still
+-- wrong. It was one storage class chosen at every construction site, which was true only while every
+-- carried channel was a rowid or a counter.
+invariant AChannelColumnIsTypedByItsRole {
+    for node in RelNodes:
+        node.channels.all(c =>
+            ChannelPolicies.any(p => p.role = c.role
+                and node.columns.any(col => col.name = c.column
+                    and col.sql_type = p.column_type
+                    and col.nullable = p.column_nullable)))
 }
 
 invariant EmittedProgramsAreWithinTheBindBudget {

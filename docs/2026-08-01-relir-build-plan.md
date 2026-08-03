@@ -1,6 +1,6 @@
 # RelIR — the build plan
 
-**Status: BUILDING.** Coverage **555 / 2,298** corpus traversals on the RelIR spine; deletion counter
+**Status: BUILDING.** Coverage **563 / 2,298** corpus traversals on the RelIR spine; deletion counter
 **110** references left across the 15 legacy rows. Both are ratchets in `ci` (§10·4). The direction was
 argued in [codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a and
 is not re-argued here.
@@ -515,19 +515,51 @@ projection with an `ORDER BY` rather than a JSON aggregate, and `fold().max(Scop
 LOCAL reducers (`reducer.ts` over a member, not over a row). `jsonbList` plus the member-transform frame
 is the increment; the rest follow it.
 
-**The rest of the corpus ranking** (`mise run rel-blockers`, 424 routed — re-run it every round, it
-MOVES): writes 187 (`addV` 146 · `mergeV` 25) · side effects 160 (`aggregate` 59 · `group` 51 ·
-`sack` 25 · `groupCount` 25) · aliases 145 (`as` 134) · the list shape 109 (all at `fold`) · scalar
-transforms 92 · the property shape 89 (`properties` 46 · `valueMap` 37) · branch 68 (`choose` 39 ·
-`union` 22) · row ops 6. In no family: `repeat` 78 · `has` 59 · `local` 56 · `where` 43 · `is` 43 ·
-`match` 36 · the SET-OP family 35 (`combine`/`difference`/`intersect`/`merge`/`product` 6 each,
-`disjunct` 5) · `path` 28 · `inject` 20 · `call` 20. **The residue is where the next family gets
-recognized** — `inject` sat in it for two rounds before being spotted as the largest prize on the
-board, and the set ops appeared in it the moment the list frame landed.
+**The rest of the corpus ranking** (`mise run rel-blockers`, 563 routed — re-run it every round, it
+MOVES): writes 195 (`addV` 147 · `mergeV` 26) · side effects 182 (`aggregate` 64 · `group` 63 ·
+`groupCount` 30 · `sack` 25) · the property shape 90 (`properties` 46 · `valueMap` 37) · branch 70
+(`choose` 40 · `union` 23) · scalar transforms 64 (`math` 15 · `asNumber` 12) · aliases 52 (all at
+`select`) · the list shape 30 (all at `fold`) · row ops 15. In no family: `repeat` 85 · `local` 61 ·
+`where` 57 · `match` 57 · `path` 38 · `is` 31 · `has` 26 · `call` 23 · `inject` 20 · `or` 17 ·
+`project` 16 · `filter` 15 · `and` 15 · `shortestPath` 15 · `V` 12. **The residue is where the next
+family gets recognized** — `inject` sat in it for two rounds before being spotted as the largest prize
+on the board, and the set ops appeared in it the moment the list frame landed. Note `where`, `match`
+and `path` all ROSE as aliases fell: they are alias CONSUMERS, so closing `as`/`select` moved their
+blockers forward into them rather than clearing them — which is what a family boundary looks like from
+the inside.
 
-**Also 4.1's, and unfinished:** the ALIAS channel (`as`/`select`, 144) needs a name→column map, which is
-one of the four roles `spine.ts`'s layout translation declares ABSENT rather than leaving to be
-forgotten (with path, origin and branchOrder).
+### The ALIAS CHANNEL — landed, and it made the shape boundary TWO-WAY
+
+`as()` writes a JSONB path HISTORY and `select(label)` re-enters it (+8; `as` is gone from the blocker
+table entirely, `select` 149 → 52). `src/compiler/rel/alias.ts` is the sixth vocabulary module. Three
+facts are the substrate, not the step:
+
+- **`elementTail` is a FUNCTION.** `terminal()` already took an element stream to a value one;
+  `select(label)` on a label holding a vertex goes the OTHER way, and with the loop inline there was
+  nowhere for it to land — a re-rooting step would have had to grow its own movement/filter/row-op
+  vocabulary, which is the second implementation `steps/CLAUDE.md` forbids. It is now re-entered from
+  three places, so `as`/`select` serve the element, scalar AND list hosts off one lowering and a step
+  learned there is learned at every position it can occupy. **This is the seam a mid-chain `V()`/`E()`
+  re-source and every later retype-back-to-elements arrives through — do not add a second.**
+- **The alias role is the ONE `LAYOUT_FIELD` entry whose framing form is a NAME MAP** (`named`), not a
+  column: a Gremlin label name is not something a `Channel` may know (§2), so it cannot live on the
+  relation and the lowering hands it over beside the plan. `spine.ts` PROVES the map's columns are the
+  result relation's alias channels — a map naming a column the relation does not emit is a silent
+  empty result, so it THROWS rather than declines. `path`/`origin`/`branchOrder` are still absent.
+- **`liveAliases` DERIVES the label set from the relation** instead of clearing it at each barrier. A
+  barrier consumes every channel, so the map would otherwise name columns that are gone; asking the
+  relation means there is no per-barrier clear to forget. Same discipline as reading the collapse law
+  off the relation rather than off `demandsEncounter`.
+
+**What is left of the family, and it is `select`'s remaining 52:** a MULTI-label `select` is the
+map/record shape (which is the property shape's arm, not this one), `Pop.all`/`mixed` is the history as
+a LIST value (the member frame over an alias column — a further arm of the same module), a modulated
+`select(label).by(k)` reads the SELECTED element's properties, and an UNBOUND label's empty-result
+answer needs the empty relation `Values` refuses to express (§3.3). Also still declined: a bare
+`dedup()` under a live alias channel, which is a GROUPING by traverser identity and so refused by
+`CHANNEL_GROUP_POLICY` — legacy refuses the same shape for the same reason, and the honest lowering
+(a ranked window over the identity partition, `dedupBy`'s shape with the id as its key) is one
+increment that has to land in BOTH spines.
 
 ### The LEADING COERCION PREFIX — folded, by legacy's own function
 
@@ -1021,7 +1053,13 @@ drop). One extra `L5` is cheaper than a red trunk.
   place: RelIR renders the vtype-aware compare key's class lists as BINDS where legacy inlines them as
   literals, so one element `order().by(key)` is ~26 binds against legacy's 2 and four in one chain
   exceed the cap. Making the key cheaper is a separate increment; making the wall a decline is
-  what keeps it out of production.
+  what keeps it out of production. **And a bind spent on a CONSTANT is the cheapest version of this
+  wall to remove:** a json object's KEYS are compile-time strings in the node rather than `Expr`s, and
+  rendering them with `value()` spent one of the 100 parameters per key — two per `{t,v}` member node,
+  two per `as()`, where legacy always inlined them. `textLiteral` (the kernel's spelling for
+  compiler-chosen text) is the fix, and the rule it instances generalizes past json: **only DATA is a
+  bind.** Inlining data would be the opposite error — the statement TEXT would become a function of the
+  data, defeating the cache and the 100 KB budget.
 - **AND THE NUMBER IT ASKS FOR MUST BE THE NUMBER THE WALL MEASURES.** The decline above first read
   `planBindCount`, which counts IR OCCURRENCES, while the platform counts the RENDERED bind list — and
   the two differ whenever the assembler spells one `Lit` twice, which is what fusing a clause reader
@@ -1048,7 +1086,15 @@ drop). One extra `L5` is cheaper than a red trunk.
   for: its re-entry gate looked at the IMMEDIATE follower, and a slice hid the movement behind it.
   Widening that gate to the whole remainder gave BOTH spines the shape (+3 corpus traversals, L3 +2 on
   each). The rule this instances is already here — fix it in both spines or decline in RelIR — and the
-  differential being green in both positions is what says which happened.
+  differential being green in both positions is what says which happened. **It has now happened twice
+  in the same shape, so read the pattern rather than the case:** the alias channel reached
+  `select('e').order().by(k).select('v').values(k)`, which legacy failed closed on (`values() cannot
+  consume the select result shape`) while the SAME chain without the `order()` worked. Both times the
+  gate read a step NAME where the answer depends on the step's ARGUMENTS — a one-label `select` is a
+  RE-ROOT, not a value-tail step, so folding it into the tail accumulator swallowed a stream that
+  belongs to whatever the label held. `foldableTailStep` is now the predicate and `isSingleLabelSelect`
+  is named ONCE, shared with the dispatcher that already routed on it. +1 corpus traversal, L3 +1 on
+  both spines, census delta exactly that row with zero changed answers.
 - **Relation ids are minted PER LOWERING.** A module-global counter made two compiles of one query emit
   different SQL depending on compile order — breaking every snapshot and any text-keyed cache, but only
   under a particular ordering.
