@@ -715,8 +715,26 @@ relation left (its result IS its last statement), which is the `discard` arm.
   TinkerPop's answer — so when a barrier after a write became the barrier that was already built, the
   pin had to move to the count. Check whether a refusal is the REFERENCE's answer before removing it;
   check equally whether it is only ever ours before keeping it.
-- **2.4** `addV`/`addE` → `Insert … SELECT … RETURNING`, with P5b's correlation key and an `ORDER BY`
-  on the source so id assignment stays emission-ordered.
+- **2.4** `addV`/`addE` → `Insert … SELECT … RETURNING`. **The VERTEX half is DONE (+79, 25.2% →
+  28.6% — the largest single jump the spine has taken), and it cost almost no new machinery**: the
+  trailing initializer run is `property()`'s statements over the ids the node insert RETURNED, so a
+  creation is a label resolution, a row, and then a vocabulary that already existed. `addE` is what
+  remains, and it is the one that needs P5b's correlation key.
+  - The DRIVER relation decides how many, so `g.addV(…)` (a one-row `Values`) and `g.V().addV(…)`
+    (the traverser stream) are one lowering.
+  - The label name→id indirection is the `labels` UPSERT `GraphStore.labelId` already spells;
+    `DO NOTHING` is wrong there because it returns no row on the existing case.
+  - **The new ids ARE the emission order** — SQLite assigns rowids in the insert's output order, so a
+    fresh vertex's `encounter` is its own id rather than a window over rows whose order is only
+    conventionally the array's. `ordered` rides `ChainCtx` now, because a step that MINTS a traverser
+    seeds the position channel exactly where the source would have.
+  - A mid-chain driver is SNAPSHOTTED for an INTRA-statement reason: `INSERT INTO nodes … SELECT …
+    FROM nodes` reads the table it writes, which SQLite does not promise to evaluate first.
+  - **A bare `addV()` DECLINES, and the reason generalizes:** under `LabelCardinality.ZERO_OR_MORE` it
+    creates a vertex with no labels and under `ONE` it takes the graph default — a property of the
+    STORE, not of the chain. Writing the default was a plausible wrong answer on a multi-label graph
+    and cost three L3 scenarios before an L4 pin named it. **A compile-time answer to a runtime
+    configuration question is a decline, not a default.**
 - **2.5** `mergeV`/`mergeE` → `Insert … ON CONFLICT DO UPDATE … RETURNING`, one statement.
 - **2.6** **Delete `runWriteChainFull`, `parseEdgeCluster`, `parseVertexSpec`, `parseMergeOptions`,
   `resolveEndpoint`, `materializeElementDrivers`, `WritePlan`.** The phase is not done while a second
