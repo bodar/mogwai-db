@@ -24,6 +24,16 @@
  *
  * A step that is in no family below is listed separately rather than silently dropped — the residue is
  * where the next family gets recognized, and `inject` sat in it for two rounds before being spotted.
+ *
+ * ## A blocker's step NAME is not always its family
+ *
+ * Measured 2026-08-03 at 349 routed: `inject` blocked 113 traversals, and **90 of them were blocked by a
+ * COLLECTION argument** — `g.inject(["a","b"]).length()` needs the LIST traverser shape, and `inject`
+ * itself is already covered. Attributing those to `inject` understated the list shape by 90 and made it
+ * look like the fifth family instead of the second. So a blocker is attributed by its CAUSE where the
+ * cause is decidable from the step's own arguments, and `blame()` below is the one place that happens.
+ * Without it the instrument ranks the wrong work while looking precise, which is worse than a coarse
+ * number honestly labelled.
  */
 import { extractStrategies, parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { runPasses } from '../src/compiler/ir/passes.ts';
@@ -54,6 +64,27 @@ const FAMILIES: Readonly<Record<string, readonly string[]>> = {
   reducers: ['sum', 'min', 'max', 'mean', 'count'],
 };
 
+/**
+ * What a blocking step should be COUNTED as — its own name, unless its arguments say the real gap is
+ * somewhere else. One case today, measured and load-bearing (see the header): a source seeded with a
+ * COLLECTION is blocked by the list traverser shape, not by the source step, which is already covered.
+ *
+ * Deliberately narrow. A cause-attribution that guessed would make the ranking confidently wrong, so it
+ * fires only where the step's own arguments decide it, and every other blocker keeps its plain name.
+ */
+function blame(step: IRStep): string {
+  const args = step.args ?? [];
+  // An ARRAY or a SET argument seeds one traverser that IS a collection, so what is missing is the list
+  // traverser shape. A `Map` argument is the MAP shape and a `Duration` is a rich SCALAR — neither is the
+  // list shape, so neither is re-attributed here even though both also block at `inject`. Guessing which
+  // family those belong to would be the confidently-wrong ranking this exists to avoid.
+  if (SOURCES.has(step.name) && args.some((arg) => Array.isArray(arg) || arg instanceof Set)) return 'fold';
+  return step.name;
+}
+
+/** Steps that SEED a traverser from a literal, so the literal's shape is the traverser's shape. */
+const SOURCES = new Set(['inject', 'constant']);
+
 const blockedAt = new Map<string, number>();
 let covered = 0, unparsed = 0;
 
@@ -72,8 +103,9 @@ for (const query of CORPUS) {
   }
   if (longest === steps.length) { covered++; continue; }
   // When even the SOURCE declines, the source is the blocker.
-  const step = steps[longest]?.name ?? steps[0]!.name;
-  blockedAt.set(step, (blockedAt.get(step) ?? 0) + 1);
+  const step = steps[longest] ?? steps[0]!;
+  const name = blame(step);
+  blockedAt.set(name, (blockedAt.get(name) ?? 0) + 1);
 }
 
 const total = (members: readonly string[]) => members.reduce((sum, m) => sum + (blockedAt.get(m) ?? 0), 0);
