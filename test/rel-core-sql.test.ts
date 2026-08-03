@@ -4,7 +4,7 @@ import { emitQuery } from '../src/rel/emit.ts';
 import { planOf } from '../src/rel/plan.ts';
 import { col, lit } from '../src/rel/expr.ts';
 import type { Expr } from '../src/rel/expr.ts';
-import { aggregate, distinct, filter, join, limit, project, recursive, scan as scanRel, sort, union, values } from '../src/rel/factory.ts';
+import { aggregate, distinct, filter, join, limit, project, recursive, scan as scanRel, sort, union, values, window } from '../src/rel/factory.ts';
 import type { Channels } from '../src/channels.ts';
 import { relId } from '../src/rel/types.ts';
 
@@ -90,6 +90,37 @@ describe('RelIR relational-core SQL', () => {
     // A filter over the same source needs only WHERE, which is free, so nothing nests.
     const named = filter({ id: relId('named'), input: n, channels, type: { cols }, pred: eq(col(n.id, 'name'), lit('marko', 'text')) });
     expect(emitQuery(planOf(named)).sql).not.toContain('(SELECT');
+  });
+
+  test('a Window over a WINDOWED block nests, because SQLite refuses one inside another OVER', () => {
+    // The rule is legality, not preference: a window's `OVER (…)` may never reference a window
+    // function, so a spec reading a column its input MINTED with one has no legal spelling in the
+    // same SELECT. This is the exact shape a lowering produces when a step mints an emission order
+    // and a later window ranks by it, and SQLite's answer is a THROW — so it is pinned by EXECUTING
+    // the emitted SQL, not only by reading it.
+    const n = scan('n');
+    const position = window({
+      id: relId('position'), input: n, channels,
+      type: { cols: [...cols, { name: 'rn', type: 'int', nullable: false }] },
+      specs: [['rn', { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: [{ expr: col(n.id, 'name'), dir: 'asc' }] } }]],
+    });
+    const ranked = window({
+      id: relId('ranked'), input: position, channels,
+      type: { cols: [...position.type.cols, { name: 'rk', type: 'int', nullable: false }] },
+      specs: [['rk', { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [col(position.id, 'name')], orderBy: [{ expr: col(position.id, 'rn'), dir: 'asc' }] } }]],
+    });
+    const emitted = emitQuery(planOf(ranked));
+    expect(emitted.sql).toContain('(SELECT');
+    // The inner window is named, not re-spelled, in the outer OVER.
+    expect(emitted.sql).toContain('OVER (PARTITION BY position.name ORDER BY position.rn ASC)');
+
+    const db = new Database(':memory:');
+    db.run('CREATE TABLE nodes (id INTEGER, name TEXT)');
+    db.run("INSERT INTO nodes VALUES (1, 'marko'), (2, 'marko'), (3, 'vadas')");
+    expect(db.query(emitted.sql).all(...emitted.binds)).toEqual([
+      { id: 1, name: 'marko', rn: 1, rk: 1 }, { id: 2, name: 'marko', rn: 2, rk: 2 }, { id: 3, name: 'vadas', rn: 3, rk: 1 },
+    ]);
+    db.close();
   });
 
   test('a Filter over an Aggregate is HAVING, not a wrapping SELECT', () => {

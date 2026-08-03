@@ -34,7 +34,11 @@ const wraps = (fn: string) => new RegExp(`\\b${fn}\\(`);
 
 describe('scalar-parent / projection SQL', () => {
   test('order().by(key[, dir]) folds ORDER BY into the projection select', () => {
-    const asc = read('g.V().hasLabel("person").order().by("age").values("name")');
+    // The LEGACY spelling, named as such: element `order()` is RelIR-routed now (it MINTS the
+    // emission-order channel), so a bare `read` here would pin the new spine's shape under the old
+    // spine's name. §10·4 — a test that pins a spine's spelling pins BOTH, and the RelIR arm is
+    // asserted below rather than left to the differential.
+    const asc = read('g.V().hasLabel("person").order().by("age").values("name")', { spine: 'legacy' });
     // the order key is the vtype-aware compareKey (numeric for a TEXT-stored big value)
     expect(asc.sql).toContain("ROW_NUMBER() OVER (ORDER BY (SELECT (CASE WHEN vtype IN ('byte'");
     expect(asc.sql).toContain("ELSE value END) FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) ASC) AS encounter");
@@ -45,8 +49,18 @@ describe('scalar-parent / projection SQL', () => {
     // for, so the projection filters on `<key> IS NOT NULL` (orderProductivityFilter).
     expect(asc.binds).toEqual(['person', 'age', 'name', 'age']);
 
-    const desc = read('g.V().hasLabel("person").order().by("age",desc).values("name")');
+    const desc = read('g.V().hasLabel("person").order().by("age",desc).values("name")', { spine: 'legacy' });
     expect(desc.sql).toContain("ELSE value END) FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) DESC");
+
+    // The RelIR arm says the same three things in its own vocabulary: the position is MINTED by a
+    // `ROW_NUMBER()` over the vtype-aware compare key, the non-productive `by()` drop is present, and
+    // the direction reaches the window rather than being lost.
+    const relAsc = read('g.V().hasLabel("person").order().by("age").values("name")', { spine: 'rel' });
+    expect(relAsc.sql).toMatch(/row_number\(\) OVER \(ORDER BY \(SELECT CASE WHEN \w+\.vtype IN [^]*CAST\(\w+\.value AS INT\)[^]*ASC/);
+    // The non-productive drop, spelled with a BOUND null (RelIR binds every `Lit`; legacy inlines it).
+    expect(relAsc.sql).toMatch(/\(\(SELECT CASE WHEN [^]*IS NOT \?\)/);
+    expect(read('g.V().hasLabel("person").order().by("age",desc).values("name")', { spine: 'rel' }).sql)
+      .toMatch(/row_number\(\) OVER \(ORDER BY \(SELECT CASE WHEN [^]*DESC/);
   });
 
   test('values().order() sorts the projected scalar', () => {
@@ -68,8 +82,15 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('range/skip become LIMIT/OFFSET tail modifiers under order()', () => {
-    expect(read('g.V().order().by("age").range(1,3).values("name")').sql).toContain('LIMIT 2 OFFSET 1');
-    expect(read('g.V().order().by("age").skip(1)').sql).toContain('LIMIT -1 OFFSET 1');
+    // Legacy folds the slice into the framing tail; RelIR reads the position it minted and slices the
+    // RELATION, so each spine is pinned in its own spelling (§10·4) and `test:legacy-spine` plus the
+    // row-for-row differential in `test/rel-spine.test.ts` are what tie the two answers together.
+    expect(read('g.V().order().by("age").range(1,3).values("name")', { spine: 'legacy' }).sql).toContain('LIMIT 2 OFFSET 1');
+    expect(read('g.V().order().by("age").skip(1)', { spine: 'legacy' }).sql).toContain('LIMIT -1 OFFSET 1');
+    // RelIR: an ORDER BY on the minted channel, then the ordinary LIMIT/OFFSET.
+    const rel = read('g.V().order().by("age").range(1,3).values("name")', { spine: 'rel' });
+    expect(rel.sql).toMatch(/ORDER BY \w+\.encounter ASC LIMIT \? OFFSET \?/);
+    expect(rel.binds).toContain(2);
   });
 
   test('range/skip/limit compose as CTEs, ordered by the source encounter when no order() is present', () => {
@@ -436,7 +457,7 @@ describe('scalar-parent / projection SQL', () => {
     // Element-side policies before the scalar boundary are rendered first, then the
     // projected rows re-enter the same scalar dispatcher. This was the last route
     // through the old one-projection accumulator ceiling.
-    const ordered = read('g.V().order().by("age").limit(2).values("name").count()');
+    const ordered = read('g.V().order().by("age").limit(2).values("name").count()', { spine: 'legacy' });
     expect(ordered.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(ordered.sql).toContain('ORDER BY (SELECT (CASE WHEN vtype IN');
     expect(ordered.sql).toContain('LIMIT 2), c2(v) as (SELECT COALESCE(SUM(s.bulk), 0) AS v FROM c1 s)');
@@ -977,9 +998,16 @@ describe('scalar-parent / projection SQL', () => {
 
   test('dedup().by() is a windowed modulation-key consumer with explicit encounter order', () => {
     const store = seededStore();
-    const ordered = read('g.V().order().by("name",desc).barrier().dedup().by("age").values("name")');
+    // Legacy's spelling — RelIR covers this chain now and says the same thing with `row_number()`
+    // over the channel it minted, which `test/rel-spine.test.ts` compares row-for-row. What is worth
+    // keeping here is the SEMANTIC fact both must have: the survivor per key is the FIRST in the
+    // emission order, not the lowest id, which is the defect the census caught when RelIR first took
+    // this chain and ranked by id.
+    const ordered = read('g.V().order().by("name",desc).barrier().dedup().by("age").values("name")', { spine: 'legacy' });
     expect(ordered.sql).toContain('ROW_NUMBER() OVER (PARTITION BY');
     expect(ordered.sql).toContain('AS encounter');
+    expect(read('g.V().order().by("name",desc).barrier().dedup().by("age").values("name")', { spine: 'rel' }).sql)
+      .toMatch(/row_number\(\) OVER \(PARTITION BY [^]*ORDER BY \w+\.encounter ASC, \w+\.id ASC\)/);
     expect(run(store, 'g.V().order().by("name",desc).barrier().dedup().by("age").values("name")').map((r) => r.v))
       .toEqual(['vadas', 'peter', 'marko', 'josh']);
     expect(run(store, 'g.V().order().by("name",desc).barrier().dedup().by("age").as("x").values("name")').map((r) => r.v))

@@ -1,6 +1,7 @@
 import { withChannel, type Channel, type Channels } from '../../channels.ts';
 import { col, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
+import { DO_BIND_CAP, planBindCount } from '../../rel/check.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import type { Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -18,7 +19,7 @@ import {
   and, EDGE_COLS, eq, labelIds, meta, minter, NODE_COLS, PROPERTIES, storedValue, typeOf,
   type Minter,
 } from './build.ts';
-import { byExpr, modulations, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
+import { byExpr, modulations, orderProductivity, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
 
@@ -386,12 +387,9 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
  * universal no-op and is here rather than nowhere because it composes — a chain is not less covered
  * for containing one.
  *
- * `order`/`limit`/`range`/`skip`/`tail`/`sample` are ABSENT, and each for its own reason rather
- * than one blanket "not yet". A slice needs the emission-order `encounter` channel, which the
- * caller gates on (`demandsEncounter`) until this route models a carried role beyond `bulk`. An
- * element `order()` is not a relation operator at all in the legacy lowering — `TailAcc` folds it
- * into the FRAMING projection's `ORDER BY` (`… FROM nodes n JOIN c0 p ON n.id=p.id ORDER BY n.id`),
- * which is Phase 4.2's block assembler and not this route's to take.
+ * `order()` IS here, and as a MINT of the emission-order channel rather than as anything new (see
+ * `elementOrder`). `tail`/`sample` are still absent: `tail` reads the order BACKWARDS and `sample`
+ * has no stable position at all, so each is its own increment rather than one blanket "not yet".
  */
 /**
  * `limit`/`skip`/`range` over ANY relation that carries an emission order — element or scalar, which
@@ -403,7 +401,7 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
  * there and this matches it, because emitting a sort over a single row would be a difference in
  * the plan for no difference in the answer.
  */
-function sliceOp(step: IRStep, input: Rel, fresh: Minter): Rel | null {
+function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
   if (step.modulators?.length || step.optionArms || isLocalScope(step)) return null;
   if (step.name !== 'limit' && step.name !== 'skip' && step.name !== 'range') return null;
   // `sliceOf` REJECTS an illegal range (`range(2,1)`) by throwing, which is right where it is the
@@ -414,11 +412,17 @@ function sliceOp(step: IRStep, input: Rel, fresh: Minter): Rel | null {
   // combinations, which is the only way a decline-contract violation shows up at all.
   let slice;
   try { slice = sliceOf(step); } catch { return null; }
-  const ordered = input.channels.some((channel) => channel.role === 'encounter');
-  const source = ordered
+  const encounter = encounterOf(input.channels);
+  const bulk = input.channels.find((channel) => channel.role === 'bulk');
+  // A COLLAPSED relation's row stands for `bulk` traversers, so `LIMIT n` would take n ROWS and
+  // answer a different question. `bulked` says the multiplicity is not provably 1, and then the
+  // slice must count traversers — which needs a position to accumulate along, so a bulked relation
+  // with no emission order declines rather than guessing one.
+  if (bulked && bulk) return encounter ? bulkSlice(input, slice, encounter, bulk, fresh) : null;
+  const source = encounter
     ? make.sort({
       id: fresh('so'), input, channels: input.channels, type: input.type,
-      terms: [{ expr: col(input.id, 'encounter'), dir: 'asc' }],
+      terms: [{ expr: col(input.id, encounter.col), dir: 'asc' }],
     })
     : input;
   return make.limit({
@@ -428,11 +432,73 @@ function sliceOp(step: IRStep, input: Rel, fresh: Minter): Rel | null {
   });
 }
 
-function rowOp(step: IRStep, input: Rel, elem: Elem, fresh: Minter): Rel | null {
+/**
+ * A SLICE THAT COUNTS TRAVERSERS — the cumulative-bulk window, and the composition that makes
+ * element `order()` safe to cover at all.
+ *
+ * Under `movementCollapse` a row is an (element, N) pair, so the traverser a slice's boundary falls
+ * inside is a row whose multiplicity must be TRIMMED rather than taken or dropped whole. A running
+ * `SUM(bulk)` over the emission order gives each row the index one past its last traverser (`cum`),
+ * so the row covers the half-open band `[cum - bulk, cum)`; the slice keeps the rows whose band
+ * intersects `[offset, offset + limit)` and re-projects `bulk` as the width of the intersection.
+ *
+ * Legacy hand-rolls exactly this shape in the element FRAMING projection (`buildProjection`'s
+ * bulk-aware limit/range), where it can only happen once and only at the end. Here it is four
+ * ordinary nodes over any relation carrying a multiplicity and a position — which is why it serves
+ * the element fold and the scalar tail from one place, and why `order().limit()` composes rather
+ * than being a shape the framing layer has to recognise.
+ *
+ * The frame is explicit (`ROWS UNBOUNDED PRECEDING … CURRENT ROW`) rather than left to SQLite's
+ * default: over a total order the default `RANGE` form agrees, but the emission order is only total
+ * because the mint tie-broke it, and a window whose correctness depends on a caller's tie-break
+ * argument is the kind of thing that goes wrong silently when the caller changes.
+ */
+function bulkSlice(
+  input: Rel, slice: { readonly offset: number; readonly limit: number | null },
+  encounter: Channel, bulk: Channel, fresh: Minter,
+): Rel {
+  const lo = slice.offset;
+  const hi = slice.limit === null ? null : lo + slice.limit;
+  const running = make.window({
+    id: fresh('bw'), input, channels: input.channels,
+    type: typeOf(...input.type.cols, meta('cum', 'int')),
+    specs: [['cum', {
+      kind: 'window-expr', fn: 'sum', args: [col(input.id, bulk.col)],
+      spec: {
+        partitionBy: [], orderBy: [{ expr: col(input.id, encounter.col), dir: 'asc' }],
+        frame: { mode: 'rows', start: { kind: 'unbounded-preceding' }, end: { kind: 'current-row' } },
+      },
+    }]],
+  });
+  // Each node addresses its own INPUT's columns, so the band is spelled twice against two relations
+  // rather than once against a relation that is out of scope where it is read.
+  const band = (rel: Rel): { readonly first: Expr; readonly past: Expr } =>
+    ({ first: { kind: 'binary', op: '-', left: col(rel.id, 'cum'), right: col(rel.id, bulk.col) }, past: col(rel.id, 'cum') });
+  const inner = band(running);
+  const kept = make.filter({
+    id: fresh('bf'), input: running, channels: running.channels, type: running.type,
+    pred: and(
+      { kind: 'binary', op: '>', left: inner.past, right: lit(lo, 'int') },
+      hi === null ? undefined : { kind: 'binary', op: '<', left: inner.first, right: lit(hi, 'int') },
+    ),
+  });
+  const outer = band(kept);
+  const from: Expr = lo ? { kind: 'call', fn: 'MAX', args: [outer.first, lit(lo, 'int')] } : outer.first;
+  const to: Expr = hi === null ? outer.past : { kind: 'call', fn: 'MIN', args: [outer.past, lit(hi, 'int')] };
+  return make.project({
+    id: fresh('bs'), input: kept, channels: input.channels, type: input.type,
+    exprs: input.type.cols.map((column) => [column.name, column.name === bulk.col
+      ? { kind: 'binary', op: '-', left: to, right: from } as Expr
+      : col(kept.id, column.name)] as const),
+  });
+}
+
+function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, fresh: Minter): Rel | null {
   if (step.optionArms) return null;
   if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
   if (step.name === 'identity' || step.name === 'barrier') return (step.args ?? []).length ? null : input;
-  const sliced = sliceOp(step, input, fresh);
+  if (step.name === 'order') return elementOrder(step, input, elem, fresh);
+  const sliced = sliceOp(step, input, bulked, fresh);
   if (sliced) return sliced;
 
   if (step.name !== 'dedup' || (step.args ?? []).length || isLocalScope(step)) return null;
@@ -500,13 +566,26 @@ function dedupBy(step: IRStep, modulation: Modulation, input: Rel, elem: Elem, f
     ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: productive })
     : input;
   const cols = elementCols(input.channels);
+  // WHICH traverser survives is the EMISSION-ORDER question, not an id question. TinkerPop keeps the
+  // FIRST occurrence, so the rank orders by the carried position where there is one and falls back to
+  // the element id where there is not — which is the only order a positionless relation has, and the
+  // one legacy uses there too (`ORDER BY <orderSql>, p.id`). Ranking by id alone was right only while
+  // nothing could mint a position: `g.V().order().by('name',desc).dedup().by('age')` then kept the
+  // lowest-id member of each age instead of the first in the sorted stream — the same rows, a
+  // different member, which the census's multiset digest DID see (it is a different set) but no
+  // assertion in the ladder named.
+  const position = encounterOf(domain.channels);
   const ranked = make.window({
     id: fresh('dw'), input: domain, channels: domain.channels, type: typeOf(...cols, meta('rn', 'int')),
     specs: [['rn', {
       kind: 'window-expr', fn: 'row_number', args: [],
-      // Partitioned by the KEY and ordered by the element id: the lowest id per key survives, which is
-      // deterministic rather than merely "one of them" — the property `mise run test:perturbed` checks.
-      spec: { partitionBy: [key], orderBy: [{ expr: col(domain.id, 'id'), dir: 'asc' }] },
+      // The element id is always the last term, so the rank is DETERMINISTIC rather than merely
+      // ordered — the property `mise run test:perturbed` checks.
+      spec: {
+        partitionBy: [key],
+        orderBy: [...(position ? [{ expr: col(domain.id, position.col), dir: 'asc' as const }] : []),
+          { expr: col(domain.id, 'id'), dir: 'asc' as const }],
+      },
     }]],
   });
   const survivors = make.filter({
@@ -552,8 +631,12 @@ function renumber(
   // whose channels disagree — the class of defect the factory's own width checks catch three nodes
   // later, where the cause is no longer visible.
   if (!encounter) throw new Error('RelIR lowering: renumber() needs an encounter channel to mint into');
+  // The window EXTENDS its own input (§3.5), so its declared type is the INPUT's columns plus the
+  // minted one — not the output's. The two differ exactly when this is a MINT rather than a re-mint:
+  // there `cols` names an emission-order column the input does not have yet, and the projection below
+  // is where it comes into existence.
   const windowed = make.window({
-    id: fresh('w'), input: rel, channels: rel.channels, type: typeOf(...cols, meta(minted, 'int')),
+    id: fresh('w'), input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, meta(minted, 'int')),
     specs: [[minted, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: terms } }]],
   });
   return make.project({
@@ -571,6 +654,41 @@ const remintOrder = (rel: Rel, encounter: Channel, fresh: Minter): Rel => renumb
 );
 
 /**
+ * ELEMENT `order()` — a MINT of the emission-order channel, and the step the model change was for.
+ *
+ * There is no new machinery, which is the point: an element relation's order IS the `encounter`
+ * channel, and the element materialization already emits `ORDER BY p.encounter` whenever that
+ * channel is live — so the whole of `order()` is "renumber by the sort key", the same `renumber` the
+ * fan-out re-mint and scalar `order()` already share. `analyzeChain` reports `demandsEncounter`
+ * FALSE for these chains (legacy folds the order into the framing clause and needs no channel at
+ * all), so the source seeded nothing and this MINTS one — the case a chain-global boolean threaded
+ * from the source structurally could not express.
+ *
+ * Two tie-breaks, and which applies is semantic rather than incidental. Re-minting over a carried
+ * position tie-breaks on THAT position, which is what makes the sort STABLE (legacy's
+ * `partitionedOrder` says the same). Minting from nothing has no arriving position to be stable
+ * against, so it tie-breaks on the element id — deterministic rather than "whichever row SQLite
+ * produced first", which is the defect `mise run test:perturbed` exists to find.
+ *
+ * **NOT a `Sort` of the core relation with the framing on top:** a JOIN's output order is
+ * unspecified, so the framing join may return sorted rows in any order — and on a six-vertex
+ * fixture it will reliably return the flattering one, which no assertion in the ladder would catch.
+ * Minting the channel is what makes the order survive the join, and it is also what makes `order()`
+ * COMPOSE: a fold into the framing `ORDER BY` can only happen once, at the end.
+ */
+function elementOrder(step: IRStep, input: Rel, elem: Elem, fresh: Minter): Rel | null {
+  const sort = sortTerms(step, { kind: 'element', id: col(input.id, 'id'), elem }, fresh);
+  if (!sort) return null;
+  const domain = sort.drop
+    ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: sort.drop })
+    : input;
+  const carried = encounterOf(domain.channels);
+  const channels = carried ? domain.channels : withChannel(domain.channels, ENCOUNTER);
+  const tie = col(domain.id, carried ? carried.col : 'id');
+  return renumber(domain, [...sort.terms, { expr: tie, dir: 'asc' }], elementCols(channels), channels, fresh);
+}
+
+/**
  * The convergent-walk COLLAPSE: `SELECT id, SUM(bulk) … GROUP BY id`, so the frontier stays bounded
  * by reachable |V| instead of by the (exponential) walk count.
  *
@@ -584,6 +702,13 @@ const remintOrder = (rel: Rel, encounter: Channel, fresh: Minter): Rel => renumb
  *
  * `isReEncoding` (src/rel/obligations.ts) is what lets the result keep carrying `bulk`: this is a
  * re-encoding of the same traverser multiset, not a barrier.
+ *
+ * **COLLAPSE AND AN EMISSION ORDER ARE MUTUALLY EXCLUSIVE**, and the caller asks the RELATION rather
+ * than a chain-global flag: a collapse merges convergent walks by discarding which one arrived, which
+ * is exactly the per-row identity a position IS. `analyzeChain` folds the seeded case in
+ * (`collapseSafe && !demandsEncounter`), but an element `order()` MINTS a position mid-chain on a
+ * chain analyze reports as demanding none — so the law has to be stated where the position is
+ * visible, not where the chain is.
  */
 const coalesce = (rel: Rel, fresh: Minter): Rel =>
   make.aggregate({
@@ -699,17 +824,23 @@ const BY_READERS = new Set(['order', 'dedup']);
  * is the one term with no subject at all: `RANDOM()` re-evaluates per row and that IS the semantics,
  * so it is a `Call` rather than a projection, and the census sees it through the multiset digest only.
  */
-function sortTerms(step: IRStep, host: ByHost, fresh: Minter): readonly SortTerm[] | null {
+function sortTerms(step: IRStep, host: ByHost, fresh: Minter): { readonly terms: readonly SortTerm[]; readonly drop?: Expr } | null {
   if (isLocalScope(step) || (step.args ?? []).length) return null;
   // ONE slot: TinkerPop's `order()` takes a comparator per key, so a multi-key sort is valid Gremlin
   // — it is this lowering that has one term, and declining says so rather than sorting on the first.
   const bys = modulations(step, 1);
   if (!bys) return null;
   const modulation: Modulation = bys[0] ?? { key: { kind: 'identity' } };
-  if (modulation.order === 'shuffle') return [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }];
+  if (modulation.order === 'shuffle') return { terms: [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }] };
   const key = byExpr(modulation, host, fresh, true);
   if (!key) return null;
-  return [{ expr: key, dir: modulation.order === 'desc' ? 'desc' : 'asc' }];
+  const terms = [{ expr: key, dir: modulation.order === 'desc' ? 'desc' as const : 'asc' as const }];
+  // PRODUCTIVITY rides with the terms rather than being each host's to remember: a traverser whose
+  // `by('age')` yielded nothing is DROPPED, so `g.V().order().by('age')` is four rows on the modern
+  // graph and not six. A forgotten drop is a wrong answer with the right arity, and it sorts the
+  // extra rows FIRST (SQLite orders NULL low), which the census's multiset digest cannot see.
+  const drop = orderProductivity(step, modulation, key);
+  return drop ? { terms, drop } : { terms };
 }
 
 /**
@@ -727,7 +858,7 @@ function sortTerms(step: IRStep, host: ByHost, fresh: Minter): readonly SortTerm
  * them, and a step that reshaped the relation without updating both was a desync no type could see.
  */
 function scalarTail(
-  seed: Rel, framing: RelFraming, steps: readonly IRStep[], from: number, fresh: Minter,
+  seed: Rel, framing: RelFraming, steps: readonly IRStep[], from: number, bulked: boolean, fresh: Minter,
 ): { readonly rel: Rel; readonly framing: RelFraming } | null {
   let rel = seed;
   let out: RelFraming = framing;
@@ -776,8 +907,12 @@ function scalarTail(
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
 
     if (step.name === 'order') {
-      const terms = sortTerms(step, host, fresh);
-      if (!terms) return null;
+      const sort = sortTerms(step, host, fresh);
+      if (!sort) return null;
+      const { terms } = sort;
+      // A value's `by()` is identity-only (a value has no properties), so `drop` is never owed here —
+      // applying it anyway keeps the rule in ONE place rather than in each host's head.
+      if (sort.drop) rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: sort.drop });
       // A sort SUPERSEDES the arriving emission order, so where one is carried the positions must be
       // re-minted and not merely re-sorted: a later slice reads the channel, and taking its window
       // from the stale seed would return the right multiset from the wrong place. Legacy says the
@@ -790,7 +925,7 @@ function scalarTail(
       continue;
     }
 
-    const sliced = sliceOp(step, rel, fresh);
+    const sliced = sliceOp(step, rel, bulked, fresh);
     if (sliced) { rel = sliced; continue; }
 
     // THE SCALAR TRANSFORM FAMILY — one `Project` per transform, and the assembler fuses a run of them
@@ -964,6 +1099,26 @@ export interface Lowering {
   readonly correlatedChildren?: boolean;
 }
 
+/**
+ * THE BIND BUDGET IS A COVERAGE QUESTION, not a crash.
+ *
+ * §3.6 makes the DO 100-parameter cap a property of the plan that fails closed rather than SQL that
+ * only fails in production — and `check` enforces it by THROWING, which is right inside the algebra
+ * and wrong at this seam: a traversal legacy answers must not become a compile error because the new
+ * route spells its predicate more expensively (§11 — RelIR throwing where legacy answers is the one
+ * failure mode the routing switch cannot absorb). So the budget is asked HERE, before the plan is
+ * handed over, and an over-budget plan is a decline like any unlearned step.
+ *
+ * It bites at a knowable place: RelIR renders the vtype-aware compare key's class lists as binds
+ * where legacy inlines them as literals, so one element `order().by(key)` is ~27 binds against
+ * legacy's 2 — three in one chain would exceed the cap. Making that a decline is what keeps the wall
+ * out of production; making the key cheaper is a separate increment.
+ */
+const lowered = (rel: Rel, framing: RelFraming): RelLowering | null => {
+  const plan = nameBindings(rel);
+  return planBindCount(plan) > DO_BIND_CAP ? null : { plan, framing };
+};
+
 export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLowering | null {
   const { params = {}, collapse = true, correlatedChildren = true } = opts;
   const ctx: FilterCtx = { params, correlatedChildren };
@@ -975,15 +1130,6 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   // rows, and a census that structurally cannot see it (`ord` is telemetry, `ms` is the gate).
   const ordered = analyzeChain(steps as IRStep[]).demandsEncounter;
   const seedChannels = ordered ? withChannel(BULK, ENCOUNTER) : BULK;
-  // COLLAPSE AND ORDER ARE MUTUALLY EXCLUSIVE, and this module says so itself rather than trusting
-  // its caller to. A collapse merges convergent walks by discarding which one arrived — exactly the
-  // per-row identity an emission order IS — so the two cannot both hold. `analyzeChain` already
-  // folds that in (`collapseSafe && !demandsEncounter`), so the engine never asks for both; but a
-  // lowering that produces an invalid plan when handed a combination it cannot honour is a defect
-  // whether or not today's caller can reach it. Found exactly that way: a sweep calling
-  // `lowerToRel` directly built a collapse that dropped the encounter column its own declared type
-  // still promised, and the factory caught it as a join-width mismatch three nodes later.
-  const collapsing = collapse && !ordered;
   const first = steps[0];
   if (!first) return null;
   const fresh = minter();
@@ -991,9 +1137,9 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   if (first.name === 'inject') {
     const injected = injectSource(first, fresh);
     if (!injected) return null;
-    const tail = scalarTail(injected.rel, injected.framing, steps, 1, fresh);
+    const tail = scalarTail(injected.rel, injected.framing, steps, 1, false, fresh);
     if (!tail) return null;
-    return { plan: nameBindings(tail.rel), framing: tail.framing };
+    return lowered(tail.rel, tail.framing);
   }
 
   if (first.name !== 'V' && first.name !== 'E') return null;
@@ -1029,11 +1175,25 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   // PHASE 2 — movement and post-movement filtering, over the id-relation. A filter here reads only
   // the traverser's id, which is why `Subject` carries no `label`: after a hop the relation is
   // `(id, bulk)` and an edge-label test becomes the membership form.
+  // Does a row stand for more than ONE traverser? Only a collapse makes that true, and a slice has
+  // to know because `LIMIT n` over (element, N) rows answers a different question (`bulkSlice`). It
+  // is a fact about the relation the algebra cannot state — `bulk` is a channel whether its value is
+  // 1 or not — so it rides beside `rel` exactly as `elem` does. Conservative on purpose: a `dedup`
+  // resets the multiplicity to 1 and this does not learn that, which costs the heavier slice form
+  // and never a wrong answer.
+  let bulked = false;
   for (; at < steps.length; at++) {
     const step = steps[at];
     const moved: { rel: Rel; elem: Elem } | null = movement(step, { rel }, elem, fresh);
     if (moved) {
+      // The mutual exclusion is read off the RELATION (see `coalesce`): a movement under a live
+      // emission order must not collapse, whether that order was seeded at the source or minted by
+      // an `order()` further up. Getting this from `demandsEncounter` alone built a collapse that
+      // dropped the encounter column its own declared type still promised — caught by the factory as
+      // a join-width mismatch three nodes later, found by a sweep calling `lowerToRel` directly.
+      const collapsing = collapse && !encounterOf(moved.rel.channels);
       rel = collapsing ? coalesce(moved.rel, fresh) : moved.rel;
+      bulked = bulked || collapsing;
       elem = moved.elem;
       continue;
     }
@@ -1046,17 +1206,17 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
     // legacy answers. Found by L5 on a generated `E().limit(1).has(…).where(…)` — no corpus traversal
     // has that prefix, so the corpus sweep could not reach it.
     if (clause) { rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause }); continue; }
-    const row = rowOp(step, rel, elem, fresh);
+    const row = rowOp(step, rel, elem, bulked, fresh);
     if (!row) break;
     rel = row;
   }
 
-  if (at === steps.length) return { plan: nameBindings(rel), framing: { kind: 'elements', elem } };
+  if (at === steps.length) return lowered(rel, { kind: 'elements', elem });
 
   const retyped = terminal(steps[at], rel, elem, fresh);
   if (!retyped) return null;
 
-  const tail = scalarTail(retyped.rel, retyped.framing, steps, at + 1, fresh);
+  const tail = scalarTail(retyped.rel, retyped.framing, steps, at + 1, bulked, fresh);
   if (!tail) return null;
-  return { plan: nameBindings(tail.rel), framing: tail.framing };
+  return lowered(tail.rel, tail.framing);
 }

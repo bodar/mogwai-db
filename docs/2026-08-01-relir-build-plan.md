@@ -1,6 +1,6 @@
 # RelIR — the build plan
 
-**Status: BUILDING.** Coverage **349 / 2,298** corpus traversals on the RelIR spine; deletion counter
+**Status: BUILDING.** Coverage **370 / 2,298** corpus traversals on the RelIR spine; deletion counter
 **110** references left across the 15 legacy rows. Both are ratchets in `ci` (§10·4). The direction was
 argued in [codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a and
 is not re-argued here.
@@ -329,28 +329,43 @@ modulator vocabulary, `dedup`/`identity`, slices, scalar `order()`, the 18-name 
 and the four-name reducer family. `src/compiler/rel/` is `build ◂ {predicate, modulator, transform,
 reducer} ◂ lower ◂ spine` — a DAG, and each vocabulary module serves every host at once (§10·8).
 
-**The next move is a MODEL change, not a step**, and it is 4.1's prerequisite:
+**The MODEL change is DONE, and it is the shape every later row op inherits.** The emission-order
+channel is a property of each RELATION, not a chain-global boolean: `elementCols(channels)` derives the
+declared columns from the channel list, every producer reads `input.channels`, and `withChannel`
+(`src/channels.ts`) is the MINT — insert in `ROLE_ORDER`, fail closed on a duplicate column. Two
+consequences worth not undoing:
 
-> **The emission-order channel must become a property of each RELATION rather than a chain-global
-> boolean threaded from the source.** `ordered` is one flag read once from `analyzeChain`, which was
-> right while only the SOURCE could seed a position; a `Sort` that MINTS one makes the channel set
-> change mid-chain, which §3.5's per-node table already permits. Concretely: `elementCols` /
-> `elementChannels(ordered)` stop taking the flag and start reading `rel.channels`.
+- **`RelLowering` is `{plan, framing}`.** Its `cols` and `channels` were properties of `plan.result`
+  carried beside it, and `scalarTail` shadowed them in two accumulators. Read them off the relation.
+- **The collapse law is read off the RELATION too.** "Collapse and an emission order are mutually
+  exclusive" cannot be decided from `demandsEncounter` alone once a step MINTS a position, so the
+  Phase-2 loop asks `encounterOf(moved.rel.channels)` per movement.
 
-Why it is ranked first: **`demandsEncounter` is FALSE for element `order()`** (measured for
-`g.V().order()`, `…by('name')`, and `…by('name').limit(2)`) because legacy folds order and slice into
-the same framing clause and needs no channel for either. The refactor unblocks element `order()`,
-`tail()` (which reads the order backwards) and `sample()` — i.e. the whole of `globalRowOps` (deletion
-floor 10) and eventually `TailAcc` (13).
+**Element `order()` LANDED on it** (+21 coverage, L3 +2), and it needed no new machinery: the element
+materialization already emits `ORDER BY p.encounter` whenever that channel is live, so `order()` is
+`renumber(rel, [<by-key>, <id tie-break>], …)` — the same function the fan-out re-mint and scalar
+`order()` share. Three things it turned up, each now structural rather than remembered:
 
-And element `order()` then needs **no new machinery**: the element materialization already emits
-`ORDER BY p.encounter` whenever that channel is live, so element `order()` is
-`renumber(rel, [<by-key>, <id tie-break>], …)` — MINT the emission order from the sort key and let
-framing read it, the same function the fan-out re-mint and scalar `order()` already share. It also
-COMPOSES, which is why `TailAcc` deserves deleting: a fold into the framing `ORDER BY` can only happen
-once, at the end. **Do NOT `Sort` the core relation and frame on top — a JOIN's output order is
-unspecified**, so the framing join may return sorted rows in any order (and on a six-vertex fixture will
-reliably return the flattering one). No assertion in the ladder would catch it.
+- **A slice after it must count TRAVERSERS.** Under `movementCollapse` a row is an (element, N) pair,
+  so `bulkSlice` is a cumulative-`SUM(bulk)` window plus a boundary trim — legacy hand-rolls the same
+  shape inside the framing projection, where it can only happen once and only at the end. The lowering
+  carries ONE fact beside `rel` for it (`bulked`), because "is the multiplicity provably 1" is not
+  something a channel can say.
+- **`dedup().by(k)` ranks by the POSITION, not the id.** The survivor is the first in emission order;
+  ranking by id was right only while nothing could mint one. The census caught it (a different member
+  of each group — a different multiset), which is what that instrument is for.
+- **A window may not read a WINDOWED column** — `OVER (…)` cannot contain a window function, so the
+  emitter closes the block (`case 'window'`, and `case 'sort'` for §11's fence reason). Stating it in
+  the assembler is what stops it being a `Materialize` fence remembered at N sites.
+
+**Do NOT `Sort` the core relation and frame on top — a JOIN's output order is unspecified**, so the
+framing join may return sorted rows in any order (and on a six-vertex fixture will reliably return the
+flattering one). No assertion in the ladder would catch it; minting the channel is what makes the order
+survive the join.
+
+**Next in the row-algebraic class:** `tail()` (reads the order BACKWARDS — a descending window) and
+`sample()`, which together with `order()` are the whole of `globalRowOps` (deletion floor 10) and
+eventually `TailAcc` (13). Then the list shape below.
 
 **Then: THE LIST SHAPE — 194 blocked traversals, the largest family, and it splits by FRAMING ARM
 rather than by step** (measured at 349 routed, by asking what shape legacy frames each blocked traversal
@@ -769,6 +784,27 @@ commit does not prove the commit itself green.**
   closed where legacy answers. The fence lands legacy's CTE-then-read shape (16 / 38 / 50, linear).
   **Only the FIRST reader needs the hint**, structurally: a later one already sits over a
   `Limit`/`Distinct`/`Sort`/fence the assembler refuses to fuse into.
+- **A BIND BUDGET OVERRUN IS A DECLINE, NOT A THROW.** §3.6 makes the DO 100-parameter cap a plan
+  property `check` proves, and `check` proves it by THROWING — correct inside the algebra, wrong at the
+  routing seam, where it turns a traversal legacy answers into a compile error. `lowerToRel` asks
+  `planBindCount` before handing the plan over and declines above the cap. It bites at a knowable
+  place: RelIR renders the vtype-aware compare key's class lists as BINDS where legacy inlines them as
+  literals, so one element `order().by(key)` is ~27 binds against legacy's 2 and three in one chain
+  would exceed the cap. Making the key cheaper is a separate increment; making the wall a decline is
+  what keeps it out of production.
+- **A WINDOW may not read a WINDOWED column, and that is the ASSEMBLER's rule to know.** SQLite refuses
+  a window function inside another window's `OVER (…)` outright (`misuse of window function
+  row_number()`), which is the exact shape a minted emission order produces under any later ranking
+  (`dedup().by(k)` after `order()`, the cumulative-bulk slice). The alternative was a `Materialize`
+  fence at each site — i.e. remembering the rule N times, and it was already forgotten twice in one
+  increment. `case 'sort'` closes a windowed block for §11's fence reason instead: an `ORDER BY` cannot
+  name a select alias, so fusing re-inlines a whole `ROW_NUMBER()` over a correlated compare key.
+- **A capability RelIR gains that legacy lacks puts `test:legacy-spine` red — so fix legacy.** Element
+  `order()` reached `order().by(k).limit(n).out(…)`, which legacy threw `step not implemented: out()`
+  for: its re-entry gate looked at the IMMEDIATE follower, and a slice hid the movement behind it.
+  Widening that gate to the whole remainder gave BOTH spines the shape (+3 corpus traversals, L3 +2 on
+  each). The rule this instances is already here — fix it in both spines or decline in RelIR — and the
+  differential being green in both positions is what says which happened.
 - **Relation ids are minted PER LOWERING.** A module-global counter made two compiles of one query emit
   different SQL depending on compile order — breaking every snapshot and any text-keyed cache, but only
   under a particular ordering.

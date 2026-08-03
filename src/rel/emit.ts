@@ -294,7 +294,14 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       }
 
       case 'sort': {
-        const b = inputBlock(r.input, outer, (input) => input.orderBy !== undefined || input.limit !== undefined || input.offset !== undefined || input.distinct);
+        // A WINDOWED input closes the block for the same reason a `Filter` does (§11's fence): an
+        // `ORDER BY` cannot name a select alias, so fusing re-inlines the expression that computes
+        // its subject — and where the subject is a minted position that expression is a whole
+        // `ROW_NUMBER()` over a correlated compare key. Measured on
+        // `g.V().order().by("age").range(1,3).values("name")`: the key spelled THREE times and 30
+        // binds against legacy's 5, so a second `order()` in one chain would approach the DO cap and
+        // fail closed where legacy answers. Naming the column costs one nested SELECT.
+        const b = inputBlock(r.input, outer, (input) => input.orderBy !== undefined || input.limit !== undefined || input.offset !== undefined || input.distinct || input.windowed);
         return { ...b, orderBy: r.terms.map((term) => sortTerm(term, b.scope)), scope: withRel(b.scope, r.id, outMap(b)) };
       }
 
@@ -314,7 +321,14 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       }
 
       case 'window': {
-        const b = inputBlock(r.input, outer, (input) => tailUsed(input));
+        // A WINDOWED input closes the block, and this is a LEGALITY rule rather than a preference: a
+        // window's own `OVER (…)` clause may never reference a window function, so a spec that reads a
+        // column its input computed with one has no legal spelling in the same SELECT. SQLite says so
+        // outright — `misuse of window function row_number()` — and it says it for the shape RelIR
+        // produces whenever a step MINTS an emission order and a later window ranks by it
+        // (`dedup().by(k)` after `order()`, the cumulative-bulk slice). Refusing here is total; the
+        // alternative was a `Materialize` fence at each such site, i.e. remembering the rule N times.
+        const b = inputBlock(r.input, outer, (input) => tailUsed(input) || input.windowed);
         const select = [...b.select, ...r.specs.map(([name, spec]) => [name, expr(spec, b.scope)] as const)];
         return { ...b, select, windowed: true, scope: withRel(b.scope, r.id, new Map(select)) };
       }

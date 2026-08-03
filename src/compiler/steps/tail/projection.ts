@@ -328,11 +328,17 @@ const tailOrder: ShapeTailFn<ElementStream> = (st, step, steps, stop) => {
     return continueLowering(lowerElementDedup(st, steps[dedupAt], step), dedupAt + 1);
   const ordered = lowerElementOrderByTraversal(st, step);
   if (ordered) return continueLowering(ordered, stop + 1);
-  // A plain order() whose FOLLOWER is a movement/branch/re-source (not a value-tail step the
-  // acc machinery folds) retypes to an ordered element stream and re-enters — otherwise
-  // foldTailAcc would throw `step not implemented` on that follower (item 5b).
-  const next = steps[stop + 1];
-  if (next && !VALUE_TAIL_STEPS.has(next.name)) {
+  // A plain order() FOLLOWED ANYWHERE by a movement/branch/re-source (a step outside the value-tail
+  // vocabulary the acc machinery folds) retypes to an ordered element stream and re-enters —
+  // otherwise foldTailAcc throws `step not implemented` on that follower (item 5b).
+  //
+  // ANYWHERE, not "immediately": the gate used to read only `steps[stop + 1]`, so
+  // `order().by('name').limit(2).out('followedBy')` folded the order AND the slice into the framing
+  // clause and then threw on `out()` — two corpus traversals, both grateful-dead, unanswerable by
+  // either spine. A slice is a value-tail step, so the immediate check could not see the movement
+  // behind it. Where the whole remainder IS foldable the fold still wins (one clause beats a CTE and
+  // a re-entry), which is why this looks past the run rather than replacing the fold.
+  if (steps.slice(stop + 1).some((later) => !VALUE_TAIL_STEPS.has(later.name))) {
     const reentered = lowerElementOrderReenter(st, step);
     if (reentered) return continueLowering(reentered, stop + 1);
   }

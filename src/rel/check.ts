@@ -60,6 +60,18 @@ export function bindCount(plan: Rel | Stmt): number {
   return n;
 }
 
+/**
+ * THE WHOLE PROGRAM's binds — what the database actually counts.
+ *
+ * `bindCount` answers for one node, and `check` applies the cap per BINDING, which is the right
+ * question for a `Stmt` boundary (each is its own statement). A read plan's bindings are CTEs of ONE
+ * statement, so its budget is the SUM — and that is the number DO's 100-parameter cap is measured
+ * against. Kept beside `bindCount` rather than derived at a call site, because the two must not
+ * disagree about what counts as a bind.
+ */
+export const planBindCount = ({ bindings, result }: Plan): number =>
+  bindings.reduce((total, binding) => total + bindCount(binding.node), 0) + bindCount(result);
+
 export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt> = new Map()): void {
   /** SQLite's recursive-term law is positional, not merely a reference count. */
   const recursiveTerm = (term: Rel, name: string): { selfRefs: number; aggregate: boolean; window: boolean } => {

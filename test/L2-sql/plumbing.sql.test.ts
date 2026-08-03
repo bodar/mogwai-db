@@ -402,8 +402,13 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     // no longer one of them. The tail accumulator carries the token to `tailOrderTerm`, which
     // resolves it through the ONE token authority (`tokenExpr`), so this sorts by the label NAME.
     // Asserted on the SQL, because "did not throw" would also pass if it silently sorted by id.
-    expect(read('g.V().order().by(T.label)').sql).toContain('ORDER BY (SELECT labels.name');
-    expect(read('g.V().order().by(T.id)').sql).toContain('ORDER BY COALESCE(n.uid, n.id) ASC');
+    // Pinned on the LEGACY spine by name: element `order()` is RelIR-routed now, and what is being
+    // asserted is that a `T` token resolves through the ONE token authority rather than silently
+    // sorting by id — a property both spines must have, so both are asked.
+    expect(read('g.V().order().by(T.label)', { spine: 'legacy' }).sql).toContain('ORDER BY (SELECT labels.name');
+    expect(read('g.V().order().by(T.id)', { spine: 'legacy' }).sql).toContain('ORDER BY COALESCE(n.uid, n.id) ASC');
+    expect(read('g.V().order().by(T.label)', { spine: 'rel' }).sql).toMatch(/row_number\(\) OVER \(ORDER BY \(SELECT \w+\.name/);
+    expect(read('g.V().order().by(T.id)', { spine: 'rel' }).sql).toMatch(/row_number\(\) OVER \(ORDER BY \(SELECT COALESCE\(\w+\.uid, \w+\.id\)/);
     // single AND multi-term order().by(traversal) are now supported (mixing keys/traversals),
     // lowered through the shared multi-modulator seam — see order-traversal-multi.feature (L4)
     // and the order().by() SQL tests. They must NOT throw.

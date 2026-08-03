@@ -223,3 +223,16 @@ export function byExpr(modulation: Modulation, host: ByHost, fresh: Minter, orde
  *  `ProductiveByStrategy` asked for the null-keeping behaviour. */
 export const productivityFilter = (step: IRStep, key: Expr | undefined): Expr | undefined =>
   key && !isProductiveBy(step) ? { kind: 'binary', op: 'is not', left: key, right: lit(null, 'any') } : undefined;
+
+/**
+ * `order()`'s productivity, which is NARROWER than `dedup()`'s — and the difference is the reference's,
+ * not a simplification.
+ *
+ * **Only a property KEY can be unproductive.** A `T` token is always present, a bare `by()` is the
+ * element itself, and `shuffle` projects nothing at all, so none of them can yield "nothing" for a
+ * traverser. Legacy says the same in one line (`orderProductivityFilter` filters `c.key !== null`),
+ * and `dedup()` deliberately does NOT: there the drop applies to any `by()` at all
+ * (`modulators.length && !productiveBy`). Two hosts, two rules, one place each is stated.
+ */
+export const orderProductivity = (step: IRStep, modulation: Modulation, key: Expr): Expr | undefined =>
+  modulation.key.kind === 'property' ? productivityFilter(step, key) : undefined;

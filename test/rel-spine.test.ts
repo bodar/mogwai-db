@@ -99,6 +99,27 @@ const COVERED = [
   "g.V().values('age').is(P.typeOf(GType.BOOLEAN))", "g.V().values('age').is(P.typeOf(GType.NULL))",
   "g.V().values('age').is(P.typeOf(GType.VERTEX))",
   "g.V().values('age').is(P.typeOf(GType.INT)).is(P.gt(29))",
+  // ELEMENT `order()` — a MINT of the emission-order channel, which is what made the channel set a
+  // property of each RELATION rather than of the chain (`analyzeChain` reports `demandsEncounter`
+  // FALSE for every one of these). The `by()` projections are the SAME vocabulary the scalar sort and
+  // `dedup().by()` read, so all three arrive together; `by('lang')` is the productivity arm, where a
+  // vertex without the key is DROPPED rather than sorted last.
+  'g.V().order()', 'g.E().order()', "g.V().order().by('name')", "g.V().order().by('age')",
+  "g.V().order().by('name',Order.desc)", "g.V().order().by(T.label)", "g.V().order().by(T.id)",
+  "g.V().order().by('lang')", "g.withStrategies(ProductiveByStrategy).V().order().by('lang')",
+  "g.V().hasLabel('person').order().by('age')", "g.V().out().order().by('name')",
+  // …and it COMPOSES, which is the whole reason to mint a channel rather than fold an ORDER BY into
+  // the framing SELECT: a slice after it reads the position, a movement after it re-mints, and a
+  // retyping terminal carries it into the scalar tail.
+  "g.V().order().by('name').limit(2)", "g.V().order().by('name').range(1,3)",
+  "g.V().order().by('age').skip(1)", "g.V().order().by('name').dedup()",
+  "g.V().order().by('name').count()", "g.V().order().by('name').values('name')",
+  "g.V().order().by('name').out()", "g.V().out().order().by('name').limit(2)",
+  // The BULKED slice: `movementCollapse` merges convergent walks into (element, N) rows, so a slice
+  // after the order has to count TRAVERSERS and trim the boundary row's multiplicity (`bulkSlice`).
+  // `LIMIT n` over those rows would answer a different question — the same rows, the wrong count.
+  "g.V().both().order().by('name').limit(2)", "g.V().both().order().by('name').range(1,4)",
+  "g.V().both().both().order().by('name').limit(3)",
 ];
 
 /**
@@ -108,7 +129,6 @@ const COVERED = [
 const DECLINED = [
   "g.V().bothE().otherV()",           // otherV reads the entering vertex — carried state not modelled
   "g.V().as('a').out().select('a')",  // an alias: carried state not modelled
-  'g.V().out().order()',              // the row-algebraic class, not learned yet
   'g.V().count().fold()',             // a step after the shape change that is NOT in its vocabulary
   'g.inject([1,2])',                  // a COLLECTION argument is a list traverser, a different arm
   'g.inject()',                       // the EMPTY relation, which `Values` refuses to express (§3.3)
@@ -125,7 +145,6 @@ const DECLINED = [
   "g.V().has('name',null)",           // a null value: not a literal this route can compare
   "g.V().where(__.has('name','marko'))", // a filter-only body is a predicate on the SAME traverser
   "g.V().where(__.out().order())",    // a body step the child fold has not learned
-  'g.V().order()',                    // element order() is TailAcc's, folded into the FRAMING SELECT
   'g.V().tail(2)',                    // reads the order BACKWARDS — a descending window, not learned
   'g.V().sample(2)',                  // ORDER BY RANDOM(): deliberately nondeterministic
 ];
@@ -176,6 +195,40 @@ describe('the RelIR spine', () => {
     // ascending sequence itself, which no scan order can produce by luck three times over.
     const asc = read('g.inject(3,1,2).order()', { spine: 'rel' });
     expect(store.query(asc.sql, asc.binds).map((row: any) => row.v)).toEqual([1, 2, 3]);
+  });
+
+  test('an element order() pins the SEQUENCE, and every composition of it', () => {
+    // The MINT is only observable as an ORDER, so `rowsVia`'s sorted comparison structurally cannot
+    // see any of this: a wrong direction, a sort the assembler fused away, a mint that renumbered
+    // per arm rather than once over the fan-out, or a slice reading the stale seed. Row-for-row
+    // against legacy is what can — and every one of these is a chain `analyzeChain` reports
+    // `demandsEncounter` FALSE for, which is exactly why the channel had to become the relation's.
+    for (const gremlin of ['g.V().order()', 'g.E().order()', "g.V().order().by('name')",
+      "g.V().order().by('name',Order.desc)", "g.V().order().by('age')", "g.V().order().by(T.label)",
+      "g.V().order().by('name').limit(2)", "g.V().order().by('name').range(1,3)",
+      "g.V().order().by('age').skip(1)", "g.V().order().by('name').values('name')",
+      "g.V().hasLabel('person').order().by('age')", "g.V().out().order().by('name')",
+      "g.V().out().order().by('name').limit(2)", "g.V().order().by('name').out()",
+      // The BULKED slice: a collapsed row stands for N traversers, so the boundary row's
+      // multiplicity is TRIMMED. `LIMIT n` over those rows returns the same rows with the wrong
+      // count — right arity per row, wrong number of traversers, invisible to a sorted compare.
+      "g.V().both().order().by('name').limit(2)", "g.V().both().order().by('name').range(1,4)",
+      "g.V().both().both().order().by('name').limit(3)"]) {
+      const rel = read(gremlin, { spine: 'rel' });
+      const legacy = read(gremlin, { spine: 'legacy' });
+      expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
+    }
+    // …plus two ABSOLUTE assertions, because a differential agrees when both sides are wrong. The
+    // modern graph's names ascending, and the same list reversed — no scan order produces either by
+    // luck six times over.
+    const names = (gremlin: string) => {
+      const plan = read(gremlin, { spine: 'rel' });
+      return store.query(plan.sql, plan.binds).map((row: any) => JSON.parse(row.props).name[0].v);
+    };
+    expect(names("g.V().order().by('name')")).toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+    expect(names("g.V().order().by('name',Order.desc)")).toEqual(['vadas', 'ripple', 'peter', 'marko', 'lop', 'josh']);
+    // A non-productive `by('age')` DROPS the two software vertices rather than sorting them first.
+    expect(names("g.V().order().by('age')")).toEqual(['vadas', 'marko', 'josh', 'peter']);
   });
 
   test('a scalar order() narrows on its MODULATOR rather than declining wholesale', () => {
@@ -401,7 +454,7 @@ describe('the RelIR spine', () => {
     // Asking for RelIR does not make an uncovered chain route there, and asking for legacy always
     // works. Coverage is a property of the CHAIN; if these ever diverge the router has started
     // deciding something the lowering should own.
-    expect(read('g.V().out().order()', { spine: 'rel' }).spine).toBe('legacy');
+    expect(read('g.V().out().tail(2)', { spine: 'rel' }).spine).toBe('legacy');
     expect(read('g.V()', { spine: 'legacy' }).spine).toBe('legacy');
     expect(read('g.V()', { spine: 'rel' }).spine).toBe('rel');
   });
