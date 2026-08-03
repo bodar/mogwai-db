@@ -39,6 +39,9 @@ import { extractStrategies, parseGremlin, stepChain } from '../src/gremlin/front
 import { runPasses } from '../src/compiler/ir/passes.ts';
 import type { IRStep } from '../src/compiler/ir/step.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
+import { DO_BIND_CAP, planBindCount } from '../src/rel/check.ts';
+import { emitRelational } from '../src/rel/emit.ts';
+import { render } from '../src/sql/kernel/q.ts';
 
 const CORPUS = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.meta.url)).text())
   .split('\n').filter(Boolean);
@@ -49,7 +52,40 @@ const SLICE = { name: 'limit', args: [1] } as unknown as IRStep;
 type Shape = 'authored' | 'ordered' | 'ordered-at-source';
 
 const violations = new Map<string, string>();
+/** The bind-accounting violations, kept apart because they are a different property (below). */
+const accounting = new Map<string, string>();
 let swept = 0;
+let emitted = 0;
+
+/**
+ * THE ADMITTED COUNT MUST BOUND THE ENFORCED COUNT.
+ *
+ * `lowerToRel` declines above the cap on `planBindCount`, which counts IR OCCURRENCES; the wall
+ * counts the RENDERED bind list, and the two are different numbers — the assembler can spell one
+ * `Lit` more than once when it fuses a clause reader into the block that computes its subject
+ * (measured in the algebra: 91 occurrences rendering as 181 binds). A seam that admits on the first
+ * and meets the wall on the second admits on a number that is not the wall, and the refusal then
+ * arrives past the point where another route could have been chosen — the fail-closed violation the
+ * routing switch cannot absorb.
+ *
+ * `lowered()` therefore renders and asks the real list, so the property swept here is the one that
+ * matters: **a plan the seam ADMITTED renders within the platform cap.** It is what makes the wall
+ * unreachable from the routing decision rather than merely unlikely.
+ *
+ * The divergence is real and reachable, which is why this is swept rather than assumed: measured
+ * over every corpus prefix before the fix, 50 distinct prefixes rendered MORE binds than were
+ * counted, the widest 42 against 31. None crossed 100 on today's corpus — the cheap count would
+ * have looked correct for exactly as long as that held.
+ */
+function checkBindAccounting(plan: Parameters<typeof planBindCount>[0], where: string): void {
+  // Not `emitQuery`, which refuses above the cap itself: this must measure what an ADMITTED plan
+  // renders, so the counting and the refusal stay separable and a violation reports a NUMBER.
+  const rendered = render(emitRelational(plan)).binds.length;
+  emitted++;
+  if (rendered <= DO_BIND_CAP) return;
+  const message = `an admitted plan renders ${rendered} binds, above the cap of ${DO_BIND_CAP}`;
+  if (!accounting.has(message)) accounting.set(message, where);
+}
 
 for (const query of CORPUS) {
   let steps: IRStep[];
@@ -70,13 +106,16 @@ for (const query of CORPUS) {
       // lowering STRATEGIES, so each is a configuration the compiler really can hand it.
       for (const collapse of [true, false]) for (const correlatedChildren of [true, false]) {
         swept++;
-        try { lowerToRel(chain, { collapse, correlatedChildren }); } catch (error) {
+        const at = () => `${chain.map((step) => step.name).join('.')}  [${shape} collapse=${collapse} correlatedChildren=${correlatedChildren}]`;
+        try {
+          const lowered = lowerToRel(chain, { collapse, correlatedChildren });
+          if (lowered) checkBindAccounting(lowered.plan, at());
+        } catch (error) {
           // One entry per MESSAGE, with the first chain that produced it — the same "one entry per
           // root cause" discipline L5's `known.ts` uses, because one dropped channel shows up on
           // hundreds of prefixes and a per-prefix list would bury the count.
           const message = (error as Error).message.split('\n')[0]!.slice(0, 100);
-          if (!violations.has(message))
-            violations.set(message, `${chain.map((step) => step.name).join('.')}  [${shape} collapse=${collapse} correlatedChildren=${correlatedChildren}]`);
+          if (!violations.has(message)) violations.set(message, at());
         }
       }
     }
@@ -84,10 +123,13 @@ for (const query of CORPUS) {
 }
 
 console.log(`rel-sweep: ${swept} prefix × shape × switch combinations over ${CORPUS.length} corpus traversals`);
-if (!violations.size) {
-  console.log('rel-sweep: 0 violations — the decline contract holds');
+console.log(`rel-sweep: ${emitted} admitted plans rendered — every one within the ${DO_BIND_CAP}-bind platform cap`);
+if (!violations.size && !accounting.size) {
+  console.log('rel-sweep: 0 violations — the decline contract and the bind accounting both hold');
   process.exit(0);
 }
 for (const [message, where] of violations) console.log(`  THROW ${message}\n        first at ${where}`);
-console.log(`\nrel-sweep: ${violations.size} distinct violation(s) — lowerToRel must DECLINE, never throw`);
+for (const [message, where] of accounting) console.log(`  BINDS ${message}\n        first at ${where}`);
+if (violations.size) console.log(`\nrel-sweep: ${violations.size} distinct decline violation(s) — lowerToRel must DECLINE, never throw`);
+if (accounting.size) console.log(`\nrel-sweep: ${accounting.size} distinct bind-accounting violation(s) — a plan the seam admits must render within the platform cap`);
 process.exit(1);

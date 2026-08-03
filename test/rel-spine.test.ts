@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { compile } from '../src/compiler/compiler.ts';
 import { read, runWith, seededStore } from './support/harness.ts';
+import { CF_MAX_BINDS as DO_BIND_CAP, cfLimitViolation } from '../src/cf-limits.ts';
 
 /**
  * THE RelIR SPINE — routing, coverage and the per-traversal differential (§10·4).
@@ -348,6 +349,35 @@ describe('the RelIR spine', () => {
     expect(names("g.V().order().by('name',Order.desc)")).toEqual(['vadas', 'ripple', 'peter', 'marko', 'lop', 'josh']);
     // A non-productive `by('age')` DROPS the two software vertices rather than sorting them first.
     expect(names("g.V().order().by('age')")).toEqual(['vadas', 'marko', 'josh', 'peter']);
+  });
+
+  test('the bind budget is decided on the number the PLATFORM measures', () => {
+    // A traversal legacy answers must not become a compile error because this route spells its
+    // predicate more expensively, so an over-budget plan DECLINES (§11). The number that decision
+    // reads has to be the rendered bind list and not the IR-occurrence count: the assembler can
+    // spell one `Lit` twice, and measured over every corpus prefix, 50 of them rendered MORE binds
+    // than were counted (widest 42 against 31). None crossed 100 on today's corpus, which is exactly
+    // why the cheap count looked correct.
+    //
+    // The vtype-aware compare key is the knowable place: one element `order().by(k)` is ~26 binds
+    // against legacy's 2, so a chain of them walks up to the cap and over it.
+    const binds = (gremlin: string) => read(gremlin, { spine: 'rel' }).binds.length;
+    expect(binds("g.V().order().by('name')")).toBeLessThan(DO_BIND_CAP);
+    expect(binds("g.V().order().by('name').order().by('age').order().by('lang')")).toBeLessThan(DO_BIND_CAP);
+
+    // Four of them is over, so it declines WHOLE and legacy answers it — with its own 2-binds-per-key
+    // spelling, which is why the same traversal is cheap over there.
+    const over = read("g.V().order().by('name').order().by('age').order().by('lang').order().by('x')", { spine: 'rel' });
+    expect(over.spine).toBe('legacy');
+    expect(over.binds.length).toBeLessThan(DO_BIND_CAP);
+
+    // THE PROPERTY, not the example: nothing this route admits may exceed the cap. `rel-sweep`
+    // holds it over all 38k admitted corpus prefixes; here it is stated where a reader will find it.
+    for (const gremlin of [...COVERED, "g.V().order().by('name').order().by('age')"]) {
+      const plan = read(gremlin, { spine: 'rel' });
+      if (plan.spine !== 'rel') continue;
+      expect(cfLimitViolation(plan.sql, plan.binds)).toBeNull();
+    }
   });
 
   test('tail(n) reads the emission order backwards, and sample(n) is a size not a sequence', () => {

@@ -2,7 +2,9 @@ import { withChannel, type Channel, type Channels } from '../../channels.ts';
 import { col, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { DO_BIND_CAP, planBindCount } from '../../rel/check.ts';
+import { emitRelational } from '../../rel/emit.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
+import { render } from '../../sql/kernel/q.ts';
 import type { Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
@@ -1511,10 +1513,26 @@ export interface Lowering {
  * where legacy inlines them as literals, so one element `order().by(key)` is ~27 binds against
  * legacy's 2 — three in one chain would exceed the cap. Making that a decline is what keeps the wall
  * out of production; making the key cheaper is a separate increment.
+ *
+ * **The number asked must be the number the WALL measures.** `planBindCount` counts IR OCCURRENCES;
+ * the platform counts the RENDERED bind list, and the two differ whenever the assembler spells one
+ * `Lit` twice — fusing a clause reader into the block that computes its subject does exactly that.
+ * Measured over every corpus prefix: 50 distinct divergences, the widest 42 rendered against 31
+ * counted, so a plan admitted at 75 can render past 100. Deciding on the cheap count would therefore
+ * admit on a number that is not the wall, and the refusal would then land at emission — past the
+ * point where this seam could still have chosen the other route. So RENDER once and ask the real
+ * list. The render costs ~30µs against a compile and buys the only count worth checking.
+ *
+ * It goes through `emitRelational` + the kernel's own `render` rather than `emitQuery`, and that is
+ * not a shortcut: `emitQuery` answers an over-budget plan by THROWING, so a `catch` here would have
+ * to swallow it — and the same `catch` would swallow a checker violation, turning the one failure
+ * `rel-sweep` exists to see into a silent decline. `checkPlan` still runs inside `emitRelational`,
+ * so a genuine violation still escapes; only the cap decision is taken here.
  */
 const lowered = (rel: Rel, framing: RelFraming): RelLowering | null => {
   const plan = nameBindings(rel);
-  return planBindCount(plan) > DO_BIND_CAP ? null : { plan, framing };
+  if (planBindCount(plan) > DO_BIND_CAP) return null;
+  return render(emitRelational(plan)).binds.length > DO_BIND_CAP ? null : { plan, framing };
 };
 
 export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLowering | null {

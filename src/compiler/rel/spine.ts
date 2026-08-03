@@ -1,6 +1,7 @@
 import { derived } from '../../sql/kernel/q.ts';
 import type { Compiled } from '../../sql/kernel/render.ts';
 import { emitRelational } from '../../rel/emit.ts';
+import { cfLimitViolation } from '../../cf-limits.ts';
 import type { TraverserLayout } from '../steps/context/context.ts';
 import type { Channels, ChannelRole } from '../../channels.ts';
 import type { Stream } from '../steps/context/stream.ts';
@@ -108,5 +109,17 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
   // through `lowerSteps` rather than calling the projection directly is the point: a step this
   // route grows tomorrow lands in the SAME loop, and there is no second orchestrator.
   const compiled = materializeRootStream(engine.lowerStepsStrict(stream, steps, steps.length));
+  // THE LAST BUDGET CHECK IS THE PLATFORM'S OWN, MEASURED ON WHAT A DURABLE OBJECT ACTUALLY GETS.
+  //
+  // `lowerToRel` owns the BIND decision and now renders to take it, so this is a backstop for the
+  // two things that decision cannot see: whatever binds the FRAMING layer adds on top of the RelIR
+  // relation (zero for every shape measured today, but it is framing's number and not ours), and
+  // the 100 KB statement-TEXT cap, which §3.6 gives the plan and nothing else enforced. Both come
+  // from `cfLimitViolation` — the one authority for what the platform refuses — because a second
+  // constant here would be a second chance to disagree with it.
+  //
+  // A DECLINE and not a throw: legacy answers these today, and a plan we cannot ship is coverage we
+  // do not have. If it ever fires, the census's per-query spine ratchet is what reports it.
+  if (cfLimitViolation(compiled.sql, compiled.binds)) return null;
   return { ...compiled, spine: 'rel' };
 }
