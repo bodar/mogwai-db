@@ -6,7 +6,7 @@ import type { Rel, Table } from '../../rel/rel.ts';
 import type { Channels } from '../../channels.ts';
 import { insert, remove } from '../../rel/stmt-factory.ts';
 import type { Stmt } from '../../rel/stmt.ts';
-import { EXCLUDED, type ColMeta, type RelType } from '../../rel/types.ts';
+import { EXCLUDED, type ColMeta, type RelId, type RelType } from '../../rel/types.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { isNested } from '../../gremlin/frontend.ts';
@@ -15,6 +15,9 @@ import { propertyFtsEntries } from '../../services/fts-index.ts';
 import { parseProperty, type ParsedProperty } from '../steps/write/write.ts';
 import { validateLabel, validatePropertyKey } from '../steps/write/validate.ts';
 import { and, carriedCols, eq, meta, typeOf, type Minter } from './build.ts';
+import { rewriteExpr } from '../../rel/walk.ts';
+import { aliasIdAt } from './alias.ts';
+import type { AliasMap } from '../steps/context/context.ts';
 import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 
 /**
@@ -569,17 +572,188 @@ export function elementAddV(drivers: Rel, step: IRStep, propertySteps: readonly 
   return { bindings: [...(seeded?.bindings ?? []), ...bindings], result };
 }
 
-/** The driver rows a creation walks, IN EMISSION ORDER where the chain has one — the same argument
- *  the legacy write path makes about `renderDriverRows`: a write assigns ids as it goes and those
- *  ids are OBSERVABLE, so which row it sees first is part of the answer. */
+/** A creation's driver rows: the identity plus the emission order, and nothing else — `addV` reads
+ *  no other column of its driver. The ORDER is the argument the legacy write path makes about
+ *  `renderDriverRows`: a write assigns ids as it goes and those ids are OBSERVABLE, so which row it
+ *  sees first is part of the answer. */
 function driverOrder(drivers: Rel, fresh: Minter): { readonly bindings: readonly Binding[]; readonly result: Rel } {
   const encounter = drivers.channels.find((channel) => channel.role === 'encounter');
-  const cols: readonly ColMeta[] = encounter ? [meta('id', 'int'), meta(encounter.col, 'int')] : [meta('id', 'int')];
-  const kept = make.project({
-    id: fresh('w'), input: drivers, channels: [], type: typeOf(...cols),
-    exprs: cols.map((column) => [column.name, col(drivers.id, column.name)] as const),
+  return driverRows(drivers, encounter ? [meta('id', 'int'), meta(encounter.col, 'int')] : [meta('id', 'int')], fresh);
+}
+
+// ---------- addE() ----------
+
+const EDGE_ROW_COLS: readonly ColMeta[] = [meta('id', 'int'), meta('uid', 'text', true), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')];
+
+/** Where an edge endpoint comes from — the three forms `from()`/`to()` take that are decidable
+ *  against the DRIVER relation, plus the implicit one. */
+type Endpoint =
+  /** No `from()`/`to()` on that side: the incoming traverser IS that end, which is what makes
+   *  `g.V(1).addE('e').to(x)` an out-edge of the current vertex. */
+  | { readonly kind: 'driver' }
+  /** An `as()` LABEL, spelled bare (`from("a")`) or as `__.select("a")` — the same thing, and the
+   *  label's history holds the element, so the endpoint is its last entry's rowid. */
+  | { readonly kind: 'alias'; readonly label: string }
+  /** A ROOTED sub-read (`to(__.V(2))`, `from(V().has(…))`) — a relation, read through a scalar
+   *  subquery. Legacy takes its FIRST row, so this takes one row of the same relation. */
+  | { readonly kind: 'read'; readonly rel: Rel };
+
+/** The endpoint as an expression over the driver relation. */
+function endpointExpr(end: Endpoint, driver: Rel, aliases: AliasMap, fresh: Minter): Expr | null {
+  if (end.kind === 'driver') return col(driver.id, 'id');
+  if (end.kind === 'read') {
+    const one = make.limit({ id: fresh('li'), input: end.rel, channels: [], type: end.rel.type, count: lit(1, 'int') });
+    const only = make.project({ id: fresh('p'), input: one, channels: [], type: ID_TYPE, exprs: [['id', col(one.id, 'id')]] });
+    return { kind: 'scalar', plan: only };
+  }
+  const entry = aliases.get(end.label);
+  // An UNBOUND label is a runtime error legacy raises with a message it owns ("unknown as() label"),
+  // so it declines here rather than becoming a NULL endpoint — a silently unproductive write.
+  if (!entry) return null;
+  return aliasIdAt(col(driver.id, entry.col), 'last');
+}
+
+/**
+ * `addE(label)` with its `from`/`to`/`property` cluster — ONE edge per incoming traverser.
+ *
+ * Its shape is `addV`'s and it reuses the same three pieces: the label UPSERT, an `Insert … SELECT …
+ * RETURNING` whose SOURCE decides how many, and then `property()`'s statements over the returned
+ * ids. What differs is that an edge has ENDPOINTS, and the whole of that difference is two
+ * expressions written in the driver's scope — so `from("a")` (an alias column on the driver),
+ * `to(__.V(2))` (a scalar subquery) and an omitted side (the driver itself) are one lowering.
+ *
+ * **No correlation key is needed and that is not luck**: every endpoint form here is decidable
+ * against the DRIVER row, so `src` and `tgt` are columns of the insert's own source. The form that
+ * would need one — an alias bound to a vertex `addV()` created EARLIER in the same chain — declines,
+ * because `addV`'s `RETURNING` carries the target table's columns and not its source's.
+ */
+export function elementAddE(
+  drivers: Rel, elem: Elem, step: IRStep, cluster: readonly IRStep[], aliases: AliasMap,
+  ordered: boolean, params: Record<string, any>, reads: SubReads, fresh: Minter,
+): Effects | null {
+  // An edge's ends are VERTICES; an edge-stream driver would be one for neither end.
+  if (elem !== 'vertex' || step.modulators?.length || step.optionArms) return null;
+  const label = (step.args ?? [])[0];
+  if (typeof label !== 'string') return null;
+  try { validateLabel(label); } catch { return null; }
+
+  let from: Endpoint = { kind: 'driver' };
+  let to: Endpoint = { kind: 'driver' };
+  let sides = 0;
+  const propertySteps: IRStep[] = [];
+  for (const member of cluster) {
+    if (member.name === 'property') { propertySteps.push(member); continue; }
+    if (member.modulators?.length || member.optionArms) return null;
+    const parsed = endpointOf((member.args ?? [])[0], reads);
+    if (!parsed) return null;
+    if (member.name === 'from') from = parsed; else to = parsed;
+    sides++;
+  }
+  // BOTH ends implicit is not a traversal the grammar means anything by, and both ends EXPLICIT is
+  // fine (the driver is then only a multiplier). At the SOURCE there is no incoming traverser at
+  // all, so an implicit end has nothing to be: the one-row seed carries no `id`, and asking it for
+  // one is a throw rather than a decline unless it is asked here (`rel-sweep` found exactly that on
+  // `addE.from`).
+  const implicit = from.kind === 'driver' || to.kind === 'driver';
+  if (sides === 0 || (implicit && !drivers.type.cols.some((column) => column.name === 'id'))) return null;
+  const writes = propertySteps.length ? propertyWrites(propertySteps, 'edge', params) : [];
+  if (!writes) return null;
+
+  const carried: readonly ColMeta[] = [meta('id', 'int'),
+    ...drivers.channels.filter((channel) => channel.role === 'encounter' || channel.role === 'alias').map((channel) => meta(channel.col, channel.role === 'alias' ? 'json' : 'int', channel.role === 'alias'))];
+  const seeded = drivers.kind === 'values' ? null : driverRows(drivers, carried, fresh);
+  const { bindings, bind } = effectScope(fresh);
+  const driver = seeded ? bind(seeded.result, true) : drivers;
+
+  const src = endpointExpr(from, driver, aliases, fresh);
+  const tgt = endpointExpr(to, driver, aliases, fresh);
+  if (!src || !tgt) return null;
+
+  const labelTarget = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('wt'), channels: [], type: typeOf(...LABELS_COLS) });
+  const named = make.values({ id: fresh('lv'), channels: [], type: typeOf(meta('name', 'text')), rows: [[text(label)]] });
+  const labelRow = bind(insert({
+    target: labelTarget, cols: ['name'], source: named, channels: [], type: typeOf(meta('id', 'int')),
+    onConflict: { target: ['name'], set: [['name', col(EXCLUDED, 'name')]] },
+    returning: [['id', col(labelTarget.id, 'id')]],
+  }));
+
+  const paired = make.join({
+    id: fresh('j'), left: driver, right: labelRow, join: 'cross', channels: [],
+    type: typeOf(...driver.type.cols, meta('lbl', 'int')),
   });
-  const ordered = encounter
+  const rows = make.project({
+    id: fresh('p'), input: paired, channels: [],
+    type: typeOf(meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
+    exprs: [['src', reScope(src, driver.id, paired.id)], ['label', col(paired.id, 'lbl')], ['tgt', reScope(tgt, driver.id, paired.id)]],
+  });
+  const edgesTarget = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('wt'), channels: [], type: typeOf(...EDGE_ROW_COLS) });
+  const created = bind(insert({
+    target: edgesTarget, cols: ['src', 'label', 'tgt'], source: rows, channels: [], type: ID_TYPE,
+    returning: [['id', col(edgesTarget.id, 'id')]],
+  }));
+
+  for (const write of writes) propertyStatements('edge', created, write, bind, fresh);
+
+  const channels: Channels = ordered ? [{ col: 'bulk', role: 'bulk' }, { col: 'encounter', role: 'encounter' }] : [{ col: 'bulk', role: 'bulk' }];
+  const cols: readonly ColMeta[] = [meta('id', 'int'), ...carriedCols(channels)];
+  const result = make.project({
+    id: fresh('c'), input: created, channels, type: typeOf(...cols),
+    exprs: [['id', col(created.id, 'id')], ['bulk', lit(1, 'int')],
+      ...(ordered ? [['encounter', col(created.id, 'id')] as const] : [])],
+  });
+  return { bindings: [...(seeded?.bindings ?? []), ...bindings], result };
+}
+
+/** One `from()`/`to()` argument → the endpoint it names, or `null` for a form this route declines
+ *  (`__.addV(…)`, which CREATES its endpoint as a side effect of resolving it, and anything whose
+ *  nested chain the read fold does not cover). */
+function endpointOf(arg: unknown, reads: SubReads): Endpoint | null {
+  if (typeof arg === 'string') return { kind: 'alias', label: arg };
+  if (!isNested(arg)) return null;
+  const inner = reads.body(arg);
+  if (!inner?.length) return null;
+  // `__.select("a")` IS the bare label, spelled longhand.
+  if (inner.length === 1 && inner[0]!.name === 'select' && typeof inner[0]!.args?.[0] === 'string')
+    return { kind: 'alias', label: inner[0]!.args[0] as string };
+  const read = reads.rooted(inner);
+  return read && { kind: 'read', rel: read };
+}
+
+/**
+ * THE READ FOLD, handed to the write vocabulary as two functions.
+ *
+ * An endpoint like `to(__.V(2))` is a ROOTED CHAIN LOWERED INSIDE ANOTHER — the sub-read seam — and
+ * the fold that does it lives in `lower.ts`, which imports this module. Passing the two entry points
+ * in keeps the import graph a DAG (`build ◂ … ◂ write ◂ lower ◂ spine`) and keeps the decline
+ * contract intact: an inner chain this route does not cover propagates outward as a decline, one
+ * level down, exactly as the set-op operand seam already does.
+ */
+export interface SubReads {
+  /** A nested argument's normalized body, or `null` where normalizing it RAISES. */
+  readonly body: (nested: unknown) => readonly IRStep[] | null;
+  /** A rooted VERTEX chain as a one-column relation of rowids, or `null` if it is not covered. */
+  readonly rooted: (steps: readonly IRStep[]) => Rel | null;
+}
+
+/** Rewrite a `Col` written against `from` so it names `to` instead — what a CROSS JOIN's projection
+ *  needs, because a join's outputs are spelled in ITS scope and not its sides'. */
+const reScope = (e: Expr, from: RelId, to: RelId): Expr =>
+  rewriteExpr(e, (node) => (node.kind === 'col' && node.rel === from ? { ...node, rel: to } : node));
+
+/** The driver rows a creation walks, projected to the columns it needs and IN EMISSION ORDER.
+ *  An ALIAS column crosses as `json(…)` TEXT: the retained-row transport carries what JSON carries
+ *  losslessly, and a JSONB blob is not that (`src/program.ts` fails closed on one). `->>`/
+ *  `json_extract` read the two identically, so nothing downstream learns which it got. */
+function driverRows(drivers: Rel, cols: readonly ColMeta[], fresh: Minter): { readonly bindings: readonly Binding[]; readonly result: Rel } {
+  const jsonOf = (column: ColMeta): Expr =>
+    column.type === 'json' ? { kind: 'call', fn: 'json', args: [col(drivers.id, column.name)] } : col(drivers.id, column.name);
+  const declared = cols.map((column) => (column.type === 'json' ? meta(column.name, 'text', true) : column));
+  const kept = make.project({
+    id: fresh('w'), input: drivers, channels: [], type: typeOf(...declared),
+    exprs: cols.map((column) => [column.name, jsonOf(column)] as const),
+  });
+  const encounter = drivers.channels.find((channel) => channel.role === 'encounter');
+  const ordered = encounter && cols.some((column) => column.name === encounter.col)
     ? make.sort({ id: fresh('so'), input: kept, channels: [], type: kept.type, terms: [{ expr: col(kept.id, encounter.col), dir: 'asc' }] })
     : kept;
   return nameBindings(ordered);

@@ -11,10 +11,11 @@ import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { isLocalScope, sliceOf } from '../ir/step.ts';
 import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
-import { flattenListArgs, isNested, isTokenArg } from '../../gremlin/frontend.ts';
+import { flattenListArgs, isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
 import { childSteps, collectionAssert } from '../steps/tail/child-shape.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain } from '../ir/analyze.ts';
+import { normalize } from '../ir/passes.ts';
 import { containsTextSearch, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { bareInjectTag, foldConstantCoercions } from '../steps/write/inject.ts';
 import {
@@ -26,7 +27,7 @@ import type { AliasMap } from '../steps/context/context.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
-import { elementAddV, elementDrop, elementProperty, propertyWrites, type Effects } from './write.ts';
+import { elementAddE, elementAddV, elementDrop, elementProperty, propertyWrites, type Effects, type SubReads } from './write.ts';
 import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listRetype, listSetOp, unfoldList, type ListCtx } from './list.ts';
 
 /**
@@ -1798,6 +1799,16 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   // `addV` AT THE SOURCE is one vertex, and that is the only thing that differs from the mid-chain
   // form: the driver relation is a single `Values` row instead of the traverser stream, and the same
   // lowering runs. A one-row source is what "how many" means here, so there is no second arm.
+  // `addE` at the SOURCE is one edge with both ends named — the driver is a one-row `Values` and the
+  // endpoints carry the whole answer, so the mid-chain lowering runs unchanged.
+  if (first.name === 'addE') {
+    const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[lit(1, 'int')]] });
+    const added = addedEdges(one, 'vertex', steps, 0, NO_ALIASES, ctx, fresh);
+    if (!added) return null;
+    const tail = elementTail(added.effects.result, 'edge', steps, added.at, false, ctx, fresh, NO_ALIASES);
+    return tail && { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
+  }
+
   if (first.name === 'addV') {
     const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[lit(1, 'int')]] });
     const added = addedVertices(one, steps, 0, ctx, fresh);
@@ -1926,6 +1937,13 @@ function elementTail(
       // At bulk 1 that is the same answer as the plain slice, so the cost is SQL shape and never
       // correctness — the same trade the movement loop already makes.
       return continueAs(merged.rel, merged.framing, steps, at + 1, bulked || ctx.collapse, ctx, fresh, labels);
+    }
+    if (step.name === 'addE') {
+      const added = addedEdges(rel, elem, steps, at, labels, ctx, fresh);
+      if (!added) return null;
+      const tail = elementTail(added.effects.result, 'edge', steps, added.at, false, ctx, fresh, NO_ALIASES);
+      if (!tail) return null;
+      return { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
     }
     if (step.name === 'addV') {
       const added = addedVertices(rel, steps, at, ctx, fresh);
@@ -2161,6 +2179,43 @@ const sameColumns = (left: readonly ColMeta[], right: readonly ColMeta[]): boole
  * is more labels on the same vertex, which is a different statement and a further increment; the fold
  * simply does not know the step and declines.
  */
+/** `addE(…)` plus the `from`/`to`/`property` cluster that belongs to it — legacy's `parseEdgeCluster`
+ *  scans the same run, and the members may come in any order. */
+function addedEdges(
+  drivers: Rel, elem: Elem, steps: readonly IRStep[], at: number, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
+): { readonly effects: Effects; readonly at: number } | null {
+  const CLUSTER = new Set(['from', 'to', 'property']);
+  let end = at + 1;
+  while (end < steps.length && CLUSTER.has(steps[end]!.name)) end++;
+  const effects = elementAddE(
+    drivers, elem, steps[at]!, steps.slice(at + 1, end), aliases, ctx.ordered, ctx.params, subReads(ctx, fresh), fresh,
+  );
+  return effects && { effects, at: end };
+}
+
+/** The read fold, as the two functions the write vocabulary needs of it (`SubReads`). A rooted
+ *  chain with EFFECTS of its own is refused rather than spliced: an endpoint that writes is
+ *  `__.addV(…)`, whose creation is ordered against the edge insert and is a further increment. */
+const subReads = (ctx: ChainCtx, fresh: Minter): SubReads => ({
+  // An endpoint's body is ROOTED (`__.V(2)`), not a CHILD of the current traverser, so it goes
+  // through `normalize(stepChain(…))` and not `childSteps` — which strips a source and answers the
+  // empty chain, i.e. an endpoint that silently matched nothing. Legacy's `resolveEndpoint` reaches
+  // the same two functions, so the two routes normalize a nested endpoint identically.
+  body: (nested) => rootedBody(nested, ctx.params),
+  rooted: (steps) => {
+    const chain = lowerChain(steps, { params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren }, fresh);
+    if (!chain || chain.effects || chain.framing.kind !== 'elements' || chain.framing.elem !== 'vertex') return null;
+    return make.project({ id: fresh('ep'), input: chain.rel, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(chain.rel.id, 'id')]] });
+  },
+});
+
+/** A nested ROOTED traversal's steps, normalized — or `null` where normalizing RAISES (a deferral
+ *  the spine that owns the message will raise for itself). */
+function rootedBody(nested: unknown, params: Record<string, any>): readonly IRStep[] | null {
+  if (!isNested(nested)) return null;
+  try { return normalize(stepChain((nested as { nested: unknown }).nested, params)).steps as IRStep[]; } catch { return null; }
+}
+
 function addedVertices(
   drivers: Rel, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
 ): { readonly effects: Effects; readonly at: number } | null {

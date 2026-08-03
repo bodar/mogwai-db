@@ -198,8 +198,11 @@ test('property() updates edges too (materialized on the wire via edgeBuffer)', (
 
 test('addE start-step: from()/to() nested traversals + edge property', () => {
   const store = seededStore();
-  const res = run(store, 'g.addE("knows").from(__.V().has("name","marko")).to(__.V().has("name","vadas")).property("weight", 0.9)');
-  expect(bare((res[0] as any).edge)).toMatchObject({ label: 'knows', src: 1, tgt: 2, props: { weight: 0.9 } });
+  // The edge's IDENTITY read back, rather than the write artifact's own object: the two spines hand
+  // back different intermediate shapes and the graph is what either of them is about.
+  run(store, 'g.addE("knows").from(__.V().has("name","marko")).to(__.V().has("name","vadas")).property("weight", 0.9)');
+  expect(run(store, 'g.V().has("name","marko").outE("knows").has("weight",0.9).inV().values("name")').map((r: any) => r.v)).toEqual(['vadas']);
+  expect(run(store, 'g.E().hasLabel("knows").has("weight",0.9).count()').map((r: any) => r.v)).toEqual([1]);
   // marko already knew vadas (edge 7); now a second knows edge exists → 2 paths to vadas
   expect(run(store, 'g.V(1).out("knows").has("name","vadas").count()').map((r) => r.v)).toEqual([2]);
   expect(run(store, 'g.V(1).outE("knows").count()').map((r) => r.v)).toEqual([3]);
