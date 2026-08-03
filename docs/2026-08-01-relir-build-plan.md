@@ -936,6 +936,45 @@ keeping:
 - **Reading the flag does not make spine CHOICE depend on it.** Coverage is identical either way;
   what the chosen spine emits is what changes, which is what a fast-path flag is for.
 
+**Coverage 112 → 117 (`3a8a2dd`): `where`/`filter`/`not` over a traversal body — the correlated
+child seam.** The body folds through the SAME movement and filter vocabulary as the outer chain,
+which is why movement had to land first and why this cost so little once it had: `sourceFilter`
+already returns an `Expr`, so an existence test slots in beside `has` and `hasLabel` at every
+position they work at.
+
+**No seed node, and that was the design question.** Legacy writes `(SELECT n.id AS id) p` — a
+projection with no input, which RelIR has no node for. §7's bar says a missing kind needs proof the
+seam cannot EXPRESS the shape, and it can: compare the edge column to the outer id directly. One
+derived table FEWER than the form it replaces, and it costs one parameter on the movement builder —
+a hop starts from an id-RELATION (joined) or a correlated id EXPRESSION (compared), both producing
+the same `(id, bulk)` shape, so every hop after the first is the ordinary one and there is no second
+movement implementation. `not()` is `NOT EXISTS`, not legacy's `NOT COALESCE(EXISTS(…), 0)`: an
+EXISTS is never NULL.
+
+**A REFINEMENT of the fast-path rule, which reads like its opposite and is not.**
+`predicateInlining` selects between two LOWERINGS of a `where()` body: the correlated `EXISTS`, and
+a materialized child-existence gate (pushed ordinal, `LEFT JOIN`, rejoin). RelIR implements the
+first, so with the switch off it declines — exactly as it declines an unlearned step. The FTS rule
+said spine choice must not read the flag; the distinction is *what the flag names*. There it named a
+physical ACCESS PATH RelIR cannot state at all, so reading it would have been using the spine switch
+to dodge an optimization. Here it names two STRATEGIES and RelIR covers the side it implements,
+which is ordinary coverage — both positions stay live and L5 still compares two forms.
+`movementCollapse` is the other side of the same coin: RelIR states BOTH forms, so it covers the
+traversal either way and the flag only changes what it emits.
+
++5, well under the +38 the sweep predicted, because most corpus `where` bodies also use
+`as()`/`select()` or an alias comparison — carried state this route does not model yet. The
+structure is the deliverable, not the number.
+
+**NEXT, measured from base 259** (`V`/`E`/`hasLabel`/`has`/`count`/`values`/`is`/movement/`where`):
+**the row-algebraic class is +50 and it is literally Phase 4.1's named deliverable** — `order` 20 ·
+`dedup` 11 · `limit`/`range`/`skip` 2 · `identity` 2, and together with `tail`/`sample` fifty. The
+only comparable is `as` + `select` at +49, which needs the alias channel. Two things known about
+4.1 before it starts: on an ELEMENT stream these steps are fused into the framing projection by
+`TailAcc`, so a `Sort`/`Limit` on the CORE relation is a different plan (the framing join is 1:1 on
+`id`, so it is equivalent — but that is an argument to verify, not to assume); and `order` needs the
+`encounter` channel, which is the first carried role beyond `bulk` this route will model.
+
 **Coverage growth, measured over the 2,298-traversal corpus.** Cumulative chains fully covered as
 each step name is admitted, so an increment can be chosen by what it BUYS rather than by what looks
 next: `V`/`E` 41 · `+hasLabel` 51 · `+has` 95 · all six movement steps + `inV`/`outV`/`otherV` 104 ·
