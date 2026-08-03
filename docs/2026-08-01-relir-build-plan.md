@@ -538,11 +538,11 @@ projection with an `ORDER BY` rather than a JSON aggregate, and `fold().max(Scop
 LOCAL reducers (`reducer.ts` over a member, not over a row). `jsonbList` plus the member-transform frame
 is the increment; the rest follow it.
 
-**The rest of the corpus ranking** (`mise run rel-blockers`, 706 routed — re-run it every round, it
+**The rest of the corpus ranking** (`mise run rel-blockers`, 725 routed — re-run it every round, it
 MOVES): **side effects 184 is now the largest family by a wide margin** (`aggregate` 65 · `group` 63 ·
 `groupCount` 31 · `sack` 25) · the property shape 90 (`properties` 46 · `valueMap` 37) · scalar
-transforms 64 (`math` 15 · `asNumber` 12) · branch 63 (`choose` 36 · `union` 20) · **writes down to 58**
-(`property` 37 · `addE` 6 · `mergeV` 6 · `mergeE` 6 · `addV` 3) · aliases 53 (all at `select`) · the
+transforms 64 (`math` 15 · `asNumber` 12) · branch 63 (`choose` 36 · `union` 20) · aliases 53 (all at
+`select`) · **writes down to 39** (`property` 18 · `addE` 6 · `mergeV` 6 · `mergeE` 6 · `addV` 3) · the
 list shape 30 (all at `fold`) · row ops 15. In no family: `repeat` 86 · `local` 61 · `match` 57 ·
 `where` 51 · `path` 38 · `is` 31 · `has` 26 · `call` 23 · `inject` 20 · `or` 17 · `project` 16 ·
 `filter` 15 · `and` 15 · `shortestPath` 15 · `V` 12. **The residue is where the next
@@ -711,8 +711,23 @@ traversers, as a relation. `input`/`incoming` is its only spelling, in code and 
   statement is GUARDED by, because two elements in one stream take different arms. The FTS rows are an
   `INSERT … SELECT` over the property insert's own `RETURNING` (the text is a compile-time constant,
   the pid is not, so they meet as a cross join over a `Values`), and the walk that produces the text is
-  SHARED with legacy — a re-derived index is a silent divergence. Declines: a traversal value, a
-  collection, `null` (the removal rule), a meta-property, a `T` key, and cardinality/meta on an edge.
+  SHARED with legacy — a re-derived index is a silent divergence. Declines: a traversal value, `null`
+  (the removal rule), a meta-property, a `T` key, and cardinality/meta on an edge.
+
+  **A COLLECTION value LANDED (+19, 30.7% → 31.5%, `property`'s blockers 37 → 18)** and it was neither
+  the "different bind shape and different index walk" this list predicted nor a further increment: both
+  shared waists already did the work. `propertyValueBind` returns the typed `{t,v}` tree's JSON TEXT for
+  a collection and `propertyFtsEntries` already walks it per nested LEAF, so what was missing was
+  carrying the one bit that says which bind form to use — `PropertyWrite.collection`, plus `storedExpr`
+  wrapping `jsonb(<text>)`. **Written ONCE because the value appears twice in one statement set**: the
+  row inserted, and the `set`-cardinality "is it already present" comparison. A form that differed
+  between them appends a duplicate instead of matching, which is why that is the sharpest of the L4
+  pins. §10·5 is unaffected — the blob goes INTO the table and the `RETURNING` projects ids only.
+
+  **A read-path gap found while pinning it and not fixed:** `has(key, <collection>)` THROWS on both
+  spines — the collection reaches the bind layer raw and SQLite refuses, so it fails with a bind error
+  rather than a clear deferral (the class §11 exists to keep out). The pins read the value back through
+  `values()` instead. Its own increment, and probably one of the census's 17 `crashed` rows.
 
   **Two algebra gaps it closed, both of which any later write would have hit.** `EXCLUDED` — a reserved
   relation identity for SQLite's `excluded`, in scope for an `ON CONFLICT` clause alone, without which
@@ -886,7 +901,11 @@ traversers, as a relation. `input`/`incoming` is its only spelling, in code and 
   every one of them and deleting its dispatcher would turn each into a hard error. **2.6 is gated on
   write coverage being COMPLETE, not on the prerequisite** — which is worth stating because the
   prerequisite is the exciting-looking half and it is done. The remaining order is therefore
-  `property`'s 37 first (the largest by a wide margin), then the three sixes.
+  `property`'s 18 first (still the largest), then the three sixes. Its residue is now four NAMED causes
+  rather than one undifferentiated number: a NESTED value (~6), the `null` REMOVAL rule (~6), a
+  `T`-token key (3) and a meta-property (~4), plus three `withSideEffect` constants. Two of those are
+  cheap and one is not — `null` is a DELETE wearing a write's spelling, and a nested value is the
+  per-traverser evaluation this route does not do.
 
   **`parseMergeOptions` is DELETED — absorbed into `mergeMaps` (0 references, floor banked).** It came
   off this list rather than down it, and the reason generalizes to any target a migration makes SHARED:
