@@ -1210,6 +1210,37 @@ matching move at the module level — the construction leaf (`meta`/`typeOf`/`mi
 `labelIds`/`storedValue`/`PROPERTIES`/`firstOf`) that both lowering modules sit on, keeping the import
 graph a DAG: `build ◂ {predicate, modulator} ◂ lower ◂ spine`.
 
+**Coverage 210 → 251, 10.9%: `P.typeOf`, the first increment chosen by §10·8 — and the largest per
+line of code so far.** The indicator was the blocker table saying `is` blocked **104** traversals while
+`is` was already covered; the family was one predicate op, and because the predicate vocabulary is a
+MODULE it landed for `is`, `has`, `where` and every nesting inside `P.not`/`and`/`or` at once. Three
+resolution modes, all three the reference's: a compile-time type CONSTANT-FOLDS (`count()` is a `long`,
+so `count().is(P.typeOf(GType.LONG))` never touches a row), a per-row `vtype` compares the column with
+the storage class as the fallback for a raw-inserted row, and nothing-known is the storage-class test
+alone — FALSE for every type SQLite's classes cannot distinguish, which is the answer rather than a
+decline.
+
+**IT ALSO BANKED SIX TRAVERSALS OF COVERAGE IT WAS NOT ENTITLED TO, and the way that surfaced is the
+finding.** `is(typeOf(GType.LIST|SET|MAP))` is not a predicate at all — it is a TYPE ASSERT that
+RETYPES the stream, scalar → list or map. Lowered as a filter it returns the right ROWS framed as the
+wrong SHAPE, which is the one thing the module may never do. Two things about how it was caught:
+
+- **The census could not see it, structurally.** Every affected corpus traversal returns ZERO rows on
+  the reference fixture (which has no `list`/`map`/`set` property), so both the before and after digests
+  are the empty-set hash. The rows moved `legacy → rel` with an identical answer, and a first
+  `census-record` BANKED that. Only the L2 SHAPE assertions caught it, one commit later. **So a coverage
+  increment is validated by the shape assertions, not by the census** — the census answers "did anything
+  change", and a wrong shape over an empty result changes nothing it measures.
+- **The coverage ratchet then did exactly its job**, refusing the corrected number as a `rel → legacy`
+  regression and naming all six traversals. That is the mechanism working: the re-record went DOWN, on
+  purpose, with the reason in the commit message — which is why `census-record` is a command and not
+  automatic.
+
+The fix reuses legacy's ONE decode (`typeOfAssert` → `collectionAssert` in `child-shape.ts`) rather than
+recognizing the assert again. That decode exists because FIVE shape arms had already drifted decoding it
+inline — a sixth copy in the RelIR route would have been the same mistake with a new spine's name on it,
+which is the §10·8 duplication sweep catching something it had already been built to catch.
+
 **PHASE 4.1's ENTRY FACT, measured 2026-08-03 — and it corrects this document twice.** §6 said the
 element row-ops are "fused into the framing projection by `TailAcc`, so a `Sort` on the CORE relation
 is a different plan (the framing join is 1:1 on `id`, so it is equivalent — but that is an argument to
@@ -1686,6 +1717,62 @@ works; deletion says the old one is gone, and only the second one ends this.
   every round for the reason it was built: at 208 routed it showed `is` blocking **104** traversals
   while `is` was already covered — every one of them `P.typeOf`, a single predicate op. That kind of
   finding is what the instrument is for, and it is orthogonal to which criterion ranks the list.
+
+### 10·8 — DECIDED 2026-08-03: the corpus is an INDICATOR; the unit of work is the FAMILY
+
+10·7 changed what to rank by. This changes what an increment IS, and the two compose: **read the corpus
+blocker table to find WHERE the fold gives up, then expand to the whole family that step belongs to.**
+Never land the step alone.
+
+**Why the family and not the step.** A family closes; a step leaves a ragged edge, and the ragged edge
+is what makes the NEXT increment expensive — it has to re-derive the parse, the projection, the type
+context or the productivity rule that the first one solved locally. Landing the vocabulary instead is
+barely more work than landing its largest member, because the members ARE one lowering. Three rounds of
+evidence, in increasing order of how clearly they say it:
+
+| increment | shape | delta |
+|---|---|---|
+| scalar `order()` | one step, one host | **+2** |
+| the modulator seam | one VOCABULARY (`by()`), two hosts today, six more free | **+2**, and six blanket declines gone |
+| `P.typeOf` | one arm of an existing vocabulary, every predicate position at once | **+47** |
+
+`P.typeOf` is the case that settles it. The per-step table said `is` blocked **104** traversals while
+`is` was already covered — every one of them a single predicate op. Landing it was one arm in
+`predicate.ts` plus a type context, and because the predicate vocabulary is a MODULE, `is`, `has`,
+`where` and every nesting inside `P.not`/`and`/`or` all gained it together. Had the same op been added
+where a `predicateSql`-style switch lived, it would have been four copies.
+
+**And sweep for DUPLICATION or DEFERRAL GROUPS every round, because that is compounding work already
+landed.** Not a separate task — it is where the leverage is, and every round so far has produced one:
+
+- `P.typeOf` needed the GType → SQLite storage-class table. It was private to legacy's `plan.ts`, so it
+  moved to `gremlin/types.ts` as `STORAGE_CLASS` beside `normalizeTypeName`/`CANONICAL` — the same
+  vocabulary asked a different question, now with ONE authority instead of one per spine.
+- It also forced `predicateExpr`'s optional `compare` callback to become the total `SubjectType` union,
+  because `typeOf` needs the vtype as an *expression* where the range ops need it as a *cast key*: two
+  optionals describing one fact, which is exactly `ScalarType`'s pattern
+  (`docs/2026-07-28-scalartype-refactoring-pattern.md`) and now has the coarse view DERIVED.
+- The modulator seam forced `storedCompare(rel, col)` → `storedCompareOn(expr)` for the same reason, and
+  `build.ts` as the construction leaf both lowering modules sit on.
+
+**The instrument is `mise run rel-blockers`** (`scripts/rel-blockers.ts`), and it reports BOTH views
+because only the family total ranks correctly. Measured at 257 routed (2026-08-03):
+
+| family | blocked | largest members |
+|---|---|---|
+| writes | **187** | `addV` 146 · `mergeV` 25 |
+| side effects | **159** | `aggregate` 59 · `group` 50 · `sack` 25 · `groupCount` 25 |
+| scalar transforms | **153** | `asNumber` 60 · `asBool` 12 · `concat` 9 · `asDate` 9 — **eighteen** names |
+| aliases | 145 | `as` 133 · `select` 12 |
+| the list shape | 106 | `fold` 102 |
+| the property shape | 87 | `properties` 46 · `valueMap` 35 |
+| branch | 65 | `choose` 37 · `union` 22 |
+| row ops (4.1) | 51 | `order` 39 |
+| reducers | 34 | `sum` 16 |
+
+In no family: `inject` 113 (the forms that decline by design, plus their tails), `repeat` 73, `has` 59,
+`local` 55, `where` 45, `match` 36, `path` 28. **The residue is where the next family gets recognized** —
+`inject` sat in it for two rounds before being spotted as the largest prize on the board.
 
 **Sequencing: 10·1 → 10·2 → 10·3 — all three landed (`b199a5f`, `3057e89`, `25e0b5f`).** 10·4 is
 the decision that governs everything after them; 10·5 is settled by measurement; 10·6 is small and ready. The assembler rewrites every emitter arm while the `Plan` wrapper
