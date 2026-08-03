@@ -72,12 +72,14 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
   });
 
   test('union() → UNION ALL of branch id-relations, multi-hop bodies fold', () => {
-    const u = read('g.V(1).union(__.out("knows"), __.out("created")).values("name")');
+    // The LEGACY spelling, pinned explicitly: an unordered element-arm union routes RelIR now, and
+    // a test that pins a spine's spelling pins BOTH (§10·4). The RelIR half is at the end.
+    const u = read('g.V(1).union(__.out("knows"), __.out("created")).values("name")', { spine: 'legacy' });
     expect(u.sql).toContain('UNION ALL');
     expect(u.sql).toContain('ROW_NUMBER() OVER () AS o0');
     expect(u.sql).toContain('SELECT e.tgt AS id, p.bulk, p.o0 FROM edges e JOIN');
     // multi-hop branch now folds through the dispatch (was single-hop only)
-    expect(read('g.V().union(__.out().out(), __.in()).values("name")').sql)
+    expect(read('g.V().union(__.out().out(), __.in()).values("name")', { spine: 'legacy' }).sql)
       .toContain('SELECT e.tgt AS id, p.bulk, p.o0 FROM edges e JOIN c2 p ON e.src=p.id');
     // Homogeneous scalar arms lower at the shape-aware dispatcher and re-enter the
     // scalar pipeline; this is not the element-only PREFIX union.
@@ -90,9 +92,21 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // is how the guard was found. ZERO branches still throws.
     expect(read('g.V().union(__.out())').sql).toContain('FROM');
     // as() before union now threads the alias column through the merge (carried-schema, Move B)
-    const ua = read('g.V().as("a").union(__.out(), __.in()).select("a")');
+    const ua = read('g.V().as("a").union(__.out(), __.in()).select("a")', { spine: 'legacy' });
     expect(ua.sql).toContain('UNION ALL');
     expect(ua.sql).toContain('SELECT id, a0, bulk FROM'); // the a0 alias column survives the branch merge
+    // The SAME chain on the RelIR spine, and the two things worth asserting are structural rather
+    // than spelling: the parent relation is referenced once per arm and so becomes a SHARED binding
+    // (the `name` pass's decision, not the merge's), and the alias column rides through the merge
+    // into the select — which is the arm merge and the alias channel composing with no code between
+    // them. An arm that BINDS a label still declines, which is why the divergent case below stays
+    // legacy.
+    const uaRel = read('g.V().as("a").union(__.out(), __.in()).select("a")', { spine: 'rel' });
+    expect(uaRel.spine).toBe('rel');
+    expect(uaRel.sql).toContain('UNION ALL');
+    expect(uaRel.sql).toMatch(/WITH r0 AS \(/);
+    expect(uaRel.sql.match(/FROM edges \w+ INNER JOIN r0 /g)).toHaveLength(2);
+    expect(uaRel.shape).toEqual(ua.shape);
     // a NEW as() bound INSIDE one arm now forks/merges: the label unions into the merged
     // set and the arm that never bound it pads an empty (NULL) history.
     const divU = read('g.V().union(__.as("b").out(), __.in()).select("b")');

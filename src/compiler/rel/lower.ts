@@ -1,4 +1,4 @@
-import { groupableChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
+import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
 import { col, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { DO_BIND_CAP, planBindCount } from '../../rel/check.ts';
@@ -1154,7 +1154,13 @@ function scalarTail(
     if (step.name === 'select') {
       const selected = selectOne(step, rel, labels, fresh);
       if (!selected) return null;
-      return selectTail(selected, steps, at + 1, bulked, ctx, fresh, labels);
+      return continueAs(selected.rel, readFraming(selected.read), steps, at + 1, bulked, ctx, fresh, labels);
+    }
+
+    if (step.name === 'union') {
+      const merged = unionArms(step, rel, out, bulked, ctx, fresh, labels);
+      if (!merged) return null;
+      return continueAs(merged.rel, merged.framing, steps, at + 1, bulked || ctx.collapse, ctx, fresh, labels);
     }
 
     if (step.name === 'order') {
@@ -1486,7 +1492,7 @@ function listTail(
     if (step.name === 'select') {
       const selected = selectOne(step, rel, labels, fresh);
       if (!selected) return null;
-      return selectTail(selected, steps, at + 1, false, ctx, fresh, labels);
+      return continueAs(selected.rel, readFraming(selected.read), steps, at + 1, false, ctx, fresh, labels);
     }
 
     if (step.name === 'unfold') {
@@ -1786,9 +1792,16 @@ function elementTail(
     if (step.name === 'select') {
       const selected = selectOne(step, rel, labels, fresh);
       if (!selected) return null;
-      const next = selectTail(selected, steps, at + 1, bulked, ctx, fresh, labels);
-      if (!next) return null;
-      return next;
+      return continueAs(selected.rel, readFraming(selected.read), steps, at + 1, bulked, ctx, fresh, labels);
+    }
+    if (step.name === 'union') {
+      const merged = unionArms(step, rel, { kind: 'elements', elem }, bulked, ctx, fresh, labels);
+      if (!merged) return null;
+      // `bulked` after a merge is deliberately CONSERVATIVE: an arm may have collapsed and the arm
+      // lowering does not report it back, so a following slice takes the cumulative-`SUM(bulk)` form.
+      // At bulk 1 that is the same answer as the plain slice, so the cost is SQL shape and never
+      // correctness — the same trade the movement loop already makes.
+      return continueAs(merged.rel, merged.framing, steps, at + 1, bulked || ctx.collapse, ctx, fresh, labels);
     }
     const row = rowOp(step, rel, elem, bulked, fresh);
     if (!row) break;
@@ -1804,24 +1817,121 @@ function elementTail(
 }
 
 /**
- * WHERE A `select(label)` GOES NEXT — the re-entry, and the one place the alias read's shape is turned
- * back into a host.
+ * GIVEN A RELATION AND ITS SHAPE, WHICH LOOP OWNS THE REST OF THE CHAIN.
  *
- * Every arm hands the rest of the chain to the fold that owns that shape, which is what makes
- * `select()` position-independent: the label decides the shape, the shape decides the loop, and no
- * step after it has to know a `select` happened. The alias map rides through unchanged — selecting a
- * label does not consume it, so `as('a').as('b').select('a').select('b')` is ordinary composition.
+ * The ONE dispatcher, and it is what stops every step that produces a new shape mid-chain from
+ * growing its own copy of the fold. Two already need it — a `select(label)` re-root and a branch
+ * ARM MERGE — and they need the identical thing: hand a relation plus its framing to whichever loop
+ * owns that shape and let the rest of the chain proceed as if it had arrived there naturally.
+ *
+ * TOTAL over `RelFraming`, so a shape the lowering learns to produce is a compile error here until
+ * this says which loop owns it — the same discipline `spine.ts` applies at the framing seam.
  */
-function selectTail(
-  selected: { readonly rel: Rel; readonly read: AliasRead }, steps: readonly IRStep[], from: number,
+function continueAs(
+  rel: Rel, framing: RelFraming, steps: readonly IRStep[], from: number,
   bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | null {
-  const { rel, read } = selected;
-  switch (read.kind) {
-    case 'element': return elementTail(rel, read.elem, steps, from, bulked, ctx, fresh, labels);
-    case 'list': return listTail(rel, read.of, steps, from, ctx, fresh, labels);
-    // A selected value's multiplicity is the traverser's, so `bulked` carries; its framing is the
-    // label's own recorded type, restored by `selectOne` (per-row types land back in a `vtype` column).
-    case 'value': return scalarTail(rel, { kind: 'scalar', type: read.type }, steps, from, bulked, ctx, fresh, labels);
+  switch (framing.kind) {
+    case 'elements': return elementTail(rel, framing.elem, steps, from, bulked, ctx, fresh, labels);
+    case 'list': return listTail(rel, framing.of, steps, from, ctx, fresh, labels);
+    // A value's multiplicity is the traverser's, so `bulked` carries.
+    case 'scalar': return scalarTail(rel, framing, steps, from, bulked, ctx, fresh, labels);
   }
 }
+
+/** An alias READ, as a framing. The label decides the shape; `continueAs` decides the loop. */
+const readFraming = (read: AliasRead): RelFraming =>
+  read.kind === 'element' ? { kind: 'elements', elem: read.elem }
+    : read.kind === 'list' ? { kind: 'list', of: read.of }
+      // The label's own recorded type, restored by `selectOne` (a per-row type lands back in `vtype`).
+      : { kind: 'scalar', type: read.type };
+
+/**
+ * `union(a, b, …)` — the ARM MERGE, and the first production caller of the channel core's peer merge.
+ *
+ * Every arm is lowered from the SAME input relation, which is the whole reason the arms need no
+ * machinery of their own: an arm body over the current traverser IS the ordinary fold started at that
+ * relation, so `__.out('knows')` inside a `union` is the same movement it is outside one. The input
+ * node is then referenced once per arm, and a node referenced more than once is a DAG share — so
+ * `name` decides whether the parent becomes a CTE (§4.6) rather than each arm recomputing it.
+ *
+ * Traversers are a multiset, so the merge is `UNION ALL` and only `dedup()` collapses.
+ *
+ * Three declines, each a CHAIN FACT rather than a step name:
+ *
+ * - **a live EMISSION ORDER.** A branch merge's canonical key is (input traverser, arm, arm position)
+ *   and the first term is unrecoverable here: `encounter` is ONE slot which every fan-out inside an
+ *   arm re-mints in place, so two arms rank independently and merging them interleaves the streams
+ *   (§11). Recovering it needs the `origin`/`branchOrder` channels, which this route does not carry
+ *   and `spine.ts` has no framing translation for. Measured: 5 of the 70 branch-blocked corpus
+ *   traversals demand an order, and every one of them contains other uncovered steps as well.
+ * - **arms that disagree on their PAYLOAD.** A `Union` emits its arms positionally, so a scalar arm
+ *   carrying a per-row `vtype` cannot merge with one that does not. Legacy NULL-pads to the widest
+ *   arm; padding is a framing decision about what the absent type MEANS, so it declines here rather
+ *   than being guessed at.
+ * - **an arm that BINDS a label.** Arms mint alias columns independently from the same seed, so their
+ *   raw column names collide and the merge owes each arm a projection remapping onto a canonical
+ *   column. That is the alias half of the merge contract and it is a further increment.
+ */
+function unionArms(
+  step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): { readonly rel: Rel; readonly framing: RelFraming } | null {
+  if (step.modulators?.length || step.optionArms) return null;
+  // Read off the RELATION, not off `demandsEncounter`: what matters is whether a position is
+  // physically carried here, which an `order()` upstream can make true where the chain-global flag
+  // does not, and vice versa.
+  if (encounterOf(input.channels)) return null;
+
+  const args = step.args ?? [];
+  if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
+  const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
+  if (bodies.some((body) => !body?.length)) return null;
+
+  const arms: Tail[] = [];
+  for (const body of bodies) {
+    const arm = continueAs(input, framing, body!, 0, bulked, ctx, fresh, labels);
+    if (!arm) return null;
+    arms.push(arm);
+  }
+
+  const [first, ...rest] = arms as [Tail, ...Tail[]];
+  // The arms must agree on SHAPE, and `sameFraming` is the whole test: an element arm and a scalar
+  // arm merge to legacy's VARIANT stream, which is a shape this route does not produce.
+  if (rest.some((arm) => !sameFraming(first.framing, arm.framing))) return null;
+  // …and on their declared COLUMNS, name for name, because a Union is positional.
+  if (rest.some((arm) => !sameColumns(first.rel.type.cols, arm.rel.type.cols))) return null;
+  // An arm that bound a label would have to be remapped onto a canonical column (see above).
+  if (arms.some((arm) => arm.aliases.size !== labels.size)) return null;
+  // AN ARM THAT MINTS RIGID STATE DECLINES, and this is the check the channel core would otherwise
+  // make by THROWING — which is right inside the core and wrong here, where the contract is `null`.
+  // The reachable case is an arm-local `order()`: it mints an emission order INSIDE the arm, so two
+  // arms arrive independently numbered from 1 and the merged stream has two positions claiming to be
+  // one. `rigidChannels` is why the peer merge refuses it rather than picking a winner, and asking
+  // here is what turns that refusal into a deferral (found by `rel-sweep` on
+  // `union(out(…).order().by(k).limit(2), …)`).
+  if (arms.some((arm) => !sameChannels(input.channels, arm.rel.channels))) return null;
+
+  // The merged list, from the core rather than assembled here. Today the arms are required to agree,
+  // so the peer merge has nothing to reconcile and this is a derivation rather than a reconciliation
+  // — it earns its keep when the alias half lands, since an alias is the one FORKABLE role and a
+  // label bound in one arm is exactly what `union` merge policy exists for.
+  const channels = mergeChannels(input.channels, arms.map((arm) => arm.rel.channels), { rigid: 'peer' });
+  return {
+    rel: make.union({
+      id: fresh('un'), inputs: arms.map((arm) => arm.rel), all: true,
+      channels, type: first.rel.type,
+    }),
+    framing: first.framing,
+  };
+}
+
+/** Do two framings describe the same stream? A shape mismatch between arms is a variant stream, which
+ *  is why this is an equality rather than a merge. */
+const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
+  left.kind === 'elements' ? right.kind === 'elements' && left.elem === right.elem
+    : left.kind === 'list' ? right.kind === 'list' && JSON.stringify(left.of) === JSON.stringify(right.of)
+      : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
+
+const sameColumns = (left: readonly ColMeta[], right: readonly ColMeta[]): boolean =>
+  left.length === right.length && left.every((column, i) => column.name === right[i]!.name);

@@ -257,6 +257,17 @@ const COVERED = [
   'g.V().values("name").fold().as("a").select("a")',
   'g.V().values("name").fold().as("a").select("a").unfold()',
   'g.inject(["a","b"]).as("a").select("a").count(Scope.local)',
+  // THE ARM MERGE — `union()` as an n-ary `Union`, and the arms need no machinery of their own: an
+  // arm body over the current traverser IS the ordinary fold started at that relation, so the input
+  // node is simply referenced once per arm and `name` decides whether it becomes a CTE.
+  'g.V().union(__.out(), __.in())', 'g.V(1).union(__.out("knows"), __.out("created"))',
+  'g.V().union(__.out().out(), __.in())', 'g.V().union(__.out(), __.in(), __.both())',
+  'g.V().union(__.out(), __.in()).count()', 'g.V().union(__.out(), __.in()).values("name")',
+  'g.V().hasLabel("person").union(__.out("knows"), __.out("created")).dedup()',
+  // …composing with the alias channel, with nothing written between the two features.
+  'g.V().as("a").union(__.out(), __.in()).select("a")',
+  // …and over a VALUE parent, where the arms are scalar bodies rather than movements.
+  'g.V().values("name").union(__.identity(), __.identity())',
 ];
 
 /**
@@ -269,6 +280,11 @@ const DECLINED = [
   "g.V().as('a').out().as('a').select(Pop.all,'a')", // Pop.all is the history as a LIST value
   "g.V().as('a').out().select('a').by('name')", // a modulated select reads the SELECTED element
   "g.V().out().select('a')",           // a label bound NOWHERE drops every traverser — the empty relation
+  "g.V().union(__.out())",             // a SINGLE arm: `union(t) === t`, not a merge at all
+  "g.V().union(__.as('b').out(), __.in())",  // an arm that BINDS a label owes each arm a remap + NULL pad
+  "g.V(1).union(__.values('name'), __.constant('x'))",  // arms disagreeing on payload: a Union is positional
+  "g.V().union(__.out(), __.count())", // element arm + scalar arm: the VARIANT shape, not either of them
+  "g.V().order().by('name').union(__.out(), __.in())",  // a live emission order: the merge key needs the origin
   'g.inject()',                       // the EMPTY relation, which `Values` refuses to express (§3.3)
   "g.inject([1,2],3)",                // MIXED list/scalar args: the VARIANT shape, not either of them
   "g.inject(['a','b']).order(Scope.local)",   // a member SORT needs the vtype-aware compare key

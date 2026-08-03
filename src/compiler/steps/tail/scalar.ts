@@ -7,7 +7,7 @@ import { isLocalScope, REDUCERS, sliceOf } from '../../ir/step.ts';
 import { armOrderKey, branchFork, layoutProjection, layoutProjectionMinting, layoutCols, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
 import { loweringStateOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec, SCALAR_TRANSFORMS } from './coerce.ts';
-import { perRowColumnOf, perRowCols, STATIC, staticTypeOf, UNKNOWN, type ScalarType, type ValueType } from '../../../sql/kernel/render.ts';
+import { PER_ROW, perRowColumnOf, perRowCols, STATIC, staticTypeOf, UNKNOWN, type ScalarType, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { reprojectRows, rankedRows } from './barrier.ts';
 import { collectionAssert } from './child-shape.ts';
@@ -515,9 +515,24 @@ export function unionScalarStreams(base: LoweringState, arms: readonly ScalarStr
   const armsGrewAlias = layoutGrewAliases(fork, mergedLayout);
   // Forward the base carried EXCEPT any prior encounter — the merge supersedes it.
   const out = patchLayout(fork, { encounter: null, aliases: mergedAliases });
-  // The merged relation projects only `v` (+ `vt`), so a per-row type column cannot cross the
-  // union: this payload list is also why an arm carrying one degrades to `unknown` below.
-  const payload = ['v', ...(numeric ? ['vt'] : [])];
+  // A PER-ROW TYPE COLUMN CROSSES THE UNION where every arm agrees on it, and that is not a
+  // refinement — it is the difference between framing a typed value right and wrong. This used to
+  // project `v` (+ `vt`) only, so an arm carrying a stored `vtype` degraded to `unknown` and the wire
+  // then INFERRED the type from the storage class. On a string that agrees with the stored tag by
+  // luck; on a long past 2^53, a `uuid`, a `char` or a `datetime` it does not, and the type authority
+  // in this project is the `vtype` column and never SQLite's `typeof`. Re-expressing the scalar arm
+  // merge in RelIR is what surfaced it: that route kept the column, so the two spines disagreed on
+  // the SHAPE while agreeing on every row of the fixture — which is the species of divergence only a
+  // side-by-side shape assertion can see.
+  //
+  // Only where EVERY arm carries the same per-row column: a mixed set has no single answer and
+  // `unknown` is the honest merge for it. `numeric` is disjoint (a reducer's dynamic `vt`).
+  const perRowCol = numeric ? undefined : perRowColumnOf(arms[0].type);
+  const perRow = perRowCol !== undefined
+    && arms.every((a) => perRowColumnOf(a.type) === perRowCol)
+    && arms.every((a) => a.rel.cols.includes(perRowCol))
+      ? perRowCol : undefined;
+  const payload = ['v', ...(numeric ? ['vt'] : []), ...(perRow ? [perRow] : [])];
   const parts = arms.map((a, k) => {
     const r = a.rel.as('a');
     const key = armOrderKey(out, a.traverserLayout, r);
@@ -526,16 +541,18 @@ export function unionScalarStreams(base: LoweringState, arms: readonly ScalarStr
     // `bulk` fills it with 1 (what the reference's generated reducer traverser carries) while still
     // projecting a label it bound after the barrier.
     const carried = layoutArmProjection(out, a.traverserLayout, r, armsGrewAlias);
-    return q`SELECT ${r.c.v} AS v${numeric ? q`, ${r.c.vt} AS vt` : empty}, ${value(k)} AS arm_idx, ${key.ordinal} AS arm_ordinal, ${key.encounter} AS arm_encounter${carried} FROM ${r}${gate ? q` WHERE ${gate}` : empty}`;
+    return q`SELECT ${r.c.v} AS v${numeric ? q`, ${r.c.vt} AS vt` : empty}${perRow ? q`, ${r.c[perRow]} AS ${raw(perRow)}` : empty}, ${value(k)} AS arm_idx, ${key.ordinal} AS arm_ordinal, ${key.encounter} AS arm_encounter${carried} FROM ${r}${gate ? q` WHERE ${gate}` : empty}`;
   });
   // `mint: true` UNCONDITIONALLY, unlike the list/variant siblings: a scalar stream's positional
   // consumers (limit/range/take-first after a branch) are reachable today, so the merge has to
   // establish the canonical order even when nothing upstream asked for one.
   const armMerge = mergeArmRelation(base, out, payload, parts, true);
-  // A STATIC type survives only if every arm agrees; anything else is inferred at the wire.
+  // A STATIC type survives only if every arm agrees; a PER-ROW one survives because the column now
+  // crosses the merge (see `perRow` above); anything else is inferred at the wire.
   const first = arms[0].type;
-  const merged: ScalarType = first.kind === 'static' && arms.every((a) => a.type.kind === 'static' && a.type.type === first.type)
-    ? first : UNKNOWN;
+  const merged: ScalarType = perRow ? PER_ROW(perRow)
+    : first.kind === 'static' && arms.every((a) => a.type.kind === 'static' && a.type.type === first.type)
+      ? first : UNKNOWN;
   return toScalarStream(
     { q: base.q, params: base.params, sideEffects: base.sideEffects, traverserLayout: armMerge.traverserLayout },
     armMerge.rel, undefined, { type: merged, result: numeric ? 'number' : 'value' },
