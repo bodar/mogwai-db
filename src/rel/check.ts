@@ -98,8 +98,14 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
     if (term.kind === 'self-ref') return term.name === name;
     // The emitter can place a direct source at the recursive term's FROM, but it may not
     // unwrap a derived unary chain. `flatten` is the pass that makes broader bodies legal.
+    //
+    // `Materialize` is deliberately NOT in this set, though it is a unary node like the others: it
+    // is the one whose whole purpose is to FORCE a named CTE boundary, which is the derived-table
+    // wrapping of the self reference that P1 measured as fatal — `circular reference`, even as the
+    // sole reference, because SQLite's rule is positional rather than a count. A fence belongs
+    // outside the recursive term, never between it and its own walk.
     if (term.kind === 'project' || term.kind === 'filter' || term.kind === 'sort' || term.kind === 'limit'
-      || term.kind === 'distinct' || term.kind === 'window' || term.kind === 'explode' || term.kind === 'materialize')
+      || term.kind === 'distinct' || term.kind === 'window' || term.kind === 'explode')
       return term.input?.kind === 'self-ref' && term.input.name === name;
     return term.kind === 'join'
       && ((term.left.kind === 'self-ref' && term.left.name === name) || (term.right.kind === 'self-ref' && term.right.name === name));

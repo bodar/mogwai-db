@@ -157,6 +157,14 @@ describe('RelIR', () => {
       },
     });
     expect(() => check(hidden)).toThrow("must reference 'hiddenWalk' at the top level of FROM");
+    // A FENCE is the same rejection, and it is the one worth naming: a `Materialize` is a legal
+    // unary node whose whole purpose is to force a named CTE boundary, which is exactly the derived
+    // table P1 measured as fatal (`circular reference`) even as the SOLE reference — SQLite's rule
+    // is positional, not a count. So it is refused where a `Filter` is admitted.
+    const fenced = recursiveRel({ id: relId('fencedWalk'), name: 'fencedWalk', cols: ['id'], seed, channels, type: { cols: oneCol },
+      step: (self) => materialize({ id: relId('fence'), name: 'fence', input: self, channels, type: { cols: oneCol } }),
+    });
+    expect(() => check(fenced)).toThrow("must reference 'fencedWalk' at the top level of FROM");
   });
 
   test('places named dependencies beside a recursive CTE', () => {
