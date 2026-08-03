@@ -902,6 +902,26 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { readon
     };
   }
 
+  // `constant(c)` REPLACES the traverser's value with a literal, which over an element stream is a
+  // shape boundary like `values()` and `count()` — the element is gone and a value is in its place.
+  // The channels ride through untouched: a constant changes the VALUE, not the traverser.
+  if (step.name === 'constant') {
+    const [value, extra] = args;
+    if (extra !== undefined) return null;
+    const literal = value === null ? lit(null, 'any') : operandLit(value);
+    if (!literal) return null;
+    return {
+      rel: make.project({
+        id: fresh('ct'), input, channels: input.channels,
+        type: typeOf(meta('v', 'any', true), ...input.channels.map((channel) => meta(channel.col, 'int'))),
+        exprs: [['v', literal], ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
+      }),
+      // UNKNOWN, not a tag inferred from the JS value: that is what legacy frames here, and a
+      // compile-time tag would be a claim the argument's declared type does not support.
+      framing: { kind: 'scalar', type: UNKNOWN },
+    };
+  }
+
   if (step.name === 'values') {
     // TinkerPop's `PropertiesStep` is `element.properties(keys)`: no keys means EVERY key, several
     // mean membership in the set. A non-string key is a decline rather than a guess — answering
@@ -1015,7 +1035,8 @@ function sortTerms(step: IRStep, host: ByHost, fresh: Minter): { readonly terms:
  * them, and a step that reshaped the relation without updating both was a desync no type could see.
  */
 function scalarTail(
-  seed: Rel, framing: RelFraming, steps: readonly IRStep[], from: number, bulked: boolean, fresh: Minter,
+  seed: Rel, framing: RelFraming, steps: readonly IRStep[], from: number,
+  bulked: boolean, params: Record<string, any>, fresh: Minter,
 ): { readonly rel: Rel; readonly framing: RelFraming } | null {
   let rel = seed;
   let out: RelFraming = framing;
@@ -1127,6 +1148,24 @@ function scalarTail(
       continue;
     }
 
+    // `constant(c)` over a value stream is the same replacement as over an element one, minus the shape
+    // change — and it DROPS the per-row `vtype`, for the reason every transform does: the stored type
+    // no longer describes the value that is there now.
+    if (step.name === 'constant') {
+      const [value, extra] = args;
+      if (extra !== undefined) return null;
+      const literal = value === null ? lit(null, 'any') : operandLit(value);
+      if (!literal) return null;
+      const carried = rel.channels;
+      rel = make.project({
+        id: fresh('ct'), input: rel, channels: carried,
+        type: typeOf(meta('v', 'any', true), ...carried.map((channel) => meta(channel.col, 'int'))),
+        exprs: [['v', literal], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+      });
+      out = { kind: 'scalar', type: UNKNOWN };
+      continue;
+    }
+
     if (step.name === 'is') {
       if (args.length !== 1) return null;
       // `is(typeOf(GType.LIST|SET|MAP))` is a TYPE ASSERT, not a predicate: over a scalar stream
@@ -1145,7 +1184,7 @@ function scalarTail(
       if (asserted) {
         if (asserted === 'map' || !carries('vtype')) return null;
         const retyped = collectionRetype(rel, 'vtype', asserted, fresh);
-        const tail = listTail(retyped.rel, retyped.of, steps, at + 1, fresh);
+        const tail = listTail(retyped.rel, retyped.of, steps, at + 1, params, fresh);
         if (!tail) return null;
         // The SET marker rides on the framing, not the relation — a set and a list share every member
         // op and differ only at the wire. So it is applied to whatever the list tail finished as, and
@@ -1232,7 +1271,7 @@ function scalarTail(
         ...(out.kind === 'scalar' && staticTypeOf(out.type) ? { staticTag: staticTypeOf(out.type)! } : {}),
         ...(encounter ? { encounter: encounter.col } : {}),
       }, fresh);
-      return listTail(folded.rel, folded.of, steps, at + 1, fresh);
+      return listTail(folded.rel, folded.of, steps, at + 1, params, fresh);
     }
 
     return null;
@@ -1342,7 +1381,7 @@ function injectList(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFramin
  * the distinction legacy draws by composing the shared row op in front of the local one.
  */
 function listTail(
-  seed: Rel, of: ListOf, steps: readonly IRStep[], from: number, fresh: Minter,
+  seed: Rel, of: ListOf, steps: readonly IRStep[], from: number, params: Record<string, any>, fresh: Minter,
 ): { readonly rel: Rel; readonly framing: RelFraming } | null {
   let rel = seed;
   let items = of;
@@ -1373,12 +1412,12 @@ function listTail(
       );
       // A NESTED list's members are LISTS, so the unfolded stream stays in the list vocabulary rather
       // than entering the scalar one — the same explode, a different payload.
-      if (unfolded.member) return listTail(positioned, unfolded.member, steps, at + 1, fresh);
+      if (unfolded.member) return listTail(positioned, unfolded.member, steps, at + 1, params, fresh);
       // A TYPED list's members frame by their OWN type, exactly as `values()` over a stored property
       // does — `PER_ROW('vtype')`, the same channel and the same column name, so the scalar tail's
       // `carries('vtype')` picks it up and an `is(P.gt(…))` after it gets the vtype-aware compare key
       // for free. A bare list's members are honestly `UNKNOWN` (inferred per value at the wire).
-      return scalarTail(positioned, { kind: 'scalar', type: unfolded.typed ? PER_ROW('vtype') : UNKNOWN }, steps, at + 1, false, fresh);
+      return scalarTail(positioned, { kind: 'scalar', type: unfolded.typed ? PER_ROW('vtype') : UNKNOWN }, steps, at + 1, false, params, fresh);
     }
 
     // A GLOBAL row op slices the stream's rows, not one traverser's members.
@@ -1391,7 +1430,7 @@ function listTail(
     // The SET-OP family, which needs to know whether it is TERMINAL: the four deduping ops frame as a
     // GraphBinary SET only at the end of a chain — with a follower TinkerPop treats the deduped
     // content as a plain List, which is what the suite asserts.
-    const setOp = listSetOp(step, rel, items, at + 1 >= steps.length, fresh);
+    const setOp = listSetOp(step, rel, items, at + 1 >= steps.length, params, fresh);
     if (setOp) {
       rel = setOp.rel;
       items = setOp.of;
@@ -1404,7 +1443,7 @@ function listTail(
     return scalarTail(
       retyped.rel,
       { kind: 'scalar', type: retyped.type, ...(retyped.result ? { result: retyped.result } : {}) },
-      steps, at + 1, false, fresh,
+      steps, at + 1, false, params, fresh,
     );
   }
   return { rel, framing: { kind: 'list', of: items } };
@@ -1474,12 +1513,12 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
     // the argument decides which, so the list arm is asked first and declines a scalar inject.
     const listed = injectList(first, fresh);
     if (listed) {
-      const tail = listTail(listed.rel, (listed.framing as { readonly of: ListOf }).of, steps, 1, fresh);
+      const tail = listTail(listed.rel, (listed.framing as { readonly of: ListOf }).of, steps, 1, params, fresh);
       return tail ? lowered(tail.rel, tail.framing) : null;
     }
     const injected = injectSource(steps, fresh);
     if (!injected) return null;
-    const tail = scalarTail(injected.rel, injected.framing, steps, injected.at, false, fresh);
+    const tail = scalarTail(injected.rel, injected.framing, steps, injected.at, false, params, fresh);
     if (!tail) return null;
     return lowered(tail.rel, tail.framing);
   }
@@ -1558,7 +1597,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   const retyped = terminal(steps[at], rel, elem, fresh);
   if (!retyped) return null;
 
-  const tail = scalarTail(retyped.rel, retyped.framing, steps, at + 1, bulked, fresh);
+  const tail = scalarTail(retyped.rel, retyped.framing, steps, at + 1, bulked, params, fresh);
   if (!tail) return null;
   return lowered(tail.rel, tail.framing);
 }

@@ -1,6 +1,6 @@
 # RelIR — the build plan
 
-**Status: BUILDING.** Coverage **526 / 2,298** corpus traversals on the RelIR spine; deletion counter
+**Status: BUILDING.** Coverage **533 / 2,298** corpus traversals on the RelIR spine; deletion counter
 **110** references left across the 15 legacy rows. Both are ratchets in `ci` (§10·4). The direction was
 argued in [codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a and
 is not re-argued here.
@@ -462,10 +462,11 @@ decode — is what recognises it. A MAP assert still declines: that needs the ma
    first-occurrence rule respectively.
 2. The ELEMENT list (`fold()` over elements, whose members are rowids) — its members need expansion
    rather than a decode, which is why `isBareList` names the scalar encodings only.
-3. A TRAVERSAL operand for the set ops and `within`/`without` — the same "a folded re-sourced read is a
-   list value" fact legacy shares between them. `constant(c).fold()` is the cheap half (a compile-time
-   list); a real sub-read needs a nested lowering whose BINDINGS hoist into the outer plan, which is
-   plan composition (§3.0) rather than an escape node.
+3. A SUB-READ operand for the set ops and `within`/`without` — the same "a folded re-sourced read is a
+   list value" fact legacy shares between them. `constant(c).fold()` is DONE (a compile-time one-member
+   list, which is the same fact as a literal array rather than a special case); a real sub-read needs a
+   nested lowering whose BINDINGS hoist into the outer plan, which is plan composition (§3.0) rather
+   than an escape node, and is the next thing this route needs for `where`/`within`/`match` too.
 
 **Then: THE LIST SHAPE — 194 blocked traversals, the largest family, and it splits by FRAMING ARM
 rather than by step** (measured at 349 routed, by asking what shape legacy frames each blocked traversal

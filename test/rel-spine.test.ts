@@ -215,6 +215,18 @@ const COVERED = [
   // `T.id` is the EXTERNAL id (`COALESCE(uid, id)`), read through a correlated scan so the clause is
   // the same at the source and after a movement.
   'g.V().has(T.id,1)', 'g.E().has(T.id,7)', 'g.V().has(T.id,P.gt(2))',
+  // `constant(c)` REPLACES the traverser's value with a literal — a shape boundary over an element
+  // stream, a projection over a value one, and channel-preserving either way: a constant changes the
+  // VALUE, not the traverser. Framed `unknown`, which is what legacy frames (a compile-time tag would
+  // be a claim the argument's declared type does not support).
+  'g.V().constant(1)', 'g.V().constant(null)', "g.V().constant('x')", 'g.V().out().constant(true)',
+  "g.V().values('name').constant('x')", "g.inject(1).constant('a')", 'g.V().constant(1).count()',
+  'g.V().constant(123).is(P.gt(1))',
+  // …and `constant(c).fold()` as a set-op OPERAND is the same fact rather than a special case: a
+  // one-member list known at compile time, which is how legacy resolves it too.
+  "g.V().values('age').fold().merge(__.constant(27).fold())",
+  "g.V().values('age').fold().intersect(__.constant(27).fold())",
+  "g.inject(['a']).merge(__.constant('b').fold())",
 ];
 
 /**
@@ -229,7 +241,7 @@ const DECLINED = [
   "g.inject(['a','b']).order(Scope.local)",   // a member SORT needs the vtype-aware compare key
   "g.inject(['a','a']).dedup(Scope.local)",   // a member dedup keeps the FIRST occurrence per value
   "g.inject(['a','b']).reverse()",    // on a list `reverse` reverses ORDER, not each member
-  "g.inject(['a','b']).merge(__.V().values('name').fold())", // a TRAVERSAL operand is a child read
+  "g.inject(['a','b']).merge(__.V().values('name').fold())", // a real SUB-READ operand: run-time members
   "g.V().values('age').is(P.typeOf(GType.MAP))", // a MAP retype needs the map shape, not a decode
   "g.inject([1,2],3)",                // MIXED list/scalar args: the VARIANT shape, and legacy FLATTENS
   'g.V().has(null)',                  // a null KEY is neither a property name nor a token

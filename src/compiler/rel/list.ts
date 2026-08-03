@@ -3,9 +3,10 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
 import { STATIC, UNKNOWN, type ListOf, type ValueType } from '../../sql/kernel/render.ts';
-import { isPred } from '../../gremlin/frontend.ts';
+import { isNested, isPred } from '../../gremlin/frontend.ts';
 import { isLocalScope, sliceOf } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
+import { childSteps } from '../steps/tail/child-shape.ts';
 import { LIST_LOCAL_TX, STRING_LOCAL_TX } from '../steps/tail/list.ts';
 import { meta, typedNode, typeOf, type Minter } from './build.ts';
 import { predicateExpr, SUBJECT_UNKNOWN } from './predicate.ts';
@@ -569,16 +570,35 @@ const SET_RESULT = new Set(['intersect', 'difference', 'disjunct', 'merge']);
 
 const OPERAND = { value: 'ov', ord: 'oo' } as const;
 
+/**
+ * A set-op OPERAND's members, or `null` to decline — the two COMPILE-TIME forms.
+ *
+ * A literal array is one. `constant(c).fold()` is the other, and it is the same fact rather than a
+ * special case: a one-member list known at compile time, which is exactly how legacy resolves it
+ * (`jsonb(JSON.stringify([c]))`). What declines is a real sub-read (`merge(__.V().values('name')
+ * .fold())`): its members are only known at run time, so it needs a nested lowering whose BINDINGS
+ * hoist into the outer plan — plan composition (§3.0), not an escape node, and its own increment.
+ */
+function operandMembers(arg: unknown, params: Record<string, any>): readonly unknown[] | null {
+  if (Array.isArray(arg)) return arg;
+  if (!isNested(arg)) return null;
+  const inner = childSteps((arg as { readonly nested: unknown }).nested, params);
+  if (inner.length !== 2 || inner[0]?.name !== 'constant' || inner[1]?.name !== 'fold') return null;
+  const [value, extra] = inner[0].args ?? [];
+  if (extra !== undefined || value === undefined) return null;
+  return [value];
+}
+
 export function listSetOp(
-  step: IRStep, input: Rel, of: ListOf, terminal: boolean, fresh: Minter,
+  step: IRStep, input: Rel, of: ListOf, terminal: boolean, params: Record<string, any>, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf; readonly set?: boolean } | null {
   if (step.modulators?.length || step.optionArms || !SET_OPS.has(step.name) || !isBareList(of)) return null;
   const [arg, extra] = step.args ?? [];
-  // A literal array only: every other operand form is either a child read this route has not learned
-  // or an argument error whose exact message legacy owns.
-  if (!Array.isArray(arg) || extra !== undefined) return null;
+  if (extra !== undefined) return null;
+  const members = operandMembers(arg, params);
+  if (!members) return null;
   const rel = fenced(input, fresh);
-  const operand: Expr = { kind: 'call', fn: 'jsonb', args: [lit(JSON.stringify(arg), 'text')] };
+  const operand: Expr = { kind: 'call', fn: 'jsonb', args: [lit(JSON.stringify(members), 'text')] };
 
   // Both sides in ONE vocabulary: bare. A typed self is re-emitted as its payloads first, through the
   // same member frame every other op uses.
