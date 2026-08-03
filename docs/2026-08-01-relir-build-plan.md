@@ -538,14 +538,14 @@ projection with an `ORDER BY` rather than a JSON aggregate, and `fold().max(Scop
 LOCAL reducers (`reducer.ts` over a member, not over a row). `jsonbList` plus the member-transform frame
 is the increment; the rest follow it.
 
-**The rest of the corpus ranking** (`mise run rel-blockers`, 684 routed — re-run it every round, it
+**The rest of the corpus ranking** (`mise run rel-blockers`, 706 routed — re-run it every round, it
 MOVES): **side effects 184 is now the largest family by a wide margin** (`aggregate` 65 · `group` 63 ·
-`groupCount` 31 · `sack` 25) · the property shape 90 (`properties` 46 · `valueMap` 37) · writes 81
-(`property` 37 · `addE` 29 · `mergeV` 6 · `mergeE` 6 · `addV` 3) · scalar transforms 64 (`math` 15 ·
-`asNumber` 12) · branch 63 (`choose` 36 · `union` 20) · aliases 53 (all at `select`) · the list shape 30
-(all at `fold`) · row ops 15. In no family: `repeat` 86 · `local` 61 · `match` 57 · `where` 51 ·
-`path` 38 · `is` 31 · `has` 26 · `call` 23 · `inject` 20 · `or` 17 · `project` 16 · `filter` 15 ·
-`and` 15 · `shortestPath` 15 · `V` 12. **The residue is where the next
+`groupCount` 31 · `sack` 25) · the property shape 90 (`properties` 46 · `valueMap` 37) · scalar
+transforms 64 (`math` 15 · `asNumber` 12) · branch 63 (`choose` 36 · `union` 20) · **writes down to 58**
+(`property` 37 · `addE` 6 · `mergeV` 6 · `mergeE` 6 · `addV` 3) · aliases 53 (all at `select`) · the
+list shape 30 (all at `fold`) · row ops 15. In no family: `repeat` 86 · `local` 61 · `match` 57 ·
+`where` 51 · `path` 38 · `is` 31 · `has` 26 · `call` 23 · `inject` 20 · `or` 17 · `project` 16 ·
+`filter` 15 · `and` 15 · `shortestPath` 15 · `V` 12. **The residue is where the next
 family gets recognized** — `inject` sat in it for two rounds before being spotted as the largest prize
 on the board, and the set ops appeared in it the moment the list frame landed. Note `where`, `match`
 and `path` all ROSE as aliases fell: they are alias CONSUMERS, so closing `as`/`select` moved their
@@ -770,13 +770,29 @@ the two get confused, and the word cost a reader exactly that confusion once.
     subquery over a sub-read, an omitted side the driver itself — one lowering, not three. At the
     source the driver is a one-row `Values` and both ends must then be explicit (`rel-sweep` caught
     the throw where an implicit end asked the seed for an `id` it has not got).
-  - **No correlation key was needed, and that is a fact about the endpoint FORMS**, not luck: every
-    one of them is decidable against the driver ROW. The form that WOULD need one — an alias bound to
-    a vertex `addV()` created earlier in the same chain — declines, because an `Insert`'s `RETURNING`
-    carries the target table's columns and not its source's. **That is the one piece
-    `runWriteChainFull` still owns, and it is 2.6's remaining prerequisite.** Its shape is known: the
-    retained-rows transport would carry each row's POSITION, and position is what correlates a
-    write's `RETURNING` with its driver, since ids are assigned in the source's order.
+  - **No correlation key was needed for the ENDPOINTS, and that is a fact about their FORMS**, not
+    luck: every one of them is decidable against the driver ROW. ~~The form that WOULD need one — an
+    alias bound to a vertex `addV()` created earlier in the same chain — declines… That is the one
+    piece `runWriteChainFull` still owns, and it is 2.6's remaining prerequisite.~~ **DONE, and it was
+    two asymmetries with `addV` rather than the missing substrate this predicted** (+13, 29.5% → 30.7%,
+    `addE`'s blockers 19 → 6). The correlation key that carries an alias through a creation had already
+    landed for `addV`; `addE` simply did not use it, and the fold then re-entered its tail with
+    `NO_ALIASES` — so the relation physically carried the alias columns while the fold had forgotten
+    the labels that name them. And the edge-stream refusal was checked at the TOP (`elem !== 'vertex'`)
+    when the element kind only matters where an END IS IMPLICIT: an implicit end IS the incoming
+    traverser, so an edge stream is one for neither side, while with both ends named the input is only
+    a multiplier and its kind is irrelevant — which the function's own comment already said. Together
+    they declined every SECOND `addE` in a chain, self-edges included, i.e. **the corpus's dominant
+    write shape**: every standard-graph seeder is N `addV`s binding `as()` then N `addE`s reading them.
+    The modern reference graph's own initializer now routes through RelIR and builds a graph identical
+    to legacy's, verified row-for-row on both spines and pinned in L4 as a TRAVERSAL rather than
+    trusted as setup (when a seeder is wrong, the scenario using it fails for a reason naming the
+    traversal under test, never the seeder).
+
+    **The general lesson is the one this doc keeps re-learning: before declaring a substrate missing,
+    check whether an existing one is merely not REACHED** (`src/compiler/steps/CLAUDE.md`'s
+    "cannot EXPRESS this" versus "cannot be HANDED this"). Predicted here as a retained-rows transport
+    carrying each row's position; delivered as two call-site fixes to a join that already existed.
   - `SubReads` hands the read fold to the write vocabulary as two functions, which keeps the import
     graph a DAG and the decline contract intact one level down. An endpoint's body is ROOTED, so it
     goes through `normalize(stepChain(…))` and not `childSteps` — the latter strips a source and
@@ -861,7 +877,11 @@ the two get confused, and the word cost a reader exactly that confusion once.
   here as its prerequisite** — see the `LabelCardinality` note under 2.4.
 - **2.6** **Delete `runWriteChainFull`, `parseEdgeCluster`, `parseVertexSpec`, `parseMergeOptions`,
   `resolveEndpoint`, `materializeElementDrivers`, `WritePlan`.** The phase is not done while a second
-  step dispatcher exists.
+  step dispatcher exists. **Its declared prerequisite is now MET** — 2.4's alias-through-a-creation
+  form was the last piece `runWriteChainFull` owned, and it landed with `addE`'s carry above. Note that
+  `parseMergeOptions` is on this list and is now SHARED with the RelIR route through `mergeMaps`
+  (§10·8): what gets deleted is the imperative `run` closure around it, not the parse, which has to
+  outlive the spine because it is the one authority on a merge map's five validation rules.
 
 **Phase 2 supersedes [write-path](./2026-08-01-write-path-plan.md) and inherits its requirements.**
 W1/W4 are landed and must not regress (four L4 pins + the perturbed census); W2 §3 and W3 §4 are this

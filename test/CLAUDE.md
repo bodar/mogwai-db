@@ -98,10 +98,12 @@ It is an **instrument, not a gate** (the `orphans` standing) and is absent from 
 still red. At first run: 20 failures, **13 of them L3 conformance scenarios** — ~0.8% of the
 conformance floor passing by luck, all one defect (`order().fold()`). Three rounds of fixes have
 taken the corpus view — the perturbed CENSUS, which names every order-fragile traversal in one place
-and is both the best worklist and the only fixed denominator — from 41 to 8; the suite total sits at
-18, mostly order-sensitive assertions in `test/compiler/`. A failure here is a real under-specification,
-never a flake — the remainder are item 20 in `docs/outstanding-work.md`, and this becomes a gate
-when they are cleared. It is an ENV switch (`MOGWAI_REVERSE_UNORDERED=1`, read in `src/bun/BunSqlite.ts`)
+and is both the best worklist and the only fixed denominator — from 41 to 8. **The suite total is 4**
+(measured 2026-08-03): the census's own answer-change gate, a `group().by(T.id)` keying, and two
+child-scope per-origin reducer assertions. A failure here is a real under-specification, never a
+flake — the remainder are item 20 in `docs/outstanding-work.md`, and this becomes a gate when they
+are cleared. **Baseline it before blaming a diff**: re-run the instrument with the change set aside,
+because a pre-existing failure here reads exactly like one the diff caused. It is an ENV switch (`MOGWAI_REVERSE_UNORDERED=1`, read in `src/bun/BunSqlite.ts`)
 rather than a parameter precisely so the suite under test cannot know it is being perturbed.
 
 Related: an `ordered` L4 assertion is only worth writing if it survives this. Check before adding one.
