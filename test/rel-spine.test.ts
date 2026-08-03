@@ -82,6 +82,16 @@ const COVERED = [
   // `ProductiveByStrategy` is the OTHER side of the productivity rule, and it must stay a live
   // position: with it on, a traverser whose `by()` yielded nothing is KEPT.
   "g.withStrategies(ProductiveByStrategy).V().dedup().by('lang')",
+  // `P.typeOf` — the whole FAMILY at once, which is the payoff for the predicate vocabulary being a
+  // module: one arm serves `is`, `has`, `where` and every nesting inside `P.not`/`and`/`or`. All three
+  // resolution modes are here, because each is a different question and only one of them reads a row.
+  "g.V().values('age').is(P.typeOf(GType.INT))", "g.V().values('name').is(P.typeOf(GType.STRING))",
+  "g.V().values('age').is(P.typeOf('Integer'))", "g.V().has('name',P.typeOf(GType.STRING))",
+  "g.V().values('age').is(P.not(P.typeOf(GType.STRING)))", "g.inject(1).is(P.typeOf(GType.INT))",
+  "g.V().count().is(P.typeOf(GType.LONG))", "g.V().count().is(P.typeOf(GType.STRING))",
+  "g.V().values('age').is(P.typeOf(GType.BOOLEAN))", "g.V().values('age').is(P.typeOf(GType.NULL))",
+  "g.V().values('age').is(P.typeOf(GType.VERTEX))",
+  "g.V().values('age').is(P.typeOf(GType.INT)).is(P.gt(29))",
 ];
 
 /**
@@ -189,6 +199,41 @@ describe('the RelIR spine', () => {
     // One survivor per distinct `lang` (java) PLUS one for the null key — SQL groups NULLs together in
     // a `PARTITION BY`, which is what TinkerPop's "all non-productive traversers share a key" means.
     expect(store.query(kept.sql, kept.binds).length).toBe(2);
+  });
+
+  test('P.typeOf resolves through all THREE modes, and each is a different question', () => {
+    // A differential is the weakest evidence here, because a `typeOf` that resolved through the WRONG
+    // mode still returns rows — and on a fixture where every value's storage class happens to match
+    // its declared type, the wrong mode agrees with the right one. So each mode is pinned by what it
+    // must and must not touch.
+    //
+    // Mode 1, COMPILE-TIME type → constant fold, and the tell is that it reads no row at all:
+    // `count()` is a `long`, so the predicate resolves before the query does.
+    const folded = read('g.V().count().is(P.typeOf(GType.LONG))', { spine: 'rel' });
+    expect(folded.spine).toBe('rel');
+    expect(folded.sql).not.toMatch(/typeof\(/i);
+    expect(folded.sql).not.toMatch(/vtype/);
+    expect(store.query(folded.sql, folded.binds).length).toBe(1);
+    const wrong = read('g.V().count().is(P.typeOf(GType.STRING))', { spine: 'rel' });
+    expect(store.query(wrong.sql, wrong.binds).length).toBe(0);
+
+    // Mode 2, PER-ROW `vtype` → compare the column, with the storage class as the fallback for a row
+    // whose vtype is NULL. Both halves must be present: the column is the only thing that tells a
+    // `datetime` from a `long`, and the fallback is the only thing that answers for a raw-inserted row.
+    const perRow = read('g.V().values("age").is(P.typeOf(GType.INT))', { spine: 'rel' });
+    expect(perRow.sql).toMatch(/vtype/);
+    expect(perRow.sql).toMatch(/typeof\(/i);
+
+    // Mode 3, NOTHING KNOWN → the storage-class test alone, and FALSE for every type SQLite's classes
+    // cannot distinguish. False rather than a decline, because that is the answer the reference gives.
+    const boolean = read('g.V().values("age").is(P.typeOf(GType.BOOLEAN))', { spine: 'rel' });
+    expect(store.query(boolean.sql, boolean.binds).length).toBe(0);
+
+    // A GType naming something a property value can never be is FALSE (valid syntax); an unregistered
+    // NAME is an ERROR, and the two must not be confused — so the second declines and legacy raises.
+    expect(compile('g.V().values("age").is(P.typeOf(GType.VERTEX))', {}, { spine: 'rel' })).toMatchObject({ spine: 'rel' });
+    expect(() => compile('g.V().values("age").is(P.typeOf("bogus-name"))', {}, { spine: 'rel' }))
+      .toThrow("unregistered type 'bogus-name'");
   });
 
   test('dedup().by() keeps ONE traverser per key, deterministically', () => {

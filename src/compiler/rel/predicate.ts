@@ -1,6 +1,8 @@
 import { col, lit, type Expr } from '../../rel/expr.ts';
 import { CF_MAX_BINDS } from '../../cf-limits.ts';
 import type { RelId } from '../../rel/types.ts';
+import { gtypeName } from '../../gremlin/frontend.ts';
+import { normalizeTypeName, STORAGE_CLASS } from '../../gremlin/types.ts';
 
 /**
  * `P`/`TextP` AS RelIR EXPRESSIONS — the predicate vocabulary, re-expressed in the algebra.
@@ -75,6 +77,37 @@ const CAST_TO_REAL = ['float', 'double', 'bigdecimal'];
  * than a per-site judgement. That is the trade the rule was made for: a `check` that can PROVE the
  * DO cap, at the cost of some binds a hand-written emitter would have inlined.
  */
+/**
+ * WHAT IS KNOWN ABOUT THE SUBJECT'S GREMLIN TYPE — one total union, replacing what used to be an
+ * optional `compare` callback.
+ *
+ * Two predicate arms need this and they need DIFFERENT halves of it, which is why it is a vocabulary
+ * rather than a flag or a function: the four ordering comparisons need the vtype as an EXPRESSION (to
+ * build the cast key), and `typeOf` needs either a compile-time type name (constant-fold), the vtype
+ * expression (compare it), or neither (fall back to the storage class). An optional callback could
+ * carry the first and not the second, so `typeOf` would have had to take a second parameter — two
+ * optionals describing one fact, which is the shape `docs/2026-07-28-scalartype-refactoring-pattern.md`
+ * exists to refuse. The coarse view (`compare`) is DERIVED below rather than passed alongside.
+ *
+ * It is deliberately NOT `plan.ts`'s `TypeCtx` imported: that one carries a kernel `Expression`, and
+ * the RelIR side must speak `Expr` (§2, the clean-room boundary). Same three cases, different layer.
+ */
+export type SubjectType =
+  /** A compile-time canonical Gremlin type name — `count()`'s `long`, a typed `inject`. */
+  | { readonly kind: 'static'; readonly type: string }
+  /** The subject came from a stored property, so its type is the row's own `vtype` column. */
+  | { readonly kind: 'perRow'; readonly vtype: Expr }
+  /** Nothing is known — an untyped computed scalar. */
+  | { readonly kind: 'unknown' };
+
+export const SUBJECT_UNKNOWN: SubjectType = { kind: 'unknown' };
+
+/** The ORDERING key builder implied by a subject type — the coarse view, derived rather than passed.
+ *  Only the per-row case needs one: a compile-time-typed subject is already a native value, which is
+ *  what the legacy `typeCtx.kind !== 'perRow'` branch means. */
+const compareFor = (type: SubjectType): (subject: Expr) => Expr =>
+  type.kind === 'perRow' ? storedCompareOn(type.vtype) : (subject) => subject;
+
 export const storedCompareOn = (vtype: Expr) => (subject: Expr): Expr => ({
   kind: 'case',
   whens: [
@@ -127,13 +160,61 @@ function likePattern(op: string, value: unknown): { pattern: string; negated: bo
 }
 
 /**
+ * `P.typeOf(GType|"ClassName")` — a TYPE test over the subject, or `null` to decline.
+ *
+ * Three modes, and which one applies is entirely `SubjectType`'s answer — the same three the legacy
+ * `typeOfSql` resolves, reproduced rather than reinvented (that is the migration rule, and this arm is
+ * where a plausible-looking shortcut would be silently wrong for a whole type family):
+ *
+ * 1. **compile-time type** → CONSTANT FOLD. `count().is(P.typeOf(GType.LONG))` is `1=1` and
+ *    `…(GType.STRING)` is `1=0`; neither needs to touch a row.
+ * 2. **per-row `vtype`** → compare it, with the storage class as the fallback for a row whose `vtype`
+ *    is NULL (a raw insert). Both halves are needed: the column is the only thing that distinguishes
+ *    a `datetime` from a `long`, and the fallback is the only thing that answers for a legacy row.
+ * 3. **nothing known** → the storage-class test alone, which is FALSE for every type SQLite's classes
+ *    cannot distinguish. False rather than declining, because that IS the answer TinkerPop's reference
+ *    gives over an untyped value, and `STORAGE_CLASS`'s `null` entries are what say so.
+ *
+ * Declines rather than throwing on an unreadable argument, where legacy raises `typeOf() requires a
+ * GType argument` / `unregistered type 'x'` — those are real errors and stay the legacy spine's to
+ * raise, since a chain reaching them declines whole and gets the identical message.
+ */
+function typeOfExpr(subject: Expr, arg: unknown, type: SubjectType): Expr | null {
+  const raw = gtypeName(arg)?.toLowerCase();
+  if (raw === undefined || raw === null) return null;
+  if (raw === 'null') return binary('is', subject, lit(null, 'any'));
+  const canonical = normalizeTypeName(raw);
+  // A recognized element/token GType (vertex/edge/path/…) is valid Gremlin but a stored property
+  // scalar is never one, so it folds to FALSE. An unrecognized NAME is an error legacy raises — which
+  // means declining here, not folding, because folding would answer a question that should have thrown.
+  if (!canonical) return KNOWN_NON_VALUE.has(raw) ? CONSTANT.false : null;
+
+  if (type.kind === 'static') return normalizeTypeName(type.type) === canonical ? CONSTANT.true : CONSTANT.false;
+  const storage = STORAGE_CLASS[canonical];
+  const byStorage: Expr = storage ? binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, lit(storage, 'text')) : CONSTANT.false;
+  if (type.kind === 'unknown') return byStorage;
+  return {
+    kind: 'case',
+    whens: [[binary('is not', type.vtype, lit(null, 'any')), binary('=', type.vtype, lit(canonical, 'text'))]],
+    else: byStorage,
+  };
+}
+
+/** GTypes that name something a stored property value can never be. Valid syntax, so the answer is
+ *  FALSE; an unrecognized name is an ERROR instead, and the two must not be confused. */
+const KNOWN_NON_VALUE = new Set(['vertex', 'edge', 'vertexproperty', 'vproperty', 'property', 'tree', 'graph', 'path', 'binary']);
+
+/**
  * A predicate over `subject`, or `null` to decline.
  *
- * `compare` is the ordering-key builder for the four range ops (`storedCompare` where a per-row
- * `vtype` is in scope, absent otherwise). It is a parameter rather than a flag because the caller
- * is the only one that knows WHERE the vtype column lives — the same reason `Col` names a relation.
+ * `type` is what is known about the subject's Gremlin type, and it is ONE total union rather than the
+ * optional `compare` callback it replaced: the range ops derive their ordering key from it and
+ * `typeOf` reads it directly, so two arms share one fact instead of two parameters describing it.
+ * The caller supplies it because the caller is the only one that knows where the `vtype` column lives
+ * — the same reason `Col` names a relation.
  */
-export function predicateExpr(subject: Expr, pred: unknown, compare: (e: Expr) => Expr = (e) => e): Expr | null {
+export function predicateExpr(subject: Expr, pred: unknown, type: SubjectType = SUBJECT_UNKNOWN): Expr | null {
+  const compare = compareFor(type);
   // `has(key)` with no value: presence, not comparison.
   if (pred === undefined) return binary('is not', subject, lit(null, 'any'));
   if (!isPred(pred)) {
@@ -142,7 +223,7 @@ export function predicateExpr(subject: Expr, pred: unknown, compare: (e: Expr) =
   }
 
   const { op, values } = pred;
-  const recurse = (p: unknown) => predicateExpr(subject, p, compare);
+  const recurse = (p: unknown) => predicateExpr(subject, p, type);
   const both = (build: (left: Expr, right: Expr) => Expr): Expr | null => {
     const [left, right] = [recurse(values[0]), recurse(values[1])];
     return left && right ? build(left, right) : null;
@@ -195,8 +276,10 @@ export function predicateExpr(subject: Expr, pred: unknown, compare: (e: Expr) =
     return like.negated ? not(call) : call;
   }
 
-  // `typeOf`, `regex`, `withinList`/`withoutList` (a list-valued traversal operand). Each needs
-  // something this module does not have — a type vocabulary, a regex function, or a run-time
-  // member list — so each declines rather than being half-answered.
+  if (op === 'typeOf') return values.length === 1 ? typeOfExpr(subject, values[0], type) : null;
+
+  // `regex` and `withinList`/`withoutList` (a list-valued traversal operand) remain. Each needs
+  // something this module does not have — a regex function, or a run-time member list — so each
+  // declines rather than being half-answered.
   return null;
 }

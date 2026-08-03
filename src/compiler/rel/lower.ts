@@ -9,10 +9,10 @@ import { isLocalScope, sliceOf } from '../ir/step.ts';
 import { PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs, isNested } from '../../gremlin/frontend.ts';
-import { childSteps } from '../steps/tail/child-shape.ts';
+import { childSteps, collectionAssert } from '../steps/tail/child-shape.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain } from '../ir/analyze.ts';
-import { containsTextSearch, predicateExpr, storedCompare } from './predicate.ts';
+import { containsTextSearch, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { bareInjectTag } from '../steps/write/inject.ts';
 import {
   and, EDGE_COLS, eq, labelIds, meta, minter, NODE_COLS, PROPERTIES, storedValue, typeOf,
@@ -199,7 +199,7 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
     // The property row's own `vtype` is in scope here, so an ordering comparison gets the
     // vtype-aware key — the whole reason `predicateExpr` takes `compare` as a parameter.
     const matches = val === undefined ? undefined
-      : predicateExpr(col(props.id, 'value'), val, storedCompare(props.id));
+      : predicateExpr(col(props.id, 'value'), val, { kind: 'perRow', vtype: col(props.id, 'vtype') });
     if (val !== undefined && !matches) return null;
 
     const matching = make.filter({
@@ -705,10 +705,17 @@ function scalarTail(
   let out: RelFraming = framing;
   let outCols = cols;
   let outChannels = channels;
-  // A per-row `vtype` is in scope only where the value came from a stored property; a `count` is a
-  // compile-time long and an injected value carries no stored type. Same distinction `predicateSql`
-  // draws as `typeCtx.kind === 'perRow'`.
-  const compare = () => (outCols.includes('vtype') ? storedCompare(rel.id) : undefined);
+  // WHAT IS KNOWN about the value's Gremlin type, read off the framing rather than guessed — the ONE
+  // fact both `is`'s ordering comparisons and its `typeOf` test need, so it is computed once as a
+  // total union rather than twice as two optionals. A per-row `vtype` column is in scope only where
+  // the value came from a stored property; a `count()` is a compile-time `long`, which is what lets
+  // `count().is(P.typeOf(GType.LONG))` constant-fold without touching a row; an injected value with a
+  // heterogeneous or untagged type is honestly `unknown`. Same three cases `predicateSql` calls
+  // `TypeCtx`, in the algebra's own expression vocabulary.
+  const subjectType = (): SubjectType =>
+    outCols.includes('vtype') ? { kind: 'perRow', vtype: col(rel.id, 'vtype') }
+      : out.kind === 'scalar' && out.type.kind === 'static' ? { kind: 'static', type: out.type.type }
+        : SUBJECT_UNKNOWN;
 
   // A BOUNDARY before a CLAUSE-POSITION READER, and it is not cosmetic. Fusing a `Filter` or a
   // `Sort` into its input's block means the input's outputs are spelled as the EXPRESSIONS that
@@ -761,7 +768,14 @@ function scalarTail(
 
     if (step.name === 'is') {
       if (args.length !== 1) return null;
-      const pred = predicateExpr(col(rel.id, 'v'), args[0], compare());
+      // `is(typeOf(GType.LIST|SET|MAP))` is a TYPE ASSERT, not a predicate: over a scalar stream
+      // carrying a stored collection it RETYPES the stream to a list or a map, so lowering it as a
+      // filter would return the right rows framed as the wrong shape — a different question, which is
+      // the one thing this module may never answer. `collectionAssert` is the derived view of legacy's
+      // ONE `typeOfAssert` decode (`child-shape.ts`), reused rather than re-recognized: five arms had
+      // already drifted apart decoding this inline, and a sixth copy here would be the same mistake.
+      if (collectionAssert(step)) return null;
+      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType());
       if (!pred) return null;
       rel = make.filter({ id: fresh('f'), input: rel, channels: outChannels, type: rel.type, pred });
       continue;

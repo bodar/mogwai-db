@@ -1,7 +1,7 @@
 import { flattenListArgs, gtypeName, isNested, type Pred } from '../../gremlin/frontend.ts';
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from '../../sql/kernel/q.ts';
 import type { FastPath } from '../options/fast-paths.ts';
-import { normalizeTypeName, BigDecimal, Duration, coerceBindValue } from '../../gremlin/types.ts';
+import { normalizeTypeName, STORAGE_CLASS, BigDecimal, Duration, coerceBindValue } from '../../gremlin/types.ts';
 import { nodes, edges, labels, vertexLabels, vertexProperties, edgeProperties } from '../../sql/schema.ts';
 import type { LabelRegime } from '../../api.ts';
 import { CF_MAX_BINDS } from '../../cf-limits.ts';
@@ -290,19 +290,9 @@ export function idPredFromArgs(rawArgs: any[]): any {
   return { op: 'within', values: args.filter((a) => a !== null && a !== undefined) };
 }
 
-// GType → SQLite `typeof()` storage class — the LEGACY FALLBACK used only when a value
-// carries no stored `vtype` (a NULL-vtype/raw-insert row, or a computed scalar with no
-// type tag). `null` = a type SQLite's storage class can't distinguish (boolean/datetime/
-// uuid/list/… all collapse to integer/text) → folds to false in the fallback; the stored
-// `vtype` column is what recovers those (see typeOfSql mode 2). Keyed by canonical name.
-const GTYPE_SQL: Record<string, string | null> = {
-  string: 'text',
-  int: 'integer', long: 'integer', short: 'integer',
-  byte: 'integer', bigint: 'integer',
-  double: 'real', float: 'real', bigdecimal: 'real',
-  boolean: null, char: null, uuid: null, datetime: null,
-  duration: null, list: null, map: null, set: null,
-};
+// The GType → SQLite storage-class table moved to `gremlin/types.ts` as `STORAGE_CLASS`: it is the
+// same type vocabulary as `normalizeTypeName`/`CANONICAL` asked a different question, and the RelIR
+// predicate module needs the identical answer. Two copies is how one of them stops matching the other.
 
 // A compile-time scalar `as` tag (ValueType, render.ts) → canonical Gremlin type name, for
 // the static-fold typeOf mode. The one vocabulary correspondence lives in gremlin/types.ts.
@@ -348,7 +338,7 @@ function typeOfSql(expr: Expression, arg: any, ctx: TypeCtx = TYPE_UNKNOWN): Exp
   }
   // Mode 1 — compile-time known type → constant fold.
   if (ctx.kind === 'static') return ctx.type === canonical ? q`1` : q`0`;
-  const storage = GTYPE_SQL[canonical];
+  const storage = STORAGE_CLASS[canonical];
   const byStorage = storage ? q`typeof(${expr}) = ${value(storage)}` : q`0`;
   // Mode 2 — per-row stored vtype, with a storage-class fallback for legacy NULL rows.
   if (ctx.kind === 'perRow') return q`(CASE WHEN ${ctx.expr} IS NOT NULL THEN ${ctx.expr} = ${value(canonical)} ELSE ${byStorage} END)`;

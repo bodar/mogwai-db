@@ -212,6 +212,31 @@ const CANONICAL = new Set<string>([
   'bigdecimal', 'datetime', 'uuid', 'char', 'duration', 'list', 'map', 'set',
 ]);
 
+/**
+ * Canonical type → the SQLite STORAGE CLASS a value of it lands in, or `null` where the storage class
+ * cannot distinguish it.
+ *
+ * This is the fallback `typeOf` resolves through when a row carries no stored `vtype` — a raw insert,
+ * or a computed scalar with no type tag. `null` means "collapses into another class": a boolean, a
+ * datetime, a uuid, a char and a duration are all `integer` or `text` on disk, so a storage-class test
+ * cannot answer for them and the honest fallback is FALSE. The stored `vtype` column is what recovers
+ * those, and it is why it exists.
+ *
+ * It lives HERE, beside `normalizeTypeName`/`CANONICAL`/`ALIASES`, because it is the same vocabulary
+ * asked a different question — and because two lowerings now need it (the legacy `typeOfSql` and the
+ * RelIR predicate module). A copy in each is how one of them stops matching the other; a type added to
+ * `CANONICAL` without a storage class is a compile error here, which is the point of the exhaustive
+ * `Record`.
+ */
+export const STORAGE_CLASS: Readonly<Record<CanonicalType, string | null>> = {
+  string: 'text',
+  int: 'integer', long: 'integer', short: 'integer',
+  byte: 'integer', bigint: 'integer',
+  double: 'real', float: 'real', bigdecimal: 'real',
+  boolean: null, char: null, uuid: null, datetime: null,
+  duration: null, list: null, map: null, set: null,
+};
+
 /** Collections are stored as JSONB in the value column (not a raw scalar bind). */
 export const COLLECTION_TYPES = new Set<CanonicalType>(['list', 'map', 'set']);
 export const isCollectionType = (t: string | null | undefined): boolean =>

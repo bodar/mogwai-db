@@ -30,28 +30,49 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     expect(read('g.V().not(__.hasId(P.within([])))').sql).toContain('NOT COALESCE');
   });
 
-  test('P.typeOf resolves the stored vtype, with a storage-class fallback', () => {
-    // value stream + is(): the per-row vtype column (values() reads vp.vtype) answers the
-    // type; a NULL-vtype legacy row falls back to typeof(v). Both binds appear (canonical
-    // name for the vtype match, storage class for the fallback).
-    const str = read('g.V().values("name").is(P.typeOf(GType.STRING))');
-    expect(str.sql).toContain('CASE WHEN p.vtype IS NOT NULL THEN p.vtype = ? ELSE typeof(p.v) = ? END');
-    expect(str.binds).toContain('string');
-    expect(str.binds).toContain('text');
-    expect(read('g.V().values("age").is(P.typeOf(GType.INT))').binds).toContain('int');
-    // java class-name string form is equivalent
-    expect(read('g.V().values("name").is(P.typeOf("String"))').binds).toContain('string');
-    // has(): the EXISTS matches the stored vtype (fallback to typeof(value)).
-    expect(read('g.V().has("name", P.typeOf(GType.STRING))').sql)
-      .toContain('CASE WHEN vtype IS NOT NULL THEN vtype = ? ELSE typeof(value) = ? END');
-    // NULL → is-null; a storage-class-invisible type (boolean) → vtype match, else 0.
-    expect(read('g.V().values("age").is(P.typeOf(GType.NULL))').sql).toContain('is null');
-    expect(read('g.V().values("age").is(P.typeOf(GType.BOOLEAN))').sql)
-      .toContain('CASE WHEN p.vtype IS NOT NULL THEN p.vtype = ? ELSE 0 END');
-    // P.not wraps and negates the inner predicate
-    expect(read('g.V().values("age").is(P.not(P.typeOf(GType.STRING)))').sql).toContain('NOT ((CASE WHEN p.vtype');
-    // an unregistered type name raises
-    expect(() => compile('g.V().values("age").is(P.typeOf("bogus-name"))', {})).toThrow('unregistered type');
+  // `P.typeOf` is RelIR-routed on both `is` and `has`, so the CONTRACT is asserted once per spine —
+  // three resolution modes, and the point of each is which evidence it reads, not how it spells it.
+  for (const spine of ['legacy', 'rel'] as const) {
+    test(`P.typeOf resolves the stored vtype, with a storage-class fallback — ${spine} spine`, () => {
+      // value stream + is(): the per-row vtype column (values() reads vp.vtype) answers the type; a
+      // NULL-vtype legacy row falls back to typeof(v). BOTH halves must be present — the column is the
+      // only thing that tells a datetime from a long, the fallback the only thing that answers for a
+      // raw-inserted row — and both binds appear (canonical name, then storage class).
+      const str = read('g.V().values("name").is(P.typeOf(GType.STRING))', { spine });
+      expect(str.sql).toMatch(/CASE WHEN \(?\w+\.vtype IS NOT (NULL|\?)\)? THEN \(?\w+\.vtype = \?\)? ELSE \(?typeof\(\w+\.v\) = \?\)? END/);
+      expect(str.binds).toContain('string');
+      expect(str.binds).toContain('text');
+      expect(read('g.V().values("age").is(P.typeOf(GType.INT))', { spine }).binds).toContain('int');
+      // java class-name string form is equivalent
+      expect(read('g.V().values("name").is(P.typeOf("String"))', { spine }).binds).toContain('string');
+      // has(): the same test, over the property row's own vtype rather than the projected one.
+      expect(read('g.V().has("name", P.typeOf(GType.STRING))', { spine }).sql)
+        .toMatch(/CASE WHEN \(?\w*\.?vtype IS NOT (NULL|\?)\)? THEN \(?\w*\.?vtype = \?\)? ELSE \(?typeof\(\w*\.?value\) = \?\)? END/);
+      // NULL → is-null; a storage-class-invisible type (boolean) → vtype match, else FALSE. `0` and
+      // `1 = 0` are the two spellings of that false — RelIR has no bare boolean literal (§3.2).
+      expect(read('g.V().values("age").is(P.typeOf(GType.NULL))', { spine }).sql).toMatch(/is null|IS \?/i);
+      expect(read('g.V().values("age").is(P.typeOf(GType.BOOLEAN))', { spine }).sql)
+        .toMatch(/THEN \(?\w+\.vtype = \?\)? ELSE \(?(0|\? = \?)\)? END/);
+      // P.not wraps and negates the inner predicate
+      expect(read('g.V().values("age").is(P.not(P.typeOf(GType.STRING)))', { spine }).sql).toMatch(/NOT \(+CASE WHEN/);
+      // an unregistered type name RAISES, and RelIR must not answer it instead: an unreadable name is
+      // an error, unlike a GType that names something a value can never be (which is FALSE).
+      expect(() => compile('g.V().values("age").is(P.typeOf("bogus-name"))', {}, { spine })).toThrow('unregistered type');
+    });
+  }
+
+  test('is(typeOf(LIST|SET|MAP)) is a shape RETYPE, so RelIR declines it', () => {
+    // The one arm where treating `typeOf` as an ordinary predicate is a WRONG ANSWER rather than a
+    // missing one: over a scalar stream carrying a stored collection, the assert retypes the stream to
+    // a list or a map, so filtering would return the right rows framed as the wrong shape. RelIR reuses
+    // legacy's ONE `typeOfAssert` decode (via `collectionAssert`) to recognize it — five arms had
+    // already drifted decoding this inline, which is why there is one decode and not a sixth copy.
+    for (const gremlin of ['g.V().values("uuid").is(P.typeOf(GType.LIST))', 'g.V().values("age").is(P.typeOf(GType.MAP))']) {
+      const plan = compile(gremlin, {}, { spine: 'rel' });
+      expect(plan.kind === 'read' ? plan.spine : 'legacy').toBe('legacy');
+      // …and the retype still HAPPENS on the spine that owns it — the decline is not a loss of support.
+      expect(read(gremlin).shape.kind).not.toBe('value');
+    }
   });
 
   // `values().is()` and `count().is()` are RelIR-routed, so both run on BOTH spines. Each spine's

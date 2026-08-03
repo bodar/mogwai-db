@@ -97,6 +97,13 @@ description = "Deletion ratchet: names a plan promised to delete, and how much o
 depends = ["install"]
 run = "bun scripts/deletion-check.ts"
 
+# An INSTRUMENT, not a gate: the RelIR migration's worklist, ranked by FAMILY because a per-step count
+# systematically understates a vocabulary (the scalar transforms are 18 names, largest 60, together 153).
+[tasks.rel-blockers]
+description = "RelIR worklist: where the fold gives up, per step and per family (instrument — needs judgement)"
+depends = ["install"]
+run = "bun scripts/rel-blockers.ts"
+
 # The RelIR decline contract, over every corpus prefix × chain shape × fast-path switch. A gate and
 # not an instrument because zero IS the contract: `lowerToRel` returning null defers to the legacy
 # spine, but THROWING is the new spine erroring on a traversal the old one compiles.
