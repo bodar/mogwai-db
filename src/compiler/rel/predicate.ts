@@ -75,14 +75,20 @@ const CAST_TO_REAL = ['float', 'double', 'bigdecimal'];
  * than a per-site judgement. That is the trade the rule was made for: a `check` that can PROVE the
  * DO cap, at the cost of some binds a hand-written emitter would have inlined.
  */
-export const storedCompare = (rel: RelId, vtype = 'vtype') => (subject: Expr): Expr => ({
+export const storedCompareOn = (vtype: Expr) => (subject: Expr): Expr => ({
   kind: 'case',
   whens: [
-    [{ kind: 'in-list', expr: col(rel, vtype), values: CAST_TO_INT.map((t) => lit(t, 'text')) }, { kind: 'cast', arg: subject, to: 'int' }],
-    [{ kind: 'in-list', expr: col(rel, vtype), values: CAST_TO_REAL.map((t) => lit(t, 'text')) }, { kind: 'cast', arg: subject, to: 'real' }],
+    [{ kind: 'in-list', expr: vtype, values: CAST_TO_INT.map((t) => lit(t, 'text')) }, { kind: 'cast', arg: subject, to: 'int' }],
+    [{ kind: 'in-list', expr: vtype, values: CAST_TO_REAL.map((t) => lit(t, 'text')) }, { kind: 'cast', arg: subject, to: 'real' }],
   ],
   else: subject,
 });
+
+/** The common case: the `vtype` is a COLUMN of a relation in scope. Derived from the general form
+ *  rather than a second copy of the type lists — `modulator.ts` builds the key inside a scalar
+ *  subquery where the vtype is an arbitrary expression, and two spellings of the same cast policy is
+ *  how one of them silently stops matching the other. */
+export const storedCompare = (rel: RelId, vtype = 'vtype') => storedCompareOn(col(rel, vtype));
 
 /**
  * Does this predicate contain a `TextP` SUBSTRING op — the shape `ftsSubstringPredicate` claims?

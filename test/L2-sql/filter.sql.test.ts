@@ -295,5 +295,27 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
       expect(read('g.V().has("age", P.within(29,30))', { spine }).sql).toMatch(/in \(\?, ?\?\)/i);
       expect(read('g.V().has("age", P.between(29,35))', { spine }).sql).toMatch(compared('>='));
     });
+
+    test(`dedup().by() is a ranked window over the projected key — ${spine} spine`, () => {
+      // The MODULATOR SEAM's first element host. Both spines emit the same SHAPE and must: the
+      // survivor is the LOWEST-id row per key, which is a `ROW_NUMBER() … = 1` and not a `GROUP BY`,
+      // because every other column has to be that row's and an aggregate cannot say which row a
+      // `MIN(id)` came from. Matched on the window, not on either spine's aliases.
+      const byKey = read('g.V().dedup().by("name")', { spine }).sql;
+      expect(byKey).toMatch(/ROW_NUMBER\(\) OVER \(PARTITION BY[^]*ORDER BY \w+\.id/i);
+      expect(byKey).toMatch(/\bFROM vertex_properties\b/);
+      // …and the PRODUCTIVITY rule: TinkerPop's default `by()` drops a traverser it yielded nothing
+      // for, so the key is tested for NULL. `ProductiveByStrategy` is the position that does not.
+      // The NULL is a BIND on the RelIR side and inline on the legacy one — §3.2 makes every `Lit` a
+      // bind so the plan can PROVE its budget, and `x IS NOT ?` with a null bind is the same operator.
+      const nullTest = /IS NOT (NULL|\?)/i;
+      expect(byKey).toMatch(nullTest);
+      expect(read('g.withStrategies(ProductiveByStrategy).V().dedup().by("name")', { spine }).sql)
+        .not.toMatch(nullTest);
+      // A `T` token reads the element itself rather than a property row: an external id is
+      // `COALESCE(uid, id)`, a label is the `labels` indirection.
+      expect(read('g.V().dedup().by(T.id)', { spine }).sql).toMatch(/PARTITION BY[^]*COALESCE\(\w+\.uid, \w+\.id\)/i);
+      expect(read('g.V().dedup().by(T.label)', { spine }).sql).toMatch(/PARTITION BY[^]*\bFROM (labels|vertex_labels)\b/i);
+    });
   }
 });

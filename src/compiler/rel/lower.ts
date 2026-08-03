@@ -4,16 +4,21 @@ import * as make from '../../rel/factory.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import type { Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { relId, type ColMeta, type RelType, type SortTerm, type SqlType } from '../../rel/types.ts';
+import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { isLocalScope, sliceOf } from '../ir/step.ts';
 import { PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
-import { flattenListArgs, isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
+import { flattenListArgs, isNested } from '../../gremlin/frontend.ts';
 import { childSteps } from '../steps/tail/child-shape.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain } from '../ir/analyze.ts';
 import { containsTextSearch, predicateExpr, storedCompare } from './predicate.ts';
 import { bareInjectTag } from '../steps/write/inject.ts';
+import {
+  and, EDGE_COLS, eq, labelIds, meta, minter, NODE_COLS, PROPERTIES, storedValue, typeOf,
+  type Minter,
+} from './build.ts';
+import { byExpr, modulations, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
 
 /**
  * THE SECOND LOWERING — `Step[] -> RelIR` (§10·4 of `docs/2026-08-01-relir-build-plan.md`).
@@ -65,14 +70,6 @@ export interface RelLowering {
   readonly channels: Channels;
 }
 
-const meta = (colName: string, type: SqlType, nullable = false): ColMeta => ({ name: colName, type, nullable });
-const typeOf = (...cols: readonly ColMeta[]): RelType => ({ cols });
-
-/** Physical columns of the two element tables, as `Scan` must declare them. `Scan` is the one node
- *  that names the physical schema (§3.3), so this list IS the algebra's view of storage. */
-const NODE_COLS = [meta('id', 'int'), meta('uid', 'text', true)];
-const EDGE_COLS = [meta('id', 'int'), meta('uid', 'text', true), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')];
-
 /** The bulk channel every element source seeds: the RLE traverser count a reducer reads as
  *  `SUM(bulk)` and a movement collapse merges convergent walks on. One channel, one column, and the
  *  role vocabulary is the neutral core's — a RelIR node cannot know what a sack is. */
@@ -92,43 +89,7 @@ const elementChannels = (ordered: boolean): Channels => (ordered ? ORDERED : BUL
 const elementCols = (ordered: boolean): readonly ColMeta[] =>
   [meta('id', 'int'), meta('bulk', 'int'), ...(ordered ? [meta('encounter', 'int')] : [])];
 
-/** Relation ids, minted PER LOWERING. A module-global counter would make the emitted SQL depend on
- *  how many traversals this process had already compiled — two compiles of one query producing two
- *  different strings, which breaks every snapshot and every cache keyed on the text. */
-type Minter = (hint: string) => import('../../rel/types.ts').RelId;
-const minter = (): Minter => { let n = 0; return (hint) => relId(`${hint}${n++}`); };
 
-/** The two element tables' property side-tables, and the column each keys its owner by. The
- *  asymmetry (`node` vs `edge`) is the physical schema's, so it lives beside the `Scan` tables. */
-const PROPERTIES = {
-  vertex: { table: 'vertex_properties', owner: 'node' },
-  edge: { table: 'edge_properties', owner: 'edge' },
-} as const;
-
-function and(left: Expr | undefined, right: Expr): Expr;
-function and(left: Expr, right: Expr | undefined): Expr;
-function and(left: Expr | undefined, right: Expr | undefined): Expr {
-  if (!left || !right) {
-    const only = left ?? right;
-    if (!only) throw new Error('RelIR lowering: a conjunction of nothing');
-    return only;
-  }
-  return { kind: 'binary', op: 'and', left, right };
-}
-
-const eq = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '=', left, right });
-
-
-/** `SELECT id FROM labels WHERE name IN (…)` — the name→id indirection every label-aware step
- *  reaches through, and the reason `labels` is a `Scan` table rather than a string in an emitter. */
-function labelIds(names: readonly string[], fresh: Minter): Rel {
-  const scan = make.scan({ id: fresh('lbl'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
-  const matching = make.filter({
-    id: fresh('f'), input: scan, channels: [], type: scan.type,
-    pred: { kind: 'in-list', expr: col(scan.id, 'name'), values: names.map((n) => lit(n, 'text')) },
-  });
-  return make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
-}
 
 /**
  * A source-scope FILTER as a predicate over the element scan — the whole of `hasLabel`/`has` that
@@ -153,6 +114,12 @@ interface Subject { readonly id: Expr; readonly label?: Expr; readonly rel: Rel;
 interface FilterCtx { readonly params: Record<string, any>; readonly correlatedChildren: boolean; }
 
 function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter, ctx: FilterCtx): Expr | null {
+  // One filter form HOSTS a `by()` — the alias-compare `where('a', P.eq('b')).by('key')`, which
+  // `isAliasCompareWhere` detects structurally rather than by name — and it is not covered at all
+  // (it needs the alias channel). So this stays a blanket decline, and `modulator.ts` is what it will
+  // read when that lands; the vocabulary is already there, which is the point of having built it as
+  // one. Every other step reaching here (`hasLabel`, `has`, `filter`, `not`) is not a `BY_HOSTS`
+  // member, so a modulator on one is a front-end impossibility and declining is belt-and-braces.
   if (step.modulators?.length || step.optionArms) return null;
   const args = step.args ?? [];
 
@@ -284,16 +251,6 @@ function elementScan(step: IRStep, fresh: Minter): { scan: Rel; pred?: Expr; ele
     left ? { kind: 'binary', op: 'or', left, right } : right, undefined);
   return { scan, pred, elem };
 }
-
-/** The storage-class recovery every stored value goes through on the way out: a JSON-typed value
- *  comes back as JSON, everything else as itself. Shared by `values()` and, later, every other
- *  reader of a property value. */
-const storedValue = (rel: import('../../rel/types.ts').RelId): Expr => ({
-  kind: 'case',
-  whens: [[{ kind: 'in-list', expr: col(rel, 'vtype'), values: ['list', 'map', 'set'].map((t) => lit(t, 'text')) },
-    { kind: 'call', fn: 'json', args: [col(rel, 'value')] }]],
-  else: col(rel, 'value'),
-});
 
 /**
  * MOVEMENT — the graph algebra proper, as a join over `edges` and a re-projection.
@@ -446,13 +403,19 @@ function sliceOp(step: IRStep, input: Rel, fresh: Minter): Rel | null {
   });
 }
 
-function rowOp(step: IRStep, input: Rel, ordered: boolean, fresh: Minter): Rel | null {
-  if (step.modulators?.length || step.optionArms) return null;
+function rowOp(step: IRStep, input: Rel, elem: Elem, ordered: boolean, fresh: Minter): Rel | null {
+  if (step.optionArms) return null;
+  if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
   if (step.name === 'identity' || step.name === 'barrier') return (step.args ?? []).length ? null : input;
   const sliced = sliceOp(step, input, fresh);
   if (sliced) return sliced;
 
-  if (step.name !== 'dedup' || (step.args ?? []).length) return null;
+  if (step.name !== 'dedup' || (step.args ?? []).length || isLocalScope(step)) return null;
+
+  const bys = modulations(step, 1);
+  if (!bys) return null;
+  if (bys[0]) return dedupBy(step, bys[0], input, elem, ordered, fresh);
+
   // `dedup()` RESETS the multiplicity: the survivor stands for itself, not for the sum of the
   // duplicates it replaced.
   //
@@ -473,6 +436,61 @@ function rowOp(step: IRStep, input: Rel, ordered: boolean, fresh: Minter): Rel |
     id: fresh('dd'), input, channels: input.channels, type: typeOf(...elementCols(true)),
     groupBy: [col(input.id, 'id')],
     aggs: [['bulk', lit(1, 'int')], ['encounter', { kind: 'agg', fn: 'min', args: [col(input.id, 'encounter')] }]],
+  });
+}
+
+/**
+ * `dedup().by(<projection>)` over an ELEMENT relation — the first host to take a real `by()`.
+ *
+ * It is a `Window` + `Filter`, not a grouped aggregate, and the difference is the reason: the survivor
+ * is the one traverser with the LOWEST id per key, and every other column must be ITS values — an
+ * `Aggregate` can produce `MIN(id)` but not "the encounter belonging to the row that had it". That is
+ * what a ranked window says and an aggregate cannot, so this is the shape legacy emits too.
+ *
+ * PRODUCTIVITY is the vocabulary's, not this host's: TinkerPop drops a traverser whose `by()` yielded
+ * nothing (`DedupGlobalStep.filter` → `product.isProductive()`), and `ProductiveByStrategy` turns that
+ * off. `productivityFilter` returns the predicate or `undefined`, so the rule cannot be forgotten here.
+ *
+ * **`bulk` RESETS to 1, which is the reference's rule and NOT the spelling legacy uses.** TinkerPop's
+ * `DedupGlobalStep.filter` calls `traverser.setBulk(1L)` unconditionally — before it even looks at the
+ * `by()` — so a survivor stands for itself whether or not a projection was given
+ * (`vendor/tinkerpop/gremlin-core/.../DedupGlobalStep.java:75`). Legacy carries `p.bulk` through
+ * instead, and the two are NOT observably different: `analyzeChain`'s collapse-safety rule excludes a
+ * `dedup` that has modulators, so `movementCollapse` never fires upstream of one and the multiplicity
+ * is provably 1 where it arrives. Checked, not assumed — `g.V().both().both().dedup().by('lang')`
+ * emits no `GROUP BY` on either spine. So this is not a divergence to reconcile; it is the form that
+ * stays correct if that safety rule is ever relaxed, at no cost today.
+ */
+function dedupBy(step: IRStep, modulation: Modulation, input: Rel, elem: Elem, ordered: boolean, fresh: Minter): Rel | null {
+  // A comparator on `dedup()` is not a form Gremlin has — `DedupGlobalStep` is not a comparator host —
+  // so an `Order` in its `by()` is a chain `verifyByModulatorArity` never sees. Decline rather than
+  // silently ignoring it.
+  if (modulation.order !== undefined) return null;
+  const key = byExpr(modulation, { kind: 'element', id: col(input.id, 'id'), elem }, fresh);
+  if (!key) return null;
+
+  const productive = productivityFilter(step, key);
+  const domain = productive
+    ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: productive })
+    : input;
+  const cols = elementCols(ordered);
+  const ranked = make.window({
+    id: fresh('dw'), input: domain, channels: domain.channels, type: typeOf(...cols, meta('rn', 'int')),
+    specs: [['rn', {
+      kind: 'window-expr', fn: 'row_number', args: [],
+      // Partitioned by the KEY and ordered by the element id: the lowest id per key survives, which is
+      // deterministic rather than merely "one of them" — the property `mise run test:perturbed` checks.
+      spec: { partitionBy: [key], orderBy: [{ expr: col(domain.id, 'id'), dir: 'asc' }] },
+    }]],
+  });
+  const survivors = make.filter({
+    id: fresh('f'), input: ranked, channels: ranked.channels, type: ranked.type,
+    pred: eq(col(ranked.id, 'rn'), lit(1, 'int')),
+  });
+  return make.project({
+    id: fresh('dk'), input: survivors, channels: elementChannels(ordered), type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name,
+      column.name === 'bulk' ? lit(1, 'int') : col(survivors.id, column.name)] as const),
   });
 }
 
@@ -635,40 +653,38 @@ function terminal(step: IRStep, input: Rel, elem: Elem, ordered: boolean, fresh:
  *  or an `ORDER BY`. What they have in common is the bind wall, and the remedy, both in `scalarTail`. */
 const CLAUSE_READERS = new Set(['is', 'order']);
 
+/** The tail steps that HOST a `by()` (`BY_HOSTS` ∩ this fold's vocabulary). Named rather than checked
+ *  inline because the blanket `step.modulators?.length` decline must exempt exactly these — a host
+ *  added to the fold without being added here silently loses its modulator, which is the failure mode
+ *  the modulator seam exists to end. */
+const BY_READERS = new Set(['order', 'dedup']);
+
 /**
- * A SCALAR `order()`'s sort terms, or `null` to decline.
+ * An `order()`'s sort terms over any host, or `null` to decline.
  *
  * Scalar `order()` IS a relation operator, and that is what separates it from the element one: over
  * values legacy emits `SELECT p.v FROM c0 p ORDER BY p.v ASC` — a `Sort` in the algebra, exactly —
  * whereas over elements it folds the order into the FRAMING projection, which is `TailAcc`'s and
- * Phase 4.2's. Same step name, two different layers, and only one of them is here.
+ * Phase 4.2's. Same step name, two different layers, and only one of them is here today; the host
+ * parameter is what will let the other one in without a second parse.
  *
- * The key goes through `storedCompare` wherever a per-row `vtype` is in scope, for the reason the
- * range predicates do: a value too big for SQLite's numeric storage classes is stored as TEXT, so a
- * plain `<` sorts it lexically and after every numeric row. This is the SAME authority the `is(P)`
- * arm uses — one ordering key for comparing and for sorting, because they are the same question.
- *
- * `by()` narrows rather than declining wholesale: a bare `by(Order.asc|desc|shuffle)` names a
- * direction the algebra can state, while `by(key)`, `by(traversal)` and `by(token)` all need a value
- * a scalar stream does not have (there are no properties on a value) — legacy throws for those and
- * declining hands it the message. More than one `by()` is a multi-key sort no scalar stream can
- * satisfy either.
+ * `by()` is READ, not declined, and the whole of it lives in `modulator.ts`: which value to sort on
+ * and which direction, with the ordering flag asking for the vtype-aware compare key — the same
+ * authority the range predicates use, because comparing and sorting are the same question. `shuffle`
+ * is the one term with no subject at all: `RANDOM()` re-evaluates per row and that IS the semantics,
+ * so it is a `Call` rather than a projection, and the census sees it through the multiset digest only.
  */
-function sortTerms(step: IRStep, rel: Rel, cols: readonly string[]): readonly SortTerm[] | null {
+function sortTerms(step: IRStep, host: ByHost, fresh: Minter): readonly SortTerm[] | null {
   if (isLocalScope(step) || (step.args ?? []).length) return null;
-  const bys = step.modulators ?? [];
-  if (bys.length > 1) return null;
-  const by = bys[0] ?? [];
-  if (by.some((arg: unknown) => typeof arg === 'string' || isNested(arg) || isTokenArg(arg))) return null;
-  const dir = by.find(isOrderArg)?.order;
-  // `shuffle` is a sort by a value that is not in any row, which is why it is a `Call` and not a
-  // `Col`: SQLite's `RANDOM()` re-evaluates per row and that IS the semantics. Nondeterministic by
-  // construction, so the census sees it through the multiset digest and never through `ord`.
-  if (dir === 'shuffle') return [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }];
-  if (dir !== undefined && dir !== 'asc' && dir !== 'desc') return null;
-  const value = col(rel.id, 'v');
-  const key = cols.includes('vtype') ? storedCompare(rel.id)(value) : value;
-  return [{ expr: key, dir: dir === 'desc' ? 'desc' : 'asc' }];
+  // ONE slot: TinkerPop's `order()` takes a comparator per key, so a multi-key sort is valid Gremlin
+  // — it is this lowering that has one term, and declining says so rather than sorting on the first.
+  const bys = modulations(step, 1);
+  if (!bys) return null;
+  const modulation: Modulation = bys[0] ?? { key: { kind: 'identity' } };
+  if (modulation.order === 'shuffle') return [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }];
+  const key = byExpr(modulation, host, fresh, true);
+  if (!key) return null;
+  return [{ expr: key, dir: modulation.order === 'desc' ? 'desc' : 'asc' }];
 }
 
 /**
@@ -716,14 +732,17 @@ function scalarTail(
     const step = steps[at];
     const args = step.args ?? [];
     if (step.optionArms) return null;
-    // `order()` is the one step here whose MODULATOR is part of what it covers — `by(Order.desc)` is
-    // a direction, not a projection — so the blanket decline exempts it and `sortTerms` decides.
-    if (step.name !== 'order' && step.modulators?.length) return null;
+    // The blanket modulator decline exempts the two steps that HOST a `by()` here; each reads it
+    // through `modulator.ts` and declines the projections a value stream cannot serve.
+    if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
+    // A value's own `vtype` is in scope only where it came from a stored property, which is the same
+    // distinction `compare()` above draws and the reason `ByHost` carries it as an optional.
+    const host: ByHost = { kind: 'scalar', value: col(rel.id, 'v'), ...(outCols.includes('vtype') ? { vtype: col(rel.id, 'vtype') } : {}) };
 
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
 
     if (step.name === 'order') {
-      const terms = sortTerms(step, rel, outCols);
+      const terms = sortTerms(step, host, fresh);
       if (!terms) return null;
       // A sort SUPERSEDES the arriving emission order, so where one is carried the positions must be
       // re-minted and not merely re-sorted: a later slice reads the channel, and taking its window
@@ -761,7 +780,15 @@ function scalarTail(
       //
       // The emission order goes with it for the same reason — a survivor has no one position — and
       // that matches legacy, whose scalar dedup projects the payload alone.
+      //
+      // A `by()` here is IDENTITY or nothing, and that is not a gap: over a value stream the only
+      // projection available IS the value, so `dedup().by()` and bare `dedup()` are the same question
+      // (legacy emits the identical `SELECT DISTINCT p.v` for both). `by(key)`/`by(token)` decline
+      // through the vocabulary, which is where the "a value has no properties" rule lives.
       if (args.length || isLocalScope(step)) return null;
+      const deduped = modulations(step, 1);
+      if (!deduped || (deduped[0] && !byExpr(deduped[0], host, fresh))) return null;
+      if (deduped[0]?.order !== undefined) return null;
       const payload = rel.type.cols.filter((column) => !outChannels.some((channel) => channel.col === column.name));
       if (!payload.length) return null;
       const projected = make.project({
@@ -938,7 +965,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
     // legacy answers. Found by L5 on a generated `E().limit(1).has(…).where(…)` — no corpus traversal
     // has that prefix, so the corpus sweep could not reach it.
     if (clause) { rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause }); continue; }
-    const row = rowOp(step, rel, ordered, fresh);
+    const row = rowOp(step, rel, elem, ordered, fresh);
     if (!row) break;
     rel = row;
   }

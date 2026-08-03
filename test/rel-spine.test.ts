@@ -72,6 +72,16 @@ const COVERED = [
   "g.V().values('age').order()", "g.V().values('age').order().range(1,3)",
   "g.V().values('name').order().by(Order.desc)", "g.V().values('age').order().is(P.gt(29))",
   "g.V().values('age').order().dedup()", "g.V().values('age').order().count()",
+  // THE MODULATOR SEAM — `by()` as one vocabulary (`modulator.ts`), so a host gains all three
+  // projections at once: identity, a property, and a `T` token. `dedup()` is the first ELEMENT host to
+  // take a real one, and the projections are the same objects `order()` reads.
+  "g.V().dedup().by('name')", "g.V().dedup().by('lang')", "g.E().dedup().by('weight')",
+  "g.V().dedup().by(T.label)", "g.E().dedup().by(T.label)", "g.V().dedup().by(T.id)",
+  "g.V().out().dedup().by('lang')", "g.V().dedup().by('lang').values('name')",
+  "g.V().dedup().by('name').count()", "g.V().values('name').dedup().by()",
+  // `ProductiveByStrategy` is the OTHER side of the productivity rule, and it must stay a live
+  // position: with it on, a traverser whose `by()` yielded nothing is KEPT.
+  "g.withStrategies(ProductiveByStrategy).V().dedup().by('lang')",
 ];
 
 /**
@@ -87,6 +97,7 @@ const DECLINED = [
   'g.inject()',                       // the EMPTY relation, which `Values` refuses to express (§3.3)
   "g.inject('a').inject('b')",        // a second inject is a UNION with the first, not a source
   'g.inject(1,2).order(Scope.local)', // LOCAL scope: a per-traverser sort of a LIST, a different arm
+  "g.V().dedup().by(__.out().count())", // a SUB-TRAVERSAL projection: a child lowering, not an expr
   'g.withSack(0).V()',                // a carried sack the source seed would have to declare
   'g.withSideEffect("a",1).V()',      // a side effect
   'g.addV("person")',                 // a write
@@ -162,6 +173,37 @@ describe('the RelIR spine', () => {
       .toThrow('order().by(key/traversal) on a scalar stream not supported');
     expect(() => compile("g.V().values('name').order().by(Order.asc).by(Order.desc)", {}, { spine: 'rel' }))
       .toThrow('multiple order().by() modulators');
+  });
+
+  test("a by()'s PRODUCTIVITY is honoured, both ways round", () => {
+    // TinkerPop's default `by()` DROPS a traverser it yielded nothing for; `ProductiveByStrategy`
+    // keeps it. Both positions are asserted with absolute counts rather than against legacy, because
+    // this is the arm where "agrees with the other spine" is the weakest available evidence: a
+    // productivity filter omitted on BOTH sides is a shared defect a differential cannot see, and the
+    // reference graph makes the difference visible — 6 vertices, only 2 with a `lang`.
+    const dropped = read("g.V().dedup().by('lang')", { spine: 'rel' });
+    expect(dropped.spine).toBe('rel');
+    expect(store.query(dropped.sql, dropped.binds).length).toBe(1);
+    const kept = read("g.withStrategies(ProductiveByStrategy).V().dedup().by('lang')", { spine: 'rel' });
+    expect(kept.spine).toBe('rel');
+    // One survivor per distinct `lang` (java) PLUS one for the null key — SQL groups NULLs together in
+    // a `PARTITION BY`, which is what TinkerPop's "all non-productive traversers share a key" means.
+    expect(store.query(kept.sql, kept.binds).length).toBe(2);
+  });
+
+  test('dedup().by() keeps ONE traverser per key, deterministically', () => {
+    // The survivor must be a NAMED row, not "whichever SQLite produced first" — a `PARTITION BY key`
+    // with no `ORDER BY` in the window is right-arity and arbitrary, and the reference fixture is
+    // small enough that the arbitrary choice is reliably the flattering one. So: row-for-row against
+    // legacy, unsorted, plus the perturbation instrument (`MOGWAI_REVERSE_UNORDERED=1`) over this file.
+    for (const gremlin of ["g.V().dedup().by('name')", "g.V().dedup().by('lang')",
+      "g.V().dedup().by(T.label)", "g.E().dedup().by(T.label)", "g.V().dedup().by(T.id)",
+      "g.E().dedup().by('weight')", "g.V().out().dedup().by('lang')",
+      "g.V().dedup().by('lang').values('name')", "g.V().out().dedup().by('lang').limit(2)"]) {
+      const rel = read(gremlin, { spine: 'rel' });
+      const legacy = read(gremlin, { spine: 'legacy' });
+      expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
+    }
   });
 
   test("a scalar order()'s key is vtype-aware, so a TEXT-stored number sorts numerically", () => {
