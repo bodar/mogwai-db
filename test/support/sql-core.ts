@@ -18,7 +18,8 @@ import type { GraphStore } from '../../src/storage.ts';
  * maps, typed envelopes). RelIR sits BELOW that framing — §2 keeps shape out of the algebra
  * entirely — so the core is the part a hand-built plan is answerable for, and taking it by
  * structure rather than by hand is what stops the gate degrading into a transcription of the
- * emitter's own output (§9·1).
+ * emitter's own output — which is exactly what an earlier "gate" was, and why §5a's two properties
+ * (same results, same access path) replaced byte-identity.
  *
  * Returns `undefined` for a plan with no CTE chain (nothing to isolate) or a `WITH RECURSIVE` one
  * (the recursive families are Phase 3's, and their core is the CTE itself).
