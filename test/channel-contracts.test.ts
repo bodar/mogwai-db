@@ -9,7 +9,7 @@ import {
     BARRIER_ROLE_POLICY, barrierLayout, channelsOf, LAYOUT_ROLE_POLICY, layoutCols, layoutGrewAliases, layoutOverAliases, mergeArmRelation, mergeLayouts, nonAliasCols, rigidCols,
     type AliasEntry, type TraverserLayout,
 } from '../src/compiler/steps/context/context.ts';
-import { barrierChannels, channelCols, mergeChannels, rigidChannels, ROLE_ORDER, sameChannels } from '../src/channels.ts';
+import { barrierChannels, channelCols, mergeChannels, rigidChannels, ROLE_ORDER, sameChannels, withChannel, type Channel } from '../src/channels.ts';
 import { Query, q } from '../src/sql/kernel/q.ts';
 
 describe('channel contracts', () => {
@@ -38,6 +38,34 @@ describe('channel contracts', () => {
       .toEqual({ kind: 'runsByKey', key: 'pk' });
     expect(() => cardinalityOf({ kind: 'path', layout: { kind: 'grouped', elem: 'vertex' }, rel: { cols: ['ord'] }, traverserLayout: {} } as any))
       .toThrow('requires its pk run key');
+  });
+
+  // A MINT is what makes the channel set a property of a relation rather than of a chain: an
+  // element `order()` adds the emission position where the source seeded none. `ROLE_ORDER` is an
+  // invariant of the list (a merge rebuilds in it, and `layoutCols` reads it), so the one thing
+  // this must never do is append.
+  test('withChannel inserts in ROLE_ORDER and refuses a duplicate column', () => {
+    const bulk: Channel = { col: 'bulk', role: 'bulk' };
+    const encounter: Channel = { col: 'encounter', role: 'encounter' };
+    const alias0: Channel = { col: 'a0', role: 'alias' };
+
+    // bulk precedes encounter in ROLE_ORDER, so a mint over [bulk] appends…
+    expect(withChannel([bulk], encounter)).toEqual([bulk, encounter]);
+    // …and an alias, which precedes both, does NOT.
+    expect(withChannel([bulk, encounter], alias0)).toEqual([alias0, bulk, encounter]);
+    expect(withChannel([], encounter)).toEqual([encounter]);
+    // Several channels of one role keep their relative order and the new one goes last among peers.
+    expect(withChannel([alias0, bulk], { col: 'a1', role: 'alias' }))
+      .toEqual([alias0, { col: 'a1', role: 'alias' }, bulk]);
+    // Whatever it produces is a list ROLE_ORDER agrees with, which is the property rather than the
+    // four cases above.
+    for (const built of [withChannel([bulk], encounter), withChannel([bulk, encounter], alias0)]) {
+      const seen = built.map((channel) => channel.role);
+      expect(seen).toEqual(ROLE_ORDER.filter((role) => seen.includes(role)));
+    }
+    // Two channels naming one column is a lowering bug, and it reads downstream as a width mismatch
+    // three nodes later — so it fails here instead.
+    expect(() => withChannel([bulk], { col: 'bulk', role: 'encounter' })).toThrow("'bulk' is already carried");
   });
 });
 

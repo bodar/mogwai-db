@@ -87,8 +87,13 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
 
   // `rir` deliberately does not collide with the framing aliases (`n`/`e`/`p`/`s`/`v`/`g`/`j`/`l`)
   // or with the `Query`'s minted `c0…cN`: the RelIR relation sits beside them, not among them.
-  const rel = derived(emitRelational(lowered.plan), lowered.cols, 'rir');
-  const traverserLayout = layoutOf(lowered.channels);
+  // The header and the carried layout are the RESULT RELATION's own, read off the plan rather than
+  // handed over beside it: `plan.result` declares both, and a lowering that passed them separately
+  // was two chances for the framing layer to be told a shape the relation did not have. (A `name`
+  // pass binding is never the root, so the result is the relation the fold finished on.)
+  const result = lowered.plan.result;
+  const rel = derived(emitRelational(lowered.plan), result.type.cols.map((column) => column.name), 'rir');
+  const traverserLayout = layoutOf(result.channels);
   // TOTAL over the framing union: a stream kind the lowering learns to produce is a compile error
   // here until this seam knows how to frame it, which is the same discipline §3.5's obligation
   // table applies inside the algebra.

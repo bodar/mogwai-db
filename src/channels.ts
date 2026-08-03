@@ -85,6 +85,28 @@ export type RigidPolicy = 'peer' | 'rehomed';
 export const ROLE_ORDER: readonly ChannelRole[] = ['alias', 'sack', 'bulk', 'origin', 'branchOrder', 'fromV', 'encounter', 'path'];
 
 export const channelCols = (channels: Channels): readonly string[] => channels.map((channel) => channel.col);
+
+/**
+ * ADD a carried channel, in `ROLE_ORDER` — the operation a step that MINTS carried state needs.
+ *
+ * A channel set is not a chain-global constant: an `order()` mints an emission position where none
+ * was carried, and §3.5's per-node table already permits the set to change mid-plan. What must not
+ * change is the ORDER, which is why this is a function in the core rather than an array spread at
+ * each mint site: `ROLE_ORDER` is an INVARIANT of a `Channels` list (a merge rebuilds in it), so a
+ * producer appending a role out of order desyncs its declared schema from the physical one three
+ * nodes later. Several channels of one role (aliases, path positions) keep their relative order and
+ * the new one goes last among its peers.
+ *
+ * Fails closed on a duplicate COLUMN rather than carrying it twice: two channels naming one column
+ * is a lowering bug, and it reads downstream as a width mismatch whose cause is no longer visible.
+ */
+export function withChannel(channels: Channels, channel: Channel): Channels {
+  if (channels.some((existing) => existing.col === channel.col))
+    throw new Error(`channel column '${channel.col}' is already carried`);
+  const rank = (role: ChannelRole): number => ROLE_ORDER.indexOf(role);
+  const at = channels.findIndex((existing) => rank(existing.role) > rank(channel.role));
+  return at < 0 ? [...channels, channel] : [...channels.slice(0, at), channel, ...channels.slice(at)];
+}
 const withRole = (channels: Channels, role: ChannelRole): Channels => channels.filter((channel) => channel.role === role);
 const forkable = (role: ChannelRole): boolean => CHANNEL_MERGE_POLICY[role] !== 'identical';
 

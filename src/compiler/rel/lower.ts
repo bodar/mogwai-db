@@ -1,4 +1,4 @@
-import type { Channels } from '../../channels.ts';
+import { withChannel, type Channel, type Channels } from '../../channels.ts';
 import { col, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
@@ -63,13 +63,18 @@ export type RelFraming =
   | { readonly kind: 'elements'; readonly elem: Elem }
   | { readonly kind: 'scalar'; readonly type: ScalarType; readonly result?: 'value' | 'count' | 'number' };
 
-/** A covered chain, lowered: a relation, its output columns, its channels, and what to frame. */
+/**
+ * A covered chain, lowered: the program, and what to frame over it.
+ *
+ * The output COLUMNS and the CHANNELS are deliberately absent: both are properties of
+ * `plan.result`, and carrying them beside it was two bookkeeping variables threaded through every
+ * arm of the fold with nothing but discipline keeping them in step with the relation they described.
+ * `spine.ts` reads them off the result (§9's declare-vs-derive finding, applied where the desync was
+ * actually reachable — a channel list shorter than the relation's is the 33% defect category).
+ */
 export interface RelLowering {
   readonly plan: Plan;
   readonly framing: RelFraming;
-  /** The result relation's output columns, in order — the framing layer's `Relation` header. */
-  readonly cols: readonly string[];
-  readonly channels: Channels;
 }
 
 /** The bulk channel every element source seeds: the RLE traverser count a reducer reads as
@@ -80,16 +85,29 @@ const BULK: Channels = [{ col: 'bulk', role: 'bulk' }];
 /**
  * The EMISSION-ORDER channel, and the second carried role this route models.
  *
- * A chain that slices has an answer depending on which rows come first, so `analyzeChain` marks it
- * `demandsEncounter` and the source seeds a monotone column the whole chain threads. Its position
- * in the list is not free: `ROLE_ORDER` (src/channels.ts) is an INVARIANT of a `Channels` list, and
- * the framing layer's `layoutCols` sorts the same way — bulk before encounter — so a producer that
- * emitted them the other way round would desync the declared schema from the physical one.
+ * A chain that slices has an answer depending on which rows come first; `analyzeChain` marks it
+ * `demandsEncounter` and the SOURCE seeds a monotone column — but that flag is only ever the seed's
+ * question, never the plan's. **The channel set is a property of each RELATION**, so an `order()`
+ * MINTS this channel where none arrived and every reader downstream keys on its presence rather than
+ * on a chain-global boolean threaded from the source. That is why `withChannel` exists in the core:
+ * `ROLE_ORDER` is an invariant of a `Channels` list, and the framing layer's `layoutCols` sorts the
+ * same way — bulk before encounter — so a mint that appended out of order would desync the declared
+ * schema from the physical one.
  */
-const ORDERED: Channels = [{ col: 'bulk', role: 'bulk' }, { col: 'encounter', role: 'encounter' }];
-const elementChannels = (ordered: boolean): Channels => (ordered ? ORDERED : BULK);
-const elementCols = (ordered: boolean): readonly ColMeta[] =>
-  [meta('id', 'int'), meta('bulk', 'int'), ...(ordered ? [meta('encounter', 'int')] : [])];
+const ENCOUNTER: Channel = { col: 'encounter', role: 'encounter' };
+const encounterOf = (channels: Channels): Channel | undefined =>
+  channels.find((channel) => channel.role === 'encounter');
+
+/**
+ * An element relation's DECLARED COLUMNS: the traverser's id, then one column per carried channel,
+ * in the channel list's own order.
+ *
+ * Derived from the channels rather than from a boolean, which is the whole of the model change: a
+ * chain no longer has one element shape decided at its source, so every producer here asks its
+ * INPUT what it carries. A role this route grows tomorrow gets its column with no edit at all.
+ */
+const elementCols = (channels: Channels): readonly ColMeta[] =>
+  [meta('id', 'int'), ...channels.map((channel) => meta(channel.col, 'int'))];
 
 
 
@@ -310,11 +328,12 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
   if (labels.length && FROM_EDGE.has(step.name)) return null;
 
   const input = frontierRel(from);
-  // Only a ROOTED hop threads the emission order. A correlated one lives inside an `EXISTS`, which
-  // asks whether a row is there and never in what order — so its `bulk` is synthetic and it carries
-  // no position at all.
-  const ordered = !!input && input.channels.some((channel) => channel.role === 'encounter');
-  const armCols = elementCols(ordered);
+  // WHAT THE HOP CARRIES is its input's channels, read off the frontier rather than off a
+  // chain-global flag. Only a ROOTED hop carries anything at all: a correlated one lives inside an
+  // `EXISTS`, which asks whether a row is there and never in what order — so its `bulk` is synthetic
+  // and it carries no position.
+  const carried = input ? input.channels : BULK;
+  const armCols = elementCols(carried);
   const arms = hops.map((hop) => {
     const e = make.scan({
       id: fresh('mv'), table: 'edges', alias: fresh('rme'), channels: [],
@@ -332,16 +351,19 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
     // `bulk` is synthetic: an EXISTS asks whether a row is there, never how many traversers it is.
     const source = input
       ? make.join({
-        id: fresh('j'), left: e, right: input, join: 'inner', on, channels: elementChannels(ordered),
-        type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int'), meta('pid', 'int'), ...armCols.slice(1)),
+        id: fresh('j'), left: e, right: input, join: 'inner', on, channels: carried,
+        type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int'), meta('pid', 'int'),
+          ...carried.map((channel) => meta(channel.col, 'int'))),
       })
       : make.filter({ id: fresh('f'), input: e, channels: [], type: e.type, pred: on });
     // The arm carries the INCOMING position through unchanged; re-minting happens once over the
     // whole fan-out below, not per arm — two arms each numbering from 1 would interleave.
     return make.project({
-      id: fresh('m'), input: source, channels: elementChannels(ordered), type: typeOf(...armCols),
-      exprs: [['id', col(source.id, hop.to)], ['bulk', input ? col(source.id, 'bulk') : lit(1, 'int')],
-        ...(ordered ? [['encounter', col(source.id, 'encounter')] as const] : [])],
+      id: fresh('m'), input: source, channels: carried, type: typeOf(...armCols),
+      exprs: [['id', col(source.id, hop.to)],
+        ...(input
+          ? carried.map((channel) => [channel.col, col(source.id, channel.col)] as const)
+          : [['bulk', lit(1, 'int')] as const])],
     });
   });
   const [first, ...rest] = arms;
@@ -349,9 +371,10 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
   // N-ary UNION ALL, minted once — and ALL, never distinct: traversers are a multiset, so a vertex
   // reachable both ways is two traversers.
   const fanned = rest.length
-    ? make.union({ id: fresh('u'), inputs: arms, all: true, channels: elementChannels(ordered), type: typeOf(...armCols) })
+    ? make.union({ id: fresh('u'), inputs: arms, all: true, channels: carried, type: typeOf(...armCols) })
     : first;
-  return { rel: ordered ? remintOrder(fanned, fresh) : fanned, elem: hops[0]!.elem };
+  const encounter = encounterOf(carried);
+  return { rel: encounter ? remintOrder(fanned, encounter, fresh) : fanned, elem: hops[0]!.elem };
 }
 
 /**
@@ -405,7 +428,7 @@ function sliceOp(step: IRStep, input: Rel, fresh: Minter): Rel | null {
   });
 }
 
-function rowOp(step: IRStep, input: Rel, elem: Elem, ordered: boolean, fresh: Minter): Rel | null {
+function rowOp(step: IRStep, input: Rel, elem: Elem, fresh: Minter): Rel | null {
   if (step.optionArms) return null;
   if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
   if (step.name === 'identity' || step.name === 'barrier') return (step.args ?? []).length ? null : input;
@@ -414,9 +437,10 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, ordered: boolean, fresh: Mi
 
   if (step.name !== 'dedup' || (step.args ?? []).length || isLocalScope(step)) return null;
 
+  const ordered = !!encounterOf(input.channels);
   const bys = modulations(step, 1);
   if (!bys) return null;
-  if (bys[0]) return dedupBy(step, bys[0], input, elem, ordered, fresh);
+  if (bys[0]) return dedupBy(step, bys[0], input, elem, fresh);
 
   // `dedup()` RESETS the multiplicity: the survivor stands for itself, not for the sum of the
   // duplicates it replaced.
@@ -435,7 +459,7 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, ordered: boolean, fresh: Mi
     return make.distinct({ id: fresh('d'), input: projected, channels: BULK, type: projected.type });
   }
   return make.aggregate({
-    id: fresh('dd'), input, channels: input.channels, type: typeOf(...elementCols(true)),
+    id: fresh('dd'), input, channels: input.channels, type: typeOf(...elementCols(input.channels)),
     groupBy: [col(input.id, 'id')],
     aggs: [['bulk', lit(1, 'int')], ['encounter', { kind: 'agg', fn: 'min', args: [col(input.id, 'encounter')] }]],
   });
@@ -463,7 +487,7 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, ordered: boolean, fresh: Mi
  * emits no `GROUP BY` on either spine. So this is not a divergence to reconcile; it is the form that
  * stays correct if that safety rule is ever relaxed, at no cost today.
  */
-function dedupBy(step: IRStep, modulation: Modulation, input: Rel, elem: Elem, ordered: boolean, fresh: Minter): Rel | null {
+function dedupBy(step: IRStep, modulation: Modulation, input: Rel, elem: Elem, fresh: Minter): Rel | null {
   // A comparator on `dedup()` is not a form Gremlin has — `DedupGlobalStep` is not a comparator host —
   // so an `Order` in its `by()` is a chain `verifyByModulatorArity` never sees. Decline rather than
   // silently ignoring it.
@@ -475,7 +499,7 @@ function dedupBy(step: IRStep, modulation: Modulation, input: Rel, elem: Elem, o
   const domain = productive
     ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: productive })
     : input;
-  const cols = elementCols(ordered);
+  const cols = elementCols(input.channels);
   const ranked = make.window({
     id: fresh('dw'), input: domain, channels: domain.channels, type: typeOf(...cols, meta('rn', 'int')),
     specs: [['rn', {
@@ -490,7 +514,7 @@ function dedupBy(step: IRStep, modulation: Modulation, input: Rel, elem: Elem, o
     pred: eq(col(ranked.id, 'rn'), lit(1, 'int')),
   });
   return make.project({
-    id: fresh('dk'), input: survivors, channels: elementChannels(ordered), type: typeOf(...cols),
+    id: fresh('dk'), input: survivors, channels: input.channels, type: typeOf(...cols),
     exprs: cols.map((column) => [column.name,
       column.name === 'bulk' ? lit(1, 'int') : col(survivors.id, column.name)] as const),
   });
@@ -540,10 +564,10 @@ function renumber(
 
 /** The fan-out re-mint: renumber by the incoming position, tie-broken on the element id so rows
  *  that shared one incoming traverser get a deterministic order rather than SQLite's. */
-const remintOrder = (rel: Rel, fresh: Minter): Rel => renumber(
+const remintOrder = (rel: Rel, encounter: Channel, fresh: Minter): Rel => renumber(
   rel,
-  [{ expr: col(rel.id, 'encounter'), dir: 'asc' }, { expr: col(rel.id, 'id'), dir: 'asc' }],
-  elementCols(true), ORDERED, fresh,
+  [{ expr: col(rel.id, encounter.col), dir: 'asc' }, { expr: col(rel.id, 'id'), dir: 'asc' }],
+  elementCols(rel.channels), rel.channels, fresh,
 );
 
 /**
@@ -592,7 +616,7 @@ function countExpr(input: Rel): Expr {
  * that both arms change the STREAM KIND: everything before produces elements and frames as the
  * element payload, and these produce one scalar per row and frame through the value projection.
  */
-function terminal(step: IRStep, input: Rel, elem: Elem, ordered: boolean, fresh: Minter): Omit<RelLowering, 'plan'> & { readonly rel: Rel } | null {
+function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { readonly rel: Rel; readonly framing: RelFraming } | null {
   if (step.modulators?.length || step.optionArms) return null;
   const args = step.args ?? [];
 
@@ -607,7 +631,7 @@ function terminal(step: IRStep, input: Rel, elem: Elem, ordered: boolean, fresh:
     // `barrierChannels` says and why the channels list is empty rather than trimmed by hand.
     return {
       rel: make.aggregate({ id: fresh('agg'), input, channels: [], type: typeOf(meta('v', 'int')), groupBy: [], aggs: [['v', total]] }),
-      framing: { kind: 'scalar', type: STATIC('long'), result: 'count' }, cols: ['v'], channels: [],
+      framing: { kind: 'scalar', type: STATIC('long'), result: 'count' },
     };
   }
 
@@ -626,8 +650,8 @@ function terminal(step: IRStep, input: Rel, elem: Elem, ordered: boolean, fresh:
     // A JOIN, not an EXISTS: `values()` emits one traverser PER matching property, so multiplying
     // the row is the answer rather than the bug it would be in a filter.
     const joined = make.join({
-      id: fresh('j'), left: input, right: props, join: 'inner', channels: elementChannels(ordered),
-      type: typeOf(...elementCols(ordered), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+      id: fresh('j'), left: input, right: props, join: 'inner', channels: input.channels,
+      type: typeOf(...elementCols(input.channels), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
       // The key set is bounded by the QUERY TEXT, never by row count, so an `InList` is right here
       // and a JSON bind is not (root CLAUDE.md's rule is about data-sized sets).
       on: and(eq(col(props.id, owner), col(input.id, 'id')), keys.length
@@ -636,15 +660,14 @@ function terminal(step: IRStep, input: Rel, elem: Elem, ordered: boolean, fresh:
     });
     return {
       rel: make.project({
-        id: fresh('sv'), input: joined, channels: elementChannels(ordered),
-        type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...elementCols(ordered).slice(1)),
-        exprs: [['v', storedValue(joined.id)], ['vtype', col(joined.id, 'vtype')], ['bulk', col(joined.id, 'bulk')],
-          ...(ordered ? [['encounter', col(joined.id, 'encounter')] as const] : [])],
+        id: fresh('sv'), input: joined, channels: input.channels,
+        type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...input.channels.map((channel) => meta(channel.col, 'int'))),
+        exprs: [['v', storedValue(joined.id)], ['vtype', col(joined.id, 'vtype')],
+          ...input.channels.map((channel) => [channel.col, col(joined.id, channel.col)] as const)],
       }),
       // The value's Gremlin type is PER ROW, off the stored `vtype` column — one compile-time tag
       // would be a lie for an untyped property key.
       framing: { kind: 'scalar', type: PER_ROW('vtype') },
-      cols: ['v', 'vtype', ...elementCols(ordered).slice(1).map((c) => c.name)], channels: elementChannels(ordered),
     };
   }
 
@@ -698,15 +721,17 @@ function sortTerms(step: IRStep, host: ByHost, fresh: Minter): readonly SortTerm
  * uses the same `sliceOp` as the element fold. `dedup()` is `Distinct` over the whole row — which
  * for a scalar IS the value. `count()` reduces to a long, reading the multiplicity off the CHANNEL
  * rather than assuming one exists.
+ *
+ * Every fact about the current relation — its columns, its channels, whether a per-row `vtype` is in
+ * scope — is READ OFF `rel` rather than tracked beside it. Two accumulator variables used to shadow
+ * them, and a step that reshaped the relation without updating both was a desync no type could see.
  */
 function scalarTail(
-  seed: Rel, framing: RelFraming, cols: readonly string[], channels: Channels,
-  steps: readonly IRStep[], from: number, fresh: Minter,
-): (Omit<RelLowering, 'plan'> & { readonly rel: Rel }) | null {
+  seed: Rel, framing: RelFraming, steps: readonly IRStep[], from: number, fresh: Minter,
+): { readonly rel: Rel; readonly framing: RelFraming } | null {
   let rel = seed;
   let out: RelFraming = framing;
-  let outCols = cols;
-  let outChannels = channels;
+  const carries = (name: string): boolean => rel.type.cols.some((column) => column.name === name);
   // WHAT IS KNOWN about the value's Gremlin type, read off the framing rather than guessed — the ONE
   // fact both `is`'s ordering comparisons and its `typeOf` test need, so it is computed once as a
   // total union rather than twice as two optionals. A per-row `vtype` column is in scope only where
@@ -715,7 +740,7 @@ function scalarTail(
   // heterogeneous or untagged type is honestly `unknown`. Same three cases `predicateSql` calls
   // `TypeCtx`, in the algebra's own expression vocabulary.
   const subjectType = (): SubjectType =>
-    outCols.includes('vtype') ? { kind: 'perRow', vtype: col(rel.id, 'vtype') }
+    carries('vtype') ? { kind: 'perRow', vtype: col(rel.id, 'vtype') }
       : out.kind === 'scalar' && out.type.kind === 'static' ? { kind: 'static', type: out.type.type }
         : SUBJECT_UNKNOWN;
 
@@ -735,7 +760,7 @@ function scalarTail(
   // `Distinct`, an earlier `Sort`, or this very fence — so its subject is a column of a finished
   // block and there is nothing left to re-inline.
   if (CLAUSE_READERS.has(steps[from]?.name ?? '') && seed.kind !== 'values')
-    rel = make.materialize({ id: fresh('m'), input: rel, channels: outChannels, type: rel.type });
+    rel = make.materialize({ id: fresh('m'), input: rel, channels: rel.channels, type: rel.type });
 
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
@@ -746,7 +771,7 @@ function scalarTail(
     if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
     // A value's own `vtype` is in scope only where it came from a stored property, which is the same
     // distinction `compare()` above draws and the reason `ByHost` carries it as an optional.
-    const host: ByHost = { kind: 'scalar', value: col(rel.id, 'v'), ...(outCols.includes('vtype') ? { vtype: col(rel.id, 'vtype') } : {}) };
+    const host: ByHost = { kind: 'scalar', value: col(rel.id, 'v'), ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}) };
 
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
 
@@ -758,10 +783,10 @@ function scalarTail(
       // from the stale seed would return the right multiset from the wrong place. Legacy says the
       // same thing with its own window projection (`partitionedOrder`), tie-broken on the old
       // encounter — which is what makes the sort STABLE, so that is the second term here too.
-      const encounter = outChannels.find((channel) => channel.role === 'encounter');
+      const encounter = encounterOf(rel.channels);
       rel = encounter
-        ? renumber(rel, [...terms, { expr: col(rel.id, encounter.col), dir: 'asc' }], rel.type.cols, outChannels, fresh)
-        : make.sort({ id: fresh('so'), input: rel, channels: outChannels, type: rel.type, terms });
+        ? renumber(rel, [...terms, { expr: col(rel.id, encounter.col), dir: 'asc' }], rel.type.cols, rel.channels, fresh)
+        : make.sort({ id: fresh('so'), input: rel, channels: rel.channels, type: rel.type, terms });
       continue;
     }
 
@@ -785,13 +810,13 @@ function scalarTail(
       // here. Dropping it also removes the vtype from `subjectType()`, so a following `is(P.gt(…))`
       // stops asking for an ordering key the value no longer has one for, which is correct: the
       // transformed value is a native SQLite value and compares directly.
-      const payload = [meta('v', 'any', true), ...outChannels.map((channel) => meta(channel.col, 'int'))];
+      const carried = rel.channels;
       rel = make.project({
-        id: fresh('tx'), input: rel, channels: outChannels, type: typeOf(...payload),
-        exprs: [['v', tx.expr], ...outChannels.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+        id: fresh('tx'), input: rel, channels: carried,
+        type: typeOf(meta('v', 'any', true), ...carried.map((channel) => meta(channel.col, 'int'))),
+        exprs: [['v', tx.expr], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
       });
       out = { kind: 'scalar', type: tx.type ?? UNKNOWN };
-      outCols = payload.map((column) => column.name);
       continue;
     }
 
@@ -806,7 +831,7 @@ function scalarTail(
       if (collectionAssert(step)) return null;
       const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType());
       if (!pred) return null;
-      rel = make.filter({ id: fresh('f'), input: rel, channels: outChannels, type: rel.type, pred });
+      rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
       continue;
     }
 
@@ -832,15 +857,13 @@ function scalarTail(
       const deduped = modulations(step, 1);
       if (!deduped || (deduped[0] && !byExpr(deduped[0], host, fresh))) return null;
       if (deduped[0]?.order !== undefined) return null;
-      const payload = rel.type.cols.filter((column) => !outChannels.some((channel) => channel.col === column.name));
+      const payload = rel.type.cols.filter((column) => !rel.channels.some((channel) => channel.col === column.name));
       if (!payload.length) return null;
       const projected = make.project({
         id: fresh('dp'), input: rel, channels: [], type: typeOf(...payload),
         exprs: payload.map((column) => [column.name, col(rel.id, column.name)] as const),
       });
       rel = make.distinct({ id: fresh('d'), input: projected, channels: [], type: projected.type });
-      outCols = payload.map((column) => column.name);
-      outChannels = [];
       continue;
     }
 
@@ -849,7 +872,7 @@ function scalarTail(
     // (§3.5's `barrierChannels`), which is why the channels list is empty rather than trimmed by hand.
     if (isReducer(step.name)) {
       if (args.length || isLocalScope(step)) return null;
-      const bulk = outChannels.find((channel) => channel.role === 'bulk');
+      const bulk = rel.channels.find((channel) => channel.role === 'bulk');
       const reduced = reducerAggregate(col(rel.id, 'v'), step.name, bulk && col(rel.id, bulk.col));
       rel = make.aggregate({
         id: fresh('red'), input: rel, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
@@ -859,8 +882,6 @@ function scalarTail(
       // DYNAMIC (a sum of integers is an integer, of reals a real), so there is no compile-time tag to
       // give and `UNKNOWN` would throw the second column away.
       out = { kind: 'scalar', type: UNKNOWN, result: 'number' };
-      outCols = ['v', 'vt'];
-      outChannels = [];
       continue;
     }
 
@@ -871,14 +892,12 @@ function scalarTail(
         groupBy: [], aggs: [['v', countExpr(rel)]],
       });
       out = { kind: 'scalar', type: STATIC('long'), result: 'count' };
-      outCols = ['v'];
-      outChannels = [];
       continue;
     }
 
     return null;
   }
-  return { rel, framing: out, cols: outCols, channels: outChannels };
+  return { rel, framing: out };
 }
 
 /**
@@ -955,7 +974,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   // not defer, it would pick a different window from the same multiset — right arity, plausible
   // rows, and a census that structurally cannot see it (`ord` is telemetry, `ms` is the gate).
   const ordered = analyzeChain(steps as IRStep[]).demandsEncounter;
-  const channels = elementChannels(ordered);
+  const seedChannels = ordered ? withChannel(BULK, ENCOUNTER) : BULK;
   // COLLAPSE AND ORDER ARE MUTUALLY EXCLUSIVE, and this module says so itself rather than trusting
   // its caller to. A collapse merges convergent walks by discarding which one arrived — exactly the
   // per-row identity an emission order IS — so the two cannot both hold. `analyzeChain` already
@@ -972,10 +991,9 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   if (first.name === 'inject') {
     const injected = injectSource(first, fresh);
     if (!injected) return null;
-    const tail = scalarTail(injected.rel, injected.framing, ['v'], [], steps, 1, fresh);
+    const tail = scalarTail(injected.rel, injected.framing, steps, 1, fresh);
     if (!tail) return null;
-    const { rel: injRel, ...injRest } = tail;
-    return { plan: nameBindings(injRel), ...injRest };
+    return { plan: nameBindings(tail.rel), framing: tail.framing };
   }
 
   if (first.name !== 'V' && first.name !== 'E') return null;
@@ -1003,7 +1021,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   // natural order is the only order a bare source has, and naming it makes every later slice ask
   // the same question of the same column instead of of whatever SQLite happened to produce.
   let rel: Rel = make.project({
-    id: fresh('c'), input: source, channels, type: typeOf(...elementCols(ordered)),
+    id: fresh('c'), input: source, channels: seedChannels, type: typeOf(...elementCols(seedChannels)),
     exprs: [['id', col(source.id, 'id')], ['bulk', lit(1, 'int')],
       ...(ordered ? [['encounter', col(source.id, 'id')] as const] : [])],
   });
@@ -1028,20 +1046,17 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
     // legacy answers. Found by L5 on a generated `E().limit(1).has(…).where(…)` — no corpus traversal
     // has that prefix, so the corpus sweep could not reach it.
     if (clause) { rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause }); continue; }
-    const row = rowOp(step, rel, elem, ordered, fresh);
+    const row = rowOp(step, rel, elem, fresh);
     if (!row) break;
     rel = row;
   }
 
-  if (at === steps.length)
-    return { plan: nameBindings(rel), framing: { kind: 'elements', elem }, cols: elementCols(ordered).map((c) => c.name), channels };
+  if (at === steps.length) return { plan: nameBindings(rel), framing: { kind: 'elements', elem } };
 
-  const retyped = terminal(steps[at], rel, elem, ordered, fresh);
+  const retyped = terminal(steps[at], rel, elem, fresh);
   if (!retyped) return null;
-  const { rel: retypedRel, ...rest } = retyped;
 
-  const tail = scalarTail(retypedRel, rest.framing, rest.cols, rest.channels, steps, at + 1, fresh);
+  const tail = scalarTail(retyped.rel, retyped.framing, steps, at + 1, fresh);
   if (!tail) return null;
-  const { rel: tailRel, ...tailRest } = tail;
-  return { plan: nameBindings(tailRel), ...tailRest };
+  return { plan: nameBindings(tail.rel), framing: tail.framing };
 }
