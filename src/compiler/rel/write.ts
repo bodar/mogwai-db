@@ -192,10 +192,13 @@ export function elementDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
  * 8,936). A COLLECTION value is expressible too and by the same route — it stores as a
  * self-describing typed `{t,v}` tree, so the only difference is that its JSON text crosses as
  * `jsonb(<text>)` and its index walk emits one row per nested leaf, both of which the shared waists
- * already do. A traversal value, a meta-property, a `T` token key and the `null` REMOVAL rule each
- * need something the compile-time value does not have, and every one of them is a decline: legacy
- * answers them today, and answering a different question is the failure mode the routing switch
- * cannot absorb.
+ * already do. A traversal value, a meta-property and a `T` token key each need something the
+ * compile-time value does not have, and every one of them is a decline: legacy answers them today, and
+ * answering a different question is the failure mode the routing switch cannot absorb.
+ *
+ * **`null` is expressible and is not a write at all** — it is TinkerPop's property REMOVAL rule, a
+ * delete wearing a write's spelling, which is why `PropertyWrite` is a union rather than a record with
+ * a nullable value.
  *
  * ## The cardinality is a PER-ELEMENT question, and stays one
  *
@@ -205,7 +208,21 @@ export function elementDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
  * same stream — so it is an EXPRESSION each statement is guarded by, never a branch taken once.
  * Collapsing it to a constant is exactly the bug that made a repeated `property(k, v)` overwrite.
  */
-export interface PropertyWrite {
+/**
+ * WHAT ONE `property()` DOES — a total union, because `property(k, null)` is not a write of null.
+ *
+ * TinkerPop's null-VALUE rule: on a graph that does not declare `supportsNullPropertyValues` — ours
+ * does not — `property(k, null)` REMOVES every property under `k`. Modelled as a variant rather than
+ * as a `stored: null` because the two arms share almost nothing: a removal has no stored value, no
+ * vtype, no index rows to write, and it ignores the DECLARED cardinality entirely (`ElementHelper`
+ * removes before it resolves one, so `property(single, k, null)` writes no declaration either). Every
+ * one of those would have been an optional field whose emptiness meant "this is really the other
+ * thing", which is the vocabulary shape `ScalarType` exists as the counter-example to.
+ */
+export type PropertyWrite = PropertySet | PropertyRemoval;
+
+export interface PropertySet {
+  readonly kind: 'set';
   readonly key: string;
   /** The value as STORAGE holds it, and the canonical Gremlin type beside it. */
   readonly stored: unknown;
@@ -222,6 +239,12 @@ export interface PropertyWrite {
   readonly cardinality: VertexCardinality | null;
 }
 
+/** `property(k, null)` — every property under `k` goes, whatever the cardinality says. */
+export interface PropertyRemoval {
+  readonly kind: 'remove';
+  readonly key: string;
+}
+
 /**
  * THE VALUE AS THE STATEMENT SPELLS IT — a bare bind for a scalar, `jsonb(<text>)` for a collection.
  *
@@ -234,7 +257,7 @@ export interface PropertyWrite {
  * §10·5 is unaffected: the blob goes INTO the table, and this statement's `RETURNING` projects ids
  * only, so nothing untransportable is retained.
  */
-const storedExpr = (write: PropertyWrite): Expr =>
+const storedExpr = (write: PropertySet): Expr =>
   write.collection ? { kind: 'call', fn: 'jsonb', args: [lit(write.stored, 'text')] } : lit(write.stored);
 
 /** The property side-table each element kind writes, as `Scan` must declare it. */
@@ -271,7 +294,7 @@ function cardinalityOf(owner: Expr, key: string, declared: VertexCardinality | n
  *  meet as a cross join — one row per written property per index entry. `Values` is exactly the
  *  right node for a compile-time row set, and there is always at least one entry (the value row),
  *  which is what makes it constructible. */
-function indexWritten(written: Rel, elem: Elem, write: PropertyWrite, fresh: Minter): Stmt {
+function indexWritten(written: Rel, elem: Elem, write: PropertySet, fresh: Minter): Stmt {
   const entries = make.values({
     id: fresh('fv'), channels: [], type: typeOf(meta('kind', 'text'), meta('text', 'text')),
     rows: write.fts.map((entry) => [text(entry.kind), text(entry.text)]),
@@ -341,6 +364,17 @@ function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind:
   // so the identity projection is taken once here rather than at each of the four predicates that
   // want it. (`IN (SELECT id, bulk, encounter …)` is what SQLite refuses, and it refused it.)
   const ids = make.project({ id: fresh('w'), input: owners, channels: [], type: ID_TYPE, exprs: [['id', col(owners.id, 'id')]] });
+
+  // A REMOVAL is the replace half on its own, with no insert after it and no cardinality consulted:
+  // the FTS text those rows own, then the rows. It is UNGUARDED — `property(k, null)` removes under
+  // every cardinality, which is what makes it a removal rather than a `single` write of nothing.
+  if (write.kind === 'remove') {
+    const stale = existingRows(elem, ids, write.key, undefined, fresh);
+    bind(dropStaleIndex(elem, stale.ids, fresh));
+    const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+    bind(remove({ target, channels: [], type: typeOf(), where: stale.pred(target), returning: [] }));
+    return;
+  }
 
   // A DECLARED cardinality is a schema write, and it must land before anything reads it back.
   if (write.cardinality) {
@@ -473,7 +507,6 @@ export function elementProperty(target: Rel, elem: Elem, writes: readonly Proper
  *
  * - a **nested traversal** key or value — its rows are known only at run time, so neither the stored
  *   value nor its index text exists yet.
- * - **`null`** — that is TinkerPop's property REMOVAL rule, a delete wearing a write's spelling.
  * - a **meta-property**, and a **`T` token** key (an id/label write on an existing element, which
  *   legacy refuses with a message it owns).
  * - an **edge** carrying a cardinality or meta at all, which TinkerPop's `Property` has neither of.
@@ -505,13 +538,19 @@ export function propertyWrites(steps: readonly IRStep[], elem: Elem, params: Rec
  * reads back.
  */
 function writeOf(spec: PropSpec, elem: Elem): PropertyWrite | null {
-  if (typeof spec.key !== 'string' || spec.meta || isNested(spec.value) || spec.value == null) return null;
+  if (typeof spec.key !== 'string' || spec.meta || isNested(spec.value)) return null;
   if (elem === 'edge' && spec.cardinality !== null) return null;
   // The key waist, shared: an invalid key is an ERROR legacy raises, never a silently skipped write.
   try { validatePropertyKey(spec.key); } catch { return null; }
+  // TinkerPop's null-VALUE rule, and the reason the return type is a union: a null value REMOVES every
+  // property under the key. `undefined` is a different thing — an absent argument, which this route has
+  // nothing to write for — so the test is `=== null` exactly as `isPropertyRemoval` spells it, never a
+  // loose `== null` that would silently turn a missing value into a delete.
+  if (spec.value === null) return { kind: 'remove', key: spec.key };
+  if (spec.value === undefined) return null;
   const { stored, collection } = propertyValueBind(spec.value, spec.vtype, spec.typeNode);
   return {
-    key: spec.key, stored, collection, vtype: spec.vtype, cardinality: spec.cardinality,
+    kind: 'set', key: spec.key, stored, collection, vtype: spec.vtype, cardinality: spec.cardinality,
     fts: propertyFtsEntries(spec.value, spec.typeNode),
   };
 }
