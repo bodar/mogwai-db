@@ -778,7 +778,11 @@ reading the code.** They are grouped by what they teach.
 Corollary, learned the hard way: **a coverage increment is validated by the SHAPE assertions, not by the
 census** — the census answers "did anything change", and a wrong shape over an empty result changes
 nothing it measures. And L5 derives its seed from `HEAD`, so **a local green `mise run ci` before a
-commit does not prove the commit itself green.**
+commit does not prove the commit itself green.** The remedy is mechanical and worth using: COMMIT
+first, then run `mise run L5` at that commit — that IS the seed CI will use — and only then push.
+Measured 2026-08-03: `ci` was green before the set-op commit and CI was RED on it, for a defect the
+next commit's local run then found (a legacy `order().by(k).dedup()` losing the order's productivity
+drop). One extra `L5` is cheaper than a red trunk.
 
 ### The decline contract
 
