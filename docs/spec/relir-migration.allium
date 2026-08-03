@@ -104,8 +104,11 @@ entity StepChain {
     contains_side_effect: Boolean
     contains_sack: Boolean
 
-    -- The routing seam's precondition: an effectful chain is legacy's until the write wedge
-    -- lands, and never partly RelIR's.
+    -- The routing seam's precondition, and it is NARROWER than "has effects" now that the write
+    -- wedge has landed: a chain whose effects the write vocabulary covers routes to RelIR as a
+    -- PROGRAM. What is still legacy's whole is a sack or a side effect, and a write shape the
+    -- vocabulary has not learned — the same decline any unlearned step gets, never a partial route.
+    is_legacy_only: contains_side_effect or contains_sack
     is_effectful: contains_write or contains_side_effect or contains_sack
 }
 
@@ -270,7 +273,7 @@ default MigrationPhase phase_4_1 = {
     number: 2, title: "The row-algebraic read class and the shape vocabularies", status: active, coverage_moved: true, depends_on: phase_1
 }
 default MigrationPhase phase_2 = {
-    number: 3, title: "The write wedge", status: pending, coverage_moved: false, depends_on: phase_4_1
+    number: 3, title: "The write wedge", status: active, coverage_moved: true, depends_on: phase_4_1
 }
 default MigrationPhase phase_3 = {
     number: 4, title: "The repeat wedge", status: pending, coverage_moved: false, depends_on: phase_2
