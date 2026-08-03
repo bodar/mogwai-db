@@ -655,7 +655,7 @@ them were the same three-argument form. The instrument keeps its job with a diff
 ### Phase 2 — the write wedge
 
 `Insert`/`Update`/`Delete` bindings over read plans. 2.1 (§3.0 down to a program running against
-SQLite, including the executor) is COMPLETE, and **2.2 LANDED with the WAY IN** (+3, and the number is
+SQLite, including the executor) is COMPLETE, and **2.2 and 2.3 LANDED, 2.2 with the WAY IN** (+3, and the number is
 the wrong thing to read it by — §10·7): a covered chain ending in `drop()` lowers to a PROGRAM, and
 what that opened is the substrate every later write step inherits.
 
@@ -684,19 +684,37 @@ all of them this). And the census's `isWrite` asked `kind === 'write'`, so a `dr
 `program` shared the READ store and emptied it for every traversal after it — the question that probe
 is really asking is whether a shared store SURVIVES, and only `kind === 'read'` answers yes.
 
-**What 2.3 needs that 2.2 did not: FRAMING over a program.** `drop()` frames nothing, so the program
-leaves through its own door in `spine.ts`. `property()`/`addV()` return traversers, and their framing
-query has to run AFTER the effects and read their retained rows. Two shapes for it, and the second
-looks right: give `Program` a `tail` (the framing layer's composed query, whose binds may hold a
-`RowsBind`), or make `emitRelational` render a plan's RESULT with the effects' steps stripped off, so
-the framing layer keeps composing an `Expression` exactly as it does today. Decide it at 2.3, not
-before — the two differ only in who owns the last render.
+**FRAMING over a program LANDED with 2.3, and it is both answers at once.** `emitProgram` splits a
+plan into the steps that RUN and the relation that is LEFT; `spine.ts` frames that relation through the
+SAME element projection a pure read reaches, and the composed query rides as `Program.tail` — so shape
+stays resolved above RelIR (§2) and the wire layer still has no write vocabulary. A `drop()` has no
+relation left (its result IS its last statement), which is the `discard` arm.
 
 - **2.2** `drop()` → `Delete` with an `InQuery` membership predicate. **DONE.** What still declines is
   a PROPERTY drop (`g.V().properties().drop()`), which needs the property stream RelIR does not have —
   the property shape's 90 blockers, not this phase's.
-- **2.3** `property()` → `Update{from}` / `Insert … ON CONFLICT`. Expressing `Cardinality.list` as an
-  `Insert` of N rows rather than a JS overwrite is a structural fix for the cardinality bug class.
+- **2.3** `property()` on an element that already exists. **DONE (+2).** The cardinality is a
+  PER-ELEMENT question and stays one: an explicit `property(Cardinality.x, …)` declares and is constant
+  thereafter, and absent one it is `COALESCE(<this element's declaration>, list)` — an expression each
+  statement is GUARDED by, because two elements in one stream take different arms. The FTS rows are an
+  `INSERT … SELECT` over the property insert's own `RETURNING` (the text is a compile-time constant,
+  the pid is not, so they meet as a cross join over a `Values`), and the walk that produces the text is
+  SHARED with legacy — a re-derived index is a silent divergence. Declines: a traversal value, a
+  collection, `null` (the removal rule), a meta-property, a `T` key, and cardinality/meta on an edge.
+
+  **Two algebra gaps it closed, both of which any later write would have hit.** `EXCLUDED` — a reserved
+  relation identity for SQLite's `excluded`, in scope for an `ON CONFLICT` clause alone, without which
+  an upsert can only assign constants; and a statement's target columns are now TABLE-QUALIFIED, because
+  a correlated subquery over a table with a same-named column CAPTURES a bare one. `node = node` read as
+  the inner relation's column, was trivially true, and deleted every element's rows because one of them
+  carried a `single` declaration — legal SQL, both names resolve, invisible to the checker, and found by
+  an L4 pin.
+
+  **One L4 pin MOVED, and the rule it illustrates is write-path trap 3 read the other way round.**
+  `g_V_property_count_over_many` recorded OUR refusal ("cannot observe the whole stream"), not
+  TinkerPop's answer — so when a barrier after a write became the barrier that was already built, the
+  pin had to move to the count. Check whether a refusal is the REFERENCE's answer before removing it;
+  check equally whether it is only ever ours before keeping it.
 - **2.4** `addV`/`addE` → `Insert … SELECT … RETURNING`, with P5b's correlation key and an `ORDER BY`
   on the source so id assignment stays emission-ordered.
 - **2.5** `mergeV`/`mergeE` → `Insert … ON CONFLICT DO UPDATE … RETURNING`, one statement.
