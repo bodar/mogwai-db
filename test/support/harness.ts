@@ -92,6 +92,28 @@ export const bare = (v: any): any =>
   : v;
 
 /**
+ * WHAT A WRITE ECHOED, as `{labels, props}` — from EITHER spine.
+ *
+ * The two spell the row differently and both are right. The legacy write closure returns its own
+ * `{vertex: {id, labels, props}}` record; a RelIR program frames its result rows through the READ
+ * element projection, so `label`/`props` arrive as exactly the JSON text `g.V()` returns and the wire
+ * layer serializes the two identically (that is §2 — shape resolved above RelIR).
+ *
+ * A test that asserted one spelling was asserting the ROUTE: the day the step joined the RelIR spine
+ * it failed, having found no defect. What these tests mean to assert is what was WRITTEN, so that is
+ * what this reads, and it reads it the same way whichever route answered.
+ */
+export const written = (row: any): { labels: unknown[]; props: Record<string, unknown[]> } => {
+  const echo = row?.vertex ?? row?.edge;
+  if (echo) return { labels: echo.labels ?? [echo.label], props: bare(echo.props) };
+  const label = row?.label;
+  return {
+    labels: typeof label === 'string' && label.startsWith('[') ? JSON.parse(label) : [label],
+    props: bare(typeof row?.props === 'string' ? JSON.parse(row.props) : row?.props ?? {}),
+  };
+};
+
+/**
  * A result MULTISET, for a traversal whose order nothing determines.
  *
  * No `order()` and no positional consumer means the rows come out unordered by design (Crux 4 of

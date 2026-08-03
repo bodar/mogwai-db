@@ -19,7 +19,7 @@ import { normalize } from '../ir/passes.ts';
 import { containsTextSearch, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { bareInjectTag, foldConstantCoercions } from '../steps/write/inject.ts';
 import {
-  and, carriedCols, EDGE_COLS, eq, labelIds, meta, minter, NODE_COLS, PROPERTIES, storedValue, typeOf,
+  and, carriedCols, EDGE_COLS, eq, labelIds, meta, minter, NODE_COLS, PROPERTIES, renumber, storedValue, typeOf,
   type Minter,
 } from './build.ts';
 import { bindAliases, liveAliases, selectOne, type AliasRead } from './alias.ts';
@@ -27,7 +27,7 @@ import type { AliasMap } from '../steps/context/context.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
-import { elementAddE, elementAddV, elementDrop, elementProperty, propertyWrites, type Effects, type SubReads } from './write.ts';
+import { elementAddE, elementAddV, elementDrop, elementMergeV, elementProperty, propertyWrites, type Effects, type SubReads } from './write.ts';
 import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listRetype, listSetOp, unfoldList, type ListCtx } from './list.ts';
 import { LabelCardinality } from '../../api.ts';
 
@@ -885,52 +885,6 @@ function dedupBy(step: IRStep, modulation: Modulation, input: Rel, elem: Elem, f
     id: fresh('dk'), input: survivors, channels: input.channels, type: typeOf(...cols),
     exprs: cols.map((column) => [column.name,
       column.name === 'bulk' ? lit(1, 'int') : col(survivors.id, column.name)] as const),
-  });
-}
-
-/**
- * RENUMBER the emission order — `ROW_NUMBER()` into the `encounter` channel's own column, over
- * whatever order the caller names, leaving every other column exactly as it was.
- *
- * ONE function because the two callers ask the identical question of different orders, and reading
- * them side by side is what makes that visible: a fan-out renumbers by *the incoming position*
- * (several outgoing rows share one, so the old numbers no longer number the new rows), and a
- * scalar `order()` renumbers by *its own sort key* (the sort SUPERSEDES the arriving order, so a
- * later slice must take its window from the new positions and not the stale seed). Legacy has these
- * as two hand-rolled window projections; here the difference is the `terms` argument and nothing
- * else.
- *
- * The last term is a TIE-BREAK, and it is the caller's to supply because only the caller knows what
- * makes its order total. Without one the rows sharing a rank are numbered in whatever order SQLite
- * produced them — right multiset, arbitrary window — which is exactly the defect
- * `mise run test:perturbed` exists to find and which no assertion in the ladder can see.
- *
- * Two nodes because `Window` may only EXTEND its input (§3.5) — it adds the new column, and the
- * projection is what makes that column the channel and drops the stale one. The assembler fuses
- * them back into one SELECT, which is the division of labour §5 describes: the IR stays normalized
- * and the emitter does the composing.
- */
-function renumber(
-  rel: Rel, terms: readonly SortTerm[], cols: readonly ColMeta[], channels: Channels, fresh: Minter,
-): Rel {
-  const minted = 'rn';
-  const encounter = channels.find((channel) => channel.role === 'encounter');
-  // Renumbering a relation with nowhere to put the number is a lowering bug, not a deferral: every
-  // caller checks the channel first, so reaching here means a plan was built whose declared type and
-  // whose channels disagree — the class of defect the factory's own width checks catch three nodes
-  // later, where the cause is no longer visible.
-  if (!encounter) throw new Error('RelIR lowering: renumber() needs an encounter channel to mint into');
-  // The window EXTENDS its own input (§3.5), so its declared type is the INPUT's columns plus the
-  // minted one — not the output's. The two differ exactly when this is a MINT rather than a re-mint:
-  // there `cols` names an emission-order column the input does not have yet, and the projection below
-  // is where it comes into existence.
-  const windowed = make.window({
-    id: fresh('w'), input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, meta(minted, 'int')),
-    specs: [[minted, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: terms } }]],
-  });
-  return make.project({
-    id: fresh('ro'), input: windowed, channels, type: typeOf(...cols),
-    exprs: cols.map((column) => [column.name, col(windowed.id, column.name === encounter.col ? minted : column.name)] as const),
   });
 }
 
@@ -1837,6 +1791,16 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
     return tail && { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
   }
 
+  // `mergeV` AT THE SOURCE is the same one-row driver the two creations take, and for the same reason:
+  // the driver is a MULTIPLIER, so one row means the search's answer is emitted once.
+  if (first.name === 'mergeV') {
+    const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[lit(1, 'int')]] });
+    const merged = mergedVertices(one, steps, 0, ctx, fresh);
+    if (!merged) return null;
+    const tail = elementTail(merged.effects.result, 'vertex', steps, merged.at, false, ctx, fresh, NO_ALIASES);
+    return tail && { ...tail, effects: [...merged.effects.bindings, ...(tail.effects ?? [])] };
+  }
+
   if (first.name !== 'V' && first.name !== 'E') return null;
   // A modulator or an option arm on the source is not a source argument; decline rather than
   // silently ignore it.
@@ -1964,6 +1928,16 @@ function elementTail(
       const tail = elementTail(added.effects.result, 'edge', steps, added.at, false, ctx, fresh, NO_ALIASES);
       if (!tail) return null;
       return { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
+    }
+    if (step.name === 'mergeV') {
+      const merged = mergedVertices(rel, steps, at, ctx, fresh);
+      if (!merged) return null;
+      // The LABELS carry for `addV`'s reason and by `addV`'s mechanism, but the correlation is a cross
+      // join rather than a positional one: a merge emits the elements its SEARCH found, and no driver
+      // row produced any of them.
+      const tail = elementTail(merged.effects.result, 'vertex', steps, merged.at, false, ctx, fresh, labels);
+      if (!tail) return null;
+      return { ...tail, effects: [...merged.effects.bindings, ...(tail.effects ?? [])] };
     }
     if (step.name === 'addV') {
       const added = addedVertices(rel, steps, at, ctx, fresh);
@@ -2231,6 +2205,18 @@ const subReads = (ctx: ChainCtx, fresh: Minter): SubReads => ({
     if (!chain || chain.effects || chain.framing.kind !== 'elements' || chain.framing.elem !== 'vertex') return null;
     return make.project({ id: fresh('ep'), input: chain.rel, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(chain.rel.id, 'id')]] });
   },
+  // SYNTHESIZED STEPS, deliberately: the criteria ARE a `has()` chain, so writing them as one and
+  // sending it through `rooted` is the only spelling under which the merge's search and `has()`'s
+  // answer cannot drift apart. It also means the search inherits whatever `has` learns next — the
+  // vtype-aware compare it already has, the FTS arm §4.7 lifts — without this seam being touched.
+  // `args` is the whole of an `IRStep` these two steps read; the passes have already run on the chain
+  // this belongs to, so re-running them over a synthesized fragment would ask a question about a
+  // traversal nobody wrote.
+  matching: (labels, props) => subReads(ctx, fresh).rooted([
+    { name: 'V', args: [] },
+    ...labels.map((label) => ({ name: 'hasLabel', args: [label] })),
+    ...props.map(([key, value]) => ({ name: 'has', args: [key, value] })),
+  ] as IRStep[]),
 });
 
 /** A nested ROOTED traversal's steps, normalized — or `null` where normalizing RAISES (a deferral
@@ -2246,5 +2232,22 @@ function addedVertices(
   let end = at + 1;
   while (end < steps.length && steps[end]!.name === 'property') end++;
   const effects = elementAddV(drivers, steps[at]!, steps.slice(at + 1, end), ctx.ordered, ctx.params, ctx.labelCardinality, fresh);
+  return effects && { effects, at: end };
+}
+
+/** `mergeV(map)` plus its cluster — the `option()` arms that MODULATE it, then the `property()` run
+ *  that acts on its OUTPUT. The order is upstream's and it is load-bearing (an `option()` after a
+ *  property tail is not a merge arm), so the two runs are taken in sequence rather than as one set. */
+function mergedVertices(
+  drivers: Rel, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
+): { readonly effects: Effects; readonly at: number } | null {
+  let options = at + 1;
+  while (options < steps.length && steps[options]!.name === 'option') options++;
+  let end = options;
+  while (end < steps.length && steps[end]!.name === 'property') end++;
+  const effects = elementMergeV(
+    drivers, steps[at]!, steps.slice(at + 1, options), steps.slice(options, end),
+    ctx.ordered, ctx.params, ctx.labelCardinality, subReads(ctx, fresh), fresh,
+  );
   return effects && { effects, at: end };
 }

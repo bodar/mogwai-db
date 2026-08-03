@@ -1083,12 +1083,12 @@ function resolveEndpoint(engine: Engine, store: GraphStore, spec: any, d: { alia
  * for `mergeE`, its endpoint directions). Carrying it on the spec is what lets ONE validation run
  * at the ONE place every map becomes concrete, instead of three near-copies at three call sites.
  */
-interface MergeRole {
+export interface MergeRole {
   readonly op: 'mergeV' | 'mergeE';
   readonly kind: 'merge' | 'onCreate' | 'onMatch';
 }
 
-interface MergeSpec {
+export interface MergeSpec {
   readonly role: MergeRole;
   /** A LIST because a merge map's T.label may be `["a","b"]`; null = the key was absent. */
   label: string[] | null | { nested: any };
@@ -1345,7 +1345,7 @@ function mergeMatchQuery(spec: MergeSpec): { sql: string; binds: any[] } {
  *  cardinality in that position work without the merge lowering knowing either exists.
  *
  *  `option()` must come first: it modulates the merge, while the tail acts on its OUTPUT. */
-function parseMergeOptions(mods: Step[], step: MergeRole['op'], sideEffects: Map<string, any> | undefined, params: Record<string, any>): { onCreate: MergeSpec | null; onMatch: MergeSpec | null; tail: PropSpec[] } {
+function parseMergeOptions(mods: readonly Step[], step: MergeRole['op'], sideEffects: Map<string, any> | undefined, params: Record<string, any>): { onCreate: MergeSpec | null; onMatch: MergeSpec | null; tail: PropSpec[] } {
   let onCreate: MergeSpec | null = null, onMatch: MergeSpec | null = null;
   const optionCount = mods.findIndex((s) => s.name !== 'option');
   const tail = optionCount < 0 ? [] : parsePropertyTail(mods.slice(optionCount), `${step}()`, sideEffects, params);
@@ -1377,18 +1377,44 @@ function mergeDrivers(engine: Engine, prefix: IRStep[], params: Record<string, a
   return (store) => store.query<{ id: number }>(sel.sql, sel.binds).map((r) => r.id);
 }
 
+/**
+ * THE MERGE MAPS — the merge argument, its `option()` arms and the `property()` tail after them,
+ * normalized against their roles and cross-validated.
+ *
+ * Exported because the RelIR write route needs the identical parse (§10·8, and the same argument
+ * `parseProperty` already carries): the role-dependent token rules, the `validateNoOverrides` check,
+ * `Cardinality.x(v)` beating an enclosing option default, and the per-argument type channel are five
+ * things a second parser would have five chances to get differently — and one of them had already
+ * drifted between two copies inside this file. What the other route re-expresses is the EMISSION.
+ *
+ * `validateNoOverrides` runs STATICALLY, before anything else — TinkerPop's
+ * `validateStaticNoOverrides`, which is why the corpus expects a contradicting onCreate to raise even
+ * where the merge argument MATCHES and no create would have happened. The create branch re-checks the
+ * RESOLVED specs, for the slots that still held a nested traversal here.
+ */
+export interface MergeMaps {
+  readonly match: MergeSpec;
+  readonly onCreate: MergeSpec | null;
+  readonly onMatch: MergeSpec | null;
+  readonly tail: readonly PropSpec[];
+}
+
+export function mergeMaps(
+  step: IRStep, mods: readonly Step[], op: MergeRole['op'],
+  sideEffects: Map<string, any> | undefined, params: Record<string, any>,
+): MergeMaps {
+  if (step.args.length === 0)
+    throw new Error(`${op}() with no argument (uses the incoming traverser as the map) not yet supported`);
+  const match = normalizeMergeMap({ op, kind: 'merge' }, step.args[0], step.argTypes?.[0] ?? null, sideEffects, params);
+  const { onCreate, onMatch, tail } = parseMergeOptions(mods, op, sideEffects, params);
+  if (onCreate) validateNoOverrides(match, onCreate);
+  return { match, onCreate, onMatch, tail };
+}
+
 // g.mergeV(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
 function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const mvIdx = steps.findIndex((s) => s.name === 'mergeV');
-  if (steps[mvIdx].args.length === 0)
-    throw new Error('mergeV() with no argument (uses the incoming traverser as the map) not yet supported');
-  const matchSpecRaw = normalizeMergeMap({ op: 'mergeV', kind: 'merge' }, steps[mvIdx].args[0], steps[mvIdx].argTypes?.[0] ?? null, sideEffects, params);
-  const { onCreate, onMatch, tail } = parseMergeOptions(steps.slice(mvIdx + 1), 'mergeV', sideEffects, params);
-  // Statically, before anything runs — TinkerPop's `validateStaticNoOverrides`, which is why the
-  // corpus expects a contradicting onCreate to raise even when the merge argument MATCHES and no
-  // create would have happened. The create branch re-checks the RESOLVED specs, for the slots that
-  // held a nested traversal here.
-  if (onCreate) validateNoOverrides(matchSpecRaw, onCreate);
+  const { match: matchSpecRaw, onCreate, onMatch, tail } = mergeMaps(steps[mvIdx], steps.slice(mvIdx + 1), 'mergeV', sideEffects, params);
   const drivers = mergeDrivers(engine, steps.slice(0, mvIdx), params);
   return {
     kind: 'write',
@@ -1462,12 +1488,8 @@ function edgeMatchQuery(spec: MergeSpec, outV: number, inV: number): { sql: stri
 // g.mergeE(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
 function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const meIdx = steps.findIndex((s) => s.name === 'mergeE');
-  if (steps[meIdx].args.length === 0)
-    throw new Error('mergeE() with no argument (uses the incoming traverser as the map) not yet supported');
-  const matchSpecRaw = normalizeMergeMap({ op: 'mergeE', kind: 'merge' }, steps[meIdx].args[0], steps[meIdx].argTypes?.[0] ?? null, sideEffects, params);
-  const { onCreate, onMatch, tail } = parseMergeOptions(steps.slice(meIdx + 1), 'mergeE', sideEffects, params);
+  const { match: matchSpecRaw, onCreate, onMatch, tail } = mergeMaps(steps[meIdx], steps.slice(meIdx + 1), 'mergeE', sideEffects, params);
   for (const sp of tail) assertEdgePropertySpec(sp);
-  if (onCreate) validateNoOverrides(matchSpecRaw, onCreate);
   const drivers = mergeDrivers(engine, steps.slice(0, meIdx), params);
   return {
     kind: 'write',

@@ -10,11 +10,11 @@ import { EXCLUDED, type ColMeta, type RelId, type RelType } from '../../rel/type
 import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { isNested } from '../../gremlin/frontend.ts';
-import { propertyValueBind } from '../../gremlin/types.ts';
+import { gremlinTypeOf, propertyValueBind } from '../../gremlin/types.ts';
 import { propertyFtsEntries } from '../../services/fts-index.ts';
-import { parseProperty, type ParsedProperty } from '../steps/write/write.ts';
+import { mergeMaps, parseProperty, type MergeMaps, type MergeSpec, type ParsedProperty, type PropSpec } from '../steps/write/write.ts';
 import { validateLabel, validatePropertyKey } from '../steps/write/validate.ts';
-import { and, carriedCols, eq, meta, typeOf, type Minter } from './build.ts';
+import { and, carriedCols, eq, meta, renumber, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import type { AliasMap } from '../steps/context/context.ts';
@@ -465,19 +465,33 @@ export function propertyWrites(steps: readonly IRStep[], elem: Elem, params: Rec
     // and decline so the spine that owns it raises it, exactly as the coercion prefix does.
     try { parsed = parseProperty(step, undefined, params); } catch { return null; }
     if (parsed.kind !== 'prop') return null;
-    const spec = parsed.spec;
-    if (typeof spec.key !== 'string' || spec.meta || isNested(spec.value) || spec.value == null) return null;
-    if (elem === 'edge' && spec.cardinality !== null) return null;
-    // The key waist, shared: an invalid key is an ERROR legacy raises, never a silently skipped write.
-    try { validatePropertyKey(spec.key); } catch { return null; }
-    const { stored, collection } = propertyValueBind(spec.value, spec.vtype, spec.typeNode);
-    if (collection) return null;
-    writes.push({
-      key: spec.key, stored, vtype: spec.vtype, cardinality: spec.cardinality,
-      fts: propertyFtsEntries(spec.value, spec.typeNode),
-    });
+    const write = writeOf(parsed.spec, elem);
+    if (!write) return null;
+    writes.push(write);
   }
   return writes.length ? writes : null;
+}
+
+/**
+ * ONE PARSED SPEC → what this route can WRITE, or `null` for a value the compile-time form does not
+ * carry the answer for (the list is in `propertyWrites`' own contract above).
+ *
+ * The spec is legacy's parse whichever host asked (§10·8): `parseProperty` for a `property()` STEP,
+ * a merge map's entries for a `mergeV` arm. Putting the EXPRESSIBILITY question in one place is what
+ * stops the two hosts admitting different values — a merge arm that accepted a collection where a
+ * `property()` step declines it would write a JSONB tree through a scalar bind and index it as text.
+ */
+function writeOf(spec: PropSpec, elem: Elem): PropertyWrite | null {
+  if (typeof spec.key !== 'string' || spec.meta || isNested(spec.value) || spec.value == null) return null;
+  if (elem === 'edge' && spec.cardinality !== null) return null;
+  // The key waist, shared: an invalid key is an ERROR legacy raises, never a silently skipped write.
+  try { validatePropertyKey(spec.key); } catch { return null; }
+  const { stored, collection } = propertyValueBind(spec.value, spec.vtype, spec.typeNode);
+  if (collection) return null;
+  return {
+    key: spec.key, stored, vtype: spec.vtype, cardinality: spec.cardinality,
+    fts: propertyFtsEntries(spec.value, spec.typeNode),
+  };
 }
 
 // ---------- addV() ----------
@@ -845,6 +859,13 @@ export interface SubReads {
   readonly body: (nested: unknown) => readonly IRStep[] | null;
   /** A rooted VERTEX chain as a one-column relation of rowids, or `null` if it is not covered. */
   readonly rooted: (steps: readonly IRStep[]) => Rel | null;
+  /**
+   * THE VERTICES A MERGE MAP MATCHES — its criteria handed BACK to the read fold as the
+   * `V().hasLabel(l)….has(k, v)…` chain they are, rather than re-expressed as a second predicate
+   * vocabulary. Every name must be carried (so one `hasLabel` per name, since one step listing them
+   * all is ANY-of) and every entry is an ANY-value property match, which is what `has` already means.
+   */
+  readonly matching: (labels: readonly string[], props: readonly (readonly [string, unknown])[]) => Rel | null;
 }
 
 /** Rewrite a `Col` written against `from` so it names `to` instead — what a CROSS JOIN's projection
@@ -904,4 +925,216 @@ function positioned(created: Rel, fresh: Minter): Rel {
     id: fresh('wn'), input: created, channels: [], type: typeOf(...created.type.cols, meta(ORD, 'int')),
     specs: [[ORD, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: [{ expr: col(created.id, 'id'), dir: 'asc' }] } }]],
   });
+}
+
+// ---------- mergeV() ----------
+
+/**
+ * `mergeV(map)` with its `option()` arms and the `property()` run after them — the upsert, as
+ * statements over ONE search relation.
+ *
+ * ## THE BRANCH IS NOT CONTROL FLOW, and that is the whole design
+ *
+ * Upstream searches, then applies `onMatch` to every match — or, where there were none, creates from
+ * the merge map plus `onCreate`. Read as an `if` that needs a row COUNT before the next statement can
+ * be chosen, which is exactly what a program of statements over relations cannot express. Read
+ * RELATIONALLY it needs nothing at all: the `onMatch` writes run over the MATCH relation, which is
+ * empty on the create path and therefore writes nothing; and the create runs over a source GUARDED by
+ * `NOT EXISTS <the match>`, which is empty on the match path and therefore inserts nothing. Two total
+ * statements, no branch taken anywhere — and the same reason a driver of N rows needs no loop.
+ *
+ * ## THE SEARCH IS `V().hasLabel(…).has(k, v)`, spelled as those steps
+ *
+ * A merge map's criteria are a `has()` chain and nothing more: `T.label` is `hasLabel` (EVERY name
+ * must be carried, so one step per name rather than one step listing them, which is ANY), and a
+ * property entry is `has(key, value)` — an ANY-value `EXISTS` over the normalized table, which is
+ * already what `has` means. So the search is built by handing those steps back to the READ FOLD
+ * (`SubReads.matching`) instead of by writing a second predicate vocabulary. Legacy's
+ * `commonMergeConds` is those same three clauses spelled a second time, and it is the copy this route
+ * does not make — every improvement to `has` (the FTS arm, a vtype-aware compare) serves the merge for
+ * free, and a divergence between "what mergeV searches for" and "what has() finds" is not expressible.
+ *
+ * ## WHAT THE DRIVER CONTRIBUTES IS A COUNT
+ *
+ * A constant merge map poses the same search for every incoming traverser, so the driver decides how
+ * MANY results there are and nothing else: the result is the driver CROSS JOIN the merged element(s),
+ * which is upstream's per-traverser loop stated as a relation. `g.V().mergeV([:])` over two vertices
+ * is FOUR traversers for exactly that reason and the scenario asserts it. The create takes `LIMIT 1`
+ * off the driver because upstream's second iteration matches what its first one created — one vertex,
+ * N traversers, and the N comes from the join.
+ *
+ * **The result is the SNAPSHOT union the created ids, never the search re-run.** Re-reading the search
+ * after the writes looks equivalent and is not: `option(onMatch, [name: 'allen'])` under a `single`
+ * cardinality changes the very property the search asked about, so the re-read would return nothing
+ * and the traversal would emit no traverser at all. A corpus scenario does exactly this.
+ *
+ * ## WHAT DECLINES, each because the answer is not a compile-time one
+ *
+ * - a NESTED label/key/value anywhere in a map — resolved per driver against the graph, which is
+ *   `resolveMergeSpec`'s row-at-a-time surface and not an expression. A `__.select(k)` whole-arg map
+ *   is the same decline for a smaller reason: it needs the `withSideEffect` constants, which this seam
+ *   is not handed.
+ * - `T.id` — a numeric id is written as the ROWID after asking whether it is still free
+ *   (`assertAvailableElementId`), a runtime refusal an `Insert` cannot state. The MATCH half is
+ *   perfectly expressible; declining the pair is what stops a create silently colliding.
+ * - `option(onMatch, [(T.label): …])` — label MUTATION, whose refusal depends on the graph's `mutable`
+ *   flag and whose write is not a property write at all.
+ */
+export function elementMergeV(
+  input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
+  ordered: boolean, params: Record<string, any>, cardinality: LabelCardinality,
+  reads: SubReads, fresh: Minter,
+): Effects | null {
+  if (step.modulators?.length || step.optionArms) return null;
+  let maps: MergeMaps;
+  // The parse RAISES for every map shape it refuses, and those messages are the legacy spine's to
+  // raise — catch and decline, exactly as the `property()` run does.
+  try { maps = mergeMaps(step, options, 'mergeV', undefined, params); } catch { return null; }
+  const { match, onCreate, onMatch } = maps;
+  for (const spec of [match, onCreate, onMatch]) {
+    if (!spec) continue;
+    if (spec.id != null || isNested(spec.label)) return null;
+    if (Object.values(spec.props).some(isNested) || Object.values(spec.propKeys).some(isNested)) return null;
+  }
+  // A label on the MATCH arm is a search criterion; a label on `onMatch` is a mutation of an element
+  // that already exists, which is a different statement and a different refusal.
+  if (onMatch?.label) return null;
+
+  const matchWrites = mergeWrites(onMatch, 'vertex');
+  // `onCreate` WINS per key, and `validateNoOverrides` has already proved the two cannot contradict —
+  // so the spread is a merge of two agreeing maps, not a precedence rule this route invented.
+  const createWrites = mergeWrites(onCreate ? {
+    ...onCreate,
+    props: { ...match.props, ...onCreate.props },
+    propTypes: { ...match.propTypes, ...onCreate.propTypes },
+    propCardinalities: { ...match.propCardinalities, ...onCreate.propCardinalities },
+  } : match, 'vertex');
+  const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'vertex', params) : [];
+  if (!matchWrites || !createWrites || !tailWrites) return null;
+  const createLabels = creationLabels(((onCreate?.label ?? match.label) as string[] | null) ?? [], cardinality);
+  if (!createLabels) return null;
+
+  const searched = reads.matching((match.label as string[] | null) ?? [], Object.entries(match.props));
+  if (!searched) return null;
+
+  const carried = writeInputChannels(input);
+  if (carried.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
+  const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
+  const { bindings, bind } = effectScope(fresh);
+  const driver = seeded ? bind(seeded.result, true, carried) : input;
+
+  // SNAPSHOTTED for two reasons at once, and either alone would be enough: the create is guarded by
+  // this relation's emptiness and would otherwise be a predicate over the very table its own statement
+  // inserts into (the `addV` trap, one level up); and every `onMatch` statement after the first has
+  // already changed a property the search asked about.
+  const matched = bind(idsOf(searched, fresh), true);
+  for (const write of matchWrites) propertyStatements('vertex', matched, write, bind, fresh);
+
+  // ONE row off the driver, because a create happens once however many traversers asked for it. The
+  // driver's own columns are dropped first: what the creation needs from it is its ROW COUNT, and
+  // carrying an alias through `addVertex` as well would correlate the created row back to a driver row
+  // that the join below is about to cross it with anyway.
+  // A `Limit` is channel-PRESERVING by contract (§3.5), so it declares the driver's own list and the
+  // projection below is where they are dropped — naming a shorter one here is the dropped-channel
+  // defect the factory catches, and it caught this.
+  const once = make.limit({
+    id: fresh('lm'), input: driver, channels: driver.channels, type: driver.type, count: lit(1, 'int'),
+  });
+  const absent = make.project({
+    id: fresh('p'), input: once, channels: [], type: typeOf(meta('n', 'int')),
+    exprs: [['n', lit(1, 'int')]],
+  });
+  const creating = make.filter({
+    id: fresh('f'), input: absent, channels: [], type: absent.type,
+    pred: { kind: 'exists', plan: matched, negated: true },
+  });
+  const created = addVertex(creating, createLabels, createWrites, false, bind, fresh);
+
+  // THE MERGED ELEMENT(S) — the pre-write matches, or the one creation. Exactly one side is ever
+  // non-empty, so a UNION ALL states "whichever branch happened" without either knowing about the
+  // other.
+  const merged = make.union({
+    id: fresh('u'), inputs: [matched, idsOf(created, fresh)], all: true, channels: [], type: ID_TYPE,
+  });
+  // The tail `property()` run acts on whatever the merge EMITTED — matched and created alike, which is
+  // upstream's own reading of it (an ordinary AddPropertyStep over the merge's output). One statement
+  // set over the union, rather than one per branch.
+  const emitted = tailWrites.length ? bind(merged, true) : merged;
+  for (const write of tailWrites) propertyStatements('vertex', emitted, write, bind, fresh);
+
+  return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(driver, emitted, carried, ordered, fresh) };
+}
+
+/**
+ * A merge map's PROPERTY entries as writes — `null` for a map holding a value this route cannot write,
+ * and the empty list for no map at all (an absent `option()` arm writes nothing, which is a real state
+ * and not a decline).
+ *
+ * A merge map is not a `PropSpec` list — its values carry their type in a parallel `propTypes` and
+ * their cardinality in a parallel `propCardinalities` — so it is reshaped into one and goes through the
+ * same `writeOf`. `?? null` on the cardinality preserves "the map declared none", which only the
+ * element's own declaration may resolve.
+ */
+function mergeWrites(
+  spec: Pick<MergeSpec, 'props' | 'propTypes' | 'propCardinalities'> | null, elem: Elem,
+): readonly PropertyWrite[] | null {
+  if (!spec) return [];
+  const writes: PropertyWrite[] = [];
+  for (const [key, value] of Object.entries(spec.props)) {
+    const typeNode = spec.propTypes[key] ?? null;
+    const write = writeOf({
+      key, value, vtype: gremlinTypeOf(value, typeNode), typeNode, meta: null,
+      cardinality: spec.propCardinalities[key] ?? null,
+    }, elem);
+    if (!write) return null;
+    writes.push(write);
+  }
+  return writes;
+}
+
+/**
+ * THE DRIVER CROSSED WITH WHAT A STEP PRODUCED — one traverser per (incoming row, produced element)
+ * pair, carrying the driver's aliases and a freshly minted position.
+ *
+ * This is what a step whose output does NOT correspond row-for-row with its input hands back, and
+ * `mergeV` is the first: a creation returns one row per input row (so `addV` JOINS on the position),
+ * a merge returns the elements the SEARCH found, which no input row produced. So the correlation is a
+ * cross join by construction rather than an equality — the per-traverser loop upstream runs, stated
+ * once.
+ *
+ * The minted order is the driver's position and then the element's id, which is the order the loop
+ * would have emitted in: outer iteration first, and within one iteration the search's own rowid order.
+ * A driver with no position of its own is a one-row seed, where the element order IS the whole order.
+ */
+function crossed(driver: Rel, produced: Rel, aliases: Channels, ordered: boolean, fresh: Minter): Rel {
+  const carried = aliases.filter((channel) => channel.role === 'alias');
+  const joined = make.join({
+    id: fresh('j'), left: produced, right: driver, join: 'cross', channels: [],
+    type: typeOf(...produced.type.cols, ...driver.type.cols.map((column) => meta(`in_${column.name}`, column.type, column.nullable))),
+  });
+  const position = driver.type.cols.some((column) => column.name === ORD) ? `in_${ORD}` : null;
+  const channels: Channels = [...carried, ...(ordered ? [BULK_CHANNEL, ENCOUNTER_CHANNEL] : [BULK_CHANNEL])];
+  const cols: readonly ColMeta[] = [meta('id', 'int'), ...carriedCols(channels)];
+  // The pre-mint projection carries the two sort keys as columns and NOT the encounter, which
+  // `renumber` is what brings into existence — so its `cols` may name a column its input has not got,
+  // and this one must not.
+  const payload: readonly ColMeta[] = [meta('id', 'int'), ...carried.map((channel) => meta(channel.col, 'json', true)),
+    meta('bulk', 'int'), ...(position ? [meta(ORD, 'int')] : [])];
+  const flat = make.project({
+    id: fresh('c'), input: joined, channels: ordered ? [] : channels, type: typeOf(...(ordered ? payload : cols)),
+    exprs: [
+      ['id', col(joined.id, 'id')],
+      ...carried.map((channel) => [channel.col, col(joined.id, `in_${channel.col}`)] as const),
+      // A merge neither reads nor changes a multiplicity, so the emitted traverser is bulk 1 — the same
+      // re-mint `property()` makes, and for the same reason.
+      ['bulk', lit(1, 'int')],
+      ...(ordered && position ? [[ORD, col(joined.id, position)] as const] : []),
+    ],
+  });
+  return ordered
+    ? renumber(flat, [
+      ...(position ? [{ expr: col(flat.id, ORD), dir: 'asc' } as const] : []),
+      { expr: col(flat.id, 'id'), dir: 'asc' },
+    ], cols, channels, fresh)
+    : flat;
 }

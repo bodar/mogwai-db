@@ -6,7 +6,7 @@ import { UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { bare, read, relirAhead, relirOff, run, seededStore } from '../support/harness.ts';
+import { bare, read, relirAhead, relirOff, run, seededStore, written } from '../support/harness.ts';
 import { emit } from '../../src/rel/emit.ts';
 import { executeQuery } from '../support/executor.ts';
 import { CF_MAX_BINDS } from '../../src/cf-limits.ts';
@@ -405,11 +405,55 @@ test('addV property value __.constant(UUID(...)) keeps the uuid vtype (not strin
 test('mergeV creates when no match, matches when it exists (inline map)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   const a = run(store, 'g.mergeV([(T.label): "person", name: "marko"])');
-  expect(bare((a[0] as any).vertex)).toMatchObject({ labels: ['person'], props: { name: ['marko'] } });
-  // second identical merge matches the first → still one vertex
-  run(store, 'g.mergeV([(T.label): "person", name: "marko"])');
+  expect(written(a[0])).toMatchObject({ labels: ['person'], props: { name: ['marko'] } });
+  // second identical merge matches the first → still one vertex, and the MATCH branch echoes it too.
+  const b = run(store, 'g.mergeV([(T.label): "person", name: "marko"])');
+  expect(written(b[0])).toMatchObject({ labels: ['person'], props: { name: ['marko'] } });
   expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([1]);
   expect(run(store, 'g.V().hasLabel("person").has("name","marko").count()').map((r) => r.v)).toEqual([1]);
+});
+
+// The ROUTE and the SHAPE, pinned — the semantics above hold whichever spine answers them, so nothing
+// else here would notice a merge falling back to the legacy write closure.
+//
+// What the shape says is the whole design: upstream's "search, then branch on whether anything was
+// found" needs a row COUNT before the next statement can be chosen, and a program of statements over
+// relations cannot ask for one. So neither branch is a branch — the `onMatch` writes run over the match
+// relation (empty on the create path) and the create runs over a source guarded by `NOT EXISTS <the
+// match>` (empty on the match path). The match is SNAPSHOTTED because both of those read it after the
+// statements between have changed the very properties it asked about.
+test('mergeV compiles to a RelIR program whose two branches are both unconditional statements', () => {
+  const plan = compile('g.mergeV([(T.label): "person", name: "marko"]).option(Merge.onMatch, [age: 33])', {}, { spine: 'rel' });
+  expect([plan.kind, (plan as { spine?: string }).spine]).toEqual(['program', 'rel']);
+  if (plan.kind !== 'program') throw new Error('unreachable');
+  // ONE snapshot: the search. Nothing else here is read after being written.
+  expect(plan.program.bindings.filter((binding) => binding.snapshot).length).toBe(1);
+  const steps = emit(plan.program);
+  // Both branches emit, in one program, on every run: the create's INSERT INTO nodes and the onMatch
+  // write's INSERT INTO vertex_properties are both there, and which of them writes a row is decided by
+  // a predicate rather than by which statements were assembled.
+  expect(steps.some((step) => /INSERT INTO nodes/.test(step.emitted.sql))).toBe(true);
+  expect(steps.some((step) => /INSERT INTO vertex_properties/.test(step.emitted.sql))).toBe(true);
+  // Same platform budget every write program is held to — the search crosses as ONE JSON value (§10·5),
+  // so no statement's bind count is a function of how many elements the search matched.
+  expect(Math.max(...steps.map((step) => step.emitted.binds.length))).toBeLessThanOrEqual(CF_MAX_BINDS);
+});
+
+// A merge's statement count is a function of the PLAN, exactly as `property()`'s is above: the search
+// is an `Insert.source`/`InQuery` relation, never rows walked in JS. Legacy runs the match query plus
+// eight store calls PER MATCHED ELEMENT; this must not move with the match count at all.
+(relirOff ? test.skip : test)('a mergeV program runs the same number of statements whatever the match count', () => {
+  const runs = (n: number): number => {
+    const inner = new BunSqlite(':memory:');
+    let calls = 0;
+    const counting = { exec: (...a: any[]) => (inner as any).exec(...a), query: (sql: string, binds?: any[]) => { calls++; return (inner as any).query(sql, binds); } } as any;
+    const store = new GraphStore(counting);
+    for (let i = 1; i <= n; i++) run(store, "g.addV('person').property('name','marko')");
+    const before = calls;
+    run(store, "g.mergeV([(T.label): 'person', name: 'marko']).option(Merge.onMatch, [age: 33])");
+    return calls - before;
+  };
+  expect(runs(10)).toBe(runs(100));
 });
 
 test('mergeV map literal with a NESTED value ([k: __.trav]) resolves it', () => {
@@ -558,9 +602,10 @@ test('mergeV accepts a bound Map parameter with EnumValue keys (wire path)', () 
   const store = new GraphStore(new BunSqlite(':memory:'));
   // mimic a GraphBinary-deserialized m[{"t[label]":"person","name":"stephen"}]
   const xx1 = new Map<any, any>([[{ typeName: 'T', elementName: 'label' }, 'person'], ['name', 'stephen']]);
-  const p = compile('g.mergeV(xx1).option(Merge.onCreate, null)', { xx1 });
-  if (p.kind !== 'write') throw new Error('want write');
-  p.run(store);
+  // Through the EXECUTOR rather than by asserting a plan kind: the claim is that a bound Map with
+  // EnumValue keys parses and merges, and pinning `kind === 'write'` made it also claim which spine
+  // answered — a claim that failed the day mergeV joined the RelIR route and found nothing.
+  executeQuery(store, 'g.mergeV(xx1).option(Merge.onCreate, null)', { xx1 });
   const r = compile('g.V().hasLabel("person").has("name","stephen").count()', {});
   if (r.kind !== 'read') throw new Error('want read');
   expect(store.query(r.sql, r.binds).map((x: any) => x.v)).toEqual([1]);

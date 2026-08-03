@@ -2,7 +2,7 @@ import type { ChannelRole, Channels } from '../../channels.ts';
 import { col, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { relId, type ColMeta, type RelId, type RelType, type SqlType } from '../../rel/types.ts';
+import { relId, type ColMeta, type RelId, type RelType, type SortTerm, type SqlType } from '../../rel/types.ts';
 
 /**
  * THE CONSTRUCTION LEAF every RelIR lowering module sits on — the physical schema as the algebra sees
@@ -154,4 +154,54 @@ export function firstOf(rel: Rel, value: Expr, order: Expr, fresh: Minter): Expr
     exprs: [['v', col(one.id, 'v')]],
   });
   return { kind: 'scalar', plan: only };
+}
+
+/**
+ * RENUMBER the emission order — `ROW_NUMBER()` into the `encounter` channel's own column, over
+ * whatever order the caller names, leaving every other column exactly as it was.
+ *
+ * ONE function because every caller asks the identical question of a different order, and reading them
+ * side by side is what makes that visible: a fan-out renumbers by *the incoming position* (several
+ * outgoing rows share one, so the old numbers no longer number the new rows), a scalar `order()`
+ * renumbers by *its own sort key* (the sort SUPERSEDES the arriving order, so a later slice must take
+ * its window from the new positions and not the stale seed), and a `mergeV` numbers the driver-crossed
+ * result, whose order is the driver's position and then the element's. Legacy has these as three
+ * hand-rolled window projections; here the difference is the `terms` argument and nothing else.
+ *
+ * It lives HERE rather than in `lower.ts` for this file's own stated reason: a second module (`write.ts`,
+ * which mints a merge's position) has to agree with the first about what "renumber" means, and a channel
+ * minted two ways is a channel two readers can disagree about.
+ *
+ * The last term is a TIE-BREAK, and it is the caller's to supply because only the caller knows what
+ * makes its order total. Without one the rows sharing a rank are numbered in whatever order SQLite
+ * produced them — right multiset, arbitrary window — which is exactly the defect
+ * `mise run test:perturbed` exists to find and which no assertion in the ladder can see.
+ *
+ * Two nodes because `Window` may only EXTEND its input (§3.5) — it adds the new column, and the
+ * projection is what makes that column the channel and drops the stale one. The assembler fuses
+ * them back into one SELECT, which is the division of labour §5 describes: the IR stays normalized
+ * and the emitter does the composing.
+ */
+export function renumber(
+  rel: Rel, terms: readonly SortTerm[], cols: readonly ColMeta[], channels: Channels, fresh: Minter,
+): Rel {
+  const minted = 'rn';
+  const encounter = channels.find((channel) => channel.role === 'encounter');
+  // Renumbering a relation with nowhere to put the number is a lowering bug, not a deferral: every
+  // caller checks the channel first, so reaching here means a plan was built whose declared type and
+  // whose channels disagree — the class of defect the factory's own width checks catch three nodes
+  // later, where the cause is no longer visible.
+  if (!encounter) throw new Error('RelIR lowering: renumber() needs an encounter channel to mint into');
+  // The window EXTENDS its own input (§3.5), so its declared type is the INPUT's columns plus the
+  // minted one — not the output's. The two differ exactly when this is a MINT rather than a re-mint:
+  // there `cols` names an emission-order column the input does not have yet, and the projection below
+  // is where it comes into existence.
+  const windowed = make.window({
+    id: fresh('w'), input: rel, channels: rel.channels, type: typeOf(...rel.type.cols, meta(minted, 'int')),
+    specs: [[minted, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: terms } }]],
+  });
+  return make.project({
+    id: fresh('ro'), input: windowed, channels, type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, col(windowed.id, column.name === encounter.col ? minted : column.name)] as const),
+  });
 }
