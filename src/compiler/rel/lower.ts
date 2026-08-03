@@ -183,18 +183,43 @@ const bodyOf = (nested: unknown, params: Record<string, any>): readonly IRStep[]
  * to get the child's own filter recursion wrong.
  */
 function correlatedExists(
-  body: readonly IRStep[], subject: Subject, elem: Elem, fresh: Minter, ctx: FilterCtx, negated: boolean,
+  body: readonly IRStep[], subject: Subject, elem: Elem, fresh: Minter, ctx: ChainCtx, negated: boolean,
 ): Expr | null {
-  let child = movement(body[0]!, { correlated: subject.id }, elem, fresh);
+  const child = movement(body[0]!, { correlated: subject.id }, elem, fresh);
   if (!child) return null;
-  for (const inner of body.slice(1)) {
-    const hop = movement(inner, { rel: child.rel }, child.elem, fresh);
-    if (hop) { child = hop; continue; }
-    const clause = sourceFilter(inner, { id: col(child.rel.id, 'id'), rel: child.rel }, child.elem, fresh, ctx);
-    if (!clause) return null;
-    child = { rel: make.filter({ id: fresh('f'), input: child.rel, channels: BULK, type: child.rel.type, pred: clause }), elem: child.elem };
-  }
-  const probe = make.project({ id: fresh('p'), input: child.rel, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', lit(1, 'int')]] });
+  // THE REST OF THE BODY IS THE ORDINARY FOLD, started at the correlated child — the same insight the
+  // arm merge rests on, one position further in. This used to be a hand-rolled movement|filter walk,
+  // which is the third copy of the fold this module has grown and then deleted: it could express a
+  // multi-hop path and a filter and nothing else, so `where(__.out().count().is(P.gt(0)))` declined on
+  // a body whose every step was already covered somewhere else in this file.
+  //
+  // A correlated hop threads NO carried state — an EXISTS asks whether a row is there, never in what
+  // order or how many times — so the child starts from the bulk channel `movement` gave it and any
+  // order the body mints is the body's own.
+  const tail = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body, 1, false, ctx, fresh, NO_ALIASES);
+  if (!tail) return null;
+  // A NUMERIC REDUCER OVER AN EMPTY CHILD IS THE ONE PLACE SQL AND GREMLIN DISAGREE ABOUT EXISTENCE,
+  // so it fails closed. `sum`/`min`/`max`/`mean` over zero rows return ONE row holding NULL in SQL,
+  // while TinkerPop emits NO traverser — so a bare EXISTS answers "true" for a parent the reference
+  // REJECTS. Right arity, plausible rows, and the differential cannot see it because both spines are
+  // asked and only one is asked correctly, which is precisely the shape the decline contract exists
+  // to keep out. `count()` and `fold()` are NOT this: both emit a traverser for an empty child (0 and
+  // the empty list), so their EXISTS is honest. Expressing the reducer case needs the aggregate's
+  // own NULL-ness as the test rather than row existence; that is a further arm.
+  if (tail.framing.kind === 'scalar' && tail.framing.result === 'number') return null;
+  // THE PROBE PROJECTS THE TAIL'S OWN FIRST COLUMN, not a literal — an EXISTS does not care what the
+  // value is, but the BLOCK does. A body ending in a reducer is an `Aggregate`, and the assembler
+  // fuses the whole run into one SELECT; projecting `1` there left a block with a `HAVING` and no
+  // aggregate in its select list, which SQLite refuses outright (`HAVING clause on a non-aggregate
+  // query`) — a THROW from the position where legacy answers. Projecting the column keeps whatever
+  // the block computes visible, so the aggregate query stays an aggregate query.
+  //
+  // A `Materialize` fence is the WRONG remedy here even though it is the right one elsewhere (§11):
+  // this subplan is CORRELATED to the outer row, and a fence forces a named CTE, which cannot
+  // reference it. That is the same fact behind `name` not walking expression subplans.
+  const probeCol = tail.rel.type.cols[0];
+  if (!probeCol) return null;
+  const probe = make.project({ id: fresh('p'), input: tail.rel, channels: [], type: typeOf(meta('one', 'any', true)), exprs: [['one', col(tail.rel.id, probeCol.name)]] });
   // `NOT EXISTS`, not legacy's `NOT COALESCE(EXISTS(…), 0)`: EXISTS is never NULL, so the COALESCE
   // guards nothing here.
   return { kind: 'exists', plan: probe, negated };
@@ -218,7 +243,7 @@ function correlatedExists(
  * value comparison over a correlated sub-read, which is a further arm rather than this one.
  */
 function bodyPredicate(
-  body: readonly IRStep[], subject: Subject, elem: Elem, fresh: Minter, ctx: FilterCtx,
+  body: readonly IRStep[], subject: Subject, elem: Elem, fresh: Minter, ctx: ChainCtx,
 ): Expr | null {
   let clause: Expr | undefined;
   for (const step of body) {
@@ -229,7 +254,7 @@ function bodyPredicate(
   return clause ?? null;
 }
 
-function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter, ctx: FilterCtx): Expr | null {
+function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter, ctx: ChainCtx): Expr | null {
   // One filter form HOSTS a `by()` — the alias-compare `where('a', P.eq('b')).by('key')`, which
   // `isAliasCompareWhere` detects structurally rather than by name — and it is not covered at all
   // (it needs the alias channel). So this stays a blanket decline, and `modulator.ts` is what it will

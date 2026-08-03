@@ -188,7 +188,10 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     // does not need. One derived table fewer, and no new node kind (§7's bar: the seam CAN express
     // the shape).
     const w = read('g.V().where(__.out("knows")).values("name")', { spine: 'rel' });
-    expect(w.sql).toMatch(/EXISTS \(SELECT \? AS one FROM edges \w+ WHERE \(\(\w+\.src = \w+\.id\) AND \w+\.label IN/);
+    // The probe projects the CHILD'S OWN first column rather than a literal: an EXISTS does not care
+    // what the value is, but a body ending in an aggregate does — projecting `1` there leaves a block
+    // with a HAVING and no aggregate in its select list, which SQLite refuses.
+    expect(w.sql).toMatch(/EXISTS \(SELECT \w+\.tgt AS one FROM edges \w+ WHERE \(\(\w+\.src = \w+\.id\) AND \w+\.label IN/);
     // `NOT EXISTS`, not legacy's `NOT COALESCE(EXISTS(…), 0)`: an EXISTS is never NULL, so the
     // COALESCE guards nothing.
     const n = read('g.V().not(__.out("created")).values("name")', { spine: 'rel' });
@@ -197,9 +200,17 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
   });
 
   test('where(__.count().is(P)) → correlated scalar compare over incident edges', () => {
-    const c = read('g.V().where(__.inE("knows").count().is(P.gte(1))).values("name")');
+    // LEGACY's spelling, pinned explicitly — a correlated child ending in count().is() routes RelIR
+    // now that the child body folds through the ordinary loop (§10·4: a spelling pin pins both).
+    const c = read('g.V().where(__.inE("knows").count().is(P.gte(1))).values("name")', { spine: 'legacy' });
     expect(c.sql).toContain('(SELECT COUNT(*) FROM (SELECT e.id AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.tgt=p.id');
     expect(c.sql).toContain('>= ?');
+    // RelIR asks the same question as an EXISTS over the child's own aggregate, which is why the
+    // aggregate has to stay in the probe's select list — see the `AS one` note above.
+    const cRel = read('g.V().where(__.inE("knows").count().is(P.gte(1))).values("name")', { spine: 'rel' });
+    expect(cRel.spine).toBe('rel');
+    expect(cRel.sql).toContain('EXISTS (');
+    expect(cRel.sql).toContain('HAVING');
   });
 
   test('alias-compare where(P.neq("a")) and where("a",P,by(key)); unknown label throws', () => {
@@ -281,7 +292,11 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
   });
 
   test('where child order is per-parent and precedes range/limit before EXISTS', () => {
-    const ordered = read('g.V().where(__.out().hasLabel("person").order().by("name").range(1,2))');
+    // LEGACY's shape: the child is compiled once for every parent and PARTITIONed back apart, so the
+    // per-parent order is a window. RelIR needs no partition at all — the child is a subquery
+    // evaluated per outer row, so its ORDER BY and its slice are per-parent by construction. Two
+    // spellings of one contract, which is why the ROW assertion below is the one left spine-ambient.
+    const ordered = read('g.V().where(__.out().hasLabel("person").order().by("name").range(1,2))', { spine: 'legacy' });
     expect(ordered.sql).toContain('ROW_NUMBER() OVER (PARTITION BY');
     expect(ordered.sql).toContain('ORDER BY');
     expect(ordered.sql).toContain('EXISTS (SELECT 1');

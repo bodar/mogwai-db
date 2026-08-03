@@ -367,9 +367,15 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(c.sql).toContain('UNION ALL');
     expect(c.shape).toEqual({ kind: 'vertex' });
     expect(c.binds).toEqual(['name', 'vadas', 'knows', 'name', 'vadas', 'knows']);
-    // count().is predicate rides as a correlated subquery; multi-hop arm folds
-    expect(read('g.V().choose(__.out("knows").count().is(P.gt(0)), __.out("created").out())').sql)
+    // count().is predicate rides as a correlated subquery; multi-hop arm folds. LEGACY's spelling —
+    // a MOVEMENT-rooted projecting condition routes RelIR now that the correlated child body folds
+    // through the ordinary loop, so `out().count().is(P)` is covered there too (a `values()`-rooted
+    // condition still declines: its root is a projection rather than a hop).
+    expect(read('g.V().choose(__.out("knows").count().is(P.gt(0)), __.out("created").out())', { spine: 'legacy' }).sql)
       .toContain('(SELECT COUNT(*) FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id AND e.label IN');
+    const countCond = read('g.V().choose(__.out("knows").count().is(P.gt(0)), __.out("created").out())', { spine: 'rel' });
+    expect(countCond.spine).toBe('rel');
+    expect(countCond.sql).toContain('EXISTS (');
     // 2-arg form: else absent → identity passthrough of the NOT-pred seed
     expect(read('g.V().choose(__.hasLabel("software"), __.in("created"))', { spine: 'legacy' }).sql).toContain('UNION ALL');
     // …and on RelIR, where `choose` is the SAME merge as `union` over arms guarded by the condition

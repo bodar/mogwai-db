@@ -155,8 +155,11 @@ describe('unified lowering characterization', () => {
     ];
 
     for (const { key, query, fastSql, fastPattern, genericSql, genericNot } of cases) {
-      const enabled = { fastPaths: { [key]: true } } as CompileOptions;
-      const disabled = { fastPaths: { [key]: false } } as CompileOptions;
+      // `spine: 'legacy'` because these characterize the LEGACY fast paths' SQL: the switch selects
+      // between two legacy lowerings, and RelIR implements one side of some of them, so leaving the
+      // spine ambient would compare a fast-path spelling against a route that has no fast paths.
+      const enabled = { spine: 'legacy', fastPaths: { [key]: true } } as CompileOptions;
+      const disabled = { spine: 'legacy', fastPaths: { [key]: false } } as CompileOptions;
       expect(read(query, enabled).sql).toContain(fastSql);
       if (fastPattern) expect(read(query, enabled).sql).toMatch(fastPattern);
       expect(read(query, disabled).sql).toContain(genericSql);

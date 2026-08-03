@@ -277,6 +277,11 @@ const COVERED = [
   'g.V().choose(__.hasLabel("person"), __.out(), __.in())',
   'g.V().choose(__.out("created"), __.out("knows"), __.in("knows"))',
   'g.V().choose(__.has("name","marko"), __.out(), __.in()).count()',
+  // A CORRELATED child body is the ordinary fold too, started at the correlated child — so every step
+  // the loop knows is available inside a `where`/`filter`/`not` body at once, not one at a time.
+  'g.V().where(__.out().order())', 'g.V().where(__.out().count().is(P.gt(1)))',
+  'g.V().where(__.out().hasLabel("person").order().by("name").range(1,2))',
+  'g.V().where(__.out().limit(1))', 'g.V().not(__.out().count().is(P.gt(2)))',
 ];
 
 /**
@@ -293,6 +298,9 @@ const DECLINED = [
   "g.V().union(__.as('b').out(), __.in())",  // an arm that BINDS a label owes each arm a remap + NULL pad
   "g.V(1).union(__.values('name'), __.constant('x'))",  // arms disagreeing on payload: a Union is positional
   "g.V().union(__.out(), __.count())", // element arm + scalar arm: the VARIANT shape, not either of them
+  "g.V().where(__.out().values('age').sum())",  // a NUMERIC reducer over an EMPTY child: SQL yields one
+  // NULL row where Gremlin yields NO traverser, so a bare EXISTS would answer true where the
+  // reference rejects. count()/fold() are not this — both emit a traverser for an empty child.
   "g.V().choose(__.values('age').is(P.gt(30)), __.out(), __.in())",  // a PROJECTING condition: a value
   // comparison over a correlated sub-read, which is the branch family's remaining gap and is shared
   // with where()/match()/is() in the blocker residue.
@@ -317,7 +325,6 @@ const DECLINED = [
   "g.V().has('name',P.within(__.V().values('name').fold()))", // a run-time member list, not a set
   "g.V().has('name',null)",           // a null value: not a literal this route can compare
   "g.V().where(__.has('name','marko'))", // a filter-only body is a predicate on the SAME traverser
-  "g.V().where(__.out().order())",    // a body step the child fold has not learned
 ];
 
 describe('the RelIR spine', () => {
