@@ -1,6 +1,6 @@
 # RelIR — the build plan
 
-**Status: BUILDING.** Coverage **370 / 2,298** corpus traversals on the RelIR spine; deletion counter
+**Status: BUILDING.** Coverage **373 / 2,298** corpus traversals on the RelIR spine; deletion counter
 **110** references left across the 15 legacy rows. Both are ratchets in `ci` (§10·4). The direction was
 argued in [codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a and
 is not re-argued here.
@@ -363,9 +363,21 @@ framing join may return sorted rows in any order (and on a six-vertex fixture wi
 flattering one). No assertion in the ladder would catch it; minting the channel is what makes the order
 survive the join.
 
-**Next in the row-algebraic class:** `tail()` (reads the order BACKWARDS — a descending window) and
-`sample()`, which together with `order()` are the whole of `globalRowOps` (deletion floor 10) and
-eventually `TailAcc` (13). Then the list shape below.
+**`tail()` and `sample()` LANDED with it**, which closes `globalRowOps`' whole vocabulary on the RelIR
+side: `tail(n)` is the DIRECTION flag on the shared slice (accumulate backwards and the band `[0, n)`
+is the last n), and `sample(n)` is `ORDER BY RANDOM() LIMIT n` needing no position at all. Both are
++3 coverage together and that is the wrong number to read them by (§10·7): what they remove is two
+blanket declines and the last reason the class was not a vocabulary. What still fails closed is the
+one case that is a SAFETY property rather than a gap — `tail` over a relation whose position a barrier
+has consumed (`g.V().count().tail(1)`), because "the last n" is a question about an order that is no
+longer there, and a weighted `sample().by()`, whose weight is a per-shape expression.
+
+**Deleting `globalRowOps` (floor 10) is now a LEGACY-side question, not a coverage one** — every one
+of its five step names routes through RelIR when the rest of the chain does. Same for `TailAcc` (13):
+element `order()` no longer needs it, so what is left there is the framing folds for shapes RelIR does
+not yet produce.
+
+**Next: the list shape below** — 194 blocked traversals, the largest family.
 
 **Then: THE LIST SHAPE — 194 blocked traversals, the largest family, and it splits by FRAMING ARM
 rather than by step** (measured at 349 routed, by asking what shape legacy frames each blocked traversal

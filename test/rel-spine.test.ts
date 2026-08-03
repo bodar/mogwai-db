@@ -120,6 +120,12 @@ const COVERED = [
   // `LIMIT n` over those rows would answer a different question — the same rows, the wrong count.
   "g.V().both().order().by('name').limit(2)", "g.V().both().order().by('name').range(1,4)",
   "g.V().both().both().order().by('name').limit(3)",
+  // `tail(n)` is the same slice read BACKWARDS, which is the whole of it once the position is a
+  // relation property; `sample(n)` is `ORDER BY RANDOM() LIMIT n`, so it is covered but compared for
+  // SIZE rather than for rows (see the test below — `rowsVia` would be comparing two dice).
+  'g.V().tail(2)', 'g.E().tail(1)', 'g.V().tail()', "g.V().hasLabel('person').tail(2)",
+  'g.V().out().tail(2)', "g.V().values('name').tail(2)", 'g.V().tail(2).count()',
+  "g.V().order().by('name').tail(2)", 'g.V().out().values("name").tail(1)',
 ];
 
 /**
@@ -145,8 +151,6 @@ const DECLINED = [
   "g.V().has('name',null)",           // a null value: not a literal this route can compare
   "g.V().where(__.has('name','marko'))", // a filter-only body is a predicate on the SAME traverser
   "g.V().where(__.out().order())",    // a body step the child fold has not learned
-  'g.V().tail(2)',                    // reads the order BACKWARDS — a descending window, not learned
-  'g.V().sample(2)',                  // ORDER BY RANDOM(): deliberately nondeterministic
 ];
 
 describe('the RelIR spine', () => {
@@ -229,6 +233,34 @@ describe('the RelIR spine', () => {
     expect(names("g.V().order().by('name',Order.desc)")).toEqual(['vadas', 'ripple', 'peter', 'marko', 'lop', 'josh']);
     // A non-productive `by('age')` DROPS the two software vertices rather than sorting them first.
     expect(names("g.V().order().by('age')")).toEqual(['vadas', 'marko', 'josh', 'peter']);
+  });
+
+  test('tail(n) reads the emission order backwards, and sample(n) is a size not a sequence', () => {
+    // `tail` is the one slice where the order IS the answer twice over: which n, and in what order
+    // they are reported (backwards from the end, forwards on the wire). Row-for-row against legacy.
+    for (const gremlin of ['g.V().tail(2)', 'g.V().tail()', 'g.E().tail(1)', 'g.V().out().tail(2)',
+      "g.V().values('name').tail(2)", "g.V().order().by('name').tail(2)", "g.V().hasLabel('person').tail(2)"]) {
+      const rel = read(gremlin, { spine: 'rel' });
+      const legacy = read(gremlin, { spine: 'legacy' });
+      expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
+    }
+    // …and an ABSOLUTE one: the LAST two names in emission order, reported forwards.
+    const last = read("g.V().order().by('name').tail(2)", { spine: 'rel' });
+    expect(store.query(last.sql, last.binds).map((row: any) => JSON.parse(row.props).name[0].v)).toEqual(['ripple', 'vadas']);
+
+    // `sample(n)` is deliberately nondeterministic, so the differential is over the SIZE and the
+    // membership — comparing two rows of dice would be comparing the dice. What must hold is that it
+    // routes, that it takes n, and that n is bounded by what there is.
+    const sampled = read('g.V().sample(2)', { spine: 'rel' });
+    expect(sampled.spine).toBe('rel');
+    expect(store.query(sampled.sql, sampled.binds)).toHaveLength(2);
+    const all = read('g.V().sample(99)', { spine: 'rel' });
+    expect(store.query(all.sql, all.binds)).toHaveLength(6);
+    // A WEIGHTED sample (`by()`) has no shared form — the weight is a per-shape expression — so it
+    // declines through the modulator gate, and LEGACY raises the message it owns. Pinned as the
+    // throw rather than as a route, because RelIR throwing FIRST is how "not learned yet" becomes a
+    // support regression.
+    expect(() => read("g.V().sample(2).by('age')", { spine: 'rel' })).toThrow('by() is only supported');
   });
 
   test('a scalar order() narrows on its MODULATOR rather than declining wholesale', () => {
@@ -390,24 +422,23 @@ describe('the RelIR spine', () => {
     expect(graph.query(plan.sql, plan.binds).map((row: any) => String(row.v))).toEqual(['12', '300', '9007199254740993']);
   });
 
-  test('a chain that demands emission order fails CLOSED', () => {
-    // The one decline that is a SAFETY property rather than a coverage gap. A slice's answer
-    // depends on which rows come first, and this route carries no channel but `bulk`; omitting the
-    // encounter would not defer, it would pick a different window from the same multiset — right
-    // arity, plausible rows, and a census that cannot see it (`ord` is telemetry, `ms` is the gate).
-    // So the gate is on `demandsEncounter`, the same chain fact the legacy source seeds from.
-    // The channel is modelled now, so what declines is a chain that demands an order and reaches a
-    // step this route cannot THREAD it through: a hop re-mints the order with a window function,
-    // and `dedup` under an order stops being a `Distinct` at all.
-    // What declines now is a chain that demands an order and reaches a step this route cannot
-    // THREAD it through: `tail()` reads the order backwards (a descending window) and `sample()`
-    // replaces it with `ORDER BY RANDOM()`.
-    for (const gremlin of ['g.V().tail(2)', 'g.V().sample(2)', "g.V().out().values('name').tail(1)"]) {
-      expect(read(gremlin, { spine: 'rel' }).spine).toBe('legacy');
-    }
+  test('a positional step with no position to read fails CLOSED', () => {
+    // The decline that is a SAFETY property rather than a coverage gap, and it survived the whole
+    // row-algebraic class landing: a slice's answer depends on which rows come first, so a step that
+    // reads a position the relation does not carry must DEFER. Omitting the channel would not defer,
+    // it would pick a different window from the same multiset — right arity, plausible rows, and a
+    // census that structurally cannot see it (`ord` is telemetry, `ms` is the gate).
+    //
+    // `tail` is where that is reachable: "the last n" is a question ABOUT emission order, and a
+    // barrier has consumed the position by the time it is asked. Legacy refuses the same shape from
+    // its own side, so what is being pinned is that RelIR does not answer it — nor throw first.
+    expect(read('g.V().count().tail(1)', { spine: 'rel' }).spine).toBe('legacy');
+    // A WEIGHTED `sample().by()` declines through the modulator gate, and legacy raises the message
+    // it owns — pinned in the `tail`/`sample` test above.
     // …and it is a GATE, not a blanket: everything whose order the route DOES thread still routes,
     // including across a fan-out, where the position has to be re-minted rather than carried.
-    for (const gremlin of ['g.V().limit(2)', 'g.V().dedup().limit(2)', 'g.V().out().limit(2)', 'g.V().out().dedup().limit(1)']) {
+    for (const gremlin of ['g.V().limit(2)', 'g.V().dedup().limit(2)', 'g.V().out().limit(2)',
+      'g.V().out().dedup().limit(1)', 'g.V().tail(2)', 'g.V().out().tail(2)', 'g.V().sample(2)']) {
       expect(read(gremlin, { spine: 'rel' }).spine).toBe('rel');
     }
   });
@@ -454,7 +485,7 @@ describe('the RelIR spine', () => {
     // Asking for RelIR does not make an uncovered chain route there, and asking for legacy always
     // works. Coverage is a property of the CHAIN; if these ever diverge the router has started
     // deciding something the lowering should own.
-    expect(read('g.V().out().tail(2)', { spine: 'rel' }).spine).toBe('legacy');
+    expect(read('g.V().as("a").out().select("a")', { spine: 'rel' }).spine).toBe('legacy');
     expect(read('g.V()', { spine: 'legacy' }).spine).toBe('legacy');
     expect(read('g.V()', { spine: 'rel' }).spine).toBe('rel');
   });

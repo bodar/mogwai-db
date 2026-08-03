@@ -403,32 +403,87 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
  */
 function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
   if (step.modulators?.length || step.optionArms || isLocalScope(step)) return null;
-  if (step.name !== 'limit' && step.name !== 'skip' && step.name !== 'range') return null;
+  if (!SLICE_STEPS.has(step.name)) return null;
+  const encounter = encounterOf(input.channels);
+  const bulk = input.channels.find((channel) => channel.role === 'bulk');
+
+  // `sample(n)` is n traversers chosen UNIFORMLY — `SampleGlobalStep` is a weighted reservoir sample
+  // whose weights come from a `by()`, and with no modulator every weight is 1. `ORDER BY RANDOM()
+  // LIMIT n` is that, and it needs no emission order at all: which n is the answer, not which order
+  // they come in (the root still sorts by the carried position, so the sample is REPORTED in emission
+  // order — the same shape legacy emits). A `by()` declines through the blanket modulator gate above.
+  //
+  // Over a COLLAPSED relation it declines rather than sampling: a uniform sample of ROWS is not a
+  // uniform sample of traversers when a row stands for N of them, and there is no trimming to do —
+  // sample has no band, so `bulkSlice` has nothing to say about it.
+  if (step.name === 'sample') {
+    if (bulked) return null;
+    const shuffled = make.sort({
+      id: fresh('sh'), input, channels: input.channels, type: input.type,
+      terms: [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }],
+    });
+    return make.limit({ id: fresh('li'), input: shuffled, channels: input.channels, type: input.type, count: lit(countArg(step), 'int') });
+  }
+
+  // `tail(n)` is `limit(n)` read from the FAR END, so it is the direction flag on the shared slice
+  // rather than a fourth builder — and it is the one window `sliceOf` will not decode, because "the
+  // last n" is an offset only once something supplies the member count. Nothing has to: read the
+  // relation backwards and the count never appears.
+  //
+  // It NEEDS a carried position, and that is not a limitation to work around — "last" is a question
+  // ABOUT emission order, so a relation carrying none has no last. Declining hands it to the spine
+  // that owns the message.
+  if (step.name === 'tail') {
+    if (!encounter) return null;
+    const last = { offset: 0, limit: countArg(step) };
+    if (bulked && bulk) return bulkSlice(input, last, encounter, bulk, 'desc', fresh);
+    return slice(input, last, encounter, 'desc', fresh);
+  }
+
   // `sliceOf` REJECTS an illegal range (`range(2,1)`) by throwing, which is right where it is the
   // only answer available — but this module's contract is that `null` is its only decline, and a
   // throw from here would mean the RelIR route raising an error the legacy spine has not reached
   // yet. Declining hands the traversal to the spine that owns the message, which raises the
   // identical one. Found by sweeping every prefix of every corpus traversal under all four switch
   // combinations, which is the only way a decline-contract violation shows up at all.
-  let slice;
-  try { slice = sliceOf(step); } catch { return null; }
-  const encounter = encounterOf(input.channels);
-  const bulk = input.channels.find((channel) => channel.role === 'bulk');
+  let window;
+  try { window = sliceOf(step); } catch { return null; }
   // A COLLAPSED relation's row stands for `bulk` traversers, so `LIMIT n` would take n ROWS and
   // answer a different question. `bulked` says the multiplicity is not provably 1, and then the
   // slice must count traversers — which needs a position to accumulate along, so a bulked relation
   // with no emission order declines rather than guessing one.
-  if (bulked && bulk) return encounter ? bulkSlice(input, slice, encounter, bulk, fresh) : null;
+  if (bulked && bulk) return encounter ? bulkSlice(input, window, encounter, bulk, 'asc', fresh) : null;
+  return slice(input, window, encounter, 'asc', fresh);
+}
+
+/** The row slice steps this fold serves. `tail` and `sample` are here as DIRECTIONS and a shuffle on
+ *  the same op rather than as separate arms, which is what `globalRowOps` says with its own three
+ *  handlers over one `reprojectRows`. */
+const SLICE_STEPS = new Set(['limit', 'skip', 'range', 'tail', 'sample']);
+
+/** `tail(n)`/`sample(n)`'s count. Both default to 1, and neither takes a range, so the numeric
+ *  argument is the whole decode — `sliceOf` deliberately refuses `tail` (see `sliceOp`). */
+const countArg = (step: IRStep): number =>
+  Number((step.args ?? []).find((arg: unknown) => typeof arg === 'number') ?? 1);
+
+/** `ORDER BY <position> [DESC] LIMIT/OFFSET` — the plain slice, where a row IS one traverser. An
+ *  unordered relation stays unordered rather than inventing a SQLite scan order: a slice with no
+ *  position to take a window from only reaches here where the order cannot matter (after `count()`,
+ *  whose one row makes `LIMIT 1` and `ORDER BY … LIMIT 1` the same question). */
+function slice(
+  input: Rel, window: { readonly offset: number; readonly limit: number | null },
+  encounter: Channel | undefined, dir: 'asc' | 'desc', fresh: Minter,
+): Rel {
   const source = encounter
     ? make.sort({
       id: fresh('so'), input, channels: input.channels, type: input.type,
-      terms: [{ expr: col(input.id, encounter.col), dir: 'asc' }],
+      terms: [{ expr: col(input.id, encounter.col), dir }],
     })
     : input;
   return make.limit({
     id: fresh('li'), input: source, channels: input.channels, type: input.type,
-    ...(slice.limit === null ? {} : { count: lit(slice.limit, 'int') }),
-    ...(slice.offset ? { offset: lit(slice.offset, 'int') } : {}),
+    ...(window.limit === null ? {} : { count: lit(window.limit, 'int') }),
+    ...(window.offset ? { offset: lit(window.offset, 'int') } : {}),
   });
 }
 
@@ -454,18 +509,21 @@ function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel 
  * argument is the kind of thing that goes wrong silently when the caller changes.
  */
 function bulkSlice(
-  input: Rel, slice: { readonly offset: number; readonly limit: number | null },
-  encounter: Channel, bulk: Channel, fresh: Minter,
+  input: Rel, window: { readonly offset: number; readonly limit: number | null },
+  encounter: Channel, bulk: Channel, dir: 'asc' | 'desc', fresh: Minter,
 ): Rel {
-  const lo = slice.offset;
-  const hi = slice.limit === null ? null : lo + slice.limit;
+  const lo = window.offset;
+  const hi = window.limit === null ? null : lo + window.limit;
   const running = make.window({
     id: fresh('bw'), input, channels: input.channels,
     type: typeOf(...input.type.cols, meta('cum', 'int')),
     specs: [['cum', {
       kind: 'window-expr', fn: 'sum', args: [col(input.id, bulk.col)],
       spec: {
-        partitionBy: [], orderBy: [{ expr: col(input.id, encounter.col), dir: 'asc' }],
+        // The direction is the whole of `tail(n)`: accumulate BACKWARDS and the band `[0, n)` is the
+        // last n traversers instead of the first. The rows keep their positions either way, so the
+        // root's `ORDER BY <position>` still reports them in emission order.
+        partitionBy: [], orderBy: [{ expr: col(input.id, encounter.col), dir }],
         frame: { mode: 'rows', start: { kind: 'unbounded-preceding' }, end: { kind: 'current-row' } },
       },
     }]],
