@@ -61,18 +61,21 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     });
   }
 
-  test('is(typeOf(LIST|SET|MAP)) is a shape RETYPE, so RelIR declines it', () => {
+  test('is(typeOf(LIST|SET|MAP)) is a shape RETYPE, and both spines retype', () => {
     // The one arm where treating `typeOf` as an ordinary predicate is a WRONG ANSWER rather than a
     // missing one: over a scalar stream carrying a stored collection, the assert retypes the stream to
-    // a list or a map, so filtering would return the right rows framed as the wrong shape. RelIR reuses
-    // legacy's ONE `typeOfAssert` decode (via `collectionAssert`) to recognize it — five arms had
-    // already drifted decoding this inline, which is why there is one decode and not a sixth copy.
-    for (const gremlin of ['g.V().values("uuid").is(P.typeOf(GType.LIST))', 'g.V().values("age").is(P.typeOf(GType.MAP))']) {
-      const plan = compile(gremlin, {}, { spine: 'rel' });
-      expect(plan.kind === 'read' ? plan.spine : 'legacy').toBe('legacy');
-      // …and the retype still HAPPENS on the spine that owns it — the decline is not a loss of support.
-      expect(read(gremlin).shape.kind).not.toBe('value');
+    // a list or a map, so filtering would return the right rows framed as the wrong shape. Both spines
+    // reach the retype through legacy's ONE `typeOfAssert` decode (via `collectionAssert`) — five arms
+    // had already drifted decoding this inline, which is why there is one decode and not a sixth copy.
+    for (const gremlin of ['g.V().values("uuid").is(P.typeOf(GType.LIST))', 'g.V().values("list").is(P.typeOf(GType.SET))']) {
+      expect(compile(gremlin, {}, { spine: 'rel' })).toMatchObject({ spine: 'rel' });
+      for (const spine of ['legacy', 'rel'] as const) expect(read(gremlin, { spine }).shape.kind).not.toBe('value');
     }
+    // A MAP retype declines: RelIR has the LIST shape and not the map one, so it hands the traversal to
+    // the spine that does — the decline is not a loss of support.
+    const mapped = compile('g.V().values("age").is(P.typeOf(GType.MAP))', {}, { spine: 'rel' });
+    expect(mapped.kind === 'read' ? mapped.spine : 'legacy').toBe('legacy');
+    expect(read('g.V().values("age").is(P.typeOf(GType.MAP))').shape.kind).not.toBe('value');
   });
 
   // `values().is()` and `count().is()` are RelIR-routed, so both run on BOTH spines. Each spine's

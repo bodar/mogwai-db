@@ -14,7 +14,7 @@ import { aliasCompareTest, aliasOperandsOf, appendCte, layoutCols, patchLayout, 
 import { aliasAppend, aliasSeed, elemEntry, elemShape } from '../context/alias.ts';
 import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from '../tail/child.ts';
 import { operandDeps, resolveTraversalOperands } from '../tail/operand.ts';
-import { directElementModulation, elementOrderSql } from '../tail/modulation.ts';
+import { directElementModulation, elementOrderDrop, elementOrderSql } from '../tail/modulation.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { isInjectionMarker, injectedValues } from '../injection.ts';
 import { engineOf, fastPathContextOf } from '../../engine/deps.ts';
@@ -316,7 +316,16 @@ export function lowerElementDedup(st: ElementStream, s: IRStep, order?: IRStep):
     return appendCte(st, body, encounter ? { encounter } : {});
   }
   const orderSql = elementOrderSql(st, n, order);
-  const where = modulators.length && !s.productiveBy ? q` WHERE ${predicateSql(key, undefined)}` : q``;
+  // TWO productivity drops, and the ORDER's was missing: a `dedup().by(k)` drops a traverser whose OWN
+  // `by()` yields nothing, and a folded `order().by(k)` drops one whose ORDER key yields nothing — two
+  // different keys, two different steps, both non-productive by default. `g.V().order().by('age')`
+  // alone answers four rows on the modern graph and `g.V().order().by('age').dedup()` answered SIX,
+  // because this route folds the order() in and only ever applied the dedup's own drop. Found by L5's
+  // metamorphic partition law once the RelIR route answered four for the same chain.
+  const orderDrop = elementOrderDrop(st, n, order);
+  const dedupDrop = modulators.length && !s.productiveBy ? predicateSql(key, undefined) : null;
+  const drops = [orderDrop, dedupDrop].filter((d): d is Expression => !!d);
+  const where = drops.length ? q` WHERE ${list(drops, ' AND ')}` : q``;
   const existing = layoutCols(layout);
   const encounter = order ? 'encounter' : undefined;
   const encounterExpr = order ? q`, ROW_NUMBER() OVER (ORDER BY ${orderSql}, ${p.c.id}) AS encounter` : q``;

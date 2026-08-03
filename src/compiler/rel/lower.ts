@@ -22,7 +22,7 @@ import {
 import { byExpr, modulations, orderProductivity, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
-import { BARE_LIST, foldScalars, LIST_COL, listMemberOp, listRetype, listSetOp, unfoldList } from './list.ts';
+import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listRetype, listSetOp, unfoldList } from './list.ts';
 
 /**
  * THE SECOND LOWERING — `Step[] -> RelIR` (§10·4 of `docs/2026-08-01-relir-build-plan.md`).
@@ -1057,7 +1057,25 @@ function scalarTail(
       // the one thing this module may never answer. `collectionAssert` is the derived view of legacy's
       // ONE `typeOfAssert` decode (`child-shape.ts`), reused rather than re-recognized: five arms had
       // already drifted apart decoding this inline, and a sixth copy here would be the same mistake.
-      if (collectionAssert(step)) return null;
+      // A TYPE ASSERT is not a predicate: `is(typeOf(LIST|SET))` RETYPES the stream to a collection, so
+      // lowering it as a filter would return the right ROWS framed as the wrong SHAPE — the one thing
+      // this module may never do. `collectionAssert` is the derived view of legacy's ONE `typeOfAssert`
+      // decode, reused rather than re-recognized. A MAP retype needs the map shape, which this route
+      // does not have; a stream with no per-row stored type has no stored collection at all, and
+      // legacy's generic `is()` static-folds that case.
+      const asserted = collectionAssert(step);
+      if (asserted) {
+        if (asserted === 'map' || !carries('vtype')) return null;
+        const retyped = collectionRetype(rel, 'vtype', asserted, fresh);
+        const tail = listTail(retyped.rel, retyped.of, steps, at + 1, fresh);
+        if (!tail) return null;
+        // The SET marker rides on the framing, not the relation — a set and a list share every member
+        // op and differ only at the wire. So it is applied to whatever the list tail finished as, and
+        // only where that is still a collection.
+        return tail.framing.kind === 'list' && retyped.set
+          ? { rel: tail.rel, framing: { ...tail.framing, set: true } }
+          : tail;
+      }
       const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType());
       if (!pred) return null;
       rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
@@ -1248,10 +1266,13 @@ function listTail(
       ];
       const positioned = renumber(
         unfolded.rel, terms,
-        [meta('v', 'any', true), ...(unfolded.typed ? [meta('vtype', 'text', true)] : []),
+        [...(unfolded.member ? [meta(LIST_COL, 'json')] : [meta('v', 'any', true), ...(unfolded.typed ? [meta('vtype', 'text', true)] : [])]),
           ...channels.map((channel) => meta(channel.col, 'int'))],
         channels, fresh,
       );
+      // A NESTED list's members are LISTS, so the unfolded stream stays in the list vocabulary rather
+      // than entering the scalar one — the same explode, a different payload.
+      if (unfolded.member) return listTail(positioned, unfolded.member, steps, at + 1, fresh);
       // A TYPED list's members frame by their OWN type, exactly as `values()` over a stored property
       // does — `PER_ROW('vtype')`, the same channel and the same column name, so the scalar tail's
       // `carries('vtype')` picks it up and an `is(P.gt(…))` after it gets the vtype-aware compare key

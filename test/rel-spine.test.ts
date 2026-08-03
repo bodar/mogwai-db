@@ -184,6 +184,15 @@ const COVERED = [
   "g.inject(['a'],['b']).combine(['c'])", "g.inject(['a','b']).combine(['c']).unfold()",
   "g.inject(['a','b']).merge(['c']).unfold()", "g.inject([1,2]).combine([3]).sum(Scope.local)",
   "g.V().values('name').fold().combine(['x'])", "g.V().values('name').fold().intersect(['marko'])",
+  // `unfold()` of a NESTED list (a `product()`'s pair-lists) stays in the list vocabulary — one LIST
+  // traverser per member, which is the same explode with a different payload column.
+  "g.inject(['a','b']).product(['c']).unfold()", "g.inject(['a','b']).product(['c','d']).unfold().count(Scope.local)",
+  // `is(P.typeOf(LIST|SET))` is a type ASSERT that RETYPES the stream — §11's trap, and expressible
+  // now that the list shape exists. A MAP retype still declines (see DECLINED).
+  "g.V().values('list').is(P.typeOf(GType.LIST))", "g.V().values('list').is(P.typeOf(GType.SET))",
+  "g.V().values('list').is(P.typeOf(GType.LIST)).unfold()",
+  "g.V().values('list').is(P.typeOf(GType.LIST)).count(Scope.local)",
+  "g.V().values('age').is(P.typeOf(GType.LIST))",
 ];
 
 /**
@@ -199,7 +208,7 @@ const DECLINED = [
   "g.inject(['a','a']).dedup(Scope.local)",   // a member dedup keeps the FIRST occurrence per value
   "g.inject(['a','b']).reverse()",    // on a list `reverse` reverses ORDER, not each member
   "g.inject(['a','b']).merge(__.V().values('name').fold())", // a TRAVERSAL operand is a child read
-  "g.inject(['a','b']).product(['c']).unfold()",            // a NESTED list's members are lists
+  "g.V().values('age').is(P.typeOf(GType.MAP))", // a MAP retype needs the map shape, not a decode
   "g.inject('a').inject('b')",        // a second inject is a UNION with the first, not a source
   'g.inject(1,2).order(Scope.local)', // LOCAL scope: a per-traverser sort of a LIST, a different arm
   "g.V().dedup().by(__.out().count())", // a SUB-TRAVERSAL projection: a child lowering, not an expr

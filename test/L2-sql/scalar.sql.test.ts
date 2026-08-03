@@ -124,12 +124,19 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().values("uuid")').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // is(typeOf(LIST)) is a RETYPE, not a value filter: the scalar value stream becomes a
     // ListStream whose `list` column is json() of the stored JSONB list value.
-    const listed = read('g.V().values("list").is(typeOf(GType.LIST))');
+    // Both spines retype (RelIR takes this chain now), so the LEGACY spelling is pinned by name and the
+    // RelIR one beside it — what both must have is the `json(<value>) AS list` projection under a
+    // `vtype = 'list'` filter, which is the retype rather than a predicate.
+    const listed = read('g.V().values("list").is(typeOf(GType.LIST))', { spine: 'legacy' });
     // typed: items are self-describing {t,v} nodes → framed via frameTypedNode (full-fidelity).
     expect(listed.shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });
     expect(listed.sql).toContain("json(p.v) AS list");
     expect(listed.sql).toContain("p.vtype = ?");
     expect(listed.binds).toContain('list');
+    const relListed = read('g.V().values("list").is(typeOf(GType.LIST))', { spine: 'rel' });
+    expect(relListed.shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });
+    expect(relListed.sql).toMatch(/json\(\w+\.v\) AS list/);
+    expect(relListed.sql).toMatch(/WHERE \(\w+\.vtype = \?\)/);
     // once a ListStream, the list substrate composes: unfold/count(local)/range reuse it.
     // typed unfold carries each element's own stored vtype (perRowType framing).
     expect(read('g.V().values("list").is(typeOf(GType.LIST)).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });

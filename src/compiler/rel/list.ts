@@ -411,7 +411,12 @@ const scalarOf = (
  * it is only a total order where the relation has one row — which is why the caller re-mints through
  * `renumber` rather than declaring `mo` the channel directly.
  */
-export function unfoldList(rel: Rel, of: ListOf, fresh: Minter): { readonly rel: Rel; readonly ord: string; readonly typed: boolean } | null {
+export function unfoldList(
+  rel: Rel, of: ListOf, fresh: Minter,
+): { readonly rel: Rel; readonly ord: string; readonly typed: boolean; readonly member?: ListOf } | null {
+  // A NESTED list unfolds into one LIST traverser per member (a `product()`'s pair-lists), which is
+  // the same explode with a different payload column — so it is one arm rather than a second function.
+  if (of.kind === 'list') return unfoldNested(rel, of, fresh);
   if (!isBareList(of)) return null;
   const exploded = make.explode({
     id: fresh('uf'), input: rel, expr: col(rel.id, LIST_COL), channels: rel.channels, as: MEMBER,
@@ -691,4 +696,55 @@ export function listSetOp(
 
   const resultOf: ListOf = step.name === 'product' ? { kind: 'list', of: BARE_LIST } : BARE_LIST;
   return { rel: result, of: resultOf, ...(SET_RESULT.has(step.name) && terminal ? { set: true } : {}) };
+}
+
+/** `unfold()` over a list whose MEMBERS are lists: each member becomes a list traverser of its own,
+ *  written back WHOLE (`json(…)`) so a nested JSON array stays an array rather than being re-encoded
+ *  as a string. Its own members keep the inner encoding, which is what `member` reports. */
+function unfoldNested(rel: Rel, of: ListOf & { readonly kind: 'list' }, fresh: Minter): { readonly rel: Rel; readonly ord: string; readonly typed: boolean; readonly member: ListOf } {
+  const exploded = make.explode({
+    id: fresh('un'), input: rel, expr: col(rel.id, LIST_COL), channels: rel.channels, as: MEMBER,
+    type: typeOf(...rel.type.cols, meta(MEMBER.value, 'any', true), meta(MEMBER.ord, 'int'), meta(MEMBER.type, 'text', true)),
+  });
+  return {
+    rel: make.project({
+      id: fresh('ul'), input: exploded, channels: rel.channels,
+      type: typeOf(meta(LIST_COL, 'json'), ...rel.channels.map((channel) => meta(channel.col, 'int')), meta(MEMBER.ord, 'int')),
+      exprs: [[LIST_COL, { kind: 'call', fn: 'json', args: [col(exploded.id, MEMBER.value)] }],
+        ...rel.channels.map((channel) => [channel.col, col(exploded.id, channel.col)] as const),
+        [MEMBER.ord, col(exploded.id, MEMBER.ord)]],
+    }),
+    ord: MEMBER.ord,
+    typed: false,
+    member: of.of,
+  };
+}
+
+/**
+ * `is(P.typeOf(LIST|SET))` — a type ASSERT, which RETYPES the stream rather than filtering it.
+ *
+ * §11's trap in its original form: lowered as a predicate it returns the right ROWS framed as the
+ * wrong SHAPE. What it actually means is "keep the rows whose stored value IS a collection, and treat
+ * that value as the traverser" — so it needs a per-row stored `vtype` (a computed scalar has no stored
+ * collection, and legacy's generic `is()` static-folds that case), and the members are the stored
+ * collection's own self-describing `{t,v}` tree, i.e. a TYPED list.
+ *
+ * A SET differs only in the framing marker: the member substrate is shared, which is exactly why
+ * `set` rides on the framing rather than on the relation.
+ */
+export function collectionRetype(rel: Rel, vtype: string, kind: 'list' | 'set', fresh: Minter): { readonly rel: Rel; readonly of: ListOf; readonly set: boolean } {
+  const matching = make.filter({
+    id: fresh('cr'), input: rel, channels: rel.channels, type: rel.type,
+    pred: { kind: 'binary', op: '=', left: col(rel.id, vtype), right: lit(kind, 'text') },
+  });
+  return {
+    rel: make.project({
+      id: fresh('cl'), input: matching, channels: rel.channels,
+      type: typeOf(meta(LIST_COL, 'json'), ...rel.channels.map((channel) => meta(channel.col, 'int'))),
+      exprs: [[LIST_COL, { kind: 'call', fn: 'json', args: [col(matching.id, 'v')] }],
+        ...rel.channels.map((channel) => [channel.col, col(matching.id, channel.col)] as const)],
+    }),
+    of: TYPED_LIST,
+    set: kind === 'set',
+  };
 }

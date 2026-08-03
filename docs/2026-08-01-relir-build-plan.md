@@ -1,6 +1,6 @@
 # RelIR — the build plan
 
-**Status: BUILDING.** Coverage **474 / 2,298** corpus traversals on the RelIR spine; deletion counter
+**Status: BUILDING.** Coverage **487 / 2,298** corpus traversals on the RelIR spine; deletion counter
 **110** references left across the 15 legacy rows. Both are ratchets in `ci` (§10·4). The direction was
 argued in [codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a and
 is not re-argued here.
@@ -448,14 +448,24 @@ Two different accidents for one concept. Both spines now say `ORDER BY value`, w
 property AND makes the two agree by construction — reproducing either accident in RelIR would have
 been reproducing luck.
 
+**Two more arms closed with it** (+13): `unfold()` over a NESTED list (a `product()`'s pair-lists)
+stays in the list vocabulary — one LIST traverser per member, the same explode with a different payload
+column — and **`is(P.typeOf(LIST|SET))` is now EXPRESSED rather than declined.** That one is §11's own
+trap resolved: a type ASSERT retypes the stream, so lowering it as a predicate returns the right rows
+framed as the wrong shape. It was only a decline because RelIR had no list shape; with one, the retype
+is a `Filter(vtype = 'list')` plus a projection, and `collectionAssert` — legacy's ONE `typeOfAssert`
+decode — is what recognises it. A MAP assert still declines: that needs the map shape, not a decode.
+
 **What remains of the family, in order:**
 
 1. `order(Scope.local)`/`dedup(Scope.local)`, which need the member compare key and the
    first-occurrence rule respectively.
-2. The ELEMENT list (`fold()` over elements, whose members are rowids) and the NESTED list — each needs
-   its own expansion rather than a decode, which is why `isBareList` names the scalar encodings only.
+2. The ELEMENT list (`fold()` over elements, whose members are rowids) — its members need expansion
+   rather than a decode, which is why `isBareList` names the scalar encodings only.
 3. A TRAVERSAL operand for the set ops and `within`/`without` — the same "a folded re-sourced read is a
-   list value" fact legacy shares between them, and a child read this route has not grown.
+   list value" fact legacy shares between them. `constant(c).fold()` is the cheap half (a compile-time
+   list); a real sub-read needs a nested lowering whose BINDINGS hoist into the outer plan, which is
+   plan composition (§3.0) rather than an escape node.
 
 **Then: THE LIST SHAPE — 194 blocked traversals, the largest family, and it splits by FRAMING ARM
 rather than by step** (measured at 349 routed, by asking what shape legacy frames each blocked traversal

@@ -59,3 +59,36 @@ Feature: mogwai addendum — dedup() keeps the FIRST occurrence, so an ordered s
       | josh |
       | marko |
       | peter |
+
+  # A folded `order().by(key)` carries its OWN non-productive drop, and `dedup()`'s route lost it.
+  # Two different keys, two different steps, both non-productive by default: `dedup().by(k)` drops a
+  # traverser whose own `by()` yields nothing, and the `order().by(k)` folded in front of it drops one
+  # whose ORDER key yields nothing. `g.V().order().by('age')` alone answers four rows on the modern
+  # graph; `g.V().order().by('age').dedup()` answered SIX. Found by L5's metamorphic partition law
+  # once the RelIR route answered four for the same chain — no corpus traversal has this prefix.
+  @gap:dedup-first-occurrence
+  Scenario: g_V_order_byXageX_dedup_valuesXnameX
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().order().by("age").dedup().values("name")
+      """
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | vadas |
+      | marko |
+      | josh |
+      | peter |
+
+  @gap:dedup-first-occurrence
+  Scenario: g_V_withStrategiesXProductiveByX_order_byXageX_dedup_count
+    Given the modern graph
+    And the traversal of
+      """
+      g.withStrategies(ProductiveByStrategy).V().order().by("age").dedup().count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
