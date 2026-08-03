@@ -110,11 +110,22 @@ for (const query of CORPUS) {
     steps = runPasses(stepChain(tree, {}), extractStrategies(tree, {}), {}).steps as IRStep[];
   } catch { unparsed++; continue; }
   if (!steps.length) continue;
+  // EVERY prefix, never stopping at the first decline — because coverage is NOT monotonic in prefix
+  // length and assuming it was made this instrument understate its own subject.
+  //
+  // A step that absorbs a CLUSTER declines as a bare prefix and lowers with its cluster present:
+  // `addE` needs its `from`/`to` (both ends implicit is not a traversal that means anything), `mergeV`
+  // its `option()` arms, `addV` its `property()` run. Breaking at the first `null` therefore stopped at
+  // `…addV().as('a').addV().as('b').addE('knows')` and reported the whole chain blocked AT `addE` —
+  // while the chain WITH its endpoints lowers, routes and answers correctly. Measured: 29 traversals
+  // attributed to `addE`, including every standard-graph seeder, none of them blocked by it. That is
+  // this file's own stated failure mode (ranking the wrong work while looking precise), so the scan
+  // costs a few seconds and takes the maximum instead.
   let longest = 0;
   for (let n = 1; n <= steps.length; n++) {
-    // A throw ends the prefix as a decline does. `mise run rel-sweep` is what asserts there are none;
-    // here it would only distort the count to treat one differently.
-    try { if (lowerToRel(steps.slice(0, n))) longest = n; else break; } catch { break; }
+    // A throw counts as a decline. `mise run rel-sweep` is what asserts there are none; here it would
+    // only distort the count to treat one differently.
+    try { if (lowerToRel(steps.slice(0, n))) longest = n; } catch { /* a declining prefix, not the end */ }
   }
   if (longest === steps.length) { covered++; continue; }
   // When even the SOURCE declines, the source is the blocker.
