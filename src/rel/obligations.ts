@@ -66,7 +66,9 @@ export const CHANNEL_OBLIGATION: { readonly [K in RelKind]: ChannelObligation<K>
   distinct: preserving,
   materialize: preserving,
   window: (node) => extending(node, node.specs.map(([name]) => name)),
-  explode: (node) => extending(node, explodeColumns(node.as)),
+  // With an input it EXTENDS (input columns then the member's); source-less it emits exactly the
+  // member columns and carries nothing, so it answers for itself like any other source.
+  explode: (node) => (node.input ? extending(node as Rel & { readonly input: Rel }, explodeColumns(node.as)) : declares(node)),
 
   /**
    * Reducing, and it is TWO contracts rather than one — §3.5 assumed one and left the gap open.

@@ -7,7 +7,7 @@
 
 import { q, value, raw, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { predicateSql, scalarTx, compareKey, inferVtypeSql } from '../../plan/plan.ts';
-import { isColumnArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from '../context/stream.ts';
 import { layoutProjection, layoutCols, type ElementStream } from '../context/context.ts';
@@ -165,14 +165,34 @@ function listCte(s: ListStream, c: Relation, listExpr: Expression, of: ListStrea
   return toListStream(loweringStateOf(s), rel, of);
 }
 
+/**
+ * ONE member predicate for all three of `all`/`any`/`none`, null-aware.
+ *
+ * `P.eq(null)`/`P.neq(null)` cannot go through `predicateSql` as written: SQL's `= NULL` is NULL, so
+ * a member that IS null would never satisfy an `eq(null)` and every member would satisfy a
+ * `neq(null)`. TinkerPop compares with `Objects.equals`, so both must read as `IS [NOT] NULL`.
+ *
+ * It lives here ONCE rather than at each of the three hosts, and that is the fix rather than a tidy:
+ * `listAllAny` had its own copy reading `pred.value`, a field a `Pred` does not have (`{op, values}`),
+ * so `isNullEq` was TRUE for EVERY `eq`/`neq` and both steps tested `IS NULL` instead of the
+ * predicate — `g.inject(["a","a"]).all(P.eq("a"))` returned nothing where the list must survive, and
+ * `any(P.eq("a"))` likewise. A wrong answer with the right arity in the census's blind spot: an empty
+ * result and a plausible one are the same digest length.
+ */
+const memberPredicate = (of: ListStream['of'], pred: unknown): Expression => {
+  const val = memberValue(of);
+  if (isPred(pred) && (pred.op === 'eq' || pred.op === 'neq') && pred.values[0] === null)
+    return pred.op === 'eq' ? q`${val} IS NULL` : q`${val} IS NOT NULL`;
+  return predicateSql(val, pred);
+};
+
 /** none(pred): keep each list where NO element satisfies pred (a per-list collection
- *  filter) — stays a list stream. (SQL null semantics: an eq(null)/neq(null) predicate
- *  won't match a null element, so those edge forms may differ from TinkerPop.) */
+ *  filter) — stays a list stream. */
 function listNoneFilter(s: ListStream, pred: any): ListStream {
   const c = s.rel.as('c');
   // A whole-list filter: the list passes through byte-identical, so only the payload
   // read has to know the encoding.
-  return listCte(s, c, c.c.list, s.of, q` WHERE NOT EXISTS (SELECT 1 FROM json_each(${c.c.list}) je WHERE ${predicateSql(memberValue(s.of), pred)})`);
+  return listCte(s, c, c.c.list, s.of, q` WHERE NOT EXISTS (SELECT 1 FROM json_each(${c.c.list}) je WHERE ${memberPredicate(s.of, pred)})`);
 }
 
 /** The Scope.local collection transforms that keep a list a list (per-list, not a
@@ -396,11 +416,8 @@ function setOpExpr(name: string, self: Expression, op: Expression, selfTyped = f
  *  null-aware so all([null,null], eq(null)) keeps. */
 function listAllAny(s: ListStream, step: IRStep): ListStream {
   const c = s.rel.as('c');
-  const pred = step.args[0];
   const je = q`json_each(${c.c.list})`;
-  const val = memberValue(s.of);
-  const isNullEq = pred && typeof pred === 'object' && (pred.op === 'eq' || pred.op === 'neq') && (pred.value === null || pred.value === undefined);
-  const elemPred = isNullEq ? (pred.op === 'eq' ? q`${val} IS NULL` : q`${val} IS NOT NULL`) : predicateSql(val, pred);
+  const elemPred = memberPredicate(s.of, step.args[0]);
   const keep = step.name === 'all'
     ? q`NOT EXISTS (SELECT 1 FROM ${je} je WHERE (${elemPred}) IS NOT TRUE)`
     : q`EXISTS (SELECT 1 FROM ${je} je WHERE (${elemPred}) IS TRUE)`;

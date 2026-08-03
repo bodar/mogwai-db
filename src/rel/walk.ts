@@ -18,7 +18,10 @@ export function relChildren(r: Rel): readonly Rel[] {
   switch (r.kind) {
     case 'scan': case 'values': case 'self-ref': case 'ref': return [];
     case 'project': case 'filter': case 'aggregate': case 'sort': case 'limit':
-    case 'distinct': case 'window': case 'explode': case 'materialize': return [r.input];
+    case 'distinct': case 'window': case 'materialize': return [r.input];
+    // A source-less `Explode` has no relational child at all — its input is an OUTER-scope
+    // expression (see `rel.ts`), so the walk must not invent one.
+    case 'explode': return r.input ? [r.input] : [];
     case 'join': return [r.left, r.right];
     case 'union': return r.inputs;
     case 'recursive': return [r.seed, recursiveStep(r)];
@@ -107,7 +110,7 @@ export function mapRelChildren(r: Rel, f: (child: Rel) => Rel): Rel {
     case 'limit': return make.limit({ id, channels, type, input: f(r.input), count: r.count, offset: r.offset });
     case 'distinct': return make.distinct({ id, channels, type, input: f(r.input) });
     case 'window': return make.window({ id, channels, type, input: f(r.input), specs: r.specs });
-    case 'explode': return make.explode({ id, channels, type, input: f(r.input), expr: r.expr, as: r.as });
+    case 'explode': return make.explode({ id, channels, type, ...(r.input ? { input: f(r.input) } : {}), expr: r.expr, as: r.as });
     case 'materialize': return make.materialize({ id, channels, type, input: f(r.input), name: r.name });
     case 'join': return make.join({ id, channels, type, left: f(r.left), right: f(r.right), join: r.join, on: r.on });
     case 'union': return make.union({ id, channels, type, inputs: r.inputs.map(f), all: r.all });
@@ -136,7 +139,7 @@ export function mapRelExprs(r: Rel, f: (e: Expr) => Expr): Rel {
       });
       return make.window({ id, channels, type, input: r.input, specs });
     }
-    case 'explode': return make.explode({ id, channels, type, input: r.input, expr: f(r.expr), as: r.as });
+    case 'explode': return make.explode({ id, channels, type, ...(r.input ? { input: r.input } : {}), expr: f(r.expr), as: r.as });
     case 'join': return make.join({ id, channels, type, left: r.left, right: r.right, join: r.join, on: r.on && f(r.on) });
   }
 }

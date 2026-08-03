@@ -100,7 +100,7 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
     // unwrap a derived unary chain. `flatten` is the pass that makes broader bodies legal.
     if (term.kind === 'project' || term.kind === 'filter' || term.kind === 'sort' || term.kind === 'limit'
       || term.kind === 'distinct' || term.kind === 'window' || term.kind === 'explode' || term.kind === 'materialize')
-      return term.input.kind === 'self-ref' && term.input.name === name;
+      return term.input?.kind === 'self-ref' && term.input.name === name;
     return term.kind === 'join'
       && ((term.left.kind === 'self-ref' && term.left.name === name) || (term.right.kind === 'self-ref' && term.right.name === name));
   };

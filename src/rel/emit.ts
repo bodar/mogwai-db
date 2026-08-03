@@ -334,12 +334,21 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       }
 
       case 'explode': {
+        // Exactly the columns `explodeColumns` declares — a member's key, its value, and its ordinal
+        // (for a JSON array `json_each.key` IS the index).
+        const memberCol = (name: string): readonly [string, Expression] =>
+          [name, qualified(r.id, name === r.as.value ? 'value' : 'key')];
+        // SOURCE-LESS: `json_each(<outer expression>)` is the whole FROM, and the expression resolves
+        // in the OUTER scope because there is no input block to resolve it against. That is what makes
+        // a per-member computation a CORRELATED subquery — the shape every list member op takes.
+        if (!r.input) {
+          const item: FromItem = { text: q`json_each(${expr(r.expr, outer)})`, alias: r.id };
+          const select = explodeColumns(r.as).map(memberCol);
+          return { kind: 'block', select, from: item, joins: [], distinct: false, windowed: false, scope: withRel(outer, r.id, new Map(select)) };
+        }
         const b = inputBlock(r.input, outer, (input) => input.windowed || grouped(input) || tailUsed(input));
         const item: FromItem = { text: q`json_each(${expr(r.expr, b.scope)})`, alias: r.id };
-        // Exactly the columns `explodeColumns` declares, in that order — a member's key, its value,
-        // and its ordinal (for a JSON array `json_each.key` IS the index).
-        const member = (name: string): readonly [string, Expression] => [name, qualified(r.id, name === r.as.value ? 'value' : 'key')];
-        const select = [...b.select, ...explodeColumns(r.as).map(member)];
+        const select = [...b.select, ...explodeColumns(r.as).map(memberCol)];
         return { ...b, joins: [...b.joins, { kind: 'cross', item }], select, scope: withRel(b.scope, r.id, new Map(select)) };
       }
 
