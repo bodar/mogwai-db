@@ -80,6 +80,17 @@ interface Scenario {
   /** `Then the traversal will raise an error [with message <containing|starting|ending> text of "…"]`.
    *  Upstream compares case-INSENSITIVELY, and so do we. `null` text = any error will do. */
   error: { comparison: 'containing' | 'starting' | 'ending'; text: string } | null;
+  /**
+   * `@RelIR` — this scenario's ANSWER needs the RelIR spine, and the legacy one refuses it.
+   *
+   * Not a coverage marker and not a skip in disguise: it says the two routes DIVERGE and which way
+   * round, which is the one thing `test:legacy-spine` (the differential with RelIR off) must be told
+   * or it reads a deliberate improvement as a regression. Every tag here is a write shape the legacy
+   * driver cannot re-enter, so the tag disappears with §8's `runWriteChainFull` rather than
+   * accumulating. A scenario carrying it must never be a shape legacy answers DIFFERENTLY — that is
+   * a defect, and the census is what sees it.
+   */
+  relirOnly: boolean;
   expected: string[];
   /** `And the graph should return N for count of "<traversal>"` — upstream's own Then-step for
    *  asserting GRAPH STATE after a write, which is the only thing that can catch a write that
@@ -108,6 +119,7 @@ function parseFeature(featureName: string, text: string): Scenario[] {
     const s: Scenario = {
       feature: featureName, name: m[1].trim(), graph: 'empty',
       initializer: null, gremlin: '', assertion: 'unordered', count: null, expected: [], graphChecks: [], error: null,
+      relirOnly: /@RelIR\b/.test(tags),
     };
     // The routing the official runner does (`feature-steps.js`): a @MultiLabel scenario's EMPTY
     // graph is the multi-label source, not the plain one. Mirrored here so a scenario can be
@@ -118,6 +130,12 @@ function parseFeature(featureName: string, text: string): Scenario[] {
     let docTarget: 'gremlin' | 'initializer' = 'gremlin';
     for (i++; i < lines.length && !/^\s*Scenario:/.test(lines[i]); i++) {
       const l = lines[i].trim();
+      // A TAG here belongs to the NEXT scenario, and this loop is the only reader that reaches it —
+      // so it has to hand it on. Without this every scenario-level tag but the FIRST file's-first
+      // one was silently dropped: the outer loop never sees these lines, and `pending` arrived
+      // empty. Nothing noticed because `@gap:` is documentation and `@MultiLabel` is a FEATURE tag,
+      // read before any scenario; a tag that CHANGES behaviour is what made it visible.
+      if (l.startsWith('@')) { pending += l + ' '; continue; }
       const g = l.match(/^(?:Given|And)\s+(?:the|an?)\s+(\w+)\s+graph$/);
       if (g) s.graph = multiLabel && g[1] === 'empty' ? 'multilabel' : g[1];
       if (/^(?:Given|And)\s+the\s+graph\s+initializer\s+of$/.test(l)) docTarget = 'initializer';
@@ -310,8 +328,13 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
   const scenarios = loadScenarios();
   test('the addendum is non-empty', () => expect(scenarios.length).toBeGreaterThan(0));
 
+  // The differential's OFF position runs the same suite through the legacy spine, so a scenario whose
+  // answer only that spine's replacement can give is not a failure there — it is the divergence the
+  // tag declares.
+  const relirOff = process.env.MOGWAI_RELIR === '0';
   for (const s of scenarios) {
-    test(`[${s.graph}] ${s.name}`, async () => {
+    const run = s.relirOnly && relirOff ? test.skip : test;
+    run(`[${s.graph}] ${s.name}`, async () => {
       if (!(s.graph in GRAPHS)) throw new Error(`unknown graph '${s.graph}' (add its fixture to GRAPHS)`);
       const fixture = GRAPHS[s.graph];
       const store = new GraphStore(new BunSqlite(':memory:'), fixture.labelCardinality);

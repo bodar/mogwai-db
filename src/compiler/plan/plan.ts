@@ -859,16 +859,36 @@ export const propHasFor = (idExpr: Expression, elem: Elem, key: string, pred: an
   return pred === undefined ? q`EXISTS(${base})` : q`EXISTS(${base} AND ${predicateSql(s.value, pred, TYPE_PER_ROW(s.vtype))})`;
 };
 
+/**
+ * An EDGE's property bag, IN INSERTION ORDER — the ordered subselect the vertex side already uses
+ * (`GROUP BY key ORDER BY MIN(id)`), applied to the side that was missing it.
+ *
+ * A bare `json_group_object(key, …) FROM edge_properties WHERE edge=?` takes its entries in
+ * whatever order SQLite scans, and the scan it picks is the `UNIQUE(edge, key)` index — so the bag
+ * came out in KEY order as an INDEX ARTIFACT, right only while the planner chooses that path. It
+ * also disagreed with the WRITE response for the same edge, which reads `ORDER BY id`: two answers
+ * for one element, differing by which code path you reached it through. The RelIR write route frames
+ * through this projection, which is what made the disagreement visible.
+ *
+ * Insertion order rather than key order because that is the choice the vertex bag already made, and
+ * one convention for "the properties of an element" is the point.
+ */
+const orderedPropBag = (value: Expression, edgeIdExpr: Expression): Expression =>
+  // `json(v)` around the subquery column, exactly as the vertex bag does: a JSON value crossing a
+  // subquery boundary LOSES SQLite's json subtype, so the aggregate would quote it as text. That is
+  // not a style choice — it silently reshaped every edge's property bag on the first attempt.
+  q`COALESCE((SELECT json_group_object(key, json(v)) FROM (SELECT key, ${value} AS v FROM edge_properties WHERE edge=${edgeIdExpr} ORDER BY id)), '{}')`;
+
 /** edge: all props as flat JSON text `{key:value}` (single-valued per key), correlated
  *  on the edge rowid. Empty → `{}`. Mirror of vertexPropsAgg (which nests `[values]`
  *  for multi-property vertices; edges are single so the value is bare). */
 export const edgePropsAgg = (edgeIdExpr: Expression): Expression =>
-  q`COALESCE((SELECT json_group_object(key, ${propNodeExpr(raw('value'), raw('vtype'))}) FROM edge_properties WHERE edge=${edgeIdExpr}), '{}')`;
+  orderedPropBag(propNodeExpr(raw('value'), raw('vtype')), edgeIdExpr);
 
 /** edge: valueMap props as `{key:[value]}` (each value wrapped in a 1-list so the
  *  handler frames node + edge valueMaps uniformly). */
 export const edgeValueMapProps = (edgeIdExpr: Expression): Expression =>
-  q`COALESCE((SELECT json_group_object(key, json_array(${propNodeExpr(raw('value'), raw('vtype'))})) FROM edge_properties WHERE edge=${edgeIdExpr}), '{}')`;
+  orderedPropBag(q`json_array(${propNodeExpr(raw('value'), raw('vtype'))})`, edgeIdExpr);
 
 /** A stored property read for a value PROJECTION: the raw value, its stored type, and the two
  *  already composed by `storedValueExpr`. The three always travel together — a value projected
@@ -942,5 +962,5 @@ const bareStoredValueExpr = (v: Expression, vt: Expression): Expression =>
  *  framing uses the TYPED valueMapProps above; only this re-entry drops element types. */
 export const bareValueMapProps = (rel: Relation, elem: Elem): Expression =>
   elem === 'edge'
-    ? q`COALESCE((SELECT json_group_object(p.key, json_array(${bareStoredValueExpr(raw('p.value'), raw('p.vtype'))})) FROM edge_properties p WHERE p.edge=${rel.c.id}), '{}')`
+    ? orderedPropBag(q`json_array(${bareStoredValueExpr(raw('value'), raw('vtype'))})`, rel.c.id)
     : q`COALESCE((SELECT json_group_object(key, json(vs)) FROM (SELECT p.key AS key, json_group_array(${bareStoredValueExpr(raw('p.value'), raw('p.vtype'))} ORDER BY p.id) AS vs FROM vertex_properties p WHERE p.node=${rel.c.id} GROUP BY p.key ORDER BY MIN(p.id))), '{}')`;
