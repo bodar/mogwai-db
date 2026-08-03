@@ -485,12 +485,15 @@ of gravity is ceiling, not correctness.
     addition, not a patch); precedent `apache/tinkerpop#3511` came from here and merged.
     → `patches/upstream/tinkerpop-03-multilabel-default-untestable.md`. *Medium — 10 scenarios for everyone.*
 
-24. **`tree()` — 12 scenarios, the largest unimplemented-step bucket, parked on a false premise.** The
-    won't-do said the JS GLV stubs `DataType.TREE`; it does not — the vendored client ships a full
-    bidirectional `TreeSerializer.js`, so the result decodes end to end. `tree()` is a path-history
-    consumer, so scope it against P3's recursive-path tails and item 6: the wire half is free, the path
-    half is not. **`feature-support-matrix.md` still carries the refuted premise in two places** — the
-    `tree()` 🚫 row and the Locked non-goals table; sweep both. **Medium.**
+24. **`tree()` — 14 scenarios, the largest unimplemented-step bucket.** The won't-do premise (the JS GLV
+    stubs `DataType.TREE`) is refuted and the matrix now says so: the client at the pinned gitlink ships
+    a full bidirectional `TreeSerializer.js` AND a real `the result should be a tree with a structure of`
+    assertion, so the result decodes end to end. `tree()` is a path-history consumer, so scope it against
+    P3's recursive-path tails and item 6: the wire half is free, the path half is not. Take the two
+    scenarios that need NO wire type first (`tree("a").select("a").count(local)`, and the same under
+    `local()`) — they exercise the barrier, merge-by-key and the `cap()` side-effect form without
+    `0x2b`. Two of the 14 are OURS, not upstream's: `g_V_out_tree_isXtypeOfXGType_TREEXX_count` and
+    `g_V_whereXtree_isXtypeOfXGType_TREEXXX_values_name` already probe `GType.TREE` re-entry. **Medium.**
 
 25. **Unimplemented-step matrix-fill, with L3 counts.** `subgraph()` 6 · `branch()` 5 · `discard()` 4 ·
     `sideEffect()` 4 · `sample()` 3 · `index()` 2 (14) · `with()` 2 (13) · `asString()` 2 · `fail()` 2 ·

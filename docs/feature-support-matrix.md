@@ -145,7 +145,7 @@ drops the other arm's rows).
 | `path()`, `path().by(…)`, `path().from(l)/to(l)` | 🟡 | linear or recursive layout; `count()`/`is(typeOf(PATH))` re-enter; per-position `by('key')`/`by(T.label/T.id)`/`by(__.trav)` (value/transform/reducer, or a bare 1-to-1 `choose()`/`coalesce()`); `from(l)`/`to(l)` scope a linear path to a static label slice; collection ops compose over a `by(key)` path; a BRANCHED (pad-to-max) path takes `by()` too — a padded position carries a presence column so "this arm's path is shorter" (omit the position) stays distinct from "the by() value is missing" (drop the whole path); a LINEAR path is row-preserving so it CARRIES the as() label history — `path().as('a')` binds the whole path (as a list) and `select('a')` reads it back. ❌ `as()`/`select(label)` over a RECURSIVE (grouped) path — one row per position, not per path; list members frame as bare values not elements (AliasEntry records no member shape); `union()` over a path value; a fan-out `by(__.union(…))` (a position holds one value) or a `by(traversal)` with a movement/filter prefix before a branch; an aggregate `by(traversal)`; `from` / `to` through a branch or a recursive path; mixed element-kind at a position; a dynamic-length (`repeat`) arm; spanning more than one movement/repeat |
 | `simplePath()`, `cyclicPath()` [`.from(l)/.to(l)`] | ✅ | all-pairs identity / `json_each` guard; `from(l)`/`to(l)` scope a static label range. ❌ `by(key/T)` scoping |
 | other steps after `path()` | 🟡 | collection ops (set-ops/`merge`/`reverse`/`conjoin`/`unfold`) compose over a `by(key)` path. ❌ `order`/reducer/`inject`/`select(Column.keys)` — need label history |
-| `tree()` | 🚫 | the JS GLV stubs it (0 conformance) |
+| `tree()` | ❌ | `step not implemented: tree()`. A reducing barrier over PATH history: each traverser's path becomes a root→leaf chain and the chains merge, by key, into a nested key→subtree map (so unlike `path()` it is not a multiset — shared prefixes fold). 14 L3 scenarios. What it needs: the path track at the barrier, merge-by-key, per-path-POSITION `by()` (a cycling ring, where a non-productive arm COLLAPSES that level rather than emitting a gap), the side-effect form (`tree("a")` passes the stream through, read back by `cap("a")`), and the `g:Tree` / GraphBinary `0x2b` wire type — which the `tree("a").select("a").count(local)` forms do not touch at all |
 
 ## 8. Pattern matching
 
@@ -259,5 +259,4 @@ each staying one SQL statement.
 | Lambdas | v4-native stance |
 | OLAP / GraphComputer | OLTP-only (small per-tenant graphs) |
 | Multi-request `g.tx()` | needs DO session state (P5 stretch) |
-| `tree()` | 0 conformance (JS GLV stubs it) |
 | TextP regex | platform wall — no SQLite `regexp()` UDF, DO blocks extensions |
