@@ -240,14 +240,20 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
   QUERY TEXT may stay an IN-list. Two gates keep it that way: `mise run binds` statically,
   `mise run test:cf-limits` at runtime (`src/cf-limits.ts` — the `Sql` decorator that makes a DO-only
   wall fail on Bun).
-  **This rule was measured on the runtime we SHIP to, and that is load-bearing: Bun and DO disagree
-  on its direction.** Chunking a write through `src/rowbatch.ts` is ~1.7× faster on `bun:sqlite` and
-  ~2× SLOWER on DO, because 607 `sql.exec` calls cross the host boundary where one does not. Picking
-  the form the dev runtime prefers is exactly the error `cf-limits.ts` exists to prevent. (The older
-  4.6× figure compared chunking against INLINING LITERALS — still true, still not the question.)
-  `src/rowbatch.ts` remains the LEGACY write path's mechanism and is correct until that path is
-  migrated; it is not the pattern to copy into new code, and it shrinks to whatever JSON cannot carry.
-  Numbers, method and caveats: `docs/2026-08-01-relir-build-plan.md` §10·5. Cap detail:
+  **The rule is STRUCTURAL, not a benchmark result** — three independent reasons, none of which a
+  runtime release can move: a read cannot chunk at all (a compiled plan is one statement, and the set
+  must be a relation it can join against); a chunked write cannot be a value the algebra references,
+  which is what preserves a cascade's pre-mutation snapshot; and one value makes a plan's bind count
+  O(plan size) BY CONSTRUCTION rather than an idiom to grep for. Typing goes the same way — JSON
+  transport fails closed on what it cannot carry (`src/program.ts`) and AGREES across runtimes where
+  native binds do not (an integer binds INTEGER on Bun, REAL on DO; `boolean`/`bigint` throw on DO).
+  Its one real cost: a BLOB cannot travel, so **a `RETURNING` feeding a retained binding projects
+  `json(x)`, never `jsonb`.** Performance merely agrees (chunking ~1.7× faster on `bun:sqlite`, ~2×
+  SLOWER on DO) — a tiebreaker, and a reminder that picking the form the DEV runtime prefers is the
+  error `cf-limits.ts` exists to prevent. `src/rowbatch.ts` remains the LEGACY write path's mechanism
+  and is correct until that path is migrated; it is not the pattern to copy into new code, and it
+  shrinks to whatever JSON cannot carry. Reasons, numbers, method and the unmeasured ceilings:
+  `docs/2026-08-01-relir-build-plan.md` §10·5. Cap detail:
   `docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md`.
 - Storage runtimes meet at the sync **`Sql` interface** (`src/storage.ts`): `bun:sqlite` (dev) and
   DO `ctx.storage.sql` (prod). Compiler + frame tier are storage-agnostic; the HTTP edge never

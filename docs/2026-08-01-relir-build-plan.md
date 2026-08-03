@@ -755,11 +755,43 @@ reasonable decisions, and a year later the project has two engines and every cha
    census and the L1–L4 ladder. **Nobody may use "we would lose the differential" as a reason to keep
    the legacy spine alive.**
 
-### 10·5 — BY MEASUREMENT: one value, never N parameters
+### 10·5 — a data-sized row set is a VALUE, not a control-flow loop
 
-§3.6 said a large row set lands as one JSON bind; the root `CLAUDE.md` said a WRITE chunks through
-`src/rowbatch.ts`. Measured on both runtimes — Bun via `bun:sqlite`, Cloudflare via a throwaway DO under
-`wrangler dev`. Median of 7, 20,000 rows × 3 columns:
+**The rule: a row set whose size is a function of DATA crosses the `Sql` seam as ONE VALUE — a single
+JSON bind exploded by `json_each` — never as N parameters, read or write.** §3.6 said that; the root
+`CLAUDE.md` said a WRITE chunks through `src/rowbatch.ts`. The conflict was never a performance
+question, and this section is ORDERED so that stays legible: three reasons that each decide it with
+the benchmark deleted, and the benchmark last. A Bun-versus-workerd ratio can move on any release of
+either runtime, and a rule justified by one would read as newly wrong when nothing had changed.
+
+1. **A read cannot chunk, so "one mechanism" already forces it.** Chunking is host-language control
+   flow, a loop issuing N statements; a read needs the set as a RELATION INSIDE ONE QUERY — joined
+   against, correlated, nested mid-CTE-chain — and a compiled plan is one statement by construction.
+2. **RelIR is an algebra and chunking is a hole in it.** A JSON bind is a VALUE the plan carries, so
+   transport is one `map` over a marker in `src/program.ts` and `emit` never learns it. Under chunking
+   the emitter learns batching, and — load-bearing — a chunked write cannot be a `Ref` a later step
+   joins against. That `Stmt`-binding-as-relation IS the pre-mutation snapshot a vertex-drop cascade
+   requires. Chunking has no worse version of it; it has none.
+3. **The DO cap becomes provable rather than grepped.** One concept replaces `bindChunks`/
+   `placeholders`/`jsonbArrayBind`/`RowsBind`, and a plan's bind count is O(plan size) BY
+   CONSTRUCTION — something `check` proves. `binds-check.ts` is deletable once the last hand-rolled
+   placeholder site is gone.
+
+**Typing goes the OTHER way — JSON is more deterministic than native binds, not less.**
+`transportable()` (`src/program.ts`) fails closed naming the binding and column, and on what it does
+carry the runtimes AGREE where native binds do not: an integer binds INTEGER on Bun and **REAL on DO**
+(the divergence that made CAST-AS-TEXT the int64 read escape), and `boolean`/`bigint` THROW on DO. The
+storage class of `1.0` collapsing to INTEGER is unobservable — our type authority is the `vtype`
+column, never SQLite's `typeof`.
+
+*What it genuinely costs.* A BLOB cannot travel and `RETURNING` is an arbitrary `Expr` list, so **a
+`RETURNING` feeding a retained binding projects `json(x)`, never `jsonb`** (lossless — props are JSON
+anyway). Two UNMEASURED ceilings: `json_each` is a virtual table with no statistics, so join order
+against a large one can go wrong where an IN-list would not; and the whole set is stringified in JS,
+one full copy against a 128 MB isolate, tested only to 20,000 rows.
+
+**Only then, performance — and it agrees.** Median of 7, 20,000 rows × 3 columns, both runtimes — Bun
+via `bun:sqlite`, Cloudflare via a throwaway DO under `wrangler dev`:
 
 | | statements | Bun | **DO (workerd)** |
 |---|---|---|---|
@@ -772,19 +804,16 @@ reasonable decisions, and a year later the project has two engines and every cha
 the JSON form wins ~2× on DO — and the mechanism explains it rather than merely reporting it: on Bun
 statement count is not the cost (607 statements and 10 statements are 10.6 ms and 9.9 ms), so what
 chunking saves is the per-row JSON extraction; on DO that saving is still there, but 607 `sql.exec` calls
-now cross the host boundary and cost more.
-
-**The rule: a row set whose size is a function of DATA crosses the `Sql` seam as ONE VALUE, never as N
-parameters — read or write, nothing to choose.** Choosing the other form because the DEV runtime prefers
-it is precisely what `src/cf-limits.ts` exists to prevent. It collapses `bindChunks`/`placeholders`/
-`jsonbArrayBind`/`RowsBind` into one concept and turns the DO cap from an idiom `mise run binds` greps
-for into a structural property `check` proves. `RowBatch` shrinks to whatever JSON cannot carry (a blob).
+now cross the host boundary and cost more. So the JSON form is also faster where we ship, and choosing
+the other because the DEV runtime prefers it is what `src/cf-limits.ts` exists to prevent. **But if a
+workerd release erased that gap, none of reasons 1–3 would move.**
 
 *Caveats:* workerd clamps timer resolution inside a DO, so read that column as ratios (the Bun column,
 opposite direction, same harness, is what rules out noise). The DO run also reconfirmed the cap — a
 2,000-row insert was refused with `too many SQL variables`. **Method worth reusing: a throwaway
 `wrangler dev` worker with its own DO measures production SQLite for real in about a minute. Any future
-"X is faster" claim about storage goes there before it becomes a rule.**
+"X is faster" claim about storage goes there before it becomes a rule — and, per the ordering above,
+does not become the top line of the rule it supports.**
 
 ### 10·7 — the ordering criterion is DELETION, not marginal coverage
 
