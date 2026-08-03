@@ -750,17 +750,18 @@ function endpointExpr(end: Endpoint, over: Rel, aliases: AliasMap, fresh: Minter
  * expressions written in the INPUT relation's scope — so `from("a")` (an alias column it carries),
  * `to(__.V(2))` (a scalar subquery) and an omitted side (the incoming traverser) are one lowering.
  *
- * **No correlation key is needed and that is not luck**: every endpoint form here is decidable
- * against the INPUT row, so `src` and `tgt` are columns of the insert's own source. The form that
- * would need one — an alias bound to a vertex `addV()` created EARLIER in the same chain — declines,
- * because `addV`'s `RETURNING` carries the target table's columns and not its source's.
+ * **No correlation key is needed for the ENDPOINTS and that is not luck**: every endpoint form here is
+ * decidable against the INPUT row, so `src` and `tgt` are columns of the insert's own source. One IS
+ * needed to carry the driver's ALIASES forward, and it is `addV`'s — the created rows recover their
+ * position from their own ids and join back to the input's. That is what makes a SECOND `addE` in the
+ * same chain work, which is the corpus's dominant write shape (every standard-graph seeder is six
+ * `addV`s and then six `addE`s reading the labels they bound).
  */
 export function elementAddE(
   input: Rel, elem: Elem, step: IRStep, cluster: readonly IRStep[], aliases: AliasMap,
   ordered: boolean, params: Record<string, any>, reads: SubReads, fresh: Minter,
 ): Effects | null {
-  // An edge's ends are VERTICES; an edge stream would be one for neither end.
-  if (elem !== 'vertex' || step.modulators?.length || step.optionArms) return null;
+  if (step.modulators?.length || step.optionArms) return null;
   const label = (step.args ?? [])[0];
   if (typeof label !== 'string') return null;
   try { validateLabel(label); } catch { return null; }
@@ -782,14 +783,21 @@ export function elementAddE(
   // all, so an implicit end has nothing to be: the one-row seed carries no `id`, and asking it for
   // one is a throw rather than a decline unless it is asked here (`rel-sweep` found exactly that on
   // `addE.from`).
+  //
+  // **The INPUT'S element kind only matters where an end is implicit**, and that is why it is asked
+  // here rather than at the top: an implicit end IS the incoming traverser, so an edge stream would be
+  // one for neither side. With both ends named the input is a multiplier and its kind is irrelevant —
+  // which is exactly the second `addE` of a seeder chain, whose driver is the first `addE`'s edge.
+  // Refusing on the kind alone declined every one of them.
   const implicit = from.kind === 'traverser' || to.kind === 'traverser';
-  if (sides === 0 || (implicit && !input.type.cols.some((column) => column.name === 'id'))) return null;
+  if (sides === 0 || (implicit && (elem !== 'vertex' || !input.type.cols.some((column) => column.name === 'id')))) return null;
   const writes = propertySteps.length ? propertyWrites(propertySteps, 'edge', params) : [];
   if (!writes) return null;
 
+  const carried = input.channels.filter((channel) => channel.role === 'alias');
   const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
   const { bindings, bind } = effectScope(fresh);
-  const selecting = seeded ? bind(seeded.result, true) : input;
+  const selecting = seeded ? bind(seeded.result, true, writeInputChannels(input)) : input;
 
   const src = endpointExpr(from, selecting, aliases, fresh);
   const tgt = endpointExpr(to, selecting, aliases, fresh);
@@ -803,9 +811,15 @@ export function elementAddE(
     returning: [['id', col(labelTarget.id, 'id')]],
   }));
 
+  // ORDERED BY THE INPUT'S OWN POSITION, for `addVertex`'s reason: rowids are assigned in the source's
+  // output order, so this is what makes the k-th created edge the k-th input row — which is what the
+  // alias carry below joins on. Channel-PRESERVING, so the `Sort` declares its input's list.
+  const inOrder = selecting.type.cols.some((column) => column.name === ORD)
+    ? make.sort({ id: fresh('so'), input: selecting, channels: selecting.channels, type: selecting.type, terms: [{ expr: col(selecting.id, ORD), dir: 'asc' }] })
+    : selecting;
   const paired = make.join({
-    id: fresh('j'), left: selecting, right: labelRow, join: 'cross', channels: [],
-    type: typeOf(...selecting.type.cols, meta('lbl', 'int')),
+    id: fresh('j'), left: inOrder, right: labelRow, join: 'cross', channels: [],
+    type: typeOf(...inOrder.type.cols, meta('lbl', 'int')),
   });
   const rows = make.project({
     id: fresh('p'), input: paired, channels: [],
@@ -820,12 +834,31 @@ export function elementAddE(
 
   for (const write of writes) propertyStatements('edge', created, write, bind, fresh);
 
-  const channels: Channels = ordered ? [{ col: 'bulk', role: 'bulk' }, { col: 'encounter', role: 'encounter' }] : [{ col: 'bulk', role: 'bulk' }];
+  // THE ALIASES CARRY, by `addVertex`'s mechanism because it is the same question: an `Insert`'s
+  // `RETURNING` says nothing about which input row produced a given output row, so the created rows
+  // recover their position from their own ids and join back to the position the input carried. Without
+  // it a SECOND `addE` in one chain has no labels to read, and that is the corpus's dominant write
+  // shape — every standard-graph seeder binds six `as()`es over six `addV`s and then reads them from
+  // six `addE`s.
+  const channels: Channels = [...carried, ...(ordered ? [BULK_CHANNEL, ENCOUNTER_CHANNEL] : [BULK_CHANNEL])];
   const cols: readonly ColMeta[] = [meta('id', 'int'), ...carriedCols(channels)];
+  const ranked = positioned(created, fresh);
+  const zipped = carried.length
+    ? make.join({
+      id: fresh('j'), left: ranked, right: selecting, join: 'inner', channels: [],
+      type: typeOf(...ranked.type.cols, ...selecting.type.cols.map((column) => meta(`in_${column.name}`, column.type, column.nullable))),
+      on: eq(col(ranked.id, ORD), col(selecting.id, ORD)),
+    })
+    : created;
   const result = make.project({
-    id: fresh('c'), input: created, channels, type: typeOf(...cols),
-    exprs: [['id', col(created.id, 'id')], ['bulk', lit(1, 'int')],
-      ...(ordered ? [['encounter', col(created.id, 'id')] as const] : [])],
+    id: fresh('c'), input: zipped, channels, type: typeOf(...cols),
+    // IN THE DECLARED ORDER — the id followed by the channels in `ROLE_ORDER`.
+    exprs: [
+      ['id', col(zipped.id, 'id')],
+      ...carried.map((channel) => [channel.col, col(zipped.id, `in_${channel.col}`)] as const),
+      ['bulk', lit(1, 'int')],
+      ...(ordered ? [['encounter', col(zipped.id, 'id')] as const] : []),
+    ],
   });
   return { bindings: [...(seeded?.bindings ?? []), ...bindings], result };
 }

@@ -1925,7 +1925,11 @@ function elementTail(
     if (step.name === 'addE') {
       const added = addedEdges(rel, elem, steps, at, labels, ctx, fresh);
       if (!added) return null;
-      const tail = elementTail(added.effects.result, 'edge', steps, added.at, false, ctx, fresh, NO_ALIASES);
+      // The LABELS carry, for `addV`'s reason and by its mechanism — the created edges correlate back
+      // to the driver row that made them. Re-entering with `NO_ALIASES` is what made a SECOND `addE`
+      // decline: the relation still carried the alias columns, so the next `from("a")` was looking for
+      // a label the fold had just forgotten it had.
+      const tail = elementTail(added.effects.result, 'edge', steps, added.at, false, ctx, fresh, labels);
       if (!tail) return null;
       return { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
     }
