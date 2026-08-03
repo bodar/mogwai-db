@@ -1028,8 +1028,17 @@ policy per role and checking only structure is what the two tables beside it alr
 increments, three tables, one shape — and that is the argument for reaching for a total `Record`
 over a predicate the next time this comes up.
 
-The other decline is ordinary: a hop RE-MINTS the order (`ROW_NUMBER() OVER (ORDER BY encounter,
-id)`) because the join fans out and the incoming positions no longer number the outgoing rows.
+**The hop RE-MINT landed too (`2bc42f9`).** A hop is a join, so one incoming traverser becomes N
+outgoing ones and the incoming positions no longer NUMBER the outgoing rows. `ROW_NUMBER() OVER
+(ORDER BY encounter, id)` renumbers them, and **the tie-break on `id` is what makes it deterministic
+rather than merely ordered** — without it the rows sharing an incoming position are numbered in
+whatever order SQLite produced them, which is the defect `test:perturbed` exists to find. Minted
+ONCE over the whole fan-out, never per arm: `both()` is two joins under one `UNION ALL`, and two
+arms each numbering from 1 would interleave. Two nodes, because `Window` may only EXTEND its input
+(§3.5) — the assembler fuses them back into one `SELECT`, which is §5's division of labour working
+as designed. A CORRELATED hop threads no order at all (an `EXISTS` asks whether a row is there,
+never in what order), and that falls out of reading the frontier's channels rather than a second
+parameter.
 
 **Verified where it matters.** The slice tests compare against legacy row-for-row **unsorted**,
 because a slice is the one place the wrong ORDER is the wrong ANSWER and the census's `ms` gate
