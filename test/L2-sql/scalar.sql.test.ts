@@ -326,7 +326,14 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().values("age").fold().intersect(__.constant(27).fold())').shape).toEqual({ kind: 'jsonbSet' });
     expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())').shape).toEqual({ kind: 'jsonbSet' });
     // the standalone operand embeds as a scalar subquery (its own WITH + json_group_array).
-    expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())').sql).toContain('SELECT jsonb(list)');
+    // A SUB-READ operand — the members are only known at run time, so the operand is a relation. Legacy
+    // compiles it separately and embeds the rendered SQL; RelIR lowers it with the SAME fold into the
+    // same algebra and reads it through a `Scalar` expression (no escape node), so each spine is pinned
+    // in its own spelling and the row-for-row differential ties the answers.
+    expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())', { spine: 'legacy' }).sql)
+      .toContain('SELECT jsonb(list)');
+    expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())', { spine: 'rel' }).sql)
+      .toMatch(/json_each\(\(SELECT jsonb\(COALESCE\(json_group_array/);
     // an element-fold operand (a vertex list) isn't a scalar list → defers.
     expect(() => compile('g.V().fold().combine(__.V().fold())', {})).toThrow('must fold a scalar list');
     // argument-type errors mirror TinkerPop's messages.

@@ -571,41 +571,64 @@ const SET_RESULT = new Set(['intersect', 'difference', 'disjunct', 'merge']);
 const OPERAND = { value: 'ov', ord: 'oo' } as const;
 
 /**
- * A set-op OPERAND's members, or `null` to decline — the two COMPILE-TIME forms.
+ * What a list op needs beyond the step and the relation: the bound parameters a nested body parses
+ * against, and the lowerer for a nested rooted SUB-READ.
  *
- * A literal array is one. `constant(c).fold()` is the other, and it is the same fact rather than a
- * special case: a one-member list known at compile time, which is exactly how legacy resolves it
- * (`jsonb(JSON.stringify([c]))`). What declines is a real sub-read (`merge(__.V().values('name')
- * .fold())`): its members are only known at run time, so it needs a nested lowering whose BINDINGS
- * hoist into the outer plan — plan composition (§3.0), not an escape node, and its own increment.
+ * `subRead` is INJECTED rather than imported, which is what keeps the module DAG a DAG — an operand
+ * that needs a whole chain lowered would otherwise make this module import the fold that imports it.
+ * It is the same dependency-inversion `FilterCtx.correlatedChildren` uses for the same reason.
  */
-function operandMembers(arg: unknown, params: Record<string, any>): readonly unknown[] | null {
-  if (Array.isArray(arg)) return arg;
+export interface ListCtx {
+  readonly params: Record<string, any>;
+  readonly subRead: (steps: readonly IRStep[]) => { readonly expr: Expr; readonly of: ListOf } | null;
+}
+
+/**
+ * A set-op OPERAND as a list expression, or `null` to decline — three forms, one question.
+ *
+ * A literal ARRAY and `constant(c).fold()` are both COMPILE-TIME lists (the second a one-member one,
+ * which is the same fact rather than a special case, and exactly how legacy resolves it). A rooted
+ * SUB-READ is a relation: its members are only known at run time, so it is lowered by the same fold
+ * and read through a `Scalar` expression — no escape node, and if the inner chain is not covered the
+ * decline propagates outward, which is the contract one level down.
+ */
+function operandList(arg: unknown, ctx: ListCtx): { readonly expr: Expr; readonly of: ListOf } | null {
+  const literal = (members: readonly unknown[]) =>
+    ({ expr: { kind: 'call', fn: 'jsonb', args: [lit(JSON.stringify(members), 'text')] } as Expr, of: BARE_LIST });
+  if (Array.isArray(arg)) return literal(arg);
   if (!isNested(arg)) return null;
-  const inner = childSteps((arg as { readonly nested: unknown }).nested, params);
-  if (inner.length !== 2 || inner[0]?.name !== 'constant' || inner[1]?.name !== 'fold') return null;
-  const [value, extra] = inner[0].args ?? [];
-  if (extra !== undefined || value === undefined) return null;
-  return [value];
+  const inner = childSteps((arg as { readonly nested: unknown }).nested, ctx.params);
+  if (inner.length === 2 && inner[0]?.name === 'constant' && inner[1]?.name === 'fold') {
+    const [value, extra] = inner[0].args ?? [];
+    if (extra !== undefined || value === undefined) return null;
+    return literal([value]);
+  }
+  return ctx.subRead(inner);
 }
 
 export function listSetOp(
-  step: IRStep, input: Rel, of: ListOf, terminal: boolean, params: Record<string, any>, fresh: Minter,
+  step: IRStep, input: Rel, of: ListOf, terminal: boolean, ctx: ListCtx, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf; readonly set?: boolean } | null {
   if (step.modulators?.length || step.optionArms || !SET_OPS.has(step.name) || !isBareList(of)) return null;
   const [arg, extra] = step.args ?? [];
   if (extra !== undefined) return null;
-  const members = operandMembers(arg, params);
-  if (!members) return null;
+  const resolved = operandList(arg, ctx);
+  if (!resolved || !isBareList(resolved.of)) return null;
   const rel = fenced(input, fresh);
-  const operand: Expr = { kind: 'call', fn: 'jsonb', args: [lit(JSON.stringify(members), 'text')] };
 
-  // Both sides in ONE vocabulary: bare. A typed self is re-emitted as its payloads first, through the
-  // same member frame every other op uses.
-  const selfList = isTypedList(of)
-    ? (() => { const members = membersOf(col(rel.id, LIST_COL), fresh);
-      return listOfMembers(members, memberPayload(of, members), [memberOrder(members)], fresh); })()
-    : col(rel.id, LIST_COL);
+  // BOTH SIDES IN ONE VOCABULARY: bare payloads. A typed list's members MAY be `{t,v}` envelopes, and
+  // comparing an envelope against a bare value never matches — so either side that might carry one is
+  // re-emitted as its payloads first, through the same member frame every other op uses. Legacy only
+  // does this to the SELF side, which happens to work because its sub-read operands are all
+  // storage-class-determined on the reference graph; doing it to both is the same code and correct for
+  // an operand that is not.
+  const payloads = (listExpr: Expr, items: ListOf): Expr => {
+    if (!isTypedList(items)) return listExpr;
+    const members = membersOf(listExpr, fresh);
+    return listOfMembers(members, memberPayload(items, members), [memberOrder(members)], fresh);
+  };
+  const operand = payloads(resolved.expr, resolved.of);
+  const selfList = payloads(col(rel.id, LIST_COL), of);
 
   const mine = membersOf(selfList, fresh);
 

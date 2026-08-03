@@ -22,7 +22,7 @@ import {
 import { byExpr, modulations, orderProductivity, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
-import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listRetype, listSetOp, unfoldList } from './list.ts';
+import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listRetype, listSetOp, unfoldList, type ListCtx } from './list.ts';
 
 /**
  * THE SECOND LOWERING — `Step[] -> RelIR` (§10·4 of `docs/2026-08-01-relir-build-plan.md`).
@@ -1385,6 +1385,10 @@ function listTail(
 ): { readonly rel: Rel; readonly framing: RelFraming } | null {
   let rel = seed;
   let items = of;
+  // The sub-read lowerer is INJECTED rather than imported, which is what keeps the module DAG a DAG
+  // (`build ◂ {predicate, modulator, transform, reducer, list} ◂ lower ◂ spine`): a list op that needs
+  // a nested chain lowered would otherwise import the fold that imports it.
+  const listCtx: ListCtx = { params, subRead: (inner: readonly IRStep[]) => subReadList(inner, { params }, fresh) };
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
     if (step.name === 'identity' || step.name === 'barrier') { if ((step.args ?? []).length) return null; continue; }
@@ -1430,7 +1434,7 @@ function listTail(
     // The SET-OP family, which needs to know whether it is TERMINAL: the four deduping ops frame as a
     // GraphBinary SET only at the end of a chain — with a follower TinkerPop treats the deduped
     // content as a plain List, which is what the suite asserts.
-    const setOp = listSetOp(step, rel, items, at + 1 >= steps.length, params, fresh);
+    const setOp = listSetOp(step, rel, items, at + 1 >= steps.length, listCtx, fresh);
     if (setOp) {
       rel = setOp.rel;
       items = setOp.of;
@@ -1447,6 +1451,26 @@ function listTail(
     );
   }
   return { rel, framing: { kind: 'list', of: items } };
+}
+
+/**
+ * A ROOTED SUB-READ used as a LIST VALUE — `__.V().values('name').fold()` and friends.
+ *
+ * The operand's members are only known at RUN TIME, so this is a relation rather than a literal, and
+ * the outer plan reads it through a `Scalar` expression. What it must be is LIST-framed: legacy shares
+ * the same rule between the set-op operands and the predicate ones (`foldedListSubquery`), so the two
+ * cannot disagree about which traversals qualify — a scalar-valued sub-read is not a collection and
+ * declines here rather than being folded on its behalf.
+ *
+ * NO opaque escape node is involved and none is needed (§10·4): the sub-read is lowered by the SAME
+ * fold into the SAME algebra, spliced in as an ordinary relation. If the inner chain is not covered,
+ * this declines and the whole traversal goes to legacy — the decline contract, one level down.
+ */
+function subReadList(steps: readonly IRStep[], opts: Lowering, fresh: Minter): { readonly expr: Expr; readonly of: ListOf } | null {
+  if (!steps.length) return null;
+  const inner = lowerChain(steps, opts, fresh);
+  if (!inner || inner.framing.kind !== 'list') return null;
+  return { expr: { kind: 'scalar', plan: inner.rel }, of: inner.framing.of };
 }
 
 /** A literal an injected row can hold. Anything else — a collection, a map, a nested traversal —
@@ -1494,6 +1518,29 @@ const lowered = (rel: Rel, framing: RelFraming): RelLowering | null => {
 };
 
 export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLowering | null {
+  const chain = lowerChain(steps, opts, minter());
+  return chain && lowered(chain.rel, chain.framing);
+}
+
+/**
+ * THE CHAIN, lowered to a bare RELATION — the same fold, minus the naming and the budget.
+ *
+ * The split exists so a chain can be lowered INSIDE another one. A rooted sub-read used as a VALUE
+ * (`merge(__.V().values('name').fold())`, `within(__.…fold())`, and eventually a `match` pattern) is a
+ * relation the outer plan reads through a `Scalar` expression, and two things make that work:
+ *
+ * - **the MINTER is injected**, so the sub-read's relation ids come from the OUTER id space. §11's
+ *   "relation ids are minted PER LOWERING" is about not sharing a module-global counter between
+ *   COMPILES; within one compile the opposite is required, because two `minter()`s would both start at
+ *   0 and the emitter's scope would see one id naming two relations.
+ * - **naming happens ONCE, at the top.** The sub-read is spliced in unnamed, so the outer `name` pass
+ *   sees the whole DAG. (A sub-read whose OWN graph shares a node internally is not bound today, since
+ *   `name` does not walk expression subplans — it renders correctly, just inlined twice. Making the
+ *   pass walk them is the general fix if a case ever needs it.)
+ */
+function lowerChain(
+  steps: readonly IRStep[], opts: Lowering, fresh: Minter,
+): { readonly rel: Rel; readonly framing: RelFraming } | null {
   const { params = {}, collapse = true, correlatedChildren = true } = opts;
   const ctx: FilterCtx = { params, correlatedChildren };
   // EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step.
@@ -1506,21 +1553,15 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   const seedChannels = ordered ? withChannel(BULK, ENCOUNTER) : BULK;
   const first = steps[0];
   if (!first) return null;
-  const fresh = minter();
 
   if (first.name === 'inject') {
     // A COLLECTION literal seeds a LIST traverser, an ordinary value a SCALAR one — two shapes, and
     // the argument decides which, so the list arm is asked first and declines a scalar inject.
     const listed = injectList(first, fresh);
-    if (listed) {
-      const tail = listTail(listed.rel, (listed.framing as { readonly of: ListOf }).of, steps, 1, params, fresh);
-      return tail ? lowered(tail.rel, tail.framing) : null;
-    }
+    if (listed) return listTail(listed.rel, (listed.framing as { readonly of: ListOf }).of, steps, 1, params, fresh);
     const injected = injectSource(steps, fresh);
     if (!injected) return null;
-    const tail = scalarTail(injected.rel, injected.framing, steps, injected.at, false, params, fresh);
-    if (!tail) return null;
-    return lowered(tail.rel, tail.framing);
+    return scalarTail(injected.rel, injected.framing, steps, injected.at, false, params, fresh);
   }
 
   if (first.name !== 'V' && first.name !== 'E') return null;
@@ -1592,12 +1633,10 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
     rel = row;
   }
 
-  if (at === steps.length) return lowered(rel, { kind: 'elements', elem });
+  if (at === steps.length) return { rel, framing: { kind: 'elements', elem } };
 
   const retyped = terminal(steps[at], rel, elem, fresh);
   if (!retyped) return null;
 
-  const tail = scalarTail(retyped.rel, retyped.framing, steps, at + 1, bulked, params, fresh);
-  if (!tail) return null;
-  return lowered(tail.rel, tail.framing);
+  return scalarTail(retyped.rel, retyped.framing, steps, at + 1, bulked, params, fresh);
 }

@@ -1,6 +1,6 @@
 # RelIR — the build plan
 
-**Status: BUILDING.** Coverage **533 / 2,298** corpus traversals on the RelIR spine; deletion counter
+**Status: BUILDING.** Coverage **555 / 2,298** corpus traversals on the RelIR spine; deletion counter
 **110** references left across the 15 legacy rows. Both are ratchets in `ci` (§10·4). The direction was
 argued in [codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a and
 is not re-argued here.
@@ -462,11 +462,7 @@ decode — is what recognises it. A MAP assert still declines: that needs the ma
    first-occurrence rule respectively.
 2. The ELEMENT list (`fold()` over elements, whose members are rowids) — its members need expansion
    rather than a decode, which is why `isBareList` names the scalar encodings only.
-3. A SUB-READ operand for the set ops and `within`/`without` — the same "a folded re-sourced read is a
-   list value" fact legacy shares between them. `constant(c).fold()` is DONE (a compile-time one-member
-   list, which is the same fact as a literal array rather than a special case); a real sub-read needs a
-   nested lowering whose BINDINGS hoist into the outer plan, which is plan composition (§3.0) rather
-   than an escape node, and is the next thing this route needs for `where`/`within`/`match` too.
+3. The SUB-READ operand is DONE, and it is the seam `within`/`where`/`match` will reuse — see below.
 
 **Then: THE LIST SHAPE — 194 blocked traversals, the largest family, and it splits by FRAMING ARM
 rather than by step** (measured at 349 routed, by asking what shape legacy frames each blocked traversal
@@ -533,6 +529,35 @@ for `inject(datetime(…)).dateAdd(hour, 2)`.
 A MIXED `inject([1,2], 3)` still declines. Legacy FLATTENS it — its own comment calls that the
 historical representation, held until a scalar stream gains a per-row shape discriminant — and
 reproducing an approximation is not the same as reproducing an answer.
+
+### The SUB-READ SEAM — a rooted chain lowered INSIDE another one
+
+A set-op operand whose members are only known at run time (`merge(__.V().values('name').fold())`) is a
+RELATION, and the outer plan reads it through a `Scalar` expression (+22). **No opaque escape node is
+involved and none is needed** (§10·4): the sub-read is lowered by the SAME fold into the same algebra
+and spliced in as an ordinary relation, so if the inner chain is not covered the decline propagates
+outward — the contract, one level down.
+
+Two things make it work, and both are worth not rediscovering:
+
+- **The MINTER is injected.** `lowerToRel` split into `lowerChain` (the fold, unnamed, minter-passed)
+  plus the budget check and `name`. §11's "relation ids are minted PER LOWERING" is about not sharing a
+  module-global counter between COMPILES; WITHIN one compile the opposite is required, because two
+  `minter()`s both start at 0 and the emitter's scope would see one id naming two relations.
+- **Naming happens ONCE, at the top**, so the outer `name` pass sees the whole DAG. (A sub-read whose
+  own graph shares a node internally is not bound today — `name` does not walk expression subplans — so
+  it renders inlined twice rather than as a CTE. Making the pass walk them is the general fix when a
+  case needs it; the same gap is why `fold()`'s lossy probe is a window and not an `EXISTS`.)
+- **BOTH sides are projected to payloads.** A typed list's members may be `{t,v}` envelopes and an
+  envelope never equals a bare value, so either side that might carry one is re-emitted through the
+  member frame first. Legacy only does this to the SELF side, which happens to work because its operand
+  sub-reads are all storage-class-determined on the reference graph.
+
+**And it exposed a legacy gap that read like a shape refusal:** `operandList` parsed its nested body
+with a bare `stepChain` instead of `childSteps`, so the body never went through the normalization that
+ABSORBS a modulator onto its host — `merge(__.V().values('age').order().by(desc).fold())` handed the
+inner compile a free-standing `by` step and it failed closed with `by() after a scalar stream not yet
+supported`. One authority, both spines: +2 traversals neither could answer, and L3 1710 → 1712.
 
 ### `has()`'s three ARGUMENT SHAPES — one step, and the residue is where it was found
 

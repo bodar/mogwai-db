@@ -354,8 +354,6 @@ unbound	legacy	Unbound parameter 'vid1'	g.V().values("age").is(P.within(__.V(vid
 deferred	legacy	The child traversal of is() contains a mutating step (addV) and thus is not read only: a mutating step is not allowed in a value-argument child traversal	g.V().values("age").is(__.addV("x").values("age"))
 unbound	legacy	Unbound parameter 'xx1'	g.V().values("age").is(xx1)
 deferred	legacy	none() after a scalar stream not yet supported	g.V().values("age").none(P.gt(32))
-deferred	legacy	by() after a scalar stream not yet supported	g.V().values("age").order().by(desc).fold().combine(__.V().values("age").order().by(desc).fold())
-deferred	legacy	by() after a scalar stream not yet supported	g.V().values("age").order().by(desc).limit(3).fold().product(__.V().values("age").order().by(asc).limit(2).fold()).unfold()
 deferred	legacy	a traversal as a predicate operand is not yet supported unless it is a constant() — a per-traverser operand needs a correlated value	g.V().values("age").where(P.within(__.V(vid1).out("knows").values("age").fold()))
 deferred	legacy	project() on a list value not yet supported	g.V().values("list").is(P.typeOf(GType.LIST)).project("original", "size").by(identity()).by(count(local))
 deferred	legacy	where() on a list value not yet supported	g.V().values("list").is(P.typeOf(GType.LIST)).where(count(local).is(P.gt(2)))

@@ -14,7 +14,7 @@ import { layoutProjection, layoutCols, type ElementStream } from '../context/con
 import { PER_ROW, STATIC, type Compiled, type ListOf, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf, type Engine } from '../../engine/deps.ts';
 import { firstOf, globalRowOps, lowerGlobalCount, aliasCompareRows } from './barrier.ts';
-import { assertsGType, classifyBy, collectionAssert } from './child-shape.ts';
+import { assertsGType, childSteps, classifyBy, collectionAssert } from './child-shape.ts';
 import { isLocalScope, REDUCERS } from '../../ir/step.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
@@ -323,7 +323,12 @@ function operandList(engine: Engine, arg: any, op: string, params: Record<string
   if (arg === null || arg === undefined) throw new Error(`Argument provided for ${op} step can't be null`);
   if (Array.isArray(arg)) return q`jsonb(${value(JSON.stringify(arg))})`;
   if (isNested(arg)) {
-    const inner = stepChain(arg.nested, params);
+    // `childSteps`, not a bare `stepChain`: the operand is a nested BODY and must go through the same
+    // normalization every other body does, which is what ABSORBS a modulator onto its host. Without it
+    // `merge(__.V().values('age').order().by(desc).fold())` handed the inner compile a free-standing
+    // `by` step and it failed closed with `by() after a scalar stream not yet supported` — a support
+    // gap that read like a shape refusal. Found when the RelIR route answered the same traversal.
+    const inner = childSteps(arg.nested, params);
     const last = inner[inner.length - 1];
     if (last?.name !== 'fold') {
       if (inner.length === 1 && inner[0].name === 'constant') {

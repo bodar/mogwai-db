@@ -227,6 +227,16 @@ const COVERED = [
   "g.V().values('age').fold().merge(__.constant(27).fold())",
   "g.V().values('age').fold().intersect(__.constant(27).fold())",
   "g.inject(['a']).merge(__.constant('b').fold())",
+  // A rooted SUB-READ operand: the members are only known at RUN TIME, so the operand is a relation —
+  // lowered by the SAME fold into the same algebra and read through a `Scalar` expression. No opaque
+  // escape node (§10·4), and if the inner chain is not covered the decline propagates outward.
+  "g.inject(['a','b']).merge(__.V().values('name').fold())",
+  "g.V().values('age').fold().merge(__.V().values('age').fold())",
+  "g.V().values('name').fold().intersect(__.V().values('name').fold())",
+  "g.V().values('name').fold().difference(__.V().hasLabel('person').values('name').fold())",
+  "g.V().values('name').fold().combine(__.V().values('nonexistant').fold())",
+  "g.V().values('age').fold().disjunct(__.V().values('age').fold())",
+  "g.V().values('name').fold().product(__.V().values('name').order().fold())",
 ];
 
 /**
@@ -241,7 +251,6 @@ const DECLINED = [
   "g.inject(['a','b']).order(Scope.local)",   // a member SORT needs the vtype-aware compare key
   "g.inject(['a','a']).dedup(Scope.local)",   // a member dedup keeps the FIRST occurrence per value
   "g.inject(['a','b']).reverse()",    // on a list `reverse` reverses ORDER, not each member
-  "g.inject(['a','b']).merge(__.V().values('name').fold())", // a real SUB-READ operand: run-time members
   "g.V().values('age').is(P.typeOf(GType.MAP))", // a MAP retype needs the map shape, not a decode
   "g.inject([1,2],3)",                // MIXED list/scalar args: the VARIANT shape, and legacy FLATTENS
   'g.V().has(null)',                  // a null KEY is neither a property name nor a token
