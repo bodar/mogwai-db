@@ -34,6 +34,14 @@
  * cause is decidable from the step's own arguments, and `blame()` below is the one place that happens.
  * Without it the instrument ranks the wrong work while looking precise, which is worse than a coarse
  * number honestly labelled.
+ *
+ * ## `--step <name>` — the count is the ranking, the LIST is the increment
+ *
+ * A family total says what to do next; it says nothing about what the increment IS. That question —
+ * which traversals, in which POSITION, with which argument forms — was answered by a throwaway script
+ * every round, which is a re-derivation of what this file already computes. `--step mergeV` prints the
+ * blocked traversals themselves, so the shape of the work is read off the instrument rather than
+ * guessed at from a number.
  */
 import { extractStrategies, parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { runPasses } from '../src/compiler/ir/passes.ts';
@@ -85,7 +93,14 @@ function blame(step: IRStep): string {
 /** Steps that SEED a traverser from a literal, so the literal's shape is the traverser's shape. */
 const SOURCES = new Set(['inject', 'constant']);
 
+/** `--step <name>`: also LIST the traversals this step blocks, with the position it blocks at. */
+const wanted = ((): string | null => {
+  const i = process.argv.indexOf('--step');
+  return i < 0 ? null : (process.argv[i + 1] ?? null);
+})();
+
 const blockedAt = new Map<string, number>();
+const blockedTraversals: string[] = [];
 let covered = 0, unparsed = 0;
 
 for (const query of CORPUS) {
@@ -106,6 +121,10 @@ for (const query of CORPUS) {
   const step = steps[longest] ?? steps[0]!;
   const name = blame(step);
   blockedAt.set(name, (blockedAt.get(name) ?? 0) + 1);
+  // The POSITION is half the answer: the same step name at the source and mid-chain are two different
+  // increments (a one-row `Values` driver versus the traverser stream), and a list that omitted it
+  // would hide the split it exists to show.
+  if (name === wanted) blockedTraversals.push(`  [${longest}/${steps.length}] ${query}`);
 }
 
 const total = (members: readonly string[]) => members.reduce((sum, m) => sum + (blockedAt.get(m) ?? 0), 0);
@@ -122,3 +141,8 @@ const inAFamily = new Set(Object.values(FAMILIES).flat());
 const residue = [...blockedAt].filter(([step]) => !inAFamily.has(step)).sort((a, b) => b[1] - a[1]);
 console.log('\n  IN NO FAMILY — where the next family gets recognized:');
 console.log(`  ${residue.map(([step, n]) => `${step}:${n}`).join(' ')}`);
+
+if (wanted) {
+  console.log(`\n  BLOCKED AT ${wanted}() — [covered prefix/steps] traversal:`);
+  console.log(blockedTraversals.length ? blockedTraversals.join('\n') : '  (none)');
+}
