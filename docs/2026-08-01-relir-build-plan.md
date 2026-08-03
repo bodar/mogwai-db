@@ -1210,6 +1210,35 @@ matching move at the module level — the construction leaf (`meta`/`typeOf`/`mi
 `labelIds`/`storedValue`/`PROPERTIES`/`firstOf`) that both lowering modules sit on, keeping the import
 graph a DAG: `build ◂ {predicate, modulator} ◂ lower ◂ spine`.
 
+**PHASE 4.1's ENTRY FACT, measured 2026-08-03 — and it corrects this document twice.** §6 said the
+element row-ops are "fused into the framing projection by `TailAcc`, so a `Sort` on the CORE relation
+is a different plan (the framing join is 1:1 on `id`, so it is equivalent — but that is an argument to
+verify, not to assume)". Verified, and the conclusion is the opposite: **a `Sort` on the core relation
+is NOT equivalent, because a JOIN's output order is unspecified** — the framing `… FROM nodes n JOIN c0
+p ON n.id=p.id` may return the sorted rows in any order, and on a six-vertex fixture it will reliably
+return the flattering one. So sorting the core relation and framing on top is a wrong answer that no
+assertion in the ladder would catch.
+
+**What IS equivalent, and it needs no new machinery:** the element materialization already emits
+`ORDER BY p.encounter` whenever that channel is live (measured: `g.V().out().limit(2)` ends exactly
+so). Therefore element `order()` is `renumber(rel, [<by-key>, <id tie-break>], …)` — MINT the emission
+order from the sort key and let the existing framing read it — which is the function scalar `order()`
+and the fan-out re-mint already share. It also COMPOSES, which is the whole reason `TailAcc` exists to
+be deleted: a fold into the framing `ORDER BY` can only happen once, at the end.
+
+**The one real blocker is that `demandsEncounter` is FALSE for element `order()`** — measured for
+`g.V().order()`, `g.V().order().by('name')` and even `g.V().order().by('name').limit(2)`, because
+legacy folds order and slice into the same clause and needs no channel for either. So Phase 4.1's
+first move is not a step, it is a MODEL change: **the emission-order channel must become a property of
+each RELATION rather than a chain-global boolean threaded from the source.** `ordered` is currently one
+flag read once from `analyzeChain` and passed down, which was right while only the SOURCE could seed a
+position; a `Sort` that MINTS one makes the channel set change mid-chain, which is what §3.5's
+per-node obligation table already says it may. Concretely: `elementCols`/`elementChannels(ordered)`
+stop taking the flag and start reading `rel.channels`, and the source keeps seeding a position only
+when the chain demanded one anyway. That refactor is the prerequisite for element `order()`, `tail()`
+(which reads the order backwards) and `sample()`, i.e. for the whole of `globalRowOps` (deletion floor
+10) and eventually `TailAcc` (13) — which is exactly why §10·7 ranks it first.
+
 **NEXT, measured from base 259** (`V`/`E`/`hasLabel`/`has`/`count`/`values`/`is`/movement/`where`):
 **the row-algebraic class is +50 and it is literally Phase 4.1's named deliverable** — `order` 20 ·
 `dedup` 11 · `limit`/`range`/`skip` 2 · `identity` 2, and together with `tail`/`sample` fifty. The
