@@ -78,7 +78,6 @@ const DECLINED = [
   "g.V().where(__.out().order())",    // a body step the child fold has not learned
   'g.V().order()',                    // element order() is TailAcc's, folded into the FRAMING SELECT
   'g.V().out().skip(1)',              // a hop RE-MINTS the order; that Window is the next increment
-  'g.V().dedup().limit(2)',           // dedup under an order is a grouped MIN(encounter), not DISTINCT
 ];
 
 describe('the RelIR spine', () => {
@@ -116,13 +115,14 @@ describe('the RelIR spine', () => {
     // The channel is modelled now, so what declines is a chain that demands an order and reaches a
     // step this route cannot THREAD it through: a hop re-mints the order with a window function,
     // and `dedup` under an order stops being a `Distinct` at all.
-    for (const gremlin of ['g.V().out().limit(2)', "g.V().out().dedup().limit(1)", 'g.V().dedup().limit(2)']) {
+    for (const gremlin of ['g.V().out().limit(2)', "g.V().out().dedup().limit(1)", "g.V().out().values('name').limit(1)"]) {
       expect(read(gremlin, { spine: 'rel' }).spine).toBe('legacy');
     }
     // …and it is a GATE, not a blanket: the same steps' order-free neighbours still route, and so
     // does a slice over a relation whose order the route DOES thread.
     expect(read('g.V().out().dedup()', { spine: 'rel' }).spine).toBe('rel');
     expect(read('g.V().limit(2)', { spine: 'rel' }).spine).toBe('rel');
+    expect(read('g.V().dedup().limit(2)', { spine: 'rel' }).spine).toBe('rel');
   });
 
   test('a fast-path switch selects a STRATEGY, and RelIR covers the side it implements', () => {

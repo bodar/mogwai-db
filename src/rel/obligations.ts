@@ -1,4 +1,4 @@
-import { barrierChannels, channelCols, isMultiplicityOnly, mergeChannels, rigidChannels, sameChannels, type Channels } from '../channels.ts';
+import { barrierChannels, CHANNEL_GROUP_POLICY, channelCols, groupableChannels, mergeChannels, rigidChannels, sameChannels, type Channels } from '../channels.ts';
 import type { Rel, RelKind } from './rel.ts';
 import { recursiveStep } from './walk.ts';
 
@@ -45,25 +45,6 @@ const extending = (node: Rel & { readonly input: Rel }, added: readonly string[]
   if (!sameNames(expected, names(node))) throw new Error(`RelIR: ${node.kind} output must be its input columns followed by ${added.join(', ') || 'nothing'}`);
 };
 
-/**
- * Is this `Aggregate` a MULTIPLICITY RE-ENCODING rather than a barrier? See `MULTIPLICITY_ROLE` in
- * `src/channels.ts` for why the distinction is semantic and not a spelling.
- *
- * Every clause is required. The grouping must be non-empty (`groupBy: []` is one row out, a new
- * traverser however it is spelled); the input must carry the multiplicity channel and NOTHING else
- * (a grouping discards the per-row identity any other channel belongs to); and the sole aggregate
- * must be exactly `SUM(<that column>)` written back into it.
- */
-export function isReEncoding(node: Extract<Rel, { readonly kind: 'aggregate' }>): boolean {
-  if (!node.groupBy.length || !isMultiplicityOnly(node.input.channels)) return false;
-  const [only, ...rest] = node.aggs;
-  if (!only || rest.length) return false;
-  const [name, agg] = only;
-  const [column] = channelCols(node.input.channels);
-  return name === column && agg.kind === 'agg' && agg.fn === 'sum' && !agg.distinct && !agg.orderBy?.length
-    && agg.args.length === 1 && agg.args[0]!.kind === 'col' && agg.args[0]!.rel === node.input.id && agg.args[0]!.name === column;
-}
-
 export const explodeColumns = (as: { readonly key?: string; readonly value: string; readonly ord?: string }): readonly string[] =>
   [...(as.key ? [as.key] : []), as.value, ...(as.ord ? [as.ord] : [])];
 
@@ -88,24 +69,33 @@ export const CHANNEL_OBLIGATION: { readonly [K in RelKind]: ChannelObligation<K>
   explode: (node) => extending(node, explodeColumns(node.as)),
 
   /**
-   * Reducing — with ONE exception that is not an exception, and §3.5 left it open.
+   * Reducing, and it is TWO contracts rather than one — §3.5 assumed one and left the gap open.
    *
-   * A barrier result is a NEW traverser and cannot claim per-row state from any one input row, so
-   * the default is `barrierChannels`. But summing the MULTIPLICITY channel under a grouping by
-   * traverser identity emits the SAME traverser multiset, run-length encoded: it reduces ROWS, not
-   * TRAVERSERS. That is a re-encoding, and it must keep carrying `bulk` or a following reducer's
-   * `SUM(bulk)` would count the collapse away.
+   * A BARRIER emits a new traverser (`count`, `fold`, `group`) and cannot claim per-row state from
+   * any one input row, so no channel survives. A grouping by the traverser's own IDENTITY is not
+   * that: `dedup()` keeping the first occurrence, or a movement coalescing convergent walks, emits
+   * one row per surviving traverser, and its channels have to come out the other side or a later
+   * reducer counts the collapse away.
    *
-   * The build plan guessed this would have to be a `recognize` rewrite (§4.7) — a rule that fires
-   * outside the algebra. It does not: `isReEncoding` is decidable from the node alone, so it is a
-   * clause of the obligation like every other, and the totality that makes this table worth having
-   * is preserved. `isMultiplicityOnly` carries the reason a grouping is legal at all — no other
-   * channel may be riding, because a grouping discards the per-row identity each one belongs to.
+   * **The node declares which it is, and this checks it is allowed to be.** Declaring no channels
+   * is a barrier and the barrier contract applies. Declaring its input's channels is a
+   * per-traverser reduction, legal only where every role has a defined answer when N rows become
+   * one — `CHANNEL_GROUP_POLICY`, the third total table in the channel core. Anything else is
+   * neither, and neither is what a dropped carried field looks like.
+   *
+   * WHICH aggregate is right for a role is Gremlin semantics and stays above this layer (`dedup`
+   * takes `MIN(encounter)` because TinkerPop keeps the first occurrence, a collapse takes
+   * `SUM(bulk)` because multiplicity adds). This once pattern-matched the sole `SUM(bulk)` shape it
+   * had seen, and had to be widened the moment a second legitimate grouping appeared — so the rule
+   * now states the policy per ROLE and checks only structure, which is what the two tables beside
+   * it already do.
    */
   aggregate: (node) => {
-    const expected = isReEncoding(node) ? node.input.channels : barrierChannels(node.input.channels);
-    if (!sameChannels(expected, node.channels))
-      throw new Error(`RelIR: Aggregate must apply the ${isReEncoding(node) ? 'multiplicity re-encoding' : 'barrier'} channel contract to its input channels`);
+    if (sameChannels(barrierChannels(node.input.channels), node.channels)) { declares(node); return; }
+    if (!node.groupBy.length || !sameChannels(node.input.channels, node.channels))
+      throw new Error('RelIR: Aggregate must either apply the barrier channel contract or, grouped, carry its input channels through unchanged');
+    if (!groupableChannels(node.channels))
+      throw new Error(`RelIR: a grouped Aggregate cannot carry the ${node.channels.filter((c) => CHANNEL_GROUP_POLICY[c.role] !== 'combine').map((c) => `'${c.role}'`).join(', ')} channel(s) — a grouping would take the value from an arbitrary member`);
     declares(node);
   },
 

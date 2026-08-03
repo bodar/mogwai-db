@@ -425,16 +425,26 @@ function rowOp(step: IRStep, input: Rel, ordered: boolean, fresh: Minter): Rel |
 
   if (step.name !== 'dedup' || (step.args ?? []).length) return null;
   // `dedup()` RESETS the multiplicity: the survivor stands for itself, not for the sum of the
-  // duplicates it replaced. Under an emission order it stops being a `Distinct` at all — the
-  // survivor must keep the FIRST occurrence's position, which is `MIN(encounter)` under a
-  // `GROUP BY id`, and that is an `Aggregate` whose channel obligation is neither the barrier
-  // contract nor `isReEncoding`. Declined until that question is answered rather than guessed at.
-  if (ordered) return null;
-  const projected = make.project({
-    id: fresh('dd'), input, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
-    exprs: [['id', col(input.id, 'id')], ['bulk', lit(1, 'int')]],
+  // duplicates it replaced.
+  //
+  // Under an emission order it stops being a `Distinct` at all, and the reason is semantic rather
+  // than mechanical: the survivor must keep the FIRST occurrence's position, so the step is a
+  // GROUPING by traverser identity that takes `MIN(encounter)`. That is the per-traverser reduction
+  // the channel core's third policy table (`CHANNEL_GROUP_POLICY`) exists to permit — a grouping
+  // may carry a role only where N-rows-into-one has a defined answer, which `bulk` and `encounter`
+  // have and an alias, a path or a sack do not.
+  if (!ordered) {
+    const projected = make.project({
+      id: fresh('dd'), input, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
+      exprs: [['id', col(input.id, 'id')], ['bulk', lit(1, 'int')]],
+    });
+    return make.distinct({ id: fresh('d'), input: projected, channels: BULK, type: projected.type });
+  }
+  return make.aggregate({
+    id: fresh('dd'), input, channels: input.channels, type: typeOf(...elementCols(true)),
+    groupBy: [col(input.id, 'id')],
+    aggs: [['bulk', lit(1, 'int')], ['encounter', { kind: 'agg', fn: 'min', args: [col(input.id, 'encounter')] }]],
   });
-  return make.distinct({ id: fresh('d'), input: projected, channels: BULK, type: projected.type });
 }
 
 /**

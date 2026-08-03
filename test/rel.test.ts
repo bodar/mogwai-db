@@ -86,7 +86,32 @@ describe('RelIR', () => {
       type: { cols: [{ name: 'n', type: 'int', nullable: false }] },
       groupBy: [], aggs: [['n', { kind: 'agg', fn: 'count', args: [] }]],
     });
-    expect(() => check(invalid)).toThrow('Aggregate must apply the barrier channel contract');
+    expect(() => check(invalid)).toThrow('Aggregate must either apply the barrier channel contract');
+  });
+
+  test('a GROUPED Aggregate may carry channels through, but only roles a grouping can combine', () => {
+    // The third case §3.5 did not have, and the one `dedup()` under an emission order needs: a
+    // grouping by the traverser's own identity emits one row per SURVIVING traverser, so its
+    // channels have to come out the other side. What decides legality is the ROLE — a multiplicity
+    // adds and an emission position is the earliest of the group, while an alias, a path or a sack
+    // belongs to ONE member and a grouping would take it from whichever row came first.
+    const ordered: Channels = [{ col: 'bulk', role: 'bulk' }, { col: 'encounter', role: 'encounter' }];
+    const shape = { cols: [{ name: 'id', type: 'int' as const, nullable: false }, { name: 'bulk', type: 'int' as const, nullable: false }, { name: 'encounter', type: 'int' as const, nullable: false }] };
+    const input = valuesRel({ id: relId('groupedInput'), rows: [[lit(1, 'int'), lit(1, 'int'), lit(1, 'int')]], channels: ordered, type: shape });
+    const grouped = aggregateRel({
+      id: relId('grouped'), input, channels: ordered, type: shape, groupBy: [col(input.id, 'id')],
+      aggs: [['bulk', lit(1, 'int')], ['encounter', { kind: 'agg', fn: 'min', args: [col(input.id, 'encounter')] }]],
+    });
+    expect(() => check(grouped)).not.toThrow();
+
+    // …and the counterexample, which is the half worth having: the same shape carrying an ALIAS.
+    const aliased: Channels = [{ col: 'bulk', role: 'bulk' }, { col: 'encounter', role: 'alias' }];
+    const aliasInput = valuesRel({ id: relId('aliasInput'), rows: [[lit(1, 'int'), lit(1, 'int'), lit(1, 'int')]], channels: aliased, type: shape });
+    const badGroup = aggregateRel({
+      id: relId('badGroup'), input: aliasInput, channels: aliased, type: shape, groupBy: [col(aliasInput.id, 'id')],
+      aggs: [['bulk', lit(1, 'int')], ['encounter', { kind: 'agg', fn: 'min', args: [col(aliasInput.id, 'encounter')] }]],
+    });
+    expect(() => check(badGroup)).toThrow("cannot carry the 'alias' channel");
   });
 
   test('names Values columns for downstream expressions', () => {

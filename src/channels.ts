@@ -98,35 +98,47 @@ export const barrierChannels = (channels: Channels): Channels =>
   channels.filter((channel) => CHANNEL_BARRIER_POLICY[channel.role] === 'keep');
 
 /**
- * The MULTIPLICITY channel — the one whose value is a count of traversers rather than a property
- * of one, and therefore the only one a grouping may combine without changing the answer.
+ * What a GROUPING does to one role — the third policy table, and the one that distinguishes a
+ * BARRIER from a per-traverser REDUCTION.
  *
- * This is what distinguishes a BARRIER from a RE-ENCODING, and the distinction is not a detail of
- * SQL. A barrier consumes the stream and emits a NEW traverser (`count`, `fold`, `group`), so no
- * per-row state can honestly survive it. Summing `bulk` under a grouping by traverser identity
- * emits the SAME traverser multiset, run-length encoded — it reduces ROWS, not TRAVERSERS, and it
- * is how a movement keeps its frontier bounded by reachable |V| instead of by the (exponential)
- * walk count.
+ * The distinction is not about SQL. A barrier consumes the stream and emits a NEW traverser
+ * (`count`, `fold`, `group`), so no per-row state can honestly survive it. A grouping by the
+ * traverser's own IDENTITY emits one row per surviving traverser — `dedup()` keeping the first
+ * occurrence, a movement coalescing convergent walks — so the traversers are still the same kind of
+ * thing and their channels have to come out the other side.
  *
- * `isReEncoding` states the whole condition, and every clause is load-bearing:
+ * What the CORE can say is which roles have a defined answer when N rows become one:
  *
- *  - **bulk must be the ONLY channel.** A grouping discards per-row identity, so an alias, a path
- *    position or a sack riding alongside would be silently picked from an arbitrary member of the
- *    group. At the Gremlin level that is `collapseSafe`'s "no path/as/sack/branch/order"; here it
- *    falls out of the channel list, with no second vocabulary to keep in step.
- *  - **the grouping must be non-empty.** `groupBy: []` is a whole-relation reduction: one row out,
- *    which is a new traverser however the aggregate is spelled.
- *  - **the aggregate must be exactly `SUM(bulk)` into bulk's own column.** Anything else computes
- *    something the traversers did not previously say.
+ * - `combine` — the value is a property of the GROUP, not of a member. A multiplicity ADDS; an
+ *   emission position is the earliest of them. Which aggregate is right for a given STEP is Gremlin
+ *   semantics and stays above this layer (`dedup` takes `MIN(encounter)` because TinkerPop keeps the
+ *   first occurrence); what this table settles is that an answer exists at all.
+ * - `undefined` — the value belongs to ONE member and picking one is arbitrary. An alias binding, a
+ *   path history and a sack are all per-traverser facts that a grouping would silently take from
+ *   whichever row SQLite reached first. Fail closed.
  *
- * It answers the question §3.5 of the RelIR build plan left open ("bulk coalescing must KEEP
- * carrying bulk while every reducing aggregate is a barrier") as a RULE rather than an exception,
- * and it lives here rather than in `src/rel/` because it is a fact about channel ROLES.
+ * Total, like the other two: a role added tomorrow must declare whether it survives a grouping
+ * before anything can group over it. That totality is the whole reason these are tables.
+ *
+ * NOTE this REPLACED a narrower rule (`isReEncoding`) that recognised exactly one shape — a sole
+ * `SUM(bulk)` — and therefore had to be widened the moment a second legitimate grouping appeared.
+ * The lesson is the one the two tables above already encode: state the POLICY per role and let the
+ * obligation check structure, rather than pattern-matching the one expression you have seen.
  */
-export const MULTIPLICITY_ROLE: ChannelRole = 'bulk';
+export const CHANNEL_GROUP_POLICY: Readonly<Record<ChannelRole, 'combine' | 'undefined'>> = {
+  bulk: 'combine',
+  encounter: 'combine',
+  alias: 'undefined',
+  path: 'undefined',
+  origin: 'undefined',
+  branchOrder: 'undefined',
+  sack: 'undefined',
+  fromV: 'undefined',
+};
 
-export const isMultiplicityOnly = (channels: Channels): boolean =>
-  channels.length === 1 && channels[0]!.role === MULTIPLICITY_ROLE;
+/** May a grouping carry this whole channel list through? See `CHANNEL_GROUP_POLICY`. */
+export const groupableChannels = (channels: Channels): boolean =>
+  channels.every((channel) => CHANNEL_GROUP_POLICY[channel.role] === 'combine');
 
 /** A LIST EQUALITY, which is the whole tell that this decomposition is the right one: the layout
  * comparison it replaces was a `JSON.stringify` of a struct whose alias shapes it had no reason to
