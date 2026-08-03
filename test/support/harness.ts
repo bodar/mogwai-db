@@ -13,6 +13,7 @@
 // test/serializers.test.ts (deserialize a buffer through a serializer) and `read` in
 // test/L3-conformance/glv-compat.ts (a bound `deserializeValue`) are unrelated functions that
 // merely share a name.
+import { expect } from 'bun:test';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { runProgram } from '../../src/program.ts';
 import { GraphStore } from '../../src/storage.ts';
@@ -53,13 +54,34 @@ export const run = (store: GraphStore, q: string) => runWith(store, q, undefined
 /**
  * IS THE RELIR SPINE OFF — the differential's other position (`mise run test:legacy-spine`).
  *
- * The bun-test twin of L4's `@RelIR` tag, and the same rule governs both: a test asserting a
- * property only the RelIR route HAS must skip when that route is off, or the differential reads a
- * deliberate improvement as a regression. What it must NEVER cover is a property legacy answers
- * DIFFERENTLY — that is a defect, and the census is what sees it. Every use today is a write shape
- * the legacy driver refuses outright, so the skips disappear with `runWriteChainFull` (§8).
+ * Read it directly ONLY for a property about the PLAN rather than the ANSWER — the statement-count
+ * pin is the one case: both spines return the same rows, and what differs is that legacy spends a
+ * statement per element. For a divergence in the ANSWER, use `relirAhead` below; a bare `test.skip`
+ * there is the form that lets the dangerous case through.
  */
 export const relirOff = process.env.MOGWAI_RELIR === '0';
+
+/**
+ * A TRAVERSAL RELIR ANSWERS AND THE LEGACY SPINE REFUSES — declared, and PROVEN in both positions.
+ *
+ * The RelIR route is allowed to be ahead: `mise run ci` does not include the differential, and the
+ * census's spine column ratchets one way, both so that a capability legacy lacks is never a reason
+ * to cripple its replacement. What the differential still has to be told is WHICH WAY ROUND a given
+ * divergence goes, or it reads a deliberate improvement as a regression.
+ *
+ * A bare `test.skip` under `relirOff` would say that — and would say it equally well if the two
+ * spines both answered and answered DIFFERENTLY, which is not an improvement but a defect. So this
+ * does not skip. With RelIR off it asserts the traversal THROWS, which turns "legacy refuses this"
+ * from an assumption into the thing the differential run proves. The day legacy learns the shape,
+ * this fails and the caller deletes it — which is the correct end for a marker whose whole content
+ * is a gap.
+ *
+ * `body` runs only on the RelIR side; `gremlin` is the traversal whose refusal is the claim.
+ */
+export const relirAhead = (gremlin: string, body: () => void) => (): void => {
+  if (!relirOff) return body();
+  expect(() => runWith(seededStore(), gremlin)).toThrow();
+};
 
 // A write-response echo carries each prop value as a self-describing {t,v} typed node (so the wire
 // frames it exactly). Tests that assert the written VALUES, not their types, unwrap to plain values.

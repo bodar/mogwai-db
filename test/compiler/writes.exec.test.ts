@@ -6,7 +6,7 @@ import { UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { bare, read, relirOff, run, seededStore } from '../support/harness.ts';
+import { bare, read, relirAhead, relirOff, run, seededStore } from '../support/harness.ts';
 import { emit } from '../../src/rel/emit.ts';
 import { executeQuery } from '../support/executor.ts';
 import { CF_MAX_BINDS } from '../../src/cf-limits.ts';
@@ -233,18 +233,19 @@ test('a label bound before addV() is still bound after it — the write chain', 
   expect(run(store, 'g.E().hasLabel("e").inV().label()').map((r: any) => r.v)).toEqual(['b']);
 });
 
-(relirOff ? test.skip : test)('addV() over many traversers pairs each new element with ITS OWN input row', () => {
+const CLONE_EACH = 'g.V().hasLabel("person").as("p").addV("clone").addE("of").to("p")';
+test('addV() over many traversers pairs each new element with ITS OWN input row', relirAhead(CLONE_EACH, () => {
   const store = seededStore();
   // One clone per person, each edged back to the person it was cloned from. A cross join would give
   // 16 edges; a correlation that paired wrongly would give a person with two incoming edges and
   // another with none. (Which clone got which person is unobservable — clones carry nothing to tell
   // them apart — so this is as strong as the assertion can honestly be.)
-  run(store, 'g.V().hasLabel("person").as("p").addV("clone").addE("of").to("p")');
+  run(store, CLONE_EACH);
   expect(run(store, 'g.E().hasLabel("of").count()').map((r: any) => r.v)).toEqual([4]);
   expect(run(store, 'g.E().hasLabel("of").inV().values("name").order()').map((r: any) => r.v))
     .toEqual(['josh', 'marko', 'peter', 'vadas']);
   expect(run(store, 'g.E().hasLabel("of").outV().dedup().count()').map((r: any) => r.v)).toEqual([4]);
-});
+}));
 
 test('addE start-step: from()/to() nested traversals + edge property', () => {
   const store = seededStore();

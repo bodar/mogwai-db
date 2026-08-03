@@ -330,11 +330,13 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
 
   // The differential's OFF position runs the same suite through the legacy spine, so a scenario whose
   // answer only that spine's replacement can give is not a failure there — it is the divergence the
-  // tag declares.
+  // tag declares. It is not SKIPPED there either: the declared divergence is "RelIR answers this and
+  // the legacy spine refuses it", and both halves are checkable, so with RelIR off the scenario
+  // asserts the REFUSAL. A skip would say the same thing right up until the two spines started both
+  // answering and answering differently, which is not a divergence to declare but a defect.
   const relirOff = process.env.MOGWAI_RELIR === '0';
   for (const s of scenarios) {
-    const run = s.relirOnly && relirOff ? test.skip : test;
-    run(`[${s.graph}] ${s.name}`, async () => {
+    test(`[${s.graph}] ${s.name}`, async () => {
       if (!(s.graph in GRAPHS)) throw new Error(`unknown graph '${s.graph}' (add its fixture to GRAPHS)`);
       const fixture = GRAPHS[s.graph];
       const store = new GraphStore(new BunSqlite(':memory:'), fixture.labelCardinality);
@@ -344,12 +346,14 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
       if (s.initializer) executeQuery(store, s.initializer, {}, {}, standardRegistry);
       // An `error` scenario asserts the REFUSAL, so it runs the traversal expecting a throw and
       // nothing below it applies. Upstream compares the message case-insensitively; so do we.
-      if (s.assertion === 'error') {
+      // An `@RelIR` scenario becomes one of these when RelIR is off — its message is the legacy
+      // spine's and not ours to pin, so only the throw itself is asserted.
+      if (s.assertion === 'error' || (s.relirOnly && relirOff)) {
         let thrown: unknown;
         try { await decodeAll(executeQuery(store, s.gremlin, {}, {}, standardRegistry)); }
         catch (e) { thrown = e; }
         expect(thrown).toBeInstanceOf(Error);
-        if (s.error) {
+        if (s.error && s.assertion === 'error') {
           const msg = String((thrown as Error).message).toUpperCase();
           const want = s.error.text.toUpperCase();
           if (s.error.comparison === 'containing') expect(msg).toContain(want);
