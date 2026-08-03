@@ -171,6 +171,64 @@ const bodyOf = (nested: unknown, params: Record<string, any>): readonly IRStep[]
   try { return childSteps(nested, params); } catch { return null; }
 };
 
+/**
+ * A SUB-TRAVERSAL AS A BOOLEAN — `EXISTS (<the body, rooted at the current row>)`.
+ *
+ * The body's FIRST step must be a movement: it is what makes the child a RELATION to test for rows at
+ * all. A filter-only body is a predicate on the SAME traverser, not a sub-traversal, so it has nothing
+ * to gain from an EXISTS wrapper and `bodyPredicate` below takes it instead.
+ *
+ * Extracted because `choose(<body>, …)` asks the identical question `where(<body>)` does — "does this
+ * body produce anything for this traverser" — and a second copy of the walk would be a second chance
+ * to get the child's own filter recursion wrong.
+ */
+function correlatedExists(
+  body: readonly IRStep[], subject: Subject, elem: Elem, fresh: Minter, ctx: FilterCtx, negated: boolean,
+): Expr | null {
+  let child = movement(body[0]!, { correlated: subject.id }, elem, fresh);
+  if (!child) return null;
+  for (const inner of body.slice(1)) {
+    const hop = movement(inner, { rel: child.rel }, child.elem, fresh);
+    if (hop) { child = hop; continue; }
+    const clause = sourceFilter(inner, { id: col(child.rel.id, 'id'), rel: child.rel }, child.elem, fresh, ctx);
+    if (!clause) return null;
+    child = { rel: make.filter({ id: fresh('f'), input: child.rel, channels: BULK, type: child.rel.type, pred: clause }), elem: child.elem };
+  }
+  const probe = make.project({ id: fresh('p'), input: child.rel, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', lit(1, 'int')]] });
+  // `NOT EXISTS`, not legacy's `NOT COALESCE(EXISTS(…), 0)`: EXISTS is never NULL, so the COALESCE
+  // guards nothing here.
+  return { kind: 'exists', plan: probe, negated };
+}
+
+/**
+ * A BODY AS A PREDICATE on the current traverser — the two shapes a `choose()` condition can take,
+ * and the distinction is TinkerPop's rather than ours.
+ *
+ * `ChooseStep`'s condition is "does the predicate traversal produce output for this traverser", and
+ * that is answered two ways depending on what the body IS:
+ *
+ * - a FILTER-ONLY body (`__.hasLabel('person')`, `__.has('name','x').has('age',29)`) never leaves the
+ *   traverser, so it is a conjunction of ordinary clauses over the same row. Wrapping it in an EXISTS
+ *   would ask the same question through an extra subquery.
+ * - a body that MOVES (`__.out('created')`) is a sub-traversal, so it is the correlated EXISTS above.
+ *
+ * A body that mixes a movement with a leading filter is handled by the second arm, since
+ * `correlatedExists` folds the filters after the hop itself. Anything else — a body that PROJECTS
+ * (`__.values('age').is(P.gt(30))`, `__.out().count().is(P.gt(0))`) — declines: its condition is a
+ * value comparison over a correlated sub-read, which is a further arm rather than this one.
+ */
+function bodyPredicate(
+  body: readonly IRStep[], subject: Subject, elem: Elem, fresh: Minter, ctx: FilterCtx,
+): Expr | null {
+  let clause: Expr | undefined;
+  for (const step of body) {
+    const filter = sourceFilter(step, subject, elem, fresh, ctx);
+    if (!filter) return correlatedExists(body, subject, elem, fresh, ctx, false);
+    clause = and(clause, filter);
+  }
+  return clause ?? null;
+}
+
 function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter, ctx: FilterCtx): Expr | null {
   // One filter form HOSTS a `by()` — the alias-compare `where('a', P.eq('b')).by('key')`, which
   // `isAliasCompareWhere` detects structurally rather than by name — and it is not covered at all
@@ -210,23 +268,7 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
     // which is the same instrument-shaped finding as the four before it.
     const body = bodyOf(nested.nested, ctx.params);
     if (!body?.length) return null;
-    // The body's FIRST step must be a movement: it is what makes the child a relation to test for
-    // rows at all. A filter-only body (`where(__.has('name','x'))`) is a predicate on the SAME
-    // traverser, not a sub-traversal — legacy inlines it directly and there is nothing to gain by
-    // wrapping it in an EXISTS here.
-    let child = movement(body[0]!, { correlated: subject.id }, elem, fresh);
-    if (!child) return null;
-    for (const inner of body.slice(1)) {
-      const hop = movement(inner, { rel: child.rel }, child.elem, fresh);
-      if (hop) { child = hop; continue; }
-      const clause = sourceFilter(inner, { id: col(child.rel.id, 'id'), rel: child.rel }, child.elem, fresh, ctx);
-      if (!clause) return null;
-      child = { rel: make.filter({ id: fresh('f'), input: child.rel, channels: BULK, type: child.rel.type, pred: clause }), elem: child.elem };
-    }
-    const probe = make.project({ id: fresh('p'), input: child.rel, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', lit(1, 'int')]] });
-    // `NOT EXISTS`, not legacy's `NOT COALESCE(EXISTS(…), 0)`: EXISTS is never NULL, so the
-    // COALESCE guards nothing here.
-    return { kind: 'exists', plan: probe, negated: step.name === 'not' };
+    return correlatedExists(body, subject, elem, fresh, ctx, step.name === 'not');
   }
 
   if (step.name === 'has') {
@@ -1794,8 +1836,11 @@ function elementTail(
       if (!selected) return null;
       return continueAs(selected.rel, readFraming(selected.read), steps, at + 1, bulked, ctx, fresh, labels);
     }
-    if (step.name === 'union') {
-      const merged = unionArms(step, rel, { kind: 'elements', elem }, bulked, ctx, fresh, labels);
+    if (step.name === 'union' || step.name === 'choose') {
+      const framing = { kind: 'elements', elem } as const;
+      const merged = step.name === 'union'
+        ? unionArms(step, rel, framing, bulked, ctx, fresh, labels)
+        : chooseArms(step, rel, elem, framing, bulked, ctx, fresh, labels);
       if (!merged) return null;
       // `bulked` after a merge is deliberately CONSERVATIVE: an arm may have collapsed and the arm
       // lowering does not report it back, so a following slice takes the cumulative-`SUM(bulk)` form.
@@ -1894,7 +1939,17 @@ function unionArms(
     if (!arm) return null;
     arms.push(arm);
   }
+  return mergeArms(arms, input, labels, fresh);
+}
 
+/**
+ * THE MERGE ITSELF — n arms into one `Union`, with every agreement the algebra needs asserted.
+ *
+ * Split from `unionArms` because `choose()` produces its arms differently (each is guarded by the
+ * condition or its negation) and merges them identically. The arm-shape rules are the merge's, not
+ * `union`'s, so there is one place they are stated.
+ */
+function mergeArms(arms: readonly Tail[], input: Rel, labels: AliasMap, fresh: Minter): { readonly rel: Rel; readonly framing: RelFraming } | null {
   const [first, ...rest] = arms as [Tail, ...Tail[]];
   // The arms must agree on SHAPE, and `sameFraming` is the whole test: an element arm and a scalar
   // arm merge to legacy's VARIANT stream, which is a shape this route does not produce.
@@ -1924,6 +1979,48 @@ function unionArms(
     }),
     framing: first.framing,
   };
+}
+
+/**
+ * `choose(<condition>, <then>[, <else>])` — a branch whose arms are GUARDED rather than unconditional.
+ *
+ * TinkerPop's `ChooseStep`: exactly one arm fires per traverser, decided by whether the condition
+ * traversal produces output. So it is the SAME merge as `union` over arms filtered by the condition and
+ * its negation — which is why this is twenty lines rather than a second branch implementation, and why
+ * it inherits every one of the merge's agreement rules for free.
+ *
+ * **An absent `else` arm is `identity`, not "drop the traverser"** — `choose(pred, then)` passes a
+ * non-matching traverser through unchanged. An empty body expresses that exactly: `continueAs` over
+ * zero steps returns the relation it was handed, so the false arm is the filtered input and no special
+ * case is needed for the two-argument form.
+ *
+ * The OPTION form (`choose(<key>).option(v, arm)…`) is a different question — a CASE over a projected
+ * key rather than a boolean — and declines here; it is the family's next arm.
+ */
+function chooseArms(
+  step: IRStep, input: Rel, elem: Elem, framing: RelFraming, bulked: boolean,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): { readonly rel: Rel; readonly framing: RelFraming } | null {
+  if (step.modulators?.length || step.optionArms) return null;
+  if (encounterOf(input.channels)) return null;
+  const args = step.args ?? [];
+  if (args.length < 2 || args.length > 3 || args.some((arg) => !isNested(arg))) return null;
+  const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
+  const [condition, then, otherwise] = bodies;
+  if (!condition?.length || !then?.length) return null;
+
+  const pred = bodyPredicate(condition, { id: col(input.id, 'id'), rel: input }, elem, fresh, ctx);
+  if (!pred) return null;
+  const guarded = (negated: boolean): Rel => make.filter({
+    id: fresh('cg'), input, channels: input.channels, type: input.type,
+    pred: negated ? { kind: 'unary', op: 'not', arg: pred } : pred,
+  });
+
+  const armThen = continueAs(guarded(false), framing, then, 0, bulked, ctx, fresh, labels);
+  // The else arm over ZERO steps is `identity` on the complement — see above.
+  const armElse = continueAs(guarded(true), framing, otherwise ?? [], 0, bulked, ctx, fresh, labels);
+  if (!armThen || !armElse) return null;
+  return mergeArms([armThen, armElse], input, labels, fresh);
 }
 
 /** Do two framings describe the same stream? A shape mismatch between arms is a variant stream, which

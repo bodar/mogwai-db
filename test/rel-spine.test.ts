@@ -268,6 +268,15 @@ const COVERED = [
   'g.V().as("a").union(__.out(), __.in()).select("a")',
   // …and over a VALUE parent, where the arms are scalar bodies rather than movements.
   'g.V().values("name").union(__.identity(), __.identity())',
+  // `choose(cond, then[, else])` is the SAME merge over arms GUARDED by the condition and its
+  // negation — so it is the arm merge plus a predicate, not a second branch implementation. An absent
+  // `else` is `identity`: a non-matching traverser passes through, which an empty arm body expresses
+  // exactly (`continueAs` over zero steps returns what it was handed).
+  'g.V().choose(__.has("name","vadas"), __.out("knows"), __.in("knows"))',
+  'g.V().choose(__.hasLabel("software"), __.in("created"))',
+  'g.V().choose(__.hasLabel("person"), __.out(), __.in())',
+  'g.V().choose(__.out("created"), __.out("knows"), __.in("knows"))',
+  'g.V().choose(__.has("name","marko"), __.out(), __.in()).count()',
 ];
 
 /**
@@ -284,6 +293,11 @@ const DECLINED = [
   "g.V().union(__.as('b').out(), __.in())",  // an arm that BINDS a label owes each arm a remap + NULL pad
   "g.V(1).union(__.values('name'), __.constant('x'))",  // arms disagreeing on payload: a Union is positional
   "g.V().union(__.out(), __.count())", // element arm + scalar arm: the VARIANT shape, not either of them
+  "g.V().choose(__.values('age').is(P.gt(30)), __.out(), __.in())",  // a PROJECTING condition: a value
+  // comparison over a correlated sub-read, which is the branch family's remaining gap and is shared
+  // with where()/match()/is() in the blocker residue.
+  "g.V().choose(__.label()).option('person', __.out()).option(Pick.none, __.identity())",  // the OPTION
+  // form is a CASE over a projected KEY rather than a boolean — a different question, next arm.
   "g.V().order().by('name').union(__.out(), __.in())",  // a live emission order: the merge key needs the origin
   'g.inject()',                       // the EMPTY relation, which `Values` refuses to express (§3.3)
   "g.inject([1,2],3)",                // MIXED list/scalar args: the VARIANT shape, not either of them

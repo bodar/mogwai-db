@@ -357,7 +357,9 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
   });
 
   test('choose(pred, then, else) → gated-seed UNION ALL, arms fold from their seed', () => {
-    const c = read('g.V().choose(__.has("name","vadas"), __.out("knows"), __.in("knows"))');
+    // LEGACY spelling, pinned explicitly — an unordered filter-condition choose routes RelIR now, and
+    // a test pinning a spine's spelling pins BOTH (§10·4). The RelIR half is at the end of the test.
+    const c = read('g.V().choose(__.has("name","vadas"), __.out("knows"), __.in("knows"))', { spine: 'legacy' });
     // two gated seeds off the same source (c0): pred and NOT-pred
     expect(c.sql).toContain("WHERE EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value = ?)");
     expect(c.sql).toContain("WHERE NOT COALESCE((EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value = ?)), 0)");
@@ -369,7 +371,18 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(read('g.V().choose(__.out("knows").count().is(P.gt(0)), __.out("created").out())').sql)
       .toContain('(SELECT COUNT(*) FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id AND e.label IN');
     // 2-arg form: else absent → identity passthrough of the NOT-pred seed
-    expect(read('g.V().choose(__.hasLabel("software"), __.in("created"))').sql).toContain('UNION ALL');
+    expect(read('g.V().choose(__.hasLabel("software"), __.in("created"))', { spine: 'legacy' }).sql).toContain('UNION ALL');
+    // …and on RelIR, where `choose` is the SAME merge as `union` over arms guarded by the condition
+    // and its negation — so the structural facts worth asserting are that both guards are present off
+    // one shared parent, and that the absent `else` arm is an identity passthrough rather than a drop.
+    const cRel = read('g.V().choose(__.has("name","vadas"), __.out("knows"), __.in("knows"))', { spine: 'rel' });
+    expect(cRel.spine).toBe('rel');
+    expect(cRel.sql).toContain('UNION ALL');
+    expect(cRel.sql).toContain('NOT (');
+    expect(cRel.shape).toEqual(c.shape);
+    const twoArg = read('g.V().choose(__.hasLabel("software"), __.in("created"))', { spine: 'rel' });
+    expect(twoArg.spine).toBe('rel');
+    expect(twoArg.sql).toContain('UNION ALL');
     const scalar = read('g.V().choose(__.hasLabel("person"), __.values("name"), __.constant("software")).count()');
     expect(scalar.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(scalar.sql).toContain(' AS v FROM');
@@ -387,7 +400,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(() => compile('g.V().choose(__.has("x"), __.out(), __.outE())', {}))
       .toThrow('different element kinds');
     // as() before choose now threads the alias column through the gated arms + merge (Move B)
-    const ca = read('g.V().as("a").choose(__.has("x"), __.out(), __.in()).select("a")');
+    const ca = read('g.V().as("a").choose(__.has("x"), __.out(), __.in()).select("a")', { spine: 'legacy' });
     expect(ca.sql).toContain('UNION ALL');
     expect(ca.sql).toContain('SELECT id, a0, bulk FROM'); // a0 preserved across the gated-arm merge
     // a NEW as() inside one arm now forks/merges: the non-binding arm pads an empty history.

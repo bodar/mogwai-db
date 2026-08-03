@@ -123,7 +123,7 @@ ran	legacy	4	4	d2fd782c04be75b8	f369cbf6629e9d32	g.V().bothE().properties().dedu
 ran	legacy	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().choose(T.label). option("blah", __.out("knows")). option("bleep", __.out("created")). option(Pick.none, __.discard()). values("name")
 ran	legacy	6	6	1c896079cb4d3b31	d6a2410cdfc2fe81	g.V().choose(T.label). option("blah", __.out("knows")). option("bleep", __.out("created")). option(Pick.none, __.identity()). values("name")
 ran	legacy	4	4	6f4d4284f30de8eb	9adccf4b5b7a2140	g.V().choose(T.label). option("person", __.out("knows").values("name")). option("bleep", __.constant("bleep"))
-ran	legacy	4	4	1aa36e04deabeb19	f42ffd38e425c604	g.V().choose(__.has("name", "vadas"), __.values("name"), __.values("age"))
+ran	rel	4	4	1aa36e04deabeb19	f42ffd38e425c604	g.V().choose(__.has("name", "vadas"), __.values("name"), __.values("age"))
 ran	legacy	6	5	1b55201dab0b26f7	0264f2030c308c2e	g.V().choose(__.hasLabel("person"), __.values("name"), __.constant("inhuman"))
 ran	legacy	5	4	ff396ca42f2bac1a	91a54bab511bee5c	g.V().choose(__.hasLabel("person").and().out("created"), __.out("knows")). values("name")
 ran	legacy	5	4	ff396ca42f2bac1a	91a54bab511bee5c	g.V().choose(__.hasLabel("person").and().out("created"), __.out("knows"), __.identity()). values("name")
