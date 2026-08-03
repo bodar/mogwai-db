@@ -350,6 +350,11 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
   if (labels.length && FROM_EDGE.has(step.name)) return null;
 
   const input = frontierRel(from);
+  // Only a ROOTED hop threads the emission order. A correlated one lives inside an `EXISTS`, which
+  // asks whether a row is there and never in what order — so its `bulk` is synthetic and it carries
+  // no position at all.
+  const ordered = !!input && input.channels.some((channel) => channel.role === 'encounter');
+  const armCols = elementCols(ordered);
   const arms = hops.map((hop) => {
     const e = make.scan({
       id: fresh('mv'), table: 'edges', alias: fresh('rme'), channels: [],
@@ -367,23 +372,26 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
     // `bulk` is synthetic: an EXISTS asks whether a row is there, never how many traversers it is.
     const source = input
       ? make.join({
-        id: fresh('j'), left: e, right: input, join: 'inner', on, channels: BULK,
-        type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int'), meta('pid', 'int'), meta('bulk', 'int')),
+        id: fresh('j'), left: e, right: input, join: 'inner', on, channels: elementChannels(ordered),
+        type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int'), meta('pid', 'int'), ...armCols.slice(1)),
       })
       : make.filter({ id: fresh('f'), input: e, channels: [], type: e.type, pred: on });
+    // The arm carries the INCOMING position through unchanged; re-minting happens once over the
+    // whole fan-out below, not per arm — two arms each numbering from 1 would interleave.
     return make.project({
-      id: fresh('m'), input: source, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
-      exprs: [['id', col(source.id, hop.to)], ['bulk', input ? col(source.id, 'bulk') : lit(1, 'int')]],
+      id: fresh('m'), input: source, channels: elementChannels(ordered), type: typeOf(...armCols),
+      exprs: [['id', col(source.id, hop.to)], ['bulk', input ? col(source.id, 'bulk') : lit(1, 'int')],
+        ...(ordered ? [['encounter', col(source.id, 'encounter')] as const] : [])],
     });
   });
   const [first, ...rest] = arms;
   if (!first) return null;
   // N-ary UNION ALL, minted once — and ALL, never distinct: traversers are a multiset, so a vertex
   // reachable both ways is two traversers.
-  const rel = rest.length
-    ? make.union({ id: fresh('u'), inputs: arms, all: true, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')) })
+  const fanned = rest.length
+    ? make.union({ id: fresh('u'), inputs: arms, all: true, channels: elementChannels(ordered), type: typeOf(...armCols) })
     : first;
-  return { rel, elem: hops[0]!.elem };
+  return { rel: ordered ? remintOrder(fanned, fresh) : fanned, elem: hops[0]!.elem };
 }
 
 /**
@@ -444,6 +452,36 @@ function rowOp(step: IRStep, input: Rel, ordered: boolean, fresh: Minter): Rel |
     id: fresh('dd'), input, channels: input.channels, type: typeOf(...elementCols(true)),
     groupBy: [col(input.id, 'id')],
     aggs: [['bulk', lit(1, 'int')], ['encounter', { kind: 'agg', fn: 'min', args: [col(input.id, 'encounter')] }]],
+  });
+}
+
+/**
+ * RE-MINT the emission order after a fan-out.
+ *
+ * A hop is a join: one incoming traverser becomes N outgoing ones, so the incoming positions no
+ * longer NUMBER the outgoing rows — several share one. `ROW_NUMBER() OVER (ORDER BY encounter, id)`
+ * renumbers them, and the tie-break on `id` is what makes the result deterministic rather than
+ * merely ordered: without it the rows sharing an incoming position would be numbered in whatever
+ * order SQLite produced them, which is the defect `mise run test:perturbed` exists to find.
+ *
+ * Two nodes because `Window` may only EXTEND its input (§3.5) — it adds the new column, and the
+ * projection is what makes that column the channel and drops the stale one. The assembler fuses
+ * them back into one SELECT, which is the division of labour §5 describes: the IR stays normalized
+ * and the emitter does the composing.
+ */
+function remintOrder(rel: Rel, fresh: Minter): Rel {
+  const minted = 'rn';
+  const windowed = make.window({
+    id: fresh('w'), input: rel, channels: rel.channels,
+    type: typeOf(...elementCols(true), meta(minted, 'int')),
+    specs: [[minted, {
+      kind: 'window-expr', fn: 'row_number', args: [],
+      spec: { partitionBy: [], orderBy: [{ expr: col(rel.id, 'encounter'), dir: 'asc' }, { expr: col(rel.id, 'id'), dir: 'asc' }] },
+    }]],
+  });
+  return make.project({
+    id: fresh('ro'), input: windowed, channels: ORDERED, type: typeOf(...elementCols(true)),
+    exprs: [['id', col(windowed.id, 'id')], ['bulk', col(windowed.id, 'bulk')], ['encounter', col(windowed.id, minted)]],
   });
 }
 
@@ -603,11 +641,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   // `(id, bulk)` and an edge-label test becomes the membership form.
   for (; at < steps.length; at++) {
     const step = steps[at];
-    // A hop RE-MINTS the emission order (`ROW_NUMBER() OVER (ORDER BY encounter, id)`) because the
-    // join fans out and the incoming positions no longer number the outgoing rows. That is a
-    // `Window` plus a renaming projection, and it is the next increment; until then a chain that
-    // both moves and slices declines whole rather than threading a stale order.
-    const moved: { rel: Rel; elem: Elem } | null = ordered ? null : movement(step, { rel }, elem, fresh);
+    const moved: { rel: Rel; elem: Elem } | null = movement(step, { rel }, elem, fresh);
     if (moved) {
       rel = collapse ? coalesce(moved.rel, fresh) : moved.rel;
       elem = moved.elem;

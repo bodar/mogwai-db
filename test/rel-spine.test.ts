@@ -77,7 +77,7 @@ const DECLINED = [
   "g.V().where(__.has('name','marko'))", // a filter-only body is a predicate on the SAME traverser
   "g.V().where(__.out().order())",    // a body step the child fold has not learned
   'g.V().order()',                    // element order() is TailAcc's, folded into the FRAMING SELECT
-  'g.V().out().skip(1)',              // a hop RE-MINTS the order; that Window is the next increment
+  "g.V().out().values('name').limit(1)", // a slice PAST the shape change, in the scalar vocabulary
 ];
 
 describe('the RelIR spine', () => {
@@ -99,7 +99,8 @@ describe('the RelIR spine', () => {
     // Compared UNSORTED and against legacy row-for-row: a slice is the one place where the wrong
     // ORDER is the wrong ANSWER, so sorting before comparing would hide exactly the defect this
     // covers. `ms` (the census gate) would not see it either — same multiset size, different rows.
-    for (const gremlin of ['g.V().limit(2)', 'g.V().range(1,3)', 'g.V().skip(2)', 'g.V().skip(1).limit(2)']) {
+    for (const gremlin of ['g.V().limit(2)', 'g.V().range(1,3)', 'g.V().skip(2)', 'g.V().skip(1).limit(2)',
+      'g.V().out().limit(2)', 'g.V().both().limit(3)', 'g.V().out().out().limit(2)', 'g.V().out().range(1,3)']) {
       const rel = read(gremlin, { spine: 'rel' });
       const legacy = read(gremlin, { spine: 'legacy' });
       expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
@@ -115,14 +116,17 @@ describe('the RelIR spine', () => {
     // The channel is modelled now, so what declines is a chain that demands an order and reaches a
     // step this route cannot THREAD it through: a hop re-mints the order with a window function,
     // and `dedup` under an order stops being a `Distinct` at all.
-    for (const gremlin of ['g.V().out().limit(2)', "g.V().out().dedup().limit(1)", "g.V().out().values('name').limit(1)"]) {
+    // What declines now is a chain that demands an order and reaches a step this route cannot
+    // THREAD it through — a slice past the shape change is in the SCALAR vocabulary, which the
+    // row-op fold (an element-relation fold) never sees.
+    for (const gremlin of ["g.V().out().values('name').limit(1)", "g.V().values('name').limit(1)"]) {
       expect(read(gremlin, { spine: 'rel' }).spine).toBe('legacy');
     }
-    // …and it is a GATE, not a blanket: the same steps' order-free neighbours still route, and so
-    // does a slice over a relation whose order the route DOES thread.
-    expect(read('g.V().out().dedup()', { spine: 'rel' }).spine).toBe('rel');
-    expect(read('g.V().limit(2)', { spine: 'rel' }).spine).toBe('rel');
-    expect(read('g.V().dedup().limit(2)', { spine: 'rel' }).spine).toBe('rel');
+    // …and it is a GATE, not a blanket: everything whose order the route DOES thread still routes,
+    // including across a fan-out, where the position has to be re-minted rather than carried.
+    for (const gremlin of ['g.V().limit(2)', 'g.V().dedup().limit(2)', 'g.V().out().limit(2)', 'g.V().out().dedup().limit(1)']) {
+      expect(read(gremlin, { spine: 'rel' }).spine).toBe('rel');
+    }
   });
 
   test('a fast-path switch selects a STRATEGY, and RelIR covers the side it implements', () => {
