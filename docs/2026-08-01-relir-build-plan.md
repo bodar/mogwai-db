@@ -1308,6 +1308,33 @@ is meant: an explicit `Cast` to REAL. Generalize before reaching for a `Lit` to 
 were caught by the shape and by L3 — three rounds, three different instruments, which is the argument
 for running all of them rather than the cheapest one.
 
+**THE `inject` RESIDUE, INVESTIGATED — and the answer was that the INSTRUMENT was misranking, not that
+`inject` had 113 traversals left in it.** §10·8 says the residue is where the next family gets
+recognized; this is the first time it recognized a defect in the measurement instead of a family.
+
+`inject` blocked 113. Split by CAUSE rather than by step name:
+
+| cause | count | what is actually missing |
+|---|---|---|
+| a COLLECTION argument (`g.inject(["a","b"]).length()`) | **90** | the LIST traverser shape. `inject` itself is covered |
+| a `Map` literal | 7 | the map shape |
+| a `Duration` literal | 7 | a rich SCALAR whose bind needs cross-runtime coercion |
+| MID-CHAIN `inject` (`values().inject(1000)`) | 4 | a `Union` of the current relation with a `Values` |
+| `inject()` empty | 2 | the empty relation, which `Values` refuses to express (§3.3) |
+
+**So 90 of the 113 belonged to a family the table ranked FIFTH.** `mise run rel-blockers` now attributes a
+blocker by its CAUSE where the cause is decidable from the step's own arguments (`blame()`), and the
+ranking changes at the top: **the list shape is 194 and first, ahead of writes at 187.** The
+re-attribution is deliberately narrow — an array or a set seeds a collection traverser, so it is the list
+shape; a `Map` is the map shape and a `Duration` is a rich scalar, and neither is re-attributed, because
+guessing their family would be the confidently-wrong ranking the instrument exists to avoid.
+
+**The remaining 20 are genuinely `inject`'s and none is worth taking now**, which is the criterion working
+rather than a gap: four unrelated causes, the largest 7 traversals, and two of them (`Duration`/bigint
+literals, mid-chain `Union`) need bind-precision work across two runtimes that the corpus cannot even
+exercise separately — every mid-chain instance also carries a bigint literal, so landing the `Union`
+alone would measure +0. Speculative substrate with no measurable gain is what §10·8 ranks last.
+
 **PHASE 4.1's ENTRY FACT, measured 2026-08-03 — and it corrects this document twice.** §6 said the
 element row-ops are "fused into the framing projection by `TailAcc`, so a `Sort` on the CORE relation
 is a different plan (the framing join is 1:1 on `id`, so it is equivalent — but that is an argument to
