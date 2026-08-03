@@ -10,7 +10,7 @@ relir	symbol	REPEAT_BODY_OK	2	Phase 3 exit — the row-local vocabulary gate dis
 relir	symbol	runWriteChainFull	3	Phase 2.6 — the second step dispatcher
 relir	symbol	parseEdgeCluster	3	Phase 2.6
 relir	symbol	parseVertexSpec	6	Phase 2.6
-relir	symbol	parseMergeOptions	3	Phase 2.6
+relir	symbol	parseMergeOptions	0	Phase 2.6
 relir	symbol	resolveEndpoint	6	Phase 2.6
 relir	symbol	materializeElementDrivers	4	Phase 2.6 — Insert.source IS a read plan, so there is no driver to materialize
 relir	symbol	WritePlan	15	Phase 2.6 — a write is Plan.bindings, not a private run(store)

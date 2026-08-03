@@ -1336,37 +1336,6 @@ function mergeMatchQuery(spec: MergeSpec): { sql: string; binds: any[] } {
   return render(q`SELECT id, uid FROM nodes WHERE ${where}`);
 }
 
-/** The `option()`s a merge carries, plus the `property()` TAIL that may follow them.
- *
- *  The tail is not a merge feature: `mergeV(map).property(k, v)` is an ordinary AddPropertyStep over
- *  whatever the merge emitted, matched or created alike, and TinkerPop compiles it as exactly that.
- *  So it parses through the same `parsePropertyTail` a mutation tail uses, and the merge compilers
- *  apply it through the same storage waist — which is what makes a meta-property or a declared
- *  cardinality in that position work without the merge lowering knowing either exists.
- *
- *  `option()` must come first: it modulates the merge, while the tail acts on its OUTPUT. */
-function parseMergeOptions(mods: readonly Step[], step: MergeRole['op'], sideEffects: Map<string, any> | undefined, params: Record<string, any>): { onCreate: MergeSpec | null; onMatch: MergeSpec | null; tail: PropSpec[] } {
-  let onCreate: MergeSpec | null = null, onMatch: MergeSpec | null = null;
-  const optionCount = mods.findIndex((s) => s.name !== 'option');
-  const tail = optionCount < 0 ? [] : parsePropertyTail(mods.slice(optionCount), `${step}()`, sideEffects, params);
-  for (const s of optionCount < 0 ? mods : mods.slice(0, optionCount)) {
-    if (s.name !== 'option') throw new Error(`step not implemented after ${step}(): ${s.name}()`);
-    const [sel, mapArg, cardinalityArg] = s.args;
-    if (!isMergeArg(sel))
-      throw new Error(`${step} option() selector must be Merge.onCreate/onMatch`);
-    if (cardinalityArg != null && (!isCardinalityArg(cardinalityArg) || isCardinalityValueArg(cardinalityArg)))
-      throw new Error(`${step} option() third argument must be Cardinality.single/list/set`);
-    const defaultCardinality = cardinalityArg?.cardinality ?? null;
-    if (defaultCardinality !== null && defaultCardinality !== 'single' && defaultCardinality !== 'list' && defaultCardinality !== 'set')
-      throw new Error(`${step} option() has unsupported cardinality '${defaultCardinality}'`);
-    const kind = sel.merge === 'oncreate' ? 'onCreate' : sel.merge === 'onmatch' ? 'onMatch' : null;
-    if (!kind) throw new Error(`${step} option(Merge.${sel.merge}) not supported`);
-    const spec = normalizeMergeMap({ op: step, kind }, mapArg, s.argTypes?.[1] ?? null, sideEffects, params, defaultCardinality);
-    if (kind === 'onCreate') onCreate = spec; else onMatch = spec;
-  }
-  return { onCreate, onMatch, tail };
-}
-
 // The incoming traversers a merge runs once per, evaluated at run time.
 function mergeDrivers(engine: Engine, prefix: IRStep[], params: Record<string, any>): (store: GraphStore) => (number | null)[] {
   if (prefix.length === 0) return () => [null];
@@ -1391,6 +1360,17 @@ function mergeDrivers(engine: Engine, prefix: IRStep[], params: Record<string, a
  * `validateStaticNoOverrides`, which is why the corpus expects a contradicting onCreate to raise even
  * where the merge argument MATCHES and no create would have happened. The create branch re-checks the
  * RESOLVED specs, for the slots that still held a nested traversal here.
+ *
+ * The `option()`s must come FIRST and the `property()` tail after them: an option modulates the merge,
+ * the tail acts on its OUTPUT. The tail is not a merge feature at all — `mergeV(map).property(k, v)` is
+ * an ordinary AddPropertyStep over whatever the merge emitted, matched and created alike, and TinkerPop
+ * compiles it as exactly that. So it goes through the same `parsePropertyTail` a mutation tail uses,
+ * which is what makes a meta-property or a declared cardinality work in that position without either
+ * merge lowering knowing they exist.
+ *
+ * This absorbed `parseMergeOptions`, which was on §8's deletion list and could not honestly reach zero
+ * once the parse became SHARED: what Phase 2.6 deletes is the imperative closure around it, never the
+ * parse, so the name had to become this one rather than linger as a target nothing could remove.
  */
 export interface MergeMaps {
   readonly match: MergeSpec;
@@ -1406,7 +1386,26 @@ export function mergeMaps(
   if (step.args.length === 0)
     throw new Error(`${op}() with no argument (uses the incoming traverser as the map) not yet supported`);
   const match = normalizeMergeMap({ op, kind: 'merge' }, step.args[0], step.argTypes?.[0] ?? null, sideEffects, params);
-  const { onCreate, onMatch, tail } = parseMergeOptions(mods, op, sideEffects, params);
+
+  let onCreate: MergeSpec | null = null, onMatch: MergeSpec | null = null;
+  const optionCount = mods.findIndex((s) => s.name !== 'option');
+  const tail = optionCount < 0 ? [] : parsePropertyTail(mods.slice(optionCount), `${op}()`, sideEffects, params);
+  for (const s of optionCount < 0 ? mods : mods.slice(0, optionCount)) {
+    if (s.name !== 'option') throw new Error(`step not implemented after ${op}(): ${s.name}()`);
+    const [sel, mapArg, cardinalityArg] = s.args;
+    if (!isMergeArg(sel))
+      throw new Error(`${op} option() selector must be Merge.onCreate/onMatch`);
+    if (cardinalityArg != null && (!isCardinalityArg(cardinalityArg) || isCardinalityValueArg(cardinalityArg)))
+      throw new Error(`${op} option() third argument must be Cardinality.single/list/set`);
+    const defaultCardinality = cardinalityArg?.cardinality ?? null;
+    if (defaultCardinality !== null && defaultCardinality !== 'single' && defaultCardinality !== 'list' && defaultCardinality !== 'set')
+      throw new Error(`${op} option() has unsupported cardinality '${defaultCardinality}'`);
+    const kind = sel.merge === 'oncreate' ? 'onCreate' : sel.merge === 'onmatch' ? 'onMatch' : null;
+    if (!kind) throw new Error(`${op} option(Merge.${sel.merge}) not supported`);
+    const spec = normalizeMergeMap({ op, kind }, mapArg, s.argTypes?.[1] ?? null, sideEffects, params, defaultCardinality);
+    if (kind === 'onCreate') onCreate = spec; else onMatch = spec;
+  }
+
   if (onCreate) validateNoOverrides(match, onCreate);
   return { match, onCreate, onMatch, tail };
 }

@@ -876,13 +876,24 @@ traversers, as a relation. `input`/`incoming` is its only spelling, in code and 
 
   **`mergeV` with no `T.label` creates on `addV`'s rule, which is why the bare-`addV` fix is listed
   here as its prerequisite** — see the `LabelCardinality` note under 2.4.
-- **2.6** **Delete `runWriteChainFull`, `parseEdgeCluster`, `parseVertexSpec`, `parseMergeOptions`,
-  `resolveEndpoint`, `materializeElementDrivers`, `WritePlan`.** The phase is not done while a second
-  step dispatcher exists. **Its declared prerequisite is now MET** — 2.4's alias-through-a-creation
-  form was the last piece `runWriteChainFull` owned, and it landed with `addE`'s carry above. Note that
-  `parseMergeOptions` is on this list and is now SHARED with the RelIR route through `mergeMaps`
-  (§10·8): what gets deleted is the imperative `run` closure around it, not the parse, which has to
-  outlive the spine because it is the one authority on a merge map's five validation rules.
+- **2.6** **Delete `runWriteChainFull`, `parseEdgeCluster`, `parseVertexSpec`, `resolveEndpoint`,
+  `materializeElementDrivers`, `WritePlan`.** The phase is not done while a second step dispatcher
+  exists. **Its declared PREREQUISITE is now met** — 2.4's alias-through-a-creation form was the last
+  piece `runWriteChainFull` owned, and it landed with `addE`'s carry above.
+
+  **But the prerequisite is not the gate: 58 write traversals still DECLINE** (`property` 37 ·
+  `addE` 6 · `mergeV` 6 · `mergeE` 6 · `addV` 3), so the legacy write path is still the answer for
+  every one of them and deleting its dispatcher would turn each into a hard error. **2.6 is gated on
+  write coverage being COMPLETE, not on the prerequisite** — which is worth stating because the
+  prerequisite is the exciting-looking half and it is done. The remaining order is therefore
+  `property`'s 37 first (the largest by a wide margin), then the three sixes.
+
+  **`parseMergeOptions` is DELETED — absorbed into `mergeMaps` (0 references, floor banked).** It came
+  off this list rather than down it, and the reason generalizes to any target a migration makes SHARED:
+  once the RelIR route parses a merge map through the same function, what 2.6 deletes is the imperative
+  closure AROUND the parse and never the parse itself, so the name could not honestly reach zero while
+  it named something that has to outlive the spine. A ratchet row nothing can remove is a row that
+  stops being read. Absorbing it puts the surviving code under a name that describes what it IS.
 
 **Phase 2 supersedes [write-path](./2026-08-01-write-path-plan.md) and inherits its requirements.**
 W1/W4 are landed and must not regress (four L4 pins + the perturbed census); W2 §3 and W3 §4 are this
@@ -962,7 +973,7 @@ editing that file changes nothing** — the file is the gate, this section is it
 is over when every floor is 0, and not before.
 
 `expandRepeatBody` · `REPEAT_BODY_OK` · `runWriteChainFull` · `parseEdgeCluster` · `parseVertexSpec` ·
-`parseMergeOptions` · `resolveEndpoint` · `materializeElementDrivers` · `WritePlan` · `TailAcc` ·
+`resolveEndpoint` · `materializeElementDrivers` · `WritePlan` · `TailAcc` ·
 `globalRowOps` · `runFastPath` · `appliesWhen` · the five-copy `count` adapter and the four-copy `where`
 adapter.
 
