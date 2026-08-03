@@ -448,38 +448,22 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
     ctes.length ? q`WITH ${recursive ? raw('RECURSIVE ') : empty}${list(ctes)} ${body}` : body;
 
   /**
-   * The whole program as ONE kernel `Expression` — a read plan's relational body, `WITH` list and
-   * all, with nothing rendered to a string yet.
+   * THE PROGRAM, IN ITS TWO HALVES — the steps that RUN, and the relation that is left.
    *
-   * This is what a caller that COMPOSES RelIR output into a larger tree needs, and the framing
-   * layer is that caller: Gremlin shape is resolved above RelIR and rides to the wire as
-   * `Compiled.shape` (§2), so the algebra's output contract is a RELATION, not a finished
-   * statement. Handing back an `Expression` rather than `{sql, binds}` is what keeps binds in one
-   * `render` and stops a second bind-ordering authority existing.
+   * One walk, because there is one program: a retained binding (a `Stmt`, or a relation the plan
+   * snapshotted) is a step, a plain `Rel` binding is a CTE the steps after it see, and whatever the
+   * result relation is renders over the CTE list that reached it. `emit` finishes the job by
+   * rendering `result`; `emitRelational` hands that expression to the framing layer instead of
+   * rendering it. Splitting them into two near-copies of this walk is what let the CTE-versus-step
+   * rule be stated twice — and the recursive-root case, which only one of them had.
    *
-   * Read plans only: a retained binding — a `Stmt`, or a relation the plan snapshotted — is an
-   * execution step, which a relation cannot be.
+   * `result` is ABSENT when the plan's result is exactly a retained binding's rows: the executor
+   * already holds them, and emitting a `json_each` read of rows it just retained would be a round
+   * trip to fetch what it already has. That is a `drop()`'s shape — its result is its last statement.
    */
-  const relational = (input: Plan): Expression => {
+  const parts = (input: Plan): { readonly effects: readonly Step[]; readonly result?: Expression } => {
+    const effects: Step[] = [];
     const ctes: Expression[] = [];
-    for (const binding of input.bindings) {
-      // `isStmt` first because it NARROWS the union `retained` only answers a question about: the
-      // two together are `retained(binding)`, split so the CTE arm below has a `Rel`.
-      if (isStmt(binding.node) || binding.snapshot)
-        throw new Error(`RelIR: binding '${binding.name}' is retained; a program with execution steps must go through emit()`);
-      ctes.push(q`${ident(binding.name)} AS (${renderBuilt(build(binding.node, EMPTY_SCOPE))})`);
-    }
-    return input.result.kind === 'recursive' && ctes.length
-      ? q`WITH RECURSIVE ${list([...ctes, recursiveDefinition(input.result, EMPTY_SCOPE)])} SELECT * FROM ${ident(input.result.name)}`
-      : withCtes(ctes, renderRel(input.result, EMPTY_SCOPE));
-  };
-
-  const program = (input: Plan): readonly Step[] => {
-    const steps: Step[] = [];
-    const ctes: Expression[] = [];
-    // A plan whose RESULT is exactly a retained binding's rows has nothing left to run: the executor
-    // already holds them. Emitting a json_each read of rows it just retained would be a round trip
-    // to fetch what it already has.
     const resultBinding = input.result.kind === 'ref' ? bindings.get(input.result.name) : undefined;
     const lastRetained = resultBinding && retained(resultBinding) ? resultBinding.name : undefined;
     for (const binding of input.bindings) {
@@ -487,27 +471,28 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       // differs. That is what makes "the value at this point" one concept: the executor cannot tell
       // the two apart, and neither can a later `Ref`.
       const retain = (body: Expression): void => {
-        steps.push({ binding: binding.name, result: binding.name === lastRetained, emitted: emitted(withCtes(ctes, body)) });
+        effects.push({ binding: binding.name, result: binding.name === lastRetained, emitted: renderStep(withCtes(ctes, body)) });
       };
+      // `isStmt` first because it NARROWS the union `retained` only answers a question about, so the
+      // CTE arm below has a `Rel`.
       if (isStmt(binding.node)) { retain(statement(binding.node)); continue; }
       if (binding.snapshot) { retain(renderRel(binding.node, EMPTY_SCOPE)); continue; }
       ctes.push(q`${ident(binding.name)} AS (${renderBuilt(build(binding.node, EMPTY_SCOPE))})`);
     }
-    if (lastRetained) return steps;
+    if (lastRetained) return { effects };
     // A recursive root must share ONE `WITH RECURSIVE` list with the bindings beside it.
-    const body = input.result.kind === 'recursive' && ctes.length
+    const result = input.result.kind === 'recursive' && ctes.length
       ? q`WITH RECURSIVE ${list([...ctes, recursiveDefinition(input.result, EMPTY_SCOPE)])} SELECT * FROM ${ident(input.result.name)}`
       : withCtes(ctes, renderRel(input.result, EMPTY_SCOPE));
-    steps.push({ result: true, emitted: emitted(body) });
-    return steps;
+    return { effects, result };
   };
 
-  return { program, relational };
+  return { parts };
 }
 
 /** The rendered bind list is the authority the DO cap is measured against: `check`'s static count
  * is over IR occurrences, and a fused block can spell one `Lit` more than once. */
-const emitted = (tree: Expression): Emitted => {
+const renderStep = (tree: Expression): Emitted => {
   const out = render(tree);
   if (out.binds.length > DO_BIND_CAP) throw new BindBudgetExceeded(out.binds.length);
   return { sql: out.sql, binds: out.binds };
@@ -520,19 +505,39 @@ const emitted = (tree: Expression): Emitted => {
  * the drift toward rebuilding write as a special case inside a new layer.
  */
 export function emit(program: Plan): readonly Step[] {
-  checkPlan(program);
-  return assembler(new Map(program.bindings.map((binding) => [binding.name, binding]))).program(program);
+  const { effects, result } = emitProgram(program);
+  return result ? [...effects, { result: true, emitted: renderStep(result) }] : effects;
 }
 
 /**
- * A checked read program as ONE kernel `Expression`, for a caller that composes it into a larger
- * `q` tree instead of executing it. The framing layer is that caller — RelIR's output contract is a
- * relation, and shape is resolved above it (§2) — and going through the kernel rather than a
- * rendered string is what keeps bind ordering in one `render`.
+ * A CHECKED PROGRAM SPLIT INTO WHAT RUNS AND WHAT IS LEFT — the entry point for a caller that must
+ * put something of its own BETWEEN the two.
+ *
+ * The framing layer is that caller once a write produces traversers: `property()` hands back the
+ * elements it mutated, so the framing query has to run AFTER the effects and read their retained
+ * rows. Handing back an `Expression` rather than a rendered string is what keeps bind ordering in
+ * one `render` (the same reason `emitRelational` does), and handing the effects back separately is
+ * what stops the framing layer needing a write vocabulary to run them.
+ */
+export function emitProgram(program: Plan): { readonly effects: readonly Step[]; readonly result?: Expression } {
+  checkPlan(program);
+  return assembler(new Map(program.bindings.map((binding) => [binding.name, binding]))).parts(program);
+}
+
+/**
+ * A checked READ program as ONE kernel `Expression`, for a caller that composes it into a larger
+ * `q` tree instead of executing it. RelIR's output contract is a relation, and shape is resolved
+ * above it (§2).
+ *
+ * Read plans only, and the THROW is the point: a caller that composes this into a `SELECT` has no
+ * way to run the effects, so a program with them would silently lose its writes. A caller that CAN
+ * run them asks `emitProgram` instead and gets the same expression beside its steps.
  */
 export function emitRelational(program: Plan): Expression {
-  checkPlan(program);
-  return assembler(new Map(program.bindings.map((binding) => [binding.name, binding]))).relational(program);
+  const { effects, result } = emitProgram(program);
+  if (effects.length) throw new Error(`RelIR: this plan has ${effects.length} execution step(s); a caller that composes its result must run them — use emitProgram()`);
+  if (!result) throw new Error('RelIR: this plan has no relational result');
+  return result;
 }
 
 /** The single-step case, which every read plan is. A derived convenience over `emit`, deliberately
