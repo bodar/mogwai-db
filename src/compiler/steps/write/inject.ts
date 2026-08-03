@@ -51,8 +51,15 @@ export function bareInjectTag(steps: IRStep[], count: number): ValueType | undef
 /** Apply the leading coercion prefix while the inject values are still JS constants.
  * These steps have TinkerPop parse/overflow errors SQL cannot reproduce faithfully.
  * The returned index is the first ordinary step, which enters the shared relational
- * dispatcher. Later coercions remain normal scalar transforms (or fail closed there). */
-function foldConstantCoercions(steps: IRStep[], vals: any[]): { at: number; as?: ValueType } {
+ * dispatcher. Later coercions remain normal scalar transforms (or fail closed there).
+ *
+ * EXPORTED for the RelIR lowering, for `bareInjectTag`'s reason and more sharply: the fold IS the
+ * parse, and the parse RAISES TinkerPop's exact messages (`Can't parse string '1,000' as number.`).
+ * A second implementation would be a second chance to get an overflow boundary or a date format
+ * wrong, and SQL cannot raise either message — which is why this happens at compile time on both
+ * spines. It MUTATES `vals`, and a caller whose contract is `null` must catch: a value that does not
+ * parse throws from here, and that throw belongs to whichever spine owns the message. */
+export function foldConstantCoercions(steps: IRStep[], vals: any[]): { at: number; as?: ValueType } {
   let at = 1;
   let as: ValueType | undefined;
   for (; at < steps.length && CONST_COERCIONS.has(steps[at].name); at++) {

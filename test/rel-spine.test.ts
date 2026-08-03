@@ -193,6 +193,14 @@ const COVERED = [
   "g.V().values('list').is(P.typeOf(GType.LIST)).unfold()",
   "g.V().values('list').is(P.typeOf(GType.LIST)).count(Scope.local)",
   "g.V().values('age').is(P.typeOf(GType.LIST))",
+  // THE LEADING COERCION PREFIX, folded at COMPILE TIME by the same function legacy uses. `asNumber`/
+  // `asBool`/`asDate` raise TinkerPop's exact parse and overflow messages, which SQL cannot raise at
+  // all — a `CAST` answers `1` for `'1,000'` and epoch 0 for an invalid date, which is §11's "a
+  // required error became a plausible value". So the fold is reused rather than re-expressed, and a
+  // value that does not parse declines (see DECLINED) so legacy raises the message it owns.
+  "g.inject('1').asNumber()", "g.inject('1','2').asNumber(GType.INT)", 'g.inject(1).asNumber(GType.LONG)',
+  "g.inject('true').asBool()", "g.inject('2023-08-02T00:00:00Z').asDate()",
+  "g.inject('1','2').asNumber(GType.INT).sum()", "g.inject('1').asNumber().is(P.gt(0))",
 ];
 
 /**
@@ -209,6 +217,7 @@ const DECLINED = [
   "g.inject(['a','b']).reverse()",    // on a list `reverse` reverses ORDER, not each member
   "g.inject(['a','b']).merge(__.V().values('name').fold())", // a TRAVERSAL operand is a child read
   "g.V().values('age').is(P.typeOf(GType.MAP))", // a MAP retype needs the map shape, not a decode
+  "g.inject([1,2],3)",                // MIXED list/scalar args: the VARIANT shape, and legacy FLATTENS
   "g.inject('a').inject('b')",        // a second inject is a UNION with the first, not a source
   'g.inject(1,2).order(Scope.local)', // LOCAL scope: a per-traverser sort of a LIST, a different arm
   "g.V().dedup().by(__.out().count())", // a SUB-TRAVERSAL projection: a child lowering, not an expr
@@ -332,6 +341,22 @@ describe('the RelIR spine', () => {
     // throw rather than as a route, because RelIR throwing FIRST is how "not learned yet" becomes a
     // support regression.
     expect(() => read("g.V().sample(2).by('age')", { spine: 'rel' })).toThrow('by() is only supported');
+  });
+
+  test('a coercion that cannot PARSE declines, so the error stays the reference\'s', () => {
+    // The fold is where TinkerPop's parse and overflow messages live, and SQL can raise neither — so
+    // the arms that RAISE are the ones a `CAST` would silently answer for (`1` for `'1,000'`, epoch 0
+    // for an invalid date). What is pinned here is that RelIR does not throw FIRST: it declines, and
+    // legacy raises the message the reference specifies. A family whose members raise needs its error
+    // cases enumerated as tests, because no differential covers them (§11).
+    for (const [gremlin, message] of [
+      ["g.inject('1,000').asNumber()", "Can't parse string '1,000' as number."],
+      ["g.inject('nope').asBool()", "Can't parse"],
+      ["g.inject('not-a-date').asDate()", "Can't parse"],
+    ] as const) {
+      expect(() => compile(gremlin, {}, { spine: 'rel' })).toThrow(message);
+      expect(() => compile(gremlin, {}, { spine: 'legacy' })).toThrow(message);
+    }
   });
 
   test('a scalar order() narrows on its MODULATOR rather than declining wholesale', () => {

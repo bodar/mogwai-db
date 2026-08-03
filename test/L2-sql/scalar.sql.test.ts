@@ -686,31 +686,26 @@ describe('scalar-parent / projection SQL', () => {
   test('dateAdd(DT.unit, n) / dateDiff(date) — integer millis arithmetic', () => {
     // dateAdd folds n * fixed-width-unit millis; bare or DT.-prefixed unit; negative n
     const base = Date.parse('2023-08-02T00:00:00Z');
-    // Legacy folds to the resulting instant; RelIR emits base + offset. Same answer either way, so the
-    // ARITHMETIC is what is asserted per spine and the folded constant only where it is produced.
-    expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(DT.hour, 2)", { spine: 'legacy' }).binds).toEqual([base + 2 * 3600000]);
-    expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(hour, -1)", { spine: 'legacy' }).binds).toEqual([base - 3600000]);
-    for (const [gremlin, offset] of [["dateAdd(DT.hour, 2)", 2 * 3600000], ["dateAdd(hour, -1)", -3600000]] as const) {
-      const p = read(`g.inject(datetime('2023-08-02T00:00:00Z')).${gremlin}`, { spine: 'rel' });
-      expect(p.binds).toContain(base);
-      expect(p.binds).toContain(offset);
+    // BOTH spines fold to the resulting instant now, and by the same function: a leading coercion
+    // prefix over an inject literal is `foldConstantCoercions`, which RelIR reuses rather than
+    // re-expressing — the arms that RAISE (`asNumber`/`asBool`/`asDate`) are why it must happen at
+    // compile time, and `dateAdd`/`dateDiff` ride the same prefix.
+    for (const spine of ['legacy', 'rel'] as const) {
+      expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(DT.hour, 2)", { spine }).binds).toEqual([base + 2 * 3600000]);
+      expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(hour, -1)", { spine }).binds).toEqual([base - 3600000]);
     }
     expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(day, 11)").shape).toEqual({ kind: 'value', type: STATIC('datetime') });
     // only second/minute/hour/day are valid DT units — the grammar rejects the rest
     expect(() => compile("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(month, 1)", {})).toThrow('parse error');
-    // dateDiff = self − other → signed Long; literal / constant(datetime) / constant(null)→0
-    // Legacy folds the difference to one bind; RelIR emits `base - other`. Same signed Long either way.
-    const d = read("g.inject(datetime('2023-08-02T00:00:00Z')).dateDiff(datetime('2023-08-09T00:00:00Z'))", { spine: 'legacy' });
-    expect(d.shape).toEqual({ kind: 'value', type: STATIC('long') });
-    expect(d.binds).toEqual([-604800000]);
-    const dRel = read("g.inject(datetime('2023-08-02T00:00:00Z')).dateDiff(datetime('2023-08-09T00:00:00Z'))", { spine: 'rel' });
-    expect(dRel.shape).toEqual({ kind: 'value', type: STATIC('long') });
-    // BIND ORDER follows the rendered SQL, not the traversal: the select list renders before the FROM,
-    // so the subtrahend precedes the injected row. Asserted as a set plus the EXECUTED answer, because
-    // the answer is the contract and the order is the emitter's clause sequence.
-    expect(dRel.binds).toContain(base);
-    expect(dRel.binds).toContain(Date.parse('2023-08-09T00:00:00Z'));
-    expect(seededStore().query(dRel.sql, dRel.binds).map((r: any) => r.v)).toEqual([-604800000]);
+    // dateDiff = self − other → signed Long; literal / constant(datetime) / constant(null)→0. Both
+    // spines fold the leading prefix to ONE bind (see dateAdd above), and the EXECUTED answer is the
+    // contract either way.
+    for (const spine of ['legacy', 'rel'] as const) {
+      const d = read("g.inject(datetime('2023-08-02T00:00:00Z')).dateDiff(datetime('2023-08-09T00:00:00Z'))", { spine });
+      expect(d.shape).toEqual({ kind: 'value', type: STATIC('long') });
+      expect(d.binds).toEqual([-604800000]);
+      expect(seededStore().query(d.sql, d.binds).map((r: any) => r.v)).toEqual([-604800000]);
+    }
     expect(read("g.inject(datetime('2023-08-08T00:00:00Z')).dateDiff(constant(datetime('2023-08-01T00:00:00Z')))").binds).toEqual([604800000]);
     // runtime dateDiff against a literal → v − other_ms (the epoch bound as a value)
     const rd = read('g.V().values("birthday").asNumber().asDate().dateDiff(datetime("1970-01-01T00:00Z"))');

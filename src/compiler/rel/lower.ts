@@ -14,7 +14,7 @@ import { childSteps, collectionAssert } from '../steps/tail/child-shape.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain } from '../ir/analyze.ts';
 import { containsTextSearch, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
-import { bareInjectTag } from '../steps/write/inject.ts';
+import { bareInjectTag, foldConstantCoercions } from '../steps/write/inject.ts';
 import {
   and, EDGE_COLS, eq, labelIds, meta, minter, NODE_COLS, PROPERTIES, storedValue, typeOf,
   type Minter,
@@ -1184,21 +1184,44 @@ function scalarTail(
  * (`Values([])` rendered as invalid SQL that only failed at the database), and the algebra's answer
  * is a `Filter(false)` over something, which there is nothing here to be over.
  */
-function injectSource(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFraming } | null {
+function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; framing: RelFraming; at: number } | null {
+  const step = steps[0]!;
   if (step.modulators?.length || step.optionArms) return null;
   const args = step.args ?? [];
   if (!args.length) return null;
-  const rows = args.map((arg) => (arg === null ? lit(null, 'any') : operandLit(arg)));
+  // A COLLECTION argument here means a MIXED inject (`inject([1,2], 3)`): a list traverser and a
+  // scalar traverser in one stream, which is the VARIANT shape rather than either of them. Legacy
+  // FLATTENS it — its own comment calls that the historical representation, held until a scalar
+  // stream gains a per-row shape discriminant — and reproducing an approximation is not the same as
+  // reproducing an answer, so this declines instead.
+  if (args.some((arg) => Array.isArray(arg))) return null;
+
+  // THE LEADING COERCION PREFIX IS FOLDED AT COMPILE TIME, on both spines and by the same function.
+  // `asNumber`/`asBool`/`asDate` raise TinkerPop's exact parse and overflow messages, which SQL
+  // cannot raise at all — that is why legacy folds them over a literal rather than emitting a CAST,
+  // and it is why a `CAST` here would answer `1` for `'1,000'` and epoch 0 for an invalid date (§11:
+  // a required error became a plausible value). So the fold is REUSED, not re-expressed: it mutates
+  // the value array in place and hands back the first ordinary step plus the framing tag it
+  // established. A value that does not parse THROWS from in there, and this module's contract is
+  // `null` — so it is caught, and the legacy spine raises the message it owns.
+  const vals = [...args];
+  let folded: { at: number; as?: string };
+  try { folded = foldConstantCoercions(steps as IRStep[], vals); } catch { return null; }
+
+  const rows = vals.map((arg) => (arg === null ? lit(null, 'any') : operandLit(arg)));
   if (rows.some((row) => !row)) return null;
+  // The tag the FOLD established, else a uniform declared type where there is one, else per-value
+  // inference — which is what `UNKNOWN` means and is the honest floor for a heterogeneous inject
+  // (there is no per-row vtype column to carry a mixed type on). Same precedence as legacy's, whose
+  // `bareInjectTag` only applies when nothing was folded.
+  const tag = folded.as ?? (folded.at === 1 ? bareInjectTag(steps as IRStep[], vals.length) : undefined);
   return {
     rel: make.values({
       id: fresh('inj'), rows: (rows as Expr[]).map((row) => [row]), channels: [],
       type: typeOf(meta('v', 'any', true)),
     }),
-    // A uniform declared type where there is one; per-value inference otherwise, which is what
-    // `UNKNOWN` means and is the honest floor for a heterogeneous inject (there is no per-row vtype
-    // column to carry a mixed type on).
-    framing: { kind: 'scalar', type: (() => { const tag = bareInjectTag([step], args.length); return tag ? STATIC(tag) : UNKNOWN; })() },
+    framing: { kind: 'scalar', type: tag ? STATIC(tag as never) : UNKNOWN },
+    at: folded.at,
   };
 }
 
@@ -1376,9 +1399,9 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
       const tail = listTail(listed.rel, (listed.framing as { readonly of: ListOf }).of, steps, 1, fresh);
       return tail ? lowered(tail.rel, tail.framing) : null;
     }
-    const injected = injectSource(first, fresh);
+    const injected = injectSource(steps, fresh);
     if (!injected) return null;
-    const tail = scalarTail(injected.rel, injected.framing, steps, 1, false, fresh);
+    const tail = scalarTail(injected.rel, injected.framing, steps, injected.at, false, fresh);
     if (!tail) return null;
     return lowered(tail.rel, tail.framing);
   }

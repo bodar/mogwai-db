@@ -1,6 +1,6 @@
 # RelIR — the build plan
 
-**Status: BUILDING.** Coverage **487 / 2,298** corpus traversals on the RelIR spine; deletion counter
+**Status: BUILDING.** Coverage **517 / 2,298** corpus traversals on the RelIR spine; deletion counter
 **110** references left across the 15 legacy rows. Both are ratchets in `ci` (§10·4). The direction was
 argued in [codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a and
 is not re-argued here.
@@ -511,6 +511,27 @@ board, and the set ops appeared in it the moment the list frame landed.
 **Also 4.1's, and unfinished:** the ALIAS channel (`as`/`select`, 144) needs a name→column map, which is
 one of the four roles `spine.ts`'s layout translation declares ABSENT rather than leaving to be
 forgotten (with path, origin and branchOrder).
+
+### The LEADING COERCION PREFIX — folded, by legacy's own function
+
+`asNumber`/`asBool`/`asDate`/`dateAdd`/`dateDiff` at the head of an `inject()` are folded at COMPILE
+TIME on both spines, and RelIR REUSES `foldConstantCoercions` rather than re-expressing it (+30). The
+reason is §11's, sharpened: **the fold IS the parse, and the parse RAISES** TinkerPop's exact messages
+(`Can't parse string '1,000' as number.`) which SQL cannot raise at all. A `CAST` answers `1` for
+`'1,000'` and epoch 0 for an invalid date — a required error becoming a plausible value. So a second
+implementation would be a second chance to get an overflow boundary or a date format wrong; the shared
+function mutates the value array and hands back the first ordinary step plus the framing tag, and a
+value that does not parse THROWS from inside it, which this module catches and declines so legacy
+raises the message it owns.
+
+Note this SUPERSEDES `transform.ts`'s reasoning about `dateAdd`/`dateDiff` ("their fold is an
+OPTIMIZATION, not a semantic requirement"): that is still true of the COLUMN form, and irrelevant at
+the source, where they ride the same literal prefix legacy already folds. Both spines now emit one bind
+for `inject(datetime(…)).dateAdd(hour, 2)`.
+
+A MIXED `inject([1,2], 3)` still declines. Legacy FLATTENS it — its own comment calls that the
+historical representation, held until a scalar stream gains a per-row shape discriminant — and
+reproducing an approximation is not the same as reproducing an answer.
 
 ### Phase 2 — the write wedge
 
