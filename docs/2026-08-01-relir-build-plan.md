@@ -966,6 +966,29 @@ traversal either way and the flag only changes what it emits.
 `as()`/`select()` or an alias comparison — carried state this route does not model yet. The
 structure is the deliverable, not the number.
 
+**Coverage 117 → 125 (`52fb9bf`): `dedup`/`identity`, and a FAIL-CLOSED GATE on emission order.**
+`dedup()` is `Distinct` over a projection that RESETS the multiplicity — a survivor stands for
+itself, not for the sum of the duplicates it replaced, which is `isReEncoding`'s distinction run in
+the opposite direction. What is absent from 4.1 so far is absent for two DIFFERENT reasons, and
+neither is "not yet":
+
+- **An element `order()` is not a relation operator at all** in the legacy lowering. `TailAcc` folds
+  it into the FRAMING projection's `ORDER BY` (`… FROM nodes n JOIN c0 p ON n.id=p.id ORDER BY
+  n.id`), so it belongs to Phase 4.2's block assembler, not to this route. That is a correction to
+  the expectation in §6 that 4.1 collapses "`order` across all 11 dispatch tables": for the ELEMENT
+  table it cannot, until the assembler owns the tail.
+- **A slice needs the `encounter` channel**, which is the next increment and the first carried role
+  beyond `bulk`.
+
+**The gate is a SAFETY property, and it is the part of this increment worth having.** A slice's
+answer depends on which rows come first. Omitting the channel would not defer — it would pick a
+DIFFERENT WINDOW from the same multiset: right arity, plausible rows, and a census that
+structurally cannot see it, because `ord` is telemetry and `ms` is the gate. So the lowering fails
+closed on `demandsEncounter`, the same chain fact the legacy source seeds from, rather than on a
+list of step names that would drift from it. Measured at zero covered traversals, so it costs
+nothing today and keeps it that way as the vocabulary grows — and the increment was green on its
+first run with no test to fix, which is the gate working rather than luck.
+
 **NEXT, measured from base 259** (`V`/`E`/`hasLabel`/`has`/`count`/`values`/`is`/movement/`where`):
 **the row-algebraic class is +50 and it is literally Phase 4.1's named deliverable** — `order` 20 ·
 `dedup` 11 · `limit`/`range`/`skip` 2 · `identity` 2, and together with `tail`/`sample` fifty. The
