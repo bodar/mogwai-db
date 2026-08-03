@@ -1,4 +1,4 @@
-import { empty, identifier, list, q, raw, render, value, type Expression } from '../sql/kernel/q.ts';
+import { empty, identifier, list, q, raw, render, textLiteral, value, type Expression } from '../sql/kernel/q.ts';
 import { DO_BIND_CAP, checkPlan } from './check.ts';
 import type { Expr } from './expr.ts';
 import { recursiveSelf } from './factory.ts';
@@ -124,7 +124,12 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       // the one we ship to. The star is a SPELLING, so it belongs here and not as a node field.
       case 'agg': return q`${raw(e.fn)}(${e.distinct ? raw('DISTINCT ') : empty}${e.args.length ? list(e.args.map(self)) : raw('*')}${e.orderBy?.length ? q` ORDER BY ${list(e.orderBy.map((term) => sortTerm(term, scope)))}` : empty})`;
       case 'window-expr': return q`${raw(e.fn)}(${list(e.args.map(self))}) OVER (${windowSpec(e.spec, scope)})`;
-      case 'json-object': return q`${raw(e.binary ? 'jsonb_object' : 'json_object')}(${list(e.entries.flatMap(([key, val]) => [value(key), self(val)]))})`;
+      // A json object's KEYS are compile-time strings in the node, not `Expr`s — so they render as
+      // LITERALS, never as binds. `value(key)` here spent one of the platform's 100 parameters per
+      // key: a `{t,v}` member node cost two and one `as()` cost two, which is a plan the seam declines
+      // for a constant the compiler itself wrote. Legacy always inlined them; this is the two spines
+      // agreeing on the cheap spelling rather than RelIR paying for the same SQL.
+      case 'json-object': return q`${raw(e.binary ? 'jsonb_object' : 'json_object')}(${list(e.entries.flatMap(([key, val]) => [textLiteral(key), self(val)]))})`;
       case 'json-array': return q`${raw(e.binary ? 'jsonb_array' : 'json_array')}(${list(e.items.map(self))})`;
       case 'scalar': return q`(${renderRel(e.plan, scope)})`;
       case 'exists': return q`${e.negated ? raw('NOT ') : empty}EXISTS (${renderRel(e.plan, scope)})`;

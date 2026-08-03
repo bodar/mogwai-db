@@ -65,6 +65,22 @@ const quote = (n: string) => SAFE.test(n) ? n : `"${n.replace(/"/g, '""')}"`;
  * kernel's single identifier spelling authority; callers never concatenate names themselves. */
 export const identifier = (name: string): Text => raw(quote(name));
 
+/**
+ * A COMPILE-TIME string literal — single-quoted, `''`-escaped, and NOT a bind.
+ *
+ * For text the COMPILER chose, never for data. The distinction is a platform one rather than a
+ * stylistic one: a Durable Object caps a statement at 100 BOUND PARAMETERS, so spending one on a
+ * constant the compiler wrote is spending a scarce resource on nothing — and it is what made the
+ * RelIR spelling of one `as()` cost four binds against legacy's one (`jsonb_object(?, ?, ?, p.id)`
+ * versus `jsonb_object('k', ?, 'v', p.id)`), which at four labels in a chain is the difference
+ * between a plan the routing seam admits and one it declines.
+ *
+ * A value from the QUERY or the STORE is `value()` and must stay one: inlining data would make the
+ * statement text a function of the data, which defeats both the statement cache and the 100 KB text
+ * cap. Keeping the two spellings distinct is what keeps a bind count meaningful.
+ */
+export const textLiteral = (text: string): Text => raw(`'${text.replace(/'/g, "''")}'`);
+
 /** A column reference `qualifier.name`, each part safe-quoted. A Text (no binds). */
 const colRef = (qualifier: string, name: string): Text => raw(`${quote(qualifier)}.${quote(name)}`);
 

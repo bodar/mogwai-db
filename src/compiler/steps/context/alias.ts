@@ -18,7 +18,11 @@ import { type Elem } from '../../plan/plan.ts';
 
 export type AliasShape = 'vertex' | 'edge' | 'value' | 'list' | 'map' | 'property';
 
-const SHAPE_K: Record<AliasShape, number> = { vertex: 0, edge: 1, value: 2, list: 3, map: 4, property: 5 };
+/** The `k` tag each shape rides under. EXPORTED because it is DATA rather than emission: the RelIR
+ *  spine writes the same history entries (`src/compiler/rel/alias.ts`) and a second copy of these
+ *  numbers would be a second chance for the two encodings to drift apart silently — the same reason
+ *  `STORAGE_CLASS`/`JAVA_WHITESPACE` are shared rather than re-derived (build plan §10·8). */
+export const SHAPE_K: Record<AliasShape, number> = { vertex: 0, edge: 1, value: 2, list: 3, map: 4, property: 5 };
 const K_SHAPE: Record<number, AliasShape> = { 0: 'vertex', 1: 'edge', 2: 'value', 3: 'list', 4: 'map', 5: 'property' };
 
 // Elem ⊂ AliasShape now that both spell an element the same way — these were two ternaries

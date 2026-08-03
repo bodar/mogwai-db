@@ -1,4 +1,4 @@
-import { withChannel, type Channel, type Channels } from '../../channels.ts';
+import { groupableChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
 import { col, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { DO_BIND_CAP, planBindCount } from '../../rel/check.ts';
@@ -18,9 +18,11 @@ import { analyzeChain } from '../ir/analyze.ts';
 import { containsTextSearch, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { bareInjectTag, foldConstantCoercions } from '../steps/write/inject.ts';
 import {
-  and, EDGE_COLS, eq, labelIds, meta, minter, NODE_COLS, PROPERTIES, storedValue, typeOf,
+  and, carriedCols, EDGE_COLS, eq, labelIds, meta, minter, NODE_COLS, PROPERTIES, storedValue, typeOf,
   type Minter,
 } from './build.ts';
+import { bindAliases, liveAliases, selectOne, type AliasRead } from './alias.ts';
+import type { AliasMap } from '../steps/context/context.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
@@ -84,7 +86,23 @@ export type RelFraming =
 export interface RelLowering {
   readonly plan: Plan;
   readonly framing: RelFraming;
+  /**
+   * The ALIAS channel's label→column map — the one carried role whose framing form is not a column
+   * (§2's four absent `LAYOUT_FIELD` roles). It is here rather than derived off `plan.result` for the
+   * reason the two above are derived: a Gremlin LABEL NAME is not something a `Channel` may know, so
+   * the mapping cannot live on the relation and there is nothing to read it off. `spine.ts`
+   * cross-checks it against the result's alias channels, which is what stops it becoming a second
+   * bookkeeping variable that merely claims to describe the relation.
+   */
+  readonly aliases: AliasMap;
 }
+
+/** A lowered chain BEFORE naming and the budget — the relation, plus the two facts about it that are
+ *  not properties of the relation itself. Every tail function returns this shape. */
+type Tail = { readonly rel: Rel; readonly framing: RelFraming; readonly aliases: AliasMap };
+
+/** No label bound yet. One shared value, because an empty Map is the seed at every entry point. */
+const NO_ALIASES: AliasMap = new Map();
 
 /** The bulk channel every element source seeds: the RLE traverser count a reducer reads as
  *  `SUM(bulk)` and a movement collapse merges convergent walks on. One channel, one column, and the
@@ -115,8 +133,7 @@ const encounterOf = (channels: Channels): Channel | undefined =>
  * chain no longer has one element shape decided at its source, so every producer here asks its
  * INPUT what it carries. A role this route grows tomorrow gets its column with no edit at all.
  */
-const elementCols = (channels: Channels): readonly ColMeta[] =>
-  [meta('id', 'int'), ...channels.map((channel) => meta(channel.col, 'int'))];
+const elementCols = (channels: Channels): readonly ColMeta[] => [meta('id', 'int'), ...carriedCols(channels)];
 
 
 
@@ -141,6 +158,18 @@ interface Subject { readonly id: Expr; readonly label?: Expr; readonly rel: Rel;
 /** What a filter needs beyond the step and its subject: the bound parameters a nested body parses
  *  against, and whether the correlated-child form is this compile's to emit (see `Lowering`). */
 interface FilterCtx { readonly params: Record<string, any>; readonly correlatedChildren: boolean; }
+
+/** What the ELEMENT loop needs on top of a filter's context: whether this compile asked for the
+ *  movement collapse. One record rather than three positional arguments, because `elementTail` is now
+ *  re-entered from three places and a re-entry that dropped one of them would silently pick a
+ *  different lowering strategy. */
+interface ChainCtx extends FilterCtx { readonly collapse: boolean; }
+
+/** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
+ *  throw there is a deferral rather than a bug. */
+const bodyOf = (nested: unknown, params: Record<string, any>): readonly IRStep[] | null => {
+  try { return childSteps(nested, params); } catch { return null; }
+};
 
 function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter, ctx: FilterCtx): Expr | null {
   // One filter form HOSTS a `by()` — the alias-compare `where('a', P.eq('b')).by('key')`, which
@@ -172,8 +201,15 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
     // an optimization (the FTS rule): the flag selects between two strategies and RelIR implements
     // one of them, so both positions stay live and L5's differential still compares two forms.
     if (!ctx.correlatedChildren) return null;
-    const body = childSteps(nested.nested, ctx.params);
-    if (!body.length) return null;
+    // NORMALIZING A CHILD BODY CAN RAISE, and a module whose contract is `null` must not let a throw
+    // escape (§11, the rule `sliceOf` already instances). `childSteps` re-runs the Pass pipeline over
+    // the body, and `rewriteWhereVariables` legitimately hard-errors on a `where(__.as(l))` start
+    // variable the body's OWN scope never bound — TinkerPop errors there too. Whether that error is
+    // this traversal's answer is the spine that owns the message's business, not ours: catch, decline,
+    // and let it raise. Found by `rel-sweep` the moment `as()` made these prefixes reachable at all,
+    // which is the same instrument-shaped finding as the four before it.
+    const body = bodyOf(nested.nested, ctx.params);
+    if (!body?.length) return null;
     // The body's FIRST step must be a movement: it is what makes the child a relation to test for
     // rows at all. A filter-only body (`where(__.has('name','x'))`) is a predicate on the SAME
     // traverser, not a sub-traversal — legacy inlines it directly and there is nothing to gain by
@@ -440,7 +476,7 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
       ? make.join({
         id: fresh('j'), left: e, right: input, join: 'inner', on, channels: carried,
         type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int'), meta('pid', 'int'),
-          ...carried.map((channel) => meta(channel.col, 'int'))),
+          ...carriedCols(carried)),
       })
       : make.filter({ id: fresh('f'), input: e, channels: [], type: e.type, pred: on });
     // The arm carries the INCOMING position through unchanged; re-minting happens once over the
@@ -646,6 +682,16 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, fresh: Min
   if (sliced) return sliced;
 
   if (step.name !== 'dedup' || (step.args ?? []).length || isLocalScope(step)) return null;
+  // A BARE `dedup()` is a grouping by traverser IDENTITY, so the channel policy table decides whether
+  // it may carry what the relation carries — and an ALIAS binding belongs to ONE of the merged rows.
+  // Keeping it in the key would distinguish two traversers reaching the same element by the label they
+  // bound on the way, which is a different multiset; taking an arbitrary one is the `undefined` the
+  // table names. Legacy refuses the same shape for the same reason (`dedup() after as() not yet
+  // supported (path-distinct semantics)`), so declining keeps the two spines agreeing rather than
+  // giving RelIR a capability the differential would then be red against. The honest lowering is a
+  // ranked window over the identity partition (`dedupBy`'s shape with the id as its key), which is a
+  // separate increment landing in BOTH spines.
+  if (!groupableChannels(input.channels)) return null;
 
   const ordered = !!encounterOf(input.channels);
   const bys = modulations(step, 1);
@@ -915,7 +961,7 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { readon
     return {
       rel: make.project({
         id: fresh('ct'), input, channels: input.channels,
-        type: typeOf(meta('v', 'any', true), ...input.channels.map((channel) => meta(channel.col, 'int'))),
+        type: typeOf(meta('v', 'any', true), ...carriedCols(input.channels)),
         exprs: [['v', literal], ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
       }),
       // UNKNOWN, not a tag inferred from the JS value: that is what legacy frames here, and a
@@ -950,7 +996,7 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { readon
     return {
       rel: make.project({
         id: fresh('sv'), input: joined, channels: input.channels,
-        type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...input.channels.map((channel) => meta(channel.col, 'int'))),
+        type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...carriedCols(input.channels)),
         exprs: [['v', storedValue(joined.id)], ['vtype', col(joined.id, 'vtype')],
           ...input.channels.map((channel) => [channel.col, col(joined.id, channel.col)] as const)],
       }),
@@ -1038,10 +1084,11 @@ function sortTerms(step: IRStep, host: ByHost, fresh: Minter): { readonly terms:
  */
 function scalarTail(
   seed: Rel, framing: RelFraming, steps: readonly IRStep[], from: number,
-  bulked: boolean, params: Record<string, any>, fresh: Minter,
-): { readonly rel: Rel; readonly framing: RelFraming } | null {
+  bulked: boolean, ctx: ChainCtx, fresh: Minter, aliases: AliasMap = NO_ALIASES,
+): Tail | null {
   let rel = seed;
   let out: RelFraming = framing;
+  let labels = aliases;
   const carries = (name: string): boolean => rel.type.cols.some((column) => column.name === name);
   // WHAT IS KNOWN about the value's Gremlin type, read off the framing rather than guessed — the ONE
   // fact both `is`'s ordering comparisons and its `typeOf` test need, so it is computed once as a
@@ -1085,6 +1132,30 @@ function scalarTail(
     const host: ByHost = { kind: 'scalar', value: col(rel.id, 'v'), ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}) };
 
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
+
+    // `as()` over a VALUE traverser records the value AND its type: the entry's own `t` field is the
+    // only place a per-row `vtype` COLUMN can survive becoming JSON, which is what makes
+    // `values('age').as('a').select('a').is(P.gt(30))` compare as a number rather than as text.
+    if (step.name === 'as') {
+      const bound = bindAliases(step, rel, labels, {
+        kind: 'value', value: col(rel.id, 'v'),
+        type: out.kind === 'scalar' ? out.type : UNKNOWN,
+        ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}),
+      }, fresh);
+      if (!bound) return null;
+      rel = bound.rel;
+      labels = bound.aliases;
+      continue;
+    }
+
+    // A `select()` here may re-root to an ELEMENT, which is the whole reason `elementTail` is a
+    // function: the shape boundary runs both ways and `selectTail` is the one place that decides which
+    // loop the label's shape belongs to.
+    if (step.name === 'select') {
+      const selected = selectOne(step, rel, labels, fresh);
+      if (!selected) return null;
+      return selectTail(selected, steps, at + 1, bulked, ctx, fresh, labels);
+    }
 
     if (step.name === 'order') {
       const sort = sortTerms(step, host, fresh);
@@ -1143,7 +1214,7 @@ function scalarTail(
       const carried = rel.channels;
       rel = make.project({
         id: fresh('tx'), input: rel, channels: carried,
-        type: typeOf(meta('v', 'any', true), ...carried.map((channel) => meta(channel.col, 'int'))),
+        type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
         exprs: [['v', tx.expr], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
       });
       out = { kind: 'scalar', type: tx.type ?? UNKNOWN };
@@ -1161,7 +1232,7 @@ function scalarTail(
       const carried = rel.channels;
       rel = make.project({
         id: fresh('ct'), input: rel, channels: carried,
-        type: typeOf(meta('v', 'any', true), ...carried.map((channel) => meta(channel.col, 'int'))),
+        type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
         exprs: [['v', literal], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
       });
       out = { kind: 'scalar', type: UNKNOWN };
@@ -1186,13 +1257,13 @@ function scalarTail(
       if (asserted) {
         if (asserted === 'map' || !carries('vtype')) return null;
         const retyped = collectionRetype(rel, 'vtype', asserted, fresh);
-        const tail = listTail(retyped.rel, retyped.of, steps, at + 1, params, fresh);
+        const tail = listTail(retyped.rel, retyped.of, steps, at + 1, ctx, fresh, labels);
         if (!tail) return null;
         // The SET marker rides on the framing, not the relation — a set and a list share every member
         // op and differ only at the wire. So it is applied to whatever the list tail finished as, and
         // only where that is still a collection.
         return tail.framing.kind === 'list' && retyped.set
-          ? { rel: tail.rel, framing: { ...tail.framing, set: true } }
+          ? { ...tail, framing: { ...tail.framing, set: true } }
           : tail;
       }
       const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType());
@@ -1273,12 +1344,12 @@ function scalarTail(
         ...(out.kind === 'scalar' && staticTypeOf(out.type) ? { staticTag: staticTypeOf(out.type)! } : {}),
         ...(encounter ? { encounter: encounter.col } : {}),
       }, fresh);
-      return listTail(folded.rel, folded.of, steps, at + 1, params, fresh);
+      return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
     }
 
     return null;
   }
-  return { rel, framing: out };
+  return { rel, framing: out, aliases: labels };
 }
 
 /**
@@ -1383,17 +1454,40 @@ function injectList(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFramin
  * the distinction legacy draws by composing the shared row op in front of the local one.
  */
 function listTail(
-  seed: Rel, of: ListOf, steps: readonly IRStep[], from: number, params: Record<string, any>, fresh: Minter,
-): { readonly rel: Rel; readonly framing: RelFraming } | null {
+  seed: Rel, of: ListOf, steps: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
+  aliases: AliasMap = NO_ALIASES,
+): Tail | null {
   let rel = seed;
   let items = of;
+  let labels = aliases;
   // The sub-read lowerer is INJECTED rather than imported, which is what keeps the module DAG a DAG
   // (`build ◂ {predicate, modulator, transform, reducer, list} ◂ lower ◂ spine`): a list op that needs
   // a nested chain lowered would otherwise import the fold that imports it.
-  const listCtx: ListCtx = { params, subRead: (inner: readonly IRStep[]) => subReadList(inner, { params }, fresh) };
+  const listCtx: ListCtx = { params: ctx.params, subRead: (inner: readonly IRStep[]) => subReadList(inner, ctx, fresh) };
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
     if (step.name === 'identity' || step.name === 'barrier') { if ((step.args ?? []).length) return null; continue; }
+
+    // `as()` over a LIST traverser binds the whole collection as ONE history entry, tagged `list` — a
+    // list is one traverser, so binding it per member would be a different question. `listOf` rides on
+    // the entry, which is what lets `fold().as('a').select('a').unfold()` re-enter the member frame
+    // with the encoding the fold actually produced rather than a guess at it.
+    if (step.name === 'as') {
+      const bound = bindAliases(step, rel, labels, { kind: 'list', list: col(rel.id, LIST_COL), of: items }, fresh);
+      if (!bound) return null;
+      rel = bound.rel;
+      labels = bound.aliases;
+      continue;
+    }
+
+    // A `select()` over a LIST traverser is the same read as anywhere else — the label decides the
+    // shape and `selectTail` decides the loop, so a label holding an element re-enters `elementTail`
+    // from here exactly as it does from the scalar tail.
+    if (step.name === 'select') {
+      const selected = selectOne(step, rel, labels, fresh);
+      if (!selected) return null;
+      return selectTail(selected, steps, at + 1, false, ctx, fresh, labels);
+    }
 
     if (step.name === 'unfold') {
       if ((step.args ?? []).length) return null;
@@ -1413,17 +1507,17 @@ function listTail(
       const positioned = renumber(
         unfolded.rel, terms,
         [...(unfolded.member ? [meta(LIST_COL, 'json')] : [meta('v', 'any', true), ...(unfolded.typed ? [meta('vtype', 'text', true)] : [])]),
-          ...channels.map((channel) => meta(channel.col, 'int'))],
+          ...carriedCols(channels)],
         channels, fresh,
       );
       // A NESTED list's members are LISTS, so the unfolded stream stays in the list vocabulary rather
       // than entering the scalar one — the same explode, a different payload.
-      if (unfolded.member) return listTail(positioned, unfolded.member, steps, at + 1, params, fresh);
+      if (unfolded.member) return listTail(positioned, unfolded.member, steps, at + 1, ctx, fresh, labels);
       // A TYPED list's members frame by their OWN type, exactly as `values()` over a stored property
       // does — `PER_ROW('vtype')`, the same channel and the same column name, so the scalar tail's
       // `carries('vtype')` picks it up and an `is(P.gt(…))` after it gets the vtype-aware compare key
       // for free. A bare list's members are honestly `UNKNOWN` (inferred per value at the wire).
-      return scalarTail(positioned, { kind: 'scalar', type: unfolded.typed ? PER_ROW('vtype') : UNKNOWN }, steps, at + 1, false, params, fresh);
+      return scalarTail(positioned, { kind: 'scalar', type: unfolded.typed ? PER_ROW('vtype') : UNKNOWN }, steps, at + 1, false, ctx, fresh, labels);
     }
 
     // A GLOBAL row op slices the stream's rows, not one traverser's members.
@@ -1440,7 +1534,7 @@ function listTail(
     if (setOp) {
       rel = setOp.rel;
       items = setOp.of;
-      if (setOp.set) return { rel, framing: { kind: 'list', of: items, set: true } };
+      if (setOp.set) return { rel, framing: { kind: 'list', of: items, set: true }, aliases: labels };
       continue;
     }
 
@@ -1449,10 +1543,10 @@ function listTail(
     return scalarTail(
       retyped.rel,
       { kind: 'scalar', type: retyped.type, ...(retyped.result ? { result: retyped.result } : {}) },
-      steps, at + 1, false, params, fresh,
+      steps, at + 1, false, ctx, fresh, labels,
     );
   }
-  return { rel, framing: { kind: 'list', of: items } };
+  return { rel, framing: { kind: 'list', of: items }, aliases: labels };
 }
 
 /**
@@ -1529,15 +1623,20 @@ export interface Lowering {
  * `rel-sweep` exists to see into a silent decline. `checkPlan` still runs inside `emitRelational`,
  * so a genuine violation still escapes; only the cap decision is taken here.
  */
-const lowered = (rel: Rel, framing: RelFraming): RelLowering | null => {
-  const plan = nameBindings(rel);
+const lowered = (chain: Tail): RelLowering | null => {
+  const plan = nameBindings(chain.rel);
   if (planBindCount(plan) > DO_BIND_CAP) return null;
-  return render(emitRelational(plan)).binds.length > DO_BIND_CAP ? null : { plan, framing };
+  // `liveAliases` at the seam as well as at every reader: the framing layer is handed the map, and a
+  // map naming a column the RESULT does not emit is what `spine.ts` throws on. A chain ending in a
+  // barrier (`as('a').count()`) is exactly that case, and pruning here means the fold never has to
+  // remember to clear it at each of the four barrier sites.
+  return render(emitRelational(plan)).binds.length > DO_BIND_CAP
+    ? null : { plan, framing: chain.framing, aliases: liveAliases(chain.aliases, chain.rel) };
 };
 
 export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLowering | null {
   const chain = lowerChain(steps, opts, minter());
-  return chain && lowered(chain.rel, chain.framing);
+  return chain && lowered(chain);
 }
 
 /**
@@ -1556,11 +1655,9 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  *   `name` does not walk expression subplans — it renders correctly, just inlined twice. Making the
  *   pass walk them is the general fix if a case ever needs it.)
  */
-function lowerChain(
-  steps: readonly IRStep[], opts: Lowering, fresh: Minter,
-): { readonly rel: Rel; readonly framing: RelFraming } | null {
+function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Tail | null {
   const { params = {}, collapse = true, correlatedChildren = true } = opts;
-  const ctx: FilterCtx = { params, correlatedChildren };
+  const ctx: ChainCtx = { params, correlatedChildren, collapse };
   // EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step.
   // `analyzeChain` is the same authority the legacy source seeds from, so the two cannot disagree
   // about which chains have an order to take a window from. A chain that demands one and reaches a
@@ -1576,10 +1673,10 @@ function lowerChain(
     // A COLLECTION literal seeds a LIST traverser, an ordinary value a SCALAR one — two shapes, and
     // the argument decides which, so the list arm is asked first and declines a scalar inject.
     const listed = injectList(first, fresh);
-    if (listed) return listTail(listed.rel, (listed.framing as { readonly of: ListOf }).of, steps, 1, params, fresh);
+    if (listed) return listTail(listed.rel, (listed.framing as { readonly of: ListOf }).of, steps, 1, ctx, fresh);
     const injected = injectSource(steps, fresh);
     if (!injected) return null;
-    return scalarTail(injected.rel, injected.framing, steps, injected.at, false, params, fresh);
+    return scalarTail(injected.rel, injected.framing, steps, injected.at, false, ctx, fresh);
   }
 
   if (first.name !== 'V' && first.name !== 'E') return null;
@@ -1612,16 +1709,38 @@ function lowerChain(
       ...(ordered ? [['encounter', col(source.id, 'id')] as const] : [])],
   });
 
-  // PHASE 2 — movement and post-movement filtering, over the id-relation. A filter here reads only
-  // the traverser's id, which is why `Subject` carries no `label`: after a hop the relation is
-  // `(id, bulk)` and an edge-label test becomes the membership form.
-  // Does a row stand for more than ONE traverser? Only a collapse makes that true, and a slice has
-  // to know because `LIMIT n` over (element, N) rows answers a different question (`bulkSlice`). It
-  // is a fact about the relation the algebra cannot state — `bulk` is a channel whether its value is
-  // 1 or not — so it rides beside `rel` exactly as `elem` does. Conservative on purpose: a `dedup`
-  // resets the multiplicity to 1 and this does not learn that, which costs the heavier slice form
-  // and never a wrong answer.
-  let bulked = false;
+  return elementTail(rel, elem, steps, at, false, ctx, fresh, NO_ALIASES);
+}
+
+/**
+ * THE ELEMENT TAIL — movement, post-movement filtering, the row-algebraic ops, `as()`, and the retype
+ * out of the element shape. A filter here reads only the traverser's id, which is why `Subject`
+ * carries no `label`: after a hop the relation is `(id, …channels)` and an edge-label test becomes the
+ * membership form.
+ *
+ * **It is a FUNCTION, not the second half of `lowerChain`, and that is what makes the shape boundary
+ * two-way.** `terminal()` already took an element stream to a value one; `select(label)` on a label
+ * holding a vertex goes the other way, and so will a mid-chain `V()`. With the loop inline there was
+ * nowhere for either to land, and a step that re-roots to an element would have had to grow its own
+ * movement/filter/row-op vocabulary — the second implementation `steps/CLAUDE.md` forbids. Every host
+ * now re-enters ONE loop, so a step learned here is learned at every position it can occupy.
+ *
+ * `bulked` — does a row stand for more than ONE traverser? Only a collapse makes that true, and a
+ * slice has to know because `LIMIT n` over (element, N) rows answers a different question
+ * (`bulkSlice`). It is a fact about the relation the algebra cannot state — `bulk` is a channel
+ * whether its value is 1 or not — so it rides beside `rel` exactly as `elem` does. Conservative on
+ * purpose: a `dedup` resets the multiplicity to 1 and this does not learn that, which costs the
+ * heavier slice form and never a wrong answer.
+ */
+function elementTail(
+  seed: Rel, elem0: Elem, steps: readonly IRStep[], from: number, bulked0: boolean,
+  ctx: ChainCtx, fresh: Minter, aliases: AliasMap,
+): Tail | null {
+  let rel = seed;
+  let elem = elem0;
+  let bulked = bulked0;
+  let labels = aliases;
+  let at = from;
   for (; at < steps.length; at++) {
     const step = steps[at];
     const moved: { rel: Rel; elem: Elem } | null = movement(step, { rel }, elem, fresh);
@@ -1631,7 +1750,16 @@ function lowerChain(
       // an `order()` further up. Getting this from `demandsEncounter` alone built a collapse that
       // dropped the encounter column its own declared type still promised — caught by the factory as
       // a join-width mismatch three nodes later, found by a sweep calling `lowerToRel` directly.
-      const collapsing = collapse && !encounterOf(moved.rel.channels);
+      // `groupableChannels` is the SECOND condition and it is read off the channel policy table, not
+      // off a list of roles: a collapse GROUPS convergent walks, so every channel it carries must have
+      // a defined answer when N rows become one. `bulk` adds and `encounter` takes the earliest; an
+      // ALIAS binding belongs to ONE of the merged walks and a grouping would take whichever row
+      // SQLite reached first. Naming `alias` here instead would be the widen-a-check-per-case mistake
+      // `CHANNEL_GROUP_POLICY` replaced — the encounter half already reads the relation for the same
+      // reason. `check` catches it either way (the obligation refuses a grouped Aggregate carrying a
+      // non-combinable role), but as a THROW where legacy answers, which is the one failure the
+      // routing switch cannot absorb: `rel-sweep` found exactly that on `V().as('a').both()`.
+      const collapsing = ctx.collapse && !encounterOf(moved.rel.channels) && groupableChannels(moved.rel.channels);
       rel = collapsing ? coalesce(moved.rel, fresh) : moved.rel;
       bulked = bulked || collapsing;
       elem = moved.elem;
@@ -1646,15 +1774,54 @@ function lowerChain(
     // legacy answers. Found by L5 on a generated `E().limit(1).has(…).where(…)` — no corpus traversal
     // has that prefix, so the corpus sweep could not reach it.
     if (clause) { rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause }); continue; }
+    // `as()` is SHAPE-PRESERVING at every position, which is why it sits in the ordinary loop rather
+    // than at a boundary: the payload passes through and only the alias channels change.
+    if (step.name === 'as') {
+      const bound = bindAliases(step, rel, labels, { kind: 'element', elem, id: col(rel.id, 'id') }, fresh);
+      if (!bound) return null;
+      rel = bound.rel;
+      labels = bound.aliases;
+      continue;
+    }
+    if (step.name === 'select') {
+      const selected = selectOne(step, rel, labels, fresh);
+      if (!selected) return null;
+      const next = selectTail(selected, steps, at + 1, bulked, ctx, fresh, labels);
+      if (!next) return null;
+      return next;
+    }
     const row = rowOp(step, rel, elem, bulked, fresh);
     if (!row) break;
     rel = row;
   }
 
-  if (at === steps.length) return { rel, framing: { kind: 'elements', elem } };
+  if (at === steps.length) return { rel, framing: { kind: 'elements', elem }, aliases: labels };
 
   const retyped = terminal(steps[at], rel, elem, fresh);
   if (!retyped) return null;
 
-  return scalarTail(retyped.rel, retyped.framing, steps, at + 1, bulked, params, fresh);
+  return scalarTail(retyped.rel, retyped.framing, steps, at + 1, bulked, ctx, fresh, labels);
+}
+
+/**
+ * WHERE A `select(label)` GOES NEXT — the re-entry, and the one place the alias read's shape is turned
+ * back into a host.
+ *
+ * Every arm hands the rest of the chain to the fold that owns that shape, which is what makes
+ * `select()` position-independent: the label decides the shape, the shape decides the loop, and no
+ * step after it has to know a `select` happened. The alias map rides through unchanged — selecting a
+ * label does not consume it, so `as('a').as('b').select('a').select('b')` is ordinary composition.
+ */
+function selectTail(
+  selected: { readonly rel: Rel; readonly read: AliasRead }, steps: readonly IRStep[], from: number,
+  bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | null {
+  const { rel, read } = selected;
+  switch (read.kind) {
+    case 'element': return elementTail(rel, read.elem, steps, from, bulked, ctx, fresh, labels);
+    case 'list': return listTail(rel, read.of, steps, from, ctx, fresh, labels);
+    // A selected value's multiplicity is the traverser's, so `bulked` carries; its framing is the
+    // label's own recorded type, restored by `selectOne` (per-row types land back in a `vtype` column).
+    case 'value': return scalarTail(rel, { kind: 'scalar', type: read.type }, steps, from, bulked, ctx, fresh, labels);
+  }
 }

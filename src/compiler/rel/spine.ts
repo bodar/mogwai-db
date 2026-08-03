@@ -2,8 +2,8 @@ import { derived } from '../../sql/kernel/q.ts';
 import type { Compiled } from '../../sql/kernel/render.ts';
 import { emitRelational } from '../../rel/emit.ts';
 import { cfLimitViolation } from '../../cf-limits.ts';
-import type { TraverserLayout } from '../steps/context/context.ts';
-import type { Channels, ChannelRole } from '../../channels.ts';
+import type { AliasMap, TraverserLayout } from '../steps/context/context.ts';
+import { channelCols, type Channels, type ChannelRole } from '../../channels.ts';
 import type { Stream } from '../steps/context/stream.ts';
 import { materializeRootStream } from '../steps/tail/materialize.ts';
 import type { Engine } from '../engine/deps.ts';
@@ -47,27 +47,41 @@ import { lowerToRel } from './lower.ts';
  * silently omitting the column, and that throw is a bug in whichever lowering produced it, not a
  * deferral, so it must not be caught.
  */
-const LAYOUT_FIELD: Readonly<Record<ChannelRole, keyof TraverserLayout | null>> = {
+const LAYOUT_FIELD: Readonly<Record<ChannelRole, keyof TraverserLayout | 'named' | null>> = {
   bulk: 'bulk',
   encounter: 'encounter',
   sack: 'sack',
   fromV: 'fromV',
-  // Not a single column: an alias is a NAME→column map, a path is a position list, and an
+  // An ALIAS is the one role whose framing form is a NAME→column MAP rather than a column, and it
+  // cannot be otherwise: a Gremlin label name is not something a `Channel` may know (§2), so the
+  // mapping is compiler-side state the lowering hands over beside the plan and `named` is what says
+  // so. The check below is what keeps that from being a claim — the map's columns must be exactly the
+  // relation's alias channels.
+  alias: 'named',
+  // Still not a single column and still not translated: a path is a position list and an
   // origin/branch-order is a stack. Each needs a shape this translation does not have, so each is
   // declared absent rather than left to be forgotten.
-  alias: null,
   path: null,
   origin: null,
   branchOrder: null,
 };
 
-function layoutOf(channels: Channels): TraverserLayout {
-  const layout: TraverserLayout = { aliases: new Map(), origins: [], branchOrders: [] };
+function layoutOf(channels: Channels, aliases: AliasMap): TraverserLayout {
+  const layout: TraverserLayout = { aliases, origins: [], branchOrders: [] };
   for (const channel of channels) {
     const field = LAYOUT_FIELD[channel.role];
     if (!field) throw new Error(`RelIR spine: no framing translation for the '${channel.role}' channel role`);
-    Object.assign(layout, { [field]: channel.col });
+    if (field !== 'named') Object.assign(layout, { [field]: channel.col });
   }
+  // THE NAME MAP AND THE RELATION MUST AGREE, and this is where that is provable rather than assumed.
+  // A layout claiming an alias column the relation does not emit makes `rel.c[entry.col]` `undefined`,
+  // and an `undefined` spliced into a `q` template is a type error at no layer — the framing layer
+  // then reads a column that is not there and returns a silent empty result. A THROW, not a decline:
+  // the two are built by one fold, so a disagreement is a bug in this route, never a deferral.
+  const claimed = [...aliases.values()].map((entry) => entry.col).sort();
+  const carried = channelCols(channels.filter((channel) => channel.role === 'alias')).slice().sort();
+  if (claimed.length !== carried.length || claimed.some((column, i) => column !== carried[i]))
+    throw new Error(`RelIR spine: the alias map names [${claimed}] but the result relation carries [${carried}]`);
   return layout;
 }
 
@@ -94,7 +108,7 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
   // pass binding is never the root, so the result is the relation the fold finished on.)
   const result = lowered.plan.result;
   const rel = derived(emitRelational(lowered.plan), result.type.cols.map((column) => column.name), 'rir');
-  const traverserLayout = layoutOf(result.channels);
+  const traverserLayout = layoutOf(result.channels, lowered.aliases);
   // TOTAL over the framing union: a stream kind the lowering learns to produce is a compile error
   // here until this seam knows how to frame it, which is the same discipline §3.5's obligation
   // table applies inside the algebra.

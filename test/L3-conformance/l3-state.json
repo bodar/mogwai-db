@@ -1,5 +1,5 @@
 {
-  "passing": 1712,
+  "passing": 1713,
   "total": 2267,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -783,6 +783,7 @@
     "g_V_order_byXname_descX_barrier_dedup_age_name",
     "g_V_order_byXnoX_count",
     "g_V_order_byXoutE_count_descX_byXnameX",
+    "g_V_outE_asXeX_inV_asXvX_selectXeX_order_byXweight_ascX_selectXvX_valuesXnameX_dedup",
     "g_V_outE_drop",
     "g_V_outE_hasXweight_1X_outV",
     "g_V_outE_mathX0_minus_itX_byXweightX",
@@ -2014,7 +2015,6 @@
     "g_V_order_byXname_descX_repeatXlocalXout_order_byXnameXXX_timesX1X",
     "g_V_outEXknowsX_subgraphXsgX_capXsgX_asString",
     "g_V_outEXnoexistX_subgraphXsgXcapXsgX",
-    "g_V_outE_asXeX_inV_asXvX_selectXeX_order_byXweight_ascX_selectXvX_valuesXnameX_dedup",
     "g_V_outXcreatedX_name_groupCountXaX_capXaX",
     "g_V_outXfollowedByX_group_byXsongTypeX_byXbothE_group_byXlabelX_byXweight_sumXX",
     "g_V_out_asXxX_in_asXyX_selectXx_yX_byXnameX_fold_dedupXlocal_x_yX_unfold",

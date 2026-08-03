@@ -8,7 +8,7 @@ import { isLocalScope, sliceOf } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { childSteps } from '../steps/tail/child-shape.ts';
 import { LIST_LOCAL_TX, STRING_LOCAL_TX } from '../steps/tail/list.ts';
-import { meta, typedNode, typeOf, type Minter } from './build.ts';
+import { carriedCols, meta, typedNode, typeOf, type Minter } from './build.ts';
 import { predicateExpr, SUBJECT_UNKNOWN } from './predicate.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
 import { transformExpr } from './transform.ts';
@@ -397,7 +397,7 @@ const scalarOf = (
   rel: Rel, exprs: readonly (readonly [string, Expr])[], cols: readonly import('../../rel/types.ts').ColMeta[], fresh: Minter,
 ): Rel => make.project({
   id: fresh('ls'), input: rel, channels: rel.channels,
-  type: typeOf(...cols, ...rel.channels.map((channel) => meta(channel.col, 'int'))),
+  type: typeOf(...cols, ...carriedCols(rel.channels)),
   exprs: [...exprs, ...rel.channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
 });
 
@@ -431,7 +431,7 @@ export function unfoldList(
     rel: make.project({
       id: fresh('uv'), input: exploded, channels: rel.channels,
       type: typeOf(meta('v', 'any', true), ...(vtype ? [meta('vtype', 'text', true)] : []),
-        ...rel.channels.map((channel) => meta(channel.col, 'int')), meta(MEMBER.ord, 'int')),
+        ...carriedCols(rel.channels), meta(MEMBER.ord, 'int')),
       exprs: [['v', memberPayload(of, exploded)],
         ...(vtype ? [['vtype', vtype] as const] : []),
         ...rel.channels.map((channel) => [channel.col, col(exploded.id, channel.col)] as const),
@@ -752,7 +752,7 @@ function unfoldNested(rel: Rel, of: ListOf & { readonly kind: 'list' }, fresh: M
   return {
     rel: make.project({
       id: fresh('ul'), input: exploded, channels: rel.channels,
-      type: typeOf(meta(LIST_COL, 'json'), ...rel.channels.map((channel) => meta(channel.col, 'int')), meta(MEMBER.ord, 'int')),
+      type: typeOf(meta(LIST_COL, 'json'), ...carriedCols(rel.channels), meta(MEMBER.ord, 'int')),
       exprs: [[LIST_COL, { kind: 'call', fn: 'json', args: [col(exploded.id, MEMBER.value)] }],
         ...rel.channels.map((channel) => [channel.col, col(exploded.id, channel.col)] as const),
         [MEMBER.ord, col(exploded.id, MEMBER.ord)]],
@@ -783,7 +783,7 @@ export function collectionRetype(rel: Rel, vtype: string, kind: 'list' | 'set', 
   return {
     rel: make.project({
       id: fresh('cl'), input: matching, channels: rel.channels,
-      type: typeOf(meta(LIST_COL, 'json'), ...rel.channels.map((channel) => meta(channel.col, 'int'))),
+      type: typeOf(meta(LIST_COL, 'json'), ...carriedCols(rel.channels)),
       exprs: [[LIST_COL, { kind: 'call', fn: 'json', args: [col(matching.id, 'v')] }],
         ...rel.channels.map((channel) => [channel.col, col(matching.id, channel.col)] as const)],
     }),

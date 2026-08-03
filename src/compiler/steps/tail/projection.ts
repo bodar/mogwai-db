@@ -135,6 +135,35 @@ const MODIFIERS = new Map<string, ModFn>([
 // drift from what foldTailAcc actually accepts.
 const VALUE_TAIL_STEPS = new Set<string>([...PROJECTION_NAMES, ...MODIFIERS.keys(), 'unfold']);
 
+/**
+ * A ONE-LABEL `select` is the labelled traverser ITSELF, so it re-roots the stream rather than
+ * producing the tail's value — which makes it the one `PROJECTION_NAMES` member the accumulator must
+ * not fold. `tailSelectProject` below already routes it to `lowerSingleSelect` for exactly that
+ * reason; naming the predicate once is what stops the two disagreeing about which form re-roots.
+ */
+const isSingleLabelSelect = (step: IRStep): boolean => step.name === 'select'
+  && (step.args ?? []).filter((a) => typeof a === 'string').length === 1
+  && !(step.args ?? []).some(isNested)
+  && !(step.args ?? []).some(isColumnArg);
+
+/**
+ * Can the value-tail accumulator fold this step at all? Set membership, MINUS the re-root.
+ *
+ * The distinction the plain set could not draw: every other projection in it PRODUCES the tail's
+ * value, so the steps after it are that value's; `select(label)` hands the stream a DIFFERENT
+ * traverser, and the steps after it belong to whatever the label held. Folding it meant `select("e")
+ * .order().by("weight").select("v").values("name")` accumulated both selects and then failed closed
+ * (`values() cannot consume the select result shape`) — while `select("e").values("name")` with no
+ * `order()` between them worked, because nothing pulled it into the accumulator.
+ *
+ * Same species as the widening recorded in `tailOrder` below, one vocabulary further in: the gate was
+ * reading a step NAME where the answer depends on the step's ARGUMENTS. Found by re-expressing the
+ * alias channel in RelIR, which answers this shape naturally and so put `test:legacy-spine` red — the
+ * standing rule being fix it in BOTH spines or decline in RelIR, never disagree on purpose.
+ */
+const foldableTailStep = (step: IRStep): boolean =>
+  VALUE_TAIL_STEPS.has(step.name) && !isSingleLabelSelect(step);
+
 function reducerMod(name: NonNullable<TailAcc['reducer']>): ModFn {
   return (_s, acc, at) => {
     // Scope.local (a per-list reduction) always arrives after fold()/aggregate()
@@ -338,7 +367,7 @@ const tailOrder: ShapeTailFn<ElementStream> = (st, step, steps, stop) => {
   // either spine. A slice is a value-tail step, so the immediate check could not see the movement
   // behind it. Where the whole remainder IS foldable the fold still wins (one clause beats a CTE and
   // a re-entry), which is why this looks past the run rather than replacing the fold.
-  if (steps.slice(stop + 1).some((later) => !VALUE_TAIL_STEPS.has(later.name))) {
+  if (steps.slice(stop + 1).some((later) => !foldableTailStep(later))) {
     const reentered = lowerElementOrderReenter(st, step);
     if (reentered) return continueLowering(reentered, stop + 1);
   }
@@ -488,11 +517,7 @@ const tailGroup: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
 // Map (retype immediately so later steps use common dispatch). Multi-label select() and
 // every project() produce a per-traverser RecordStream (shared framing/field selection).
 const tailSelectProject: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
-  if (step.name === 'select'
-    && step.args.filter((a) => typeof a === 'string').length === 1
-    && !step.args.some(isNested)
-    && !step.args.some(isColumnArg))
-    return continueLowering(lowerSingleSelect(st, step), stop + 1);
+  if (isSingleLabelSelect(step)) return continueLowering(lowerSingleSelect(st, step), stop + 1);
   return continueLowering(lowerRecordSelectProject(st, step), stop + 1);
 };
 

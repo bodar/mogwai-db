@@ -238,6 +238,25 @@ const COVERED = [
   "g.V().values('name').fold().combine(__.V().values('nonexistant').fold())",
   "g.V().values('age').fold().disjunct(__.V().values('age').fold())",
   "g.V().values('name').fold().product(__.V().values('name').order().fold())",
+  // THE ALIAS CHANNEL — `as()` writes a JSONB path HISTORY (array-always, appended on rebind) and
+  // `select(label)` re-enters whatever shape the label holds. Both are shape-PRESERVING/shape-DECIDED
+  // rather than position-specific, so the same lowering serves every host, and `select` back to an
+  // ELEMENT is what makes the shape boundary two-way (`elementTail` is re-entered, not duplicated).
+  'g.V().as("a")', 'g.V().as("a").out()', 'g.V().as("a","b").out()',
+  'g.V().as("a").out().as("b")', 'g.V().as("a").out().as("a")',
+  'g.V().as("a").out().select("a")', 'g.V().as("a").out().as("b").select("b")',
+  'g.V().as("a").out().select("a").out()', 'g.V().as("a").out().select("a").count()',
+  'g.V().as("a").out().as("a").select(Pop.first,"a")', 'g.V().as("a").out().as("a").select(Pop.last,"a")',
+  // …over a VALUE stream, where the label's own `t` field is the only place a per-row `vtype` COLUMN
+  // can survive becoming JSON — which is what keeps the comparison numeric after the round trip.
+  'g.V().values("age").as("a").select("a")', 'g.V().values("age").as("a").select("a").is(P.gt(30))',
+  'g.V().values("name").as("a").select("a").count()',
+  'g.V().as("a").values("name").select("a")', 'g.V().as("a").values("name").select("a").values("name")',
+  // …and over a LIST stream, where the whole collection is ONE entry tagged `list`, carrying the
+  // member encoding the fold produced so the member frame is re-entered with it rather than a guess.
+  'g.V().values("name").fold().as("a").select("a")',
+  'g.V().values("name").fold().as("a").select("a").unfold()',
+  'g.inject(["a","b"]).as("a").select("a").count(Scope.local)',
 ];
 
 /**
@@ -246,14 +265,16 @@ const COVERED = [
  */
 const DECLINED = [
   "g.V().bothE().otherV()",           // otherV reads the entering vertex — carried state not modelled
-  "g.V().as('a').out().select('a')",  // an alias: carried state not modelled
+  "g.V().as('a').out().select('a','b')", // MULTI-label select is the map/record shape, not this one
+  "g.V().as('a').out().as('a').select(Pop.all,'a')", // Pop.all is the history as a LIST value
+  "g.V().as('a').out().select('a').by('name')", // a modulated select reads the SELECTED element
+  "g.V().out().select('a')",           // a label bound NOWHERE drops every traverser — the empty relation
   'g.inject()',                       // the EMPTY relation, which `Values` refuses to express (§3.3)
   "g.inject([1,2],3)",                // MIXED list/scalar args: the VARIANT shape, not either of them
   "g.inject(['a','b']).order(Scope.local)",   // a member SORT needs the vtype-aware compare key
   "g.inject(['a','a']).dedup(Scope.local)",   // a member dedup keeps the FIRST occurrence per value
   "g.inject(['a','b']).reverse()",    // on a list `reverse` reverses ORDER, not each member
   "g.V().values('age').is(P.typeOf(GType.MAP))", // a MAP retype needs the map shape, not a decode
-  "g.inject([1,2],3)",                // MIXED list/scalar args: the VARIANT shape, and legacy FLATTENS
   'g.V().has(null)',                  // a null KEY is neither a property name nor a token
   'g.V().has(T.label,null)',          // a null label VALUE: legacy owns what that means
   "g.inject('a').inject('b')",        // a second inject is a UNION with the first, not a source
@@ -653,7 +674,10 @@ describe('the RelIR spine', () => {
     // Asking for RelIR does not make an uncovered chain route there, and asking for legacy always
     // works. Coverage is a property of the CHAIN; if these ever diverge the router has started
     // deciding something the lowering should own.
-    expect(read('g.V().as("a").out().select("a")', { spine: 'rel' }).spine).toBe('legacy');
+    // Any chain the fold has not learned serves — this one is the MAP shape (`valueMap`), and it will
+    // need replacing when that lands, which is the point: there is no permanently uncovered chain and
+    // pinning one would be pinning a gap rather than the rule.
+    expect(read('g.V().valueMap()', { spine: 'rel' }).spine).toBe('legacy');
     expect(read('g.V()', { spine: 'legacy' }).spine).toBe('legacy');
     expect(read('g.V()', { spine: 'rel' }).spine).toBe('rel');
   });

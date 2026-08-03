@@ -1,3 +1,4 @@
+import type { ChannelRole, Channels } from '../../channels.ts';
 import { col, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -19,6 +20,42 @@ import { relId, type ColMeta, type RelId, type RelType, type SqlType } from '../
 
 export const meta = (colName: string, type: SqlType, nullable = false): ColMeta => ({ name: colName, type, nullable });
 export const typeOf = (...cols: readonly ColMeta[]): RelType => ({ cols });
+
+/**
+ * WHAT A CARRIED CHANNEL'S COLUMN DECLARES — a total `Record<ChannelRole, …>`, so a role this route
+ * learns to carry cannot get a column type by accident.
+ *
+ * It exists because it was `meta(channel.col, 'int')` at NINE sites, which was true only while every
+ * channel this route carried was a rowid or a counter. An alias history is a JSONB array and NULL
+ * wherever the label is unbound on that row; declaring it `int NOT NULL` would have every node's
+ * declared type disagree with the value it actually emits, in the one direction §3.5's obligations
+ * cannot see (they check NAMES and channel membership, never storage class).
+ */
+const CHANNEL_COL: Readonly<Record<ChannelRole, { readonly type: SqlType; readonly nullable: boolean }>> = {
+  // A JSONB history array — `jsonb_array` of tagged entries — NULL on a row where nothing bound it.
+  alias: { type: 'json', nullable: true },
+  // Either regime: a per-position rowid (linear) or one JSONB array (recursive). Neither is produced
+  // by this route yet, and `json` is the honest declaration for the one that will come first.
+  path: { type: 'json', nullable: true },
+  // A per-traverser scalar of whatever the sack's seed was.
+  sack: { type: 'any', nullable: true },
+  bulk: { type: 'int', nullable: false },
+  encounter: { type: 'int', nullable: false },
+  origin: { type: 'int', nullable: false },
+  branchOrder: { type: 'int', nullable: false },
+  fromV: { type: 'int', nullable: true },
+};
+
+/** The carried channels' COLUMNS, in the channel list's own order — every relation that carries
+ *  state declares these after its payload, and the order IS `ROLE_ORDER` (`src/channels.ts`). */
+export const carriedCols = (channels: Channels): readonly ColMeta[] =>
+  channels.map((channel) => meta(channel.col, CHANNEL_COL[channel.role].type, CHANNEL_COL[channel.role].nullable));
+
+/** A relation's PAYLOAD columns: everything that is not a carried channel, in emission order. The
+ *  payload-then-channels layout is an invariant of every relation this lowering builds, so a step
+ *  that rebuilds a relation asks for the halves rather than re-deriving which is which. */
+export const payloadCols = (rel: Rel): readonly ColMeta[] =>
+  rel.type.cols.filter((column) => !rel.channels.some((channel) => channel.col === column.name));
 
 /** Physical columns of the two element tables, as `Scan` must declare them. `Scan` is the one node
  *  that names the physical schema (§3.3), so this list IS the algebra's view of storage. */

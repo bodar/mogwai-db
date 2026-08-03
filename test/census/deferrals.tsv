@@ -278,7 +278,6 @@ deferred	legacy	step not implemented: subgraph()	g.V().outE("knows").subgraph("s
 deferred	legacy	step not implemented: subgraph()	g.V().outE("knows").subgraph("sg").cap("sg").is(P.typeOf(GType.GRAPH)).count()
 deferred	legacy	step not implemented: subgraph()	g.V().outE("knows").subgraph("sg").cap("sg").is(not(P.typeOf(GType.GRAPH))).count()
 deferred	legacy	step not implemented: subgraph()	g.V().outE("noexist").subgraph("sg").cap("sg")
-deferred	legacy	values() cannot consume the select result shape	g.V().outE().as("e").inV().as("v").select("e").order().by("weight", Order.asc).select("v").values("name").dedup()
 unbound	legacy	Unbound parameter 'xx1'	g.V().outE().values("weight").fold().order(Scope.local).skip(Scope.local, xx1)
 deferred	legacy	step not implemented: pageRank()	g.V().pageRank().has("gremlin.pageRankVertexProgram.pageRank")
 deferred	legacy	step not implemented: pageRank()	g.V().pageRank().order().by("gremlin.pageRankVertexProgram.pageRank", Order.desc).by("name").values("name")

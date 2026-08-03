@@ -831,7 +831,9 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('as() threads a synthetic alias column through subsequent CTEs', () => {
-    const p = read('g.V().as("a").out("knows").select("a")');
+    // The LEGACY spelling, pinned explicitly: this chain routes RelIR by default now, and §10·4's rule
+    // is that a test pinning a spine's spelling pins BOTH. The RelIR half is below.
+    const p = read('g.V().as("a").out("knows").select("a")', { spine: 'legacy' });
     // as('a') appends the current id to label a0's JSONB history array; out() carries a0
     expect(p.sql).toContain("jsonb_array(jsonb_object('k', ?, 'v', p.id)) AS a0, p.bulk FROM c0");
     expect(p.sql).toContain('SELECT e.tgt AS id, p.a0, p.bulk FROM edges e');
@@ -839,6 +841,14 @@ describe('scalar-parent / projection SQL', () => {
     expect(p.sql).toContain('SELECT CAST(p.a0 ->> ? AS INTEGER) AS id, p.a0, p.bulk FROM c2 p');
     expect(p.sql).toContain('JOIN c3 p ON n.id=p.id');
     expect(p.shape).toEqual({ kind: 'vertex' });
+    // RelIR writes the IDENTICAL history encoding — `SHAPE_K` is imported rather than restated, which
+    // is what makes that a property of the code and not of this assertion — and reads it back with
+    // `json_extract` rather than `->>` so the node set stays closed (§3.3). Same shape, same rows.
+    const viaRel = read('g.V().as("a").out("knows").select("a")', { spine: 'rel' });
+    expect(viaRel.spine).toBe('rel');
+    expect(viaRel.sql).toContain("jsonb_array(jsonb_object('k', ?, 'v', ");
+    expect(viaRel.sql).toContain("CAST(json_extract(");
+    expect(viaRel.shape).toEqual(p.shape);
   });
 
   test('single-label select().by(key) → scalar value from the alias column', () => {
