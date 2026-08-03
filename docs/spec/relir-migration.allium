@@ -281,10 +281,12 @@ default MigrationPhase phase_4_rest = {
 
 -- §1's gate, stated as an obligation rather than as a sentence: the write constructs the platform
 -- has never been measured on are exactly the species of wall that passes on the dev runtime.
+-- BUILT and green: measured on workerd through a throwaway worker with its own Durable Object, because
+-- whether a CONSTRUCT is accepted is not countable from the dev runtime.
 default PhaseGate platform_write_constructs = {
     name: "RETURNING and ON CONFLICT measured on the platform runtime",
     phase: phase_2,
-    status: unbuilt
+    status: green
 }
 default PhaseGate equivalence_families = {
     name: "Traversal families equivalent under results and access path",
@@ -646,6 +648,5 @@ surface MigrationProgress {
 
 open question "A class of traversal that only the unwired bind-landing pass could carry is declined instead, which parks it permanently on the route this migration exists to delete. Is that a coverage gap with an owner, or an accepted exception that has to be recorded as one? (docs/outstanding-work.md item 37)"
 
-open question "The platform gate for the write constructs already emitted by the algebra is unbuilt while the constructs are already reachable through the executor. Does the gate block the write wedge, or does it block any emission of those constructs at all? (docs/outstanding-work.md item 38)"
 
 open question "Coverage is censused per query against a committed baseline, but nothing asserts a floor on the TOTAL. A refactor that trades ten covered traversals for eleven new ones passes the per-query ratchet only if no individual query regresses — is that the intended strength?"

@@ -56,9 +56,23 @@ Measured against SQLite 3.51.2. **Do not re-derive.**
   source `SELECT`'s `ORDER BY`**, and RETURNING can project an inserted column.
   → *order the source and re-associate by carried key — NEVER by RETURNING position.*
 
-**Gate before Phase 2 ships — NOT BUILT YET** (§6 Phase 2 says why it therefore blocks nothing):
-re-run P5/P5b under DO SQLite via `mise run test:cf-limits`. `RETURNING`
-and `ON CONFLICT` are the exact species of "passes on Bun, walls in production" that seam exists for.
+**Gate before Phase 2 ships — BUILT AND GREEN** (`test/cf-constructs.test.ts`, in the ordinary
+suite so `ci` covers it). P5/P5b are re-measured on DO SQLite through a THROWAWAY worker with its own
+Durable Object (`test/cf-probe/`, §10·5's own method), because whether a CONSTRUCT is accepted is not
+countable from Bun — `src/cf-limits.ts` sees a SIZE wall and this sees a VOCABULARY wall, and neither
+sees the other's. Every P5 shape is accepted on the platform and the one prohibition is refused there
+too, so **the write envelope holds where we ship and Phase 2 rests on measurement rather than on the
+dev runtime's agreement.** Confirmed: CTE→`INSERT … SELECT … RETURNING`, multi-row
+`INSERT … RETURNING`, `INSERT … ON CONFLICT DO UPDATE … RETURNING`, `UPDATE … FROM (subquery)`,
+`DELETE … WHERE … IN (SELECT …)`, the data-modifying CTE REFUSED, P5b's id-follows-`ORDER BY`, and the
+100-parameter cap refused past it.
+
+**Two findings came from the probe's own plumbing, and both are the AUTHORIZER rather than the
+dialect:** `PRAGMA writable_schema` is refused outright (`not authorized: SQLITE_AUTH`), and so is
+dropping a DO's own bookkeeping table — whose name also differs between local dev
+(`__miniflare_do_name`) and production (`_cf_*`). Nothing in the algebra wants either, but a wipe that
+filtered by name would have been brittle in exactly the direction this seam exists to catch, so the
+probe uses a FRESH DO per run and needs no privileged operation at all.
 
 ---
 
@@ -654,12 +668,12 @@ composition. write-path §6 and §7 (the traps) carry over unchanged — especia
 refusal is the reference's answer before removing it* (a third of the write messages in L3 telemetry
 belong to scenarios that PASS by asserting the throw).
 
-**The `RETURNING`/`ON CONFLICT` gate is UNBUILT, and it is a prerequisite rather than an exit
-criterion.** `src/cf-limits.ts` and `test/cf-limits.test.ts` mention neither construct, while the
-algebra already emits both and `runProgram` already executes them — so the two write constructs whose
-platform behaviour has never been measured are the two already shipping in code. §1 asks for P5/P5b
-re-run under DO SQLite; the throwaway-`wrangler dev` method in §10·5 is how, and `test/cloudflare.test.ts`
-is the harness. A gate described and not built cannot fail, so it blocks nothing until someone writes it.
+**The `RETURNING`/`ON CONFLICT` gate is BUILT AND GREEN** — `test/cf-constructs.test.ts`, see §1.
+It was a prerequisite rather than an exit criterion (the algebra already emitted both constructs and
+`runProgram` already executed them, so the two whose platform behaviour had never been measured were
+the two already shipping), and it is now measured on workerd rather than asserted. **This phase no
+longer has an unbuilt prerequisite**; what remains of its gate list is the WRITE side —
+`test:cf-limits` green including the two constructs in real emitted plans, and W1's four L4 pins.
 
 **Exit criteria:** every write L3 scenario at least as good as before; W2/W3's ~41 + ~15 candidates
 measurably moved; W1's four L4 pins green; census identical or better with every moved row explained;

@@ -1,0 +1,12 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  // A TEST-ONLY worker (test/cf-probe/worker.ts explains why it is separate). Never deployed: it
+  // takes arbitrary SQL, so it must not share an entry point with the shipped Worker.
+  "name": "mogwai-cf-probe",
+  "main": "worker.ts",
+  "compatibility_date": "2026-07-01",
+  "durable_objects": {
+    "bindings": [{ "name": "PROBE", "class_name": "SqlProbe" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SqlProbe"] }]
+}
