@@ -19,6 +19,7 @@ import {
   type Minter,
 } from './build.ts';
 import { byExpr, modulations, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
+import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 
 /**
  * THE SECOND LOWERING — `Step[] -> RelIR` (§10·4 of `docs/2026-08-01-relir-build-plan.md`).
@@ -765,6 +766,33 @@ function scalarTail(
 
     const sliced = sliceOp(step, rel, fresh);
     if (sliced) { rel = sliced; continue; }
+
+    // THE SCALAR TRANSFORM FAMILY — one `Project` per transform, and the assembler fuses a run of them
+    // into one SELECT (`upper(lower(p.v))`), which is what legacy's `fuseScalarSegment` hand-rolls.
+    // Membership is checked BEFORE the lowering is asked for, so an unlowerable member of the family
+    // (`reverse`, `asBool`) DECLINES rather than falling through to be misread by a later arm.
+    if (REL_TRANSFORMS.has(step.name)) {
+      // `seed.kind === 'values'` IS "the value is a compile-time literal": an `inject()` source is the
+      // only one, and it is the population legacy constant-folds. Read off the SEED rather than the
+      // current relation, because a preceding transform does not stop a value being literal-derived.
+      const tx = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values');
+      if (!tx) return null;
+      // EVERY transform drops the per-row `vtype` column, not only the casts: `toUpper()` leaves a
+      // value the stored row no longer describes and `length()` turns it into an integer outright, so
+      // carrying the column would reframe the RESULT as the INPUT's type. The framing type becomes
+      // whatever the transform knows, or `UNKNOWN` — which infers per value and is what legacy frames
+      // here. Dropping it also removes the vtype from `subjectType()`, so a following `is(P.gt(…))`
+      // stops asking for an ordering key the value no longer has one for, which is correct: the
+      // transformed value is a native SQLite value and compares directly.
+      const payload = [meta('v', 'any', true), ...outChannels.map((channel) => meta(channel.col, 'int'))];
+      rel = make.project({
+        id: fresh('tx'), input: rel, channels: outChannels, type: typeOf(...payload),
+        exprs: [['v', tx.expr], ...outChannels.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+      });
+      out = { kind: 'scalar', type: tx.type ?? UNKNOWN };
+      outCols = payload.map((column) => column.name);
+      continue;
+    }
 
     if (step.name === 'is') {
       if (args.length !== 1) return null;

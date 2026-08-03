@@ -27,6 +27,11 @@ import { read, run, runWith, seededStore } from '../support/harness.ts';
 const eligible = (col: string, text = false): string =>
   `CASE WHEN typeof(${col}) in ('integer', 'real'${text ? ", 'text'" : ''}) THEN ${col} END`;
 
+// A transform pin's semantic fact is WHICH SQLite function wraps the traverser's value — legacy names a
+// CTE column (`p.v`), RelIR inlines the projection it fused into the same SELECT, and the assertion must
+// survive both (test/CLAUDE.md: snapshots assert semantic equivalence, not byte identity).
+const wraps = (fn: string) => new RegExp(`\\b${fn}\\(`);
+
 describe('scalar-parent / projection SQL', () => {
   test('order().by(key[, dir]) folds ORDER BY into the projection select', () => {
     const asc = read('g.V().hasLabel("person").order().by("age").values("name")');
@@ -458,15 +463,20 @@ describe('scalar-parent / projection SQL', () => {
     // integer targets truncate toward zero; the converted constant is bound
     expect(read('g.inject(5.43).asNumber(GType.INT)').binds).toEqual([5]);
     expect(read("g.inject('5').asNumber(GType.BYTE)").binds).toEqual([5]);
-    // runtime value → SQL CAST + tag (no compile-time constant)
-    const f = read('g.V().values("weight").asNumber(GType.FLOAT)');
-    expect(f.shape).toEqual({ kind: 'value', type: STATIC('float') });
-    expect(f.sql).toContain('CAST(p.v AS REAL)');
-    // is(P.typeOf(X)) after a cast is compile-time known (the cast's `as` tag) → the
-    // typeOf STATIC-FOLDS to a constant instead of a runtime typeof() test.
-    const castTypeOf = read('g.V().values("weight").asNumber(GType.FLOAT).is(P.typeOf(GType.FLOAT))');
-    expect(castTypeOf.sql).toContain('CAST(p.v AS REAL) AS v, p.bulk FROM c1 p WHERE 1');
-    expect(castTypeOf.sql).not.toContain('typeof(');
+    // runtime value → SQL CAST + tag (no compile-time constant). RelIR-routed, so the CAST is asserted
+    // per spine: legacy reads a CTE column, RelIR inlines the projection it fused, and the semantic
+    // fact — a cast to REAL over the value — is what both must say.
+    for (const spine of ['legacy', 'rel'] as const) {
+      const f = read('g.V().values("weight").asNumber(GType.FLOAT)', { spine });
+      expect(f.shape).toEqual({ kind: 'value', type: STATIC('float') });
+      expect(f.sql).toMatch(/CAST\([^]*AS REAL\)/);
+      // is(P.typeOf(X)) after a cast is compile-time known (the cast's `as` tag) → the typeOf
+      // STATIC-FOLDS to a constant instead of a runtime typeof() test. `1` and `? = ?` are the two
+      // spellings of that true — RelIR has no bare boolean literal (§3.2).
+      const castTypeOf = read('g.V().values("weight").asNumber(GType.FLOAT).is(P.typeOf(GType.FLOAT))', { spine });
+      expect(castTypeOf.sql).toMatch(/WHERE \(?(1|\? = \?)\)?/);
+      expect(castTypeOf.sql).not.toContain('typeof(');
+    }
     // overflow + non-numeric-token errors raise TinkerPop's exact messages
     expect(() => compile('g.inject(32768).asNumber(GType.SHORT)', {})).toThrow('Can\'t convert number of type Integer to Short due to overflow.');
     expect(() => compile('g.inject(300).asNumber(GType.BYTE)', {})).toThrow('Can\'t convert number of type Integer to Byte due to overflow.');
@@ -573,9 +583,12 @@ describe('scalar-parent / projection SQL', () => {
     expect(() => compile("g.inject('This String is not an ISO 8601 Date').asDate()", {})).toThrow("Can't parse");
     expect(() => compile('g.inject(null).asDate()', {})).toThrow("Can't parse");
     // runtime: an ISO-text property → unixepoch()*1000; an integer/real is already millis
-    const rt = read('g.V().values("birthday").asDate()');
-    expect(rt.shape).toEqual({ kind: 'value', type: STATIC('datetime') });
-    expect(rt.sql).toContain("unixepoch(p.v) * 1000");
+    for (const spine of ['legacy', 'rel'] as const) {
+      const rt = read('g.V().values("birthday").asDate()', { spine });
+      expect(rt.shape).toEqual({ kind: 'value', type: STATIC('datetime') });
+      // ×1000 is the millis conversion; RelIR binds the factor where legacy inlines it (§3.2).
+      expect(rt.sql).toMatch(/unixepoch\([^]*\) \* (1000|\?)/);
+    }
     // bare asNumber() over a date → its epoch-millis (Long, identity); asDate composes back
     expect(read('g.V().values("birthday").asDate().asNumber().asDate()').shape).toEqual({ kind: 'value', type: STATIC('datetime') });
     // bare asNumber() as the ms-string leg feeding asDate() is allowed; standalone it
@@ -583,21 +596,42 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().values("birthday").asNumber().asDate()').shape).toEqual({ kind: 'value', type: STATIC('datetime') });
     expect(() => compile('g.V().values("weight").asNumber()', {})).toThrow('non-date runtime value');
     // an offset-less datetime literal is UTC-normalized (not host-local) so Bun ≡ DO
-    expect(read("g.inject(datetime('2023-08-02T00:00:00')).dateAdd(second, 0)").binds).toEqual([Date.parse('2023-08-02T00:00:00Z')]);
+    // `toContain`, not `toEqual`: legacy FOLDS the offset into the literal (one bind) while RelIR emits
+    // the arithmetic (literal + offset), which answers identically — the fold is an optimization a RelIR
+    // `Pass` over `Values`+`Lit` owes, not a semantic difference. What is asserted is the instant.
+    for (const spine of ['legacy', 'rel'] as const)
+      expect(read("g.inject(datetime('2023-08-02T00:00:00')).dateAdd(second, 0)", { spine }).binds)
+        .toContain(Date.parse('2023-08-02T00:00:00Z'));
   });
 
   test('dateAdd(DT.unit, n) / dateDiff(date) — integer millis arithmetic', () => {
     // dateAdd folds n * fixed-width-unit millis; bare or DT.-prefixed unit; negative n
     const base = Date.parse('2023-08-02T00:00:00Z');
-    expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(DT.hour, 2)").binds).toEqual([base + 2 * 3600000]);
-    expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(hour, -1)").binds).toEqual([base - 3600000]);
+    // Legacy folds to the resulting instant; RelIR emits base + offset. Same answer either way, so the
+    // ARITHMETIC is what is asserted per spine and the folded constant only where it is produced.
+    expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(DT.hour, 2)", { spine: 'legacy' }).binds).toEqual([base + 2 * 3600000]);
+    expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(hour, -1)", { spine: 'legacy' }).binds).toEqual([base - 3600000]);
+    for (const [gremlin, offset] of [["dateAdd(DT.hour, 2)", 2 * 3600000], ["dateAdd(hour, -1)", -3600000]] as const) {
+      const p = read(`g.inject(datetime('2023-08-02T00:00:00Z')).${gremlin}`, { spine: 'rel' });
+      expect(p.binds).toContain(base);
+      expect(p.binds).toContain(offset);
+    }
     expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(day, 11)").shape).toEqual({ kind: 'value', type: STATIC('datetime') });
     // only second/minute/hour/day are valid DT units — the grammar rejects the rest
     expect(() => compile("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(month, 1)", {})).toThrow('parse error');
     // dateDiff = self − other → signed Long; literal / constant(datetime) / constant(null)→0
-    const d = read("g.inject(datetime('2023-08-02T00:00:00Z')).dateDiff(datetime('2023-08-09T00:00:00Z'))");
+    // Legacy folds the difference to one bind; RelIR emits `base - other`. Same signed Long either way.
+    const d = read("g.inject(datetime('2023-08-02T00:00:00Z')).dateDiff(datetime('2023-08-09T00:00:00Z'))", { spine: 'legacy' });
     expect(d.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(d.binds).toEqual([-604800000]);
+    const dRel = read("g.inject(datetime('2023-08-02T00:00:00Z')).dateDiff(datetime('2023-08-09T00:00:00Z'))", { spine: 'rel' });
+    expect(dRel.shape).toEqual({ kind: 'value', type: STATIC('long') });
+    // BIND ORDER follows the rendered SQL, not the traversal: the select list renders before the FROM,
+    // so the subtrahend precedes the injected row. Asserted as a set plus the EXECUTED answer, because
+    // the answer is the contract and the order is the emitter's clause sequence.
+    expect(dRel.binds).toContain(base);
+    expect(dRel.binds).toContain(Date.parse('2023-08-09T00:00:00Z'));
+    expect(seededStore().query(dRel.sql, dRel.binds).map((r: any) => r.v)).toEqual([-604800000]);
     expect(read("g.inject(datetime('2023-08-08T00:00:00Z')).dateDiff(constant(datetime('2023-08-01T00:00:00Z')))").binds).toEqual([604800000]);
     // runtime dateDiff against a literal → v − other_ms (the epoch bound as a value)
     const rd = read('g.V().values("birthday").asNumber().asDate().dateDiff(datetime("1970-01-01T00:00Z"))');
@@ -636,33 +670,42 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('inject().<scalar transform>() maps to SQLite scalar functions', () => {
-    // concat skips nulls (concat_ws) so an all-null result is null, not '' (Gremlin semantics)
-    expect(read('g.inject("a","b").concat("c")').sql).toContain("concat_ws('', p.v, ?)");
-    expect(read('g.inject("a").length()').sql).toContain('length(p.v)');
-    expect(read('g.inject("A").toLower()').sql).toContain('lower(p.v)');
-    expect(read('g.inject("a").toUpper()').sql).toContain('upper(p.v)');
-    expect(read('g.inject(1).asString()').sql).toContain('CAST(p.v AS TEXT)');
-    expect(read('g.inject("hello").substring(1,8)').sql).toContain('substr(p.v');
-    expect(read('g.inject("that").replace("h","j")').sql).toContain('replace(p.v');
-    // Scope.local on a scalar stream is a no-op (per-element == per-list); it now fuses
-    // through the scalar row pipeline like any transform (aliased p.v).
-    expect(read('g.inject("a").length(Scope.local)').sql).toContain('length(p.v)');
-    // Adjacent transforms fuse into one expression while preserving left-to-right order.
-    expect(read('g.inject("a").concat("b").toUpper()').sql).toContain("upper(concat_ws('', p.v, ?))");
-    // trim family → SQLite trim/ltrim/rtrim over the Java-whitespace char set
-    expect(read('g.inject(" a ").trim()').sql).toContain('trim(p.v, ?)');
-    expect(read('g.inject(" a ").lTrim()').sql).toContain('ltrim(p.v, ?)');
-    expect(read('g.inject(" a ").rTrim()').sql).toContain('rtrim(p.v, ?)');
-    // reverse: string reverses chars (recursive CTE), non-string is identity
+    // The whole family is RelIR-routed over an inject source (the CAST subfamily excepted — see
+    // rel-spine.test.ts), so each function is asserted per spine on the function itself.
+    for (const spine of ['legacy', 'rel'] as const) {
+      // concat skips nulls (concat_ws) so an all-null result is null, not '' (Gremlin semantics)
+      expect(read('g.inject("a","b").concat("c")', { spine }).sql).toMatch(wraps('concat_ws'));
+      expect(read('g.inject("a").length()', { spine }).sql).toMatch(wraps('length'));
+      expect(read('g.inject("A").toLower()', { spine }).sql).toMatch(wraps('lower'));
+      expect(read('g.inject("a").toUpper()', { spine }).sql).toMatch(wraps('upper'));
+      expect(read('g.inject(1).asString()', { spine }).sql).toMatch(/CAST\([^]*AS TEXT\)/);
+      expect(read('g.inject("hello").substring(1,8)', { spine }).sql).toMatch(wraps('substr'));
+      expect(read('g.inject("that").replace("h","j")', { spine }).sql).toMatch(wraps('replace'));
+      // Scope.local on a scalar stream is a no-op (per-element == per-list) — a scalar IS a
+      // one-element list, so per-element and per-list are the same question.
+      expect(read('g.inject("a").length(Scope.local)', { spine }).sql).toMatch(wraps('length'));
+      // Adjacent transforms FUSE into one expression while preserving left-to-right order. RelIR gets
+      // that from the block assembler rather than a hand-rolled segment fold, which is the point.
+      expect(read('g.inject("a").concat("b").toUpper()', { spine }).sql).toMatch(/upper\(concat_ws\(/);
+      // trim family → SQLite trim/ltrim/rtrim over the JAVA-whitespace char set (a bound second arg)
+      expect(read('g.inject(" a ").trim()', { spine }).sql).toMatch(/\btrim\([^]*, \?\)/);
+      expect(read('g.inject(" a ").lTrim()', { spine }).sql).toMatch(/ltrim\([^]*, \?\)/);
+      expect(read('g.inject(" a ").rTrim()', { spine }).sql).toMatch(/rtrim\([^]*, \?\)/);
+    }
+    // reverse: a string reverses its chars via a RECURSIVE CTE inside an expression, which RelIR has no
+    // node for at all (`Recursive` is a relation, not a scalar subquery) — so it stays legacy's, and
+    // the decline is a §7 node-set question rather than unfinished work.
     expect(read('g.inject("ab").reverse()').sql).toContain('WITH RECURSIVE rev(');
   });
 
   test('scalar transforms also wrap an element value projection', () => {
-    expect(read("g.V().values('name').substring(2)").sql).toContain("substr(p.v");
-    expect(read("g.V().values('name').toUpper()").sql).toContain("upper(p.v)");
-    expect(read("g.V().values('name').concat('X')").sql).toContain("concat_ws('', p.v, ?)");
-    // chained; is()/order() see the transformed value
-    expect(read("g.V().values('name').toUpper().is('MARKO')").sql).toContain('upper(');
+    for (const spine of ['legacy', 'rel'] as const) {
+      expect(read("g.V().values('name').substring(2)", { spine }).sql).toMatch(wraps('substr'));
+      expect(read("g.V().values('name').toUpper()", { spine }).sql).toMatch(wraps('upper'));
+      expect(read("g.V().values('name').concat('X')", { spine }).sql).toMatch(wraps('concat_ws'));
+      // chained; is()/order() see the transformed value
+      expect(read("g.V().values('name').toUpper().is('MARKO')", { spine }).sql).toMatch(wraps('upper'));
+    }
     // transform on a non-scalar projection is rejected (no scalar stream to transform)
     expect(() => compile("g.V().valueMap().toUpper()", {})).toThrow('toUpper() cannot consume the valueMap result shape');
   });
@@ -987,14 +1030,23 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('scalar transforms lower relationally and feed later filters/reducers', () => {
-    const transformed = read('g.V().values("name").toUpper().is("MARKO")');
-    expect(transformed.sql).toContain('upper(p.v) AS v');
-    expect(transformed.sql).toContain('WHERE upper(p.v) = ?');
+    // Both spines FUSE a transform run into one SELECT, and both must place a predicate at the position
+    // it was WRITTEN: `tx().is().tx()` stays ordered even with no CTE between, because the predicate
+    // captures the expression visible where it sits. That ordering is the semantic fact; the aliases are
+    // not. Legacy fuses via `fuseScalarSegment`, RelIR via the block assembler — one per spine.
+    for (const spine of ['legacy', 'rel'] as const) {
+      const transformed = read('g.V().values("name").toUpper().is("MARKO")', { spine });
+      expect(transformed.sql).toMatch(/upper\([^]*\) AS v/);
+      expect(transformed.sql).toMatch(/WHERE \(?upper\([^]*\) = \?\)?/);
 
-    const fused = read('g.V().values("name").toLower().is(P.neq("x")).toUpper()');
-    expect(fused.sql).toContain('upper(lower(p.v)) AS v');
-    expect(fused.sql).toContain('WHERE lower(p.v) != ?');
-    expect(fused.sql).not.toContain('FROM c2 p)');
+      const fused = read('g.V().values("name").toLower().is(P.neq("x")).toUpper()', { spine });
+      // the OUTER transform wraps the inner one — left-to-right order preserved through the fusion
+      expect(fused.sql).toMatch(/upper\(lower\(/);
+      // …and the predicate sees the value as it was at ITS position: `lower`, never `upper(lower(…))`.
+      expect(fused.sql).toMatch(/WHERE \(?lower\([^]*\) != \?\)?/);
+      expect(fused.sql).not.toMatch(/WHERE \(?upper\(/);
+    }
+    expect(read('g.V().values("name").toLower().is(P.neq("x")).toUpper()', { spine: 'legacy' }).sql).not.toContain('FROM c2 p)');
 
     // A keyed/bare order() re-establishes determinism, so the following slice needs no emission
     // encounter — order()+range() fuse into one ORDER BY … LIMIT … OFFSET (demand pass resets).
@@ -1006,7 +1058,7 @@ describe('scalar-parent / projection SQL', () => {
 
     const typedSum = read('g.V().values("age").asNumber(GType.DOUBLE).sum().is(P.gt(100))');
     expect(typedSum.shape).toEqual({ kind: 'scalar' });
-    expect(typedSum.sql).toContain('CAST(p.v AS REAL) AS v');
+    expect(typedSum.sql).toMatch(/CAST\([^]*AS REAL\) AS v/);
     expect(typedSum.sql).toContain(`SUM(${eligible('s.v')} * s.bulk) AS v`);
 
     const store = seededStore();

@@ -201,6 +201,32 @@ describe('the RelIR spine', () => {
     expect(store.query(kept.sql, kept.binds).length).toBe(2);
   });
 
+  test('a cast over a LITERAL must RAISE, so RelIR declines the constant-folded transforms', () => {
+    // The one place a differential is blind by construction: these six traversals must produce an
+    // ERROR, and comparing rows against legacy cannot see a missing throw. TinkerPop requires the exact
+    // parse/overflow messages and SQL cannot raise them, so legacy folds `asNumber`/`asDate`/`asBool`
+    // at COMPILE time over an inject literal. RelIR lowered them as SQLite casts instead, which
+    // answered `1` for `'1,000'` and epoch 0 for an invalid date string — a required error turned into
+    // a plausible value, which is the worst direction the "never answer a different question" rule has.
+    //
+    // Caught by L3 (six official scenarios, 1701 → 1695), not by the census, not by the row-for-row
+    // probe, and not by the shape assertions. Promoted here so the decline is pinned by name.
+    for (const [gremlin, message] of [
+      ['g.inject(1694017709000d).asDate()', "Can't parse"],
+      ["g.inject('1,000').asNumber(GType.BIGINT)", "Can't parse string '1,000' as number."],
+      ['g.inject(300).asNumber(GType.BYTE)', "Can't convert number of type Integer to Byte due to overflow."],
+      ['g.inject(32768).asNumber(GType.SHORT)', "Can't convert number of type Integer to Short due to overflow."],
+      ["g.inject('invalid str').asDate()", "Can't parse"],
+      ['g.inject(null).asDate()', "Can't parse"],
+    ] as const) expect(() => compile(gremlin, {}, { spine: 'rel' })).toThrow(message);
+
+    // …and the decline is the CAST SUBFAMILY over a literal, not the family: a string transform of a
+    // literal has no parse to fail, so it still routes.
+    expect(compile("g.inject('a','b').toUpper()", {}, { spine: 'rel' })).toMatchObject({ spine: 'rel' });
+    // Over a RUNTIME value there is nothing to fold and the SQL cast is the answer, so it routes there.
+    expect(compile("g.V().values('age').asNumber(GType.DOUBLE)", {}, { spine: 'rel' })).toMatchObject({ spine: 'rel' });
+  });
+
   test('P.typeOf resolves through all THREE modes, and each is a different question', () => {
     // A differential is the weakest evidence here, because a `typeOf` that resolved through the WRONG
     // mode still returns rows — and on a fixture where every value's storage class happens to match
