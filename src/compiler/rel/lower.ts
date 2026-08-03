@@ -5,6 +5,7 @@ import { name as nameBindings } from '../../rel/passes/name.ts';
 import type { Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { relId, type ColMeta, type RelType, type SqlType } from '../../rel/types.ts';
+import { isLocalScope, sliceOf } from '../ir/step.ts';
 import { PER_ROW, STATIC, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs, isNested } from '../../gremlin/frontend.ts';
@@ -75,7 +76,20 @@ const EDGE_COLS = [meta('id', 'int'), meta('uid', 'text', true), meta('src', 'in
  *  `SUM(bulk)` and a movement collapse merges convergent walks on. One channel, one column, and the
  *  role vocabulary is the neutral core's — a RelIR node cannot know what a sack is. */
 const BULK: Channels = [{ col: 'bulk', role: 'bulk' }];
-const SOURCE_COLS = ['id', 'bulk'] as const;
+
+/**
+ * The EMISSION-ORDER channel, and the second carried role this route models.
+ *
+ * A chain that slices has an answer depending on which rows come first, so `analyzeChain` marks it
+ * `demandsEncounter` and the source seeds a monotone column the whole chain threads. Its position
+ * in the list is not free: `ROLE_ORDER` (src/channels.ts) is an INVARIANT of a `Channels` list, and
+ * the framing layer's `layoutCols` sorts the same way — bulk before encounter — so a producer that
+ * emitted them the other way round would desync the declared schema from the physical one.
+ */
+const ORDERED: Channels = [{ col: 'bulk', role: 'bulk' }, { col: 'encounter', role: 'encounter' }];
+const elementChannels = (ordered: boolean): Channels => (ordered ? ORDERED : BULK);
+const elementCols = (ordered: boolean): readonly ColMeta[] =>
+  [meta('id', 'int'), meta('bulk', 'int'), ...(ordered ? [meta('encounter', 'int')] : [])];
 
 /** Relation ids, minted PER LOWERING. A module-global counter would make the emitted SQL depend on
  *  how many traversals this process had already compiled — two compiles of one query producing two
@@ -388,10 +402,34 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
  * into the FRAMING projection's `ORDER BY` (`… FROM nodes n JOIN c0 p ON n.id=p.id ORDER BY n.id`),
  * which is Phase 4.2's block assembler and not this route's to take.
  */
-function rowOp(step: IRStep, input: Rel, fresh: Minter): Rel | null {
-  if (step.modulators?.length || step.optionArms || (step.args ?? []).length) return null;
-  if (step.name === 'identity' || step.name === 'barrier') return input;
-  if (step.name !== 'dedup') return null;
+function rowOp(step: IRStep, input: Rel, ordered: boolean, fresh: Minter): Rel | null {
+  if (step.modulators?.length || step.optionArms) return null;
+  if (step.name === 'identity' || step.name === 'barrier') return (step.args ?? []).length ? null : input;
+
+  if (step.name === 'limit' || step.name === 'skip' || step.name === 'range') {
+    // A slice is only a WINDOW if the relation has an order to take it from, and `demandsEncounter`
+    // is what guarantees one is threaded — so the caller's gate is this arm's precondition, not a
+    // belt-and-braces check.
+    if (!ordered || isLocalScope(step)) return null;
+    const slice = sliceOf(step);
+    const sorted = make.sort({
+      id: fresh('so'), input, channels: input.channels, type: input.type,
+      terms: [{ expr: col(input.id, 'encounter'), dir: 'asc' }],
+    });
+    return make.limit({
+      id: fresh('li'), input: sorted, channels: input.channels, type: input.type,
+      ...(slice.limit === null ? {} : { count: lit(slice.limit, 'int') }),
+      ...(slice.offset ? { offset: lit(slice.offset, 'int') } : {}),
+    });
+  }
+
+  if (step.name !== 'dedup' || (step.args ?? []).length) return null;
+  // `dedup()` RESETS the multiplicity: the survivor stands for itself, not for the sum of the
+  // duplicates it replaced. Under an emission order it stops being a `Distinct` at all — the
+  // survivor must keep the FIRST occurrence's position, which is `MIN(encounter)` under a
+  // `GROUP BY id`, and that is an `Aggregate` whose channel obligation is neither the barrier
+  // contract nor `isReEncoding`. Declined until that question is answered rather than guessed at.
+  if (ordered) return null;
   const projected = make.project({
     id: fresh('dd'), input, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
     exprs: [['id', col(input.id, 'id')], ['bulk', lit(1, 'int')]],
@@ -429,7 +467,7 @@ const coalesce = (rel: Rel, fresh: Minter): Rel =>
  * that both arms change the STREAM KIND: everything before produces elements and frames as the
  * element payload, and these produce one scalar per row and frame through the value projection.
  */
-function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): Omit<RelLowering, 'plan'> & { readonly rel: Rel } | null {
+function terminal(step: IRStep, input: Rel, elem: Elem, ordered: boolean, fresh: Minter): Omit<RelLowering, 'plan'> & { readonly rel: Rel } | null {
   if (step.modulators?.length || step.optionArms) return null;
   const args = step.args ?? [];
 
@@ -463,8 +501,8 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): Omit<Rel
     // A JOIN, not an EXISTS: `values()` emits one traverser PER matching property, so multiplying
     // the row is the answer rather than the bug it would be in a filter.
     const joined = make.join({
-      id: fresh('j'), left: input, right: props, join: 'inner', channels: BULK,
-      type: typeOf(meta('id', 'int'), meta('bulk', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+      id: fresh('j'), left: input, right: props, join: 'inner', channels: elementChannels(ordered),
+      type: typeOf(...elementCols(ordered), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
       // The key set is bounded by the QUERY TEXT, never by row count, so an `InList` is right here
       // and a JSON bind is not (root CLAUDE.md's rule is about data-sized sets).
       on: and(eq(col(props.id, owner), col(input.id, 'id')), keys.length
@@ -473,13 +511,15 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): Omit<Rel
     });
     return {
       rel: make.project({
-        id: fresh('sv'), input: joined, channels: BULK,
-        type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), meta('bulk', 'int')),
-        exprs: [['v', storedValue(joined.id)], ['vtype', col(joined.id, 'vtype')], ['bulk', col(joined.id, 'bulk')]],
+        id: fresh('sv'), input: joined, channels: elementChannels(ordered),
+        type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...elementCols(ordered).slice(1)),
+        exprs: [['v', storedValue(joined.id)], ['vtype', col(joined.id, 'vtype')], ['bulk', col(joined.id, 'bulk')],
+          ...(ordered ? [['encounter', col(joined.id, 'encounter')] as const] : [])],
       }),
       // The value's Gremlin type is PER ROW, off the stored `vtype` column — one compile-time tag
       // would be a lie for an untyped property key.
-      framing: { kind: 'scalar', type: PER_ROW('vtype') }, cols: ['v', 'vtype', 'bulk'], channels: BULK,
+      framing: { kind: 'scalar', type: PER_ROW('vtype') },
+      cols: ['v', 'vtype', ...elementCols(ordered).slice(1).map((c) => c.name)], channels: elementChannels(ordered),
     };
   }
 
@@ -506,13 +546,14 @@ export interface Lowering {
 export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLowering | null {
   const { params = {}, collapse = true, correlatedChildren = true } = opts;
   const ctx: FilterCtx = { params, correlatedChildren };
-  // FAIL CLOSED on emission order. A chain that DEMANDS the encounter channel — any slice, and
-  // `order()` where it composes — has an answer that depends on which rows come first, and this
-  // route carries no role but `bulk`. Silently omitting the channel would not defer, it would pick
-  // a different window from the same multiset: right arity, plausible rows, and a census that
-  // cannot tell (`ord` is telemetry, `ms` is the gate). Measured at zero covered traversals today,
-  // so the gate costs nothing and is here to keep it that way as the vocabulary grows.
-  if (analyzeChain(steps as IRStep[]).demandsEncounter) return null;
+  // EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step.
+  // `analyzeChain` is the same authority the legacy source seeds from, so the two cannot disagree
+  // about which chains have an order to take a window from. A chain that demands one and reaches a
+  // step this route cannot thread it through declines WHOLE: silently omitting the channel would
+  // not defer, it would pick a different window from the same multiset — right arity, plausible
+  // rows, and a census that structurally cannot see it (`ord` is telemetry, `ms` is the gate).
+  const ordered = analyzeChain(steps as IRStep[]).demandsEncounter;
+  const channels = elementChannels(ordered);
   const first = steps[0];
   if (!first) return null;
   if (first.name !== 'V' && first.name !== 'E') return null;
@@ -538,9 +579,13 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   }
 
   const source = pred ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred }) : seeded.scan;
+  // The seed of the emission order is the ROWID, exactly as the legacy source seeds it: a scan's
+  // natural order is the only order a bare source has, and naming it makes every later slice ask
+  // the same question of the same column instead of of whatever SQLite happened to produce.
   let rel: Rel = make.project({
-    id: fresh('c'), input: source, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
-    exprs: [['id', col(source.id, 'id')], ['bulk', lit(1, 'int')]],
+    id: fresh('c'), input: source, channels, type: typeOf(...elementCols(ordered)),
+    exprs: [['id', col(source.id, 'id')], ['bulk', lit(1, 'int')],
+      ...(ordered ? [['encounter', col(source.id, 'id')] as const] : [])],
   });
 
   // PHASE 2 — movement and post-movement filtering, over the id-relation. A filter here reads only
@@ -548,7 +593,11 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   // `(id, bulk)` and an edge-label test becomes the membership form.
   for (; at < steps.length; at++) {
     const step = steps[at];
-    const moved = movement(step, { rel }, elem, fresh);
+    // A hop RE-MINTS the emission order (`ROW_NUMBER() OVER (ORDER BY encounter, id)`) because the
+    // join fans out and the incoming positions no longer number the outgoing rows. That is a
+    // `Window` plus a renaming projection, and it is the next increment; until then a chain that
+    // both moves and slices declines whole rather than threading a stale order.
+    const moved: { rel: Rel; elem: Elem } | null = ordered ? null : movement(step, { rel }, elem, fresh);
     if (moved) {
       rel = collapse ? coalesce(moved.rel, fresh) : moved.rel;
       elem = moved.elem;
@@ -556,15 +605,15 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
     }
     const clause = sourceFilter(step, { id: col(rel.id, 'id'), rel }, elem, fresh, ctx);
     if (clause) { rel = make.filter({ id: fresh('f'), input: rel, channels: BULK, type: rel.type, pred: clause }); continue; }
-    const row = rowOp(step, rel, fresh);
+    const row = rowOp(step, rel, ordered, fresh);
     if (!row) break;
     rel = row;
   }
 
   if (at === steps.length)
-    return { plan: nameBindings(rel), framing: { kind: 'elements', elem }, cols: [...SOURCE_COLS], channels: BULK };
+    return { plan: nameBindings(rel), framing: { kind: 'elements', elem }, cols: elementCols(ordered).map((c) => c.name), channels };
 
-  const retyped = terminal(steps[at], rel, elem, fresh);
+  const retyped = terminal(steps[at], rel, elem, ordered, fresh);
   if (!retyped) return null;
   const { rel: retypedRel, ...rest } = retyped;
 

@@ -64,9 +64,20 @@ describe('scalar-parent / projection SQL', () => {
     // whatever subset SQLite scanned first, which is a WRONG SUBSET rather than a reorder and
     // changed answer under `mise run test:perturbed`. The source seeds `encounter = id`, so the
     // window is now the id order the reference iterates in — and it is a rowid read, not a sort.
-    expect(read('g.V().range(1,3)').sql).toContain('SELECT p.id, p.bulk, p.encounter FROM c0 p ORDER BY p.encounter LIMIT 2 OFFSET 1');
-    expect(read('g.V().skip(2)').sql).toContain('SELECT p.id, p.bulk, p.encounter FROM c0 p ORDER BY p.encounter LIMIT -1 OFFSET 2');
-    expect(read('g.V().range(1,3)').sql).toContain('SELECT id, 1 AS bulk, id AS encounter FROM nodes');
+    expect(read('g.V().range(1,3)', { spine: 'legacy' }).sql).toContain('SELECT p.id, p.bulk, p.encounter FROM c0 p ORDER BY p.encounter LIMIT 2 OFFSET 1');
+    expect(read('g.V().skip(2)', { spine: 'legacy' }).sql).toContain('SELECT p.id, p.bulk, p.encounter FROM c0 p ORDER BY p.encounter LIMIT -1 OFFSET 2');
+    expect(read('g.V().range(1,3)', { spine: 'legacy' }).sql).toContain('SELECT id, 1 AS bulk, id AS encounter FROM nodes');
+    // Both spines seed the encounter from the ROWID and take the window from it — that is the
+    // property, and it is what makes the subset the reference's rather than SQLite's scan order.
+    // The ORDER BY's SPELLING differs: the RelIR assembler fuses the sort into the source block, so
+    // it orders by the expression that COMPUTES the encounter (`rn.id`) rather than by the column
+    // name a separate CTE would have given it. Same order, one derived table fewer.
+    for (const spine of ['legacy', 'rel'] as const) {
+      const ranged = read('g.V().range(1,3)', { spine }).sql;
+      expect(ranged).toMatch(/AS encounter FROM nodes/);
+      expect(ranged).toMatch(/ORDER BY [\w.]+(?: ASC)?[^)]*LIMIT[^)]*OFFSET/i);
+      expect(read('g.V().skip(2)', { spine }).sql).toMatch(/ORDER BY [\w.]+(?: ASC)?[^)]*OFFSET/i);
+    }
   });
 
   test('illegal range is rejected', () => {
@@ -618,9 +629,14 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('limit before count wraps the counted id-relation', () => {
-    const sql = read('g.V().limit(2).count()').sql;
-    expect(sql).toContain('c1(id, bulk, encounter) as (SELECT p.id, p.bulk, p.encounter FROM c0 p ORDER BY p.encounter LIMIT 2)');
-    expect(sql).toContain('SELECT COALESCE(SUM(s.bulk), 0) AS v FROM c1 s');
+    expect(read('g.V().limit(2).count()', { spine: 'legacy' }).sql)
+      .toContain('c1(id, bulk, encounter) as (SELECT p.id, p.bulk, p.encounter FROM c0 p ORDER BY p.encounter LIMIT 2)');
+    // The property both spines owe: the count reduces the SLICED relation, so the window is taken
+    // before the SUM rather than after it.
+    for (const spine of ['legacy', 'rel'] as const) {
+      expect(read('g.V().limit(2).count()', { spine }).sql).toMatch(/ORDER BY [\w.]+(?: ASC)? LIMIT (\?|2)/i);
+      expect(read('g.V().limit(2).count()', { spine }).sql).toMatch(/COALESCE\(sum\(/i);
+    }
   });
 
   test('inject seeds a VALUES stream', () => {

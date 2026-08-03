@@ -2,6 +2,7 @@ import { derived } from '../../sql/kernel/q.ts';
 import type { Compiled } from '../../sql/kernel/render.ts';
 import { emitRelational } from '../../rel/emit.ts';
 import type { TraverserLayout } from '../steps/context/context.ts';
+import type { Channels, ChannelRole } from '../../channels.ts';
 import type { Stream } from '../steps/context/stream.ts';
 import { materializeRootStream } from '../steps/tail/materialize.ts';
 import type { Engine } from '../engine/deps.ts';
@@ -33,6 +34,42 @@ import { lowerToRel } from './lower.ts';
  * What it is NOT is an opaque escape node: nothing legacy enters a `Rel`. The traffic is one-way —
  * a finished RelIR relation is consumed by framing — which is the direction §10·4 permits.
  */
+/**
+ * §2's VOCABULARY BOUNDARY, in one place: the neutral channel core a RelIR node speaks, translated
+ * into the `TraverserLayout` struct the framing layer reads.
+ *
+ * A `Record<ChannelRole, …>` rather than a chain of `if`s, and for the reason the two policy tables
+ * in `src/channels.ts` are: **a role added to the core fails the build here until its framing
+ * translation is declared.** The alternative — widening an ad-hoc check each time — is how a
+ * carried field gets dropped at a seam, which is 33% of this repo's diagnosed defects. A role whose
+ * entry is `null` is one RelIR may carry and this seam cannot yet express; it THROWS rather than
+ * silently omitting the column, and that throw is a bug in whichever lowering produced it, not a
+ * deferral, so it must not be caught.
+ */
+const LAYOUT_FIELD: Readonly<Record<ChannelRole, keyof TraverserLayout | null>> = {
+  bulk: 'bulk',
+  encounter: 'encounter',
+  sack: 'sack',
+  fromV: 'fromV',
+  // Not a single column: an alias is a NAME→column map, a path is a position list, and an
+  // origin/branch-order is a stack. Each needs a shape this translation does not have, so each is
+  // declared absent rather than left to be forgotten.
+  alias: null,
+  path: null,
+  origin: null,
+  branchOrder: null,
+};
+
+function layoutOf(channels: Channels): TraverserLayout {
+  const layout: TraverserLayout = { aliases: new Map(), origins: [], branchOrders: [] };
+  for (const channel of channels) {
+    const field = LAYOUT_FIELD[channel.role];
+    if (!field) throw new Error(`RelIR spine: no framing translation for the '${channel.role}' channel role`);
+    Object.assign(layout, { [field]: channel.col });
+  }
+  return layout;
+}
+
 export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<string, any>): Compiled | null {
   // TWO fast-path switches reach the lowering, and for the same reason: each selects between two
   // lowering STRATEGIES that the algebra can state, rather than between two physical access paths
@@ -51,17 +88,7 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
   // `rir` deliberately does not collide with the framing aliases (`n`/`e`/`p`/`s`/`v`/`g`/`j`/`l`)
   // or with the `Query`'s minted `c0…cN`: the RelIR relation sits beside them, not among them.
   const rel = derived(emitRelational(lowered.plan), lowered.cols, 'rir');
-  // The framing layer's own carried-state vocabulary. RelIR proved which columns are channels and
-  // what role each plays (`lowered.channels`); translating that into the struct the framing layer
-  // reads is this seam's job and no RelIR node's — §2's vocabulary boundary, in one place. The
-  // roles a lowering can currently produce are `bulk` or nothing, so the translation is that
-  // narrow; it widens with the roles, and a role RelIR carries that this cannot express must fail
-  // here rather than be dropped.
-  const carried = lowered.channels.map((channel) => channel.role);
-  if (carried.some((role) => role !== 'bulk')) throw new Error(`RelIR spine: no framing translation for channel role(s) ${[...new Set(carried)].join(', ')}`);
-  const traverserLayout: TraverserLayout = {
-    aliases: new Map(), origins: [], branchOrders: [], ...(carried.includes('bulk') ? { bulk: 'bulk' } : {}),
-  };
+  const traverserLayout = layoutOf(lowered.channels);
   // TOTAL over the framing union: a stream kind the lowering learns to produce is a compile error
   // here until this seam knows how to frame it, which is the same discipline §3.5's obligation
   // table applies inside the algebra.
