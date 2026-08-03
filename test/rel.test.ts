@@ -73,7 +73,7 @@ describe('RelIR', () => {
       input: scan, channels, type: { cols: [{ name: 'n', type: 'int', nullable: false }] },
       groupBy: [], aggs: [['n', { kind: 'agg', fn: 'count', args: [] }]],
     });
-    expect(emitQuery(planOf(aggregate)).sql).toContain('count()');
+    expect(emitQuery(planOf(aggregate)).sql).toContain('count(*)');
     const invalid = projectRel({ id: relId('p'), input: scan, channels, type: { cols: [{ name: 'n', type: 'int', nullable: false }] }, exprs: [['n', { kind: 'agg', fn: 'count', args: [] }]] });
     expect(() => check(invalid)).toThrow('Agg is legal only in Aggregate.aggs');
   });

@@ -34,8 +34,13 @@ const DECLARED_TYPE_REQUIRED = new Set<CanonicalType>([
  *  Derive the framing tag from a UNIFORM declared arg type for exactly those types, translating
  *  the canonical name into the framing vocabulary. Mixed types keep per-value inference
  *  (undefined): inject has no per-row vtype column to carry a heterogeneous type on, and the
- *  client hands over plain JS values, so per-value inference is the honest floor there. */
-function bareInjectTag(steps: IRStep[], count: number): ValueType | undefined {
+ *  client hands over plain JS values, so per-value inference is the honest floor there.
+ *
+ *  EXPORTED for the RelIR lowering, which must reach the SAME tag from the same `argTypes` — this
+ *  is the one part of `inject` that is not derivable from the values, so a second implementation
+ *  would be a second chance to get `char`/`uuid`/`datetime` wrong. Measured: it already was, and
+ *  the census caught four traversals reframing before the port used this. */
+export function bareInjectTag(steps: IRStep[], count: number): ValueType | undefined {
   const argTypes = steps[0].argTypes ?? [];
   if (!count) return undefined;
   const names = Array.from({ length: count }, (_, i) => flatType(argTypes[i]));

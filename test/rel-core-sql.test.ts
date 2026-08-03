@@ -53,7 +53,7 @@ describe('RelIR relational-core SQL', () => {
       'SELECT v.column1 AS id, v.column2 AS name FROM (VALUES (?, ?)) v',
       'SELECT n.id AS id, n.name AS name FROM nodes n',
       'SELECT n.id AS id, n.name AS name FROM nodes n WHERE (n.name = ?)',
-      'SELECT count() AS n FROM nodes n',
+      'SELECT count(*) AS n FROM nodes n',
       'SELECT n.id AS id, n.name AS name FROM nodes n ORDER BY n.name ASC',
       'SELECT n.id AS id, n.name AS name FROM nodes n LIMIT ?',
       'SELECT DISTINCT n.id AS id, n.name AS name FROM nodes n',
@@ -101,7 +101,7 @@ describe('RelIR relational-core SQL', () => {
     });
     const popular = filter({ id: relId('popular'), input: byName, channels, type: byName.type, pred: { kind: 'binary', op: '>', left: col(byName.id, 'n'), right: lit(1, 'int') } });
     const emitted = emitQuery(planOf(popular));
-    expect(emitted.sql).toBe('SELECT n.name AS name, count() AS n FROM nodes n GROUP BY n.name HAVING (count() > ?)');
+    expect(emitted.sql).toBe('SELECT n.name AS name, count(*) AS n FROM nodes n GROUP BY n.name HAVING (count(*) > ?)');
 
     const db = new Database(':memory:');
     db.run('CREATE TABLE nodes (id INTEGER, name TEXT)');

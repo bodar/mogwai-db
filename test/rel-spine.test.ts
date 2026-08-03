@@ -54,6 +54,16 @@ const COVERED = [
   // `values()` is `element.properties(keys)`: no keys means EVERY key, several mean membership.
   // Both spines answered these WRONG until 2026-08-02 — see the semantics test below.
   "g.V().values('name','age')", "g.V().values('name','age',null)", 'g.V().values()', 'g.E().values()',
+  // `inject()` — a SCALAR source, and the largest single blocker measured over the corpus: 387 of
+  // the 2,298 traversals begin with one. Its relation has NO channels: an injected row is one
+  // traverser by construction, so there is no multiplicity to carry and nothing has established an
+  // emission order. `count()` reads that off the CHANNEL rather than the step name, which is why it
+  // becomes `COUNT(*)` here and `SUM(bulk)` over an element source.
+  'g.inject(1)', 'g.inject(1,2,3)', "g.inject('a','b')", 'g.inject(null)', 'g.inject(true)',
+  'g.inject(1).count()', 'g.inject(1,2,3).count()', 'g.inject(1,2).is(P.gt(1))',
+  'g.inject(1,2).limit(1)', 'g.inject(1,2).skip(1)', 'g.inject(1,2,2).dedup()',
+  // The scalar tail is now ONE fold whichever source fed it, so these reach the same arms.
+  "g.V().values('name').dedup()", 'g.V().count().count()', "g.V().out().values('name').dedup()",
 ];
 
 /**
@@ -65,7 +75,10 @@ const DECLINED = [
   "g.V().as('a').out().select('a')",  // an alias: carried state not modelled
   'g.V().out().order()',              // the row-algebraic class, not learned yet
   'g.V().count().fold()',             // a step after the shape change that is NOT in its vocabulary
-  'g.inject(1)',                      // a source that is not V()/E()
+  'g.inject([1,2])',                  // a COLLECTION argument is a list traverser, a different arm
+  'g.inject()',                       // the EMPTY relation, which `Values` refuses to express (§3.3)
+  "g.inject('a').inject('b')",        // a second inject is a UNION with the first, not a source
+  'g.inject(1,2).order()',            // scalar order() is a Sort — the next increment
   'g.withSack(0).V()',                // a carried sack the source seed would have to declare
   'g.withSideEffect("a",1).V()',      // a side effect
   'g.addV("person")',                 // a write

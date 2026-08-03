@@ -6,13 +6,14 @@ import type { Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { relId, type ColMeta, type RelType, type SqlType } from '../../rel/types.ts';
 import { isLocalScope, sliceOf } from '../ir/step.ts';
-import { PER_ROW, STATIC, type ScalarType } from '../../sql/kernel/render.ts';
+import { PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs, isNested } from '../../gremlin/frontend.ts';
 import { childSteps } from '../steps/tail/child-shape.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain } from '../ir/analyze.ts';
 import { containsTextSearch, predicateExpr, storedCompare } from './predicate.ts';
+import { bareInjectTag } from '../steps/write/inject.ts';
 
 /**
  * THE SECOND LOWERING — `Step[] -> RelIR` (§10·4 of `docs/2026-08-01-relir-build-plan.md`).
@@ -528,6 +529,22 @@ const coalesce = (rel: Rel, fresh: Minter): Rel =>
   });
 
 /**
+ * `count()` is the RLE TRAVERSER total, and which expression that is depends on whether the relation
+ * carries a multiplicity at all.
+ *
+ * With a `bulk` channel it is `SUM(bulk)` — a collapse merged convergent walks into (row, N) pairs,
+ * so counting rows would count the collapse away. Without one (an `inject()` source has no
+ * multiplicity: each row is one traverser by construction) it is `COUNT(*)`, which is what legacy
+ * emits there. Reading the CHANNEL rather than the step name is what keeps the two in step.
+ */
+function countExpr(input: Rel): Expr {
+  const bulk = input.channels.find((channel) => channel.role === 'bulk');
+  return bulk
+    ? { kind: 'call', fn: 'COALESCE', args: [{ kind: 'agg', fn: 'sum', args: [col(input.id, bulk.col)] }, lit(0, 'int')] }
+    : { kind: 'agg', fn: 'count', args: [] };
+}
+
+/**
  * A TERMINAL that retypes the element relation into another shape — the SHAPE BOUNDARY, and the
  * substrate every scalar-valued step then rides on.
  *
@@ -545,7 +562,7 @@ function terminal(step: IRStep, input: Rel, elem: Elem, ordered: boolean, fresh:
   // in step when movement lands.
   if (step.name === 'count') {
     if (args.length) return null;
-    const total: Expr = { kind: 'call', fn: 'COALESCE', args: [{ kind: 'agg', fn: 'sum', args: [col(input.id, 'bulk')] }, lit(0, 'int')] };
+    const total = countExpr(input);
     // A reducing aggregate is a BARRIER: no channel survives it (§3.5), which is exactly what
     // `barrierChannels` says and why the channels list is empty rather than trimmed by hand.
     return {
@@ -595,6 +612,148 @@ function terminal(step: IRStep, input: Rel, elem: Elem, ordered: boolean, fresh:
 }
 
 /**
+ * THE SCALAR TAIL — the vocabulary above a one-value-per-row relation, wherever that relation came
+ * from. `values()`/`count()` retyping an element stream and `inject()` seeding one both land here,
+ * which is why it is a function and not two inline folds.
+ *
+ * `is(P)` uses the SAME predicate module the source filters use, over the scalar's own `v`. A slice
+ * uses the same `sliceOp` as the element fold. `dedup()` is `Distinct` over the whole row — which
+ * for a scalar IS the value. `count()` reduces to a long, reading the multiplicity off the CHANNEL
+ * rather than assuming one exists.
+ */
+function scalarTail(
+  seed: Rel, framing: RelFraming, cols: readonly string[], channels: Channels,
+  steps: readonly IRStep[], from: number, fresh: Minter,
+): (Omit<RelLowering, 'plan'> & { readonly rel: Rel }) | null {
+  let rel = seed;
+  let out: RelFraming = framing;
+  let outCols = cols;
+  let outChannels = channels;
+  // A per-row `vtype` is in scope only where the value came from a stored property; a `count` is a
+  // compile-time long and an injected value carries no stored type. Same distinction `predicateSql`
+  // draws as `typeCtx.kind === 'perRow'`.
+  const compare = () => (outCols.includes('vtype') ? storedCompare(rel.id) : undefined);
+
+  // A BOUNDARY before a run of filters, and it is not cosmetic. Fusing a `Filter` into its input's
+  // block means the input's outputs are spelled as the EXPRESSIONS that compute them (§5) — SQL has
+  // no other option, since a `WHERE` cannot name a select alias. So each `is` re-inlines the whole
+  // projection, and with the vtype-aware ordering CASE in play that is ~20 binds apiece: measured
+  // 25 / 45 / 65 for one, two and three range predicates against legacy's 2 / 3 / 4. Four would
+  // exceed the DO cap and fail closed where legacy answers — a support regression, not a wall worth
+  // shipping. `Materialize` is the declared remedy (§3.3, "a boundary hint … where the planner needs
+  // a fence") and lands the same CTE-then-filter shape legacy emits.
+  if (steps[from]?.name === 'is' && seed.kind !== 'values')
+    rel = make.materialize({ id: fresh('m'), input: rel, channels: outChannels, type: rel.type });
+
+  for (let at = from; at < steps.length; at++) {
+    const step = steps[at];
+    const args = step.args ?? [];
+    if (step.modulators?.length || step.optionArms) return null;
+
+    if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
+
+    const sliced = sliceOp(step, rel, fresh);
+    if (sliced) { rel = sliced; continue; }
+
+    if (step.name === 'is') {
+      if (args.length !== 1) return null;
+      const pred = predicateExpr(col(rel.id, 'v'), args[0], compare());
+      if (!pred) return null;
+      rel = make.filter({ id: fresh('f'), input: rel, channels: outChannels, type: rel.type, pred });
+      continue;
+    }
+
+    if (step.name === 'dedup') {
+      // `Distinct` is WHOLE-ROW and only whole row (§3.3), so what the row IS decides the answer —
+      // and a channel must not be in it. Two reasons, both load-bearing:
+      //
+      //  - a dedup must not DISTINGUISH rows by their multiplicity. Keeping `bulk` in the key means
+      //    the same value at bulk 1 and bulk 3 survives twice, which is a wrong answer the moment a
+      //    collapse upstream makes bulk anything but 1 — invisible on a fixture where it never is.
+      //  - the survivor STANDS FOR ITSELF, not for the sum of the duplicates it replaced, so the
+      //    multiplicity is dropped rather than carried: a following `count()` then reads
+      //    `COUNT(*)`, which is what legacy emits and what the traversers actually number.
+      //
+      // The emission order goes with it for the same reason — a survivor has no one position — and
+      // that matches legacy, whose scalar dedup projects the payload alone.
+      if (args.length || isLocalScope(step)) return null;
+      const payload = rel.type.cols.filter((column) => !outChannels.some((channel) => channel.col === column.name));
+      if (!payload.length) return null;
+      const projected = make.project({
+        id: fresh('dp'), input: rel, channels: [], type: typeOf(...payload),
+        exprs: payload.map((column) => [column.name, col(rel.id, column.name)] as const),
+      });
+      rel = make.distinct({ id: fresh('d'), input: projected, channels: [], type: projected.type });
+      outCols = payload.map((column) => column.name);
+      outChannels = [];
+      continue;
+    }
+
+    if (step.name === 'count') {
+      if (args.length) return null;
+      rel = make.aggregate({
+        id: fresh('agg'), input: rel, channels: [], type: typeOf(meta('v', 'int')),
+        groupBy: [], aggs: [['v', countExpr(rel)]],
+      });
+      out = { kind: 'scalar', type: STATIC('long'), result: 'count' };
+      outCols = ['v'];
+      outChannels = [];
+      continue;
+    }
+
+    return null;
+  }
+  return { rel, framing: out, cols: outCols, channels: outChannels };
+}
+
+/**
+ * `g.inject(v…)` — a SCALAR source, and the largest single blocker measured over the corpus: 387 of
+ * the 2,298 traversals begin with one, 17% of the whole set.
+ *
+ * `Values` is the node, and it is the one construct measured emitting SQL's `VALUES` (§3.3). The
+ * relation is one column and NO channels — an injected row is one traverser by construction, so
+ * there is no multiplicity to carry and nothing has established an emission order.
+ *
+ * A UNIFORM DECLARED TYPE is not derivable from the values and must not be re-derived: a `char`, a
+ * `uuid`, a `datetime` and a long past 2^53 all arrive as ordinary JS strings or numbers, so framing
+ * by inference reframes them as the wrong wire type. `bareInjectTag` is the one authority for that
+ * and this calls it rather than reimplementing it. Measured: before it did, the census caught four
+ * corpus traversals (`inject("a"c)`, `inject(UUID(…))` and friends) changing their answer — right
+ * arity, plausible rows, wrong GraphBinary type.
+ *
+ * Two forms decline, each for a reason rather than a blanket. A COLLECTION argument
+ * (`inject([1,2])`) is a LIST traverser, a different framing arm and a JSONB payload rather than a
+ * scalar column. `inject()` with no arguments is the EMPTY relation, which legacy spells
+ * `SELECT NULL AS v WHERE 0` and `Values` cannot express at all — §3.3 records why it refuses to
+ * (`Values([])` rendered as invalid SQL that only failed at the database), and the algebra's answer
+ * is a `Filter(false)` over something, which there is nothing here to be over.
+ */
+function injectSource(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFraming } | null {
+  if (step.modulators?.length || step.optionArms) return null;
+  const args = step.args ?? [];
+  if (!args.length) return null;
+  const rows = args.map((arg) => (arg === null ? lit(null, 'any') : operandLit(arg)));
+  if (rows.some((row) => !row)) return null;
+  return {
+    rel: make.values({
+      id: fresh('inj'), rows: (rows as Expr[]).map((row) => [row]), channels: [],
+      type: typeOf(meta('v', 'any', true)),
+    }),
+    // A uniform declared type where there is one; per-value inference otherwise, which is what
+    // `UNKNOWN` means and is the honest floor for a heterogeneous inject (there is no per-row vtype
+    // column to carry a mixed type on).
+    framing: { kind: 'scalar', type: (() => { const tag = bareInjectTag([step], args.length); return tag ? STATIC(tag) : UNKNOWN; })() },
+  };
+}
+
+/** A literal an injected row can hold. Anything else — a collection, a map, a nested traversal —
+ *  is a different traverser shape and declines. */
+const operandLit = (arg: unknown): Expr | null =>
+  typeof arg === 'string' ? lit(arg, 'text')
+    : typeof arg === 'number' ? lit(arg, 'real')
+      : typeof arg === 'boolean' ? lit(arg, 'int') : null;
+
+/**
  * Lower a whole rooted chain, or decline.
  *
  * Coverage today is the element SOURCE plus a run of source-scope filters. The declines are the
@@ -633,12 +792,21 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   const collapsing = collapse && !ordered;
   const first = steps[0];
   if (!first) return null;
+  const fresh = minter();
+
+  if (first.name === 'inject') {
+    const injected = injectSource(first, fresh);
+    if (!injected) return null;
+    const tail = scalarTail(injected.rel, injected.framing, ['v'], [], steps, 1, fresh);
+    if (!tail) return null;
+    const { rel: injRel, ...injRest } = tail;
+    return { plan: nameBindings(injRel), ...injRest };
+  }
+
   if (first.name !== 'V' && first.name !== 'E') return null;
   // A modulator or an option arm on the source is not a source argument; decline rather than
   // silently ignore it.
   if (first.modulators?.length || first.optionArms) return null;
-
-  const fresh = minter();
   const seeded = elementScan(first, fresh);
   if (!seeded) return null;
 
@@ -690,39 +858,8 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   if (!retyped) return null;
   const { rel: retypedRel, ...rest } = retyped;
 
-  // Past the shape change the vocabulary is the NEW shape's, and `is(P)` is the whole of it here.
-  // It is the same predicate module the source filters use, over the scalar's own `v` — which is
-  // the point of having built that module rather than a `has`-shaped helper.
-  const vtyped = rest.cols.includes('vtype');
-  // A BOUNDARY before the filters, and it is not cosmetic. Fusing a `Filter` into its input's
-  // block means the input's outputs are spelled as the EXPRESSIONS that compute them (§5) — SQL
-  // has no other option, since a `WHERE` cannot name a select alias. So each `is` re-inlines the
-  // whole projection, and with the vtype-aware ordering CASE in play that is ~20 binds apiece:
-  // measured 25 / 45 / 65 for one, two and three range predicates, against legacy's 2 / 3 / 4.
-  // Four would exceed the DO cap and fail closed where legacy answers — a support regression, not
-  // a wall worth shipping. `Materialize` is exactly the declared remedy (§3.3: "a boundary hint …
-  // where the planner needs a fence"), and it lands the same CTE-then-filter shape legacy emits.
-  let filtered: Rel = steps[at + 1]?.name === 'is'
-    ? make.materialize({ id: fresh('m'), input: retypedRel, channels: rest.channels, type: retypedRel.type })
-    : retypedRel;
-  for (at++; at < steps.length; at++) {
-    const step = steps[at];
-    // The scalar vocabulary past the shape change. A slice reaches it through the SAME `sliceOp` the
-    // element fold uses — what a window needs is the emission-order channel, not a particular
-    // stream shape, and `values()` carries the parent's position through exactly as legacy does
-    // (a property fan-out shares its parent's position; it does not re-mint one).
-    if (step.name === 'identity' || step.name === 'barrier') { if ((step.args ?? []).length) return null; continue; }
-    const sliced = sliceOp(step, filtered, fresh);
-    if (sliced) { filtered = sliced; continue; }
-    if (step.name !== 'is' || step.modulators?.length || step.optionArms) return null;
-    const args = step.args ?? [];
-    if (args.length !== 1) return null;
-    // A per-row `vtype` is in scope only where the value came from a stored property; a `count` is
-    // a compile-time long and needs no ordering key. Same distinction `predicateSql` draws as
-    // `typeCtx.kind === 'perRow'`.
-    const pred2 = predicateExpr(col(filtered.id, 'v'), args[0], vtyped ? storedCompare(filtered.id) : undefined);
-    if (!pred2) return null;
-    filtered = make.filter({ id: fresh('f'), input: filtered, channels: rest.channels, type: filtered.type, pred: pred2 });
-  }
-  return { plan: nameBindings(filtered), ...rest };
+  const tail = scalarTail(retypedRel, rest.framing, rest.cols, rest.channels, steps, at + 1, fresh);
+  if (!tail) return null;
+  const { rel: tailRel, ...tailRest } = tail;
+  return { plan: nameBindings(tailRel), ...tailRest };
 }

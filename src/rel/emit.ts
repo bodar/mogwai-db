@@ -118,7 +118,11 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       case 'case': return q`CASE ${list(e.whens.map(([when, then]) => q`WHEN ${self(when)} THEN ${self(then)}`), ' ')}${e.else ? q` ELSE ${self(e.else)}` : empty} END`;
       case 'cast': return q`CAST(${self(e.arg)} AS ${raw(e.to.toUpperCase())})`;
       case 'call': return q`${raw(e.fn)}(${e.distinct ? raw('DISTINCT ') : empty}${list(e.args.map(self))})`;
-      case 'agg': return q`${raw(e.fn)}(${e.distinct ? raw('DISTINCT ') : empty}${list(e.args.map(self))}${e.orderBy?.length ? q` ORDER BY ${list(e.orderBy.map((term) => sortTerm(term, scope)))}` : empty})`;
+      // An `Agg` with no arguments means "over all rows", and SQL spells that `count(*)` — not
+      // `count()`, which is SQLite LENIENCY rather than syntax. Emitting the lenient form would be
+      // the exact species `src/cf-limits.ts` exists to catch: valid on the dev runtime, unproven on
+      // the one we ship to. The star is a SPELLING, so it belongs here and not as a node field.
+      case 'agg': return q`${raw(e.fn)}(${e.distinct ? raw('DISTINCT ') : empty}${e.args.length ? list(e.args.map(self)) : raw('*')}${e.orderBy?.length ? q` ORDER BY ${list(e.orderBy.map((term) => sortTerm(term, scope)))}` : empty})`;
       case 'window-expr': return q`${raw(e.fn)}(${list(e.args.map(self))}) OVER (${windowSpec(e.spec, scope)})`;
       case 'json-object': return q`${raw(e.binary ? 'jsonb_object' : 'json_object')}(${list(e.entries.flatMap(([key, val]) => [value(key), self(val)]))})`;
       case 'json-array': return q`${raw(e.binary ? 'jsonb_array' : 'json_array')}(${list(e.items.map(self))})`;

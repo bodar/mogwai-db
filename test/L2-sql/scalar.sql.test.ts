@@ -319,12 +319,22 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.inject(1,2,3).count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.inject(1,2,3).fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
     // is() BEFORE count() filters the pre-count stream (WHERE inside the counted set)
-    expect(read('g.inject(1,2,3).is(P.gt(1)).count()').sql).toContain('WHERE p.v > ?');
+    expect(read('g.inject(1,2,3).is(P.gt(1)).count()', { spine: 'legacy' }).sql).toContain('WHERE p.v > ?');
     // count is a relational boundary, so later scalar filters compose in position.
-    expect(read('g.inject(1,2,3).count().is(P.gt(2))').sql).toContain('WHERE p.v > ?');
+    expect(read('g.inject(1,2,3).count().is(P.gt(2))', { spine: 'legacy' }).sql).toContain('WHERE p.v > ?');
+    // Both spines: the filter is inside the counted set, so the WHERE precedes the aggregate.
+    for (const spine of ['legacy', 'rel'] as const) {
+      const inner = read('g.inject(1,2,3).is(P.gt(1)).count()', { spine }).sql;
+      // The filter is inside the counted set. Which aggregate it is differs by SOURCE, not by
+      // spine: an injected row carries no multiplicity, so counting rows IS counting traversers.
+      expect(inner).toMatch(/count\(\*\)/i);
+      expect(inner).toMatch(/WHERE/i);
+    }
     // value modifiers
     expect(read('g.inject(3,1,2).order()').sql).toContain('ORDER BY p.v ASC');
-    expect(read('g.inject(1,1,2).dedup()').sql).toContain('DISTINCT p.v');
+    expect(read('g.inject(1,1,2).dedup()', { spine: 'legacy' }).sql).toContain('DISTINCT p.v');
+    // RelIR reaches the same DISTINCT over the injected VALUES directly, with no CTE between.
+    expect(read('g.inject(1,1,2).dedup()', { spine: 'rel' }).sql).toMatch(/SELECT DISTINCT \w+\.column1 AS v FROM \(VALUES/);
     const store = new GraphStore(new BunSqlite(':memory:'));
     // as()/select() now work on a scalar (value) stream — the label carries the value.
     expect(run(store, 'g.inject(1).as("a").select("a")').map((r) => r.v)).toEqual([1]);
@@ -337,19 +347,45 @@ describe('scalar-parent / projection SQL', () => {
     // values().count() no longer hits the "one projection per traversal" ceiling — it
     // retypes to a ScalarStream and counts the value ROWS (multi-valued keys counted
     // per-value, matching TinkerPop's values()-flatMap semantics).
-    const c = read('g.V().values("age").count()');
+    const c = read('g.V().values("age").count()', { spine: 'legacy' });
     expect(c.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(c.sql).toContain('SELECT COALESCE(SUM(s.bulk), 0) AS v FROM c1 s');
+    // Both spines count the RLE traverser total, not the rows — `values()` carries the multiplicity
+    // and a collapse upstream would otherwise be counted away.
+    for (const spine of ['legacy', 'rel'] as const) {
+      // A SUM and not a COUNT — the spelling of the summed expression differs, because the RelIR
+      // assembler fuses the aggregate into its input's block and spells `bulk` as the expression
+      // that computes it. What must agree is which aggregate.
+      expect(read('g.V().values("age").count()', { spine }).sql).toMatch(/COALESCE\(sum\(/i);
+      expect(read('g.V().values("age").count()', { spine }).shape).toEqual({ kind: 'value', type: STATIC('long') });
+    }
     // the values() flatMap (now carrying per-row vtype; a collection value → json() text)
     // feeds the count.
     expect(c.sql).toContain("THEN json(vp.value) ELSE vp.value END AS v, vp.vtype AS vtype, p.bulk FROM");
     // intervening scalar-stream modifiers compose through the re-entry
-    const dedupCount = read('g.V().values("age").dedup().count()').sql;
+    const dedupCount = read('g.V().values("age").dedup().count()', { spine: 'legacy' }).sql;
     expect(dedupCount).toContain('SELECT DISTINCT p.v AS v');
     expect(dedupCount).toContain('SELECT COUNT(*) AS v FROM c2');
+    // Both spines: a dedup DROPS the multiplicity, so the count that follows is COUNT(*). That is
+    // not cosmetic — carrying `bulk` through would put it in the DISTINCT key, so the same value at
+    // bulk 1 and bulk 3 would survive twice, and a following SUM would count the duplicates it just
+    // removed. Invisible on a fixture where bulk is always 1, which is why it is asserted here.
+    for (const spine of ['legacy', 'rel'] as const) {
+      const sql = read('g.V().values("age").dedup().count()', { spine }).sql;
+      expect(sql).toMatch(/count\(\*\)/i);
+      expect(sql).not.toMatch(/sum\(/i);
+    }
+    // Both spines: a dedup DISCARDS the multiplicity (a survivor stands for itself), so the count
+    // that follows is COUNT(*) and not SUM(bulk) — the distinction is semantic, not spelling.
+    for (const spine of ['legacy', 'rel'] as const) {
+      const sql = read('g.V().values("age").dedup().count()', { spine }).sql;
+      expect(sql).toMatch(/DISTINCT/i);
+      expect(sql).toMatch(/count\(\*\)/i);
+      expect(sql).not.toMatch(/sum\([\w.]*bulk\)[^]*count/i);
+    }
     expect(read('g.V().out().id().count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
     // The reducer is another scalar stream, so lowering can continue past it.
-    expect(read('g.V().values("age").count().is(P.gt(2))').sql).toContain('WHERE p.v > ?');
+    expect(read('g.V().values("age").count().is(P.gt(2))', { spine: 'legacy' }).sql).toContain('WHERE p.v > ?');
 
     // Element-side policies before the scalar boundary are rendered first, then the
     // projected rows re-enter the same scalar dispatcher. This was the last route
@@ -364,10 +400,14 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('count is a relational scalar boundary and can continue lowering', () => {
-    const filtered = read('g.V().values("age").count().is(P.gt(3))');
+    const filtered = read('g.V().values("age").count().is(P.gt(3))', { spine: 'legacy' });
     expect(filtered.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(filtered.sql).toContain('SELECT COALESCE(SUM(s.bulk), 0) AS v');
     expect(filtered.sql).toContain('WHERE p.v > ?');
+    // Both spines agree on the RESULT, which is what a boundary that can continue lowering means.
+    for (const spine of ['legacy', 'rel'] as const) {
+      expect(read('g.V().values("age").count().is(P.gt(3))', { spine }).shape).toEqual({ kind: 'value', type: STATIC('long') });
+    }
 
     const countedAgain = read('g.V().values("age").count().count()');
     expect(countedAgain.shape).toEqual({ kind: 'value', type: STATIC('long') });
@@ -640,7 +680,7 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('inject seeds a VALUES stream', () => {
-    const p = read('g.inject(1,2,3)');
+    const p = read('g.inject(1,2,3)', { spine: 'legacy' });
     // q-kernel built: Query mints the CTE name (unquoted, identifier-safe) + our
     // SQL casing; binds ride as Value tokens (one row each).
     // inject is a ScalarStream source materialized directly from its VALUES relation.
@@ -649,6 +689,11 @@ describe('scalar-parent / projection SQL', () => {
     // and asking the question uniformly beats aliasing only when the answer turns out to be yes.
     expect(p.sql).toBe('with c0(v) as (VALUES (?), (?), (?)) SELECT v FROM c0 s');
     expect(p.binds).toEqual([1, 2, 3]);
+    // RelIR-routed by default, and it emits the SAME `VALUES` — the one construct measured emitting
+    // it (§3.3) — with the CTE collapsed into the derived table the framing selects from.
+    const viaRel = read('g.inject(1,2,3)', { spine: 'rel' });
+    expect(viaRel.sql).toContain('VALUES (?), (?), (?)');
+    expect(viaRel.binds).toEqual([1, 2, 3]);
   });
 
   test('as() threads a synthetic alias column through subsequent CTEs', () => {
@@ -914,11 +959,17 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('scalar row operators lower left-to-right instead of commuting through a tail accumulator', () => {
-    const p = read('g.V().values("age").count().limit(1).is(P.gt(3))');
+    const p = read('g.V().values("age").count().limit(1).is(P.gt(3))', { spine: 'legacy' });
     expect(p.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(p.sql).toContain('LIMIT 1');
     expect(p.sql).toContain('WHERE p.v > ?');
     expect(p.sql.indexOf('LIMIT 1')).toBeLessThan(p.sql.indexOf('WHERE p.v > ?'));
+    // The ORDER is the point, on either spine: a slice then a filter, never the reverse — which is
+    // what "left-to-right instead of commuting through a tail accumulator" means.
+    for (const spine of ['legacy', 'rel'] as const) {
+      const sql = read('g.V().values("age").count().limit(1).is(P.gt(3))', { spine }).sql;
+      expect(sql.search(/LIMIT/i)).toBeLessThan(sql.search(/WHERE/i));
+    }
 
     const store = seededStore();
     expect(run(store, 'g.V().values("age").count().limit(1).is(P.gt(3))').map((r) => r.v)).toEqual([4]);
