@@ -1,11 +1,12 @@
 import type { Executor as ExecutorApi, ForeignRow } from './api.ts';
 import { DEFAULT_VERTEX_LABEL } from './api.ts';
-import { compilePlan, staticTypeOf, type Compiled, type ElemShape, type FastPathConfig, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type ValueType, type WritePlan } from './compiler/compiler.ts';
+import { compilePlan, staticTypeOf, type Compiled, type ElemShape, type Executable, type FastPathConfig, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type ValueType } from './compiler/compiler.ts';
 import type { FederationSource, Plan } from './compiler/segment.ts';
 import { hasSerializer, isCollectionType, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import { ioc, Property, t, VertexProperty } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
+import { runProgram } from './program.ts';
 import type { GraphStore } from './storage.ts';
 
 // ---- GraphBinary v4 result framing ----
@@ -548,7 +549,7 @@ const bulkOf = (r: any): bigint => (r?.bulk != null ? BigInt(r.bulk) : 1n);
 // Element leaves may carry that per-row bulk; every other shape is a single-multiplicity value.
 // The write path and all non-element value shapes frame through frameValues (bulk 1); only the
 // element leaves read the column here, so the multiplicity plumbing touches exactly two cases.
-function* frameResolved(store: GraphStore, plan: Compiled | WritePlan): Generator<Framed> {
+function* frameResolved(store: GraphStore, plan: Executable): Generator<Framed> {
   if (plan.kind === 'write') {
     if (plan.continuation) {
       plan.run(store);
@@ -573,7 +574,10 @@ function* frameResolved(store: GraphStore, plan: Compiled | WritePlan): Generato
     }
     return;
   }
-  const rows = store.query(plan.sql, plan.binds) as any[];
+  // A PROGRAM's rows come from the executor rather than one `query`, and everything downstream is
+  // identical: shape is the framing contract whether the traversal wrote or only read (§2), so the
+  // effects change WHERE the rows come from and nothing about how they are framed.
+  const rows = (plan.kind === 'program' ? runProgram(store, plan.program) : store.query(plan.sql, plan.binds)) as any[];
   const shape = plan.shape;
   if (shape.kind === 'vertex') { for (const r of rows) yield { buf: rowVertex(r), bulk: bulkOf(r) }; return; }
   if (shape.kind === 'edge') { for (const r of rows) yield { buf: rowEdge(r), bulk: bulkOf(r) }; return; }
@@ -745,7 +749,7 @@ export class Executor implements ExecutorApi {
    *  rowVertex/rowEdge read; propsOf parses the JSON props into the {t,v}-node object. */
   async raw(gremlin: string, params: Record<string, any>, depth: number, paramTypes: Record<string, TypeNode> = {}): Promise<ForeignRow[]> {
     const plan = await this.drive(gremlin, params, paramTypes, depth);
-    if (plan.kind === 'write')
+    if (plan.kind !== 'read')
       throw new Error('federated traversal must be a read that yields vertices or edges, not a write');
     const rows = this.store.query(plan.sql, plan.binds) as any[];
     if (plan.shape.kind === 'vertex')
@@ -760,7 +764,7 @@ export class Executor implements ExecutorApi {
    *  to a segment plan, which needs the async segment loop (drive) — so this throws, fail-closed
    *  (the sync API cannot honestly run federation). Shares compilePlan + the framing tail with the
    *  async path; only the await-loop differs. */
-  private runSync(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>): Compiled | WritePlan {
+  private runSync(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>): Executable {
     const plan = compilePlan(gremlin, params, { app: this.app, federationDepth: 0 }, paramTypes);
     if (plan.kind === 'segment')
       throw new Error('this traversal contains a federated call() — use the async path (framedAsync / raw), not the sync framed()/buffers()');
@@ -773,7 +777,7 @@ export class Executor implements ExecutorApi {
    *  loops: read+drain head → await apply() → land + resume. `federationDepth` rides
    *  CompileOptions beside the registry, reaching the service's CallSite so the barrier's
    *  apply closure captures it (a recursive federate hops at depth+1). */
-  private async drive(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, federationDepth: number): Promise<Compiled | WritePlan> {
+  private async drive(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, federationDepth: number): Promise<Executable> {
     let p: Plan = compilePlan(gremlin, params, { app: this.app, federationDepth }, paramTypes);
     while (p.kind === 'segment') {
       const rows = p.head ? this.readSegmentHead(p.head) : [];

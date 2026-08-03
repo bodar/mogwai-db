@@ -1,11 +1,11 @@
 import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
 import { col, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
-import { DO_BIND_CAP, planBindCount } from '../../rel/check.ts';
-import { emitRelational } from '../../rel/emit.ts';
+import { BindBudgetExceeded, DO_BIND_CAP, planBindCount } from '../../rel/check.ts';
+import { emit, emitRelational } from '../../rel/emit.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import { render } from '../../sql/kernel/q.ts';
-import type { Plan } from '../../rel/plan.ts';
+import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { isLocalScope, sliceOf } from '../ir/step.ts';
@@ -26,6 +26,7 @@ import type { AliasMap } from '../steps/context/context.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
+import { elementDrop } from './write.ts';
 import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listRetype, listSetOp, unfoldList, type ListCtx } from './list.ts';
 
 /**
@@ -72,7 +73,13 @@ export type RelFraming =
    *  vocabulary, `list.ts`). `of` describes the MEMBER encoding, which is what the framing layer
    *  needs to know how to expand each one; `set` is a framing marker only (a SET frames differently,
    *  the member substrate is shared). */
-  | { readonly kind: 'list'; readonly of: ListOf; readonly set?: boolean };
+  | { readonly kind: 'list'; readonly of: ListOf; readonly set?: boolean }
+  /** NOTHING to frame. A write whose Gremlin result is no traverser at all (`drop()`, and `iterate()`
+   *  over any of them) ends on a statement with an empty `RETURNING`, so the plan's result relation
+   *  has no columns and there is no shape to interpret. It is an arm of this union rather than an
+   *  absent framing because `spine.ts` switches TOTALLY: "there is nothing here" has to be something
+   *  the lowering can SAY. */
+  | { readonly kind: 'discard' };
 
 /**
  * A covered chain, lowered: the program, and what to frame over it.
@@ -99,7 +106,19 @@ export interface RelLowering {
 
 /** A lowered chain BEFORE naming and the budget — the relation, plus the two facts about it that are
  *  not properties of the relation itself. Every tail function returns this shape. */
-type Tail = { readonly rel: Rel; readonly framing: RelFraming; readonly aliases: AliasMap };
+type Tail = {
+  readonly rel: Rel; readonly framing: RelFraming; readonly aliases: AliasMap;
+  /**
+   * THE STATEMENTS THIS CHAIN RUNS BEFORE ITS RESULT IS READ — a write's effects, in execution order
+   * (§3.0: effects are legal only at a `Plan` binding).
+   *
+   * Absent for every read, which is why it is optional rather than an empty list threaded through
+   * forty returns. A step that writes appends here and hands back a `Ref` to whichever binding its
+   * result is, so the fold's shape does not change and a write remains one step of the same loop
+   * rather than a second orchestrator.
+   */
+  readonly effects?: readonly Binding[];
+};
 
 /** No label bound yet. One shared value, because an empty Map is the seed at every entry point. */
 const NO_ALIASES: AliasMap = new Map();
@@ -1697,7 +1716,24 @@ export interface Lowering {
  * so a genuine violation still escapes; only the cap decision is taken here.
  */
 const lowered = (chain: Tail): RelLowering | null => {
-  const plan = nameBindings(chain.rel);
+  const named = nameBindings(chain.rel);
+  // EFFECTS FIRST, then whatever CTEs the result still needs — `checkPlan` proves a `Ref` resolves
+  // only backwards, so the order the executor runs IS the order the checker walked. `name` is called
+  // on the result alone because a write step has already named its own target's shared nodes; the
+  // day a write RESULT needs naming across that boundary, this is where the pass grows to walk a
+  // program rather than a tree.
+  const plan = chain.effects ? program({ bindings: [...chain.effects, ...named.bindings], result: named.result }) : named;
+  // A PROGRAM's budget is PER STATEMENT — each binding is its own query — so the sum a read plan is
+  // measured by (its bindings are CTEs of ONE statement) would refuse a nine-statement cascade on a
+  // number no database ever asks. `emit` renders every step and raises `BindBudgetExceeded` on the
+  // one that is over, which is the same rendered-list authority the read path renders for.
+  if (chain.effects) {
+    try { emit(plan); } catch (error) {
+      if (!(error instanceof BindBudgetExceeded)) throw error;
+      return null;
+    }
+    return { plan, framing: chain.framing, aliases: liveAliases(chain.aliases, chain.rel) };
+  }
   if (planBindCount(plan) > DO_BIND_CAP) return null;
   // `liveAliases` at the seam as well as at every reader: the framing layer is handed the map, and a
   // map naming a column the RESULT does not emit is what `spine.ts` throws on. A chain ending in a
@@ -1873,6 +1909,14 @@ function elementTail(
       // correctness — the same trade the movement loop already makes.
       return continueAs(merged.rel, merged.framing, steps, at + 1, bulked || ctx.collapse, ctx, fresh, labels);
     }
+    if (step.name === 'drop') {
+      // TERMINAL by the grammar, and asserted rather than assumed: a step after `drop()` would be a
+      // read over a stream that no longer exists, and the honest answer to a chain the passes should
+      // have rejected is to decline it, not to lower the prefix and forget the rest.
+      if (at !== steps.length - 1 || step.modulators?.length || step.optionArms || (step.args ?? []).length) return null;
+      const dropped = elementDrop(rel, elem, fresh);
+      return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: dropped.bindings };
+    }
     const row = rowOp(step, rel, elem, bulked, fresh);
     if (!row) break;
     rel = row;
@@ -1906,6 +1950,10 @@ function continueAs(
     case 'list': return listTail(rel, framing.of, steps, from, ctx, fresh, labels);
     // A value's multiplicity is the traverser's, so `bulked` carries.
     case 'scalar': return scalarTail(rel, framing, steps, from, bulked, ctx, fresh, labels);
+    // Nothing survives a discard, so nothing can follow one. `drop()` is a terminal step in the
+    // grammar and the passes reject a chain that continues past it, so this is unreachable rather
+    // than a decline — and saying so keeps the switch total.
+    case 'discard': return null;
   }
 }
 
@@ -2053,7 +2101,10 @@ function chooseArms(
 const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
   left.kind === 'elements' ? right.kind === 'elements' && left.elem === right.elem
     : left.kind === 'list' ? right.kind === 'list' && JSON.stringify(left.of) === JSON.stringify(right.of)
-      : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
+      // A DISCARD is not a stream, so no arm can be one: `drop()` is terminal, and an arm body ending
+      // in it would be a branch whose arms disagree about whether a traverser exists at all.
+      : left.kind === 'discard' ? false
+        : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
 
 const sameColumns = (left: readonly ColMeta[], right: readonly ColMeta[]): boolean =>
   left.length === right.length && left.every((column, i) => column.name === right[i]!.name);

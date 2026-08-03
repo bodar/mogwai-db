@@ -1,9 +1,9 @@
 import { empty, identifier, list, q, raw, render, textLiteral, value, type Expression } from '../sql/kernel/q.ts';
-import { DO_BIND_CAP, checkPlan } from './check.ts';
+import { BindBudgetExceeded, DO_BIND_CAP, checkPlan } from './check.ts';
 import type { Expr } from './expr.ts';
 import { recursiveSelf } from './factory.ts';
 import { explodeColumns } from './obligations.ts';
-import type { Binding, Plan } from './plan.ts';
+import { retained, type Binding, type Plan } from './plan.ts';
 import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import type { FrameBound, SortTerm, WindowSpec } from './types.ts';
@@ -11,17 +11,19 @@ import type { FrameBound, SortTerm, WindowSpec } from './types.ts';
 export interface Emitted { readonly sql: string; readonly binds: readonly any[]; }
 
 /**
- * A bind the EXECUTOR fills in: the retained `RETURNING` rows of an earlier statement binding,
- * landed as ONE JSON bind exploded by `json_each` — never a row-count-sized placeholder list,
- * which is the DO 100-parameter wall (§3.6). It travels in `Emitted.binds` in its own position, so
- * `emit` never learns about chunking and the executor never parses SQL to find the slot.
+ * A bind the EXECUTOR fills in: the retained rows of an earlier binding — a statement's `RETURNING`
+ * or a `snapshot` relation's SELECT — landed as ONE JSON bind exploded by `json_each`, never a
+ * row-count-sized placeholder list, which is the DO 100-parameter wall (§3.6). It travels in
+ * `Emitted.binds` in its own position, so `emit` never learns about chunking and the executor never
+ * parses SQL to find the slot.
  */
 export interface RowsBind { readonly rowsOf: string; }
 export const isRowsBind = (bind: unknown): bind is RowsBind =>
   typeof bind === 'object' && bind !== null && typeof (bind as RowsBind).rowsOf === 'string';
 
-/** One executable statement of a `Plan`, in execution order. A `Rel` binding is a CTE and produces
- * no step of its own; a `Stmt` binding is a step whose `RETURNING` rows the executor retains. */
+/** One executable statement of a `Plan`, in execution order. A plain `Rel` binding is a CTE and
+ * produces no step of its own; a `Stmt` binding and a `snapshot` `Rel` binding are each a step whose
+ * rows the executor retains. */
 export interface Step { readonly binding?: string; readonly result: boolean; readonly emitted: Emitted; }
 
 /**
@@ -249,14 +251,15 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
 
   /**
    * A `Ref` is a table source either way, and that is the whole point of §3.0 collapsing the two
-   * mechanisms: a `Rel` binding is a CTE name, and a `Stmt` binding is its retained rows arriving
-   * as one JSON bind. Positional `$[i]` because a statement's result is a RELATION — the binding's
-   * declared type is the authority for every column, so there is nothing to infer here.
+   * mechanisms: a re-derivable `Rel` binding is a CTE name, and a RETAINED one — a `Stmt`, or a
+   * relation the plan marked `snapshot` — is its rows arriving as one JSON bind. Positional `$[i]`
+   * because a retained result is a RELATION: the binding's declared type is the authority for every
+   * column, so there is nothing to infer here.
    */
   const refSource = (r: Extract<Rel, { readonly kind: 'ref' }>): { item: FromItem; cols: Cols } => {
     const bound = bindings.get(r.name);
     if (!bound) throw new Error(`RelIR emitter: Ref '${r.name}' has no Plan binding`);
-    if (!isStmt(bound.node)) return { item: { text: ident(r.name), alias: r.id }, cols: colsOf(r.id, r) };
+    if (!retained(bound)) return { item: { text: ident(r.name), alias: r.id }, cols: colsOf(r.id, r) };
     const rows: RowsBind = { rowsOf: r.name };
     return {
       item: { text: q`json_each(${value(rows)})`, alias: r.id },
@@ -454,13 +457,16 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
    * statement. Handing back an `Expression` rather than `{sql, binds}` is what keeps binds in one
    * `render` and stops a second bind-ordering authority existing.
    *
-   * Read plans only: a `Stmt` binding is an execution step, which a relation cannot be.
+   * Read plans only: a retained binding — a `Stmt`, or a relation the plan snapshotted — is an
+   * execution step, which a relation cannot be.
    */
   const relational = (input: Plan): Expression => {
     const ctes: Expression[] = [];
     for (const binding of input.bindings) {
-      if (isStmt(binding.node))
-        throw new Error(`RelIR: binding '${binding.name}' is a statement; a program with effects has execution steps, so use emit()`);
+      // `isStmt` first because it NARROWS the union `retained` only answers a question about: the
+      // two together are `retained(binding)`, split so the CTE arm below has a `Rel`.
+      if (isStmt(binding.node) || binding.snapshot)
+        throw new Error(`RelIR: binding '${binding.name}' is retained; a program with execution steps must go through emit()`);
       ctes.push(q`${ident(binding.name)} AS (${renderBuilt(build(binding.node, EMPTY_SCOPE))})`);
     }
     return input.result.kind === 'recursive' && ctes.length
@@ -471,19 +477,23 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
   const program = (input: Plan): readonly Step[] => {
     const steps: Step[] = [];
     const ctes: Expression[] = [];
-    const resultRef = input.result.kind === 'ref' ? input.result.name : undefined;
-    // A plan whose RESULT is exactly a statement's rows has nothing left to run: the executor
+    // A plan whose RESULT is exactly a retained binding's rows has nothing left to run: the executor
     // already holds them. Emitting a json_each read of rows it just retained would be a round trip
     // to fetch what it already has.
-    const lastStatement = resultRef && isStmt(bindings.get(resultRef)?.node as never) ? resultRef : undefined;
+    const resultBinding = input.result.kind === 'ref' ? bindings.get(input.result.name) : undefined;
+    const lastRetained = resultBinding && retained(resultBinding) ? resultBinding.name : undefined;
     for (const binding of input.bindings) {
-      if (isStmt(binding.node)) {
-        steps.push({ binding: binding.name, result: binding.name === lastStatement, emitted: emitted(withCtes(ctes, statement(binding.node))) });
-        continue;
-      }
+      // A SNAPSHOT is the same STEP as a statement — run it, keep its rows — and only the body
+      // differs. That is what makes "the value at this point" one concept: the executor cannot tell
+      // the two apart, and neither can a later `Ref`.
+      const retain = (body: Expression): void => {
+        steps.push({ binding: binding.name, result: binding.name === lastRetained, emitted: emitted(withCtes(ctes, body)) });
+      };
+      if (isStmt(binding.node)) { retain(statement(binding.node)); continue; }
+      if (binding.snapshot) { retain(renderRel(binding.node, EMPTY_SCOPE)); continue; }
       ctes.push(q`${ident(binding.name)} AS (${renderBuilt(build(binding.node, EMPTY_SCOPE))})`);
     }
-    if (lastStatement) return steps;
+    if (lastRetained) return steps;
     // A recursive root must share ONE `WITH RECURSIVE` list with the bindings beside it.
     const body = input.result.kind === 'recursive' && ctes.length
       ? q`WITH RECURSIVE ${list([...ctes, recursiveDefinition(input.result, EMPTY_SCOPE)])} SELECT * FROM ${ident(input.result.name)}`
@@ -499,7 +509,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
  * is over IR occurrences, and a fused block can spell one `Lit` more than once. */
 const emitted = (tree: Expression): Emitted => {
   const out = render(tree);
-  if (out.binds.length > DO_BIND_CAP) throw new Error(`RelIR: ${out.binds.length} rendered binds exceeds Durable Objects cap of ${DO_BIND_CAP}`);
+  if (out.binds.length > DO_BIND_CAP) throw new BindBudgetExceeded(out.binds.length);
   return { sql: out.sql, binds: out.binds };
 };
 

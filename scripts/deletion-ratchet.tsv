@@ -13,7 +13,7 @@ relir	symbol	parseVertexSpec	6	Phase 2.6
 relir	symbol	parseMergeOptions	3	Phase 2.6
 relir	symbol	resolveEndpoint	6	Phase 2.6
 relir	symbol	materializeElementDrivers	4	Phase 2.6 — Insert.source IS a read plan, so there is no driver to materialize
-relir	symbol	WritePlan	24	Phase 2.6 — a write is Plan.bindings, not a private run(store)
+relir	symbol	WritePlan	15	Phase 2.6 — a write is Plan.bindings, not a private run(store)
 relir	symbol	TailAcc	13	Phase 4.2 — the block assembler (§5) is where fusion happens instead
 relir	symbol	globalRowOps	10	Phase 4.1 — the row-algebraic half of the 11 dispatch tables
 relir	symbol	runFastPath	14	Phase 4.4 §4.7 — a fast path becomes a plan rewrite

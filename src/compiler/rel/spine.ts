@@ -1,6 +1,6 @@
 import { derived } from '../../sql/kernel/q.ts';
-import type { Compiled } from '../../sql/kernel/render.ts';
-import { emitRelational } from '../../rel/emit.ts';
+import type { Compiled, Program } from '../../sql/kernel/render.ts';
+import { emit, emitRelational } from '../../rel/emit.ts';
 import { cfLimitViolation } from '../../cf-limits.ts';
 import type { AliasMap, TraverserLayout } from '../steps/context/context.ts';
 import { channelCols, type Channels, type ChannelRole } from '../../channels.ts';
@@ -85,7 +85,12 @@ function layoutOf(channels: Channels, aliases: AliasMap): TraverserLayout {
   return layout;
 }
 
-export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<string, any>): Compiled | null {
+/** A framing arm that cannot be reached, as a value the type system proves is `never`. */
+const unreachable = (framing: never): never => {
+  throw new Error(`RelIR spine: no framing translation for ${JSON.stringify(framing)}`);
+};
+
+export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<string, any>): Compiled | Program | null {
   // TWO fast-path switches reach the lowering, and for the same reason: each selects between two
   // lowering STRATEGIES that the algebra can state, rather than between two physical access paths
   // (which is the FTS case, where RelIR declines instead). `movementCollapse` picks the grouped
@@ -99,6 +104,19 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
     correlatedChildren: engine.fastPaths.predicateInlining,
   });
   if (!lowered) return null;
+
+  // A PROGRAM leaves through its own door, and the reason is that there is nothing for the framing
+  // layer to do: `drop()`'s result relation is a statement with an empty `RETURNING`, so the shape is
+  // `discard` and the whole traversal IS its effects. What travels is the `Plan` itself — the
+  // executor runs it (`runProgram`), and the retained-rows transport §10·5 requires rides with it
+  // rather than being re-derived at the edge.
+  //
+  // The platform budget is asked PER STATEMENT here for the same reason it is inside `lowerToRel`:
+  // each step is its own query, so each meets the 100-bind and 100 KB walls on its own.
+  if (lowered.framing.kind === 'discard') {
+    if (emit(lowered.plan).some((step) => cfLimitViolation(step.emitted.sql, step.emitted.binds))) return null;
+    return { kind: 'program', program: lowered.plan, shape: { kind: 'discard' }, spine: 'rel' };
+  }
 
   // `rir` deliberately does not collide with the framing aliases (`n`/`e`/`p`/`s`/`v`/`g`/`j`/`l`)
   // or with the `Query`'s minted `c0…cN`: the RelIR relation sits beside them, not among them.
@@ -118,7 +136,11 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
     ? { kind: 'elements', ...state, elem: framing.elem }
     : framing.kind === 'list'
       ? { kind: 'list', ...state, of: framing.of, ...(framing.set ? { set: framing.set } : {}) }
-      : { kind: 'scalar', ...state, type: framing.type, ...(framing.result ? { result: framing.result } : {}) };
+      : framing.kind === 'scalar'
+        ? { kind: 'scalar', ...state, type: framing.type, ...(framing.result ? { result: framing.result } : {}) }
+        // A discard left through the program door above; naming it keeps the chain total rather than
+        // leaving the arm to a `never` nobody reads.
+        : unreachable(framing);
   // Zero steps remain, so the loop runs the root element projection and nothing else. Going
   // through `lowerSteps` rather than calling the projection directly is the point: a step this
   // route grows tomorrow lands in the SAME loop, and there is no second orchestrator.

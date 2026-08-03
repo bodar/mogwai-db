@@ -2,6 +2,7 @@ import type { Expr } from './expr.ts';
 import { recursiveSelf } from './factory.ts';
 import * as make from './factory.ts';
 import type { Rel } from './rel.ts';
+import { isStmt, type Stmt } from './stmt.ts';
 import type { FrameBound, SortTerm, WindowSpec } from './types.ts';
 
 /** The structure of a node is declared ONCE, here. Every analysis and every rewrite folds over
@@ -206,4 +207,40 @@ export function forEachRel(plan: Rel, visit: (r: Rel) => void): void {
 export function forEachExpr(e: Expr, visit: (node: Expr) => void): void {
   visit(e);
   exprChildren(e).forEach((child) => forEachExpr(child, visit));
+}
+
+/** Child relations a STATEMENT owns, in declaration order — its target scan, and the relation it
+ * reads (an `Insert`'s source, an `Update`'s `from`). Declared here beside the relational cases for
+ * the same reason they are: an analysis that walked a statement by re-deriving its shape is one a
+ * new statement field would silently skip. */
+export function stmtChildren(s: Stmt): readonly Rel[] {
+  switch (s.kind) {
+    case 'insert': return [s.target, s.source];
+    case 'update': return s.from ? [s.target, s.from] : [s.target];
+    case 'delete': return [s.target];
+  }
+}
+
+/** Expressions a STATEMENT owns, in declaration order. */
+export function stmtExprs(s: Stmt): readonly Expr[] {
+  const returning = s.returning.map(([, e]) => e);
+  switch (s.kind) {
+    case 'insert': return [...(s.onConflict?.set ?? []).map(([, e]) => e), ...returning];
+    case 'update': return [...s.set.map(([, e]) => e), ...(s.where ? [s.where] : []), ...returning];
+    case 'delete': return [...(s.where ? [s.where] : []), ...returning];
+  }
+}
+
+/** Every `Ref` NAME a node reaches, relations and expression subplans alike — "which bindings does
+ * this step read". One walk for both halves of the union, because a program's steps are of both
+ * kinds and the question asked of them is the same. */
+export function refNames(node: Rel | Stmt): ReadonlySet<string> {
+  const names = new Set<string>();
+  const relation = (r: Rel): void => forEachRel(r, (n) => { if (n.kind === 'ref') names.add(n.name); });
+  const expression = (e: Expr): void => forEachExpr(e, (n) => exprRels(n).forEach(relation));
+  if (isStmt(node)) {
+    stmtChildren(node).forEach(relation);
+    stmtExprs(node).forEach(expression);
+  } else relation(node);
+  return names;
 }

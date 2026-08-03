@@ -29,16 +29,22 @@ export function seeded(seed: readonly string[]): GraphStore {
  *  rowids alone — a harness artifact, not a defect. */
 export type StoreFactory = () => GraphStore;
 
-/** Does this traversal mutate? Decided by the compiler's own routing (`kind === 'write'`), not by
- *  string-matching for addV/drop — a chain like `V().property(k,v)` is a write with no add* in it,
- *  and the compiler is the only authority on which chains route to routeWrite. A traversal that
- *  fails to compile is not a write (it will throw identically however it is run).
+/** Does this traversal mutate? Decided by the compiler's own routing, not by string-matching for
+ *  addV/drop — a chain like `V().property(k,v)` is a write with no add* in it, and the compiler is
+ *  the only authority on which chains carry effects. A traversal that fails to compile is not a
+ *  write (it will throw identically however it is run).
+ *
+ *  **Asked as "not a read", not as "is a `WritePlan`".** There are two mutating artifacts while the
+ *  RelIR migration runs — the legacy closure and a `program` — and a probe that named only the first
+ *  silently let a `g.V().drop()` share the read store and empty it for every traversal after it. The
+ *  question this probe is really asking is whether a shared store survives the traversal, and only
+ *  `kind === 'read'` answers yes.
  *
  *  NOTE this uses a bare `compile()`, so it sees no service registry: a `call()` traversal throws
  *  here and is reported as a non-write, which is correct (no `call()` form is a write today). Do
  *  NOT reuse this as a general "does it compile" probe — see the header on test/census/census.ts. */
 export function isWrite(q: string): boolean {
-  try { return compile(q, {}).kind === 'write'; } catch { return false; }
+  try { return compile(q, {}).kind !== 'read'; } catch { return false; }
 }
 
 /**

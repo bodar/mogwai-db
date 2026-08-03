@@ -4,14 +4,14 @@ import { runPasses } from './ir/passes.ts';
 import { LoweringEngine, collapseSafeFastPaths } from './engine/engine.ts';
 import { analyzeChain } from './ir/analyze.ts';
 import { routeWrite } from './steps/write/write.ts';
-import { type Compiled, type WritePlan } from '../sql/kernel/render.ts';
+import { type Executable } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
 import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './options/fast-paths.ts';
 import { resolveSpine } from './options/spine.ts';
 import { compileViaRel } from './rel/spine.ts';
 import { createAppScope, createRequestScope } from '../scopes.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
-export type { Compiled, WritePlan, WriteResult, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from '../sql/kernel/render.ts';
+export type { Compiled, Executable, Program, WritePlan, WriteResult, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from '../sql/kernel/render.ts';
 export { staticTypeOf, perRowColumnOf, PER_ROW, STATIC, UNKNOWN } from '../sql/kernel/render.ts';
 export type { ScalarType } from '../sql/kernel/render.ts';
 export type { CompileOptions, FastPathConfig } from './options/fast-paths.ts';
@@ -34,7 +34,7 @@ export type { CompileOptions, FastPathConfig } from './options/fast-paths.ts';
 /** Apply v4 iterate()'s trailing discard: execute for effect, return nothing. Shared by the
  *  sync (Compiled/WritePlan) and segment resume paths — a discard turns any read leaf's shape
  *  into `discard` and empties a write's result. */
-function applyDiscard(plan: Compiled | WritePlan): Compiled | WritePlan {
+function applyDiscard(plan: Executable): Executable {
   if (plan.kind === 'write') { const inner = plan.run; return { kind: 'write', run: (s) => { inner(s); return []; } }; }
   return { ...plan, shape: { kind: 'discard' } };
 }
@@ -92,7 +92,7 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   return { kind: 'sql', compiled: discard ? applyDiscard(read) : read };
 }
 
-export function compile(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, TypeNode> = {}): Compiled | WritePlan {
+export function compile(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, TypeNode> = {}): Executable {
   const plan = compilePlan(gremlin, params, options, paramTypes);
   if (plan.kind === 'segment')
     throw new Error('call(): barrier/async services require the segment executor (executeFramed); compile() cannot resolve one synchronously');

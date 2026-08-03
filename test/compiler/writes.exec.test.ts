@@ -7,6 +7,8 @@ import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { bare, read, run, seededStore } from '../support/harness.ts';
+import { emit } from '../../src/rel/emit.ts';
+import { CF_MAX_BINDS } from '../../src/cf-limits.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -51,6 +53,31 @@ test('g.E().drop() removes every edge but keeps all vertices', () => {
   run(store, 'g.E().drop()');
   expect(store.query('SELECT COUNT(*) AS c FROM edges')[0].c).toBe(0);
   expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([6]);
+});
+
+// The ROUTE, pinned — the semantics above are asserted whichever spine answers them, so nothing else
+// here would notice a drop() falling back to the legacy write closure.
+//
+// What the shape says: the target is a RETAINED read (`snapshot`), so the cascade's statements read
+// the ids the graph had BEFORE any of them ran — the property `g.V().out().drop()` above depends on,
+// and one a CTE could not have, since a CTE reading `edges` is a different question after the
+// incident-edge delete. Every statement carries O(1) binds because that retained set crosses as ONE
+// JSON value (§10·5); `test/cf-limits.test.ts` is where that is measured at 250 elements.
+test('drop() compiles to a RelIR program whose target is snapshotted, not a re-evaluated CTE', () => {
+  const vertex = compile('g.V().has("name","marko").drop()', {}, { spine: 'rel' });
+  expect([vertex.kind, (vertex as { spine?: string }).spine]).toEqual(['program', 'rel']);
+  if (vertex.kind !== 'program') throw new Error('unreachable');
+  const snapshots = vertex.program.bindings.filter((binding) => binding.snapshot);
+  // Two: the matched vertices, and the edges incident to them.
+  expect(snapshots.length).toBe(2);
+  const steps = emit(vertex.program);
+  expect(steps.filter((step) => step.emitted.sql.startsWith('DELETE')).length).toBe(8);
+  expect(Math.max(...steps.map((step) => step.emitted.binds.length))).toBeLessThanOrEqual(CF_MAX_BINDS);
+
+  const edge = compile('g.E().drop()', {}, { spine: 'rel' });
+  if (edge.kind !== 'program') throw new Error('an edge drop() is a program too');
+  // No cascade to an element: an edge takes only its own property rows and their FTS text.
+  expect(emit(edge.program).filter((step) => step.emitted.sql.startsWith('DELETE')).length).toBe(3);
 });
 
 test('property() updates existing vertices (overwrite + new key, single cardinality)', () => {

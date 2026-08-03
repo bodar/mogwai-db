@@ -5,7 +5,7 @@ import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { run, seededStore } from '../support/harness.ts';
+import { run, runWith, seededStore } from '../support/harness.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -78,7 +78,7 @@ test('E()/hasLabel/count and edge values() over the edges table', () => {
 test('user-supplied string ids: create, seed, traverse, expose (COALESCE uid,id)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   const w = (q: string) => { const p = compile(q, {}); if (p.kind !== 'write') throw new Error('want write'); return p.run(store); };
-  const r = (q: string) => { const p = compile(q, {}); if (p.kind === 'write') return p.run(store); return store.query(p.sql, p.binds); };
+  const r = (q: string) => runWith(store, q);
   w('g.addV("person").property(T.id,"person:marko").property("name","marko")');
   w('g.addV("person").property(T.id,"person:vadas").property("name","vadas")');
   w('g.V("person:marko").addE("knows").to(__.V("person:vadas"))');

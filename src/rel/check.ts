@@ -2,11 +2,28 @@ import type { Expr } from './expr.ts';
 import { joinWidth } from './factory.ts';
 import { checkChannels } from './obligations.ts';
 import { isRel, type Rel, type RelKind } from './rel.ts';
-import type { Binding, Plan } from './plan.ts';
+import { retained, type Binding, type Plan } from './plan.ts';
 import { isStmt, type Stmt } from './stmt.ts';
-import { exprChildren, exprRels, recursiveStep, relChildren, relExprs } from './walk.ts';
+import { exprChildren, exprRels, recursiveStep, refNames, relChildren, relExprs } from './walk.ts';
 
 export const DO_BIND_CAP = 100;
+
+/**
+ * THE ONE FAILURE A CALLER MAY ANSWER BY CHOOSING THE OTHER ROUTE.
+ *
+ * Every other violation the checker or the emitter raises is a BUG in whatever built the plan, and
+ * must escape (§11 — a `catch` that swallowed them would turn the failure `rel-sweep` exists to see
+ * into a silent decline). The bind budget is different: a traversal legacy answers must not become a
+ * compile error because this route spells its predicate more expensively, so the cap is a COVERAGE
+ * question. A distinct class is what lets `lowerToRel` decline on exactly that and nothing else,
+ * without matching on a message.
+ */
+export class BindBudgetExceeded extends Error {
+  constructor(readonly count: number) {
+    super(`RelIR: ${count} binds exceeds Durable Objects cap of ${DO_BIND_CAP}`);
+    this.name = 'BindBudgetExceeded';
+  }
+}
 
 /** `bindings` is the PLAN scope (§3.0): every `Ref` resolves against a binding declared EARLIER,
  * which is the same rule for a named CTE and for a statement's retained rows. */
@@ -284,7 +301,7 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
     if (!isStmt(plan)) throw new Error('RelIR: statement was not constructed by a Stmt factory');
     checkStmt(plan);
   } else checkRel(plan, root(bindings));
-  if (bindCount(plan) > DO_BIND_CAP) throw new Error(`RelIR: ${bindCount(plan)} binds exceeds Durable Objects cap of ${DO_BIND_CAP}`);
+  if (bindCount(plan) > DO_BIND_CAP) throw new BindBudgetExceeded(bindCount(plan));
 }
 
 /**
@@ -300,4 +317,52 @@ export function checkPlan({ bindings, result }: Plan): void {
   };
   bindings.forEach(declare);
   check(result, scope);
+  checkSnapshots({ bindings, result });
+}
+
+/**
+ * A RE-EVALUATED CTE IS A DIFFERENT QUESTION ONCE SOMETHING HAS BEEN WRITTEN.
+ *
+ * A `Rel` binding is a CTE, which every step naming it computes for itself. In a read program that
+ * is invisible; in one with effects it is the vertex-drop cascade's whole failure mode — the target
+ * relation reads `edges`, the incident-edge delete runs, and the vertex delete then matches nothing.
+ * A `snapshot` binding is the answer (§3.0), and this is what makes using it obligatory rather than
+ * remembered: **in a program with effects, a plain `Rel` binding read by more than one step must be
+ * a snapshot.** Reached through the same step only once, a CTE is still exactly right, so the rule
+ * names the hazard and nothing wider.
+ *
+ * A THROW rather than a decline, and the distinction is the one §11 draws: an unlowered step is
+ * coverage we do not have, but a plan whose answer depends on which statement ran first is a bug in
+ * whatever built it.
+ */
+function checkSnapshots({ bindings, result }: Plan): void {
+  if (!bindings.some((binding) => isStmt(binding.node))) return;
+  const declared = new Map(bindings.map((binding) => [binding.name, binding] as const));
+  // A step reads a binding TRANSITIVELY: a CTE naming another CTE puts both in the same statement.
+  // The walk stops at a retained binding, whose rows that step reads as a bind rather than recompute.
+  const reads = (node: Rel | Stmt): ReadonlySet<string> => {
+    const seen = new Set<string>();
+    const pending = [...refNames(node)];
+    while (pending.length) {
+      const name = pending.pop()!;
+      const binding = declared.get(name);
+      if (!binding || retained(binding) || seen.has(name)) continue;
+      seen.add(name);
+      pending.push(...refNames(binding.node));
+    }
+    return seen;
+  };
+  const readers = new Map<string, number>();
+  const step = (node: Rel | Stmt): void => {
+    for (const name of reads(node)) readers.set(name, (readers.get(name) ?? 0) + 1);
+  };
+  for (const binding of bindings) if (retained(binding)) step(binding.node);
+  // The trailing read is a step too — unless the result IS a retained binding, which the executor
+  // already holds and never re-reads.
+  const resultBinding = result.kind === 'ref' ? declared.get(result.name) : undefined;
+  if (!(resultBinding && retained(resultBinding))) step(result);
+  for (const [name, count] of readers) {
+    if (count > 1)
+      throw new Error(`RelIR: binding '${name}' is read by ${count} steps of a program with effects; a re-evaluated CTE is a different question after a write, so it must be a snapshot`);
+  }
 }

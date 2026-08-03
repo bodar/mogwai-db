@@ -2,6 +2,7 @@ import type { GraphStore } from '../../storage.ts';
 import { q, type Expression, type Query, type Relation } from './q.ts';
 import type { ValueNode, ValueType } from '../../gremlin/types.ts';
 import type { Elem } from '../../compiler/plan/plan.ts';
+import type { Plan as RelPlan } from '../../rel/plan.ts';
 
 // ---------- compile output contract ----------
 //
@@ -208,6 +209,23 @@ export interface Compiled {
   shape: Shape;
   spine: Spine;
 }
+
+/**
+ * A compiled traversal WITH EFFECTS — RelIR's §3.0 program: an ordered list of bindings the executor
+ * runs, statements and retained reads alike, ending in the rows to frame.
+ *
+ * It sits beside `Compiled` rather than inside it because the difference is real — a read is ONE
+ * statement and this is several — and beside `WritePlan` rather than replacing it because the two
+ * say opposite things about where the traversal machine lives: a `WritePlan` is a JS closure that
+ * walks drivers and calls the store, while this is DATA the algebra produced and one executor runs.
+ * `WritePlan` is on §8's deletion list; this is what replaces it.
+ *
+ * `shape` is the framing contract exactly as a read's is, so the wire layer needs no write vocabulary.
+ */
+export interface Program { kind: 'program'; program: RelPlan; shape: Shape; spine: Spine; }
+
+/** What `compile()` hands back: one statement, a program, or the legacy write closure. */
+export type Executable = Compiled | Program | WritePlan;
 
 export type WriteResult =
   // A vertex's props are multi-valued per key (cardinality list/set); an EDGE's are not — TinkerPop's

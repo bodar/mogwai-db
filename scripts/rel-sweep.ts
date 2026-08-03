@@ -40,7 +40,8 @@ import { runPasses } from '../src/compiler/ir/passes.ts';
 import type { IRStep } from '../src/compiler/ir/step.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
 import { DO_BIND_CAP, planBindCount } from '../src/rel/check.ts';
-import { emitRelational } from '../src/rel/emit.ts';
+import { emit, emitRelational } from '../src/rel/emit.ts';
+import { retained } from '../src/rel/plan.ts';
 import { render } from '../src/sql/kernel/q.ts';
 
 const CORPUS = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.meta.url)).text())
@@ -80,12 +81,23 @@ let emitted = 0;
 function checkBindAccounting(plan: Parameters<typeof planBindCount>[0], where: string): void {
   // Not `emitQuery`, which refuses above the cap itself: this must measure what an ADMITTED plan
   // renders, so the counting and the refusal stay separable and a violation reports a NUMBER.
-  const rendered = render(emitRelational(plan)).binds.length;
+  //
+  // A PROGRAM (a chain with effects) is measured PER STEP, because each of its statements meets the
+  // wall on its own — summing them would report a number no database ever asks. `emit` raises above
+  // the cap, so the widest step is read from `renderedSteps` instead.
+  const rendered = renderedSteps(plan);
   emitted++;
-  if (rendered <= DO_BIND_CAP) return;
-  const message = `an admitted plan renders ${rendered} binds, above the cap of ${DO_BIND_CAP}`;
+  const widest = Math.max(...rendered);
+  if (widest <= DO_BIND_CAP) return;
+  const message = `an admitted plan renders ${widest} binds, above the cap of ${DO_BIND_CAP}`;
   if (!accounting.has(message)) accounting.set(message, where);
 }
+
+/** Each executable step's rendered bind count. One statement for a read, N for a program. */
+const renderedSteps = (plan: Parameters<typeof planBindCount>[0]): readonly number[] =>
+  plan.bindings.some((binding) => retained(binding))
+    ? emit(plan).map((step) => step.emitted.binds.length)
+    : [render(emitRelational(plan)).binds.length];
 
 for (const query of CORPUS) {
   let steps: IRStep[];

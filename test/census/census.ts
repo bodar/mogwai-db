@@ -109,7 +109,7 @@ const FOREIGN_ORIGIN: readonly RegExp[] = [
 function spineOf(query: string): Spine {
   try {
     const plan = compile(query, {}, { spine: 'rel' });
-    return plan.kind === 'read' ? plan.spine : 'legacy';
+    return plan.kind === 'write' ? 'legacy' : plan.spine;
   } catch {
     return 'legacy';
   }

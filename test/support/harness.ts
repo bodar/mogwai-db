@@ -14,6 +14,7 @@
 // test/L3-conformance/glv-compat.ts (a bound `deserializeValue`) are unrelated functions that
 // merely share a name.
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
+import { runProgram } from '../../src/program.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
@@ -42,6 +43,8 @@ export function seededStore() {
 export const runWith = (store: GraphStore, q: string, options?: CompileOptions) => {
   const p = compile(q, {}, options);
   if (p.kind === 'write') return p.run(store);
+  // A RelIR program is several statements, so running it is the executor's job, not a `query` call.
+  if (p.kind === 'program') return [...runProgram(store, p.program)] as any[];
   return store.query(p.sql, p.binds);
 };
 

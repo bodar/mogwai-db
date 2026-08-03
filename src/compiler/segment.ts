@@ -21,7 +21,7 @@
 // executor's collaborators (store + the federation source). This module is TYPES ONLY: the
 // cycle-free description of a plan, importing only leaf types, never the store / framing / engine.
 
-import type { Compiled, WritePlan } from '../sql/kernel/render.ts';
+import type { Compiled, Executable } from '../sql/kernel/render.ts';
 import type { ForeignRow } from '../api.ts';
 import type { CallParams } from '../services/spi/types.ts';
 
@@ -56,5 +56,5 @@ export interface SegmentPlan {
 /** A fully-planned traversal: either a single synchronous SQL/write compile (everything in
  *  Phases 1-5 — the zero-segment degenerate case) or a barrier segment awaiting resumption. */
 export type Plan =
-  | { readonly kind: 'sql'; readonly compiled: Compiled | WritePlan }
+  | { readonly kind: 'sql'; readonly compiled: Executable }
   | SegmentPlan;
