@@ -397,8 +397,6 @@ enum RefusalReason { bind_budget | statement_text_budget | unrenderable_row_valu
 entity Pass {
     kind: PassKind
     order: Integer
-    semantic: Boolean
-    owning_phase: Integer
 
     -- A pass that exists but is not in the pipeline is a pass that does not run.
     in_live_pipeline: Boolean
@@ -487,14 +485,14 @@ default ChannelPolicy bulk_policy = {
 -- for a row set sized by DATA, and while it is unwired the remedy in force is a DECLINE at the
 -- routing seam instead — which keeps the wall out of production and puts that whole class of
 -- traversal permanently on the route this migration exists to delete.
-default Pass check_pass  = { kind: check,     order: 1, semantic: false, owning_phase: 1, in_live_pipeline: true }
-default Pass flatten_pass = { kind: flatten,  order: 2, semantic: true,  owning_phase: 3, in_live_pipeline: false }
-default Pass unroll_pass = { kind: unroll,    order: 3, semantic: true,  owning_phase: 3, in_live_pipeline: false }
-default Pass fuse_pass   = { kind: fuse,      order: 4, semantic: true,  owning_phase: 1, in_live_pipeline: false }
-default Pass prune_pass  = { kind: prune,     order: 5, semantic: false, owning_phase: 1, in_live_pipeline: false }
-default Pass land_pass   = { kind: land,      order: 6, semantic: false, owning_phase: 1, in_live_pipeline: false }
-default Pass name_pass   = { kind: name,      order: 7, semantic: false, owning_phase: 1, in_live_pipeline: true }
-default Pass recognize_pass = { kind: recognize, order: 8, semantic: true, owning_phase: 4, in_live_pipeline: false }
+default Pass check_pass  = { kind: check,     order: 1, in_live_pipeline: true }
+default Pass flatten_pass = { kind: flatten,  order: 2, in_live_pipeline: false }
+default Pass unroll_pass = { kind: unroll,    order: 3, in_live_pipeline: false }
+default Pass fuse_pass   = { kind: fuse,      order: 4, in_live_pipeline: false }
+default Pass prune_pass  = { kind: prune,     order: 5, in_live_pipeline: false }
+default Pass land_pass   = { kind: land,      order: 6, in_live_pipeline: false }
+default Pass name_pass   = { kind: name,      order: 7, in_live_pipeline: true }
+default Pass recognize_pass = { kind: recognize, order: 8, in_live_pipeline: false }
 
 ------------------------------------------------------------
 -- Rules
@@ -642,7 +640,15 @@ rule ApplyPrune {
 
 rule ApplyLand {
     when: ApplyPass(program, land)
-    ensures: OversizedRowSetsLanded(program: program)
+
+    ensures:
+        if every_oversized_row_set_is_literal(program):
+            OversizedRowSetsLanded(program: program)
+        else:
+            -- It declines what it cannot carry rather than guessing, and the budget then fails
+            -- closed on it — never silently mis-executed.
+            LandDeclined(program: program)
+            program.refusal_reason = unrenderable_row_value
 
     @guidance
         -- An over-budget literal row set becomes ONE JSON bind exploded by json_each and
@@ -650,13 +656,6 @@ rule ApplyLand {
         -- about chunking, and the rewritten plan is an ordinary plan the checker verifies.
         -- A row holding anything but a literal has no compile-time JSON, so the pass declines
         -- it and the budget fails closed on it.
-}
-
-rule DeclineToLandANonLiteralRowSet {
-    when: LandRowSet(program, row_set)
-    requires: not row_set.all_values_json_transportable
-    ensures: LandDeclined(program: program, row_set: row_set)
-    ensures: program.refusal_reason = unrenderable_row_value
 }
 
 rule FenceAClauseReader {
@@ -843,6 +842,7 @@ surface RelationalAlgebra {
         MintRelation(kind, columns, channels, inputs)
         CheckProgram(program)
         ApplyPass(program, pass)
+        FenceClauseReader(program, reader)
         EmitProgram(program)
         RunProgram(program)
 
@@ -882,8 +882,6 @@ deferred SpineRouting.coverage         -- see: relir-migration.allium
 -- Open Questions
 ------------------------------------------------------------
 
-open question "Which passes are ORDERED relative to each other, and who runs them? `land` must precede the bind-budget refusal, `prune` must precede replication, and `name` must run last because it alone returns a program rather than a relation. No pipeline object states this today."
+open question "Which passes are ORDERED relative to each other, and who runs them? `land` must precede the bind-budget refusal, `prune` must precede replication, and `name` must run last because it alone returns a program rather than a relation. No pipeline object states this today. (docs/outstanding-work.md item 37)"
 
-open question "The statement-text budget has no owner: the plan is declared to own it, but nothing measures rendered size and no pass consults a ceiling."
-
-open question "Is a materialisation hint legal directly above a recursive self reference? The positional recursive-term law forbids wrapping the self reference in a derived table, and a forced CTE boundary inside the term is exactly that wrapping."
+open question "The statement-text budget now has an owner for the READ route only — the routing seam refuses on the platform's own limits, which covers text as well as binds. What has no owner is the replication ceiling: the pass that multiplies plan size is meant to consult rendered size and decline, and it is unbuilt."

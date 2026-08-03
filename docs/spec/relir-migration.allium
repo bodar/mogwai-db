@@ -30,11 +30,6 @@ enum DeclineReason {
     | bind_budget_exceeded      -- the plan is over the platform's parameter cap
 }
 
-enum StepFamily {
-    writes | side_effects | scalar_transforms | aliases | list_shape | property_shape
-    | branch | row_ops | reducers | unfamilied
-}
-
 enum RatchetKind { symbol | pattern }
 
 ------------------------------------------------------------
@@ -165,8 +160,13 @@ entity MigrationPhase {
     targets: DeletionTarget with owning_phase = this
     gates: PhaseGate with phase = this
 
+    -- "If coverage has not moved in a phase, that is the finding OF the phase" (§10·4·3), so it is a
+    -- fact about the phase and not about the global state.
+    coverage_moved: Boolean
+
     all_targets_gone: targets.all(t => t.is_gone)
     all_gates_green: gates.all(g => g.status = green)
+    stalled: not coverage_moved or not all_targets_gone
 
     transitions status {
         pending -> active
@@ -190,20 +190,10 @@ entity PhaseGate {
     }
 }
 
--- The instrument that ranks the work: where does the fold give up, per step and per family.
--- Deliberately not a gate, because every number in it is a question rather than an answer.
-entity BlockerReport {
-    routed_count: Integer
-    family: StepFamily
-    blocked_count: Integer
-    largest_member: String
-}
-
 entity MigrationState {
     covered_traversals: Integer
     total_traversals: Integer
     live_deletion_targets: Integer
-    coverage_moved_this_phase: Boolean
 
     is_fully_covered: covered_traversals = total_traversals
     legacy_spine_deletable: is_fully_covered and live_deletion_targets = 0
@@ -237,19 +227,19 @@ config {
 ------------------------------------------------------------
 
 default MigrationPhase phase_1 = {
-    number: 1, title: "The clean-room core", status: complete
+    number: 1, title: "The clean-room core", status: complete, coverage_moved: true
 }
 default MigrationPhase phase_4_1 = {
-    number: 2, title: "The row-algebraic read class and the shape vocabularies", status: active, depends_on: phase_1
+    number: 2, title: "The row-algebraic read class and the shape vocabularies", status: active, coverage_moved: true, depends_on: phase_1
 }
 default MigrationPhase phase_2 = {
-    number: 3, title: "The write wedge", status: pending, depends_on: phase_4_1
+    number: 3, title: "The write wedge", status: pending, coverage_moved: false, depends_on: phase_4_1
 }
 default MigrationPhase phase_3 = {
-    number: 4, title: "The repeat wedge", status: pending, depends_on: phase_2
+    number: 4, title: "The repeat wedge", status: pending, coverage_moved: false, depends_on: phase_2
 }
 default MigrationPhase phase_4_rest = {
-    number: 5, title: "The rest of the read migration", status: pending, depends_on: phase_3
+    number: 5, title: "The rest of the read migration", status: pending, coverage_moved: false, depends_on: phase_3
 }
 
 -- §1's gate, stated as an obligation rather than as a sentence: the write constructs the platform
@@ -340,6 +330,17 @@ rule DeclineAnOverBudgetPlan {
         -- Reproduced at 2x: 91 IR occurrences, 181 rendered.
 }
 
+-- THE ONE DECLINE THAT IS A SAFETY PROPERTY rather than a coverage gap, and it must read the CHAIN
+-- FACT rather than a list of step names, which drifts from it. Omitting a demanded emission order
+-- would not defer — it would pick a DIFFERENT WINDOW from the same multiset: right arity, plausible
+-- rows, and a census that structurally cannot see it.
+rule DeclineAnUnthreadableEmissionOrder {
+    when: LowerChain(chain)
+    requires: chain.demands_emission_order
+    requires: not order_is_threadable(chain)
+    ensures: LoweredPlan.created(chain: chain, covered: false, decline_reason: order_not_threadable)
+}
+
 rule DeclineASpecialisedAccessPath {
     when: LowerChain(chain)
     requires: lowering_covers(chain)
@@ -390,7 +391,7 @@ rule RecordDeletionFloor {
 
 rule ReportStalledCountdown {
     when: phase: MigrationPhase.status transitions_to complete
-    requires: not phase.all_targets_gone
+    requires: phase.stalled
     ensures: CountdownStalled(phase: phase)
 
     @guidance
@@ -566,7 +567,6 @@ surface SpineRouting {
 surface MigrationProgress {
     exposes:
         MigrationState
-        BlockerReport
         DeletionTarget
 
     provides:
@@ -601,10 +601,8 @@ surface MigrationProgress {
 -- Open Questions
 ------------------------------------------------------------
 
-open question "The routing seam declines on the IR-occurrence bind count while the emitter refuses on the rendered count, and the two differ by the assembler's own clause-reader re-inlining. Should the seam render once and decline on the real number, or should an over-budget emission report a decline rather than raise?"
+open question "A class of traversal that only the unwired bind-landing pass could carry is declined instead, which parks it permanently on the route this migration exists to delete. Is that a coverage gap with an owner, or an accepted exception that has to be recorded as one? (docs/outstanding-work.md item 37)"
 
-open question "A class of traversal that only the unwired bind-landing pass could carry is declined instead, which parks it permanently on the route this migration exists to delete. Is that a coverage gap with an owner, or an accepted exception that has to be recorded as one?"
-
-open question "The platform gate for the write constructs already emitted by the algebra is unbuilt while the constructs are already reachable through the executor. Does the gate block the write wedge, or does it block any emission of those constructs at all?"
+open question "The platform gate for the write constructs already emitted by the algebra is unbuilt while the constructs are already reachable through the executor. Does the gate block the write wedge, or does it block any emission of those constructs at all? (docs/outstanding-work.md item 38)"
 
 open question "Coverage is censused per query against a committed baseline, but nothing asserts a floor on the TOTAL. A refactor that trades ten covered traversals for eleven new ones passes the per-query ratchet only if no individual query regresses — is that the intended strength?"
