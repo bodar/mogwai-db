@@ -97,6 +97,14 @@ description = "Deletion ratchet: names a plan promised to delete, and how much o
 depends = ["install"]
 run = "bun scripts/deletion-check.ts"
 
+# The RelIR decline contract, over every corpus prefix × chain shape × fast-path switch. A gate and
+# not an instrument because zero IS the contract: `lowerToRel` returning null defers to the legacy
+# spine, but THROWING is the new spine erroring on a traversal the old one compiles.
+[tasks.rel-sweep]
+description = "RelIR decline contract: lowerToRel returns a plan or null over every corpus prefix, never throws"
+depends = ["install"]
+run = "bun scripts/rel-sweep.ts"
+
 [tasks.deletion-record]
 description = "Bank a lowered deletion floor (downward only; commit scripts/deletion-ratchet.tsv)"
 depends = ["install"]
@@ -259,6 +267,6 @@ depends = ["install", "submodule"]
 run = "bunx wrangler deploy --dry-run --outdir dist"
 
 [tasks.ci]
-description = "CI gate: type-check + lint + architectural + bind-budget + deletion ratchet + test + worker build"
-depends = ["check", "lint", "arch", "binds", "deletion", "test", "build"]
+description = "CI gate: type-check + lint + architectural + bind-budget + deletion ratchet + RelIR decline contract + test + worker build"
+depends = ["check", "lint", "arch", "binds", "deletion", "rel-sweep", "test", "build"]
 run = "echo 'CI passed'"

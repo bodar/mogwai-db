@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { compile } from '../src/compiler/compiler.ts';
-import { read, seededStore } from './support/harness.ts';
+import { read, runWith, seededStore } from './support/harness.ts';
 
 /**
  * THE RelIR SPINE — routing, coverage and the per-traversal differential (§10·4).
@@ -64,6 +64,14 @@ const COVERED = [
   'g.inject(1,2).limit(1)', 'g.inject(1,2).skip(1)', 'g.inject(1,2,2).dedup()',
   // The scalar tail is now ONE fold whichever source fed it, so these reach the same arms.
   "g.V().values('name').dedup()", 'g.V().count().count()', "g.V().out().values('name').dedup()",
+  // A SCALAR `order()` — a `Sort`, which is what separates it from the element one: over values
+  // legacy emits the ORDER BY as a relation (`SELECT p.v FROM c0 p ORDER BY p.v ASC`), whereas over
+  // elements it folds into the FRAMING projection, which is Phase 4.2's. `by(Order.asc|desc|shuffle)`
+  // is a DIRECTION the algebra can state, so the modulator is covered rather than declining.
+  'g.inject(1,2).order()', 'g.inject(3,1,2).order().limit(2)', "g.inject('b','a').order().by(Order.desc)",
+  "g.V().values('age').order()", "g.V().values('age').order().range(1,3)",
+  "g.V().values('name').order().by(Order.desc)", "g.V().values('age').order().is(P.gt(29))",
+  "g.V().values('age').order().dedup()", "g.V().values('age').order().count()",
 ];
 
 /**
@@ -78,7 +86,7 @@ const DECLINED = [
   'g.inject([1,2])',                  // a COLLECTION argument is a list traverser, a different arm
   'g.inject()',                       // the EMPTY relation, which `Values` refuses to express (§3.3)
   "g.inject('a').inject('b')",        // a second inject is a UNION with the first, not a source
-  'g.inject(1,2).order()',            // scalar order() is a Sort — the next increment
+  'g.inject(1,2).order(Scope.local)', // LOCAL scope: a per-traverser sort of a LIST, a different arm
   'g.withSack(0).V()',                // a carried sack the source seed would have to declare
   'g.withSideEffect("a",1).V()',      // a side effect
   'g.addV("person")',                 // a write
@@ -120,6 +128,54 @@ describe('the RelIR spine', () => {
       const legacy = read(gremlin, { spine: 'legacy' });
       expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
     }
+  });
+
+  test('a scalar order() pins the SEQUENCE, not just the multiset', () => {
+    // `rowsVia` SORTS, so the COVERED loop above is a multiset comparison and structurally cannot
+    // see the two defects an `order()` actually has: a sort in the wrong DIRECTION, and a sort the
+    // assembler fused away entirely. Both leave the multiset untouched, so the census cannot see
+    // them either (`ms` is the gate, `ord` is telemetry). Row-for-row against legacy is what can.
+    for (const gremlin of ['g.inject(3,1,2).order()', "g.inject('c','a','b').order()",
+      "g.inject('c','a','b').order().by(Order.desc)", 'g.inject(3,1,2).order().limit(2)',
+      'g.inject(3,1,2).order().skip(1)', "g.V().values('age').order()", "g.V().values('name').order()",
+      "g.V().values('name').order().by(Order.desc)", "g.V().values('age').order().range(1,3)",
+      "g.V().out().values('name').order()", "g.V().values('age').order().is(P.gt(29))"]) {
+      const rel = read(gremlin, { spine: 'rel' });
+      const legacy = read(gremlin, { spine: 'legacy' });
+      expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
+    }
+    // …and one ABSOLUTE assertion, because a differential agrees when both sides are wrong: the
+    // ascending sequence itself, which no scan order can produce by luck three times over.
+    const asc = read('g.inject(3,1,2).order()', { spine: 'rel' });
+    expect(store.query(asc.sql, asc.binds).map((row: any) => row.v)).toEqual([1, 2, 3]);
+  });
+
+  test('a scalar order() narrows on its MODULATOR rather than declining wholesale', () => {
+    // `by()` is the one modulator the scalar tail reads, because on `order()` it names a DIRECTION
+    // and not a projection. So the arms split: a direction routes, and a form that needs a value a
+    // scalar stream has not got — `by(key)`, `by(traversal)`, `by(token)`, or two keys at once —
+    // declines and legacy raises the message it owns. These are not `DECLINED` entries because
+    // legacy THROWS for them: what is being pinned is that RelIR does not throw FIRST, since a
+    // deferral raised by the wrong spine is how "not learned yet" turns into a support regression.
+    expect(compile("g.V().values('name').order().by(Order.desc)", {}, { spine: 'rel' })).toMatchObject({ spine: 'rel' });
+    expect(() => compile("g.V().values('name').order().by('age')", {}, { spine: 'rel' }))
+      .toThrow('order().by(key/traversal) on a scalar stream not supported');
+    expect(() => compile("g.V().values('name').order().by(Order.asc).by(Order.desc)", {}, { spine: 'rel' }))
+      .toThrow('multiple order().by() modulators');
+  });
+
+  test("a scalar order()'s key is vtype-aware, so a TEXT-stored number sorts numerically", () => {
+    // The arm where a plausible-looking lowering is silently wrong, and it needs its own fixture:
+    // every `age` in the reference graph fits an INTEGER storage class, so a key that skipped the
+    // compare CASE would agree with legacy on all eleven traversals above. A long past 2^53 does not
+    // fit, is stored as TEXT, and a lexical sort then puts it BETWEEN 12 and 300 — right multiset,
+    // wrong sequence, and nothing else in the suite looks.
+    const graph = seededStore();
+    for (const value of ['12L', '9007199254740993L', '300L'])
+      runWith(graph, `g.addV("n").property("k",${value})`);
+    const plan = read("g.V().hasLabel('n').values('k').order()", { spine: 'rel' });
+    expect(plan.spine).toBe('rel');
+    expect(graph.query(plan.sql, plan.binds).map((row: any) => String(row.v))).toEqual(['12', '300', '9007199254740993']);
   });
 
   test('a chain that demands emission order fails CLOSED', () => {

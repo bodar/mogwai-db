@@ -45,13 +45,21 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('values().order() sorts the projected scalar', () => {
-    const p = read('g.V().values("age").order()');
-    // scalar order sorts by the vtype-aware compareKey (numeric for a TEXT-stored big
-    // long/bigdecimal/duration, lexical for strings via the ELSE branch).
-    expect(p.sql).toContain('ORDER BY (CASE WHEN p.vtype');
-    expect(p.sql).toContain('ELSE p.v END) ASC');
-    // values() carries the per-row stored type → framed by it (perRowType).
-    expect(p.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
+    // A scalar order() is a RELATION operator (unlike the element one, which is the framing
+    // projection's ORDER BY), so it is RelIR-routed (§10·4). What both spines must agree on is that
+    // the sort key is the VTYPE-AWARE compare key — numeric for a TEXT-stored big long / bigdecimal
+    // / duration, lexical for a string via the ELSE branch — so that is what is asserted per spine,
+    // rather than either one's aliases.
+    const legacy = read('g.V().values("age").order()', { spine: 'legacy' });
+    expect(legacy.sql).toContain('ORDER BY (CASE WHEN p.vtype');
+    expect(legacy.sql).toContain('ELSE p.v END) ASC');
+    const rel = read('g.V().values("age").order()', { spine: 'rel' });
+    expect(rel.sql).toMatch(/ORDER BY CASE WHEN \w+\.vtype IN [^]*CAST\(\w+\.v AS INT\)[^]*CAST\(\w+\.v AS REAL\)[^]*ASC/);
+    // …and the key reads a COLUMN, not the value expression re-inlined: the `Materialize` fence in
+    // front of a clause-position reader is what keeps one order() at 15 binds instead of 24.
+    expect(rel.sql).not.toMatch(/ORDER BY[^]*CAST\(CASE/);
+    // values() carries the per-row stored type → framed by it (perRowType), on both.
+    for (const p of [legacy, rel]) expect(p.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
   });
 
   test('range/skip become LIMIT/OFFSET tail modifiers under order()', () => {
@@ -330,8 +338,10 @@ describe('scalar-parent / projection SQL', () => {
       expect(inner).toMatch(/count\(\*\)/i);
       expect(inner).toMatch(/WHERE/i);
     }
-    // value modifiers
-    expect(read('g.inject(3,1,2).order()').sql).toContain('ORDER BY p.v ASC');
+    // value modifiers. An injected value carries no stored vtype, so the sort key is the value
+    // itself on both spines — the compare CASE is only for a per-row-typed property.
+    expect(read('g.inject(3,1,2).order()', { spine: 'legacy' }).sql).toContain('ORDER BY p.v ASC');
+    expect(read('g.inject(3,1,2).order()', { spine: 'rel' }).sql).toMatch(/FROM \(VALUES[^]*\) \w+ ORDER BY \w+\.column1 ASC/);
     expect(read('g.inject(1,1,2).dedup()', { spine: 'legacy' }).sql).toContain('DISTINCT p.v');
     // RelIR reaches the same DISTINCT over the injected VALUES directly, with no CTE between.
     expect(read('g.inject(1,1,2).dedup()', { spine: 'rel' }).sql).toMatch(/SELECT DISTINCT \w+\.column1 AS v FROM \(VALUES/);
@@ -988,8 +998,11 @@ describe('scalar-parent / projection SQL', () => {
 
     // A keyed/bare order() re-establishes determinism, so the following slice needs no emission
     // encounter — order()+range() fuse into one ORDER BY … LIMIT … OFFSET (demand pass resets).
-    const ordered = read('g.V().values("age").order().range(1,3)');
-    expect(ordered.sql).toContain('ELSE p.v END) ASC LIMIT 2 OFFSET 1');
+    // Both spines fuse, so both are asserted; the RelIR one binds its window rather than inlining it.
+    expect(read('g.V().values("age").order().range(1,3)', { spine: 'legacy' }).sql)
+      .toContain('ELSE p.v END) ASC LIMIT 2 OFFSET 1');
+    expect(read('g.V().values("age").order().range(1,3)', { spine: 'rel' }).sql)
+      .toMatch(/ELSE \w+\.v END ASC LIMIT \? OFFSET \?/);
 
     const typedSum = read('g.V().values("age").asNumber(GType.DOUBLE).sum().is(P.gt(100))');
     expect(typedSum.shape).toEqual({ kind: 'scalar' });

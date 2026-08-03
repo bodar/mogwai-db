@@ -25,9 +25,20 @@ describe('unified lowering characterization', () => {
         // fast middle = the inline correlated movement child (a nested derived EXISTS,
         // no CTE); generic middle = the materialized child-existence gate (ROW_NUMBER
         // domain). Same filterCte plumbing either way.
+        //
+        // This case is the SWITCH-ASYMMETRIC one: RelIR implements the inlined side of
+        // `predicateInlining` and declines the generic side (§10·4), so the enabled position is
+        // RelIR-routed and the disabled position is legacy — which is exactly what keeps the switch
+        // meaningful rather than a coverage toggle. So the fast side is matched on the SHAPE both
+        // spines emit and not on either's aliases: the body reaches `edges` INSIDE the EXISTS. That is
+        // the whole difference from the generic side, whose EXISTS reads a materialized CTE — and it
+        // must hold with `MOGWAI_RELIR=0` too, where this position is legacy again
+        // (`mise run test:legacy-spine`). A pattern that named one spine's join shape failed there,
+        // which is the differential doing its job on a test rather than on the compiler.
         key: 'predicateInlining',
         query: 'g.V().where(__.out("knows")).values("name").order()',
-        fastSql: 'WHERE EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e',
+        fastSql: 'WHERE EXISTS',
+        fastPattern: /EXISTS\s*\([^]*\bFROM edges\b/,
         genericSql: 'ROW_NUMBER() OVER () AS o0',
       },
       {

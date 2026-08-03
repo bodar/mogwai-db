@@ -4,11 +4,11 @@ import * as make from '../../rel/factory.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import type { Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { relId, type ColMeta, type RelType, type SqlType } from '../../rel/types.ts';
+import { relId, type ColMeta, type RelType, type SortTerm, type SqlType } from '../../rel/types.ts';
 import { isLocalScope, sliceOf } from '../ir/step.ts';
 import { PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
-import { flattenListArgs, isNested } from '../../gremlin/frontend.ts';
+import { flattenListArgs, isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
 import { childSteps } from '../steps/tail/child-shape.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain } from '../ir/analyze.ts';
@@ -477,34 +477,54 @@ function rowOp(step: IRStep, input: Rel, ordered: boolean, fresh: Minter): Rel |
 }
 
 /**
- * RE-MINT the emission order after a fan-out.
+ * RENUMBER the emission order — `ROW_NUMBER()` into the `encounter` channel's own column, over
+ * whatever order the caller names, leaving every other column exactly as it was.
  *
- * A hop is a join: one incoming traverser becomes N outgoing ones, so the incoming positions no
- * longer NUMBER the outgoing rows — several share one. `ROW_NUMBER() OVER (ORDER BY encounter, id)`
- * renumbers them, and the tie-break on `id` is what makes the result deterministic rather than
- * merely ordered: without it the rows sharing an incoming position would be numbered in whatever
- * order SQLite produced them, which is the defect `mise run test:perturbed` exists to find.
+ * ONE function because the two callers ask the identical question of different orders, and reading
+ * them side by side is what makes that visible: a fan-out renumbers by *the incoming position*
+ * (several outgoing rows share one, so the old numbers no longer number the new rows), and a
+ * scalar `order()` renumbers by *its own sort key* (the sort SUPERSEDES the arriving order, so a
+ * later slice must take its window from the new positions and not the stale seed). Legacy has these
+ * as two hand-rolled window projections; here the difference is the `terms` argument and nothing
+ * else.
+ *
+ * The last term is a TIE-BREAK, and it is the caller's to supply because only the caller knows what
+ * makes its order total. Without one the rows sharing a rank are numbered in whatever order SQLite
+ * produced them — right multiset, arbitrary window — which is exactly the defect
+ * `mise run test:perturbed` exists to find and which no assertion in the ladder can see.
  *
  * Two nodes because `Window` may only EXTEND its input (§3.5) — it adds the new column, and the
  * projection is what makes that column the channel and drops the stale one. The assembler fuses
  * them back into one SELECT, which is the division of labour §5 describes: the IR stays normalized
  * and the emitter does the composing.
  */
-function remintOrder(rel: Rel, fresh: Minter): Rel {
+function renumber(
+  rel: Rel, terms: readonly SortTerm[], cols: readonly ColMeta[], channels: Channels, fresh: Minter,
+): Rel {
   const minted = 'rn';
+  const encounter = channels.find((channel) => channel.role === 'encounter');
+  // Renumbering a relation with nowhere to put the number is a lowering bug, not a deferral: every
+  // caller checks the channel first, so reaching here means a plan was built whose declared type and
+  // whose channels disagree — the class of defect the factory's own width checks catch three nodes
+  // later, where the cause is no longer visible.
+  if (!encounter) throw new Error('RelIR lowering: renumber() needs an encounter channel to mint into');
   const windowed = make.window({
-    id: fresh('w'), input: rel, channels: rel.channels,
-    type: typeOf(...elementCols(true), meta(minted, 'int')),
-    specs: [[minted, {
-      kind: 'window-expr', fn: 'row_number', args: [],
-      spec: { partitionBy: [], orderBy: [{ expr: col(rel.id, 'encounter'), dir: 'asc' }, { expr: col(rel.id, 'id'), dir: 'asc' }] },
-    }]],
+    id: fresh('w'), input: rel, channels: rel.channels, type: typeOf(...cols, meta(minted, 'int')),
+    specs: [[minted, { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: terms } }]],
   });
   return make.project({
-    id: fresh('ro'), input: windowed, channels: ORDERED, type: typeOf(...elementCols(true)),
-    exprs: [['id', col(windowed.id, 'id')], ['bulk', col(windowed.id, 'bulk')], ['encounter', col(windowed.id, minted)]],
+    id: fresh('ro'), input: windowed, channels, type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, col(windowed.id, column.name === encounter.col ? minted : column.name)] as const),
   });
 }
+
+/** The fan-out re-mint: renumber by the incoming position, tie-broken on the element id so rows
+ *  that shared one incoming traverser get a deterministic order rather than SQLite's. */
+const remintOrder = (rel: Rel, fresh: Minter): Rel => renumber(
+  rel,
+  [{ expr: col(rel.id, 'encounter'), dir: 'asc' }, { expr: col(rel.id, 'id'), dir: 'asc' }],
+  elementCols(true), ORDERED, fresh,
+);
 
 /**
  * The convergent-walk COLLAPSE: `SELECT id, SUM(bulk) … GROUP BY id`, so the frontier stays bounded
@@ -611,6 +631,46 @@ function terminal(step: IRStep, input: Rel, elem: Elem, ordered: boolean, fresh:
   return null;
 }
 
+/** The tail steps that read the traverser's value from a clause SQL cannot alias into — a `WHERE`
+ *  or an `ORDER BY`. What they have in common is the bind wall, and the remedy, both in `scalarTail`. */
+const CLAUSE_READERS = new Set(['is', 'order']);
+
+/**
+ * A SCALAR `order()`'s sort terms, or `null` to decline.
+ *
+ * Scalar `order()` IS a relation operator, and that is what separates it from the element one: over
+ * values legacy emits `SELECT p.v FROM c0 p ORDER BY p.v ASC` — a `Sort` in the algebra, exactly —
+ * whereas over elements it folds the order into the FRAMING projection, which is `TailAcc`'s and
+ * Phase 4.2's. Same step name, two different layers, and only one of them is here.
+ *
+ * The key goes through `storedCompare` wherever a per-row `vtype` is in scope, for the reason the
+ * range predicates do: a value too big for SQLite's numeric storage classes is stored as TEXT, so a
+ * plain `<` sorts it lexically and after every numeric row. This is the SAME authority the `is(P)`
+ * arm uses — one ordering key for comparing and for sorting, because they are the same question.
+ *
+ * `by()` narrows rather than declining wholesale: a bare `by(Order.asc|desc|shuffle)` names a
+ * direction the algebra can state, while `by(key)`, `by(traversal)` and `by(token)` all need a value
+ * a scalar stream does not have (there are no properties on a value) — legacy throws for those and
+ * declining hands it the message. More than one `by()` is a multi-key sort no scalar stream can
+ * satisfy either.
+ */
+function sortTerms(step: IRStep, rel: Rel, cols: readonly string[]): readonly SortTerm[] | null {
+  if (isLocalScope(step) || (step.args ?? []).length) return null;
+  const bys = step.modulators ?? [];
+  if (bys.length > 1) return null;
+  const by = bys[0] ?? [];
+  if (by.some((arg: unknown) => typeof arg === 'string' || isNested(arg) || isTokenArg(arg))) return null;
+  const dir = by.find(isOrderArg)?.order;
+  // `shuffle` is a sort by a value that is not in any row, which is why it is a `Call` and not a
+  // `Col`: SQLite's `RANDOM()` re-evaluates per row and that IS the semantics. Nondeterministic by
+  // construction, so the census sees it through the multiset digest and never through `ord`.
+  if (dir === 'shuffle') return [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }];
+  if (dir !== undefined && dir !== 'asc' && dir !== 'desc') return null;
+  const value = col(rel.id, 'v');
+  const key = cols.includes('vtype') ? storedCompare(rel.id)(value) : value;
+  return [{ expr: key, dir: dir === 'desc' ? 'desc' : 'asc' }];
+}
+
 /**
  * THE SCALAR TAIL — the vocabulary above a one-value-per-row relation, wherever that relation came
  * from. `values()`/`count()` retyping an element stream and `inject()` seeding one both land here,
@@ -634,23 +694,48 @@ function scalarTail(
   // draws as `typeCtx.kind === 'perRow'`.
   const compare = () => (outCols.includes('vtype') ? storedCompare(rel.id) : undefined);
 
-  // A BOUNDARY before a run of filters, and it is not cosmetic. Fusing a `Filter` into its input's
-  // block means the input's outputs are spelled as the EXPRESSIONS that compute them (§5) — SQL has
-  // no other option, since a `WHERE` cannot name a select alias. So each `is` re-inlines the whole
-  // projection, and with the vtype-aware ordering CASE in play that is ~20 binds apiece: measured
-  // 25 / 45 / 65 for one, two and three range predicates against legacy's 2 / 3 / 4. Four would
-  // exceed the DO cap and fail closed where legacy answers — a support regression, not a wall worth
-  // shipping. `Materialize` is the declared remedy (§3.3, "a boundary hint … where the planner needs
-  // a fence") and lands the same CTE-then-filter shape legacy emits.
-  if (steps[from]?.name === 'is' && seed.kind !== 'values')
+  // A BOUNDARY before a CLAUSE-POSITION READER, and it is not cosmetic. Fusing a `Filter` or a
+  // `Sort` into its input's block means the input's outputs are spelled as the EXPRESSIONS that
+  // compute them (§5) — SQL has no other option, since neither a `WHERE` nor an `ORDER BY` can name
+  // a select alias. So each one re-inlines the whole projection, and with the vtype-aware ordering
+  // CASE in play that is ~20 binds apiece: measured 25 / 45 / 65 for one, two and three range
+  // predicates against legacy's 2 / 3 / 4, and 24 against legacy's 1 for a single `order()` (whose
+  // key inlines the value expression three times over — once per arm of the compare CASE). A fourth
+  // predicate would exceed the DO cap and fail closed where legacy answers — a support regression,
+  // not a wall worth shipping. `Materialize` is the declared remedy (§3.3, "a boundary hint … where
+  // the planner needs a fence") and lands the same CTE-then-read shape legacy emits.
+  //
+  // Only the FIRST tail step needs the hint, and that is structural rather than lucky: a reader
+  // further along sits over a node the assembler already refuses to fuse into — a `Limit`, a
+  // `Distinct`, an earlier `Sort`, or this very fence — so its subject is a column of a finished
+  // block and there is nothing left to re-inline.
+  if (CLAUSE_READERS.has(steps[from]?.name ?? '') && seed.kind !== 'values')
     rel = make.materialize({ id: fresh('m'), input: rel, channels: outChannels, type: rel.type });
 
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
     const args = step.args ?? [];
-    if (step.modulators?.length || step.optionArms) return null;
+    if (step.optionArms) return null;
+    // `order()` is the one step here whose MODULATOR is part of what it covers — `by(Order.desc)` is
+    // a direction, not a projection — so the blanket decline exempts it and `sortTerms` decides.
+    if (step.name !== 'order' && step.modulators?.length) return null;
 
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
+
+    if (step.name === 'order') {
+      const terms = sortTerms(step, rel, outCols);
+      if (!terms) return null;
+      // A sort SUPERSEDES the arriving emission order, so where one is carried the positions must be
+      // re-minted and not merely re-sorted: a later slice reads the channel, and taking its window
+      // from the stale seed would return the right multiset from the wrong place. Legacy says the
+      // same thing with its own window projection (`partitionedOrder`), tie-broken on the old
+      // encounter — which is what makes the sort STABLE, so that is the second term here too.
+      const encounter = outChannels.find((channel) => channel.role === 'encounter');
+      rel = encounter
+        ? renumber(rel, [...terms, { expr: col(rel.id, encounter.col), dir: 'asc' }], rel.type.cols, outChannels, fresh)
+        : make.sort({ id: fresh('so'), input: rel, channels: outChannels, type: rel.type, terms });
+      continue;
+    }
 
     const sliced = sliceOp(step, rel, fresh);
     if (sliced) { rel = sliced; continue; }
@@ -845,7 +930,14 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
       continue;
     }
     const clause = sourceFilter(step, { id: col(rel.id, 'id'), rel }, elem, fresh, ctx);
-    if (clause) { rel = make.filter({ id: fresh('f'), input: rel, channels: BULK, type: rel.type, pred: clause }); continue; }
+    // `rel.channels`, NOT `BULK`: a `Filter` is channel-preserving by contract (§3.5), so naming a
+    // list rather than passing the input's through is a chance to name a SHORTER one — and under
+    // `demandsEncounter` the relation carries `bulk` AND `encounter`, so the hardcoded `BULK` dropped
+    // the position its own input still declared. The factory catches it (`filter changed its carried
+    // channels`), which made a fail-closed VIOLATION rather than a wrong answer: RelIR threw where
+    // legacy answers. Found by L5 on a generated `E().limit(1).has(…).where(…)` — no corpus traversal
+    // has that prefix, so the corpus sweep could not reach it.
+    if (clause) { rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause }); continue; }
     const row = rowOp(step, rel, ordered, fresh);
     if (!row) break;
     rel = row;
