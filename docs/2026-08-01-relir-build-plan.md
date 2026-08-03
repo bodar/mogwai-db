@@ -1069,6 +1069,27 @@ corpus, against 1,368 beginning with `g.V()`/`g.E()`. The node is already proven
 family 11 of the Phase-1 equivalence gate — and what it needs is the SCALAR source and the scalar
 vocabulary above it, most of which (`is`, the slices, the predicate module) already exists.
 
+**RE-MEASURED at 208 routed (2026-08-03), and the ranking moved — as it always does:**
+
+| blocked at | traversals | | blocked at | traversals |
+|---|---|---|---|---|
+| `addV` | **146** | | `local` | 52 |
+| `as` | **133** | | `group` | 50 |
+| `inject` | 113 | | `properties` | 46 |
+| `is` | **104** | | `where` | 40 |
+| `fold` | 101 | | `order` | 39 |
+| `repeat` | 73 | | `match` | 36 |
+| `has` | 66 | | `choose` | 35 |
+| `asNumber` | 60 | | `valueMap` | 35 |
+| `aggregate` | 57 | | `path` | 28 |
+
+**`is` blocking 104 while `is` is COVERED is the finding, and every one of them is `P.typeOf`.** A
+single predicate op — `P.typeOf(GType.X)` over a value whose per-row `vtype` column is in scope is a
+`vtype = 'x'` test with a storage-class fallback (`typeOfSql` mode 2), which the algebra states
+exactly. Nothing else on this list is one op wide. `inject` 113 is the residue of the forms that
+decline by design (a collection argument, the empty relation, a second `inject`) plus their tails, not
+a regression from 403.
+
 **The sweep also found two latent defects, which is the better argument for running it.** Sweeping
 every PREFIX under all four switch combinations — rather than the shapes one has in mind — caught
 (a) `collapse` and `ordered` being accepted together, where the collapse dropped an encounter column
@@ -1102,6 +1123,38 @@ now consistent: every one was right-arity and plausible, and none was reachable 
    aggregate at all). Valid on the dev runtime, unproven on the one we ship to — the exact species
    `src/cf-limits.ts` exists for. An `Agg` with no arguments MEANS "over all rows" and `count(*)` is
    SQL's spelling of that, so the star belongs in the emitter, not as a node field.
+
+**Coverage 206 → 208, 9.1% (`2d022e9`): SCALAR `order()`, and the increment whose value was not the
++2.** A scalar `order()` IS a relation operator and an element `order()` is not — over values legacy
+emits `SELECT p.v FROM c0 p ORDER BY p.v ASC`, a `Sort` in the algebra exactly, while over elements
+it folds the ORDER BY into the framing projection, which is `TailAcc`'s and 4.2's. Same step name,
+two layers. Both census digests (`ms` AND `ord`) are unchanged on the two rows that moved, so the
+SEQUENCE matches legacy and not merely the multiset — which for an `order()` is the whole claim.
+
+Three things it produced that outlast it:
+
+- **The fan-out re-mint and the scalar sort are ONE function.** `renumber(rel, terms, …)` mints
+  `ROW_NUMBER()` into the `encounter` channel's own column over whatever order the caller names — a
+  hop renumbers by the incoming POSITION (several outgoing rows share one), a sort by its own KEY (a
+  sort supersedes the arriving order, so a later slice must read the new positions and not the stale
+  seed). The tie-break is the caller's argument, because only the caller knows what makes its order
+  total. Legacy has these as two hand-rolled window projections.
+- **The `Materialize` fence generalized from one step to a CLASS.** Neither `WHERE` nor `ORDER BY`
+  can name a select alias, so a `Filter` or a `Sort` fused into the block that computes `v`
+  re-inlines the whole projection — measured **24 binds for one `order()` against legacy's 1**, and
+  15 after the fence (the compare CASE inlines the value expression once per arm). `CLAUSE_READERS`
+  is the set of tail steps that read the value from such a clause, and only the FIRST needs the hint:
+  a later one sits over a `Limit`/`Distinct`/`Sort`/fence the assembler already refuses to fuse into.
+- **`mise run rel-sweep` is now a CI GATE** (`scripts/rel-sweep.ts`, ~8s, 82,536 combinations at
+  zero). L5 found a post-movement `Filter` naming `BULK` instead of passing its input's channels
+  through, which under `demandsEncounter` made RelIR **THROW where legacy answers** — a fail-closed
+  VIOLATION, not a wrong answer, and the one failure mode §10·4's routing switch cannot absorb. The
+  earlier ad-hoc corpus sweep missed it because no corpus traversal has an `E().limit(1).has(…)`
+  prefix. The committed gate adds the two chain shapes that fix that: `demandsEncounter` is
+  chain-GLOBAL, so a prefix that never slices can only ever be lowered UNORDERED, and INSERTING a
+  `limit(1)` right after the source additionally forces every later filter out of the source-scope
+  phase and into the id-relation phase — which is the position that threads the channels. Zero IS the
+  gate, deliberately not a ratchet.
 
 **NEXT, measured from base 259** (`V`/`E`/`hasLabel`/`has`/`count`/`values`/`is`/movement/`where`):
 **the row-algebraic class is +50 and it is literally Phase 4.1's named deliverable** — `order` 20 ·
@@ -1520,6 +1573,36 @@ field, the `Membership` interface, the emitter arm and the two key-agreement che
 column name, because the caller writes the predicate and `check` validates it against the scope like
 any other expression. `Insert.source` and `Update.from` keep their places — a source relation and
 SQLite's `UPDATE … FROM` have no predicate spelling — and `using` never had one.
+
+### 10·7 — DECIDED 2026-08-03: the ordering criterion is DELETION, not marginal coverage
+
+**The change.** An increment is chosen by *which §8 name does this let me delete*, with marginal
+corpus coverage as the tiebreak. It was the other way round for the first ten increments and that was
+correct at the time; it has stopped being.
+
+**Why it was right, and why it stopped.** Marginal value is what found `is` at **+53** and `inject` at
+**+81** — two of the three largest jumps, both invisible to a fixed worklist, and `is` had read *worth
+zero alone* one round earlier (§ the marginal-value paragraphs above). That argument only holds while
+30–50-chain wins exist. They no longer do: the high-multiplier vocabularies are spent, and what is
+left is `addV` (a write — Phase 2), `as`/`select` (the alias channel), `repeat` (Phase 3) and a long
+tail of one-host steps. Scalar `order()` was **+2**. Continuing to rank by marginal coverage from here
+optimizes a number that is no longer the binding constraint, and §10·4 already says which number is:
+**coverage at 100% with a non-empty §8 list is a FAILED migration.** Coverage says the new spine
+works; deletion says the old one is gone, and only the second one ends this.
+
+**Two consequences, both deliberate.**
+
+- **A small coverage delta is not a failed increment.** The modulator seam is the worked example: `if
+  (step.modulators?.length || step.optionArms) return null` guarded **six** handlers in `lower.ts` —
+  one concept declined six times — and no single-step increment will ever motivate fixing it, because
+  each host only ever needs its own `by()`. Landed as ONE vocabulary (`modulator.ts`, as
+  `predicate.ts` was), `order`/`dedup`/`group`/`groupCount`/`select`/`project`/`path`/`sack` all gain
+  `by()` at once. FAMILY CLOSURE is the criterion there, and the coverage delta is close to noise.
+- **The blocker instrument keeps its job, with a different question.** "Where does the fold give up"
+  still ranks the work; it just no longer decides the order by itself. It is also still worth running
+  every round for the reason it was built: at 208 routed it showed `is` blocking **104** traversals
+  while `is` was already covered — every one of them `P.typeOf`, a single predicate op. That kind of
+  finding is what the instrument is for, and it is orthogonal to which criterion ranks the list.
 
 **Sequencing: 10·1 → 10·2 → 10·3 — all three landed (`b199a5f`, `3057e89`, `25e0b5f`).** 10·4 is
 the decision that governs everything after them; 10·5 is settled by measurement; 10·6 is small and ready. The assembler rewrites every emitter arm while the `Plan` wrapper
