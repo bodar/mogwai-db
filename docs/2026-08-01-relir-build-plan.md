@@ -1,6 +1,6 @@
 # RelIR — the build plan
 
-**Status: BUILDING.** Coverage **459 / 2,298** corpus traversals on the RelIR spine; deletion counter
+**Status: BUILDING.** Coverage **474 / 2,298** corpus traversals on the RelIR spine; deletion counter
 **110** references left across the 15 legacy rows. Both are ratchets in `ci` (§10·4). The direction was
 argued in [codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a and
 is not re-argued here.
@@ -433,15 +433,29 @@ never the work: it is one `Aggregate` with an `orderBy`. The MEMBER ENCODING was
   block model already tracks the symmetric fact for windows; fencing lands legacy's CTE-per-list-op
   shape.
 
+**The SET-OP family LANDED** (+15): six semantics over one frame, each a relational statement rather
+than a hand-written subquery — a UNION for concatenation (with a segment column, because a UNION ALL
+has no order of its own), a correlated `EXISTS` for membership, a `Distinct` for the deduped results, a
+cross join for the product (the second `json_each` takes the first as its INPUT). The operand crosses
+the seam as ONE bind, which is the root rule about a set sized by DATA. A TRAVERSAL operand is a child
+read and declines.
+
+**It also turned up a determinism defect in BOTH spines, now fixed in both.** A Set has no member
+order, so the order is ours to choose — and left unchosen it was a DEDUP IMPLEMENTATION DETAIL:
+`UNION` (merge/disjunct) sorts, so those came out in storage-class order; `SELECT DISTINCT`
+(intersect/difference) leaves it to a temp b-tree, so those came out in something like source order.
+Two different accidents for one concept. Both spines now say `ORDER BY value`, which states the
+property AND makes the two agree by construction — reproducing either accident in RelIR would have
+been reproducing luck.
+
 **What remains of the family, in order:**
 
-1. **The SET-OP family — 35 traversals** (`combine`/`difference`/`intersect`/`merge`/`product`/
-   `disjunct`, 5–6 each). One lowering: a list OPERAND plus a set expression over two `json_each`es,
-   over the frame just built.
-2. `order(Scope.local)`/`dedup(Scope.local)`, which need the member compare key and the
+1. `order(Scope.local)`/`dedup(Scope.local)`, which need the member compare key and the
    first-occurrence rule respectively.
-3. The ELEMENT list (`fold()` over elements, whose members are rowids) and the NESTED list — each needs
+2. The ELEMENT list (`fold()` over elements, whose members are rowids) and the NESTED list — each needs
    its own expansion rather than a decode, which is why `isBareList` names the scalar encodings only.
+3. A TRAVERSAL operand for the set ops and `within`/`without` — the same "a folded re-sourced read is a
+   list value" fact legacy shares between them, and a child read this route has not grown.
 
 **Then: THE LIST SHAPE — 194 blocked traversals, the largest family, and it splits by FRAMING ARM
 rather than by step** (measured at 349 routed, by asking what shape legacy frames each blocked traversal

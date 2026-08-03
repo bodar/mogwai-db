@@ -377,6 +377,13 @@ export function embedSql(c: Compiled): Expression {
 }
 
 /** Build the JSONB-list result of a set-op over the incoming list `self` and `op`.
+ *
+ *  **The four SET results name their member order**, and that is a determinism fix rather than a
+ *  cosmetic one: a Set has no member order, so the order is ours to choose — and left unchosen it was
+ *  a DEDUP IMPLEMENTATION DETAIL. `UNION` (merge/disjunct) sorts, so those came out in storage-class
+ *  order; `SELECT DISTINCT` (intersect/difference) leaves it to a temp b-tree, so those came out in
+ *  something like source order. Two different accidents for one concept, neither stated anywhere, and
+ *  the RelIR route reproducing either would have been reproducing luck. `ORDER BY value` states it.
  *  `selfTyped` says the self side's members are {t,v} nodes: project them to their payloads
  *  first so both sides compare and emit in ONE vocabulary (the operand is always bare). */
 function setOpExpr(name: string, self: Expression, op: Expression, selfTyped = false): Expression {
@@ -393,19 +400,19 @@ function setOpExpr(name: string, self: Expression, op: Expression, selfTyped = f
       return q`(SELECT jsonb(COALESCE(json_group_array(value ORDER BY seg, ord), json('[]'))) FROM (SELECT je.value AS value, 0 AS seg, je.key AS ord FROM ${se} je UNION ALL SELECT je.value, 1, je.key FROM ${oe} je))`;
     // intersect = distinct self-elements also in op (null-safe membership via IS).
     case 'intersect':
-      return q`(SELECT jsonb(COALESCE(json_group_array(value), json('[]'))) FROM (SELECT DISTINCT je.value AS value FROM ${se} je WHERE EXISTS (SELECT 1 FROM ${oe} o WHERE o.value IS je.value)))`;
+      return q`(SELECT jsonb(COALESCE(json_group_array(value ORDER BY value), json('[]'))) FROM (SELECT DISTINCT je.value AS value FROM ${se} je WHERE EXISTS (SELECT 1 FROM ${oe} o WHERE o.value IS je.value)))`;
     // difference = distinct self-elements NOT in op.
     case 'difference':
-      return q`(SELECT jsonb(COALESCE(json_group_array(value), json('[]'))) FROM (SELECT DISTINCT je.value AS value FROM ${se} je WHERE NOT EXISTS (SELECT 1 FROM ${oe} o WHERE o.value IS je.value)))`;
+      return q`(SELECT jsonb(COALESCE(json_group_array(value ORDER BY value), json('[]'))) FROM (SELECT DISTINCT je.value AS value FROM ${se} je WHERE NOT EXISTS (SELECT 1 FROM ${oe} o WHERE o.value IS je.value)))`;
     // disjunct = symmetric difference (in exactly one), deduped (UNION dedups nulls too).
     case 'disjunct':
-      return q`(SELECT jsonb(COALESCE(json_group_array(value), json('[]'))) FROM (SELECT je.value AS value FROM ${se} je WHERE NOT EXISTS (SELECT 1 FROM ${oe} o WHERE o.value IS je.value) UNION SELECT o.value FROM ${oe} o WHERE NOT EXISTS (SELECT 1 FROM ${se} je WHERE je.value IS o.value)))`;
+      return q`(SELECT jsonb(COALESCE(json_group_array(value ORDER BY value), json('[]'))) FROM (SELECT je.value AS value FROM ${se} je WHERE NOT EXISTS (SELECT 1 FROM ${oe} o WHERE o.value IS je.value) UNION SELECT o.value FROM ${oe} o WHERE NOT EXISTS (SELECT 1 FROM ${se} je WHERE je.value IS o.value)))`;
     // product = cartesian product → a list of [selfElem, opElem] pair-lists.
     case 'product':
       return q`(SELECT jsonb(COALESCE(json_group_array(jsonb(json_array(a.value, b.value)) ORDER BY a.key, b.key), json('[]'))) FROM ${q`json_each(${selfBare})`} a, ${q`json_each(${op})`} b)`;
     // merge = set union: every distinct element of self OR op (UNION dedups, nulls too).
     case 'merge':
-      return q`(SELECT jsonb(COALESCE(json_group_array(value), json('[]'))) FROM (SELECT je.value AS value FROM ${se} je UNION SELECT o.value FROM ${oe} o))`;
+      return q`(SELECT jsonb(COALESCE(json_group_array(value ORDER BY value), json('[]'))) FROM (SELECT je.value AS value FROM ${se} je UNION SELECT o.value FROM ${oe} o))`;
   }
   throw new Error(`set-op ${name}() not implemented`);
 }

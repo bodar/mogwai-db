@@ -22,7 +22,7 @@ import {
 import { byExpr, modulations, orderProductivity, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
-import { BARE_LIST, foldScalars, LIST_COL, listMemberOp, listRetype, unfoldList } from './list.ts';
+import { BARE_LIST, foldScalars, LIST_COL, listMemberOp, listRetype, listSetOp, unfoldList } from './list.ts';
 
 /**
  * THE SECOND LOWERING — `Step[] -> RelIR` (§10·4 of `docs/2026-08-01-relir-build-plan.md`).
@@ -1265,6 +1265,17 @@ function listTail(
 
     const member = listMemberOp(step, rel, items, fresh);
     if (member) { rel = member.rel; items = member.of; continue; }
+
+    // The SET-OP family, which needs to know whether it is TERMINAL: the four deduping ops frame as a
+    // GraphBinary SET only at the end of a chain — with a follower TinkerPop treats the deduped
+    // content as a plain List, which is what the suite asserts.
+    const setOp = listSetOp(step, rel, items, at + 1 >= steps.length, fresh);
+    if (setOp) {
+      rel = setOp.rel;
+      items = setOp.of;
+      if (setOp.set) return { rel, framing: { kind: 'list', of: items, set: true } };
+      continue;
+    }
 
     const retyped = listRetype(step, rel, items, fresh);
     if (!retyped) return null;

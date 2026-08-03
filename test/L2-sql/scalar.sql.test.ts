@@ -303,9 +303,16 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().values("age").fold().disjunct([27])').shape).toEqual({ kind: 'jsonbSet' });
     // merge = set union of both operands → a Set (jsonbSet) when terminal.
     expect(read('g.V().values("age").fold().merge([1,2])').shape).toEqual({ kind: 'jsonbSet' });
-    expect(read('g.inject(["a",null,"b"]).merge(["a","c"])').sql).toContain('UNION');
-    // null-safe set membership (IS, not =) so null intersects/differs correctly.
-    expect(read('g.inject(["a",null,"b"]).difference(["a","c"])').sql).toContain('o.value IS je.value');
+    expect(read('g.inject(["a",null,"b"]).merge(["a","c"])', { spine: 'legacy' }).sql).toContain('UNION');
+    // null-safe set membership (IS, not =) so null intersects/differs correctly — both spines, each in
+    // its own aliases, because getting this wrong is a wrong ANSWER (a null member never matching).
+    expect(read('g.inject(["a",null,"b"]).difference(["a","c"])', { spine: 'legacy' }).sql).toContain('o.value IS je.value');
+    expect(read('g.inject(["a",null,"b"]).difference(["a","c"])', { spine: 'rel' }).sql)
+      .toMatch(/WHERE \(\w+\.value IS \w+\.value\)/);
+    // A SET's member order is NAMED rather than inherited from the dedup implementation (`UNION` sorts,
+    // `SELECT DISTINCT` does not) — on both spines, so the two agree by construction.
+    for (const spine of ['legacy', 'rel'] as const)
+      expect(read('g.inject(["a",null,"b"]).merge(["a","c"])', { spine }).sql).toMatch(/ORDER BY \w*\.?\bmv? ?ASC|ORDER BY value/);
     // a Set followed by a list op (order(Scope.local)) degrades to a List (not a Set).
     expect(read('g.V().values("age").fold().intersect([27]).order(Scope.local)').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
     // constant(c).fold() and a standalone scalar-list traversal are valid operands.

@@ -172,6 +172,18 @@ const COVERED = [
   "g.V().values('name').fold().toUpper(Scope.local)", "g.V().values('name').fold().limit(Scope.local,2)",
   "g.V().values('name').fold().tail(Scope.local,2)", "g.V().values('name').fold().all(P.eq('marko'))",
   "g.V().values('name').fold().any(P.eq('marko'))", "g.V().values('name').fold().unfold().toUpper()",
+  // THE SET-OP FAMILY over a list OPERAND — six semantics, one frame, and the operand crosses the seam
+  // as ONE bind (`jsonb('[…]')`) because its size is a function of DATA. `IS`, not `=`, so a null
+  // member matches a null member; the four deduping results NAME their member order rather than
+  // inheriting the dedup implementation's.
+  "g.inject(['a','b']).combine(['c'])", "g.inject(['a','b']).intersect(['b','c'])",
+  "g.inject(['a','b']).difference(['b'])", "g.inject(['a','b']).disjunct(['b','c'])",
+  "g.inject(['a','b']).merge(['b','c'])", "g.inject(['a','b']).product(['c','d'])",
+  "g.inject(['a',null]).intersect([null])", "g.inject(['a',null]).difference([null])",
+  "g.inject(['a']).disjunct([])", "g.inject([]).merge(['a'])",
+  "g.inject(['a'],['b']).combine(['c'])", "g.inject(['a','b']).combine(['c']).unfold()",
+  "g.inject(['a','b']).merge(['c']).unfold()", "g.inject([1,2]).combine([3]).sum(Scope.local)",
+  "g.V().values('name').fold().combine(['x'])", "g.V().values('name').fold().intersect(['marko'])",
 ];
 
 /**
@@ -186,7 +198,8 @@ const DECLINED = [
   "g.inject(['a','b']).order(Scope.local)",   // a member SORT needs the vtype-aware compare key
   "g.inject(['a','a']).dedup(Scope.local)",   // a member dedup keeps the FIRST occurrence per value
   "g.inject(['a','b']).reverse()",    // on a list `reverse` reverses ORDER, not each member
-  "g.inject(['a'],['b']).combine(['c'])",     // the set-op family takes a list OPERAND
+  "g.inject(['a','b']).merge(__.V().values('name').fold())", // a TRAVERSAL operand is a child read
+  "g.inject(['a','b']).product(['c']).unfold()",            // a NESTED list's members are lists
   "g.inject('a').inject('b')",        // a second inject is a UNION with the first, not a source
   'g.inject(1,2).order(Scope.local)', // LOCAL scope: a per-traverser sort of a LIST, a different arm
   "g.V().dedup().by(__.out().count())", // a SUB-TRAVERSAL projection: a child lowering, not an expr

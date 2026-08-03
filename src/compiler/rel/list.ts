@@ -534,3 +534,161 @@ const withLossyFlag = (input: Rel, vtype: Expr, fresh: Minter): Rel => make.wind
     spec: { partitionBy: [], orderBy: [] },
   }]],
 });
+
+/**
+ * THE SET-OP FAMILY — `combine`/`intersect`/`difference`/`disjunct`/`merge`/`product` over a list
+ * OPERAND, and 70 corpus traversals that became visible the moment the member frame existed.
+ *
+ * One lowering, six semantics, and each is a relational statement over the two sides' members rather
+ * than a hand-written subquery: a UNION for concatenation, a correlated `EXISTS` for membership, a
+ * `Distinct` for the deduped results, a cross join for the product. What makes them a family is that
+ * they all read both sides through the same `membersOf`, and what makes them cheap is that the frame
+ * was the previous increment.
+ *
+ * **The OPERAND crosses the seam as ONE VALUE** — `jsonb('[…]')`, a single bind for the whole array —
+ * which is the root rule about a set sized by DATA rather than by query text, and which legacy
+ * already spells this way. A TRAVERSAL operand (`merge(__.V().values('name').fold())`) is a child
+ * read and declines; a `Map` operand is a permanent type error whose message legacy owns.
+ *
+ * **A typed self side is projected to PAYLOADS first**, because the operand is always bare: comparing
+ * `{"t":"int","v":5}` against `5` would never match, and emitting a mix of both encodings inside one
+ * result list is the corruption the uniform-per-list rule exists to prevent. So a typed self makes
+ * the result BARE, which is what legacy's `retypedList` says too.
+ */
+const SET_OPS = new Set(['combine', 'intersect', 'difference', 'disjunct', 'merge', 'product']);
+
+/** The four whose result is a SET rather than a list — deduped content, and it frames as a
+ *  GraphBinary SET only when TERMINAL: with a follower (`order(Scope.local)`, `unfold()`) TinkerPop
+ *  treats it as a plain List, which is what the suite asserts. */
+const SET_RESULT = new Set(['intersect', 'difference', 'disjunct', 'merge']);
+
+const OPERAND = { value: 'ov', ord: 'oo' } as const;
+
+export function listSetOp(
+  step: IRStep, input: Rel, of: ListOf, terminal: boolean, fresh: Minter,
+): { readonly rel: Rel; readonly of: ListOf; readonly set?: boolean } | null {
+  if (step.modulators?.length || step.optionArms || !SET_OPS.has(step.name) || !isBareList(of)) return null;
+  const [arg, extra] = step.args ?? [];
+  // A literal array only: every other operand form is either a child read this route has not learned
+  // or an argument error whose exact message legacy owns.
+  if (!Array.isArray(arg) || extra !== undefined) return null;
+  const rel = fenced(input, fresh);
+  const operand: Expr = { kind: 'call', fn: 'jsonb', args: [lit(JSON.stringify(arg), 'text')] };
+
+  // Both sides in ONE vocabulary: bare. A typed self is re-emitted as its payloads first, through the
+  // same member frame every other op uses.
+  const selfList = isTypedList(of)
+    ? (() => { const members = membersOf(col(rel.id, LIST_COL), fresh);
+      return listOfMembers(members, memberPayload(of, members), [memberOrder(members)], fresh); })()
+    : col(rel.id, LIST_COL);
+
+  const mine = membersOf(selfList, fresh);
+
+  /**
+   * One side's members as a single-column `(mv)` relation, optionally filtered.
+   *
+   * `column` is which of the input's columns holds the member, and the filter is applied BEFORE the
+   * projection — so the projection addresses the FILTER, not the explode. Every expression here names
+   * the relation it is read from, which is the one rule the emitter's scope enforces and the one this
+   * function exists to make impossible to get wrong.
+   */
+  const valuesOf = (members: Rel, column: string, pred?: (side: Rel) => Expr): Rel => {
+    const filtered = pred
+      ? make.filter({ id: fresh('sf'), input: members, channels: [], type: members.type, pred: pred(members) })
+      : members;
+    return make.project({
+      id: fresh('sp'), input: filtered, channels: [], type: typeOf(meta(MEMBER.value, 'any', true)),
+      exprs: [[MEMBER.value, col(filtered.id, column)]],
+    });
+  };
+
+  /** Does the OTHER side contain this side's member? `IS`, not `=`: a null member must match a null
+   *  member, which is what null-safe membership means and what `=` cannot say. */
+  const contains = (other: Expr, mine_: Expr, negated: boolean): Expr => {
+    const theirs = membersOf(other, fresh);
+    const same = make.filter({
+      id: fresh('cf'), input: theirs, channels: [], type: theirs.type,
+      pred: { kind: 'binary', op: 'is', left: col(theirs.id, MEMBER.value), right: mine_ },
+    });
+    return {
+      kind: 'exists',
+      negated,
+      plan: make.project({ id: fresh('cp'), input: same, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', lit(1, 'int')]] }),
+    };
+  };
+
+  /**
+   * A finished SET result: the members, deduped, back into one list — in VALUE order.
+   *
+   * A set has no member order, so the order is ours to choose, and choosing it is the point.
+   * `Distinct` over `UNION ALL` is §3.3's declared collapse of SQL's distinct `UNION`, but the two
+   * differ in an artifact: SQLite implements `UNION` by SORTING, so legacy's set results come out in
+   * storage-class order (`null`, numbers, then text) BY ACCIDENT while a `SELECT DISTINCT` leaves it to
+   * a temp b-tree. Naming the order makes it deterministic by design AND identical to the answer
+   * legacy gives today — the alternative was inheriting a dedup implementation detail as a contract.
+   */
+  const setOf = (rows: Rel): Rel => {
+    const deduped = make.distinct({ id: fresh('sd'), input: rows, channels: [], type: rows.type });
+    return withList(rel, listOfMembers(deduped, col(deduped.id, MEMBER.value),
+      [{ expr: col(deduped.id, MEMBER.value), dir: 'asc' }], fresh), fresh);
+  };
+
+  /** The two sides' single-column member relations, unioned — the shape `merge` and `disjunct`
+   *  aggregate over. `all: true` plus the `Distinct` in `setOf` IS SQL's distinct `UNION` (§3.3's
+   *  declared collapse), so there is no second union node kind. */
+  const union = (left: Rel, right: Rel): Rel => make.union({
+    id: fresh('su'), inputs: [left, right], all: true, channels: [],
+    type: typeOf(meta(MEMBER.value, 'any', true)),
+  });
+
+  const result = ((): Rel | null => {
+    switch (step.name) {
+      // CONCATENATION: my members then theirs, order, duplicates and nulls all kept. The segment
+      // column is what makes "then" expressible — a UNION ALL has no order of its own.
+      case 'combine': {
+        const seg = (members: Rel, index: number): Rel => make.project({
+          id: fresh('cs'), input: members, channels: [],
+          type: typeOf(meta(MEMBER.value, 'any', true), meta('seg', 'int'), meta(MEMBER.ord, 'int')),
+          exprs: [[MEMBER.value, col(members.id, MEMBER.value)], ['seg', lit(index, 'int')], [MEMBER.ord, col(members.id, MEMBER.ord)]],
+        });
+        const both = make.union({
+          id: fresh('cu'), inputs: [seg(mine, 0), seg(membersOf(operand, fresh), 1)],
+          all: true, channels: [], type: typeOf(meta(MEMBER.value, 'any', true), meta('seg', 'int'), meta(MEMBER.ord, 'int')),
+        });
+        return withList(rel, listOfMembers(both, col(both.id, MEMBER.value),
+          [{ expr: col(both.id, 'seg'), dir: 'asc' }, { expr: col(both.id, MEMBER.ord), dir: 'asc' }], fresh), fresh);
+      }
+      // MEMBERSHIP: mine that are (not) theirs, deduped.
+      case 'intersect':
+        return setOf(valuesOf(mine, MEMBER.value, (side) => contains(operand, col(side.id, MEMBER.value), false)));
+      case 'difference':
+        return setOf(valuesOf(mine, MEMBER.value, (side) => contains(operand, col(side.id, MEMBER.value), true)));
+      // SYMMETRIC difference: in exactly one side, which is the two one-sided differences unioned.
+      case 'disjunct':
+        return setOf(union(
+          valuesOf(mine, MEMBER.value, (side) => contains(operand, col(side.id, MEMBER.value), true)),
+          valuesOf(membersOf(operand, fresh), MEMBER.value, (side) => contains(selfList, col(side.id, MEMBER.value), true)),
+        ));
+      // SET UNION: every distinct member of either side.
+      case 'merge':
+        return setOf(union(valuesOf(mine, MEMBER.value), valuesOf(membersOf(operand, fresh), MEMBER.value)));
+      // CARTESIAN product → a list of PAIR-lists, so the result's members are lists and no further
+      // member op reads it (`isBareList` names the scalar encodings only). The second `json_each`
+      // takes the first as its INPUT, which is exactly the cross join legacy writes.
+      case 'product': {
+        const paired = make.explode({
+          id: fresh('px'), input: mine, expr: operand, channels: [], as: OPERAND,
+          type: typeOf(...mine.type.cols, meta(OPERAND.value, 'any', true), meta(OPERAND.ord, 'int')),
+        });
+        const pair: Expr = { kind: 'json-array', items: [col(paired.id, MEMBER.value), col(paired.id, OPERAND.value)], binary: true };
+        return withList(rel, listOfMembers(paired, pair,
+          [{ expr: col(paired.id, MEMBER.ord), dir: 'asc' }, { expr: col(paired.id, OPERAND.ord), dir: 'asc' }], fresh), fresh);
+      }
+      default: return null;
+    }
+  })();
+  if (!result) return null;
+
+  const resultOf: ListOf = step.name === 'product' ? { kind: 'list', of: BARE_LIST } : BARE_LIST;
+  return { rel: result, of: resultOf, ...(SET_RESULT.has(step.name) && terminal ? { set: true } : {}) };
+}
