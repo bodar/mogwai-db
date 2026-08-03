@@ -189,10 +189,13 @@ export function elementDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
  * decided at compile time, so the index rows are an `INSERT … SELECT` over the property insert's own
  * `RETURNING` — the walk that produces them is `propertyFtsEntries`, shared with the legacy path
  * because a re-derived index is a SILENT divergence (`fts-index.ts` measured 9,023 rows against
- * 8,936). A traversal value, a collection, a meta-property, a `T` token key and the `null` REMOVAL
- * rule each need something the compile-time value does not have, and every one of them is a
- * decline: legacy answers them today, and answering a different question is the failure mode the
- * routing switch cannot absorb.
+ * 8,936). A COLLECTION value is expressible too and by the same route — it stores as a
+ * self-describing typed `{t,v}` tree, so the only difference is that its JSON text crosses as
+ * `jsonb(<text>)` and its index walk emits one row per nested leaf, both of which the shared waists
+ * already do. A traversal value, a meta-property, a `T` token key and the `null` REMOVAL rule each
+ * need something the compile-time value does not have, and every one of them is a decline: legacy
+ * answers them today, and answering a different question is the failure mode the routing switch
+ * cannot absorb.
  *
  * ## The cardinality is a PER-ELEMENT question, and stays one
  *
@@ -207,12 +210,32 @@ export interface PropertyWrite {
   /** The value as STORAGE holds it, and the canonical Gremlin type beside it. */
   readonly stored: unknown;
   readonly vtype: string | null;
+  /** Is `stored` a COLLECTION's JSON text rather than a scalar? It decides one thing — that the value
+   *  crosses as `jsonb(?)` rather than a bare bind — and it is carried rather than re-derived from
+   *  `vtype` because `propertyValueBind` is the authority on which types are collections and a second
+   *  reading of that list is a second chance to disagree with it. */
+  readonly collection: boolean;
   /** What this value indexes as: (kind, text) pairs from the ONE shared walk. */
   readonly fts: readonly { readonly kind: string; readonly text: string }[];
   /** The DECLARED cardinality, or `null` for "the traversal named none" — a real state, since only
    *  the element's own declaration may resolve it. Always `null` for an edge (single by spec). */
   readonly cardinality: VertexCardinality | null;
 }
+
+/**
+ * THE VALUE AS THE STATEMENT SPELLS IT — a bare bind for a scalar, `jsonb(<text>)` for a collection.
+ *
+ * A collection stores as a self-describing typed `{t,v}` tree and a raw array/Map bind throws at the
+ * SQLite seam, so the JSON TEXT is what crosses and SQLite builds the blob. Written once because the
+ * value appears at TWO places in one statement set — the row being inserted and the `set`-cardinality
+ * "is it already present" comparison — and a form that differed between them would silently append a
+ * duplicate instead of matching.
+ *
+ * §10·5 is unaffected: the blob goes INTO the table, and this statement's `RETURNING` projects ids
+ * only, so nothing untransportable is retained.
+ */
+const storedExpr = (write: PropertyWrite): Expr =>
+  write.collection ? { kind: 'call', fn: 'jsonb', args: [lit(write.stored, 'text')] } : lit(write.stored);
 
 /** The property side-table each element kind writes, as `Scan` must declare it. */
 const PROPERTY_TABLE = {
@@ -358,7 +381,7 @@ function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind:
     const matching = make.filter({
       id: fresh('f'), input: scan, channels: [], type: scan.type,
       pred: and(and(eq(col(scan.id, spec.owner), col(owners.id, 'id')), eq(col(scan.id, 'key'), text(write.key))),
-        eq(col(scan.id, 'value'), lit(write.stored))),
+        eq(col(scan.id, 'value'), storedExpr(write))),
     });
     return { kind: 'exists', plan: matching, negated: true };
   };
@@ -377,7 +400,7 @@ function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind:
   const source = make.project({
     id: fresh('p'), input: seed, channels: [],
     type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-    exprs: [[spec.owner, col(seed.id, 'id')], ['key', text(write.key)], ['value', lit(write.stored)], ['vtype', write.vtype === null ? lit(null, 'text') : text(write.vtype)]],
+    exprs: [[spec.owner, col(seed.id, 'id')], ['key', text(write.key)], ['value', storedExpr(write)], ['vtype', write.vtype === null ? lit(null, 'text') : text(write.vtype)]],
   });
   const rowsWritten = insert({
     target, cols: [spec.owner, 'key', 'value', 'vtype'], source, channels: [], type: WRITTEN_TYPE,
@@ -450,8 +473,6 @@ export function elementProperty(target: Rel, elem: Elem, writes: readonly Proper
  *
  * - a **nested traversal** key or value — its rows are known only at run time, so neither the stored
  *   value nor its index text exists yet.
- * - a **collection** value — it stores as a JSONB tree, which is a different bind shape and a
- *   different index walk; the arm is real, not absent, and it is a further increment.
  * - **`null`** — that is TinkerPop's property REMOVAL rule, a delete wearing a write's spelling.
  * - a **meta-property**, and a **`T` token** key (an id/label write on an existing element, which
  *   legacy refuses with a message it owns).
@@ -479,8 +500,9 @@ export function propertyWrites(steps: readonly IRStep[], elem: Elem, params: Rec
  *
  * The spec is legacy's parse whichever host asked (§10·8): `parseProperty` for a `property()` STEP,
  * a merge map's entries for a `mergeV` arm. Putting the EXPRESSIBILITY question in one place is what
- * stops the two hosts admitting different values — a merge arm that accepted a collection where a
- * `property()` step declines it would write a JSONB tree through a scalar bind and index it as text.
+ * stops the two hosts admitting different values: a value one host wrote through a scalar bind while
+ * the other wrapped it in `jsonb(…)` would be two encodings of one property, and only one of them
+ * reads back.
  */
 function writeOf(spec: PropSpec, elem: Elem): PropertyWrite | null {
   if (typeof spec.key !== 'string' || spec.meta || isNested(spec.value) || spec.value == null) return null;
@@ -488,9 +510,8 @@ function writeOf(spec: PropSpec, elem: Elem): PropertyWrite | null {
   // The key waist, shared: an invalid key is an ERROR legacy raises, never a silently skipped write.
   try { validatePropertyKey(spec.key); } catch { return null; }
   const { stored, collection } = propertyValueBind(spec.value, spec.vtype, spec.typeNode);
-  if (collection) return null;
   return {
-    key: spec.key, stored, vtype: spec.vtype, cardinality: spec.cardinality,
+    key: spec.key, stored, collection, vtype: spec.vtype, cardinality: spec.cardinality,
     fts: propertyFtsEntries(spec.value, spec.typeNode),
   };
 }
