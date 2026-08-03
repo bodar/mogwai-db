@@ -126,6 +126,36 @@ const COVERED = [
   'g.V().tail(2)', 'g.E().tail(1)', 'g.V().tail()', "g.V().hasLabel('person').tail(2)",
   'g.V().out().tail(2)', "g.V().values('name').tail(2)", 'g.V().tail(2).count()',
   "g.V().order().by('name').tail(2)", 'g.V().out().values("name").tail(1)',
+  // THE LIST SHAPE — a traverser whose VALUE is a collection, ranked first by `rel-blockers` at 194
+  // corpus traversals. A collection LITERAL is the larger half of the `jsonbList` arm, and the member
+  // FRAME (`json_each` → an op per member → re-aggregate) is what the four vocabularies plug into:
+  // `transform.ts` per member, `predicate.ts` over a member, `reducer.ts` over a member.
+  'g.inject([1,2])', "g.inject(['a','b'])", 'g.inject([1,2],[3])', 'g.inject([])', 'g.inject([null,1])',
+  "g.inject(['a','b']).unfold()", 'g.inject([1,2]).unfold().is(P.gt(1))', "g.inject(['a','b']).unfold().toUpper()",
+  "g.inject(['a','b']).unfold().count()", "g.inject(['b','a']).unfold().order()",
+  // member transforms — `Scope.local` maps over the members; the GLOBAL spelling is a permanent type
+  // error on a collection, which legacy raises TinkerPop's own message for (see the DECLINED list).
+  "g.inject(['a','b']).toUpper(Scope.local)", "g.inject([' a ']).trim(Scope.local)",
+  "g.inject([' a ']).lTrim(Scope.local)", "g.inject([' a ']).rTrim(Scope.local)",
+  "g.inject(['ab','cd']).substring(Scope.local,1)", "g.inject(['ab']).replace(Scope.local,'a','z')",
+  "g.inject(['ab','c']).length(Scope.local)", "g.inject([1,2]).asString(Scope.local)",
+  // member predicates — `all` is "no member FAILS", which differs from "every member passes" once a
+  // predicate can be NULL. Both spines had this wrong until 2026-08-03 (L4 list-member-predicate).
+  "g.inject(['a','a']).all(P.eq('a'))", "g.inject(['a','b']).all(P.eq('a'))",
+  "g.inject(['a','b']).any(P.eq('a'))", "g.inject(['a','b']).none(P.eq('z'))",
+  'g.inject([null,null]).all(P.eq(null))', 'g.inject([null,1]).none(P.eq(null))',
+  "g.inject(['a','b']).any(P.gt('a'))",
+  // member reductions — `conjoin` joins them, the reducer family reduces them, `count(Scope.local)`
+  // counts them. All three retype the traverser, so the scalar tail continues from there.
+  "g.inject(['a','b']).conjoin('+')", "g.inject(['a','b']).conjoin('')",
+  'g.inject([1,2]).sum(Scope.local)', 'g.inject([1,2]).mean(Scope.local)',
+  'g.inject([1,2]).min(Scope.local)', 'g.inject([1,2]).max(Scope.local)',
+  "g.inject(['a','b']).count(Scope.local)", "g.inject(['a','b']).count(Scope.local).is(P.gt(1))",
+  // member slices — position order, and `tail(Scope.local)` from the far end. A GLOBAL slice on the
+  // same relation takes the stream's ROWS instead, which is the distinction the two arms draw.
+  "g.inject(['a','b','c']).limit(Scope.local,2)", "g.inject(['a','b','c']).range(Scope.local,1,3)",
+  "g.inject(['a','b','c']).skip(Scope.local,1)", "g.inject(['a','b','c']).tail(Scope.local,2)",
+  "g.inject(['a','b']).limit(Scope.local,1).unfold()", 'g.inject([1,2],[3]).limit(1)',
 ];
 
 /**
@@ -136,8 +166,12 @@ const DECLINED = [
   "g.V().bothE().otherV()",           // otherV reads the entering vertex — carried state not modelled
   "g.V().as('a').out().select('a')",  // an alias: carried state not modelled
   'g.V().count().fold()',             // a step after the shape change that is NOT in its vocabulary
-  'g.inject([1,2])',                  // a COLLECTION argument is a list traverser, a different arm
   'g.inject()',                       // the EMPTY relation, which `Values` refuses to express (§3.3)
+  "g.inject([1,2],3)",                // MIXED list/scalar args: the VARIANT shape, not either of them
+  "g.inject(['a','b']).order(Scope.local)",   // a member SORT needs the vtype-aware compare key
+  "g.inject(['a','a']).dedup(Scope.local)",   // a member dedup keeps the FIRST occurrence per value
+  "g.inject(['a','b']).reverse()",    // on a list `reverse` reverses ORDER, not each member
+  "g.inject(['a'],['b']).combine(['c'])",     // the set-op family takes a list OPERAND
   "g.inject('a').inject('b')",        // a second inject is a UNION with the first, not a source
   'g.inject(1,2).order(Scope.local)', // LOCAL scope: a per-traverser sort of a LIST, a different arm
   "g.V().dedup().by(__.out().count())", // a SUB-TRAVERSAL projection: a child lowering, not an expr

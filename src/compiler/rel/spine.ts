@@ -98,9 +98,12 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
   // here until this seam knows how to frame it, which is the same discipline §3.5's obligation
   // table applies inside the algebra.
   const state = { q: engine.q, params, rel, traverserLayout };
-  const stream: Stream = lowered.framing.kind === 'elements'
-    ? { kind: 'elements', ...state, elem: lowered.framing.elem }
-    : { kind: 'scalar', ...state, type: lowered.framing.type, ...(lowered.framing.result ? { result: lowered.framing.result } : {}) };
+  const framing = lowered.framing;
+  const stream: Stream = framing.kind === 'elements'
+    ? { kind: 'elements', ...state, elem: framing.elem }
+    : framing.kind === 'list'
+      ? { kind: 'list', ...state, of: framing.of, ...(framing.set ? { set: framing.set } : {}) }
+      : { kind: 'scalar', ...state, type: framing.type, ...(framing.result ? { result: framing.result } : {}) };
   // Zero steps remain, so the loop runs the root element projection and nothing else. Going
   // through `lowerSteps` rather than calling the projection directly is the point: a step this
   // route grows tomorrow lands in the SAME loop, and there is no second orchestrator.

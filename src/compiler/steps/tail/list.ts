@@ -197,7 +197,7 @@ function listNoneFilter(s: ListStream, pred: any): ListStream {
 
 /** The Scope.local collection transforms that keep a list a list (per-list, not a
  *  whole-stream reduction). Each rebuilds each row's list via a correlated json_each. */
-const LIST_LOCAL_TX = new Set(['order', 'dedup', 'limit', 'skip', 'range', 'tail']);
+export const LIST_LOCAL_TX = new Set(['order', 'dedup', 'limit', 'skip', 'range', 'tail']);
 
 /** The shared global row ops keyed by step name, so a LIST_LOCAL_TX name can compose with its
  *  shared twin instead of replacing it. */
@@ -211,7 +211,7 @@ const SHARED_ROW_OPS = new Map(globalRowOps<ListStream>());
 // collection is invalid at every scope (`ConcatStep.map` rejects any non-String receiver outright)
 // — it gets its own always-refusing entry below. Having it here made
 // `g.inject(["a","b"],"c").concat("d")` answer ['ad','bd','cd'] where the spec demands a throw.
-const STRING_LOCAL_TX = new Set(['toUpper', 'toLower', 'trim', 'lTrim', 'rTrim', 'asString', 'length', 'substring', 'replace']);
+export const STRING_LOCAL_TX = new Set(['toUpper', 'toLower', 'trim', 'lTrim', 'rTrim', 'asString', 'length', 'substring', 'replace']);
 
 /** A per-element string transform over a list value (Scope.local): rebuild each row's
  *  list applying scalarTx to every element, preserving position order. Null elements

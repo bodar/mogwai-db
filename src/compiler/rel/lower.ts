@@ -7,7 +7,7 @@ import type { Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { isLocalScope, sliceOf } from '../ir/step.ts';
-import { PER_ROW, STATIC, UNKNOWN, type ScalarType } from '../../sql/kernel/render.ts';
+import { PER_ROW, STATIC, UNKNOWN, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs, isNested } from '../../gremlin/frontend.ts';
 import { childSteps, collectionAssert } from '../steps/tail/child-shape.ts';
@@ -22,6 +22,7 @@ import {
 import { byExpr, modulations, orderProductivity, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
+import { BARE_LIST, LIST_COL, listMemberOp, listRetype, unfoldList } from './list.ts';
 
 /**
  * THE SECOND LOWERING — `Step[] -> RelIR` (§10·4 of `docs/2026-08-01-relir-build-plan.md`).
@@ -62,7 +63,12 @@ import { isReducer, reducerAggregate } from './reducer.ts';
  */
 export type RelFraming =
   | { readonly kind: 'elements'; readonly elem: Elem }
-  | { readonly kind: 'scalar'; readonly type: ScalarType; readonly result?: 'value' | 'count' | 'number' };
+  | { readonly kind: 'scalar'; readonly type: ScalarType; readonly result?: 'value' | 'count' | 'number' }
+  /** A traverser whose VALUE is a collection — one JSONB `list` column per row (§ the list
+   *  vocabulary, `list.ts`). `of` describes the MEMBER encoding, which is what the framing layer
+   *  needs to know how to expand each one; `set` is a framing marker only (a SET frames differently,
+   *  the member substrate is shared). */
+  | { readonly kind: 'list'; readonly of: ListOf; readonly set?: boolean };
 
 /**
  * A covered chain, lowered: the program, and what to frame over it.
@@ -1163,6 +1169,94 @@ function injectSource(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFram
   };
 }
 
+/**
+ * `g.inject([…])` — a COLLECTION literal, which seeds one LIST traverser per argument rather than one
+ * scalar per member. The largest half of the largest blocked family: 45 of the 194 list traversals
+ * begin here (the other 27 begin at a `fold()`), and both halves frame identically, which is why one
+ * arm serves both.
+ *
+ * `jsonb_array(…)` is the member encoding, and it is BARE — legacy's `jsonbArrayOf` spells it
+ * `jsonb(json_array(…))`, the same value. The members are query-text-bounded literals, so a bind
+ * each is right here and a JSON bind is not (the root rule is about sets sized by DATA); an
+ * over-budget list declines through `planBindCount` like anything else.
+ *
+ * MIXED arguments decline: `inject([1,2], 3)` is a list traverser and a scalar traverser in one
+ * stream, which is the VARIANT shape rather than either of them.
+ */
+function injectList(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFraming } | null {
+  const args = step.args ?? [];
+  if (step.modulators?.length || step.optionArms || !args.length) return null;
+  if (!args.every((arg) => Array.isArray(arg))) return null;
+  const rows = (args as readonly unknown[][]).map((members) => {
+    const items = members.map((member) => (member === null ? lit(null, 'any') : operandLit(member)));
+    return items.some((item) => !item) ? null : [{ kind: 'json-array', items: items as Expr[], binary: true } as Expr];
+  });
+  if (rows.some((row) => !row)) return null;
+  return {
+    rel: make.values({ id: fresh('inl'), rows: rows as readonly (readonly Expr[])[], channels: [], type: typeOf(meta(LIST_COL, 'json')) }),
+    framing: { kind: 'list', of: BARE_LIST },
+  };
+}
+
+/**
+ * THE LIST TAIL — the vocabulary above a collection-valued relation.
+ *
+ * Three exits, and they are the three things a list op can do: stay a list (`list.ts`'s member
+ * frame), retype to a scalar (`conjoin`, a local reducer, `count(Scope.local)`), or `unfold` into one
+ * traverser per member, which hands the rest of the chain to the SCALAR tail. A global row op —
+ * `limit(2)` with no `Scope.local` — slices the stream's ROWS and is the ordinary `sliceOp`, which is
+ * the distinction legacy draws by composing the shared row op in front of the local one.
+ */
+function listTail(
+  seed: Rel, of: ListOf, steps: readonly IRStep[], from: number, fresh: Minter,
+): { readonly rel: Rel; readonly framing: RelFraming } | null {
+  let rel = seed;
+  let items = of;
+  for (let at = from; at < steps.length; at++) {
+    const step = steps[at];
+    if (step.name === 'identity' || step.name === 'barrier') { if ((step.args ?? []).length) return null; continue; }
+
+    if (step.name === 'unfold') {
+      if ((step.args ?? []).length) return null;
+      const unfolded = unfoldList(rel, items, fresh);
+      if (!unfolded) return null;
+      // The member's POSITION becomes the emission order, minted rather than declared: `json_each.key`
+      // is an index within ONE list, so it is a total order only where the relation has one row, and
+      // taking a later slice's window from a per-row index would return the right multiset from the
+      // wrong place. Where a position was already carried it leads the sort, so the members of an
+      // earlier list all precede the members of a later one.
+      const carried = encounterOf(rel.channels);
+      const channels = carried ? rel.channels : withChannel(rel.channels, ENCOUNTER);
+      const terms: readonly SortTerm[] = [
+        ...(carried ? [{ expr: col(unfolded.rel.id, carried.col), dir: 'asc' as const }] : []),
+        { expr: col(unfolded.rel.id, unfolded.ord), dir: 'asc' as const },
+      ];
+      const positioned = renumber(
+        unfolded.rel, terms,
+        [meta('v', 'any', true), ...channels.map((channel) => meta(channel.col, 'int'))],
+        channels, fresh,
+      );
+      return scalarTail(positioned, { kind: 'scalar', type: UNKNOWN }, steps, at + 1, false, fresh);
+    }
+
+    // A GLOBAL row op slices the stream's rows, not one traverser's members.
+    const sliced = sliceOp(step, rel, false, fresh);
+    if (sliced) { rel = sliced; continue; }
+
+    const member = listMemberOp(step, rel, items, fresh);
+    if (member) { rel = member.rel; items = member.of; continue; }
+
+    const retyped = listRetype(step, rel, items, fresh);
+    if (!retyped) return null;
+    return scalarTail(
+      retyped.rel,
+      { kind: 'scalar', type: retyped.type, ...(retyped.result ? { result: retyped.result } : {}) },
+      steps, at + 1, false, fresh,
+    );
+  }
+  return { rel, framing: { kind: 'list', of: items } };
+}
+
 /** A literal an injected row can hold. Anything else — a collection, a map, a nested traversal —
  *  is a different traverser shape and declines. */
 const operandLit = (arg: unknown): Expr | null =>
@@ -1223,6 +1317,13 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   const fresh = minter();
 
   if (first.name === 'inject') {
+    // A COLLECTION literal seeds a LIST traverser, an ordinary value a SCALAR one — two shapes, and
+    // the argument decides which, so the list arm is asked first and declines a scalar inject.
+    const listed = injectList(first, fresh);
+    if (listed) {
+      const tail = listTail(listed.rel, (listed.framing as { readonly of: ListOf }).of, steps, 1, fresh);
+      return tail ? lowered(tail.rel, tail.framing) : null;
+    }
     const injected = injectSource(first, fresh);
     if (!injected) return null;
     const tail = scalarTail(injected.rel, injected.framing, steps, 1, false, fresh);

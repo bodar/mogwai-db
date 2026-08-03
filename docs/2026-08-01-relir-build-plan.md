@@ -1,6 +1,6 @@
 # RelIR — the build plan
 
-**Status: BUILDING.** Coverage **378 / 2,298** corpus traversals on the RelIR spine; deletion counter
+**Status: BUILDING.** Coverage **424 / 2,298** corpus traversals on the RelIR spine; deletion counter
 **110** references left across the 15 legacy rows. Both are ratchets in `ci` (§10·4). The direction was
 argued in [codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a and
 is not re-argued here.
@@ -386,7 +386,36 @@ of its five step names routes through RelIR when the rest of the chain does. Sam
 element `order()` no longer needs it, so what is left there is the framing folds for shapes RelIR does
 not yet produce.
 
-**Next: the list shape below** — 194 blocked traversals, the largest family.
+### The LIST SHAPE — the member frame LANDED; `fold()` is what is left
+
+The collection-LITERAL half of the `jsonbList` arm is covered (`+46`, 378→424, the largest single
+jump so far), and with it the frame every list op plugs into. `src/compiler/rel/list.ts` is the fifth
+vocabulary module.
+
+**The frame is the whole idea, and it is a CORRELATED SCALAR SUBQUERY.** A list is ONE traverser, so
+exploding it at relation level would multiply the stream's rows and then need re-grouping by a row
+identity the algebra does not carry. `Explode` with no `input` is exactly `FROM json_each(<outer
+expr>)` — which is why that field is now optional, and it is the shape legacy uses at all four of its
+hand-written member subqueries. What plugs in is already written: `transform.ts` per member,
+`predicate.ts` over a member, `reducer.ts` over a member. `unfold()` is the ONE relation-level explode
+and the contrast is the point — it makes each member a traverser, so multiplying rows is the answer.
+
+Covered: the collection literal, member transforms (`Scope.local`), `all`/`any`/`none`, `conjoin`,
+the local reducers, `count(Scope.local)`, the local slices, `unfold()` into the scalar tail.
+
+**What remains of the family, in order:**
+
+1. **`fold()` — 109 traversals, and every one of the remaining list blockers.** The obstacle is the
+   MEMBER ENCODING, not the barrier: `fold()` over a stored-property stream emits `{t,v}` typed nodes,
+   decided by a correlated `EXISTS` over the same relation (`vtype NOT IN ('string','double','int')`),
+   and every member READER then needs the `CASE WHEN je.type='object'` decode. `isBareList` is the gate
+   that keeps today's ops honest until that lands.
+2. **The SET-OP family — 35 traversals, newly visible in the residue** (`combine`/`difference`/
+   `intersect`/`merge`/`product`/`disjunct`, 5–6 each). One lowering: a list OPERAND plus a set
+   expression over two `json_each`es. Ranked second because it is a family with one frame, and the
+   frame is the one just built.
+3. `order(Scope.local)`/`dedup(Scope.local)`, which need the member compare key and the
+   first-occurrence rule respectively.
 
 **Then: THE LIST SHAPE — 194 blocked traversals, the largest family, and it splits by FRAMING ARM
 rather than by step** (measured at 349 routed, by asking what shape legacy frames each blocked traversal
@@ -419,13 +448,15 @@ projection with an `ORDER BY` rather than a JSON aggregate, and `fold().max(Scop
 LOCAL reducers (`reducer.ts` over a member, not over a row). `jsonbList` plus the member-transform frame
 is the increment; the rest follow it.
 
-**The rest of the corpus ranking** (`mise run rel-blockers`, 349 routed — re-run it every round, it
-MOVES): writes 187 (`addV` 146 · `mergeV` 25) · side effects 159 (`aggregate` 59 · `group` 50 ·
-`sack` 25 · `groupCount` 25) · aliases 144 (`as` 133) · the property shape 87 (`properties` 46 ·
-`valueMap` 35) · scalar transforms 79 · branch 67 (`choose` 39 · `union` 22) · row ops 51 (`order` 39).
-In no family: `repeat` 73 · `has` 59 · `local` 55 · `where` 43 · `is` 42 · `match` 36 · `path` 28 ·
-`inject` 20. **The residue is where the next family gets recognized** — `inject` sat in it for two
-rounds before being spotted as the largest prize on the board.
+**The rest of the corpus ranking** (`mise run rel-blockers`, 424 routed — re-run it every round, it
+MOVES): writes 187 (`addV` 146 · `mergeV` 25) · side effects 160 (`aggregate` 59 · `group` 51 ·
+`sack` 25 · `groupCount` 25) · aliases 145 (`as` 134) · the list shape 109 (all at `fold`) · scalar
+transforms 92 · the property shape 89 (`properties` 46 · `valueMap` 37) · branch 68 (`choose` 39 ·
+`union` 22) · row ops 6. In no family: `repeat` 78 · `has` 59 · `local` 56 · `where` 43 · `is` 43 ·
+`match` 36 · the SET-OP family 35 (`combine`/`difference`/`intersect`/`merge`/`product` 6 each,
+`disjunct` 5) · `path` 28 · `inject` 20 · `call` 20. **The residue is where the next family gets
+recognized** — `inject` sat in it for two rounds before being spotted as the largest prize on the
+board, and the set ops appeared in it the moment the list frame landed.
 
 **Also 4.1's, and unfinished:** the ALIAS channel (`as`/`select`, 144) needs a name→column map, which is
 one of the four roles `spine.ts`'s layout translation declares ABSENT rather than leaving to be
