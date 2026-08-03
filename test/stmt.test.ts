@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { check } from '../src/rel/check.ts';
 import { col, lit } from '../src/rel/expr.ts';
 import { emit, isRowsBind } from '../src/rel/emit.ts';
-import { ref, scan, values } from '../src/rel/factory.ts';
+import { filter, ref, scan, values } from '../src/rel/factory.ts';
 import { plan } from '../src/rel/plan.ts';
 import type { Binding } from '../src/rel/plan.ts';
 import { isStmt } from '../src/rel/stmt.ts';
@@ -53,11 +53,35 @@ describe('RelIR statements', () => {
     expect(() => check(write)).toThrow("has no declared column 'missing'");
   });
 
+  // A DELETE cannot alias its target, so the table name is the qualifier — and a qualifier is not
+  // cosmetic. A correlated subquery over a table with a same-named column captures the BARE name, so
+  // `node = node` reads as the inner relation's column and is trivially true; it deleted every
+  // element's rows because one of them carried a declaration. Legal SQL, both names resolve, and
+  // only an execution assertion can see it.
+  test('a correlated subquery cannot capture the target\'s column, because the target is qualified', () => {
+    const db = new Database(':memory:');
+    db.run('CREATE TABLE nodes(id INTEGER PRIMARY KEY, uid TEXT)');
+    db.run('CREATE TABLE marks(id INTEGER)');
+    db.run("INSERT INTO nodes(id, uid) VALUES (1, 'a'), (2, 'b')");
+    db.run('INSERT INTO marks(id) VALUES (1)');
+    const marks = scan({ id: relId('m'), table: 'labels', alias: 'm', channels, type: { cols: ids } });
+    // `EXISTS (SELECT … FROM marks WHERE marks.id = nodes.id)` — the outer `id` must NOT bind to
+    // `marks.id`, which is exactly what a bare spelling would do.
+    const marked = filter({
+      id: relId('mf'), input: marks, channels, type: { cols: ids },
+      pred: { kind: 'binary', op: '=', left: col(marks.id, 'id'), right: col(nodes.id, 'id') },
+    });
+    const write = remove({ target: nodes, channels, type: noReturning, returning: [], where: { kind: 'exists', plan: marked, negated: false } });
+    const emitted = emit(program({ name: 'drop', node: write }))[0]!.emitted;
+    db.query(emitted.sql.replace(' labels ', ' marks ').replace('FROM labels', 'FROM marks')).run(...emitted.binds);
+    expect(db.query('SELECT id FROM nodes ORDER BY id').all()).toEqual([{ id: 2 }]);
+  });
+
   test('emits membership in another relation as an ordinary IN (SELECT …)', () => {
     const doomed = values({ id: relId('doomed'), rows: [[lit(2, 'int')]], channels, type: { cols: ids } });
     const steps = emit(program({ name: 'drop', node: remove({ target: nodes, channels, type: noReturning, returning: [], where: memberOf('id', doomed) }) }));
     const emitted = steps[0]!.emitted;
-    expect(emitted.sql).toBe('DELETE FROM nodes WHERE id IN (SELECT doomed.column1 AS id FROM (VALUES (?)) doomed)');
+    expect(emitted.sql).toBe('DELETE FROM nodes WHERE nodes.id IN (SELECT doomed.column1 AS id FROM (VALUES (?)) doomed)');
     expect(emitted.binds).toEqual([2]);
     const db = new Database(':memory:');
     db.run('CREATE TABLE nodes (id INTEGER PRIMARY KEY)');
@@ -96,7 +120,7 @@ describe('RelIR statements', () => {
     }));
 
     const membership = steps[1]!.emitted;
-    expect(membership.sql).toBe("DELETE FROM nodes WHERE id IN (SELECT json_extract(prior.value, ?) AS id FROM json_each(?) prior)");
+    expect(membership.sql).toBe("DELETE FROM nodes WHERE nodes.id IN (SELECT json_extract(prior.value, ?) AS id FROM json_each(?) prior)");
     expect(membership.binds.filter(isRowsBind)).toEqual([{ rowsOf: 'added' }]);
   });
 

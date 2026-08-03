@@ -26,7 +26,7 @@ import type { AliasMap } from '../steps/context/context.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
-import { elementDrop } from './write.ts';
+import { elementDrop, elementProperty, propertyWrites } from './write.ts';
 import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listRetype, listSetOp, unfoldList, type ListCtx } from './list.ts';
 
 /**
@@ -1908,6 +1908,23 @@ function elementTail(
       // At bulk 1 that is the same answer as the plain slice, so the cost is SQL shape and never
       // correctness — the same trade the movement loop already makes.
       return continueAs(merged.rel, merged.framing, steps, at + 1, bulked || ctx.collapse, ctx, fresh, labels);
+    }
+    if (step.name === 'property') {
+      // The whole RUN of property() steps, because they share one target: taking them one at a time
+      // would snapshot the same elements once per step and, worse, let a later step read a graph an
+      // earlier one had already written. `elementProperty` re-enters this loop at `at`, so a read
+      // tail after the run is the ordinary fold and nothing here knows it happened.
+      let end = at;
+      while (end < steps.length && steps[end]!.name === 'property') end++;
+      const writes = propertyWrites(steps.slice(at, end), elem, ctx.params);
+      if (!writes) return null;
+      const written = elementProperty(rel, elem, writes, fresh);
+      if (!written) return null;
+      const tail = elementTail(written.result, elem, steps, end, bulked, ctx, fresh, NO_ALIASES);
+      if (!tail) return null;
+      // Effects run BEFORE anything the tail computes, and a tail of its own (a nested write) lands
+      // after them — one flat list, in the order the fold produced it.
+      return { ...tail, effects: [...written.bindings, ...(tail.effects ?? [])] };
     }
     if (step.name === 'drop') {
       // TERMINAL by the grammar, and asserted rather than assumed: a step after `drop()` would be a

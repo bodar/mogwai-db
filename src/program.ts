@@ -1,4 +1,4 @@
-import { emit, isRowsBind } from './rel/emit.ts';
+import { emit, emitProgram, isRowsBind, type Emitted } from './rel/emit.ts';
 import type { Binding, Plan } from './rel/plan.ts';
 
 /** The one thing a program needs of a store: run a statement, get rows back. Deliberately not
@@ -24,12 +24,20 @@ export interface RowSource { query<T = any>(sql: string, binds?: readonly unknow
  * `RowsBind` marker in its bind list saying which binding's rows belong there, so this never parses
  * SQL to find the slot and `emit` never learns about the transport.
  */
-export function runProgram(store: RowSource, program: Plan): readonly Record<string, unknown>[] {
+export function runProgram(store: RowSource, program: Plan, tail?: Emitted): readonly Record<string, unknown>[] {
   const declared = new Map(program.bindings.map((binding) => [binding.name, binding] as const));
   const retained = new Map<string, readonly Record<string, unknown>[]>();
   let result: readonly Record<string, unknown>[] = [];
 
-  for (const step of emit(program)) {
+  // A TAIL is the framing layer's own read over what the effects retained, and it replaces the
+  // relational step this would otherwise render — same position, same transport, composed by
+  // whoever owns Gremlin shape (§2). Its binds carry the same `RowsBind` markers, so nothing here
+  // learns that a shape exists.
+  const steps = tail
+    ? [...emitProgram(program).effects, { result: true, emitted: tail }]
+    : emit(program);
+
+  for (const step of steps) {
     const binds = step.emitted.binds.map((bind) => (isRowsBind(bind) ? payload(bind.rowsOf, declared, retained) : bind));
     const rows = store.query<Record<string, unknown>>(step.emitted.sql, binds);
     if (step.binding) retained.set(step.binding, rows);

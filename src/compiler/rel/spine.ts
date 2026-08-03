@@ -1,6 +1,6 @@
 import { derived } from '../../sql/kernel/q.ts';
 import type { Compiled, Program } from '../../sql/kernel/render.ts';
-import { emit, emitRelational } from '../../rel/emit.ts';
+import { emitProgram } from '../../rel/emit.ts';
 import { cfLimitViolation } from '../../cf-limits.ts';
 import type { AliasMap, TraverserLayout } from '../steps/context/context.ts';
 import { channelCols, type Channels, type ChannelRole } from '../../channels.ts';
@@ -113,8 +113,10 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
   //
   // The platform budget is asked PER STATEMENT here for the same reason it is inside `lowerToRel`:
   // each step is its own query, so each meets the 100-bind and 100 KB walls on its own.
-  if (lowered.framing.kind === 'discard') {
-    if (emit(lowered.plan).some((step) => cfLimitViolation(step.emitted.sql, step.emitted.binds))) return null;
+  const { effects, result: relational } = emitProgram(lowered.plan);
+  if (effects.some((step) => cfLimitViolation(step.emitted.sql, step.emitted.binds))) return null;
+  if (lowered.framing.kind === 'discard' || !relational) {
+    if (lowered.framing.kind !== 'discard' || relational) throw new Error('RelIR spine: a discard framing and a relational result disagree about whether this program yields traversers');
     return { kind: 'program', program: lowered.plan, shape: { kind: 'discard' }, spine: 'rel' };
   }
 
@@ -125,7 +127,7 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
   // was two chances for the framing layer to be told a shape the relation did not have. (A `name`
   // pass binding is never the root, so the result is the relation the fold finished on.)
   const result = lowered.plan.result;
-  const rel = derived(emitRelational(lowered.plan), result.type.cols.map((column) => column.name), 'rir');
+  const rel = derived(relational, result.type.cols.map((column) => column.name), 'rir');
   const traverserLayout = layoutOf(result.channels, lowered.aliases);
   // TOTAL over the framing union: a stream kind the lowering learns to produce is a compile error
   // here until this seam knows how to frame it, which is the same discipline §3.5's obligation
@@ -157,5 +159,11 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
   // A DECLINE and not a throw: legacy answers these today, and a plan we cannot ship is coverage we
   // do not have. If it ever fires, the census's per-query spine ratchet is what reports it.
   if (cfLimitViolation(compiled.sql, compiled.binds)) return null;
-  return { ...compiled, spine: 'rel' };
+  // A traversal that WROTE frames its rows through exactly this projection — the effects ran first,
+  // and the framing read is the program's last step. That is the whole of §2 holding under a write:
+  // shape is resolved above RelIR either way, so the element projection here is the same code a pure
+  // read reaches, not a write-shaped copy of it.
+  return effects.length
+    ? { kind: 'program', program: lowered.plan, tail: { sql: compiled.sql, binds: compiled.binds }, shape: compiled.shape, spine: 'rel' }
+    : { ...compiled, spine: 'rel' };
 }

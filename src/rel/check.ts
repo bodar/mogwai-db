@@ -1,10 +1,11 @@
 import type { Expr } from './expr.ts';
-import { joinWidth } from './factory.ts';
+import { joinWidth, scan } from './factory.ts';
 import { checkChannels } from './obligations.ts';
 import { isRel, type Rel, type RelKind } from './rel.ts';
 import { retained, type Binding, type Plan } from './plan.ts';
 import { isStmt, type Stmt } from './stmt.ts';
 import { exprChildren, exprRels, recursiveStep, refNames, relChildren, relExprs } from './walk.ts';
+import { EXCLUDED } from './types.ts';
 
 export const DO_BIND_CAP = 100;
 
@@ -42,6 +43,10 @@ const add = (scope: Scope, rel: Rel): Scope => {
   if (bound && bound !== rel) throw new Error(`RelIR: relation id '${rel.id}' names two different relations in one scope`);
   return { ...scope, cols: new Map(scope.cols).set(rel.id, rel) };
 };
+/** The `excluded` pseudo-relation an `ON CONFLICT` clause reads: the target's own row shape under
+ *  the reserved identity, so a `Col` against it checks against real columns like any other. */
+const excludedRow = (target: Extract<Rel, { readonly kind: 'scan' }>): Rel =>
+  scan({ id: EXCLUDED, table: target.table, alias: 'excluded', channels: target.channels, type: target.type });
 const root = (bindings: ReadonlyMap<string, Rel | Stmt> = new Map()): Scope => ({ cols: new Map(), inAggregate: false, inWindow: false, bindings });
 const sameColumns = (left: Rel['type']['cols'], right: Rel['type']['cols']): boolean =>
   left.length === right.length && left.every((column, i) => {
@@ -273,7 +278,9 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
           if (!s.onConflict.target.length) throw new Error('RelIR: Insert conflict target cannot be empty');
           if (new Set(s.onConflict.target).size !== s.onConflict.target.length) throw new Error('RelIR: Insert conflict target has duplicate column');
           assignments(s.onConflict.set, 'conflict update');
-          s.onConflict.set.forEach(([, expression]) => checkExpr(expression, targetScope));
+          // The incoming row is in scope for this clause and no other, exactly as SQLite scopes it.
+          const merging = add(targetScope, excludedRow(s.target));
+          s.onConflict.set.forEach(([, expression]) => checkExpr(expression, merging));
         }
         returning(targetScope);
         break;

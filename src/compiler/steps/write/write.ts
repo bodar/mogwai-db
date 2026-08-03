@@ -360,7 +360,7 @@ type Cardinality = VertexCardinality | null;
 // the FULL recursive type tree, threaded so a collection value tags each element/entry/key
 // losslessly (valueNodeOf). A scalar's typeNode is redundant with vtype; a nested-traversal
 // value has no literal typeNode (its type is resolved at run time as a scalar).
-interface PropSpec { key: string | { nested: any }; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null; meta: Record<string, any> | null; cardinality: Cardinality; }
+export interface PropSpec { key: string | { nested: any }; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null; meta: Record<string, any> | null; cardinality: Cardinality; }
 /** `labels` is a LIST because a vertex carries a set: `addV("a","b")` is two labels, and
  *  `addV()` with no argument is the single default 'vertex'. Under LabelCardinality.ONE a spec
  *  with more than one is rejected at insert time rather than silently truncated. */
@@ -392,14 +392,14 @@ const propTypeNode = (step: Step, off: number): TypeNode | null => step.argTypes
  *  tail refuses for the same reason — so the token is REPORTED here rather than decided here. This
  *  loop existed twice before the merge tail needed it a third time; the copies had already drifted
  *  (only one of them collapsed a `__.select(sideEffectConst)` VALUE). */
-type ParsedProperty =
+export type ParsedProperty =
   | { kind: 'prop'; spec: PropSpec }
   | { kind: 'token'; token: string; value: any; meta: boolean }
   /** `property(null, …)` — a null KEY adds nothing, which is TinkerPop's null case. (The map form
    *  never reaches here: `desugarPropertyMap` expanded it before lowering ever saw the chain.) */
   | { kind: 'none' };
 
-function parseProperty(s: Step, sideEffects: Map<string, any> | undefined, params: Record<string, any>): ParsedProperty {
+export function parseProperty(s: Step, sideEffects: Map<string, any> | undefined, params: Record<string, any>): ParsedProperty {
   const { cardinality, rest, off } = readCardinality(s.args);
   let [key, val] = rest; const metaArgs = rest.slice(2);
   { const ck = constFromNested(key, sideEffects, params); if (ck.has) key = ck.value; }

@@ -577,7 +577,7 @@ function* frameResolved(store: GraphStore, plan: Executable): Generator<Framed> 
   // A PROGRAM's rows come from the executor rather than one `query`, and everything downstream is
   // identical: shape is the framing contract whether the traversal wrote or only read (§2), so the
   // effects change WHERE the rows come from and nothing about how they are framed.
-  const rows = (plan.kind === 'program' ? runProgram(store, plan.program) : store.query(plan.sql, plan.binds)) as any[];
+  const rows = (plan.kind === 'program' ? runProgram(store, plan.program, plan.tail) : store.query(plan.sql, plan.binds)) as any[];
   const shape = plan.shape;
   if (shape.kind === 'vertex') { for (const r of rows) yield { buf: rowVertex(r), bulk: bulkOf(r) }; return; }
   if (shape.kind === 'edge') { for (const r of rows) yield { buf: rowEdge(r), bulk: bulkOf(r) }; return; }

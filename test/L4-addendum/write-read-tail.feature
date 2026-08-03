@@ -58,17 +58,23 @@ Feature: mogwai addendum — a read tail after an element-preserving write
       | result |
       | d[1].l |
 
-  # …and over SEVERAL it is not, so it fails closed rather than answering once per element. The
-  # refusal fires before any mutation, so the graph is untouched.
+  # …and over SEVERAL it is ALSO one answer, which is the point of a barrier: `count()` observes the
+  # whole mutated stream, so a four-person write counts four. This scenario pinned a REFUSAL until
+  # the RelIR spine made `property()` a step of the ordinary fold — the write's result is the same
+  # element relation, so a barrier after it is the barrier that was already built. TinkerPop's answer
+  # is the count, and the refusal was ours; a pin that records our own limitation moves the day the
+  # limitation goes.
   @gap:write-read-tail
-  Scenario: g_V_propertyXtempX_count_over_many_is_refused
+  Scenario: g_V_propertyXtempX_count_over_many
     Given the modern graph
     And the traversal of
       """
       g.V().hasLabel("person").property(Cardinality.single, "temp", "x").count()
       """
     When iterated to list
-    Then the traversal will raise an error with message containing text of "cannot observe the whole stream"
+    Then the result should be unordered
+      | result |
+      | d[4].l |
 
   # A MUTATING tail is a different question again (the write driver would have to re-enter the write
   # spine), and is refused with its own message.

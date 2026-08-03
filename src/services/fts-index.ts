@@ -29,7 +29,7 @@ export type OwnerElem = 'node' | 'edge';
 
 /** A row to write into property_fts. `text` is the only indexed (searchable) column;
  *  everything else is UNINDEXED (stored + filterable, not tokenized). */
-interface FtsRow {
+export interface FtsRow {
   kind: 'value' | 'jsonkey' | 'jsonleaf';
   text: string;
 }
@@ -123,8 +123,19 @@ export const PROPERTY_FTS_COLUMNS = ['owner_elem', 'pid', 'owner', 'pk', 'kind',
 export function propertyFtsRows(
   ownerElem: OwnerElem, pid: number, owner: number, key: string, val: unknown, typeNode: TypeNode | null,
 ): unknown[][] {
-  return ftsRowsFor(valueNodeOf(val, typeNode)).map((r) => [ownerElem, pid, owner, key, r.kind, r.text]);
+  return propertyFtsEntries(val, typeNode).map((r) => [ownerElem, pid, owner, key, r.kind, r.text]);
 }
+
+/** The (kind, text) pairs ONE value indexes as — the walk, without the owner columns.
+ *
+ *  Split out for the caller that knows the TEXT at compile time and the PID only at run time: a
+ *  RelIR `property(k, <literal>)` lands its FTS rows as an `INSERT … SELECT` over the property
+ *  insert's own `RETURNING`, so it needs the walk's output as data rather than as a store call.
+ *  Both callers go through the SAME walk, which is the invariant `propertyFtsRows`' own comment
+ *  states: a re-derivation that skipped empty-text rows produced 9,023 rows where this produces
+ *  8,936, and a divergent index is silent. */
+export const propertyFtsEntries = (val: unknown, typeNode: TypeNode | null): readonly FtsRow[] =>
+  ftsRowsFor(valueNodeOf(val, typeNode));
 
 /** Index ONE property instance into property_fts. Caller deletes stale rows first
  *  (single-cardinality replace) — this only inserts. Batched through RowBatch: a collection

@@ -222,7 +222,16 @@ export interface Compiled {
  *
  * `shape` is the framing contract exactly as a read's is, so the wire layer needs no write vocabulary.
  */
-export interface Program { kind: 'program'; program: RelPlan; shape: Shape; spine: Spine; }
+export interface Program {
+  kind: 'program';
+  program: RelPlan;
+  /** The FRAMING read, composed above RelIR and run last — absent when the traversal produces no
+   *  traverser at all (`drop()`), where the program's own last statement is the result. Its binds
+   *  may hold a `RowsBind` marker, which the executor fills with the rows it retained. */
+  tail?: { sql: string; binds: any[] };
+  shape: Shape;
+  spine: Spine;
+}
 
 /** What `compile()` hands back: one statement, a program, or the legacy write closure. */
 export type Executable = Compiled | Program | WritePlan;

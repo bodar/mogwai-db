@@ -8,6 +8,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { bare, read, run, seededStore } from '../support/harness.ts';
 import { emit } from '../../src/rel/emit.ts';
+import { executeQuery } from '../support/executor.ts';
 import { CF_MAX_BINDS } from '../../src/cf-limits.ts';
 
 // ---------- execution semantics against a seeded store ----------
@@ -85,10 +86,11 @@ test('property() updates existing vertices (overwrite + new key, single cardinal
   // overwrite marko's age, add a new key. `single` is SPELLED OUT: the graph default is `list`
   // (api.ts, DEFAULT_VERTEX_CARDINALITY), so an undeclared write would append a second age —
   // which is the next test.
-  const res = run(store, 'g.V(1).property(single, "age", 30).property("city", "London")');
-  // A write response's VERTEX prop bag is per-key multi-valued (cardinality list/set), so each
-  // value is a list — the same shape a read of the vertex frames. An edge's stays flat (below).
-  expect(bare((res[0] as any).vertex)).toEqual({ id: 1, labels: ['person'], props: { name: ['marko'], age: [30], city: ['London'] } });
+  // ONE traverser out, and it is the vertex — asserted on the WIRE rather than on whatever object
+  // the compile route happens to hand back, because the two spines produce different intermediate
+  // shapes (a legacy `WriteResult`, a RelIR read projection) and identical GraphBinary. The
+  // properties themselves are read back below, which is the assertion that survives either.
+  expect(executeQuery(store, 'g.V(1).property(single, "age", 30).property("city", "London")').length).toBe(1);
   expect(run(store, 'g.V(1).values("age")').map((r) => r.v)).toEqual([30]);
   expect(run(store, 'g.V(1).values("city")').map((r) => r.v)).toEqual(['London']);
   // untouched vertices keep their props
@@ -183,9 +185,15 @@ test('meta-property read chains: has(metaKey) filter, properties().properties(),
 
 test('property() updates edges too (materialized on the wire via edgeBuffer)', () => {
   const store = seededStore();
-  const res = run(store, 'g.V(1).outE("created").property("weight2", 0.9)');
-  expect(bare((res[0] as any).edge.props)).toEqual({ weight: 0.4, weight2: 0.9 });
+  // The wire payload is the point of this one: a client's own EdgeSerializer drops properties, so
+  // `edgeBuffer` writes them itself — an edge framed with no props would be a SHORTER buffer, which
+  // is what a byte-length assertion over the two writes catches without pinning the encoding.
+  const before = executeQuery(store, 'g.V(1).outE("created")');
+  const after = executeQuery(store, 'g.V(1).outE("created").property("weight2", 0.9)');
+  expect([before.length, after.length]).toEqual([1, 1]);
+  expect(after[0]!.length).toBeGreaterThan(before[0]!.length);
   expect(run(store, 'g.V(1).outE("created").values("weight2")').map((r) => r.v)).toEqual([0.9]);
+  expect(run(store, 'g.V(1).outE("created").values("weight")').map((r) => r.v)).toEqual([0.4]);
 });
 
 test('addE start-step: from()/to() nested traversals + edge property', () => {

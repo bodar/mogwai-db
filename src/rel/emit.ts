@@ -6,7 +6,7 @@ import { explodeColumns } from './obligations.ts';
 import { retained, type Binding, type Plan } from './plan.ts';
 import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
-import type { FrameBound, SortTerm, WindowSpec } from './types.ts';
+import { EXCLUDED, type FrameBound, type SortTerm, type WindowSpec } from './types.ts';
 
 export interface Emitted { readonly sql: string; readonly binds: readonly any[]; }
 
@@ -410,19 +410,48 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
   const recursiveDefinition = (r: Extract<Rel, { readonly kind: 'recursive' }>, outer: Scope): Expression =>
     q`${ident(r.name)}(${list(r.cols.map(ident))}) AS (${renderRel(r.seed, outer)} UNION ALL ${renderRel(r.step(recursiveSelf(r)), outer)})`;
 
-  /** A statement is a scope whose target spells its columns bare: SQLite's UPDATE/DELETE do not
-   * alias theirs. Statements share this renderer entirely — no second expression path, and none of
-   * the `externalAliases`/`bareColumns` back channels a separate entry point needed. */
+  /**
+   * `INSERT … SELECT … ON CONFLICT` NEEDS A `WHERE` IN THE SELECT, and SQLite says so: with a
+   * values-from-SELECT upsert its parser cannot tell the conflict clause's `ON` from a join's, and
+   * the documented disambiguator is a WHERE. `true` is the one that changes no rows, and it is
+   * spelled INLINE rather than bound — a parameter spent on a compiler constant is a parameter the
+   * platform's cap does not get back (`OnlyDataSpendsAParameter`).
+   *
+   * In the emitter because it is a fact about SQL's SURFACE, not about the algebra: an `Insert` with
+   * a conflict clause means the same thing whatever its source's shape, and making every caller
+   * remember to bolt a vacuous filter on would be the block assembler's job leaking upward.
+   */
+  const upsertSource = (r: Rel): Expression => {
+    const built = build(r, EMPTY_SCOPE);
+    if (built.kind === 'closed') return q`SELECT * FROM (${built.body}) ${ident(r.id)} WHERE ${raw('true')}`;
+    return renderBuilt(built.where ? built : { ...built, where: raw('true') });
+  };
+
+  /**
+   * A statement is a scope whose target spells its columns TABLE-QUALIFIED. SQLite's UPDATE/DELETE
+   * do not alias their target, so the table name is the only qualifier available — and a qualifier
+   * is not optional: a correlated subquery in the `WHERE` that scans a table with a same-named
+   * column captures the bare name, so `node = node` reads as the INNER relation's column and is
+   * trivially true. That produced a `property()` cascade deleting every element's rows because ONE
+   * of them had a `single` declaration — caught by an L4 pin, invisible to the checker (both names
+   * resolve) and invisible to SQLite (both are legal).
+   *
+   * Statements share this renderer entirely — no second expression path, and none of the
+   * `externalAliases`/`bareColumns` back channels a separate entry point needed.
+   */
   const statement = (s: Stmt): Expression => {
     const target = s.target;
-    const scope: Scope = withRel(EMPTY_SCOPE, target.id, new Map(target.type.cols.map((column) => [column.name, ident(column.name)])));
+    const scope: Scope = withRel(EMPTY_SCOPE, target.id, new Map(target.type.cols.map((column) => [column.name, qualified(target.table, column.name)])));
+    // `excluded` is in scope for the conflict clause ALONE, which is SQLite's own rule — and it is
+    // what makes an upsert able to assign the incoming row rather than only a constant.
+    const merging: Scope = withRel(scope, EXCLUDED, new Map(target.type.cols.map((column) => [column.name, qualified('excluded', column.name)])));
     const returning = (pairs: readonly (readonly [string, Expr])[]): Expression => pairs.length
       ? q` RETURNING ${list(pairs.map(([name, expression]) => q`${expr(expression, scope)} AS ${ident(name)}`))}` : empty;
     switch (s.kind) {
       case 'insert':
-        return q`INSERT INTO ${ident(target.table)} (${list(s.cols.map(ident))}) ${renderRel(s.source, EMPTY_SCOPE)}${
+        return q`INSERT INTO ${ident(target.table)} (${list(s.cols.map(ident))}) ${s.onConflict ? upsertSource(s.source) : renderRel(s.source, EMPTY_SCOPE)}${
           s.onConflict
-            ? q` ON CONFLICT (${list(s.onConflict.target.map(ident))}) DO UPDATE SET ${list(s.onConflict.set.map(([name, expression]) => q`${ident(name)} = ${expr(expression, scope)}`))}`
+            ? q` ON CONFLICT (${list(s.onConflict.target.map(ident))}) DO UPDATE SET ${list(s.onConflict.set.map(([name, expression]) => q`${ident(name)} = ${expr(expression, merging)}`))}`
             : empty
         }${returning(s.returning)}`;
       case 'update': {

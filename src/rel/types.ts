@@ -15,6 +15,17 @@ export interface RelType { readonly cols: readonly ColMeta[]; }
 export type RelId = string & { readonly __relId: unique symbol };
 export const relId = (name: string): RelId => name as RelId;
 
+/**
+ * SQLite's `excluded` — the row an `ON CONFLICT` update is being asked to merge in.
+ *
+ * A reserved relation identity rather than a field on `Insert`, because that is what it IS: a
+ * relation in scope for exactly one clause, carrying the target's columns. Without it an upsert can
+ * only assign CONSTANTS, which is not an upsert — and spelling it as an emitter special case would
+ * put a physical name back inside a statement, the thing `Delete.using`'s deletion was about.
+ * The minter cannot produce this name (its ids are `<hint><n>`), so a collision is unreachable.
+ */
+export const EXCLUDED = relId('excluded');
+
 export interface SortTerm {
   readonly expr: import('./expr.ts').Expr;
   readonly dir: 'asc' | 'desc';
