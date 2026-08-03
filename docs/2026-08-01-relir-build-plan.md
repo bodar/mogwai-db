@@ -1335,6 +1335,42 @@ literals, mid-chain `Union`) need bind-precision work across two runtimes that t
 exercise separately — every mid-chain instance also carries a bigint literal, so landing the `Union`
 alone would measure +0. Speculative substrate with no measurable gain is what §10·8 ranks last.
 
+**THE LIST SHAPE, SCOPED BEFORE STARTING — 194, now the largest family, and it splits by FRAMING ARM
+rather than by step.** Measured 2026-08-03 at 349 routed, by asking what SHAPE legacy frames each blocked
+traversal as, because that names the arm RelIR would have to grow:
+
+| arm | from `fold` | from a collection source | total |
+|---|---|---|---|
+| **`jsonbList`** | 27 | 45 | **72** |
+| `jsonbSet` | 14 | 15 | 29 |
+| a SCALAR result (`fold().max(Scope.local)`) | 14 | — | 14 |
+| a VALUE result (`fold().conjoin(';')`, `fold().unfold()`) | 7 | 11 | 18 |
+| `jsonbElementList` (a list of ELEMENTS, `g.V().fold()`) | 2 | — | 2 |
+| legacy THROWS too (`merge`/`combine`/`difference` with a traversal operand, `order(local).by(key)`) | ~15 | — | ~15 |
+
+**Four facts worth having before the increment starts.**
+
+1. **`jsonbList` is 72 on its own** — larger than any single family's realised gain so far except `inject`.
+   It is ONE framing arm, and both halves of it (a `fold()` barrier and a collection LITERAL) frame
+   identically, so the arm serves both.
+2. **The traversals do not stop at the arm — they operate ON the list**, which is where the 72 actually
+   cash out: `g.inject(["a","b"]).lTrim(Scope.local)` needs a per-MEMBER transform, i.e. a `json_each`
+   explode, the transform, and a re-aggregate. That is a fifth vocabulary module in shape — and the
+   compounding insight is that **it is `transform.ts` applied to a member**, exactly as legacy's `list.ts`
+   calls `scalarTx` per member. The table is already written; what is missing is the explode/re-aggregate
+   frame around it.
+3. **`fold()` needs the ENCOUNTER order** (`json_group_array(… ORDER BY s.encounter)`), and RelIR's `Agg`
+   node already carries an `orderBy` — so the ordering half is expressible today, no node-set question.
+4. **~15 of the 194 are not coverage at all** — legacy throws for them too. A family's headline number
+   should be read net of those, which is the first time that correction has mattered.
+
+**And the arms are NOT one increment.** `jsonbList` and `jsonbSet` differ by set semantics (dedup on
+construction, and `difference`/`intersect`/`disjunct` over them), the ELEMENT list is the element
+projection with an `ORDER BY` rather than a JSON aggregate, and `fold().max(Scope.local)` reaches the
+LOCAL reducers, which are `reducer.ts` over a member rather than over a row. Landing them together would
+be four lowerings in one commit; landing `jsonbList` plus the member-transform frame is the increment the
+split argues for, and the rest follow it.
+
 **PHASE 4.1's ENTRY FACT, measured 2026-08-03 — and it corrects this document twice.** §6 said the
 element row-ops are "fused into the framing projection by `TailAcc`, so a `Sort` on the CORE relation
 is a different plan (the framing join is 1:1 on `id`, so it is equivalent — but that is an argument to
