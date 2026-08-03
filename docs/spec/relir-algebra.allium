@@ -344,13 +344,36 @@ entity Binding {
     relation: RelNode?
     statement: Statement?
 
+    -- A relation binding whose rows are TAKEN rather than re-derived: the value it held at THIS
+    -- point in the program. A CTE is recomputed by every step that names it, which is invisible
+    -- in a read program and is the vertex-drop cascade's whole failure mode in one with effects —
+    -- the target relation reads edges an earlier statement has already deleted, so the vertex
+    -- delete matches nothing and leaves vertices standing.
+    snapshot: Boolean
+
     is_statement_boundary: statement != null
+
+    -- The ONE question that decides both how a reference to this binding renders and whether it
+    -- is a step of its own. A statement is retained by what it IS — its rows cannot be recomputed
+    -- at all — so `snapshot` says of a relation exactly what a statement says of itself.
+    is_retained: is_statement_boundary or snapshot
+
+    -- How many of the program's steps READ this binding, transitively: a CTE naming another CTE
+    -- puts both inside the same statement. The walk stops at a retained binding, whose rows a
+    -- reader takes as a bind rather than recomputing.
+    reading_steps: Integer
 
     -- A named CTE and a prior statement's result are the SAME CONCEPT: a reference to a
     -- relation computed earlier. Two mechanisms for it is why the write path read as a second
     -- machine.
     invariant ABindingIsEitherARelationOrAStatement {
         (relation != null and statement = null) or (relation = null and statement != null)
+    }
+
+    -- There is nothing to snapshot about an effect: a statement's rows are retained by what the
+    -- statement is, and marking it would be the same fact spelled twice.
+    invariant OnlyARelationIsSnapshotted {
+        snapshot implies relation != null
     }
 }
 
@@ -393,9 +416,21 @@ entity Program {
 
     steps: EmittedStep with program = this
     statement_bindings: bindings where is_statement_boundary
+    retained_bindings: bindings where is_retained
 
     within_bind_budget: bind_occurrences <= config.do_bind_cap
     is_read_only: statement_bindings.count = 0
+
+    -- A RE-EVALUATED CTE IS A DIFFERENT QUESTION ONCE SOMETHING HAS BEEN WRITTEN, and this is what
+    -- makes the snapshot obligatory rather than remembered. Reached through ONE step a CTE is still
+    -- exactly right, so the law names the hazard and nothing wider. It is a CHECK failure and not a
+    -- refusal, and the distinction is the same one the decline contract draws: an unlowered step is
+    -- coverage we do not have, but a plan whose answer depends on which statement ran first is a
+    -- bug in whatever built it.
+    invariant ARelationReadByTwoStepsOfAProgramWithEffectsIsSnapshotted {
+        statement_bindings.count > 0
+            implies bindings.all(b => b.is_retained or b.reading_steps <= 1)
+    }
 
     transitions stage {
         assembled -> checked
@@ -439,16 +474,19 @@ entity EmittedStep {
     }
 }
 
--- A statement binding's RETURNING rows, retained by the executor. The retention is not an
--- optimisation: it is the pre-mutation snapshot a vertex-drop cascade requires. Re-evaluating
--- the source after an earlier delete asks a different question of a graph that has changed.
+-- A retained binding's rows, held by the executor — a statement's RETURNING, or the SELECT of a
+-- relation the program snapshotted. The retention is not an optimisation: it is the pre-mutation
+-- snapshot a vertex-drop cascade requires. Re-evaluating the source after an earlier delete asks a
+-- different question of a graph that has changed.
 entity RetainedRows {
     binding: Binding
     row_count: Integer
     all_values_json_transportable: Boolean
 
-    invariant RetainedOnlyForStatementBindings {
-        binding.is_statement_boundary
+    -- Retention follows `is_retained`, not statement-hood: the executor cannot tell the two apart,
+    -- and neither can a later reference.
+    invariant RetainedOnlyForRetainedBindings {
+        binding.is_retained
     }
 }
 
@@ -639,9 +677,9 @@ rule ResolveReference {
     ensures: ReferenceResolved(reference: reference)
 
     @guidance
-        -- One concept, one node: a reference to a relation binding is a named CTE, a reference
-        -- to a statement binding is that statement's retained rows carried as one JSON bind.
-        -- Asking "CTE or materialise?" once, of one concept, is the point.
+        -- One concept, one node: a reference to a re-derivable relation binding is a named CTE,
+        -- and a reference to a RETAINED one — a statement, or a snapshotted relation — is its rows
+        -- carried as one JSON bind. Asking "CTE or materialise?" once, of one concept, is the point.
 }
 
 -- LOWERING PASSES ----------------------------------------------------------
@@ -773,16 +811,17 @@ rule RunProgram {
     ensures: program.stage = executed
 
     @guidance
-        -- Walk the bindings in order. A relation binding is already a CTE in the SQL of every
-        -- step after it; a statement binding is a step whose RETURNING rows are retained, and
-        -- every later reference to it resolves to those rows. The executor lives outside the
-        -- algebra: an executor inside it rebuilds write as a special case in a new layer.
+        -- Walk the bindings in order. A plain relation binding is already a CTE in the SQL of
+        -- every step after it; a RETAINED binding — a statement, or a snapshotted relation — is a
+        -- step whose rows are kept, and every later reference to it resolves to those rows. The
+        -- executor lives outside the algebra: an executor inside it rebuilds write as a special
+        -- case in a new layer.
 }
 
-rule RetainStatementResult {
+rule RetainStepResult {
     when: StepExecuted(program, step)
     requires: step.binding != null
-    requires: step.binding.is_statement_boundary
+    requires: step.binding.is_retained
     ensures: RetainedRows.created(
         binding: step.binding,
         row_count: rows_returned(step),

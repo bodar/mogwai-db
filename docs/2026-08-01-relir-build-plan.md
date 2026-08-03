@@ -130,7 +130,7 @@ or lose the brand. No `src/rel/index.ts` barrel while the internal API moves.
 
 ```ts
 type Plan    = { readonly bindings: readonly Binding[]; readonly result: Rel }
-type Binding = { readonly name: string; readonly node: Rel | Stmt }
+type Binding = { readonly name: string; readonly node: Rel | Stmt; readonly snapshot?: boolean }
 // plus one source node:  Ref { name }
 ```
 
@@ -142,6 +142,15 @@ earlier — and having two mechanisms for it is why the write path reads as a se
 - a `Stmt` binding → a **statement boundary**. The executor (`src/program.ts`, outside `src/rel/`) runs
   it, retains its `RETURNING` rows, and the same `Ref` resolves to them as ONE JSON bind exploded by
   `json_each` — never a row-count-sized placeholder list.
+- a `Rel` binding marked **`snapshot`** → a **read boundary**: the same step shape, the same retention,
+  the same transport. **It is what makes "the value AT THIS POINT" expressible**, and Phase 2 does not
+  work without it: a CTE is recomputed by every statement that names it, so a drop cascade whose target
+  relation reads `edges` would ask a DIFFERENT question after the incident-edge delete and leave
+  vertices standing. `retained(binding)` (`isStmt(node) || snapshot`) is the one predicate; the emitter
+  cannot tell the two apart and neither can a `Ref`. **`checkPlan` proves the discipline rather than
+  trusting statement order**: in a program with effects, a plain `Rel` binding read by more than one
+  step is a THROW naming it. Reached through ONE step a CTE is still exactly right, so the rule names
+  the hazard and nothing wider.
 - a write in a read position is a **hoist to a binding**, so `union(__.addV(), __.V())`,
   `optional(__.addV())` and `repeat(__.addV())` are plan composition. **There is no driver anywhere.**
 - **Effects are legal only at a binding.** `Rel` positions stay pure — a `Stmt` cannot be a `Join`
@@ -529,10 +538,10 @@ projection with an `ORDER BY` rather than a JSON aggregate, and `fold().max(Scop
 LOCAL reducers (`reducer.ts` over a member, not over a row). `jsonbList` plus the member-transform frame
 is the increment; the rest follow it.
 
-**The rest of the corpus ranking** (`mise run rel-blockers`, 563 routed — re-run it every round, it
-MOVES): writes 195 (`addV` 147 · `mergeV` 26) · side effects 182 (`aggregate` 64 · `group` 63 ·
-`groupCount` 30 · `sack` 25) · the property shape 90 (`properties` 46 · `valueMap` 37) · branch 70
-(`choose` 40 · `union` 23) · scalar transforms 64 (`math` 15 · `asNumber` 12) · aliases 52 (all at
+**The rest of the corpus ranking** (`mise run rel-blockers`, 577 routed — re-run it every round, it
+MOVES): writes 195 (`addV` 147 · `mergeV` 26) · side effects 183 (`aggregate` 64 · `group` 63 ·
+`groupCount` 31 · `sack` 25) · the property shape 90 (`properties` 46 · `valueMap` 37) · branch 63
+(`choose` 36 · `union` 20) · scalar transforms 64 (`math` 15 · `asNumber` 12) · aliases 53 (all at
 `select`) · the list shape 30 (all at `fold`) · row ops 15. In no family: `repeat` 85 · `local` 61 ·
 `where` 57 · `match` 57 · `path` 38 · `is` 31 · `has` 26 · `call` 23 · `inject` 20 · `or` 17 ·
 `project` 16 · `filter` 15 · `and` 15 · `shortestPath` 15 · `V` 12. **The residue is where the next
@@ -646,10 +655,46 @@ them were the same three-argument form. The instrument keeps its job with a diff
 ### Phase 2 — the write wedge
 
 `Insert`/`Update`/`Delete` bindings over read plans. 2.1 (§3.0 down to a program running against
-SQLite, including the executor) is COMPLETE; what is not built is the way in, which is why 4.1 comes
-first.
+SQLite, including the executor) is COMPLETE, and **2.2 LANDED with the WAY IN** (+3, and the number is
+the wrong thing to read it by — §10·7): a covered chain ending in `drop()` lowers to a PROGRAM, and
+what that opened is the substrate every later write step inherits.
 
-- **2.2** `drop()` → `Delete` with an `InQuery` membership predicate.
+- **`Binding.snapshot`** (§3.0) — the pre-mutation snapshot, with `checkPlan` proving it. Without it
+  the cascade is correct only by an ORDER OF STATEMENTS somebody got right, which is exactly the class
+  of reasoning §11 exists to delete.
+- **`Program`** joins `Compiled` and `WritePlan` in the compile-output contract (`Executable` is the
+  union), and `Shape` frames its rows exactly as it frames a read's — so the wire layer needs no write
+  vocabulary at all. It is what REPLACES `WritePlan` (§8): data the algebra produced and one executor
+  runs, versus a JS closure that walks drivers and calls the store.
+- **`BindBudgetExceeded`** — the one emitter/checker failure a caller may answer by choosing the other
+  route. Every other violation must escape (§11), so a `catch` that could not tell them apart would
+  turn the failure `rel-sweep` exists to see into a silent decline.
+- **`RelFraming` gains `discard`** — "there is nothing here" has to be something the lowering can SAY,
+  because `spine.ts` switches totally. A `drop()` program's result is its last statement with an empty
+  `RETURNING`, which is also why nothing had to build the empty relation `Values` refuses to express.
+- **Every statement's binds are O(plan size)**, because the retained id set crosses as ONE JSON value
+  (§10·5). The cascade therefore needs no chunking at all, and `test/cf-limits.test.ts`'s 250-vertex
+  and 250-edge drops pass through the new route unchanged. This is the first place the structural
+  argument in §10·5 pays a write rather than a read.
+
+**Two instruments caught what review would not have, and both found the same class of thing — a
+question asked of the OLD union of artifacts.** `rel-sweep`'s budget probe went through
+`emitRelational`, which refuses a program, so it had to ask per STEP (six decline-contract violations,
+all of them this). And the census's `isWrite` asked `kind === 'write'`, so a `drop()` compiled to a
+`program` shared the READ store and emptied it for every traversal after it — the question that probe
+is really asking is whether a shared store SURVIVES, and only `kind === 'read'` answers yes.
+
+**What 2.3 needs that 2.2 did not: FRAMING over a program.** `drop()` frames nothing, so the program
+leaves through its own door in `spine.ts`. `property()`/`addV()` return traversers, and their framing
+query has to run AFTER the effects and read their retained rows. Two shapes for it, and the second
+looks right: give `Program` a `tail` (the framing layer's composed query, whose binds may hold a
+`RowsBind`), or make `emitRelational` render a plan's RESULT with the effects' steps stripped off, so
+the framing layer keeps composing an `Expression` exactly as it does today. Decide it at 2.3, not
+before — the two differ only in who owns the last render.
+
+- **2.2** `drop()` → `Delete` with an `InQuery` membership predicate. **DONE.** What still declines is
+  a PROPERTY drop (`g.V().properties().drop()`), which needs the property stream RelIR does not have —
+  the property shape's 90 blockers, not this phase's.
 - **2.3** `property()` → `Update{from}` / `Insert … ON CONFLICT`. Expressing `Cardinality.list` as an
   `Insert` of N rows rather than a JS overwrite is a structural fix for the cardinality bug class.
 - **2.4** `addV`/`addE` → `Insert … SELECT … RETURNING`, with P5b's correlation key and an `ORDER BY`
