@@ -156,6 +156,22 @@ const COVERED = [
   "g.inject(['a','b','c']).limit(Scope.local,2)", "g.inject(['a','b','c']).range(Scope.local,1,3)",
   "g.inject(['a','b','c']).skip(Scope.local,1)", "g.inject(['a','b','c']).tail(Scope.local,2)",
   "g.inject(['a','b']).limit(Scope.local,1).unfold()", 'g.inject([1,2],[3]).limit(1)',
+  // `fold()` — the other half of the `jsonbList` arm, and the one whose MEMBER ENCODING is a runtime
+  // decision: over a per-row-typed stream the members become self-describing `{t,v}` nodes iff SOME
+  // member's type is lossy under its storage class, asked once for the whole list so the encoding
+  // stays uniform. Every member reader then detects the envelope per member.
+  "g.V().values('name').fold()", "g.V().values('age').fold()", 'g.V().count().fold()',
+  'g.inject(1,2,3).fold()', "g.inject('a','b').fold()", "g.V().out().values('name').fold()",
+  "g.V().values('name').order().fold()", "g.V().hasLabel('person').values('age').fold()",
+  // …and the member frame over a FOLDED list is the same frame, which is the whole point of having
+  // one: the typed decode rides inside `memberPayload`, so no op below knows which encoding it is on.
+  "g.V().values('name').fold().unfold()", "g.V().values('age').fold().unfold().is(P.gt(29))",
+  "g.V().values('name').fold().count(Scope.local)", "g.V().values('age').fold().sum(Scope.local)",
+  "g.V().values('age').fold().max(Scope.local)", "g.V().values('age').fold().min(Scope.local)",
+  "g.V().values('age').fold().mean(Scope.local)", "g.V().values('name').fold().conjoin(';')",
+  "g.V().values('name').fold().toUpper(Scope.local)", "g.V().values('name').fold().limit(Scope.local,2)",
+  "g.V().values('name').fold().tail(Scope.local,2)", "g.V().values('name').fold().all(P.eq('marko'))",
+  "g.V().values('name').fold().any(P.eq('marko'))", "g.V().values('name').fold().unfold().toUpper()",
 ];
 
 /**
@@ -165,7 +181,6 @@ const COVERED = [
 const DECLINED = [
   "g.V().bothE().otherV()",           // otherV reads the entering vertex — carried state not modelled
   "g.V().as('a').out().select('a')",  // an alias: carried state not modelled
-  'g.V().count().fold()',             // a step after the shape change that is NOT in its vocabulary
   'g.inject()',                       // the EMPTY relation, which `Values` refuses to express (§3.3)
   "g.inject([1,2],3)",                // MIXED list/scalar args: the VARIANT shape, not either of them
   "g.inject(['a','b']).order(Scope.local)",   // a member SORT needs the vtype-aware compare key

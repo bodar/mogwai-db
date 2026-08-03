@@ -7,7 +7,7 @@ import type { Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { isLocalScope, sliceOf } from '../ir/step.ts';
-import { PER_ROW, STATIC, UNKNOWN, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
+import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs, isNested } from '../../gremlin/frontend.ts';
 import { childSteps, collectionAssert } from '../steps/tail/child-shape.ts';
@@ -22,7 +22,7 @@ import {
 import { byExpr, modulations, orderProductivity, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
-import { BARE_LIST, LIST_COL, listMemberOp, listRetype, unfoldList } from './list.ts';
+import { BARE_LIST, foldScalars, LIST_COL, listMemberOp, listRetype, unfoldList } from './list.ts';
 
 /**
  * THE SECOND LOWERING — `Step[] -> RelIR` (§10·4 of `docs/2026-08-01-relir-build-plan.md`).
@@ -1124,6 +1124,21 @@ function scalarTail(
       continue;
     }
 
+    // `fold()` — the SHAPE BOUNDARY out of the scalar tail and into the list vocabulary: every
+    // traverser becomes one member of ONE list traverser. The member encoding is `list.ts`'s (it is
+    // the decision every later member read depends on); what this side owns is the two facts it needs
+    // — the per-row type column if the values carry one, and the emission order to fold IN.
+    if (step.name === 'fold') {
+      if (args.length || isLocalScope(step)) return null;
+      const encounter = encounterOf(rel.channels);
+      const folded = foldScalars(rel, {
+        ...(carries('vtype') ? { vtype: 'vtype' } : {}),
+        ...(out.kind === 'scalar' && staticTypeOf(out.type) ? { staticTag: staticTypeOf(out.type)! } : {}),
+        ...(encounter ? { encounter: encounter.col } : {}),
+      }, fresh);
+      return listTail(folded.rel, folded.of, steps, at + 1, fresh);
+    }
+
     return null;
   }
   return { rel, framing: out };
@@ -1233,10 +1248,15 @@ function listTail(
       ];
       const positioned = renumber(
         unfolded.rel, terms,
-        [meta('v', 'any', true), ...channels.map((channel) => meta(channel.col, 'int'))],
+        [meta('v', 'any', true), ...(unfolded.typed ? [meta('vtype', 'text', true)] : []),
+          ...channels.map((channel) => meta(channel.col, 'int'))],
         channels, fresh,
       );
-      return scalarTail(positioned, { kind: 'scalar', type: UNKNOWN }, steps, at + 1, false, fresh);
+      // A TYPED list's members frame by their OWN type, exactly as `values()` over a stored property
+      // does — `PER_ROW('vtype')`, the same channel and the same column name, so the scalar tail's
+      // `carries('vtype')` picks it up and an `is(P.gt(…))` after it gets the vtype-aware compare key
+      // for free. A bare list's members are honestly `UNKNOWN` (inferred per value at the wire).
+      return scalarTail(positioned, { kind: 'scalar', type: unfolded.typed ? PER_ROW('vtype') : UNKNOWN }, steps, at + 1, false, fresh);
     }
 
     // A GLOBAL row op slices the stream's rows, not one traverser's members.

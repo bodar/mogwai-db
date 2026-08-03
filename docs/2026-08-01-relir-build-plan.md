@@ -1,6 +1,6 @@
 # RelIR — the build plan
 
-**Status: BUILDING.** Coverage **424 / 2,298** corpus traversals on the RelIR spine; deletion counter
+**Status: BUILDING.** Coverage **459 / 2,298** corpus traversals on the RelIR spine; deletion counter
 **110** references left across the 15 legacy rows. Both are ratchets in `ci` (§10·4). The direction was
 argued in [codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a and
 is not re-argued here.
@@ -403,19 +403,45 @@ and the contrast is the point — it makes each member a traverser, so multiplyi
 Covered: the collection literal, member transforms (`Scope.local`), `all`/`any`/`none`, `conjoin`,
 the local reducers, `count(Scope.local)`, the local slices, `unfold()` into the scalar tail.
 
+**`fold()` LANDED too** (+35, 424→459 — the spine is now a fifth of the corpus), and the barrier was
+never the work: it is one `Aggregate` with an `orderBy`. The MEMBER ENCODING was.
+
+- **A per-row `vtype` makes the encoding a RUNTIME question about the whole list.** Members become
+  self-describing `{t,v}` nodes iff SOME member's recorded type is lossy under its storage class, asked
+  ONCE so a list is wholly typed or wholly bare — mixing encodings inside one list is the corruption
+  this shape exists to avoid.
+- **That question is a WINDOW here, not legacy's second alias.** `MAX(<is this row lossy>) OVER ()`.
+  Legacy notes a window "cannot nest inside the json_group_array aggregate" and reaches for an `EXISTS`
+  over a second alias; true of ONE SELECT, and not a constraint on a normalized IR — the window is its
+  own node, so the aggregate reads a COLUMN and the assembler opens the nested SELECT. **The `Exists`
+  form is what the algebra actually refuses, and it is worth recording why: `name` does not walk
+  EXPRESSION subplans, so a subplan sharing the outer tree becomes a `Ref` in one place and stays
+  itself in the other.** `check` fails closed on it ("names two different relations in one scope").
+  Making `name` walk expression subplans is the general fix if a second case ever wants it.
+- **`memberPayload`/`memberNode` are the two reads, and every op goes through one.** Which one is
+  decided by what the op DOES: anything that compares, filters or aggregates reads the payload
+  (ordering a raw `{"t":"int","v":5}` would sort JSON text); anything that writes members BACK reads the
+  node, so a subset or a reorder keeps each member's exact type. That is what lets a typed list flow
+  through the same code as a bare one instead of failing closed — the frame did not change at all.
+- **`unfold()` over a typed list frames PER ROW**, off a `vtype` column built from each member's own
+  tag (inferred from the storage class where a member is bare). Same channel and same column name as
+  `values()`, so the scalar tail's `carries('vtype')` picks it up and a following `is(P.gt(…))` gets the
+  vtype-aware compare key for free.
+- **A member op needs a FENCE, and this one is a legality wall.** `json_each(<list>)` is a FROM-clause
+  reader, so fused into the block that COMPUTES the list it re-inlines the expression — and where that
+  expression is `json_group_array(…)` SQLite refuses outright (`misuse of aggregate function`). The
+  block model already tracks the symmetric fact for windows; fencing lands legacy's CTE-per-list-op
+  shape.
+
 **What remains of the family, in order:**
 
-1. **`fold()` — 109 traversals, and every one of the remaining list blockers.** The obstacle is the
-   MEMBER ENCODING, not the barrier: `fold()` over a stored-property stream emits `{t,v}` typed nodes,
-   decided by a correlated `EXISTS` over the same relation (`vtype NOT IN ('string','double','int')`),
-   and every member READER then needs the `CASE WHEN je.type='object'` decode. `isBareList` is the gate
-   that keeps today's ops honest until that lands.
-2. **The SET-OP family — 35 traversals, newly visible in the residue** (`combine`/`difference`/
-   `intersect`/`merge`/`product`/`disjunct`, 5–6 each). One lowering: a list OPERAND plus a set
-   expression over two `json_each`es. Ranked second because it is a family with one frame, and the
-   frame is the one just built.
-3. `order(Scope.local)`/`dedup(Scope.local)`, which need the member compare key and the
+1. **The SET-OP family — 35 traversals** (`combine`/`difference`/`intersect`/`merge`/`product`/
+   `disjunct`, 5–6 each). One lowering: a list OPERAND plus a set expression over two `json_each`es,
+   over the frame just built.
+2. `order(Scope.local)`/`dedup(Scope.local)`, which need the member compare key and the
    first-occurrence rule respectively.
+3. The ELEMENT list (`fold()` over elements, whose members are rowids) and the NESTED list — each needs
+   its own expansion rather than a decode, which is why `isBareList` names the scalar encodings only.
 
 **Then: THE LIST SHAPE — 194 blocked traversals, the largest family, and it splits by FRAMING ARM
 rather than by step** (measured at 349 routed, by asking what shape legacy frames each blocked traversal

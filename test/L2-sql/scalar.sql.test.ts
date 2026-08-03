@@ -324,8 +324,17 @@ describe('scalar-parent / projection SQL', () => {
     // type, not per-value inference at the wire.
     expect(read('g.V().values("name").order().fold().conjoin("_")').shape).toEqual({ kind: 'value', type: STATIC('string') });
     // all(P)/any(P) filter the list (IS TRUE / IS NOT TRUE null handling).
-    expect(read('g.V().values("age").order().fold().all(P.gt(10))').sql).toContain('IS NOT TRUE');
-    expect(read('g.V().values("age").order().fold().any(P.gt(10))').sql).toContain('IS TRUE');
+    // `all` is "no member FAILS", not "every member passes" — the two differ once a predicate can be
+    // NULL. Legacy spells the guard `IS NOT TRUE`; RelIR binds the 1 (`IS NOT ?`), which is the same
+    // test for a predicate's 0/1/NULL result, so each spine is pinned in its own spelling (§10·4).
+    expect(read('g.V().values("age").order().fold().all(P.gt(10))', { spine: 'legacy' }).sql).toContain('IS NOT TRUE');
+    expect(read('g.V().values("age").order().fold().all(P.gt(10))', { spine: 'rel' }).sql)
+      .toMatch(/NOT EXISTS \(SELECT \? AS one FROM json_each\([^]*IS NOT \?\)\)/);
+    // `any` needs no `IS TRUE` guard at all — a `WHERE` already treats NULL as not-satisfied — so
+    // legacy's explicit form and RelIR's bare predicate are the same test. `all` is the asymmetric one.
+    expect(read('g.V().values("age").order().fold().any(P.gt(10))', { spine: 'legacy' }).sql).toContain('IS TRUE');
+    expect(read('g.V().values("age").order().fold().any(P.gt(10))', { spine: 'rel' }).sql)
+      .toMatch(/WHERE EXISTS \(SELECT \? AS one FROM json_each\(/);
     // a list-collection step on a scalar stream raises the incoming-type error.
     expect(() => compile('g.V().values("name").fold().unfold().combine([1])', {})).toThrow('incoming traversers');
   });

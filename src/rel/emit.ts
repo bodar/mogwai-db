@@ -337,7 +337,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         // Exactly the columns `explodeColumns` declares — a member's key, its value, and its ordinal
         // (for a JSON array `json_each.key` IS the index).
         const memberCol = (name: string): readonly [string, Expression] =>
-          [name, qualified(r.id, name === r.as.value ? 'value' : 'key')];
+          [name, qualified(r.id, name === r.as.value ? 'value' : name === r.as.type ? 'type' : 'key')];
         // SOURCE-LESS: `json_each(<outer expression>)` is the whole FROM, and the expression resolves
         // in the OUTER scope because there is no input block to resolve it against. That is what makes
         // a per-member computation a CORRELATED subquery — the shape every list member op takes.

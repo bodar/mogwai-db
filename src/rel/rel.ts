@@ -24,7 +24,7 @@ type RawRel =
    *  OUTER scope, which is what makes a per-member computation a correlated scalar subquery rather
    *  than a join. Every list member op is that shape — a transform, a predicate, a local reducer or a
    *  local slice over one traverser's members, not over the stream's rows. */
-  | (RelBase & { readonly kind: 'explode'; readonly id: RelId; readonly input?: Rel; readonly expr: Expr; readonly as: { readonly key?: string; readonly value: string; readonly ord?: string } })
+  | (RelBase & { readonly kind: 'explode'; readonly id: RelId; readonly input?: Rel; readonly expr: Expr; readonly as: { readonly key?: string; readonly value: string; readonly ord?: string; readonly type?: string } })
   | (RelBase & { readonly kind: 'materialize'; readonly id: RelId; readonly input: Rel; readonly name?: string })
   | (RelBase & { readonly kind: 'join'; readonly id: RelId; readonly left: Rel; readonly right: Rel; readonly join: 'inner' | 'left' | 'cross' | 'semi' | 'anti'; readonly on?: Expr })
   | (RelBase & { readonly kind: 'union'; readonly id: RelId; readonly inputs: readonly Rel[]; readonly all: boolean })

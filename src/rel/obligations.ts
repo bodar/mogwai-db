@@ -45,8 +45,11 @@ const extending = (node: Rel & { readonly input: Rel }, added: readonly string[]
   if (!sameNames(expected, names(node))) throw new Error(`RelIR: ${node.kind} output must be its input columns followed by ${added.join(', ') || 'nothing'}`);
 };
 
-export const explodeColumns = (as: { readonly key?: string; readonly value: string; readonly ord?: string }): readonly string[] =>
-  [...(as.key ? [as.key] : []), as.value, ...(as.ord ? [as.ord] : [])];
+/** `json_each`'s columns a caller asked for, in declaration order. `type` is the member's JSON type
+ *  — the only way to tell a `{t,v}` ENVELOPE from a bare value, since `json_each` has already
+ *  extracted the member and `json_type()` would error on a bare string. */
+export const explodeColumns = (as: { readonly key?: string; readonly value: string; readonly ord?: string; readonly type?: string }): readonly string[] =>
+  [...(as.key ? [as.key] : []), as.value, ...(as.ord ? [as.ord] : []), ...(as.type ? [as.type] : [])];
 
 export const CHANNEL_OBLIGATION: { readonly [K in RelKind]: ChannelObligation<K> } = {
   // Sources answer for themselves: nothing flows in, so the only rule is that they emit what they claim.

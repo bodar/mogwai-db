@@ -65,11 +65,30 @@ export function labelIds(names: readonly string[], fresh: Minter): Rel {
 /** The storage-class recovery every stored value goes through on the way out: a JSON-typed value
  *  comes back as JSON, everything else as itself. Shared by `values()` and every other reader of a
  *  property value. */
-export const storedValue = (rel: RelId): Expr => ({
+export const storedValueOn = (value: Expr, vtype: Expr): Expr => ({
   kind: 'case',
-  whens: [[{ kind: 'in-list', expr: col(rel, 'vtype'), values: ['list', 'map', 'set'].map((t) => lit(t, 'text')) },
-    { kind: 'call', fn: 'json', args: [col(rel, 'value')] }]],
-  else: col(rel, 'value'),
+  whens: [[{ kind: 'in-list', expr: vtype, values: ['list', 'map', 'set'].map((t) => lit(t, 'text')) },
+    { kind: 'call', fn: 'json', args: [value] }]],
+  else: value,
+});
+
+/** The common case: the value and its type are the `value`/`vtype` COLUMNS of a property scan.
+ *  Derived from the general form rather than spelled twice — the same relationship
+ *  `storedCompare`/`storedCompareOn` already have, and for the same reason. */
+export const storedValue = (rel: RelId): Expr => storedValueOn(col(rel, 'value'), col(rel, 'vtype'));
+
+/**
+ * A self-describing `{t,v}` member node — `json_object('t', <type>, 'v', <stored value>)`.
+ *
+ * The encoding `typedScalarNode` (legacy `plan.ts`) produces, re-expressed in the algebra's own
+ * vocabulary because it is EMISSION rather than data. What must not diverge is the payload: a
+ * collection value rides as embedded JSON, not as a JSON string, which is why it goes through
+ * `storedValueOn` rather than naming the column twice.
+ */
+export const typedNode = (value: Expr, vtype: Expr): Expr => ({
+  kind: 'json-object',
+  entries: [['t', vtype], ['v', storedValueOn(value, vtype)]],
+  binary: false,
 });
 
 /**
