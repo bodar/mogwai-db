@@ -71,10 +71,61 @@ if git -C "$CLAUDE_PROJECT_DIR" rev-parse --verify -q origin/trunk >/dev/null 2>
       echo "[git] local trunk ($LOCAL_TRUNK) differs from origin/trunk ($ORIGIN_TRUNK) and IS CHECKED OUT." >&2
       echo "[git] not touching it — if the tree looks wrong, run: git reset --hard origin/trunk" >&2
     else
-      git -C "$CLAUDE_PROJECT_DIR" branch -f trunk origin/trunk
+      # `>/dev/null`, not cosmetic: `branch -f` prints "set up to track 'origin/trunk'" on
+      # STDOUT, and for SessionStart stdout IS Claude's context — a channel this hook reserves
+      # for the notes and the cannot-build report. Every diagnostic here goes to stderr.
+      git -C "$CLAUDE_PROJECT_DIR" branch -f trunk origin/trunk >/dev/null
       echo "[git] local trunk was $LOCAL_TRUNK, reset to origin/trunk ($ORIGIN_TRUNK); previous tip in \`git reflog show trunk\`" >&2
     fi
   fi
+
+  # 0b. Remove the session branch outright, rather than teach the session to work around it.
+  #
+  #     The harness checks the session out on `claude/<slug>` and instructs Claude to develop
+  #     there, but a repository ruleset rejects `refs/heads/claude/**` outright (creation +
+  #     update + non_fast_forward, no bypass actors), so that branch has NO reachable remote.
+  #     The failure mode is not the rejected push — it is the work that never gets re-aimed at
+  #     trunk afterwards and dies with the container. 29 such branches, pushed before the rule
+  #     existed, were swept on 2026-08-03.
+  #
+  #     Deleting beats redirecting. The rejected alternative was to leave the branch in place
+  #     with `branch --set-upstream-to=origin/trunk`: it reads plausibly, but a successful
+  #     `HEAD:refs/heads/trunk` push advances `origin/trunk` and leaves LOCAL `trunk` where it
+  #     was — so `git checkout trunk` then hands back a tree without the work, which is exactly
+  #     the "my edits vanished" trap step 0 above exists to prevent. One less ref is one less
+  #     thing that can be wrong; a branch that cannot be pushed has no reason to exist here.
+  #
+  #     Order is forced: git refuses to delete the branch a worktree has checked out, so the
+  #     checkout must land on trunk first. Deleting is safe HERE for the same reason step 0's
+  #     reset is — the remote-session guard at the top means the container is ephemeral and the
+  #     clone is fresh, so a `claude/…` tip is provisioning residue and not authored work. `-D`
+  #     rather than `-d` because the shallow window can leave ancestry unprovable (see above),
+  #     and the previous tip stays in the branch reflog for the life of the container either way.
+  if [ -n "$CHECKED_OUT" ] && [ "$CHECKED_OUT" != "trunk" ]; then
+    if git -C "$CLAUDE_PROJECT_DIR" checkout -q trunk 2>/dev/null; then
+      echo "[git] harness checked this session out on '$CHECKED_OUT'; switched to trunk" >&2
+    else
+      echo "[git] could NOT switch off '$CHECKED_OUT' onto trunk — leaving it alone." >&2
+      echo "[git] '$CHECKED_OUT' cannot be pushed (ruleset); commit to trunk or the work is lost." >&2
+    fi
+  fi
+  if [ "$(git -C "$CLAUDE_PROJECT_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "trunk" ]; then
+    # Prefix pattern: `refs/heads/claude/` matches everything beneath it, nested names included.
+    for STALE in $(git -C "$CLAUDE_PROJECT_DIR" for-each-ref --format='%(refname:short)' 'refs/heads/claude/'); do
+      git -C "$CLAUDE_PROJECT_DIR" branch -D "$STALE" >/dev/null 2>&1 &&
+        echo "[git] deleted unpushable local branch '$STALE'" >&2
+    done
+  fi
+
+  #     Backstop, independent of everything above: if the harness re-creates or re-checks-out a
+  #     session branch AFTER this hook runs, the deletion silently stops helping. A per-remote
+  #     push refspec does not care which branch HEAD is on — `git push` with no arguments reads
+  #     `remote.<name>.push` before `push.default` is ever consulted, so it resolves to
+  #     `HEAD:refs/heads/trunk` from trunk and from any resurrected `claude/…` alike. Measured:
+  #     without it, `push.default=current` recreates the branch remotely and only the ruleset
+  #     stops it; `push.default=simple` instead aborts with a name-mismatch fatal. Neither is a
+  #     force-push — a non-fast-forward to trunk is still rejected as the notes describe.
+  git -C "$CLAUDE_PROJECT_DIR" config --local remote.origin.push HEAD:refs/heads/trunk
 fi
 
 # 1. Preflight the egress policy, and do it by REACHABILITY rather than by environment
