@@ -273,7 +273,14 @@ describe('the RelIR spine', () => {
     expect(compile("g.V().values('name').order().by(Order.desc)", {}, { spine: 'rel' })).toMatchObject({ spine: 'rel' });
     expect(() => compile("g.V().values('name').order().by('age')", {}, { spine: 'rel' }))
       .toThrow('order().by(key/traversal) on a scalar stream not supported');
-    expect(() => compile("g.V().values('name').order().by(Order.asc).by(Order.desc)", {}, { spine: 'rel' }))
+    // SEVERAL comparators is legal Gremlin — `ComparatorHolder` takes one per key — and legacy refuses
+    // it as "not yet supported" rather than as the reference's answer, so RelIR ANSWERS it: two
+    // direction-only `by()`s over a value stream sort the same value twice, which the second term makes
+    // a no-op tie-break. §11's rule cuts this way round only because the refusal is a legacy gap; the
+    // legacy spine still raises its own message, which is what the differential compares.
+    expect(compile("g.V().values('name').order().by(Order.asc).by(Order.desc)", {}, { spine: 'rel' }))
+      .toMatchObject({ spine: 'rel' });
+    expect(() => compile("g.V().values('name').order().by(Order.asc).by(Order.desc)", {}, { spine: 'legacy' }))
       .toThrow('multiple order().by() modulators');
   });
 

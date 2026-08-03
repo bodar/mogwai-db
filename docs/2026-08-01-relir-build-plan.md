@@ -1,6 +1,6 @@
 # RelIR — the build plan
 
-**Status: BUILDING.** Coverage **373 / 2,298** corpus traversals on the RelIR spine; deletion counter
+**Status: BUILDING.** Coverage **378 / 2,298** corpus traversals on the RelIR spine; deletion counter
 **110** references left across the 15 legacy rows. Both are ratchets in `ci` (§10·4). The direction was
 argued in [codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a and
 is not re-argued here.
@@ -371,6 +371,15 @@ blanket declines and the last reason the class was not a vocabulary. What still 
 one case that is a SAFETY property rather than a gap — `tail` over a relation whose position a barrier
 has consumed (`g.V().count().tail(1)`), because "the last n" is a question about an order that is no
 longer there, and a weighted `sample().by()`, whose weight is a per-shape expression.
+
+**A sort MINTS the position on BOTH hosts, and `order()` takes EVERY slot.** Two residual gaps in the
+same space, both closed by making the vocabulary total rather than by adding a step: a SCALAR `order()`
+used to leave its order in a clause, which meant a following `tail()` had nothing to read backwards
+(legacy's answer there is `ROW_NUMBER() OVER ()` + `COUNT(*) OVER ()` over a CTE's incidental scan
+order — right only while SQLite preserves it); and `sortTerms` took ONE `by()`, so
+`by('performances',desc).by('name')` sorted by the wrong thing wherever the first key tied. `SortTerm[]`
+was always a list, so multi-key is the same lowering with the productivity drops conjoined. `shuffle`
+mixed with a real key declines — it is the whole order or none of it.
 
 **Deleting `globalRowOps` (floor 10) is now a LEGACY-side question, not a coverage one** — every one
 of its five step names routes through RelIR when the rest of the chain does. Same for `TailAcc` (13):

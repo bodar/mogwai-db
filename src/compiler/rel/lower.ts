@@ -884,20 +884,35 @@ const BY_READERS = new Set(['order', 'dedup']);
  */
 function sortTerms(step: IRStep, host: ByHost, fresh: Minter): { readonly terms: readonly SortTerm[]; readonly drop?: Expr } | null {
   if (isLocalScope(step) || (step.args ?? []).length) return null;
-  // ONE slot: TinkerPop's `order()` takes a comparator per key, so a multi-key sort is valid Gremlin
-  // — it is this lowering that has one term, and declining says so rather than sorting on the first.
-  const bys = modulations(step, 1);
+  // EVERY slot: TinkerPop's `order()` takes a comparator per key, so `by('performances',desc).by('name')`
+  // is a two-term sort and the number of slots is whatever the chain wrote. `SortTerm[]` was always a
+  // LIST, so a multi-key order is the same lowering — taking only the first would have sorted by the
+  // wrong thing where the first key ties, which is a wrong ORDER with the right multiset.
+  const bys = modulations(step, (step.modulators ?? []).length);
   if (!bys) return null;
-  const modulation: Modulation = bys[0] ?? { key: { kind: 'identity' } };
-  if (modulation.order === 'shuffle') return { terms: [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }] };
-  const key = byExpr(modulation, host, fresh, true);
-  if (!key) return null;
-  const terms = [{ expr: key, dir: modulation.order === 'desc' ? 'desc' as const : 'asc' as const }];
+  const parsed: readonly Modulation[] = bys.length ? bys : [{ key: { kind: 'identity' } }];
+  // `shuffle` has no subject at all — `RANDOM()` re-evaluates per row and that IS the semantics — so it
+  // is the whole order or none of it. Mixed with a real key it is a form legacy refuses too, and a
+  // lowering that dropped the shuffle would silently answer a deterministic order.
+  if (parsed.some((modulation) => modulation.order === 'shuffle'))
+    return parsed.length === 1 ? { terms: [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }] } : null;
+
+  const terms: SortTerm[] = [];
   // PRODUCTIVITY rides with the terms rather than being each host's to remember: a traverser whose
   // `by('age')` yielded nothing is DROPPED, so `g.V().order().by('age')` is four rows on the modern
   // graph and not six. A forgotten drop is a wrong answer with the right arity, and it sorts the
-  // extra rows FIRST (SQLite orders NULL low), which the census's multiset digest cannot see.
-  const drop = orderProductivity(step, modulation, key);
+  // extra rows FIRST (SQLite orders NULL low), which the census's multiset digest cannot see. With
+  // several terms each KEY term owes one, conjoined — the same thing legacy's `orderProductivityFilter`
+  // does over its whole clause list.
+  const drops: Expr[] = [];
+  for (const modulation of parsed) {
+    const key = byExpr(modulation, host, fresh, true);
+    if (!key) return null;
+    terms.push({ expr: key, dir: modulation.order === 'desc' ? 'desc' : 'asc' });
+    const drop = orderProductivity(step, modulation, key);
+    if (drop) drops.push(drop);
+  }
+  const drop = drops.reduce<Expr | undefined>((left, right) => (left ? and(left, right) : right), undefined);
   return drop ? { terms, drop } : { terms };
 }
 
@@ -976,10 +991,25 @@ function scalarTail(
       // from the stale seed would return the right multiset from the wrong place. Legacy says the
       // same thing with its own window projection (`partitionedOrder`), tie-broken on the old
       // encounter — which is what makes the sort STABLE, so that is the second term here too.
+      // A sort MINTS the emission order where none is carried and RE-MINTS where one is, which is the
+      // same rule the element host follows and for the same reason: an order that is not a column
+      // cannot survive a relation boundary. Legacy's answer without one is `ROW_NUMBER() OVER ()` plus
+      // `COUNT(*) OVER ()` reading a CTE's incidental scan order — which is what `tail()` after a
+      // scalar `order()` needs, and which is only right while SQLite happens to preserve it. A column
+      // is the honest form, and it is what makes the position COMPOSE: a following `tail` reads the
+      // order backwards, a slice takes its window from it, and the root reports it.
+      //
+      // Re-minting tie-breaks on the ARRIVING position (which is what makes the sort STABLE, legacy's
+      // `partitionedOrder`); minting fresh has nothing to be stable against, and equal keys over a
+      // value stream are interchangeable, so the terms are the whole order.
       const encounter = encounterOf(rel.channels);
-      rel = encounter
-        ? renumber(rel, [...terms, { expr: col(rel.id, encounter.col), dir: 'asc' }], rel.type.cols, rel.channels, fresh)
-        : make.sort({ id: fresh('so'), input: rel, channels: rel.channels, type: rel.type, terms });
+      const channels = encounter ? rel.channels : withChannel(rel.channels, ENCOUNTER);
+      rel = renumber(
+        rel,
+        encounter ? [...terms, { expr: col(rel.id, encounter.col), dir: 'asc' }] : terms,
+        encounter ? rel.type.cols : [...rel.type.cols, meta(ENCOUNTER.col, 'int')],
+        channels, fresh,
+      );
       continue;
     }
 

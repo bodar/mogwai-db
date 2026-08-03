@@ -398,7 +398,11 @@ describe('scalar-parent / projection SQL', () => {
     // value modifiers. An injected value carries no stored vtype, so the sort key is the value
     // itself on both spines — the compare CASE is only for a per-row-typed property.
     expect(read('g.inject(3,1,2).order()', { spine: 'legacy' }).sql).toContain('ORDER BY p.v ASC');
-    expect(read('g.inject(3,1,2).order()', { spine: 'rel' }).sql).toMatch(/FROM \(VALUES[^]*\) \w+ ORDER BY \w+\.column1 ASC/);
+    // RelIR MINTS the position rather than leaving the order in a clause: an order that is not a
+    // column cannot survive a relation boundary, which is what makes a following `tail()`/slice read
+    // the same order the root reports.
+    expect(read('g.inject(3,1,2).order()', { spine: 'rel' }).sql)
+      .toMatch(/row_number\(\) OVER \(ORDER BY \w+\.column1 ASC\) AS encounter FROM \(VALUES/);
     expect(read('g.inject(1,1,2).dedup()', { spine: 'legacy' }).sql).toContain('DISTINCT p.v');
     // RelIR reaches the same DISTINCT over the injected VALUES directly, with no CTE between.
     expect(read('g.inject(1,1,2).dedup()', { spine: 'rel' }).sql).toMatch(/SELECT DISTINCT \w+\.column1 AS v FROM \(VALUES/);
@@ -1120,12 +1124,15 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().values("name").toLower().is(P.neq("x")).toUpper()', { spine: 'legacy' }).sql).not.toContain('FROM c2 p)');
 
     // A keyed/bare order() re-establishes determinism, so the following slice needs no emission
-    // encounter — order()+range() fuse into one ORDER BY … LIMIT … OFFSET (demand pass resets).
-    // Both spines fuse, so both are asserted; the RelIR one binds its window rather than inlining it.
+    // encounter from the demand pass — legacy fuses order()+range() into one ORDER BY … LIMIT …
+    // OFFSET. RelIR instead MINTS the position at the order() and the slice reads that COLUMN, which
+    // is what lets the same slice serve a `tail()` and a movement afterwards; the compare key is then
+    // spelled ONCE instead of once per clause reader.
     expect(read('g.V().values("age").order().range(1,3)', { spine: 'legacy' }).sql)
       .toContain('ELSE p.v END) ASC LIMIT 2 OFFSET 1');
-    expect(read('g.V().values("age").order().range(1,3)', { spine: 'rel' }).sql)
-      .toMatch(/ELSE \w+\.v END ASC LIMIT \? OFFSET \?/);
+    const relSlice = read('g.V().values("age").order().range(1,3)', { spine: 'rel' });
+    expect(relSlice.sql).toMatch(/row_number\(\) OVER \(ORDER BY CASE WHEN [^]*ELSE \w+\.v END ASC\) AS encounter/);
+    expect(relSlice.sql).toMatch(/ORDER BY \w+\.encounter ASC LIMIT \? OFFSET \?/);
 
     const typedSum = read('g.V().values("age").asNumber(GType.DOUBLE).sum().is(P.gt(100))');
     expect(typedSum.shape).toEqual({ kind: 'scalar' });
