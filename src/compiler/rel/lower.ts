@@ -29,6 +29,7 @@ import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
 import { elementAddE, elementAddV, elementDrop, elementProperty, propertyWrites, type Effects, type SubReads } from './write.ts';
 import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listRetype, listSetOp, unfoldList, type ListCtx } from './list.ts';
+import { LabelCardinality } from '../../api.ts';
 
 /**
  * THE SECOND LOWERING — `Step[] -> RelIR` (§10·4 of `docs/2026-08-01-relir-build-plan.md`).
@@ -190,6 +191,10 @@ interface ChainCtx extends FilterCtx {
    *  position channel exactly where the source would have, and a step-local re-derivation would be a
    *  second authority on a fact the source already decided. */
   readonly ordered: boolean;
+  /** The GRAPH's declared vertex-label cardinality, which decides what a creation with no label of
+   *  its own gets. Threaded for the reason `ordered` is: it is settled before a step is lowered, so a
+   *  step that asked the store instead would be asking at the wrong time. */
+  readonly labelCardinality: LabelCardinality;
 }
 
 /** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
@@ -1691,6 +1696,21 @@ export interface Lowering {
   readonly params?: Record<string, any>;
   readonly collapse?: boolean;
   readonly correlatedChildren?: boolean;
+  /**
+   * The GRAPH's declared vertex-label cardinality — a CAPABILITY, not a strategy, which is why it is
+   * here rather than being read from a store at lowering time.
+   *
+   * `addV()` with no label used to decline on the grounds that "under `ZERO_OR_MORE` it creates a
+   * vertex with no labels and under `ONE` it takes the graph default" is a property of the store. The
+   * property is real; the conclusion was wrong by one step. The cardinality is request-scope DI
+   * (`src/scopes.ts`), so it is settled BEFORE a compile starts — what was actually missing is that
+   * this seam had not been handed it. Threading it is what makes the answer compile-time, and the
+   * label COUNT rule (`min`/`max`) then declines exactly the chains legacy raises a message for.
+   *
+   * Defaults to `ONE`, which is `createAppScope`'s own default, so an instrument or a test that
+   * lowers without an engine measures the default graph rather than a regime nothing runs.
+   */
+  readonly labelCardinality?: LabelCardinality;
 }
 
 /**
@@ -1773,7 +1793,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  *   pass walk them is the general fix if a case ever needs it.)
  */
 function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Tail | null {
-  const { params = {}, collapse = true, correlatedChildren = true } = opts;
+  const { params = {}, collapse = true, correlatedChildren = true, labelCardinality = LabelCardinality.ONE } = opts;
   // EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step.
   // `analyzeChain` is the same authority the legacy source seeds from, so the two cannot disagree
   // about which chains have an order to take a window from. A chain that demands one and reaches a
@@ -1781,7 +1801,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   // not defer, it would pick a different window from the same multiset — right arity, plausible
   // rows, and a census that structurally cannot see it (`ord` is telemetry, `ms` is the gate).
   const ordered = analyzeChain(steps as IRStep[]).demandsEncounter;
-  const ctx: ChainCtx = { params, correlatedChildren, collapse, ordered };
+  const ctx: ChainCtx = { params, correlatedChildren, collapse, ordered, labelCardinality };
   const seedChannels = ordered ? withChannel(BULK, ENCOUNTER) : BULK;
   const first = steps[0];
   if (!first) return null;
@@ -2207,7 +2227,7 @@ const subReads = (ctx: ChainCtx, fresh: Minter): SubReads => ({
   // the same two functions, so the two routes normalize a nested endpoint identically.
   body: (nested) => rootedBody(nested, ctx.params),
   rooted: (steps) => {
-    const chain = lowerChain(steps, { params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren }, fresh);
+    const chain = lowerChain(steps, { params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren, labelCardinality: ctx.labelCardinality }, fresh);
     if (!chain || chain.effects || chain.framing.kind !== 'elements' || chain.framing.elem !== 'vertex') return null;
     return make.project({ id: fresh('ep'), input: chain.rel, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(chain.rel.id, 'id')]] });
   },
@@ -2225,6 +2245,6 @@ function addedVertices(
 ): { readonly effects: Effects; readonly at: number } | null {
   let end = at + 1;
   while (end < steps.length && steps[end]!.name === 'property') end++;
-  const effects = elementAddV(drivers, steps[at]!, steps.slice(at + 1, end), ctx.ordered, ctx.params, fresh);
+  const effects = elementAddV(drivers, steps[at]!, steps.slice(at + 1, end), ctx.ordered, ctx.params, ctx.labelCardinality, fresh);
   return effects && { effects, at: end };
 }

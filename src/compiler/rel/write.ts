@@ -18,7 +18,7 @@ import { and, carriedCols, eq, meta, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import type { AliasMap } from '../steps/context/context.ts';
-import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
+import { DEFAULT_VERTEX_CARDINALITY, DEFAULT_VERTEX_LABEL, type LabelCardinality, type VertexCardinality } from '../../api.ts';
 
 /**
  * THE WRITE VOCABULARY — an effect is a `Stmt` binding over a read plan, never a row-at-a-time loop.
@@ -499,7 +499,8 @@ const VERTEX_LABEL_COLS: readonly ColMeta[] = [meta('node', 'int'), meta('label'
  * - **The label name→id indirection is an UPSERT**, exactly as `GraphStore.labelId` does it: the
  *   `labels` table is a set, so `ON CONFLICT (name) DO UPDATE SET name = excluded.name RETURNING id`
  *   is the idiom that returns the id whether the row was new or already there. `DO NOTHING` would
- *   return no row on the existing case, which is why it is not that.
+ *   return no row on the existing case, which is why it is not that. It interns the WHOLE list in one
+ *   statement, so the bind count is a function of the query text and not of anything the data decides.
  * - **The new ids ARE the emission order.** SQLite assigns rowids in the insert's output order, so a
  *   fresh vertex's `encounter` is its own id — exact, free, and not a window over rows whose order
  *   is only conventionally the array's.
@@ -507,14 +508,20 @@ const VERTEX_LABEL_COLS: readonly ColMeta[] = [meta('node', 'int'), meta('label'
  *   is the traverser stream, so `g.V().addV('x')` creates one per vertex, which is the semantics
  *   rather than a special case.
  */
-export function addVertex(input: Rel, label: string, writes: readonly PropertyWrite[], ordered: boolean, bind: Binder, fresh: Minter): Rel {
+export function addVertex(input: Rel, labels: readonly string[], writes: readonly PropertyWrite[], ordered: boolean, bind: Binder, fresh: Minter): Rel {
+  // ZERO labels is a real state and it is the whole reason this takes a LIST: under
+  // `LabelCardinality.ZERO_OR_MORE` a bare `addV()` creates a vertex carrying none, and a merge map
+  // with no `T.label` does the same. Nothing to intern and nothing to pair, so both statements are
+  // absent rather than emitted over an empty `Values` — which is a relation `Values` refuses to
+  // express anyway.
   const labelTarget = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('wt'), channels: [], type: typeOf(...LABELS_COLS) });
-  const named = make.values({ id: fresh('lv'), channels: [], type: typeOf(meta('name', 'text')), rows: [[text(label)]] });
-  const labelRow = bind(insert({
-    target: labelTarget, cols: ['name'], source: named, channels: [], type: typeOf(meta('id', 'int')),
+  const labelRow = labels.length ? bind(insert({
+    target: labelTarget, cols: ['name'],
+    source: make.values({ id: fresh('lv'), channels: [], type: typeOf(meta('name', 'text')), rows: labels.map((label) => [text(label)]) }),
+    channels: [], type: typeOf(meta('id', 'int')),
     onConflict: { target: ['name'], set: [['name', col(EXCLUDED, 'name')]] },
     returning: [['id', col(labelTarget.id, 'id')]],
-  }));
+  })) : null;
 
   const nodesTarget = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('wt'), channels: [], type: typeOf(...NODES_COLS) });
   // ORDERED BY THE INPUT'S OWN POSITION, explicitly. Rowids are assigned in the source's output
@@ -534,14 +541,18 @@ export function addVertex(input: Rel, label: string, writes: readonly PropertyWr
     returning: [['id', col(nodesTarget.id, 'id')]],
   }));
 
-  const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
-  const pairs = make.join({
-    id: fresh('j'), left: created, right: labelRow, join: 'cross', channels: [],
-    type: typeOf(meta('node', 'int'), meta('label', 'int')),
-  });
-  bind(insert({
-    target: labelTargetRows, cols: ['node', 'label'], source: pairs, channels: [], type: typeOf(), returning: [],
-  }));
+  if (labelRow) {
+    const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
+    // A CROSS JOIN, so N labels are N pairs per created node — the same statement whether the list
+    // holds one name or four, which is what makes a multi-label creation no new shape.
+    const pairs = make.join({
+      id: fresh('j'), left: created, right: labelRow, join: 'cross', channels: [],
+      type: typeOf(meta('node', 'int'), meta('label', 'int')),
+    });
+    bind(insert({
+      target: labelTargetRows, cols: ['node', 'label'], source: pairs, channels: [], type: typeOf(), returning: [],
+    }));
+  }
 
   for (const write of writes) propertyStatements('vertex', created, write, bind, fresh);
 
@@ -610,20 +621,13 @@ const writeInputChannels = (input: Rel): Channels =>
  *
  *  `input` is what decides HOW MANY, and its two callers are the whole story: a `Values` row at
  *  the source (`g.addV(…)` is one vertex), the traverser relation mid-chain (`g.V().addV(…)` is one
- *  per vertex). A label that is a nested traversal, more than one label, or an invalid one declines —
- *  the label validator is the shared waist, and a name it refuses is an ERROR legacy raises, not a
- *  write this route may silently skip. */
-export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IRStep[], ordered: boolean, params: Record<string, any>, fresh: Minter): Effects | null {
+ *  per vertex). A label that is a nested traversal or an invalid one declines — the label validator is
+ *  the shared waist, and a name it refuses is an ERROR legacy raises, not a write this route may
+ *  silently skip. */
+export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IRStep[], ordered: boolean, params: Record<string, any>, cardinality: LabelCardinality, fresh: Minter): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
-  const args = step.args ?? [];
-  // A BARE `addV()` is not a compile-time question: under `LabelCardinality.ZERO_OR_MORE` it creates a
-  // vertex with NO labels and under `ONE` it takes the graph default, and which one the graph declares
-  // is a property of the STORE. Declining is the honest answer — writing the default label would be a
-  // plausible wrong answer on a multi-label graph, which an L4 pin caught.
-  if (args.length !== 1) return null;
-  const label = args[0];
-  if (typeof label !== 'string') return null;
-  try { validateLabel(label); } catch { return null; }
+  const labels = creationLabels(step.args ?? [], cardinality);
+  if (!labels) return null;
   const writes = propertySteps.length ? propertyWrites(propertySteps, 'vertex', params) : [];
   if (!writes) return null;
   // A MID-CHAIN input is SNAPSHOTTED, and this one is not about a later statement: `INSERT INTO
@@ -633,8 +637,35 @@ export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IR
   // A `Values` source is one literal row and has nothing to snapshot.
   const seeded = input.kind === 'values' ? null : orderedInput(input, fresh);
   const { bindings, bind } = effectScope(fresh);
-  const result = addVertex(seeded ? bind(seeded.result, true, writeInputChannels(input)) : input, label, writes, ordered, bind, fresh);
+  const result = addVertex(seeded ? bind(seeded.result, true, writeInputChannels(input)) : input, labels, writes, ordered, bind, fresh);
   return { bindings: [...(seeded?.bindings ?? []), ...bindings], result };
+}
+
+/**
+ * THE LABELS A CREATION GIVES ITS NEW VERTEX — `addV`'s arguments and a merge map's `T.label` reduced
+ * to the same list, or `null` for a form this route declines.
+ *
+ * **A creation with NO label of its own is answerable, and it needed only the graph's declared
+ * cardinality.** `insertVertex` spells the same rule: an unstated list takes the graph default where
+ * the cardinality demands at least one label, and stays empty where it permits zero. That is a
+ * compile-time question the moment the cardinality is threaded (see `Lowering.labelCardinality`) —
+ * what made it look like a runtime one was that this seam had not been handed the value.
+ *
+ * The COUNT rule is the other half, and it is a DECLINE rather than a throw: `assertLabelCount` raises
+ * a message the conformance suite matches on, and that refusal is the reference's own answer, so the
+ * spine that owns the message must be the one to raise it (write-path trap 3).
+ *
+ * Deduped as a SET before counting, exactly as `insertVertex` does — `addV('a','a')` is one label, so
+ * it must not fail a `max: 1` graph.
+ */
+function creationLabels(args: readonly unknown[], cardinality: LabelCardinality): readonly string[] | null {
+  const named = args.length === 1 && Array.isArray(args[0]) ? args[0] as unknown[] : args;
+  if (named.some((arg) => typeof arg !== 'string')) return null;
+  const labels = [...new Set(named as string[])];
+  try { for (const label of labels) validateLabel(label); } catch { return null; }
+  const resolved = labels.length || cardinality.min === 0 ? labels : [DEFAULT_VERTEX_LABEL];
+  if (resolved.length > cardinality.max || resolved.length < cardinality.min) return null;
+  return resolved;
 }
 
 /** A creation's input rows: the identity plus the emission order, and nothing else — `addV` reads no

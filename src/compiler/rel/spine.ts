@@ -102,6 +102,11 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
     params,
     collapse: engine.fastPaths.movementCollapse,
     correlatedChildren: engine.fastPaths.predicateInlining,
+    // NOT a strategy switch — the graph's declared label cardinality is a CAPABILITY, and a creation
+    // with no label of its own is a compile-time question only because this value is settled before a
+    // compile starts (request-scope DI). Coverage is still not a function of configuration: what the
+    // cardinality changes is the ANSWER, not whether there is one.
+    labelCardinality: engine.labelCardinality,
   });
   if (!lowered) return null;
 
