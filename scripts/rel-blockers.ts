@@ -61,7 +61,14 @@ const CORPUS = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.me
  */
 const FAMILIES: Readonly<Record<string, readonly string[]>> = {
   writes: ['addV', 'addE', 'property', 'mergeV', 'mergeE', 'drop'],
-  'side effects': ['aggregate', 'store', 'cap', 'sack', 'groupCount', 'group'],
+  // A NAMED collection plus the `cap()` that reads it back. `group`/`groupCount` appear here only in
+  // their KEYED form — see `blame()` for why the unkeyed form is a different family entirely.
+  'side effects': ['aggregate', 'store', 'cap', 'group', 'groupCount'],
+  // A barrier whose RESULT is a map. Not a side effect: nothing is named, nothing is read back with
+  // `cap()`, and what is missing is the map traverser shape.
+  'the map shape': ['group*', 'groupCount*'],
+  // A per-traverser carried CHANNEL, which is neither a collection nor a shape.
+  sack: ['sack'],
   'scalar transforms': ['concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace',
     'trim', 'lTrim', 'rTrim', 'reverse', 'asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff', 'math', 'format'],
   aliases: ['as', 'select'],
@@ -87,8 +94,19 @@ function blame(step: IRStep): string {
   // list shape, so neither is re-attributed here even though both also block at `inject`. Guessing which
   // family those belong to would be the confidently-wrong ranking this exists to avoid.
   if (SOURCES.has(step.name) && args.some((arg) => Array.isArray(arg) || arg instanceof Set)) return 'fold';
+  // A `group`/`groupCount` WITH a string label is a side effect: it fills a named collection that a
+  // later `cap()` reads back. WITHOUT one it is an ordinary barrier whose RESULT is a map, and the two
+  // need completely different things — a named-collection substrate versus the map traverser shape.
+  // Measured 2026-08-04: of 184 blockers filed under "side effects", 64 were the unkeyed form, which
+  // made a shape that is the third largest family on the board look like part of the first. The `*`
+  // suffix keeps both readable in one table rather than inventing a second step name.
+  if (KEYABLE.has(step.name) && !(args.length > 0 && typeof args[0] === 'string')) return `${step.name}*`;
   return step.name;
 }
+
+/** Steps whose FIRST argument, when it is a string, names a side-effect collection — and whose meaning
+ *  changes family when it is absent. */
+const KEYABLE = new Set(['group', 'groupCount', 'aggregate', 'store']);
 
 /** Steps that SEED a traverser from a literal, so the literal's shape is the traverser's shape. */
 const SOURCES = new Set(['inject', 'constant']);
