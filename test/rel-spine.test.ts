@@ -124,8 +124,8 @@ const COVERED = [
   "g.V().both().order().by('name').limit(2)", "g.V().both().order().by('name').range(1,4)",
   "g.V().both().both().order().by('name').limit(3)",
   // `tail(n)` is the same slice read BACKWARDS, which is the whole of it once the position is a
-  // relation property; `sample(n)` is `ORDER BY RANDOM() LIMIT n`, so it is covered but compared for
-  // SIZE rather than for rows (see the test below — `rowsVia` would be comparing two dice).
+  // relation property; `sample(n)` ranks by RANDOM() and filters the rank, so it is covered but
+  // compared for SIZE rather than for rows (see the test below — `rowsVia` would compare two dice).
   'g.V().tail(2)', 'g.E().tail(1)', 'g.V().tail()', "g.V().hasLabel('person').tail(2)",
   'g.V().out().tail(2)', "g.V().values('name').tail(2)", 'g.V().tail(2).count()',
   "g.V().order().by('name').tail(2)", 'g.V().out().values("name").tail(1)',
@@ -328,6 +328,8 @@ const DECLINED = [
   "g.inject('a').inject('b')",        // a second inject is a UNION with the first, not a source
   'g.inject(1,2).order(Scope.local)', // LOCAL scope: a per-traverser sort of a LIST, a different arm
   'g.V().group().by("name").by(__.out().count())', // a reducing child VALUE reduces over the GROUP, not per traverser
+  'g.V().order().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
+  'g.V().dedup().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
   'g.withSack(0).V()',                // a carried sack the source seed would have to declare
   'g.withSideEffect("a",1).V()',      // a side effect
   'g.addV("person")',                 // a write
@@ -474,6 +476,14 @@ describe('the RelIR spine', () => {
     // throw rather than as a route, because RelIR throwing FIRST is how "not learned yet" becomes a
     // support regression.
     expect(() => read("g.V().sample(2).by('age')", { spine: 'rel' })).toThrow('by() is only supported');
+  });
+
+  test('sample(n) returns exactly n traversers on every run', () => {
+    // One run cannot see the defect: the old fused RANDOM() plan sometimes returned n by chance.
+    // Repetition asserts the cardinality on the ambient spine in both a source and a fan-out chain.
+    for (const gremlin of ['g.V().sample(3)', 'g.V().both().sample(3)']) {
+      for (let run = 0; run < 10; run++) expect(runWith(store, gremlin)).toHaveLength(3);
+    }
   });
 
   test('a coercion that cannot PARSE declines, so the error stays the reference\'s', () => {

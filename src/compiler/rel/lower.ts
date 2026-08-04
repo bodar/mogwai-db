@@ -670,21 +670,43 @@ function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel 
   const bulk = input.channels.find((channel) => channel.role === 'bulk');
 
   // `sample(n)` is n traversers chosen UNIFORMLY — `SampleGlobalStep` is a weighted reservoir sample
-  // whose weights come from a `by()`, and with no modulator every weight is 1. `ORDER BY RANDOM()
-  // LIMIT n` is that, and it needs no emission order at all: which n is the answer, not which order
-  // they come in (the root still sorts by the carried position, so the sample is REPORTED in emission
-  // order — the same shape legacy emits). A `by()` declines through the blanket modulator gate above.
+  // whose weights come from a `by()`, and with no modulator every weight is 1. Rank once in a window
+  // over RANDOM(), then FILTER the chosen ranks: a Sort(RANDOM()) -> Limit(n) can be fused so SQLite
+  // re-evaluates RANDOM() for each outer candidate and returns the wrong cardinality. Filtering also
+  // preserves the INPUT order of the survivors, matching CollectingBarrierStep's insertion-order
+  // drain; the old claim that the root restored a carried position was false because `sample` is not
+  // a positional consumer. A `by()` declines through the blanket modulator gate above.
   //
   // Over a COLLAPSED relation it declines rather than sampling: a uniform sample of ROWS is not a
   // uniform sample of traversers when a row stands for N of them, and there is no trimming to do —
   // sample has no band, so `bulkSlice` has nothing to say about it.
   if (step.name === 'sample') {
     if (bulked) return null;
-    const shuffled = make.sort({
-      id: fresh('sh'), input, channels: input.channels, type: input.type,
-      terms: [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }],
+    const rank = 'sample_rank';
+    const ranked = make.window({
+      id: fresh('sw'), input, channels: input.channels,
+      type: typeOf(...input.type.cols, meta(rank, 'int')),
+      specs: [[rank, {
+        kind: 'window-expr', fn: 'row_number', args: [],
+        spec: {
+          partitionBy: [],
+          orderBy: [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }],
+        },
+      }]],
     });
-    return make.limit({ id: fresh('li'), input: shuffled, channels: input.channels, type: input.type, count: lit(countArg(step), 'int') });
+    // The filter reads a column computed by the window's block, so fence it rather than letting the
+    // assembler inline and re-evaluate the RANDOM() expression at the clause-reader boundary.
+    const frame = make.materialize({
+      id: fresh('sm'), input: ranked, channels: ranked.channels, type: ranked.type,
+    });
+    const sampled = make.filter({
+      id: fresh('sf'), input: frame, channels: frame.channels, type: frame.type,
+      pred: { kind: 'binary', op: '<=', left: col(frame.id, rank), right: lit(countArg(step), 'int') },
+    });
+    return make.project({
+      id: fresh('sp'), input: sampled, channels: input.channels, type: input.type,
+      exprs: input.type.cols.map((column) => [column.name, col(sampled.id, column.name)] as const),
+    });
   }
 
   // `tail(n)` is `limit(n)` read from the FAR END, so it is the direction flag on the shared slice
@@ -2486,7 +2508,13 @@ const byChild = (ctx: ChainCtx, fresh: Minter): ByChild => (body, host) => {
   } else if (leading?.name === 'constant') {
     const args = leading.args ?? [];
     if (args.length !== 1) return null;
-    const projected = args[0] === null ? lit(null, 'any') : operandLit(args[0]);
+    // Productivity is EMISSION, not NULLNESS: TraversalProduct.java explicitly says null is a valid
+    // productive value (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/
+    // process/traversal/util/TraversalProduct.java`). This route currently expresses productivity
+    // through NULLNESS, which coincides for every buildable body except one that deliberately emits
+    // null. Decline until the queued ByChild signature refinement reports emission separately.
+    if (args[0] === null) return null;
+    const projected = operandLit(args[0]);
     if (!projected) return null;
     value = projected;
     at = 1;
