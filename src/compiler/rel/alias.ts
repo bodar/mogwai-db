@@ -66,7 +66,10 @@ import { carriedCols, meta, payloadCols, typeOf, type Minter } from './build.ts'
  * are the same DECLINE on this route — the distinction only buys a better message, which is the spine
  * that owns messages' business.
  */
-export const liveAliases = (aliases: AliasMap, rel: Rel): AliasMap =>
+/** MODULE-PRIVATE again since §10·10: its one external reader was `lowerToRel`, pruning the map before
+ *  handing it to `spine.ts`'s `TraverserLayout` bridge. With the payload projection inside the algebra
+ *  there is no bridge and no map to hand over, so the two readers left are both here. */
+const liveAliases = (aliases: AliasMap, rel: Rel): AliasMap =>
   new Map([...aliases].filter(([, entry]) => rel.channels.some((channel) => channel.col === entry.col)));
 
 /** What `as()` is binding — one arm per stream shape, so the entry's tag and its payload cannot be

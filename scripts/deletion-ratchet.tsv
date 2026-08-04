@@ -29,3 +29,5 @@ relir-own	symbol	externalAliases	0	deleted by §3.0 (3057e89) — the statement-
 relir-own	symbol	bareColumns	0	deleted by §3.0 (3057e89) — the statement-only back channel
 relir-own	symbol	Membership	0	deleted by §10·6 (bedf49e/50e883d) — membership is an InQuery predicate
 relir-own	symbol	sameLayout	0	§2 — layout equality is list equality over Channels
+relir-own	symbol	LAYOUT_FIELD	0	deleted by §10·10 — the Channels→TraverserLayout bridge, whose null roles WERE the path wall
+relir-own	symbol	layoutOf	0	deleted by §10·10 — with the payload projection inside the algebra there is no seam to translate at

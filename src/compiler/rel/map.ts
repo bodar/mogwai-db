@@ -1,10 +1,10 @@
 import { col, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { MapOf } from '../../sql/kernel/render.ts';
+import type { MapOf, Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/step.ts';
-import { meta, typeOf, typedNode, type Minter } from './build.ts';
+import { byEncounter, jsonOf, meta, typeOf, typedNode, type Minter } from './build.ts';
 import { byNode, modulations, productivityFilter, type ByHost } from './modulator.ts';
 
 /**
@@ -210,3 +210,31 @@ export function groupBarrier(
 /** The host a `by()` projects from, for an ELEMENT relation — the shape `groupBarrier` needs handed to
  *  it, kept here so the two callers (element and scalar tails) cannot describe it differently. */
 export const elementHost = (rel: Rel, elem: Elem): ByHost => ({ kind: 'element', id: col(rel.id, 'id'), elem });
+
+/**
+ * THE MAP PAYLOAD — one row's `map` column as the JSON the framing layer reads (§10·10), or `null` to
+ * decline.
+ *
+ * The blob is ALREADY the frameable tree: `[[keyNode, valNode], …]` with self-describing `{t,v}` scalar
+ * sides, which is the encoding every producer here emits and the one `frameTypedNode` decodes. So the
+ * projection is `json(map)` and nothing else — the relational column is JSONB and `json()` is what turns it
+ * into the text the framer parses. A LIST value side needs no conversion either: the blob's value side is a
+ * naked array, and the typed framer treats a bare array as a list of bare members exactly as it treats a
+ * bare scalar as an inferred value. ONE blob encoding, not two with a rebuild between them.
+ *
+ * An ELEMENT side declines. This is the `materialize.ts:191` throw that §10·10 names as the thing blocking
+ * `group()`, and it now sits on the correct side of the boundary: a decline routes to the spine that
+ * answers, and building it is `element.ts`'s payload reached per pair — the same expansion the element-list
+ * arm wants. `groupBarrier` above emits scalar sides only, so nothing reachable today declines here.
+ */
+export function mapPayload(rel: Rel, keyOf: MapOf, valOf: MapOf, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null {
+  if (keyOf.kind === 'elem' || valOf.kind === 'elem') return null;
+  const ordered = byEncounter(rel, fresh);
+  return {
+    rel: make.project({
+      id: fresh('mw'), input: ordered, channels: [], type: typeOf(meta(MAP_COL, 'json', true)),
+      exprs: [[MAP_COL, jsonOf(col(ordered.id, MAP_COL))]],
+    }),
+    shape: { kind: 'mapValue' },
+  };
+}

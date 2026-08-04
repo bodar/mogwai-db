@@ -2,13 +2,13 @@ import { col, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
-import { STATIC, UNKNOWN, type ListOf, type ValueType } from '../../sql/kernel/render.ts';
+import { STATIC, UNKNOWN, type ListOf, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import { isNested, isPred } from '../../gremlin/frontend.ts';
 import { isLocalScope, sliceOf } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { childSteps } from '../steps/tail/child-shape.ts';
 import { LIST_LOCAL_TX, STRING_LOCAL_TX } from '../steps/tail/list.ts';
-import { carriedCols, meta, typedNode, typeOf, type Minter } from './build.ts';
+import { byEncounter, carriedCols, coalesce, EMPTY_ARRAY, jsonOf, meta, typedNode, typeOf, type Minter } from './build.ts';
 import { predicateExpr, SUBJECT_UNKNOWN } from './predicate.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
 import { transformExpr } from './transform.ts';
@@ -789,5 +789,58 @@ export function collectionRetype(rel: Rel, vtype: string, kind: 'list' | 'set', 
     }),
     of: TYPED_LIST,
     set: kind === 'set',
+  };
+}
+
+/**
+ * THE LIST PAYLOAD — one row's `list` column, projected to the JSON the framing layer reads (§10·10).
+ *
+ * `null` declines, as everywhere in this module. Two encodings are served and each is what legacy's
+ * `materializeListRoot` builds for it:
+ *
+ * - a SCALAR-membered list (bare, typed, or a set) is already frameable and rides out as `json(list)` —
+ *   the relational column is JSONB, and `json()` is what turns it into the text the framer parses;
+ * - a NESTED list is REBUILT one level at a time, because the raw inner values are arrays whose JSON
+ *   subtype does not survive the enclosing aggregate. That is legacy's `nestedListResult` and it recurses
+ *   through the same member frame every other op in this module uses — `Explode` with no input, i.e. a
+ *   correlated `FROM json_each(…)`, which is what makes a per-member computation a scalar subquery rather
+ *   than a row multiplication.
+ *
+ * An ELEMENT-membered list declines. Not a wall: the expansion is `element.ts`'s payload as a member
+ * (legacy's `elementListResult`), and it becomes reachable the moment `fold()` over elements lands — which
+ * is the increment that would first PRODUCE one. Declining until then is the decline contract, not a gap:
+ * legacy answers it today.
+ */
+function listPayloadExpr(list: Expr, of: ListOf, fresh: Minter): Expr | null {
+  if (of.kind === 'scalar') return jsonOf(list);
+  if (of.kind !== 'list') return null;
+  const members = membersOf(jsonOf(list), fresh);
+  const inner = listPayloadExpr(col(members.id, MEMBER.value), of.of, fresh);
+  if (!inner) return null;
+  const rebuilt = make.aggregate({
+    id: fresh('lp'), input: members, channels: [], type: typeOf(meta('members', 'json', true)),
+    groupBy: [],
+    aggs: [['members', { kind: 'agg', fn: 'json_group_array', args: [inner], orderBy: [memberOrder(members)] }]],
+  });
+  return jsonOf(coalesce({ kind: 'scalar', plan: rebuilt }, EMPTY_ARRAY));
+}
+
+/** The list relation as WIRE ROWS: one `list` column per traverser, in emission order, plus the `Shape`
+ *  that says how to frame each member. Legacy's arm ORDER is preserved deliberately — a nested list is
+ *  framed as a `jsonbList` whatever `set` says, because a set OF LISTS has no distinct wire form and
+ *  `materializeListRoot` decides it the same way. */
+export function listPayload(rel: Rel, of: ListOf, set: boolean, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null {
+  const ordered = byEncounter(rel, fresh);
+  const payload = listPayloadExpr(col(ordered.id, LIST_COL), of, fresh);
+  if (!payload) return null;
+  const shape: Shape = of.kind === 'list' ? { kind: 'jsonbList', items: of }
+    : set ? { kind: 'jsonbSet', ...(isTypedList(of) ? { typed: true } : {}) }
+      : { kind: 'jsonbList', items: of };
+  return {
+    rel: make.project({
+      id: fresh('lw'), input: ordered, channels: [], type: typeOf(meta(LIST_COL, 'json', true)),
+      exprs: [[LIST_COL, payload]],
+    }),
+    shape,
   };
 }

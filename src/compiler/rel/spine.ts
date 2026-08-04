@@ -1,11 +1,7 @@
-import { derived, render } from '../../sql/kernel/q.ts';
+import { render } from '../../sql/kernel/q.ts';
 import type { Compiled, Program } from '../../sql/kernel/render.ts';
 import { emitProgram } from '../../rel/emit.ts';
 import { cfLimitViolation } from '../../cf-limits.ts';
-import type { AliasMap, TraverserLayout } from '../steps/context/context.ts';
-import { channelCols, type Channels, type ChannelRole } from '../../channels.ts';
-import type { Stream } from '../steps/context/stream.ts';
-import { materializeRootStream } from '../steps/tail/materialize.ts';
 import type { Engine } from '../engine/deps.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { lowerToRel } from './lower.ts';
@@ -17,94 +13,37 @@ import { lowerToRel } from './lower.ts';
  * finished read, and the split matters because the two halves have different rules. Lowering is
  * pure and must never throw for uncovered vocabulary; this side crosses out of the algebra.
  *
- * ## THIS FILE IS SCAFFOLDING. Both halves of it have an end date (§10·4, §10·10)
+ * ## THIS FILE IS SCAFFOLDING, and now it is ONLY a router (§10·4)
  *
- * It holds a ROUTER (`compileViaRel` — chooses between two spines, so it dies when there is one) and a
- * VOCABULARY BRIDGE (`layoutOf`/`LAYOUT_FIELD` — translates the channel core into the legacy
- * `TraverserLayout`, which exists only because two vocabularies do). Nothing here is permanent, and the
- * name is the harness's rather than the thing's — kept only until the deletion lands, because renaming
- * scaffolding is churn.
+ * It used to be two things: a router AND a vocabulary bridge (`layoutOf`/`LAYOUT_FIELD`, translating
+ * the neutral channel core into legacy's `TraverserLayout` so that legacy's materializer could compose
+ * the payload SELECT over RelIR's relation). §10·10 moved that projection into the algebra, so the
+ * bridge is gone along with the alias map that only it read — and with it the wall it was: it could
+ * declare no translation for the `path`, `origin` or `branchOrder` roles and THREW, which is what
+ * blocked RelIR from carrying a path. The channel core could always hold one; the seam could not
+ * express it. There is no longer a seam.
  *
- * **What it does today is NOT the target arrangement.** It hands the finished relation to legacy's
- * materializer, which composes the payload SELECT — so RelIR does not yet produce the whole query. §10·10
- * moves that projection into `src/compiler/rel/` and makes `Shape` the boundary, after which this file is
- * a router and `execute.ts`'s byte framers are the only per-shape code left outside the algebra.
+ * What remains has one job — choose between two spines — so it dies with the second one. The name is
+ * the harness's rather than the thing's, kept until the deletion lands because renaming scaffolding is
+ * churn.
  *
- * ## The RelIR plan is ONE RELATION to the framing layer
+ * ## The plan IS the query
  *
- * `emitRelational` hands back the whole program as a kernel `Expression`, `WITH` list and all, and
- * `derived()` makes it a `Relation` the existing element projection selects from exactly as it
- * selects from the legacy `c0`. Three things fall out of that, all of them wanted:
+ * `emitProgram` hands back the effects and the result as a kernel `Expression`, `WITH` list and all, and
+ * one `render` turns that into `{sql, binds}`. Three things fall out, all of them wanted:
  *
- * - **binds stay in one `render`.** Composing an `Expression` rather than splicing a rendered
- *   string is what stops a second bind-ordering authority existing.
- * - **CTE-versus-inline stays RelIR's decision** (§4.6, the `name` pass), instead of leaking into
- *   the framing `Query`'s `c0…cN` namespace where the two naming schemes would have to agree.
- * - **no payload projection is duplicated — TODAY, and that is the interim, not the design.** The
- *   element payload, its label and property joins and its `Shape` are reached through the ordinary
- *   lowering loop with zero steps left, so this route frames identically to the legacy one by
- *   construction. It also means the payload SELECT is composed by legacy and that RelIR is not yet
- *   producing the whole query — which is what §10·10 corrects, by moving that projection into the
- *   algebra's own lowering and leaving only `execute.ts`'s byte framers per-shape.
+ * - **binds stay in ONE `render`.** Composing an `Expression` rather than splicing a rendered string is
+ *   what stops a second bind-ordering authority existing.
+ * - **CTE-versus-inline stays RelIR's decision** (§4.6, the `name` pass) rather than leaking into a
+ *   framing `Query`'s `c0…cN` namespace where two naming schemes would have to agree.
+ * - **the payload projection is not duplicated, because there is only one of it.** `Shape` is the whole
+ *   contract crossing this boundary, and `execute.ts`'s byte framers — `(rows, Shape) → Buffer[]`, no SQL
+ *   anywhere — are the only per-shape code outside the algebra. That is what makes §5a's equivalence gate
+ *   mean what it says: the query being compared is the one RelIR produced.
  *
- * What it is NOT is an opaque escape node: nothing legacy enters a `Rel`. The traffic is one-way —
- * a finished RelIR relation is consumed by framing — which is the direction §10·4 permits.
+ * Nothing legacy enters a `Rel`, and nothing RelIR-shaped enters legacy. There is no opaque escape node
+ * and never will be (§10·4: "not as a bridge, not temporarily, not behind a flag").
  */
-/**
- * §2's VOCABULARY BOUNDARY, in one place: the neutral channel core a RelIR node speaks, translated
- * into the `TraverserLayout` struct the framing layer reads.
- *
- * A `Record<ChannelRole, …>` rather than a chain of `if`s, and for the reason the two policy tables
- * in `src/channels.ts` are: **a role added to the core fails the build here until its framing
- * translation is declared.** The alternative — widening an ad-hoc check each time — is how a
- * carried field gets dropped at a seam, which is 33% of this repo's diagnosed defects. A role whose
- * entry is `null` is one RelIR may carry and this seam cannot yet express; it THROWS rather than
- * silently omitting the column, and that throw is a bug in whichever lowering produced it, not a
- * deferral, so it must not be caught.
- */
-const LAYOUT_FIELD: Readonly<Record<ChannelRole, keyof TraverserLayout | 'named' | null>> = {
-  bulk: 'bulk',
-  encounter: 'encounter',
-  sack: 'sack',
-  fromV: 'fromV',
-  // An ALIAS is the one role whose framing form is a NAME→column MAP rather than a column, and it
-  // cannot be otherwise: a Gremlin label name is not something a `Channel` may know (§2), so the
-  // mapping is compiler-side state the lowering hands over beside the plan and `named` is what says
-  // so. The check below is what keeps that from being a claim — the map's columns must be exactly the
-  // relation's alias channels.
-  alias: 'named',
-  // Still not a single column and still not translated: a path is a position list and an
-  // origin/branch-order is a stack. Each needs a shape this translation does not have, so each is
-  // declared absent rather than left to be forgotten.
-  path: null,
-  origin: null,
-  branchOrder: null,
-};
-
-function layoutOf(channels: Channels, aliases: AliasMap): TraverserLayout {
-  const layout: TraverserLayout = { aliases, origins: [], branchOrders: [] };
-  for (const channel of channels) {
-    const field = LAYOUT_FIELD[channel.role];
-    if (!field) throw new Error(`RelIR spine: no framing translation for the '${channel.role}' channel role`);
-    if (field !== 'named') Object.assign(layout, { [field]: channel.col });
-  }
-  // THE NAME MAP AND THE RELATION MUST AGREE, and this is where that is provable rather than assumed.
-  // A layout claiming an alias column the relation does not emit makes `rel.c[entry.col]` `undefined`,
-  // and an `undefined` spliced into a `q` template is a type error at no layer — the framing layer
-  // then reads a column that is not there and returns a silent empty result. A THROW, not a decline:
-  // the two are built by one fold, so a disagreement is a bug in this route, never a deferral.
-  const claimed = [...aliases.values()].map((entry) => entry.col).sort();
-  const carried = channelCols(channels.filter((channel) => channel.role === 'alias')).slice().sort();
-  if (claimed.length !== carried.length || claimed.some((column, i) => column !== carried[i]))
-    throw new Error(`RelIR spine: the alias map names [${claimed}] but the result relation carries [${carried}]`);
-  return layout;
-}
-
-/** A framing arm that cannot be reached, as a value the type system proves is `never`. */
-const unreachable = (framing: never): never => {
-  throw new Error(`RelIR spine: no framing translation for ${JSON.stringify(framing)}`);
-};
-
 export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<string, any>): Compiled | Program | null {
   // TWO fast-path switches reach the lowering, and for the same reason: each selects between two
   // lowering STRATEGIES that the algebra can state, rather than between two physical access paths
@@ -125,85 +64,37 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
   });
   if (!lowered) return null;
 
-  // A PROGRAM leaves through its own door, and the reason is that there is nothing for the framing
-  // layer to do: `drop()`'s result relation is a statement with an empty `RETURNING`, so the shape is
-  // `discard` and the whole traversal IS its effects. What travels is the `Plan` itself — the
-  // executor runs it (`runProgram`), and the retained-rows transport §10·5 requires rides with it
-  // rather than being re-derived at the edge.
-  //
   // The platform budget is asked PER STATEMENT here for the same reason it is inside `lowerToRel`:
   // each step is its own query, so each meets the 100-bind and 100 KB walls on its own.
   const { effects, result: relational } = emitProgram(lowered.plan);
   if (effects.some((step) => cfLimitViolation(step.emitted.sql, step.emitted.binds))) return null;
-  const isDiscard = lowered.result.kind === 'wire' && lowered.result.shape.kind === 'discard';
+
+  // A DISCARD leaves through its own door, and the reason is that there is nothing to read: `drop()`'s
+  // result relation is a statement with an empty `RETURNING`, so the whole traversal IS its effects.
+  // What travels is the `Plan` itself — the executor runs it (`runProgram`), and the retained-rows
+  // transport §10·5 requires rides with it rather than being re-derived at the edge.
+  const isDiscard = lowered.shape.kind === 'discard';
   if (isDiscard || !relational) {
-    if (!isDiscard || relational) throw new Error('RelIR spine: a discard framing and a relational result disagree about whether this program yields traversers');
+    if (!isDiscard || relational) throw new Error('RelIR spine: a discard shape and a relational result disagree about whether this program yields traversers');
     return { kind: 'program', program: lowered.plan, shape: { kind: 'discard' }, spine: 'rel' };
   }
 
-  // A WIRE RESULT LEAVES WITHOUT TOUCHING THE FRAMING LAYER AT ALL — §10·10's target arrangement, and
-  // what makes §5a's equivalence gate mean what it says: the plan below IS the whole query, so there is
-  // nothing for legacy to compose over it and no `TraverserLayout` to translate into. `render` rather
-  // than `emitQuery` because the program's steps are already in hand; asking `emitQuery` would re-emit
-  // and, for a write, refuse a multi-step plan it has no reason to see.
-  if (lowered.result.kind === 'wire') {
-    const emitted = render(relational);
-    const shape = lowered.result.shape;
-    // The same platform backstop the stream arm takes below, for the same two things `lowerToRel`'s
-    // decision cannot see: whatever the render spells more than once, and the 100 KB statement-TEXT cap.
-    if (cfLimitViolation(emitted.sql, emitted.binds)) return null;
-    return effects.length
-      ? { kind: 'program', program: lowered.plan, tail: { sql: emitted.sql, binds: emitted.binds }, shape, spine: 'rel' }
-      : { kind: 'read', sql: emitted.sql, binds: emitted.binds, shape, spine: 'rel' };
-  }
-
-  // `rir` deliberately does not collide with the framing aliases (`n`/`e`/`p`/`s`/`v`/`g`/`j`/`l`)
-  // or with the `Query`'s minted `c0…cN`: the RelIR relation sits beside them, not among them.
-  // The header and the carried layout are the RESULT RELATION's own, read off the plan rather than
-  // handed over beside it: `plan.result` declares both, and a lowering that passed them separately
-  // was two chances for the framing layer to be told a shape the relation did not have. (A `name`
-  // pass binding is never the root, so the result is the relation the fold finished on.)
-  const result = lowered.plan.result;
-  const rel = derived(relational, result.type.cols.map((column) => column.name), 'rir');
-  const traverserLayout = layoutOf(result.channels, lowered.aliases);
-  // TOTAL over the framing union: a stream kind the lowering learns to produce is a compile error
-  // here until this seam knows how to frame it, which is the same discipline §3.5's obligation
-  // table applies inside the algebra.
-  const state = { q: engine.q, params, rel, traverserLayout };
-  const framing = lowered.result.framing;
-  const stream: Stream = framing.kind === 'list'
-    ? { kind: 'list', ...state, of: framing.of, ...(framing.set ? { set: framing.set } : {}) }
-    // The LIST arm's twin and it needs nothing else: the relation carries one `map` column holding
-    // the pairs tree, and `keyOf`/`valOf` are what the materializer reads to know how to frame each
-    // side. No step is delegated to get here (§10·9) — the grouping is the algebra's own.
-    : framing.kind === 'map'
-      ? { kind: 'map', ...state, keyOf: framing.keyOf, valOf: framing.valOf }
-      : framing.kind === 'scalar'
-        ? { kind: 'scalar', ...state, type: framing.type, ...(framing.result ? { result: framing.result } : {}) }
-        // ELEMENTS and DISCARD left through the wire door above, and the `Exclude` on `RelResult`'s
-        // `stream` arm is what proves it rather than leaving the claim to this comment.
-        : unreachable(framing);
-  // Zero steps remain, so the loop runs the root value projection and nothing else. Going
-  // through `lowerSteps` rather than calling the projection directly is the point: a step this
-  // route grows tomorrow lands in the SAME loop, and there is no second orchestrator.
-  const compiled = materializeRootStream(engine.lowerStepsStrict(stream, steps, steps.length));
+  const { sql, binds } = render(relational);
   // THE LAST BUDGET CHECK IS THE PLATFORM'S OWN, MEASURED ON WHAT A DURABLE OBJECT ACTUALLY GETS.
   //
-  // `lowerToRel` owns the BIND decision and now renders to take it, so this is a backstop for the
-  // two things that decision cannot see: whatever binds the FRAMING layer adds on top of the RelIR
-  // relation (zero for every shape measured today, but it is framing's number and not ours), and
-  // the 100 KB statement-TEXT cap, which §3.6 gives the plan and nothing else enforced. Both come
-  // from `cfLimitViolation` — the one authority for what the platform refuses — because a second
-  // constant here would be a second chance to disagree with it.
+  // `lowerToRel` owns the BIND decision and renders to take it, so this is a backstop for the one thing
+  // that decision cannot see: the 100 KB statement-TEXT cap, which §3.6 gives the plan and nothing else
+  // enforced. It comes from `cfLimitViolation` — the one authority for what the platform refuses —
+  // because a second constant here would be a second chance to disagree with it.
   //
-  // A DECLINE and not a throw: legacy answers these today, and a plan we cannot ship is coverage we
-  // do not have. If it ever fires, the census's per-query spine ratchet is what reports it.
-  if (cfLimitViolation(compiled.sql, compiled.binds)) return null;
-  // A traversal that WROTE frames its rows through exactly this projection — the effects ran first,
-  // and the framing read is the program's last step. A write reaches the SAME projection a pure read
-  // does rather than a write-shaped copy, and that property is what must survive §10·10 moving where
-  // the projection is built.
+  // A DECLINE and not a throw: legacy answers these today, and a plan we cannot ship is coverage we do
+  // not have. If it ever fires, the census's per-query spine ratchet is what reports it.
+  if (cfLimitViolation(sql, binds)) return null;
+  // A traversal that WROTE frames its rows through exactly this projection — the effects ran first, and
+  // the framing read is the program's last step. A write reaches the SAME payload projection a pure read
+  // does rather than a write-shaped copy, which is the property §10·10 had to preserve while moving where
+  // that projection is built.
   return effects.length
-    ? { kind: 'program', program: lowered.plan, tail: { sql: compiled.sql, binds: compiled.binds }, shape: compiled.shape, spine: 'rel' }
-    : { ...compiled, spine: 'rel' };
+    ? { kind: 'program', program: lowered.plan, tail: { sql, binds }, shape: lowered.shape, spine: 'rel' }
+    : { kind: 'read', sql, binds, shape: lowered.shape, spine: 'rel' };
 }

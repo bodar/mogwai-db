@@ -3,7 +3,10 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import type { Elem } from '../plan/plan.ts';
-import { and, EDGE_COLS, eq, meta, NODE_COLS, typeOf, typedNode, type Minter } from './build.ts';
+import {
+  and, byEncounter, coalesce, EDGE_COLS, EMPTY_ARRAY, EMPTY_OBJECT, eq, jsonOf, meta, NODE_COLS, typeOf, typedNode,
+  type Minter,
+} from './build.ts';
 
 /**
  * THE ELEMENT PAYLOAD — an id-relation projected to the tuple a vertex or an edge is ON THE WIRE.
@@ -47,17 +50,9 @@ import { and, EDGE_COLS, eq, meta, NODE_COLS, typeOf, typedNode, type Minter } f
  * ships in the read path, so this is the same capability applied to the object form). Same answer,
  * stated where nothing can drop it.
  *
- * ## Bind-free empties
- *
- * `json_object()` / `json_array()` rather than the `'{}'` / `'[]'` literals legacy inlines: a `Lit` is a
- * BIND (§3.6) and the platform allows a hundred of them, so a compiler-authored constant that has a
- * function spelling takes the function. Same value, same subtype, no budget.
+ * The bind-free empties (`json_object()` / `json_array()` rather than the `'{}'` / `'[]'` literals legacy
+ * inlines) and the emission-order `Sort` are `build.ts`'s, because every payload arm needs both.
  */
-
-const EMPTY_OBJECT: Expr = { kind: 'json-object', entries: [], binary: false };
-const EMPTY_ARRAY: Expr = { kind: 'json-array', items: [], binary: false };
-const jsonOf = (arg: Expr): Expr => ({ kind: 'call', fn: 'json', args: [arg] });
-const coalesce = (...args: readonly Expr[]): Expr => ({ kind: 'call', fn: 'COALESCE', args });
 
 /** `labels`, as the algebra sees it. Declared per use rather than shared, because two scans of one
  *  table in one plan are two RELATIONS and a shared `RelId` is the one thing `Col` cannot disambiguate. */
@@ -197,14 +192,7 @@ const ROW = (name: string): string => `w_${name}`;
  * per-traverser state has been spent — the emission order became the `ORDER BY`, and a collapse's
  * multiplicity became the `bulk` COLUMN the framer reads as a per-value count.
  *
- * ## The ORDER BY is the encounter channel, and it belongs here
- *
- * `rootOrder` (legacy's materializer) is the ONE place the wire's row order was decided, and the comment
- * there records what it cost to learn: every root that dropped the carried columns from its projection —
- * correctly, they are internal — also dropped the `ORDER BY` with them, so `order().by('name')` was stable
- * before `values()` and arbitrary before `.properties()`. SQL lets `ORDER BY` name a column the SELECT
- * list does not, which is why the sort sits UNDER the projection: the assembler fuses the two into one
- * block, and the ordering column is still in the FROM where the clause reads it.
+ * The wire's row order is `byEncounter`'s (`build.ts`), shared with every other payload arm.
  *
  * ## `bulk` is a COLUMN here, not a channel
  *
@@ -225,14 +213,7 @@ export function elementPayload(input: Rel, elem: Elem, opts: { readonly bulk: bo
     on: eq(col(row.id, 'id'), col(input.id, 'id')),
   });
 
-  const encounter = joined.channels.find((channel) => channel.role === 'encounter');
-  const ordered = encounter
-    ? make.sort({
-        id: fresh('wso'), input: joined, channels: joined.channels, type: joined.type,
-        terms: [{ expr: col(joined.id, encounter.col), dir: 'asc' }],
-      })
-    : joined;
-
+  const ordered = byEncounter(joined, fresh);
   const rowid = col(ordered.id, ROW('id'));
   const bulk = opts.bulk ? ordered.channels.find((channel) => channel.role === 'bulk') : undefined;
   // The tuple, in legacy's own order — id, label, (src, tgt), props, then bulk. The framer reads rows by

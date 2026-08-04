@@ -135,7 +135,11 @@ describe('scalar-parent / projection SQL', () => {
     expect(listed.binds).toContain('list');
     const relListed = read('g.V().values("list").is(typeOf(GType.LIST))', { spine: 'rel' });
     expect(relListed.shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });
-    expect(relListed.sql).toMatch(/json\(\w+\.v\) AS list/);
+    // The RelIR route composes the retype's `json(v)` (relation level) with the payload projection's own
+    // `json(list)` (§10·10) — a no-op nesting, since `json()` of valid JSON text is that text. The
+    // assertion is about WHICH column becomes the list, not how many times the conversion is spelled;
+    // §5a's gate is results and access path, never spelling.
+    expect(relListed.sql).toMatch(/json\((?:json\()?\w+\.v\)+ AS list/);
     expect(relListed.sql).toMatch(/WHERE \(\w+\.vtype = \?\)/);
     // once a ListStream, the list substrate composes: unfold/count(local)/range reuse it.
     // typed unfold carries each element's own stored vtype (perRowType framing).

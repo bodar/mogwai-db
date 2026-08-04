@@ -75,6 +75,45 @@ export const PROPERTIES = {
   edge: { table: 'edge_properties', owner: 'edge' },
 } as const;
 
+/** `json(x)` / `COALESCE(…)`, as expressions rather than as three transcriptions. Every payload
+ *  projection needs both — a JSON value crossing a subquery boundary loses SQLite's json subtype, and
+ *  every aggregate over zero rows is NULL. */
+export const jsonOf = (arg: Expr): Expr => ({ kind: 'call', fn: 'json', args: [arg] });
+export const coalesce = (...args: readonly Expr[]): Expr => ({ kind: 'call', fn: 'COALESCE', args });
+
+/**
+ * The EMPTY collection literals, BIND-FREE. A `Lit` renders as a bound parameter (§3.6) and the platform
+ * allows a hundred of them, so a compiler-authored constant that has a function spelling takes the
+ * function: `json_object()` is `{}` and `json_array()` is `[]`, at zero budget and with the json subtype
+ * that a quoted `'{}'` would have to be re-parsed to get.
+ */
+export const EMPTY_OBJECT: Expr = { kind: 'json-object', entries: [], binary: false };
+export const EMPTY_ARRAY: Expr = { kind: 'json-array', items: [], binary: false };
+
+/**
+ * THE WIRE'S ROW ORDER — a `Sort` on the carried emission-order channel, or the relation unchanged when
+ * there is none.
+ *
+ * `rootOrder` (legacy's materializer) is the ONE place this was decided, and the comment there records
+ * what its absence cost: every root that dropped the carried columns from its projection — correctly, they
+ * are internal — dropped the `ORDER BY` with them, so `order().by('name').values('name')` was stable while
+ * the same prefix before `.properties()` returned whatever the scan produced. Every payload projection in
+ * this route therefore sorts THROUGH this one function and then projects on top: SQL lets `ORDER BY` name a
+ * column the SELECT list does not, and the assembler fuses the pair into one block, so the ordering column
+ * is still in the FROM where the clause reads it.
+ *
+ * Shared by every arm for the reason `renumber` is shared: a channel read two ways is a channel two
+ * readers can disagree about.
+ */
+export const byEncounter = (rel: Rel, fresh: Minter): Rel => {
+  const encounter = rel.channels.find((channel) => channel.role === 'encounter');
+  if (!encounter) return rel;
+  return make.sort({
+    id: fresh('eo'), input: rel, channels: rel.channels, type: rel.type,
+    terms: [{ expr: col(rel.id, encounter.col), dir: 'asc' }],
+  });
+};
+
 export function and(left: Expr | undefined, right: Expr): Expr;
 export function and(left: Expr, right: Expr | undefined): Expr;
 export function and(left: Expr | undefined, right: Expr | undefined): Expr {
