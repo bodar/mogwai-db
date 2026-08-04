@@ -1548,13 +1548,44 @@ Two things fall out that are worth keeping:
   encounter channel are carried into the group's scope for `group()` and NOT for `groupCount()`: state
   nothing reads is what the channel obligations exist to prevent, one layer down.
 
-**What remains of the family:** `group()`'s remaining 35 are all either the side-effect label form
-(`group('a')`, which needs the side-effect substrate) or a value `by()`. Of those,
-`group().by(k).by(<direct key>)` is a list of TYPED VALUES per key — the same `members` aggregate with
-`byNode`'s second slot as the member — while `by(<reducer>)` is a scalar value and lands with the reducer
-vocabulary, and `by(<traversal>)` needs the child seam. Then the mid-chain consumers (`unfold()` to
-entries, `select(Column.keys/values)`), which is what makes the map arm re-enterable and what `valueMap`'s
-28 mid-chain cases need.
+**LANDED — the VALUE `by()`** (+3, 32.4%). The projection needed nothing: `byNode`'s second slot already
+yields a self-describing node. What it needed was a node FIELD, and the reason is the one thing worth
+carrying out of this arm.
+
+**A `by()`'s productivity applies to THREE different things, and they are distinguishable.** For
+`g.V().group().by("name").by("age")`, where `ripple` and `lop` have no `age`:
+
+| where the drop applies | answer |
+|---|---|
+| the ROW, before the aggregate | those two KEYS vanish |
+| nowhere — collect the NULL | `{"lop": [null]}`, indistinguishable from a productive null |
+| the MEMBER, group kept | `{"lop": []}` — **`sideEffect/Group.feature`'s own answer** |
+
+So the reference is QUOTED here rather than reasoned from, because two of the three are plausible.
+Legacy reaches the same wire answer by collecting the SQL null and having the `scalarList` framer strip
+it — correct, but only because that Shape's framer knows to; the typed tree has no per-position
+strip-nulls instruction and must not grow one.
+
+**`Agg.filter` — SQL's `FILTER (WHERE …)` — is therefore a node field, and it MEETS §3.2's bar.** Neither
+existing node expresses "the rows this aggregate does not take, with the GROUP still decided by all of
+them": `Aggregate.groupBy` derives the groups from its input's rows, and a `Filter` before it removes a row
+from the group as well as from the aggregate. That is the seam being unable to EXPRESS the shape rather
+than not having been handed it, which is the distinction §7's bar is about. (SQLite ≥ 3.30; the DO's is
+3.47, and `test:cf-limits` is green.)
+
+**A checker gap it exposed:** `check.ts` was not walking an `Agg`'s `orderBy` terms AT ALL, so a `Col`
+naming a relation out of scope inside one reached the emitter unchecked. `walk.ts`'s `exprChildren` had
+always included them — the two disagreed, and the fix is the checker agreeing with the walk. A reminder
+that "a total table per node KIND" does not make the per-FIELD coverage total.
+
+**And the first place RelIR answers what legacy does not:** `group().by(k).by(T.label)` throws
+`unsupported group().by() value modulator` on the legacy route.
+
+**What remains of the family:** `group()`'s remaining blockers are the side-effect label form (`group('a')`,
+which needs the side-effect substrate) and the two value-`by()` forms this arm declines —
+`by(<reducer>)`, a scalar value that lands with the reducer vocabulary, and `by(<traversal>)`, which needs
+the child seam. Then the mid-chain consumers (`unfold()` to entries, `select(Column.keys/values)`), which is
+what makes the map arm re-enterable and what `valueMap`'s 28 mid-chain cases need.
 
 **The cost estimate that lost this its "cheap" label, recorded so it is not re-made:** 43 of the map
 shape's 64 blockers are terminal, and that was briefly read as "43 cases behind a framing seam". It is
