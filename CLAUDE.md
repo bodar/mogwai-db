@@ -206,6 +206,15 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
 - Element ids are integer rowids, externally faced as `COALESCE(uid, id)` — don't invent string ids.
 - **Correct by design, fail closed:** never reject a valid input to keep scope small, and never
   silently answer a different question — throw a clear deferral or fall through, never mis-execute.
+- **IN DOUBT ABOUT A SEMANTICS QUESTION, READ THE VENDORED REFERENCE — do not reason it out.** The
+  `.feature` corpus says WHAT the answer is; **`vendor/tinkerpop/gremlin-core` says WHY and covers the
+  cases no scenario names** (e.g. what a reducing barrier emits over ZERO rows is per-step and decided by
+  whether it supplies a seed — `GroupStep`/`FoldStep` do and emit `{}`/`[]`, `SumGlobalStep` overrides
+  `processAllStarts` and emits nothing). Algebra and lowering questions go to `vendor/calcite` on the same
+  footing. **Cite the path at the pin** so the claim is checkable by CI and by anyone else. Measured cost
+  of not doing this: a correct guard was deleted on a plausible-sounding inference that one line of
+  `Group.feature` refuted. **When two comments in this repo cite one feature file for opposite behaviours,
+  the resolution is IN the file, not in the argument.**
 
 ## Environment notes
 
