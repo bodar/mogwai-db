@@ -386,7 +386,8 @@ declared columns from the channel list, every producer reads `input.channels`, a
 (`src/channels.ts`) is the MINT — insert in `ROLE_ORDER`, fail closed on a duplicate column. Two
 consequences worth not undoing:
 
-- **`RelLowering` is `{plan, framing}`.** Its `cols` and `channels` were properties of `plan.result`
+- **`RelLowering` is `{plan, shape}`** (it was `{plan, framing}`, and `{plan, framing, aliases}` before
+  §10·10 moved the payload projection in). Its `cols` and `channels` were properties of `plan.result`
   carried beside it, and `scalarTail` shadowed them in two accumulators. Read them off the relation.
 - **The collapse law is read off the RELATION too.** "Collapse and an emission order are mutually
   exclusive" cannot be decided from `demandsEncounter` alone once a step MINTS a position, so the
@@ -1034,7 +1035,8 @@ nowhere to happen, and the majority of an 11,201-line directory.
 the same failure one layer in — all at 0, so the ratchet now keeps them dead: `Sequence` ·
 `PriorResult` · `Param` · `returningType` · `Distinct.on` · `Delete.using` · `Membership` · the `Naming`
 side-table · `emitStmt`/`emitSequence` as separate entry points · the statement-only
-`externalAliases`/`bareColumns` back channels · `sameLayout`-by-`JSON.stringify`.
+`externalAliases`/`bareColumns` back channels · `sameLayout`-by-`JSON.stringify` ·
+`LAYOUT_FIELD`/`layoutOf`, the `Channels`→`TraverserLayout` bridge §10·10 retired.
 
 ---
 
