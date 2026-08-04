@@ -1,34 +1,52 @@
 // L3 — the official TinkerPop cucumber suite, as a ratcheted `bun test`.
 //
-// TinkerPop's own JS cucumber runner (vendored via the `vendor/tinkerpop`
-// submodule, pinned at 4.0.0-beta.2) drives the official Gherkin feature files
-// over GraphBinary against a live in-process mogwai-db. The number of passing
-// scenarios is THE conformance number; this test ratchets it against the last
-// committed run recorded in l3-state.json: a regression or a lower count fails the
-// build, and a clean local run re-records the state (CI never rewrites it, so
-// there is no push-back / re-trigger loop). Telemetry (the compact `.`/`E`
-// progress line + the systematic-gap summary) is always on.
+// TinkerPop's own Gherkin corpus and its own JS step definitions (both vendored via the
+// `vendor/tinkerpop` submodule, tracking `origin/master`) drive mogwai-db over GraphBinary. The
+// number of passing scenarios is THE conformance number; this test ratchets it against the last
+// committed run recorded in l3-state.json: a regression or a lower count fails the build, and a clean
+// local run re-records the state (CI never rewrites it, so there is no push-back / re-trigger loop).
+// Telemetry (the compact `.`/`E` progress line + the systematic-gap summary) is always on.
 //
-// The step scope lives in ./tags.ts (widen as steps land). The full runbook and
-// history is in ./README-cucumber.md. ./conformance.test.ts is the fast
-// in-process mini-L3 that proves the wire path without the submodule.
+// ── ONE PROCESS, NO SOCKET ────────────────────────────────────────────────────────────────────────
+//
+// Cucumber runs HERE, through its programmatic api (`test/support/cucumber.ts`), and the client talks
+// to the conformance host as a `fetch` HANDLER (`test/support/in-memory-transport.ts`) rather than
+// over TCP. There is no server, no port and no child process.
+//
+// That is a correctness fix, not a tidy-up. Spawning the runner forced the host to be reachable by
+// URL, which forced a fixed port the GLV chose and we could not change — one inside Linux's ephemeral
+// range, so an unrelated outbound connection on the host could take it and the bind would fail
+// `EADDRINUSE` with nothing listening. Measured locally and intermittently red in CI. A handler
+// cannot collide with anything.
+//
+// The step scope lives in ./tags.ts (widen as steps land). The full runbook and history is in
+// ./README-cucumber.md. ./conformance.test.ts is the mini-L3 that still goes over a real socket on an
+// EPHEMERAL port, deliberately — it is the one place the TCP path itself is under test.
 import { test, expect, beforeAll, afterAll } from 'bun:test';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startConformanceServer } from './conformance-server.ts';
+import '../support/undici-shim.ts'; // client teardown calls Agent.close() — see the shim's header
+import { buildConformanceApp } from './conformance-server.ts';
+import { installInMemoryTransport, type InMemoryTransport } from '../support/in-memory-transport.ts';
+import { runFeatures, GLV } from '../support/cucumber.ts';
 import { L3_TAGS } from './tags.ts';
 import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readState, writeState, delta, formatDelta, expectedErrorSubstrings } from './telemetry.ts';
 
-// helper.js in the GLV hardcodes http://localhost:45940 — the port is not
-// configurable, so the host must own it for the duration of the run.
-const PORT = 45940;
 const ROOT = new URL('../../', import.meta.url).pathname;
-const GLV = join(ROOT, 'vendor/tinkerpop/gremlin-js/gremlin-javascript');
 // A GLOB, not a bare directory: cucumber 13 (the submodule's runner since the master bump)
 // no longer walks a directory argument — a bare path matches 0 features, silently.
 const FEATURES = join(ROOT, 'vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/**/*.feature');
-const CUCUMBER_BIN = join(ROOT, 'vendor/tinkerpop/gremlin-js/node_modules/.bin/cucumber-js');
+// Upstream's step definitions + world. Also a glob, for the same reason.
+const STEPS = 'test/cucumber/*.js';
+// Our GraphBinary extensions, loaded into the same registry: without them a valid server
+// BigDecimal/Char/Duration response fails to decode before the official assertion can inspect it.
+// RELATIVE to cucumber's cwd (the GLV), like the step glob — an absolute path here is accepted and
+// then silently not loaded, which costs exactly the 10 BIGINT/BIGDECIMAL scenarios and nothing else.
+const GLV_COMPAT = '../../../../test/L3-conformance/glv-compat.ts';
+// Provisioning marker: the corpus + upstream's generated step data. Cheaper and more honest than
+// checking for a `cucumber-js` BIN, which we no longer run.
+const STEP_DATA = join(GLV, 'test/cucumber/gremlin.js');
 // The single committed ratchet state: the last-known run's passing/failing scenario
 // sets + count. The delta is computed against it; a clean local run rewrites it. It
 // replaces the old baseline.json + l3-passing.txt pair.
@@ -60,54 +78,46 @@ function syncCountFiles(passing: number): string[] {
 // take minutes; the default 5s hook/test timeout would abort them.
 const LONG = 600_000;
 
-let server: Awaited<ReturnType<typeof startConformanceServer>> | undefined;
+let transport: InMemoryTransport | undefined;
 
 beforeAll(async () => {
   // Self-heal: `mise run test` provisions the submodule first, but a bare
-  // `bun test` does not — so if the runner deps are missing, provision now.
-  if (!existsSync(CUCUMBER_BIN)) {
+  // `bun test` does not — so if the corpus or step data is missing, provision now.
+  if (!existsSync(STEP_DATA)) {
     const p = Bun.spawn({ cmd: ['bash', join(ROOT, 'scripts/init-submodule.sh')], cwd: ROOT, stdout: 'inherit', stderr: 'inherit' });
     if ((await p.exited) !== 0) throw new Error('submodule provisioning failed — run `mise run submodule`');
   }
-  server = await startConformanceServer(PORT);
+  // Seed the reference graphs and take the handler. Nothing listens.
+  const app = await buildConformanceApp();
+  transport = await installInMemoryTransport(app.fetch);
 }, LONG);
 
-afterAll(() => server?.stop(true));
+afterAll(() => transport?.restore());
 
 test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBinary', async () => {
   const report = join(tmpdir(), `mogwai-l3-${process.pid}.json`);
-  const proc = Bun.spawn({
-    cmd: [
-      'bunx', '--bun', 'cucumber-js',
-      '--tags', L3_TAGS,
-      '--format', `json:${report}`,
-      '--format', 'summary',
-      // The cucumber process has its own GLV module graph. Load our GraphBinary
-      // extensions there as well, otherwise a valid server BigDecimal/Char/Duration
-      // response fails before the official assertion can inspect it.
-      '--import', '../../../../test/L3-conformance/glv-compat.ts',
-      // Also a glob: cucumber 13 does not expand a bare step-definition DIRECTORY either,
-      // so every step comes back `undefined` and the run reports 0 passing.
-      '--import', 'test/cucumber/*.js',
-      FEATURES,
-    ],
-    cwd: GLV,
-    env: { ...process.env, CLIENT_MIMETYPE: 'application/vnd.graphbinary-v4.0' },
-    stdout: 'pipe',
-    stderr: 'pipe',
+  // The `json` formatter is cucumber's OWN output and stays the measurement: `collectScenarios`
+  // reads its shape, and the committed floor was recorded from it. Only how cucumber is DRIVEN
+  // changed here — swapping the counting to message envelopes in the same step would have moved the
+  // transport and the measurement at once, and the count has subtleties that were misdiagnosed twice
+  // (see test/CLAUDE.md on repeated scenario names).
+  const { stdout: out } = await runFeatures({
+    paths: [FEATURES],
+    imports: [STEPS, GLV_COMPAT],
+    tags: L3_TAGS,
+    formats: [`json:${report}`],
   });
-  const [out, err] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  await proc.exited;
 
-  // Terminate the in-process server's compact `.`/`E` progress line so the
-  // aggregate output below starts clean on its own line.
+  // Terminate the host's compact `.`/`E` progress line so the aggregate output below starts clean
+  // on its own line.
   process.stdout.write('\n');
 
+  // The client MUST have gone through the handler. Without this a swap that silently missed would
+  // read as a server bug (every scenario failing to connect) rather than as a harness bug.
+  transport!.assertUsed();
+
   if (!existsSync(report)) {
-    throw new Error(`cucumber produced no report — the runner likely failed to start.\n--- stdout ---\n${out}\n--- stderr ---\n${err}`);
+    throw new Error(`cucumber produced no report — the run likely failed to start.\n--- cucumber stdout ---\n${out}`);
   }
 
   // A scenario passes iff every one of its steps passed (matches cucumber's own

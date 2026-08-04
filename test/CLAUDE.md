@@ -49,7 +49,11 @@
     different feature/graph fixtures, same generated name). So `passing` counts scenarios, not
     unique names: `len(passed) > len(set(passed))` is expected and the count is correct.
 - **L4** (`test/L4-addendum/`) — our Gherkin addendum for gaps the official corpus misses; gate =
-  all pass. Add a scenario by dropping it in a `.feature` — no code change.
+  all pass. Add a scenario by dropping it in a `.feature` — no code change. Read by cucumber's REAL
+  parser compiled to pickles (`read-features.ts`), so `Background`/`Scenario Outline` work; the
+  RUNNER is ours because upstream's `Given('the traversal of')` ignores the docstring and looks the
+  scenario NAME up in a pre-generated map, which our names are not in. Each scenario is its own
+  `bun test`, so a failure reports under its name with a diff.
 - **L5** (`test/L5-properties/`) — property-based, the only level whose inputs nobody wrote down.
   Generates well-typed Gremlin by walking a shape lattice (state = stream shape, transition = step,
   so `count().out()` is unreachable by construction) and asserts the fast-path differential:
@@ -133,9 +137,22 @@ Related: an `ordered` L4 assertion is only worth writing if it survives this. Ch
   The old rule here said "pinning L3 to master breaks it for zero gain" — **measured, and it is
   false**: master is L3 1363/2297 vs beta.2's 1347/2041 (+16 passing, +256 scenarios in scope).
   What master actually needs is two runner details, each of which fails SILENTLY: cucumber 13
-  wants a **glob** for features and for `--import` step definitions (a bare directory matches
+  wants a **glob** for features and for `import` step definitions (a bare directory matches
   zero and reads as a total failure), and Bun's built-in `undici` shim lacks
   `Agent.close()`/`destroy()` so every client teardown throws (`test/support/undici-shim.ts`).
+- **L3 runs cucumber IN THIS PROCESS and the client talks to a `fetch` HANDLER, not a socket** —
+  `test/support/cucumber.ts` (cucumber's programmatic api) + `test/support/in-memory-transport.ts`
+  (upstream's own swappable `httpFetch` holder). No port, no server, no child process, and the
+  ephemeral-range port collision that took the suite red locally and in CI is gone by construction.
+  Two rules that follow:
+  - **the cucumber api MUST come from the submodule's copy.** Its support-code registry is
+    per-instance, and upstream's step files import the bare specifier, so a copy of ours would read a
+    different registry and every step would report `undefined`.
+  - **`glv-compat.ts` is loaded by a path RELATIVE to cucumber's cwd.** An absolute path is accepted
+    and then silently not loaded, which costs exactly the 10 BIGINT/BIGDECIMAL scenarios.
+  `transport.assertUsed()` fails closed if the swap ever misses, because otherwise a miss reads as a
+  broken server rather than a broken harness. `conformance.test.ts` keeps a REAL socket on an
+  ephemeral port on purpose — it is the one place the TCP path is under test.
 - **Every new step lands with** L2 SQL snapshots + its cucumber tag in `tags.ts`, L1 still 100%.
 - **A new fast path lands with its L5 differential, not just a non-empty `equivalentWhen`.** The
   registry test only checks that the field is a non-empty string; L5 is what checks the claim. Six

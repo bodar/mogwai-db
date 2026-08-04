@@ -1,61 +1,79 @@
 # L3 — the official TinkerPop cucumber suite
 
-The conformance number. TinkerPop's own JS cucumber runner drives the official
-Gherkin feature files over GraphBinary against a live mogwai-db.
+The conformance number. TinkerPop's own Gherkin corpus and its own JS step definitions
+drive mogwai-db over GraphBinary.
 
-**This now runs automatically as a ratchet under `bun test`** —
-`test/L3-conformance/l3.test.ts` boots the host in-process, runs the cucumber suite
-against the pinned `vendor/tinkerpop` submodule, and diffs this run against the
-last-known run committed in `l3-state.json` (`{passing, total, passed[], failed[]}`).
-Telemetry is **always on**: a live `.`/`E` progress line during the run, then the
-DELTA (`✅ NEWLY PASSING` + `❌ REGRESSED`) and the systematic-gap summary after.
-Gates: any regression → fail (named); count below `passing` → fail. A clean local
-run re-records `l3-state.json` + count-quoting prose; CI never rewrites. The step
-scope lives in `tags.ts`. `conformance.test.ts` is a self-contained mini-L3 (no
-submodule) that proves the wiring. **This file is the runbook for running the full
-suite manually** (e.g. to inspect individual failures).
+**It runs as a ratchet under `bun test`** — `test/L3-conformance/l3.test.ts` seeds the
+host, runs the cucumber suite against the pinned `vendor/tinkerpop` submodule, and diffs
+this run against the last-known run committed in `l3-state.json`
+(`{passing, total, passed[], failed[]}`). Telemetry is **always on**: a live `.`/`E`
+progress line during the run, then the DELTA (`✅ NEWLY PASSING` + `❌ REGRESSED`) and the
+systematic-gap summary after. Gates: any regression → fail (named); count below `passing` →
+fail. A clean local run re-records `l3-state.json` + count-quoting prose; CI never rewrites.
+The step scope lives in `tags.ts`.
 
-## 1. Start the conformance host
+## One process, no socket
 
-```bash
-bun run test/L3-conformance/conformance-server.ts     # listens on :45940/gremlin
-```
+Cucumber runs **in this process**, through its programmatic api
+(`test/support/cucumber.ts`), and the client reaches the host as a `fetch` **handler**
+(`test/support/in-memory-transport.ts`) rather than over TCP. There is no server to start,
+no port, and no child process — `mise run L3` is the whole runbook.
 
-Hosts the named toy graphs the runner opens, selected by traversal-source name
-in the request `g` field (the runner's convention):
+That removed a real failure mode, not just a step: the previous arrangement spawned
+`cucumber-js`, so the host had to be reachable by URL, which pinned it to a port the GLV
+hard-codes and we could not change. That port sits inside Linux's ephemeral range, so an
+unrelated outbound connection on the host could hold it and the bind would fail
+`EADDRINUSE` with nothing listening — measured locally, and intermittently red in CI.
+`patches/upstream/tinkerpop-04-connection-fetch-option.patch` is the fix we owe upstream so
+nobody else needs the workaround.
+
+`conformance.test.ts` is a mini-L3 that still goes over a **real socket on an ephemeral
+port** — deliberately, because it is the one place the TCP path itself is under test.
+
+## Graphs
+
+The host serves the named toy graphs, selected by traversal-source name in the request `g`
+field (the runner's convention); the router's bare `/gremlin` endpoint resolves that field
+to the graph id:
 
 | graph   | source name | state                       |
 |---------|-------------|-----------------------------|
 | modern  | `gmodern`   | seeded, canonical ids       |
 | empty   | `ggraph`    | empty, writable (reset via `g.V().drop()`) |
-| classic/crew/grateful/sink | `gclassic` … | empty until seeds land |
+| crew/grateful/sink/zoo/multilabel | `gcrew` … | seeded (see `SEEDS`) |
 
-The runner defaults to `http://localhost:45940/gremlin` (hardcoded in
-`gremlin-js/gremlin-javascript/test/helper.js`) — no edit needed; the router's bare
-`/gremlin` endpoint resolves the `traversalSource` (`g` field) to the graph. Add
-seeds to `SEEDS` in `conformance-server.ts` as more reference graphs come online —
-each seed is a list of gremlin write traversals (`seed-*.ts`) run through the normal
-query path, so seeding is identical on both runtimes.
+Add seeds to `SEEDS` in `conformance-server.ts` as more reference graphs come online — each
+is either a list of gremlin write traversals (`seed-*.ts`) run through the normal query path
+or a canonical GraphSON file through the bulk loader, so seeding is identical on both
+runtimes.
 
-## 2. Run the suite, narrowed to the implemented step set
+## Running a narrowed slice manually
 
-In the pinned submodule runner (`vendor/tinkerpop/gremlin-js/gremlin-javascript`);
-`mise run submodule` has already `bun install`ed the workspace (bun runs the GLV's
-TS source and the cucumber step defs natively — no `npm install`, no ts-node).
-The `--tags` scope is the single source of truth in `test/L3-conformance/tags.ts`
-(the ratchet lever). Read it from there so this command never drifts:
+To inspect individual failures, narrow the tag expression. `tags.ts` is the single source of
+truth for the scope (the ratchet lever), so read it rather than retyping it:
 
 ```bash
-# from the mogwai-db repo root:
-TAGS="$(bun -e 'import{L3_TAGS}from"./test/L3-conformance/tags.ts";console.log(L3_TAGS)')"
+# a subset by tag, in-process, from the repo root:
+bun test test/L3-conformance/l3.test.ts
 
-cd vendor/tinkerpop/gremlin-js/gremlin-javascript
-CLIENT_MIMETYPE='application/vnd.graphbinary-v4.0' \
-  bunx --bun cucumber-js \
-  --tags "$TAGS" \
-  --import test/cucumber \
-  ../../gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/
+# or drive cucumber directly against one feature file:
+bun -e '
+import { buildConformanceApp } from "./test/L3-conformance/conformance-server.ts";
+import { installInMemoryTransport } from "./test/support/in-memory-transport.ts";
+import { runFeatures } from "./test/support/cucumber.ts";
+const app = await buildConformanceApp();
+await installInMemoryTransport(app.fetch);
+const r = await runFeatures({
+  paths: ["vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/map/Count.feature"].map((p) => process.cwd() + "/" + p),
+  imports: ["test/cucumber/*.js", "../../../../test/L3-conformance/glv-compat.ts"],
+});
+console.log(r.stdout);
+'
 ```
+
+A standalone host is still available if you want to point an external client at it —
+`bun run test/L3-conformance/conformance-server.ts` binds an **ephemeral** port on loopback
+and prints it.
 
 **The live number lives in `l3-state.json`** (`passing` = `passed.length`), which the
 ratchet auto-records — treat that file, not this doc, as authoritative; the same record

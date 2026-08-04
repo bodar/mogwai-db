@@ -1,8 +1,7 @@
 // L3 conformance host: the SAME shared stack the production Bun server runs
 // (`application` over a `BunGraphManager`), just with the reference toy graphs
-// pre-seeded. The official cucumber suite connects to one URL
-// (http://localhost:45940/gremlin) and selects a graph by the traversal-source
-// name in the request `g` field:
+// pre-seeded. The official cucumber suite talks to ONE endpoint and selects a graph
+// by the traversal-source name in the request `g` field:
 //
 //   modern -> gmodern   crew -> gcrew   (empty/other -> auto-created empty)
 //
@@ -89,8 +88,14 @@ const SEEDS: Record<string, Seed> = {
 };
 
 /**
- * Start the host, seeding `graphs` (default: ALL of SEEDS — what the official cucumber runner
- * needs, since a scenario may select any reference graph).
+ * Build the host as a plain `fetch` HANDLER — a `(Request) => Promise<Response>` — seeding `graphs`
+ * (default: ALL of SEEDS — what the official cucumber runner needs, since a scenario may select any
+ * reference graph).
+ *
+ * **The handler, not a listening socket, is the real interface.** Bun's `Bun.serve` and a Cloudflare
+ * Worker both take exactly this shape, so a caller that holds the handler can drive the whole stack
+ * with no TCP at all — which is how L3 runs (`test/support/in-memory-transport.ts`). Binding a port
+ * is one CALLER's choice, and `startConformanceServer` below is that caller.
  *
  * Seeding used to be the whole startup cost, dominated by ONE graph: ggrateful was 8,857 write
  * traversals ≈ 4.4s of a ≈5.0s total, because a seed ran one parse→compile→execute per vertex/edge.
@@ -100,7 +105,7 @@ const SEEDS: Record<string, Seed> = {
  * Naming the graphs you need is still worth doing: it is the honest statement of the fixture a test
  * depends on. It is no longer load-bearing for the timeout.
  */
-export async function startConformanceServer(port = 45940, graphs: readonly string[] = Object.keys(SEEDS)) {
+export async function buildConformanceApp(graphs: readonly string[] = Object.keys(SEEDS)) {
   // The conformance host emulates the REFERENCE provider exactly: only the tinker.* / --list
   // services, NOT our mogwai.* extensions. The official g_call / g_callXlistX scenarios assert
   // --list returns exactly the reference set, so registering our federated service (which --list
@@ -139,18 +144,21 @@ export async function startConformanceServer(port = 45940, graphs: readonly stri
   );
   const log = (e: { ok: boolean; error?: string }) => process.stdout.write(progressMark(e, expected));
   const app = application({ manager: served, log });
-  // LOOPBACK ONLY, and that is the fix for a real flake rather than a hardening gesture.
-  //
-  // 45940 is not ours to choose — the GLV's `test/helper.js` hard-codes `http://localhost:45940`
-  // (`patches/upstream/tinkerpop-02-cucumber-port-env-override.patch` is the fix we owe them) — and it
-  // sits INSIDE Linux's ephemeral range (`ip_local_port_range` starts at 32768). So any outbound
-  // connection on the host can be assigned 45940 as its SOURCE port, and a wildcard `bind(0.0.0.0:45940)`
-  // then fails `EADDRINUSE` even though nothing is listening. Measured: one long-lived HTTPS keepalive
-  // bound to `10.0.0.219:45940` took the whole conformance suite red, with `ss -ltn` showing the port
-  // free. Binding the LOOPBACK address does not collide with a socket bound to the LAN address, and
-  // `localhost` is exactly where the runner connects — so this is both narrower and more available.
-  // It also stops a fixture graph being reachable from the network, which it never should have been.
-  return Bun.serve({ port, hostname: '127.0.0.1', fetch: app.router });
+  return { fetch: app.router as (req: Request) => Promise<Response>, manager, served };
+}
+
+/**
+ * Bind {@link buildConformanceApp} to a TCP port. Used by the in-repo mini-L3
+ * (`conformance.test.ts`, which drives the packaged client through a real socket) and by
+ * `import.meta.main` below for a manual host. **L3 itself no longer needs this** — it holds the
+ * handler directly.
+ */
+export async function startConformanceServer(port = 0, graphs: readonly string[] = Object.keys(SEEDS)) {
+  const app = await buildConformanceApp(graphs);
+  // Port 0 (an OS-assigned ephemeral port) and LOOPBACK, both by default: no caller needs a
+  // predictable port, so there is no fixed one to collide over, and a fixture graph should never be
+  // reachable from the network. `import.meta.main` prints whichever port it got.
+  return Bun.serve({ port, hostname: '127.0.0.1', fetch: app.fetch });
 }
 
 if (import.meta.main) {

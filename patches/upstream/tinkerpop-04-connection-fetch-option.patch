@@ -1,0 +1,34 @@
+diff --git a/gremlin-js/gremlin-javascript/lib/driver/connection.ts b/gremlin-js/gremlin-javascript/lib/driver/connection.ts
+index 68f477d081..f666c2e356 100644
+--- a/gremlin-js/gremlin-javascript/lib/driver/connection.ts
++++ b/gremlin-js/gremlin-javascript/lib/driver/connection.ts
+@@ -74,6 +74,17 @@ export type ConnectionOptions = {
+   batchSize?: number;
+   /** Connection-level default for `bulkResults`, applied to every request unless overridden per-request. Defaults to `false`. */
+   bulkResults?: boolean;
++  /**
++   * The `fetch` implementation used to issue requests. Defaults to the platform default (undici's
++   * `fetch` on Node, the global `fetch` in a browser).
++   *
++   * Supplying one lets a caller drive the client without a network: a Node/Bun server handler and a
++   * service-worker-style handler both have the shape `(Request) => Promise<Response>`, so an
++   * embedder that already owns its server can hand that handler over directly and the client will
++   * never open a socket. That is how a cucumber suite can be run in the SAME process as the server
++   * under test, which removes the fixed-port requirement entirely.
++   */
++  fetch?: typeof globalThis.fetch;
+   /** An optional logger (a logger object or a callback). Logging is disabled when unset. */
+   logger?: Logger;
+   interceptors?: RequestInterceptor | RequestInterceptor[];
+@@ -322,7 +333,10 @@ export default class Connection extends EventEmitter {
+ 
+     this._log('debug', `Sending ${httpRequest.method} request to ${httpRequest.url}`);
+ 
+-    return httpFetch.fetch(httpRequest.url, {
++    // `options.fetch` wins when supplied; otherwise the holder is read at CALL time, which is what
++    // lets a test swap the platform default.
++    const doFetch = this.options.fetch ?? httpFetch.fetch;
++    return doFetch(httpRequest.url, {
+       method: httpRequest.method,
+       headers: httpRequest.headers,
+       body: httpRequest.body,

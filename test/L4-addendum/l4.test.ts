@@ -3,19 +3,29 @@
 // official corpus doesn't cover. Each is a combination we implemented for combinatorial
 // completeness; @gap:<area> tags the family for a possible gremlin-test PR (the give-back).
 //
-// Unlike the official cucumber harness — which binds each scenario NAME to a pre-generated
-// traversal in a vendored `gremlin.js` — L4 runs the scenario's OWN embedded Gremlin STRING
-// straight through our native stack: parse → compile → SQLite → frame → GraphBinary, then
-// decode the response with the real `gremlin` client `ioc` (so our extended serializers —
-// BigDecimal/Char/Duration + vertex/edge props — are exercised end-to-end, both directions).
-// The expected `| result |` table is parsed in TinkerPop's typed notation (d[32].i / d[1].l /
-// l[…] / null). Every scenario must pass (these are OURS); a failure is named with its diff.
+// The features are read by the REAL Gherkin parser (./read-features.ts — cucumber's own, compiled to
+// PICKLES so `Background` and `Scenario Outline` work), which replaced a hand-rolled regex reader.
 //
-// Add a scenario: drop it into a *.feature — no code change here. Because they are
-// real Gherkin, the @gap set harvests directly into an upstream PR.
+// The RUNNER is ours, and has to be. Upstream's step definitions look like they would fit — L4
+// features are in upstream's exact format — but `feature-steps.js` implements
+// `Given('the traversal of', …)` by IGNORING the docstring and looking the scenario NAME up in a
+// pre-generated `gremlin.js` map. Our scenario names are not in that map, so its Given cannot run
+// our traversals. L4 therefore executes the scenario's OWN embedded Gremlin STRING straight through
+// our native stack: parse → compile → SQLite → frame → GraphBinary, then decode the response with
+// the real `gremlin` client `ioc` (so our extended serializers — BigDecimal/Char/Duration +
+// vertex/edge props — are exercised end-to-end, both directions). The expected `| result |` table is
+// read in TinkerPop's typed notation (d[32].i / d[1].l / l[…] / null). Every scenario must pass
+// (these are OURS); a failure is named with its diff.
+//
+// That split is also why each scenario is its own `bun test` rather than a cucumber run: the
+// assertions are ours either way, and this way a failure reports under the scenario's name with a
+// real diff.
+//
+// Add a scenario: drop it into a *.feature — no code change here. Because they are real Gherkin,
+// parsed by the real parser, the @gap set harvests directly into an upstream PR.
 
 import { test, expect, describe } from 'bun:test';
-import { readdirSync, readFileSync } from 'node:fs';
+import { loadScenarios } from './read-features.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
@@ -52,12 +62,10 @@ const SEARCH_SEED = [
   'g.addV("doc").property("title", "chapter two").property("addr", ["city": "london", "zone": "central"])',
 ];
 
-const ADDENDUM = new URL('./', import.meta.url).pathname;
-
-/** `assertion` mirrors TinkerPop's own Then-steps, because L4 features are REAL Gherkin in the
- *  official format — that is what lets a @gap family harvest straight into a gremlin-test PR, and
- *  it is why the reader grows to match upstream rather than the features being rewritten to match
- *  the reader.
+/** The `.feature` files are read by the REAL Gherkin parser — `Scenario` and the assertion
+ *  vocabulary live in ./read-features.ts, which maps a cucumber PICKLE onto what this file runs.
+ *
+ *  What each assertion pins, since this is where they are APPLIED:
  *    unordered/ordered — compare the whole multiset against the table
  *    empty             — no results
  *    count             — only the cardinality is pinned
@@ -67,114 +75,7 @@ const ADDENDUM = new URL('./', import.meta.url).pathname;
  *                        constrains. A refusal is a real answer here (a third of the write-path
  *                        messages belong to scenarios that pass BECAUSE they assert the throw), so
  *                        it needs to be pinnable without leaving the .feature format. */
-type Assertion = 'unordered' | 'ordered' | 'empty' | 'count' | 'of' | 'error';
 
-interface Scenario {
-  feature: string; name: string; graph: string;
-  /** `And the graph initializer of` — write traversals run before the scenario's own. */
-  initializer: string | null;
-  gremlin: string;
-  assertion: Assertion;
-  /** `Then the result should have a count of N`. */
-  count: number | null;
-  /** `Then the traversal will raise an error [with message <containing|starting|ending> text of "…"]`.
-   *  Upstream compares case-INSENSITIVELY, and so do we. `null` text = any error will do. */
-  error: { comparison: 'containing' | 'starting' | 'ending'; text: string } | null;
-  /**
-   * `@RelIR` — this scenario's ANSWER needs the RelIR spine, and the legacy one refuses it.
-   *
-   * Not a coverage marker and not a skip in disguise: it says the two routes DIVERGE and which way
-   * round, which is the one thing `test:legacy-spine` (the differential with RelIR off) must be told
-   * or it reads a deliberate improvement as a regression. Every tag here is a write shape the legacy
-   * driver cannot re-enter, so the tag disappears with §8's `runWriteChainFull` rather than
-   * accumulating. A scenario carrying it must never be a shape legacy answers DIFFERENTLY — that is
-   * a defect, and the census is what sees it.
-   */
-  relirOnly: boolean;
-  expected: string[];
-  /** `And the graph should return N for count of "<traversal>"` — upstream's own Then-step for
-   *  asserting GRAPH STATE after a write, which is the only thing that can catch a write that
-   *  ran and left the graph wrong. Several per scenario; each runs against the post-traversal
-   *  store. Without it a write scenario can only pin what the write RETURNED, and the returned
-   *  element is a consequence of the mutation rather than the mutation itself (write-path plan,
-   *  trap 4). */
-  graphChecks: { gremlin: string; count: number }[];
-}
-
-// A minimal Gherkin reader for our own feature files: name + `Given the X graph` + the
-// `the traversal of """…"""` docstring + the `| result |` table. Deliberately tiny — it only
-// has to read the subset we author, not the full Gherkin grammar.
-function parseFeature(featureName: string, text: string): Scenario[] {
-  const lines = text.split('\n');
-  const out: Scenario[] = [];
-  // Tags accumulate onto the next Scenario (or onto the Feature, in which case they apply to all).
-  let featureTags = '', pending = '';
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i].trim();
-    if (raw.startsWith('@')) { pending += raw + ' '; continue; }
-    if (raw.startsWith('Feature:')) { featureTags = pending; pending = ''; continue; }
-    const m = raw.match(/^Scenario:\s*(.+)$/);
-    if (!m) { if (raw) pending = ''; continue; }
-    const tags = featureTags + pending; pending = '';
-    const s: Scenario = {
-      feature: featureName, name: m[1].trim(), graph: 'empty',
-      initializer: null, gremlin: '', assertion: 'unordered', count: null, expected: [], graphChecks: [], error: null,
-      relirOnly: /@RelIR\b/.test(tags),
-    };
-    // The routing the official runner does (`feature-steps.js`): a @MultiLabel scenario's EMPTY
-    // graph is the multi-label source, not the plain one. Mirrored here so a scenario can be
-    // copied in with its `Given the empty graph` intact.
-    const multiLabel = /@MultiLabel\b/.test(tags);
-    // Which docstring we are reading — a scenario may carry an initializer AND a traversal, so the
-    // preceding step line decides, not the order of appearance.
-    let docTarget: 'gremlin' | 'initializer' = 'gremlin';
-    for (i++; i < lines.length && !/^\s*Scenario:/.test(lines[i]); i++) {
-      const l = lines[i].trim();
-      // A TAG here belongs to the NEXT scenario, and this loop is the only reader that reaches it —
-      // so it has to hand it on. Without this every scenario-level tag but the FIRST file's-first
-      // one was silently dropped: the outer loop never sees these lines, and `pending` arrived
-      // empty. Nothing noticed because `@gap:` is documentation and `@MultiLabel` is a FEATURE tag,
-      // read before any scenario; a tag that CHANGES behaviour is what made it visible.
-      if (l.startsWith('@')) { pending += l + ' '; continue; }
-      const g = l.match(/^(?:Given|And)\s+(?:the|an?)\s+(\w+)\s+graph$/);
-      if (g) s.graph = multiLabel && g[1] === 'empty' ? 'multilabel' : g[1];
-      if (/^(?:Given|And)\s+the\s+graph\s+initializer\s+of$/.test(l)) docTarget = 'initializer';
-      else if (/^(?:Given|And)\s+the\s+traversal\s+of$/.test(l)) docTarget = 'gremlin';
-      // Upstream writes the traversal as a double-quoted string with its own quotes backslash-
-      // escaped, so unescaping is part of reading the step, not a courtesy.
-      const gc = l.match(/^(?:Then|And)\s+the\s+graph\s+should\s+return\s+(\d+)\s+for\s+count\s+of\s+"(.*)"$/);
-      if (gc) { s.graphChecks.push({ count: Number(gc[1]), gremlin: gc[2].replace(/\\"/g, '"') }); continue; }
-      const err = l.match(/^(?:Then|And)\s+the\s+traversal\s+will\s+raise\s+an\s+error(?:\s+with\s+message\s+(containing|starting|ending)\s+text\s+of\s+"(.*)")?$/);
-      if (err) {
-        s.assertion = 'error';
-        s.error = err[1] ? { comparison: err[1] as 'containing' | 'starting' | 'ending', text: err[2].replace(/\\"/g, '"') } : null;
-        continue;
-      }
-      const cnt = l.match(/^(?:Then|And)\s+the\s+result\s+should\s+have\s+a\s+count\s+of\s+(\d+)$/);
-      if (cnt) { s.assertion = 'count'; s.count = Number(cnt[1]); }
-      else if (/^(?:Then|And)\s+the\s+result\s+should\s+be\s+unordered$/.test(l)) s.assertion = 'unordered';
-      else if (/^(?:Then|And)\s+the\s+result\s+should\s+be\s+ordered$/.test(l)) s.assertion = 'ordered';
-      else if (/^(?:Then|And)\s+the\s+result\s+should\s+be\s+empty$/.test(l)) s.assertion = 'empty';
-      // `should be of` may FOLLOW a count (upstream pairs them), so it wins the assertion slot
-      // while `count` survives as an extra check.
-      else if (/^(?:Then|And)\s+the\s+result\s+should\s+be\s+of$/.test(l)) s.assertion = 'of';
-      // Fail loudly on a Then we do not implement. Silently ignoring one used to mean an
-      // unrecognized assertion compared against an EMPTY table — a test that cannot fail.
-      else if (/^Then\s/.test(l)) throw new Error(`${featureName}: unsupported step "${l}" (extend parseFeature)`);
-      if (l === '"""') {
-        const body: string[] = [];
-        for (i++; i < lines.length && lines[i].trim() !== '"""'; i++) body.push(lines[i].trim());
-        if (docTarget === 'initializer') s.initializer = body.join(' '); else s.gremlin = body.join(' ');
-      } else if (l.startsWith('|')) {
-        const cell = l.replace(/^\|/, '').replace(/\|$/, '').trim();
-        if (cell !== 'result') s.expected.push(cell);
-      }
-    }
-    i--; // the inner loop stepped onto the next Scenario line; let the outer loop see it
-    out.push(s);
-  }
-  return out;
-}
 
 // TinkerPop typed-result notation → the SAME canonical key `canon()` produces for the decoded
 // value, so expected and actual compare directly. Numbers: d[n].i/.d/.f/.b/.s → number,
@@ -316,12 +217,6 @@ function elementRefs(store: GraphStore): Map<string, unknown> {
     'SELECT vp.value AS name, vp.node AS id FROM vertex_properties vp WHERE vp.key = ?', ['name']))
     refs.set(`v[${String(r.name)}].id`, r.id);
   return refs;
-}
-
-function loadScenarios(): Scenario[] {
-  return readdirSync(ADDENDUM)
-    .filter((f) => f.endsWith('.feature'))
-    .flatMap((f) => parseFeature(f, readFileSync(ADDENDUM + f, 'utf8')));
 }
 
 describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary)', () => {

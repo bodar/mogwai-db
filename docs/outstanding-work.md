@@ -640,8 +640,10 @@ deferral clusters in 5c instead.
 - **Land the TinkerPop fork's upstream payloads** (fork at `danielbodart/tinkerpop`): (1) `toNumeric`
   cannot produce a BigInteger — branch written and pushed, **not yet a PR**; (2) the generated cucumber
   `gremlin.js` references an undefined `uuid`, killing every UUID scenario — patch ready
-  (`patches/upstream/tinkerpop-01`); (3) the cucumber port is hard-coded, the intermittent CI conflict
-  with our conformance host — patch ready (`tinkerpop-02`); (4) Bun's `undici` shim lacks `Agent.close()`/`destroy()` —
+  (`patches/upstream/tinkerpop-01`); (3) the client cannot be given a `fetch`, so a cucumber run needs a
+  socket and therefore a fixed port — patch ready (`tinkerpop-04`), and it supersedes the withdrawn
+  port-override patch (`tinkerpop-02`), since L3 now runs in-process and binds nothing;
+  (4) Bun's `undici` shim lacks `Agent.close()`/`destroy()` —
   a BUN bug, worked around in `test/support/undici-shim.ts`, worth reporting. Do NOT "fix" (4) by making
   the client call `close?.()` — that skips real pool teardown. The fork is also the intended home for the
   non-conformant-client UUID/ISO-date shim (**opt-in**, never default).
