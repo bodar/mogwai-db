@@ -1522,11 +1522,39 @@ spelling, which exposed that RelIR emits `COUNT(*)` where legacy emits `SUM(bulk
 that compares them**: reading the ambient default made one assertion mean "whatever this run is
 configured for", and the differential failed it immediately.
 
-**What remains of the family:** `group()` (41), whose value side with no `by()` is a LIST OF ELEMENTS per
-key — so `valOf` is `{kind: 'list', of: 'elem'}` and the materializer expands each pair. Then
-`group().by(k).by(<reducer>)`, which is a scalar value and lands with the reducer vocabulary. Then the
-mid-chain consumers (`unfold()` to entries, `select(Column.keys/values)`), which is what makes the map
-arm re-enterable and what `valueMap`'s 28 mid-chain cases need.
+**LANDED — `group()`, the family's second arm** (+3, 32.3%; `group*` 41 → 35, the map shape 60 → 54). And
+the prediction above was WRONG in the useful direction, so it is corrected in place rather than deleted:
+the value side is indeed a list of elements per key, but `valOf` did NOT become `{kind: 'list', of: 'elem'}`
+and nothing expands per pair. **The obstacle was never the SQL — it was the WIRE VOCABULARY.**
+
+`materialize.ts:191`'s throw existed because the framer's self-describing tree had no arm for an element,
+so an element inside a collection needed a descriptor threaded to every position (`ListOf.elem`,
+`MapOf.elem`) and expansion SQL written per position. That is the fourteen-hand-rolled-payloads shape one
+layer up. The fix is to name the arm ONCE, at the tree: `FrameNode` gains `{t: 'vertex' | 'edge'; v:
+<payload>}`, `frameTypedNode` routes it to the same `rowVertex`/`rowEdge` the top-level element shapes use,
+and `elementNode` (`element.ts`) is its SQL half — the tuple `elementPayload` builds as columns, built
+instead as that node, correlated on a rowid. A list of elements, a map whose value is a list of elements
+and a map whose KEY is an element are then ONE rule at three depths, and `mapPayload` needs no element arm.
+
+Two things fall out that are worth keeping:
+
+- **`FrameNode` is a SUPERSET of `ValueNode`, not a widened one.** `ValueNode` is the STORED vocabulary, so
+  `graphsonNode` and the write path stay closed over exactly what a property value can hold; an element
+  cannot be stored. Widening would have handed those walkers an arm they can never receive and could not
+  encode — `tsc` said so on the first attempt, which is the cheap version of learning it.
+- **A group's MEMBER ORDER is stated, not inherited.** The members ride inside one collected traverser's
+  buffer, so their order is fully observable, and `json_group_array` takes rows in scan order. Emission
+  position where the chain carries one, element id otherwise. That is why the traverser column and the
+  encounter channel are carried into the group's scope for `group()` and NOT for `groupCount()`: state
+  nothing reads is what the channel obligations exist to prevent, one layer down.
+
+**What remains of the family:** `group()`'s remaining 35 are all either the side-effect label form
+(`group('a')`, which needs the side-effect substrate) or a value `by()`. Of those,
+`group().by(k).by(<direct key>)` is a list of TYPED VALUES per key — the same `members` aggregate with
+`byNode`'s second slot as the member — while `by(<reducer>)` is a scalar value and lands with the reducer
+vocabulary, and `by(<traversal>)` needs the child seam. Then the mid-chain consumers (`unfold()` to
+entries, `select(Column.keys/values)`), which is what makes the map arm re-enterable and what `valueMap`'s
+28 mid-chain cases need.
 
 **The cost estimate that lost this its "cheap" label, recorded so it is not re-made:** 43 of the map
 shape's 64 blockers are terminal, and that was briefly read as "43 cases behind a framing seam". It is
@@ -1602,8 +1630,8 @@ partly present. The state column below now says which HALF exists.
 |---|---|---|---|
 | **element** | id + labels JSON aggregate + ordered property bag | `Aggregate`, `json-object`, `json-array`, correlated `Scalar` — all in the node set | **LANDED** `debf46f` — `element.ts`. `AggFn` gained `json_group_object`; the bag's entry order is now the aggregate's own `ORDER BY` rather than a subquery's, which legacy relies on surviving a boundary it does not |
 | scalar / value | `SELECT v[, vt]` | `Project` | **LANDED** `e4dc296` — `scalarPayload` (`lower.ts`, beside the scalar vocabulary). `result` is the total three-way, and the `'number'` arm IS reachable — see the trap below |
-| list | `SELECT json(list)` | `Aggregate` + `json_group_array` | **LANDED** `e4dc296` — `listPayload` (`list.ts`). Scalar-membered (bare/typed/set) and NESTED, the latter rebuilt a level at a time through the module's own correlated member frame. An ELEMENT leaf DECLINES: nothing produces one until `fold()` over elements lands, and `element.ts` is the expansion when it does |
-| map | `SELECT json(map)` | as above | **LANDED** `e4dc296` — `mapPayload` (`map.ts`). An ELEMENT side declines, which is where `group()` picks it up |
+| list | `SELECT json(list)` | `Aggregate` + `json_group_array` | **LANDED** `e4dc296` — `listPayload` (`list.ts`). Scalar-membered (bare/typed/set) and NESTED, the latter rebuilt a level at a time through the module's own correlated member frame. An ELEMENT leaf declines only because nothing PRODUCES one yet (`fold()` over elements); the member encoding itself exists — `elementNode`, `53853e3` — so that arm is one `of.kind` case, not a substrate |
+| map | `SELECT json(map)` | as above | **LANDED** `e4dc296` — `mapPayload` (`map.ts`). An ELEMENT side declines and never needed an arm: since `53853e3` an element is a MEMBER of the typed tree, so a map holding one is `json(map)` like any other (§10·9's `group()` record) |
 | property | `vpid/owner/pk/pv/pvtype/pmeta` | `Scan` + `Project` | needs the property shape anyway |
 | record | one wide row, heterogeneous fields | `Project` + child joins | needs `project()`/`select()` |
 | mapEntry | `mk`/`mv` per row | `Explode` | arrives with map re-entry |
