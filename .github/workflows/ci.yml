@@ -38,13 +38,34 @@ jobs:
             bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}-
             bun-${{ runner.os }}-
 
-      # mise installs the pinned bun, then runs the build graph (test + build).
+      # ── the submodule root, in two phases so the client build can be cached ────────────────────
       #
-      # MOGWAI_SKIP_REFERENCE: this runner compiles and tests, and never opens a source citation, so
+      # `submodule` is the SERIAL ROOT of the task graph — `install` waits on it and all eight tasks
+      # that fan out wait on `install` — so a second removed here is a second off the whole run.
+      # Measured on trunk: 16.8s of a 93.7s run, of which the gremlin client build is ~7.7s (antlr
+      # generate + duel's dual ESM/CJS emit) for an artifact that is a pure function of the pin.
+      #
+      # ORDER IS LOAD-BEARING. A fresh provision does `rm -rf vendor/tinkerpop` before cloning, so a
+      # cache restored BEFORE the clone is deleted by it. Hence: clone first (`--submodules-only`
+      # stops before the install/build/link), restore the build into the cloned tree, then let
+      # `mise run ci` re-enter the `submodule` task — which finds the checkout already at the pin,
+      # and skips the build because build/.mogwai-built-from matches. That stamp is the existing
+      # guard, not something added for the cache: it lives INSIDE build/, so a build cannot outlive
+      # the artifact it certifies, and a pin bump misses the key AND fails the stamp check.
+      #
+      # MOGWAI_SKIP_REFERENCE: this runner compiles and tests and never opens a source citation, so
       # it does not provision the two cited-never-executed checkouts (gremlin-core, vendor/calcite).
-      # See scripts/init-submodule.sh for what that costs. `submodule` is the SERIAL ROOT of the task
-      # graph — everything waits on it — so seconds removed here are seconds off the whole run, which
-      # is not true of the eight tasks that fan out after it.
+      # See scripts/init-submodule.sh for what that costs. Set on both steps — the second invocation
+      # re-asserts the sparse set, so omitting it there would fetch gremlin-core back.
+      - run: mise run submodule -- --submodules-only
+        env:
+          MOGWAI_SKIP_REFERENCE: "1"
+      - uses: actions/cache@v6
+        with:
+          path: vendor/tinkerpop/gremlin-js/gremlin-javascript/build
+          key: gremlin-client-${{ runner.os }}-${{ steps.pin.outputs.sha }}
+
+      # mise runs the build graph (test + build).
       - run: mise run ci
         env:
           MOGWAI_SKIP_REFERENCE: "1"
