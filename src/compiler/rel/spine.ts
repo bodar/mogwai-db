@@ -15,8 +15,20 @@ import { lowerToRel } from './lower.ts';
  *
  * `lower.ts` answers whether the chain is covered; this module is what makes a covered chain a
  * finished read, and the split matters because the two halves have different rules. Lowering is
- * pure and must never throw for uncovered vocabulary; this side crosses into the framing layer,
- * which is legacy on purpose and stays that way (§2 — shape is resolved above RelIR).
+ * pure and must never throw for uncovered vocabulary; this side crosses out of the algebra.
+ *
+ * ## THIS FILE IS SCAFFOLDING. Both halves of it have an end date (§10·4, §10·10)
+ *
+ * It holds a ROUTER (`compileViaRel` — chooses between two spines, so it dies when there is one) and a
+ * VOCABULARY BRIDGE (`layoutOf`/`LAYOUT_FIELD` — translates the channel core into the legacy
+ * `TraverserLayout`, which exists only because two vocabularies do). Nothing here is permanent, and the
+ * name is the harness's rather than the thing's — kept only until the deletion lands, because renaming
+ * scaffolding is churn.
+ *
+ * **What it does today is NOT the target arrangement.** It hands the finished relation to legacy's
+ * materializer, which composes the payload SELECT — so RelIR does not yet produce the whole query. §10·10
+ * moves that projection into `src/compiler/rel/` and makes `Shape` the boundary, after which this file is
+ * a router and `execute.ts`'s byte framers are the only per-shape code left outside the algebra.
  *
  * ## The RelIR plan is ONE RELATION to the framing layer
  *
@@ -28,9 +40,12 @@ import { lowerToRel } from './lower.ts';
  *   string is what stops a second bind-ordering authority existing.
  * - **CTE-versus-inline stays RelIR's decision** (§4.6, the `name` pass), instead of leaking into
  *   the framing `Query`'s `c0…cN` namespace where the two naming schemes would have to agree.
- * - **no framing code is duplicated.** The element payload projection, its label and property
- *   joins and its `Shape` are reached through the ordinary lowering loop with zero steps left, so
- *   this route frames identically to the legacy one BY CONSTRUCTION rather than by comparison.
+ * - **no payload projection is duplicated — TODAY, and that is the interim, not the design.** The
+ *   element payload, its label and property joins and its `Shape` are reached through the ordinary
+ *   lowering loop with zero steps left, so this route frames identically to the legacy one by
+ *   construction. It also means the payload SELECT is composed by legacy and that RelIR is not yet
+ *   producing the whole query — which is what §10·10 corrects, by moving that projection into the
+ *   algebra's own lowering and leaving only `execute.ts`'s byte framers per-shape.
  *
  * What it is NOT is an opaque escape node: nothing legacy enters a `Rel`. The traffic is one-way —
  * a finished RelIR relation is consumed by framing — which is the direction §10·4 permits.
@@ -170,9 +185,9 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
   // do not have. If it ever fires, the census's per-query spine ratchet is what reports it.
   if (cfLimitViolation(compiled.sql, compiled.binds)) return null;
   // A traversal that WROTE frames its rows through exactly this projection — the effects ran first,
-  // and the framing read is the program's last step. That is the whole of §2 holding under a write:
-  // shape is resolved above RelIR either way, so the element projection here is the same code a pure
-  // read reaches, not a write-shaped copy of it.
+  // and the framing read is the program's last step. A write reaches the SAME projection a pure read
+  // does rather than a write-shaped copy, and that property is what must survive §10·10 moving where
+  // the projection is built.
   return effects.length
     ? { kind: 'program', program: lowered.plan, tail: { sql: compiled.sql, binds: compiled.binds }, shape: compiled.shape, spine: 'rel' }
     : { ...compiled, spine: 'rel' };

@@ -50,24 +50,30 @@ import { LabelCardinality } from '../../api.ts';
  *
  * ## What this module does NOT do
  *
- * **Framing.** Gremlin shape is resolved above RelIR and rides to the wire as `Compiled.shape`
- * (§2), so this returns a RELATION plus the channel/layout facts the framing layer needs, and
- * `spine.ts` hands that to the existing per-shape framing. Re-encoding the element payload
- * projection in RelIR would be §7's named risk ("re-encoding, not simplification") for no gain: the
- * shape-interpreting class stays per-shape forever and correctly so.
+ * **BYTE FRAMING.** `(rows, Shape) → Buffer[]` is `execute.ts`'s, contains no SQL, and stays per-shape
+ * forever. So this returns a RELATION plus the `RelFraming` that says what the relation holds.
+ *
+ * **The PAYLOAD PROJECTION is a different thing and is on its way IN, not permanently out.** Today
+ * `spine.ts` hands the relation to legacy's materializer, which composes the payload SELECT — so the
+ * element payload, the list/map blob reads and their `Shape` choice are still built outside the algebra.
+ * §10·10 of the build plan corrects that: `materialize.ts` produces SQL, so it is a query producer and
+ * therefore this layer's work, and `Shape` is the boundary. `list.ts` and `map.ts` already do it the
+ * intended way for their two shapes; the element payload is the keystone that is left.
  */
 
 /**
  * WHAT THE FRAMING LAYER MUST BUILD over the result relation — the shape half of a lowering.
  *
- * Gremlin shape is resolved ABOVE RelIR and rides to the wire as `Compiled.shape` (§2), so a
- * lowering hands back a relation plus the minimum the framing layer needs to pick its per-shape
- * projection. This union is that minimum, and it is deliberately a union rather than a widened
- * record: an element stream has no scalar type and a scalar stream has no element kind, and
- * pretending otherwise is how a shape vocabulary starts leaking into the algebra.
+ * Shape does not enter the NODE SET (§2) — but this LOWERING both knows it and says so, which is what
+ * `RelFraming` is. A lowering hands back a relation plus the minimum needed to build that relation's
+ * payload projection and pick its `Shape`. Deliberately a union rather than a widened record: an element
+ * stream has no scalar type and a scalar stream has no element kind, and pretending otherwise is how a
+ * shape vocabulary starts leaking into `src/rel/`, which is the boundary that matters.
  *
- * It grows one arm per stream kind the spine learns, and `spine.ts` switches on it TOTALLY — the
- * shape-interpreting class stays per-shape forever and correctly so (§6, Phase 4).
+ * It grows one arm per stream kind the spine learns, and every consumer switches on it TOTALLY, so a
+ * shape this route learns to produce is a compile error until its projection and its `Shape` are
+ * declared. Per §10·10 that projection belongs here rather than in legacy's materializer; two arms
+ * (`list`, `map`) are already built that way and the rest follow.
  */
 export type RelFraming =
   | { readonly kind: 'elements'; readonly elem: Elem }

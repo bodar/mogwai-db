@@ -116,7 +116,7 @@ export const grouped = (rows: readonly any[]): Record<string, unknown> => {
  * The two spell the row differently and both are right. The legacy write closure returns its own
  * `{vertex: {id, labels, props}}` record; a RelIR program frames its result rows through the READ
  * element projection, so `label`/`props` arrive as exactly the JSON text `g.V()` returns and the wire
- * layer serializes the two identically (that is §2 — shape resolved above RelIR).
+ * layer serializes the two identically — a write reaches the same payload projection a read does.
  *
  * A test that asserted one spelling was asserting the ROUTE: the day the step joined the RelIR spine
  * it failed, having found no defect. What these tests mean to assert is what was WRITTEN, so that is

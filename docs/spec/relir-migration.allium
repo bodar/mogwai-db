@@ -335,9 +335,11 @@ rule RouteToRelIR {
     @guidance
         -- A covered chain becomes a finished read by handing the whole program to the framing
         -- layer as ONE relation. Binds stay in one render, the CTE-or-inline decision stays with
-        -- the plan, and no framing code is duplicated: the element projection is reached through
-        -- the ordinary lowering loop with zero steps left, so this route frames identically to
-        -- the legacy one BY CONSTRUCTION rather than by comparison.
+        -- the plan, and no payload projection is duplicated TODAY: the element projection is
+        -- reached through the ordinary lowering loop with zero steps left, so this route frames
+        -- identically to the legacy one BY CONSTRUCTION. That also means the payload SELECT is still
+        -- COMPOSED outside the algebra, so the new spine does not yet produce the whole query. Only
+        -- BYTE framing — rows plus a shape, no SQL — is permanently outside it.
         --
         -- The framing layer is told the carried state by ROLE, and that translation is total: a
         -- role the lowering learns to carry cannot reach framing until the seam knows how to

@@ -250,6 +250,15 @@ criterion: `PARTITION BY …, p.c.v`. Three classes follow — row-algebraic (on
 current-object (needs a named authority generalising `foldMember`, `barrier.ts:54`, allowed to
 return `null`), and shape-interpreting (per-shape forever, correctly).
 
+**CORRECTION (2026-08-04): "shape-interpreting" is TWO classes, and treating it as one drew the RelIR
+migration's boundary in the wrong place.** A shape's PAYLOAD PROJECTION composes SQL (`materialize.ts`'s
+`materializeRoot` is `readCompiled(query, tail, shape)`), so it is a query producer and belongs to whatever
+layer owns query production — RelIR, by that migration's decision #3. Its BYTE FRAMING (`(rows, Shape) →
+Buffer[]`, `execute.ts`) contains no SQL and is the part that is genuinely per-shape forever. `Shape` is
+the boundary between them and already exists. See §10·10 of `docs/2026-08-01-relir-build-plan.md`; both
+halves are still per-shape, so the classification above is unchanged for every purpose except *who owns
+which*.
+
 One live mis-execution risk to design against: a naive list `dedup()` over blob equality is unsound,
 because `foldMember` makes the typed-`{t,v}` vs bare member encoding a **runtime, per-relation**
 decision — two logically equal lists from different producers can be different JSONB blobs.

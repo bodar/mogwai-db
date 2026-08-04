@@ -102,10 +102,15 @@ Three properties of the core that must not be lost:
   framing layer's business; reproducing that algebra in the core would be the Gremlin leak the module
   exists to prevent. `test/channel-contracts.test.ts` ties the two.
 
-**Shape does not enter RelIR at all.** RelIR sits downstream of lowering, so Gremlin shape is already
-resolved and rides to the wire as `Compiled.shape`. **If a RelIR node ever acquires a
+**Shape does not enter the NODE SET.** **If a `src/rel/` node ever acquires a
 `kind: 'scalar' | 'element' | …` field, the layer has failed and should be reverted.** `ChannelRole` is
 not that field: a role is per-COLUMN carried-state bookkeeping, never the stream's Gremlin type.
+
+**This is a claim about `src/rel/`, not about who builds the payload projection.** The LOWERING
+(`src/compiler/rel/`) both knows Gremlin shape and says so — `RelFraming` is declared there, and `list.ts`
+and `map.ts` build shape-specific SQL out of shape-free nodes. That is the intended arrangement, and it is
+why §10·10 can move the payload projection into `src/compiler/rel/` without touching this boundary: both
+the old home and the new one are outside `src/rel/`.
 
 ---
 
@@ -699,7 +704,8 @@ is really asking is whether a shared store SURVIVES, and only `kind === 'read'` 
 **FRAMING over a program LANDED with 2.3, and it is both answers at once.** `emitProgram` splits a
 plan into the steps that RUN and the relation that is LEFT; `spine.ts` frames that relation through the
 SAME element projection a pure read reaches, and the composed query rides as `Program.tail` — so shape
-stays resolved above RelIR (§2) and the wire layer still has no write vocabulary. A `drop()` has no
+needs no write vocabulary in the wire layer at all (§10·10 moves WHERE that projection is built, and
+changes nothing about a write reaching the same one as a read). A `drop()` has no
 relation left (its result IS its last statement), which is the `discard` arm.
 
 **AND THE THING THE PHASE IS FOR, MEASURED.** A write's statement count is a function of the PLAN,
@@ -978,9 +984,11 @@ pinned in L4; the 5 `until()`/`emit()` barrier traversals throw a deferral namin
 - **4.4** `recognize` (§4.7): fast paths become plan rewrites, which is what lets the FTS decline in §7
   be lifted.
 
-**The shape-interpreting class (materialization, framing, JSON construction) stays per-shape forever and
-correctly so.** Phase 4 is finished when the ROW-ALGEBRAIC class is gone from the shape tables — not
-when the shape tables are gone.
+**Only BYTE FRAMING stays legacy's per-shape and forever — `(rows, Shape) → Buffer[]`, which contains no
+SQL.** An earlier version of this line said "materialization, framing, JSON construction" and that
+conflation was wrong: `materialize.ts` composes a `q` SELECT, so it is a query producer and therefore
+RelIR's. **§10·10 corrects it and is the authority.** Phase 4 is finished when the ROW-ALGEBRAIC class is
+gone from the shape tables — not when the shape tables are gone.
 
 ---
 
@@ -1409,13 +1417,17 @@ framing layer" and is not — `group.ts` holds the barrier, the `by()` key compu
 of which are the ROW-ALGEBRAIC class §8 deletes. **New coverage would be taking a dependency on code
 whose removal is the exit criterion**, which is the migration running backwards.
 
-**The boundary is not "framing is legacy's" — it is `steps.length`.** §6's closing line already says the
-shape-INTERPRETING class (materialization, framing, JSON construction) stays per-shape forever; what this
-adds is the mechanism that keeps that honest. So growing a shape has exactly three parts and no fourth:
+**The boundary is `steps.length`, and that half of this decision stands.** No step is ever delegated, and
+that is what the parameter enforces. What this section ALSO claimed — that the materializer staying
+legacy's is the settled other half — is **CORRECTED BY §10·10**: `materialize.ts` builds SQL, so it is
+RelIR's, and only `execute.ts`'s byte framers are permanently legacy's. Read the two together; where they
+disagree, §10·10 wins. So growing a shape has exactly three parts and no fourth:
 
 1. RelIR builds the VALUE with its own nodes;
 2. a new `RelFraming` arm SAYS what the relation holds;
-3. `spine.ts` translates that arm into the corresponding `Stream`, and the existing materializer frames it.
+3. the arm is turned into `(sql, binds, Shape)` and `execute.ts` frames the rows. Today `spine.ts`
+   translates it into a legacy `Stream` and legacy's materializer builds that SQL — an INTERIM
+   arrangement §10·10 replaces, not the target.
 
 **The LIST shape is this pattern already done, and it is the template.** `{kind: 'list'; of: ListOf}` is
 the arm, `list.ts` builds `jsonb(COALESCE(json_group_array(<member> ORDER BY …), '[]'))`, and legacy's
@@ -1488,3 +1500,74 @@ shape's 64 blockers are terminal, and that was briefly read as "43 cases behind 
 not — under this decision the grouping is RelIR's own work, so the increment is list.ts-scale. The three
 candidate families are therefore closer in cost than the terminal/mid-chain split suggests, and
 dependency is what separates them.
+
+### 10·10 — the boundary is `Shape`, not the materializer. CORRECTS §6 and §10·9.
+
+**§6's closing line and §10·9 both drew the line in the wrong place, and this supersedes them.** They said
+the shape-interpreting class — "materialization, framing, JSON construction" — stays legacy's per-shape
+forever. Two of those three do. The middle one does not, and lumping them together was the error.
+
+**`materialize.ts` BUILDS SQL.** `materializeRoot` is `readCompiled(query, tail, shape)`: every
+`materialize*Root` composes a `q` SELECT and picks a `Shape`. That is a query producer, and by decision #3
+a query producer is RelIR's. What is genuinely permanent and genuinely not RelIR's business is the layer
+AFTER it: `execute.ts`'s framers, which take ROWS plus a `Shape` and yield GraphBinary with no SQL
+anywhere. **`Shape` is the real boundary, and it already exists.**
+
+So the three layers, named apart:
+
+| layer | what it does | whose |
+|---|---|---|
+| row algebra | movement, filter, aggregate, join | RelIR — decided |
+| **payload projection** | element id → labels JSON + property bag; the list/map/record blob assembly | **legacy today; RelIR's by this decision** |
+| byte framing | `(rows, Shape) → Buffer[]` | `execute.ts` — permanent, per-shape, correctly so |
+
+**§2 is UNAFFECTED and must not be weakened to accommodate this.** Its claim is about the NODE SET: a
+`src/rel/` node may never carry a `kind: 'scalar' | 'element' | …` field, and `src/rel/` may import
+nothing from `src/compiler/`. Both stay. The payload projection would be built in `src/compiler/rel/`,
+which already owns `RelFraming` and already knows Gremlin shape — the same side of the clean-room line as
+`list.ts` and `map.ts`, emitting the same shape-free nodes. Moving SQL construction between two modules
+that are both outside `src/rel/` is not a clean-room question at all.
+
+**THE ARGUMENT IS NOT PURITY — the current line is already binding, in three measured ways:**
+
+- **`LAYOUT_FIELD` declares `null` for `path`, `origin` and `branchOrder`, and THROWS.** RelIR is blocked
+  from carrying a path by the TRANSLATION, not by the algebra. The channel core can hold it; the seam
+  cannot express it.
+- **`materializeRootStream` throws for an `ElementStream`.** So for every covered element traversal —
+  most of today's 32% — legacy's `lowerSteps` builds the payload SQL after RelIR's relation. **RelIR does
+  not currently produce the whole query**, which is not what §5a's equivalence gate reads as.
+- **`materialize.ts:191` throws `'a terminal map with an element key or value not yet supported'`.** The
+  next arm of the map family — `group()`, 41 blockers — is blocked by a throw in the code §8 deletes. To
+  advance RelIR one would have to edit legacy's tail. **That is the migration running backwards**, and it
+  is the same trap §10·9 was written to close, arriving from the other side.
+
+**Shape by shape, with what each needs.** The whole of `materialize.ts` is 294 lines and the eleven
+per-shape builders are ~250 of it, so the file is not the work — the ELEMENT payload is, and it is the
+keystone because it is what every element-returning traversal already depends on.
+
+| shape | payload projection | RelIR nodes | state |
+|---|---|---|---|
+| scalar / value | `SELECT v[, vt]` | `Project` | **done** — the arm exists |
+| list | `SELECT json(list)` | `Aggregate` + `json_group_array` | **done** (`list.ts`) |
+| map | `SELECT json(map)` | as above | **done** (`map.ts`) |
+| **element** | id + labels JSON aggregate + ordered property bag | `Aggregate`, `json-object`, `json-array`, correlated `Scalar` — all in the node set | **the keystone.** `vertexLabelsJson`/`framedProps` are ~5 lines each in `plan.ts`; `buildProjection` is 90 |
+| property | `vpid/owner/pk/pv/pvtype/pmeta` | `Scan` + `Project` | needs the property shape anyway |
+| record | one wide row, heterogeneous fields | `Project` + child joins | needs `project()`/`select()` |
+| mapEntry | `mk`/`mv` per row | `Explode` | arrives with map re-entry |
+| path | positions, or grouped rows | needs the path CHANNEL first | Phase 3-adjacent |
+| variant | dynamic-tag union | `Union` + tag column | the variant arm exists in legacy only |
+| group (rows form) | — | — | **DIES.** The map value replaces it |
+| foreign | landed `VALUES` columns | federation-specific | out of scope here |
+
+**Sizing, honestly: comparable to the write wedge, not to an increment.** Four shapes are already done,
+`group`'s rows form is deleted rather than ported, and three more (property, record, mapEntry) arrive with
+families that are queued anyway. What this decision actually commits to NOW is the **element payload** —
+and that one is not optional, because it is the shape 32% of the corpus already routes through.
+
+**What it buys, and why it is worth a phase of its own:** `path` becomes carryable (the channel exists and
+has nowhere to go), the element-valued map stops being blocked on the wrong side of the line, `spine.ts`
+shrinks to a router with an end date, and "edit legacy to advance RelIR" stops recurring. It also makes
+§5a's gate mean what it says — that RelIR produced the query being compared.
+
+**Ordering: this comes BEFORE `group()`**, because `group()` is the first increment that would otherwise
+require editing legacy's materializer.

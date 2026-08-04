@@ -216,9 +216,10 @@ entity RelNode {
         is_source implies inputs.count = 0
     }
 
-    -- The categorical difference from the refuted typed-core IR: shape is resolved above this
-    -- layer, so a node has no Gremlin type field. A ChannelRole is per-COLUMN carried-state
-    -- bookkeeping, never the stream's Gremlin type.
+    -- The categorical difference from the refuted typed-core IR: a NODE has no Gremlin type field.
+    -- This is a claim about the node set alone — the lowering that BUILDS these nodes knows the
+    -- traverser's shape and says so, and it is where a shape's payload projection belongs. A
+    -- ChannelRole is per-COLUMN carried-state bookkeeping, never the stream's Gremlin type.
     invariant NoGremlinTypeVocabulary {
         columns.all(col => col.sql_type in {int, real, text, blob, json, any})
     }
