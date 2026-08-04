@@ -1394,3 +1394,54 @@ drop). One extra `L5` is cheaper than a red trunk.
 - **A replicated subplan — what `unroll` produces — must carry FRESH relation ids**, or it trips §3.3's
   distinct-sides rule at `check` rather than in SQLite. Two columns sharing a name in one declared type
   shadow each other in the emitter's scope map, so a joined side's `id` needs another name.
+
+### 10·9 — a SHAPE is a VALUE plus a framing arm, NEVER a delegated step
+
+**RelIR never hands a STEP back to the legacy lowering, and the one call it makes into the legacy layer
+passes `steps.length` precisely so that it cannot.** `spine.ts` is the whole seam:
+`materializeRootStream(engine.lowerStepsStrict(stream, steps, steps.length))` — zero steps remain, so
+legacy turns a finished RelIR relation into the root payload and does nothing else.
+
+This came up as a live temptation and it is worth writing down because the cheap-looking version is
+wrong. `lowerStepsStrict` accepts an `at < steps.length`, so a terminal `group()` COULD be delegated: let
+RelIR lower the element prefix and hand `group()` to legacy's `group.ts`. That reads as "reusing the
+framing layer" and is not — `group.ts` holds the barrier, the `by()` key computation and the reduce, all
+of which are the ROW-ALGEBRAIC class §8 deletes. **New coverage would be taking a dependency on code
+whose removal is the exit criterion**, which is the migration running backwards.
+
+**The boundary is not "framing is legacy's" — it is `steps.length`.** §6's closing line already says the
+shape-INTERPRETING class (materialization, framing, JSON construction) stays per-shape forever; what this
+adds is the mechanism that keeps that honest. So growing a shape has exactly three parts and no fourth:
+
+1. RelIR builds the VALUE with its own nodes;
+2. a new `RelFraming` arm SAYS what the relation holds;
+3. `spine.ts` translates that arm into the corresponding `Stream`, and the existing materializer frames it.
+
+**The LIST shape is this pattern already done, and it is the template.** `{kind: 'list'; of: ListOf}` is
+the arm, `list.ts` builds `jsonb(COALESCE(json_group_array(<member> ORDER BY …), '[]'))`, and legacy's
+list materialization frames a RelIR-built value with no legacy step run. It was the largest single
+coverage jump so far (+46).
+
+**Prior art agrees, and Calcite agrees more usefully than TinkerPop.** TinkerPop separates the two
+producers by SUPERCLASS — `GroupStep extends ReducingBarrierStep<S, Map<K,V>>` (a barrier emitting one
+Map) versus `PropertyMapStep extends ScalarMapStep<Element, Map<K,E>>` (one Map per element) — while the
+VALUE type is the same `Map<K,V>` in both, which is why unifying them in one shape is faithful rather
+than a shortcut. Calcite goes further and has **no map stream at all**: `Aggregate` (GROUP BY) yields an
+ordinary relation, and a collection VALUE is an aggregate FUNCTION over a group (`COLLECT` with
+`ReturnTypes.TO_MULTISET`, `JSON_OBJECTAGG`) or a constructor expression (`MAP_VALUE_CONSTRUCTOR`), with
+MAP a first-class type via `RelDataTypeFactory.createMapType`. A map is a type plus a function, never a
+kind of stream. That is the decomposition to copy.
+
+**Decision, locked: the MAP SHAPE is the next family, built this way.** `g.V().group().by(k)` is two
+ordinary `Aggregate` nodes — `Aggregate(groupBy: [key], aggs: [<value>])` for the grouped relation, then
+`Aggregate(groupBy: [], aggs: [<pairs array>])` for the one map value — and `Aggregate.groupBy` is
+already in the node set, unused for this. Chosen for DEPENDENCY, not for size: `stream.ts` states that
+*"every producer (group/groupCount/valueMap/is(typeOf(MAP))) builds this one shape"*, so `valueMap`'s
+mid-chain cases, all 30 keyed `group`/`groupCount` cases and the `is(P.typeOf(MAP))` decline are behind
+it. Picking either other family means building it later anyway, under pressure.
+
+**The cost estimate that lost this its "cheap" label, recorded so it is not re-made:** 43 of the map
+shape's 64 blockers are terminal, and that was briefly read as "43 cases behind a framing seam". It is
+not — under this decision the grouping is RelIR's own work, so the increment is list.ts-scale. The three
+candidate families are therefore closer in cost than the terminal/mid-chain split suggests, and
+dependency is what separates them.
