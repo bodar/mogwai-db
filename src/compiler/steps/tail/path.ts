@@ -347,7 +347,8 @@ function compilePathArray(st: ElementStream, proj: IRStep, acc: TailAcc): PathSt
  *  coerced to its element sequence (a list) and the op reshapes/filters/explodes it.
  *  order/dedup/limit/count are deliberately NOT here — those are whole-stream path ops
  *  (count() handled below; order/reducer as whole-stream is a separate slice). */
-const PATH_LIST_OPS = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'merge', 'reverse', 'conjoin', 'all', 'any', 'none', 'unfold']);
+/** Shared data: both lowering spines read this one Path-to-List operation vocabulary. */
+export const PATH_LIST_OPS = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'merge', 'reverse', 'conjoin', 'all', 'any', 'none', 'unfold']);
 
 /** Coerce a homogeneous scalar linear path (every position a by(key) value) into one
  *  list value per row, so the list-value engine (set-ops / reverse / unfold / reducers)

@@ -1832,3 +1832,60 @@ a test that pins a spine's spelling pins both) and the RelIR spelling gets its o
 EXEC test was reading legacy's raw `x0_id`/`x1_id` columns to assert a WALK; that one is rewritten to
 assert the decoded `Path` objects, which is spine-neutral and is the `written()` lesson from
 `test/support/harness.ts` applied to reads.
+
+### 10·11·1 — `path()` composes: the tail, `by()` per position, and the boundary a review caught
+
+The two increments after §10·11, and the reap the channel was for: **census 746 → 762 (33.2%), `path`
+blockers 29 → 13**, all sixteen route changes carrying IDENTICAL answer hashes.
+
+**`pathTail` is tiny on purpose, and that is the §10·9 shape paying off.** A path is the list shape wearing
+a different framer, so what belongs in its own loop is only what a Path answers *differently* from a List:
+`is(typeOf(GType.PATH))` (identity — and any other `typeOf` is the empty relation, spelled `Filter(false)`
+per §3.3), `count()` (paths, not positions — the element tail's `countTail`, now shared so the two cannot
+disagree about `SUM(bulk)` versus `COUNT(*)`), and the slices. Everything else is handed to `listTail` over
+**the same relation** — the retype costs no node at all, because the relation already IS a list relation and
+only the framing arm changes. That is what makes the ~17 set-op traversals land with no path-specific
+lowering.
+
+`PATH_LIST_OPS` is now EXPORTED from the legacy tail and read by both spines, for `SHAPE_K`'s reason: it is
+DATA, and a second copy is a second chance to drift.
+
+**The delegation is a WHITELIST and must not become a fall-through** — the failure would be a wrong ANSWER,
+not a missing one: `as()` in `listTail` binds the collection tagged `list`, so `path().as('a').select('a')`
+would re-enter as a List and frame as one.
+
+**`by()` per position: the round-robin is `po % N`, which is where the array encoding pays again.** Legacy
+cycles modulators across STATIC position columns and refuses more than one `by()` in its recursive regime
+("multiple modulators over a recursive repeat().path() not yet supported") precisely because the length is
+unknown there. Over an exploded array the arm selector is an expression on the member's own ordinal, so N
+modulators over a path of ANY length — including a future recursive one — is one `case`. Each arm is
+`byNode` (not `byExpr`): the self-describing `{t,v}` node with the property's own `vtype`, which is what
+keeps a stored uuid/long/datetime position framing exactly and is already the members' encoding. The host's
+`elem` is a RUNTIME fact on a path that interleaves vertices and edges, so each arm is itself a `case` on the
+entry tag.
+
+**Productivity is ONE clause, however many positions.** TinkerPop's default drops the WHOLE path when any
+position's `by()` yields nothing; legacy spells that as an `IS NOT NULL` per position. Asked of the REBUILT
+list it is a single `NOT EXISTS (… json_each(list) … value IS NULL)`, because a missing projection lands as a
+JSON null member. A bare `by()` position cannot be unproductive (it is the element), which is why the guard
+is keyed on there being a non-identity projection at all.
+
+**THE BOUNDARY A REVIEW CAUGHT, and it is the decline contract's exact failure mode.** With the retype in
+place, `path().unfold()` over ELEMENT positions answered where legacy defers — and answered WRONGLY, framing
+each vertex's payload object as a plain value (`"{\"id\":1,\"label\":[\"person\"],…}"`). The cause is not in
+the path module: a list member op decodes a member's `$.v` into the SCALAR stream, and that stream has no
+element arm — §10·10's remaining list arm, the one nothing PRODUCES yet. Two lessons:
+
+- **`TYPED_LIST` is the right encoding for framing a path and not sufficient for re-entering one.** An
+  element position and a `by()`-projected position are both members of the self-describing tree, so the
+  member encoding cannot distinguish them — correct for `framePath`, wrong for a member op. The fact a
+  consumer needs is therefore REPORTED (`pathPositions`' `scalars`, a required field on the framing arm, and
+  compared by `sameFraming` because two arms can disagree about it) rather than re-derived from `of`.
+- **the boundary is legacy's own, restated in this route's vocabulary.** `linearScalarList` coerces a path to
+  a list only when every position is a value; `scalars` is that predicate. Mirroring it keeps the two spines
+  agreeing, and it lifts when a list can hold an element member — not before.
+
+A test had already PINNED the wrong behaviour (`shape.kind === 'value'`) in the same change that introduced
+it, which is the reminder worth keeping: **a new test written beside a new lowering is not evidence the
+lowering is right.** What caught it was running the traversal on both spines and comparing the decoded
+values — the differential, by hand, on a shape no corpus traversal reaches.

@@ -144,32 +144,32 @@ test('simplePath() drops repeated-vertex walks; cyclicPath() keeps only them', (
     .toEqual(['marko']); // only the returns-to-marko walk
 });
 
-test('path().by(key) projects each element; a missing key drops the whole path', () => {
+test('path().by(key) projects each element; a missing key drops the whole path', async () => {
   const store = seededStore();
   // marko(age29)→{vadas27,josh32, lop(no age)}: lop path drops (non-productive by).
-  const rows = run(store, 'g.V(1).out().path().by("age")').map((r) => [r.x0_v, r.x1_v]);
+  const rows = (await decodePaths(store, 'g.V(1).out().path().by("age")')).map((path: any) => path.objects);
   expect(bagOf(rows)).toEqual(bagOf([[29, 27], [29, 32]])); // three out-neighbours, only two survive
 });
 
-test('the SAME path().by() answers identically in both regimes (one position projector)', () => {
+test('the SAME path().by() answers identically in both regimes (one position projector)', async () => {
   // The two regimes had two hand-rolled projectors and the grouped one hardcoded a property
   // read, so by(T.id)/by(T.label) worked on a LINEAR path and threw on a RECURSIVE one — the
   // same modulator, two answers. Both now go through one projector, parameterized by how the
   // element is reached (joined table vs correlated read off the exploded id).
   const store = seededStore();
-  const linear = (g: string) => run(store, g).map((r) => [r.x0_v, r.x1_v, r.x2_v]);
-  const grouped = (g: string) => run(store, g).map((r) => r.v);
+  const paths = async (g: string) => (await decodePaths(store, g)).map((path: any) => path.objects);
+  const grouped = async (g: string) => (await paths(g)).flat();
   // marko's 2-hop walks are [marko,josh,lop] and [marko,josh,ripple].
-  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(T.id)')).toEqual([1, 4, 3, 1, 4, 5]);
-  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(T.label)'))
+  expect(await grouped('g.V(1).repeat(__.out()).times(2).path().by(T.id)')).toEqual([1, 4, 3, 1, 4, 5]);
+  expect(await grouped('g.V(1).repeat(__.out()).times(2).path().by(T.label)'))
     .toEqual(['person', 'person', 'software', 'person', 'person', 'software']);
   // by(key) unchanged in the grouped regime…
-  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by("name")'))
+  expect(await grouped('g.V(1).repeat(__.out()).times(2).path().by("name")'))
     .toEqual(['marko', 'josh', 'lop', 'marko', 'josh', 'ripple']);
   // …and the LINEAR regime is byte-for-byte unaffected, including an EDGE position (which
   // reads its label/id off the joined edges table, not nodes).
-  expect(bagOf(linear('g.V(1).out().path().by(T.id)'))).toEqual(bagOf([[1, 2, undefined], [1, 4, undefined], [1, 3, undefined]]));
-  expect(linear('g.V(1).outE("created").inV().path().by(T.label)')).toEqual([['person', 'created', 'software']]);
+  expect(bagOf(await paths('g.V(1).out().path().by(T.id)'))).toEqual(bagOf([[1, 2], [1, 4], [1, 3]]));
+  expect(await paths('g.V(1).outE("created").inV().path().by(T.label)')).toEqual([['person', 'created', 'software']]);
 });
 
 test('path().by(traversal) works on a RECURSIVE path, via the SAME positional child', () => {

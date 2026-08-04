@@ -3,11 +3,13 @@ import { col, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ListOf, Shape } from '../../sql/kernel/render.ts';
+import type { IRStep } from '../ir/step.ts';
 import { SHAPE_K } from '../steps/context/alias.ts';
 import { byEncounter, carriedCols, jsonOf, meta, typeOf, type Minter } from './build.ts';
 import { elementNode } from './element.ts';
 import { historyAppend, historySeed, objectEntry, type TraverserObject } from './history.ts';
 import { LIST_COL, TYPED_LIST } from './list.ts';
+import { byNode, modulations, type Modulation } from './modulator.ts';
 
 /**
  * THE PATH CHANNEL — where the traverser has BEEN, as one carried column.
@@ -120,9 +122,11 @@ export function extendPath(rel: Rel, object: TraverserObject, fresh: Minter): Re
  * deep inside a table-valued function argument.
  */
 export function pathPositions(
-  rel: Rel, fresh: Minter,
-): { readonly rel: Rel; readonly of: ListOf } | null {
+  rel: Rel, step: IRStep, fresh: Minter,
+): { readonly rel: Rel; readonly of: ListOf; readonly scalars: boolean } | null {
   if (!pathCarried(rel)) return null;
+  const parsed = modulations(step, step.modulators?.length ?? 0);
+  if (!parsed) return null;
   const fenced = rel.kind === 'materialize'
     ? rel
     : make.materialize({ id: fresh('pm'), input: rel, channels: rel.channels, type: rel.type });
@@ -141,7 +145,7 @@ export function pathPositions(
   // ONE `case` over the entry's own tag, whatever the path's length — which is the whole reason the entry
   // carries a tag at all. Two arms because only element objects reach the append today; a VALUE position
   // is a third arm here and an append at the retype, not a different encoding.
-  const node: Expr = {
+  const element: Expr = {
     kind: 'case',
     whens: [[
       { kind: 'binary', op: '=', left: tag, right: lit(SHAPE_K.edge, 'int') },
@@ -149,6 +153,36 @@ export function pathPositions(
     ]],
     else: elementNode(rowid, 'vertex', fresh),
   };
+  const projectedNode = (modulation: Modulation): Expr | null => {
+    if (modulation.key.kind === 'identity') return element;
+    const edge = byNode(modulation, { kind: 'element', id: rowid, elem: 'edge' }, fresh);
+    const vertex = byNode(modulation, { kind: 'element', id: rowid, elem: 'vertex' }, fresh);
+    if (!edge || !vertex) return null;
+    return {
+      kind: 'case',
+      whens: [[
+        { kind: 'binary', op: '=', left: tag, right: lit(SHAPE_K.edge, 'int') },
+        edge,
+      ]],
+      else: vertex,
+    };
+  };
+  const projected = parsed.map(projectedNode);
+  if (projected.some((node) => node === null)) return null;
+  const nodes = projected as Expr[];
+  const node: Expr = nodes.length === 0
+    ? element
+    : nodes.length === 1
+      ? nodes[0]
+      : {
+          kind: 'case',
+          whens: nodes.slice(0, -1).map((arm, j) => [{
+            kind: 'binary', op: '=',
+            left: { kind: 'binary', op: '%', left: col(members.id, 'po'), right: lit(nodes.length, 'int') },
+            right: lit(j, 'int'),
+          }, arm]),
+          else: nodes[nodes.length - 1],
+        };
   const positions: Expr = {
     kind: 'scalar',
     plan: make.aggregate({
@@ -174,13 +208,56 @@ export function pathPositions(
   // and the emission position are still this traverser's (which is what lets `select(label)` after
   // `path()` resolve, once that arm lands).
   const channels = fenced.channels.filter((channel) => channel.role !== 'path');
+  const projection = make.project({
+    id: fresh('pp'), input: fenced, channels,
+    type: typeOf(meta(LIST_COL, 'json'), ...carriedCols(channels)),
+    exprs: [[LIST_COL, positions], ...channels.map((channel) => [channel.col, col(fenced.id, channel.col)] as const)],
+  });
+  const hasNonIdentity = parsed.some((modulation) => modulation.key.kind !== 'identity');
+  /**
+   * IS EVERY POSITION A PROJECTED SCALAR? — the one thing a consumer of this path needs that the member
+   * encoding cannot tell it, and the reason it is reported rather than re-derived.
+   *
+   * `TYPED_LIST` is the honest encoding for both an element position and a `by()`-projected one (both are
+   * members of the self-describing tree, and `frameTypedNode` reads each member's own tag), so the framing
+   * arm cannot distinguish them — which is exactly right for FRAMING a Path and exactly wrong for RE-ENTERING
+   * one as a list. The list vocabulary's member ops decode a member's `$.v` into a SCALAR stream, and the
+   * scalar tail has no element arm, so `path().unfold()` over element positions would frame a vertex's
+   * payload object as a plain value: a WRONG ANSWER where legacy fails closed, which is the one failure the
+   * routing switch cannot absorb.
+   *
+   * So this is legacy's own boundary, stated in this route's vocabulary — `linearScalarList` coerces a path
+   * to a list only when `positions.every(p => p.render === 'value')`. A MIXED `by().by('name')` is false for
+   * the same reason it is there: alternate positions are still elements. It goes away when a list can hold
+   * an ELEMENT member (§10·10's remaining list arm), not before.
+   */
+  const scalars = parsed.length > 0 && !parsed.some((modulation) => modulation.key.kind === 'identity');
+  if (!hasNonIdentity || step.productiveBy === true) return { rel: projection, of: TYPED_LIST, scalars };
+
+  // Productivity reads the rebuilt list, so fence the projection before the correlated clause reader.
+  const projectedPath = make.materialize({
+    id: fresh('pm'), input: projection, channels: projection.channels, type: projection.type,
+  });
+  const projectedMembers = make.explode({
+    id: fresh('px'), expr: jsonOf(col(projectedPath.id, LIST_COL)), channels: [],
+    as: { value: 'pv', ord: 'po' },
+    type: typeOf(meta('pv', 'any', true), meta('po', 'int')),
+  });
+  const missing = make.filter({
+    id: fresh('f'), input: projectedMembers, channels: [], type: projectedMembers.type,
+    pred: { kind: 'binary', op: 'is', left: col(projectedMembers.id, 'pv'), right: lit(null, 'any') },
+  });
+  const probe = make.project({
+    id: fresh('pp'), input: missing, channels: [], type: typeOf(meta('pv', 'any', true)),
+    exprs: [['pv', col(missing.id, 'pv')]],
+  });
   return {
-    rel: make.project({
-      id: fresh('pp'), input: fenced, channels,
-      type: typeOf(meta(LIST_COL, 'json'), ...carriedCols(channels)),
-      exprs: [[LIST_COL, positions], ...channels.map((channel) => [channel.col, col(fenced.id, channel.col)] as const)],
+    rel: make.filter({
+      id: fresh('f'), input: projectedPath, channels: projectedPath.channels, type: projectedPath.type,
+      pred: { kind: 'exists', negated: true, plan: probe },
     }),
     of: TYPED_LIST,
+    scalars,
   };
 }
 

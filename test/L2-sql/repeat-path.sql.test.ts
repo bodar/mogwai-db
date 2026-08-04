@@ -354,7 +354,7 @@ describe('repeat / path SQL', () => {
 
   test('path().by(k1).by(k2) cycles modulators round-robin and drops on missing key', () => {
     // Three positions, two by()s → name, age, name (index % byCount).
-    const p = read('g.V(1).out().out().path().by("name").by("age")');
+    const p = read('g.V(1).out().out().path().by("name").by("age")', { spine: 'legacy' });
     expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=x0n.id AND key=? ORDER BY id LIMIT 1) AS x0_v");
     expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=x1n.id AND key=? ORDER BY id LIMIT 1) AS x1_v");
     expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=x2n.id AND key=? ORDER BY id LIMIT 1) AS x2_v");
@@ -364,6 +364,12 @@ describe('repeat / path SQL', () => {
     expect(p.shape).toEqual({ kind: 'path', positions: [
       { render: 'value', prefix: 'x0' }, { render: 'value', prefix: 'x1' }, { render: 'value', prefix: 'x2' },
     ] });
+    if (!relirOff) {
+      const rel = read('g.V(1).out().out().path().by("name").by("age")', { spine: 'rel' });
+      expect(rel.shape).toEqual({ kind: 'jsonbPath', items: { kind: 'scalar', typed: true } });
+      expect(rel.sql).toContain(' % ');
+      expect(rel.sql).toContain('NOT EXISTS');
+    }
   });
 
   test('simplePath()/cyclicPath() compile to a static all-pairs identity test', () => {
@@ -376,16 +382,23 @@ describe('repeat / path SQL', () => {
 
   test('P3 Stage A: path() is re-enterable — count()/is(typeOf(PATH))', () => {
     // count() over a linear path → COUNT(*) (one row per path)
-    const c = read('g.V(1).out().out().path().count()');
+    const c = read('g.V(1).out().out().path().count()', { spine: 'legacy' });
     expect(c.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(c.sql).toContain('COUNT(*) AS v');
+    if (!relirOff) {
+      const rel = read('g.V(1).out().out().path().count()', { spine: 'rel' });
+      expect(rel.shape).toEqual({ kind: 'value', type: STATIC('long') });
+      expect(rel.sql).toContain('COALESCE(sum(');
+    }
     // count() over a recursive (grouped) path → COUNT(DISTINCT pk), not exploded elements
     const rc = read('g.V(1).repeat(__.out()).times(2).path().count()');
     expect(rc.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(rc.sql).toContain('COUNT(DISTINCT');
     // is(typeOf(GType.PATH)) is identity — a path IS a Path, so the result stays a path
-    const t = read('g.V(1).out().out().path().is(typeOf(GType.PATH))');
+    const t = read('g.V(1).out().out().path().is(typeOf(GType.PATH))', { spine: 'legacy' });
     expect(t.shape.kind).toBe('path');
+    if (!relirOff)
+      expect(read('g.V(1).out().out().path().is(typeOf(GType.PATH))', { spine: 'rel' }).shape.kind).toBe('jsonbPath');
     // still-deferred followers fail closed
     expect(() => compile('g.V(1).out().path().select(Column.keys)', {})).toThrow('not yet supported');
   });
@@ -401,7 +414,11 @@ describe('repeat / path SQL', () => {
     expect(read('g.V().out().out().path().by("name").conjoin("-")').shape).toEqual({ kind: 'value', type: STATIC('string') });
     // the retype builds one JSON array per path row from the position value columns.
     expect(read('g.V().out().out().path().by("name").reverse()').sql).toContain('json_array');
-    // an element-position path (no by(key)) is NOT list-representable → still fails closed.
+    // An ELEMENT-position path is NOT list-representable on EITHER spine, and the RelIR route declines for
+    // the same reason legacy does rather than for a different one: a member op decodes into the scalar
+    // stream, which has no element arm, so answering would frame a vertex's payload object as a plain value.
+    // `pathPositions`' `scalars` is where that boundary is stated; it lifts when a list can hold an element
+    // member (§10·10's remaining list arm), and until then BOTH spines fail closed here.
     expect(() => compile('g.V(1).out().path().unfold()', {})).toThrow('not yet supported');
     expect(() => compile('g.V(1).out().path().reverse()', {})).toThrow('not yet supported');
   });
@@ -428,9 +445,12 @@ describe('repeat / path SQL', () => {
 
   test('path().by(T.token) and path().by(__.traversal): per-position scalar', () => {
     // by(T.label)/by(T.id) project the token inline; both are value positions.
-    const lbl = read('g.V().out().path().by(T.label)');
+    const lbl = read('g.V().out().path().by(T.label)', { spine: 'legacy' });
     expect(lbl.shape).toEqual({ kind: 'path', positions: [{ render: 'value', prefix: 'x0' }, { render: 'value', prefix: 'x1' }] });
-    expect(read('g.V(1).out().path().by(T.id)').sql).toContain('COALESCE');
+    expect(read('g.V(1).out().path().by(T.id)', { spine: 'legacy' }).sql).toContain('COALESCE');
+    if (!relirOff)
+      expect(read('g.V().out().path().by(T.label)', { spine: 'rel' }).shape)
+        .toEqual({ kind: 'jsonbPath', items: { kind: 'scalar', typed: true } });
     // by(__.trav) positions lower through the generic scalar child seam (pushChildScope +
     // tryCompileScalarValueChild), re-rooted per position — the same seam select/dedup/order use.
     // by(__.values(k).transform): a value+transform chain.

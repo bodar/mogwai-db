@@ -12,7 +12,8 @@ import { isLocalScope, sliceOf } from '../ir/step.ts';
 import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs, isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
-import { childSteps, collectionAssert } from '../steps/tail/child-shape.ts';
+import { assertsGType, childSteps, collectionAssert, typeOfAssert } from '../steps/tail/child-shape.ts';
+import { PATH_LIST_OPS } from '../steps/tail/path.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain } from '../ir/analyze.ts';
 import { normalize } from '../ir/passes.ts';
@@ -85,7 +86,13 @@ export type RelFraming =
    *  needs to know how to expand each one; `set` is a framing marker only (a SET frames differently,
    *  the member substrate is shared). */
   | { readonly kind: 'list'; readonly of: ListOf; readonly set?: boolean }
-  | { readonly kind: 'path'; readonly of: ListOf }
+  /** A traverser whose value is a PATH — the LIST arm's relation exactly (one JSONB `list` column of
+   *  typed-tree positions), and only the wire form differs (`framePath` over the same per-member buffers).
+   *  `scalars` says every position is a `by()`-projected value rather than an element, which is what decides
+   *  whether the path may RE-ENTER the list vocabulary: a member op decodes to a scalar stream, and that
+   *  stream has no element arm (see `pathPositions`). It is a required field, not an optional marker — a
+   *  path always knows the answer, and defaulting it either way is how a wrong shape gets framed. */
+  | { readonly kind: 'path'; readonly of: ListOf; readonly scalars: boolean }
   /** A traverser whose VALUE is a MAP — one JSONB `map` column per row holding an ordered
    *  `[[keyNode, valNode], …]` pairs array, which is the same self-describing tree a stored map
    *  property uses. The LIST arm's twin, deliberately: `keyOf`/`valOf` describe each side's shape for
@@ -1010,6 +1017,18 @@ function countExpr(input: Rel): Expr {
     : { kind: 'agg', fn: 'count', args: [] };
 }
 
+/** `count()` as a RETYPE, shared by every host that has one — the element tail's terminal and the path tail's
+ *  own arm, so the two cannot disagree about whether the answer is `SUM(bulk)` or `COUNT(*)` (that question is
+ *  `countExpr`'s, and it reads the CHANNEL). A reducing aggregate is a BARRIER: no channel survives it (§3.5),
+ *  which is why `channels` is empty rather than trimmed by hand. */
+const countTail = (input: Rel, fresh: Minter): { rel: Rel; framing: RelFraming } => ({
+  rel: make.aggregate({
+    id: fresh('agg'), input, channels: [], type: typeOf(meta('v', 'int')),
+    groupBy: [], aggs: [['v', countExpr(input)]],
+  }),
+  framing: { kind: 'scalar', type: STATIC('long'), result: 'count' },
+});
+
 /**
  * A TERMINAL that retypes the element relation into another shape — the SHAPE BOUNDARY, and the
  * substrate every scalar-valued step then rides on.
@@ -1028,13 +1047,7 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { readon
   // in step when movement lands.
   if (step.name === 'count') {
     if (args.length) return null;
-    const total = countExpr(input);
-    // A reducing aggregate is a BARRIER: no channel survives it (§3.5), which is exactly what
-    // `barrierChannels` says and why the channels list is empty rather than trimmed by hand.
-    return {
-      rel: make.aggregate({ id: fresh('agg'), input, channels: [], type: typeOf(meta('v', 'int')), groupBy: [], aggs: [['v', total]] }),
-      framing: { kind: 'scalar', type: STATIC('long'), result: 'count' },
-    };
+    return countTail(input, fresh);
   }
 
   // `constant(c)` REPLACES the traverser's value with a literal, which over an element stream is a
@@ -1643,6 +1656,69 @@ function listTail(
 }
 
 /**
+ * THE PATH TAIL — the steps a Path answers ITSELF, and the retype into the list loop for the rest.
+ *
+ * A path is the list shape wearing a different framer (`compiler/rel/path.ts`), so this loop is deliberately
+ * tiny: what belongs here is only what a Path answers differently from a List, and everything else is handed
+ * to `listTail` over the SAME relation — the retype costs no node at all, because the relation already is a
+ * list relation and only the framing arm changes.
+ *
+ * Three things are a Path's own:
+ *
+ * - **`is(typeOf(GType.PATH))` is IDENTITY** — a path IS a Path. Any other `typeOf` matches nothing, which is
+ *   the empty relation, and §3.3 records the honest spelling of that as a `Filter(false)` (`Values` refuses
+ *   to express empty). A real predicate declines: legacy owns the message.
+ * - **`count()` counts PATHS**, not positions — the same `countTail` an element relation uses, shared rather
+ *   than re-derived so the two cannot disagree about whether the answer is `SUM(bulk)` or `COUNT(*)`.
+ * - **the slices** read the emission order the path carried through, exactly as anywhere else.
+ *
+ * **The delegation is a WHITELIST (`PATH_LIST_OPS`) and must never become a fall-through**, for a reason
+ * that is a wrong ANSWER rather than a missing one: `as()` in `listTail` binds the collection as a history
+ * entry tagged `list`, so `path().as('a').select('a')` would re-enter as a List and frame as one. `dedup()`
+ * is absent for a smaller reason — nothing produces a path a `dedup()` can reach yet (the `inject()` sources
+ * are the corpus's only ones), so building it would be building for no caller.
+ */
+function pathTail(
+  seed: Rel, of: ListOf, scalars: boolean, steps: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
+  aliases: AliasMap,
+): Tail | null {
+  let rel = seed;
+  const labels = aliases;
+  for (let at = from; at < steps.length; at++) {
+    const step = steps[at];
+    const args = step.args ?? [];
+    if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
+
+    if (step.name === 'is') {
+      if (assertsGType(step, 'PATH')) continue;
+      if (typeOfAssert(step).kind !== 'gtype') return null;
+      rel = make.filter({
+        id: fresh('f'), input: rel, channels: rel.channels, type: rel.type,
+        pred: eq(lit(0, 'int'), lit(1, 'int')),
+      });
+      continue;
+    }
+
+    if (step.name === 'count') {
+      if (args.length || step.modulators?.length || step.optionArms) return null;
+      const counted = countTail(rel, fresh);
+      return scalarTail(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, labels);
+    }
+
+    const sliced = sliceOp(step, rel, false, fresh);
+    if (sliced) { rel = sliced; continue; }
+
+    // The relation is ALREADY a list relation, so the retype is the framing arm and nothing else — but only
+    // where every position is a projected SCALAR. An element position would decode through a member op into
+    // the scalar stream, which has no element arm, and legacy fails closed on exactly this boundary
+    // (`linearScalarList`). See `scalars` on `pathPositions`.
+    if (PATH_LIST_OPS.has(step.name)) return scalars ? listTail(rel, of, steps, at, ctx, fresh, labels) : null;
+    return null;
+  }
+  return { rel, framing: { kind: 'path', of, scalars }, aliases: labels };
+}
+
+/**
  * A ROOTED SUB-READ used as a LIST VALUE — `__.V().values('name').fold()` and friends.
  *
  * The operand's members are only known at RUN TIME, so this is a relation rather than a literal, and
@@ -2043,11 +2119,11 @@ function elementTail(
       return continueAs(merged.rel, merged.framing, steps, at + 1, bulked || ctx.collapse, ctx, fresh, labels);
     }
     if (step.name === 'path') {
-      if (!pathCarried(rel) || step.modulators?.length || step.optionArms || (step.args ?? []).length
+      if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length
         || step.from !== undefined || step.to !== undefined) return null;
-      const positions = pathPositions(rel, fresh);
+      const positions = pathPositions(rel, step, fresh);
       if (!positions) return null;
-      return continueAs(positions.rel, { kind: 'path', of: positions.of }, steps, at + 1, false, ctx, fresh, labels);
+      return continueAs(positions.rel, { kind: 'path', of: positions.of, scalars: positions.scalars }, steps, at + 1, false, ctx, fresh, labels);
     }
     if (step.name === 'addE') {
       if (pathCarried(rel)) return null;
@@ -2152,7 +2228,7 @@ function continueAs(
   switch (framing.kind) {
     case 'elements': return elementTail(rel, framing.elem, steps, from, bulked, ctx, fresh, labels);
     case 'list': return listTail(rel, framing.of, steps, from, ctx, fresh, labels);
-    case 'path': return from === steps.length ? { rel, framing, aliases: labels } : null;
+    case 'path': return pathTail(rel, framing.of, framing.scalars, steps, from, ctx, fresh, labels);
     // A value's multiplicity is the traverser's, so `bulked` carries.
     case 'scalar': return scalarTail(rel, framing, steps, from, bulked, ctx, fresh, labels);
     // A MAP is a barrier's RESULT, so a step after one re-enters a map traverser — `unfold()` to
@@ -2310,7 +2386,11 @@ function chooseArms(
 const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
   left.kind === 'elements' ? right.kind === 'elements' && left.elem === right.elem
     : left.kind === 'list' ? right.kind === 'list' && JSON.stringify(left.of) === JSON.stringify(right.of)
-      : left.kind === 'path' ? right.kind === 'path' && JSON.stringify(left.of) === JSON.stringify(right.of)
+      // A path arm compares `scalars` as well as the member encoding, and it has to: two arms whose positions
+      // are elements in one and projected values in the other agree on `of` (both are typed trees) and
+      // disagree about whether the merged path may re-enter the list vocabulary.
+      : left.kind === 'path'
+        ? right.kind === 'path' && left.scalars === right.scalars && JSON.stringify(left.of) === JSON.stringify(right.of)
       // A DISCARD is not a stream, so no arm can be one: `drop()` is terminal, and an arm body ending
       // in it would be a branch whose arms disagree about whether a traverser exists at all.
       : left.kind === 'discard' ? false
