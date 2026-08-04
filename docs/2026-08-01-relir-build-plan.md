@@ -2110,3 +2110,117 @@ before the code.
 body can never be unproductive while a numeric reducer can, and three call sites now want that fact (the
 `order()` productivity filter, `groupBarrier`'s domain filter, and this combiner arm). `ByChild` returning
 the expression plus "can this body yield nothing" states it where it is decided instead of at each reader.
+
+## 13. THE REFERENCE AUDIT (2026-08-04) — what `gremlin-core` says we get wrong
+
+Three read-only audits cross-checked the landed RelIR surface against the vendored reference. This section
+is the WORKLIST that came out; it is deliberately in the plan doc rather than a dated note, because these
+are work items and this file is the index.
+
+**Read this first: most of these are NOT RelIR regressions.** The majority are shared with the legacy
+spine, several are already-failing L3 scenarios that now have a diagnosed root cause and a citation, and
+the most valuable ones are invisible to the entire corpus. The audit's own framing is the one to keep:
+**a wrong answer with the right arity is the class no ladder level can see.**
+
+Every finding below that I marked VERIFIED I re-ran myself rather than taking on trust.
+
+### 13a. Comparison and negation — one root cause, six arms `DEFECT`
+
+**A negated predicate over a NULL subject must be TRUE and we drop the row.** `NOT p` / `x != v` is NULL in
+SQL when the subject is NULL, so the traverser is filtered; TinkerPop's `test` is two-valued and negation is
+plain boolean negation — `Text.notContaining` is `!containing.test(...)` where `containing` returns `false`
+for a null, and `Contains.without` is `!within.test(...)`, and `Compare.neq` is `!eq.test(...)` where `eq`
+returns false across type boundaries including null. Affects `not`, `neq`, `without`,
+`notStartingWith`/`notEndingWith`/`notContaining` (`src/compiler/rel/predicate.ts`), and surfaces again
+inside the member frame (`list.ts`'s `memberPredicate`, whose `IS NOT 1` counts a NULL member as a failure).
+**VERIFIED:** `g.inject([null]).any(TextP.notContaining("z"))` → `[]`, reference TRUE;
+`g.inject(["bcd",null]).all(P.neq("abc"))` → `[]`, reference TRUE. Fix once, in negation: emit
+`<p> IS NOT 1` rather than `NOT (<p>)`, and `memberPredicate` then needs no change. Corpus: invisible.
+
+**A cross-type range comparison must be FALSE, and we return SQLite's storage-class order — the exact
+inverse.** `GremlinValueComparator` — "*Comparability is limited to a single type space: compare(type1,
+type2) = ERROR*" — and `Compare.gt` opens with
+`if (!COMPARABILITY.comparable(first, second)) return false;`. **VERIFIED and worse than reported:**
+`g.V().has("name", P.gt(27)).values("name")` matches **all six** names (TEXT sorts after numerals), so
+`g.V().not(__.has("name", P.gt(27))).values("name")` returns NOTHING where the reference returns all six.
+`between`/`inside` share the path. Corpus: **visible** — `filter/Not.feature:47`, currently in
+`l3-state.json`'s failed set, so this is a diagnosed conformance gap rather than a new one. Fix: gate the
+ordering comparison on type-space agreement; the bound's type is known at compile time, so it is one guard
+per site.
+
+### 13b. The transform family answers where TinkerPop RAISES `DEFECT`
+
+Same shape five times, and the module header already promises not to do it. Each reference step opens with
+an `IllegalArgumentException` on a wrong-typed subject:
+
+| ours | reference | VERIFIED symptom |
+|---|---|---|
+| `toUpper`/`toLower`/`length`/`trim*`/`replace`/`substring`/`concat` over a non-string | `ToUpperGlobalStep`: "*can only take string as argument*" | `g.V().values("age").toUpper()` → `["27","29","32","35"]` |
+| `asString` over NULL | `AsStringGlobalStep`: `throw … "Can't parse null as String."` | `g.inject(1,null).asString()` → `["1",null]` |
+| `asNumber(GType.X)` over a runtime string or an overflowing value | `AsNumberStep.parseNumber`/`castNumber` | the literal arm declines; the COLUMN arm does not |
+| `dateAdd`/`dateDiff` over a non-date | `DateAddStep`: "*accept only OffsetDateTime or Date*" | unguarded (the arithmetic itself is verified correct) |
+| a local string transform over non-string MEMBERS | `StringLocalStep`: "*or list of strings, encountered %s in list*" | `values("age").fold().toUpper(Scope.local)` |
+
+`asString` is also a **`DOC`** finding: `transform.ts`'s "*NULL propagates through every one of them … so none
+needs a guard*" is a false generalisation over its own table — right for `toUpper` ("*we will pass null
+values to next step*"), wrong for `asString`. Corpus: `asString`-over-null and the five `substring` index
+scenarios are visible and already failing; the rest are invisible.
+
+**`substring` computes a different substring for negative or reversed indices** — SQLite's `substr` counts a
+negative Y from the RIGHT and a negative Z BACKWARDS, while `SubstringGlobalStep.processStringIndex`
+resolves a negative index to a positive offset and returns `""` when `newEnd <= newStart`. **VERIFIED:**
+`substring(-3)` on `marko` → `ko` (reference `rko`); `substring(1,0)` → `m` (reference `""`). Both spines —
+`plan.ts` carries the identical formula. Corpus: **visible**, five failing `map/Substring.feature` scenarios.
+
+### 13c. Shape and channel findings `RISK` / `DOC`
+
+- **`CHANNEL_MERGE_POLICY.path = 'pad'` documents the encoding we retired**, and `path.ts` says the opposite
+  of it in prose. The tail is a real `RISK`: `pad` ≠ `identical` makes `path` FORKABLE, so `mergeChannels`
+  does not require arms to agree on it (`prefixOf([], [path])` succeeds) — an arm lacking the column would
+  merge into a relation claiming it, and `historyAppend`'s `COALESCE(prev, jsonb_array())` would then read a
+  NULL path as an EMPTY one, silently omitting every hop of that arm. Unreachable only because the seed is
+  at the source. **Consider making `path` rigid so a divergent arm fails closed.**
+- **`pathPositions`' element `case` treats every non-edge tag as a VERTEX rowid** — a value or list entry
+  (both expressible by `history.ts`) would read as an unrelated vertex. Guarded today by an ABSENCE (the fold
+  appends no value positions) rather than by the code; make the `else` a third arm that fails closed.
+- **`Path.labels()` is a second channel we do not carry at all.** `Path.java` — "*any Path implementation
+  maintains two lists: a list of sets of labels and a list of objects*" — and `as()` extends the labels of
+  the EXISTING head rather than adding a position. `execute.ts` says "labels-on-path deferred"; `path.ts`,
+  which owns the model, omits it from both the model and its list of absences.
+- **`AliasEntry.binds` is a compile-time count that can disagree with the reference both ways.**
+  `as('a').filter(…).as('a')` binds ONCE in the reference (`addLabels` extends a new position only when the
+  head changed; `ImmutablePath.extend` is a no-op for labels it already has) and twice here — costing only
+  coverage. The other direction is a wrong answer and arrives with `repeat`: one textual `as('a')` in a loop
+  body binds N times at run time while `binds` stays 1, and `Pop.mixed` then answers a singleton where a
+  list is owed. Make it `1 | 'many' | 'unknown'` before the repeat arm lands.
+- **The set-op `set` framing marker is cleared by ANY follower**, but the reference converts a Set to a List
+  only at some: `OrderLocalStep` really does `Collectors.toList()`, while `RangeLocalStep` documents "*Set
+  becomes Set (order-preserving)*" and `all`/`any`/`none` are `FilterStep`s that never touch the object. So
+  a set-op followed by a local slice frames as a List where a Set is owed — right members, wrong wire type.
+- **`list.ts`'s `all` comment attributes a SQL fact to TinkerPop.** `AllStep` is a two-valued
+  `if (!test(...)) return false;` — so there "no member fails" and "every member passes" are the same
+  statement. The `IS NOT 1` spelling is right; its stated reason is not.
+
+### 13d. Two findings outside the audited partition, both tied to a reference
+
+- **`all`/`any`/`none` over a NON-collection traverser must be FALSE for all three** — including `none`,
+  which each step spells as a bare `return false;` outside its `instanceof Iterable` branch. Already visible:
+  `g_V_valuesXageX_allXgtX32XX`, `g_injectX7X_noneXeqX7XX`, `g_injectXnullX_allXeqXnullXX` are failing.
+- **`select()` resolves map scope → side-effect scope → path scope, in that order** (`Scoping.getScopeValue`)
+  and only then throws; `alias.ts` reads the path history unconditionally. Not reachable today (no map tail,
+  and side-effect steps decline) but it is a wrong answer the moment either arm lands. Confirmed correct
+  alongside it: an UNBOUND label drops the traverser rather than erroring
+  (`SelectOneStep` catches `KeyNotFoundException` → `EmptyTraverser`), while a bound label holding NULL does
+  NOT drop (`if (null == o) return traverser.split(null, this)`).
+
+### 13e. Confirmed correct, worth not re-litigating
+
+`path().by()`'s ring cycles by POSITION (`TraversalRing` `% size`, `PathStep` resets per traverser, and
+`json_each.key` is 0-based — the three agree exactly), and its unproductive-`by()` filter drops the whole
+traverser exactly as `PathStep` does. The set-op RESULT TYPES match the reference signatures one for one
+(`Intersect`/`Difference`/`Disjunct`/`Merge` → `Set`, `Combine` → `List`, `Product` → `List<List>`).
+`combine`/`product` multiplicity, ordering and null-tolerant membership match `CombineStep.map`'s
+`addAll`, `ProductStep`'s nested loop and `DifferenceStep`'s `HashSet.contains`. `conjoin`'s three cases
+(empty → `""`, nulls skipped, all-null → `""`) match `ConjoinStep`. And a vertex's `{label}` payload really
+is a LIST on the wire — the client's `VertexSerializer` serializes `labels` as a list and derives `.label`
+from it.
