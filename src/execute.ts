@@ -494,8 +494,11 @@ function groupKey(r: any, key: GroupKey): { buf: Buffer; canon: string } {
 }
 
 // group()/groupCount(): fold ALL rows into ONE GraphBinary Map. Element-valued
-// groups arrive ORDER BY key (runs of same-key rows); scalar-reducer groups
-// arrive one row per group (GROUP BY). One loop keyed on GroupVal handles both.
+// groups arrive one row per MEMBER, in the parent's EMISSION order — so same-key rows are
+// interleaved, not contiguous, and that is deliberate (a group's value list is a `fold` and keeps
+// arrival order). The accumulator below is keyed on the canonical key precisely so a run is never
+// required; do NOT "optimize" it into a run-detecting loop. Scalar-reducer groups arrive one row
+// per group (GROUP BY). One loop keyed on GroupVal handles both.
 function groupBuffer(rows: any[], key: GroupKey, val: GroupVal): Buffer {
   const groups = new Map<string, { buf: Buffer; members: Buffer[]; gv: any; gvt: string }>();
   for (const r of rows) {

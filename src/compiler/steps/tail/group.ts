@@ -57,6 +57,8 @@ export interface GroupSource {
    * `groupCount()` sums it instead of `COUNT(*)`. Absent (bulk≡1) → the unweighted form,
    * identical result. Matches lowerScalarGroupCount's scalar-key weighting. */
   bulk?: Expression;
+  /** The parent stream's emission order, consumed by an element-list group value. */
+  encounter?: Expression;
   /** The per-CHILD-ROW multiplicity that weights a value reducer over child rows
    * (`by(__.count())` → SUM(bulk); `by(__.values(x).sum())` → SUM(v·bulk)). The child rows
    * inherit the source traverser's bulk through the child scope, so a fanned-out reducer
@@ -106,6 +108,7 @@ export function elementGroupSource(st: ElementStream, productiveBy?: boolean): G
     parent: st,
     productiveBy,
     bulk: st.traverserLayout.bulk ? p.c[st.traverserLayout.bulk] : undefined,
+    encounter: st.traverserLayout.encounter ? p.c[st.traverserLayout.encounter] : undefined,
   };
 }
 
@@ -204,6 +207,13 @@ const childEncounter = (rows: { traverserLayout: TraverserLayout }, site: string
   if (!enc) throw new Error(`${site}: child rows carry no emission-order encounter to fold/mark on`);
   return enc;
 };
+
+/** The emission-order column an element-list GroupStream retains until its members are framed or
+ *  folded into a map value — or `undefined` where the chain could never carry one (`repeat`/`match`;
+ *  see the member-order note in `lowerGroup`). The caller then aggregates unordered, which is the
+ *  pre-existing behaviour for those shapes: keeping SUPPORT beats improving an ORDER. */
+const groupEncounter = (rows: { traverserLayout: TraverserLayout }): string | undefined =>
+  rows.traverserLayout.encounter;
 
 /** Lower generic scalar key/value children and join them back to the original
  * element through ONE shared parent origin. Keys consume `first`; non-reducing
@@ -479,7 +489,12 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   // The pushed domain `p` re-projects the parent traverser's bulk, so a source-level count
   // (bare groupCount() over a by(traversal) key) weights by it just like the direct path.
   const bulk = parent.traverserLayout.bulk ? p.c[parent.traverserLayout.bulk] : undefined;
-  const common = { keyExpr, keyParts, valExpr, valReducer, valMarker, valFold, valOrder, valDistinct, valElement, valNestedMap, valBulk, bulk, productiveBy: src.productiveBy };
+  // …and it re-projects the EMISSION ORDER for the same reason, so an element-list value collects
+  // its members in arrival order whether the key came from a by(child) or straight off the parent.
+  // Without this the by(child) path reached `lowerGroup` with no encounter and fell into its throw —
+  // `g.V(1).outE().group().by(__.label())`, which is an L2 assertion.
+  const encounter = parent.traverserLayout.encounter ? p.c[parent.traverserLayout.encounter] : undefined;
+  const common = { keyExpr, keyParts, valExpr, valReducer, valMarker, valFold, valOrder, valDistinct, valElement, valNestedMap, valBulk, bulk, encounter, productiveBy: src.productiveBy };
   // Property parent: the pushed domain `p` already carries owner/pk/pv, so the source is
   // `p` itself (plus the child joins) — no element table to rejoin. Element parent rejoins
   // nodes/edges `n` on the domain id so key/value ctx reads its columns.
@@ -499,7 +514,15 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
  * group()/groupCount(): fold the whole stream into one Map. Dual-path (locked
  * decision #3): a scalar-reducing value (count/sum) or scalar list becomes a SQL
  * GROUP BY aggregate; an element value can't be aggregated in SQL (props must be
- * framed), so we emit rows ORDER BY the key and the handler folds runs into the Map.
+ * framed), so we emit one row per MEMBER and the handler folds them into the Map.
+ *
+ * Those member rows come out ORDER BY the parent's EMISSION ORDER, not by the key: a group's value
+ * list is a `fold` and `GroupStep` keeps arrival order (§13h·1 — `ReducingBarrierStep`, so nothing
+ * coalesces). Ordering by the key instead left the member order to SQLite's scan choice, which
+ * `MOGWAI_REVERSE_UNORDERED=1` moved. Same-key rows are therefore NOT contiguous, and nothing
+ * requires them to be: `groupBuffer` (execute.ts) accumulates into a Map keyed on the canonical
+ * key, so a run is a convenience the framer never depended on. Map ENTRY order is not part of the
+ * answer either — `GroupStep` seeds a `HashMap` and the corpus compares maps unordered.
  */
 export function lowerGroup(st: LoweringState, isCount: boolean, bys: any[][], src: GroupSource): GroupStream {
   src = tryLowerGroupChildSource(bys, src) ?? src;
@@ -574,10 +597,23 @@ export function lowerGroup(st: LoweringState, isCount: boolean, bys: any[][], sr
     } else throw new Error('unsupported group().by() value modulator');
   }
 
-  const order = src.valElement && src.valOrder ? q`${key.group}, ${src.valOrder}` : key.group;
-  const node = q`SELECT ${key.cols}, ${valNode} FROM ${src.from} ${groupBy ? 'GROUP BY' : 'ORDER BY'} ${order}`;
-  const rel = st.q.cte(node, groupColumns({ key: key.desc, val }));
-  return toGroupStream(dropLayoutAtBarrier(st), rel, key.desc, val);
+  // THE MEMBER ORDER, and its ONE named limitation. `group` is a COLLECTING_CONSUMER, so
+  // `analyzeChain` demands an emission-order encounter and this is normally present. It is absent
+  // exactly where the substrate cannot carry one at all — `canCarryEncounter` is false for a chain
+  // containing `repeat()`/`match()`, which are opaque boundaries the encounter does not cross — and
+  // there we keep the previous key order rather than REFUSING the traversal. Fail-closed does not
+  // mean fail-loud here: `g.V().repeat(__.out()).times(2).group().by(T.label)` is valid Gremlin that
+  // both spines answered before, and a throw would have removed support to buy a better ORDER (the
+  // rule e720d8e set). The answer stays deterministic, just rowid-ordered rather than arrival-ordered
+  // — the same gap `repeat` already has for every other position-dependent step, and it closes when
+  // the encounter learns to cross a recursive term, not here.
+  const memberOrder = val.kind === 'elementList' ? (src.valElement ? src.valOrder : src.encounter) : undefined;
+  const order = memberOrder ?? key.group;
+  const barrier = dropLayoutAtBarrier(st);
+  const out = memberOrder ? patchLayout(barrier.traverserLayout, { encounter: 'encounter' }) : barrier.traverserLayout;
+  const node = q`SELECT ${key.cols}, ${valNode}${memberOrder ? q`, ROW_NUMBER() OVER (ORDER BY ${memberOrder}) AS encounter` : empty} FROM ${src.from} ${groupBy ? 'GROUP BY' : 'ORDER BY'} ${order}`;
+  const rel = st.q.cte(node, [...groupColumns({ key: key.desc, val }), ...layoutCols(out)]);
+  return toGroupStream({ ...barrier, traverserLayout: out }, rel, key.desc, val);
 }
 
 /**
@@ -719,7 +755,7 @@ export function lowerScalarGroupCount(s: ScalarStream): GroupStream {
  *  re-dispatched against the new shape. */
 const asMapValue: ShapeTailFn<GroupStream> = (s, _step, _steps, at) => {
   const { rel, keyOf, valOf } = deriveGroupMap(s);
-  return continueLowering(toMapStream(loweringStateOf(s), rel, keyOf, valOf), at);
+  return continueLowering(toMapStream(dropLayoutAtBarrier(loweringStateOf(s)), rel, keyOf, valOf), at);
 };
 
 const GROUP_DISPATCH = new Map<string, ShapeTailFn<GroupStream>>([
@@ -782,7 +818,8 @@ function deriveGroupMap(s: GroupStream): { rel: Relation; keyOf: MapOf; valOf: M
   if (s.val.kind === 'elementList') {
     if (s.val.elem === 'property') throw new Error('select(Column)/unfold() over a group of property-element values not yet supported');
     const elem = s.val.elem; // narrowed to Elem by the property guard above
-    valNode = q`jsonb(COALESCE(json_group_array(${g.c.v_rid}) FILTER (WHERE ${g.c.v_rid} IS NOT NULL), json('[]')))`;
+    const encounter = groupEncounter(s);
+    valNode = q`jsonb(COALESCE(json_group_array(${g.c.v_rid}${encounter ? q` ORDER BY ${g.c[encounter]}` : empty}) FILTER (WHERE ${g.c.v_rid} IS NOT NULL), json('[]')))`;
     valOf = { kind: 'list', of: { kind: 'elem', elem } };
   } else if (s.val.kind === 'elementLast') {
     throw new Error('select(Column)/unfold() over a group of single-element (tail) values not yet supported');
@@ -1031,7 +1068,7 @@ const propertyGroup: ShapeTailFn<PropertyStream> = (s, step, _steps, at) => {
   // A live property parent — its by() sub-traversals lower through the generic child
   // seam (tryLowerGroupChildSource), exactly as an element group does.
   const p = s.rel.as('p');
-  const src: GroupSource = { from: p, ctx: propertyCtx(p, s.ownerElem), elem: 'property', parent: s, productiveBy: step.productiveBy, bulk: s.traverserLayout.bulk ? p.c[s.traverserLayout.bulk] : undefined };
+  const src: GroupSource = { from: p, ctx: propertyCtx(p, s.ownerElem), elem: 'property', parent: s, productiveBy: step.productiveBy, bulk: s.traverserLayout.bulk ? p.c[s.traverserLayout.bulk] : undefined, encounter: s.traverserLayout.encounter ? p.c[s.traverserLayout.encounter] : undefined };
   const isCount = step.name === 'groupCount';
   return continueLowering(lowerGroup(s, isCount, step.modulators ?? [], src), at + 1);
 };

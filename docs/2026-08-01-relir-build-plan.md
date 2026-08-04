@@ -2346,10 +2346,26 @@ ORDER OF MEMBERS, not just a count.** Three reference facts, at the pin:
 | `order()` | `CollectingBarrierStep` | **yes** (`OrderGlobalStep.java:78` sorts `traverserSet`) | distinct traversers by FIRST arrival, duplicates ADJACENT |
 | `group()` | `ReducingBarrierStep` | **no** — one start at a time | ARRIVAL order, duplicates wherever they arrived |
 
-`group()` is itself a `Barrier`, so `LazyBarrierStrategy` inserts nothing before it and the traversers
-reaching it have bulk 1. **So §13h's `group` arm is CONFIRMED and its justification is now stronger than
-the audit's**: arrival order is not merely `FoldStep`'s habit, it is what `group` gets because nothing on
-that path can coalesce. `order()` is the opposite, and "ties keep arrival order" is false there.
+`group()` is itself a `Barrier`, so `LazyBarrierStrategy` inserts nothing DIRECTLY before it. **So §13h's
+`group` arm is CONFIRMED and its justification is now stronger than the audit's**: arrival order is not
+merely `FoldStep`'s habit, it is what `group` gets on an ADJACENT fan-out because nothing on that path can
+coalesce. `order()` is the opposite, and "ties keep arrival order" is false there.
+
+**One qualifier, and it rehabilitates §13h's third bullet from `RISK` to a real latent divergence.** "The
+traversers reaching a `group()` have bulk 1" holds only when the fan-out is ADJACENT to it, as in the
+measured `g.V().both().group()`. Put any barrier-eligible step between them — `g.V().both().values("name").group()`
+— and `LazyBarrierStrategy` DOES insert a coalescing barrier after `both()` (its successor is now `values`,
+neither the last step nor a `Barrier`), and bulk SURVIVES the intervening flatMap:
+`traverser/util/AbstractTraverser.java:57` `split(r, step)` clones the traverser and replaces only the
+value, so a bulked parent yields bulked children. `FoldStep` then repeats each member `bulk` times,
+adjacently. So §13h's "a bulked `group()` would not repeat members by `bulk`" is REACHABLE, not merely
+hypothetical — its stated reason for being safe (`computeCollapseSafe` excludes a `group` from the prefix)
+is about OUR collapse gating and says nothing about the reference's bulking.
+
+**This does not change the increment.** Arrival order is the right answer for the unbulked shape, which is
+what the `group` arm fixes; the bulked shape needs the bulk column exactly as `order()` does, and lands with
+it. What it changes is the SIZE of the bulking increment's payoff: it is not one step's tie-break but the
+member order of every collecting barrier reached through a non-adjacent fan-out.
 
 **`groupCount` is NOT part of the fix, and §13h naming it is a third error the code refutes.** Its value is
 a count and its map is a `HashMap` (`GroupStep.java:64` `HashMapSupplier`, and the corpus compares maps
@@ -2374,8 +2390,18 @@ answer is whatever scan SQLite chose; RelIR's is stable under reversal and wrong
 "one right, one wrong": one is pinned to the wrong column and the other is pinned to nothing. Adding
 `group`/`groupCount` to `COLLECTING_CONSUMERS` fixes BOTH at once — RelIR stops falling back to `'id'`, and
 legacy's arrival order stops being SQLite's choice — which is the standing rule that a member order must be
-pinned by the SQL we emit (`test/CLAUDE.md`, the perturbation instrument). It also predicts a new
-`test:perturbed` gain, so measure that instrument before and after.
+pinned by the SQL we emit (`test/CLAUDE.md`, the perturbation instrument).
+
+**One prediction here was WRONG and the correction is the useful part.** This paragraph originally said the
+fix "predicts a new `test:perturbed` gain". It did not: the instrument sat at 4 before and after, and the
+four are the ones `test/CLAUDE.md` already names — a `group().by(T.id)` KEYING defect (a different bug), two
+child-scope per-origin reducer assertions, and the census's own answer gate. The reason is the point:
+**no test asserted a group's member order at all**, so the fragility was invisible to the instrument as well
+as to the corpus, and a fix cannot show up as a gain in a suite that never made the claim. What the
+instrument CAN do is confirm the fix, once an assertion exists — the new
+`test/L4-addendum/group-member-order.feature` passes under `MOGWAI_REVERSE_UNORDERED=1` on BOTH spines,
+which is the real evidence, and is why `test/CLAUDE.md`'s rule about only adding an `ordered` L4 assertion
+that survives perturbation cuts both ways: it is also how a perturbation fix gets a witness.
 
 Read the `order()` column carefully: **RelIR is closer to the reference than legacy is** — it already puts
 duplicates adjacent, and only the group ORDER is wrong (rowid, where the reference is first arrival). So
@@ -2675,3 +2701,35 @@ own comment records as having left the obligation "declared … but unprovable t
 The same override for `spine` puts the differential inside `ci` for all 2,298 corpus traversals, one always-on
 committed artifact, and it costs one extra execute per traversal. `test:legacy-spine` remains the instrument
 for everything the corpus does NOT cover.
+
+### 13g·1. The group child-value arm, settled — and it DEPENDS on the `group` arm above
+
+§13g's first bullet (a child value `by()` on `group()` collects a LIST where the reference assigns a single
+VALUE) is CONFIRMED against `gremlin-core`, with three details the audit did not carry — two of which change
+what the fix has to do.
+
+**The wrapped set is FIVE kinds, not three.**
+`gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java:92-101` wraps
+into `__.map(v).fold()` — hence a list — for `ValueTraversal`, `TokenTraversal`, `IdentityTraversal`,
+**`ColumnTraversal`** and **a start step that is a `LambdaMapStep` whose function is a `FunctionTraverser`**.
+So `by(Column.values)` folds to a list too, which §13g's "`by('age')`, `by(T.label)`, `by()`" omits. Anything
+else — a genuine anonymous traversal — is returned unwrapped.
+
+**The unwrapped arm takes the FIRST value the child produces, not "the value".**
+`.../step/map/GroupStep.java:111-138`: `projectTraverser` does `this.valueTraversal.reset()`, adds the one
+traverser as a start, and under `if (null == this.barrierStep)` does
+`if (this.valueTraversal.hasNext()) map.put((K) p, (V) this.valueTraversal.next())`. A child emitting several
+values contributes only its first; the rest are discarded, never appended.
+
+**And across traversers sharing a key, the LAST one wins.** `GroupStep.java:63` sets the reducing operator to
+`new GroupBiOperator<>(null == this.barrierStep ? Operator.assign : …)`, and
+`.../traversal/Operator.java:112-116` is `assign { apply(a, b) { return b; } }` — the new incoming value,
+returned unchanged. So the group's value for a key is the LAST arriving traverser's first child value.
+
+**Therefore this arm is BLOCKED ON the `group` arm of §13h, and that is a real ordering constraint rather
+than a preference:** "last arriving" is not expressible while the chain carries no emission position for a
+`group()` — with `ORD_COL` falling back to the rowid, "last" would mean "highest rowid", which is a different
+question and the same class of wrong answer §13h·1 documents for the member list. Land `group` in
+`COLLECTING_CONSUMERS` first, then this arm is `LAST_VALUE`/`MAX(encounter)` over the group rather than a
+`json_group_array`. Corpus: **visible** — `sideEffect/Group.feature:122`
+`g_V_group_byXvaluesXnameX_substringX1XX_byXconstantX1XX`, which RelIR fully covers.

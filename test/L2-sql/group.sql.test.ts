@@ -17,6 +17,18 @@ import { bagOf, read, relirOff, run, seededStore } from '../support/harness.ts';
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
 
 describe('group / properties SQL', () => {
+  test('group() carries emission order into both member-list lowerings', () => {
+    const query = 'g.V().both().group().by(T.label)';
+    const rel = read(query, { spine: 'rel' });
+    expect(rel.sql).toContain('AS go');
+    expect(rel.sql).toContain('ORDER BY gm23.go ASC');
+    expect(rel.sql).toContain('AS encounter');
+
+    const legacy = read(query, { spine: 'legacy' });
+    expect(legacy.sql).toContain('ROW_NUMBER() OVER (ORDER BY p.encounter) AS encounter');
+    expect(legacy.sql).toContain('ORDER BY p.encounter');
+  });
+
   test('valueMap variants set shape, reuse the vertex row source', () => {
     expect(read('g.V().valueMap()').shape).toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: false });
     expect(read('g.V().valueMap(true)').shape).toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: true });
@@ -510,7 +522,7 @@ describe('group / properties SQL', () => {
     // not tell an unproductive child from a productive NULL member). `scalarList` remains the
     // DIRECT by(key) projection, which has no child rows and does emit SQL NULLs.
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'list' } });
-    expect(p.sql).toContain('ROW_NUMBER() OVER () AS o0');
+    expect(p.sql).toContain('ROW_NUMBER() OVER (ORDER BY p.encounter) AS o0');
     expect(p.sql).toContain('ON gv.o0=gp.o0');
     // The member list is EMISSION-ORDERED (per-origin encounter), not incidentally ordered by
     // whatever the join produced — the whole point of routing this through the fold aggregate.
@@ -595,7 +607,7 @@ describe('group / properties SQL', () => {
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'map', parts: [{ key: 'o' }, { key: 'l' }, { key: 'i' }] }, val: { kind: 'elementLast', elem: 'edge' } });
     // Every project field is an independent generic child joined on one outer edge
     // ordinal; no composite-key field uses a correlated scalar mini-compiler.
-    expect(p.sql).toContain('ROW_NUMBER() OVER () AS o0');
+    expect(p.sql).toContain('ROW_NUMBER() OVER (ORDER BY p.encounter) AS o0');
     expect(p.sql).toContain('gkp0.v AS k0_v, gkp1.v AS k1_v, gkp2.v AS k2_v');
     expect(p.sql).toContain('JOIN vertex_properties vp ON vp.node=n.id');
     expect(p.sql).toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=gn.src) AS v_src'); // edge value framing → external endpoint id
@@ -608,7 +620,7 @@ describe('group / properties SQL', () => {
     const p = read('g.V().properties().group().by(__.project("n","k","v").by(__.element().values("name")).by(__.key()).by(__.value())).by(__.tail())');
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'map', parts: [{ key: 'n' }, { key: 'k' }, { key: 'v' }] }, val: { kind: 'elementLast', elem: 'property' } });
     // The property parent's multiset-safe domain carries the full property payload.
-    expect(p.sql).toContain('p.pk AS pk, p.pv AS pv, p.pvtype AS pvtype, p.pmeta AS pmeta, p.bulk, ROW_NUMBER() OVER () AS o0');
+    expect(p.sql).toContain('p.pk AS pk, p.pv AS pv, p.pvtype AS pvtype, p.pmeta AS pmeta, p.bulk, ROW_NUMBER() OVER (ORDER BY p.encounter) AS o0');
     // element().values("name") → owner re-root + values, joined back as a composite key part.
     expect(p.sql).toContain('gkp0.v AS k0_v, gkp1.v AS k1_v, gkp2.v AS k2_v');
     expect(p.sql).toContain('SELECT p.pk AS v, p.bulk, p.o0, ROW_NUMBER() OVER (PARTITION BY p.o0'); // key() child, per-origin encounter (carried slot)

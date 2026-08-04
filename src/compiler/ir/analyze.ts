@@ -71,12 +71,18 @@ const POSITIONAL_CONSUMERS = new Set(['limit', 'range', 'skip', 'tail']);
  *  the slice steps above do not share: an upstream `order()` does not satisfy them (they read
  *  across a relation boundary, where SQL drops a subquery's ORDER BY), and neither does the
  *  absence of a fan-out (a bare `g.V().fold()` observes the source's order just as much).
+ *  A `group()` value list is itself a fold, so it has the same property. Specifically,
+ *  `GroupStep` extends `ReducingBarrierStep` and consumes starts one at a time rather than
+ *  parking them in a coalescing TraverserSet: its members therefore keep arrival order,
+ *  including separated duplicates. `groupCount` is deliberately absent — its value is a
+ *  count in a HashMap, not an ordered member collection. See the pinned reference at
+ *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java`.
  *
  *  `cap` is here as well as `aggregate`, and that is not redundancy: this scan is FLAT, so an
  *  `aggregate` written inside a child body — `g.V().local(aggregate('a')).cap('a')`, the whole
  *  Scope.local family — is invisible to it. `cap` is the step that makes a collection's member
  *  order observable and it is always at the top level, so it is the one that cannot be missed. */
-const COLLECTING_CONSUMERS = new Set(['fold', 'aggregate', 'cap']);
+const COLLECTING_CONSUMERS = new Set(['fold', 'aggregate', 'cap', 'group']);
 /** The WRITE steps, which are order-sensitive for a reason none of the read consumers share: a
  *  write ASSIGNS ids, in the order it consumes its driver rows, and those ids are observable —
  *  `g.V().as("a").in("created").addE("createdBy").from("a")` creates the same four edges under a

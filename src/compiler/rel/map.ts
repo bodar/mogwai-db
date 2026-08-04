@@ -212,6 +212,8 @@ export function groupBarrier(
       // The MEMBER is the projected value where a value `by()` names one, and the traverser's rowid
       // otherwise — which `elementNode` then expands. The ORDER is separate because a projected value is
       // not an order: two traversers can share one, and the members would then collect in scan order.
+      // analyzeChain demands an encounter for every group(), so the id fallback is unreachable for this
+      // collecting arm; it remains only as a defensive fallback if that analysis contract is violated.
       ...(collecting ? [[MEMBER_COL, member ?? col(input.id, 'id')] as const, [ORD_COL, col(input.id, encounter ? encounter.col : 'id')] as const] : []),
       ...(bulk ? [[bulk.col, col(input.id, bulk.col)] as const] : []),
       ...(encounter ? [[encounter.col, col(input.id, encounter.col)] as const] : []),
