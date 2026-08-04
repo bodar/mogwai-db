@@ -2224,3 +2224,113 @@ traverser exactly as `PathStep` does. The set-op RESULT TYPES match the referenc
 (empty → `""`, nulls skipped, all-null → `""`) match `ConjoinStep`. And a vertex's `{label}` payload really
 is a LIST on the wire — the client's `VertexSerializer` serializes `labels` as a list and derives `.label`
 from it.
+
+### 13f. The modulator / grouping / reduction audit — TWO RelIR-ONLY defects, both silent
+
+The second audit's headline is different in kind from §13a–13e: those are mostly shared with legacy, but
+these two are **RelIR-only regressions**, i.e. the routing switch made a correct answer wrong.
+
+**1. A PRODUCTIVE NULL from a `by()` child drops every traverser. `DEFECT`, and it is MINE — the child
+seam introduced it.** VERIFIED row counts:
+
+| traversal | RelIR | legacy (= reference) |
+|---|---|---|
+| `g.V().order().by(__.constant(null)).values("name")` | **0** | 6 |
+| `g.V().dedup().by(__.constant(null)).values("name")` | **0** | 1 |
+| `g.V().group().by("name").by(__.constant(null))` | `{}` | 6 keys |
+
+The cause is a conflation I approved without questioning. `byNode`'s child arm keeps SQL NULL outside the
+`{t,v}` envelope so a productivity filter can see it — which I praised as the right instinct — and
+§10·12·2 then widened `orderProductivity` to test it. But **productivity is whether the child EMITTED a
+traverser, never whether its value is null**:
+`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalProduct.java`
+carries the line `this.o = null; // null is valid technically but productive=false trumps it`, and
+`TraversalUtil.produce` returns a PRODUCTIVE product whenever `traversal.hasNext()`. Our route expresses
+NULLNESS and calls it emission. The two coincide for every body except one that produces a null on purpose
+— which is exactly why no corpus scenario catches it (nothing puts `constant(null)` inside a `by()`).
+Fixed by DECLINING that body; the general fix is the `ByChild` emission bit already queued in §10·12·3.
+
+**2. `sample(n)` returns the wrong and nondeterministic number of rows. `DEFECT`, RelIR-only.** VERIFIED
+over six runs each: `g.V().sample(3).values("name")` → `[2,2,4,2,4,4]` where legacy is `[3,3,3,3,3,3]`, and
+`g.V().both().sample(3)` → `[3,4,4,5,3,1]`. The count can EXCEED n, which is the tell: the arm lowers to
+`Sort(RANDOM()) → Limit(n)`, the assembler fuses the block, and SQLite re-evaluates `RANDOM()` per
+candidate row so the chosen set is re-rolled for every outer row. `SampleGlobalStep` is a barrier emitting
+exactly n (`if (traverserSet.bulkSize() <= this.amountToSample) return;`).
+
+**Why `order().by(Order.shuffle)` is correct and this is not — the general lesson.** Shuffle goes through
+`renumber`, i.e. `row_number() OVER (ORDER BY RANDOM())`, and a WINDOW function is computed once per row
+over the materialized frame; a bare `ORDER BY RANDOM()` in a fusable block is not. So the fix is to RANK in
+a window and FILTER, never to sort and limit — which also makes the sample come out in the INPUT's order,
+as `CollectingBarrierStep` does when it drains its `TraverserSet` in insertion order (the arm's comment
+claimed "the root still sorts by the carried position", which is false for these chains since `sample` is
+not in `POSITIONAL_CONSUMERS`). **A non-deterministic ordering expression must never sit in a slot the
+assembler can inline.** `limit`/`range`/`tail` are unaffected because their sort key is a column.
+
+### 13g. Grouping and reduction — corpus-VISIBLE defects, shared with legacy
+
+- **A CHILD value `by()` on `group()` collects a LIST where the reference assigns a single VALUE.**
+  `Grouping.convertValueTraversal` rewrites a `ValueTraversal`/`TokenTraversal`/`IdentityTraversal`
+  (`by('age')`, `by(T.label)`, `by()`) into `__.map(v).fold()` — hence a list — but leaves an ANONYMOUS
+  traversal unwrapped, so `GroupStep` takes `map.put(p, valueTraversal.next())`: one bare value, duplicates
+  merging under `Operator.assign`. Ours collects both into `json_group_array`. Corpus: **visible** —
+  `sideEffect/Group.feature:122` `g_V_group_byXvaluesXnameX_substringX1XX_byXconstantX1XX`, which RelIR
+  fully covers. The discriminator is already in hand (`map.ts` conditions on `key.kind === 'child'`).
+- **The reducer's result TYPE is a SQLite storage class, so Gremlin's numeric tower collapses.**
+  `typeof(<agg>)` yields only integer/real/text/null, while `NumberHelper.getHighestCommonNumberInfo`
+  keeps the NARROWEST common Gremlin class and promotes only on overflow. So `sum()` of bytes must be a
+  byte and of floats a float, and `127b+1b` must promote to short. Corpus: **visible**, six `Sum.feature`
+  scenarios (`d[6].b`, `d[6].s`, `d[6].f`, `d[128].s`, `d[1123].n`). The common cases
+  (`values("age").sum()` → `d[123].i`, `mean()` → `d[30.75].d`) are correct, so only the narrow/float/big
+  arms are wrong.
+- **The reducer eligibility guard drops TEXT-carried exact int64, and `min`/`max` compare storage classes.**
+  This project deliberately carries an int64 above 2^53 as decimal TEXT, so a legal Gremlin `long` has
+  `typeof = 'text'`: `sum`/`mean` then contribute NOTHING for it (`g.inject(9007199254740993l, 1l).sum()`
+  → **1**), while `min`/`max` admit it and compare under SQLite's INTEGER-before-TEXT order
+  (`g.inject(10l, -9007199254740993l).min()` → **10**). The fix is the authority we already have —
+  `storedCompareOn(vtype)`, which casts a TEXT-carried int to a 64-bit-exact INTEGER — so it makes the
+  `arithmetic` class correct rather than widening a list. Corpus: invisible.
+- **`min`/`max` over a mixed number+string stream answers where the reference RAISES.** `NumberHelper`
+  falls through to `a.compareTo(b)` for non-Numbers, so `Integer.compareTo(String)` throws;
+  `g.inject(1,"a").min()` gives `1` here. `RISK`, and the auditor flagged the right open question: whether
+  TinkerPop 4 intends `Orderability`'s total order in this position instead. Settle that from
+  `semantics/Orderability.feature` before choosing between fail-closed and a total order.
+
+### 13h. Order-of-members findings — a spine divergence no instrument sees
+
+- **`group()`'s member order is the element ROWID, not the emission order its comment claims.** The chain
+  never carries a position for `group()`, because `COLLECTING_CONSUMERS` in `analyze.ts` is
+  `{fold, aggregate, cap}` and omits `group` — so `ORD_COL` always falls back to `'id'`. Measured on
+  `g.V().both().group().by(T.label)`, the `person` members come out rowid-grouped on RelIR
+  (`marko,marko,marko,vadas,josh,josh,josh,peter`) and arrival-ordered on legacy
+  (`vadas,josh,marko,marko,josh,peter,marko,josh`) — the same multiset in a different order, which the
+  census's digest cannot see and `test:perturbed` cannot move (rowid order is stable under scan reversal).
+  `FoldStep` collects in ARRIVAL order and a group's value list is that list. **Fix: add `group`/`groupCount`
+  to `COLLECTING_CONSUMERS`**, which makes the emission position exist by construction and the `'id'`
+  fallback unreachable — and `analyze.ts`'s own docblock already states the argument for why they belong.
+- **`elementOrder`'s tie-break is the element id where the reference is a STABLE sort.** `List.sort` is a
+  stable merge sort, so ties keep arrival order; we tie-break on id, and the two spines disagree
+  (`g.V().both().order().by(T.label)`). Same root cause as above: a position after a fan-out.
+- **A bulked `group()` would not repeat members by `bulk`** (`FoldStep` does
+  `for (i < traverser.bulk()) list.add(...)`). `RISK` only — `computeCollapseSafe` provably excludes a
+  `group` in the prefix, so `bulked` is false wherever the collecting arm runs. Worth making that coupling
+  a type error rather than a proof if collapse gating ever widens.
+
+### 13i. Doc corrections from the audit
+
+- `modulator.ts` cites `OrderGlobalStep.java:82` for the productivity quote; `:82` is the method signature
+  and the deciding line is `:85`. The claim is right, the line is off by three.
+- `modulator.ts`'s `by(T.label)` comment says "insertion order names the first", but it orders by
+  `vertex_labels.label` — a FK into the `labels` dictionary — which is the order the label NAME was first
+  interned graph-wide, not this vertex's insertion order. (The property arm beside it orders by a rowid and
+  IS insertion order, exactly as its comment says.) Note TinkerPop says nothing here: `Element.label()` is
+  single-valued upstream, so multi-label tie-breaking is our own extension.
+- **Confirmed correct and not to be re-litigated:** the `count`-seeds-0 versus reducers-emit-nothing
+  contract and its citation (exact); `dedupBy`'s `setBulk(1L)` citation (literally that line) and its
+  unobservability today; `group`/`groupCount` over zero traversers being one empty-map traverser
+  (verified to the GraphBinary bytes on both spines); `sortTerms`' per-key CONJOINED productivity being the
+  reference's rule (`OrderGlobalStep` breaks out of its comparator loop and requires
+  `projections.size() == comparators.size()`); `map.ts`'s "two rules, one slot" claim about the value
+  `by()`, whose two cited scenarios do say what it says; `bulkSlice`'s band trimming against
+  `RangeGlobalStep`'s `toSkip`/`toTrim`/`setBulk`; `mean`'s forced REAL against `MeanNumber.getFinal`; and
+  the whole bulk-weighting rule across the reducer family (`sum` multiplies by bulk, `min`/`max` are
+  bulk-invariant, `groupCount` weights).
