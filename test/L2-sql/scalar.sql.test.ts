@@ -1123,7 +1123,10 @@ describe('scalar-parent / projection SQL', () => {
     // and the same question legacy asks with a CTE plus a WHERE. Both keep the dynamic `vt` column.
     const summedRel = read('g.V().values("age").sum().is(P.gt(100))', { spine: 'rel' });
     expect(summedRel.shape).toEqual({ kind: 'scalar' });
-    expect(summedRel.sql).toMatch(/HAVING \(sum\(/);
+    // The HAVING now carries the comparability guard (§13a): a numeric bound compares only where the
+    // aggregate's own storage class is numeric, else FALSE. So what is pinned is that the filter became a
+    // HAVING over the aggregate — not the shape of the comparison inside it.
+    expect(summedRel.sql).toMatch(/HAVING [^]*sum\(/);
     expect(summedRel.sql).toMatch(/ AS vt/);
 
     const store = seededStore();
@@ -1163,7 +1166,10 @@ describe('scalar-parent / projection SQL', () => {
       // the OUTER transform wraps the inner one — left-to-right order preserved through the fusion
       expect(fused.sql).toMatch(/upper\(lower\(/);
       // …and the predicate sees the value as it was at ITS position: `lower`, never `upper(lower(…))`.
-      expect(fused.sql).toMatch(/WHERE \(?lower\([^]*\) != \?\)?/);
+      // `neq` is now total over NULL (§13a): `(x = ?) IS NOT ?` rather than `x != ?`, because negating
+      // SQL NULL must be TRUE where TinkerPop's two-valued `test` says so. Either spelling is the
+      // predicate; the POINT of this assertion is that its subject is `lower(…)` and not `upper(lower(…))`.
+      expect(fused.sql).toMatch(/WHERE \(*lower\([^]*\)( != \?|( = \?\)? IS NOT \?))/);
       expect(fused.sql).not.toMatch(/WHERE \(?upper\(/);
     }
     expect(read('g.V().values("name").toLower().is(P.neq("x")).toUpper()', { spine: 'legacy' }).sql).not.toContain('FROM c2 p)');

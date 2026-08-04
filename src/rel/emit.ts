@@ -282,9 +282,11 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       }
 
       case 'project': {
-        // A projection may always overwrite the select list, EXCEPT over a DISTINCT: dedup already
-        // happened on the old list, and re-spelling it would dedup on different columns.
-        const b = inputBlock(r.input, outer, (input) => input.distinct);
+        // A projection may overwrite the select list except over DISTINCT, or over a whole-relation
+        // aggregate: replacing the latter with constants would erase the aggregate's one-row shape.
+        // This deliberately takes Calcite's safe superset instead of recursively proving which input
+        // fields an arbitrary Expr reads; see SqlImplementor.java:2223-2241 (`fieldsUsed.isEmpty()`).
+        const b = inputBlock(r.input, outer, (input) => input.distinct || (grouped(input) && input.groupBy?.length === 0));
         const select = r.exprs.map(([name, e]) => [name, expr(e, b.scope)] as const);
         return { ...b, select, scope: withRel(b.scope, r.id, new Map(select)) };
       }

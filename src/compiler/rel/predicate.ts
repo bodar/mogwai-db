@@ -34,7 +34,8 @@ const isPred = (value: unknown): value is Pred =>
   value !== null && typeof value === 'object' && 'op' in value && Array.isArray((value as Pred).values);
 
 const binary = (op: Extract<Expr, { kind: 'binary' }>['op'], left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
-const not = (arg: Expr): Expr => ({ kind: 'unary', op: 'not', arg });
+/** Gremlin predicates are two-valued: negating SQL NULL is TRUE, not NULL. */
+const negated = (inner: Expr): Expr => binary('is not', inner, lit(1, 'int'));
 /** SQLite has no boolean literal; a degenerate set folds to a constant comparison rather than to a
  *  bare `0`, so the expression still reads as a predicate wherever it is spliced. */
 const CONSTANT = { true: binary('=', lit(1, 'int'), lit(1, 'int')), false: binary('=', lit(1, 'int'), lit(0, 'int')) };
@@ -65,6 +66,8 @@ const SET_BIND_LIMIT = Math.floor(CF_MAX_BINDS / 4);
  *  vocabulary — never user input — so there is no injection surface in the names themselves. */
 const CAST_TO_INT = ['byte', 'short', 'int', 'long', 'bigint', 'datetime', 'duration'];
 const CAST_TO_REAL = ['float', 'double', 'bigdecimal'];
+const NUMERIC_CAST_TO_INT = CAST_TO_INT.filter((type) => type !== 'datetime' && type !== 'duration');
+const NUMERIC_VTYPES = [...NUMERIC_CAST_TO_INT, ...CAST_TO_REAL];
 
 /**
  * The vtype-aware ordering key for a stored property value: `(value, vtype) -> a correctly-ordered
@@ -102,11 +105,36 @@ export type SubjectType =
 
 export const SUBJECT_UNKNOWN: SubjectType = { kind: 'unknown' };
 
-/** The ORDERING key builder implied by a subject type — the coarse view, derived rather than passed.
- *  Only the per-row case needs one: a compile-time-typed subject is already a native value, which is
- *  what the legacy `typeCtx.kind !== 'perRow'` branch means. */
-const compareFor = (type: SubjectType): (subject: Expr) => Expr =>
-  type.kind === 'perRow' ? storedCompareOn(type.vtype) : (subject) => subject;
+/** Comparability is confined to one Gremlin type space. Each CASE combines the guard and comparison
+ * so its type vocabulary is emitted once; a stored vtype outranks SQLite's storage class because an
+ * exact numeric value may deliberately be stored as decimal TEXT. */
+const ordered = (
+  op: Extract<Expr, { kind: 'binary' }>['op'], subject: Expr, bound: Expr, value: unknown, type: SubjectType,
+): Expr => {
+  const numericBound = typeof value === 'number';
+  if (type.kind === 'static') {
+    const canonical = normalizeTypeName(type.type);
+    const agrees = numericBound ? canonical !== null && NUMERIC_VTYPES.includes(canonical) : canonical === 'string';
+    return agrees ? binary(op, subject, bound) : CONSTANT.false;
+  }
+  const compilerFalse = binary('!=',
+    { kind: 'call', fn: 'json_object', args: [] },
+    { kind: 'call', fn: 'json_object', args: [] });
+  if (type.kind === 'perRow') {
+    return numericBound
+      ? { kind: 'case', whens: [
+        [{ kind: 'in-list', expr: type.vtype, values: NUMERIC_CAST_TO_INT.map((name) => lit(name, 'text')) }, binary(op, { kind: 'cast', arg: subject, to: 'int' }, bound)],
+        [{ kind: 'in-list', expr: type.vtype, values: CAST_TO_REAL.map((name) => lit(name, 'text')) }, binary(op, { kind: 'cast', arg: subject, to: 'real' }, bound)],
+      ], else: compilerFalse }
+      : { kind: 'case', whens: [[binary('=', type.vtype, lit('string', 'text')), binary(op, subject, bound)]], else: compilerFalse };
+  }
+  const storage = { kind: 'call', fn: 'typeof', args: [subject] } as const;
+  return numericBound
+    ? { kind: 'case', whens: [[
+      { kind: 'in-list', expr: storage, values: [lit('integer', 'text'), lit('real', 'text')] }, binary(op, subject, bound),
+    ]], else: compilerFalse }
+    : { kind: 'case', whens: [[binary('=', storage, lit('text', 'text')), binary(op, subject, bound)]], else: compilerFalse };
+};
 
 export const storedCompareOn = (vtype: Expr) => (subject: Expr): Expr => ({
   kind: 'case',
@@ -214,7 +242,6 @@ const KNOWN_NON_VALUE = new Set(['vertex', 'edge', 'vertexproperty', 'vproperty'
  * — the same reason `Col` names a relation.
  */
 export function predicateExpr(subject: Expr, pred: unknown, type: SubjectType = SUBJECT_UNKNOWN): Expr | null {
-  const compare = compareFor(type);
   // `has(key)` with no value: presence, not comparison.
   if (pred === undefined) return binary('is not', subject, lit(null, 'any'));
   if (!isPred(pred)) {
@@ -229,7 +256,7 @@ export function predicateExpr(subject: Expr, pred: unknown, type: SubjectType = 
     return left && right ? build(left, right) : null;
   };
 
-  if (op === 'not') { const inner = recurse(values[0]); return inner && not(inner); }
+  if (op === 'not') { const inner = recurse(values[0]); return inner && negated(inner); }
   // Infix-composed predicates — `P.gt(20).and(P.lt(30))`. Both sides test the SAME subject, so it
   // is a boolean combination that nests to any depth because each side recurses through here.
   if (op === 'and') return both((l, r) => binary('and', l, r));
@@ -241,7 +268,9 @@ export function predicateExpr(subject: Expr, pred: unknown, type: SubjectType = 
     if (!bound) return null;
     // Equality stays a RAW compare: canonical text is exact, and it keeps the value index usable
     // for the common case. Only ORDERING needs the cast, and only it pays for one.
-    return ORDERING.has(op) ? binary(comparison, compare(subject), bound) : binary(comparison, subject, bound);
+    if (ORDERING.has(op)) return ordered(comparison, subject, bound, values[0], type);
+    const inner = binary(comparison, subject, bound);
+    return op === 'neq' ? negated(binary('=', subject, bound)) : inner;
   }
 
   if (op === 'within' || op === 'without') {
@@ -252,7 +281,7 @@ export function predicateExpr(subject: Expr, pred: unknown, type: SubjectType = 
     const members = values.map(operand);
     if (members.some((m) => !m)) return null;
     const inList: Expr = { kind: 'in-list', expr: subject, values: members as Expr[] };
-    return op === 'within' ? inList : not(inList);
+    return op === 'within' ? inList : negated(inList);
   }
 
   // between = [lo, hi) — inclusive low; inside = (lo, hi) — exclusive low. Both bounds and the
@@ -261,8 +290,8 @@ export function predicateExpr(subject: Expr, pred: unknown, type: SubjectType = 
     const [low, high] = [operand(values[0]), operand(values[1])];
     if (!low || !high) return null;
     return binary('and',
-      binary(op === 'inside' ? '>' : '>=', compare(subject), low),
-      binary('<', compare(subject), high));
+      ordered(op === 'inside' ? '>' : '>=', subject, low, values[0], type),
+      ordered('<', subject, high, values[1], type));
   }
 
   const like = likePattern(op, values[0]);
@@ -273,7 +302,7 @@ export function predicateExpr(subject: Expr, pred: unknown, type: SubjectType = 
     // says. Nothing is lost: SQLite disables its LIKE index optimization whenever ESCAPE is
     // present, which the legacy operator form always is, so both spellings are a residual filter.
     const call: Expr = { kind: 'call', fn: 'like', args: [lit(like.pattern, 'text'), subject, lit('\\', 'text')] };
-    return like.negated ? not(call) : call;
+    return like.negated ? negated(call) : call;
   }
 
   if (op === 'typeOf') return values.length === 1 ? typeOfExpr(subject, values[0], type) : null;

@@ -53,8 +53,12 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
       expect(read('g.V().values("age").is(P.typeOf(GType.NULL))', { spine }).sql).toMatch(/is null|IS \?/i);
       expect(read('g.V().values("age").is(P.typeOf(GType.BOOLEAN))', { spine }).sql)
         .toMatch(/THEN \(?\w+\.vtype = \?\)? ELSE \(?(0|\? = \?)\)? END/);
-      // P.not wraps and negates the inner predicate
-      expect(read('g.V().values("age").is(P.not(P.typeOf(GType.STRING)))', { spine }).sql).toMatch(/NOT \(+CASE WHEN/);
+      // P.not negates the inner predicate, and the SPELLING is the §13a fix: `NOT (p)` is NULL when
+      // `p` is, which drops a row TinkerPop keeps (its `test` is two-valued, so negating an unknown is
+      // TRUE), so RelIR emits `p IS NOT 1` instead. Legacy still spells the bare `NOT (…)`. Either is
+      // "the inner predicate, negated"; what must not appear is the inner predicate un-negated.
+      expect(read('g.V().values("age").is(P.not(P.typeOf(GType.STRING)))', { spine }).sql)
+        .toMatch(/(NOT \(+CASE WHEN|CASE WHEN[^]*END IS NOT \?)/);
       // an unregistered type name RAISES, and RelIR must not answer it instead: an unreadable name is
       // an error, unlike a GType that names something a value can never be (which is FALSE).
       expect(() => compile('g.V().values("age").is(P.typeOf("bogus-name"))', {}, { spine })).toThrow('unregistered type');
@@ -85,9 +89,12 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     test(`is(P) folds a predicate onto the projected scalar — ${spine} spine`, () => {
       const gt = read('g.V().values("age").is(P.gt(30))', { spine });
       expect(gt.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
-      // is(gt) folds through the vtype-aware compareKey (numeric-correct for the exact tail).
-      // `END` is that CASE's tail on both spines; only the parenthesisation differs.
-      expect(gt.sql).toMatch(/END\)? > \?/);
+      // is(gt) folds through the vtype-aware compareKey (numeric-correct for the exact tail). The two
+      // spines put the operator in different places since the comparability fix (§13a) — legacy after
+      // the compare-key `END`, RelIR inside each type-space arm so a cross-type compare is FALSE
+      // rather than SQLite's storage order — so what is asserted is that the comparison is vtype-aware
+      // AT ALL. A raw `value > ?` matches neither alternative.
+      expect(gt.sql).toMatch(/(END\)? > \?|CAST\([^)]+ AS (INT|REAL)\) > \?)/);
       expect(gt.binds).toContain(30);
       // bare literal → equality, with no compareKey (equality on canonical text is exact)
       const eq = read('g.V().values("age").is(29)', { spine });
@@ -266,7 +273,8 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     // Both spines reach the same vtype-aware compare and the same label membership; only the
     // spelling differs, so the shared fragments are what is asserted across them.
     for (const spine of ['legacy', 'rel'] as const) {
-      expect(read('g.V().where(__.out("knows").has("age", P.gt(30)))', { spine }).sql).toMatch(/END\)? > \?/);
+      expect(read('g.V().where(__.out("knows").has("age", P.gt(30)))', { spine }).sql)
+        .toMatch(/(END\)? > \?|CAST\([^)]+ AS (INT|REAL)\) > \?)/);
       expect(read('g.V().where(__.out("created").hasLabel("software"))', { spine }).sql).toMatch(/vertex_labels[^]*labels/);
     }
   });
@@ -315,11 +323,22 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
   });
 
   // `has()` is RelIR-routed (§10·4), so these two run on BOTH spines. What is asserted is the
-  // SEMANTIC distinction each test is about, not the spelling the spines legitimately differ over:
-  // both emit the vtype-aware compareKey CASE, one as `(CASE … END) >= ?` and the other — where
-  // every binary is parenthesised as a whole — as `(CASE … END >= ?)`. `compared` is that shared
-  // shape, so one assertion serves both and neither spine's parenthesisation is pinned.
-  const compared = (op: string) => new RegExp(`END\\)? ${op.replace(/[><=]/g, (c) => '\\' + c)} \\?`);
+  // SEMANTIC distinction each test is about, not the spelling the spines legitimately differ over —
+  // and since the comparability fix (§13a) they differ MORE than parenthesisation:
+  //
+  //  - legacy applies the operator to the whole vtype-aware compare key: `(CASE … END) >= ?`.
+  //  - RelIR pushes the operator INSIDE each type-space arm, because a cross-type comparison must be
+  //    FALSE rather than SQLite's storage order (`GremlinValueComparator`: comparability is confined
+  //    to one type space) — `CASE WHEN vtype IN (<ints>) THEN CAST(v AS INT) >= ? WHEN vtype IN
+  //    (<reals>) THEN CAST(v AS REAL) >= ? ELSE <false> END`.
+  //
+  // So `compared` accepts either: the operator applied to a compare-key `END`, or applied to a CAST
+  // inside one. Both spellings are "the ordering comparison happened, vtype-aware"; neither pins a
+  // spine's shape, and a RAW `value >= ?` with no vtype CASE anywhere still fails both alternatives.
+  const compared = (op: string) => {
+    const o = op.replace(/[><=]/g, (c) => '\\' + c);
+    return new RegExp(`(END\\)? ${o} \\?|CAST\\([^)]+ AS (INT|REAL)\\) ${o} \\?)`);
+  };
   for (const spine of ['legacy', 'rel'] as const) {
     test(`P.inside is exclusive-low (distinct from between) — ${spine} spine`, () => {
       // between = [lo,hi) ; inside = (lo,hi)
