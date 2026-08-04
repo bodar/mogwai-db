@@ -689,17 +689,30 @@ describe('the RelIR spine', () => {
     }
   });
 
-  test('a fast-path switch selects a STRATEGY, and RelIR covers the side it implements', () => {
-    // `predicateInlining` chooses between two lowerings of a `where()` body: the correlated EXISTS
-    // (which RelIR emits) and a MATERIALIZED child-existence gate — a pushed ordinal, a LEFT JOIN
-    // and a rejoin — which it has not learned. With the switch off it therefore declines, exactly
-    // as it declines an unlearned step, and both positions stay live for L5's differential.
+  test('a fast-path switch changes what a covered traversal EMITS, never whether it is covered', () => {
+    // THIS TEST ASSERTED THE OPPOSITE UNTIL L5 REFUTED IT, and the old reasoning is worth keeping
+    // because it was plausible: `predicateInlining` names two lowerings of a `where()` body — the
+    // correlated EXISTS (which RelIR emits) and a MATERIALIZED child-existence gate (which it has not
+    // learned) — so with the switch off RelIR "should" decline exactly as it declines an unlearned
+    // step, keeping both positions live for the differential.
     //
-    // This is NOT the FTS rule inverted. There, reading the flag would have let spine choice dodge
-    // an optimization RelIR cannot state at all (an index seek). Here the flag names two strategies
-    // and RelIR implements one; covering only what it implements is ordinary coverage.
-    expect(read("g.V().where(__.out('knows'))", { spine: 'rel' }).spine).toBe('rel');
-    expect(read("g.V().where(__.out('knows'))", { spine: 'rel', fastPaths: { predicateInlining: false } }).spine).toBe('legacy');
+    // That holds only while legacy's generic path can answer whatever RelIR's correlated child can.
+    // The moment it could not, turning a FAST PATH off removed SUPPORT — which
+    // `src/compiler/CLAUDE.md` forbids outright: a specialized lowering qualifies ONLY if disabling it
+    // compiles the same traversal generically, and recognition failure falls through rather than
+    // throwing. L5 produced the witness on a seed CI happened to draw:
+    // `g.E().where(__.outV().group().by('name'))` answered 6 rows with the switch ON (correct —
+    // `group()` is a barrier with a HashMap seed, so it always yields and every edge passes) and
+    // THREW `where() traversal not supported` with it OFF. An answer against a throw is not a
+    // result-equivalent pair.
+    //
+    // So the capability is no longer switched, and the rule the test now pins is the general one: a
+    // fast path may change the SQL a covered traversal emits; it may never change whether it is
+    // covered. (The FTS case remains the genuine contrast — there the flag names a physical ACCESS
+    // PATH RelIR cannot state at all, so RelIR declines the shape outright rather than implementing a
+    // side of it.)
+    for (const predicateInlining of [true, false])
+      expect(read("g.V().where(__.out('knows'))", { spine: 'rel', fastPaths: { predicateInlining } }).spine).toBe('rel');
     // `movementCollapse` is the other side of the same coin: RelIR states BOTH forms, so it covers
     // the traversal either way and the flag only changes what it emits.
     for (const movementCollapse of [true, false]) {

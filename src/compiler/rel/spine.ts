@@ -45,17 +45,34 @@ import { lowerToRel } from './lower.ts';
  * and never will be (§10·4: "not as a bridge, not temporarily, not behind a flag").
  */
 export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<string, any>): Compiled | Program | null {
-  // TWO fast-path switches reach the lowering, and for the same reason: each selects between two
-  // lowering STRATEGIES that the algebra can state, rather than between two physical access paths
-  // (which is the FTS case, where RelIR declines instead). `movementCollapse` picks the grouped
-  // `SUM(bulk)`; `predicateInlining` picks the correlated `EXISTS` over the materialized
-  // child-existence gate, and RelIR implements only the first of that pair — so with the switch off
-  // a `where()` body declines exactly as an unlearned step would. Both positions therefore stay
-  // live and L5's differential still has two forms to compare.
+  // ONE fast-path switch reaches the lowering. `movementCollapse` picks the grouped `SUM(bulk)`,
+  // which is a lowering STRATEGY the algebra can state, so both positions stay expressible and the
+  // differential has two forms to compare. (The FTS case is the contrast: it selects a physical
+  // ACCESS PATH, so RelIR declines rather than implementing a side of it.)
+  //
+  // **`predicateInlining` USED TO GATE `correlatedChildren` HERE, AND THAT WAS A CONTRACT VIOLATION
+  // WAITING FOR A WITNESS.** The reasoning was that the switch picks legacy's correlated `EXISTS`
+  // over its materialized child-existence gate and RelIR implements only the first, so with the
+  // switch off a `where()` body should decline "exactly as an unlearned step would". That is fine
+  // only while legacy's generic path can answer whatever RelIR's correlated child can — and the
+  // moment it could not, turning a FAST PATH off removed a SUPPORT capability. `src/compiler/CLAUDE.md`
+  // forbids exactly that: a specialized lowering qualifies ONLY if disabling it compiles the same
+  // traversal generically, and recognition failure falls through rather than throwing.
+  //
+  // The witness was `g.E().where(__.outV().group().by('name'))`, found by L5 on a seed CI happened to
+  // draw (the seed derives from HEAD, which is why a local run had missed it): with the switch ON the
+  // RelIR route answers 6 rows — correct, since `group()` is a barrier with a HashMap seed and
+  // therefore always yields, so every edge passes the `where()` — and with it OFF the traversal fell
+  // to legacy's generic path, which THROWS `where() traversal not supported`. An answer against a
+  // throw is not a result-equivalent pair.
+  //
+  // So the capability is no longer switched. `predicateInlining` still selects between legacy's two
+  // forms for every traversal legacy owns, which is what it is for, and L5's own
+  // `predicateInlining is equivalent to its generic fallback` case still exercises it.
   const lowered = lowerToRel(steps, {
     params,
     collapse: engine.fastPaths.movementCollapse,
-    correlatedChildren: engine.fastPaths.predicateInlining,
+    correlatedChildren: true,
     // NOT a strategy switch — the graph's declared label cardinality is a CAPABILITY, and a creation
     // with no label of its own is a compile-time question only because this value is settled before a
     // compile starts (request-scope DI). Coverage is still not a function of configuration: what the

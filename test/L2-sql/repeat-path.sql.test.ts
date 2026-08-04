@@ -265,7 +265,12 @@ describe('repeat / path SQL', () => {
 
     // The rule as SQL shape, in BOTH directions — the same query collapses its frontier and
     // weights its GLOBAL count by that bulk, while the SCOPED reducer inside it does not.
-    const off = { fastPaths: { movementCollapse: true, predicateInlining: false, scalarPredicateInlining: false } };
+    // `spine: 'legacy'` is now explicit, and the reason is a contract fix rather than a preference:
+    // `predicateInlining` used to gate RelIR's correlated-child capability, so switching it off routed
+    // these traversals to legacy and this test could read legacy's child-scope SQL through the ambient
+    // route. Turning a FAST PATH off must not remove SUPPORT (src/compiler/CLAUDE.md), so that coupling
+    // is gone — and the SQL asserted below is legacy's child-scope shape, so it now names legacy.
+    const off = { spine: 'legacy' as const, fastPaths: { movementCollapse: true, predicateInlining: false, scalarPredicateInlining: false } };
     const sumSql = read(surviving("__.out().values('age').sum().is(P.eq(11))"), off).sql;
     expect(sumSql).toContain('SUM(bulk) AS bulk');                                  // frontier collapsed
     expect(sumSql).toContain('COALESCE(SUM(s.bulk), 0) AS v');                      // GLOBAL count weights
@@ -277,6 +282,14 @@ describe('repeat / path SQL', () => {
     expect(cntSql).toContain('COUNT(c.id) AS v, d.bulk, d.o0, 1 AS encounter');
     expect(cntSql).toContain('HAVING COUNT(c.id) = ?');
     expect(cntSql).not.toContain('1 AS v');
+    // The SEMANTIC claim this test is named for holds on the RelIR route too, and is asserted as a
+    // RESULT rather than a shape: the scoped reducer answers per traverser, so the collapsed parent
+    // row (d, bulk=2) still sees count 2 and sum 11 — bulk-weighting them would give 4 and 22 and
+    // match nothing.
+    if (!relirOff) {
+      expect(run(store, surviving('__.out().count().is(P.eq(2))')).length).toBe(1);
+      expect(run(store, surviving("__.out().values('age').sum().is(P.eq(11))")).length).toBe(1);
+    }
   });
 
   test('repeat requires an exit modulator; emit()/until() run unbounded; sequential repeats chain', () => {

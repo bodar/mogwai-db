@@ -280,8 +280,14 @@ describe('unified lowering characterization', () => {
       if (p.kind !== 'read') throw new Error('expected read plan');
       return store.query('EXPLAIN QUERY PLAN ' + p.sql, p.binds).map((r: any) => r.detail).join('\n');
     };
-    const enabled = { fastPaths: { predicateInlining: true } };
-    const disabled = { fastPaths: { predicateInlining: false } };
+    // Both positions name LEGACY, and that is the point of the test rather than a detail: the
+    // contrast being asserted is between legacy's own two forms — its inline correlated rendering
+    // against its materialized generic gate. `predicateInlining` used to also gate RelIR's
+    // correlated-child capability, so the OFF position could be read through the ambient route;
+    // turning a fast path off must not remove SUPPORT (src/compiler/CLAUDE.md), so that coupling is
+    // gone and the switch now means only what it says.
+    const enabled = { spine: 'legacy' as const, fastPaths: { predicateInlining: true } };
+    const disabled = { spine: 'legacy' as const, fastPaths: { predicateInlining: false } };
     for (const query of [
       'g.V().where(__.out("knows")).values("name")',
       'g.V().where(__.out().count().is(gt(1))).values("name")',
