@@ -1536,6 +1536,8 @@ that are both outside `src/rel/` is not a clean-room question at all.
 - **`materializeRootStream` throws for an `ElementStream`.** So for every covered element traversal —
   most of today's 32% — legacy's `lowerSteps` builds the payload SQL after RelIR's relation. **RelIR does
   not currently produce the whole query**, which is not what §5a's equivalence gate reads as.
+  **LANDED (2026-08-04, `debf46f`)** — `src/compiler/rel/element.ts`. For an element result the plan IS
+  the whole query and `spine.ts` never reaches the framing layer.
 - **`materialize.ts:191` throws `'a terminal map with an element key or value not yet supported'`.** The
   next arm of the map family — `group()`, 41 blockers — is blocked by a throw in the code §8 deletes. To
   advance RelIR one would have to edit legacy's tail. **That is the migration running backwards**, and it
@@ -1545,12 +1547,22 @@ that are both outside `src/rel/` is not a clean-room question at all.
 per-shape builders are ~250 of it, so the file is not the work — the ELEMENT payload is, and it is the
 keystone because it is what every element-returning traversal already depends on.
 
+**CORRECTION — three rows below said "done" and were wrong, in the direction this section was written to
+catch.** What existed for scalar, list and map was the RELATION: a `v`/`vt` pair, a JSONB `list` column, a
+JSONB `map` column, all built by RelIR nodes. The PAYLOAD PROJECTION — the root `SELECT` over that
+relation and the `Shape` choice beside it — was still `materialize.ts`'s, reached through `spine.ts`'s
+`Stream`, and for a list whose leaf is an element or another list `elementListResult`/`nestedListResult` are
+real payload SQL rather than a wrapper. So the honest count at the time of writing was **zero of eleven**,
+not four. This is the same error §10·10 opens by naming, arriving inverted: there a substrate was declared
+MISSING when it was merely not reached; here three were declared DONE because what they need was
+partly present. The state column below now says which HALF exists.
+
 | shape | payload projection | RelIR nodes | state |
 |---|---|---|---|
-| scalar / value | `SELECT v[, vt]` | `Project` | **done** — the arm exists |
-| list | `SELECT json(list)` | `Aggregate` + `json_group_array` | **done** (`list.ts`) |
-| map | `SELECT json(map)` | as above | **done** (`map.ts`) |
-| **element** | id + labels JSON aggregate + ordered property bag | `Aggregate`, `json-object`, `json-array`, correlated `Scalar` — all in the node set | **the keystone.** `vertexLabelsJson`/`framedProps` are ~5 lines each in `plan.ts`; `buildProjection` is 90 |
+| **element** | id + labels JSON aggregate + ordered property bag | `Aggregate`, `json-object`, `json-array`, correlated `Scalar` — all in the node set | **LANDED** `debf46f` — `element.ts`. `AggFn` gained `json_group_object`; the bag's entry order is now the aggregate's own `ORDER BY` rather than a subquery's, which legacy relies on surviving a boundary it does not |
+| scalar / value | `SELECT v[, vt]` | `Project` | relation done; the ROOT projection is still legacy's. A `Project` over the encounter `Sort` — the smallest arm left |
+| list | `SELECT json(list)` | `Aggregate` + `json_group_array` | relation done (`list.ts`). Bare/typed/set roots are `json(list)`; a NESTED leaf needs `Explode` + `Aggregate` (legacy's `nestedListResult`), an ELEMENT leaf needs the element payload as a member (`elementListResult`) — which `element.ts` now makes reachable |
+| map | `SELECT json(map)` | as above | relation done (`map.ts`). The scalar/scalar and scalar/list roots are `json(map)`; an ELEMENT side is the `materialize.ts:191` throw below |
 | property | `vpid/owner/pk/pv/pvtype/pmeta` | `Scan` + `Project` | needs the property shape anyway |
 | record | one wide row, heterogeneous fields | `Project` + child joins | needs `project()`/`select()` |
 | mapEntry | `mk`/`mv` per row | `Explode` | arrives with map re-entry |
@@ -1559,10 +1571,10 @@ keystone because it is what every element-returning traversal already depends on
 | group (rows form) | — | — | **DIES.** The map value replaces it |
 | foreign | landed `VALUES` columns | federation-specific | out of scope here |
 
-**Sizing, honestly: comparable to the write wedge, not to an increment.** Four shapes are already done,
-`group`'s rows form is deleted rather than ported, and three more (property, record, mapEntry) arrive with
-families that are queued anyway. What this decision actually commits to NOW is the **element payload** —
-and that one is not optional, because it is the shape 32% of the corpus already routes through.
+**Sizing, honestly: comparable to the write wedge, not to an increment.** `group`'s rows form is deleted
+rather than ported, and three shapes (property, record, mapEntry) arrive with families that are queued
+anyway. What this decision commits to FIRST is the **element payload** — not optional, because it is the
+shape 32% of the corpus already routes through.
 
 **What it buys, and why it is worth a phase of its own:** `path` becomes carryable (the channel exists and
 has nowhere to go), the element-valued map stops being blocked on the wrong side of the line, `spine.ts`
@@ -1571,3 +1583,35 @@ shrinks to a router with an end date, and "edit legacy to advance RelIR" stops r
 
 **Ordering: this comes BEFORE `group()`**, because `group()` is the first increment that would otherwise
 require editing legacy's materializer.
+
+### 10·10·1 — `RelResult` is the ratchet, and the deletion criterion is a TYPE
+
+The migration needed a way to say "this arm's payload is in the plan; that arm's is not" that a later
+increment could not quietly undo. A boolean or an optional `shape?` would have been exactly the
+two-optionals-plus-implicit-third trap `ScalarType` and `ListOf` were both cleaned up out of. So
+`RelLowering` carries a union (`lower.ts`):
+
+```ts
+export type RelResult =
+  | { readonly kind: 'wire'; readonly shape: Shape }
+  | { readonly kind: 'stream'; readonly framing: Exclude<RelFraming, { readonly kind: 'elements' | 'discard' }> };
+```
+
+Three properties fall out, all wanted:
+
+- **An arm that migrates is removed from `stream`'s `Exclude`**, so routing it back through legacy's
+  materializer is a compile error rather than a review question.
+- **`spine.ts`'s remaining legacy call is reachable from ONE arm**, and the `unreachable(framing)` at the
+  end of its cascade is now proved by the type instead of asserted by a comment.
+- **The deletion criterion is the union going uninhabited.** When the last arm migrates, `stream` has no
+  inhabitants, the arm deletes itself, `RelResult` collapses to a `Shape`, and with it go `layoutOf`,
+  `LAYOUT_FIELD` and `RelLowering.aliases` — which is what unblocks the path channel (first bullet above).
+
+`RelFraming` is unaffected and stays the fold's INTERNAL vocabulary: an arm merge and a retype need to
+know what a relation HOLDS, which is a different and larger question than which `Shape` frames it.
+
+**A note on the bind budget, since it was the predicted risk.** The element payload adds three `Lit`s per
+projection — `storedValueOn`'s `IN ('list','map','set')`, which legacy inlines as literal text. Census
+after: **736/2298 (32.0%), unchanged**, and `rel-sweep` still renders all 53,020 admitted plans inside the
+100-bind cap. So the constant-inlining question §11 raises for the compare key's ~27 binds is real but is
+NOT this arm's blocker, and it stays a separate increment rather than a prerequisite.
