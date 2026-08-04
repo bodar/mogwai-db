@@ -139,7 +139,18 @@ export async function startConformanceServer(port = 45940, graphs: readonly stri
   );
   const log = (e: { ok: boolean; error?: string }) => process.stdout.write(progressMark(e, expected));
   const app = application({ manager: served, log });
-  return Bun.serve({ port, fetch: app.router });
+  // LOOPBACK ONLY, and that is the fix for a real flake rather than a hardening gesture.
+  //
+  // 45940 is not ours to choose — the GLV's `test/helper.js` hard-codes `http://localhost:45940`
+  // (`patches/upstream/tinkerpop-02-cucumber-port-env-override.patch` is the fix we owe them) — and it
+  // sits INSIDE Linux's ephemeral range (`ip_local_port_range` starts at 32768). So any outbound
+  // connection on the host can be assigned 45940 as its SOURCE port, and a wildcard `bind(0.0.0.0:45940)`
+  // then fails `EADDRINUSE` even though nothing is listening. Measured: one long-lived HTTPS keepalive
+  // bound to `10.0.0.219:45940` took the whole conformance suite red, with `ss -ltn` showing the port
+  // free. Binding the LOOPBACK address does not collide with a socket bound to the LAN address, and
+  // `localhost` is exactly where the runner connects — so this is both narrower and more available.
+  // It also stops a fixture graph being reachable from the network, which it never should have been.
+  return Bun.serve({ port, hostname: '127.0.0.1', fetch: app.router });
 }
 
 if (import.meta.main) {
