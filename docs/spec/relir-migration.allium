@@ -33,6 +33,7 @@ enum DeclineReason {
     | effect_not_covered        -- a sack, a side effect or a write
     | bind_budget_exceeded      -- the plan is over the platform's parameter cap
     | argument_not_static       -- the step is covered; THIS argument's value is not a compile-time one
+    | payload_not_projected     -- every STEP is covered; the RESULT SHAPE's wire projection is not built
     | refusal_belongs_to_legacy -- the answer is an ERROR whose message the other route owns
 }
 
@@ -47,20 +48,21 @@ external entity CorpusTraversal {
     gremlin: String
 }
 
+-- The framing contract for a set of rows: enough for the wire layer to turn them into bytes, and
+-- nothing about how they were produced. Deliberately opaque here — the wire vocabulary is the framing
+-- layer's, which this module excludes, and what matters at this boundary is that ONE of these is the
+-- entire thing that crosses it.
+external entity WireShape {}
+
 ------------------------------------------------------------
 -- Value Types
 ------------------------------------------------------------
 
--- A Gremlin LABEL and the carried column holding what it is bound to.
---
--- The alias role is the ONE carried role whose framing form is a name map rather than a single
--- column, and it cannot be otherwise: a label name is Gremlin vocabulary and a channel may not know
--- any. So the map cannot live on the relation, and the lowering hands it across the seam beside the
--- plan (see `LoweredPlan.bound_labels`).
-value LabelBinding {
-    label: String
-    column: String
-}
+-- (The label->column map a bound Gremlin LABEL needs was described here while it CROSSED the
+-- boundary beside the plan. It no longer crosses: the lowering builds the wire projection itself, so
+-- the map is read only by the vocabulary that builds it and is not observable at this boundary. The
+-- rule it illustrated survives in the algebra — a channel may not know a Gremlin label name — and is
+-- stated there.)
 
 ------------------------------------------------------------
 -- Contracts
@@ -124,27 +126,31 @@ entity LoweredPlan {
     covered: Boolean
     decline_reason: DeclineReason? when covered = false
 
-    -- What crosses the seam BESIDE the plan, and the only thing that does. Empty where the chain
-    -- bound no labels.
-    bound_labels: List<LabelBinding>
+    -- The WIRE CONTRACT, and the only thing that crosses to the framing layer. The plan's result
+    -- relation IS the rows to frame: its columns are the wire columns and its row order is the wire's,
+    -- so a shape is all that is left to say.
+    wire_shape: WireShape? when covered = true
 
-    alias_channels: program.result.channels where role = alias
+    @invariant NothingCrossesButTheShape
+        -- A covered plan is the WHOLE query. Nothing is composed above it and nothing accompanies it,
+        -- so there is no second description of the relation that could disagree with the relation.
+        --
+        -- This replaced a proved agreement, and the replacement is the point. While a label->column
+        -- map crossed beside the plan, the two could describe different columns — reading a column
+        -- that is not there is an EMPTY result, silently, with the coverage counter reporting the
+        -- traversal as answered — so the boundary had to PROVE they agreed. A boundary that carries
+        -- one description cannot have that fault.
+        --
+        -- It is also what removes a whole class of wall. While the carried state had to be TRANSLATED
+        -- to cross, a role the lowering could carry but the translation could not express was blocked
+        -- by the boundary rather than by the algebra: three roles were declared untranslatable and one
+        -- of them is a traverser's path. Nothing translates now, so no role can be blocked that way.
 
-    -- The seam PROVES the two agree rather than assuming it, and a disagreement is a fault and not
-    -- a deferral. A map naming a column the relation does not emit makes the framing layer read a
-    -- column that is not there: an EMPTY result, silently, with the coverage counter reporting the
-    -- traversal as answered. A carried alias column no label names is the same fault from the other
-    -- side — state nothing can read.
-    --
-    -- Stating the agreement is also what makes the live label set DERIVED rather than remembered.
-    -- The algebra's role policy consumes the alias channels at a barrier, so a map carried across
-    -- one would violate this, and the only way to satisfy it is to read the labels that are still
-    -- live off the relation. There is no per-barrier clear to forget.
-    invariant BoundLabelsAndAliasChannelsAgree {
-        covered implies
-            bound_labels.all(b => alias_channels.any(c => c.column = b.column))
-            and alias_channels.all(c => bound_labels.any(b => b.column = c.column))
-    }
+    @invariant UnprojectedShapeDeclines
+        -- A RESULT SHAPE whose wire projection is not built yet declines (`payload_not_projected`),
+        -- exactly as an unlearned step does. It is coverage not written, never an error: the other
+        -- route answers these, and the lowering raising where the other route answers is the one
+        -- failure the router cannot absorb.
 }
 
 entity Traversal {
@@ -333,19 +339,19 @@ rule RouteToRelIR {
     ensures: Traversal.created(gremlin: gremlin, chain: chain, routed_to: rel)
 
     @guidance
-        -- A covered chain becomes a finished read by handing the whole program to the framing
-        -- layer as ONE relation. Binds stay in one render, the CTE-or-inline decision stays with
-        -- the plan, and no payload projection is duplicated TODAY: the element projection is
-        -- reached through the ordinary lowering loop with zero steps left, so this route frames
-        -- identically to the legacy one BY CONSTRUCTION. That also means the payload SELECT is still
-        -- COMPOSED outside the algebra, so the new spine does not yet produce the whole query. Only
-        -- BYTE framing — rows plus a shape, no SQL — is permanently outside it.
+        -- A covered chain becomes a finished read as ONE program, and that program is the WHOLE
+        -- query: the payload projection — the element tuple, the collection blob reads, the value
+        -- columns — is built by the lowering, so its result relation is already the rows to frame.
+        -- Binds stay in one render and the CTE-or-inline decision stays with the plan.
         --
-        -- The framing layer is told the carried state by ROLE, and that translation is total: a
-        -- role the lowering learns to carry cannot reach framing until the seam knows how to
-        -- express it. The alias role is the one whose expression is a NAME MAP rather than a
-        -- column, so it is the one thing handed over beside the plan — and the seam proves the map
-        -- agrees with the relation before framing reads it (`BoundLabelsAndAliasChannelsAgree`).
+        -- What is permanently outside is BYTE framing: rows plus a shape, yielding wire bytes, with
+        -- no query construction anywhere in it. That is the whole boundary, and a shape is the whole
+        -- of what crosses it — which is what makes the equivalence gate mean what it says, since the
+        -- query being compared is the one this route produced.
+        --
+        -- The projection is per SHAPE, so the coverage question includes the shape and not only the
+        -- steps: a shape whose projection is unbuilt declines like any unlearned step
+        -- (`UnprojectedShapeDeclines`).
 }
 
 rule RouteToLegacy {

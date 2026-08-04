@@ -13,7 +13,9 @@
 -- Excludes:
 --   - Gremlin semantics, shape, productivity, bulking as MEANING (resolved above this layer)
 --   - the Step[] -> Rel lowering and spine routing (relir-migration.allium)
---   - the framing/wire layer, storage schema, the q kernel's internals
+--   - the framing/wire layer, storage schema, the q kernel's internals. "Framing" here means BYTE
+--     framing — rows plus a shape, yielding wire bytes — and not the payload PROJECTION, which is
+--     query construction and belongs to the lowering above these nodes
 --   - the legacy spine (scheduled for deletion; see relir-migration.allium)
 
 ------------------------------------------------------------
@@ -217,9 +219,12 @@ entity RelNode {
     }
 
     -- The categorical difference from the refuted typed-core IR: a NODE has no Gremlin type field.
-    -- This is a claim about the node set alone — the lowering that BUILDS these nodes knows the
-    -- traverser's shape and says so, and it is where a shape's payload projection belongs. A
-    -- ChannelRole is per-COLUMN carried-state bookkeeping, never the stream's Gremlin type.
+    -- This is a claim about the node set alone, and the distinction it rests on is worth keeping
+    -- separate from the purity it can be mistaken for. The lowering that BUILDS these nodes knows the
+    -- traverser's shape and says so, and a shape's PAYLOAD PROJECTION — the element tuple, the
+    -- collection blob reads, the value columns — is built THERE, out of these same shape-free nodes.
+    -- What the shape never becomes is a field on one of them. A ChannelRole is per-COLUMN
+    -- carried-state bookkeeping, never the stream's Gremlin type.
     invariant NoGremlinTypeVocabulary {
         columns.all(col => col.sql_type in {int, real, text, blob, json, any})
     }
