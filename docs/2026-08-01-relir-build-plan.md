@@ -2460,3 +2460,38 @@ matches Calcite's clause set and SQLite accepts it; the `Sort`/`Limit` SPLIT aga
 DISTINCT-with-ORDER-BY-on-a-non-selected-column and a window-in-WHERE are unreachable BY CONSTRUCTION; and
 a `Join`'s positional output, no-duplicate-name rule and "addressed through the JOIN, never through the
 side" all hold, the last as a `check` throw.
+
+### 13n. WHAT THE AUDIT ASKED FOR AND WE REFUSED — a decline is only right when the OTHER spine is right
+
+§13b listed five places where we answer and TinkerPop RAISES, and the suggested remedy in each was to
+DECLINE so legacy raises the message it owns. Four of the five were then refused, and the reason
+generalises past this family:
+
+    g.V().values("age").toUpper()                     rel ["27","29","32","35"]   legacy ["27","29","32","35"]
+    g.inject(1,null).asString()                       rel ["1",null]              legacy ["1",null]
+    g.V().values("name").asNumber(GType.INT)          rel [0,0,0,0,0,0]           legacy [0,0,0,0,0,0]
+    g.V().values("age").fold().toUpper(Scope.local)   rel [null]                  legacy [null]
+
+**Legacy answers identically wrongly in every one.** So the decline buys ZERO correctness — it routes the
+traversal to a spine that produces the same wrong value — and costs real RelIR coverage.
+**A decline is only ever the right remedy when the other spine answers CORRECTLY**, which is the
+assumption §13b's suggestions carried and which is false here. That is now a standing test to apply to any
+"decline to legacy" proposal: measure the other spine first.
+
+What the honest fix would need, and why it is not an increment yet: TinkerPop raises **per traverser**
+(`ToUpperGlobalStep` tests `item instanceof String` for each), and NEITHER spine can raise from SQL. The
+two candidate routes are (a) compile-time property typing, which would decide it statically — and does not
+exist, because a property's type is per-row data in this schema; or (b) a runtime guard, which cannot
+raise and so could only answer a DIFFERENT question (a `CASE` that skipped non-strings) or abort the whole
+statement with a message that is not TinkerPop's. Neither is better than the documented divergence.
+
+**The narrow discriminator that made `substring` different, and worth naming:** its defect was pure
+ARITHMETIC — no type knowledge, no raise, no decline. That is why it was implementable in both spines at
+once and closed five scenarios, while its four neighbours in the same file are parked. When triaging an
+"answers where the reference raises" finding, ask first whether the fix needs a TYPE or only a FORMULA.
+
+**A process note worth keeping.** The expected values in my own brief for two `substring` cases were
+WRONG (I computed `mark`/`ma` where the reference gives `ark`/`a`), and the delegate pushed back with the
+arithmetic rather than bending the code to match them. The corpus then settled it —
+`Substring.feature` pins `o`/`ippl` and `lo`/`""` on the software names, which is what both spines now
+produce. **A brief's expected values are a hypothesis, not an oracle; the corpus is the oracle.**
