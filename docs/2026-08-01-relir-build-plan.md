@@ -2495,3 +2495,51 @@ WRONG (I computed `mark`/`ma` where the reference gives `ark`/`a`), and the dele
 arithmetic rather than bending the code to match them. The corpus then settled it —
 `Substring.feature` pins `o`/`ippl` and `lo`/`""` on the software names, which is what both spines now
 produce. **A brief's expected values are a hypothesis, not an oracle; the corpus is the oracle.**
+
+## 14. THE L3 RATCHET MUST EXPRESS "RelIR IS AHEAD" — the next increment, specified
+
+**Decision (Dan, 2026-08-04): do NOT port the comparability and negation fixes to legacy.** Legacy is what
+§8 deletes; spending on it is waste. The problem to fix is that **the L3 ratchet cannot express a spine
+being ahead**, so `mise run test:legacy-spine` now fails on a floor it structurally cannot meet.
+
+**The state today.** `l3-state.json` holds ONE floor (`passing: 1726`, plus `passed[]`/`failed[]`) and the
+gate is "no regression, and not below the count". With RelIR ON that is 1726. With `MOGWAI_RELIR=0` it is
+**1719** — the 7 comparability/negation scenarios are RelIR-only, because those fixes landed in
+`src/compiler/rel/predicate.ts` and legacy keeps both defects. RelIR being ahead is explicitly ALLOWED
+(§10·4; the harness has `relirAhead` for the per-test case), but a single global floor cannot say it.
+
+### The design — TWO floors, one per configuration, each ratcheting upward alone
+
+`l3-state.json` gains a second recorded section for the legacy-spine configuration:
+
+```
+{ "passing": 1726, "passed": [...], "failed": [...],          // the DEFAULT config (RelIR on)
+  "legacySpine": { "passing": 1719, "passed": [...], "failed": [...] } }
+```
+
+- a DEFAULT run gates on the top-level floor, exactly as now;
+- a run with `MOGWAI_RELIR=0` gates on `legacySpine` instead;
+- both ratchet UPWARD only, and both refuse a named regression.
+
+**The one load-bearing rule: a legacy-spine run must write ONLY its own section.** L3 rewrites its state on
+a clean run, so a legacy run that touched the top-level `passed[]` would silently LOWER the real floor —
+turning the instrument into a way to erase the gate. Read the env switch once, pick the section, and never
+cross.
+
+**`passing - legacySpine.passing` is then a migration metric worth having** — the number of official
+scenarios only the new spine answers. It should GROW as RelIR gains ground, and it is the honest measure of
+"what would be lost by turning the switch off", which no counter reports today. Print it in the L3
+telemetry line.
+
+**Why not the alternatives.** Skipping the ratchet entirely under `MOGWAI_RELIR=0` would leave that
+instrument with no conformance signal at all, so a genuine legacy regression would land green. A
+hand-curated list of RelIR-only scenario NAMES (the `known.ts` shape) would work but needs a staleness
+check and manual upkeep, where two recorded counts need neither — the scenario sets are already recorded,
+so the difference is derivable rather than maintained.
+
+**Scope.** `test/L3-conformance/l3.test.ts` (the gate + the record), `telemetry.ts` if the summary line
+moves, and `test/CLAUDE.md`'s L3 paragraph, which currently describes one floor. Nothing in `src/`.
+
+**Definition of done.** `mise run ci` green; `mise run test:legacy-spine` green with the legacy floor
+recorded at 1719; deliberately breaking a legacy-only scenario fails the legacy run; deliberately breaking
+a RelIR-only scenario fails the default run; and neither run can lower the other's floor.
