@@ -1,7 +1,7 @@
 import { derived, empty, list, paren, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { perRowCols } from '../../../sql/kernel/render.ts';
 import { isNested, isPopArg, stepChain } from '../../../gremlin/frontend.ts';
-import { appendCte, patchLayout, withoutFromV, layoutProjection, layoutProjectionMinting, layoutCols, partitionOver, prevRel, withLayout, type TraverserLayout, type ElementStream } from '../context/context.ts';
+import { appendCte, patchLayout, trackFromV, withoutFromV, layoutProjection, layoutProjectionMinting, layoutCols, partitionOver, prevRel, withLayout, type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
 import { loweringStateOf, streamPayloadCols, toScalarStream, withRelationAndLayout, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream, type RelationalStream } from '../context/stream.ts';
@@ -1059,7 +1059,22 @@ function compileElementChildRows(
   // step has to mint — so clearing the demand there breaks it (measured: four L3 scenarios,
   // `otherV() requires a preceding edge step`). Only an existence gate can drop it, because
   // nothing of the child survives the EXISTS.
-  const prefixed = lowerElementBody(resultEscapes ? pushed.seed : withoutFromV(pushed.seed), parts.prefix);
+  // THE BODY'S OWN DEMAND IS THE WHOLE BODY'S, NOT ITS PREFIX'S — the second half of the same
+  // disable-safety hole, found by L5's rotating seed on
+  // `g.V().where(__.outE().range(0, 2).hasLabel('knows').otherV())`. `lowerElementSteps` derives
+  // `trackFromV` from the STEPS IT IS HANDED, which is exactly right at the root (one call, the whole
+  // chain) and wrong here: a barrier splits the body, so `outE()` lands in the prefix and `otherV()`
+  // in the suffix, the prefix call sees no reader and mints no `fv`, and the suffix's `otherV()` then
+  // throws `requires a preceding edge step`. Measured: `range`/`limit`/`skip`/`dedup` before an
+  // `otherV()` all threw on the materialized gate while the inlined predicate answered, and `order()`
+  // threw on BOTH — a divergence for the first four and a plain wrong answer for the fifth, which is
+  // the class only the metamorphic oracle could otherwise see.
+  //
+  // Asked of the body's TOP LEVEL, matching `chainNeedsFromV`'s own rule: a nested body is its own
+  // scope and derives its own demand when it is lowered.
+  const bodyReadsFromV = body.some((step) => step.name === 'otherV');
+  const seed = resultEscapes ? pushed.seed : withoutFromV(pushed.seed);
+  const prefixed = lowerElementBody(bodyReadsFromV ? trackFromV(seed) : seed, parts.prefix);
   if (!prefixed) return null;
 
   // Rank rows per parent traverser: order/slice/first all window over the child's origin
