@@ -1,0 +1,72 @@
+name: provision
+description: >
+  Check out, install the pinned bun, and provision the submodule root with both caches warm — the
+  prefix every CI job needs before it can run a mise task.
+
+# Extracted because the run is now FOUR jobs (gates, rel-sweep, and three test shards), each on its
+# own 4-core runner, and each needs the identical seven steps first. GitHub Actions has no YAML
+# anchors, so the alternative is four copies of a block whose ORDER is load-bearing — see below.
+#
+# No checkout step: resolving `uses: ./.github/actions/provision` at all requires the caller to have
+# checked out already, so one here would be a second, redundant checkout.
+runs:
+  using: composite
+  steps:
+    - uses: jdx/mise-action@v4
+
+    # Bun's DOWNLOAD cache (`bun pm cache`), not node_modules. Two reasons it must be this and not
+    # the installed tree: `gremlin` is a `link:` dep resolving into the submodule, and antlr4ng
+    # carries a load-bearing `bun patch` — both are things `bun install` DOES, and a restored
+    # node_modules would skip them. With only the downloads cached, install still resolves, links and
+    # patches; it just stops re-fetching.
+    #
+    # This is the variance it exists to remove: measured on trunk, the same 62 packages against the
+    # same lockfile installed in 0.9s on one run and 51.6s on the next — a 57x swing on identical
+    # work, which read as a 50% CI regression attributable to nothing in the diff.
+    #
+    # The key carries the submodule's pinned commit as well as the lockfile, because the same cache
+    # also serves the submodule's own 839-package workspace install. That is load-bearing, not
+    # cosmetic: actions/cache never re-saves an existing key, so a lockfile-only key would cache
+    # those deps once and then re-download them on every run after a pin bump, forever. Reading the
+    # pin from the superproject INDEX matches what scripts/init-submodule.sh provisions, so a
+    # staged-but-uncommitted bump keys against the commit actually used.
+    - id: pin
+      shell: bash
+      run: echo "sha=$(git ls-files -s vendor/tinkerpop | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v6
+      with:
+        path: ~/.bun/install/cache
+        key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}-${{ steps.pin.outputs.sha }}
+        restore-keys: |
+          bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}-
+          bun-${{ runner.os }}-
+
+    # ── the submodule root, in two phases so the client build can be cached ──────────────────────
+    #
+    # `submodule` is the SERIAL ROOT of every job's task graph — `install` waits on it and everything
+    # else waits on `install` — so a second removed here is a second off that job. Measured on trunk:
+    # 16.8s, of which the gremlin client build is ~7.7s (antlr generate + duel's dual ESM/CJS emit)
+    # for an artifact that is a pure function of the pin. With both caches warm the whole root is
+    # ~7s: 5s clone, 1s restore, 1s re-entry.
+    #
+    # ORDER IS LOAD-BEARING. A fresh provision does `rm -rf vendor/tinkerpop` before cloning, so a
+    # cache restored BEFORE the clone is deleted by it. Hence: clone first (`--submodules-only` stops
+    # before the install/build/link), restore the build into the cloned tree, then let the job's own
+    # mise task re-enter `submodule` — which finds the checkout already at the pin and skips the build
+    # because build/.mogwai-built-from matches. That stamp is the EXISTING guard, not something added
+    # for the cache: it lives inside build/, so a build cannot outlive the artifact it certifies, and
+    # a pin bump both misses the key and fails the stamp.
+    #
+    # MOGWAI_SKIP_REFERENCE: a runner compiles and tests and never opens a source citation, so it does
+    # not provision the two cited-never-executed checkouts (gremlin-core, vendor/calcite). See
+    # scripts/init-submodule.sh for what that costs. Set on the phase-1 step only because that is the
+    # one that provisions; the caller sets it for its own mise invocation, which re-asserts the sparse
+    # set.
+    - shell: bash
+      run: mise run submodule -- --submodules-only
+      env:
+        MOGWAI_SKIP_REFERENCE: "1"
+    - uses: actions/cache@v6
+      with:
+        path: vendor/tinkerpop/gremlin-js/gremlin-javascript/build
+        key: gremlin-client-${{ runner.os }}-${{ steps.pin.outputs.sha }}

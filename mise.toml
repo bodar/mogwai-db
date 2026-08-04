@@ -273,7 +273,37 @@ description = "Bundle the Cloudflare Worker (dry-run deploy)"
 depends = ["install", "submodule"]
 run = "bunx wrangler deploy --dry-run --outdir dist"
 
+# ONE SHARD of the suite, for a CI runner of its own. `bun test` is a single process and bun does not
+# parallelise across files, so the suite is a serial CPU pole (61s locally, 117s on a runner); the
+# only thing that shortens it is more RUNNERS, not more processes on one (measured: 2 test shards ∥ 2
+# sweep shards on a 4-core pin took 66.8s against 72.9s unsharded — every extra bun process re-pays
+# JIT warmup).
+#
+# The shards PARTITION test discovery rather than naming directories, so their union is the whole
+# suite by construction and a new test file cannot land outside every shard — see scripts/test-shard.ts.
+# Verified on this commit: 3 shards ran 655 + 531 + 636 = 1,822 tests across 26 + 23 + 22 = 71 files,
+# which is exactly what a bare `bun test` collects.
+[tasks."test:shard"]
+description = "One shard of the suite (MOGWAI_SHARDS=n MOGWAI_SHARD=i); the shards partition discovery"
+depends = ["install", "check", "submodule"]
+run = "bun scripts/test-shard.ts"
+
+# The static half of the gate, grouped so CI can put it on a runner of its own. Every member finishes
+# within ~7s of `install`, so as a group it is free — it exists to be a JOB, not because anyone needs
+# to run the six separately.
+[tasks.gates]
+description = "The static gates: type-check + lint + architectural + bind-budget + deletion ratchet + worker build"
+depends = ["check", "lint", "arch", "binds", "deletion", "build"]
+run = "echo 'gates passed'"
+
+# THE LOCAL one-command gate, and still the complete one: `mise run ci` runs everything CI runs.
+#
+# CI no longer invokes this task — it fans the same work across four runners (`gates`, `rel-sweep`,
+# and `test:shard` × 3) because one runner has 4 cores and `test` alone saturates barely more than
+# one of them. The COVERAGE is identical by construction, and this dependency list is where that is
+# checkable: CI's jobs are exactly `gates` + `rel-sweep` + `test` (as shards whose union is `test`).
+# Keep the two in step — a job added here without a job there is a gate that only fires locally.
 [tasks.ci]
-description = "CI gate: type-check + lint + architectural + bind-budget + deletion ratchet + RelIR decline contract + test + worker build"
-depends = ["check", "lint", "arch", "binds", "deletion", "rel-sweep", "test", "build"]
+description = "CI gate: the static gates + RelIR decline contract + the full suite (locally: all of it, in one command)"
+depends = ["gates", "rel-sweep", "test"]
 run = "echo 'CI passed'"
