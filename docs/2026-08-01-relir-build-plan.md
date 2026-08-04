@@ -1,9 +1,12 @@
 # RelIR — the build plan
 
-**Status: BUILDING.** Coverage **563 / 2,298** corpus traversals on the RelIR spine; deletion counter
-**110** references left across the 15 legacy rows. Both are ratchets in `ci` (§10·4). The direction was
-argued in [codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a and
-is not re-argued here.
+**Status: BUILDING.** The two counters this migration runs on — spine coverage and the deletion ratchet —
+are NOT copied here. They live in `test/census/goldens.tsv` and `scripts/deletion-ratchet.tsv`, both gated
+in `ci` (§10·4), and a number in prose is a second authority that goes stale between commits (it did: the
+header carried 563/110 while the artifacts said 775/98). Read them from the artifacts, or from a `ci` run.
+The direction was argued in
+[codebase-analytics](./2026-08-01-codebase-analytics-and-blue-sky-restructure.md) §6/§6a and is not
+re-argued here.
 
 **Section numbers are an API.** ~96 comments in `src/`, `scripts/` and `test/` cite `§3.5`, `§5a`,
 `§10·4`, `§10·5` and friends. Renumbering breaks them; content under a number may be rewritten freely.
@@ -253,8 +256,11 @@ node kind fails the build until its obligation is declared.
   (`SELECT id, SUM(bulk) … GROUP BY id`) and `dedup` under an emission order (`MIN(encounter)`) are both
   this. What makes a barrier is that the output row is a new traverser — **not** that the SQL groups.
 
-The node DECLARES which it is under (`isReEncoding`, decidable from the node alone); the table checks it
-is allowed to. `CHANNEL_GROUP_POLICY` is the third total table: which roles have a defined answer when N
+The node DECLARES which it is by WHICH CHANNELS IT CARRIES — none is the barrier contract, its input's is
+the per-traverser reduction — and the table checks it is allowed to. (This sentence used to name
+`isReEncoding`, a narrower predicate that pattern-matched the one `SUM(bulk)` shape it had seen; it was
+deleted for the reason `src/channels.ts` records at `CHANNEL_GROUP_POLICY`, and the policy table is the
+replacement.) `CHANNEL_GROUP_POLICY` is the third total table: which roles have a defined answer when N
 rows become one — `bulk` combines (adds), `encounter` combines (earliest); an alias, path, origin or
 sack belong to ONE member, and a grouping would take whichever row SQLite reached first.
 
@@ -2334,3 +2340,123 @@ assembler can inline.** `limit`/`range`/`tail` are unaffected because their sort
   `RangeGlobalStep`'s `toSkip`/`toTrim`/`setBulk`; `mean`'s forced REAL against `MeanNumber.getFinal`; and
   the whole bulk-weighting rule across the reducer family (`sum` multiplies by bulk, `min`/`max` are
   bulk-invariant, `groupCount` weights).
+
+### 13j. THE WORST ONE — a `Project` over a whole-relation `Aggregate` DELETES the aggregation `DEFECT`
+
+Third audit, against Calcite. **Calcite has the exact guard we are missing, with a comment naming this
+case**, so this is not a subtle disagreement — it is a known hazard of the block assembler that we did not
+copy. VERIFIED, RelIR-only, shipping:
+
+| traversal | RelIR | legacy (correct) |
+|---|---|---|
+| `g.V().count().constant(1)` | **6 rows of 1** | `[1]` |
+| `g.E().count().constant(7)` | **6 rows of 7** | `[7]` |
+| `g.V().values("age").max().constant(0)` | **4 rows of 0** | `[0]` |
+| `g.V().count().constant(1).count()` | **6** | `1` |
+| `g.V().count().constant(1).is(P.gt(0))` | **`HAVING clause on a non-aggregate query`** | `[1]` |
+
+`emit.ts`'s `project` arm opens a nested SELECT only when `input.distinct`; it never consults whether the
+block is GROUPED. A whole-relation `Aggregate` has `groupBy: []`, so `renderBlock` emits no `GROUP BY`
+clause at all — and a projection that references none of the aggregate's outputs therefore erases it,
+leaving `SELECT ? AS v FROM nodes rn`. The fourth row is the tell that this is a wrong NUMBER and not just
+a wrong arity, and the fifth is invalid SQL (the block still carries `groupBy: []`, so the `filter` arm
+routes to `HAVING` while the select list no longer aggregates).
+
+Calcite: `vendor/calcite/core/src/main/java/org/apache/calcite/rel/rel2sql/SqlImplementor.java:2223-2241`
+— `if (hasAggregate && fieldsUsed.isEmpty()) return true;` under the comment *"Cannot merge because
+\"select 1 from t\" is different from \"select 1 from (select count(1) from t)\""*. That is this defect,
+named, in the file §5 already cites as the prior art for our slot-occupied test.
+
+**Reached by `constant()` after a reducer**, because that projection emits `[['v', literal], …channels]`
+and a reducer leaves no channels — so it references nothing. **Nothing can see it:** `rel-sweep` never
+executes SQL, and the census only runs the L1 corpus, which contains no `<reducer>().constant(…)`.
+`test:legacy-spine` is the right instrument and no test names one of these traversals.
+
+**Fix:** block the `project` arm when the block is grouped and the projection reads none of its select
+names (Calcite's `fieldsUsed.isEmpty()`); the safe superset is to block on any `grouped(b)` with an empty
+`groupBy`. Then add the family to an L4 `.feature`, because it is a shape the corpus does not carry.
+
+### 13k. The verifier proves less than the plan doc claims `DEFECT` (laws claimed, not enforced)
+
+Four findings, all of the same kind — a rule stated in §3/§4 that nothing checks:
+
+- **`prune` drops columns a non-`Project` parent's own expressions read.** It collects references only in
+  its `project` arm, so a `Filter.pred`, `Sort.terms`, `Window.specs` or `Explode.expr` reading a column no
+  consumer above needs has that column pruned from under it — measured, the result then fails `check` with
+  `relation p has no declared column 'name'`. Latent (the pass has no production caller) but §4.5 calls it
+  "Phase 3's prerequisite", and `test/rel.test.ts` covers only the shape where the required column is the
+  one the `Project` emits. Fix: add each node's own `relExprs` references into its children's need.
+- **The clean-room import boundary is claimed to be gated and is not.** §2 says "`mise run arch` gates it
+  as a textual import scan"; `scripts/arch-check.ts` checks only the compiler Pass-role rules and the
+  string `src/rel` does not appear in it. The boundary DOES hold today (verified: `src/rel/**` imports only
+  `./*`, `../channels.ts`, `../sql/kernel/q.ts`) — but a breach would land green. Add the scan or delete
+  the claim.
+- **`check` never verifies that a pass-through node's declared type matches its input's.**
+  `filter`/`sort`/`limit`/`distinct`/`materialize` have no type law: a `Filter` declaring `[id,name]` over
+  a `Project` emitting `[id]` passes `check` and fails later in the EMITTER — which `rel-sweep` treats as a
+  support regression. The same hole makes §3.5's left-join law unenforceable (the obligation checks rigid
+  channels, never that the right side's `nullable` flags were widened). Fix: `preserving` asserts
+  `sameColumns`, and the left-join arm asserts nullability.
+- **The rendered-bind cap is bypassable and `checkPlan` never applies `planBindCount`.** §3.6 calls the DO
+  cap "a plan property `check` can prove"; in fact the cap is applied to one node in `check`, and the
+  RENDERED check lives in `renderStep`, which `emitRelational` does not go through — both current callers
+  re-render and re-check by hand. A third caller would not. Move the assertion into `emitRelational`.
+
+### 13l. Structural risks worth fixing before the arms that reach them `RISK`
+
+- **`Distinct` collapses N rows into one and gets the PRESERVING contract**, so `CHANNEL_GROUP_POLICY`
+  never applies to it — a `Distinct` carrying `encounter`/`alias`/`path` would pass the checker while the
+  dedup is silently inert (the channel makes every row unique). Correct today only because the lowering
+  projects `bulk` as a constant and routes the ordered case through an `Aggregate`. Apply
+  `groupableChannels` to `distinct` too: a whole-row dedup IS a grouping by the whole row. Related and
+  worse: `check` does not require an `aggs` entry to CONTAIN an `Agg`, so `aggs: [['x', col(input,'x')]]`
+  is admitted and SQLite silently picks an arbitrary member.
+- **`check` admits `Distinct`/`Limit`/`Sort` inside a recursive term**, which P3 measured as inert or
+  whole-CTE rather than per-iteration. Latent until `repeat()` migrates, and exactly the shape that would
+  silently answer a different question — refuse them by name, as the aggregate and window arms already do.
+- **`name` is blind to correlated subplans.** It walks `relChildren` only, so a node shared between the
+  main tree and a `Scalar`/`Exists` body is inlined twice, and a `Materialize` INSIDE a correlated subplan
+  is silently inert. No reachable wrong answer found; the fix is to walk expression subplans, which
+  `fuse.ts` already demonstrates.
+- **`bindCount` re-derives a statement's shape** instead of using `stmtChildren`/`stmtExprs` — the exact
+  thing `walk.ts` says it exists to prevent ("an analysis that walked a statement by re-deriving its shape
+  is one a new statement field would silently skip"). No divergence today; the budget is the DO wall, and
+  under-reporting only shows up in production.
+- **A set op takes an unnecessary derived table for a tail slot.** Calcite's `Clause` order puts `SET_OP`
+  before `ORDER_BY`/`FETCH`, so `(…) UNION ALL (…) ORDER BY x LIMIT n` is ONE statement there and two
+  here. Not wrong, just fatter — and worth noting the inverse: our conjoining of adjacent `Filter`s into
+  one `WHERE` is BETTER than Calcite, which wraps.
+- **`Values` refusing the empty relation has nowhere to land.** Calcite's empty `Values` IS its canonical
+  empty relation, lowered to exactly the spelling our factory tells callers to build by hand
+  (`SELECT NULL AS c0 … WHERE FALSE`) — and that spelling is not constructible here, because `Block.from`
+  is required so the emitter cannot produce a FROM-less SELECT. So "a `Filter(false)` over something" must
+  drag in a real table scan. Unreachable today; the first lowering that needs a statically empty relation
+  pays for it.
+
+### 13m. Plan-doc corrections the code refutes
+
+The doc invites this and the code duly refutes it in seven places: the header's coverage (563) and deletion
+(110) counters have both moved (775 and 98 — better replaced by a pointer to the two artifacts, which are
+the authority) — **both now FIXED: the header cites the two artifacts instead of copying their numbers,
+and §3.5 names the carried-channels rule.** A `lower.ts` comment still cites `isReEncoding`, deleted and
+replaced by `CHANNEL_GROUP_POLICY`; §3.3 calls `Materialize` a planner HINT while `list.ts` calls it a legality WALL
+and both are partly right (no `MATERIALIZED` keyword is emitted, so a named CTE is not a planner fence —
+the bind-duplication and the table-valued-function legality are what it buys; and Calcite DOES have this
+node, `Spool`, where it is semantics); §3 says `HAVING`-as-`Filter` and distinct-`UNION`-as-`Distinct`
+COLLAPSE, but `Aggregate.having` and `Union.all` are still live fields that nothing ever constructs — dead
+surface in a set the doc calls CLOSED; §3.6 credits `unroll` with a statement-text ceiling that does not
+exist (the 100 KB cap is enforced only at the router) and §§4.2/4.3/4.7 describe `flatten`/`unroll`/
+`recognize` in the present tense while `src/rel/passes/` holds only `fuse`/`land`/`name`/`prune` — worse,
+`check.ts` throws a message instructing the reader to "run flatten first", a pass that cannot be run; §3.0's
+three write-in-read-position examples (`union(__.addV(), __.V())`, `optional(__.addV())`,
+`repeat(__.addV())`) all THROW on both spines, so they are the model's intent rather than behaviour; and
+§3.6 credits the `land` pass with the retained-rows JSON transport, which is the EMITTER's (`land` only
+rewrites `Values`).
+
+**Confirmed exact, and not to be re-litigated:** §3.2's node counts (15 expression kinds, 19
+relational/statement kinds); both Calcite anchors resolve at the pin; filter-after-aggregate → `HAVING`
+matches Calcite's clause set and SQLite accepts it; the `Sort`/`Limit` SPLIT against Calcite's single
+`Sort` is coherent in both directions (`Sort(Limit(x))` nests, `Limit(Sort(x))` fuses);
+DISTINCT-with-ORDER-BY-on-a-non-selected-column and a window-in-WHERE are unreachable BY CONSTRUCTION; and
+a `Join`'s positional output, no-duplicate-name rule and "addressed through the JOIN, never through the
+side" all hold, the last as a `check` throw.
