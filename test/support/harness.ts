@@ -92,6 +92,25 @@ export const bare = (v: any): any =>
   : v;
 
 /**
+ * A GROUP RESULT as a plain object — from EITHER spine.
+ *
+ * The two carry it differently and both are correct. Legacy's `GroupStream` emits one `(gk, gv)` ROW per
+ * key and the wire handler folds the runs into a Map; a RelIR map relation carries ONE row with one
+ * `map` column holding the `[[keyNode, valNode], …]` tree, and the map framer reads that. The framed
+ * answer is the same Map either way.
+ *
+ * So a test that read `r.gk`/`r.gv` was asserting the ROUTE, and five did — every one of them failed the
+ * moment `groupCount()` migrated, none of them because the answer had changed. What they mean to assert
+ * is the grouping, so that is what this reads.
+ */
+export const grouped = (rows: readonly any[]): Record<string, unknown> => {
+  if (rows.length === 0) return {};
+  if (rows[0] && 'gk' in rows[0]) return Object.fromEntries(rows.map((r) => [String(bare(r.gk)), bare(r.gv)]));
+  const pairs = JSON.parse(rows[0].map) as readonly (readonly [unknown, unknown])[];
+  return Object.fromEntries(pairs.map(([k, v]) => [String(bare(k)), bare(v)]));
+};
+
+/**
  * WHAT A WRITE ECHOED, as `{labels, props}` — from EITHER spine.
  *
  * The two spell the row differently and both are right. The legacy write closure returns its own

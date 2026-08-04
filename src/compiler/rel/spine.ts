@@ -143,11 +143,16 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
     ? { kind: 'elements', ...state, elem: framing.elem }
     : framing.kind === 'list'
       ? { kind: 'list', ...state, of: framing.of, ...(framing.set ? { set: framing.set } : {}) }
-      : framing.kind === 'scalar'
-        ? { kind: 'scalar', ...state, type: framing.type, ...(framing.result ? { result: framing.result } : {}) }
-        // A discard left through the program door above; naming it keeps the chain total rather than
-        // leaving the arm to a `never` nobody reads.
-        : unreachable(framing);
+      // The LIST arm's twin and it needs nothing else: the relation carries one `map` column holding
+      // the pairs tree, and `keyOf`/`valOf` are what the materializer reads to know how to frame each
+      // side. No step is delegated to get here (§10·9) — the grouping is the algebra's own.
+      : framing.kind === 'map'
+        ? { kind: 'map', ...state, keyOf: framing.keyOf, valOf: framing.valOf }
+        : framing.kind === 'scalar'
+          ? { kind: 'scalar', ...state, type: framing.type, ...(framing.result ? { result: framing.result } : {}) }
+          // A discard left through the program door above; naming it keeps the chain total rather than
+          // leaving the arm to a `never` nobody reads.
+          : unreachable(framing);
   // Zero steps remain, so the loop runs the root element projection and nothing else. Going
   // through `lowerSteps` rather than calling the projection directly is the point: a step this
   // route grows tomorrow lands in the SAME loop, and there is no second orchestrator.

@@ -20,7 +20,7 @@ Object is one graph, so per-tenant isolation and scale-to-zero are free.
 >
 > - **Understands the whole language** — 2,298 / 2,298 canonical Gremlin
 >   traversals from the official corpus parse (100%).
-> - **Executes correctly** — **<!-- L3:passing -->1,713<!-- /L3:passing -->** official TinkerPop Gherkin scenarios pass
+> - **Executes correctly** — **<!-- L3:passing -->1,714<!-- /L3:passing -->** official TinkerPop Gherkin scenarios pass
 >   against a live server through the *unmodified* `gremlin` JS client at tinkerpop `origin/master`,
 >   run under `bun test` as a **ratchet** (the number only goes up).
 > - **Reads + writes + strategies** land across a wide step surface. For the exact

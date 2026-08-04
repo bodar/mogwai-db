@@ -217,7 +217,6 @@ deferred	legacy	index() on a list value not yet supported	g.V().hasLabel("softwa
 deferred	legacy	alias holds a value, not an element	g.V().hasLabel("song").match( __.as("a").values("name").as("b"), __.as("a").values("performances").as("c")).select("b", "c").count()
 unbound	legacy	Unbound parameter 'xx1'	g.V().hasLabel(xx1).hasLabel("software")
 unbound	legacy	Unbound parameter 'xx1'	g.V().hasLabel(xx1,xx2)
-deferred	legacy	step not implemented: hasNot()	g.V().hasNot("age").values("name")
 unbound	legacy	Unbound parameter 'xx1'	g.V().in().hasId(P.neq(xx1))
 deferred	legacy	as() on a group value not yet supported	g.V().label().groupCount().as("x").select("x")
 unbound	legacy	Unbound parameter 'xx1'	g.V().limit(1).mergeE(xx1)

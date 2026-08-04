@@ -210,9 +210,19 @@ describe('group / properties SQL', () => {
     expect(read('g.V().groupCount().by(T.label).unfold()').sql).toContain('json_group_array');
   });
 
-  test('group()/groupCount() always lowers to GroupStream; Column selection derives MapStream', () => {
-    // A terminal GroupStream reaches the existing row-folding groupBuffer Map.
-    expect(read('g.V().groupCount().by("name")').shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
+  test('a terminal groupCount() is a MAP VALUE on RelIR and a GroupStream on legacy; Column selection derives MapStream', () => {
+    // TWO ROUTES, both correct, and the difference is where the map is BUILT. RelIR emits one `map`
+    // column holding the `[[keyNode, valNode], …]` tree and the map framer reads it (§10·9 — a shape is
+    // a value plus a framing arm); legacy emits `(gk, gv)` ROWS and the wire handler folds the runs.
+    // The framed Map is the same either way, verified byte-for-byte.
+    // BOTH routes named EXPLICITLY, never the ambient default: `options.spine` wins over the env, so
+    // this holds in both positions of `mise run test:legacy-spine`. Reading the default here made the
+    // assertion say "whatever this run is configured for", which the differential immediately failed.
+    expect(read('g.V().groupCount().by("name")', { spine: 'rel' }).shape).toEqual({ kind: 'mapValue' });
+    // Legacy's own lowering stays pinned — it still answers everything RelIR declines, and it must keep
+    // working until §8 deletes it.
+    expect(read('g.V().groupCount().by("name")', { spine: 'legacy' }).shape)
+      .toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
     // A Column consumer derives MapStream; select(Column.values) aggregates the
     // value column into a list value (one row), unfold() explodes it. Count → Long tag.
     const gv = read('g.V().groupCount().by("name").select(Column.values)');
@@ -534,8 +544,11 @@ describe('group / properties SQL', () => {
     expect(p.sql).toContain('p.sk, p.bulk FROM edges'); // carried through outE()/inV()
   });
 
-  test('groupCount() → count value; GROUP BY', () => {
-    const p = read('g.V().groupCount().by("name")');
+  test('groupCount() → count value; GROUP BY (legacy lowering)', () => {
+    // Pinned to the LEGACY spine deliberately: this asserts that lowering's SQL, and RelIR now answers
+    // the same traversal with a map value instead. The equivalent RelIR assertions are in the
+    // terminal-groupCount test above (shape) and the map-shape L4 feature (answer).
+    const p = read('g.V().groupCount().by("name")', { spine: 'legacy' });
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
     // count is the traverser total per key — SUM(bulk) (≡ COUNT while bulk is 1, correct after a fan-out)
     expect(p.sql).toContain('SUM(p.bulk) AS gv');

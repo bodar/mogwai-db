@@ -9,7 +9,7 @@ import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { isLocalScope, sliceOf } from '../ir/step.ts';
-import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
+import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs, isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
 import { childSteps, collectionAssert } from '../steps/tail/child-shape.ts';
@@ -29,6 +29,7 @@ import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
 import { elementAddE, elementAddV, elementDrop, elementMergeV, elementProperty, propertyWrites, type Effects, type SubReads } from './write.ts';
 import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listRetype, listSetOp, unfoldList, type ListCtx } from './list.ts';
+import { elementHost, groupBarrier } from './map.ts';
 import { LabelCardinality } from '../../api.ts';
 
 /**
@@ -76,6 +77,12 @@ export type RelFraming =
    *  needs to know how to expand each one; `set` is a framing marker only (a SET frames differently,
    *  the member substrate is shared). */
   | { readonly kind: 'list'; readonly of: ListOf; readonly set?: boolean }
+  /** A traverser whose VALUE is a MAP — one JSONB `map` column per row holding an ordered
+   *  `[[keyNode, valNode], …]` pairs array, which is the same self-describing tree a stored map
+   *  property uses. The LIST arm's twin, deliberately: `keyOf`/`valOf` describe each side's shape for
+   *  the framing layer exactly as `of` does for a list, and a pairs ARRAY rather than a JSON object is
+   *  what keeps the entry order ours to state and lets a key be something other than a string. */
+  | { readonly kind: 'map'; readonly keyOf: MapOf; readonly valOf: MapOf }
   /** NOTHING to frame. A write whose Gremlin result is no traverser at all (`drop()`, and `iterate()`
    *  over any of them) ends on a statement with an empty `RETURNING`, so the plan's result relation
    *  has no columns and there is no shape to interpret. It is an arm of this union rather than an
@@ -326,6 +333,14 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
     const body = bodyOf(nested.nested, ctx.params);
     if (!body?.length) return null;
     return correlatedExists(body, subject, elem, fresh, ctx, step.name === 'not');
+  }
+
+  // `hasNot(key)` is a bare `has(key)` NEGATED, and it reuses that clause rather than spelling a second
+  // absence test — the two must agree about what "carries a property" means, and one builder is how.
+  if (step.name === 'hasNot') {
+    if (args.length !== 1 || typeof args[0] !== 'string') return null;
+    const present = hasPropertyClause(args[0], undefined, subject, elem, fresh);
+    return present && { kind: 'unary', op: 'not', arg: present };
   }
 
   if (step.name === 'has') {
@@ -1933,6 +1948,14 @@ function elementTail(
       if (!tail) return null;
       return { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
     }
+    // `groupCount()` with no side-effect label — a BARRIER whose result is one map. It is terminal by
+    // construction here: `continueAs`'s map arm declines a step after one until the map re-entry
+    // vocabulary (unfold to entries, select(Column.*)) exists, so this cannot silently drop a tail.
+    if (step.name === 'groupCount' || step.name === 'group') {
+      const grouped = groupBarrier(rel, elementHost(rel, elem), step, bulked, fresh);
+      if (!grouped) return null;
+      return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES);
+    }
     if (step.name === 'mergeV') {
       const merged = mergedVertices(rel, steps, at, ctx, fresh);
       if (!merged) return null;
@@ -2012,6 +2035,10 @@ function continueAs(
     case 'list': return listTail(rel, framing.of, steps, from, ctx, fresh, labels);
     // A value's multiplicity is the traverser's, so `bulked` carries.
     case 'scalar': return scalarTail(rel, framing, steps, from, bulked, ctx, fresh, labels);
+    // A MAP is a barrier's RESULT, so a step after one re-enters a map traverser — `unfold()` to
+    // entries, `select(Column.keys/values)`, a local reducer. None of that is lowered yet, so the
+    // honest answer is a DECLINE and not a loop that silently drops the map.
+    case 'map': return from === steps.length ? { rel, framing, aliases: labels } : null;
     // Nothing survives a discard, so nothing can follow one. `drop()` is a terminal step in the
     // grammar and the passes reject a chain that continues past it, so this is unreachable rather
     // than a decline — and saying so keeps the switch total.
@@ -2166,7 +2193,10 @@ const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
       // A DISCARD is not a stream, so no arm can be one: `drop()` is terminal, and an arm body ending
       // in it would be a branch whose arms disagree about whether a traverser exists at all.
       : left.kind === 'discard' ? false
-        : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
+        // A MAP arm would be a branch whose arms each produce a whole map — expressible in principle,
+        // and nothing builds one yet, so an equality that guessed would be untested code.
+        : left.kind === 'map' ? false
+          : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
 
 const sameColumns = (left: readonly ColMeta[], right: readonly ColMeta[]): boolean =>
   left.length === right.length && left.every((column, i) => column.name === right[i]!.name);

@@ -13,7 +13,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery, executeFramed } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
-import { read, run, runWith, seededStore } from '../support/harness.ts';
+import { grouped, read, run, runWith, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -163,7 +163,9 @@ describe('repeat / path SQL', () => {
     for (const [s, t] of [[a, b], [a, c], [b, d], [c, d]]) store.query('INSERT INTO edges(src,label,tgt) VALUES (?,?,?)', [s, 0, t]);
 
     const gq = `g.V(${a}).out().out().groupCount().by(T.id)`;
-    const asMap = (rows: any[]) => Object.fromEntries(rows.map((r: any) => [String(r.gk), Number(r.gv)]));
+    // Route-agnostic: `grouped` reads legacy's `(gk, gv)` rows and a RelIR map value alike, so this
+    // asserts the WEIGHTING rather than which spine produced it.
+    const asMap = (rows: any[]) => Object.fromEntries(Object.entries(grouped(rows)).map(([k, v]) => [k, Number(v)]));
     // Enabled (default) vs disabled movementCollapse are result-equivalent — the fast path's bar.
     expect(asMap(runWith(store, gq, { fastPaths: { movementCollapse: true } }))).toEqual({ [String(d)]: 2 });
     expect(asMap(runWith(store, gq, { fastPaths: { movementCollapse: false } }))).toEqual({ [String(d)]: 2 });
@@ -174,10 +176,20 @@ describe('repeat / path SQL', () => {
     const sqlOf = (opts: CompileOptions) => { const p = compile(gq, {}, opts); if (p.kind !== 'read') throw new Error('read'); return p.sql; };
     const on = sqlOf({ fastPaths: { movementCollapse: true } });
     const off = sqlOf({ fastPaths: { movementCollapse: false } });
-    expect(on).toContain('SUM(bulk) AS bulk');       // convergent-walk frontier collapse
-    expect(on).toContain('SUM(p.bulk) AS gv');        // bulk-weighted group count
-    expect(off).not.toContain('SUM(bulk) AS bulk');   // no collapse when disabled
-    expect(off).toContain('SUM(p.bulk) AS gv');       // weighting is always emitted
+    // Asserted as PROPERTIES rather than as either spine's spelling: both routes emit a frontier
+    // collapse and a bulk-weighted count, with different aliases and different case.
+    const collapses = (sql: string) => /sum\([^)]*bulk\)\s+AS\s+bulk/i.test(sql);
+    const weighted = (sql: string) => /sum\([^)]*bulk\)\s+AS\s+gv/i.test(sql);
+    expect(collapses(on)).toBe(true);        // convergent-walk frontier collapse
+    expect(weighted(on)).toBe(true);         // bulk-weighted group count
+    expect(collapses(off)).toBe(false);      // no collapse when disabled
+
+    // With collapse OFF the two spines differ in SPELLING and agree in answer, which the two
+    // `asMap` assertions above already prove. Legacy emits `SUM(bulk)` unconditionally; RelIR emits
+    // `COUNT(*)`, because with no collapse every row IS one traverser and `bulked` says so — the same
+    // number by a cheaper aggregate. Legacy's unconditional form stays pinned on its own spine, since
+    // it is a property of that lowering and must hold until §8 deletes it.
+    expect(weighted(sqlOf({ fastPaths: { movementCollapse: false }, spine: 'legacy' }))).toBe(true);
 
     // A by(traversal) KEY can map one traverser to many keys — a GROUP BY-id merge would
     // corrupt it, so that shape must NOT enable collapse (stays the enumerated path) even with

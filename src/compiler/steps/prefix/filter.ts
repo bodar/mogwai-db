@@ -161,6 +161,23 @@ export const has: StepFn = (s, st) => {
   return filterCte(st, list(conds, ' AND '));
 };
 
+/**
+ * `hasNot(key)` — keep the elements carrying NO property under `key`.
+ *
+ * TinkerPop's `HasStep` with a `hasNot` traversal: the exact negation of a bare `has(key)`, and it goes
+ * through the same `hasProp` waist so the two cannot disagree about what "carries a property" means. A
+ * key with only a null-valued row still counts as PRESENT, because a property row is a property row —
+ * the removal rule is what deletes them (`property(k, null)`), not a null value stored under the key.
+ *
+ * `NOT EXISTS` rather than `notCoalesce`: `hasProp` is already an `EXISTS`, which is never NULL, so
+ * there is no three-valued case for the coalesce to close over.
+ */
+export const hasNot: StepFn = (s, st) => {
+  const key = s.args[0];
+  if (typeof key !== 'string' || s.args.length !== 1) throw new Error('hasNot() takes exactly one property key');
+  return filterCte(st, q`NOT ${hasProp(currentCtx(st), key, undefined)}`);
+};
+
 /** where()/filter()/not(): keep rows satisfying the nested traversal (or an
  *  alias comparison). not() negates via notCoalesce. */
 export const where: StepFn = (s, st) => {

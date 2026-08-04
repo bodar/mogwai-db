@@ -6,7 +6,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
-import { bagOf, run, seededStore } from '../support/harness.ts';
+import { bagOf, grouped, run, seededStore } from '../support/harness.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -111,9 +111,9 @@ test('group().by(name).by(tail) yields one vertex per name (gate #1 rows)', () =
 
 test('groupCount().by(label) counts per label', () => {
   const store = seededStore();
-  const rows = run(store, 'g.V().groupCount().by(T.label)');
-  const m = Object.fromEntries(rows.map((r) => [r.gk, r.gv]));
-  expect(m).toEqual({ person: 4, software: 2 });
+  // The GROUPING, read from whichever spine answered — the raw `gk`/`gv` columns are legacy's row
+  // shape, not the answer (see `grouped` in the harness).
+  expect(grouped(run(store, 'g.V().groupCount().by(T.label)'))).toEqual({ person: 4, software: 2 });
   const degree = Object.fromEntries(run(store, 'g.V().groupCount().by(__.out().count())').map((r) => [r.gk, r.gv]));
   expect(degree).toEqual({ 0: 3, 1: 1, 2: 1, 3: 1 });
   expect(run(store, 'g.V(1).union(__.identity(),__.identity()).groupCount().by(__.out().count())'))

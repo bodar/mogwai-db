@@ -5,7 +5,7 @@ import { type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, canCarryEncounter, type ChainFacts } from '../ir/analyze.ts';
 import { layoutCols, rootLayout, trackFromV, type LoweringState, type ElementStream, type StepFn } from '../steps/context/context.ts';
 import { move, toEdge, toVertex, otherV, reSource } from '../steps/prefix/movement.ts';
-import { as, hasLabel, has, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../steps/prefix/filter.ts';
+import { as, hasLabel, has, hasNot, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../steps/prefix/filter.ts';
 import { union, optional, repeat, choose, coalesce, sourceUnion } from '../steps/prefix/branch.ts';
 import { seedInject } from '../steps/write/inject.ts';
 import { asBranchKind, branchNeedsShapeDispatch, childCtx, isElementChild, isListChild, isScalarChild, labelSelectOf, type ChildCtx } from '../steps/tail/child-shape.ts';
@@ -159,7 +159,7 @@ export class LoweringEngine implements Engine {
       ['outV', toVertex], ['inV', toVertex], ['bothV', toVertex], ['otherV', otherV],
       // MID-TRAVERSAL V()/E() only — seedRooted consumes a source V()/E() before this fold runs.
       ['V', reSource], ['E', reSource],
-      ['as', as], ['hasLabel', hasLabel], ['has', has], ['hasId', hasId],
+      ['as', as], ['hasLabel', hasLabel], ['has', has], ['hasNot', hasNot], ['hasId', hasId],
       ['where', where], ['filter', where], ['not', where],
       ['and', andOr], ['or', andOr], ['dedup', dedup],
       ['simplePath', simplePath], ['cyclicPath', cyclicPath],

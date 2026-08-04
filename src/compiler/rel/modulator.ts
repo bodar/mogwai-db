@@ -3,7 +3,7 @@ import * as make from '../../rel/factory.ts';
 import { isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { Elem } from '../plan/plan.ts';
-import { and, eq, EDGE_COLS, firstOf, meta, NODE_COLS, PROPERTIES, typeOf, type Minter } from './build.ts';
+import { and, eq, EDGE_COLS, firstOf, meta, NODE_COLS, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
 import { storedCompareOn } from './predicate.ts';
 
 /**
@@ -216,6 +216,53 @@ export function byExpr(modulation: Modulation, host: ByHost, fresh: Minter, orde
   });
   const value = ordering ? storedCompareOn(col(mine.id, 'vtype'))(col(mine.id, 'value')) : col(mine.id, 'value');
   return firstOf(mine, value, col(mine.id, 'id'), fresh);
+}
+
+/**
+ * A `by()` projection as a SELF-DESCRIBING `{t,v}` NODE rather than a bare value — what a MAP entry
+ * needs, because a map's sides are framed per entry from their own tags (§ the map shape) and a
+ * heterogeneous map has to round-trip each one exactly.
+ *
+ * It is `byExpr`'s twin and shares its scans deliberately: a property key's value and its `vtype` come
+ * out of the SAME `firstOf` subquery, so the tag cannot disagree with the value it describes. Written
+ * here rather than in the map module because it is the `by()` vocabulary answering a question about
+ * itself — the second consumer (`valueMap`'s per-element map) wants the identical thing.
+ *
+ * `null` declines the two hosts whose node this cannot build: an ELEMENT key (the node would have to be
+ * a framed element, which the materializer expands per pair rather than tagging) and anything `byExpr`
+ * already refuses.
+ */
+export function byNode(modulation: Modulation, host: ByHost, fresh: Minter): Expr | null {
+  const { key } = modulation;
+
+  if (host.kind === 'scalar') {
+    if (key.kind !== 'identity') return null;
+    // A scalar stream carries its own tag where the value came from a stored property; without one the
+    // framer infers from the JS value, which is what an untagged node means.
+    return host.vtype ? typedNode(host.value, host.vtype) : typedNode(host.value, lit(null, 'text'));
+  }
+
+  // A bare `by()` over an element projects the ELEMENT — not a value with a tag.
+  if (key.kind === 'identity') return null;
+
+  if (key.kind === 'token') {
+    // A LABEL is always a string; an `id` is whatever `COALESCE(uid, id)` yields, so it stays untagged
+    // and the framer infers — the same answer the element projection gives for an external id.
+    const value = byExpr(modulation, host, fresh);
+    return value && typedNode(value, key.token === 'label' ? lit('string', 'text') : lit(null, 'text'));
+  }
+
+  // ONE subquery for both halves: the tag IS the row the value came from.
+  const { table, owner } = PROPERTIES[host.elem];
+  const scan = make.scan({
+    id: fresh('vp'), table, alias: fresh('rp'), channels: [],
+    type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+  });
+  const mine = make.filter({
+    id: fresh('f'), input: scan, channels: [], type: scan.type,
+    pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), lit(key.key, 'text'))),
+  });
+  return firstOf(mine, typedNode(col(mine.id, 'value'), col(mine.id, 'vtype')), col(mine.id, 'id'), fresh);
 }
 
 /** TinkerPop's default `by()` productivity, as a predicate: a traverser whose `by()` yielded nothing
