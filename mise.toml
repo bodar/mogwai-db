@@ -283,9 +283,17 @@ run = "bunx wrangler deploy --dry-run --outdir dist"
 # suite by construction and a new test file cannot land outside every shard — see scripts/test-shard.ts.
 # Verified on this commit: 3 shards ran 655 + 531 + 636 = 1,822 tests across 26 + 23 + 22 = 71 files,
 # which is exactly what a bare `bun test` collects.
+#
+# NO `check` EDGE, and it is the one task here without one. Every other test task gates on
+# `tsc --noEmit` because `bun test` runs TS without type-checking, so a type error would otherwise ship
+# green. That reasoning is about the GATE, not about each process: this task exists for CI, where
+# `gates` runs `check` on a runner of its own and the aggregating job refuses to pass unless it
+# succeeded. Keeping the edge here would re-run the type-check on all three shard runners and put it on
+# each one's critical path before `bun test` could start, for a property already being proved next door.
+# `mise run test` keeps its edge and remains what a human runs.
 [tasks."test:shard"]
-description = "One shard of the suite (MOGWAI_SHARDS=n MOGWAI_SHARD=i); the shards partition discovery"
-depends = ["install", "check", "submodule"]
+description = "One shard of the suite for CI (MOGWAI_SHARDS=n MOGWAI_SHARD=i); the shards partition discovery"
+depends = ["install", "submodule"]
 run = "bun scripts/test-shard.ts"
 
 # The static half of the gate, grouped so CI can put it on a runner of its own. Every member finishes
