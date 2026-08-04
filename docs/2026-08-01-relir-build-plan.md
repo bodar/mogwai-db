@@ -1960,3 +1960,39 @@ keeps a genuinely string-valued group a string.
 **Measured.** Census 762 → 772 (33.6%), ten route changes with identical answer hashes, `0 changed answer`.
 Seven of the ten are the path family's `by(values("name").toUpper())` set-ops, so the seam closed most of
 what §10·11·1 left. `rel-sweep` 0 violations. `test:perturbed` unchanged at its known 4.
+
+### 10·12·1 — what a reducing barrier emits over ZERO rows is PER STEP, and `gremlin-core` says which
+
+§10·12 left the empty-barrier divergence resolved by inference ("a reducing barrier emits its seed"). The
+implementation settles it exactly, and the mechanism is worth recording because every reducer arm will need
+it: **`ReducingBarrierStep` decides emit-versus-nothing by whether the step supplies a SEED.**
+
+`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/ReducingBarrierStep.java`:
+`processNextStart()` throws `FastNoSuchElementException` when `seed == NON_EMITTING_SEED`, and
+`processAllStarts()` replaces that sentinel with `getSeedSupplier().get()` — which is
+`generateSeedFromStarts()` unless the step set a supplier. So:
+
+| step | seed | over ZERO rows |
+|---|---|---|
+| `group()`, `groupCount()` | `setSeedSupplier(HashMapSupplier.instance())` (`GroupStep.java:64`, `GroupCountStep.java:50`) | **emits `{}`** — one traverser |
+| `fold()` | `setSeedSupplier(seed)` (`FoldStep.java:53`) | **emits `[]`** |
+| `sum()` (and `min`/`max`/`mean`) | none — and `SumGlobalStep` OVERRIDES `processAllStarts` to `if (this.starts.hasNext()) super.processAllStarts();` | **emits NOTHING** — the sentinel survives |
+
+Two things follow, one confirming and one for free:
+
+- **RelIR is right about the empty group and legacy is wrong**, with a citation instead of an argument:
+  `GroupStep.java:64` sets an empty-`HashMap` seed, so `g.V().hasLabel("nope").group().by("name")` is one
+  empty map. §10·12's pinned divergence stands, and the `{spine:'legacy'}` line above it is now known to be
+  pinning a defect rather than a preference.
+- **The movement+reducer child arm's semantics arrive settled.** `by(__.out().values("weight").sum())` over
+  a vertex with no out-edges: the child's `sum()` emits NO traverser, so the `by()` is unproductive, so the
+  TRAVERSER is dropped and the key VANISHES (§10·12's second reference fact). SQL agrees for free — `sum`
+  over zero rows is NULL — so the existing domain filter fires with no new machinery. That is also why
+  `correlatedExists` declines a numeric reducer body today: an `EXISTS` over the child would answer "true"
+  where the reference emits nothing, and the honest test is the aggregate's own NULL-ness.
+
+**The process rule this is an instance of:** the `.feature` corpus says WHAT; `gremlin-core` says WHY and
+covers the cases no scenario names. When a semantics question is in doubt — or when two comments in this
+repo cite one feature file for opposite behaviours — read the vendored implementation and cite the path at
+the pin. Same standing `vendor/calcite` has for the algebra questions (§5's `needNewSubQuery`, §10·9's
+`Aggregate`-versus-`COLLECT` decomposition).
