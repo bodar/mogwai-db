@@ -276,6 +276,14 @@ function frameTypedNode(node: FrameNode): Buffer {
   if (node.t === 'list') return listBuffer((node.v as FrameNode[]).map(frameTypedNode));
   if (node.t === 'set') return setBuffer((node.v as FrameNode[]).map(frameTypedNode));
   if (node.t === 'map') return typedMapBuffer(node.v as [FrameNode, FrameNode][]);
+  // An ELEMENT member — `v` is the public payload the SQL side already expanded, so this is the same
+  // `rowVertex`/`rowEdge` the top-level element shapes use. It is one arm rather than a descriptor at
+  // every container for the reason the bare-array arm above is: the tree is SELF-DESCRIBING, so a list
+  // of elements, a map whose value is a list of elements and an element map key all frame by this one
+  // rule at a different depth. The alternative is a `MapOf`/`ListOf` `elem` tag threaded to every
+  // position, which is how a payload tuple ends up spelled at fourteen sites.
+  if (node.t === 'vertex') return rowVertex(node.v);
+  if (node.t === 'edge') return rowEdge(node.v);
   return frameValue(node.v, vtypeToValueType(node.t));
 }
 

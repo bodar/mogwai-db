@@ -5,6 +5,7 @@ import type { MapOf, Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/step.ts';
 import { byEncounter, jsonOf, meta, typeOf, typedNode, type Minter } from './build.ts';
+import { elementNode } from './element.ts';
 import { byNode, modulations, productivityFilter, type ByHost } from './modulator.ts';
 
 /**
@@ -107,6 +108,9 @@ function mapOfGroups(grouped: Rel, entry: Entry, order: Expr, fresh: Minter): Re
  *  the emitter names `groupBy` exprs before the aggregates (`emit.ts`'s `aggregate` case). */
 const KEY_COL = 'gk';
 const VAL_COL = 'gv';
+/** The TRAVERSER, carried into the grouped relation's scope so a collecting group can read it. A
+ *  `groupCount()` never needs it — it reduces to a number — so it rides only where `group()` asks. */
+const MEMBER_COL = 'gt';
 
 /**
  * `group()`/`groupCount()` with NO side-effect label — the barrier, as a map value, or `null` to
@@ -122,16 +126,29 @@ const VAL_COL = 'gv';
  * cannot, which is identical while bulk ≡ 1 and correct after a fan-out. That is legacy's own rule and
  * the reason it is a rule rather than a constant.
  *
- * `group()` declines for now, and the reason is worth stating because it is not laziness: with no value
- * `by()` its value is a LIST OF ELEMENTS per key, so `valOf` is `{kind: 'list', of: 'elem'}` and the
- * materializer expands each pair — a real arm, and the next one. With a reducer value `by()` it is a
- * scalar and lands with the reducer family's own vocabulary.
+ * `group()` is the second arm, and its VALUE is a list of the traversers themselves — `Map<K, List<V>>`,
+ * `GroupStep`'s default with no value `by()`. Over an element stream that is a list of elements, and it
+ * needs no `MapOf` arm and no per-pair expansion at the root: an element is a MEMBER of the
+ * self-describing tree (`elementNode`, `element.ts`), so the value side is `{t: 'list', v: [...]}` whose
+ * members are `{t: 'vertex', v: {...}}`, and the framer walks it by the one rule it already has for a
+ * typed list. That is what `materialize.ts`'s `'a terminal map with an element key or value not yet
+ * supported'` was really blocked on — not the SQL, but a wire vocabulary that made an element a member.
+ *
+ * `group()` with a value `by()` still declines: a reducer value is a scalar and lands with the reducer
+ * family's vocabulary; an element/list value `by()` needs the child seam.
  */
 export function groupBarrier(
   input: Rel, host: ByHost, step: IRStep, bulked: boolean, fresh: Minter,
 ): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } | null {
   if (step.optionArms || (step.args ?? []).length > 0) return null;
-  if (step.name !== 'groupCount') return null;
+  if (step.name !== 'groupCount' && step.name !== 'group') return null;
+  // A VALUE `by()` is a second slot this arm does not implement. `modulations(step, 1)` would decline it
+  // anyway, but saying so here is what keeps the two arms' coverage readable.
+  if (step.name === 'group' && (step.modulators ?? []).length > 1) return null;
+  // A group's members are the ELEMENTS, so a scalar host has no element to collect. It is a real arm —
+  // the members are the values, tagged by their own `vtype` — and it arrives with the scalar-host caller
+  // that does not exist yet, rather than being guessed at here.
+  if (step.name === 'group' && host.kind !== 'element') return null;
 
   const bys = modulations(step, 1);
   // A bare `groupCount()` groups by the TRAVERSER, so an element stream would need an element key —
@@ -142,16 +159,36 @@ export function groupBarrier(
   if (!key) return null;
 
   const bulk = input.channels.find((channel) => channel.role === 'bulk');
+  // A COLLECTING group carries the traverser and, where the chain has one, its emission position: the
+  // members' order is observable (they ride inside one buffer) so it must be stated, and the position is
+  // the only thing that states the TRAVERSERS' order rather than the rowids'. Carried only for `group()`,
+  // because a `groupCount()` projection that named columns it never reads would be state nothing reads —
+  // the same rule the channel obligations apply one layer down.
+  const collecting = step.name === 'group';
+  const encounter = collecting ? input.channels.find((channel) => channel.role === 'encounter') : undefined;
+  const extra = [
+    ...(collecting ? [meta(MEMBER_COL, 'int')] : []),
+    ...(bulk ? [meta(bulk.col, 'int')] : []),
+    ...(encounter ? [meta(encounter.col, 'int')] : []),
+  ];
 
   // THE KEY IS PROJECTED TO A COLUMN FIRST, and that is a plan-quality requirement rather than a
   // tidiness one. A `by()` key is a correlated subquery, and SQL needs it in the SELECT list AND the
   // GROUP BY — so grouping directly by the expression inlines the whole subquery at every position it
   // appears, which an L2 assertion caught at FOUR copies (select, group by, and twice more once the
   // productivity filter became a HAVING). Naming it once means every later reference is a column.
+  //
+  // The CHANNELS it declares are the ones it still carries as channels — the traverser rides as an
+  // ordinary payload column, because at a barrier it is data being collected rather than per-row state.
   const projected = make.project({
-    id: fresh('gk'), input, channels: bulk ? [bulk] : [],
-    type: typeOf(meta(KEY_COL, 'json', true), ...(bulk ? [meta(bulk.col, 'int')] : [])),
-    exprs: [[KEY_COL, key], ...(bulk ? [[bulk.col, col(input.id, bulk.col)] as const] : [])],
+    id: fresh('gk'), input, channels: [...(bulk ? [bulk] : []), ...(encounter ? [encounter] : [])],
+    type: typeOf(meta(KEY_COL, 'json', true), ...extra),
+    exprs: [
+      [KEY_COL, key],
+      ...(collecting ? [[MEMBER_COL, col(input.id, 'id')] as const] : []),
+      ...(bulk ? [[bulk.col, col(input.id, bulk.col)] as const] : []),
+      ...(encounter ? [[encounter.col, col(input.id, encounter.col)] as const] : []),
+    ],
   });
   // FENCED, or the projection is fused straight back in and the naming buys nothing: the emitter merges
   // a plain `Project` into the aggregate's own block, so `gk` becomes the expression again in the SELECT
@@ -180,21 +217,41 @@ export function groupBarrier(
   const rows = drop
     ? make.filter({ id: fresh('gf'), input: keyed, channels: keyed.channels, type: keyed.type, pred: drop })
     : keyed;
+  // THE VALUE, and the two arms differ only here. `groupCount()` reduces the group to a traverser COUNT
+  // — `SUM(bulk)` where the stream carries a multiplicity, `COUNT(*)` where it cannot, identical while
+  // bulk ≡ 1 and correct after a fan-out. `group()` COLLECTS the traversers instead, as a typed list of
+  // element members.
+  //
+  // MEMBER ORDER IS THE TRAVERSERS' OWN, and it is stated rather than inherited: a group's members ride
+  // inside one collected traverser's buffer, so their order is fully observable, and `json_group_array`
+  // takes rows in whatever order SQLite scanned. The emission order where the chain carries one, the
+  // rowid otherwise — a total order either way, which is what `mise run test:perturbed` exists to check.
+  const members: Expr = {
+    kind: 'json-object',
+    entries: [['t', lit('list', 'text')], ['v', {
+      kind: 'agg', fn: 'json_group_array',
+      args: [jsonOf(elementNode(col(rows.id, MEMBER_COL), (host as Extract<ByHost, { kind: 'element' }>).elem, fresh))],
+      orderBy: [{ expr: col(rows.id, encounter ? encounter.col : MEMBER_COL), dir: 'asc' }],
+    }]],
+    binary: false,
+  };
   const count: Expr = bulked && bulk
     ? { kind: 'agg', fn: 'sum', args: [col(rows.id, bulk.col)] }
     : { kind: 'agg', fn: 'count', args: [lit(1, 'int')] };
+  const value = step.name === 'group' ? members : count;
   const productive = make.aggregate({
     id: fresh('gb'), input: rows,
-    channels: [], type: typeOf(meta(KEY_COL, 'json', true), meta(VAL_COL, 'int')),
+    channels: [], type: typeOf(meta(KEY_COL, 'json', true), meta(VAL_COL, step.name === 'group' ? 'json' : 'int')),
     groupBy: [col(rows.id, KEY_COL)],
-    aggs: [[VAL_COL, count]],
+    aggs: [[VAL_COL, value]],
   });
 
   // A COUNT is a Gremlin `long`, and the tag is what makes the wire agree with legacy's `countBuffer`
-  // (an explicit Int64) rather than letting magnitude inference pick Int for a small count.
+  // (an explicit Int64) rather than letting magnitude inference pick Int for a small count. A COLLECTED
+  // group needs no envelope added: `members` already IS one.
   const entry: Entry = {
     key: col(productive.id, KEY_COL),
-    val: typedNode(col(productive.id, VAL_COL), lit('long', 'text')),
+    val: step.name === 'group' ? col(productive.id, VAL_COL) : typedNode(col(productive.id, VAL_COL), lit('long', 'text')),
     keyOf: { kind: 'scalar' },
     valOf: { kind: 'scalar' },
   };

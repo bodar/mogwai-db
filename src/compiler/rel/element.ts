@@ -1,4 +1,4 @@
-import { col, type Expr } from '../../rel/expr.ts';
+import { col, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
@@ -179,6 +179,52 @@ function edgeProps(edge: Expr, fresh: Minter): Expr {
     }]],
   });
   return coalesce({ kind: 'scalar', plan: bag }, EMPTY_OBJECT);
+}
+
+/**
+ * AN ELEMENT AS A MEMBER OF THE TYPED TREE — `{"t": "vertex", "v": {id, label, props[, src, tgt]}}`,
+ * correlated on a rowid.
+ *
+ * The same tuple `elementPayload` projects to COLUMNS, projected instead to the self-describing node the
+ * wire framer already walks. That is the whole of what an element inside a collection needs, and it is
+ * why nothing else here grows a per-position descriptor: a group's value list, a folded element list and
+ * a map key that holds an element are one rule at three depths (`FrameNode`'s own note says the same
+ * thing from the framer's side).
+ *
+ * CORRELATED rather than joined, because the caller has a rowid inside an aggregate rather than a
+ * relation to join against — a group's members arrive as one array per key, not as rows.
+ *
+ * `json()` around each field for the reason the column form does NOT need it: inside `json_object` a
+ * value that is itself JSON must carry the subtype or it is quoted as a string, and a subtype does not
+ * survive a subquery boundary. Legacy's `elementPayloadObject` carries the identical wrappers.
+ */
+export function elementNode(rowid: Expr, elem: Elem, fresh: Minter): Expr {
+  const rowCols = elem === 'edge' ? EDGE_COLS : NODE_COLS;
+  const row = make.scan({
+    id: fresh('wen'), table: elem === 'edge' ? 'edges' : 'nodes', alias: fresh('rwm'), channels: [],
+    type: typeOf(...rowCols),
+  });
+  const mine = make.filter({ id: fresh('wnm'), input: row, channels: [], type: row.type, pred: eq(col(row.id, 'id'), rowid) });
+  const own = (name: string): Expr => col(mine.id, name);
+  const payload: Expr = {
+    kind: 'json-object',
+    entries: [
+      ['id', coalesce(own('uid'), own('id'))],
+      // A VERTEX's label payload is a JSON ARRAY and an EDGE's is a bare name, so only the first needs
+      // the subtype pinned — quoting an array as a string is the failure this prevents.
+      ['label', elem === 'edge' ? edgeLabel(own('label'), fresh) : jsonOf(vertexLabels(own('id'), fresh))],
+      ...(elem === 'edge'
+        ? [['src', nodeExternalId(own('src'), fresh)] as const, ['tgt', nodeExternalId(own('tgt'), fresh)] as const]
+        : []),
+      ['props', jsonOf(elem === 'edge' ? edgeProps(own('id'), fresh) : vertexProps(own('id'), fresh))],
+    ],
+    binary: false,
+  };
+  const only = make.project({
+    id: fresh('wnp'), input: mine, channels: [], type: typeOf(meta('n', 'json', true)),
+    exprs: [['n', { kind: 'json-object', entries: [['t', lit(elem, 'text')], ['v', payload]], binary: false }]],
+  });
+  return { kind: 'scalar', plan: only };
 }
 
 /** The renamed element-row columns a JOIN may declare beside the traverser's own. A `Join` emits its

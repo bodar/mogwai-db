@@ -126,3 +126,51 @@ Feature: mogwai addendum — groupCount() is a MAP VALUE, and its key keeps its 
     Then the result should be unordered
       | result |
       | d[0].l |
+
+  # ─── group(): the map's VALUE is a LIST OF ELEMENTS, and an element is a MEMBER of the tree ───
+  #
+  # The map shape's second arm, and the wire composition it rests on is what these pin. `group().by(k)`
+  # with no value `by()` collects the traversers themselves, so the value side is a list of VERTICES —
+  # and that is expressed by making an element a first-class MEMBER of the self-describing tree
+  # (`{t:'vertex', v:{id,label,props}}`), not by a per-position descriptor the framer has to be handed.
+  #
+  # Naming the arm once is what makes the containers compose: a list of elements, a map whose value is a
+  # list of elements, and (later) a map whose KEY is an element are the same rule at a different depth.
+  # The official corpus asserts group()'s CONTENTS; what it does not pin is that the members arrive as
+  # real elements WITH their properties rather than as inferred JS maps — which is exactly the class of
+  # bug that made the whole-element serializers hand-rolled in the first place.
+
+  @gap:map-shape-group-count
+  Scenario: g_V_hasLabelXpersonX_group_byXageX_values_are_vertices
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().hasLabel("person").group().by("age")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"d[29].i":["v[marko]"],"d[27].i":["v[vadas]"],"d[32].i":["v[josh]"],"d[35].i":["v[peter]"]}] |
+
+  # SEVERAL members under one key, so the list is a real list rather than a one-element accident. Member
+  # order is the TRAVERSERS' own (the emission position where the chain has one, the element id
+  # otherwise) — stated, because the members ride inside one collected traverser's buffer and their order
+  # is therefore fully observable.
+  @gap:map-shape-group-count
+  Scenario: g_V_group_byXlabelX_collects_every_member
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().group().by(T.label)
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | m[{"person":["v[marko]","v[vadas]","v[josh]","v[peter]"],"software":["v[lop]","v[ripple]"]}] |
+
+  # EDGE members are NOT pinned here, and the reason is the harness rather than the feature: this runner
+  # compares a decoded element BY ID and resolves `v[name]` through a cache keyed on the `name` property,
+  # which the fixtures' edges do not carry — so an edge member could only be written as a raw rowid, which
+  # pins the wrong thing. The edge arm is asserted where the comparison can be about the PAYLOAD instead:
+  # `test/rel-spine.test.ts` decodes the map and checks each member's label and its EXTERNAL endpoints,
+  # which is the field two of the fourteen hand-rolled element payloads used to get wrong.

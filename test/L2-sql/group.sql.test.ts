@@ -467,8 +467,16 @@ describe('group / properties SQL', () => {
   });
 
   test('group().by(key) default value → element list; group by key reports an index key', () => {
-    const p = read('g.V().group().by("name")');
-    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementList', elem: 'vertex' } });
+    // PINNED PER SPINE: this chain is RelIR-routed now (§10·10), and the two express the same map two
+    // ways. Legacy ASSEMBLES it — one row per (key, member), folded by the handler, so the shape carries
+    // the key/value descriptors the fold needs. RelIR builds ONE self-describing tree per group, whose
+    // members are `{t:'vertex', v:{…}}` nodes the framer walks by the rule it already has for a typed
+    // list — so `mapValue` is the whole contract and there is nothing per-position to describe.
+    expect(read('g.V().group().by("name")', { spine: 'legacy' }).shape)
+      .toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementList', elem: 'vertex' } });
+    expect(read('g.V().group().by("name")', { spine: 'rel' }).shape).toEqual({ kind: 'mapValue' });
+    // That the two AGREE on the answer is the census's and L3's job, not this file's — an L2 assertion
+    // over SQL text cannot see it.
   });
 
   test('group().by(key).by(prop) → scalar-list via json_group_array + GROUP BY', () => {

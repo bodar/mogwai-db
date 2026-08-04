@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { compile } from '../src/compiler/compiler.ts';
 import { read, runWith, seededStore } from './support/harness.ts';
 import { CF_MAX_BINDS as DO_BIND_CAP, cfLimitViolation } from '../src/cf-limits.ts';
+import { executeQuery } from './support/executor.ts';
+import { decodeAll } from './support/decode.ts';
 
 /**
  * THE RelIR SPINE — routing, coverage and the per-traversal differential (§10·4).
@@ -748,6 +750,36 @@ describe('the RelIR spine', () => {
       expect(rows('g.V().values()')).toEqual([27, 29, 32, 35, 'java', 'java', 'josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
       expect(rows('g.E().values()')).toEqual([0.2, 0.4, 0.4, 0.5, 1, 1]);
     }
+  });
+
+  test("group()'s EDGE members carry their label and their EXTERNAL endpoints", async () => {
+    // The wire composition `group()` rests on: an element is a MEMBER of the self-describing tree
+    // (`{t:'edge', v:{id,label,src,tgt,props}}`), so a map whose value is a list of edges frames by the
+    // one rule the framer already has for a typed list. Asserted HERE rather than in L4 because the
+    // Gherkin runner compares a decoded element BY ID and cannot resolve an edge reference in these
+    // fixtures — so the only thing it could pin is a rowid, which is not what went wrong at the
+    // fourteen hand-rolled payload sites. What went wrong was the PAYLOAD: two of them emitted an
+    // edge's endpoints as internal rowids where the other twelve resolved them to external ids, a
+    // read/write divergence invisible until a graph sets `uid`.
+    const [grouped] = await decodeAll(executeQuery(store, 'g.E().group().by(T.label)', {}));
+    expect(grouped).toBeInstanceOf(Map);
+    const byLabel = grouped as Map<string, any[]>;
+    expect([...byLabel.keys()].sort()).toEqual(['created', 'knows']);
+    // Each member is a real Edge, not a JS-inferred map: it carries its label and both endpoints, and
+    // the endpoints are VERTEX references the client resolved from the payload rather than raw ids.
+    const knows = byLabel.get('knows')!;
+    expect(knows.length).toBe(2);
+    for (const edge of knows) {
+      expect(edge.label).toBe('knows');
+      expect(edge.outV?.id).toBeDefined();
+      expect(edge.inV?.id).toBeDefined();
+    }
+    // The endpoints are the ids a client SEES. This fixture has no `uid`, so external === rowid; what
+    // the assertion pins is that they agree with what the same edge reports at the top level, which is
+    // the projection the write path also returns.
+    const top = (await decodeAll(executeQuery(store, 'g.E().hasLabel("knows")', {}))) as any[];
+    const endpoints = (xs: any[]) => xs.map((e) => `${e.outV.id}->${e.inV.id}`).sort();
+    expect(endpoints(knows)).toEqual(endpoints(top));
   });
 
   test('the emitted SQL does not depend on how many traversals were compiled before it', () => {
