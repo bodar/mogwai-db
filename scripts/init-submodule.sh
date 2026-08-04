@@ -9,18 +9,123 @@
 # --no-checkout, set sparse, then checkout the pinned gitlink SHA ourselves.
 set -euo pipefail
 
+# `--submodules-only` provisions the CHECKOUTS and stops — no workspace install, no client build, no
+# link registration. `--root <dir>` provisions a DIFFERENT checkout's submodules.
+#
+# Both exist for one caller: a linked worktree that wants to share the main checkout's submodules has
+# to make sure they exist there first (see `share_from_main`). `--submodules-only` because the
+# worktree's own run does the install/build parts and doing them twice costs ~30s for a byte-identical
+# result; `--root` because THIS script must be the one that runs — the main checkout has its own
+# committed copy of this file, which on any branch that has changed it is a different version. Reading
+# main's copy would make behaviour depend on what trunk happens to hold (measured: it silently ignored
+# `--submodules-only` and rebuilt the client).
+SUBMODULES_ONLY=""
+ROOT_OVERRIDE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --submodules-only) SUBMODULES_ONLY=1; shift ;;
+    --root) ROOT_OVERRIDE="$2"; shift 2 ;;
+    *) echo "usage: $0 [--submodules-only] [--root <dir>]" >&2; exit 2 ;;
+  esac
+done
+
 # Neutralize CDPATH: if set in the caller's environment, `cd` to a dir found via
 # CDPATH echoes the resolved path to stdout, which would poison the command
 # substitution below (ROOT would capture the path twice) and break `cd "$ROOT"`.
 unset CDPATH
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Absolute, and captured BEFORE the `cd` below — `$0` is typically relative to the caller's cwd, so
+# re-invoking it after moving would miss.
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+ROOT="$(cd "${ROOT_OVERRIDE:-$(dirname "$0")/..}" && pwd)"
 cd "$ROOT"
 
 # Set by `provision` to the SHA it left the checkout at, for callers that need it (the
 # client-build stamp below). A global rather than stdout: `provision` prints progress, so a
 # command substitution around it would swallow that and mix it into the value.
 PROVISIONED_SHA=
+
+# ── worktree sharing ──────────────────────────────────────────────────────────────────────────────
+#
+# In a linked worktree, `vendor/<sm>` becomes a SYMLINK to the main checkout's copy instead of a
+# second clone. Measured before this: four checkouts of this repo held 1.2 GB of `vendor/` working
+# trees and 317 MB of submodule packs, of which about 1 GB was byte-identical duplication — and each
+# worktree separately paid the ~30s gremlin client build.
+#
+# `--git-common-dir` is the shared `.git`; `--git-dir` is per-worktree and differs only in a linked
+# worktree, which is the whole detection.
+MAIN_ROOT=""
+GIT_COMMON="$(git rev-parse --git-common-dir)"
+if [ "$(git rev-parse --git-dir)" != "$GIT_COMMON" ]; then
+  MAIN_ROOT="$(cd "$(dirname "$(cd "$GIT_COMMON" && pwd)")" && pwd)"
+  [ "$MAIN_ROOT" = "$ROOT" ] && MAIN_ROOT=""
+fi
+
+# Point $SM at the main checkout's copy. Returns non-zero when sharing is NOT appropriate, and the
+# caller then provisions locally — the fallback is load-bearing, see the pin check below.
+share_from_main() {
+  local SM="$1"
+  [ -n "$MAIN_ROOT" ] || return 1
+  local SRC="$MAIN_ROOT/$SM"
+
+  # SHARE ONLY WHEN THE PINS AGREE.
+  #
+  # A shared checkout is whatever commit MAIN is at, not what this worktree's gitlink names. For
+  # calcite (read-only reference) that would be harmless, but for tinkerpop it is not: the L3 corpus
+  # AND the client come out of that tree, so a worktree whose gitlink names a different pin would run
+  # conformance against a corpus it does not describe — and reporting a number for the wrong corpus is
+  # the one failure mode here that produces wrong ANSWERS rather than an error. So a divergent pin
+  # falls back to a local clone, which costs disk exactly when disk is the cheaper thing to spend.
+  local HERE_PIN MAIN_PIN
+  HERE_PIN="$(git ls-files -s "$SM" | awk '{print $2}')"
+  MAIN_PIN="$(git -C "$MAIN_ROOT" ls-files -s "$SM" | awk '{print $2}')"
+  if [ -z "$MAIN_PIN" ] || [ "$HERE_PIN" != "$MAIN_PIN" ]; then
+    echo "[submodule] $SM pin differs from main (${HERE_PIN:0:10} vs ${MAIN_PIN:0:10}) — provisioning locally"
+    return 1
+  fi
+
+  # Provision in the MAIN checkout if it has not been, so a worktree-only workflow still works.
+  # `"$0" --root` so THIS version of the script runs against main's index — see the flag comments at
+  # the top. The recursion is one level by construction: main is never a linked worktree, so its own
+  # MAIN_ROOT is empty and it can never call back.
+  if [ ! -e "$SRC/.git" ]; then
+    echo "[submodule] $SM not provisioned in the main checkout — doing that first"
+    bash "$SELF" --submodules-only --root "$MAIN_ROOT"
+  fi
+
+  # A submodule's `.git` is a FILE holding `gitdir: <path>`, and git writes that path RELATIVE to the
+  # submodule's location. Reached through a symlink at a different depth it resolves against the LINK's
+  # path and misses — measured: `fatal: not a git repository: vendor/calcite/../../../../../.git/…`,
+  # which takes out `git status` in the superproject and any `git -C vendor/<sm> …`. Rewriting it
+  # ABSOLUTE fixes the class once, in the tree that owns it, and is idempotent.
+  local GITDIR_LINE
+  GITDIR_LINE="$(cat "$SRC/.git" 2>/dev/null || true)"
+  case "$GITDIR_LINE" in
+    'gitdir: /'*) ;; # already absolute
+    'gitdir: '*)
+      local REL="${GITDIR_LINE#gitdir: }" ABS
+      ABS="$(cd "$SRC/$REL" && pwd)"
+      echo "gitdir: $ABS" > "$SRC/.git"
+      echo "[submodule] $SM: rewrote main's gitdir pointer absolute (needed to reach it via a symlink)"
+      ;;
+  esac
+
+  if [ "$(readlink "$SM" 2>/dev/null || true)" != "$SRC" ]; then
+    # Reclaim this worktree's own copy AND its absorbed gitdir. Dropping the gitdir is the point —
+    # leaving it behind keeps the pack that sharing exists to stop duplicating.
+    rm -rf "$SM" "$(git rev-parse --git-dir)/modules/$SM"
+    ln -s "$SRC" "$SM"
+    echo "[submodule] $SM -> $SRC (shared with the main checkout)"
+  fi
+
+  # `git add -A` MUST NOT rewrite the 160000 gitlink into a 120000 symlink. Measured: without
+  # skip-worktree it does exactly that, and committing it would delete the submodule for everyone.
+  # The index is per-worktree, so this cannot leak into the main checkout, and it is re-applied every
+  # run because a superproject checkout/rebase resets it.
+  git update-index --skip-worktree "$SM" 2>/dev/null || true
+  return 0
+}
 
 # Materialize $SM at exactly $PINNED, as leanly as the policy allows. Sparse-checkout is
 # configured BEFORE anything is checked out — that ordering is the whole reason this script exists.
@@ -77,6 +182,20 @@ provision() {
     exit 1
   fi
   PROVISIONED_SHA="$PINNED"
+
+  # In a linked worktree, borrow the main checkout's copy rather than cloning a second one. Falls
+  # through to a normal local provision when that is not safe (divergent pin) or not applicable.
+  if share_from_main "$SM"; then return 0; fi
+
+  # Not sharing. Undo a PREVIOUS run's sharing before anything below looks at the path, because a
+  # symlink to a provisioned tree passes `-e "$SM/.git"` and would otherwise send us down the
+  # steady-state branch — reconfiguring sparse-checkout on the MAIN checkout's copy through the link.
+  # Unfreezing the index entry matters too: left set, the gitlink could never be updated here again.
+  if [ -L "$SM" ]; then
+    echo "[submodule] $SM: no longer shared — restoring a local checkout"
+    rm -f "$SM"
+    git update-index --no-skip-worktree "$SM" 2>/dev/null || true
+  fi
 
   local FRESH=""
   if [ ! -e "$SM/.git" ]; then
@@ -163,6 +282,11 @@ provision vendor/calcite https://github.com/apache/calcite.git shallow \
   "$CALCITE_SRC/sql2rel" "$CALCITE_SRC/util" "$CALCITE_SRC/tools"
 
 # ── the gremlin client: install deps, build, register the link ─────────────────────────────────
+
+if [ -n "$SUBMODULES_ONLY" ]; then
+  echo "[submodule] checkouts ready (--submodules-only: skipping workspace install + client build)"
+  exit 0
+fi
 
 # The cucumber runner + GLV source live in the submodule and need their own deps
 # (@cucumber/cucumber, etc.). gremlin-js/ is the bun workspace root (workspaces:

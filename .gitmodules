@@ -14,3 +14,7 @@
 	# scripts/init-submodule.sh; `shallow = true` so a stock `git submodule update` that
 	# bypasses the script does not deepen the checkout to full history.
 	shallow = true
+	# In a linked worktree this path is a SYMLINK to the main checkout's copy (see
+	# `share_from_main`), which git would otherwise report as a typechange against the
+	# gitlink — ignore all working-tree state, as tinkerpop does.
+	ignore = all

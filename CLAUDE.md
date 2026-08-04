@@ -242,6 +242,24 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
   cannot fetch an off-tip SHA without reconciling the shallow boundary and dragging the history graph
   in (measured on calcite: 3.9 MB of pack → 21 MB, permanently). tinkerpop is therefore `full`: we
   diff a pin bump against the previous pin. calcite is `shallow`: we only ever read it at the pin.
+- **A linked worktree SHARES the main checkout's `vendor/<sm>` by symlink rather than cloning its
+  own** (`share_from_main`), which also means one client build and one `bun link` target instead of
+  one per worktree. Measured before: four checkouts held 1.2 GB of `vendor/` trees + 317 MB of packs,
+  ~1 GB of it duplication; this worktree's `vendor/` went 299 MB → 88 bytes. Three things make it
+  safe, and none is optional:
+  - **`git update-index --skip-worktree vendor/<sm>`, re-applied every run.** Without it `git add -A`
+    rewrites the `160000` gitlink into a `120000` symlink entry, and committing that deletes the
+    submodule for everyone. Measured, not theoretical. The index is per-worktree, so it cannot leak
+    into the main checkout — and a superproject checkout/rebase resets it, which is why it is
+    re-applied rather than set once.
+  - **the shared submodule's `.git` gitdir pointer is rewritten ABSOLUTE.** git writes it relative,
+    and through a symlink at a different depth it resolves against the LINK's path and misses —
+    taking out `git status` in the superproject and any `git -C vendor/<sm> …`.
+  - **share ONLY when the two gitlinks agree**, else provision locally. A shared tree is whatever
+    commit MAIN is at; for tinkerpop the L3 corpus AND the client come out of it, so a divergent pin
+    would run conformance against a corpus it does not describe — a wrong ANSWER, not an error.
+  `--root <dir>` exists so the worktree's OWN copy of the script provisions main (each checkout has
+  its own committed copy, and reading main's made behaviour depend on what trunk happened to hold).
 - **DO SQLite caps a query at 100 BOUND PARAMETERS (and 100 KB of statement text) — Bun's cap is
   65,535, so a bind list that scales with ROW COUNT passes every test and fails only in production.**
   Never write `ids.map(() => '?')`. **A row set whose size is a function of DATA crosses the seam as
