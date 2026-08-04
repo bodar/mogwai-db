@@ -2051,3 +2051,62 @@ harness's `grouped`; and `rel-spine.test.ts`'s covered list gained the by()-chil
 the suite caught them: a GROUP traversal cannot join the covered list (it compares RAW ROWS, and the two
 spines spell a group row differently by design), and a traversal BOTH spines refuse cannot join `DECLINED`
 (which means "RelIR declines, legacy answers").
+
+### 10·12·3 — the remaining by()-child work, measured per HOST × BODY KIND, and how `group` reduces
+
+§10·12 ranked the by()-traversal family by host and §10·12·2 landed its reducer arm. Re-measured after
+both, the residue is not one queue but a MATRIX, and reading it that way changes what comes next:
+
+| host ← body kind | count | what it needs |
+|---|---|---|
+| `group` ← reducer | **20** | the group-scoped reduction below — declined today |
+| `project` ← per-row | 18 | `project()` as a STEP first |
+| `group` ← collecting (`fold`) | 17 | a list-valued child |
+| `group` ← per-row, MOVING | 14 | the child as a JOINED RELATION (one row per member), not a scalar |
+| `project` ← reducer | 8 | `project()` first |
+| `select` ← collecting | 8 | multi-label `select()` first |
+| `aggregate`/`select`/`format`/`sack` ← per-row | 14 | their own hosts |
+
+Two readings worth keeping. **26 of these are `project()`'s** and are blocked by the host rather than by the
+child, so they do not belong in the child seam's queue at all — the earlier flat count of 99 overstated the
+seam's remaining reap by that much. And **`group` ← per-row-MOVING is a different arm from `group` ←
+per-row-FLAT**: a flat body is one value (an expression), while a moving body is MANY values per member and
+the group collects them all (`group().by('name').by(__.out().values('name'))` gives marko
+`['josh','lop','vadas']`), so it needs the child as a relation joined per member — which is what legacy's
+`o0` ordinal join is.
+
+**HOW A REDUCING CHILD VALUE REDUCES, from `GroupStep` rather than from the answer shape.** This was
+recorded in §10·12·2 as "reduces over the whole GROUP, not per traverser", which is the right decline and
+the wrong mechanism. `GroupStep.projectTraverser` builds a **one-entry map per traverser** — the value
+traversal is `addStart`ed with THAT traverser and `barrierStep.nextBarrier()` pops its contribution — and
+`GroupBiOperator` then merges those maps with **the barrier step's own memory reducer**
+(`setReducingBiOperator(new GroupBiOperator<>(… this.barrierStep.getMemoryComputeKey().getReducer()))`,
+`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GroupStep.java:63`).
+
+So it is **reduce per traverser, then COMBINE across the group with that reducer's own combiner** — which is
+a table, not a new engine:
+
+| child body ends in | per-member | cross-group combiner |
+|---|---|---|
+| `count()` | count of the child's rows | `SUM` |
+| `sum()` | sum | `SUM` |
+| `min()` / `max()` | min / max | `MIN` / `MAX` |
+| `mean()` | (sum, count) | `SUM(sum) / SUM(count)` — never an average of averages |
+| `fold()` | the member's list | concatenation |
+
+Verified against the current legacy answers on the modern graph, which are correct on both counts:
+`g.V().group().by(T.label).by(__.out().count())` → `{person: 6, software: 0}` (3+0+2+1 for the four people,
+not four separate counts), and `g.V().group().by(T.label).by(__.outE().values("weight").sum())` →
+`{person: 3.5}` with **`software` ABSENT** — every software member's `sum()` is unproductive, so each member
+drops and the key never forms (§10·12's second reference fact, and §10·12·1's seed rule, composing).
+
+**What that makes the next increment.** The per-member expression the reducer arm already builds IS the
+member; the only new thing is the combiner, chosen by the body's terminal reducer. So `group` ← reducer (20
+traversals, the largest cell) is an addition to `groupBarrier`'s value arm rather than a new seam — and
+`mean` is the one entry that cannot use the naive form, which is exactly why the table is written down
+before the code.
+
+**The `ByChild` signature refinement §10·12·2 deferred belongs with it**: a `count()` body and a `fold()`
+body can never be unproductive while a numeric reducer can, and three call sites now want that fact (the
+`order()` productivity filter, `groupBarrier`'s domain filter, and this combiner arm). `ByChild` returning
+the expression plus "can this body yield nothing" states it where it is decided instead of at each reader.
