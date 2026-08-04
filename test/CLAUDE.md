@@ -5,6 +5,17 @@
   skips type-checking and the submodule, so green there can hide broken types. `bun test <file>` is
   fine for a fast inner loop on one already-type-checked file, never as the gate. `mise run L1`..`L5`
   run one level each; `mise run ci` is the full gate.
+- **`mise run ci` ALREADY CONTAINS the ladder, the census and the static gates — do not invoke them
+  beside it.** `ci` depends on `check`, `lint`, `arch`, `binds`, `deletion`, `rel-sweep`, `test` and
+  `build`, and `test` is a bare `bun test` over all 71 files, so **L1–L5 and `test/census` are inside
+  it**. A separate `mise run rel-sweep` / `census` / `lint` / `arch` / `binds` after a green `ci` re-runs
+  what just passed AND re-pays its own `depends` (submodule, install, `check`). The single-level tasks
+  exist for the inner loop — before `ci`, not after it.
+  Only four things are genuinely outside: the three ENV-switch runs (`test:legacy-spine`,
+  `test:cf-limits`, `test:perturbed` — a different RUN of the same suite, so they cannot be folded in)
+  and a post-commit `mise run L5`, whose seed derives from `HEAD`. `test:perturbed` is worth a run only
+  when the change touches ORDER; it is an instrument at a known 4, and running it on a change with no
+  ordering surface reports nothing.
 - **"Did my change slow the build?" is answered by `[test] Finished in`, NOT by CI wall-clock.**
   mise prints a `Finished in` per task and those are the measurement; wall-clock also contains three
   network-bound phases (`submodule` git fetch, `install`, `build`'s `bunx wrangler`) whose cost is

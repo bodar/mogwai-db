@@ -1223,6 +1223,28 @@ reading the code.** They are grouped by what they teach.
 
 ### Which instrument can see what — run all of them, not the cheapest
 
+**FIRST: most of them are ALREADY INSIDE `mise run ci`, so "run all of them" is not "invoke all of
+them".** `ci` depends on `check`, `lint`, `arch`, `binds`, `deletion`, `rel-sweep`, `test` and `build`,
+and `test` is a bare `bun test` over all 71 files — which includes **L1–L5 and the census**. Invoking
+`mise run rel-sweep` / `census` / `lint` / `arch` / `binds` / `deletion` beside `ci` re-runs work `ci`
+just did, and each one re-pays its `depends` (submodule, install, `check`) on top. Measured on the
+§10·10 session: ~8–10 minutes of pure repeat across the increments, which is comparable to the cost of
+an increment.
+
+**What `ci` genuinely does NOT cover, and why** — all three are an ENV switch, so they are a different
+RUN of the same suite and cannot be folded in:
+
+| beside `ci` | switch | when |
+|---|---|---|
+| `test:legacy-spine` | `MOGWAI_RELIR=0` | every increment that moves coverage — it IS the differential |
+| `test:cf-limits` | `MOGWAI_CF_LIMITS=1` | every increment that emits new SQL |
+| `test:perturbed` | `MOGWAI_REVERSE_UNORDERED=1` | only when the change touches ORDER — an aggregate's member order, an `ORDER BY`, a window, a barrier. Not otherwise: it is an instrument at a known 4, and re-running it on a change with no ordering surface tells you nothing |
+| `mise run L5` | none — the SEED derives from `HEAD` | AFTER the commit, always (see below) |
+| `orphans`, `census-record` | — | on demand: the first needs judgement, the second is a WRITE |
+
+So the per-increment loop is `ci` → `test:legacy-spine` → `test:cf-limits` → commit → `L5` at the
+commit → push → confirm the Actions run. Four runs, not ten.
+
 | instrument | blind to |
 |---|---|
 | the **census** (`ms` multiset digest) | a wrong SHAPE over an empty result; a required THROW that became a plausible value (a throw records as a deferral, so answering looks like coverage); a lost fast path (same rows, same digest) |
