@@ -32,7 +32,10 @@ jobs:
         env:
           MOGWAI_SKIP_REFERENCE: "1"
 
-  # Its own job because it is the second pole: 110s, and nothing in the suite can start it earlier.
+  # Its own job because it is the second pole: 105s, and nothing in the suite can start it earlier.
+  #
+  # It shards itself across the runner's four cores (scripts/rel-sweep.ts, `min(4, cores)` by default),
+  # which needs nothing here — the sweep is the only thing on this runner, so the cores are all its.
   rel-sweep:
     runs-on: ubuntu-latest
     steps:

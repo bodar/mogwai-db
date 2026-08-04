@@ -33,15 +33,21 @@ const PATTERNS = [
  *  worth balancing around are listed — everything else is DEFAULT_COST, which is roughly the median.
  *  Re-measure with `bun scripts/test-shard.ts --costs` when the balance drifts. */
 const COST: Record<string, number> = {
-  'test/L5-properties/differential.test.ts': 20.3,
-  'test/L3-conformance/l3.test.ts': 17.0,
-  'test/census/census.test.ts': 8.7,
-  'test/L5-properties/table.test.ts': 3.8,
-  'test/L5-properties/shape-annotation.test.ts': 3.3,
-  'test/L5-properties/metamorphic.test.ts': 3.0,
-  'test/L4-addendum/l4.test.ts': 2.4,
-  'test/L1-corpus/corpus.test.ts': 2.2,
-  'test/L5-properties/capability.test.ts': 2.0,
+  'test/L5-properties/differential.test.ts': 21.7,
+  'test/L3-conformance/l3.test.ts': 18.5,
+  'test/census/census.test.ts': 9.2,
+  'test/L5-properties/table.test.ts': 4.2,
+  'test/L5-properties/shape-annotation.test.ts': 3.5,
+  'test/L5-properties/metamorphic.test.ts': 3.3,
+  'test/L1-corpus/corpus.test.ts': 3.2,
+  'test/L4-addendum/l4.test.ts': 2.7,
+  'test/L5-properties/capability.test.ts': 2.2,
+  'test/cf-limits.test.ts': 1.7,
+  'test/cloudflare.test.ts': 1.6,
+  'test/compiler/writes.exec.test.ts': 1.6,
+  'test/rel-spine.test.ts': 1.5,
+  'test/L2-sql/repeat-path.sql.test.ts': 1.3,
+  'test/L2-sql/scalar.sql.test.ts': 1.1,
 };
 const DEFAULT_COST = 0.35;
 
