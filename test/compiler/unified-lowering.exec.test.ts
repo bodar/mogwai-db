@@ -208,7 +208,9 @@ describe('unified lowering characterization', () => {
     // carries a `bulk` column and emits ONE (v, N) row per element (fastSql), so the rows
     // legitimately DIFFER from the per-walk generic form. Equivalence is at the RLE-expanded
     // multiset — expand each row by its bulk and compare the id bags.
-    expect(read('g.V().both().both()', { fastPaths: { movementCollapse: true } }).sql).toContain('AS props, p.bulk AS bulk FROM');
+    // The alias is the COLLAPSED RELATION's, and it is minted per lowering now that the RelIR route
+    // projects its own payload (§10·10) — so what is pinned is that the leaf carries the column at all.
+    expect(read('g.V().both().both()', { fastPaths: { movementCollapse: true } }).sql).toMatch(/AS props, \w+\.bulk AS bulk FROM/);
     const idBag = (query: string, fp: Partial<NonNullable<CompileOptions['fastPaths']>>) => {
       const p = read(query, { fastPaths: fp });
       return store.query(p.sql, p.binds).flatMap((r: any) => Array(Number(r.bulk ?? 1)).fill(r.id)).sort();

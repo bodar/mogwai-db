@@ -9,7 +9,7 @@ import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { isLocalScope, sliceOf } from '../ir/step.ts';
-import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType } from '../../sql/kernel/render.ts';
+import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs, isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
 import { childSteps, collectionAssert } from '../steps/tail/child-shape.ts';
@@ -30,6 +30,7 @@ import { isReducer, reducerAggregate } from './reducer.ts';
 import { elementAddE, elementAddV, elementDrop, elementMergeV, elementProperty, propertyWrites, type Effects, type SubReads } from './write.ts';
 import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listRetype, listSetOp, unfoldList, type ListCtx } from './list.ts';
 import { elementHost, groupBarrier } from './map.ts';
+import { elementPayload } from './element.ts';
 import { LabelCardinality } from '../../api.ts';
 
 /**
@@ -97,6 +98,27 @@ export type RelFraming =
   | { readonly kind: 'discard' };
 
 /**
+ * WHAT THE SPINE MUST DO WITH THE RESULT RELATION — and a MIGRATION RATCHET that deletes itself.
+ *
+ * `RelFraming` above is this fold's INTERNAL vocabulary: it says what a relation holds while the chain is
+ * still being built, which is what an arm merge and a retype need. This says something different and
+ * strictly less: whether the payload projection is already IN the plan.
+ *
+ * - `wire` — the relation's columns ARE the wire columns and `shape` is the whole of what `execute.ts`
+ *   needs. This is the §10·10 target arrangement, and the only arm that will remain.
+ * - `stream` — NOT YET MIGRATED: legacy's materializer still composes the payload SELECT over the
+ *   relation, so the spine has to build a `Stream` and go through `materializeRootStream`.
+ *
+ * The ratchet is the `Exclude`: an arm that migrates is removed from `stream`'s union, so nothing can
+ * silently route back through legacy — and when the last one goes, `stream` becomes uninhabited, the arm
+ * deletes itself, and `RelResult` collapses to a `Shape`. That is a type-level deletion criterion rather
+ * than a comment promising one.
+ */
+export type RelResult =
+  | { readonly kind: 'wire'; readonly shape: Shape }
+  | { readonly kind: 'stream'; readonly framing: Exclude<RelFraming, { readonly kind: 'elements' | 'discard' }> };
+
+/**
  * A covered chain, lowered: the program, and what to frame over it.
  *
  * The output COLUMNS and the CHANNELS are deliberately absent: both are properties of
@@ -107,7 +129,7 @@ export type RelFraming =
  */
 export interface RelLowering {
   readonly plan: Plan;
-  readonly framing: RelFraming;
+  readonly result: RelResult;
   /**
    * The ALIAS channel's label→column map — the one carried role whose framing form is not a column
    * (§2's four absent `LAYOUT_FIELD` roles). It is here rather than derived off `plan.result` for the
@@ -115,6 +137,9 @@ export interface RelLowering {
    * the mapping cannot live on the relation and there is nothing to read it off. `spine.ts`
    * cross-checks it against the result's alias channels, which is what stops it becoming a second
    * bookkeeping variable that merely claims to describe the relation.
+   *
+   * Read by the `stream` arm ALONE — a `wire` result has already spent its channels, so the map has no
+   * reader there. It leaves with `stream` (§10·10), which is also what retires `LAYOUT_FIELD`.
    */
   readonly aliases: AliasMap;
 }
@@ -1689,6 +1714,19 @@ export interface Lowering {
 }
 
 /**
+ * The options with every default APPLIED — one authority, because two consumers now need the same
+ * answer: the fold reads all four, and the wire projection reads `collapse` (a collapsed leaf carries its
+ * multiplicity out as a `bulk` COLUMN, which is exactly legacy's `movementCollapse` gate). A second
+ * `?? true` beside this one would be a second default, i.e. the kind of thing that agrees until it does not.
+ */
+const settle = (opts: Lowering): Required<Lowering> => ({
+  params: opts.params ?? {},
+  collapse: opts.collapse ?? true,
+  correlatedChildren: opts.correlatedChildren ?? true,
+  labelCardinality: opts.labelCardinality ?? LabelCardinality.ONE,
+});
+
+/**
  * THE BIND BUDGET IS A COVERAGE QUESTION, not a crash.
  *
  * §3.6 makes the DO 100-parameter cap a property of the plan that fails closed rather than SQL that
@@ -1718,8 +1756,32 @@ export interface Lowering {
  * `rel-sweep` exists to see into a silent decline. `checkPlan` still runs inside `emitRelational`,
  * so a genuine violation still escapes; only the cap decision is taken here.
  */
-const lowered = (chain: Tail): RelLowering | null => {
-  const named = nameBindings(chain.rel);
+/**
+ * THE PAYLOAD PROJECTION, APPLIED — the fold's last act, and the §10·10 boundary in one function.
+ *
+ * A `RelFraming` arm that this route projects for itself becomes a `wire` result whose relation IS the
+ * rows `execute.ts` frames; an arm still built by legacy's materializer passes through as `stream`. It runs
+ * HERE, between the fold and `name`, and both halves of that placement matter: after the fold, because the
+ * projection drops every carried channel and no later step could read one; before `name` and the budget,
+ * because the projection's own correlated subplans are part of the plan whose CTEs are chosen and whose
+ * binds are counted.
+ */
+const framed = (chain: Tail, collapse: boolean, fresh: Minter): { readonly rel: Rel; readonly result: RelResult } => {
+  const framing = chain.framing;
+  if (framing.kind === 'elements') return {
+    rel: elementPayload(chain.rel, framing.elem, { bulk: collapse }, fresh),
+    result: { kind: 'wire', shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' } },
+  };
+  // A DISCARD has nothing to project: the result relation is a statement with an empty `RETURNING`, so it
+  // has no columns and `discard` is already the whole framing contract. It is a `wire` result because that
+  // is what `wire` MEANS — the algebra owes the framing layer nothing further.
+  if (framing.kind === 'discard') return { rel: chain.rel, result: { kind: 'wire', shape: { kind: 'discard' } } };
+  return { rel: chain.rel, result: { kind: 'stream', framing } };
+};
+
+const lowered = (chain: Tail, collapse: boolean, fresh: Minter): RelLowering | null => {
+  const wire = framed(chain, collapse, fresh);
+  const named = nameBindings(wire.rel);
   // EFFECTS FIRST, then whatever CTEs the result still needs — `checkPlan` proves a `Ref` resolves
   // only backwards, so the order the executor runs IS the order the checker walked. `name` is called
   // on the result alone because a write step has already named its own target's shared nodes; the
@@ -1735,20 +1797,26 @@ const lowered = (chain: Tail): RelLowering | null => {
       if (!(error instanceof BindBudgetExceeded)) throw error;
       return null;
     }
-    return { plan, framing: chain.framing, aliases: liveAliases(chain.aliases, chain.rel) };
+    return { plan, result: wire.result, aliases: liveAliases(chain.aliases, chain.rel) };
   }
   if (planBindCount(plan) > DO_BIND_CAP) return null;
   // `liveAliases` at the seam as well as at every reader: the framing layer is handed the map, and a
   // map naming a column the RESULT does not emit is what `spine.ts` throws on. A chain ending in a
   // barrier (`as('a').count()`) is exactly that case, and pruning here means the fold never has to
-  // remember to clear it at each of the four barrier sites.
+  // remember to clear it at each of the four barrier sites. It is asked of `chain.rel` — the relation
+  // BEFORE the wire projection — because that is the one whose channels the map describes.
   return render(emitRelational(plan)).binds.length > DO_BIND_CAP
-    ? null : { plan, framing: chain.framing, aliases: liveAliases(chain.aliases, chain.rel) };
+    ? null : { plan, result: wire.result, aliases: liveAliases(chain.aliases, chain.rel) };
 };
 
 export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLowering | null {
-  const chain = lowerChain(steps, opts, minter());
-  return chain && lowered(chain);
+  // ONE minter for the chain AND its wire projection: the projection's relation ids come from the same
+  // id space the fold used, exactly as a sub-read's do (§11 — a second `minter()` would restart at 0 and
+  // the emitter's scope would see one id naming two relations).
+  const fresh = minter();
+  const settled = settle(opts);
+  const chain = lowerChain(steps, settled, fresh);
+  return chain && lowered(chain, settled.collapse, fresh);
 }
 
 /**
@@ -1768,7 +1836,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  *   pass walk them is the general fix if a case ever needs it.)
  */
 function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Tail | null {
-  const { params = {}, collapse = true, correlatedChildren = true, labelCardinality = LabelCardinality.ONE } = opts;
+  const { params, collapse, correlatedChildren, labelCardinality } = settle(opts);
   // EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step.
   // `analyzeChain` is the same authority the legacy source seeds from, so the two cannot disagree
   // about which chains have an order to take a window from. A chain that demands one and reaches a

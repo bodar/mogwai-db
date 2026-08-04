@@ -20,7 +20,15 @@ describe('movement / edge sources SQL', () => {
     // pinned here and each is pinned against the spine that produces it. Pinning the ambient one
     // would make this assertion flip under `mise run test:legacy-spine`, which is the differential
     // — and a differential that cannot run green is not one.
-    expect(read('g.E()', { spine: 'rel' }).sql).toContain('(SELECT re.id AS id, ? AS bulk FROM edges re) p');
+    const r = read('g.E()', { spine: 'rel' });
+    expect(r.sql).toContain('FROM edges re');
+    expect(r.shape).toEqual({ kind: 'edge' });
+    // The RelIR route builds its OWN payload now (§10·10), so the external-endpoint property below is
+    // pinned on both spines rather than only on the one that used to compose the projection — which is
+    // the whole point of the tuple having one authority. Aliases are minted per lowering, so the SHAPE
+    // of the resolution is what is asserted, never the alias.
+    expect(r.sql).toMatch(/\(SELECT COALESCE\(\w+\.uid, \w+\.id\) AS v FROM nodes \w+ WHERE \(\w+\.id = \w+\.src\)\) AS src/);
+    expect(r.sql).toMatch(/\(SELECT COALESCE\(\w+\.uid, \w+\.id\) AS v FROM nodes \w+ WHERE \(\w+\.id = \w+\.tgt\)\) AS tgt/);
     expect(read('g.E()', { spine: 'legacy' }).sql).toContain('c0(id, bulk) as (SELECT id, 1 AS bulk FROM edges)');
     const p = read('g.E()', { spine: 'legacy' });
     expect(p.shape).toEqual({ kind: 'edge' });
@@ -74,15 +82,23 @@ describe('movement / edge sources SQL', () => {
     // An edge `has()` is RelIR-routed, and the two spellings say the same thing two ways: legacy
     // re-joins `edges` per filter CTE, RelIR conjoins into the source scan's own WHERE.
     expect(read('g.E().has("weight",0.5)', { spine: 'legacy' }).sql).toContain('FROM edges n JOIN c0 p ON n.id=p.id');
-    expect(read('g.E().has("weight",0.5)', { spine: 'rel' }).sql).toContain('FROM edges re WHERE EXISTS (SELECT ? AS one FROM edge_properties rp2');
+    // `FROM edges re … WHERE EXISTS(…re.id…)` — the filter is still conjoined into the source scan's own
+    // clause; what sits between them is the payload join RelIR now builds for itself (§10·10).
+    expect(read('g.E().has("weight",0.5)', { spine: 'rel' }).sql).toContain('FROM edges re ');
+    expect(read('g.E().has("weight",0.5)', { spine: 'rel' }).sql).toContain('WHERE EXISTS (SELECT ? AS one FROM edge_properties rp2 WHERE (((rp2.edge = re.id)');
     expect(read('g.V(1).outE().values("weight")', { spine: 'legacy' }).sql).toContain('JOIN edge_properties ep ON ep.edge=n.id AND ep.key=?');
     expect(read('g.V(1).outE().values("weight")', { spine: 'rel' }).sql).toMatch(/INNER JOIN edge_properties \w+ ON \(\(\w+\.edge = \w+\.id\) AND \w+\.key IN/);
   });
 
   test('single select and record projection preserve edge element typing', () => {
-    const selected = read('g.V(1).outE("knows").as("b").select("b")');
-    expect(selected.shape).toEqual({ kind: 'edge' });
-    expect(selected.sql).toContain('FROM edges n JOIN');
+    // Pinned PER SPINE for the reason the `E()` test above states: the payload projection is the RelIR
+    // route's own now (§10·10), so the two spines spell the edge-row join differently and an ambient
+    // assertion could only be green on one of them — which would make the differential unrunnable.
+    for (const spine of ['legacy', 'rel'] as const) {
+      const selected = read('g.V(1).outE("knows").as("b").select("b")', { spine });
+      expect(selected.shape).toEqual({ kind: 'edge' });
+      expect(selected.sql).toMatch(spine === 'legacy' ? /FROM edges n JOIN/ : /INNER JOIN edges \w+ ON/);
+    }
     expect(read('g.V(1).outE().project("w").by("weight")').shape).toEqual({
       kind: 'map', entries: [{ key: 'w', prefix: 'e0', sub: 'value', type: PER_ROW('e0_vtype') }],
     });

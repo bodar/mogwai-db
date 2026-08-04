@@ -1,4 +1,4 @@
-import { derived } from '../../sql/kernel/q.ts';
+import { derived, render } from '../../sql/kernel/q.ts';
 import type { Compiled, Program } from '../../sql/kernel/render.ts';
 import { emitProgram } from '../../rel/emit.ts';
 import { cfLimitViolation } from '../../cf-limits.ts';
@@ -135,9 +135,26 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
   // each step is its own query, so each meets the 100-bind and 100 KB walls on its own.
   const { effects, result: relational } = emitProgram(lowered.plan);
   if (effects.some((step) => cfLimitViolation(step.emitted.sql, step.emitted.binds))) return null;
-  if (lowered.framing.kind === 'discard' || !relational) {
-    if (lowered.framing.kind !== 'discard' || relational) throw new Error('RelIR spine: a discard framing and a relational result disagree about whether this program yields traversers');
+  const isDiscard = lowered.result.kind === 'wire' && lowered.result.shape.kind === 'discard';
+  if (isDiscard || !relational) {
+    if (!isDiscard || relational) throw new Error('RelIR spine: a discard framing and a relational result disagree about whether this program yields traversers');
     return { kind: 'program', program: lowered.plan, shape: { kind: 'discard' }, spine: 'rel' };
+  }
+
+  // A WIRE RESULT LEAVES WITHOUT TOUCHING THE FRAMING LAYER AT ALL — §10·10's target arrangement, and
+  // what makes §5a's equivalence gate mean what it says: the plan below IS the whole query, so there is
+  // nothing for legacy to compose over it and no `TraverserLayout` to translate into. `render` rather
+  // than `emitQuery` because the program's steps are already in hand; asking `emitQuery` would re-emit
+  // and, for a write, refuse a multi-step plan it has no reason to see.
+  if (lowered.result.kind === 'wire') {
+    const emitted = render(relational);
+    const shape = lowered.result.shape;
+    // The same platform backstop the stream arm takes below, for the same two things `lowerToRel`'s
+    // decision cannot see: whatever the render spells more than once, and the 100 KB statement-TEXT cap.
+    if (cfLimitViolation(emitted.sql, emitted.binds)) return null;
+    return effects.length
+      ? { kind: 'program', program: lowered.plan, tail: { sql: emitted.sql, binds: emitted.binds }, shape, spine: 'rel' }
+      : { kind: 'read', sql: emitted.sql, binds: emitted.binds, shape, spine: 'rel' };
   }
 
   // `rir` deliberately does not collide with the framing aliases (`n`/`e`/`p`/`s`/`v`/`g`/`j`/`l`)
@@ -153,22 +170,20 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
   // here until this seam knows how to frame it, which is the same discipline §3.5's obligation
   // table applies inside the algebra.
   const state = { q: engine.q, params, rel, traverserLayout };
-  const framing = lowered.framing;
-  const stream: Stream = framing.kind === 'elements'
-    ? { kind: 'elements', ...state, elem: framing.elem }
-    : framing.kind === 'list'
-      ? { kind: 'list', ...state, of: framing.of, ...(framing.set ? { set: framing.set } : {}) }
-      // The LIST arm's twin and it needs nothing else: the relation carries one `map` column holding
-      // the pairs tree, and `keyOf`/`valOf` are what the materializer reads to know how to frame each
-      // side. No step is delegated to get here (§10·9) — the grouping is the algebra's own.
-      : framing.kind === 'map'
-        ? { kind: 'map', ...state, keyOf: framing.keyOf, valOf: framing.valOf }
-        : framing.kind === 'scalar'
-          ? { kind: 'scalar', ...state, type: framing.type, ...(framing.result ? { result: framing.result } : {}) }
-          // A discard left through the program door above; naming it keeps the chain total rather than
-          // leaving the arm to a `never` nobody reads.
-          : unreachable(framing);
-  // Zero steps remain, so the loop runs the root element projection and nothing else. Going
+  const framing = lowered.result.framing;
+  const stream: Stream = framing.kind === 'list'
+    ? { kind: 'list', ...state, of: framing.of, ...(framing.set ? { set: framing.set } : {}) }
+    // The LIST arm's twin and it needs nothing else: the relation carries one `map` column holding
+    // the pairs tree, and `keyOf`/`valOf` are what the materializer reads to know how to frame each
+    // side. No step is delegated to get here (§10·9) — the grouping is the algebra's own.
+    : framing.kind === 'map'
+      ? { kind: 'map', ...state, keyOf: framing.keyOf, valOf: framing.valOf }
+      : framing.kind === 'scalar'
+        ? { kind: 'scalar', ...state, type: framing.type, ...(framing.result ? { result: framing.result } : {}) }
+        // ELEMENTS and DISCARD left through the wire door above, and the `Exclude` on `RelResult`'s
+        // `stream` arm is what proves it rather than leaving the claim to this comment.
+        : unreachable(framing);
+  // Zero steps remain, so the loop runs the root value projection and nothing else. Going
   // through `lowerSteps` rather than calling the projection directly is the point: a step this
   // route grows tomorrow lands in the SAME loop, and there is no second orchestrator.
   const compiled = materializeRootStream(engine.lowerStepsStrict(stream, steps, steps.length));

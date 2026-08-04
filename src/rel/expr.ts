@@ -21,7 +21,16 @@ export type Expr =
   | { readonly kind: 'in-list'; readonly expr: Expr; readonly values: readonly Expr[] }
   | { readonly kind: 'in-query'; readonly expr: Expr; readonly plan: Rel; readonly negated: boolean };
 
-export type AggFn = 'count' | 'sum' | 'min' | 'max' | 'avg' | 'total' | 'group_concat' | 'json_group_array' | 'jsonb_group_array';
+/**
+ * SQLite's aggregate functions, as the algebra names them. A NAME rather than a node kind, so adding one
+ * is not a §3.2 closure question — `Agg` already expresses "a reduction over a group, optionally ordered",
+ * and `json_group_object` is the KEYED half of the pair `json_group_array` was already the ordered half of.
+ * Its one caller is the element payload's property bag (`compiler/rel/element.ts`), which has no other
+ * faithful spelling: assembling an object out of `group_concat` text would make the compiler responsible
+ * for JSON escaping that SQLite already does correctly.
+ */
+export type AggFn = 'count' | 'sum' | 'min' | 'max' | 'avg' | 'total' | 'group_concat'
+  | 'json_group_array' | 'jsonb_group_array' | 'json_group_object' | 'jsonb_group_object';
 export type WindowFn = 'row_number' | 'rank' | 'dense_rank' | 'count' | 'sum' | 'min' | 'max' | 'lag' | 'lead';
 
 export const col = (rel: import('./types.ts').RelId, name: string): Expr => ({ kind: 'col', rel, name });
