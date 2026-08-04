@@ -25,7 +25,7 @@ import {
 } from './build.ts';
 import { bindAliases, selectOne, type AliasRead } from './alias.ts';
 import type { AliasMap } from '../steps/context/context.ts';
-import { byExpr, modulations, orderProductivity, productivityFilter, type ByHost, type Modulation } from './modulator.ts';
+import { byExpr, modulations, orderProductivity, productivityFilter, type ByChild, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
 import { elementAddE, elementAddV, elementDrop, elementMergeV, elementProperty, propertyWrites, type Effects, type SubReads } from './write.ts';
@@ -812,11 +812,11 @@ function bulkSlice(
   });
 }
 
-function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, fresh: Minter): Rel | null {
+function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, ctx: ChainCtx, fresh: Minter): Rel | null {
   if (step.optionArms) return null;
   if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
   if (step.name === 'identity' || step.name === 'barrier') return (step.args ?? []).length ? null : input;
-  if (step.name === 'order') return elementOrder(step, input, elem, fresh);
+  if (step.name === 'order') return elementOrder(step, input, elem, ctx, fresh);
   const sliced = sliceOp(step, input, bulked, fresh);
   if (sliced) return sliced;
   if (step.name === 'dedup' && pathCarried(input)) return null;
@@ -834,7 +834,7 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, fresh: Min
   if (!groupableChannels(input.channels)) return null;
 
   const ordered = !!encounterOf(input.channels);
-  const bys = modulations(step, 1);
+  const bys = modulations(step, 1, ctx.params);
   if (!bys) return null;
   if (bys[0]) return dedupBy(step, bys[0], input, elem, fresh);
 
@@ -883,12 +883,14 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, fresh: Min
  * emits no `GROUP BY` on either spine. So this is not a divergence to reconcile; it is the form that
  * stays correct if that safety rule is ever relaxed, at no cost today.
  */
-function dedupBy(step: IRStep, modulation: Modulation, input: Rel, elem: Elem, fresh: Minter): Rel | null {
+function dedupBy(
+  step: IRStep, modulation: Modulation, input: Rel, elem: Elem, fresh: Minter,
+): Rel | null {
   // A comparator on `dedup()` is not a form Gremlin has — `DedupGlobalStep` is not a comparator host —
   // so an `Order` in its `by()` is a chain `verifyByModulatorArity` never sees. Decline rather than
   // silently ignoring it.
   if (modulation.order !== undefined) return null;
-  const key = byExpr(modulation, { kind: 'element', id: col(input.id, 'id'), elem }, fresh);
+  const key = byExpr(modulation, { kind: 'element', id: col(input.id, 'id'), elem }, fresh, false, byChild(fresh));
   if (!key) return null;
 
   const productive = productivityFilter(step, key);
@@ -960,8 +962,8 @@ const remintOrder = (rel: Rel, encounter: Channel, fresh: Minter): Rel => renumb
  * Minting the channel is what makes the order survive the join, and it is also what makes `order()`
  * COMPOSE: a fold into the framing `ORDER BY` can only happen once, at the end.
  */
-function elementOrder(step: IRStep, input: Rel, elem: Elem, fresh: Minter): Rel | null {
-  const sort = sortTerms(step, { kind: 'element', id: col(input.id, 'id'), elem }, fresh);
+function elementOrder(step: IRStep, input: Rel, elem: Elem, ctx: ChainCtx, fresh: Minter): Rel | null {
+  const sort = sortTerms(step, { kind: 'element', id: col(input.id, 'id'), elem }, ctx, fresh);
   if (!sort) return null;
   const domain = sort.drop
     ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: sort.drop })
@@ -1134,13 +1136,15 @@ const BY_READERS = new Set(['order', 'dedup']);
  * is the one term with no subject at all: `RANDOM()` re-evaluates per row and that IS the semantics,
  * so it is a `Call` rather than a projection, and the census sees it through the multiset digest only.
  */
-function sortTerms(step: IRStep, host: ByHost, fresh: Minter): { readonly terms: readonly SortTerm[]; readonly drop?: Expr } | null {
+function sortTerms(
+  step: IRStep, host: ByHost, ctx: ChainCtx, fresh: Minter,
+): { readonly terms: readonly SortTerm[]; readonly drop?: Expr } | null {
   if (isLocalScope(step) || (step.args ?? []).length) return null;
   // EVERY slot: TinkerPop's `order()` takes a comparator per key, so `by('performances',desc).by('name')`
   // is a two-term sort and the number of slots is whatever the chain wrote. `SortTerm[]` was always a
   // LIST, so a multi-key order is the same lowering — taking only the first would have sorted by the
   // wrong thing where the first key ties, which is a wrong ORDER with the right multiset.
-  const bys = modulations(step, (step.modulators ?? []).length);
+  const bys = modulations(step, (step.modulators ?? []).length, ctx.params);
   if (!bys) return null;
   const parsed: readonly Modulation[] = bys.length ? bys : [{ key: { kind: 'identity' } }];
   // `shuffle` has no subject at all — `RANDOM()` re-evaluates per row and that IS the semantics — so it
@@ -1158,7 +1162,7 @@ function sortTerms(step: IRStep, host: ByHost, fresh: Minter): { readonly terms:
   // does over its whole clause list.
   const drops: Expr[] = [];
   for (const modulation of parsed) {
-    const key = byExpr(modulation, host, fresh, true);
+    const key = byExpr(modulation, host, fresh, true, byChild(fresh));
     if (!key) return null;
     terms.push({ expr: key, dir: modulation.order === 'desc' ? 'desc' : 'asc' });
     const drop = orderProductivity(step, modulation, key);
@@ -1264,7 +1268,7 @@ function scalarTail(
     }
 
     if (step.name === 'order') {
-      const sort = sortTerms(step, host, fresh);
+      const sort = sortTerms(step, host, ctx, fresh);
       if (!sort) return null;
       const { terms } = sort;
       // A value's `by()` is identity-only (a value has no properties), so `drop` is never owed here —
@@ -1397,8 +1401,8 @@ function scalarTail(
       // (legacy emits the identical `SELECT DISTINCT p.v` for both). `by(key)`/`by(token)` decline
       // through the vocabulary, which is where the "a value has no properties" rule lives.
       if (args.length || isLocalScope(step)) return null;
-      const deduped = modulations(step, 1);
-      if (!deduped || (deduped[0] && !byExpr(deduped[0], host, fresh))) return null;
+      const deduped = modulations(step, 1, ctx.params);
+      if (!deduped || (deduped[0] && !byExpr(deduped[0], host, fresh, false, byChild(fresh)))) return null;
       if (deduped[0]?.order !== undefined) return null;
       const payload = rel.type.cols.filter((column) => !rel.channels.some((channel) => channel.col === column.name));
       if (!payload.length) return null;
@@ -2121,7 +2125,7 @@ function elementTail(
     if (step.name === 'path') {
       if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length
         || step.from !== undefined || step.to !== undefined) return null;
-      const positions = pathPositions(rel, step, fresh);
+      const positions = pathPositions(rel, step, ctx.params, byChild(fresh), fresh);
       if (!positions) return null;
       return continueAs(positions.rel, { kind: 'path', of: positions.of, scalars: positions.scalars }, steps, at + 1, false, ctx, fresh, labels);
     }
@@ -2142,7 +2146,7 @@ function elementTail(
     // vocabulary (unfold to entries, select(Column.*)) exists, so this cannot silently drop a tail.
     if (step.name === 'groupCount' || step.name === 'group') {
       if (pathCarried(rel)) return null;
-      const grouped = groupBarrier(rel, elementHost(rel, elem), step, bulked, fresh);
+      const grouped = groupBarrier(rel, elementHost(rel, elem), step, bulked, ctx.params, byChild(fresh), fresh);
       if (!grouped) return null;
       return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
@@ -2196,7 +2200,7 @@ function elementTail(
       const dropped = elementDrop(rel, elem, fresh);
       return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: dropped.bindings };
     }
-    const row = rowOp(step, rel, elem, bulked, fresh);
+    const row = rowOp(step, rel, elem, bulked, ctx, fresh);
     if (!row) break;
     rel = row;
   }
@@ -2425,6 +2429,55 @@ function addedEdges(
   );
   return effects && { effects, at: end };
 }
+
+/** A nested `by()` body that remains a VALUE expression over the same traverser. The recursive fold
+ * stays here; the modulator vocabulary receives only this injected leaf and therefore never imports
+ * its caller. Movement, collection, reducers, selection and branching all decline for later arms. */
+const byChild = (fresh: Minter): ByChild => (body, host) => {
+  if (host.kind !== 'element') return null;
+
+  let value: Expr = host.id;
+  let at = 0;
+  const leading = body[0];
+  if (leading?.name === 'values') {
+    const args = leading.args ?? [];
+    if (args.length !== 1 || typeof args[0] !== 'string') return null;
+    const projected = byExpr({ key: { kind: 'property', key: args[0] } }, host, fresh);
+    if (!projected) return null;
+    value = projected;
+    at = 1;
+  } else if (leading?.name === 'label' || leading?.name === 'id') {
+    if ((leading.args ?? []).length) return null;
+    const projected = byExpr({ key: { kind: 'token', token: leading.name } }, host, fresh);
+    if (!projected) return null;
+    value = projected;
+    at = 1;
+  } else if (leading?.name === 'constant') {
+    const args = leading.args ?? [];
+    if (args.length !== 1) return null;
+    const projected = args[0] === null ? lit(null, 'any') : operandLit(args[0]);
+    if (!projected) return null;
+    value = projected;
+    at = 1;
+  }
+
+  // A BODY MUST NAME ITS SUBJECT, and this guard is the difference between declining and answering
+  // nonsense. Without it a transform-only body falls through with `value` still the element's ROWID, so
+  // `order().by(__.toUpper())` lowers to `upper(<rowid>)` — a plausible-looking answer to a traversal
+  // TinkerPop REJECTS (`The toUpper() step can only take string as argument`), which is the worst
+  // direction the "never answer a different question" rule has. A transform needs a value in front of
+  // it; an element is not one. Measured on this very increment, so it is a guard with a witness.
+  if (at === 0) return null;
+
+  for (; at < body.length; at++) {
+    const step = body[at]!;
+    if (!REL_TRANSFORMS.has(step.name)) return null;
+    const transformed = transformExpr(step, value, false);
+    if (!transformed) return null;
+    value = transformed.expr;
+  }
+  return value;
+};
 
 /** The read fold, as the two functions the write vocabulary needs of it (`SubReads`). A rooted
  *  chain with EFFECTS of its own is refused rather than spliced: an endpoint that writes is

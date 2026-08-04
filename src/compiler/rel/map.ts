@@ -4,9 +4,9 @@ import type { Rel } from '../../rel/rel.ts';
 import type { MapOf, Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/step.ts';
-import { byEncounter, jsonOf, meta, typeOf, typedNode, type Minter } from './build.ts';
+import { and, byEncounter, jsonOf, meta, typeOf, typedNode, type Minter } from './build.ts';
 import { elementNode } from './element.ts';
-import { byNode, modulations, productivityFilter, type ByHost } from './modulator.ts';
+import { byNode, modulations, productivityFilter, type ByChild, type ByHost } from './modulator.ts';
 
 /**
  * THE MAP SHAPE — a barrier whose result is ONE map, as a value in the algebra.
@@ -150,7 +150,7 @@ const ORD_COL = 'go';
  * different shape entirely (one value per group, not a list) and lands with the reducer vocabulary.
  */
 export function groupBarrier(
-  input: Rel, host: ByHost, step: IRStep, bulked: boolean, fresh: Minter,
+  input: Rel, host: ByHost, step: IRStep, bulked: boolean, params: Record<string, any>, child: ByChild, fresh: Minter,
 ): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } | null {
   if (step.optionArms || (step.args ?? []).length > 0) return null;
   if (step.name !== 'groupCount' && step.name !== 'group') return null;
@@ -162,12 +162,12 @@ export function groupBarrier(
   // TWO SLOTS for `group()`, one for `groupCount()`, and that is the whole of the arity difference:
   // `GroupStep` takes a key `by()` and a value `by()`, `GroupCountStep` only a key.
   const collecting = step.name === 'group';
-  const bys = modulations(step, collecting ? 2 : 1);
+  const bys = modulations(step, collecting ? 2 : 1, params);
   // A bare `groupCount()` groups by the TRAVERSER, so an element stream would need an element key —
   // which the materializer expands per pair rather than tagging. Over a SCALAR stream the traverser IS
   // a value, so `by()`-less is exactly the identity projection and works.
   if (!bys) return null;
-  const key = byNode(bys[0] ?? { key: { kind: 'identity' } }, host, fresh);
+  const key = byNode(bys[0] ?? { key: { kind: 'identity' } }, host, fresh, child);
   if (!key) return null;
 
   // THE VALUE `by()`, where there is one. `byNode` declines a bare `by()` over an element (its projection
@@ -175,7 +175,7 @@ export function groupBarrier(
   // step rather than silently collecting the elements instead — which would be the right arity and the
   // wrong answer, the one thing the decline contract exists to prevent.
   const valueBy = bys[1];
-  const member = valueBy ? byNode(valueBy, host, fresh) : undefined;
+  const member = valueBy ? byNode(valueBy, host, fresh, child) : undefined;
   if (valueBy && !member) return null;
 
   const bulk = input.channels.find((channel) => channel.role === 'bulk');
@@ -233,11 +233,34 @@ export function groupBarrier(
   // traverser landed there. `ProductiveByStrategy` turns both off together, which is why this asks the
   // same function twice rather than spelling either test.
   const drop = productivityFilter(step, col(keyed.id, KEY_COL));
+  /**
+   * A CHILD value `by()` DOES filter the traverser, and a property `by(key)` does NOT — the same slot,
+   * two rules, and the reference pins both on the modern graph. It reads like an inconsistency and is
+   * not one: `by(key)` names a VALUE of the traverser, so an absent property leaves the traverser (and
+   * therefore its key) intact with nothing to contribute; a TRAVERSAL is applied to the traverser, and
+   * one that yields nothing yields no traverser to group at all.
+   *
+   * - key survives, empty list: `g.V().group().by("name").by("age")` → `ripple`/`lop` map to `[]`
+   *   (`sideEffect/Group.feature`, the `memberDrop` comment below).
+   * - key VANISHES: `g.V().has("person","name",within("vadas","peter")).group().by().by(__.out().order())`
+   *   → only `v[peter]`, and the feature file's own comment above it says "validates that a collecting
+   *   barrier produces a filtering effect if it is unproductive". Same for
+   *   `g.V().group().by(values("name")).by(values("age").fold().unfold())`, where `lop`/`ripple` are
+   *   absent rather than empty — a `values()` inside a TRAVERSAL filters where the bare key does not.
+   *
+   * So this filter is a pre-aggregate DOMAIN filter and belongs before the grouping, unlike
+   * `memberDrop`. Removing it was tried during review, on the (wrong) reasoning that `by('age')` is
+   * sugar for `by(__.values('age'))`; the second scenario above is what refutes that.
+   */
+  const childValueDrop = member && valueBy?.key.kind === 'child'
+    ? productivityFilter(step, col(keyed.id, MEMBER_COL))
+    : undefined;
+  const domainDrop = drop && childValueDrop ? and(drop, childValueDrop) : drop ?? childValueDrop;
   // The aggregate's own DIRECT input, because a `Col` names a relation in SCOPE and scope is a node's
   // direct children (§3.3). With the filter present, `keyed` is the GRANDchild — naming it is the
   // "no relation in scope" the checker catches, and it caught this.
-  const rows = drop
-    ? make.filter({ id: fresh('gf'), input: keyed, channels: keyed.channels, type: keyed.type, pred: drop })
+  const rows = domainDrop
+    ? make.filter({ id: fresh('gf'), input: keyed, channels: keyed.channels, type: keyed.type, pred: domainDrop })
     : keyed;
   // THE VALUE, and the two arms differ only here. `groupCount()` reduces the group to a traverser COUNT
   // — `SUM(bulk)` where the stream carries a multiplicity, `COUNT(*)` where it cannot, identical while

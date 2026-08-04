@@ -1889,3 +1889,74 @@ A test had already PINNED the wrong behaviour (`shape.kind === 'value'`) in the 
 it, which is the reminder worth keeping: **a new test written beside a new lowering is not evidence the
 lowering is right.** What caught it was running the traversal on both spines and comparing the decoded
 values — the differential, by hand, on a shape no corpus traversal reaches.
+
+### 10·12 — the `by(__.traversal)` CHILD SEAM, and two reference facts that look like a contradiction
+
+**Measured before starting, which is why this was next and not the path residue:** 99 corpus traversals
+block exactly at a `by()` host whose modulator is a nested traversal — `group` 48, `project` 15, `select`
+12, `path` 7, `aggregate` 4, `order` 3, `groupCount` 2, `sack` 2, `dedup` 1. That is larger than side
+effects (95) or the property shape (90), it is ONE concept, and `modulator.ts` had already named the
+shape of the answer: "a sub-traversal projection … belongs to whichever seam grows the correlated child".
+
+**The seam is an INJECTED lowerer, for `ListCtx.subRead`'s reason.** Lowering a body needs the fold, the
+fold lives in `lower.ts`, and `modulator.ts` sits below it in the module DAG — so `ByKey` gains a `child`
+arm carrying the decoded body and `byExpr`/`byNode` take a `ByChild` callback. Every by() HOST therefore
+gains the child at once (path, group/groupCount, order, dedup today), which is the whole argument for
+building the seam before any arm.
+
+Two details in the seam earned their place:
+
+- **`by(__.identity())` normalises to `{kind:'identity'}` in `modulations`.** It IS a bare `by()` — both
+  project the element — and it appears 7 times in the measured corpus. Recording it as a child would make
+  every consumer re-derive that.
+- **`byNode` keeps SQL NULL OUTSIDE the `{t,v}` envelope for a child.** `typedNode(NULL, NULL)` is a
+  non-null JSON object, so a productivity filter downstream could never see that the child yielded
+  nothing. The node is therefore wrapped in a `CASE … IS NULL` — which is also the one place this arm
+  spells its subquery twice, bounded and measured inside the bind cap.
+
+**THE FIRST ARM IS AN EXPRESSION, NOT A CORRELATION**, and that is why it is first: a flat value-and-
+transform body (`__.values('name')`, `__.values('name').toUpper()`, `__.label()`, `__.constant(1)`) is
+`byExpr`'s own property/token projection with `transformExpr` folded over it. No relation, no correlation,
+no fence. The movement/reducer arm (`__.out().count()`, ~30 occurrences) and the collecting arm
+(`__.out().label().fold()`, ~19) are the next two increments and DECLINE here.
+
+**A guard with a witness, found in review:** without requiring a leading value-producer, a
+transform-only body falls through with the subject still the element's ROWID, so
+`g.V().order().by(__.toUpper())` lowered to `upper(<rowid>)` — a plausible answer to a traversal TinkerPop
+REJECTS (`The toUpper() step can only take string as argument`). A transform needs a value in front of it
+and an element is not one.
+
+**THE TWO REFERENCE FACTS, because they read as a contradiction and cost a wrong correction.** An
+unproductive value `by()` behaves differently depending on whether it is a KEY or a TRAVERSAL:
+
+- `g.V().group().by("name").by("age")` → `ripple`/`lop` map to **`[]`**: the key SURVIVES. That is
+  `Agg.filter`'s whole reason for existing (`FILTER (WHERE …)` drops the member, not the row).
+- `g.V().has("person","name",within("vadas","peter")).group().by().by(__.out().order())` → only
+  `v[peter]`: the key **VANISHES**, and the feature file's own comment above it says "validates that a
+  collecting barrier produces a filtering effect if it is unproductive". Same for
+  `g.V().group().by(values("name")).by(values("age").fold().unfold())`, where `lop`/`ripple` are ABSENT
+  rather than empty — a `values()` inside a TRAVERSAL filters where the bare key does not.
+
+So a child value `by()` needs a pre-aggregate DOMAIN filter *and* the member `Agg.filter`, and the two are
+not redundant. This was reviewed as an inconsistency and "fixed" by deleting the domain filter on the
+reasoning that `by('age')` is sugar for `by(__.values('age'))`; the second scenario above is what refutes
+that, and the fix was reverted with both citations written down. **The lesson is the general one: when two
+comments in this repo cite the same feature file for opposite behaviours, the resolution is in the feature
+file, not in the reasoning.**
+
+**One divergence RelIR is AHEAD on, pinned in both directions rather than hidden.** A wholly unproductive
+child filters every traverser, and the two spines then disagree about what a reducing barrier over zero
+rows emits: RelIR emits the seed (one empty map), legacy emits no traverser. RelIR is right —
+`ReducingBarrierStep` emits its seed, which is what `fold()` and `count()` already do here — and the
+divergence is NOT the seam's: `g.V().hasLabel("nope").group().by("name")` produces the same two answers
+and involves no `by()` traversal at all. The legacy assertion is pinned with `{spine:'legacy'}` so it
+deletes itself when the group family fixes the empty barrier.
+
+**`grouped` in the harness was incomplete and this found it:** a legacy group's list-valued `gv` arrives as
+JSON TEXT while a RelIR map's value side is already parsed, so "the same Map either way" was only true for
+the numeric `groupCount` callers. It now reads a collection back by SHAPE (a leading `[` or `{`), which
+keeps a genuinely string-valued group a string.
+
+**Measured.** Census 762 → 772 (33.6%), ten route changes with identical answer hashes, `0 changed answer`.
+Seven of the ten are the path family's `by(values("name").toUpper())` set-ops, so the seam closed most of
+what §10·11·1 left. `rel-sweep` 0 violations. `test:perturbed` unchanged at its known 4.

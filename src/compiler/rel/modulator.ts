@@ -1,8 +1,9 @@
 import { col, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
-import { isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
+import { isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { Elem } from '../plan/plan.ts';
+import { childSteps } from '../steps/tail/child-shape.ts';
 import { and, eq, EDGE_COLS, firstOf, meta, NODE_COLS, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
 import { storedCompareOn } from './predicate.ts';
 
@@ -51,7 +52,7 @@ import { storedCompareOn } from './predicate.ts';
  */
 
 /** WHAT a `by()` projects out of the traverser. Total over the forms the algebra can state; a form it
- *  cannot (a sub-traversal, a `Column`, an `Operator`) never becomes a `ByKey` — `modulations`
+ *  cannot (a `Column`, an `Operator`) never becomes a `ByKey` — `modulations`
  *  declines instead, so an unexpressible projection cannot reach a host as a plausible-looking one.
  *
  *  Reachable through `Modulation['key']` and not exported on its own: no host matches on the
@@ -60,7 +61,12 @@ import { storedCompareOn } from './predicate.ts';
 type ByKey =
   | { readonly kind: 'identity' }
   | { readonly kind: 'property'; readonly key: string }
-  | { readonly kind: 'token'; readonly token: 'id' | 'label' };
+  | { readonly kind: 'token'; readonly token: 'id' | 'label' }
+  | { readonly kind: 'child'; readonly body: readonly IRStep[] };
+
+/** The injected lowerer for a nested `by()` body. It lives beside the vocabulary while its
+ * implementation lives beside the fold, which keeps the module DAG one-way. */
+export type ByChild = (body: readonly IRStep[], host: ByHost) => Expr | null;
 
 /** One parsed `by()`. `order` is present only where the modulator named a comparator. */
 export interface Modulation {
@@ -94,18 +100,20 @@ const TOKENS: Readonly<Record<string, 'id' | 'label'>> = { id: 'id', label: 'lab
  * distinction matters because it is not always identity — bare `dedup()` is a whole-row `Distinct`,
  * a genuinely different lowering from `dedup().by()`.
  */
-export function modulations(step: IRStep, max: number): readonly Modulation[] | null {
+export function modulations(step: IRStep, max: number, params: Record<string, any>): readonly Modulation[] | null {
   const bys = step.modulators ?? [];
   if (bys.length > max) return null;
   const parsed: Modulation[] = [];
   for (const by of bys) {
     let key: ByKey = { kind: 'identity' };
+    let projected = false;
     let order: Modulation['order'];
     for (const arg of by as readonly unknown[]) {
       if (typeof arg === 'string') {
         // A second projection in one `by()` is not a form Gremlin has; declining beats picking one.
-        if (key.kind !== 'identity') return null;
+        if (projected) return null;
         key = { kind: 'property', key: arg };
+        projected = true;
         continue;
       }
       if (isOrderArg(arg)) {
@@ -115,15 +123,25 @@ export function modulations(step: IRStep, max: number): readonly Modulation[] | 
       }
       if (isTokenArg(arg)) {
         const token = TOKENS[arg.token.toLowerCase()];
-        if (!token || key.kind !== 'identity') return null;
+        if (!token || projected) return null;
         key = { kind: 'token', token };
+        projected = true;
+        continue;
+      }
+      if (isNested(arg)) {
+        // A second projection in one `by()` is not a form Gremlin has; declining beats picking one.
+        if (projected) return null;
+        const body = childSteps(arg.nested, params);
+        // `by(__.identity())` is a bare `by()`: both project the element itself. Normalizing it here
+        // keeps every host from having to re-derive that semantic identity.
+        key = body.length === 1 && body[0]?.name === 'identity'
+          ? { kind: 'identity' }
+          : { kind: 'child', body };
+        projected = true;
         continue;
       }
       // Everything else DECLINES, and the default being refusal rather than tolerance is the point.
-      // A SUB-TRAVERSAL projection (`by(__.out().count())`) is the one remaining form the language has
-      // in this position, and it is a whole child lowering rather than an expression — it belongs to
-      // whichever seam grows the correlated child, not to a vocabulary of expressions. A `Column`, an
-      // `Operator` or a `GType` in a `by()` belongs to a host this module does not serve at all
+      // A `Column`, an `Operator` or a `GType` in a `by()` belongs to a host this module does not serve at all
       // (`group`'s key/value split, `sack`'s reducer, `valueMap`'s).
       return null;
     }
@@ -146,8 +164,17 @@ const isProductiveBy = (step: IRStep): boolean => step.productiveBy === true;
  * row. It goes INSIDE the scalar subquery, where the property row's own `vtype` is in scope, which is
  * exactly where legacy puts it.
  */
-export function byExpr(modulation: Modulation, host: ByHost, fresh: Minter, ordering = false): Expr | null {
+export function byExpr(
+  modulation: Modulation, host: ByHost, fresh: Minter, ordering = false, child?: ByChild,
+): Expr | null {
   const { key } = modulation;
+
+  if (key.kind === 'child') {
+    if (!child) return null;
+    // A child projection has no `vtype` column, so an ordering key cannot honestly use the stored-value
+    // comparison wrapper. Its expression passes through unchanged and frames by value inference.
+    return child(key.body, host);
+  }
 
   if (host.kind === 'scalar') {
     // A value has no properties and no tokens. Legacy THROWS for both ("order().by(key/traversal) on
@@ -232,8 +259,21 @@ export function byExpr(modulation: Modulation, host: ByHost, fresh: Minter, orde
  * a framed element, which the materializer expands per pair rather than tagging) and anything `byExpr`
  * already refuses.
  */
-export function byNode(modulation: Modulation, host: ByHost, fresh: Minter): Expr | null {
+export function byNode(modulation: Modulation, host: ByHost, fresh: Minter, child?: ByChild): Expr | null {
   const { key } = modulation;
+
+  if (key.kind === 'child') {
+    if (!child) return null;
+    const value = child(key.body, host);
+    // For `T.id`'s reason, a child has no recorded type: leave it untagged and let the framer infer.
+    // Preserve SQL NULL outside the node: it is how the shared productivity filter distinguishes a
+    // child that yielded nothing from a value it can collect or group.
+    return value && {
+      kind: 'case',
+      whens: [[{ kind: 'binary', op: 'is', left: value, right: lit(null, 'any') }, lit(null, 'any')]],
+      else: typedNode(value, lit(null, 'text')),
+    };
+  }
 
   if (host.kind === 'scalar') {
     if (key.kind !== 'identity') return null;

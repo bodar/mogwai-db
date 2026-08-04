@@ -9,7 +9,7 @@ import { byEncounter, carriedCols, jsonOf, meta, typeOf, type Minter } from './b
 import { elementNode } from './element.ts';
 import { historyAppend, historySeed, objectEntry, type TraverserObject } from './history.ts';
 import { LIST_COL, TYPED_LIST } from './list.ts';
-import { byNode, modulations, type Modulation } from './modulator.ts';
+import { byNode, modulations, type ByChild, type Modulation } from './modulator.ts';
 
 /**
  * THE PATH CHANNEL — where the traverser has BEEN, as one carried column.
@@ -122,10 +122,10 @@ export function extendPath(rel: Rel, object: TraverserObject, fresh: Minter): Re
  * deep inside a table-valued function argument.
  */
 export function pathPositions(
-  rel: Rel, step: IRStep, fresh: Minter,
+  rel: Rel, step: IRStep, params: Record<string, any>, child: ByChild, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf; readonly scalars: boolean } | null {
   if (!pathCarried(rel)) return null;
-  const parsed = modulations(step, step.modulators?.length ?? 0);
+  const parsed = modulations(step, step.modulators?.length ?? 0, params);
   if (!parsed) return null;
   const fenced = rel.kind === 'materialize'
     ? rel
@@ -155,8 +155,8 @@ export function pathPositions(
   };
   const projectedNode = (modulation: Modulation): Expr | null => {
     if (modulation.key.kind === 'identity') return element;
-    const edge = byNode(modulation, { kind: 'element', id: rowid, elem: 'edge' }, fresh);
-    const vertex = byNode(modulation, { kind: 'element', id: rowid, elem: 'vertex' }, fresh);
+    const edge = byNode(modulation, { kind: 'element', id: rowid, elem: 'edge' }, fresh, child);
+    const vertex = byNode(modulation, { kind: 'element', id: rowid, elem: 'vertex' }, fresh, child);
     if (!edge || !vertex) return null;
     return {
       kind: 'case',

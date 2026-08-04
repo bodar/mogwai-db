@@ -11,7 +11,7 @@ import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decode, decodeAll } from '../support/decode.ts';
-import { bagOf, read, run, seededStore } from '../support/harness.ts';
+import { bagOf, read, relirOff, run, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -509,9 +509,19 @@ describe('group / properties SQL', () => {
     // FILTERS the traverser (Group.feature g_V_hasXperson_name_withinXvadas_peterXX_group_by_
     // byXout_orderX drops the empty key), unlike a fold(), which always produces [].
     expect(p.sql).not.toContain('LEFT JOIN gv');
-    const both = read('g.V().group().by(__.label()).by(__.values("name").substring(0,1))');
+    const both = read('g.V().group().by(__.label()).by(__.values("name").substring(0,1))', { spine: 'legacy' });
     expect(both.sql).toContain('ON gk.o0=gp.o0');
     expect(both.sql).toContain('ON gv.o0=gp.o0');
+    // The RelIR route answers this one now, and the by() CHILD is an EXPRESSION there rather than a
+    // joined child relation: a flat value-and-transform body needs no correlation, so there are no `o0`
+    // ordinals to join on at all. Same map, and the productivity rule the comment above states is a
+    // pre-aggregate domain filter rather than an INNER JOIN.
+    if (!relirOff) {
+      const rel = read('g.V().group().by(__.label()).by(__.values("name").substring(0,1))', { spine: 'rel' });
+      expect(rel.shape).toEqual({ kind: 'mapValue' });
+      expect(rel.sql).not.toContain('o0');
+      expect(rel.sql).toContain('substr(');
+    }
   });
 
   test('sack(op).by(key) mutates a carried sk column; bare sack() reads it', () => {

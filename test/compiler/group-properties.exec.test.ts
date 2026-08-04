@@ -149,8 +149,15 @@ test('an unreduced scalar group value is emission-ordered, and unproductive stil
   expect(keys('g.V().group().by("name").by(__.out().values("name"))')).toEqual(['josh', 'marko', 'peter']);
   expect(keys('g.V().group().by("name").by(__.out().values("name").fold())'))
     .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
-  // a wholly unproductive value traversal filters every traverser → no groups at all
-  expect(run(store, 'g.V().group().by("name").by(__.values("missing"))')).toEqual([]);
+  // A wholly unproductive value traversal filters EVERY traverser, so the group has no keys — and the
+  // two spines then disagree about what a reducing barrier over zero rows emits. RelIR emits the seed
+  // (one empty map), which is what `ReducingBarrierStep` does and what `fold()`/`count()` already do
+  // here; legacy emits no traverser at all. The divergence is NOT the child seam's — the same two
+  // answers come out of `g.V().hasLabel("nope").group().by("name")`, which involves no by() traversal —
+  // so it is pinned in both directions rather than papered over, and the legacy line deletes itself
+  // when the group family fixes the empty barrier.
+  expect(grouped(runWith(store, 'g.V().group().by("name").by(__.values("missing"))'))).toEqual({});
+  expect(runWith(store, 'g.V().group().by("name").by(__.values("missing"))', { spine: 'legacy' })).toEqual([]);
 });
 
 test('group scalar-list drops members missing the property (json_group_array + null filter is in handler)', () => {
@@ -176,10 +183,15 @@ test('group scalar-list drops members missing the property (json_group_array + n
   });
   const duplicateChildren = JSON.parse(run(store, 'g.V(1).union(__.identity(),__.identity()).group().by("name").by(__.out().values("name"))')[0].gv).sort();
   expect(duplicateChildren).toEqual(['josh', 'josh', 'lop', 'lop', 'vadas', 'vadas']);
-  expect(run(store, 'g.V().group().by("name").by(__.values("missing"))')).toEqual([]);
-  const initials = Object.fromEntries(run(store, 'g.V().group().by(__.label()).by(__.values("name").substring(0,1))')
-    .map((r) => [r.gk, JSON.parse(r.gv).sort()]));
-  expect(initials).toEqual({ person: ['j', 'm', 'p', 'v'], software: ['l', 'r'] });
+  // The empty-barrier divergence, pinned where the test above states it in full.
+  expect(grouped(runWith(store, 'g.V().group().by("name").by(__.values("missing"))'))).toEqual({});
+  expect(runWith(store, 'g.V().group().by("name").by(__.values("missing"))', { spine: 'legacy' })).toEqual([]);
+  // Read through `grouped`, not off `gk`/`gv`: this one is covered by the RelIR route now (a flat
+  // value-and-transform child body is an expression there), and the two spines spell the group ROW
+  // differently while meaning the same map.
+  const initials = grouped(run(store, 'g.V().group().by(__.label()).by(__.values("name").substring(0,1))'));
+  expect(Object.fromEntries(Object.entries(initials).map(([k, v]) => [k, (v as unknown[]).slice().sort()])))
+    .toEqual({ person: ['j', 'm', 'p', 'v'], software: ['l', 'r'] });
 });
 
 test('group reducers operate over the complete child row domain for each key', () => {

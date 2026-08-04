@@ -103,9 +103,16 @@ export const bare = (v: any): any =>
  * moment `groupCount()` migrated, none of them because the answer had changed. What they mean to assert
  * is the grouping, so that is what this reads.
  */
+/** A legacy group's list-valued `gv` arrives as JSON TEXT while a RelIR map's value side is already a
+ *  parsed array, so "the same Map either way" is only true once the text is read back. Parsed by SHAPE
+ *  rather than by try/catch, because a group whose value is a genuine string (`by('name')`) must stay a
+ *  string — `'["a"]'` is a collection and `'marko'` is not. */
+const collectionish = (v: unknown): unknown =>
+  typeof v === 'string' && (v.startsWith('[') || v.startsWith('{')) ? JSON.parse(v) : v;
+
 export const grouped = (rows: readonly any[]): Record<string, unknown> => {
   if (rows.length === 0) return {};
-  if (rows[0] && 'gk' in rows[0]) return Object.fromEntries(rows.map((r) => [String(bare(r.gk)), bare(r.gv)]));
+  if (rows[0] && 'gk' in rows[0]) return Object.fromEntries(rows.map((r) => [String(bare(r.gk)), bare(collectionish(r.gv))]));
   const pairs = JSON.parse(rows[0].map) as readonly (readonly [unknown, unknown])[];
   return Object.fromEntries(pairs.map(([k, v]) => [String(bare(k)), bare(v)]));
 };
