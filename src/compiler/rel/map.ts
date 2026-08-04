@@ -12,8 +12,9 @@ import { byNode, modulations, productivityFilter, type ByHost } from './modulato
  *
  * The eighth vocabulary module on `build.ts`, and deliberately the LIST module's twin: a list is one
  * JSONB `list` column per row and a map is one JSONB `map` column, so both are ordinary values that
- * flow through the same relations and are framed by the same single `materializeRootStream` call
- * (§10·9 — a shape is a value plus a framing arm, never a delegated step).
+ * flow through the same relations and reach the wire through this module's own `mapPayload` exactly as a
+ * list reaches it through `listPayload` (§10·9 — a shape is a value plus a framing arm, never a delegated
+ * step; §10·10 — that arm is a PROJECTION the algebra builds, not a call into legacy's materializer).
  *
  * ## Calcite's decomposition, which is two ordinary nodes
  *

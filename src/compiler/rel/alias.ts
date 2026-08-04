@@ -37,9 +37,12 @@ import { carriedCols, meta, payloadCols, typeOf, type Minter } from './build.ts'
  * A `Channel` is `{col, role}` and nothing else — §2's vocabulary boundary means a RelIR node cannot
  * know a Gremlin label name any more than it can know what a sack is. So the label→column mapping is
  * compiler-side state, and it is the SAME `AliasEntry`/`AliasMap` the framing layer's
- * `TraverserLayout` declares: sharing that type is what lets `spine.ts` hand the map straight over
- * instead of translating one representation into another (and it is why `alias` is the one
- * `LAYOUT_FIELD` role whose framing form is a NAME map rather than a column).
+ * `TraverserLayout` declares. Sharing the type used to be load-bearing at the SEAM: `spine.ts` handed
+ * the map straight over rather than translating one representation into another, and `alias` was the one
+ * channel role whose framing form was a NAME map rather than a column. §10·10 retired that seam — the
+ * payload projection is the algebra's now, so nothing crosses — and the map is read only HERE, by the
+ * `as()`/`select()` vocabulary that builds it. The shared type stays because `select()` re-entry still
+ * needs the same entry shape the legacy host reads; it is no longer a claim about a boundary.
  *
  * ## Decline, don't approximate
  *

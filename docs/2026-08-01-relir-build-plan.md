@@ -584,11 +584,14 @@ facts are the substrate, not the step:
   three places, so `as`/`select` serve the element, scalar AND list hosts off one lowering and a step
   learned there is learned at every position it can occupy. **This is the seam a mid-chain `V()`/`E()`
   re-source and every later retype-back-to-elements arrives through — do not add a second.**
-- **The alias role is the ONE `LAYOUT_FIELD` entry whose framing form is a NAME MAP** (`named`), not a
+- **The alias role was the ONE `LAYOUT_FIELD` entry whose framing form is a NAME MAP** (`named`), not a
   column: a Gremlin label name is not something a `Channel` may know (§2), so it cannot live on the
-  relation and the lowering hands it over beside the plan. `spine.ts` PROVES the map's columns are the
-  result relation's alias channels — a map naming a column the relation does not emit is a silent
-  empty result, so it THROWS rather than declines. `path`/`origin`/`branchOrder` are still absent.
+  relation. While the seam existed the lowering handed the map over beside the plan and `spine.ts` PROVED
+  its columns were the result relation's alias channels, throwing rather than declining because a map
+  naming a column the relation does not emit is a silent empty result. **§10·10 retired all of that**:
+  `LAYOUT_FIELD` is deleted, nothing crosses, and the map is read only by the `as()`/`select()`
+  vocabulary that builds it. The channel-core rule it illustrated still holds; the seam it described
+  does not.
 - **`liveAliases` DERIVES the label set from the relation** instead of clearing it at each barrier. A
   barrier consumes every channel, so the map would otherwise name columns that are gone; asking the
   relation means there is no per-barrier clear to forget. Same discipline as reading the collapse law
@@ -1224,7 +1227,7 @@ reading the code.** They are grouped by what they teach.
 | the **row-for-row probe** vs legacy | a MISSING throw; a wrong ORDER where both spines share the defect |
 | the **L2 shape assertions** | a wrong VALUE with the right shape |
 | **L3 conformance** | anything the official corpus does not exercise — but it is the ONLY thing that sees a required error message |
-| **`rel-sweep`** | asserts the lowering does not THROW, and that a plan it ADMITS renders within the platform's bind cap — both the opposite property to "does not answer wrong" |
+| **`rel-sweep`** | asserts the lowering does not THROW, and that a plan it ADMITS renders within the platform's bind cap — both the opposite property to "does not answer wrong". **It calls `lowerToRel`, so everything `spine.ts` decides is invisible to it** — a decline (or a throw) at the seam is the census's `spine` column to catch, not this. Measured: three traversals were declining at `spine.ts`'s post-framing platform check with `rel-sweep` at zero |
 | **`test:perturbed`** | nothing about values; it is the only thing that sees an order that was right by SQLite's scan luck |
 | **`test:cf-limits`** | anything that is not a DO wall |
 | **`rel-blockers`** | everything about correctness; it counts where the fold gives up and nothing else |
@@ -1335,6 +1338,26 @@ drop). One extra `L5` is cheaper than a red trunk.
 
 ### Structure and plumbing
 
+- **"That arm is unreachable because X declines it" is a claim about SCOPE, and the scope is usually
+  narrower than it reads.** Building `scalarPayload` (§10·10) I read `lower.ts`'s
+  `if (tail.framing.kind === 'scalar' && tail.framing.result === 'number') return null` as making the
+  numeric-reducer arm unreachable at the root, and declined it. That decline is inside the CORRELATED
+  CHILD path — a `where()` body whose reducer over an empty child would answer "true" where TinkerPop
+  emits no traverser — and the root arm is minted 1,100 lines away. 28 tests failed at once, all of them
+  the reducer family, which is the cheap version of learning this. **Before declining an arm on the
+  grounds that something else already declines it, ask `refs.ts` who the other decline's CALLER is** —
+  the answer is a position, not a predicate, and the two are easy to confuse when both are spelled as a
+  guard on the same field.
+- **A DEMAND DERIVED PER SLICE IS NOT THE CHAIN'S DEMAND.** Legacy's `lowerElementSteps` reads
+  `trackFromV` off the steps it is HANDED, which is right at the root (one call, the whole chain) and
+  wrong for a child body a barrier SPLITS: `outE()` lands in the prefix, `otherV()` in the suffix, the
+  prefix call sees no reader and mints no entering vertex, and the suffix throws. `range`/`limit`/`skip`/
+  `dedup` before an `otherV()` therefore threw on the materialized gate while the inlined predicate
+  answered — a `predicateInlining` disable-safety hole — and `order()` threw on BOTH, which no
+  differential can see. Found by L5's rotating seed, fixed by taking the demand from the whole body
+  before the split (`82a3aaf`), promoted to L4. The general form: **a chain-level requirement must be
+  computed over the whole chain, at the point the chain is identified** — deriving it inside a routine
+  that only ever sees a fragment is the same class as naming a channel list instead of passing it through.
 - **Pass the input's channels THROUGH; never name a list.** Naming `BULK` on a channel-preserving node
   dropped the position its own input declared, and RelIR then THREW where legacy answers — a fail-closed
   VIOLATION, the one failure mode the routing switch cannot absorb. Found by L5 on a generated
@@ -1408,10 +1431,14 @@ drop). One extra `L5` is cheaper than a red trunk.
 
 ### 10·9 — a SHAPE is a VALUE plus a framing arm, NEVER a delegated step
 
-**RelIR never hands a STEP back to the legacy lowering, and the one call it makes into the legacy layer
-passes `steps.length` precisely so that it cannot.** `spine.ts` is the whole seam:
+**RelIR never hands a STEP back to the legacy lowering, and the one call it made into the legacy layer
+passed `steps.length` precisely so that it could not.** `spine.ts` was the whole seam:
 `materializeRootStream(engine.lowerStepsStrict(stream, steps, steps.length))` — zero steps remain, so
-legacy turns a finished RelIR relation into the root payload and does nothing else.
+legacy turned a finished RelIR relation into the root payload and did nothing else.
+**§10·10 removed the call entirely** (`e4dc296`), so the rule below no longer needs a guard to enforce it:
+there is nowhere to delegate a step TO. Kept because the temptation it describes is about how a SHAPE gets
+built, and that is unchanged — a shape is a value plus a framing arm, and the arm is now a projection this
+side of the boundary.
 
 This came up as a live temptation and it is worth writing down because the cheap-looking version is
 wrong. `lowerStepsStrict` accepts an `at < steps.length`, so a terminal `group()` COULD be delegated: let
@@ -1460,8 +1487,8 @@ it. Picking either other family means building it later anyway, under pressure.
 
 **LANDED — `groupCount()`, the family's first arm** (+4, 32.0%, and L3 1713 → 1714). It cost about what
 the list shape cost and confirmed the decomposition: `Aggregate.groupBy` needed nothing built,
-`{kind: 'map'}` rides the existing `materializeRootStream` call exactly as `{kind: 'list'}` does, and no
-step is delegated. `src/compiler/rel/map.ts` is the eighth vocabulary module; `byNode` joins `byExpr` in
+`{kind: 'map'}` rode the existing `materializeRootStream` call exactly as `{kind: 'list'}` did (both are
+`mapPayload`/`listPayload` since §10·10), and no step is delegated. `src/compiler/rel/map.ts` is the eighth vocabulary module; `byNode` joins `byExpr` in
 the `by()` vocabulary because a map key is a TYPED value and one subquery must yield the value and its
 `vtype` together.
 
@@ -1534,11 +1561,16 @@ which already owns `RelFraming` and already knows Gremlin shape — the same sid
 `list.ts` and `map.ts`, emitting the same shape-free nodes. Moving SQL construction between two modules
 that are both outside `src/rel/` is not a clean-room question at all.
 
-**THE ARGUMENT IS NOT PURITY — the current line is already binding, in three measured ways:**
+**THE ARGUMENT IS NOT PURITY — the current line is already binding, in three measured ways.** All three
+are now RESOLVED; each is annotated in place rather than struck out, because the reason is what the
+section is for.
 
 - **`LAYOUT_FIELD` declares `null` for `path`, `origin` and `branchOrder`, and THROWS.** RelIR is blocked
   from carrying a path by the TRANSLATION, not by the algebra. The channel core can hold it; the seam
   cannot express it.
+  **DELETED (`e4dc296`)** — with every arm's payload inside the algebra there is no seam to translate at,
+  so `layoutOf`/`LAYOUT_FIELD` and the alias map that was its only other reader are gone (ratchet rows in
+  `scripts/deletion-ratchet.tsv`, floor 0). **The path channel's wall is a wall no longer.**
 - **`materializeRootStream` throws for an `ElementStream`.** So for every covered element traversal —
   most of today's 32% — legacy's `lowerSteps` builds the payload SQL after RelIR's relation. **RelIR does
   not currently produce the whole query**, which is not what §5a's equivalence gate reads as.
@@ -1548,6 +1580,9 @@ that are both outside `src/rel/` is not a clean-room question at all.
   next arm of the map family — `group()`, 41 blockers — is blocked by a throw in the code §8 deletes. To
   advance RelIR one would have to edit legacy's tail. **That is the migration running backwards**, and it
   is the same trap §10·9 was written to close, arriving from the other side.
+  **RESOLVED (`e4dc296`)** — `mapPayload` (`map.ts`) owns the map root now, and an element side is a
+  DECLINE there rather than a throw in legacy. So the element-valued map is built by adding an arm on this
+  side of the boundary, which is what `group()` was waiting for.
 
 **Shape by shape, with what each needs.** The whole of `materialize.ts` is 294 lines and the eleven
 per-shape builders are ~250 of it, so the file is not the work — the ELEMENT payload is, and it is the
@@ -1566,9 +1601,9 @@ partly present. The state column below now says which HALF exists.
 | shape | payload projection | RelIR nodes | state |
 |---|---|---|---|
 | **element** | id + labels JSON aggregate + ordered property bag | `Aggregate`, `json-object`, `json-array`, correlated `Scalar` — all in the node set | **LANDED** `debf46f` — `element.ts`. `AggFn` gained `json_group_object`; the bag's entry order is now the aggregate's own `ORDER BY` rather than a subquery's, which legacy relies on surviving a boundary it does not |
-| scalar / value | `SELECT v[, vt]` | `Project` | relation done; the ROOT projection is still legacy's. A `Project` over the encounter `Sort` — the smallest arm left |
-| list | `SELECT json(list)` | `Aggregate` + `json_group_array` | relation done (`list.ts`). Bare/typed/set roots are `json(list)`; a NESTED leaf needs `Explode` + `Aggregate` (legacy's `nestedListResult`), an ELEMENT leaf needs the element payload as a member (`elementListResult`) — which `element.ts` now makes reachable |
-| map | `SELECT json(map)` | as above | relation done (`map.ts`). The scalar/scalar and scalar/list roots are `json(map)`; an ELEMENT side is the `materialize.ts:191` throw below |
+| scalar / value | `SELECT v[, vt]` | `Project` | **LANDED** `e4dc296` — `scalarPayload` (`lower.ts`, beside the scalar vocabulary). `result` is the total three-way, and the `'number'` arm IS reachable — see the trap below |
+| list | `SELECT json(list)` | `Aggregate` + `json_group_array` | **LANDED** `e4dc296` — `listPayload` (`list.ts`). Scalar-membered (bare/typed/set) and NESTED, the latter rebuilt a level at a time through the module's own correlated member frame. An ELEMENT leaf DECLINES: nothing produces one until `fold()` over elements lands, and `element.ts` is the expansion when it does |
+| map | `SELECT json(map)` | as above | **LANDED** `e4dc296` — `mapPayload` (`map.ts`). An ELEMENT side declines, which is where `group()` picks it up |
 | property | `vpid/owner/pk/pv/pvtype/pmeta` | `Scan` + `Project` | needs the property shape anyway |
 | record | one wide row, heterogeneous fields | `Project` + child joins | needs `project()`/`select()` |
 | mapEntry | `mk`/`mv` per row | `Explode` | arrives with map re-entry |
@@ -1613,8 +1648,22 @@ Three properties fall out, all wanted:
   inhabitants, the arm deletes itself, `RelResult` collapses to a `Shape`, and with it go `layoutOf`,
   `LAYOUT_FIELD` and `RelLowering.aliases` — which is what unblocks the path channel (first bullet above).
 
+**IT DID EXACTLY THAT, WITHIN ONE SESSION (`e4dc296`), so the type is gone and this is its record.**
+`RelLowering` carries a `Shape`. `spine.ts` is ~100 lines of router: lower, emit, render, hand over a
+`Shape`. Worth keeping the design note because the SHAPE of the device is the reusable part — a
+transitional union whose deletion criterion is "no inhabitants" costs one `Exclude` and cannot be
+forgotten, where a boolean or an optional `shape?` would have needed a reviewer to notice.
+
 `RelFraming` is unaffected and stays the fold's INTERNAL vocabulary: an arm merge and a retype need to
 know what a relation HOLDS, which is a different and larger question than which `Shape` frames it.
+
+**One instrument blind spot it exposed, worth stating because the census caught what `rel-sweep`
+structurally cannot.** Moving the payload in took census coverage 736 → 739 with IDENTICAL answer hashes,
+i.e. three traversals whose route changed and nothing else. They had been declining at `spine.ts`'s
+post-framing platform check — and `rel-sweep` calls `lowerToRel`, so anything `spine.ts` decided was
+invisible to it. With the payload inside, that check is measured on the plan's own render, which is the
+number `lowerToRel` already had. The general lesson: **a gate over the lowering is not a gate over the
+seam**, and the census's per-query `spine` column is what covers the difference.
 
 **A note on the bind budget, since it was the predicted risk.** The element payload adds three `Lit`s per
 projection — `storedValueOn`'s `IN ('list','map','set')`, which legacy inlines as literal text. Census
