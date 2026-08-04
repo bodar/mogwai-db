@@ -270,9 +270,22 @@ export function scalarTx(name: string, args: any[], v: Expression): Expression |
     case 'reverse':
       return q`CASE WHEN typeof(${v})='text' THEN (WITH RECURSIVE rev(s,r) AS (SELECT ${v}, '' UNION ALL SELECT substr(s,2), substr(s,1,1)||r FROM rev WHERE s<>'') SELECT r FROM rev WHERE s='') ELSE ${v} END`;
     case 'replace': return q`replace(${v}, ${value(strs[0])}, ${value(strs[1])})`;
-    case 'substring': { // 0-based [start, end) → 1-based substr(v, start+1, end-start)
+    case 'substring': {
       const [s, e] = nums;
-      return e !== undefined ? q`substr(${v}, ${value(s + 1)}, ${value(e - s)})` : q`substr(${v}, ${value(s + 1)})`;
+      // TinkerPop resolves negative indices against the string length BEFORE slicing; passing them
+      // straight to SQLite would instead invoke substr's from-the-right / backwards-length semantics.
+      // Reference: vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/
+      // traversal/step/map/SubstringGlobalStep.java (`processStringIndex`). Each index is a literal,
+      // so specialize its sign branch rather than emitting a runtime CASE. One unavoidable edge
+      // remains: Java throws for a negative index into an empty string (`% 0`), while SQLite yields
+      // NULL; SQL cannot raise that per-value error.
+      const index = (at: number): Expression => at >= 0
+        ? q`MIN(${value(at)}, length(${v}))`
+        : q`MAX(0, (length(${v}) + ${value(at)}) % length(${v}))`;
+      const start = index(s);
+      if (e === undefined) return q`substr(${v}, ${start} + 1)`;
+      const end = index(e);
+      return q`CASE WHEN ${end} <= ${start} THEN '' ELSE substr(${v}, ${start} + 1, ${end} - ${start}) END`;
     }
     default: return null;
   }

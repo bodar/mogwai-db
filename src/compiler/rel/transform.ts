@@ -83,12 +83,34 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[]) => E
     const [from, to] = args.filter((a): a is string => typeof a === 'string');
     return from === undefined || to === undefined ? null : call('replace', v, text(from), text(to));
   },
-  // 0-based [start, end) → SQLite's 1-based `substr(v, start+1, end-start)`.
+  // TinkerPop resolves negative indices against the string length BEFORE slicing; passing them
+  // straight to SQLite would instead invoke substr's from-the-right / backwards-length semantics.
+  // Reference: vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/
+  // traversal/step/map/SubstringGlobalStep.java (`processStringIndex`). Each index is a literal, so
+  // specialize its sign branch rather than emitting a runtime CASE. One unavoidable edge remains:
+  // Java throws for a negative index into an empty string (`% 0`), while SQLite yields NULL; SQL
+  // cannot raise that per-value error.
   substring: (v, args) => {
     const nums = args.filter((a): a is number => typeof a === 'number');
     const [start, end] = nums;
     if (start === undefined) return null;
-    return end === undefined ? call('substr', v, int(start + 1)) : call('substr', v, int(start + 1), int(end - start));
+    const length = (): Expr => call('length', v);
+    const index = (at: number): Expr => at >= 0
+      ? call('MIN', int(at), length())
+      : call('MAX', int(0), {
+        kind: 'binary', op: '%',
+        left: { kind: 'binary', op: '+', left: length(), right: int(at) },
+        right: length(),
+      });
+    const newStart = index(start);
+    const from = { kind: 'binary', op: '+', left: newStart, right: int(1) } as Expr;
+    if (end === undefined) return call('substr', v, from);
+    const newEnd = index(end);
+    return {
+      kind: 'case',
+      whens: [[{ kind: 'binary', op: '<=', left: newEnd, right: newStart }, text('')]],
+      else: call('substr', v, from, { kind: 'binary', op: '-', left: newEnd, right: newStart }),
+    };
   },
   concat: (v, args) => {
     // A traversal argument is a per-traverser child value (`TraversalUtil.apply`), which makes the step
