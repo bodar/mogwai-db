@@ -2628,3 +2628,50 @@ moves, and `test/CLAUDE.md`'s L3 paragraph, which currently describes one floor.
 **Definition of done.** `mise run ci` green; `mise run test:legacy-spine` green with the legacy floor
 recorded at 1719; deliberately breaking a legacy-only scenario fails the legacy run; deliberately breaking
 a RelIR-only scenario fails the default run; and neither run can lower the other's floor.
+
+### 14·1. §14 LANDED (95d932a) — and its definition of done exposed the SAME defect in the census
+
+The L3 half is done: two floors, default 1726 and `legacySpine` 1719, each gating and recording only its
+own section, the isolation rule covered by `test/L3-conformance/l3-state.test.ts` rather than by a comment,
+and `ambientSpine()` now the single reader of `MOGWAI_RELIR`. One refinement on §14 as written: the
+migration metric is the scenario-name **set** difference, not the subtraction of the two counts. Both sets
+are recorded so the difference is derivable, and a subtraction reads small while the sets diverge in both
+directions. It currently names exactly the seven — 7 RelIR-only, 0 legacy-only.
+
+**What §14 did not know: `mise run test:legacy-spine` fails a SECOND test, and for the same structural
+reason.** `test/census/census.test.ts`'s "no executing traversal changes its answer" fails, because the
+census EXECUTES under the AMBIENT spine while `goldens.tsv` records ONE digest per traversal — and it was
+recorded with RelIR on, after `bd993be` landed the RelIR-only comparability/negation fixes. One baseline, two
+configurations: §14's problem in a second instrument. Not a regression, and not visible in `ci`, which runs
+only the default position.
+
+**The divergence is NINE rows, and they are exactly §13a's two arms** — `is(P.gt/gte/lt/lte)` across a type
+boundary and `is(P.neq(...))` over `null`/`NaN`:
+`g.inject("foo").is(P.gt(1.0d))`, `…gte…`, `g.inject(1.0d).is(P.lt("foo"))`, `…lte…`,
+`g.inject(1.0d).is(P.neq(NaN))`, `g.inject(NaN).is(P.neq(1.0d))`, `g.inject(NaN).is(P.neq(NaN))`,
+`g.inject(null).is(P.neq(1.0d))`, `g.inject(null).is(P.neq(NaN))`. The same root cause as L3's seven
+RelIR-only scenarios, counted over the corpus instead of the corpus of scenarios.
+**(Nine — the commit message of 95d932a says "47 rows" and that is wrong: 47 was bun's DIFF-LINE count, and
+each row formats as three lines plus separators. Correcting it here because a count in a commit message is
+not editable and this one would read as a much larger divergence than exists.)**
+
+**The fix is not a second baseline file.** The census already pins a spine for one question — `spineOf`
+compiles with `{ spine: 'rel' }` so its coverage column measures the MIGRATION rather than the switch — and
+the increment is to extend that principle from COMPILATION to EXECUTION: run each traversal in BOTH pinned
+positions and record both, so the artifact is identical in either configuration and the census stops reading
+the ambient switch for its answer gate at all. Goldens gains `lstatus` + `lms`; the answer gate covers both
+positions; a new two-way gate holds the legacy position's status; and the divergence count
+(`ms !== lms || status !== lstatus`) is PRINTED, never gated, because it grows legitimately as RelIR gains
+ground — the per-row gates already catch every individual change.
+
+**Two columns and not one, which is the detail the design turns on:** the positions can differ in whether
+the traversal RUNS, not merely in what it answers, because RelIR is allowed to be ahead (§10·4 — that is
+what `relirAhead` exists for). A single digest column would read a legacy DEFERRAL as an empty answer.
+
+**Why this is worth more than making one red test green.** The spine equivalence obligation of §10·4 is
+today declared and checkable only by an ENV-switched run of the whole suite — exactly the position the
+FAST-PATH equivalence obligation was in before `Executor` learned to take a `fastPaths` override, which its
+own comment records as having left the obligation "declared … but unprovable through the real data plane".
+The same override for `spine` puts the differential inside `ci` for all 2,298 corpus traversals, one always-on
+committed artifact, and it costs one extra execute per traversal. `test:legacy-spine` remains the instrument
+for everything the corpus does NOT cover.

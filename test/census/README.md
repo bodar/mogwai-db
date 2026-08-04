@@ -24,17 +24,23 @@ Two committed TSVs, both regenerated together:
 
 | file | rows | holds |
 |---|---|---|
-| `goldens.tsv` | 1,425 | traversals that execute, and a digest of what they returned |
+| `goldens.tsv` | 1,425 | traversals that execute under pinned RelIR, with both pinned positions recorded |
 | `deferrals.tsv` | 873 | traversals that throw, and the normalized message |
 
 Split because they churn on different schedules: a step landing **moves a row between the files**,
 which is exactly the signal worth seeing in a diff.
 
+The primary `status`/`n`/`d`/`ms`/`ord` columns are the pinned `rel` position. `lstatus` and `lms`
+record the pinned `legacy` position; `lms` is absent when legacy throws or is nondeterministic.
+`spine` remains the separately forced-on compilation coverage measurement. Because both executions
+are explicit, the answer artifact is identical under either ambient `MOGWAI_RELIR` position and the
+census no longer needs that switch for its answer gate.
+
 ### Status vocabulary
 
 | status | n | meaning |
 |---|---|---|
-| `ran` | 1,425 | executed; `ms`/`ord` digests recorded |
+| `ran` | 1,425 | executed; primary `ms`/`ord`, or legacy `lms`, recorded |
 | `nondet` | 0 | executed, digest deliberately withheld — see below |
 | `deferred` | 475 | threw one of **our** clear deferrals. Fail-closed working as designed |
 | `unbound` | 381 | `Unbound parameter` — a harness limit, not a product defect |
@@ -57,24 +63,31 @@ deferral or a fix; the gate holds the count from growing meanwhile.
 
 1. **The artifact covers exactly the corpus** — catches a `regen-corpus` that shifts the input set.
 2. **No traversal stops executing** — support lost.
-3. **No executing traversal changes its answer** — *the regression nothing else can see.*
-4. **No clean deferral becomes a crash**, and the crash count does not grow.
-5. **The RelIR spine covers at least as much as the baseline** — the `spine` column, and the
+3. **No executing traversal changes its answer in either pinned position** — *the regression
+   nothing else can see.*
+4. **The legacy position does not change status** — two-way, because gaining and losing a shape
+   both require a written reason. This is not the one-way coverage ratchet.
+5. **No clean deferral becomes a crash**, and the crash count does not grow.
+6. **The RelIR spine covers at least as much as the baseline** — the `spine` column, and the
    migration's COVERAGE counter (`docs/2026-08-01-relir-build-plan.md` §10·4). Two assertions, which
    fail differently on purpose: no traversal moves `rel` -> `legacy` (names WHICH shape stopped
    routing), and the total may not fall (catches a wholesale loss the per-row list would report as
    2,000 lines). It ratchets UP; `mise run deletion` ratchets DOWN, and neither alone can declare
    the migration finished.
-6. **Coverage floor** (1,400) — a run where everything throws cannot pass vacuously.
+7. **Coverage floor** (1,400) — a run where everything throws cannot pass vacuously.
 
-Telemetry, reported but never gating: newly-executing traversals, emission-order changes, and
-reworded deferral messages.
+Telemetry, reported but never gating: newly-executing traversals, emission-order changes, spine
+divergences (`ms !== lms || status !== lstatus`), and reworded deferral messages.
 
 **The `spine` column is measured with the RelIR route FORCED ON**, never with the ambient
 `MOGWAI_RELIR` switch. Otherwise a re-record under `mise run test:legacy-spine` — the differential's
 off position — would write the whole artifact as `legacy` and the ratchet would be measuring the
 switch instead of the migration. A traversal that does not compile at all reads `legacy`, which is
 correct: neither an uncovered shape nor an uncompilable one is coverage the migration has banked.
+
+The execution columns are likewise pinned rather than ambient, but they answer a different
+question: what each position actually returns. That makes the census spine-differential by
+construction; `test:legacy-spine` remains useful for suite behaviour outside the corpus.
 
 ## The blind spot: a newly-executing traversal has no baseline to be wrong against
 

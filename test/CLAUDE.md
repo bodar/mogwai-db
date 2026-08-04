@@ -87,11 +87,13 @@ fail-closed deferrals into wrong answers. Two committed TSVs record what the eng
 2,298 corpus traversals (`goldens.tsv` 1,425 executing + a result digest; `deferrals.tsv` 873
 throwing + the message). `mise run census`; re-record with `mise run census-record`.
 
-Six gates: the artifact covers exactly the corpus · no traversal stops executing · **no executing
-traversal changes its answer** (the regression nothing else can see) · no clean deferral becomes a
-crash · **the RelIR spine covers at least as much as the baseline** (the `spine` column — the
-migration's coverage ratchet, §10·4 of the RelIR build plan) · a coverage floor. Runbook + the
-status vocabulary: `test/census/README.md`.
+Seven gates: the artifact covers exactly the corpus · no traversal stops executing · **no executing
+traversal changes its answer in either pinned spine position** (the regression nothing else can
+see) · the legacy position does not change status · no clean deferral becomes a crash · **the
+RelIR spine covers at least as much as the baseline** (the `spine` column — the migration's coverage
+ratchet, §10·4 of the RelIR build plan) · a coverage floor. The census is spine-differential by
+construction, independent of the ambient switch. Runbook + the status vocabulary:
+`test/census/README.md`.
 
 **It deliberately does NOT auto-record.** L3 rewrites its state on a clean local run and that is
 safe there because its artifact is a monotone floor. The census is a two-way baseline whose most

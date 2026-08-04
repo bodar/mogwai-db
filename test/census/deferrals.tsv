@@ -1,7 +1,8 @@
 # The behavioural census — the refactor guard. GENERATED; regenerate with `mise run census-record`.
 # Records what the engine DOES with every test/L1-corpus/corpus.txt traversal, so a later commit
-# can be diffed against it. `bun test` FAILS if a traversal stops executing, if an executing
-# traversal returns a DIFFERENT multiset, or if a clean deferral becomes a crash.
+# can be diffed against it. Goldens record BOTH pinned spine positions; the answer gate covers
+# both. `bun test` FAILS if a traversal stops executing, if an executing traversal returns a
+# DIFFERENT multiset, or if a clean deferral becomes a crash.
 # Never re-record to make a red build green without a written reason — that is the one thing
 # this file exists to prevent. See test/census/README.md.
 # `spine` is the RelIR migration COVERAGE ratchet: a traversal may move legacy -> rel, never back.

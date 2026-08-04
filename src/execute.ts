@@ -7,6 +7,7 @@ import { ioc, Property, t, VertexProperty } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
 import { runProgram } from './program.ts';
+import type { Spine } from './sql/kernel/render.ts';
 import type { GraphStore } from './storage.ts';
 
 // ---- GraphBinary v4 result framing ----
@@ -727,6 +728,11 @@ export class Executor implements ExecutorApi {
     /** Where io() reads and writes documents. Omitted → the fail-closed NO_IO_STORE, so an
      *  unbound graph reports the missing binding rather than silently doing nothing. */
     io?: IoStore,
+    /** Override the ambient spine for every compile on this executor. The spine equivalence
+     *  obligation (§10·4) needs the same real-data-plane proof as fast paths: the census answer
+     *  gate runs both pinned positions. A `rel` pin still declines to legacy for an uncovered
+     *  chain, because coverage is a property of the chain, not of the request. */
+    private readonly spine?: Spine,
   ) {
     this.app = createAppScope({ registry, source, fastPaths, io, store, labelCardinality: store.labelCardinality });
   }
@@ -778,7 +784,7 @@ export class Executor implements ExecutorApi {
    *  (the sync API cannot honestly run federation). Shares compilePlan + the framing tail with the
    *  async path; only the await-loop differs. */
   private runSync(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>): Executable {
-    const plan = compilePlan(gremlin, params, { app: this.app, federationDepth: 0 }, paramTypes);
+    const plan = compilePlan(gremlin, params, { app: this.app, federationDepth: 0, spine: this.spine }, paramTypes);
     if (plan.kind === 'segment')
       throw new Error('this traversal contains a federated call() — use the async path (framedAsync / raw), not the sync framed()/buffers()');
     return plan.compiled;
@@ -791,7 +797,7 @@ export class Executor implements ExecutorApi {
    *  CompileOptions beside the registry, reaching the service's CallSite so the barrier's
    *  apply closure captures it (a recursive federate hops at depth+1). */
   private async drive(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode>, federationDepth: number): Promise<Executable> {
-    let p: Plan = compilePlan(gremlin, params, { app: this.app, federationDepth }, paramTypes);
+    let p: Plan = compilePlan(gremlin, params, { app: this.app, federationDepth, spine: this.spine }, paramTypes);
     while (p.kind === 'segment') {
       const rows = p.head ? this.readSegmentHead(p.head) : [];
       const foreign = await p.apply(rows);

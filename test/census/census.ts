@@ -70,6 +70,9 @@ export interface Row {
   readonly d?: number;
   /** GATES. The weighed traverser multiset — sorted, so JS Map insertion order cannot leak in. */
   readonly ms?: string;
+  /** The pinned legacy position's status and (when digestible) weighed multiset. */
+  readonly lstatus?: Status;
+  readonly lms?: string;
   /** TELEMETRY, never gates. Emission order, isolated so it can be reported without failing a run:
    *  TinkerPop constrains order only as far as the traversal establishes it, so a bare traversal has
    *  no guaranteed order at all. 356 of these move under a planner perturbation; gating on it
@@ -163,21 +166,29 @@ function digest(framed: readonly Framed[]): Pick<Row, 'n' | 'd' | 'ms' | 'ord'> 
   };
 }
 
-/** Run the whole corpus. Reads share one store (probe-verified: no read mutates it, and
- *  fresh-per-traversal gives byte-identical results for twice the wall clock); each write gets its
- *  own, or it would see its predecessors' mutations. */
+type Position = Pick<Row, 'status' | 'n' | 'd' | 'ms' | 'ord' | 'message'>;
+
+function runPosition(query: string, spine: Spine, store: ReturnType<typeof seeded>): Position {
+  try {
+    const framed = exec(store, undefined, undefined, spine).framed(query, {});
+    return isNondeterministic(query)
+      ? { status: 'nondet', n: framed.length }
+      : { status: 'ran', ...digest(framed) };
+  } catch (e) {
+    return classify(e);
+  }
+}
+
+/** Run the whole corpus in both pinned spine positions. Reads share one store (probe-verified: no
+ *  read mutates it, and fresh-per-traversal gives byte-identical results for twice the wall clock);
+ *  each write gets its own store PER POSITION, or one position would see the other's mutation. */
 export function runCensus(corpus: readonly string[]): Row[] {
   const shared = seeded(MODERN_SEED);
   return corpus.map((query) => {
     const spine = spineOf(query);
-    try {
-      const framed = exec(isWrite(query) ? seeded(MODERN_SEED) : shared).framed(query, {});
-      return isNondeterministic(query)
-        ? { query, spine, status: 'nondet' as const, n: framed.length }
-        : { query, spine, status: 'ran' as const, ...digest(framed) };
-    } catch (e) {
-      return { query, spine, ...classify(e) };
-    }
+    const rel = runPosition(query, 'rel', isWrite(query) ? seeded(MODERN_SEED) : shared);
+    const legacy = runPosition(query, 'legacy', isWrite(query) ? seeded(MODERN_SEED) : shared);
+    return { query, spine, ...rel, lstatus: legacy.status, lms: legacy.ms };
   });
 }
 
@@ -192,14 +203,15 @@ export function runCensus(corpus: readonly string[]): Row[] {
 const HEADER = [
   '# The behavioural census — the refactor guard. GENERATED; regenerate with `mise run census-record`.',
   '# Records what the engine DOES with every test/L1-corpus/corpus.txt traversal, so a later commit',
-  '# can be diffed against it. `bun test` FAILS if a traversal stops executing, if an executing',
-  '# traversal returns a DIFFERENT multiset, or if a clean deferral becomes a crash.',
+  '# can be diffed against it. Goldens record BOTH pinned spine positions; the answer gate covers',
+  '# both. `bun test` FAILS if a traversal stops executing, if an executing traversal returns a',
+  '# DIFFERENT multiset, or if a clean deferral becomes a crash.',
   '# Never re-record to make a red build green without a written reason — that is the one thing',
   '# this file exists to prevent. See test/census/README.md.',
   '# `spine` is the RelIR migration COVERAGE ratchet: a traversal may move legacy -> rel, never back.',
 ].join('\n');
 
-const GOLDEN_COLS = 'status\tspine\tn\td\tms\tord\tquery';
+const GOLDEN_COLS = 'status\tspine\tn\td\tms\tord\tlstatus\tlms\tquery';
 const DEFERRAL_COLS = 'status\tspine\tmessage\tquery';
 
 const byQuery = (a: Row, b: Row) => (a.query < b.query ? -1 : a.query > b.query ? 1 : 0);
@@ -209,7 +221,7 @@ export function serialize(rows: readonly Row[]): { goldens: string; deferrals: s
   const threw = rows.filter((r) => !EXECUTES.has(r.status)).sort(byQuery);
   return {
     goldens: [HEADER, GOLDEN_COLS,
-      ...executed.map((r) => [r.status, r.spine, r.n ?? '', r.d ?? '', r.ms ?? '', r.ord ?? '', r.query].join('\t')),
+      ...executed.map((r) => [r.status, r.spine, r.n ?? '', r.d ?? '', r.ms ?? '', r.ord ?? '', r.lstatus ?? '', r.lms ?? '', r.query].join('\t')),
     ].join('\n') + '\n',
     deferrals: [HEADER, DEFERRAL_COLS,
       ...threw.map((r) => [r.status, r.spine, r.message ?? '', r.query].join('\t')),
@@ -225,7 +237,10 @@ function parseTsv(text: string): Row[] {
     const f = line.split('\t');
     return golden
       ? { status: f[0] as Status, spine: f[1] as Spine, n: f[2] ? Number(f[2]) : undefined, d: f[3] ? Number(f[3]) : undefined,
-          ms: f[4] || undefined, ord: f[5] || undefined, query: f.slice(6).join('\t') }
+          ms: f[4] || undefined, ord: f[5] || undefined,
+          lstatus: (f[6] || undefined) as Status | undefined, lms: f[7] || undefined,
+          // `query` LAST and taken with `slice`, because a corpus traversal can contain a tab.
+          query: f.slice(8).join('\t') }
       : { status: f[0] as Status, spine: f[1] as Spine, message: f[2], query: f.slice(3).join('\t') };
   });
 }

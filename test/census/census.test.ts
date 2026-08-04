@@ -1,6 +1,6 @@
 // The census gate. See census.ts for what the artifact is and why it does not auto-record.
 //
-// Four gates, ordered most-diagnostic first. Each asserts on an array of pre-formatted strings so
+// Seven gates, ordered most-diagnostic first. Each asserts on an array of pre-formatted strings so
 // the test runner's own diff IS the report.
 import { test, expect, describe } from 'bun:test';
 import { EXECUTES, loadCorpus, readBaseline, runCensus, type Row } from './census.ts';
@@ -15,9 +15,14 @@ const show = (r: Row | undefined): string =>
     : EXECUTES.has(r.status) ? `${r.status} n=${r.n} ms=${r.ms ?? '-'}`
     : `${r.status}: ${r.message}`;
 
-// Run once at module scope, not per test: the corpus is executed exactly once (~11s) and all five
-// gates read the same rows. Doing it in a `beforeAll` would buy nothing and doing it per test would
-// cost five passes.
+const showLegacy = (r: Row | undefined): string =>
+  !r?.lstatus ? 'absent'
+    : EXECUTES.has(r.lstatus) ? `${r.lstatus} ms=${r.lms ?? '-'}`
+    : r.lstatus;
+
+// Run once at module scope, not per test: each corpus traversal is executed in both pinned spine
+// positions and all seven gates read the same rows. Doing it in a `beforeAll` would buy nothing and
+// doing it per test would cost seven passes.
 const corpus = loadCorpus();
 const rows = runCensus(corpus);
 const baseline = readBaseline();
@@ -49,9 +54,25 @@ describe('census — the refactor guard', () => {
   test('no executing traversal changes its answer', () => {
     // The regression NOTHING else in the ladder can see: it still runs, it still fails no test, and
     // it returns something different. Compared on the weighed multiset only — `ord` is telemetry.
+    const changed = rows.flatMap((r) => {
+      const before = baseline.get(r.query);
+      const positions: string[] = [];
+      if (r.ms && before?.ms && r.ms !== before.ms)
+        positions.push(`  ${r.query} [rel]\n    was ${show(before)}\n    now ${show(r)}`);
+      if (r.lms && before?.lms && r.lms !== before.lms)
+        positions.push(`  ${r.query} [legacy]\n    was ${showLegacy(before)}\n    now ${showLegacy(r)}`);
+      return positions;
+    });
+    expect(changed).toEqual([]);
+  });
+
+  test('the legacy position does not change status', () => {
+    // This is not the coverage ratchet (`spine`, one-way). Like the answer gate it is two-way:
+    // legacy losing OR gaining a shape is a change that needs a written reason.
     const changed = rows
-      .filter((r) => r.ms && baseline.get(r.query)?.ms && r.ms !== baseline.get(r.query)!.ms)
-      .map((r) => `  ${r.query}\n    was ${show(baseline.get(r.query))}\n    now ${show(r)}`);
+      .filter((r) => baseline.get(r.query) && EXECUTES.has(baseline.get(r.query)!.status) &&
+        baseline.get(r.query)!.lstatus !== r.lstatus)
+      .map((r) => `  ${r.query}\n    was ${showLegacy(baseline.get(r.query))}\n    now ${showLegacy(r)}`);
     expect(changed).toEqual([]);
   });
 
@@ -98,9 +119,11 @@ describe('census — the refactor guard', () => {
     const gained = rows.filter((r) => EXECUTES.has(r.status) && baseline.get(r.query) && !EXECUTES.has(baseline.get(r.query)!.status));
     const reordered = rows.filter((r) => r.ord && baseline.get(r.query)?.ord && r.ord !== baseline.get(r.query)!.ord);
     const reworded = rows.filter((r) => r.message && baseline.get(r.query)?.message && r.message !== baseline.get(r.query)!.message);
+    const divergent = rows.filter((r) => r.ms !== r.lms || r.status !== r.lstatus);
     if (gained.length) console.log(`  +${gained.length} newly executing (re-record to bank it):\n` +
       gained.slice(0, 20).map((r) => `    + ${r.query}`).join('\n'));
     if (reordered.length) console.log(`  ${reordered.length} emission-order change(s) — telemetry, never gates`);
+    console.log(`  ${divergent.length} spine divergence(s) — telemetry, never gates`);
     if (reworded.length) console.log(`  ${reworded.length} deferral message(s) reworded — telemetry`);
 
     expect(executing.length).toBeGreaterThan(COVERAGE_FLOOR);
