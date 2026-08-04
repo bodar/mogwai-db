@@ -12,7 +12,17 @@ export type Expr =
   | { readonly kind: 'case'; readonly whens: readonly (readonly [Expr, Expr])[]; readonly else?: Expr }
   | { readonly kind: 'cast'; readonly arg: Expr; readonly to: SqlType }
   | { readonly kind: 'call'; readonly fn: string; readonly args: readonly Expr[]; readonly distinct?: boolean }
-  | { readonly kind: 'agg'; readonly fn: AggFn; readonly args: readonly Expr[]; readonly distinct?: boolean; readonly orderBy?: readonly SortTerm[] }
+  /**
+   * `filter` is SQL's `FILTER (WHERE …)` — the rows of the group this aggregate does NOT take, with the
+   * GROUP still determined by all of them. It is a field rather than a derived form because neither
+   * existing node can express it: `Aggregate.groupBy` decides the groups from its input's rows, and a
+   * `Filter` before it removes a row from the GROUP as well as from the aggregate. The difference is
+   * observable — TinkerPop's `group().by(k).by(v)` keeps a key whose every value was unproductive and
+   * gives it an EMPTY list, so filtering the rows would delete the key instead (reference:
+   * `sideEffect/Group.feature`'s `g_V_group_byXnameX_byXageX`, where `ripple` and `lop` map to `[]`).
+   * SQLite has had the clause since 3.30; the DO's is 3.47.
+   */
+  | { readonly kind: 'agg'; readonly fn: AggFn; readonly args: readonly Expr[]; readonly distinct?: boolean; readonly orderBy?: readonly SortTerm[]; readonly filter?: Expr }
   | { readonly kind: 'window-expr'; readonly fn: WindowFn; readonly args: readonly Expr[]; readonly spec: WindowSpec }
   | { readonly kind: 'json-object'; readonly entries: readonly (readonly [string, Expr])[]; readonly binary: boolean }
   | { readonly kind: 'json-array'; readonly items: readonly Expr[]; readonly binary: boolean }

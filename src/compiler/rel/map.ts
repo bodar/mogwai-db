@@ -108,9 +108,18 @@ function mapOfGroups(grouped: Rel, entry: Entry, order: Expr, fresh: Minter): Re
  *  the emitter names `groupBy` exprs before the aggregates (`emit.ts`'s `aggregate` case). */
 const KEY_COL = 'gk';
 const VAL_COL = 'gv';
-/** The TRAVERSER, carried into the grouped relation's scope so a collecting group can read it. A
- *  `groupCount()` never needs it — it reduces to a number — so it rides only where `group()` asks. */
+/** The MEMBER a collecting group puts in its list — the traverser's rowid where the members are the
+ *  elements, the projected value where a value `by()` names one. Named once because the aggregate reads
+ *  it either way and the difference is what the column HOLDS, never how it is collected.
+ *  A `groupCount()` never carries it: it reduces to a number, and a projection naming a column it never
+ *  reads is state nothing reads. */
 const MEMBER_COL = 'gt';
+/** The member ORDER, carried beside the member for the reason the members' order has to be stated at all:
+ *  they ride inside one collected traverser's buffer, so it is fully observable, and `json_group_array`
+ *  takes rows in scan order. The emission position where the chain has one, the traverser's own rowid
+ *  otherwise — total either way, and a SEPARATE column from the member because a projected VALUE is not
+ *  an order (two traversers can share one). */
+const ORD_COL = 'go';
 
 /**
  * `group()`/`groupCount()` with NO side-effect label — the barrier, as a map value, or `null` to
@@ -134,23 +143,26 @@ const MEMBER_COL = 'gt';
  * typed list. That is what `materialize.ts`'s `'a terminal map with an element key or value not yet
  * supported'` was really blocked on — not the SQL, but a wire vocabulary that made an element a member.
  *
- * `group()` with a value `by()` still declines: a reducer value is a scalar and lands with the reducer
- * family's vocabulary; an element/list value `by()` needs the child seam.
+ * A VALUE `by()` collects what it projects instead of the traverser, and needs nothing new: `byNode`'s
+ * second slot already yields a self-describing `{t,v}` node, so the members are written back as they are.
+ * It declines exactly where `byNode` does — a bare `by()` over an element (whose projection IS the element,
+ * which carries no tag) and a traversal body, which needs the child seam. A REDUCING value `by()` is a
+ * different shape entirely (one value per group, not a list) and lands with the reducer vocabulary.
  */
 export function groupBarrier(
   input: Rel, host: ByHost, step: IRStep, bulked: boolean, fresh: Minter,
 ): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } | null {
   if (step.optionArms || (step.args ?? []).length > 0) return null;
   if (step.name !== 'groupCount' && step.name !== 'group') return null;
-  // A VALUE `by()` is a second slot this arm does not implement. `modulations(step, 1)` would decline it
-  // anyway, but saying so here is what keeps the two arms' coverage readable.
-  if (step.name === 'group' && (step.modulators ?? []).length > 1) return null;
   // A group's members are the ELEMENTS, so a scalar host has no element to collect. It is a real arm —
   // the members are the values, tagged by their own `vtype` — and it arrives with the scalar-host caller
   // that does not exist yet, rather than being guessed at here.
   if (step.name === 'group' && host.kind !== 'element') return null;
 
-  const bys = modulations(step, 1);
+  // TWO SLOTS for `group()`, one for `groupCount()`, and that is the whole of the arity difference:
+  // `GroupStep` takes a key `by()` and a value `by()`, `GroupCountStep` only a key.
+  const collecting = step.name === 'group';
+  const bys = modulations(step, collecting ? 2 : 1);
   // A bare `groupCount()` groups by the TRAVERSER, so an element stream would need an element key —
   // which the materializer expands per pair rather than tagging. Over a SCALAR stream the traverser IS
   // a value, so `by()`-less is exactly the identity projection and works.
@@ -158,16 +170,18 @@ export function groupBarrier(
   const key = byNode(bys[0] ?? { key: { kind: 'identity' } }, host, fresh);
   if (!key) return null;
 
+  // THE VALUE `by()`, where there is one. `byNode` declines a bare `by()` over an element (its projection
+  // IS the element, which has no tag) and a traversal body, so a slot it cannot project declines the whole
+  // step rather than silently collecting the elements instead — which would be the right arity and the
+  // wrong answer, the one thing the decline contract exists to prevent.
+  const valueBy = bys[1];
+  const member = valueBy ? byNode(valueBy, host, fresh) : undefined;
+  if (valueBy && !member) return null;
+
   const bulk = input.channels.find((channel) => channel.role === 'bulk');
-  // A COLLECTING group carries the traverser and, where the chain has one, its emission position: the
-  // members' order is observable (they ride inside one buffer) so it must be stated, and the position is
-  // the only thing that states the TRAVERSERS' order rather than the rowids'. Carried only for `group()`,
-  // because a `groupCount()` projection that named columns it never reads would be state nothing reads —
-  // the same rule the channel obligations apply one layer down.
-  const collecting = step.name === 'group';
   const encounter = collecting ? input.channels.find((channel) => channel.role === 'encounter') : undefined;
   const extra = [
-    ...(collecting ? [meta(MEMBER_COL, 'int')] : []),
+    ...(collecting ? [meta(MEMBER_COL, 'any', true), meta(ORD_COL, 'int')] : []),
     ...(bulk ? [meta(bulk.col, 'int')] : []),
     ...(encounter ? [meta(encounter.col, 'int')] : []),
   ];
@@ -185,7 +199,10 @@ export function groupBarrier(
     type: typeOf(meta(KEY_COL, 'json', true), ...extra),
     exprs: [
       [KEY_COL, key],
-      ...(collecting ? [[MEMBER_COL, col(input.id, 'id')] as const] : []),
+      // The MEMBER is the projected value where a value `by()` names one, and the traverser's rowid
+      // otherwise — which `elementNode` then expands. The ORDER is separate because a projected value is
+      // not an order: two traversers can share one, and the members would then collect in scan order.
+      ...(collecting ? [[MEMBER_COL, member ?? col(input.id, 'id')] as const, [ORD_COL, col(input.id, encounter ? encounter.col : 'id')] as const] : []),
       ...(bulk ? [[bulk.col, col(input.id, bulk.col)] as const] : []),
       ...(encounter ? [[encounter.col, col(input.id, encounter.col)] as const] : []),
     ],
@@ -210,6 +227,11 @@ export function groupBarrier(
   // traversers and is threaded, not re-derived, for the reason `ordered` is not: `SUM(bulk)` where the
   // stream carries a multiplicity, `COUNT(*)` where it cannot, identical while bulk ≡ 1 and correct
   // after a fan-out.
+  // BOTH `by()` slots owe the same drop, and the value's is not a refinement of the key's: TinkerPop's
+  // unreduced value traversal that produces nothing FILTERS the traverser, so a person-only `by('age')`
+  // over the whole graph drops the two software vertices and takes their KEYS with them where no other
+  // traverser landed there. `ProductiveByStrategy` turns both off together, which is why this asks the
+  // same function twice rather than spelling either test.
   const drop = productivityFilter(step, col(keyed.id, KEY_COL));
   // The aggregate's own DIRECT input, because a `Col` names a relation in SCOPE and scope is a node's
   // direct children (§3.3). With the filter present, `keyed` is the GRANDchild — naming it is the
@@ -226,12 +248,30 @@ export function groupBarrier(
   // inside one collected traverser's buffer, so their order is fully observable, and `json_group_array`
   // takes rows in whatever order SQLite scanned. The emission order where the chain carries one, the
   // rowid otherwise — a total order either way, which is what `mise run test:perturbed` exists to check.
+  const collected = member
+    // A projected VALUE is already a self-describing `{t,v}` node (`byNode` builds it from the row the
+    // value came from), so it is written back as it is. `json()` around it for the list module's own
+    // reason: without it `json_group_array` re-encodes the envelope as a JSON STRING.
+    ? jsonOf(col(rows.id, MEMBER_COL))
+    : jsonOf(elementNode(col(rows.id, MEMBER_COL), (host as Extract<ByHost, { kind: 'element' }>).elem, fresh));
+  // THE VALUE'S PRODUCTIVITY DROPS THE MEMBER, NOT THE TRAVERSER AND NOT THE GROUP — and getting that
+  // wrong has three distinguishable answers, which is why the reference is quoted rather than reasoned
+  // from. `g.V().group().by("name").by("age")` over the modern graph: `ripple` and `lop` have no `age`,
+  // and `sideEffect/Group.feature` says they map to **`[]`** — the key survives because the traverser
+  // reached it, and the list is empty because the value produced nothing. Filtering the ROWS before the
+  // aggregate deletes those keys instead (wrong), and collecting the NULL gives them `[null]` (also
+  // wrong, and indistinguishable from a productive null under `ProductiveByStrategy`).
+  //
+  // So the drop is the aggregate's own `FILTER (WHERE …)`: the group is still whatever `GROUP BY` decided.
+  // `productivityFilter` is asked here for the same reason it is asked for the key — `ProductiveByStrategy`
+  // turns both off, and then a genuinely null value IS a member.
+  const memberDrop = member ? productivityFilter(step, col(rows.id, MEMBER_COL)) : undefined;
   const members: Expr = {
     kind: 'json-object',
     entries: [['t', lit('list', 'text')], ['v', {
-      kind: 'agg', fn: 'json_group_array',
-      args: [jsonOf(elementNode(col(rows.id, MEMBER_COL), (host as Extract<ByHost, { kind: 'element' }>).elem, fresh))],
-      orderBy: [{ expr: col(rows.id, encounter ? encounter.col : MEMBER_COL), dir: 'asc' }],
+      kind: 'agg', fn: 'json_group_array', args: [collected],
+      orderBy: [{ expr: col(rows.id, ORD_COL), dir: 'asc' }],
+      ...(memberDrop ? { filter: memberDrop } : {}),
     }]],
     binary: false,
   };

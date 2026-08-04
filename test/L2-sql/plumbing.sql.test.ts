@@ -17,7 +17,7 @@ import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toR
 import { popChildScope, pushChildScope, reuseCurrentFrame } from '../../src/compiler/steps/tail/child.ts';
 import { rootLayout } from '../../src/compiler/steps/context/context.ts';
 import { readdirSync, readFileSync } from 'node:fs';
-import { grouped, read, run, seededStore } from '../support/harness.ts';
+import { grouped, read, run, runWith, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -227,12 +227,14 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
 
   test('ProductiveByStrategy makes missing by-results explicit nulls at supported consumers', () => {
     const store = seededStore();
-    // `group()` still routes legacy (its value side is a per-key LIST, the map shape's next arm), so its
-    // rows are legacy's `(gk, gv)` — read directly rather than through `grouped`, which would flatten
-    // the list value this line is checking.
-    const groupRows = run(store, 'g.withStrategies(ProductiveByStrategy).V().group().by("age").by("name")');
-    expect(groupRows.find((r) => r.gk == null)).toMatchObject({ gv: '["lop","ripple"]' });
-    expect(read('g.withoutStrategies(ProductiveByStrategy).V().group().by("age").by("name")').shape)
+    // `group()` is RelIR-routed now, so ITS result is one map value rather than legacy's `(gk, gv)` rows.
+    // Both are read directly rather than through `grouped`, which would flatten the list value this line
+    // is checking — and each is read in the spelling the spine that produced it uses.
+    const rel = runWith(store, 'g.withStrategies(ProductiveByStrategy).V().group().by("age").by("name")', { spine: 'rel' });
+    expect((rel[0] as any).map).toContain('[null,{"t":"list","v":[{"t":"string","v":"lop"},{"t":"string","v":"ripple"}]}]');
+    const legacyRows = runWith(store, 'g.withStrategies(ProductiveByStrategy).V().group().by("age").by("name")', { spine: 'legacy' });
+    expect(legacyRows.find((r: any) => r.gk == null)).toMatchObject({ gv: '["lop","ripple"]' });
+    expect(read('g.withoutStrategies(ProductiveByStrategy).V().group().by("age").by("name")', { spine: 'legacy' }).shape)
       .toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'scalarList' } });
     // Route-agnostic: the null key survives the strategy whichever spine grouped. `groupCount()` is on
     // the RelIR route now, whose result is one map value rather than `(gk, gv)` rows — the STRATEGY is

@@ -70,7 +70,7 @@ export function exprChildren(e: Expr): readonly Expr[] {
     case 'binary': return [e.left, e.right];
     case 'case': return [...e.whens.flatMap(([when, then]) => [when, then]), ...some(e.else)];
     case 'call': return e.args;
-    case 'agg': return [...e.args, ...(e.orderBy ?? []).map((term) => term.expr)];
+    case 'agg': return [...e.args, ...(e.orderBy ?? []).map((term) => term.expr), ...some(e.filter)];
     case 'window-expr': return [...e.args, ...specExprs(e.spec)];
     case 'json-object': return e.entries.map(([, value]) => value);
     case 'json-array': return e.items;
@@ -153,7 +153,7 @@ export function mapExprChildren(e: Expr, f: (child: Expr) => Expr, rel: (plan: R
     case 'binary': return { ...e, left: f(e.left), right: f(e.right) };
     case 'case': return { ...e, whens: e.whens.map(([when, then]) => [f(when), f(then)] as const), else: e.else && f(e.else) };
     case 'call': return { ...e, args: e.args.map(f) };
-    case 'agg': return { ...e, args: e.args.map(f), orderBy: e.orderBy?.map((term) => mapTerm(term, f)) };
+    case 'agg': return { ...e, args: e.args.map(f), orderBy: e.orderBy?.map((term) => mapTerm(term, f)), filter: e.filter && f(e.filter) };
     case 'window-expr': return { ...e, args: e.args.map(f), spec: mapSpec(e.spec, f) };
     case 'json-object': return { ...e, entries: e.entries.map(([key, value]) => [key, f(value)] as const) };
     case 'json-array': return { ...e, items: e.items.map(f) };

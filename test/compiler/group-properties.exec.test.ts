@@ -6,7 +6,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
-import { bagOf, grouped, run, seededStore } from '../support/harness.ts';
+import { bagOf, grouped, run, runWith, seededStore } from '../support/harness.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -155,10 +155,18 @@ test('an unreduced scalar group value is emission-ordered, and unproductive stil
 
 test('group scalar-list drops members missing the property (json_group_array + null filter is in handler)', () => {
   const store = seededStore();
-  const rows = run(store, 'g.V().group().by("name").by("age")');
+  // LEGACY's spelling, pinned as legacy's: it collects the SQL null and its `scalarList` framer strips it
+  // to `[]` on frame. The RelIR route says it in the DATA instead — the aggregate's own `FILTER (WHERE …)`
+  // keeps the key and empties the list — which is why the two are read separately here. The reference is
+  // `sideEffect/Group.feature`'s `g_V_group_byXnameX_byXageX`: `ripple` and `lop` map to `[]`, so
+  // dropping the ROW (which would delete the key) is a third and wrong answer.
+  const rows = runWith(store, 'g.V().group().by("name").by("age")', { spine: 'legacy' });
   const byName = Object.fromEntries(rows.map((r) => [r.gk, r.gv]));
   expect(byName.marko).toBe('[29]');
   expect(byName.lop).toBe('[null]'); // SQL keeps null; handler strips it to [] on frame
+  const relMap = (runWith(store, 'g.V().group().by("name").by("age")', { spine: 'rel' })[0] as any).map;
+  expect(relMap).toContain('[{"t":"string","v":"marko"},{"t":"list","v":[{"t":"int","v":29}]}]');
+  expect(relMap).toContain('[{"t":"string","v":"lop"},{"t":"list","v":[]}]');
   const children = Object.fromEntries(run(store, 'g.V().group().by("name").by(__.out().values("name"))')
     .map((r) => [r.gk, JSON.parse(r.gv).sort()]));
   expect(children).toEqual({

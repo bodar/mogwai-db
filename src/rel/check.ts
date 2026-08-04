@@ -142,7 +142,13 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
     if (e.kind === 'agg' && !scope.inAggregate) throw new Error('RelIR: Agg is legal only in Aggregate.aggs');
     if (e.kind === 'window-expr' && !scope.inWindow) throw new Error('RelIR: WindowExpr is legal only in Window.specs');
     const child = (x: Expr) => checkExpr(x, scope);
-    switch (e.kind) { case 'unary': child(e.arg); break; case 'binary': child(e.left); child(e.right); break; case 'case': e.whens.forEach(([a,b]) => { child(a); child(b); }); if (e.else) child(e.else); break; case 'cast': child(e.arg); break; case 'call': case 'agg': case 'window-expr': e.args.forEach(child); break; case 'json-object': e.entries.forEach(([,x]) => child(x)); break; case 'json-array': e.items.forEach(child); break; case 'scalar': case 'exists': checkRel(e.plan, scope); break; case 'in-list': child(e.expr); e.values.forEach(child); break; case 'in-query': child(e.expr); checkRel(e.plan, scope); break; default: break; }
+    switch (e.kind) { case 'unary': child(e.arg); break; case 'binary': child(e.left); child(e.right); break; case 'case': e.whens.forEach(([a,b]) => { child(a); child(b); }); if (e.else) child(e.else); break; case 'cast': child(e.arg); break; case 'call': e.args.forEach(child); break;
+      // An `Agg`'s ORDER BY terms and its `FILTER (WHERE …)` are expressions in the SAME scope as its
+      // arguments, and they were not being walked — so a `Col` naming a relation out of scope inside
+      // either one reached the emitter unchecked. `exprChildren` (walk.ts) has always included the order
+      // terms; this arm is what makes the CHECK agree with the walk.
+      case 'agg': e.args.forEach(child); (e.orderBy ?? []).forEach((term) => child(term.expr)); if (e.filter) child(e.filter); break;
+      case 'window-expr': e.args.forEach(child); break; case 'json-object': e.entries.forEach(([,x]) => child(x)); break; case 'json-array': e.items.forEach(child); break; case 'scalar': case 'exists': checkRel(e.plan, scope); break; case 'in-list': child(e.expr); e.values.forEach(child); break; case 'in-query': child(e.expr); checkRel(e.plan, scope); break; default: break; }
   };
   /** Where each of a node's expressions is EVALUATED. A kind that forgets one is caught by the
    * arity assertion below, and `Record<RelKind, …>` means a new kind must declare its placement

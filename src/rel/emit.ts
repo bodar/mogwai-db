@@ -129,7 +129,9 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       // `count()`, which is SQLite LENIENCY rather than syntax. Emitting the lenient form would be
       // the exact species `src/cf-limits.ts` exists to catch: valid on the dev runtime, unproven on
       // the one we ship to. The star is a SPELLING, so it belongs here and not as a node field.
-      case 'agg': return q`${raw(e.fn)}(${e.distinct ? raw('DISTINCT ') : empty}${e.args.length ? list(e.args.map(self)) : raw('*')}${e.orderBy?.length ? q` ORDER BY ${list(e.orderBy.map((term) => sortTerm(term, scope)))}` : empty})`;
+      // `FILTER (WHERE …)` follows the closing paren, not the argument list — it qualifies WHICH ROWS the
+      // aggregate takes, while the group stays whatever `GROUP BY` decided (see `Agg.filter`).
+      case 'agg': return q`${raw(e.fn)}(${e.distinct ? raw('DISTINCT ') : empty}${e.args.length ? list(e.args.map(self)) : raw('*')}${e.orderBy?.length ? q` ORDER BY ${list(e.orderBy.map((term) => sortTerm(term, scope)))}` : empty})${e.filter ? q` FILTER (WHERE ${self(e.filter)})` : empty}`;
       case 'window-expr': return q`${raw(e.fn)}(${list(e.args.map(self))}) OVER (${windowSpec(e.spec, scope)})`;
       // A json object's KEYS are compile-time strings in the node, not `Expr`s — so they render as
       // LITERALS, never as binds. `value(key)` here spent one of the platform's 100 parameters per

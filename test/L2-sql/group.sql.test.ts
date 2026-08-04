@@ -480,10 +480,17 @@ describe('group / properties SQL', () => {
   });
 
   test('group().by(key).by(prop) → scalar-list via json_group_array + GROUP BY', () => {
-    const p = read('g.V().group().by("name").by("age")');
+    const p = read('g.V().group().by("name").by("age")', { spine: 'legacy' });
     expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'scalarList' } });
     expect(p.sql).toContain("json_group_array((SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1)) AS gv");
     expect(p.sql).toContain('GROUP BY gk');
+    // The RelIR route reaches the SAME answer with the null drop stated where it belongs: the member is
+    // dropped by the aggregate's own `FILTER (WHERE …)`, so a key whose every value was unproductive keeps
+    // its place with an EMPTY list. Legacy collects the SQL null and its framer strips it — same wire
+    // result, but only because that Shape's framer knows to; the typed tree says it in the data.
+    const r = read('g.V().group().by("name").by("age")', { spine: 'rel' });
+    expect(r.shape).toEqual({ kind: 'mapValue' });
+    expect(r.sql).toMatch(/json_group_array\(json\(\w+\.gt\) ORDER BY \w+\.go ASC\) FILTER \(WHERE \(\w+\.gt IS NOT \?\)\)/);
   });
 
   test('non-reducing scalar group values lower through generic child-all productivity', () => {
