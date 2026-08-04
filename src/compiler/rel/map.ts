@@ -22,10 +22,14 @@ import { byNode, modulations, productivityFilter, type ByHost } from './modulato
  * 1. `Aggregate(groupBy: [<key>], aggs: [<value>])` — the grouped RELATION, one row per key;
  * 2. `Aggregate(groupBy: [], aggs: [<pairs array>])` — that relation folded into ONE map value.
  *
- * Calcite says the same thing: `Aggregate` yields a relation, and a collection VALUE comes from an
- * aggregate FUNCTION over a group (`COLLECT` with `ReturnTypes.TO_MULTISET`, `JSON_OBJECTAGG`) or a
- * constructor expression (`MAP_VALUE_CONSTRUCTOR`), with MAP a first-class type. There is no map
- * STREAM anywhere in it. `Aggregate.groupBy` was already in our node set and unused for this, so the
+ * Calcite says the same thing, and it is checkable at the pin: `Aggregate` yields a relation
+ * (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/core/Aggregate.java:80` — `extends
+ * SingleRel`, so a relation in and a relation out), while a collection VALUE comes from an aggregate
+ * FUNCTION over a group (`…/sql/fun/SqlStdOperatorTable.java:2494` `COLLECT`, typed by
+ * `…/sql/type/ReturnTypes.java:847` `TO_MULTISET`; `…/sql/fun/SqlStdOperatorTable.java:1662`
+ * `JSON_OBJECTAGG`) or from a constructor expression (`…:2374` `MAP_VALUE_CONSTRUCTOR`), with MAP a
+ * first-class TYPE (`…/rel/type/RelDataTypeFactory.java:134` `createMapType`). There is no map STREAM
+ * anywhere in it. `Aggregate.groupBy` was already in our node set and unused for this, so the
  * relational half of the family needed nothing built.
  *
  * TinkerPop separates the two producers by SUPERCLASS — `GroupStep extends ReducingBarrierStep<S,

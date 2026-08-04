@@ -122,7 +122,7 @@ run = "bun scripts/deletion-check.ts --record"
 # needs bun but never the superproject's node_modules; that is what keeps the inverted edge
 # acyclic.
 [tasks.submodule]
-description = "Provision the pinned tinkerpop submodule (blobless+sparse) + build/register the client"
+description = "Provision the pinned submodules (blobless+sparse: tinkerpop, calcite) + build/register the client"
 run = "bash scripts/init-submodule.sh"
 
 # Every test task depends on `check` (tsc --noEmit): `bun test` runs TS WITHOUT type-checking,

@@ -323,8 +323,11 @@ compile error, not a runtime throw.
 slots. Converting between those shapes is the emitter's whole job.** So it accumulates a block —
 `{select, from, joins, where, group, having, order, limit, distinct}` — walking down from a node and
 opening a nested `SELECT` only when the slot it needs is occupied. Prior art: Calcite's
-`RelToSqlConverter`. This is why `Project(Filter(Join))` is one statement, and it is what deletes
-`TailAcc`.
+`RelToSqlConverter` — the slot-occupied test itself is
+`vendor/calcite/core/src/main/java/org/apache/calcite/rel/rel2sql/SqlImplementor.java:2167`
+(`needNewSubQuery`, over a `Set<Clause>` where we carry a block), and the per-node visitors that fill
+the slots are `…/rel/rel2sql/RelToSqlConverter.java:135`. This is why `Project(Filter(Join))` is one
+statement, and it is what deletes `TailAcc`.
 
 **Refused:** letting `fuse` collapse a run into a `Select` mega-node. That puts the SQL surface inside
 the IR, re-opens the closed node set (§7), and gives every pass two forms of one thing.
@@ -1439,9 +1442,12 @@ producers by SUPERCLASS — `GroupStep extends ReducingBarrierStep<S, Map<K,V>>`
 Map) versus `PropertyMapStep extends ScalarMapStep<Element, Map<K,E>>` (one Map per element) — while the
 VALUE type is the same `Map<K,V>` in both, which is why unifying them in one shape is faithful rather
 than a shortcut. Calcite goes further and has **no map stream at all**: `Aggregate` (GROUP BY) yields an
-ordinary relation, and a collection VALUE is an aggregate FUNCTION over a group (`COLLECT` with
-`ReturnTypes.TO_MULTISET`, `JSON_OBJECTAGG`) or a constructor expression (`MAP_VALUE_CONSTRUCTOR`), with
-MAP a first-class type via `RelDataTypeFactory.createMapType`. A map is a type plus a function, never a
+ordinary relation (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/core/Aggregate.java:80`,
+`extends SingleRel`), and a collection VALUE is an aggregate FUNCTION over a group
+(`…/sql/fun/SqlStdOperatorTable.java:2494` `COLLECT`, typed by `…/sql/type/ReturnTypes.java:847`
+`TO_MULTISET`; `…/sql/fun/SqlStdOperatorTable.java:1662` `JSON_OBJECTAGG`) or a constructor expression
+(`…:2374` `MAP_VALUE_CONSTRUCTOR`), with MAP a first-class type via
+`…/rel/type/RelDataTypeFactory.java:134` `createMapType`. A map is a type plus a function, never a
 kind of stream. That is the decomposition to copy.
 
 **Decision, locked: the MAP SHAPE is the next family, built this way.** `g.V().group().by(k)` is two

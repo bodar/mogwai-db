@@ -5,3 +5,12 @@
 	# Pinned by SHA; its working tree carries build artifacts (node_modules,
 	# bun.lock, generated grammar) we never track — ignore all working-tree state.
 	ignore = all
+
+[submodule "vendor/calcite"]
+	path = vendor/calcite
+	url = https://github.com/apache/calcite.git
+	# READ-ONLY prior art for src/rel/ — never built, never imported, no Java toolchain
+	# implied (same standing as tinkerpop's gremlin-core). Provisioned shallow+sparse by
+	# scripts/init-submodule.sh; `shallow = true` so a stock `git submodule update` that
+	# bypasses the script does not deepen the checkout to full history.
+	shallow = true

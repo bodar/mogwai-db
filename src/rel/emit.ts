@@ -34,7 +34,12 @@ export interface Step { readonly binding?: string; readonly result: boolean; rea
  * node filling slots, and open a nested `SELECT` only when the slot you need is already occupied.
  * That is why `Project(Filter(Join))` is ONE statement rather than three derived tables, and it is
  * what will delete `TailAcc` — the accumulator that exists only because the legacy lowering has
- * nowhere to fuse. Prior art: Calcite's `RelToSqlConverter`, same algorithm, same reason.
+ * nowhere to fuse.
+ *
+ * Prior art, same algorithm and same reason —
+ * `vendor/calcite/core/src/main/java/org/apache/calcite/rel/rel2sql/SqlImplementor.java:2167`
+ * (`needNewSubQuery`, the slot-occupied test itself, over a `Set<Clause>` where we carry a block)
+ * and `…/rel/rel2sql/RelToSqlConverter.java:135` (the per-node visitors that fill the slots).
  *
  * The alternative — letting a `fuse` pass collapse a run into a `Select` mega-node — is refused:
  * it would put the SQL surface inside the IR and give every downstream pass two forms of the same

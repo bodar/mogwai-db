@@ -227,12 +227,21 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
   `link:` dep resolving to the submodule-built client, so `bun install` FAILS (rather than falling
   back to npm's beta.2) if the submodule has not registered the link. Consequence: nothing is
   submodule-free, `check`/L1/L2 included.
-- **The submodule is sparse — four dirs, set in `scripts/init-submodule.sh` (`SPARSE=`), re-asserted
-  on every run.** `gremlin-language` (the `Gremlin.g4` source), `gremlin-js` (the linked GLV +
-  cucumber runner), `gremlin-test` (the `.feature` corpus), and `gremlin-core` — the Java core engine,
-  **reference only, never built or imported**. Cite TinkerPop as `vendor/tinkerpop/...` so the claim
-  resolves at the pinned gitlink; a path outside the repo is uncheckable by anyone else and by CI, and
-  the outside clone is typically at a SHA that is not even a valid object in our blobless history.
+- **Two submodules, both blobless + sparse, both provisioned by `scripts/init-submodule.sh`
+  (`provision`), re-asserted on every run.** `vendor/tinkerpop` is sparse to four dirs:
+  `gremlin-language` (the `Gremlin.g4` source), `gremlin-js` (the linked GLV + cucumber runner),
+  `gremlin-test` (the `.feature` corpus), and `gremlin-core` — the Java core engine, **reference only,
+  never built or imported**. `vendor/calcite` is the RelIR's prior art on the same reference-only
+  footing (never built, never imported, no Java toolchain implied), sparse to the seven dirs it takes
+  to trace `rel2sql`; ~17 MB because it is also `shallow`.
+  **Cite upstream as `vendor/tinkerpop/...` or `vendor/calcite/...` so the claim resolves at the
+  pinned gitlink**; a path outside the repo is uncheckable by anyone else and by CI, and the outside
+  clone is typically at a SHA that is not even a valid object in our blobless history.
+  **`shallow` vs `full` is a real distinction, not a size knob.** A shallow checkout holds ONE commit,
+  so `git log`/`git blame` do not work in it and moving the pin means re-provisioning — `--depth 1`
+  cannot fetch an off-tip SHA without reconciling the shallow boundary and dragging the history graph
+  in (measured on calcite: 3.9 MB of pack → 21 MB, permanently). tinkerpop is therefore `full`: we
+  diff a pin bump against the previous pin. calcite is `shallow`: we only ever read it at the pin.
 - **DO SQLite caps a query at 100 BOUND PARAMETERS (and 100 KB of statement text) — Bun's cap is
   65,535, so a bind list that scales with ROW COUNT passes every test and fails only in production.**
   Never write `ids.map(() => '?')`. **A row set whose size is a function of DATA crosses the seam as
