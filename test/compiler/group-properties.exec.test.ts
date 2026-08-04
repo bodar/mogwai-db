@@ -114,10 +114,12 @@ test('groupCount().by(label) counts per label', () => {
   // The GROUPING, read from whichever spine answered — the raw `gk`/`gv` columns are legacy's row
   // shape, not the answer (see `grouped` in the harness).
   expect(grouped(run(store, 'g.V().groupCount().by(T.label)'))).toEqual({ person: 4, software: 2 });
-  const degree = Object.fromEntries(run(store, 'g.V().groupCount().by(__.out().count())').map((r) => [r.gk, r.gv]));
-  expect(degree).toEqual({ 0: 3, 1: 1, 2: 1, 3: 1 });
-  expect(run(store, 'g.V(1).union(__.identity(),__.identity()).groupCount().by(__.out().count())'))
-    .toEqual([{ gk: 3, gv: 2 }]);
+  // Also through `grouped`: a reducing child KEY is covered by the RelIR route now (per traverser, which
+  // is what a KEY by() is — unlike a reducing VALUE by(), which reduces over the whole group and still
+  // declines). Both spines agree on the answer and spell the row differently.
+  expect(grouped(run(store, 'g.V().groupCount().by(__.out().count())'))).toEqual({ 0: 3, 1: 1, 2: 1, 3: 1 });
+  expect(grouped(run(store, 'g.V(1).union(__.identity(),__.identity()).groupCount().by(__.out().count())')))
+    .toEqual({ 3: 2 });
   // The GROUPS are sorted by key here; the MEMBERS of a group follow the emission order of the
   // group's inputs, which a bare `g.V()` does not fix — so the member list is a multiset too.
   const firstOut = run(store, 'g.V().group().by(__.out().values("name")).by("name")')

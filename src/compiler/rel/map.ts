@@ -7,6 +7,7 @@ import type { IRStep } from '../ir/step.ts';
 import { and, byEncounter, jsonOf, meta, typeOf, typedNode, type Minter } from './build.ts';
 import { elementNode } from './element.ts';
 import { byNode, modulations, productivityFilter, type ByChild, type ByHost } from './modulator.ts';
+import { isReducer } from './reducer.ts';
 
 /**
  * THE MAP SHAPE — a barrier whose result is ONE map, as a value in the algebra.
@@ -175,6 +176,15 @@ export function groupBarrier(
   // step rather than silently collecting the elements instead — which would be the right arity and the
   // wrong answer, the one thing the decline contract exists to prevent.
   const valueBy = bys[1];
+  // A REDUCING traversal value is one scalar for the WHOLE group, not one member per incoming
+  // traverser. The generic child expression reduces per parent, which is composable for neither the
+  // framing (it would produce `[n]`) nor every reducer (`mean` needs the complete child-row domain,
+  // not an average of per-parent means). That group-scoped reducer is a separate arm; decline until
+  // it lands rather than collecting a plausible-looking wrong value.
+  if (valueBy?.key.kind === 'child') {
+    const terminal = valueBy.key.body.at(-1)?.name;
+    if (terminal === 'count' || (terminal !== undefined && isReducer(terminal))) return null;
+  }
   const member = valueBy ? byNode(valueBy, host, fresh, child) : undefined;
   if (valueBy && !member) return null;
 

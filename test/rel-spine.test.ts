@@ -284,6 +284,14 @@ const COVERED = [
   'g.V().where(__.out().order())', 'g.V().where(__.out().count().is(P.gt(1)))',
   'g.V().where(__.out().hasLabel("person").order().by("name").range(1,2))',
   'g.V().where(__.out().limit(1))', 'g.V().not(__.out().count().is(P.gt(2)))',
+  // A SUB-TRAVERSAL `by()` projection — the child seam. A flat value body is an EXPRESSION over the
+  // outer row; a body that MOVES and then REDUCES is `correlatedExists` minus the EXISTS, read for its
+  // value. Both arms reach every by() host at once, which is why one entry per host is worth having.
+  "g.V().dedup().by(__.out().count())", "g.V().order().by(__.out().count()).values('name')",
+  "g.V().order().by(__.values('name'))", "g.V().dedup().by(__.values('name').toUpper())",
+  // A GROUP host is deliberately absent from this list: it compares RAW ROWS, and the two spines spell a
+  // group row differently by design (`{gk,gv}` against one `map` blob) — `grouped` in the harness is
+  // where that comparison belongs, and `test/compiler/group-properties.exec.test.ts` makes it.
 ];
 
 /**
@@ -319,7 +327,7 @@ const DECLINED = [
   'g.V().has(T.label,null)',          // a null label VALUE: legacy owns what that means
   "g.inject('a').inject('b')",        // a second inject is a UNION with the first, not a source
   'g.inject(1,2).order(Scope.local)', // LOCAL scope: a per-traverser sort of a LIST, a different arm
-  "g.V().dedup().by(__.out().count())", // a SUB-TRAVERSAL projection: a child lowering, not an expr
+  'g.V().group().by("name").by(__.out().count())', // a reducing child VALUE reduces over the GROUP, not per traverser
   'g.withSack(0).V()',                // a carried sack the source seed would have to declare
   'g.withSideEffect("a",1).V()',      // a side effect
   'g.addV("person")',                 // a write

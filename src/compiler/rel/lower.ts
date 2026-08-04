@@ -7,6 +7,7 @@ import { name as nameBindings } from '../../rel/passes/name.ts';
 import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
+import { forEachRel } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { isLocalScope, sliceOf } from '../ir/step.ts';
 import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
@@ -836,7 +837,7 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, ctx: Chain
   const ordered = !!encounterOf(input.channels);
   const bys = modulations(step, 1, ctx.params);
   if (!bys) return null;
-  if (bys[0]) return dedupBy(step, bys[0], input, elem, fresh);
+  if (bys[0]) return dedupBy(step, bys[0], input, elem, ctx, fresh);
 
   // `dedup()` RESETS the multiplicity: the survivor stands for itself, not for the sum of the
   // duplicates it replaced.
@@ -884,13 +885,13 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, ctx: Chain
  * stays correct if that safety rule is ever relaxed, at no cost today.
  */
 function dedupBy(
-  step: IRStep, modulation: Modulation, input: Rel, elem: Elem, fresh: Minter,
+  step: IRStep, modulation: Modulation, input: Rel, elem: Elem, ctx: ChainCtx, fresh: Minter,
 ): Rel | null {
   // A comparator on `dedup()` is not a form Gremlin has — `DedupGlobalStep` is not a comparator host —
   // so an `Order` in its `by()` is a chain `verifyByModulatorArity` never sees. Decline rather than
   // silently ignoring it.
   if (modulation.order !== undefined) return null;
-  const key = byExpr(modulation, { kind: 'element', id: col(input.id, 'id'), elem }, fresh, false, byChild(fresh));
+  const key = byExpr(modulation, { kind: 'element', id: col(input.id, 'id'), elem }, fresh, false, byChild(ctx, fresh));
   if (!key) return null;
 
   const productive = productivityFilter(step, key);
@@ -1162,7 +1163,7 @@ function sortTerms(
   // does over its whole clause list.
   const drops: Expr[] = [];
   for (const modulation of parsed) {
-    const key = byExpr(modulation, host, fresh, true, byChild(fresh));
+    const key = byExpr(modulation, host, fresh, true, byChild(ctx, fresh));
     if (!key) return null;
     terms.push({ expr: key, dir: modulation.order === 'desc' ? 'desc' : 'asc' });
     const drop = orderProductivity(step, modulation, key);
@@ -1402,7 +1403,7 @@ function scalarTail(
       // through the vocabulary, which is where the "a value has no properties" rule lives.
       if (args.length || isLocalScope(step)) return null;
       const deduped = modulations(step, 1, ctx.params);
-      if (!deduped || (deduped[0] && !byExpr(deduped[0], host, fresh, false, byChild(fresh)))) return null;
+      if (!deduped || (deduped[0] && !byExpr(deduped[0], host, fresh, false, byChild(ctx, fresh)))) return null;
       if (deduped[0]?.order !== undefined) return null;
       const payload = rel.type.cols.filter((column) => !rel.channels.some((channel) => channel.col === column.name));
       if (!payload.length) return null;
@@ -2125,7 +2126,7 @@ function elementTail(
     if (step.name === 'path') {
       if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length
         || step.from !== undefined || step.to !== undefined) return null;
-      const positions = pathPositions(rel, step, ctx.params, byChild(fresh), fresh);
+      const positions = pathPositions(rel, step, ctx.params, byChild(ctx, fresh), fresh);
       if (!positions) return null;
       return continueAs(positions.rel, { kind: 'path', of: positions.of, scalars: positions.scalars }, steps, at + 1, false, ctx, fresh, labels);
     }
@@ -2146,7 +2147,7 @@ function elementTail(
     // vocabulary (unfold to entries, select(Column.*)) exists, so this cannot silently drop a tail.
     if (step.name === 'groupCount' || step.name === 'group') {
       if (pathCarried(rel)) return null;
-      const grouped = groupBarrier(rel, elementHost(rel, elem), step, bulked, ctx.params, byChild(fresh), fresh);
+      const grouped = groupBarrier(rel, elementHost(rel, elem), step, bulked, ctx.params, byChild(ctx, fresh), fresh);
       if (!grouped) return null;
       return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
@@ -2430,11 +2431,41 @@ function addedEdges(
   return effects && { effects, at: end };
 }
 
-/** A nested `by()` body that remains a VALUE expression over the same traverser. The recursive fold
- * stays here; the modulator vocabulary receives only this injected leaf and therefore never imports
- * its caller. Movement, collection, reducers, selection and branching all decline for later arms. */
-const byChild = (fresh: Minter): ByChild => (body, host) => {
+/** A nested `by()` body as a VALUE expression. The recursive folds stay here; the modulator vocabulary
+ * receives only this injected leaf and therefore never imports its caller. Collection, selection and
+ * branching still decline for later arms. */
+const byChild = (ctx: ChainCtx, fresh: Minter): ByChild => (body, host) => {
   if (host.kind !== 'element') return null;
+
+  // THE MOVEMENT-THEN-REDUCER ARM is `correlatedExists` minus EXISTS: root the first hop directly at
+  // the outer row, then hand the rest to the ordinary fold. A movement is required in this increment,
+  // so bare `__.count()` and `__.label().count()` fall through to the expression arm and decline.
+  const child = movement(body[0]!, { correlated: host.id }, host.elem, fresh);
+  if (child) {
+    const tail = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body, 1, false, ctx, fresh, NO_ALIASES);
+    if (!tail || tail.framing.kind !== 'scalar'
+      || (tail.framing.result !== 'count' && tail.framing.result !== 'number')) return null;
+
+    // A per-row scalar tail could emit MANY rows and SQLite would silently take its first; only the
+    // reducing framings above have collapsed the child to one row. A fence anywhere below is also a
+    // decline: this plan is correlated to the outer row, and a Materialize forces a named CTE that
+    // cannot reference it.
+    let materialized = false;
+    forEachRel(tail.rel, (rel) => { if (rel.kind === 'materialize') materialized = true; });
+    if (materialized) return null;
+
+    // `count()` and the numeric reducers deliberately differ only in empty-input productivity.
+    // CountGlobalStep seeds 0, while SumGlobalStep leaves NON_EMITTING_SEED in place and
+    // ReducingBarrierStep then emits no traverser (vendor/tinkerpop/gremlin-core/src/main/java/org/
+    // apache/tinkerpop/gremlin/process/traversal/step/map/{CountGlobalStep,SumGlobalStep}.java and
+    // step/util/ReducingBarrierStep.java). `countExpr` therefore COALESCEs to 0; `reducerAggregate`
+    // leaves SQL's NULL alone, and the existing traversal-`by()` productivity filters drop it.
+    const scalar = make.project({
+      id: fresh('bc'), input: tail.rel, channels: [], type: typeOf(meta('v', 'any', true)),
+      exprs: [['v', col(tail.rel.id, 'v')]],
+    });
+    return { kind: 'scalar', plan: scalar };
+  }
 
   let value: Expr = host.id;
   let at = 0;

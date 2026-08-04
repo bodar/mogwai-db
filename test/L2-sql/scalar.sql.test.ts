@@ -14,7 +14,7 @@ import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { decode, decodeAll } from '../support/decode.ts';
-import { read, run, runWith, seededStore } from '../support/harness.ts';
+import { read, relirOff, run, runWith, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -1071,7 +1071,13 @@ describe('scalar-parent / projection SQL', () => {
     expect(run(store, 'g.V().has("age").order().by(__.values("age")).values("name")').map((r) => r.v))
       .toEqual(['vadas', 'marko', 'josh', 'peter']);
     // the SQL routes through the child seam (a correlated child rank + a fresh encounter).
-    expect(read('g.V().order().by(__.out().count()).values("name")').sql).toContain('ROW_NUMBER() OVER');
+    expect(read('g.V().order().by(__.out().count()).values("name")', { spine: 'legacy' }).sql).toContain('ROW_NUMBER() OVER');
+    // RelIR answers this one now (the by()-traversal child seam's movement+reducer arm) and spells the
+    // window in the emitter's own case. The ORDER is asserted spine-neutrally above; this pins that the
+    // route still ranks in a window rather than folding the child into the framing ORDER BY.
+    if (!relirOff)
+      expect(read('g.V().order().by(__.out().count()).values("name")', { spine: 'rel' }).sql)
+        .toMatch(/row_number\(\) OVER/i);
   });
 
   test('a canonicalized empty child remains identity in the generic scalar existence gate', () => {

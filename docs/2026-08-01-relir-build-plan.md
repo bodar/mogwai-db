@@ -1996,3 +1996,58 @@ covers the cases no scenario names. When a semantics question is in doubt — or
 repo cite one feature file for opposite behaviours — read the vendored implementation and cite the path at
 the pin. Same standing `vendor/calcite` has for the algebra questions (§5's `needNewSubQuery`, §10·9's
 `Aggregate`-versus-`COLLECT` decomposition).
+
+### 10·12·2 — the child seam's REDUCER arm, and two productivity facts only the implementation names
+
+The second arm of §10·12's seam: a body that MOVES then REDUCES (`__.out().count()`,
+`__.outE().values('weight').sum()`, ~30 of the 118 measured body occurrences). Census 772 → 776 (33.8%),
+four route changes, identical answer hashes, `0 changed answer`.
+
+**It is `correlatedExists` minus the EXISTS**, and that is the whole implementation: `movement` already
+roots a first hop at a correlated outer expression with no seed node, `continueAs` already folds the rest
+of the body through the ordinary loop, and this arm reads the tail's `v` instead of testing for rows. Three
+declines keep it honest — a non-scalar tail, a tail that is not REDUCING (a per-row value would emit many
+rows and a scalar subquery would silently take SQLite's first), and any `Materialize` anywhere below (the
+subplan is correlated, and a fence forces a named CTE that cannot reference the outer row —
+`correlatedExists` states this and it applies unchanged).
+
+**`count()` and `sum()` differ in exactly one observable way, and it is not a spelling.** Its seed:
+`CountGlobalStep` seeds `0L`, so an empty child counts to zero and the traverser SURVIVES;
+`SumGlobalStep` overrides `processAllStarts` so the `NON_EMITTING_SEED` sentinel survives and no traverser
+is emitted (§10·12·1). SQL agrees for free — `COALESCE(sum(bulk), 0)` is never NULL, a bare `sum` over zero
+rows is — so `countExpr` and `reducerAggregate` already produce the right thing and a COALESCE that made
+them uniform would be a bug.
+
+**TWO PRODUCTIVITY FACTS THE SEAM MADE REACHABLE, both found by reading the reference rather than by
+testing.** The corpus cannot see either — no scenario names them — and both are wrong answers with the
+right arity:
+
+- **`order()` drops an unproductive by() for ANY by(), not just a property key.** `orderProductivity` read
+  "only a property KEY can be unproductive", which was TRUE only because no other projection could yield
+  nothing; a reducing child can. `OrderGlobalStep.processAllStarts()` is
+  `createProjectedTraverser(starts.next()).ifPresent(traverserSet::add)` under TinkerPop's own comment
+  *"only add the traverser if the comparator traversal was productive"*
+  (`vendor/tinkerpop/gremlin-core/.../step/map/OrderGlobalStep.java:82`). Measured before the fix:
+  `g.V().order().by(__.outE().values('weight').sum()).values('name')` returned all SIX names with the
+  three edgeless vertices sorted first, where the reference returns THREE. The `child` arm was added to
+  `orderProductivity`, and `count()` bodies are unaffected by construction because their key cannot be NULL.
+- **A reducing child VALUE on a `group()` reduces over the WHOLE GROUP, not per traverser** — so the
+  generic per-parent expression would produce `[1,2]` where the reference produces `3`. That declines in
+  `groupBarrier` (a reducing terminal in a child value body), while a reducing child KEY is admitted
+  because a key by() genuinely IS per traverser. `g.V().groupCount().by(__.out().count())` is therefore
+  covered and `g.V().group().by('name').by(__.out().count())` is not, which looks arbitrary and is exactly
+  the reference's distinction.
+
+**One residual inefficiency, recorded rather than fixed:** the new `order()` productivity filter is a
+tautology for a `count()` child (its key is never NULL), and it re-inlines the child subquery a second
+time to say so. The honest fix is for `ByChild` to REPORT whether its body can be unproductive — the fact
+is known where it is decided — and that belongs with the third arm (`fold` bodies, which likewise never
+are). `rel-sweep` renders every admitted plan inside the 100-bind cap today, so it is a cost and not a wall.
+
+**Four test assertions were pinning the ROUTE again**, and the split is now routine: an L2 SQL spelling
+takes `{spine:'legacy'}` plus a RelIR pin beside it; a group row read off `gk`/`gv` goes through the
+harness's `grouped`; and `rel-spine.test.ts`'s covered list gained the by()-child shapes while
+`g.V().dedup().by(__.out().count())` left `DECLINED`. Two of my own additions to those lists were wrong and
+the suite caught them: a GROUP traversal cannot join the covered list (it compares RAW ROWS, and the two
+spines spell a group row differently by design), and a traversal BOTH spines refuse cannot join `DECLINED`
+(which means "RelIR declines, legacy answers").

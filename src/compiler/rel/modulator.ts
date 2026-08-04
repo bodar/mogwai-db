@@ -315,11 +315,24 @@ export const productivityFilter = (step: IRStep, key: Expr | undefined): Expr | 
  * `order()`'s productivity, which is NARROWER than `dedup()`'s — and the difference is the reference's,
  * not a simplification.
  *
- * **Only a property KEY can be unproductive.** A `T` token is always present, a bare `by()` is the
- * element itself, and `shuffle` projects nothing at all, so none of them can yield "nothing" for a
- * traverser. Legacy says the same in one line (`orderProductivityFilter` filters `c.key !== null`),
- * and `dedup()` deliberately does NOT: there the drop applies to any `by()` at all
- * (`modulators.length && !productiveBy`). Two hosts, two rules, one place each is stated.
+ * **A property KEY or a CHILD can be unproductive; a token, a bare `by()` and `shuffle` cannot.** A `T`
+ * token is always present, a bare `by()` is the element itself, and `shuffle` projects nothing at all.
+ * `dedup()` deliberately drops for any `by()` at all (`modulators.length && !productiveBy`), so the two
+ * hosts still differ — but they differ in the token/bare/shuffle cases, not in the child one.
+ *
+ * **The `child` arm was ADDED when the by()-traversal seam made it reachable, and the reference is what
+ * says so rather than an inference.** `OrderGlobalStep.processAllStarts()` is
+ * `this.createProjectedTraverser(this.starts.next()).ifPresent(traverserSet::add)` under TinkerPop's own
+ * comment "only add the traverser if the comparator traversal was productive"
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/OrderGlobalStep.java:82`).
+ * So a child that yields nothing drops the traverser exactly as a missing property does. Before the seam
+ * this comment read "only a property KEY can be unproductive", which was TRUE only because no other
+ * projection could yield nothing — the narrowing was accidental, and a reducing child body
+ * (`by(__.outE().values('weight').sum())` over a vertex with no out-edges, which
+ * `SumGlobalStep` emits NO traverser for) is exactly the case it left answering 6 rows where the
+ * reference answers 3.
  */
 export const orderProductivity = (step: IRStep, modulation: Modulation, key: Expr): Expr | undefined =>
-  modulation.key.kind === 'property' ? productivityFilter(step, key) : undefined;
+  modulation.key.kind === 'property' || modulation.key.kind === 'child'
+    ? productivityFilter(step, key)
+    : undefined;

@@ -236,11 +236,21 @@ describe('group / properties SQL', () => {
     expect(read('g.V().groupCount().select(Column.keys).unfold()').shape).toEqual({ kind: 'vertex' });
     // group().by(k).by(__.count()) → same scalar-valued map path (typed count node → per-row type).
     expect(read('g.V().group().by("name").by(__.count()).select(Column.values).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
-    const childKey = read('g.V().groupCount().by(__.out().count())');
+    const childKey = read('g.V().groupCount().by(__.out().count())', { spine: 'legacy' });
     expect(childKey.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
     expect(childKey.sql).toContain('ROW_NUMBER() OVER () AS o0');
     expect(childKey.sql).toContain('JOIN c');
     expect(childKey.sql).toContain('ON gk.o0=gp.o0');
+    // The RelIR route answers a reducing child KEY now — per traverser, which is what a key by() IS.
+    // (A reducing child VALUE still declines: it reduces over the whole GROUP, so the per-parent
+    // expression would be a plausible wrong value — see `groupBarrier`.) The child is a correlated
+    // scalar subquery there rather than a joined child relation, so there are no `o0` ordinals at all.
+    if (!relirOff) {
+      const rel = read('g.V().groupCount().by(__.out().count())', { spine: 'rel' });
+      expect(rel.shape).toEqual({ kind: 'mapValue' });
+      expect(rel.sql).not.toContain('o0');
+      expect(read('g.V().group().by("name").by(__.out().count())', { spine: 'rel' }).spine).toBe('legacy');
+    }
   });
 
   test('list-VALUED map: group().by().by(__.out()...fold()).select(Column.values)', () => {
