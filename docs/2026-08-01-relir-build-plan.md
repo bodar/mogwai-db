@@ -1440,6 +1440,49 @@ already in the node set, unused for this. Chosen for DEPENDENCY, not for size: `
 mid-chain cases, all 30 keyed `group`/`groupCount` cases and the `is(P.typeOf(MAP))` decline are behind
 it. Picking either other family means building it later anyway, under pressure.
 
+**LANDED — `groupCount()`, the family's first arm** (+4, 32.0%, and L3 1713 → 1714). It cost about what
+the list shape cost and confirmed the decomposition: `Aggregate.groupBy` needed nothing built,
+`{kind: 'map'}` rides the existing `materializeRootStream` call exactly as `{kind: 'list'}` does, and no
+step is delegated. `src/compiler/rel/map.ts` is the eighth vocabulary module; `byNode` joins `byExpr` in
+the `by()` vocabulary because a map key is a TYPED value and one subquery must yield the value and its
+`vtype` together.
+
+**Four defects on the way, each caught by a DIFFERENT instrument — the clearest evidence yet for §11's
+"run all of them, not the cheapest":**
+
+- **Double encoding.** `json_group_array` re-encodes a `{t,v}` envelope as a JSON STRING, so the framer
+  saw the text `{"t":"int","v":27}` where a tagged 27 belonged. `json()` around each side is
+  load-bearing, and `list.ts` documents the identical trap. **Only a byte-level diff sees this** — the
+  entry count and the values were already correct.
+- **`ProductiveByStrategy`.** Hardcoding `IS NOT NULL` instead of asking `productivityFilter` changed the
+  answer for `withStrategies(ProductiveByStrategy).V().groupCount().by('age')`. **Only the CENSUS saw
+  it**, and it could not have been seen by comparing spines: both were being asked the wrong question
+  identically until one stopped.
+- **The key inlined 3–4 times.** Grouping directly BY a correlated subquery repeats it in the SELECT, the
+  GROUP BY and (once the productivity filter became a HAVING) twice more. **An L2 assertion caught it**,
+  at four copies. Projecting the key to a column and FENCING that projection — the emitter fuses a plain
+  `Project` straight back in — takes it to 1 against legacy's 1, and 2 against legacy's 4 for a label key.
+- **A relation out of scope.** A `Col` names a node's DIRECT child and the filter sits between the
+  projection and the aggregate. **`check` caught it.**
+
+**`hasNot(key)` was missing from BOTH spines** and was found by writing a graph-check for these pins. It
+is now the exact negation of a bare `has(key)` through the same `hasProp`/`hasPropertyClause` waist, so
+the two cannot disagree about what carrying a property means — and it is the L3 +1.
+
+**Six more tests were asserting a ROUTE**, all six failing on migration having found no defect, so
+`grouped()` joins `written()` in the harness. Two L2 SQL snapshots are now pinned to `{spine: 'legacy'}`
+because their subject IS that lowering; the bulk-weighting test asserts the PROPERTY rather than either
+spelling, which exposed that RelIR emits `COUNT(*)` where legacy emits `SUM(bulk)` under
+`movementCollapse: false` — equivalent, because bulk is 1 there. **Name both routes explicitly in a test
+that compares them**: reading the ambient default made one assertion mean "whatever this run is
+configured for", and the differential failed it immediately.
+
+**What remains of the family:** `group()` (41), whose value side with no `by()` is a LIST OF ELEMENTS per
+key — so `valOf` is `{kind: 'list', of: 'elem'}` and the materializer expands each pair. Then
+`group().by(k).by(<reducer>)`, which is a scalar value and lands with the reducer vocabulary. Then the
+mid-chain consumers (`unfold()` to entries, `select(Column.keys/values)`), which is what makes the map
+arm re-enterable and what `valueMap`'s 28 mid-chain cases need.
+
 **The cost estimate that lost this its "cheap" label, recorded so it is not re-made:** 43 of the map
 shape's 64 blockers are terminal, and that was briefly read as "43 cases behind a framing seam". It is
 not — under this decision the grouping is RelIR's own work, so the increment is list.ts-scale. The three
