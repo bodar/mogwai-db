@@ -2733,3 +2733,89 @@ question and the same class of wrong answer §13h·1 documents for the member li
 `COLLECTING_CONSUMERS` first, then this arm is `LAST_VALUE`/`MAX(encounter)` over the group rather than a
 `json_group_array`. Corpus: **visible** — `sideEffect/Group.feature:122`
 `g_V_group_byXvaluesXnameX_substringX1XX_byXconstantX1XX`, which RelIR fully covers.
+
+### 13g·2. The `child`/non-`child` split IS the reference's wrapped/unwrapped split — with ONE lossy normalization
+
+Checking §13g·1's discriminator against `modulator.ts` before delegating it: the mapping is exact, which is
+worth recording because it means the group value arm needs no new vocabulary.
+
+| our `ByKey.kind` (`modulations`) | the `by()` written | upstream class | wrapped into `map(v).fold()`? |
+|---|---|---|---|
+| `property` | `by('age')` | `ValueTraversal` | yes → LIST |
+| `token` | `by(T.label)` | `TokenTraversal` | yes → LIST |
+| `identity` | bare `by()` | `IdentityTraversal` | yes → LIST |
+| `child` | `by(__.…)` | a plain anonymous traversal | **no** → single VALUE |
+| — declines — | `by(Column.values)` | `ColumnTraversal` | (unreachable here) |
+
+`Column` is not a hazard for this arm after all: `modulations` REFUSES a `Column`/`Operator`/`GType` in a
+`by()` outright (`src/compiler/rel/modulator.ts:144`), so it never reaches `groupBarrier` to be
+misclassified. So `kind === 'child'` is exactly the reference's unwrapped set, and the split is sound.
+
+**The one real gap is `by(__.identity())`, and it is a lossy NORMALIZATION rather than a missing arm.**
+`modulator.ts:136-138` rewrites `by(__.identity())` to `{ kind: 'identity' }` under the comment that "both
+project the element itself. Normalizing it here keeps every host from having to re-derive that semantic
+identity". That is true of the PROJECTION and false of the question `convertValueTraversal` asks, which is
+not about projection at all but about which CLASS the modulator produced:
+
+- `IdentityTraversal` is constructed in exactly one place — `step/ByModulating.java:68`, the NO-ARG
+  `modulateBy()`, i.e. a bare `by()`. An explicit `__.identity()` is an ordinary anonymous traversal.
+- so `convertValueTraversal`'s `instanceof IdentityTraversal` is FALSE for `by(__.identity())` → unwrapped →
+  `GroupStep` takes `valueTraversal.next()` → a single element, the LAST arriving traverser's.
+- and `IdentityRemovalStrategy` (also in the default list, `TraversalStrategies.java:275`) does not rescue
+  the distinction: it strips the `IdentityStep`, leaving an empty traversal that is still not an
+  `IdentityTraversal`.
+
+So `g.V().group().by(T.label).by()` is a LIST and `g.V().group().by(T.label).by(__.identity())` is a single
+ELEMENT, and we answer a list for both. **Deliberately NOT folded into the §13g arm**: that arm is about the
+`child` kind, while this is a normalization that is CORRECT at every other host (`order().by(__.identity())`
+really is `order().by()`) and lossy at exactly one. Fixing it means the group-value host distinguishing the
+two, not deleting the normalization — a separate, smaller increment, and the comment claiming the
+normalization is host-independent should be corrected when it lands. Corpus: invisible.
+
+### 13g·3. `min`/`max` over a MIXED stream: the reference RAISES — settled, so fail closed
+
+§13g's fourth bullet left this open and named the right question: whether TinkerPop 4 intends
+`Orderability`'s total order in this position rather than a raise. **The code says no, and there is no
+Orderability path in `min`/`max` at all.** `MinGlobalStep`/`MaxGlobalStep` set their reducing operator to
+`Operator.min`/`Operator.max` (`MinGlobalStep.java:39`), those delegate to
+`NumberHelper.min`/`max` (`Operator.java:88-104`), and `NumberHelper.java:582-596` / `:639-653` end with
+
+```java
+if (a instanceof Number && b instanceof Number) { … getHighestCommonNumberClass … }
+else { return a.compareTo(b) < 0 ? a : b; }
+```
+
+so a mixed pair reaches `Integer.compareTo(String)` and throws `ClassCastException`. `GremlinValueComparator`
+is never consulted. **Decision: fail closed** on a `min`/`max` whose stream is not within one type space —
+the same rule §13a already landed for range PREDICATES (`Compare.gt` opening with
+`if (!COMPARABILITY.comparable(first, second)) return false;`), so the type-space authority already exists in
+`src/compiler/rel/predicate.ts` and this is a second consumer rather than new machinery. Today
+`g.inject(1,"a").min()` answers `1`, which is a wrong answer with the right arity.
+
+**Two facts in the same functions that the audit did not record, and that no scenario need name:**
+
+- **NULL is SKIPPED, not propagated:** `if (a == null || b == null) return a == null ? b : a;` — so
+  `min` over `[null, 5]` is `5`, and over `[null, null]` is `null`. SQL's `MIN` ignores NULL, so we agree
+  here by accident of the same rule.
+- **NaN is SKIPPED unless EVERY value is NaN:** `if (eitherAreNaN(a, b)) return isNaN(a) ? b : a;` (the
+  comment says "propagate NaN if both"). This we do NOT agree with: SQLite stores NaN as NULL, so an
+  all-NaN stream gives us `null` where the reference gives `NaN`. Narrow, and worth fixing in the same
+  increment since it is the same two functions.
+
+### 13g·4. The numeric tower's PROMOTION rule, precisely — for whoever builds §13g's reducer-type arm
+
+§13g's second bullet is right that the reducer's result type must be a Gremlin class rather than a SQLite
+storage class. The mechanism, so the arm does not have to be re-derived:
+`NumberHelper.mathOperationWithPromote` (`gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/NumberHelper.java:401-428`)
+starts at `getHighestCommonNumberInfo(a, b)` — a (bits, isFloatingPoint) pair, the NARROWEST class holding
+both — and on an `ArithmeticException` calls `numberInfo.promoteBits()` and RETRIES in a loop. So:
+
+- `127b + 1b` overflows byte and promotes 8 → 16 bits: the result is a **short**, exactly as §13g says.
+- **integer overflow at ≥ 64 bits THROWS** (`if (!fp && bits >= 64) throw exception;`) — `sum()` over longs
+  that overflows is an ERROR, not a silent wrap and not an automatic `BigInteger`. Worth flagging against
+  this project's "carry an int64 above 2^53 as decimal TEXT" decision: the reducer arm must raise there
+  rather than widening into the exact-decimal representation, or it answers where the reference refuses.
+- **floating point at ≥ 64 bits does NOT throw** — it returns the infinite result (`if (fp && bits >= 64)
+  return result;`), and the javadoc states it: `±Double.POSITIVE_INFINITY` rather than an exception.
+- a `BigInteger`/`BigDecimal` result short-circuits out of the loop before the overflow checks.
+- `if (null == a || null == b) return a;` — a null operand is skipped, consistent with `min`/`max` (§13g·3).
