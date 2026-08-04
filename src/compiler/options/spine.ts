@@ -26,5 +26,11 @@ const RELIR_ENV = 'MOGWAI_RELIR';
  *  second spine is the failure mode §10·4 exists to prevent — not a safety measure. */
 const relirEnabled = (): boolean => process.env[RELIR_ENV] !== '0';
 
+/** THE AMBIENT position of the switch — the whole PROCESS's default spine, for a harness or an
+ *  instrument that must know which position a RUN is in (§14: L3's two floors). A per-compile
+ *  decision goes through `resolveSpine`, where an explicit `options.spine` still wins; this is the
+ *  only reader of the env var, so a run cannot disagree with itself about which spine it is. */
+export const ambientSpine = (): Spine => (relirEnabled() ? 'rel' : 'legacy');
+
 export const resolveSpine = (options?: CompileOptions): Spine =>
-  (options?.spine ?? (relirEnabled() ? 'rel' : 'legacy'));
+  (options?.spine ?? ambientSpine());

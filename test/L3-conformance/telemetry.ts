@@ -29,6 +29,7 @@ import { join } from 'node:path';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import type { GraphManager, GraphInfo } from '../../src/manager.ts';
 import type { RemoteExecutor } from '../../src/api.ts';
+import type { Spine } from '../../src/sql/kernel/render.ts';
 
 export interface QueryRecord {
   g: string;
@@ -291,14 +292,14 @@ export function collectScenarios(cucumberJson: any[]): ScenarioRow[] {
 //
 // The count alone is blind two ways: it can't say WHICH scenario broke, and a
 // net-positive run (more gained than lost) hides a real regression. l3-state.json
-// records the exact PASSED and FAILED scenario-name sets from the last committed
-// run (plus the derived count). Every run diffs against it:
+// records the exact PASSED and FAILED scenario-name lists for both spines' last
+// committed runs (plus the derived counts). Every run diffs against its section:
 //   - GAINS      — passed now, was NOT passing before (a fix landed).
 //   - REGRESSIONS — was passing before, fails now (something broke → FAIL the build).
-// Scenario names are globally unique in the TinkerPop gherkin corpus, so a bare
-// name is a stable key. On a clean local run the state is rewritten to the current
-// run (CI never rewrites). This is the single ratchet source of truth — the count
-// is `passed.length`, so there is no separate baseline file.
+// TinkerPop has distinct scenarios that normalize to the same name, so the recorded lists retain
+// duplicates and `passing` remains the scenario count; only name-based comparisons use sets. On a
+// clean local run the selected section is rewritten (CI never rewrites). This file is the single
+// ratchet source of truth — each count is `passed.length`, so there is no separate baseline file.
 
 export interface L3State {
   /** Passing-scenario count = passed.length. Kept explicit for greppability + the
@@ -313,25 +314,81 @@ export interface L3State {
   _comment?: string;
 }
 
-const STATE_COMMENT =
-  'L3 conformance last-known run: the passing/failing scenario sets of the official ' +
-  'TinkerPop cucumber suite (scoped by test/L3-conformance/tags.ts). `bun test` FAILS if a ' +
-  'scenario in `passed` now fails (a regression) or the count drops; it auto-records the ' +
-  'current run here on a clean local run (CI never rewrites). `passing` = passed.length is ' +
-  'the ratchet floor. Commit this file with every bump. Never hand-edit `passed` to hide a ' +
-  'regression.';
+/** The top level deliberately remains the default/RelIR-on floor: it is the conformance number
+ *  quoted by the README and feature-support matrix, and nesting it would rewrite a 126 KB committed
+ *  artifact for no semantic gain. Only the legacy floor lives in its own section. */
+export interface L3StateFile extends L3State {
+  legacySpine?: L3State;
+}
 
-export function readState(file: string): L3State {
-  if (!existsSync(file)) return { passing: 0, total: 0, passed: [], failed: [] };
-  const s = JSON.parse(readFileSync(file, 'utf8')) as L3State;
+const STATE_COMMENT =
+  'L3 conformance last-known runs: the top-level passing/failing scenario sets are the default ' +
+  '(RelIR-on) floor; `legacySpine` is the legacy floor. Each configuration FAILS if a scenario in ' +
+  'its own `passed` now fails or its count drops, and replaces only its own section on a clean local ' +
+  'run (CI never rewrites). `passing` = passed.length in each section. Commit this file with every ' +
+  'bump. Never hand-edit either `passed` to hide a regression.';
+
+const EMPTY_STATE = (): L3State => ({ passing: 0, total: 0, passed: [], failed: [] });
+
+function parseStateFile(file: string): L3StateFile {
+  if (!existsSync(file)) return EMPTY_STATE();
+  return JSON.parse(readFileSync(file, 'utf8')) as L3StateFile;
+}
+
+export function readState(file: string, spine: Spine): L3State {
+  const state = parseStateFile(file);
+  const s = spine === 'rel' ? state : state.legacySpine;
+  if (!s) return EMPTY_STATE();
   return { passing: s.passing ?? 0, total: s.total ?? 0, passed: s.passed ?? [], failed: s.failed ?? [] };
 }
 
-export function writeState(file: string, rows: ScenarioRow[]): void {
+/** A run's scenario rows AS a floor. One function because the recorded floor and the live side of the
+ *  spine gap are the same value computed from the same rows, and deriving it twice is how the two
+ *  would drift. `passed` stays a scenario LIST, repeated names included — see test/CLAUDE.md. */
+export function stateOf(rows: ScenarioRow[]): L3State {
   const passed = rows.filter((r) => r.passed).map((r) => r.name).sort();
   const failed = rows.filter((r) => !r.passed).map((r) => r.name).sort();
-  const state: L3State = { passing: passed.length, total: rows.length, passed, failed, _comment: STATE_COMMENT };
+  return { passing: passed.length, total: rows.length, passed, failed };
+}
+
+export function writeState(file: string, rows: ScenarioRow[], spine: Spine): void {
+  const next = stateOf(rows);
+  const state = parseStateFile(file);
+  // Read-modify-write is the load-bearing rule: a clean L3 run rewrites its state, so replacing the
+  // other spine's passed[] would silently lower that floor and turn the ratchet into a way to erase
+  // the gate. The one shared explanation remains top-level; legacySpine never gets its own copy.
+  if (spine === 'rel') Object.assign(state, next);
+  else state.legacySpine = next;
+  state._comment = STATE_COMMENT;
   writeFileSync(file, JSON.stringify(state, null, 2) + '\n');
+}
+
+/** The two-floor difference: scenarios only ONE spine answers. `relOnly` is the honest measure of
+ *  what turning the switch off would lose, which no counter reports today; a non-empty `legacyOnly`
+ *  is RelIR being BEHIND on those names — allowed (§10·4) but worth seeing, and invisible to a
+ *  subtraction of the two counts. */
+export function spineGap(rel: L3State, legacy: L3State): { relOnly: string[]; legacyOnly: string[] } {
+  const relNames = new Set(rel.passed);
+  const legacyNames = new Set(legacy.passed);
+  return {
+    relOnly: [...relNames].filter((name) => !legacyNames.has(name)).sort(),
+    legacyOnly: [...legacyNames].filter((name) => !relNames.has(name)).sort(),
+  };
+}
+
+/** Compact migration summary. The provenance names which side is live because the other side is
+ *  necessarily the last recorded run; large name sets stay in the committed state file. */
+export function formatSpineGap(rel: L3State, legacy: L3State, spine: Spine): string {
+  if (legacy.passing === 0) return '';
+  const gap = spineGap(rel, legacy);
+  const provenance = spine === 'rel'
+    ? 'RelIR=this run, legacy=last recorded run'
+    : 'RelIR=last recorded run, legacy=this run';
+  const detail = (label: string, names: string[]): string => names.length <= 12
+    ? `${label}: ${names.length ? names.join(', ') : 'none'}`
+    : `${label}: ${names.length} names (see l3-state.json)`;
+  return `L3 spine gap [${provenance}]: ${gap.relOnly.length} RelIR-only, ${gap.legacyOnly.length} legacy-only\n` +
+    `${detail('RelIR-only', gap.relOnly)}; ${detail('legacy-only', gap.legacyOnly)}`;
 }
 
 export interface L3Delta {

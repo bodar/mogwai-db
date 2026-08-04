@@ -2316,10 +2316,95 @@ assembler can inline.** `limit`/`range`/`tail` are unaffected because their sort
 - **`elementOrder`'s tie-break is the element id where the reference is a STABLE sort.** `List.sort` is a
   stable merge sort, so ties keep arrival order; we tie-break on id, and the two spines disagree
   (`g.V().both().order().by(T.label)`). Same root cause as above: a position after a fan-out.
+  **This bullet is CORRECTED by §13h·1 — "stable sort" is right and "ties keep ARRIVAL order" is not,
+  because the set the sort runs over has already coalesced duplicates. Do not implement it as written.**
 - **A bulked `group()` would not repeat members by `bulk`** (`FoldStep` does
   `for (i < traverser.bulk()) list.add(...)`). `RISK` only — `computeCollapseSafe` provably excludes a
   `group` in the prefix, so `bulked` is false wherever the collecting arm runs. Worth making that coupling
   a type error rather than a proof if collapse gating ever widens.
+
+### 13h·1. Bulking is OBSERVABLE in the reference's DEFAULT configuration — so half of §13h is a bulk defect, and the two arms split
+
+Verifying §13h before delegating it refuted one of its two arms and strengthened the other. The pivot is a
+fact neither the audit nor this plan had established: **TinkerPop bulks by default, and bulking changes the
+ORDER OF MEMBERS, not just a count.** Three reference facts, at the pin:
+
+- `traverser/util/DefaultTraverserGeneratorFactory.java` — with `ONE_BULK` absent from the requirements
+  (the ordinary case) the `else` branch selects `B_O_TraverserGenerator`, i.e. a **B**ulked traverser.
+- `traverser/util/TraverserSet.java:88-97` — `add` is `existing.merge(traverser)` over a `LinkedHashMap`.
+  So any step that parks traversers in a `TraverserSet` coalesces duplicates into ONE entry carrying a
+  bulk, held at the position of the **first** arrival, and `:152` sorts that list with `Collections.sort`.
+- `strategy/optimization/LazyBarrierStrategy.java:96` inserts `NoOpBarrierStep(2500)` after every
+  `FlatMapStep` whose successor is neither the last step nor a `Barrier`, and it is in the DEFAULT global
+  strategy list (`traversal/TraversalStrategies.java:287`). Its own javadoc: "*NoOpBarrierSteps allow
+  traversers to be bulked*". `NoOpBarrierStep.java:74` is `this.barrier.add(traverser)` — the merging `add`.
+
+**The discriminator between the two arms is which barrier KIND the step is**, and it is decidable per step:
+
+| step | reference superclass | parks in a `TraverserSet`? | member order the reference produces |
+|---|---|---|---|
+| `order()` | `CollectingBarrierStep` | **yes** (`OrderGlobalStep.java:78` sorts `traverserSet`) | distinct traversers by FIRST arrival, duplicates ADJACENT |
+| `group()` | `ReducingBarrierStep` | **no** — one start at a time | ARRIVAL order, duplicates wherever they arrived |
+
+`group()` is itself a `Barrier`, so `LazyBarrierStrategy` inserts nothing before it and the traversers
+reaching it have bulk 1. **So §13h's `group` arm is CONFIRMED and its justification is now stronger than
+the audit's**: arrival order is not merely `FoldStep`'s habit, it is what `group` gets because nothing on
+that path can coalesce. `order()` is the opposite, and "ties keep arrival order" is false there.
+
+**`groupCount` is NOT part of the fix, and §13h naming it is a third error the code refutes.** Its value is
+a count and its map is a `HashMap` (`GroupStep.java:64` `HashMapSupplier`, and the corpus compares maps
+order-insensitively), so nothing about a `groupCount` answer is an order. `map.ts` already knows this — its
+encounter lookup is gated on `collecting`, i.e. `step.name === 'group'`, under a comment saying a
+`groupCount` never carries the member column. Adding `groupCount` to `COLLECTING_CONSUMERS` would demand a
+channel no arm reads. **The set gains `group` alone.**
+
+Measured on the modern graph (`g.V().both()`, arrival `2,3,4,1,1,4,6,1,3,5,4,3` — both spines agree, and
+`fold()` proves the encounter column is what makes it right):
+
+| | `group().by(T.label)` members | `order().by(T.label)` |
+|---|---|---|
+| RelIR | `1,1,1,2,4,4,4,6` ✗ | `1,1,1,2,4,4,4,6,3,3,3,5` ✗ |
+| legacy | `2,4,1,1,4,6,1,4` ✓ | `2,4,1,1,4,6,1,4,3,3,3,5` ✗ |
+| reference | `2,4,1,1,4,6,1,4` | `2,4,4,4,1,1,1,6,3,3,3,5` |
+
+**And legacy's ✓ is an ACCIDENT, which is the argument for fixing the `group` arm in `analyze.ts` rather
+than in either spine.** Under `MOGWAI_REVERSE_UNORDERED=1` legacy's members come out
+`josh,vadas,josh,marko,peter,josh,marko,marko` — a different order, because with no encounter column the
+answer is whatever scan SQLite chose; RelIR's is stable under reversal and wrong. So the two spines are not
+"one right, one wrong": one is pinned to the wrong column and the other is pinned to nothing. Adding
+`group`/`groupCount` to `COLLECTING_CONSUMERS` fixes BOTH at once — RelIR stops falling back to `'id'`, and
+legacy's arrival order stops being SQLite's choice — which is the standing rule that a member order must be
+pinned by the SQL we emit (`test/CLAUDE.md`, the perturbation instrument). It also predicts a new
+`test:perturbed` gain, so measure that instrument before and after.
+
+Read the `order()` column carefully: **RelIR is closer to the reference than legacy is** — it already puts
+duplicates adjacent, and only the group ORDER is wrong (rowid, where the reference is first arrival). So
+implementing §13h's second bullet as written would have made RelIR match legacy and move it AWAY from the
+reference. That is §13n's lesson in the other direction and worth stating as a rule:
+**agreement between the two spines is not evidence of correctness — it is evidence of a shared cause.**
+
+**Consequence for the ordering criterion.** The `order()` arm is not an `elementOrder` tie-break fix at all;
+"distinct by first arrival, duplicates adjacent" is `GROUP BY row, SUM(bulk), MIN(encounter)` — which is
+exactly a **bulk column**. So this arm is BLOCKED ON BULKING and must not be attempted before it; the
+`group` arm is independent and lands on its own. Bulking's case was previously architectural (memory,
+`outstanding-work`); this makes it a CORRECTNESS argument with citations, and widens its blast radius past
+reducers — any `<fan-out>` followed by a `TraverserSet`-parking barrier has a member order we get wrong.
+
+**And bulking is far cheaper than "the biggest structural gap" implies, because the plumbing is already
+there and merely UNFED.** `bulk` is a `ChannelRole` (`src/channels.ts:25`), `CHANNEL_GROUP_POLICY` already
+admits it and `encounter` under a grouping (the two roles for which N-rows-into-one has a defined answer),
+`groupCount` already consumes it as `SUM(bulk)` and `element.ts:264` already projects it — but **every
+producer in the tree is `lit(1, 'int')`**, so nothing ever carries a multiplicity ≠ 1. Better still, the
+coalescing node itself is already written: ordered `dedup()` is
+`Aggregate { groupBy: [id], aggs: [bulk = 1, encounter = MIN(encounter)] }` (`src/compiler/rel/lower.ts:880-884`),
+where `bulk = 1` is deliberate and cited (`dedup` RESETS multiplicity). A bulking barrier is that node with
+`SUM(bulk)` in place of the reset. So the increment is a PRODUCER plus the insertion rule — where the
+reference's `LazyBarrierStrategy` puts one — not a new channel and not a new algebra node.
+
+Corpus status: **invisible, and provably so rather than by assumption.** No `.feature` expectation in the
+corpus contains a list with a repeated vertex member (checked over every feature file), and both fan-out
+`Order.feature` scenarios (`:103`, `:219`) key on `age`, which is unique per person — so the corpus cannot
+discriminate any of these three columns. Silence, per §10·8, not permission.
 
 ### 13i. Doc corrections from the audit
 

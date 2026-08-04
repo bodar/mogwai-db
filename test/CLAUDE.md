@@ -33,8 +33,11 @@
 - **L1** (`test/L1-corpus/`) — 2,298 canonical traversals; parse+chain must stay **100%**.
 - **L2** (`test/L2-sql/`) — the compile-to-SQL contract, split by step family.
 - **L3** (`test/L3-conformance/`) — the official cucumber suite over GraphBinary, **ratcheted**:
-  one committed `l3-state.json` is the floor; a run fails on any regression or a count below it.
-  Telemetry (delta + gap summary) is always on. Runbook: `README-cucumber.md`.
+  one committed `l3-state.json` holds TWO floors. The top level is the default/RelIR-on floor and
+  `legacySpine` is the legacy floor; each configuration gates and records only its own section. A
+  legacy run never rewrites the prose conformance count. Their scenario-name set difference (not
+  merely the count subtraction) is the migration metric. Telemetry is always on. Runbook:
+  `README-cucumber.md`.
   - **L3 is the floor, not the goal.** The count measures documented scenarios that pass; it does
     NOT measure how much of the grammar composes. The goal is the *ceiling* — generic lowering that
     composes the full nested Gremlin grammar at any valid depth/combination. A one-off fix that

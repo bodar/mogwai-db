@@ -31,7 +31,8 @@ import { buildConformanceApp } from './conformance-server.ts';
 import { installInMemoryTransport, type InMemoryTransport } from '../support/in-memory-transport.ts';
 import { runFeatures, GLV } from '../support/cucumber.ts';
 import { L3_TAGS } from './tags.ts';
-import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readState, writeState, delta, formatDelta, expectedErrorSubstrings } from './telemetry.ts';
+import { ambientSpine } from '../../src/compiler/options/spine.ts';
+import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readState, writeState, stateOf, delta, formatDelta, formatSpineGap, expectedErrorSubstrings } from './telemetry.ts';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 // A GLOB, not a bare directory: cucumber 13 (the submodule's runner since the master bump)
@@ -47,9 +48,9 @@ const GLV_COMPAT = '../../../../test/L3-conformance/glv-compat.ts';
 // Provisioning marker: the corpus + upstream's generated step data. Cheaper and more honest than
 // checking for a `cucumber-js` BIN, which we no longer run.
 const STEP_DATA = join(GLV, 'test/cucumber/gremlin.js');
-// The single committed ratchet state: the last-known run's passing/failing scenario
-// sets + count. The delta is computed against it; a clean local run rewrites it. It
-// replaces the old baseline.json + l3-passing.txt pair.
+// The single committed ratchet file: the default spine's last-known run at top level and the legacy
+// spine's in its own section. A clean local run rewrites only its section; the file replaces the old
+// baseline.json + l3-passing.txt pair.
 const STATE = new URL('./l3-state.json', import.meta.url).pathname;
 // Every human-facing file that quotes the conformance number, kept in lockstep
 // with the ratchet so the prose can never drift from l3-state.json.
@@ -95,6 +96,9 @@ beforeAll(async () => {
 afterAll(() => transport?.restore());
 
 test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBinary', async () => {
+  // Read the process position ONCE and carry it through every state operation: crossing sections is
+  // the failure mode, because one configuration must never gate on or rewrite the other's floor.
+  const spine = ambientSpine();
   const report = join(tmpdir(), `mogwai-l3-${process.pid}.json`);
   // The `json` formatter is cucumber's OWN output and stays the measurement: `collectScenarios`
   // reads its shape, and the committed floor was recorded from it. Only how cucumber is DRIVEN
@@ -139,8 +143,11 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
     throw new Error(`count mismatch: parsed ${passing} but cucumber summary says ${reported}. Summary:\n${out.slice(-400)}`);
   }
 
-  const prev = readState(STATE);
-  console.log(`L3 conformance: ${passing}/${total} scenarios pass (last recorded ${prev.passing})`);
+  const recordedRel = readState(STATE, 'rel');
+  const recordedLegacy = readState(STATE, 'legacy');
+  const prev = spine === 'rel' ? recordedRel : recordedLegacy;
+  const spineLabel = spine === 'rel' ? 'RelIR spine' : 'legacy spine';
+  console.log(`L3 conformance [${spineLabel}]: ${passing}/${total} scenarios pass (last recorded ${prev.passing})`);
 
   // Per-scenario delta vs the committed last-known run. The passing SET in l3-state.json
   // names exactly what changed — GAINS (fixes) and REGRESSIONS (a scenario that passed
@@ -151,6 +158,17 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
   const d = delta(prev, rows);
   const deltaText = formatDelta(d);
   if (deltaText) console.log(deltaText);
+
+  // The live side uses this run while the other side uses its last recorded section — the same value
+  // `writeState` would record, through the same function, so the printed gap cannot drift from the
+  // floor that gets committed.
+  const current = stateOf(rows);
+  const gapText = formatSpineGap(
+    spine === 'rel' ? current : recordedRel,
+    spine === 'legacy' ? current : recordedLegacy,
+    spine,
+  );
+  if (gapText) console.log(gapText);
 
   // The systematic-gap view (deferral buckets + failing-step frequency), joined from the
   // server NDJSON captured this run. Always on. The NDJSON + summary are gitignored
@@ -169,19 +187,27 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
   expect(d.regressed).toHaveLength(0);
   expect(passing).toBeGreaterThanOrEqual(prev.passing);
 
-  // Clean local run: record the current run as the new last-known state, and bump the
-  // count-quoting prose. CI never rewrites (no push-back loop) — it only reports the delta.
+  // Clean local run: record the current run as the selected spine's last-known state. CI never
+  // rewrites (no push-back loop) — it only reports the delta.
   const changed = d.gained.length > 0 || d.regressed.length > 0 || rows.length !== prev.total;
   if (changed) {
     if (process.env.CI) {
-      if (d.gained.length)
-        console.log(`L3 ahead by +${d.gained.length} — run locally to record l3-state.json (+ README + feature-support-matrix), then commit (CI does not rewrite them).`);
+      if (d.gained.length) {
+        const prose = spine === 'rel' ? ' (+ README + feature-support-matrix)' : '';
+        console.log(`L3 [${spineLabel}] ahead by +${d.gained.length} — run locally to record l3-state.json${prose}, then commit (CI does not rewrite them).`);
+      }
     } else {
-      writeState(STATE, rows);
-      const synced = passing !== prev.passing ? syncCountFiles(passing) : [];
+      writeState(STATE, rows, spine);
       const bump = passing !== prev.passing ? `${prev.passing} → ${passing}` : `+${d.gained.length}/-${d.regressed.length}`;
-      const also = synced.length ? ` + ${synced.join(' + ')}` : '';
-      console.log(`L3 state recorded (${bump}). Commit test/L3-conformance/l3-state.json${also}.`);
+      // The prose count is THE default configuration's conformance number. A legacy run records
+      // only legacySpine and must never make README or the feature-support matrix quote its floor.
+      if (spine === 'rel') {
+        const synced = passing !== prev.passing ? syncCountFiles(passing) : [];
+        const also = synced.length ? ` + ${synced.join(' + ')}` : '';
+        console.log(`L3 state [${spineLabel}] recorded (${bump}). Commit test/L3-conformance/l3-state.json${also}.`);
+      } else {
+        console.log(`L3 state [${spineLabel}] recorded (${bump}). Commit test/L3-conformance/l3-state.json.`);
+      }
     }
   }
 }, LONG);

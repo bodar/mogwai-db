@@ -15,6 +15,7 @@
 // merely share a name.
 import { expect } from 'bun:test';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
+import { ambientSpine } from '../../src/compiler/options/spine.ts';
 import { runProgram } from '../../src/program.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
@@ -59,7 +60,7 @@ export const run = (store: GraphStore, q: string) => runWith(store, q, undefined
  * statement per element. For a divergence in the ANSWER, use `relirAhead` below; a bare `test.skip`
  * there is the form that lets the dangerous case through.
  */
-export const relirOff = process.env.MOGWAI_RELIR === '0';
+export const relirOff = ambientSpine() === 'legacy';
 
 /**
  * A TRAVERSAL RELIR ANSWERS AND THE LEGACY SPINE REFUSES — declared, and PROVEN in both positions.

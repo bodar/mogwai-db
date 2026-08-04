@@ -36,6 +36,7 @@ import { CREW_SEED } from '../fixtures/seed-crew.ts';
 import { BigDecimal, Duration } from '../../src/gremlin/types.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
 import { decodeAll } from '../support/decode.ts';
+import { relirOff } from '../support/harness.ts';
 
 // A vertex carrying one property of each type our extended GraphBinary serializers cover, so a
 // `Given the typed graph` scenario can read each back and exercise serialize+decode end-to-end.
@@ -229,7 +230,6 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
   // the legacy spine refuses it", and both halves are checkable, so with RelIR off the scenario
   // asserts the REFUSAL. A skip would say the same thing right up until the two spines started both
   // answering and answering differently, which is not a divergence to declare but a defect.
-  const relirOff = process.env.MOGWAI_RELIR === '0';
   for (const s of scenarios) {
     test(`[${s.graph}] ${s.name}`, async () => {
       if (!(s.graph in GRAPHS)) throw new Error(`unknown graph '${s.graph}' (add its fixture to GRAPHS)`);
