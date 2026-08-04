@@ -120,10 +120,16 @@ test('unbounded emit() terminates at the fixpoint (no depth cap) — == times(2)
     .toEqual(['josh', 'lop', 'lop', 'marko', 'ripple', 'vadas']);
 });
 
-test('path() emits the ordered walk (one Path per distinct route)', () => {
+test('path() emits the ordered walk (one Path per distinct route)', async () => {
   const store = seededStore();
   // marko(1)→josh(4)→{lop(3),ripple(5)} — two length-3 paths, in traversal order.
-  const paths = run(store, 'g.V(1).out().out().path()').map((r) => [r.x0_id, r.x1_id, r.x2_id]);
+  //
+  // Asserted on the DECODED Paths rather than on the SQL row, and that is the point: the two spines
+  // spell the row differently and both are right — legacy projects a column per position
+  // (`x0_id`/`x1_id`/…), RelIR one JSONB array of positions — so a test reading either one was
+  // asserting the ROUTE. What this test means to assert is the WALK, which is what a framed Path
+  // holds whichever route answered (`written()` in test/support/harness.ts, same lesson).
+  const paths = (await decodePaths(store, 'g.V(1).out().out().path()')).map((p: any) => p.objects.map((o: any) => o.id));
   // Two distinct routes and nothing asking for an order between them: the assertion is the SET of
   // walks, which is what "one Path per distinct route" means.
   expect(bagOf(paths)).toEqual(bagOf([[1, 4, 3], [1, 4, 5]]));

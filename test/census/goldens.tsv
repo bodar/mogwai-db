@@ -64,7 +64,7 @@ ran	legacy	6	6	6a72838f15adf7d6	21c409acd1141f6d	g.V().as("a").and(__.select("a"
 ran	legacy	3	3	7cbcbb0d3404b5f0	288bd0639b49c1af	g.V().as("a").both().as("b").dedup("a", "b").by(T.label).select("a", "b")
 ran	legacy	6	6	6a72838f15adf7d6	21c409acd1141f6d	g.V().as("a").flatMap(__.select("a"))
 ran	legacy	1	1	edfb0fe47bba006f	fd2d76cef897cc78	g.V().as("a").has("name", "marko").as("b").as("c").select("a", "b", "c").by().by("name").by("age")
-ran	legacy	1	1	f950645de8eb9fe9	20d369a4f952d6f6	g.V().as("a").has("name", "marko").as("b").has("age", 29).as("c").path()
+ran	rel	1	1	f950645de8eb9fe9	20d369a4f952d6f6	g.V().as("a").has("name", "marko").as("b").has("age", 29).as("c").path()
 ran	legacy	1	1	8fb4e73299016537	e25a0aaf7dce8947	g.V().as("a").has("name", "marko").out("created").as("b").addV(__.select("a").label()).property("test", __.select("b").label()).valueMap().with(WithOptions.tokens)
 ran	rel	4	4	33fdbc22148727f2	833e3e0f50dc9e28	g.V().as("a").in("created").addE("createdBy").from("a").property("year", 2009).property("acl", "public")
 ran	legacy	2	2	fba98f19298ca117	fa34716d61fb6a0f	g.V().as("a").in().as("b").in().as("c").select("a","b","c").by("name").limit(Scope.local, 1)

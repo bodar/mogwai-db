@@ -7,9 +7,9 @@ import type { ColMeta } from '../../rel/types.ts';
 import type { ListOf, ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { Elem } from '../plan/plan.ts';
-import { SHAPE_K, elemShape, type AliasShape } from '../steps/context/alias.ts';
 import { aliasScalarTypeOf, withShape, type AliasEntry, type AliasMap } from '../steps/context/context.ts';
 import { carriedCols, meta, payloadCols, typeOf, type Minter } from './build.ts';
+import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject } from './history.ts';
 
 /**
  * THE ALIAS CHANNEL — `as()` writes it, `select()` reads it, and the comparison vocabulary asks it
@@ -18,19 +18,11 @@ import { carriedCols, meta, payloadCols, typeOf, type Minter } from './build.ts'
  * §6 named as 4.1's unfinished business: 149 corpus traversals block on it, the largest family
  * outside writes and side effects.
  *
- * ## A label's value is a PATH HISTORY, not a column
+ * ## A label's value is a HISTORY, not a column
  *
- * `as('a')` does not remember a rowid; it APPENDS the current object to the label's history, which is
- * TinkerPop's `Path` exactly (`select(Pop.first/last/all/mixed)` reads positions off it). So one
- * carried column per LABEL holds a JSONB array of tagged entries, and a rebind extends the array
- * rather than overwriting it. The tag is what lets one label hold — and accumulate — objects of
- * different shapes: a vertex, a value, a folded list.
- *
- * **The `k` tags are IMPORTED, not restated.** `SHAPE_K` lives with the legacy encoding
- * (`steps/context/alias.ts`) and this module writes the same entries, because the tag numbers are
- * DATA and a second copy of them is a second chance for the two spines to drift silently (§10·8 —
- * share data and pure computation, re-express only the emission). What IS re-expressed here is the
- * emission: legacy builds `q` templates, this builds `Expr` nodes.
+ * `as('a')` APPENDS the current object to the label's history, and `select(Pop.first/last/all/mixed)`
+ * reads positions from it. One carried column per LABEL holds that history; the shared tagged-entry
+ * encoding itself lives in `history.ts`, while this module owns the label names and reads.
  *
  * ## Why the NAME map rides beside the plan
  *
@@ -74,52 +66,6 @@ import { carriedCols, meta, payloadCols, typeOf, type Minter } from './build.ts'
  *  there is no bridge and no map to hand over, so the two readers left are both here. */
 const liveAliases = (aliases: AliasMap, rel: Rel): AliasMap =>
   new Map([...aliases].filter(([, entry]) => rel.channels.some((channel) => channel.col === entry.col)));
-
-/** What `as()` is binding — one arm per stream shape, so the entry's tag and its payload cannot be
- *  chosen independently of each other. A `value` binding carries its type through the history's own
- *  `t` field, which is the only place a per-row `vtype` column can survive becoming JSON. */
-export type AliasValue =
-  | { readonly kind: 'element'; readonly elem: Elem; readonly id: Expr }
-  | { readonly kind: 'value'; readonly value: Expr; readonly type: ScalarType; readonly vtype?: Expr }
-  | { readonly kind: 'list'; readonly list: Expr; readonly of: ListOf };
-
-const shapeOf = (bound: AliasValue): AliasShape =>
-  bound.kind === 'element' ? elemShape(bound.elem) : bound.kind === 'list' ? 'list' : 'value';
-
-/**
- * ONE tagged history entry — `jsonb_object('k', <k>, 'v', <value>[, 't', <type>])`.
- *
- * A list's payload goes through `json()` so SQLite stores it AS json rather than as a quoted string;
- * that is the double-encoding corruption the list vocabulary's `memberNode` guards the same way.
- */
-const entryExpr = (bound: AliasValue): Expr => {
-  const k = lit(SHAPE_K[shapeOf(bound)], 'int');
-  if (bound.kind === 'element') return { kind: 'json-object', entries: [['k', k], ['v', bound.id]], binary: true };
-  if (bound.kind === 'list')
-    return { kind: 'json-object', entries: [['k', k], ['v', { kind: 'call', fn: 'json', args: [bound.list] }]], binary: true };
-  // A STATIC tag is a compile-time string; a PER-ROW one is the stream's own `vtype` column, and this
-  // is the boundary where that column stops being a relation column and becomes a self-describing
-  // field. An `unknown` type has nothing honest to record, so the entry carries no tag at all and the
-  // read side infers from the storage class exactly as the wire would.
-  const tag = bound.type.kind === 'static' ? lit(bound.type.type, 'text') : bound.vtype;
-  return {
-    kind: 'json-object', binary: true,
-    entries: [['k', k], ['v', bound.value], ...(tag ? [['t', tag] as const] : [])],
-  };
-};
-
-/** A brand-new label's column value: a one-element history array (array-ALWAYS, even for one
- *  binding — that uniformity is what makes every Pop read one expression rather than two). */
-const seedExpr = (entry: Expr): Expr => ({ kind: 'json-array', items: [entry], binary: true });
-
-/** A rebind, appended. Total on a NULL column: a row that reached here through a path which never
- *  bound the label starts a fresh array rather than producing NULL, which is what keeps `as()` a
- *  pass-through for every row instead of a filter. */
-const appendExpr = (prev: Expr, entry: Expr): Expr => ({
-  kind: 'case',
-  whens: [[{ kind: 'binary', op: 'is', left: prev, right: lit(null, 'any') }, seedExpr(entry)]],
-  else: { kind: 'call', fn: 'jsonb_insert', args: [prev, lit('$[#]', 'text'), entry] },
-});
 
 /** Keep a traverser only where the label is actually bound on its path. An unbound label DROPS the
  *  row (an empty result), never an error — TinkerPop's `select()` rule, and the reason this is a
@@ -172,13 +118,13 @@ export const aliasListAt = (column: Expr, end: 'first' | 'last'): Expr =>
  * front-end shape this has not seen rather than a step to guess at.
  */
 export function bindAliases(
-  step: IRStep, rel: Rel, aliases: AliasMap, bound: AliasValue, fresh: Minter,
+  step: IRStep, rel: Rel, aliases: AliasMap, bound: TraverserObject, fresh: Minter,
 ): { readonly rel: Rel; readonly aliases: AliasMap } | null {
   const labels = step.args ?? [];
   if (!labels.length || labels.some((label) => typeof label !== 'string')) return null;
   if (step.modulators?.length || step.optionArms) return null;
 
-  const entry = entryExpr(bound);
+  const entry = objectEntry(bound);
   const shape = shapeOf(bound);
   // `liveAliases`, not the map as handed over: a barrier upstream consumed the columns, so a rebind
   // after one mints `a0` afresh rather than appending to a column the relation no longer has.
@@ -196,7 +142,7 @@ export function bindAliases(
       ...(bound.kind === 'list' ? { listOf: bound.of } : {}),
     });
     if (!existing) channels = withChannel(channels, { col: column, role: 'alias' });
-    set.set(column, existing ? appendExpr(col(rel.id, column), entry) : seedExpr(entry));
+    set.set(column, existing ? historyAppend(col(rel.id, column), entry) : historySeed(entry));
   }
 
   const payload = payloadCols(rel);

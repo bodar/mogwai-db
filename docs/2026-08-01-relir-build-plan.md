@@ -1690,7 +1690,7 @@ partly present. The state column below now says which HALF exists.
 | property | `vpid/owner/pk/pv/pvtype/pmeta` | `Scan` + `Project` | needs the property shape anyway |
 | record | one wide row, heterogeneous fields | `Project` + child joins | needs `project()`/`select()` |
 | mapEntry | `mk`/`mv` per row | `Explode` | arrives with map re-entry |
-| path | positions, or grouped rows | needs the path CHANNEL first | Phase 3-adjacent |
+| path | positions, or grouped rows | `Explode` + `Aggregate` + `elementNode` — the LIST arm's, reused whole | **LANDED** (§10·11) — and NEITHER of the two forms this row predicted: a path is the list value, framed by a `jsonbPath` arm |
 | variant | dynamic-tag union | `Union` + tag column | the variant arm exists in legacy only |
 | group (rows form) | — | — | **DIES.** The map value replaces it |
 | foreign | landed `VALUES` columns | federation-specific | out of scope here |
@@ -1753,3 +1753,82 @@ projection — `storedValueOn`'s `IN ('list','map','set')`, which legacy inlines
 after: **736/2298 (32.0%), unchanged**, and `rel-sweep` still renders all 53,020 admitted plans inside the
 100-bind cap. So the constant-inlining question §11 raises for the compare key's ~27 binds is real but is
 NOT this arm's blocker, and it stays a separate increment rather than a prerequisite.
+
+### 10·11 — the PATH CHANNEL: a path is a LIST VALUE, and the two legacy regimes collapse into one
+
+The reap of §10·10, and it landed as something neither §6's shape table nor the path prior art
+(`docs/2026-07-18-path-history-substrate.md`) predicted. Both assumed RelIR would reproduce legacy's
+representation — "positions, or grouped rows". It reproduces neither.
+
+**ONE JSONB array channel, not a column per position.** Legacy carries a linear path as `p0…pN` (static
+length) and a recursive one as a JSONB array, with a documented wall between them (`movement after
+recursive repeat().path() not yet supported`) and two `by()` projectors. This route carries one array of
+tagged entries, and three separate pieces of machinery evaporate:
+
+- **a branch arm's shorter path is DATA.** Legacy pads to the longest arm, so a position is nullable, an
+  element position needs a `LEFT JOIN`, and a `by()` over one needs a sibling presence column (`_at`) to
+  distinguish "this arm never got here" from "the property is missing". With an array a two-hop arm's
+  path has two entries. **`union`/`choose` needed no path-specific code at all** — the channel merge
+  already handles one column whose arrays differ in length, and `CHANNEL_MERGE_POLICY.path = 'pad'` turns
+  out to describe a padding that now happens in the data.
+- **`repeat()`'s dynamic length is the same shape**, so Phase 3 inherits the encoding rather than adding
+  the second regime back.
+- **`CHANNEL_COL` is keyed by ROLE**, so a role gets ONE column type: per-position rowids want `int` and
+  an array wants `json`, and the table cannot say both. The encoding was always going to be single; the
+  array is the one that serves both regimes. (That declaration was written before there was a producer,
+  and it called this correctly.)
+
+**The ENTRY encoding is the alias channel's, extracted rather than copied** (`src/compiler/rel/history.ts`).
+`as('a')` appends the current object to a LABEL's history; a tracked path appends it to THE traverser's
+history — TinkerPop says this outright, since a label history IS a `Path`. So both channels write the same
+tagged `{k,v[,t]}` entry with the same `SHAPE_K` tags, which buys two things: a position can hold anything
+a label can (vertex, edge, value, folded list — a heterogeneous path is not a special case), and the READ
+is ONE `case` over the tag however long the path is, where a per-position `elem` recorded at compile time
+needs an arm per position and cannot survive a dynamic length.
+
+**A PATH IS A LIST VALUE plus a framing arm, and the corpus is what settles that** — not a convenience.
+`path().by('name').combine(['dave'])` answers `l[marko,josh,dave]`: TinkerPop re-enters a Path as an
+ordinary collection. So `path()` produces the LIST shape (one `list` column of typed-tree members, built by
+the list vocabulary's own member frame plus `elementNode`), and the only thing making it a Path is which
+framer reads it — `jsonbPath` wraps the identical per-member buffers `jsonbList` does, via the `framePath`
+that already existed. That is the standing `set` already has one level up. Consequence worth stating: the
+whole set-op / `reverse()` / `unfold()` / local-reducer vocabulary composes over a path with **no
+path-specific lowering**, the moment the retype into the list loop lands.
+
+**Fail closed, because an unappended position is a wrong path with the right arity.** Every step producing
+a NEW traverser object owes the path a position; one that carries the column through without appending
+reports a path missing a hop — plausible elements, and a defect the census structurally cannot see. So the
+fold's rule is DENY: `movement` appends (once over the whole fan-out, at the new `id`), the
+position-preserving steps carry it, and every other branch declines while the channel is live. Movement
+COLLAPSE needed no new rule at all: `CHANNEL_GROUP_POLICY.path` is `'undefined'`, so `groupableChannels`
+already refuses to merge convergent walks that have different histories.
+
+**One real defect found in review, and it is a general trap for any carried column this route appends to.**
+The append was first spelled as legacy spells it — `CASE WHEN prev IS NULL THEN jsonb_array(entry) ELSE
+jsonb_insert(prev, '$[#]', entry) END` — which references `prev` TWICE. The assembler fuses a run of
+`Project`s into one `SELECT`, so each hop's expression is re-inlined into the next: **two references per
+level doubles the statement text and the bind list per hop**, measured at 2× on a two-hop path and 2^N in
+general. Legacy never sees this because its per-hop CTE materializes the column. The fix is one reference:
+`jsonb_insert(COALESCE(prev, jsonb_array()), '$[#]', entry)` — total on NULL, bind-free empty array
+(`jsonb_array()` over a `Lit '[]'`, §3.6), and it fixes the ALIAS channel's identical latent blowup on a
+repeated rebind. **The rule: an expression a fused chain re-inlines must reference its input once.**
+
+**Two boundaries needed a fence, both `list.ts`'s rule one node earlier.** `json_each` reads from the FROM
+clause, where SQL cannot name a select alias, so the member frame over the path column must sit behind a
+`Materialize` or it re-inlines the whole append chain into a table-valued function argument.
+
+**Measured.** Census 745 → 746 (32.5%), one traversal legacy→rel with IDENTICAL answer hashes — the ideal
+signature. `path` blockers 38 → 29, and the nine that left mostly moved to the step AFTER `path()` (`is`
++2, `order` +4, `select` +1, `as` +1), which is exactly what "a path is terminal here" means and where the
+next increments are: `path().by()` per position (round-robin over `po % nBys`, with productivity as ONE
+`NOT EXISTS` over the rebuilt list rather than a clause per position), the retype into the list loop
+(which unlocks the ~17 set-op traversals), `from()`/`to()` as a static slice, and a VALUE position (which
+this encoding already holds — the fold simply does not append one yet, and it is the `g_VX1X_name_path`
+scenario legacy FAILS).
+
+**Two L2 tests and one exec test were pinning the ROUTE, not the semantics**, and the treatments differ.
+The L2 SQL snapshots legitimately describe legacy's spelling, so they take `{ spine: 'legacy' }` (§10·4 —
+a test that pins a spine's spelling pins both) and the RelIR spelling gets its own pin beside them. The
+EXEC test was reading legacy's raw `x0_id`/`x1_id` columns to assert a WALK; that one is rewritten to
+assert the decoded `Path` objects, which is spine-neutral and is the `written()` lesson from
+`test/support/harness.ts` applied to reads.

@@ -13,7 +13,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery, executeFramed } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
-import { grouped, read, run, runWith, seededStore } from '../support/harness.ts';
+import { grouped, read, relirOff, run, runWith, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -326,7 +326,7 @@ describe('repeat / path SQL', () => {
   });
 
   test('path() threads a per-position column through the movement fold', () => {
-    const p = read('g.V(1).out().out().path()');
+    const p = read('g.V(1).out().out().path()', { spine: 'legacy' });
     // V() seeds p0; each hop appends a new position holding the moved id, carrying
     // the earlier positions unchanged.
     expect(p.sql).toContain('SELECT id, 1 AS bulk, id AS p0 FROM nodes');
@@ -339,6 +339,17 @@ describe('repeat / path SQL', () => {
       { render: 'element', elem: 'vertex', prefix: 'x1' },
       { render: 'element', elem: 'vertex', prefix: 'x2' },
     ] });
+  });
+
+  test('path() on the RelIR spine: one JSONB array channel, positions rebuilt as a typed tree', () => {
+    if (!relirOff) {
+      const p = read('g.V(1).out().out().path()');
+      expect(p.shape).toEqual({ kind: 'jsonbPath', items: { kind: 'scalar', typed: true } });
+      expect(p.sql).toContain('jsonb_insert(');
+      expect(p.sql).toContain('json_each(');
+      expect(p.sql).toContain('json_group_array(');
+      expect(p.sql).not.toContain('AS p0');
+    }
   });
 
   test('path().by(k1).by(k2) cycles modulators round-robin and drops on missing key', () => {
@@ -449,7 +460,7 @@ describe('repeat / path SQL', () => {
   });
 
   test('path() interleaves edge and vertex positions with the right element shape', () => {
-    const p = read('g.V(1).outE("created").inV().path()');
+    const p = read('g.V(1).outE("created").inV().path()', { spine: 'legacy' });
     // edge position frames endpoints as external ids (COALESCE(uid,id)), not raw rowid
     expect(p.sql).toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=x1n.src) AS x1_src, (SELECT COALESCE(uid, id) FROM nodes WHERE id=x1n.tgt) AS x1_tgt');
     expect(p.shape).toEqual({ kind: 'path', positions: [
@@ -461,38 +472,38 @@ describe('repeat / path SQL', () => {
 
   test('path() through a branch (pad-to-max cols): threads + pads, remaining forms defer', () => {
     // path now threads through the UNION-ALL branch ops (carried-schema + padding).
-    expect(read('g.V(1).union(__.out(), __.in()).path()').shape.kind).toBe('path');
-    expect(read('g.V(1).coalesce(__.out(), __.in()).path()').shape.kind).toBe('path');
-    expect(read('g.V(1).optional(__.out()).path()').shape.kind).toBe('path');
-    expect(read('g.V(1).choose(__.has("name","x"), __.out(), __.in()).path()').shape.kind).toBe('path');
+    expect(read('g.V(1).union(__.out(), __.in()).path()', { spine: 'legacy' }).shape.kind).toBe('path');
+    expect(read('g.V(1).coalesce(__.out(), __.in()).path()', { spine: 'legacy' }).shape.kind).toBe('path');
+    expect(read('g.V(1).optional(__.out()).path()', { spine: 'legacy' }).shape.kind).toBe('path');
+    expect(read('g.V(1).choose(__.has("name","x"), __.out(), __.in()).path()', { spine: 'legacy' }).shape.kind).toBe('path');
     // ragged arms: the shorter arm's trailing position is NULL-padded + LEFT JOINed.
-    const r = read('g.V(1).union(__.out(), __.out().out()).path()');
+    const r = read('g.V(1).union(__.out(), __.out().out()).path()', { spine: 'legacy' });
     expect(r.sql).toContain('NULL AS p2');
     expect(r.sql).toContain('LEFT JOIN');
     // A union() SOURCE tracks the path too: each rooted arm seeds its own p0 and the merge pads
     // the shorter arm, so a short-arm path is genuinely shorter (not a dropped row).
-    const s = read('g.union(__.V().out().out(), __.V().hasLabel("software")).path()');
+    const s = read('g.union(__.V().out().out(), __.V().hasLabel("software")).path()', { spine: 'legacy' });
     expect(s.sql).toContain('NULL AS p1');
     expect((s.shape as any).positions).toHaveLength(3);
     // by() over a PADDED position: the value column NULLs both when the position is absent and
     // when its property is missing, so an optional position carries a presence column (`_at`)
     // and only a present-but-missing value drops the whole path.
-    const b = read('g.V(1).union(__.out(), __.out().out()).path().by("name")');
+    const b = read('g.V(1).union(__.out(), __.out().out()).path().by("name")', { spine: 'legacy' });
     expect(b.sql).toContain('AS x2_at');
     expect(b.sql).toContain('p.p2 IS NULL OR');
     expect((b.shape as any).positions[2]).toEqual({ render: 'value', prefix: 'x2', optional: true });
     expect((b.shape as any).positions[0]).toEqual({ render: 'value', prefix: 'x0' }); // p0 is never padded
     // ---- still fail-closed ----
     // conflicting element kinds at one position (edge vs vertex) → deferred (needs tagged array).
-    expect(() => compile('g.V(1).union(__.outE().inV(), __.out()).path()', {})).toThrow('conflicting element kinds');
+    expect(() => compile('g.V(1).union(__.outE().inV(), __.out()).path()', {}, { spine: 'legacy' })).toThrow('conflicting element kinds');
     // unchanged deferrals
-    expect(() => compile('g.V(1).out().dedup().path()', {})).toThrow('dedup() with path tracking not yet supported');
+    expect(() => compile('g.V(1).out().dedup().path()', {}, { spine: 'legacy' })).toThrow('dedup() with path tracking not yet supported');
     // by(__.values(k))/by(T.id) now compile to a per-position scalar; only an unrenderable
     // by(traversal) shape defers.
-    expect(read('g.V(1).out().path().by(__.values("name"))').shape.kind).toBe('path');
-    expect(read('g.V(1).out().path().by(T.id)').shape.kind).toBe('path');
-    expect(() => compile('g.V(1).out().path().by(__.groupCount())', {})).toThrow('path().by(traversal)');
-    expect(() => compile('g.V(1).out().path().order()', {})).toThrow('order() on a path value not yet supported');
+    expect(read('g.V(1).out().path().by(__.values("name"))', { spine: 'legacy' }).shape.kind).toBe('path');
+    expect(read('g.V(1).out().path().by(T.id)', { spine: 'legacy' }).shape.kind).toBe('path');
+    expect(() => compile('g.V(1).out().path().by(__.groupCount())', {}, { spine: 'legacy' })).toThrow('path().by(traversal)');
+    expect(() => compile('g.V(1).out().path().order()', {}, { spine: 'legacy' })).toThrow('order() on a path value not yet supported');
   });
 
   test('repeat().path() accumulates a JSONB array through the WITH RECURSIVE walk', () => {

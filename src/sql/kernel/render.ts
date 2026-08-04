@@ -181,6 +181,7 @@ export type Shape =
   // flag bag made four encodings look like optional metadata and forced the framer
   // to reconstruct a fifth. `ListOf` already owns the item question.
   | { kind: 'jsonbList'; items: ListOf }
+  | { kind: 'jsonbPath'; items: ListOf } // one JSONB array of positions per row → one GraphBinary Path
   | { kind: 'jsonbElementList'; elem: Exclude<ElemShape, 'property'> } // one JSON object-array per relational element list
   | { kind: 'jsonbSet'; typed?: boolean }    // a set-VALUE stream (intersect/difference/disjunct OR a stored typed set): one Set per row, from a JSONB `list` column
   // `labelSet` says the `label` column holds a JSON ARRAY of names (the multi-label regime)

@@ -31,6 +31,7 @@ import { elementAddE, elementAddV, elementDrop, elementMergeV, elementProperty, 
 import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList, type ListCtx } from './list.ts';
 import { elementHost, groupBarrier, mapPayload } from './map.ts';
 import { elementPayload } from './element.ts';
+import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
 import { LabelCardinality } from '../../api.ts';
 
 /**
@@ -84,6 +85,7 @@ export type RelFraming =
    *  needs to know how to expand each one; `set` is a framing marker only (a SET frames differently,
    *  the member substrate is shared). */
   | { readonly kind: 'list'; readonly of: ListOf; readonly set?: boolean }
+  | { readonly kind: 'path'; readonly of: ListOf }
   /** A traverser whose VALUE is a MAP — one JSONB `map` column per row holding an ordered
    *  `[[keyNode, valNode], …]` pairs array, which is the same self-describing tree a stored map
    *  property uses. The LIST arm's twin, deliberately: `keyOf`/`valOf` describe each side's shape for
@@ -206,6 +208,7 @@ interface FilterCtx { readonly params: Record<string, any>; readonly correlatedC
  *  different lowering strategy. */
 interface ChainCtx extends FilterCtx {
   readonly collapse: boolean;
+  readonly tracksPath: boolean;
   /** Does this chain have an EMISSION ORDER at all — `analyzeChain`'s chain-global answer, threaded
    *  rather than re-derived. A step that MINTS a fresh traverser (`addV`) has to know: it seeds the
    *  position channel exactly where the source would have, and a step-local re-derivation would be a
@@ -620,9 +623,11 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
   if (!first) return null;
   // N-ary UNION ALL, minted once — and ALL, never distinct: traversers are a multiset, so a vertex
   // reachable both ways is two traversers.
-  const fanned = rest.length
+  let fanned: Rel = rest.length
     ? make.union({ id: fresh('u'), inputs: arms, all: true, channels: carried, type: typeOf(...armCols) })
     : first;
+  if (pathCarried(fanned))
+    fanned = extendPath(fanned, { kind: 'element', elem: hops[0]!.elem, id: col(fanned.id, 'id') }, fresh);
   const encounter = encounterOf(carried);
   return { rel: encounter ? remintOrder(fanned, encounter, fresh) : fanned, elem: hops[0]!.elem };
 }
@@ -807,6 +812,7 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, fresh: Min
   if (step.name === 'order') return elementOrder(step, input, elem, fresh);
   const sliced = sliceOp(step, input, bulked, fresh);
   if (sliced) return sliced;
+  if (step.name === 'dedup' && pathCarried(input)) return null;
 
   if (step.name !== 'dedup' || (step.args ?? []).length || isLocalScope(step)) return null;
   // A BARE `dedup()` is a grouping by traverser IDENTITY, so the channel policy table decides whether
@@ -1757,6 +1763,7 @@ const framed = (chain: Tail, collapse: boolean, fresh: Minter): { readonly rel: 
     };
     case 'scalar': return scalarPayload(chain.rel, framing, fresh);
     case 'list': return listPayload(chain.rel, framing.of, !!framing.set, fresh);
+    case 'path': return pathPayload(chain.rel, framing.of, fresh);
     case 'map': return mapPayload(chain.rel, framing.keyOf, framing.valOf, fresh);
     // A DISCARD has nothing to project: the result relation is a statement with an empty `RETURNING`, so it
     // has no columns and `discard` is already the whole contract. The algebra owes the framing layer nothing
@@ -1860,9 +1867,12 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   // step this route cannot thread it through declines WHOLE: silently omitting the channel would
   // not defer, it would pick a different window from the same multiset — right arity, plausible
   // rows, and a census that structurally cannot see it (`ord` is telemetry, `ms` is the gate).
-  const ordered = analyzeChain(steps as IRStep[]).demandsEncounter;
-  const ctx: ChainCtx = { params, correlatedChildren, collapse, ordered, labelCardinality };
-  const seedChannels = ordered ? withChannel(BULK, ENCOUNTER) : BULK;
+  const facts = analyzeChain(steps as IRStep[]);
+  const ordered = facts.demandsEncounter;
+  const tracksPath = facts.tracksPath;
+  const ctx: ChainCtx = { params, correlatedChildren, collapse, ordered, tracksPath, labelCardinality };
+  const orderedChannels = ordered ? withChannel(BULK, ENCOUNTER) : BULK;
+  const seedChannels = tracksPath ? withChannel(orderedChannels, PATH_CHANNEL) : orderedChannels;
   const first = steps[0];
   if (!first) return null;
 
@@ -1933,8 +1943,11 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   // the same question of the same column instead of of whatever SQLite happened to produce.
   let rel: Rel = make.project({
     id: fresh('c'), input: source, channels: seedChannels, type: typeOf(...elementCols(seedChannels)),
-    exprs: [['id', col(source.id, 'id')], ['bulk', lit(1, 'int')],
-      ...(ordered ? [['encounter', col(source.id, 'id')] as const] : [])],
+    exprs: [['id', col(source.id, 'id')], ...seedChannels.map((channel) => [channel.col,
+      channel.role === 'bulk' ? lit(1, 'int')
+        : channel.role === 'encounter' ? col(source.id, 'id')
+          : seedPath({ kind: 'element', elem, id: col(source.id, 'id') }),
+    ] as const)],
   });
 
   return elementTail(rel, elem, steps, at, false, ctx, fresh, NO_ALIASES);
@@ -2012,6 +2025,7 @@ function elementTail(
       continue;
     }
     if (step.name === 'select') {
+      if (pathCarried(rel)) return null;
       const selected = selectOne(step, rel, labels, fresh);
       if (!selected) return null;
       return continueAs(selected.rel, readFraming(selected.read), steps, at + 1, bulked, ctx, fresh, labels);
@@ -2028,7 +2042,15 @@ function elementTail(
       // correctness — the same trade the movement loop already makes.
       return continueAs(merged.rel, merged.framing, steps, at + 1, bulked || ctx.collapse, ctx, fresh, labels);
     }
+    if (step.name === 'path') {
+      if (!pathCarried(rel) || step.modulators?.length || step.optionArms || (step.args ?? []).length
+        || step.from !== undefined || step.to !== undefined) return null;
+      const positions = pathPositions(rel, fresh);
+      if (!positions) return null;
+      return continueAs(positions.rel, { kind: 'path', of: positions.of }, steps, at + 1, false, ctx, fresh, labels);
+    }
     if (step.name === 'addE') {
+      if (pathCarried(rel)) return null;
       const added = addedEdges(rel, elem, steps, at, labels, ctx, fresh);
       if (!added) return null;
       // The LABELS carry, for `addV`'s reason and by its mechanism — the created edges correlate back
@@ -2043,11 +2065,13 @@ function elementTail(
     // construction here: `continueAs`'s map arm declines a step after one until the map re-entry
     // vocabulary (unfold to entries, select(Column.*)) exists, so this cannot silently drop a tail.
     if (step.name === 'groupCount' || step.name === 'group') {
+      if (pathCarried(rel)) return null;
       const grouped = groupBarrier(rel, elementHost(rel, elem), step, bulked, fresh);
       if (!grouped) return null;
       return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
     if (step.name === 'mergeV') {
+      if (pathCarried(rel)) return null;
       const merged = mergedVertices(rel, steps, at, ctx, fresh);
       if (!merged) return null;
       // The LABELS carry for `addV`'s reason and by `addV`'s mechanism, but the correlation is a cross
@@ -2058,6 +2082,7 @@ function elementTail(
       return { ...tail, effects: [...merged.effects.bindings, ...(tail.effects ?? [])] };
     }
     if (step.name === 'addV') {
+      if (pathCarried(rel)) return null;
       const added = addedVertices(rel, steps, at, ctx, fresh);
       if (!added) return null;
       // The LABELS carry, because the relation carries their columns: `addV` correlates its new rows
@@ -2069,6 +2094,7 @@ function elementTail(
       return { ...tail, effects: [...added.effects.bindings, ...(tail.effects ?? [])] };
     }
     if (step.name === 'property') {
+      if (pathCarried(rel)) return null;
       // The whole RUN of property() steps, because they share one target: taking them one at a time
       // would snapshot the same elements once per step and, worse, let a later step read a graph an
       // earlier one had already written. `elementProperty` re-enters this loop at `at`, so a read
@@ -2086,6 +2112,7 @@ function elementTail(
       return { ...tail, effects: [...written.bindings, ...(tail.effects ?? [])] };
     }
     if (step.name === 'drop') {
+      if (pathCarried(rel)) return null;
       // TERMINAL by the grammar, and asserted rather than assumed: a step after `drop()` would be a
       // read over a stream that no longer exists, and the honest answer to a chain the passes should
       // have rejected is to decline it, not to lower the prefix and forget the rest.
@@ -2100,6 +2127,7 @@ function elementTail(
 
   if (at === steps.length) return { rel, framing: { kind: 'elements', elem }, aliases: labels };
 
+  if (pathCarried(rel)) return null;
   const retyped = terminal(steps[at], rel, elem, fresh);
   if (!retyped) return null;
 
@@ -2124,6 +2152,7 @@ function continueAs(
   switch (framing.kind) {
     case 'elements': return elementTail(rel, framing.elem, steps, from, bulked, ctx, fresh, labels);
     case 'list': return listTail(rel, framing.of, steps, from, ctx, fresh, labels);
+    case 'path': return from === steps.length ? { rel, framing, aliases: labels } : null;
     // A value's multiplicity is the traverser's, so `bulked` carries.
     case 'scalar': return scalarTail(rel, framing, steps, from, bulked, ctx, fresh, labels);
     // A MAP is a barrier's RESULT, so a step after one re-enters a map traverser — `unfold()` to
@@ -2281,6 +2310,7 @@ function chooseArms(
 const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
   left.kind === 'elements' ? right.kind === 'elements' && left.elem === right.elem
     : left.kind === 'list' ? right.kind === 'list' && JSON.stringify(left.of) === JSON.stringify(right.of)
+      : left.kind === 'path' ? right.kind === 'path' && JSON.stringify(left.of) === JSON.stringify(right.of)
       // A DISCARD is not a stream, so no arm can be one: `drop()` is terminal, and an arm body ending
       // in it would be a branch whose arms disagree about whether a traverser exists at all.
       : left.kind === 'discard' ? false

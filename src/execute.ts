@@ -446,23 +446,27 @@ function frameValue(v: any, as: ValueType | undefined): Buffer {
 // Frame one JSON list value by its item shape — shared by the list-VALUE shapes and a
 // variant's list (vk=4) arm. Element items arrive as {id,label,props[,src,tgt]} objects
 // (rowids already expanded to public payloads in SQL); scalars frame by their tag or infer.
-function frameListOf(json: string, of: ListOf): Buffer {
-  // A NULL list column is a genuine null traverser, not a list (e.g. split() of a null value)
-  // — frame it as null rather than mapping over a non-array.
-  if (json == null) return frameValue(null, undefined);
+function listItemBuffers(json: string, of: ListOf): Buffer[] {
   const items = JSON.parse(json);
-  if (of.kind === 'elem') return listBuffer(items.map(of.elem === 'edge' ? rowEdge : rowVertex));
-  if (of.kind === 'property') return listBuffer(items.map(framePropertyRow));
+  if (of.kind === 'elem') return items.map(of.elem === 'edge' ? rowEdge : rowVertex);
+  if (of.kind === 'property') return items.map(framePropertyRow);
   if (of.kind === 'scalar')
-    return of.typed ? listBuffer(items.map(frameTypedNode))
-      : of.as ? listBuffer(items.map((x: any) => frameValue(x, of.as)))
-        : ioc.listSerializer.serialize(items);
+    return of.typed ? items.map(frameTypedNode)
+      : of.as ? items.map((x: any) => frameValue(x, of.as))
+        : items.map((x: any) => ioc.anySerializer.serialize(x));
   // A list-of-lists: frame each inner member by its own descriptor so an element leaf
   // (e.g. terminal select(Column.values) over an element-list-valued group) frames its
   // members as Vertex/Edge, not the client's JS-inferred maps. SQL already expanded the
   // leaf rowids into element payload objects (materialize.nestedListResult); recursing
   // here descends the same nesting the descriptor records.
-  return listBuffer(items.map((inner: any) => frameListOf(JSON.stringify(inner), of.of)));
+  return items.map((inner: any) => frameListOf(JSON.stringify(inner), of.of));
+}
+
+function frameListOf(json: string, of: ListOf): Buffer {
+  // A NULL list column is a genuine null traverser, not a list (e.g. split() of a null value)
+  // — frame it as null rather than mapping over a non-array.
+  if (json == null) return frameValue(null, undefined);
+  return listBuffer(listItemBuffers(json, of));
 }
 
 // The GraphBinary key + a canonical string (JS Map dedup key) for one group row.
@@ -666,6 +670,7 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
     // A list-VALUE stream: frame each row's list by its item descriptor (shared with the
     // variant list arm + record list fields) — typed {t,v} items, a uniform `as` tag, or infer.
     case 'jsonbList': for (const r of rows) yield frameListOf(r.list, shape.items); return;
+    case 'jsonbPath': for (const r of rows) yield framePath(listItemBuffers(r.list, shape.items)); return;
     // Relational element-list values materialize as ordered JSON object arrays in
     // SQL, then frame each member through the same property-preserving element
     // encoders as ordinary vertex/edge rows.

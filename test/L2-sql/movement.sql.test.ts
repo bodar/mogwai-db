@@ -46,13 +46,13 @@ describe('movement / edge sources SQL', () => {
     // Regression: an edge framed out as an element must report external endpoint
     // ids on ALL paths (was raw rowid), matching the write path (write.ts nodeExtId).
     // fold() over edges reuses the __element edge projection.
-    expect(read('g.V(1).outE().fold()').sql).toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=n.src) AS src');
+    expect(read('g.V(1).outE().fold()', { spine: 'legacy' }).sql).toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=n.src) AS src');
     // path() with an edge position frames endpoints per-position (x{i}_src/_tgt).
-    const pth = read('g.V(1).outE().inV().path()');
+    const pth = read('g.V(1).outE().inV().path()', { spine: 'legacy' });
     expect(pth.sql).toContain('WHERE id=x1n.src) AS x1_src');
     expect(pth.sql).toContain('WHERE id=x1n.tgt) AS x1_tgt');
     // group() default value = element list of edges (v_src/_tgt).
-    expect(read('g.V(1).outE().group().by(__.label())').sql)
+    expect(read('g.V(1).outE().group().by(__.label())', { spine: 'legacy' }).sql)
       .toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=gn.src) AS v_src');
   });
 
