@@ -251,10 +251,33 @@ provision() {
 # docs/2026-07-29-tinkerpop-core-engine-alignment.md). +9.8MB against ~400MB already checked out.
 #
 # `full`, not `shallow`: we read this history — a pin bump is diffed against the previous pin.
-provision vendor/tinkerpop https://github.com/apache/tinkerpop.git full \
-  gremlin-language gremlin-js gremlin-test gremlin-core
+#
+# `gremlin-core` and the whole of `vendor/calcite` are dropped when MOGWAI_SKIP_REFERENCE is set —
+# see the block below for what that costs and who may set it.
+TINKERPOP_SPARSE=(gremlin-language gremlin-js gremlin-test)
+[ -z "${MOGWAI_SKIP_REFERENCE:-}" ] && TINKERPOP_SPARSE+=(gremlin-core)
+provision vendor/tinkerpop https://github.com/apache/tinkerpop.git full "${TINKERPOP_SPARSE[@]}"
 SM=vendor/tinkerpop
 PINNED="$PROVISIONED_SHA"
+
+# ── MOGWAI_SKIP_REFERENCE: provision only what is EXECUTED ─────────────────────────────────────
+#
+# Two of our checkouts are cited, never executed: `gremlin-core` (Java engine) and all of
+# `vendor/calcite`. Nothing under `src/`, `test/`, `parser/` or `scripts/` imports either — every hit
+# is a comment naming a path and a line (verified: 16 citations, all in prose). So a run that only
+# COMPILES AND TESTS this repo needs neither, and CI is exactly that run: it never opens a citation.
+#
+# What it costs, stated plainly: in a checkout provisioned this way a `vendor/…` citation does not
+# resolve, which is the property those two exist for. That is why it is opt-IN and off by default —
+# a developer checkout keeps them, and only a runner that will never read a comment turns them off.
+# Not a silent trim either: the line below says what was skipped, so a resolve failure has an
+# explanation in the log that produced the tree.
+#
+# Self-healing: `provision` re-asserts the sparse set every run, so unsetting the variable restores
+# gremlin-core on the next run and re-provisions calcite from scratch.
+if [ -n "${MOGWAI_SKIP_REFERENCE:-}" ]; then
+  echo "[submodule] MOGWAI_SKIP_REFERENCE: skipping the cited-never-executed checkouts (gremlin-core, vendor/calcite)"
+fi
 
 # ── calcite: READ-ONLY prior art for the RelIR ────────────────────────────────────────────────
 #
@@ -277,9 +300,11 @@ PINNED="$PROVISIONED_SHA"
 # has it without a second command — against a submodule step that already moves ~400 MB and builds
 # a client.
 CALCITE_SRC=core/src/main/java/org/apache/calcite
-provision vendor/calcite https://github.com/apache/calcite.git shallow \
-  "$CALCITE_SRC/rel" "$CALCITE_SRC/rex" "$CALCITE_SRC/plan" "$CALCITE_SRC/sql" \
-  "$CALCITE_SRC/sql2rel" "$CALCITE_SRC/util" "$CALCITE_SRC/tools"
+if [ -z "${MOGWAI_SKIP_REFERENCE:-}" ]; then
+  provision vendor/calcite https://github.com/apache/calcite.git shallow \
+    "$CALCITE_SRC/rel" "$CALCITE_SRC/rex" "$CALCITE_SRC/plan" "$CALCITE_SRC/sql" \
+    "$CALCITE_SRC/sql2rel" "$CALCITE_SRC/util" "$CALCITE_SRC/tools"
+fi
 
 # ── the gremlin client: install deps, build, register the link ─────────────────────────────────
 

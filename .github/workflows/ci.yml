@@ -39,4 +39,12 @@ jobs:
             bun-${{ runner.os }}-
 
       # mise installs the pinned bun, then runs the build graph (test + build).
+      #
+      # MOGWAI_SKIP_REFERENCE: this runner compiles and tests, and never opens a source citation, so
+      # it does not provision the two cited-never-executed checkouts (gremlin-core, vendor/calcite).
+      # See scripts/init-submodule.sh for what that costs. `submodule` is the SERIAL ROOT of the task
+      # graph — everything waits on it — so seconds removed here are seconds off the whole run, which
+      # is not true of the eight tasks that fan out after it.
       - run: mise run ci
+        env:
+          MOGWAI_SKIP_REFERENCE: "1"
