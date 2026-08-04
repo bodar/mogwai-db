@@ -30,7 +30,7 @@ jobs:
       # provisions, so a staged-but-uncommitted bump keys against the commit actually used.
       - id: pin
         run: echo "sha=$(git ls-files -s vendor/tinkerpop | awk '{print $2}')" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}-${{ steps.pin.outputs.sha }}
