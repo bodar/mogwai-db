@@ -1,4 +1,4 @@
-import { compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import type { ListOf, ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { SHAPE_K, elemShape, type AliasShape } from '../steps/context/alias.ts';
@@ -37,7 +37,7 @@ export const shapeOf = (object: TraverserObject): AliasShape =>
  * A list's payload goes through `json()` so SQLite stores it AS json rather than as a quoted string.
  */
 export const objectEntry = (object: TraverserObject): Expr => {
-  const k = lit(SHAPE_K[shapeOf(object)], 'int');
+  const k = compilerInt(SHAPE_K[shapeOf(object)]);
   if (object.kind === 'element')
     return { kind: 'json-object', entries: [['k', k], ['v', object.id]], binary: true };
   if (object.kind === 'list')

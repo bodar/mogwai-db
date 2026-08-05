@@ -697,7 +697,7 @@ export function listSetOp(
         const seg = (members: Rel, index: number): Rel => make.project({
           id: fresh('cs'), input: members, channels: [],
           type: typeOf(meta(MEMBER.value, 'any', true), meta('seg', 'int'), meta(MEMBER.ord, 'int')),
-          exprs: [[MEMBER.value, col(members.id, MEMBER.value)], ['seg', lit(index, 'int')], [MEMBER.ord, col(members.id, MEMBER.ord)]],
+          exprs: [[MEMBER.value, col(members.id, MEMBER.value)], ['seg', compilerInt(index)], [MEMBER.ord, col(members.id, MEMBER.ord)]],
         });
         const both = make.union({
           id: fresh('cu'), inputs: [seg(mine, 0), seg(membersOf(operand, fresh), 1)],

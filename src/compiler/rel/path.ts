@@ -1,5 +1,5 @@
 import type { Channel } from '../../channels.ts';
-import { col, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ListOf, Shape } from '../../sql/kernel/render.ts';
@@ -148,7 +148,7 @@ export function pathPositions(
   const element: Expr = {
     kind: 'case',
     whens: [[
-      { kind: 'binary', op: '=', left: tag, right: lit(SHAPE_K.edge, 'int') },
+      { kind: 'binary', op: '=', left: tag, right: compilerInt(SHAPE_K.edge) },
       elementNode(rowid, 'edge', fresh),
     ]],
     else: elementNode(rowid, 'vertex', fresh),
@@ -161,7 +161,7 @@ export function pathPositions(
     return {
       kind: 'case',
       whens: [[
-        { kind: 'binary', op: '=', left: tag, right: lit(SHAPE_K.edge, 'int') },
+        { kind: 'binary', op: '=', left: tag, right: compilerInt(SHAPE_K.edge) },
         edge,
       ]],
       else: vertex,
@@ -178,8 +178,8 @@ export function pathPositions(
           kind: 'case',
           whens: nodes.slice(0, -1).map((arm, j) => [{
             kind: 'binary', op: '=',
-            left: { kind: 'binary', op: '%', left: col(members.id, 'po'), right: lit(nodes.length, 'int') },
-            right: lit(j, 'int'),
+            left: { kind: 'binary', op: '%', left: col(members.id, 'po'), right: compilerInt(nodes.length) },
+            right: compilerInt(j),
           }, arm]),
           else: nodes[nodes.length - 1],
         };
