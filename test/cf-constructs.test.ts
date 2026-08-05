@@ -32,7 +32,10 @@ type Outcome =
 
 let proc: ReturnType<typeof Bun.spawn> | undefined;
 
-async function waitForReady(timeoutMs = 60_000): Promise<void> {
+/** Named so the `beforeAll` that wraps this can be given a strictly LARGER budget — see the hook. */
+const READY_TIMEOUT_MS = 60_000;
+
+async function waitForReady(timeoutMs = READY_TIMEOUT_MS): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -77,6 +80,13 @@ const SCHEMA = [
 ];
 
 describe('the write constructs, measured on DO SQLite', () => {
+  // THE HOOK'S BUDGET MUST EXCEED `waitForReady`'s, or the helper's deadline is unreachable and its
+  // diagnostic is never the one you see. bun's default per-hook timeout is 5s while `waitForReady`
+  // allows 60s, so the hook was being killed at 5s and reported as an unnamed timeout in this
+  // describe — with no mention of wrangler. Standalone this never bites (the whole file runs in
+  // ~1.2s); it bit only inside `mise run ci`, where `build` is invoking wrangler concurrently and
+  // startup contends. A wrapper tighter than the thing it wraps turns a slow dependency into an
+  // unattributable flake, which is what cost three red `ci` runs with three different victims.
   beforeAll(async () => {
     proc = Bun.spawn(
       ['./node_modules/.bin/wrangler', 'dev', '--config', 'test/cf-probe/wrangler.jsonc',
@@ -84,7 +94,7 @@ describe('the write constructs, measured on DO SQLite', () => {
       { cwd: ROOT, env: { ...process.env, WRANGLER_SEND_METRICS: 'false' }, stdout: 'ignore', stderr: 'ignore' },
     );
     await waitForReady();
-  });
+  }, READY_TIMEOUT_MS + 30_000);
 
   afterAll(async () => {
     proc?.kill();

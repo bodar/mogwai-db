@@ -54,6 +54,16 @@ describe('cfLimitViolation — the DO statement contract', () => {
   });
 });
 
+/**
+ * These walls are only observable at HUNDREDS of rows — that is the point of them — so each test below
+ * runs hundreds of compiles and statements, and bun's default 5s per-test budget is a unit-test budget.
+ * Standalone the whole file finishes in ~3.6s and the default never bites; inside `mise run ci` it does,
+ * because the suite shares a machine with `build`, `sql-hygiene` and the rest of `test`. An explicit
+ * budget states "slow BY CONSTRUCTION" instead of leaving a load-sensitive flake that reports as a
+ * different victim each run — measured: three red `ci` runs, three different tests, all green standalone.
+ */
+const ROW_SCALE_TIMEOUT_MS = 30_000;
+
 // Was the wall of plan doc §1d: `ids.map(() => '?')`, spliced TWICE for `src IN (…) OR tgt IN (…)`,
 // so a DO refused the statement past 50 vertices — and the FTS owner sweep refused it past 99 edges.
 describe('drop() cascades in DO-legal chunks whatever the target count', () => {
@@ -64,7 +74,7 @@ describe('drop() cascades in DO-legal chunks whatever the target count', () => {
     executeQuery(store, 'g.V().drop()', {});
     for (const t of ['nodes', 'edges', 'vertex_properties', 'vertex_labels', 'property_fts'])
       expect([t, store.query<{ n: number }>(`SELECT count(*) AS n FROM ${t}`)[0].n]).toEqual([t, 0]);
-  });
+  }, ROW_SCALE_TIMEOUT_MS);
 
   test('250 edges dropped on their own leaves the vertices and sweeps their FTS rows', () => {
     const store = limited();
@@ -76,7 +86,7 @@ describe('drop() cascades in DO-legal chunks whatever the target count', () => {
     expect(store.query<{ n: number }>('SELECT count(*) AS n FROM edge_properties')[0].n).toBe(0);
     expect(store.query<{ n: number }>('SELECT count(*) AS n FROM property_fts')[0].n).toBe(0);
     expect(store.query<{ n: number }>('SELECT count(*) AS n FROM nodes')[0].n).toBe(2);
-  });
+  }, ROW_SCALE_TIMEOUT_MS);
 });
 
 // Was the wall of plan doc §1c: four binds per landed cell, so a federated result of 26 vertices
@@ -99,7 +109,7 @@ describe('a federated landing binds the whole result set once', () => {
     const plan = landAndCount(500);
     expect(plan.binds.length).toBe(1);
     expect(store.query(plan.sql, plan.binds).length).toBe(500);
-  });
+  }, ROW_SCALE_TIMEOUT_MS);
 
   test('an empty result set lands as a zero-row relation (no special-case branch)', () => {
     const plan = landAndCount(0);
@@ -118,7 +128,7 @@ describe('a data-sized within() set rides one JSON bind', () => {
     if (plan.kind !== 'read') throw new Error('expected read plan');
     expect(plan.binds.length).toBeLessThanOrEqual(CF_MAX_BINDS);
     expect(store.query<{ v: number }>(plan.sql, plan.binds)[0].v).toBe(5);
-  });
+  }, ROW_SCALE_TIMEOUT_MS);
 
   test('a small set keeps the IN-list form (one bind per member)', () => {
     const plan = compile('g.V().has("name", within("a","b","c")).count()', {});
