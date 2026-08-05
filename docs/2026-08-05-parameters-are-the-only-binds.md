@@ -342,15 +342,26 @@ The Phase B parallel-array deviation is reversed on both shared IR types: a step
 the faithful GValue representation the thesis called for — no parallel `argTypes`/`paramNames`/`values`
 arrays left on either. Remaining consolidation of the SAME shape, each its own gated chunk (all
 behaviour-preserving):
-- **Collection-literal `literalItems` returns `{values, items}`** — unify to `Arg[]` members so a
-  member carries its own type/name; this is what dissolves the `flattenListArgs` desync for real and
-  can unblock the deferred `V($x)` / `within([$x])` collection-param gaps.
-- **RelIR `constLit(value, type, paramName)` / `sliceBound(n, paramName)`** take a loose positional trio
-  — collapse to one `Arg`, the same object the front-end now carries end to end.
-- **Predicate operand TYPE is available but not yet threaded** — `Pred.operands[i].type` is populated
-  by the parser and dropped at the render seam (`predicate.ts` passes `null`); threading it is the
-  enrichment that makes `P.gt(2.0)` render `2.0`, a small typed-literal correctness win, separate from
-  the unification.
+- **RelIR `constLit` takes an `Arg` — LANDED (`fe3bcf7`).** `constLit(value, type, paramName)` →
+  `constLit(a: Arg)`, so the same object the front-end carries flows into the bind-vs-inline seam and
+  the step-arg callers drop their `?? null` trio. (`sliceBound` left as-is — a count + name, no type.)
+
+**Now a DESIGN DECISION, not a mechanical chunk — the collection-member case.** `literalItems` returns
+`{values, items}` (member VALUES paralleling member TYPES in the arg's `type.items`), and
+`flattenListArgs` / `parsePredicate`'s bracketed-list unwrap spread the values while DROPPING the
+per-member type and name. Unifying collection members to `Arg[]` is what would dissolve that desync
+"for real" — but it is NOT a behaviour-preserving refactor like chunks 1/2/4. It would REVERSE the
+documented decision that a `$x` inside a collection literal (`within([$x])`, `inject([$x])`) inlines as
+part of the **oversized** bucket (correct result, no budget saving), by making each member a tracked
+parameter that BINDS. That is a capability/semantics change (member params start counting against the
+100), so it wants an explicit decision before landing rather than being swept in with the encoding
+tidy. Two independent pieces if taken: (a) `parsePredicate`'s wrapped-list unwrap can already thread
+`itemTypeAt(parsed[0].type, i)` into each member `Arg` (pure type-preservation, safe); (b) tracking a
+member's NAME requires the front-end to stop flattening a collection member's `$x`, which is the
+oversized→N-params reversal. **Predicate operand TYPE is the same shape of deferred enrichment** —
+`Pred.operands[i].type` is populated but `predicate.ts` passes `null` at the render seam; threading it
+makes `P.gt(2.0)` render `2.0`. Both are typed-literal correctness wins, both change SQL, neither is
+the pure unification the first four chunks were.
 
 **What remains is coverage-only / exotic / an open design question — each needs a decision before it is
 worth the risk on the shared spine:**
