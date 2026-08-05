@@ -32,6 +32,11 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
 
   // `P.typeOf` is RelIR-routed on both `is` and `has`, so the CONTRACT is asserted once per spine —
   // three resolution modes, and the point of each is which evidence it reads, not how it spells it.
+  // A canonical type name and a storage class are compiler-authored CONSTANTS: legacy binds them, RelIR
+  // inlines them as escaped literals (the parameter-budget rule). `carries` asserts the value is present
+  // either way, so the contract — that both pieces of evidence appear — holds across the spelling.
+  const carries = (plan: { sql: string; binds: readonly unknown[] }, v: string): boolean =>
+    plan.binds.includes(v) || plan.sql.includes(`'${v}'`);
   for (const spine of ['legacy', 'rel'] as const) {
     test(`P.typeOf resolves the stored vtype, with a storage-class fallback — ${spine} spine`, () => {
       // value stream + is(): the per-row vtype column (values() reads vp.vtype) answers the type; a
@@ -39,20 +44,20 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
       // only thing that tells a datetime from a long, the fallback the only thing that answers for a
       // raw-inserted row — and both binds appear (canonical name, then storage class).
       const str = read('g.V().values("name").is(P.typeOf(GType.STRING))', { spine });
-      expect(str.sql).toMatch(/CASE WHEN \(?\w+\.vtype IS NOT (NULL|\?)\)? THEN \(?\w+\.vtype = \?\)? ELSE \(?typeof\(\w+\.v\) = \?\)? END/);
-      expect(str.binds).toContain('string');
-      expect(str.binds).toContain('text');
-      expect(read('g.V().values("age").is(P.typeOf(GType.INT))', { spine }).binds).toContain('int');
+      expect(str.sql).toMatch(/CASE WHEN \(?\w+\.vtype IS NOT (NULL|\?)\)? THEN \(?\w+\.vtype = (?:\?|'\w+')\)? ELSE \(?typeof\(\w+\.v\) = (?:\?|'\w+')\)? END/);
+      expect(carries(str, 'string')).toBe(true);
+      expect(carries(str, 'text')).toBe(true);
+      expect(carries(read('g.V().values("age").is(P.typeOf(GType.INT))', { spine }), 'int')).toBe(true);
       // java class-name string form is equivalent
-      expect(read('g.V().values("name").is(P.typeOf("String"))', { spine }).binds).toContain('string');
+      expect(carries(read('g.V().values("name").is(P.typeOf("String"))', { spine }), 'string')).toBe(true);
       // has(): the same test, over the property row's own vtype rather than the projected one.
       expect(read('g.V().has("name", P.typeOf(GType.STRING))', { spine }).sql)
-        .toMatch(/CASE WHEN \(?\w*\.?vtype IS NOT (NULL|\?)\)? THEN \(?\w*\.?vtype = \?\)? ELSE \(?typeof\(\w*\.?value\) = \?\)? END/);
+        .toMatch(/CASE WHEN \(?\w*\.?vtype IS NOT (NULL|\?)\)? THEN \(?\w*\.?vtype = (?:\?|'\w+')\)? ELSE \(?typeof\(\w*\.?value\) = (?:\?|'\w+')\)? END/);
       // NULL → is-null; a storage-class-invisible type (boolean) → vtype match, else FALSE. `0` and
       // `1 = 0` are the two spellings of that false — RelIR has no bare boolean literal (§3.2).
       expect(read('g.V().values("age").is(P.typeOf(GType.NULL))', { spine }).sql).toMatch(/is null|IS \?/i);
       expect(read('g.V().values("age").is(P.typeOf(GType.BOOLEAN))', { spine }).sql)
-        .toMatch(/THEN \(?\w+\.vtype = \?\)? ELSE \(?(0|1 = 0|\? = \?)\)? END/);
+        .toMatch(/THEN \(?\w+\.vtype = (?:\?|'\w+')\)? ELSE \(?(0|1 = 0|\? = \?)\)? END/);
       // P.not negates the inner predicate, and the SPELLING is the §13a fix: `NOT (p)` is NULL when
       // `p` is, which drops a row TinkerPop keeps (its `test` is two-valued, so negating an unknown is
       // TRUE), so RelIR emits `p IS NOT 1` instead. Legacy still spells the bare `NOT (…)`. Either is
@@ -127,16 +132,21 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     expect(() => compile('g.V().is(1)', {})).toThrow('is() requires a scalar stream');
   });
 
-  test('TextP compiles to LIKE with a bound, metachar-escaped pattern', () => {
-    const sw = read('g.V().has("name", TextP.startingWith("jo"))');
+  test('TextP compiles to LIKE with a metachar-escaped pattern (bound on legacy, inlined on rel)', () => {
+    // The pattern is a parsed literal → a constant: legacy binds it (the operator form
+    // `x LIKE ? ESCAPE ?`), RelIR inlines it as an escaped literal in the `like(pattern, subject, esc)`
+    // function form. Either way the LIKE metachars are backslash-escaped and the SQL-quotes doubled, so
+    // the user value is never raw-spliced — escaping is the guard, not the bind.
+    const sw = read('g.V().has("name", TextP.startingWith("jo"))');   // has(stored) → legacy (FTS decline)
     expect(sw.sql).toContain("like ? escape ?"); // node renderer: lowercase kw, escape bound
     expect(sw.binds).toContain('jo%');
-    expect(read('g.V().values("name").is(TextP.containing("ar"))').binds).toContain('%ar%');
+    // values().is(TextP) is RelIR-routed → the pattern inlines into the like() call.
+    expect(read('g.V().values("name").is(TextP.containing("ar"))').sql).toContain("like('%ar%',");
     // negation → NOT LIKE
     expect(read('g.V().has("name", TextP.notEndingWith("o"))').sql).toContain("not like ? escape ?");
-    // metachars in the user value are escaped, never spliced
-    const esc = read('g.V().has("name", TextP.containing("50%_x"))');
-    expect(esc.binds).toContain('%50\\%\\_x%');
+    // metachars in the user value are escaped, never spliced — on both spellings.
+    expect(read('g.V().has("name", TextP.containing("50%_x"))').binds).toContain('%50\\%\\_x%'); // legacy bind
+    expect(read('g.V().values("name").is(TextP.containing("50%_x"))').sql).toContain("like('%50\\%\\_x%',"); // rel inline
   });
 
   test('ftsSubstringPredicate: has(k, >=3-char substring) routes through property_fts, LIKE fallback equivalent', () => {

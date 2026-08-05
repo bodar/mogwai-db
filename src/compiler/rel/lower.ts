@@ -1,5 +1,5 @@
 import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
-import { col, compilerInt, compilerNull, compilerReal, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, planBindCount } from '../../rel/check.ts';
 import { emit, emitRelational } from '../../rel/emit.ts';
@@ -13,7 +13,8 @@ import { isLocalScope, sliceOf } from '../ir/step.ts';
 import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs, isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
-import { flatType, type TypeNode } from '../../gremlin/types.ts';
+import type { TypeNode } from '../../gremlin/types.ts';
+import { constLit, countLit, itemTypeAt } from './const.ts';
 import { assertsGType, childSteps, collectionAssert, typeOfAssert } from '../steps/tail/child-shape.ts';
 import { PATH_LIST_OPS } from '../steps/tail/path.ts';
 import type { IRStep } from '../ir/strategies.ts';
@@ -1772,38 +1773,6 @@ function subReadList(steps: readonly IRStep[], opts: Lowering, fresh: Minter): {
   if (!inner || inner.framing.kind !== 'list') return null;
   return { expr: { kind: 'scalar', plan: inner.rel }, of: inner.framing.of };
 }
-
-/** A held CONSTANT the compiler already knows — inlined as a TYPED SQL literal so it spends none of the
- *  100-parameter budget, its storage class following the arg's declared canonical type (`Step.argTypes`)
- *  rather than being re-derived from the JS runtime value. A REAL declared type inlines an integer-valued
- *  double as `2.0`, not INTEGER `2`. Values a literal cannot spell (`NaN`/±`Infinity`) stay a bound `lit`;
- *  a shape that is a different traverser — a collection, a map, a nested traversal, or a big-value carrier
- *  (bigint/BigDecimal/Duration, the `oversized` tail) — declines with `null`, exactly as before. */
-const constLit = (value: unknown, type: TypeNode | null): Expr | null => {
-  if (value === null) return compilerNull();
-  if (typeof value === 'string') return compilerText(value);
-  if (typeof value === 'boolean') return compilerInt(value ? 1 : 0);
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) return lit(value, 'real'); // NaN/±Infinity have no literal form
-    if (!Number.isInteger(value)) return compilerReal(value);
-    const flat = flatType(type);
-    return flat === 'float' || flat === 'double' || flat === 'bigdecimal'
-      ? compilerReal(value) : compilerInt(value);
-  }
-  return null;
-};
-
-/** The element TypeNode a list/set container node declares at index `i`, or null — the per-member type
- *  a flattened collection arg still carries alongside its values (`literalItems`, `frontend.ts`). */
-const itemTypeAt = (type: TypeNode | null | undefined, i: number): TypeNode | null =>
-  type != null && typeof type === 'object' && 'items' in type ? (type.items[i] ?? null) : null;
-
-/** A COMPILE-TIME slice/count as an inlined integer literal — the sharpest constant of all: `sliceOf`
- *  and `countArg` already READ the value to shape the plan (reject `range(2,1)`, compute `lo + limit`),
- *  so it is definitionally known here and spending it as a runtime bind is a pure contradiction. A
- *  malformed non-integer (`limit(2.5)`) keeps the bound spelling the legacy spine's error path owns,
- *  rather than throwing from `compilerInt`. */
-const countLit = (n: number): Expr => Number.isSafeInteger(n) ? compilerInt(n) : lit(n, 'int');
 
 /**
  * Lower a whole rooted chain, or decline.

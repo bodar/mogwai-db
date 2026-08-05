@@ -1,4 +1,5 @@
 import { col, compilerInt, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { countLit } from './const.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
@@ -225,7 +226,7 @@ const inferredVtype = (value: Expr): Expr => ({
  */
 const memberPredicate = (member: Expr, pred: unknown): Expr | null => {
   if (isPred(pred) && (pred.op === 'eq' || pred.op === 'neq') && pred.values[0] === null)
-    return { kind: 'binary', op: pred.op === 'eq' ? 'is' : 'is not', left: member, right: lit(null, 'any') };
+    return { kind: 'binary', op: pred.op === 'eq' ? 'is' : 'is not', left: member, right: compilerNull() };
   return predicateExpr(member, pred, SUBJECT_UNKNOWN);
 };
 
@@ -275,8 +276,8 @@ export function listMemberOp(step: IRStep, input: Rel, of: ListOf, fresh: Minter
 
     const taken = make.limit({
       id: fresh('ml'), input: ordered, channels: [], type: ordered.type,
-      ...(window.limit === null ? {} : { count: lit(window.limit, 'int') }),
-      ...(window.offset ? { offset: lit(window.offset, 'int') } : {}),
+      ...(window.limit === null ? {} : { count: countLit(window.limit) }),
+      ...(window.offset ? { offset: countLit(window.offset) } : {}),
     });
     // The AGGREGATE reads the sliced relation, so the member expression and the order term name
     // `taken` rather than the explode — the slice is a relation between them.
@@ -342,8 +343,8 @@ export function listRetype(
         aggs: [['v', {
           kind: 'call',
           fn: 'COALESCE',
-          args: [{ kind: 'agg', fn: 'group_concat', args: [memberPayload(of, present), lit(sep, 'text')], orderBy: [{ expr: col(present.id, MEMBER.ord), dir: 'asc' }] },
-            lit('', 'text')],
+          args: [{ kind: 'agg', fn: 'group_concat', args: [memberPayload(of, present), compilerText(sep)], orderBy: [{ expr: col(present.id, MEMBER.ord), dir: 'asc' }] },
+            compilerText('')],
         }]],
       }),
     };
@@ -778,7 +779,7 @@ function unfoldNested(rel: Rel, of: ListOf & { readonly kind: 'list' }, fresh: M
 export function collectionRetype(rel: Rel, vtype: string, kind: 'list' | 'set', fresh: Minter): { readonly rel: Rel; readonly of: ListOf; readonly set: boolean } {
   const matching = make.filter({
     id: fresh('cr'), input: rel, channels: rel.channels, type: rel.type,
-    pred: { kind: 'binary', op: '=', left: col(rel.id, vtype), right: lit(kind, 'text') },
+    pred: { kind: 'binary', op: '=', left: col(rel.id, vtype), right: compilerText(kind) },
   });
   return {
     rel: make.project({

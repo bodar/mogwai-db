@@ -1,4 +1,4 @@
-import { col, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../ir/step.ts';
@@ -239,7 +239,7 @@ export function byExpr(
   });
   const mine = make.filter({
     id: fresh('f'), input: scan, channels: [], type: scan.type,
-    pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), lit(key.key, 'text'))),
+    pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), compilerText(key.key))),
   });
   const value = ordering ? storedCompareOn(col(mine.id, 'vtype'))(col(mine.id, 'value')) : col(mine.id, 'value');
   return firstOf(mine, value, col(mine.id, 'id'), fresh);
@@ -300,7 +300,7 @@ export function byNode(modulation: Modulation, host: ByHost, fresh: Minter, chil
   });
   const mine = make.filter({
     id: fresh('f'), input: scan, channels: [], type: scan.type,
-    pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), lit(key.key, 'text'))),
+    pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), compilerText(key.key))),
   });
   return firstOf(mine, typedNode(col(mine.id, 'value'), col(mine.id, 'vtype')), col(mine.id, 'id'), fresh);
 }

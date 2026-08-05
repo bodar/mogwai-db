@@ -209,7 +209,7 @@ function likePattern(op: string, value: unknown): { pattern: string; negated: bo
 function typeOfExpr(subject: Expr, arg: unknown, type: SubjectType): Expr | null {
   const raw = gtypeName(arg)?.toLowerCase();
   if (raw === undefined || raw === null) return null;
-  if (raw === 'null') return binary('is', subject, lit(null, 'any'));
+  if (raw === 'null') return binary('is', subject, compilerNull());
   const canonical = normalizeTypeName(raw);
   // A recognized element/token GType (vertex/edge/path/…) is valid Gremlin but a stored property
   // scalar is never one, so it folds to FALSE. An unrecognized NAME is an error legacy raises — which
@@ -218,11 +218,11 @@ function typeOfExpr(subject: Expr, arg: unknown, type: SubjectType): Expr | null
 
   if (type.kind === 'static') return normalizeTypeName(type.type) === canonical ? CONSTANT.true : CONSTANT.false;
   const storage = STORAGE_CLASS[canonical];
-  const byStorage: Expr = storage ? binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, lit(storage, 'text')) : CONSTANT.false;
+  const byStorage: Expr = storage ? binary('=', { kind: 'call', fn: 'typeof', args: [subject] }, compilerText(storage)) : CONSTANT.false;
   if (type.kind === 'unknown') return byStorage;
   return {
     kind: 'case',
-    whens: [[binary('is not', type.vtype, compilerNull()), binary('=', type.vtype, lit(canonical, 'text'))]],
+    whens: [[binary('is not', type.vtype, compilerNull()), binary('=', type.vtype, compilerText(canonical))]],
     else: byStorage,
   };
 }
@@ -300,7 +300,7 @@ export function predicateExpr(subject: Expr, pred: unknown, type: SubjectType = 
     // for a single op would widen the closed node set (§7) to say something the function already
     // says. Nothing is lost: SQLite disables its LIKE index optimization whenever ESCAPE is
     // present, which the legacy operator form always is, so both spellings are a residual filter.
-    const call: Expr = { kind: 'call', fn: 'like', args: [lit(like.pattern, 'text'), subject, lit('\\', 'text')] };
+    const call: Expr = { kind: 'call', fn: 'like', args: [compilerText(like.pattern), subject, compilerText('\\')] };
     return like.negated ? negated(call) : call;
   }
 

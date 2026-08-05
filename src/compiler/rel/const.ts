@@ -1,0 +1,47 @@
+import { compilerInt, compilerNull, compilerReal, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { flatType, type TypeNode } from '../../gremlin/types.ts';
+
+// ---------- the one seam for "a value the compiler already holds" ----------
+//
+// A COMPILER-HELD CONSTANT — a parsed literal, a slice count, a `has`/`by` key, a `V/E` id, a class
+// name, a JSON path — is inlined as a TYPED SQL literal so it spends none of the Durable Object's 100
+// bound parameters (docs/2026-08-05-parameters-are-the-only-binds.md: the 100-bind cap is a PARAMETER
+// budget). Every such site routes through here rather than calling `lit()` (a bind) directly, so the
+// storage-class rule lives once and — when Phase B lands the `Param` concept — the single place that
+// decides bind-vs-inline is this module, not N scattered `lit()` calls.
+//
+// It lives on the COMPILER side, not in `src/rel/expr.ts`, because it reads the Gremlin type
+// vocabulary (`flatType`/`TypeNode`) and `src/rel/` is the clean-room the arch check keeps free of
+// `src/gremlin` imports.
+
+/** A held CONSTANT the compiler already knows — inlined as a TYPED SQL literal, its storage class
+ *  following the arg's declared canonical type (`Step.argTypes`) rather than being re-derived from the
+ *  JS runtime value. A REAL declared type inlines an integer-valued double as `2.0`, not INTEGER `2`.
+ *  Values a literal cannot spell (`NaN`/±`Infinity`) stay a bound `lit`; a shape that is a different
+ *  traverser — a collection, a map, a nested traversal, or a big-value carrier (bigint/BigDecimal/
+ *  Duration, the `oversized` tail) — declines with `null`, exactly as the bound path did. */
+export const constLit = (value: unknown, type: TypeNode | null): Expr | null => {
+  if (value === null) return compilerNull();
+  if (typeof value === 'string') return compilerText(value);
+  if (typeof value === 'boolean') return compilerInt(value ? 1 : 0);
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return lit(value, 'real'); // NaN/±Infinity have no literal form
+    if (!Number.isInteger(value)) return compilerReal(value);
+    const flat = flatType(type);
+    return flat === 'float' || flat === 'double' || flat === 'bigdecimal'
+      ? compilerReal(value) : compilerInt(value);
+  }
+  return null;
+};
+
+/** The element TypeNode a list/set container node declares at index `i`, or null — the per-member type
+ *  a flattened collection arg still carries alongside its values (`literalItems`, `frontend.ts`). */
+export const itemTypeAt = (type: TypeNode | null | undefined, i: number): TypeNode | null =>
+  type != null && typeof type === 'object' && 'items' in type ? (type.items[i] ?? null) : null;
+
+/** A COMPILE-TIME slice/count as an inlined integer literal — the sharpest constant of all: `sliceOf`
+ *  and `countArg` already READ the value to shape the plan (reject `range(2,1)`, compute `lo + limit`),
+ *  so it is definitionally known here and spending it as a runtime bind is a pure contradiction. A
+ *  malformed non-integer (`limit(2.5)`) keeps the bound spelling the legacy spine's error path owns,
+ *  rather than throwing from `compilerInt`. */
+export const countLit = (n: number): Expr => Number.isSafeInteger(n) ? compilerInt(n) : lit(n, 'int');

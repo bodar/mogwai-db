@@ -153,7 +153,9 @@ describe('scalar-parent / projection SQL', () => {
     // assertion is about WHICH column becomes the list, not how many times the conversion is spelled;
     // §5a's gate is results and access path, never spelling.
     expect(relListed.sql).toMatch(/json\((?:json\()?\w+\.v\)+ AS list/);
-    expect(relListed.sql).toMatch(/WHERE \(\w+\.vtype = \?\)/);
+    // RelIR inlines the retype's compiler-authored `'list'` marker (legacy binds it): a `kind` the
+    // compiler wrote, not query data, so it spends no bind.
+    expect(relListed.sql).toMatch(/WHERE \(\w+\.vtype = 'list'\)/);
     // once a ListStream, the list substrate composes: unfold/count(local)/range reuse it.
     // typed unfold carries each element's own stored vtype (perRowType framing).
     expect(read('g.V().values("list").is(typeOf(GType.LIST)).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });

@@ -1,5 +1,5 @@
 import type { ChannelRole, Channels } from '../../channels.ts';
-import { col, compilerInt, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { relId, type ColMeta, type RelId, type RelType, type SortTerm, type SqlType } from '../../rel/types.ts';
@@ -133,7 +133,7 @@ export function labelIds(names: readonly string[], fresh: Minter): Rel {
   const scan = make.scan({ id: fresh('lbl'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
   const matching = make.filter({
     id: fresh('f'), input: scan, channels: [], type: scan.type,
-    pred: { kind: 'in-list', expr: col(scan.id, 'name'), values: names.map((n) => lit(n, 'text')) },
+    pred: { kind: 'in-list', expr: col(scan.id, 'name'), values: names.map(compilerText) },
   });
   return make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
 }

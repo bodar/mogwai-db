@@ -435,26 +435,25 @@ describe('the RelIR spine', () => {
     // a fused clause can spell one bound `Lit` twice.
     //
     // A COMPILER-HELD CONSTANT spends none of it: the vtype-aware compare key's class lists, the slice
-    // counts, a `has` key and a `V/E` id all inline as typed SQL literals now
-    // (docs/2026-08-05-parameters-are-the-only-binds.md). So a chain that once declined for spending the
-    // budget on constants ADMITS — the 100 is a PARAMETER budget. What still costs is genuine binds:
-    // each `order().by(key)` binds the KEY twice (the ORDER BY read and the null-guard), ~2 apiece.
+    // counts, `has`/`by` keys, `V/E` ids, class/type names all inline as typed SQL literals now
+    // (docs/2026-08-05-parameters-are-the-only-binds.md). So `order().by(key)` — once ~26 counted binds,
+    // then ~2 — is now entirely FREE, key and compare alike; a hundred of them cost zero. What remains
+    // on the budget is genuine data: a `has` VALUE still binds (until Phase B inlines a literal value and
+    // makes only a PARAMETER bind). The 100 is becoming a parameter budget, exactly as intended.
     const binds = (gremlin: string) => read(gremlin, { spine: 'rel' }).binds.length;
-    expect(binds("g.V().order().by('name')")).toBe(2);
-    // Four keys used to exceed the cap (the class lists were counted against it); now it is ~8 binds
-    // and admits — the direct, measurable payoff of inlining the compare key's constants.
-    const four = read("g.V().order().by('name').order().by('age').order().by('lang').order().by('x')", { spine: 'rel' });
-    expect(four.spine).toBe('rel');
-    expect(four.binds.length).toBeLessThan(DO_BIND_CAP);
+    expect(binds("g.V().order().by('name')")).toBe(0);
+    const manyKeys = (n: number) => `g.V().${Array.from({ length: n }, (_, i) => `order().by('k${i}')`).join('.')}`;
+    expect(binds(manyKeys(100))).toBe(0);   // once the wall; now free, because keys/compare are constants
 
-    // The decline path is still live: past 100 rendered binds RelIR declines the WHOLE plan and routes
+    // The decline path is still live, now triggered by DATA rather than constants: a chain of `has`
+    // VALUES walks up to the cap (one bind apiece) and past 100 RelIR declines the WHOLE plan and routes
     // to legacy, rather than emit SQL the DO would reject at execution (§11 — a decline is recoverable,
-    // an over-budget emission is not). Inlining the compare key's constants closed the gap where RelIR
-    // was DEARER than legacy, so the trigger is now a genuinely huge chain — over budget on legacy too;
-    // what is under test is the ROUTING (RelIR must not hand on an over-cap plan), not that legacy fits.
-    const many = (n: number) => `g.V().${Array.from({ length: n }, (_, i) => `order().by('k${i}')`).join('.')}`;
-    expect(read(many(50), { spine: 'rel' }).spine).toBe('rel');     // 100 binds — at the cap, admitted
-    expect(read(many(51), { spine: 'rel' }).spine).toBe('legacy');  // 102 binds — over, declines whole
+    // an over-budget emission is not). At the over-cap size legacy is over too; what is under test is the
+    // ROUTING (RelIR must not hand on an over-cap plan), not that legacy fits.
+    const manyHas = (n: number) => `g.V().${Array.from({ length: n }, (_, i) => `has('k${i}',${i})`).join('.')}`;
+    expect(binds(manyHas(DO_BIND_CAP))).toBe(DO_BIND_CAP);              // one value bind apiece — exactly the cap
+    expect(read(manyHas(DO_BIND_CAP), { spine: 'rel' }).spine).toBe('rel');       // at the cap, admitted
+    expect(read(manyHas(DO_BIND_CAP + 1), { spine: 'rel' }).spine).toBe('legacy'); // over, declines whole
 
     // THE PROPERTY, not the example: nothing this route admits may exceed the cap. `rel-sweep`
     // holds it over all 38k admitted corpus prefixes; here it is stated where a reader will find it.
