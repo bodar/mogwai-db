@@ -1,4 +1,4 @@
-import { col, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import type { Binding } from '../../rel/plan.ts';
@@ -101,7 +101,7 @@ function deleteFts(elem: Elem, owners: Rel, fresh: Minter): Stmt {
     target, channels: [], type: typeOf(),
     where: {
       kind: 'binary', op: 'and',
-      left: { kind: 'binary', op: '=', left: col(target.id, 'owner_elem'), right: lit(elem === 'edge' ? 'edge' : 'node', 'text') },
+      left: { kind: 'binary', op: '=', left: col(target.id, 'owner_elem'), right: compilerText(elem === 'edge' ? 'edge' : 'node') },
       right: { kind: 'in-query', expr: col(target.id, 'owner'), plan: owners, negated: false },
     },
     returning: [],
@@ -438,7 +438,7 @@ function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind:
     id: fresh('p'), input: seed, channels: [],
     type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true),
       ...(write.meta === null ? [] : [meta('meta', 'blob', true)])),
-    exprs: [[spec.owner, col(seed.id, 'id')], ['key', text(write.key)], ['value', storedExpr(write)], ['vtype', write.vtype === null ? lit(null, 'text') : text(write.vtype)],
+    exprs: [[spec.owner, col(seed.id, 'id')], ['key', text(write.key)], ['value', storedExpr(write)], ['vtype', write.vtype === null ? compilerNull('text') : text(write.vtype)],
       ...(write.meta === null ? [] : [['meta', { kind: 'call', fn: 'jsonb', args: [lit(write.meta, 'text')] }] as const])],
   });
   const rowsWritten = insert({
@@ -491,7 +491,7 @@ export function elementProperty(target: Rel, elem: Elem, writes: readonly Proper
   const cols: readonly ColMeta[] = [meta('id', 'int'), ...carriedCols(channels)];
   const result = make.project({
     id: fresh('c'), input: owners, channels, type: typeOf(...cols),
-    exprs: cols.map((column) => [column.name, column.name === 'bulk' ? lit(1, 'int') : col(owners.id, column.name)] as const),
+    exprs: cols.map((column) => [column.name, column.name === 'bulk' ? compilerInt(1) : col(owners.id, column.name)] as const),
   });
   // The target's own CTEs first: they are read by the snapshot's step alone, which is the case
   // `checkSnapshots` leaves alone.
@@ -627,7 +627,7 @@ export function addVertex(input: Rel, labels: readonly string[], writes: readonl
     : input;
   const rowPerInput = make.project({
     id: fresh('p'), input: inOrder, channels: [], type: typeOf(meta('uid', 'text', true)),
-    exprs: [['uid', lit(null, 'text')]],
+    exprs: [['uid', compilerNull('text')]],
   });
   const created = bind(insert({
     target: nodesTarget, cols: ['uid'], source: rowPerInput, channels: [], type: ID_TYPE,
@@ -678,7 +678,7 @@ export function addVertex(input: Rel, labels: readonly string[], writes: readonl
     exprs: [
       ['id', col(zipped.id, 'id')],
       ...carried.map((channel) => [channel.col, col(zipped.id, `in_${channel.col}`)] as const),
-      ['bulk', lit(1, 'int')],
+      ['bulk', compilerInt(1)],
       ...(ordered ? [['encounter', col(zipped.id, 'id')] as const] : []),
     ],
   });
@@ -809,7 +809,7 @@ type Endpoint =
 function endpointExpr(end: Endpoint, over: Rel, aliases: AliasMap, fresh: Minter): Expr | null {
   if (end.kind === 'traverser') return col(over.id, 'id');
   if (end.kind === 'read') {
-    const one = make.limit({ id: fresh('li'), input: end.rel, channels: end.rel.channels, type: end.rel.type, count: lit(1, 'int') });
+    const one = make.limit({ id: fresh('li'), input: end.rel, channels: end.rel.channels, type: end.rel.type, count: compilerInt(1) });
     const only = make.project({ id: fresh('p'), input: one, channels: [], type: ID_TYPE, exprs: [['id', col(one.id, 'id')]] });
     return { kind: 'scalar', plan: only };
   }
@@ -935,7 +935,7 @@ export function elementAddE(
     exprs: [
       ['id', col(zipped.id, 'id')],
       ...carried.map((channel) => [channel.col, col(zipped.id, `in_${channel.col}`)] as const),
-      ['bulk', lit(1, 'int')],
+      ['bulk', compilerInt(1)],
       ...(ordered ? [['encounter', col(zipped.id, 'id')] as const] : []),
     ],
   });
@@ -1150,11 +1150,11 @@ export function elementMergeV(
   // projection below is where they are dropped — naming a shorter one here is the dropped-channel
   // defect the factory catches, and it caught this.
   const once = make.limit({
-    id: fresh('lm'), input: incoming, channels: incoming.channels, type: incoming.type, count: lit(1, 'int'),
+    id: fresh('lm'), input: incoming, channels: incoming.channels, type: incoming.type, count: compilerInt(1),
   });
   const absent = make.project({
     id: fresh('p'), input: once, channels: [], type: typeOf(meta('n', 'int')),
-    exprs: [['n', lit(1, 'int')]],
+    exprs: [['n', compilerInt(1)]],
   });
   const creating = make.filter({
     id: fresh('f'), input: absent, channels: [], type: absent.type,
@@ -1239,7 +1239,7 @@ function crossed(incoming: Rel, produced: Rel, aliases: Channels, ordered: boole
       ...carried.map((channel) => [channel.col, col(joined.id, `in_${channel.col}`)] as const),
       // A merge neither reads nor changes a multiplicity, so the emitted traverser is bulk 1 — the same
       // re-mint `property()` makes, and for the same reason.
-      ['bulk', lit(1, 'int')],
+      ['bulk', compilerInt(1)],
       ...(ordered && position ? [[ORD, col(joined.id, position)] as const] : []),
     ],
   });

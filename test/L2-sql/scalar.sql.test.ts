@@ -57,8 +57,8 @@ describe('scalar-parent / projection SQL', () => {
     // the direction reaches the window rather than being lost.
     const relAsc = read('g.V().hasLabel("person").order().by("age").values("name")', { spine: 'rel' });
     expect(relAsc.sql).toMatch(/row_number\(\) OVER \(ORDER BY \(SELECT CASE WHEN \w+\.vtype IN [^]*CAST\(\w+\.value AS INT\)[^]*ASC/);
-    // The non-productive drop, spelled with a BOUND null (RelIR binds every `Lit`; legacy inlines it).
-    expect(relAsc.sql).toMatch(/\(\(SELECT CASE WHEN [^]*IS NOT \?\)/);
+    // The non-productive drop compares against compiler-selected SQL NULL, not a query bind.
+    expect(relAsc.sql).toMatch(/\(\(SELECT CASE WHEN [^]*IS NOT NULL\)/);
     expect(read('g.V().hasLabel("person").order().by("age",desc).values("name")', { spine: 'rel' }).sql)
       .toMatch(/row_number\(\) OVER \(ORDER BY \(SELECT CASE WHEN [^]*DESC/);
   });
@@ -347,16 +347,16 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().values("name").order().fold().conjoin("_")').shape).toEqual({ kind: 'value', type: STATIC('string') });
     // all(P)/any(P) filter the list (IS TRUE / IS NOT TRUE null handling).
     // `all` is "no member FAILS", not "every member passes" — the two differ once a predicate can be
-    // NULL. Legacy spells the guard `IS NOT TRUE`; RelIR binds the 1 (`IS NOT ?`), which is the same
+    // NULL. Legacy spells the guard `IS NOT TRUE`; RelIR emits its compiler-owned 1 (`IS NOT 1`), which is the same
     // test for a predicate's 0/1/NULL result, so each spine is pinned in its own spelling (§10·4).
     expect(read('g.V().values("age").order().fold().all(P.gt(10))', { spine: 'legacy' }).sql).toContain('IS NOT TRUE');
     expect(read('g.V().values("age").order().fold().all(P.gt(10))', { spine: 'rel' }).sql)
-      .toMatch(/NOT EXISTS \(SELECT \? AS one FROM json_each\([^]*IS NOT \?\)\)/);
+      .toMatch(/NOT EXISTS \(SELECT 1 AS one FROM json_each\([^]*IS NOT 1\)\)/);
     // `any` needs no `IS TRUE` guard at all — a `WHERE` already treats NULL as not-satisfied — so
     // legacy's explicit form and RelIR's bare predicate are the same test. `all` is the asymmetric one.
     expect(read('g.V().values("age").order().fold().any(P.gt(10))', { spine: 'legacy' }).sql).toContain('IS TRUE');
     expect(read('g.V().values("age").order().fold().any(P.gt(10))', { spine: 'rel' }).sql)
-      .toMatch(/WHERE EXISTS \(SELECT \? AS one FROM json_each\(/);
+      .toMatch(/WHERE EXISTS \(SELECT 1 AS one FROM json_each\(/);
     // a list-collection step on a scalar stream raises the incoming-type error.
     expect(() => compile('g.V().values("name").fold().unfold().combine([1])', {})).toThrow('incoming traversers');
   });
@@ -847,7 +847,7 @@ describe('scalar-parent / projection SQL', () => {
     // `json_extract` rather than `->>` so the node set stays closed (§3.3). Same shape, same rows.
     const viaRel = read('g.V().as("a").out("knows").select("a")', { spine: 'rel' });
     expect(viaRel.spine).toBe('rel');
-    expect(viaRel.sql).toContain("jsonb_array(jsonb_object('k', ?, 'v', ");
+    expect(viaRel.sql).toContain("jsonb_array(jsonb_object('k', 0, 'v', ");
     expect(viaRel.sql).toContain("CAST(json_extract(");
     expect(viaRel.shape).toEqual(p.shape);
   });
@@ -1106,7 +1106,7 @@ describe('scalar-parent / projection SQL', () => {
     // column reading the result's own storage class — with the value inlined rather than aliased.
     const rel = read('g.V().values("age").sum()', { spine: 'rel' });
     expect(rel.shape).toEqual({ kind: 'scalar' });
-    expect(rel.sql).toMatch(/sum\([^]*\* \?\)\) AS v/);
+    expect(rel.sql).toMatch(/sum\([^]*\* 1\)\) AS v/);
     expect(rel.sql).toMatch(/typeof\(sum\([^]*\)\) AS vt/);
   });
 
@@ -1163,10 +1163,10 @@ describe('scalar-parent / projection SQL', () => {
       // the OUTER transform wraps the inner one — left-to-right order preserved through the fusion
       expect(fused.sql).toMatch(/upper\(lower\(/);
       // …and the predicate sees the value as it was at ITS position: `lower`, never `upper(lower(…))`.
-      // `neq` is now total over NULL (§13a): `(x = ?) IS NOT ?` rather than `x != ?`, because negating
+      // `neq` is now total over NULL (§13a): `(x = ?) IS NOT 1` rather than `x != ?`, because negating
       // SQL NULL must be TRUE where TinkerPop's two-valued `test` says so. Either spelling is the
       // predicate; the POINT of this assertion is that its subject is `lower(…)` and not `upper(lower(…))`.
-      expect(fused.sql).toMatch(/WHERE \(*lower\([^]*\)( != \?|( = \?\)? IS NOT \?))/);
+      expect(fused.sql).toMatch(/WHERE \(*lower\([^]*\)( != \?|( = \?\)? IS NOT 1))/);
       expect(fused.sql).not.toMatch(/WHERE \(?upper\(/);
     }
     expect(read('g.V().values("name").toLower().is(P.neq("x")).toUpper()', { spine: 'legacy' }).sql).not.toContain('FROM c2 p)');
@@ -1189,7 +1189,7 @@ describe('scalar-parent / projection SQL', () => {
     // being summed — not where the cast sits in the select list.
     expect(typedSum.sql).toMatch(/CAST\([^]*AS REAL\)/);
     // …and the sum is BULK-WEIGHTED over an element source, whichever spine emits it.
-    expect(typedSum.sql).toMatch(/(SUM|sum)\([^]*\* (s\.bulk|\?)\)?\)? AS v/);
+    expect(typedSum.sql).toMatch(/(SUM|sum)\([^]*\* (s\.bulk|1)\)?\)? AS v/);
 
     const store = seededStore();
     expect(run(store, 'g.V().values("name").toUpper().is("MARKO")').map((r) => r.v)).toEqual(['MARKO']);
