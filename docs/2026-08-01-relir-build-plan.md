@@ -2874,3 +2874,37 @@ The paragraph above had to be written twice. A delegate running under "do NOT ed
 an UNCOMMITTED append of mine with it. The instruction was right and the loss was mine. **Commit
 architect-side doc work BEFORE delegating**, or keep it out of the worktree until the delegate is done; a
 "don't touch X" instruction makes X a file the delegate may restore, not merely one it will leave alone.
+
+### 13k·1. Finding #2 is REFUTED — the clean-room gate exists, and §2's claim is true
+
+§13k says "**The clean-room import boundary is claimed to be gated and is not** … `scripts/arch-check.ts`
+checks only the compiler Pass-role rules and the string `src/rel` does not appear in it". **That is wrong.**
+`scripts/arch-check.ts:150-168` holds the scan, spelled
+
+```ts
+const CLEANROOM = { dir: 'src/rel', forbidden: ['src/compiler/', 'src/gremlin/'] };
+```
+
+— it walks `src/rel/**/*.ts`, resolves every relative `from '…'` specifier against the file, and reports any
+that lands under a forbidden prefix; `leaks.length` joins `violations`/`unresolved` in the exit code, and the
+success line names the rule. It is not a late addition either: it landed in `25e0b5f` ("a neutral channel
+core, so the RelIR clean room is actually clean") on **2026-08-02**, two days BEFORE the audit, and
+`git merge-base --is-ancestor` confirms it is an ancestor of the audit commit. So §2's "`mise run arch` gates
+it as a textual import scan" is ACCURATE and needs no change.
+
+**Acting on the finding would have been actively harmful in both directions** — either adding a second,
+duplicate scan, or deleting a claim that is true. That is the §13n pattern in a new place: a remedy is only
+right once the premise is checked, and an audit's "X does not exist" is a claim about absence, which is the
+easiest kind to get wrong.
+
+**And a near-miss of my own, worth recording because the tooling caused it.** I first "confirmed" the finding
+from a `grep -n "src/rel" scripts/arch-check.ts` that printed NOTHING while exiting 0 — a contradiction
+(grep exits 0 only on a match), which I did not read. The wrapper had swallowed the output. **An empty
+output with a success exit code is not evidence of absence; it is evidence the command did not report.**
+The repo already has the right instrument for this class — `bun scripts/refs.ts` for a symbol, and for a
+plain string a `grep` whose output you have actually seen.
+
+**Consequence for the rest of §13k: verify each of the other three before building anything.** They are
+`prune` dropping columns a non-`Project` parent's own expressions read, `check` having no pass-through type
+law, and the rendered-bind cap being bypassable — all plausible, none yet re-derived, and this section's
+hit rate is now 3-of-4 at best.
