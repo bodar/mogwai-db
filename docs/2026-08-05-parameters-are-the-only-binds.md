@@ -216,10 +216,16 @@ concrete value only at the last responsible moment. Same thesis, far smaller bla
 - **B2 (done). RelIR `param()` + `source: 'parameter'`** in the `lit` union (no new `kind` — `walk`/
   `check` untouched); `emit.ts` renders it `value(?)`. `bindsAsParameter` and the hygiene counter treat
   `'parameter'` and mechanical `'bound'` alike as binds; a `compiler-*` constant is not.
-- **B3 (PARTIAL). Deferred reduction.** A scalar parameter stays a `param()` bind through lowering. NOT
-  yet done: the `sliceOf`/count arithmetic-in-SQL move (`LIMIT ?-? OFFSET ?`), so a `limit($x)`/`range($x)`
-  count still reduces to a concrete number and inlines. `unrollFixedRepeat` (`times($x)`) is the one
-  honest structural reduction and is unaffected.
+- **B3 (LANDED for `limit`/`skip`; `range` reduces BY DESIGN — commit `3d3d1cd`).** A scalar parameter
+  stays a `param()` bind through lowering, now including a slice count where SQL can carry it untouched:
+  `limit($x)` → `LIMIT ?`, `skip($x)` → `LIMIT -1 OFFSET ?`, in both the global (`lower.ts`) and local
+  (`list.ts`) slice paths through one `sliceBound` seam. The `LIMIT ?-? OFFSET ?` idea for `range` was
+  **refined, not implemented**: `range`'s count is `hi−lo` (arithmetic on the value) *and* its `lo>hi`
+  raises a validation SQL cannot carry, so `range` REDUCES its parameter — the last responsible moment,
+  exactly like `unrollFixedRepeat` reduces `times($x)`, and required by root `CLAUDE.md` "fail closed"
+  (a bound `range` would silently mis-limit an illegal range instead of throwing). The collapsed-relation
+  band reduces for the same arithmetic reason; `tail`/`sample` keep their own count derivations.
+  `sliceParamNames` decodes the numeric args' names in lockstep with `sliceOf` (scope tokens skipped).
 - **B4 (done, for scalars).** The hygiene gate counts a bind by `bindsAsParameter`, so a held constant
   rendered as a bind is caught by the ratchet at the family it inflates.
 
@@ -235,7 +241,9 @@ the `constLit` seam. No churn (corpus uses literals), census clean.
   oversized bucket, not N params).
 - **`V($x)`/`E($x)` ids** inline (the `flattenListArgs` index desync is why elementScan doesn't thread a
   name); ids-as-parameters are exotic.
-- **`limit($x)`/`range($x)`** inline (needs the B3 SQL-arithmetic move).
+- **`range($x, $y)`** reduces its parameters (inlines) BY DESIGN — validation + arithmetic force the
+  last-responsible-moment reduction (B3, landed). `limit($x)`/`skip($x)` now bind. A `range` param over
+  a set too big to validate cheaply is not a concern: the reduction is O(1) here.
 - **hasId($x)** — RelIR declines `hasId` entirely (routes to legacy, which binds); a coverage gap, not
   an operand-seam one.
 
