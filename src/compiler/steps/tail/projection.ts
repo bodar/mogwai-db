@@ -32,7 +32,7 @@ import { lowerChooseOptions, lowerChooseOptionsScalar, lowerConcatScalar, lowerD
 import { elementOrderDrop, orderProductivityFilter } from './modulation.ts';
 import { lowerPath } from './path.ts';
 import { tryScalarChooseChild, tryScalarCoalesceChild, tryScalarFilterByChildExistence, tryScalarMapChild, tryScalarOptionalChild, tryScalarUnionChild, tryScalarVariantChoose, tryScalarVariantCoalesce, tryScalarVariantOptional, tryScalarVariantUnion } from './scalar-arm.ts';
-import { lowerConstant, lowerScalarConstant, lowerScalarFilter, lowerScalarSack, lowerScalarSplit, scalarCollectionRetype, scalarMapRetype } from './scalar.ts';
+import { gateScalar, lowerConstant, lowerScalarConstant, lowerScalarFilter, lowerScalarSack, lowerScalarSplit, scalarCollectionRetype, scalarMapRetype } from './scalar.ts';
 import { compileSelectProject, lowerRecordSelectProject, lowerScalarProject, lowerSingleSelect, tryCompileRecordChild } from './select.ts';
 
 // ---------- tail: projection + barriers + modifiers ----------
@@ -835,9 +835,13 @@ function compileFold(st: ElementStream, acc: TailAcc): ListStream {
  * same engine compileInject's tail runs, factored out so both consume one modifier
  * vocabulary. count() is the only projection valid on a scalar stream.
  */
-// A list-collection step (set-op / conjoin / merge / all / any) requires a list/map traverser;
+// A list-collection step (set-op / conjoin / merge) requires a list/map traverser;
 // reached on a scalar stream it raises TinkerPop's incoming-type error.
-const SCALAR_LIST_ONLY = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'conjoin', 'merge', 'all', 'any']);
+const SCALAR_LIST_ONLY = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'conjoin', 'merge']);
+
+// The member-filter family answers FALSE when the incoming traverser is not a collection,
+// including null. On a scalar host that means every row drops without evaluating the predicate.
+const FALSE_ON_NON_COLLECTION = new Set(['all', 'any', 'none']);
 
 // is(typeOf(LIST|SET|MAP)) RETYPES a scalar value stream into a ListStream / MapStream: the
 // stored collection value becomes the `list` / `map` column, so unfold/count(Scope.local)/
@@ -861,6 +865,9 @@ const scalarListOnly: ShapeTailFn<ScalarStream> = (s, step) => {
   if (s.literalNull) throw new Error(`Incoming traverser for ${step.name} step can't be null`);
   throw new Error(`${step.name} step can only take an array or an Iterable type for incoming traversers, encountered a scalar`);
 };
+
+const scalarFalseOnNonCollection: ShapeTailFn<ScalarStream> = (s, _step, _steps, at) =>
+  continueLowering(gateScalar(s, () => q`0`), at + 1);
 
 // Filter family over a scalar current object: and/or/not/filter/where evaluate their child
 // predicate against `v` and drop rows. A scalar traverser is first-class — these are the
@@ -991,6 +998,7 @@ const SCALAR_DISPATCH = new Map<string, ShapeTailFn<ScalarStream>>([
   ['identity', (s, _step, _steps, at) => continueLowering(s, at + 1)],
   ...[...NUMERIC_REDUCERS].map((n): [string, ShapeTailFn<ScalarStream>] => [n, scalarNumericReducer]),
   ...[...SCALAR_LIST_ONLY].map((n): [string, ShapeTailFn<ScalarStream>] => [n, scalarListOnly]),
+  ...[...FALSE_ON_NON_COLLECTION].map((n): [string, ShapeTailFn<ScalarStream>] => [n, scalarFalseOnNonCollection]),
 ]);
 
 export function compileFromScalar(s: ScalarStream, steps: IRStep[], from: number): LoweringResult {
