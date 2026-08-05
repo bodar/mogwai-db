@@ -201,18 +201,28 @@ dropped in 40+ families and rose in none. The items below are done:
 
 **Phase B — the `Param` concept, wire → IR → RelIR. LANDED (commit `583d150`), top-level scope.**
 
-**Encoding — chose the parallel array over the tagged arg (deviation from B1 below, recorded).** B1
-proposed `{ param, value, type }` with consumers narrowing through `isParamArg`; measured, that is 62
-value-reading sites across 10 files. Instead the name rides as a parallel `Step.paramNames` array,
-exactly as `argTypes` does — the value stays a plain resolved value in `args` (no value-reader changes),
-and the ONE seam that decides bind-vs-inline (`const.ts` `constLit`) reads the name. This is what root
-`CLAUDE.md` #5 already blesses ("carried like `argTypes` already is"), and it keeps the parameter
-first-class where it counts: RelIR's `param()` carries name-intent + value together, reduced to a
-concrete value only at the last responsible moment. Same thesis, far smaller blast radius.
+**Encoding — the parallel array was the convenient choice; the OBJECT is the right one. REVERSED
+(commit `52abcc6`).** B1 proposed `{ param, value, type }` with consumers narrowing through `isParamArg`;
+the original Phase B measured that as ~62 value-reading sites and instead rode the name as a parallel
+`Step.paramNames` array beside `argTypes`, keeping `args` plain values. That was the least-resistance
+move, not the correct one: three parallel arrays are an index-coupling invariant maintained by hand,
+littered with "in lockstep" comments, and the one site that forgot (`flattenListArgs`) silently
+desynced the metadata from its value — the exact class of bug the deferred `V($x)`/collection-param
+gaps trace back to. The refactor now unifies value+type+name into ONE `Arg` object (`gremlin/frontend.ts`),
+`Step.args: Arg[]` — which is literally TinkerPop 4's `GValue` (a name→value pair, `name != null` ⇒
+variable) plus the canonical type the JS value can't spell. `walkArgs` is the one producer emitting
+`Arg[]`; every consumer reads `.value`/`.type`/`.name`; `sliceParamNames` collapses from an
+index-realignment dance to a `filter`+`map` because dropping the scope token now drops its name with
+it. The boundary value stays `any` (locked #5), but the wrapper is fully typed, so "treat the whole arg
+as a value" is a compile error rather than a silent `false`. ~50 files, behaviour-preserving (census
+answer-change oracle clean, full ladder green). The one class tsc could NOT catch — a guard/`typeof`
+that accepts `unknown`, and a synthetic step built with raw args behind an `as IRStep` cast — was swept
+by grep + the census/L1–L5 net; the two that slipped through both (`edgeLabelFilter(s.args)` binding an
+`Arg`, `reads.matching`'s cast-hidden synthetic steps) are recorded here as the tells for the next chunk.
 
-- **B1 (done, re-encoded). Front-end stops flattening.** `walkArgs`/`extractArgs` thread a `names` array
-  in lockstep with `types`; a top-level `$x` records its name at its arg index (`frontend.ts`), and
-  `stepChain` attaches `paramNames` only when one is present.
+- **B1 (done, re-encoded, then re-unified in `52abcc6`). Front-end stops flattening.**
+  `walkArgs`/`extractArgs` produce `Arg[]`; a top-level `$x` records its name on its `Arg` (`frontend.ts`),
+  and every arg now carries its own value+type+name so there is no separate `paramNames` array to attach.
 - **B2 (done). RelIR `param()` + `source: 'parameter'`** in the `lit` union (no new `kind` — `walk`/
   `check` untouched); `emit.ts` renders it `value(?)`. `bindsAsParameter` and the hygiene counter treat
   `'parameter'` and mechanical `'bound'` alike as binds; a `compiler-*` constant is not.
@@ -325,6 +335,18 @@ C1-inject(Duration) + the static-temporal ordering fail-closed fix, and C2·a (t
 over-budget literal injects) are all LANDED. The parameters-are-the-only-binds thesis is complete for
 every common case: a user parameter is the only free-standing bind, a parsed literal inlines as a typed
 literal, and an over-budget literal set rides as one JSON bind. The `by(key)` constant is inlined too.
+
+**Encoding follow-through — the `Arg` object LANDED (`52abcc6`).** The Phase B parallel-array deviation
+is reversed: a step argument is now one `Arg { value, type, name }` (`Step.args: Arg[]`), the faithful
+GValue representation the thesis called for. Remaining consolidation of the SAME shape, each its own
+gated chunk (all behaviour-preserving, none a semantics change):
+- **`Pred` still carries `values`/`paramNames` parallel arrays** — unify to `Arg[]` (rel `predicate.ts`
+  + legacy predicate consumers, ~100 sites). It is the last parallel-array pair on a shared IR type.
+- **Collection-literal `literalItems` returns `{values, items}`** — unify to `Arg[]` members so a
+  member carries its own type/name; this is what dissolves the `flattenListArgs` desync for real and
+  can unblock the deferred `V($x)` / `within([$x])` collection-param gaps.
+- **RelIR `constLit(value, type, paramName)` / `sliceBound(n, paramName)`** take a loose positional trio
+  — collapse to one `Arg`, the same object the front-end now carries end to end.
 
 **What remains is coverage-only / exotic / an open design question — each needs a decision before it is
 worth the risk on the shared spine:**
