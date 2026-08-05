@@ -30,7 +30,7 @@ import { constLit } from './const.ts';
 
 /** A parsed `P`/`TextP` as the front-end produces it. Structural, because `Step.args` is the
  *  wire boundary and a GLV may supply anything. */
-interface Pred { readonly op: string; readonly values: readonly unknown[]; }
+interface Pred { readonly op: string; readonly values: readonly unknown[]; readonly paramNames?: readonly (string | null)[]; }
 const isPred = (value: unknown): value is Pred =>
   value !== null && typeof value === 'object' && 'op' in value && Array.isArray((value as Pred).values);
 
@@ -260,6 +260,9 @@ export function predicateExpr(
   }
 
   const { op, values } = pred;
+  // A nested operand's own parameter name (`P.gt($x)`, `within($x, $y)`) — so a `$x` binds and a parsed
+  // literal inlines, wherever it sits. `null` where the value is a literal or the predicate carries none.
+  const pn = (i: number): string | null => pred.paramNames?.[i] ?? null;
   const recurse = (p: unknown) => predicateExpr(subject, p, type);
   const both = (build: (left: Expr, right: Expr) => Expr): Expr | null => {
     const [left, right] = [recurse(values[0]), recurse(values[1])];
@@ -274,7 +277,7 @@ export function predicateExpr(
 
   const comparison = COMPARISON[op];
   if (comparison) {
-    const bound = operand(values[0]);
+    const bound = operand(values[0], null, pn(0));
     if (!bound) return null;
     // Equality stays a RAW compare: canonical text is exact, and it keeps the value index usable
     // for the common case. Only ORDERING needs the cast, and only it pays for one.
@@ -288,7 +291,7 @@ export function predicateExpr(
     // nothing is never, without nothing is always.
     if (!values.length) return op === 'within' ? CONSTANT.false : CONSTANT.true;
     if (values.length > SET_BIND_LIMIT) return null;
-    const members = values.map((v) => operand(v));
+    const members = values.map((v, i) => operand(v, null, pn(i)));
     if (members.some((m) => !m)) return null;
     const inList: Expr = { kind: 'in-list', expr: subject, values: members as Expr[] };
     return op === 'within' ? inList : negated(inList);
@@ -297,7 +300,7 @@ export function predicateExpr(
   // between = [lo, hi) — inclusive low; inside = (lo, hi) — exclusive low. Both bounds and the
   // subject go through the ordering key for the same reason a range comparison does.
   if (op === 'between' || op === 'inside') {
-    const [low, high] = [operand(values[0]), operand(values[1])];
+    const [low, high] = [operand(values[0], null, pn(0)), operand(values[1], null, pn(1))];
     if (!low || !high) return null;
     return binary('and',
       ordered(op === 'inside' ? '>' : '>=', subject, low, values[0], type),

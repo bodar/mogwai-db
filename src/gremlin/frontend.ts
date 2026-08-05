@@ -634,7 +634,7 @@ function mapKeyOf(mk: any): any {
   return mk.getText();
 }
 
-export interface Pred { op: string; values: any[]; }
+export interface Pred { op: string; values: any[]; paramNames?: (string | null)[]; }
 
 /** Is this argument a parsed predicate? `Step.args` is deliberately `any[]` (the front-end
  *  boundary), so every consumer used to open-code `!a || typeof a !== 'object' || a.op !== …`
@@ -682,14 +682,21 @@ function parseComposedPredicate(node: any, params: Record<string, any>): Pred | 
 
 function parsePredicate(node: any, params: Record<string, any>): Pred {
   const m = node.constructor.name.match(/^TraversalPredicate_(\w+)Context$/);
-  const { args: values } = extractArgs(node, params); // predicate values; subtype tags unused
+  const { args: values, names } = extractArgs(node, params); // values + their wire-parameter names
   // P.within/without/inside/between accept both varargs (P.within('a','b')) and a
   // single bracketed list (P.within(['a','b'])). Collection literals now parse as one
   // array value, so unwrap a lone array arg back to the value varargs the predicate
   // consumes (predicateSql spreads them into an IN-list / bounds). A bound-param list
   // (a JS array from a binding) unwraps the same way, matching the prior flatten.
-  const vals = values.length === 1 && Array.isArray(values[0]) ? values[0] : values;
-  return { op: m![1], values: vals };
+  const single = values.length === 1 && Array.isArray(values[0]);
+  const vals = single ? values[0] : values;
+  // A predicate operand carries its own parameter name so it binds while a parsed literal inlines — the
+  // budget must not depend on whether a `$x` sits bare (`has(k, $x)`) or in a predicate (`P.gt($x)`). A
+  // lone bracketed list is unwrapped to members of ONE collection arg, which are not individually
+  // top-level params (a `within(names)` list-param is oversized, not N params), so names apply only to
+  // the varargs form and are dropped for the wrapped list.
+  const paramNames = !single && names.some((n) => n != null) ? names : undefined;
+  return { op: m![1], values: vals, ...(paramNames ? { paramNames } : {}) };
 }
 
 function unquote(s: string): string {
