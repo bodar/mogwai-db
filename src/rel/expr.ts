@@ -6,7 +6,10 @@ export type BinaryOp = '+' | '-' | '*' | '/' | '%' | '=' | '!=' | '<' | '<=' | '
 
 export type Expr =
   | { readonly kind: 'col'; readonly rel: import('./types.ts').RelId; readonly name: string }
-  | { readonly kind: 'lit'; readonly value: unknown; readonly type: SqlType; readonly source: 'bound' | 'compiler' }
+  | { readonly kind: 'lit'; readonly value: unknown; readonly type: SqlType; readonly source: 'bound' }
+  | { readonly kind: 'lit'; readonly value: string; readonly type: 'text'; readonly source: 'compiler-text' }
+  | { readonly kind: 'lit'; readonly value: number; readonly type: 'int'; readonly source: 'compiler-int' }
+  | { readonly kind: 'lit'; readonly value: null; readonly type: 'any'; readonly source: 'compiler-null' }
   | { readonly kind: 'unary'; readonly op: 'not' | 'neg'; readonly arg: Expr }
   | { readonly kind: 'binary'; readonly op: BinaryOp; readonly left: Expr; readonly right: Expr }
   | { readonly kind: 'case'; readonly whens: readonly (readonly [Expr, Expr])[]; readonly else?: Expr }
@@ -50,4 +53,13 @@ export const lit = (value: unknown, type: SqlType = 'any'): Expr => ({ kind: 'li
 /** A compiler-authored string token, rendered as an escaped SQL literal rather than consuming a DO bind.
  * This is deliberately string-only: data stays in `lit`, and the narrow type prevents a caller from
  * smuggling an arbitrary value into statement text. */
-export const compilerText = (value: string): Expr => ({ kind: 'lit', value, type: 'text', source: 'compiler' });
+export const compilerText = (value: string): Expr => ({ kind: 'lit', value, type: 'text', source: 'compiler-text' });
+
+/** A compiler-authored SQL integer token. Query/store numbers must use `lit()` and remain binds. */
+export const compilerInt = (value: number): Expr => {
+  if (!Number.isSafeInteger(value)) throw new Error(`RelIR compiler integer must be a safe integer: ${value}`);
+  return { kind: 'lit', value, type: 'int', source: 'compiler-int' };
+};
+
+/** SQL NULL selected by the compiler itself. A null supplied by the query/store stays a bound `lit`. */
+export const compilerNull = (): Expr => ({ kind: 'lit', value: null, type: 'any', source: 'compiler-null' });

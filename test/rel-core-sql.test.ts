@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
 import { emitQuery } from '../src/rel/emit.ts';
 import { planOf } from '../src/rel/plan.ts';
-import { col, compilerText, lit } from '../src/rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, lit } from '../src/rel/expr.ts';
 import type { Expr } from '../src/rel/expr.ts';
 import { aggregate, distinct, filter, join, limit, project, recursive, scan as scanRel, sort, union, values, window } from '../src/rel/factory.ts';
 import type { Channels } from '../src/channels.ts';
@@ -33,6 +33,17 @@ describe('RelIR relational-core SQL', () => {
     const emitted = emitQuery(planOf(v));
     expect(emitted.sql).toBe("SELECT v.column1 AS id, v.column2 AS name FROM (VALUES ('O''Reilly', ?)) v");
     expect(emitted.binds).toEqual(["O'Reilly"]);
+  });
+
+  test('compiler integer and NULL syntax do not turn identical query data into SQL text', () => {
+    const v = values({
+      id: relId('v'), channels, type: { cols },
+      rows: [[compilerInt(1), compilerNull()], [lit(1, 'int'), lit(null, 'any')]],
+    });
+    const emitted = emitQuery(planOf(v));
+    expect(emitted.sql).toBe('SELECT v.column1 AS id, v.column2 AS name FROM (VALUES (1, NULL), (?, ?)) v');
+    expect(emitted.binds).toEqual([1, null]);
+    expect(() => compilerInt(1.5)).toThrow('safe integer');
   });
 
   test('pins the rendering of every relational node kind', () => {
