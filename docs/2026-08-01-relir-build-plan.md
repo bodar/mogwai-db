@@ -226,8 +226,15 @@ prove the seam cannot EXPRESS the shape, not that it has not been handed one.
 - **`With`/CTE definition.** A `Plan` binding is the only naming mechanism, and CTE-versus-inline is
   `name`'s decision (§4.6). Within a binding the relation is a **DAG** — a node referenced twice is
   shared. `Materialize` is the override, not the mechanism.
-- **`Param`.** The front-end resolves wire parameters into `Step.args` before the IR exists, so nothing
-  downstream could construct one.
+- **`Param`.** ~~The front-end resolves wire parameters into `Step.args` before the IR exists, so
+  nothing downstream could construct one.~~ **SUPERSEDED — this was the bug, not a constraint.** The
+  front-end flattening a `$x` into a bare value at `frontend.ts:415` is exactly why a compiler-held
+  constant is indistinguishable from a user parameter, so every value defaults to a bind and pollutes
+  the 100-bind budget. A parameter is a first-class product concept and gets a representation at every
+  layer (wire → IR → a RelIR `Param`, spelled `lit`'s `source: 'parameter'`), with reduction to a
+  concrete value deferred to the last responsible moment (only `unrollFixedRepeat` needs it). Rationale
+  and phased plan: `docs/2026-08-05-parameters-are-the-only-binds.md`. This matches TinkerPop 4's
+  `GValue`/placeholder design.
 - **`Correlate`/lateral.** Correlation is a property of an `Expr` referencing an outer `RelId`. P1 is
   why: SQLite's rule is positional, and a node would invite constructing the one position it forbids.
 - **Shape, cardinality, productivity, bulk semantics.** All Gremlin-level (§2).

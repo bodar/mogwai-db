@@ -408,9 +408,15 @@ The one *unambiguous* duplicate found: `{path, simplePath, cyclicPath}` is spell
 - **`GValue`/`GValueHolder`/placeholder-step duality.** TinkerPop's newest pattern: every
   parameterizable step exists twice (`GraphStep`/`GraphStepPlaceholder`) behind a `*StepContract`,
   with `GValueManager.pinVariable` taint-tracking any strategy that reads a concrete parameter, so a
-  plan is marked non-generalizable the moment an optimization depends on a literal. Genuinely
-  elegant. **It buys nothing without a plan cache**, which we do not have — revisit only if one is
-  ever built.
+  plan is marked non-generalizable the moment an optimization depends on a literal. Genuinely elegant.
+  **CORRECTED (2026-08-05): the earlier verdict "buys nothing without a plan cache" was wrong** — it
+  measured the wrong payoff. The payoff for US is the **100-bind budget and honouring user intent**,
+  both real without any cache: a `GValue`'s name-or-not distinction is exactly parameter-vs-constant,
+  and only a user parameter should spend a bind. We DO adopt this pattern (a `Param` concept at every
+  layer, reduction deferred to the last responsible moment); we do NOT need the full placeholder/
+  `pinVariable` machinery, only the name-carrying value. See
+  `docs/2026-08-05-parameters-are-the-only-binds.md` and the reversal of build-plan §3.4's "no `Param`
+  node."
 - **A typed core IR / cross-layer shape algebra.** Refuted in
   [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md) §6 and §9.
 - **Merging `Stream` into `Shape`.** Refuted in the same doc §9 — `Stream` is a capability partition

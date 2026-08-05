@@ -194,7 +194,12 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
    front-end (`src/gremlin/`) is a thin translator that produces the IR — a flat step chain
    (`Step` = `{name, args, …}[]`); the compiler consumes only that. So a wire-format change
    (GraphBinary→JSON, a beta.2→master grammar bump) moves only the front-end, never the compiler.
-   Do not reach wire/parse concepts into the compiler or IR shapes into the wire layer.
+   Do not reach wire/parse concepts into the compiler or IR shapes into the wire layer. **A user
+   PARAMETER is not a wire concept** — that a `Step.arg` is a named parameter rather than a literal
+   constant is a legitimate IR fact (it decides bind-vs-literal), carried like `argTypes` already is;
+   the front-end must stop flattening it away (see the bind rule under Environment notes and
+   `docs/2026-08-05-parameters-are-the-only-binds.md`). What stays out of the compiler is the wire
+   *format*, not the *fact that the user declared a parameter*.
 
 ## Semantics traps — encode as tests before touching related steps
 
@@ -269,6 +274,23 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
     would run conformance against a corpus it does not describe — a wrong ANSWER, not an error.
   `--root <dir>` exists so the worktree's OWN copy of the script provisions main (each checkout has
   its own committed copy, and reading main's made behaviour depend on what trunk happened to hold).
+- **A BIND SERVES A USER PARAMETER — nothing else earns one.** A GValue the client sent in the
+  `bindings`/`parameters` map is the user's strongest signal of intent ("this is variable, it will
+  change"); that is what a `?` is *for*, and the 100-bind cap below is therefore a **parameter budget**.
+  A value the compiler already holds — a **parsed literal** (the `30` typed in the Gremlin string), an
+  ordinal, a class name, a JSON path, an `as()` label — is a **constant**: inline it as a *typed* SQL
+  literal (we know the type — `Step.argTypes` — so storage class follows the literal's form; do not
+  re-derive it), spending zero of the 100. The statement cache is the *user's* payoff for sending a
+  GValue, never a reason for US to manufacture a bind on a constant. Two traps a clean context keeps
+  falling into, both wrong: "inlining a literal defeats the cache" (the cache is not ours to farm) and
+  "keeping params as binds needs provenance" (it needs us to STOP flattening `$x` at `frontend.ts` —
+  deleting a lossy step, not adding tracking). A parameter is a first-class concept at every layer
+  (this is TinkerPop 4's `GValue`), reduced to a concrete value only at the last responsible moment
+  (only `unrollFixedRepeat` needs it). The only non-parameter values that may still bind are the
+  MECHANICAL exceptions — a collection `{t,v}` tree and, pending measurement, the big-decimal/duration
+  tail — a NAMED category, not evidence that "data must bind." Full rationale + phased plan:
+  `docs/2026-08-05-parameters-are-the-only-binds.md`. (Legacy `src/compiler/steps/**` is dead — do not
+  reclassify its binds.)
 - **DO SQLite caps a query at 100 BOUND PARAMETERS (and 100 KB of statement text) — Bun's cap is
   65,535, so a bind list that scales with ROW COUNT passes every test and fails only in production.**
   Never write `ids.map(() => '?')`. **A row set whose size is a function of DATA crosses the seam as
