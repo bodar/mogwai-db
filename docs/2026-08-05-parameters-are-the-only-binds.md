@@ -308,13 +308,11 @@ the `constLit` seam. No churn (corpus uses literals), census clean.
 
 ## Discovered while landing Phase A (follow-ups, not yet done)
 
-- **The `by(key)` modulator constant still binds.** `order()/select()/group().by('name')` renders the
-  key as a bound `?` twice apiece (the ORDER BY read and the null-guard), via the modulator seam
-  (`compiler/rel/modulator.ts`), NOT through any Phase-A site. It is the same principle — a parsed
-  literal key is a constant — and inlining it is the obvious next constant-sweep increment. Deliberately
-  left out of Phase A to keep the enumerated change reviewable. Do it as a Phase-A-style extension (it
-  needs no `Param` node): a `by(key)` is a constant today because the front-end flattens; a `by($x)`
-  becomes a parameter only once Phase B exists.
+- **The `by(key)` modulator constant — DONE on the RelIR spine.** `order()/group().by('name')` renders
+  the key as an inlined `compilerText` literal (`compiler/rel/modulator.ts`), so `by('name')` is 0 binds
+  on `rel` (verified). A `by($x)` would become a parameter through the same `constLit` seam once a
+  modulator param name is threaded — not currently wired, and exotic. (Legacy still binds the key, but
+  legacy is dead.)
 - **The census baseline carried pre-existing drift**: 9 `all()/any()/none()`-over-scalar traversals
   already ran on clean trunk but were recorded `deferred` (a prior commit added the support without
   re-recording; `deferred → ran` trips no census gate, so it stayed invisible). Re-recorded in
@@ -322,7 +320,26 @@ the `constLit` seam. No churn (corpus uses literals), census clean.
 
 ## Handoff + guardrail
 
-Phase A is landed (`2c99c50`); Phase B is next. This doc is the contract. The decisions that must NOT be
+**Status (current).** Phases A, B, B3 (limit/skip), nested predicate/set params, C1-predicate,
+C1-inject(Duration) + the static-temporal ordering fail-closed fix, and C2·a (the `land` pass wired for
+over-budget literal injects) are all LANDED. The parameters-are-the-only-binds thesis is complete for
+every common case: a user parameter is the only free-standing bind, a parsed literal inlines as a typed
+literal, and an over-budget literal set rides as one JSON bind. The `by(key)` constant is inlined too.
+
+**What remains is coverage-only / exotic / an open design question — each needs a decision before it is
+worth the risk on the shared spine:**
+- **C1-constant + TEXT exact-tail static ORDERING** both want the same enrichment: `SubjectType` (and
+  behind it `ScalarType`) carrying the subject's STORAGE CLASS, so `ordered`'s static arm can cast a
+  TEXT-stored `bigdecimal`/`duration` subject instead of declining. Cross-layer; exotic trigger
+  (`inject(9.99m).is(P.gt(…))`, `constant(9.99m).is(…)`).
+- **C2·b — the PARAM-LIST `within`** needs `parsePredicate` to preserve the single-collection-arg
+  distinction plus a `json_each` in-query landing (a `Minter` in `predicateExpr` or an in-list post-pass
+  mirroring `land`). Substantial; coverage-only (legacy JSON-binds the big set correctly today).
+- **The RelIR pass pipeline** (`docs/outstanding-work.md` item 37) is an OPEN DESIGN QUESTION for
+  `prune`/`fuse` — `land` is now wired ad-hoc at its one site, but whether the four passes become one
+  ordered pipeline object, and whether `fuse` is wanted at all, is undecided.
+
+This doc is the contract. The decisions that must NOT be
 relitigated by a fresh context (they were each reached against a plausible opposite and the opposite is
 wrong):
 - A bind serves a **user parameter**; the statement cache is the user's payoff, not ours to farm.
