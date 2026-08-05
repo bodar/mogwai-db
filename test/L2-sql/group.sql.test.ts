@@ -515,7 +515,14 @@ describe('group / properties SQL', () => {
     expect(r.sql).toMatch(/json_group_array\(json\(\w+\.gt\) ORDER BY \w+\.go ASC\) FILTER \(WHERE \(\w+\.gt IS NOT \?\)\)/);
   });
 
-  test('non-reducing scalar group values lower through generic child-all productivity', () => {
+  test('group().by(child).by(child) assigns the last arriving traverser\'s scalar value', () => {
+    const p = read('g.V().group().by(__.values("name").substring(0,1)).by(__.constant(1))', { spine: 'rel' });
+    expect(p.shape).toEqual({ kind: 'mapValue' });
+    expect(p.sql).toMatch(/json_extract\(json_group_array\(json\(\w+\.gt\) ORDER BY \w+\.go ASC\) FILTER \(WHERE \(\w+\.gt IS NOT \?\)\), \?\)/);
+    expect(p.sql).not.toContain("json_object('t', 'list', 'v', json_group_array(json(");
+  });
+
+  test('non-reducing scalar group values lower through generic child productivity', () => {
     const p = read('g.V().group().by("name").by(__.out().values("name"))');
     // `list`, not `scalarList`: the members are child ROWS, ordered and marked, so the SQL
     // aggregate is authoritative — the wire layer no longer strips nulls in JS (which could
@@ -536,8 +543,9 @@ describe('group / properties SQL', () => {
     expect(both.sql).toContain('ON gv.o0=gp.o0');
     // The RelIR route answers this one now, and the by() CHILD is an EXPRESSION there rather than a
     // joined child relation: a flat value-and-transform body needs no correlation, so there are no `o0`
-    // ordinals to join on at all. Same map, and the productivity rule the comment above states is a
-    // pre-aggregate domain filter rather than an INNER JOIN.
+    // ordinals to join on at all. Its value is the last arriving traverser's first child result, and
+    // the productivity rule the comment above states is a pre-aggregate domain filter rather than an
+    // INNER JOIN.
     if (!relirOff) {
       const rel = read('g.V().group().by(__.label()).by(__.values("name").substring(0,1))', { spine: 'rel' });
       expect(rel.shape).toEqual({ kind: 'mapValue' });

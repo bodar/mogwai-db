@@ -184,7 +184,7 @@ ran	legacy	6	4	0b87b02d63a0306f	09d360a34550b619	ran	0b87b02d63a0306f	g.V().grou
 ran	legacy	1	1	2a9afa92c0155dd9	7ba319eafbae0743	ran	2a9afa92c0155dd9	g.V().group().by(T.label).by(__.bothE().values("weight").dedup().order().by(Order.asc).fold())
 ran	legacy	1	1	58852ae65600255d	4f00c255a5c97ffa	ran	58852ae65600255d	g.V().group().by(T.label).by(__.values("name").order().by(Order.desc).fold())
 ran	legacy	1	1	9b1aeca36c1fb203	0c4298850e32ca88	ran	9b1aeca36c1fb203	g.V().group().by(__.label()).by(__.label().count())
-ran	rel	1	1	8a2ad7484f6145ec	bd9ca3d05b776c18	ran	8a2ad7484f6145ec	g.V().group().by(__.values("name").substring(0,1)).by(__.constant(1))
+ran	rel	1	1	5f91da31aeb71ce6	f75ceb5c805bb4c0	ran	8a2ad7484f6145ec	g.V().group().by(__.values("name").substring(0,1)).by(__.constant(1))
 ran	legacy	1	1	a2340502e977b68d	228f23b9607585dc	ran	a2340502e977b68d	g.V().group().by(label).count()
 ran	legacy	1	1	a2340502e977b68d	228f23b9607585dc	ran	a2340502e977b68d	g.V().group().by(label).count(local)
 ran	legacy	1	1	44971b6e96042f60	64034b9560df6260	ran	44971b6e96042f60	g.V().group().by(values('name')).by(both().count())

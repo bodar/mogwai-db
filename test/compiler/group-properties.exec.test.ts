@@ -176,6 +176,13 @@ test('group scalar-list drops members missing the property (json_group_array + n
   const relMap = (runWith(store, 'g.V().group().by("name").by("age")', { spine: 'rel' })[0] as any).map;
   expect(relMap).toContain('[{"t":"string","v":"marko"},{"t":"list","v":[{"t":"int","v":29}]}]');
   expect(relMap).toContain('[{"t":"string","v":"lop"},{"t":"list","v":[]}]');
+  // LEGACY'S ANSWER, AND IT IS NON-CONFORMANT — pinned as legacy's, not as the spec. RelIR declines a
+  // child body containing a MOVEMENT (that arm needs the child seam's element-traversal form), so the
+  // ambient route falls through here and `gk`/`gv` is the tell. Per the citations on the
+  // `by(__.values("name").substring(0,1))` assertion below, the reference gives ONE value per key —
+  // the last arriving traverser's first child value — so these lists are what legacy does, and §14
+  // records the decision not to spend on legacy. Do NOT read this block as the reference behaviour;
+  // when the movement-bodied child arm lands in RelIR the expectation becomes a single value.
   const children = Object.fromEntries(run(store, 'g.V().group().by("name").by(__.out().values("name"))')
     .map((r) => [r.gk, JSON.parse(r.gv).sort()]));
   expect(children).toEqual({
@@ -191,9 +198,19 @@ test('group scalar-list drops members missing the property (json_group_array + n
   // Read through `grouped`, not off `gk`/`gv`: this one is covered by the RelIR route now (a flat
   // value-and-transform child body is an expression there), and the two spines spell the group ROW
   // differently while meaning the same map.
-  const initials = grouped(run(store, 'g.V().group().by(__.label()).by(__.values("name").substring(0,1))'));
-  expect(Object.fromEntries(Object.entries(initials).map(([k, v]) => [k, (v as unknown[]).slice().sort()])))
-    .toEqual({ person: ['j', 'm', 'p', 'v'], software: ['l', 'r'] });
+  //
+  // ONE VALUE PER KEY, not a list, and the reference decides it: `Grouping.convertValueTraversal`
+  // (gremlin-core .../step/Grouping.java:92-101) wraps a value `by()` into `map(v).fold()` ONLY for a
+  // ValueTraversal/TokenTraversal/IdentityTraversal/ColumnTraversal/FunctionTraverser-lambda — an
+  // ANONYMOUS traversal like this one is left unwrapped, and `GroupStep.projectTraverser`
+  // (.../step/map/GroupStep.java:111-138) then does `map.put(p, valueTraversal.next())`: the child's
+  // FIRST value, for one traverser. Across traversers sharing a key the reducing operator is
+  // `Operator.assign` (GroupStep.java:63, Operator.java:112-116 — `apply(a,b) { return b; }`), so the
+  // LAST ARRIVING traverser wins. `g.V()` arrives 1..6 = marko,vadas,lop,josh,ripple,peter, so
+  // `person` resolves to peter's initial and `software` to ripple's. Verified stable under
+  // MOGWAI_REVERSE_UNORDERED=1 — "last arriving" is the carried encounter, not a scan artefact.
+  expect(grouped(run(store, 'g.V().group().by(__.label()).by(__.values("name").substring(0,1))')))
+    .toEqual({ person: 'p', software: 'r' });
 });
 
 test('group reducers operate over the complete child row domain for each key', () => {

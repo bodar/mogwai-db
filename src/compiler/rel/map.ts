@@ -144,11 +144,9 @@ const ORD_COL = 'go';
  * typed list. That is what `materialize.ts`'s `'a terminal map with an element key or value not yet
  * supported'` was really blocked on — not the SQL, but a wire vocabulary that made an element a member.
  *
- * A VALUE `by()` collects what it projects instead of the traverser, and needs nothing new: `byNode`'s
- * second slot already yields a self-describing `{t,v}` node, so the members are written back as they are.
- * It declines exactly where `byNode` does — a bare `by()` over an element (whose projection IS the element,
- * which carries no tag) and a traversal body, which needs the child seam. A REDUCING value `by()` is a
- * different shape entirely (one value per group, not a list) and lands with the reducer vocabulary.
+ * A VALUE `by()` needs no new framing: `byNode`'s second slot already yields a self-describing `{t,v}`
+ * node. A wrapped property/token/identity projection collects those nodes; a non-reducing anonymous child
+ * assigns one node. A REDUCING child value is a different group-scoped shape and remains declined here.
  */
 export function groupBarrier(
   input: Rel, host: ByHost, step: IRStep, bulked: boolean, params: Record<string, any>, child: ByChild, fresh: Minter,
@@ -171,10 +169,9 @@ export function groupBarrier(
   const key = byNode(bys[0] ?? { key: { kind: 'identity' } }, host, fresh, child);
   if (!key) return null;
 
-  // THE VALUE `by()`, where there is one. `byNode` declines a bare `by()` over an element (its projection
-  // IS the element, which has no tag) and a traversal body, so a slot it cannot project declines the whole
-  // step rather than silently collecting the elements instead — which would be the right arity and the
-  // wrong answer, the one thing the decline contract exists to prevent.
+  // THE VALUE `by()`, where there is one. A slot `byNode` cannot project declines the whole step rather
+  // than silently collecting the elements instead — which would be the right arity and the wrong answer,
+  // the one thing the decline contract exists to prevent.
   const valueBy = bys[1];
   // A REDUCING traversal value is one scalar for the WHOLE group, not one member per incoming
   // traverser. The generic child expression reduces per parent, which is composable for neither the
@@ -274,10 +271,11 @@ export function groupBarrier(
   const rows = domainDrop
     ? make.filter({ id: fresh('gf'), input: keyed, channels: keyed.channels, type: keyed.type, pred: domainDrop })
     : keyed;
-  // THE VALUE, and the two arms differ only here. `groupCount()` reduces the group to a traverser COUNT
-  // — `SUM(bulk)` where the stream carries a multiplicity, `COUNT(*)` where it cannot, identical while
-  // bulk ≡ 1 and correct after a fan-out. `group()` COLLECTS the traversers instead, as a typed list of
-  // element members.
+  // THE VALUE. `groupCount()` reduces the group to a traverser COUNT — `SUM(bulk)` where the stream
+  // carries a multiplicity, `COUNT(*)` where it cannot, identical while bulk ≡ 1 and correct after a
+  // fan-out. A wrapped value `by()` (property/token/identity) and the default `group()` COLLECT members.
+  // An anonymous child with no barrier is different: GroupStep takes the child's first emitted value
+  // for each traverser and Operator.assign keeps the LAST arriving traverser's value for the key.
   //
   // MEMBER ORDER IS THE TRAVERSERS' OWN, and it is stated rather than inherited: a group's members ride
   // inside one collected traverser's buffer, so their order is fully observable, and `json_group_array`
@@ -301,19 +299,25 @@ export function groupBarrier(
   // `productivityFilter` is asked here for the same reason it is asked for the key — `ProductiveByStrategy`
   // turns both off, and then a genuinely null value IS a member.
   const memberDrop = member ? productivityFilter(step, col(rows.id, MEMBER_COL)) : undefined;
-  const members: Expr = {
-    kind: 'json-object',
-    entries: [['t', lit('list', 'text')], ['v', {
-      kind: 'agg', fn: 'json_group_array', args: [collected],
-      orderBy: [{ expr: col(rows.id, ORD_COL), dir: 'asc' }],
-      ...(memberDrop ? { filter: memberDrop } : {}),
-    }]],
-    binary: false,
+  const memberAggregate: Expr = {
+    kind: 'agg', fn: 'json_group_array', args: [collected],
+    orderBy: [{ expr: col(rows.id, ORD_COL), dir: 'asc' }],
+    ...(memberDrop ? { filter: memberDrop } : {}),
   };
+  const groupedValue: Expr = valueBy?.key.kind === 'child'
+    // ONE aggregate pass over the grouped block: order the typed `{t,v}` nodes by encounter, collect
+    // them as JSON (so the envelope is embedded rather than stringified), then select the last one.
+    // The child expression itself already yields only its first value for one parent traverser.
+    ? { kind: 'call', fn: 'json_extract', args: [memberAggregate, lit('$[#-1]', 'text')] }
+    : {
+        kind: 'json-object',
+        entries: [['t', lit('list', 'text')], ['v', memberAggregate]],
+        binary: false,
+      };
   const count: Expr = bulked && bulk
     ? { kind: 'agg', fn: 'sum', args: [col(rows.id, bulk.col)] }
     : { kind: 'agg', fn: 'count', args: [lit(1, 'int')] };
-  const value = step.name === 'group' ? members : count;
+  const value = step.name === 'group' ? groupedValue : count;
   const productive = make.aggregate({
     id: fresh('gb'), input: rows,
     channels: [], type: typeOf(meta(KEY_COL, 'json', true), meta(VAL_COL, step.name === 'group' ? 'json' : 'int')),
@@ -323,7 +327,8 @@ export function groupBarrier(
 
   // A COUNT is a Gremlin `long`, and the tag is what makes the wire agree with legacy's `countBuffer`
   // (an explicit Int64) rather than letting magnitude inference pick Int for a small count. A COLLECTED
-  // group needs no envelope added: `members` already IS one.
+  // group needs no envelope added: a collecting value is already a typed list node, while the child
+  // assignment arm extracts the child's typed scalar node unchanged.
   const entry: Entry = {
     key: col(productive.id, KEY_COL),
     val: step.name === 'group' ? col(productive.id, VAL_COL) : typedNode(col(productive.id, VAL_COL), lit('long', 'text')),
