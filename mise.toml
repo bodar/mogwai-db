@@ -112,6 +112,11 @@ description = "RelIR decline contract: lowerToRel returns a plan or null over ev
 depends = ["install"]
 run = "bun scripts/rel-sweep.ts"
 
+[tasks.sql-hygiene]
+description = "Instrument: RelIR authored-corpus literal provenance and DO SQL-wall sweep"
+depends = ["install"]
+run = "bun scripts/sql-hygiene.ts"
+
 [tasks.deletion-record]
 description = "Bank a lowered deletion floor (downward only; commit scripts/deletion-ratchet.tsv)"
 depends = ["install"]
