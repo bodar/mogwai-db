@@ -2951,3 +2951,40 @@ So the process rule stands vindicated in both directions: re-deriving §13k cost
 enough that each fix is now a known one-liner against an existing total function or predicate
 (`relExprs`, `sameColumns`, `planBindCount`) rather than new machinery. **None of the three is new
 machinery — that is the headline for whoever picks them up.**
+
+### 13k·2. Finding #4's REMEDY does not work as written — and my own "all three are one-liners" was wrong
+
+§13k·1 closed with "all three fixes apply an existing TOTAL function or predicate … rather than adding
+machinery". That is true of #1 and #3 and **false of #4**, whose two halves each break on inspection. The
+FINDING stands; the remedy does not.
+
+**Half one — "`checkPlan` never applies `planBindCount`" — is real, but applying it as a flat sum would
+REJECT VALID PLANS.** `planBindCount`'s own docblock (`src/rel/check.ts:86-93`) already states the
+distinction the remedy skips: `check` applies the cap per BINDING, "which is the right question for a `Stmt`
+boundary (each is its own statement)", while "a read plan's bindings are CTEs of ONE statement, so its budget
+is the SUM". So the sum is the correct budget only when every binding is a `Rel`. A program that mixes write
+statements — the normal shape once Phase 2 lands — has several statement boundaries, and summing across them
+over-counts. `bindCount`'s comment says over-reporting "merely fails closed", which is true of a per-statement
+count and NOT true here: failing closed on a legal plan is rejecting a valid input, which the root
+`CLAUDE.md` forbids outright. The real fix therefore needs the statement-boundary PARTITION — group each
+`Rel` binding with the statement whose CTE it is, then cap per group — and a prior question the partition
+depends on: whether a `Rel` binding referenced by two statements contributes its binds once or once per
+referencing statement. Neither is a one-liner, and getting it wrong turns a proof into a false rejection.
+
+**Half two — "move the assertion into `emitRelational`" — cannot be done literally.** `emitRelational`
+(`src/rel/emit.ts:574`) returns an un-rendered `Expression` for its caller to COMPOSE into a larger query.
+The rendered bind count is not final at that point, so there is nothing there to assert; rendering it to
+check would render twice and still not bound what the caller finally emits. The honest shapes are either a
+shared render-and-check helper that both current callers go through (so a third inherits it), or an explicit
+contract at the seam saying the caller owns the check. That is a design decision, not a move.
+
+**So #4 comes OFF the ready list** and stays a `RISK` with a named prerequisite. #1 (`prune` + `relExprs`)
+and #3 (`sameColumns` for the five type-preserving kinds) remain genuinely small.
+
+**One correction to #3's own scope while I am here: its left-join half is HALF DONE already.**
+`src/rel/obligations.ts:121-128` does enforce the CHANNEL law — "An unmatched left-join row has the right
+side entirely NULL … a rigid role is per-traverser physical state", throwing on a rigid channel carried from
+the nullable right side. What is genuinely missing is the TYPE law beside it: a `left` join's declared output
+columns that came from the RIGHT side must be `nullable: true`. Since a Join's output is POSITIONAL and
+§13m confirms that holds, the law is exactly "for `join === 'left'`, every column at an index ≥
+`left.type.cols.length` is nullable" — checkable, and distinct from `sameColumns`.
