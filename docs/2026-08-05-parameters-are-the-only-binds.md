@@ -261,6 +261,17 @@ the `constLit` seam. No churn (corpus uses literals), census clean.
   `SET_BIND_LIMIT` (25) members DECLINES to legacy (`predicate.ts`); the generalisation is a coverage
   move, not a budget one (legacy already JSON-binds the big set).
 
+  **Refined by Phase B — this is now specifically the PARAM-LIST case.** With operand inlining, a big
+  set of LITERALS is already 0 binds (each member inlines), so the only set that still needs the JSON
+  bind is a `within(namesParam)` where the members are DATA — inlining those would make the statement
+  text a function of the data (the exact thing `textLiteral`'s doc forbids). The blocker is that
+  `parsePredicate` DROPS the single-vs-varargs distinction on unwrap (`single ? undefined`), so
+  `predicateExpr` cannot tell a param list (→ one JSON bind, `json_each` in-query) from literal varargs
+  (→ inline). C2 therefore needs: (a) `parsePredicate` to preserve "this set is one collection arg"
+  (and its param name), and (b) a `json_each` in-query landing in the `within` case — which needs a
+  `Minter` threaded into `predicateExpr`, or a post-pass over the `in-list` Expr mirroring `land`'s
+  Values landing. Substantial; coverage-only (legacy is correct today).
+
 ## Discovered while landing Phase A (follow-ups, not yet done)
 
 - **The `by(key)` modulator constant still binds.** `order()/select()/group().by('name')` renders the
