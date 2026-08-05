@@ -1,5 +1,5 @@
 import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
-import { col, compilerInt, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerReal, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, planBindCount } from '../../rel/check.ts';
 import { emit, emitRelational } from '../../rel/emit.ts';
@@ -13,6 +13,7 @@ import { isLocalScope, sliceOf } from '../ir/step.ts';
 import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs, isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
+import { flatType, type TypeNode } from '../../gremlin/types.ts';
 import { assertsGType, childSteps, collectionAssert, typeOfAssert } from '../steps/tail/child-shape.ts';
 import { PATH_LIST_OPS } from '../steps/tail/path.ts';
 import type { IRStep } from '../ir/strategies.ts';
@@ -437,8 +438,8 @@ function hasPropertyClause(key: string, val: unknown, subject: Subject, elem: El
   const matching = make.filter({
     id: fresh('f'), input: props, channels: [], type: props.type,
     pred: matches
-      ? and(and(eq(col(props.id, owner), subject.id), eq(col(props.id, 'key'), lit(key, 'text'))), matches)
-      : and(eq(col(props.id, owner), subject.id), eq(col(props.id, 'key'), lit(key, 'text'))),
+      ? and(and(eq(col(props.id, owner), subject.id), eq(col(props.id, 'key'), compilerText(key))), matches)
+      : and(eq(col(props.id, owner), subject.id), eq(col(props.id, 'key'), compilerText(key))),
   });
   const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
   return { kind: 'exists', plan: probe, negated: false };
@@ -526,8 +527,10 @@ function elementScan(step: IRStep, fresh: Minter): { scan: Rel; pred?: Expr; ele
   if (ids.length !== nums.length + strs.length) return null;
 
   const clauses: Expr[] = [];
-  if (nums.length) clauses.push({ kind: 'in-list', expr: col(scan.id, 'id'), values: nums.map((n) => lit(n, 'int')) });
-  if (strs.length) clauses.push({ kind: 'in-list', expr: col(scan.id, 'uid'), values: strs.map((s) => lit(s, 'text')) });
+  // Ids are parsed integer/string literals bounded by the QUERY TEXT — inline them (a rowid `int`, a
+  // uid `text`); `constLit` never declines a number/string, so the assertion cannot fire.
+  if (nums.length) clauses.push({ kind: 'in-list', expr: col(scan.id, 'id'), values: nums.map((n) => constLit(n, 'long')!) });
+  if (strs.length) clauses.push({ kind: 'in-list', expr: col(scan.id, 'uid'), values: strs.map((s) => compilerText(s)) });
   const pred = clauses.reduce<Expr | undefined>((left, right) =>
     left ? { kind: 'binary', op: 'or', left, right } : right, undefined);
   return { scan, pred, elem };
@@ -701,7 +704,7 @@ function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel 
     });
     const sampled = make.filter({
       id: fresh('sf'), input: frame, channels: frame.channels, type: frame.type,
-      pred: { kind: 'binary', op: '<=', left: col(frame.id, rank), right: lit(countArg(step), 'int') },
+      pred: { kind: 'binary', op: '<=', left: col(frame.id, rank), right: countLit(countArg(step)) },
     });
     return make.project({
       id: fresh('sp'), input: sampled, channels: input.channels, type: input.type,
@@ -766,8 +769,8 @@ function slice(
     : input;
   return make.limit({
     id: fresh('li'), input: source, channels: input.channels, type: input.type,
-    ...(window.limit === null ? {} : { count: lit(window.limit, 'int') }),
-    ...(window.offset ? { offset: lit(window.offset, 'int') } : {}),
+    ...(window.limit === null ? {} : { count: countLit(window.limit) }),
+    ...(window.offset ? { offset: countLit(window.offset) } : {}),
   });
 }
 
@@ -820,13 +823,13 @@ function bulkSlice(
   const kept = make.filter({
     id: fresh('bf'), input: running, channels: running.channels, type: running.type,
     pred: and(
-      { kind: 'binary', op: '>', left: inner.past, right: lit(lo, 'int') },
-      hi === null ? undefined : { kind: 'binary', op: '<', left: inner.first, right: lit(hi, 'int') },
+      { kind: 'binary', op: '>', left: inner.past, right: countLit(lo) },
+      hi === null ? undefined : { kind: 'binary', op: '<', left: inner.first, right: countLit(hi) },
     ),
   });
   const outer = band(kept);
-  const from: Expr = lo ? { kind: 'call', fn: 'MAX', args: [outer.first, lit(lo, 'int')] } : outer.first;
-  const to: Expr = hi === null ? outer.past : { kind: 'call', fn: 'MIN', args: [outer.past, lit(hi, 'int')] };
+  const from: Expr = lo ? { kind: 'call', fn: 'MAX', args: [outer.first, countLit(lo)] } : outer.first;
+  const to: Expr = hi === null ? outer.past : { kind: 'call', fn: 'MIN', args: [outer.past, countLit(hi)] };
   return make.project({
     id: fresh('bs'), input: kept, channels: input.channels, type: input.type,
     exprs: input.type.cols.map((column) => [column.name, column.name === bulk.col
@@ -1081,7 +1084,7 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { readon
   if (step.name === 'constant') {
     const [value, extra] = args;
     if (extra !== undefined) return null;
-    const literal = value === null ? lit(null, 'any') : operandLit(value);
+    const literal = constLit(value, step.argTypes?.[0] ?? null);
     if (!literal) return null;
     return {
       rel: make.project({
@@ -1115,7 +1118,7 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { readon
       // The key set is bounded by the QUERY TEXT, never by row count, so an `InList` is right here
       // and a JSON bind is not (root CLAUDE.md's rule is about data-sized sets).
       on: and(eq(col(props.id, owner), col(input.id, 'id')), keys.length
-        ? { kind: 'in-list', expr: col(props.id, 'key'), values: keys.map((k) => lit(k, 'text')) }
+        ? { kind: 'in-list', expr: col(props.id, 'key'), values: keys.map((k) => compilerText(k)) }
         : undefined),
     });
     return {
@@ -1360,7 +1363,7 @@ function scalarTail(
     if (step.name === 'constant') {
       const [value, extra] = args;
       if (extra !== undefined) return null;
-      const literal = value === null ? lit(null, 'any') : operandLit(value);
+      const literal = constLit(value, step.argTypes?.[0] ?? null);
       if (!literal) return null;
       const carried = rel.channels;
       rel = make.project({
@@ -1531,7 +1534,11 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
   let folded: { at: number; as?: string };
   try { folded = foldConstantCoercions(steps as IRStep[], vals); } catch { return null; }
 
-  const rows = vals.map((arg) => (arg === null ? lit(null, 'any') : operandLit(arg)));
+  // The type each row inlines under: a coercion fold (`asNumber`/`asBool`/…) has already retyped the
+  // whole stream, so its uniform `as` wins; absent a fold, the value keeps the arg's declared subtype.
+  const rowType = (i: number): TypeNode | null =>
+    (folded.as as TypeNode | undefined) ?? (folded.at === 1 ? (step.argTypes?.[i] ?? null) : null);
+  const rows = vals.map((arg, i) => constLit(arg, rowType(i)));
   if (rows.some((row) => !row)) return null;
   // The tag the FOLD established, else a uniform declared type where there is one, else per-value
   // inference — which is what `UNKNOWN` means and is the honest floor for a heterogeneous inject
@@ -1566,8 +1573,9 @@ function injectList(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFramin
   const args = step.args ?? [];
   if (step.modulators?.length || step.optionArms || !args.length) return null;
   if (!args.every((arg) => Array.isArray(arg))) return null;
-  const rows = (args as readonly unknown[][]).map((members) => {
-    const items = members.map((member) => (member === null ? lit(null, 'any') : operandLit(member)));
+  const rows = (args as readonly unknown[][]).map((members, ai) => {
+    const listType = step.argTypes?.[ai] ?? null;
+    const items = members.map((member, mi) => constLit(member, itemTypeAt(listType, mi)));
     return items.some((item) => !item) ? null : [{ kind: 'json-array', items: items as Expr[], binary: true } as Expr];
   });
   if (rows.some((row) => !row)) return null;
@@ -1765,12 +1773,37 @@ function subReadList(steps: readonly IRStep[], opts: Lowering, fresh: Minter): {
   return { expr: { kind: 'scalar', plan: inner.rel }, of: inner.framing.of };
 }
 
-/** A literal an injected row can hold. Anything else — a collection, a map, a nested traversal —
- *  is a different traverser shape and declines. */
-const operandLit = (arg: unknown): Expr | null =>
-  typeof arg === 'string' ? lit(arg, 'text')
-    : typeof arg === 'number' ? lit(arg, 'real')
-      : typeof arg === 'boolean' ? lit(arg, 'int') : null;
+/** A held CONSTANT the compiler already knows — inlined as a TYPED SQL literal so it spends none of the
+ *  100-parameter budget, its storage class following the arg's declared canonical type (`Step.argTypes`)
+ *  rather than being re-derived from the JS runtime value. A REAL declared type inlines an integer-valued
+ *  double as `2.0`, not INTEGER `2`. Values a literal cannot spell (`NaN`/±`Infinity`) stay a bound `lit`;
+ *  a shape that is a different traverser — a collection, a map, a nested traversal, or a big-value carrier
+ *  (bigint/BigDecimal/Duration, the `oversized` tail) — declines with `null`, exactly as before. */
+const constLit = (value: unknown, type: TypeNode | null): Expr | null => {
+  if (value === null) return compilerNull();
+  if (typeof value === 'string') return compilerText(value);
+  if (typeof value === 'boolean') return compilerInt(value ? 1 : 0);
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return lit(value, 'real'); // NaN/±Infinity have no literal form
+    if (!Number.isInteger(value)) return compilerReal(value);
+    const flat = flatType(type);
+    return flat === 'float' || flat === 'double' || flat === 'bigdecimal'
+      ? compilerReal(value) : compilerInt(value);
+  }
+  return null;
+};
+
+/** The element TypeNode a list/set container node declares at index `i`, or null — the per-member type
+ *  a flattened collection arg still carries alongside its values (`literalItems`, `frontend.ts`). */
+const itemTypeAt = (type: TypeNode | null | undefined, i: number): TypeNode | null =>
+  type != null && typeof type === 'object' && 'items' in type ? (type.items[i] ?? null) : null;
+
+/** A COMPILE-TIME slice/count as an inlined integer literal — the sharpest constant of all: `sliceOf`
+ *  and `countArg` already READ the value to shape the plan (reject `range(2,1)`, compute `lo + limit`),
+ *  so it is definitionally known here and spending it as a runtime bind is a pure contradiction. A
+ *  malformed non-integer (`limit(2.5)`) keeps the bound spelling the legacy spine's error path owns,
+ *  rather than throwing from `compilerInt`. */
+const countLit = (n: number): Expr => Number.isSafeInteger(n) ? compilerInt(n) : lit(n, 'int');
 
 /**
  * Lower a whole rooted chain, or decline.
@@ -2514,7 +2547,7 @@ const byChild = (ctx: ChainCtx, fresh: Minter): ByChild => (body, host) => {
     // through NULLNESS, which coincides for every buildable body except one that deliberately emits
     // null. Decline until the queued ByChild signature refinement reports emission separately.
     if (args[0] === null) return null;
-    const projected = operandLit(args[0]);
+    const projected = constLit(args[0], leading.argTypes?.[0] ?? null);
     if (!projected) return null;
     value = projected;
     at = 1;

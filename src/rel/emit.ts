@@ -124,6 +124,9 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
           case 'bound': return value(e.value);
           case 'compiler-text': return textLiteral(e.value);
           case 'compiler-int': return raw(String(e.value));
+          // A REAL literal must carry a decimal point or exponent, else SQLite reads an integer-valued
+          // double (`2.0`) back as INTEGER `2` and loses the storage class the type declared.
+          case 'compiler-real': { const s = String(e.value); return raw(/[.eE]/.test(s) ? s : `${s}.0`); }
           case 'compiler-null': return raw('NULL');
         }
       case 'unary': return e.op === 'not' ? q`NOT (${self(e.arg)})` : q`-(${self(e.arg)})`;

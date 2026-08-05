@@ -9,6 +9,7 @@ export type Expr =
   | { readonly kind: 'lit'; readonly value: unknown; readonly type: SqlType; readonly source: 'bound' }
   | { readonly kind: 'lit'; readonly value: string; readonly type: 'text'; readonly source: 'compiler-text' }
   | { readonly kind: 'lit'; readonly value: number; readonly type: 'int'; readonly source: 'compiler-int' }
+  | { readonly kind: 'lit'; readonly value: number; readonly type: 'real'; readonly source: 'compiler-real' }
   | { readonly kind: 'lit'; readonly value: null; readonly type: SqlType; readonly source: 'compiler-null' }
   | { readonly kind: 'unary'; readonly op: 'not' | 'neg'; readonly arg: Expr }
   | { readonly kind: 'binary'; readonly op: BinaryOp; readonly left: Expr; readonly right: Expr }
@@ -50,6 +51,13 @@ export const col = (rel: import('./types.ts').RelId, name: string): Expr => ({ k
 /** A value supplied by the query or store: always a bound parameter. */
 export const lit = (value: unknown, type: SqlType = 'any'): Expr => ({ kind: 'lit', value, type, source: 'bound' });
 
+/** Does this `Lit` render as a DO bind parameter (a `?`), rather than inline SQL text? Only a value the
+ * query or store supplied binds; a compiler-authored constant (`compiler-*`) renders as an escaped
+ * literal and spends none of the 100-parameter budget. The one authority both the emitter switch and
+ * the bind-budget counter read, so the counted budget cannot drift from what actually renders — which
+ * is the whole of "the 100-bind cap is a parameter budget". */
+export const bindsAsParameter = (e: Extract<Expr, { kind: 'lit' }>): boolean => e.source === 'bound';
+
 /** A compiler-authored string token, rendered as an escaped SQL literal rather than consuming a DO bind.
  * This is deliberately string-only: data stays in `lit`, and the narrow type prevents a caller from
  * smuggling an arbitrary value into statement text. */
@@ -59,6 +67,16 @@ export const compilerText = (value: string): Expr => ({ kind: 'lit', value, type
 export const compilerInt = (value: number): Expr => {
   if (!Number.isSafeInteger(value)) throw new Error(`RelIR compiler integer must be a safe integer: ${value}`);
   return { kind: 'lit', value, type: 'int', source: 'compiler-int' };
+};
+
+/** A compiler-authored SQL real (floating) token — a held numeric constant whose declared canonical
+ * type is `float`/`double`/`bigdecimal` (or a fractional value of any type). Rendered as a literal that
+ * carries an explicit REAL storage class (a decimal point or exponent), so an integer-valued double
+ * inlines as `2.0` rather than the INTEGER `2` a bare spelling would produce. Query/store numbers must
+ * use `lit()` and remain binds. */
+export const compilerReal = (value: number): Expr => {
+  if (!Number.isFinite(value)) throw new Error(`RelIR compiler real must be finite: ${value}`);
+  return { kind: 'lit', value, type: 'real', source: 'compiler-real' };
 };
 
 /** SQL NULL selected by the compiler itself. A null supplied by the query/store stays a bound `lit`. */

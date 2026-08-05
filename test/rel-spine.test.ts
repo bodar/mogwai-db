@@ -430,23 +430,31 @@ describe('the RelIR spine', () => {
 
   test('the bind budget is decided on the number the PLATFORM measures', () => {
     // A traversal legacy answers must not become a compile error because this route spells its
-    // predicate more expensively, so an over-budget plan DECLINES (§11). The number that decision
-    // reads has to be the rendered bind list and not the IR-occurrence count: the assembler can
-    // spell one `Lit` twice, and measured over every corpus prefix, 50 of them rendered MORE binds
-    // than were counted (widest 42 against 31). None crossed 100 on today's corpus, which is exactly
-    // why the cheap count looked correct.
+    // predicate more expensively, so an over-budget plan DECLINES (§11). The number that decision reads
+    // is the RENDERED bind list — the count the DO measures — asked once by rendering the plan, because
+    // a fused clause can spell one bound `Lit` twice.
     //
-    // The vtype-aware compare key is the knowable place: one element `order().by(k)` is ~26 binds
-    // against legacy's 2, so a chain of them walks up to the cap and over it.
+    // A COMPILER-HELD CONSTANT spends none of it: the vtype-aware compare key's class lists, the slice
+    // counts, a `has` key and a `V/E` id all inline as typed SQL literals now
+    // (docs/2026-08-05-parameters-are-the-only-binds.md). So a chain that once declined for spending the
+    // budget on constants ADMITS — the 100 is a PARAMETER budget. What still costs is genuine binds:
+    // each `order().by(key)` binds the KEY twice (the ORDER BY read and the null-guard), ~2 apiece.
     const binds = (gremlin: string) => read(gremlin, { spine: 'rel' }).binds.length;
-    expect(binds("g.V().order().by('name')")).toBeLessThan(DO_BIND_CAP);
-    expect(binds("g.V().order().by('name').order().by('age').order().by('lang')")).toBeLessThan(DO_BIND_CAP);
+    expect(binds("g.V().order().by('name')")).toBe(2);
+    // Four keys used to exceed the cap (the class lists were counted against it); now it is ~8 binds
+    // and admits — the direct, measurable payoff of inlining the compare key's constants.
+    const four = read("g.V().order().by('name').order().by('age').order().by('lang').order().by('x')", { spine: 'rel' });
+    expect(four.spine).toBe('rel');
+    expect(four.binds.length).toBeLessThan(DO_BIND_CAP);
 
-    // Four of them is over, so it declines WHOLE and legacy answers it — with its own 2-binds-per-key
-    // spelling, which is why the same traversal is cheap over there.
-    const over = read("g.V().order().by('name').order().by('age').order().by('lang').order().by('x')", { spine: 'rel' });
-    expect(over.spine).toBe('legacy');
-    expect(over.binds.length).toBeLessThan(DO_BIND_CAP);
+    // The decline path is still live: past 100 rendered binds RelIR declines the WHOLE plan and routes
+    // to legacy, rather than emit SQL the DO would reject at execution (§11 — a decline is recoverable,
+    // an over-budget emission is not). Inlining the compare key's constants closed the gap where RelIR
+    // was DEARER than legacy, so the trigger is now a genuinely huge chain — over budget on legacy too;
+    // what is under test is the ROUTING (RelIR must not hand on an over-cap plan), not that legacy fits.
+    const many = (n: number) => `g.V().${Array.from({ length: n }, (_, i) => `order().by('k${i}')`).join('.')}`;
+    expect(read(many(50), { spine: 'rel' }).spine).toBe('rel');     // 100 binds — at the cap, admitted
+    expect(read(many(51), { spine: 'rel' }).spine).toBe('legacy');  // 102 binds — over, declines whole
 
     // THE PROPERTY, not the example: nothing this route admits may exceed the cap. `rel-sweep`
     // holds it over all 38k admitted corpus prefixes; here it is stated where a reader will find it.

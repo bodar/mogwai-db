@@ -1,4 +1,4 @@
-import type { Expr } from './expr.ts';
+import { bindsAsParameter, type Expr } from './expr.ts';
 import { joinWidth, scan } from './factory.ts';
 import { checkChannels } from './obligations.ts';
 import { isRel, type Rel, type RelKind } from './rel.ts';
@@ -61,7 +61,7 @@ const sameNames = (left: readonly string[], right: readonly string[]): boolean =
 export function bindCount(plan: Rel | Stmt): number {
   let n = 0;
   const expr = (e: Expr): void => {
-    if (e.kind === 'lit') n++;
+    if (e.kind === 'lit' && bindsAsParameter(e)) n++;
     exprRels(e).forEach(rel);
     exprChildren(e).forEach(expr);
   };

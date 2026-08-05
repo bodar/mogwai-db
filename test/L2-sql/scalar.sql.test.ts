@@ -32,6 +32,17 @@ const eligible = (col: string, text = false): string =>
 // survive both (test/CLAUDE.md: snapshots assert semantic equivalence, not byte identity).
 const wraps = (fn: string) => new RegExp(`\\b${fn}\\(`);
 
+// A one-value inject const-folds its seed to a COMPILE-TIME CONSTANT, now inlined as a typed SQL literal
+// rather than a bound `?` (the parameter-budget win: a constant the compiler holds spends none of the
+// DO's 100 binds — docs/2026-08-05-parameters-are-the-only-binds.md). So a const-fold test asserts the
+// inlined VALUE here instead of on `.binds`: `1`/`0` for a boolean, epoch-millis for a date, and so on.
+const seed = (q: string): string => {
+  const { sql } = read(q);
+  const m = /\(VALUES \((.+?)\)\)/.exec(sql);
+  if (!m) throw new Error(`no single-value inject VALUES seed in: ${sql}`);
+  return m[1]!;
+};
+
 describe('scalar-parent / projection SQL', () => {
   test('order().by(key[, dir]) folds ORDER BY into the projection select', () => {
     // The LEGACY spelling, named as such: element `order()` is RelIR-routed now (it MINTS the
@@ -87,10 +98,12 @@ describe('scalar-parent / projection SQL', () => {
     // row-for-row differential in `test/rel-spine.test.ts` are what tie the two answers together.
     expect(read('g.V().order().by("age").range(1,3).values("name")', { spine: 'legacy' }).sql).toContain('LIMIT 2 OFFSET 1');
     expect(read('g.V().order().by("age").skip(1)', { spine: 'legacy' }).sql).toContain('LIMIT -1 OFFSET 1');
-    // RelIR: an ORDER BY on the minted channel, then the ordinary LIMIT/OFFSET.
+    // RelIR: an ORDER BY on the minted channel, then the ordinary LIMIT/OFFSET. The slice counts are
+    // compile-time constants (`range(1,3)` → offset 1, limit 2), inlined as SQL literals — a bind was
+    // never the right home for a number the compiler already computed to shape the plan.
     const rel = read('g.V().order().by("age").range(1,3).values("name")', { spine: 'rel' });
-    expect(rel.sql).toMatch(/ORDER BY \w+\.encounter ASC LIMIT \? OFFSET \?/);
-    expect(rel.binds).toContain(2);
+    expect(rel.sql).toMatch(/ORDER BY \w+\.encounter ASC LIMIT 2 OFFSET 1/);
+    expect(rel.binds).not.toContain(2);
   });
 
   test('range/skip/limit compose as CTEs, ordered by the source encounter when no order() is present', () => {
@@ -232,16 +245,18 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().hasId([1,2])').sql).toBe(read('g.V().hasId(1,2)').sql);
     // hasId(1,[2,6]) ≡ hasId(1,2,6): HasIdStep flattens every Collection arg.
     expect(read('g.V().hasId(1,[2,6])').binds).toEqual([1, 2, 6]);
-    expect(read('g.inject([1,2,3])').binds).toEqual([1, 2, 3]);
+    // inject members are parsed literals bounded by the query text → inlined into the `jsonb_array`, no binds.
+    expect(read('g.inject([1,2,3])').sql).toContain('jsonb_array(1, 2, 3)');
+    expect(read('g.inject([1,2,3])').binds).toEqual([]);
     // A lone P predicate arg is not an array → still passes through, not flattened.
     expect(read('g.V().hasId(P.within([1,2]))').sql).toContain('COALESCE(n.uid, n.id) in (?, ?)');
     // Scope.local is now captured on the step (was silently dropped) — a bare
     // reducer ignores the scope arg, so global sum() is unchanged (Scope.local lands later).
-    // What is under test is the FLATTENING — three values, not one array — so the three are asserted by
-    // presence on both spines. RelIR's bind list also carries the reducer's eligibility class names, and
-    // an exact-equality assertion here would be pinning that unrelated fact.
-    for (const spine of ['legacy', 'rel'] as const)
-      for (const value of [1, 2, 3]) expect(read('g.inject(1,2,3).sum()', { spine }).binds).toContain(value);
+    // What is under test is the FLATTENING — three values, not one array. Legacy binds them; RelIR
+    // inlines them (parsed literals are constants), so each spine is asserted in its own spelling: the
+    // three values are present either as binds (legacy) or as inlined VALUES rows (rel).
+    for (const value of [1, 2, 3]) expect(read('g.inject(1,2,3).sum()', { spine: 'legacy' }).binds).toContain(value);
+    for (const row of ['(1)', '(2)', '(3)']) expect(read('g.inject(1,2,3).sum()', { spine: 'rel' }).sql).toContain(row);
   });
 
   test('fold() as a value + unfold() re-enters the tail', () => {
@@ -397,9 +412,11 @@ describe('scalar-parent / projection SQL', () => {
 
   test('inject() is a value stream that reducers/modifiers chain onto', () => {
     expect(read('g.inject(1,2,3)').shape).toEqual({ kind: 'value', type: UNKNOWN });
-    expect(read('g.inject(1,2,3)').binds).toEqual([1, 2, 3]);
+    // parsed literals are constants, inlined as VALUES rows (no binds) on the RelIR spine.
+    expect(read('g.inject(1,2,3)').sql).toContain('VALUES (1), (2), (3)');
+    expect(read('g.inject(1,2,3)').binds).toEqual([]);
     // every inject() value across the chain folds into one VALUES seed (so the tail's
-    // dedup/order/reducer see the whole stream)
+    // dedup/order/reducer see the whole stream) — a chained inject().inject() routes legacy (binds).
     expect(read('g.inject(1,3).inject(100,300)').binds).toEqual([1, 3, 100, 300]);
     // reducers reuse the shared wrapper
     expect(read('g.inject(1,2,3).sum()').shape).toEqual({ kind: 'scalar' });
@@ -522,16 +539,16 @@ describe('scalar-parent / projection SQL', () => {
     // The value shape carries `as:'bool'` so the handler frames the 0/1 as Boolean.
     expect(read('g.inject(1).asBool()').shape).toEqual({ kind: 'value', type: STATIC('boolean') });
     // TinkerPop truthiness: NaN/0/-0 → false, nonzero → true, "true"/"false"
-    // (case-insensitive), bool → itself. Constants resolve to the bound values.
-    expect(read('g.inject(1).asBool()').binds).toEqual([true]);
-    expect(read('g.inject(0).asBool()').binds).toEqual([false]);
-    expect(read('g.inject(-0.0).asBool()').binds).toEqual([false]);
-    expect(read('g.inject(NaN).asBool()').binds).toEqual([false]);
-    expect(read('g.inject(3.14).asBool()').binds).toEqual([true]);
-    expect(read("g.inject('tRUe').asBool()").binds).toEqual([true]);
-    expect(read('g.inject(false).asBool()').binds).toEqual([false]);
+    // (case-insensitive), bool → itself. Constants resolve at compile time and inline as `1`/`0`.
+    expect(seed('g.inject(1).asBool()')).toBe('1');
+    expect(seed('g.inject(0).asBool()')).toBe('0');
+    expect(seed('g.inject(-0.0).asBool()')).toBe('0');
+    expect(seed('g.inject(NaN).asBool()')).toBe('0');
+    expect(seed('g.inject(3.14).asBool()')).toBe('1');
+    expect(seed("g.inject('tRUe').asBool()")).toBe('1');
+    expect(seed('g.inject(false).asBool()')).toBe('0');
     // strings are trimmed before the match (AsBoolStep.trim())
-    expect(read("g.inject(' true ').asBool()").binds).toEqual([true]);
+    expect(seed("g.inject(' true ').asBool()")).toBe('1');
     // per-value parse errors (can't come from SQL) raise the exact TinkerPop message
     expect(() => compile("g.inject('hello').asBool()", {})).toThrow("Can't parse hello as Boolean.");
     expect(() => compile('g.inject(null).asBool()', {})).toThrow("Can't parse null as Boolean.");
@@ -547,9 +564,9 @@ describe('scalar-parent / projection SQL', () => {
     // suffixes, so bare asNumber() can't recover the input subtype — it defers).
     expect(read('g.inject(5).asNumber(GType.LONG)').shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.inject(12).asNumber(GType.BYTE)').shape).toEqual({ kind: 'value', type: STATIC('byte') });
-    // integer targets truncate toward zero; the converted constant is bound
-    expect(read('g.inject(5.43).asNumber(GType.INT)').binds).toEqual([5]);
-    expect(read("g.inject('5').asNumber(GType.BYTE)").binds).toEqual([5]);
+    // integer targets truncate toward zero; the converted constant inlines as an integer literal
+    expect(seed('g.inject(5.43).asNumber(GType.INT)')).toBe('5');
+    expect(seed("g.inject('5').asNumber(GType.BYTE)")).toBe('5');
     // runtime value → SQL CAST + tag (no compile-time constant). RelIR-routed, so the CAST is asserted
     // per spine: legacy reads a CTE column, RelIR inlines the projection it fused, and the semantic
     // fact — a cast to REAL over the value — is what both must say.
@@ -659,12 +676,12 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('asDate() casts to a date-tagged epoch-millis value (const-fold + runtime)', () => {
-    // inject const-fold: ISO string / int / long epoch → millis, tagged date
+    // inject const-fold: ISO string / int / long epoch → millis, tagged date, inlined as the epoch literal
     expect(read('g.inject("2023-08-02T00:00:00Z").asDate()').shape).toEqual({ kind: 'value', type: STATIC('datetime') });
-    expect(read('g.inject("2023-08-02T00:00:00Z").asDate()').binds).toEqual([Date.parse('2023-08-02T00:00:00Z')]);
+    expect(seed('g.inject("2023-08-02T00:00:00Z").asDate()')).toBe(String(Date.parse('2023-08-02T00:00:00Z')));
     // an offset-bearing ISO string folds into the correct instant
-    expect(read('g.inject("2023-08-02T00:00:00-07:00").asDate()').binds).toEqual([Date.parse('2023-08-02T07:00:00Z')]);
-    expect(read('g.inject(1694017707000).asDate()').binds).toEqual([1694017707000]);
+    expect(seed('g.inject("2023-08-02T00:00:00-07:00").asDate()')).toBe(String(Date.parse('2023-08-02T07:00:00Z')));
+    expect(seed('g.inject(1694017707000).asDate()')).toBe('1694017707000');
     // rejects: float epoch, non-ISO string, null (list defers to frontend flattening)
     expect(() => compile('g.inject(1694017709000.1d).asDate()', {})).toThrow("Can't parse");
     expect(() => compile("g.inject('This String is not an ISO 8601 Date').asDate()", {})).toThrow("Can't parse");
@@ -683,12 +700,13 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().values("birthday").asNumber().asDate()').shape).toEqual({ kind: 'value', type: STATIC('datetime') });
     expect(() => compile('g.V().values("weight").asNumber()', {})).toThrow('non-date runtime value');
     // an offset-less datetime literal is UTC-normalized (not host-local) so Bun ≡ DO
-    // `toContain`, not `toEqual`: legacy FOLDS the offset into the literal (one bind) while RelIR emits
-    // the arithmetic (literal + offset), which answers identically — the fold is an optimization a RelIR
-    // `Pass` over `Values`+`Lit` owes, not a semantic difference. What is asserted is the instant.
-    for (const spine of ['legacy', 'rel'] as const)
-      expect(read("g.inject(datetime('2023-08-02T00:00:00')).dateAdd(second, 0)", { spine }).binds)
-        .toContain(Date.parse('2023-08-02T00:00:00Z'));
+    // legacy FOLDS the offset into the literal (one bind) while RelIR emits the arithmetic (literal +
+    // offset), which answers identically — the fold is an optimization a RelIR `Pass` over `Values`+`Lit`
+    // owes, not a semantic difference. What is asserted is the instant: a bind on legacy, an inlined
+    // literal on RelIR (a UTC-normalized const spends no bind).
+    const utcMs = Date.parse('2023-08-02T00:00:00Z');
+    expect(read("g.inject(datetime('2023-08-02T00:00:00')).dateAdd(second, 0)", { spine: 'legacy' }).binds).toContain(utcMs);
+    expect(read("g.inject(datetime('2023-08-02T00:00:00')).dateAdd(second, 0)", { spine: 'rel' }).sql).toContain(`(${utcMs})`);
   });
 
   test('dateAdd(DT.unit, n) / dateDiff(date) — integer millis arithmetic', () => {
@@ -698,10 +716,11 @@ describe('scalar-parent / projection SQL', () => {
     // prefix over an inject literal is `foldConstantCoercions`, which RelIR reuses rather than
     // re-expressing — the arms that RAISE (`asNumber`/`asBool`/`asDate`) are why it must happen at
     // compile time, and `dateAdd`/`dateDiff` ride the same prefix.
-    for (const spine of ['legacy', 'rel'] as const) {
-      expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(DT.hour, 2)", { spine }).binds).toEqual([base + 2 * 3600000]);
-      expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(hour, -1)", { spine }).binds).toEqual([base - 3600000]);
-    }
+    // legacy binds the folded instant; RelIR inlines it (a compile-time constant spends no bind).
+    expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(DT.hour, 2)", { spine: 'legacy' }).binds).toEqual([base + 2 * 3600000]);
+    expect(seed("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(DT.hour, 2)")).toBe(String(base + 2 * 3600000));
+    expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(hour, -1)", { spine: 'legacy' }).binds).toEqual([base - 3600000]);
+    expect(seed("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(hour, -1)")).toBe(String(base - 3600000));
     expect(read("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(day, 11)").shape).toEqual({ kind: 'value', type: STATIC('datetime') });
     // only second/minute/hour/day are valid DT units — the grammar rejects the rest
     expect(() => compile("g.inject(datetime('2023-08-02T00:00:00Z')).dateAdd(month, 1)", {})).toThrow('parse error');
@@ -711,10 +730,12 @@ describe('scalar-parent / projection SQL', () => {
     for (const spine of ['legacy', 'rel'] as const) {
       const d = read("g.inject(datetime('2023-08-02T00:00:00Z')).dateDiff(datetime('2023-08-09T00:00:00Z'))", { spine });
       expect(d.shape).toEqual({ kind: 'value', type: STATIC('long') });
-      expect(d.binds).toEqual([-604800000]);
+      // legacy binds the folded diff; RelIR inlines it — the executed answer is the contract either way.
+      if (spine === 'legacy') expect(d.binds).toEqual([-604800000]);
+      else expect(d.sql).toContain('(-604800000)');
       expect(seededStore().query(d.sql, d.binds).map((r: any) => r.v)).toEqual([-604800000]);
     }
-    expect(read("g.inject(datetime('2023-08-08T00:00:00Z')).dateDiff(constant(datetime('2023-08-01T00:00:00Z')))").binds).toEqual([604800000]);
+    expect(seed("g.inject(datetime('2023-08-08T00:00:00Z')).dateDiff(constant(datetime('2023-08-01T00:00:00Z')))")).toBe('604800000');
     // runtime dateDiff against a literal → v − other_ms (the epoch bound as a value)
     const rd = read('g.V().values("birthday").asNumber().asDate().dateDiff(datetime("1970-01-01T00:00Z"))');
     expect(rd.shape).toEqual({ kind: 'value', type: STATIC('long') });
@@ -824,11 +845,12 @@ describe('scalar-parent / projection SQL', () => {
     // and asking the question uniformly beats aliasing only when the answer turns out to be yes.
     expect(p.sql).toBe('with c0(v) as (VALUES (?), (?), (?)) SELECT v FROM c0 s');
     expect(p.binds).toEqual([1, 2, 3]);
-    // RelIR-routed by default, and it emits the SAME `VALUES` — the one construct measured emitting
-    // it (§3.3) — with the CTE collapsed into the derived table the framing selects from.
+    // RelIR-routed by default, and it emits the SAME `VALUES` construct (§3.3) with the CTE collapsed
+    // into the derived table the framing selects from — but the seed values are parsed literals, so
+    // RelIR INLINES them where legacy binds: the parameter-budget divergence, one spine to the other.
     const viaRel = read('g.inject(1,2,3)', { spine: 'rel' });
-    expect(viaRel.sql).toContain('VALUES (?), (?), (?)');
-    expect(viaRel.binds).toEqual([1, 2, 3]);
+    expect(viaRel.sql).toContain('VALUES (1), (2), (3)');
+    expect(viaRel.binds).toEqual([]);
   });
 
   test('as() threads a synthetic alias column through subsequent CTEs', () => {
@@ -1180,7 +1202,7 @@ describe('scalar-parent / projection SQL', () => {
       .toContain('ELSE p.v END) ASC LIMIT 2 OFFSET 1');
     const relSlice = read('g.V().values("age").order().range(1,3)', { spine: 'rel' });
     expect(relSlice.sql).toMatch(/row_number\(\) OVER \(ORDER BY CASE WHEN [^]*ELSE \w+\.v END ASC\) AS encounter/);
-    expect(relSlice.sql).toMatch(/ORDER BY \w+\.encounter ASC LIMIT \? OFFSET \?/);
+    expect(relSlice.sql).toMatch(/ORDER BY \w+\.encounter ASC LIMIT 2 OFFSET 1/);
 
     const typedSum = read('g.V().values("age").asNumber(GType.DOUBLE).sum().is(P.gt(100))');
     expect(typedSum.shape).toEqual({ kind: 'scalar' });

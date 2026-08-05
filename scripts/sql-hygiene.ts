@@ -142,7 +142,13 @@ for (const [family, metric] of Object.entries(baseline)) {
     ratchetFailures.push(`${family}: new traversal family needs an explicit baseline`);
     continue;
   }
-  for (const field of ['binds', 'bytes'] as const)
+  // `bound` is ratcheted alongside `binds`/`bytes` to assert the parameter-budget target DIRECTLY: a
+  // held constant (a parsed literal, an ordinal, a class name, a key/id) must render as a typed SQL
+  // literal, never a bind. So the count of `source: 'bound'` lits per family may only FALL — a rise
+  // means a constant leaked back into the bind budget (docs/2026-08-05-parameters-are-the-only-binds.md).
+  // A genuinely new query/store data bind is the one legitimate rise, and it moves the baseline with a
+  // reason, exactly as a `bytes`/`binds` rise does.
+  for (const field of ['binds', 'bytes', 'bound'] as const)
     if (metric[field] > prior[field])
       ratchetFailures.push(`${family}: ${field} rose from ${prior[field]} to ${metric[field]}`);
 }

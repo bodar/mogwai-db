@@ -13,25 +13,31 @@ import { read } from '../support/harness.ts';
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
 
 describe('write SQL', () => {
-  test('vertex property keys bind as parameters (static vp index, no literal splice)', () => {
-    // W4: vertex props are normalized into vertex_properties; has(key,val) is an EXISTS
-    // with BOTH key and value bound. The static (key,value) index serves a bound key
-    // fine (a plain B-tree column, not an expression index), so no literal splice — and
-    // no injection surface for any key.
-    // Asserted on BOTH spines: this is a security property of the compiler, not of one lowering,
-    // and `has()` is RelIR-routed today. Each spine's own spelling of the EXISTS is pinned beside
-    // it, but the load-bearing half is the bind list — a key reaching the SQL TEXT is the defect.
+  test('vertex property has(key,val): key inlined as an escaped literal, value bound', () => {
+    // W4: vertex props are normalized into vertex_properties; has(key,val) is an EXISTS. The KEY is a
+    // parsed literal the compiler holds — a CONSTANT — so RelIR inlines it as an ESCAPED SQL literal
+    // rather than spending one of the DO's 100 binds on it (the parameter-budget rule,
+    // docs/2026-08-05-parameters-are-the-only-binds.md); legacy still binds it. The VALUE is genuine
+    // data and stays bound on both. The static (key,value) index serves either spelling.
     expect(read('g.V().has("age",30)', { spine: 'legacy' }).sql)
       .toContain('EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value = ?)');
     expect(read('g.V().has("age",30)', { spine: 'rel' }).sql)
-      .toMatch(/EXISTS \(SELECT 1 AS one FROM vertex_properties \w+ WHERE .*\.key = \?.*\.value = \?/);
+      .toMatch(/EXISTS \(SELECT 1 AS one FROM vertex_properties \w+ WHERE .*\.key = 'age'.*\.value = \?/);
+    // legacy binds [key, value]; RelIR binds only [value] — the key no longer competes for the budget.
+    expect(read('g.V().has("age",30)', { spine: 'legacy' }).binds).toEqual(expect.arrayContaining(['age', 30]));
+    const rel = read('g.V().has("age",30)', { spine: 'rel' });
+    expect(rel.binds).toEqual([30]);
+    expect(rel.binds).not.toContain('age');
 
-    for (const spine of ['legacy', 'rel'] as const) {
-      expect(read('g.V().has("age",30)', { spine }).binds).toEqual(expect.arrayContaining(['age', 30]));
-      // an exotic key (space) is handled identically — bound, never spliced into SQL
-      const exotic = read('g.V().has("first name","x")', { spine });
-      expect(exotic.sql).not.toContain('first name');
-      expect(exotic.binds).toEqual(expect.arrayContaining(['first name', 'x']));
-    }
+    // No injection surface: an inlined key is `''`-escaped (textLiteral), NEVER raw-spliced — so a key
+    // that itself contains a quote survives as an escaped literal, not a break-out. Escaping is the
+    // security property now, in place of the bind.
+    const inject = read("g.V().has(\"x' OR '1'='1\", \"v\")", { spine: 'rel' });
+    expect(inject.sql).toContain("key = 'x'' OR ''1''=''1'");
+    expect(inject.binds).toEqual(['v']);
+    // legacy keeps binding the exotic key, so it never reaches the SQL text at all.
+    const exoticLegacy = read('g.V().has("first name","x")', { spine: 'legacy' });
+    expect(exoticLegacy.sql).not.toContain('first name');
+    expect(exoticLegacy.binds).toEqual(expect.arrayContaining(['first name', 'x']));
   });
 });
