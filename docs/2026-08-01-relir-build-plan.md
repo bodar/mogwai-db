@@ -2988,3 +2988,53 @@ the nullable right side. What is genuinely missing is the TYPE law beside it: a 
 columns that came from the RIGHT side must be `nullable: true`. Since a Join's output is POSITIONAL and
 §13m confirms that holds, the law is exactly "for `join === 'left'`, every column at an index ≥
 `left.type.cols.length` is nullable" — checkable, and distinct from `sameColumns`.
+
+### 13g·5. The REDUCER COMPARISON cluster, measured — six wrong answers, two root causes, one existing authority
+
+§13g's third and fourth bullets and §13g·3 are the same increment: `min`/`max`/`sum`/`mean` decide
+eligibility and ordering by SQLite STORAGE CLASS where Gremlin decides by TYPE SPACE. All six measured today
+(modern graph, RelIR spine); every one is a wrong answer with the right arity, so no ladder level sees it.
+
+| traversal | ours | the reference |
+|---|---|---|
+| `g.inject(9007199254740993L, 1L).sum()` | `1` (integer) | `9007199254740994` |
+| `g.inject(9007199254740993L, 1L).mean()` | `1` (real) | `4503599627370497` |
+| `g.inject(10L, -9007199254740993L).min()` | `10` | `-9007199254740993` |
+| `g.inject(10L, -9007199254740993L).max()` | `"-9007199254740993"` **as TEXT** | `10` |
+| `g.inject(1, "a").min()` | `1` | RAISES (§13g·3) |
+| `g.inject(1, "a").max()` | `"a"` | RAISES (§13g·3) |
+
+**The `max` rows are new — §13g named only `min`.** And the fourth row is the worst of the six: `max` does not
+merely pick the wrong element, it returns a Gremlin `long` to the wire **as a string**, because it takes
+SQLite's max over mixed storage classes and hands back that value with its own `vtype = 'text'`.
+
+**Root cause A — the eligibility guard.** This project deliberately carries an int64 above 2^53 as decimal
+TEXT (root `CLAUDE.md`; `docs/…do-sqlite-bind-precision`), so a legal Gremlin `long` has `typeof = 'text'`
+and `sum`/`mean` exclude it entirely — it contributes NOTHING rather than being cast.
+
+**Root cause B — the comparison.** `min`/`max` admit it and then compare under SQLite's storage-class order
+(INTEGER before TEXT), which is why `min` returns the larger number and `max` returns the string.
+
+**The authority already exists and we already use it ONE LAYER UP, which is the argument.**
+`storedCompareOn(vtype)` (`src/compiler/rel/predicate.ts:139`) is a `CASE` on the vtype casting to `int` for
+the int-carrying types and `real` for the real-carrying ones, else the subject unchanged — and
+`src/compiler/rel/modulator.ts:184,244` already applies it to ORDERING keys. So `order().by(…)` compares a
+TEXT-carried long exactly while `min`/`max` do not: an inconsistency inside our own code, not a gap against
+upstream. Reusing it makes the `arithmetic` class correct rather than widening a list, exactly as §13g said.
+
+**Scope, and what is deliberately NOT in it.** Three things:
+
+1. `sum`/`mean` cast the subject through `storedCompareOn` instead of excluding a TEXT-carried numeric.
+2. `min`/`max` compare through `storedCompareOn` **and return the ORIGINAL row's value plus its own vtype** —
+   selecting the row, never the raw storage extremum, which is what row four gets wrong.
+3. a mixed type space FAILS CLOSED (§13g·3 — `NumberHelper` ends in `a.compareTo(b)`, so
+   `Integer.compareTo(String)` throws and `GremlinValueComparator` is never consulted), reusing §13a's
+   type-space authority in `predicate.ts` rather than building a second one.
+
+**NOT in it, and each for a stated reason:** the numeric TOWER (§13g·4 — the result CLASS: `sum` of bytes is a
+byte, `127b+1b` promotes to short) is a different question from comparison and carries six visible
+`Sum.feature` scenarios of its own, so it is its own increment; integer overflow past 2^63, which the
+reference RAISES on (§13g·4) and which this increment makes newly REACHABLE by admitting the big values —
+worth a deferral rather than a silent wrap, and worth noting that admitting them is what makes it reachable;
+and the all-NaN case, where the reference propagates `NaN` and SQLite stores it as NULL so we answer `null`
+(§13g·3) — narrow, same two functions, fold it in if it is free and defer it loudly if not.
