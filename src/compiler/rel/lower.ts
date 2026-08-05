@@ -18,7 +18,7 @@ import { PATH_LIST_OPS } from '../steps/tail/path.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain } from '../ir/analyze.ts';
 import { normalize } from '../ir/passes.ts';
-import { containsTextSearch, inferredVtype, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
+import { containsTextSearch, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { bareInjectTag, foldConstantCoercions } from '../steps/write/inject.ts';
 import {
   and, byEncounter, carriedCols, EDGE_COLS, eq, labelIds, meta, minter, NODE_COLS, PROPERTIES, renumber, storedValue,
@@ -28,7 +28,7 @@ import { bindAliases, selectOne, type AliasRead } from './alias.ts';
 import type { AliasMap } from '../steps/context/context.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, type ByChild, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
-import { isReducer, reducerAggregate, reducerSubject } from './reducer.ts';
+import { isReducer, reducerAggregate } from './reducer.ts';
 import { elementAddE, elementAddV, elementDrop, elementMergeV, elementProperty, propertyWrites, type Effects, type SubReads } from './write.ts';
 import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList, type ListCtx } from './list.ts';
 import { elementHost, groupBarrier, mapPayload } from './map.ts';
@@ -1443,31 +1443,14 @@ function scalarTail(
     if (isReducer(step.name)) {
       if (args.length || isLocalScope(step)) return null;
       const bulk = rel.channels.find((channel) => channel.role === 'bulk');
-      const value = col(rel.id, 'v');
-      const vtype = carries('vtype') ? col(rel.id, 'vtype')
-        : out.kind === 'scalar' && out.type.kind === 'static' ? lit(out.type.type, 'text')
-          : inferredVtype(value);
-      const subject = reducerSubject(value, vtype);
-      // Compute type space and comparison key ONCE behind a CTE boundary. Repeating either CASE in
-      // every aggregate occurrence would multiply its compiler-authored binds past the DO's cap.
-      const prepared = make.project({
-        id: fresh('rp'), input: rel, channels: rel.channels,
-        type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), meta('compare', 'any', true),
-          meta('type_space', 'text', true), ...carriedCols(rel.channels)),
-        exprs: [['v', value], ['vtype', vtype], ['compare', subject.compare], ['type_space', subject.space],
-          ...rel.channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
-      });
-      rel = make.materialize({ id: fresh('rm'), input: prepared, channels: prepared.channels, type: prepared.type });
-      const reduced = reducerAggregate({
-        value: col(rel.id, 'v'), vtype: col(rel.id, 'vtype'), compare: col(rel.id, 'compare'),
-        space: col(rel.id, 'type_space'),
-      }, step.name, bulk && col(rel.id, bulk.col));
+      const reduced = reducerAggregate(col(rel.id, 'v'), step.name, bulk && col(rel.id, bulk.col));
       rel = make.aggregate({
         id: fresh('red'), input: rel, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
         groupBy: [], aggs: [['v', reduced.value], ['vt', reduced.type]],
       });
-      // `result: 'number'` is the framing arm that reads `vt`: sum/mean carry the aggregate storage
-      // class, while min/max carry the winning row's canonical vtype (or a fail-closed marker).
+      // `result: 'number'` is the framing arm that reads the `vt` column — the result's storage class is
+      // DYNAMIC (a sum of integers is an integer, of reals a real), so there is no compile-time tag to
+      // give and `UNKNOWN` would throw the second column away.
       out = { kind: 'scalar', type: UNKNOWN, result: 'number' };
       continue;
     }
@@ -1787,10 +1770,6 @@ function subReadList(steps: readonly IRStep[], opts: Lowering, fresh: Minter): {
 const operandLit = (arg: unknown): Expr | null =>
   typeof arg === 'string' ? lit(arg, 'text')
     : typeof arg === 'number' ? lit(arg, 'real')
-      // The front-end represents an exact long past JS's safe range as bigint. It cannot be bound
-      // natively on DO SQLite, so carry the decimal TEXT exactly as the storage seam does; the
-      // static/per-row vtype tells a consumer when to CAST it back for comparison or arithmetic.
-      : typeof arg === 'bigint' ? lit(arg.toString(), 'text')
       : typeof arg === 'boolean' ? lit(arg, 'int') : null;
 
 /**

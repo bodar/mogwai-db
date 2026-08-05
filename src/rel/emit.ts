@@ -119,7 +119,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         if (!column) throw new Error(`RelIR emitter: column '${e.name}' of relation '${e.rel}' is not in scope`);
         return column;
       }
-      case 'lit': return value(e.value);
+      case 'lit': return e.source === 'compiler' ? textLiteral(e.value as string) : value(e.value);
       case 'unary': return e.op === 'not' ? q`NOT (${self(e.arg)})` : q`-(${self(e.arg)})`;
       case 'binary': return q`(${self(e.left)} ${raw(e.op.toUpperCase())} ${self(e.right)})`;
       case 'case': return q`CASE ${list(e.whens.map(([when, then]) => q`WHEN ${self(when)} THEN ${self(then)}`), ' ')}${e.else ? q` ELSE ${self(e.else)}` : empty} END`;

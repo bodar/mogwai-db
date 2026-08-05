@@ -1,4 +1,4 @@
-import { col, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import { CF_MAX_BINDS } from '../../cf-limits.ts';
 import type { RelId } from '../../rel/types.ts';
 import { gtypeName } from '../../gremlin/frontend.ts';
@@ -69,49 +69,15 @@ const CAST_TO_REAL = ['float', 'double', 'bigdecimal'];
 const NUMERIC_CAST_TO_INT = CAST_TO_INT.filter((type) => type !== 'datetime' && type !== 'duration');
 const NUMERIC_VTYPES = [...NUMERIC_CAST_TO_INT, ...CAST_TO_REAL];
 
-/** The Gremlin comparison TYPE SPACE of a canonical vtype. Reducers consume this same authority
- *  as range predicates: every numeric subtype shares one space, strings occupy the other, and a
- *  type outside both is not comparable in either position. */
-export const comparableTypeSpaceOn = (vtype: Expr): Expr => ({
-  kind: 'case',
-  whens: [
-    [{ kind: 'in-list', expr: vtype, values: NUMERIC_VTYPES.map((name) => lit(name, 'text')) }, lit('number', 'text')],
-    [binary('=', vtype, lit('string', 'text')), lit('string', 'text')],
-  ],
-});
-
-/** Infer the canonical type carried by an untagged scalar. This is the same storage-class fallback
- *  used at the wire seam; a real per-row vtype or a static tag always outranks it. */
-export const inferredVtype = (value: Expr): Expr => {
-  const storage = { kind: 'call', fn: 'typeof', args: [value] } as const;
-  return {
-    kind: 'case',
-    whens: [
-      [binary('=', storage, lit('text', 'text')), lit('string', 'text')],
-      [binary('=', storage, lit('real', 'text')), lit('double', 'text')],
-      [binary('=', storage, lit('null', 'text')), lit(null, 'any')],
-      [binary('=', storage, lit('integer', 'text')), {
-        kind: 'case',
-        whens: [[{ kind: 'binary', op: 'and',
-          left: binary('>=', value, lit(-2147483648, 'int')),
-          right: binary('<=', value, lit(2147483647, 'int')) }, lit('int', 'text')]],
-        else: lit('long', 'text'),
-      }],
-    ],
-    else: lit('string', 'text'),
-  };
-};
-
 /**
  * The vtype-aware ordering key for a stored property value: `(value, vtype) -> a correctly-ordered
  * SQLite value`. Pass it as `compare` wherever a per-row `vtype` column is in scope; omit it where
  * the subject is already a native JS type (a computed scalar), which is what the legacy
  * `typeCtx.kind !== 'perRow'` branch means.
  *
- * The type lists cost 10 binds here where `plan.ts` splices them as SQL text, because in RelIR
- * every `Lit` is a bind by construction (§3.2) and the budget is a plan property (§3.6) rather
- * than a per-site judgement. That is the trade the rule was made for: a `check` that can PROVE the
- * DO cap, at the cost of some binds a hand-written emitter would have inlined.
+ * The type lists are compiler-authored vocabulary, not query data, so they render as escaped SQL
+ * string literals. User operands still use `lit()` and remain bound; this preserves the plan's data
+ * budget while not wasting it on a fixed type vocabulary.
  */
 /**
  * WHAT IS KNOWN ABOUT THE SUBJECT'S GREMLIN TYPE — one total union, replacing what used to be an
@@ -156,24 +122,24 @@ const ordered = (
   if (type.kind === 'perRow') {
     return numericBound
       ? { kind: 'case', whens: [
-        [{ kind: 'in-list', expr: type.vtype, values: NUMERIC_CAST_TO_INT.map((name) => lit(name, 'text')) }, binary(op, { kind: 'cast', arg: subject, to: 'int' }, bound)],
-        [{ kind: 'in-list', expr: type.vtype, values: CAST_TO_REAL.map((name) => lit(name, 'text')) }, binary(op, { kind: 'cast', arg: subject, to: 'real' }, bound)],
+        [{ kind: 'in-list', expr: type.vtype, values: NUMERIC_CAST_TO_INT.map(compilerText) }, binary(op, { kind: 'cast', arg: subject, to: 'int' }, bound)],
+        [{ kind: 'in-list', expr: type.vtype, values: CAST_TO_REAL.map(compilerText) }, binary(op, { kind: 'cast', arg: subject, to: 'real' }, bound)],
       ], else: compilerFalse }
-      : { kind: 'case', whens: [[binary('=', type.vtype, lit('string', 'text')), binary(op, subject, bound)]], else: compilerFalse };
+      : { kind: 'case', whens: [[binary('=', type.vtype, compilerText('string')), binary(op, subject, bound)]], else: compilerFalse };
   }
   const storage = { kind: 'call', fn: 'typeof', args: [subject] } as const;
   return numericBound
     ? { kind: 'case', whens: [[
-      { kind: 'in-list', expr: storage, values: [lit('integer', 'text'), lit('real', 'text')] }, binary(op, subject, bound),
+      { kind: 'in-list', expr: storage, values: [compilerText('integer'), compilerText('real')] }, binary(op, subject, bound),
     ]], else: compilerFalse }
-    : { kind: 'case', whens: [[binary('=', storage, lit('text', 'text')), binary(op, subject, bound)]], else: compilerFalse };
+    : { kind: 'case', whens: [[binary('=', storage, compilerText('text')), binary(op, subject, bound)]], else: compilerFalse };
 };
 
 export const storedCompareOn = (vtype: Expr) => (subject: Expr): Expr => ({
   kind: 'case',
   whens: [
-    [{ kind: 'in-list', expr: vtype, values: CAST_TO_INT.map((t) => lit(t, 'text')) }, { kind: 'cast', arg: subject, to: 'int' }],
-    [{ kind: 'in-list', expr: vtype, values: CAST_TO_REAL.map((t) => lit(t, 'text')) }, { kind: 'cast', arg: subject, to: 'real' }],
+    [{ kind: 'in-list', expr: vtype, values: CAST_TO_INT.map(compilerText) }, { kind: 'cast', arg: subject, to: 'int' }],
+    [{ kind: 'in-list', expr: vtype, values: CAST_TO_REAL.map(compilerText) }, { kind: 'cast', arg: subject, to: 'real' }],
   ],
   else: subject,
 });

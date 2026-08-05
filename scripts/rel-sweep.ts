@@ -43,6 +43,7 @@ import { DO_BIND_CAP, planBindCount } from '../src/rel/check.ts';
 import { emit, emitRelational } from '../src/rel/emit.ts';
 import { retained } from '../src/rel/plan.ts';
 import { render } from '../src/sql/kernel/q.ts';
+import { cfLimitViolation } from '../src/cf-limits.ts';
 
 const CORPUS = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.meta.url)).text())
   .split('\n').filter(Boolean);
@@ -137,16 +138,16 @@ let emitted = 0;
  * counted, the widest 42 against 31. None crossed 100 on today's corpus — the cheap count would
  * have looked correct for exactly as long as that held.
  *
- * Each executable step's count, one statement for a read and N for a program. Not `emitQuery`, which
+ * Each executable step, one statement for a read and N for a program. Not `emitQuery`, which
  * refuses above the cap itself: this must measure what an ADMITTED plan renders, so the counting and
  * the refusal stay separable and a violation reports a NUMBER. A PROGRAM is measured PER STEP,
  * because each of its statements meets the wall on its own — summing them would report a number no
  * database ever asks.
  */
-const renderedSteps = (plan: Parameters<typeof planBindCount>[0]): readonly number[] =>
+const renderedSteps = (plan: Parameters<typeof planBindCount>[0]) =>
   plan.bindings.some((binding) => retained(binding))
-    ? emit(plan).map((step) => step.emitted.binds.length)
-    : [render(emitRelational(plan)).binds.length];
+    ? emit(plan).map((step) => step.emitted)
+    : [render(emitRelational(plan))];
 
 /** Sweep ONE configuration, recording both properties above. */
 function sweepOne(chain: IRStep[], collapse: boolean, correlatedChildren: boolean, at: () => string): void {
@@ -155,10 +156,17 @@ function sweepOne(chain: IRStep[], collapse: boolean, correlatedChildren: boolea
     if (!lowered) return;
     const rendered = renderedSteps(lowered.plan);
     emitted++;
-    const widest = Math.max(...rendered);
+    const widest = Math.max(...rendered.map((step) => step.binds.length));
     if (widest > DO_BIND_CAP) {
       const message = `an admitted plan renders ${widest} binds, above the cap of ${DO_BIND_CAP}`;
       if (!accounting.has(message)) accounting.set(message, at());
+    }
+    // `DO_BIND_CAP` above states the bind half in a concise, actionable diagnostic. This asks the
+    // platform authority about EVERY rendered statement, so the 100 KB SQL-text wall cannot quietly
+    // become a RelIR-only production failure either.
+    for (const step of rendered) {
+      const violation = cfLimitViolation(step.sql, step.binds);
+      if (violation && !accounting.has(violation)) accounting.set(violation, at());
     }
   } catch (error) {
     // One entry per MESSAGE, with the first chain that produced it — the same "one entry per root

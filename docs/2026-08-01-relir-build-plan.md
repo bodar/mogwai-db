@@ -266,9 +266,10 @@ sack belong to ONE member, and a grouping would take whichever row SQLite reache
 
 ### 3.6 Two budgets the plan owns, not the emitter
 
-- **Binds.** `Lit` renders as a bind; a plan carries `bindCount()` and **fails closed above the DO cap
-  of 100** rather than emitting SQL that only fails in production. The cap is also checked against the
-  RENDERED bind list, because a fused block can spell one `Lit` more than once. An over-budget `Values`
+- **Binds.** Query and store data render as binds; compiler-authored SQL vocabulary may render as a
+  safely escaped literal. A plan carries `bindCount()` and **fails closed above the DO cap of 100**
+  rather than emitting SQL that only fails in production. The cap is also checked against the RENDERED
+  bind list, because a fused block can spell one data value more than once. An over-budget `Values`
   or a statement's retained rows land as ONE JSON bind exploded by `json_each` — done by the `land`
   pass (§4.5b), so `emit` never learns about chunking. This makes the DO cap a *plan property* `check`
   can prove instead of an idiom `mise run binds` greps for.

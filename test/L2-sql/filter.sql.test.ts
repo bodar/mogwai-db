@@ -110,15 +110,17 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
   }
 
   test('a run of range is() stays inside the DO bind cap on both spines', () => {
-    // RelIR renders every `Lit` as a BIND by construction (§3.2), so the vtype-aware compareKey's
-    // fixed type vocabulary — which the legacy emitter splices as SQL text — costs ~13 binds per
-    // ordering predicate. Fusing the filter into its input's block made that ~20 and quadratic in
+    // RelIR binds query operands but emits its fixed type vocabulary as escaped compiler text. Fusing
+    // the filter into its input's block used to make bind growth quadratic in
     // the projection's size, because a WHERE cannot name a select alias so each `is` re-inlined the
     // whole projection; a `Materialize` boundary before the filters lands the same CTE-then-filter
     // shape legacy emits. This pins that the growth is LINEAR and bounded, since the failure mode
     // is a plan that fails closed above 100 binds where legacy answers.
     const many = 'g.V().values("age").is(P.gt(1)).is(P.lt(9)).is(P.gte(2)).is(P.neq(5)).is(P.gt(0))';
     for (const spine of ['legacy', 'rel'] as const) expect(read(many, { spine }).binds.length).toBeLessThan(60);
+    // The RelIR spelling is no longer charged once per static type name: five predicates retain only
+    // their query values, not their repeated comparison vocabulary.
+    expect(read(many, { spine: 'rel' }).binds.length).toBeLessThan(20);
   });
 
   test('is() on a non-scalar projection throws', () => {

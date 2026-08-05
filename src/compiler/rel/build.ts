@@ -1,5 +1,5 @@
 import type { ChannelRole, Channels } from '../../channels.ts';
-import { col, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { relId, type ColMeta, type RelId, type RelType, type SortTerm, type SqlType } from '../../rel/types.ts';
@@ -143,7 +143,7 @@ export function labelIds(names: readonly string[], fresh: Minter): Rel {
  *  property value. */
 export const storedValueOn = (value: Expr, vtype: Expr): Expr => ({
   kind: 'case',
-  whens: [[{ kind: 'in-list', expr: vtype, values: ['list', 'map', 'set'].map((t) => lit(t, 'text')) },
+  whens: [[{ kind: 'in-list', expr: vtype, values: ['list', 'map', 'set'].map(compilerText) },
     { kind: 'call', fn: 'json', args: [value] }]],
   else: value,
 });

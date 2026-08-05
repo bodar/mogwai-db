@@ -6,7 +6,7 @@ export type BinaryOp = '+' | '-' | '*' | '/' | '%' | '=' | '!=' | '<' | '<=' | '
 
 export type Expr =
   | { readonly kind: 'col'; readonly rel: import('./types.ts').RelId; readonly name: string }
-  | { readonly kind: 'lit'; readonly value: unknown; readonly type: SqlType }
+  | { readonly kind: 'lit'; readonly value: unknown; readonly type: SqlType; readonly source: 'bound' | 'compiler' }
   | { readonly kind: 'unary'; readonly op: 'not' | 'neg'; readonly arg: Expr }
   | { readonly kind: 'binary'; readonly op: BinaryOp; readonly left: Expr; readonly right: Expr }
   | { readonly kind: 'case'; readonly whens: readonly (readonly [Expr, Expr])[]; readonly else?: Expr }
@@ -44,4 +44,10 @@ export type AggFn = 'count' | 'sum' | 'min' | 'max' | 'avg' | 'total' | 'group_c
 export type WindowFn = 'row_number' | 'rank' | 'dense_rank' | 'count' | 'sum' | 'min' | 'max' | 'lag' | 'lead';
 
 export const col = (rel: import('./types.ts').RelId, name: string): Expr => ({ kind: 'col', rel, name });
-export const lit = (value: unknown, type: SqlType = 'any'): Expr => ({ kind: 'lit', value, type });
+/** A value supplied by the query or store: always a bound parameter. */
+export const lit = (value: unknown, type: SqlType = 'any'): Expr => ({ kind: 'lit', value, type, source: 'bound' });
+
+/** A compiler-authored string token, rendered as an escaped SQL literal rather than consuming a DO bind.
+ * This is deliberately string-only: data stays in `lit`, and the narrow type prevents a caller from
+ * smuggling an arbitrary value into statement text. */
+export const compilerText = (value: string): Expr => ({ kind: 'lit', value, type: 'text', source: 'compiler' });
