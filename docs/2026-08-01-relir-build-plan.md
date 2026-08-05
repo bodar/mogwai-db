@@ -2925,3 +2925,29 @@ per-kind expression list (`filter` → `[pred]`, `sort` → the term exprs, `win
 node's shape — the same argument §13l makes against `bindCount`. So the fix is one call in the generic
 branch, not new machinery. Still latent (the pass has no production caller), and §4.5 calls it Phase 3's
 prerequisite, so it should land before the repeat wedge rather than with it. #3 and #4 remain unverified.
+
+**Tally COMPLETE: §13k is 3-of-4 — #1, #3, #4 confirmed, #2 refuted.**
+
+**#3 CONFIRMED.** `sameColumns` already exists (`src/rel/check.ts:51`) and compares name, type AND
+`nullable` positionally — but it is applied at only three sites: a `Ref` against its binding (`:197`), the
+set-op inputs (`:228`), and a recursive seed against its step (`:239`). There is no `case 'filter'` type law
+anywhere; the pass-through kinds appear in `check.ts` only at `:129-130`, which is a recursive-term LEGALITY
+test, not a type one. So a `Filter` declaring `[id,name]` over a `Project` emitting `[id]` passes `check` and
+fails later in the emitter. The fix applies an existing predicate rather than writing one. Note §13k's list
+is precisely right about WHICH kinds: `filter`/`sort`/`limit`/`distinct`/`materialize` preserve the type,
+while `window` and `explode` legitimately change it (`window` declares its spec outputs, `explode` its
+exploded column), so they must NOT be held to `sameColumns` even though `prune`'s `preserves` set includes
+them. Two different questions over overlapping sets — worth not conflating when the law is added.
+
+**#4 CONFIRMED, both halves.** `planBindCount` exists (`check.ts:94`, summing every binding plus the result)
+and `checkPlan` (`:325`) never calls it — it calls `check` per binding and once for the result, and `check`
+applies the cap per NODE at `:317`. So the plan-WIDE total is unproven, which is exactly what §3.6 claims
+`check` proves. And the RENDERED cap lives in `renderStep` (`emit.ts:533`), which `emitRelational` (`:574`)
+does not reach: it returns `result` as an un-rendered `Expression`, so its caller renders and re-checks by
+hand. Both current callers do; a third would not have to.
+
+So the process rule stands vindicated in both directions: re-deriving §13k cost little and turned one
+"missing gate" into "the gate has been there since 2026-08-02", while confirming the other three precisely
+enough that each fix is now a known one-liner against an existing total function or predicate
+(`relExprs`, `sameColumns`, `planBindCount`) rather than new machinery. **None of the three is new
+machinery — that is the headline for whoever picks them up.**
