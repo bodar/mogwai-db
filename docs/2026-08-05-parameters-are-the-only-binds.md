@@ -199,20 +199,37 @@ dropped in 40+ families and rose in none. The items below are done:
 - **A4. Tighten the hygiene gate.** `scripts/sql-hygiene.ts`'s `countExpr` already splits `bound` vs
   `compiler`; assert the target directly and ratchet the freed families down.
 
-**Phase B — the `Param` concept, wire → IR → RelIR.**
-- **B1. Front-end: stop flattening (`frontend.ts:415`, `VariableContext`).** Emit a distinct arg shape
-  `{ param: name, value, type }` (a new `TaggedArg` member with an `isParamArg` guard), so `Step.args`
-  stays `any[]` and consumers narrow. A parsed literal stays a plain value. This is the un-reduction.
-- **B2. RelIR `Param` expr.** Add `source: 'parameter'` to the `lit` union (NOT a new `kind` — keeps
-  `walk`/`check` untouched); `emit.ts` renders it `value(e.value)`. A `param()` constructor;
-  `lit(...)`'s doc narrows to "query/store data that must bind but is not a user parameter"
-  (i.e. the `oversized` bucket).
-- **B3. Deferred reduction — the last responsible moment.** A parameter stays a `Param` unless a
-  lowering must compute on its concrete value. Today the only such site is `unrollFixedRepeat`
-  (`ir/passes.ts:107`), which resolves `times(n)` — that pass reduces its own operand and nothing
-  else does. `sliceOf`/count arithmetic move into SQL (Phase A3) so they no longer force reduction.
-- **B4. Hygiene invariant flips to the real rule:** a free-standing bind's `source` is `'parameter'`
-  (or `'oversized'`); a held constant rendered as a bind is a build failure at the site.
+**Phase B — the `Param` concept, wire → IR → RelIR. LANDED (commit `583d150`), top-level scope.**
+
+**Encoding — chose the parallel array over the tagged arg (deviation from B1 below, recorded).** B1
+proposed `{ param, value, type }` with consumers narrowing through `isParamArg`; measured, that is 62
+value-reading sites across 10 files. Instead the name rides as a parallel `Step.paramNames` array,
+exactly as `argTypes` does — the value stays a plain resolved value in `args` (no value-reader changes),
+and the ONE seam that decides bind-vs-inline (`const.ts` `constLit`) reads the name. This is what root
+`CLAUDE.md` #5 already blesses ("carried like `argTypes` already is"), and it keeps the parameter
+first-class where it counts: RelIR's `param()` carries name-intent + value together, reduced to a
+concrete value only at the last responsible moment. Same thesis, far smaller blast radius.
+
+- **B1 (done, re-encoded). Front-end stops flattening.** `walkArgs`/`extractArgs` thread a `names` array
+  in lockstep with `types`; a top-level `$x` records its name at its arg index (`frontend.ts`), and
+  `stepChain` attaches `paramNames` only when one is present.
+- **B2 (done). RelIR `param()` + `source: 'parameter'`** in the `lit` union (no new `kind` — `walk`/
+  `check` untouched); `emit.ts` renders it `value(?)`. `bindsAsParameter` and the hygiene counter treat
+  `'parameter'` and mechanical `'bound'` alike as binds; a `compiler-*` constant is not.
+- **B3 (PARTIAL). Deferred reduction.** A scalar parameter stays a `param()` bind through lowering. NOT
+  yet done: the `sliceOf`/count arithmetic-in-SQL move (`LIMIT ?-? OFFSET ?`), so a `limit($x)`/`range($x)`
+  count still reduces to a concrete number and inlines. `unrollFixedRepeat` (`times($x)`) is the one
+  honest structural reduction and is unaffected.
+- **B4 (done, for scalars).** The hygiene gate counts a bind by `bindsAsParameter`, so a held constant
+  rendered as a bind is caught by the ratchet at the family it inflates.
+
+**Deferred within Phase B (documented, correct-result gaps — no budget saving, never a wrong answer):**
+- A `$x` **nested** inside a predicate (`P.gt($x)`) or a collection (`within($x, $y)`, `inject([$x])`)
+  inlines as a constant — `paramNames` tracks TOP-LEVEL args only.
+- **`V($x)`/`E($x)` ids** inline (the `flattenListArgs` index desync is why elementScan doesn't thread a
+  name); ids-as-parameters are exotic.
+- **`limit($x)`/`range($x)`** inline (needs the B3 SQL-arithmetic move).
+- **hasId($x)** — the id-list path binds today (legacy-shaped), untouched by the operand seam.
 
 **Phase C — shrink `oversized`, expose the budget honestly.**
 - **C1. Measure the decimal-TEXT literal** (open question 2). If the CAST-compare holds, the
