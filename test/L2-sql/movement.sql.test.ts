@@ -85,7 +85,7 @@ describe('movement / edge sources SQL', () => {
     // `FROM edges re … WHERE EXISTS(…re.id…)` — the filter is still conjoined into the source scan's own
     // clause; what sits between them is the payload join RelIR now builds for itself (§10·10).
     expect(read('g.E().has("weight",0.5)', { spine: 'rel' }).sql).toContain('FROM edges re ');
-    expect(read('g.E().has("weight",0.5)', { spine: 'rel' }).sql).toContain('WHERE EXISTS (SELECT ? AS one FROM edge_properties rp2 WHERE (((rp2.edge = re.id)');
+    expect(read('g.E().has("weight",0.5)', { spine: 'rel' }).sql).toContain('WHERE EXISTS (SELECT 1 AS one FROM edge_properties rp2 WHERE (((rp2.edge = re.id)');
     expect(read('g.V(1).outE().values("weight")', { spine: 'legacy' }).sql).toContain('JOIN edge_properties ep ON ep.edge=n.id AND ep.key=?');
     expect(read('g.V(1).outE().values("weight")', { spine: 'rel' }).sql).toMatch(/INNER JOIN edge_properties \w+ ON \(\(\w+\.edge = \w+\.id\) AND \w+\.key IN/);
   });

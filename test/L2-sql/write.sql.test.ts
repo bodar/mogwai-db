@@ -24,7 +24,7 @@ describe('write SQL', () => {
     expect(read('g.V().has("age",30)', { spine: 'legacy' }).sql)
       .toContain('EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value = ?)');
     expect(read('g.V().has("age",30)', { spine: 'rel' }).sql)
-      .toMatch(/EXISTS \(SELECT \? AS one FROM vertex_properties \w+ WHERE .*\.key = \?.*\.value = \?/);
+      .toMatch(/EXISTS \(SELECT 1 AS one FROM vertex_properties \w+ WHERE .*\.key = \?.*\.value = \?/);
 
     for (const spine of ['legacy', 'rel'] as const) {
       expect(read('g.V().has("age",30)', { spine }).binds).toEqual(expect.arrayContaining(['age', 30]));

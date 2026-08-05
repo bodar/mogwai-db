@@ -52,13 +52,13 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
       // `1 = 0` are the two spellings of that false — RelIR has no bare boolean literal (§3.2).
       expect(read('g.V().values("age").is(P.typeOf(GType.NULL))', { spine }).sql).toMatch(/is null|IS \?/i);
       expect(read('g.V().values("age").is(P.typeOf(GType.BOOLEAN))', { spine }).sql)
-        .toMatch(/THEN \(?\w+\.vtype = \?\)? ELSE \(?(0|\? = \?)\)? END/);
+        .toMatch(/THEN \(?\w+\.vtype = \?\)? ELSE \(?(0|1 = 0|\? = \?)\)? END/);
       // P.not negates the inner predicate, and the SPELLING is the §13a fix: `NOT (p)` is NULL when
       // `p` is, which drops a row TinkerPop keeps (its `test` is two-valued, so negating an unknown is
       // TRUE), so RelIR emits `p IS NOT 1` instead. Legacy still spells the bare `NOT (…)`. Either is
       // "the inner predicate, negated"; what must not appear is the inner predicate un-negated.
       expect(read('g.V().values("age").is(P.not(P.typeOf(GType.STRING)))', { spine }).sql)
-        .toMatch(/(NOT \(+CASE WHEN|CASE WHEN[^]*END IS NOT \?)/);
+        .toMatch(/(NOT \(+CASE WHEN|CASE WHEN[^]*END IS NOT (1|\?))/);
       // an unregistered type name RAISES, and RelIR must not answer it instead: an unreadable name is
       // an error, unlike a GType that names something a value can never be (which is FALSE).
       expect(() => compile('g.V().values("age").is(P.typeOf("bogus-name"))', {}, { spine })).toThrow('unregistered type');

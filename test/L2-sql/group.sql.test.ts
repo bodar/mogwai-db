@@ -512,13 +512,13 @@ describe('group / properties SQL', () => {
     // result, but only because that Shape's framer knows to; the typed tree says it in the data.
     const r = read('g.V().group().by("name").by("age")', { spine: 'rel' });
     expect(r.shape).toEqual({ kind: 'mapValue' });
-    expect(r.sql).toMatch(/json_group_array\(json\(\w+\.gt\) ORDER BY \w+\.go ASC\) FILTER \(WHERE \(\w+\.gt IS NOT \?\)\)/);
+    expect(r.sql).toMatch(/json_group_array\(json\(\w+\.gt\) ORDER BY \w+\.go ASC\) FILTER \(WHERE \(\w+\.gt IS NOT NULL\)\)/);
   });
 
   test('group().by(child).by(child) assigns the last arriving traverser\'s scalar value', () => {
     const p = read('g.V().group().by(__.values("name").substring(0,1)).by(__.constant(1))', { spine: 'rel' });
     expect(p.shape).toEqual({ kind: 'mapValue' });
-    expect(p.sql).toMatch(/json_extract\(json_group_array\(json\(\w+\.gt\) ORDER BY \w+\.go ASC\) FILTER \(WHERE \(\w+\.gt IS NOT \?\)\), \?\)/);
+    expect(p.sql).toMatch(/json_extract\(json_group_array\(json\(\w+\.gt\) ORDER BY \w+\.go ASC\) FILTER \(WHERE \(\w+\.gt IS NOT NULL\)\), '\$\[#-1\]'\)/);
     expect(p.sql).not.toContain("json_object('t', 'list', 'v', json_group_array(json(");
   });
 

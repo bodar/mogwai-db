@@ -193,7 +193,7 @@ describe('RelIR', () => {
     const overBudget = valuesRel({ id: relId('many'), rows: Array.from({ length: 101 }, (_, i) => [lit(i, 'int')]), channels, type: { cols: oneCol } });
     const landed = land(overBudget);
     const emitted = emitQuery(planOf(landed));
-    expect(emitted.binds).toHaveLength(2);   // the whole payload, plus one `$[i]` path per column
+    expect(emitted.binds).toHaveLength(1);   // the whole payload; the compiler-owned `$[i]` path is SQL syntax
     expect(emitted.binds.filter((bind) => typeof bind !== 'string')).toEqual([]);
     const db = new Database(':memory:');
     expect(db.query(emitted.sql).all(...emitted.binds)).toEqual(Array.from({ length: 101 }, (_, i) => ({ v: i })));
