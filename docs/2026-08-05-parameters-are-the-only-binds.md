@@ -336,17 +336,21 @@ over-budget literal injects) are all LANDED. The parameters-are-the-only-binds t
 every common case: a user parameter is the only free-standing bind, a parsed literal inlines as a typed
 literal, and an over-budget literal set rides as one JSON bind. The `by(key)` constant is inlined too.
 
-**Encoding follow-through — the `Arg` object LANDED (`52abcc6`).** The Phase B parallel-array deviation
-is reversed: a step argument is now one `Arg { value, type, name }` (`Step.args: Arg[]`), the faithful
-GValue representation the thesis called for. Remaining consolidation of the SAME shape, each its own
-gated chunk (all behaviour-preserving, none a semantics change):
-- **`Pred` still carries `values`/`paramNames` parallel arrays** — unify to `Arg[]` (rel `predicate.ts`
-  + legacy predicate consumers, ~100 sites). It is the last parallel-array pair on a shared IR type.
+**Encoding follow-through — the `Arg` object LANDED (`Step.args` `52abcc6`, `Pred.operands` `8ac00ad`).**
+The Phase B parallel-array deviation is reversed on both shared IR types: a step argument is one
+`Arg { value, type, name }` (`Step.args: Arg[]`) and a predicate's operands are `Pred.operands: Arg[]`,
+the faithful GValue representation the thesis called for — no parallel `argTypes`/`paramNames`/`values`
+arrays left on either. Remaining consolidation of the SAME shape, each its own gated chunk (all
+behaviour-preserving):
 - **Collection-literal `literalItems` returns `{values, items}`** — unify to `Arg[]` members so a
   member carries its own type/name; this is what dissolves the `flattenListArgs` desync for real and
   can unblock the deferred `V($x)` / `within([$x])` collection-param gaps.
 - **RelIR `constLit(value, type, paramName)` / `sliceBound(n, paramName)`** take a loose positional trio
   — collapse to one `Arg`, the same object the front-end now carries end to end.
+- **Predicate operand TYPE is available but not yet threaded** — `Pred.operands[i].type` is populated
+  by the parser and dropped at the render seam (`predicate.ts` passes `null`); threading it is the
+  enrichment that makes `P.gt(2.0)` render `2.0`, a small typed-literal correctness win, separate from
+  the unification.
 
 **What remains is coverage-only / exotic / an open design question — each needs a decision before it is
 worth the risk on the shared spine:**
