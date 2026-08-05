@@ -535,7 +535,7 @@ function elementScan(step: IRStep, fresh: Minter): { scan: Rel; pred?: Expr; ele
   const clauses: Expr[] = [];
   // Ids are parsed integer/string literals bounded by the QUERY TEXT — inline them (a rowid `int`, a
   // uid `text`); `constLit` never declines a number/string, so the assertion cannot fire.
-  if (nums.length) clauses.push({ kind: 'in-list', expr: col(scan.id, 'id'), values: nums.map((n) => constLit(n, 'long')!) });
+  if (nums.length) clauses.push({ kind: 'in-list', expr: col(scan.id, 'id'), values: nums.map((n) => constLit(arg(n, 'long'))!) });
   if (strs.length) clauses.push({ kind: 'in-list', expr: col(scan.id, 'uid'), values: strs.map((s) => compilerText(s)) });
   const pred = clauses.reduce<Expr | undefined>((left, right) =>
     left ? { kind: 'binary', op: 'or', left, right } : right, undefined);
@@ -1102,9 +1102,9 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { readon
   // shape boundary like `values()` and `count()` — the element is gone and a value is in its place.
   // The channels ride through untouched: a constant changes the VALUE, not the traverser.
   if (step.name === 'constant') {
-    const [value, extra] = args;
+    const [, extra] = args;
     if (extra !== undefined) return null;
-    const literal = constLit(value, step.args[0]?.type ?? null, step.args[0]?.name ?? null);
+    const literal = constLit(step.args[0]);
     if (!literal) return null;
     return {
       rel: make.project({
@@ -1381,9 +1381,9 @@ function scalarTail(
     // change — and it DROPS the per-row `vtype`, for the reason every transform does: the stored type
     // no longer describes the value that is there now.
     if (step.name === 'constant') {
-      const [value, extra] = args;
+      const [, extra] = args;
       if (extra !== undefined) return null;
-      const literal = constLit(value, step.args[0]?.type ?? null, step.args[0]?.name ?? null);
+      const literal = constLit(step.args[0]);
       if (!literal) return null;
       const carried = rel.channels;
       rel = make.project({
@@ -1577,12 +1577,12 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
   // without breaking that native case. Duration alone has no native static-subject source, so `ordered`
   // can safely decline `is(P.gt(Duration))` (routing to legacy) while the plain `inject(Duration(…))` and
   // its equality/`unfold`/… uses lower here. bigint and BigDecimal keep declining whole, as before.
-  const rowExpr = (arg: unknown, i: number): Expr | null => {
+  const rowExpr = (value: unknown, i: number): Expr | null => {
     const paramName = step.args[i]?.name ?? null;
-    const literal = constLit(arg, rowType(i), paramName);
+    const literal = constLit(arg(value, rowType(i), paramName));
     if (literal) return literal;
-    if (tag !== undefined && arg instanceof Duration)
-      return paramName != null ? param(arg) : compilerText(String(arg));
+    if (tag !== undefined && value instanceof Duration)
+      return paramName != null ? param(value) : compilerText(String(value));
     return null;
   };
   const rows = vals.map(rowExpr);
@@ -1617,7 +1617,7 @@ function injectList(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFramin
   if (!args.every((arg) => Array.isArray(arg))) return null;
   const rows = (args as readonly unknown[][]).map((members, ai) => {
     const listType = step.args[ai]?.type ?? null;
-    const items = members.map((member, mi) => constLit(member, itemTypeAt(listType, mi)));
+    const items = members.map((member, mi) => constLit(arg(member, itemTypeAt(listType, mi))));
     return items.some((item) => !item) ? null : [{ kind: 'json-array', items: items as Expr[], binary: true } as Expr];
   });
   if (rows.some((row) => !row)) return null;
@@ -2574,7 +2574,7 @@ const byChild = (ctx: ChainCtx, fresh: Minter): ByChild => (body, host) => {
     // through NULLNESS, which coincides for every buildable body except one that deliberately emits
     // null. Decline until the queued ByChild signature refinement reports emission separately.
     if (args[0] === null) return null;
-    const projected = constLit(args[0], leading.args[0]?.type ?? null, leading.args[0]?.name ?? null);
+    const projected = constLit(leading.args[0]);
     if (!projected) return null;
     value = projected;
     at = 1;

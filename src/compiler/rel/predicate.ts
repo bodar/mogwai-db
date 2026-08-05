@@ -1,7 +1,7 @@
 import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
 import { CF_MAX_BINDS } from '../../cf-limits.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
-import { gtypeName, type Arg } from '../../gremlin/frontend.ts';
+import { gtypeName, arg, type Arg } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, normalizeTypeName, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
 import { constLit } from './const.ts';
 
@@ -75,7 +75,7 @@ const STATIC_ORDERING_DECLINE = new Set(['datetime', 'duration']);
  * → `castBound`). This is why RelIR now COVERS these operands rather than declining them to legacy.
  */
 const operand = (value: unknown, type: TypeNode | null = null, paramName: string | null = null): Expr | null => {
-  if (typeof value === 'string' || typeof value === 'number') return constLit(value, type, paramName);
+  if (typeof value === 'string' || typeof value === 'number') return constLit(arg(value, type, paramName));
   if (isExactTail(value)) return paramName != null ? param(value) : compilerText(String(value));
   return null;
 };

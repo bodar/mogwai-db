@@ -1,5 +1,6 @@
 import { compilerInt, compilerNull, compilerReal, compilerText, lit, param, type Expr } from '../../rel/expr.ts';
 import { flatType, type TypeNode } from '../../gremlin/types.ts';
+import type { Arg } from '../../gremlin/frontend.ts';
 
 // ---------- the one seam for "a value the compiler already holds" ----------
 //
@@ -14,20 +15,23 @@ import { flatType, type TypeNode } from '../../gremlin/types.ts';
 // vocabulary (`flatType`/`TypeNode`) and `src/rel/` is the clean-room the arch check keeps free of
 // `src/gremlin` imports.
 
-/** A scalar arg → its RelIR expression, deciding bind-vs-inline the ONE way the whole design turns on:
+/** An `Arg` → its RelIR expression, deciding bind-vs-inline the ONE way the whole design turns on. It
+ *  takes the whole `Arg` — the same value+type+name object the front-end carries end to end — rather
+ *  than a loose (value, type, paramName) trio, so the seam reads the intent off the argument itself:
  *
- *  - `paramName != null` — the value is a USER PARAMETER (`$x` in the binding map, `Step.paramNames`).
- *    It BINDS (`?`), spending one of the 100 by intent — the only free-standing bind the design keeps,
- *    because a parameter is the user's signal that the value is variable.
- *  - `paramName == null` — the value is a CONSTANT the compiler holds (a parsed literal). It INLINES as
- *    a TYPED SQL literal, storage class following the declared canonical type (`argTypes`), so an
+ *  - `a.name != null` — the value is a USER PARAMETER (`$x` in the binding map). It BINDS (`?`),
+ *    spending one of the 100 by intent — the only free-standing bind the design keeps, because a
+ *    parameter is the user's signal that the value is variable.
+ *  - `a.name == null` — the value is a CONSTANT the compiler holds (a parsed literal). It INLINES as
+ *    a TYPED SQL literal, storage class following the declared canonical type (`a.type`), so an
  *    integer-valued double inlines as `2.0` not INTEGER `2`. Spends nothing.
  *
  *  Either way, a shape a scalar literal cannot spell — a collection, a map, a nested traversal, or a
  *  big-value carrier (bigint/BigDecimal/Duration, the `oversized` tail) — declines with `null` for the
  *  caller to route (a param of that shape is oversized, handled where collections already are). A
  *  non-finite number (`NaN`/±`Infinity`) has no literal form, so it stays a bound `lit`. */
-export const constLit = (value: unknown, type: TypeNode | null, paramName: string | null = null): Expr | null => {
+export const constLit = (a: Arg): Expr | null => {
+  const { value, type, name: paramName } = a;
   if (value === null) return paramName != null ? param(value) : compilerNull();
   if (typeof value === 'string') return paramName != null ? param(value, 'text') : compilerText(value);
   if (typeof value === 'boolean') return paramName != null ? param(value) : compilerInt(value ? 1 : 0);
