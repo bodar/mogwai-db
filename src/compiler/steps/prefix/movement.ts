@@ -1,5 +1,6 @@
 import { q, list, empty, derived, type Expression } from '../../../sql/kernel/q.ts';
 import { edges } from '../../../sql/schema.ts';
+import { argValues } from '../../../gremlin/frontend.ts';
 import { dirsFor, edgeLabelFilter, type Elem, type EdgeEnd } from '../../plan/plan.ts';
 import { appendCte, appendPathPos, layoutProjection, layoutProjectionMinting, layoutProjectionMintingMany, layoutCols, patchLayout, partitionOver, prevRel, type TraverserLayout, type PathState, type ElementStream, type StepFn } from '../context/context.ts';
 import { fastPathContextOf } from '../../engine/deps.ts';
@@ -81,7 +82,7 @@ export const move: StepFn = (s, st) => {
   const cf = layoutProjection(st.traverserLayout, p);
   const pa = pathAppend(st, 'vertex');
   const selects = dirsFor(s.name).map(([from, to]) =>
-    q`SELECT ${e.c[to]} AS id${cf}${pa.frag(e.c[to])} FROM ${e} JOIN ${p} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(s.args)}`);
+    q`SELECT ${e.c[to]} AS id${cf}${pa.frag(e.c[to])} FROM ${e} JOIN ${p} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(argValues(s))}`);
   return finishMove(st, list(selects, ' UNION ALL '), pa.opts);
 };
 
@@ -104,7 +105,7 @@ export const toEdge: StepFn = (s, st) => {
     return layoutProjectionMintingMany(outLayout, p, mints);
   };
   const selects = froms.map((from) =>
-    q`SELECT ${e.c.id} AS id${carry(p.c.id)} FROM ${e} JOIN ${p} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(s.args)}`);
+    q`SELECT ${e.c.id} AS id${carry(p.c.id)} FROM ${e} JOIN ${p} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(argValues(s))}`);
   return finishMove(st, list(selects, ' UNION ALL '), { elem: 'edge', fromV: st.traverserLayout.trackFromV ? 'fv' : null, ...pa.opts });
 };
 

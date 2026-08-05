@@ -1,5 +1,5 @@
 import { type IRStep } from './strategies.ts';
-import { isTokenArg } from '../../gremlin/frontend.ts';
+import { isTokenArg, argValues } from '../../gremlin/frontend.ts';
 import { isLocalScope, PATH_FAMILY, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, unionOf } from './step.ts';
 
 // ---------- whole-chain analysis: annotate, never rewrite ----------
@@ -154,7 +154,7 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
     if (!ordered && POSITIONAL_CONSUMERS.has(s.name) && !isLocalScope(s)) return true;
     // dedup(labels) keeps the FIRST traverser per key — first-in-emission, so it needs the
     // encounter. Bare dedup() collapses a multiset regardless of order (never triggers).
-    if (sawFanout && s.name === 'dedup' && (s.args ?? []).some((a: any) => typeof a === 'string')) return true;
+    if (sawFanout && s.name === 'dedup' && argValues(s).some((a) => typeof a === 'string')) return true;
     if (FANOUT_STEPS.has(s.name)) { sawFanout = true; ordered = false; }
   }
   return false;

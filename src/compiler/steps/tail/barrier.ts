@@ -1,4 +1,5 @@
 import { derived, empty, list, q, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
+import { argValues } from '../../../gremlin/frontend.ts';
 import { perRowColumnOf, staticTypeOf, type ListOf } from '../../../sql/kernel/render.ts';
 import { sliceSuffix, typedScalarNode } from '../../plan/plan.ts';
 import { armBatches, isLocalScope, BATCHING_BRANCHES, type BranchKind, type IRStep, type NumericReducer, type ScalarReducer } from '../../ir/step.ts';
@@ -164,12 +165,12 @@ export function rankedRows<S extends RelationalStream>(s: S, spec: RankSpec): S 
 export const aliasCompareRows = <S extends RelationalStream>(
   s: S, step: IRStep, _steps: IRStep[], at: number,
 ): LoweringResult | null => {
-  const arg0 = step.args[0];
+  const arg0 = step.args[0].value;
   if (typeof arg0 !== 'string') return null;
   return continueLowering(reprojectRows(s, {
     where: (p) => {
       const resolve = aliasOperandsOf(s.traverserLayout.aliases, p);
-      return aliasCompareTest(step, resolve(arg0), step.args[1], resolve);
+      return aliasCompareTest(step, resolve(arg0), step.args[1].value, resolve);
     },
   }), at + 1);
 };
@@ -287,7 +288,7 @@ export function globalRowOps<T extends RelationalStream>(): [string, ShapeTailFn
   // here, and it keeps a shape that owns a member-scoped `tail` (a list's) reaching its own builder.
   const tail: ShapeTailFn<T> = (s, step, _steps, at) => {
     if (isLocalScope(step) || !s.traverserLayout.encounter) return null;
-    const n = Number((step.args ?? []).find((a: unknown) => typeof a === 'number') ?? 1);
+    const n = Number(argValues(step).find((a) => typeof a === 'number') ?? 1);
     return continueLowering(
       reprojectRows(s, { suffix: q` LIMIT ${n}`, orderByEncounter: true, descending: true }), at + 1);
   };
@@ -297,7 +298,7 @@ export function globalRowOps<T extends RelationalStream>(): [string, ShapeTailFn
   // is a per-shape expression — so it declines.
   const sample: ShapeTailFn<T> = (s, step, _steps, at) => {
     if (isLocalScope(step) || (step.modulators ?? []).length) return null;
-    const n = Number((step.args ?? []).find((a: unknown) => typeof a === 'number') ?? 1);
+    const n = Number(argValues(step).find((a) => typeof a === 'number') ?? 1);
     return continueLowering(reprojectRows(s, { suffix: q` ORDER BY RANDOM() LIMIT ${n}` }), at + 1);
   };
   return [

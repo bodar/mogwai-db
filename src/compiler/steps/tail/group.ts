@@ -1,4 +1,4 @@
-import { isNested, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
+import { isNested, isTokenArg, stepChain, argValues } from '../../../gremlin/frontend.ts';
 import { empty, list, q, raw, value, values, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { PER_ROW, perRowColumnOf, staticTypeOf, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { NUMERIC_REDUCERS, REDUCERS } from '../../ir/step.ts';
@@ -192,7 +192,7 @@ function nestedInnerKeyVal(
   const reducer = rsteps.at(-1)?.name;
   if (rsteps.length === 1 && reducer === 'count') return { key, val: countVal, kind: 'count' };
   if (rsteps.length === 2 && rsteps[0].name === 'values' && SCALAR_REDUCERS.has(reducer!))
-    return { key, val: numericReducerAggregate(scalarProp(ctx, rsteps[0].args[0]), reducer as NumericReducer, bulk).value, kind: 'number' };
+    return { key, val: numericReducerAggregate(scalarProp(ctx, rsteps[0].args[0].value), reducer as NumericReducer, bulk).value, kind: 'number' };
   return null;
 }
 
@@ -261,9 +261,9 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
 
   const projectStep = keySteps[0]?.name === 'project' ? keySteps[0] : undefined;
   const projectBys = projectStep ? keySteps.slice(1) : [];
-  const projectKeys = projectStep?.args.filter((x: any): x is string => typeof x === 'string') ?? [];
+  const projectKeys = projectStep ? argValues(projectStep).filter((x: any): x is string => typeof x === 'string') : [];
   const projectByNested = projectBys.map((step) => step.name === 'by'
-    ? step.args.find(isNested)?.nested
+    ? argValues(step).find(isNested)?.nested
     : undefined);
   const projectKeyBodies = projectByNested.map((n) => n ? childSteps(n, parent.params) : null);
   const genericProjectKey = !!projectStep
@@ -301,7 +301,7 @@ function tryLowerGroupChildSource(bys: any[][], src: GroupSource): GroupSource |
   const nestedElementMove = !!nestedGroup && classifyElementChildRows(nestedPrefix, undefined, false) !== null;
   const nestedPropertiesMove = !!nestedGroup && !nestedElementMove
     && nestedPrefix.length === 1 && nestedPrefix[0].name === 'properties'
-    && ((nestedPrefix[0] as IRStep).args ?? []).every((a: any) => typeof a === 'string')
+    && argValues(nestedPrefix[0] as IRStep).every((a: any) => typeof a === 'string')
     && parent.kind === 'elements';
   const genericGroupVal = nestedElementMove || nestedPropertiesMove;
   if (!genericKey && !genericProjectKey && !genericVal && !genericReducer && !genericFold && !genericElementFold && !genericElementImplicitFold && !genericGroupVal) return null;
@@ -627,7 +627,7 @@ export function lowerGroup(st: LoweringState, isCount: boolean, bys: any[][], sr
  */
 export function lowerValueMap(st: ElementStream, proj: IRStep): MapStream {
   if (proj.name === 'elementMap') throw new Error('elementMap() re-entry not yet supported');
-  if (proj.args.includes(true)) throw new Error('valueMap(true)/token re-entry not yet supported');
+  if (argValues(proj).includes(true)) throw new Error('valueMap(true)/token re-entry not yet supported');
   // ORIGINS are admitted (and threaded below): a map is ONE blob per element, so a per-parent
   // ordinal rides it exactly as it rides a movement — which is what lets a valueMap() body be a
   // CHILD (`local(__.valueMap())`) and rejoin its parent. The other carried kinds still defer:
@@ -635,7 +635,7 @@ export function lowerValueMap(st: ElementStream, proj: IRStep): MapStream {
   // the blob has no slot for.
   if (st.traverserLayout.aliases.size || st.traverserLayout.path || st.traverserLayout.sack || st.traverserLayout.fromV)
     throw new Error('valueMap() re-entry carrying as()/path()/sack state not yet supported');
-  const keys = proj.args.filter((a: any) => typeof a === 'string') as string[];
+  const keys = argValues(proj).filter((a: any) => typeof a === 'string') as string[];
   const p = st.rel.as('p');
   const n = elemRel(st);
   const vlJoin = q`${n} JOIN ${p} ON ${n.c.id}=${p.c.id}`;
@@ -869,7 +869,7 @@ export function propertyPayload(elem: Elem, pr: Relation, n: Relation): Expressi
 /** properties()/properties(keys) is a genuine shape transition. The property row
  * stays relational so filters and projections can consume it one step at a time. */
 export function lowerProperties(st: ElementStream, step: IRStep): PropertyStream {
-  const keys = step.args.filter((a): a is string => typeof a === 'string');
+  const keys = argValues(step).filter((a): a is string => typeof a === 'string');
   const n = elemRel(st);
   const p = st.rel.as('p');
   // The property stream IS the normalized property rows — one per INSTANCE, so a multi-valued
@@ -905,11 +905,11 @@ function filterProperty(s: PropertyStream, step: IRStep): PropertyStream {
   const p = s.rel.as('p');
   let test: Expression;
   if (step.name === 'has') {
-    const [mk, mv] = step.args;
+    const [mk, mv] = argValues(step);
     if (typeof mk !== 'string') throw new Error('properties().has() requires a meta-property key');
     test = predicateSql(propExtract(p.c.pmeta, mk).expr, step.args.length > 1 ? mv : undefined);
-  } else if (step.name === 'hasKey') test = predicateSql(p.c.pk, step.args[0]);
-  else test = predicateSql(p.c.pv, step.args[0]);
+  } else if (step.name === 'hasKey') test = predicateSql(p.c.pk, step.args[0]?.value);
+  else test = predicateSql(p.c.pv, step.args[0]?.value);
   const rel = s.q.cte(
     q`SELECT ${list(PROPERTY_PAYLOAD.map((c) => p.c[c]), ', ')}${layoutProjection(s.traverserLayout, p)} FROM ${p} WHERE ${test}`,
     [...PROPERTY_PAYLOAD, ...layoutCols(s.traverserLayout)],
@@ -1081,7 +1081,7 @@ const propertyValueMap: ShapeTailFn<PropertyStream> = (s, _step, steps, at) => {
 
 const propertyMetaProperties: ShapeTailFn<PropertyStream> = (s, step, steps, at) => {
   if (at + 1 < steps.length) throw new Error(`step not implemented after properties().properties(): ${steps[at + 1].name}()`);
-  const mkeys = step.args.filter((a): a is string => typeof a === 'string');
+  const mkeys = argValues(step).filter((a): a is string => typeof a === 'string');
   const mkeyFilter = mkeys.length ? q` WHERE je.key IN (${list(mkeys.map(value), ',')})` : empty;
   const p = s.rel.as('p');
   return continueLowering(toResultStream(s.q, q`SELECT je.key AS mk, je.value AS mv FROM ${p}, json_each(COALESCE(${p.c.pmeta}, '{}')) je${mkeyFilter}`, { kind: 'metaProperty' }), at + 1);

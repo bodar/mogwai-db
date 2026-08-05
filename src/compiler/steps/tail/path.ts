@@ -1,4 +1,4 @@
-import { isNested } from '../../../gremlin/frontend.ts';
+import { isNested, argValues } from '../../../gremlin/frontend.ts';
 import { empty, list, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { type PathPos } from '../../../sql/kernel/render.ts';
 import { nodes } from '../../../sql/schema.ts';
@@ -66,7 +66,7 @@ function positionArmFansOut(body: IRStep[], params: Record<string, any>): boolea
   return body.some((s) => {
     if (POSITION_MOVEMENTS.has(s.name) || s.name === 'V' || s.name === 'E' || s.name === 'union') return true;
     if ((s.name === 'choose' || s.name === 'coalesce') && !(s as IRStep).optionArms) {
-      const kids = (s.args ?? []).filter(isNested);
+      const kids = argValues(s).filter(isNested);
       // choose(pred, then, else): the predicate (kids[0]) gates, only then/else can fan out.
       const arms = s.name === 'choose' && kids.length === 3 ? kids.slice(1) : kids;
       return arms.some((a: any) => positionArmFansOut(childSteps(a.nested, params), params));

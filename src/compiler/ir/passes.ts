@@ -65,7 +65,7 @@ const EXTRACT: Pass[] = group('extract', [
   {
     name: 'desugarMatchString',
     // Cheap gate: only a `match` step carrying a STRING first argument is the string form.
-    applies: (steps) => steps.some((s) => s.name === 'match' && typeof (s.args ?? [])[0] === 'string'),
+    applies: (steps) => steps.some((s) => s.name === 'match' && typeof (s.args ?? [])[0]?.value === 'string'),
     run: desugarMatchString,
   },
   // Also before decoration, and for the same reason: a map VALUE may be a nested traversal, and
@@ -91,7 +91,7 @@ const FOLD: Pass[] = group('canonicalize', [
     name: 'rewriteWhereEndLabels',
     // Nothing to do without a label to bind or a child body to hold a where(): no as() and no
     // nested arg at the top level means no where() host exists anywhere below either.
-    applies: (steps) => steps.some((s) => s.name === 'as' || (s.args ?? []).some(isNested)),
+    applies: (steps) => steps.some((s) => s.name === 'as' || s.args.some((a) => isNested(a.value))),
     run: (steps, ctx) => rewriteWhereEndLabels(steps, ctx.params),
   },
   // ConnectiveStrategy is the only fold that RESTRUCTURES the chain (infix `.and()`/`.or()` → the
@@ -186,7 +186,7 @@ const VERIFY: Pass[] = group('verify', [
   // looks for a step NAMED `by` in the live chain is false exactly when the violation exists.
   {
     name: 'byModulatorArity',
-    applies: (_steps, ctx) => ctx.originalChain.some((s) => s.name === 'by' || (s.args ?? []).some(isNested)),
+    applies: (_steps, ctx) => ctx.originalChain.some((s) => s.name === 'by' || s.args.some((a) => isNested(a.value))),
     run: function byModulatorArityPass(steps, ctx) {
       verifyByModulatorArity(ctx.originalChain as IRStep[], ctx.params);
       return steps;

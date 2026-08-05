@@ -7,7 +7,7 @@
 
 import { q, value, raw, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { predicateSql, scalarTx, compareKey, inferVtypeSql } from '../../plan/plan.ts';
-import { isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
+import { argValues, isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from '../context/stream.ts';
 import { layoutProjection, layoutCols, type ElementStream } from '../context/context.ts';
@@ -221,7 +221,7 @@ function listStringTransform(s: ListStream, step: IRStep): ListStream {
   // The transform REWRITES each member, so it reads the payload and emits a BARE value —
   // the stored type no longer describes the result. length() yields an int, the rest
   // strings; either way the output list is bare and re-tagged, never a stale {t,v}.
-  const elem = scalarTx(step.name, step.args ?? [], memberValue(s.of, q`x.value`, q`x.type`));
+  const elem = scalarTx(step.name, argValues(step), memberValue(s.of, q`x.value`, q`x.type`));
   if (!elem) throw new Error(`scalar transform ${step.name}() not supported`);
   const sub = q`(SELECT jsonb(COALESCE(json_group_array(${elem} ORDER BY x.key), json('[]'))) FROM json_each(${c.c.list}) x)`;
   // Untagged, NOT tagged 'string': a uniform tag would force a null member through the
@@ -252,7 +252,7 @@ function listReverse(s: ListStream): ListStream {
 function listLocalTransform(s: ListStream, step: IRStep): ListStream {
   const c = s.rel.as('c');
   const name = step.name;
-  const nums = (step.args ?? []).filter((a: any) => typeof a === 'number') as number[];
+  const nums = argValues(step).filter((a: any) => typeof a === 'number') as number[];
   const je = q`json_each(${c.c.list})`;
   // Compare on the payload, carry the whole member. For a bare list these are the same
   // expression, so the untyped SQL is unchanged.
@@ -332,7 +332,7 @@ function operandList(engine: Engine, arg: any, op: string, params: Record<string
     const last = inner[inner.length - 1];
     if (last?.name !== 'fold') {
       if (inner.length === 1 && inner[0].name === 'constant') {
-        const c = inner[0].args[0];
+        const c = inner[0].args[0].value;
         if (c === null || c === undefined) throw new Error(`traversal argument for ${op} step must yield an iterable type, not null`);
         throw new Error(`traversal argument for ${op} step must yield an iterable type, encountered ${jsGtype(c)}`);
       }
@@ -340,7 +340,7 @@ function operandList(engine: Engine, arg: any, op: string, params: Record<string
     }
     const pre = inner.slice(0, -1);
     if (pre.length === 1 && pre[0].name === 'constant') {
-      const c = pre[0].args[0];
+      const c = pre[0].args[0].value;
       return q`jsonb(${value(JSON.stringify([c ?? null]))})`;
     }
     const folded = foldedListSubquery(engine, inner, params);
@@ -429,7 +429,7 @@ function setOpExpr(name: string, self: Expression, op: Expression, selfTyped = f
 function listAllAny(s: ListStream, step: IRStep): ListStream {
   const c = s.rel.as('c');
   const je = q`json_each(${c.c.list})`;
-  const elemPred = memberPredicate(s.of, step.args[0]);
+  const elemPred = memberPredicate(s.of, step.args[0].value);
   const keep = step.name === 'all'
     ? q`NOT EXISTS (SELECT 1 FROM ${je} je WHERE (${elemPred}) IS NOT TRUE)`
     : q`EXISTS (SELECT 1 FROM ${je} je WHERE (${elemPred}) IS TRUE)`;
@@ -509,7 +509,7 @@ const listIs: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
 // plain string arg → a scalar stream (so a trailing step composes; usually terminal).
 const listConjoin: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
   const c = s.rel.as('c');
-  const delim = String(step.args[0] ?? '');
+  const delim = String(step.args[0]?.value ?? '');
   // Joins the PAYLOADS into one string — the result is a string whatever the members were.
   const memberVal = memberValue(s.of, raw('value'), raw('type'));
   const joined = q`(SELECT COALESCE(group_concat(mv, ${value(delim)}), '') FROM (SELECT ${memberVal} AS mv FROM json_each(${c.c.list}) WHERE ${memberVal} IS NOT NULL ORDER BY key))`;
@@ -520,7 +520,7 @@ const listConjoin: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
 // set-op family (combine/intersect/difference/disjunct/product) over a list operand.
 const listSetOp: ShapeTailFn<ListStream> = (s, step, steps, at) => {
   const c = s.rel.as('c');
-  const op = operandList(engineOf(s), step.args[0], step.name, s.params);
+  const op = operandList(engineOf(s), step.args[0]?.value, step.name, s.params);
   // A typed incoming list meets a BARE operand (a literal array / constant().fold()), so the
   // two sides' encodings differ. Comparing and emitting on the payload puts both sides in
   // one vocabulary; the result is therefore a bare list, uniformly (mixing a typed member
@@ -547,7 +547,7 @@ const LIST_DISPATCH = new Map<string, ShapeTailFn<ListStream>>([
   ['where', aliasCompareRows],
   ['unfold', (s, _step, _steps, at) => continueLowering(compileUnfold(s), at + 1)],
   // none(pred): keep each list where NO element satisfies pred (a collection filter).
-  ['none', (s, step, _steps, at) => continueLowering(listNoneFilter(s, step.args[0]), at + 1)],
+  ['none', (s, step, _steps, at) => continueLowering(listNoneFilter(s, step.args[0].value), at + 1)],
   // reverse() reverses element order (no Scope arg — reverse of a list is the whole list).
   ['reverse', (s, _step, _steps, at) => continueLowering(listReverse(s), at + 1)],
   // all(P)/any(P): keep the list if every/some element satisfies P (list filter).
@@ -587,7 +587,7 @@ export function compileFromList(s: ListStream, steps: IRStep[], at: number): Low
 
 /** The single Column arg of a select() over a map, if any. */
 const columnOf = (step: IRStep): 'keys' | 'values' | undefined =>
-  (step.args ?? []).map((a: any) => a && typeof a === 'object' && a.column).find((c: any) => c === 'keys' || c === 'values');
+  argValues(step).map((a: any) => a && typeof a === 'object' && a.column).find((c: any) => c === 'keys' || c === 'values');
 
 /** order(Scope.local).by(Column.keys|values [, Order]) over a map value — the ONE by()
  *  modulator being a single Column term (± direction). Returns {col, dir} or null (any
@@ -612,7 +612,7 @@ export const isMapLocalOrder = (step: IRStep): boolean => mapLocalOrder(step) !=
  *  select — unwrap its single-step body to that select() step (else null → deferral). */
 function mapOfSelect(step: IRStep, params: Record<string, any>): IRStep | null {
   if (step.name !== 'map') return null;
-  const arg = (step.args ?? [])[0];
+  const arg = (step.args ?? [])[0]?.value;
   if (!isNested(arg)) return null; // the guard narrows, so `.nested` below is rename-safe
   const body = stepChain(arg.nested, params);
   return body.length === 1 && body[0].name === 'select' && columnOf(body[0]) ? body[0] : null;

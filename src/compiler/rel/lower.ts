@@ -14,7 +14,7 @@ import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { isLocalScope, sliceOf, sliceParamNames } from '../ir/step.ts';
 import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
-import { flattenListArgs, isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
+import { flattenListArgs, isNested, isTokenArg, stepChain, argValues, arg } from '../../gremlin/frontend.ts';
 import { Duration, type TypeNode } from '../../gremlin/types.ts';
 import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
 import { assertsGType, childSteps, collectionAssert, typeOfAssert } from '../steps/tail/child-shape.ts';
@@ -329,7 +329,7 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
   // one. Every other step reaching here (`hasLabel`, `has`, `filter`, `not`) is not a `BY_HOSTS`
   // member, so a modulator on one is a front-end impossibility and declining is belt-and-braces.
   if (step.modulators?.length || step.optionArms) return null;
-  const args = step.args ?? [];
+  const args = argValues(step);
 
   if (step.name === 'hasLabel') {
     const names = flattenListArgs(args);
@@ -380,13 +380,13 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
     if (args.length === 3) {
       if (typeof args[0] !== 'string' || typeof args[1] !== 'string') return null;
       const labelled = hasLabelClause([args[0]], subject, elem, fresh);
-      const valued = hasPropertyClause(args[1], args[2], subject, elem, fresh, step.argTypes?.[2] ?? null, step.paramNames?.[2] ?? null);
+      const valued = hasPropertyClause(args[1], args[2], subject, elem, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null);
       return labelled && valued ? and(labelled, valued) : null;
     }
     const [key, val, extra] = args;
     if (extra !== undefined) return null;
-    const valType = step.argTypes?.[1] ?? null;
-    const valParam = step.paramNames?.[1] ?? null;
+    const valType = step.args[1]?.type ?? null;
+    const valParam = step.args[1]?.name ?? null;
     if (isTokenArg(key)) return hasTokenClause(key.token, val, subject, elem, fresh, valType, valParam);
     if (typeof key !== 'string') return null;
     return hasPropertyClause(key, val, subject, elem, fresh, valType, valParam);
@@ -524,7 +524,7 @@ function elementScan(step: IRStep, fresh: Minter): { scan: Rel; pred?: Expr; ele
     type: typeOf(...(elem === 'edge' ? EDGE_COLS : NODE_COLS)),
   });
 
-  const ids = flattenListArgs(step.args);
+  const ids = flattenListArgs(argValues(step));
   const nums = ids.filter((a): a is number => typeof a === 'number');
   const strs = ids.filter((a): a is string => typeof a === 'string');
   // An id argument that is neither is a hard error in the legacy spine too, but this route must
@@ -591,7 +591,7 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
   if (!hops || step.modulators?.length || step.optionArms) return null;
   if (FROM_EDGE.has(step.name) !== (elem === 'edge')) return null;
 
-  const labels = flattenListArgs(step.args ?? []);
+  const labels = flattenListArgs(argValues(step));
   if (labels.some((l) => typeof l !== 'string')) return null;
   // A label restriction is meaningless on an endpoint read — the edge is already chosen — and
   // TinkerPop's inV()/outV() take no arguments at all.
@@ -767,7 +767,7 @@ const SLICE_STEPS = new Set(['limit', 'skip', 'range', 'tail', 'sample']);
 /** `tail(n)`/`sample(n)`'s count. Both default to 1, and neither takes a range, so the numeric
  *  argument is the whole decode — `sliceOf` deliberately refuses `tail` (see `sliceOp`). */
 const countArg = (step: IRStep): number =>
-  Number((step.args ?? []).find((arg: unknown) => typeof arg === 'number') ?? 1);
+  Number(argValues(step).find((v) => typeof v === 'number') ?? 1);
 
 /** `ORDER BY <position> [DESC] LIMIT/OFFSET` — the plain slice, where a row IS one traverser. An
  *  unordered relation stays unordered rather than inventing a SQLite scan order: a slice with no
@@ -1087,7 +1087,7 @@ const countTail = (input: Rel, fresh: Minter): { rel: Rel; framing: RelFraming }
  */
 function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { readonly rel: Rel; readonly framing: RelFraming } | null {
   if (step.modulators?.length || step.optionArms) return null;
-  const args = step.args ?? [];
+  const args = argValues(step);
 
   // count() is the RLE traverser TOTAL, not the row count: a collapse merges convergent walks into
   // (row, N) pairs, so the answer is SUM(bulk) — identical to COUNT(*) only while bulk is 1
@@ -1104,7 +1104,7 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { readon
   if (step.name === 'constant') {
     const [value, extra] = args;
     if (extra !== undefined) return null;
-    const literal = constLit(value, step.argTypes?.[0] ?? null, step.paramNames?.[0] ?? null);
+    const literal = constLit(value, step.args[0]?.type ?? null, step.args[0]?.name ?? null);
     if (!literal) return null;
     return {
       rel: make.project({
@@ -1272,7 +1272,7 @@ function scalarTail(
 
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
-    const args = step.args ?? [];
+    const args = argValues(step);
     if (step.optionArms) return null;
     // The blanket modulator decline exempts the two steps that HOST a `by()` here; each reads it
     // through `modulator.ts` and declines the projections a value stream cannot serve.
@@ -1383,7 +1383,7 @@ function scalarTail(
     if (step.name === 'constant') {
       const [value, extra] = args;
       if (extra !== undefined) return null;
-      const literal = constLit(value, step.argTypes?.[0] ?? null, step.paramNames?.[0] ?? null);
+      const literal = constLit(value, step.args[0]?.type ?? null, step.args[0]?.name ?? null);
       if (!literal) return null;
       const carried = rel.channels;
       rel = make.project({
@@ -1422,7 +1422,7 @@ function scalarTail(
           ? { ...tail, framing: { ...tail.framing, set: true } }
           : tail;
       }
-      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), step.argTypes?.[0] ?? null, step.paramNames?.[0] ?? null);
+      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), step.args[0]?.type ?? null, step.args[0]?.name ?? null);
       if (!pred) return null;
       rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
       continue;
@@ -1533,7 +1533,7 @@ function scalarTail(
 function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; framing: RelFraming; at: number } | null {
   const step = steps[0]!;
   if (step.modulators?.length || step.optionArms) return null;
-  const args = step.args ?? [];
+  const args = argValues(step);
   if (!args.length) return null;
   // A COLLECTION argument here means a MIXED inject (`inject([1,2], 3)`): a list traverser and a
   // scalar traverser in one stream, which is the VARIANT shape rather than either of them. Legacy
@@ -1557,7 +1557,7 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
   // The type each row inlines under: a coercion fold (`asNumber`/`asBool`/…) has already retyped the
   // whole stream, so its uniform `as` wins; absent a fold, the value keeps the arg's declared subtype.
   const rowType = (i: number): TypeNode | null =>
-    (folded.as as TypeNode | undefined) ?? (folded.at === 1 ? (step.argTypes?.[i] ?? null) : null);
+    (folded.as as TypeNode | undefined) ?? (folded.at === 1 ? (step.args[i]?.type ?? null) : null);
   // The tag the FOLD established, else a uniform declared type where there is one, else per-value
   // inference — which is what `UNKNOWN` means and is the honest floor for a heterogeneous inject
   // (there is no per-row vtype column to carry a mixed type on). Same precedence as legacy's, whose
@@ -1578,7 +1578,7 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
   // can safely decline `is(P.gt(Duration))` (routing to legacy) while the plain `inject(Duration(…))` and
   // its equality/`unfold`/… uses lower here. bigint and BigDecimal keep declining whole, as before.
   const rowExpr = (arg: unknown, i: number): Expr | null => {
-    const paramName = step.paramNames?.[i] ?? null;
+    const paramName = step.args[i]?.name ?? null;
     const literal = constLit(arg, rowType(i), paramName);
     if (literal) return literal;
     if (tag !== undefined && arg instanceof Duration)
@@ -1612,11 +1612,11 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
  * stream, which is the VARIANT shape rather than either of them.
  */
 function injectList(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFraming } | null {
-  const args = step.args ?? [];
+  const args = argValues(step);
   if (step.modulators?.length || step.optionArms || !args.length) return null;
   if (!args.every((arg) => Array.isArray(arg))) return null;
   const rows = (args as readonly unknown[][]).map((members, ai) => {
-    const listType = step.argTypes?.[ai] ?? null;
+    const listType = step.args[ai]?.type ?? null;
     const items = members.map((member, mi) => constLit(member, itemTypeAt(listType, mi)));
     return items.some((item) => !item) ? null : [{ kind: 'json-array', items: items as Expr[], binary: true } as Expr];
   });
@@ -1763,7 +1763,7 @@ function pathTail(
   const labels = aliases;
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
-    const args = step.args ?? [];
+    const args = argValues(step);
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
 
     if (step.name === 'is') {
@@ -2373,7 +2373,7 @@ function unionArms(
   // does not, and vice versa.
   if (encounterOf(input.channels)) return null;
 
-  const args = step.args ?? [];
+  const args = argValues(step);
   if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
   const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
   if (bodies.some((body) => !body?.length)) return null;
@@ -2448,7 +2448,7 @@ function chooseArms(
 ): { readonly rel: Rel; readonly framing: RelFraming } | null {
   if (step.modulators?.length || step.optionArms) return null;
   if (encounterOf(input.channels)) return null;
-  const args = step.args ?? [];
+  const args = argValues(step);
   if (args.length < 2 || args.length > 3 || args.some((arg) => !isNested(arg))) return null;
   const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
   const [condition, then, otherwise] = bodies;
@@ -2553,7 +2553,7 @@ const byChild = (ctx: ChainCtx, fresh: Minter): ByChild => (body, host) => {
   let at = 0;
   const leading = body[0];
   if (leading?.name === 'values') {
-    const args = leading.args ?? [];
+    const args = argValues(leading);
     if (args.length !== 1 || typeof args[0] !== 'string') return null;
     const projected = byExpr({ key: { kind: 'property', key: args[0] } }, host, fresh);
     if (!projected) return null;
@@ -2566,7 +2566,7 @@ const byChild = (ctx: ChainCtx, fresh: Minter): ByChild => (body, host) => {
     value = projected;
     at = 1;
   } else if (leading?.name === 'constant') {
-    const args = leading.args ?? [];
+    const args = argValues(leading);
     if (args.length !== 1) return null;
     // Productivity is EMISSION, not NULLNESS: TraversalProduct.java explicitly says null is a valid
     // productive value (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/
@@ -2574,7 +2574,7 @@ const byChild = (ctx: ChainCtx, fresh: Minter): ByChild => (body, host) => {
     // through NULLNESS, which coincides for every buildable body except one that deliberately emits
     // null. Decline until the queued ByChild signature refinement reports emission separately.
     if (args[0] === null) return null;
-    const projected = constLit(args[0], leading.argTypes?.[0] ?? null, leading.paramNames?.[0] ?? null);
+    const projected = constLit(args[0], leading.args[0]?.type ?? null, leading.args[0]?.name ?? null);
     if (!projected) return null;
     value = projected;
     at = 1;
@@ -2621,8 +2621,8 @@ const subReads = (ctx: ChainCtx, fresh: Minter): SubReads => ({
   // traversal nobody wrote.
   matching: (labels, props) => subReads(ctx, fresh).rooted([
     { name: 'V', args: [] },
-    ...labels.map((label) => ({ name: 'hasLabel', args: [label] })),
-    ...props.map(([key, value]) => ({ name: 'has', args: [key, value] })),
+    ...labels.map((label) => ({ name: 'hasLabel', args: [arg(label)] })),
+    ...props.map(([key, value]) => ({ name: 'has', args: [arg(key), arg(value)] })),
   ] as IRStep[]),
 });
 

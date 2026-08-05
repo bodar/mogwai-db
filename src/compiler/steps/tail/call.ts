@@ -1,4 +1,4 @@
-import { isNested } from '../../../gremlin/frontend.ts';
+import { isNested, argValues } from '../../../gremlin/frontend.ts';
 import { type Query } from '../../../sql/kernel/q.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { type Stream, type LoweringResult, continueLowering, suspendLowering } from '../context/stream.ts';
@@ -146,7 +146,7 @@ export function lowerCall(step: IRStep, parent: ElementStream, scope: ChildFrame
   // only captures a CLASSIFYING traversal as spec.injectionTraversal (to avoid retaining a cyclic
   // node), so detect the unsupported case from the raw args here — never silently degrade to a
   // no-injection (Cartesian) run, which would answer a different question.
-  const rawArgs = step.args.slice(1);
+  const rawArgs = argValues(step).slice(1);
   const hasMap = rawArgs.some((a: any) => a instanceof Map);
   const thirdTrav = hasMap && rawArgs.some(isNested);
   if (thirdTrav && !injection)

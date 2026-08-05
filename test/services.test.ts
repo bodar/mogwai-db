@@ -165,7 +165,7 @@ describe('call/with fold + param resolution', () => {
   });
 
   test('injectionKindOf classifies the supported direct value reads and rejects others', () => {
-    const kind = (inj: string) => injectionKindOf(callStep(`g.call("s", ["a":"b"], ${inj})`).args[2].nested, {});
+    const kind = (inj: string) => injectionKindOf(callStep(`g.call("s", ["a":"b"], ${inj})`).args[2].value.nested, {});
     expect(kind('__.values("name")')).toEqual({ kind: 'values', key: 'name' });
     expect(kind('__.id()')).toEqual({ kind: 'id' });
     expect(kind('__.label()')).toEqual({ kind: 'label' });

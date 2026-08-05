@@ -1,6 +1,6 @@
 import { derived, empty, list, paren, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { perRowCols } from '../../../sql/kernel/render.ts';
-import { isNested, isPopArg, stepChain } from '../../../gremlin/frontend.ts';
+import { argValues, isNested, isPopArg, stepChain } from '../../../gremlin/frontend.ts';
 import { appendCte, patchLayout, trackFromV, withoutFromV, layoutProjection, layoutProjectionMinting, layoutCols, partitionOver, prevRel, withLayout, type TraverserLayout, type ElementStream } from '../context/context.ts';
 import { aliasId } from '../context/alias.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
@@ -212,7 +212,7 @@ function compileCountChildRows(
   let cut = body.length;
   const isPreds: any[] = [];
   if (trailingIs)
-    while (cut > 0 && body[cut - 1].name === 'is') { isPreds.unshift(body[cut - 1].args[0]); cut--; }
+    while (cut > 0 && body[cut - 1].name === 'is') { isPreds.unshift(body[cut - 1].args[0].value); cut--; }
   const counted = classifyCountChild(cut === body.length ? body : body.slice(0, cut), childCtx(parent));
   if (!counted) return null;
   const pushed = pushChildScope(parent, scope);
@@ -388,7 +388,7 @@ export const lowerElementBody = (seed: ElementStream, steps: IRStep[]): ElementS
 
 /** The Pop mode of a select(Pop, label) — default last, matching the root dispatch. */
 const popOf = (step: IRStep): string =>
-  step.args.find(isPopArg)?.pop ?? 'last';
+  argValues(step).find(isPopArg)?.pop ?? 'last';
 
 /** PURE. A scalar child body that RE-SOURCES the graph: a `V()`/`E()` head (with no
  *  nested-traversal id argument, which is a different shape) over which the pushed scalar seed
@@ -397,7 +397,7 @@ const popOf = (step: IRStep): string =>
 export function isResourceHead(rest: IRStep[]): boolean {
   const head = rest[0];
   return !!head && (head.name === 'V' || head.name === 'E')
-    && !(head.args ?? []).some(isNested);
+    && !argValues(head).some(isNested);
 }
 
 /** Re-source a scalar seed (`V()`/`E()`) then fold the element movement/filter remainder,
@@ -1097,7 +1097,7 @@ function compileElementChildRows(
       continue;
     }
     if (step.name === 'local') {
-      const nested = step.args[0]?.nested;
+      const nested = step.args[0]?.value?.nested;
       const lowered = nested ? tryCompileElementChild(end, nested, 'all') : null;
       if (!lowered) return null;
       end = lowered.stream;

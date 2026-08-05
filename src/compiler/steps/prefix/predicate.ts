@@ -1,5 +1,5 @@
 import { q, list, paren, value, raw, type Expression } from '../../../sql/kernel/q.ts';
-import { isNested, isTokenArg, stepChain, type Step } from '../../../gremlin/frontend.ts';
+import { argValues, isNested, isTokenArg, stepChain, type Step } from '../../../gremlin/frontend.ts';
 import { edgeProperties } from '../../../sql/schema.ts';
 import {
     predicateSql,
@@ -92,7 +92,7 @@ export function correlatedReduce(engine: Engine, body: Step[], ctx: ScalarCtx, p
     if (!child) return null;
     const c = child.rel.as('c');
     const ep = edgeProperties.as('xep');
-    return q`(SELECT ${raw(AGG_FN[body[2].name])}(${ep.c.value}) FROM ${ep} JOIN ${c} ON ${ep.c.edge}=${c.c.id} WHERE ${ep.c.key}=${value(body[1].args[0])})`;
+    return q`(SELECT ${raw(AGG_FN[body[2].name])}(${ep.c.value}) FROM ${ep} JOIN ${c} ON ${ep.c.edge}=${c.c.id} WHERE ${ep.c.key}=${value(body[1].args[0].value)})`;
   }
   return null;
 }
@@ -111,8 +111,8 @@ function correlatedExists(engine: Engine, body: Step[], fromId: Expression, isPr
   let valuesKey: string | undefined;
   if (body.at(-1)?.name === 'values') {
     const v = body.at(-1)!;
-    if (typeof v.args[0] !== 'string') return null;
-    valuesKey = v.args[0];
+    if (typeof v.args[0]?.value !== 'string') return null;
+    valuesKey = v.args[0].value;
     prefix = body.slice(0, -1);
   } else if (hasIs) {
     // a trailing is() on a movement terminal that isn't values/count/sum — unsupported.
@@ -183,7 +183,7 @@ function compileInlinePredicate(
   labels?: LabelScope,
 ): Expression {
   const h0 = nested[0];
-  const soleLabel = h0 && h0.args.length === 1 && typeof h0.args[0] === 'string' ? h0.args[0] : null;
+  const soleLabel = h0 && h0.args.length === 1 && typeof h0.args[0].value === 'string' ? h0.args[0].value : null;
   // A body that is ONLY a label step is a predicate LEAF, not a re-root — there is no
   // continuation to re-root onto. select('x') yields the label's contents — one object when
   // bound, nothing when not — so as a filter it is exactly "is x bound", which is also
@@ -215,7 +215,7 @@ function compileInlinePredicate(
 
   let body = nested;
   let isPred: any = undefined, hasIs = false;
-  if (body[body.length - 1]?.name === 'is') { isPred = body[body.length - 1].args[0]; hasIs = true; body = body.slice(0, -1); }
+  if (body[body.length - 1]?.name === 'is') { isPred = body[body.length - 1].args[0].value; hasIs = true; body = body.slice(0, -1); }
   // A traversal OPERAND resolves to an Expression before any of the branches below render it —
   // the same resolver the has()/is() StepFns use, reached here through the engine+params bag
   // rather than a Stream (this compiler never sees one). `ctx` is the current element, so the
@@ -257,7 +257,7 @@ function compileInlinePredicate(
   // normalized properties table — vertex_properties / edge_properties (hasProp dispatches).
   if (head === 'values' && body.length === 1) {
     // bare where(__.values(k)) → the key exists at all; .is(P) → any value matches P.
-    return hasProp(ctx, body[0].args[0], hasIs ? isPred : undefined);
+    return hasProp(ctx, body[0].args[0].value, hasIs ? isPred : undefined);
   }
   if (head === 'has' && body.length === 1) {
     // has(LABEL, key, value) — the 3-arg overload folds in a label filter, exactly as the
@@ -267,7 +267,7 @@ function compileInlinePredicate(
     // made the whole arm constant FALSE, and constant TRUE under not(). A silent wrong answer on a
     // form the matrix advertises as working at any depth; found by L5's differential, because the
     // generic gate got it right and only the inline path did not.
-    let args: any[] = [...body[0].args];
+    let args: any[] = argValues(body[0]);
     let labelCond: Expression | null = null;
     if (args.length === 3 && typeof args[0] === 'string') {
       labelCond = ctx.labelMatch([args[0]]);
@@ -286,9 +286,9 @@ function compileInlinePredicate(
     }
   }
   if (head === 'hasLabel' && body.length === 1)
-    return ctx.labelMatch(body[0].args);
+    return ctx.labelMatch(argValues(body[0]));
   if (head === 'hasId' && body.length === 1)
-    return predicateSql(ctx.extIdExpr!, idPredFromArgs(body[0].args));
+    return predicateSql(ctx.extIdExpr!, idPredFromArgs(argValues(body[0])));
 
   // where(__.label()[.is(P)]) — predicate on the current element's label name.
   if (head === 'label' && body.length === 1)
@@ -306,7 +306,7 @@ function compileInlinePredicate(
 
   // where(__.not(t)) — negate an inner predicate; a NULL (missing) is kept (NOT COALESCE).
   if (head === 'not' && body.length === 1) {
-    const arg = body[0].args.find(isNested);
+    const arg = argValues(body[0]).find(isNested);
     if (!arg) decline('not() without a traversal arg');
     const inner = compileInlinePredicate(engine, stepChain(arg.nested, params), ctx, params, labels);
     return q`NOT COALESCE((${inner}), 0)`;
@@ -332,7 +332,7 @@ export function combineBranchPreds(
   engine: Engine, step: Step, ctx: ScalarCtx, params: Record<string, any>, op: 'AND' | 'OR',
   labels?: LabelScope,
 ): Expression | null {
-  const branches = step.args.filter(isNested);
+  const branches = argValues(step).filter(isNested);
   // A SINGLE arm is legal Gremlin — `and(t)`/`or(t)` is just "t must produce" — and the generic
   // child-existence combiner has always lowered it. This used to THROW here, which made the inline
   // path narrower than the path it is supposed to accelerate: `V().or(__.out())` ran with

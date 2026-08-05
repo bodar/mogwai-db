@@ -19,7 +19,7 @@
 
 import { ALWAYS_PRODUCTIVE_TERMINAL } from '../../ir/productivity.ts';
 import type { Relation } from '../../../sql/kernel/q.ts';
-import { gtypeName, isColumnArg, isOperatorArg, isOrderArg, isPickArg, isPred, isTokenArg, isNested, stepChain } from '../../../gremlin/frontend.ts';
+import { gtypeName, isColumnArg, isOperatorArg, isOrderArg, isPickArg, isPred, isTokenArg, isNested, stepChain, argValues } from '../../../gremlin/frontend.ts';
 import { normalizeTypeName } from '../../../gremlin/types.ts';
 import type { AliasMap, TraverserLayout, ElementStream } from '../context/context.ts';
 import type { PropertyStream, ScalarStream, Stream } from '../context/stream.ts';
@@ -142,7 +142,7 @@ export const childCtx = (s: { params: Record<string, any>; traverserLayout: Trav
  *  as a body is walked, so a label is visible to exactly the steps that FOLLOW its binding. */
 function bindLabels(ctx: ChildCtx | undefined, s: IRStep, shape: ChildShape): ChildCtx | undefined {
   if (!ctx || s.name !== 'as') return ctx;
-  const labels = (s.args ?? []).filter((a: any): a is string => typeof a === 'string');
+  const labels = argValues(s).filter((a: any): a is string => typeof a === 'string');
   if (!labels.length) return ctx;
   const next = new Map(ctx.labels);
   for (const l of labels) next.set(l, shape);
@@ -168,7 +168,7 @@ export function labelSelectOf(step: IRStep): string | null {
  *  select yield here" — wants the modulator-indifferent form. */
 export function singleLabelSelectOf(step: IRStep): string | null {
   if (step.name !== 'select') return null;
-  const args = step.args ?? [];
+  const args = argValues(step);
   if (args.some(isColumnArg)) return null;
   const uniq = [...new Set(args.filter((a: any): a is string => typeof a === 'string'))];
   return uniq.length === 1 ? uniq[0] : null;
@@ -211,7 +211,7 @@ export function mentionsLabel(steps: readonly IRStep[], params: Record<string, a
 export function needsRecursiveCte(steps: readonly IRStep[], params: Record<string, any>): boolean {
   return steps.some((s) =>
     s.name === 'repeat'
-    || (s.args ?? []).filter(isNested).some((a) => needsRecursiveCte(childSteps((a as any).nested, params), params))
+    || argValues(s).filter(isNested).some((a) => needsRecursiveCte(childSteps((a as any).nested, params), params))
     || (s.modulators ?? []).some((m) => (m ?? []).filter(isNested).some((a: any) => needsRecursiveCte(childSteps(a.nested, params), params))));
 }
 
@@ -225,7 +225,7 @@ export function labelsMentioned(steps: readonly IRStep[], params: Record<string,
   const out = new Set<string>();
   for (const s of steps) {
     if (LABEL_STEPS.has(s.name)) {
-      for (const a of s.args ?? []) {
+      for (const a of argValues(s)) {
         if (typeof a === 'string') out.add(a);
         // `where("a", P.neq("c"))` compares two LABELS, and the second one rides inside the
         // predicate rather than as a bare arg (filter.ts resolves it via aliasIdExpr, the same as
@@ -235,7 +235,7 @@ export function labelsMentioned(steps: readonly IRStep[], params: Record<string,
           for (const v of ((a as any).values ?? [])) if (typeof v === 'string') out.add(v);
       }
     }
-    for (const a of (s.args ?? []).filter(isNested))
+    for (const a of argValues(s).filter(isNested))
       for (const l of labelsMentioned(childSteps((a as any).nested, params), params)) out.add(l);
   }
   return out;
@@ -363,7 +363,7 @@ const isScalarProducer = (s: IRStep, ctx: ChildCtx | undefined): boolean =>
  */
 function isScalarProducingScope(s: IRStep, ctx: ChildCtx | undefined): boolean {
   if (!ctx || (s.name !== 'map' && s.name !== 'local')) return false;
-  const nested = (s.args ?? [])[0]?.nested;
+  const nested = (s.args ?? [])[0]?.value?.nested;
   if (!nested) return false;
   // Recursion terminates on body length: each step strictly shrinks the chain being classified.
   return s.name === 'map'
@@ -394,7 +394,7 @@ export const isOneRowProjection = (s: IRStep, ctx?: ChildCtx): boolean =>
  *  prefix, NOT as a scalar producer. Only the BARE read form `sack()` produces a scalar. Mirror
  *  of engine.ts isSackMutate, kept here so this pure leaf has no engine dependency. */
 export const isSackMutate = (s: IRStep): boolean =>
-  s.name === 'sack' && (s.args ?? []).some(isOperatorArg);
+  s.name === 'sack' && argValues(s).some(isOperatorArg);
 /** The terminal barrier vocabulary a scalar child row-run may reduce through. Defined in this
  *  pure leaf and re-exported by child.ts (the compiler half) so the classify and emit sides read
  *  ONE set — they used to declare it twice. */
@@ -481,7 +481,7 @@ function elementRowParts(body: ReturnType<typeof stepChain>, ctx?: ChildCtx): { 
     if (CHILD_ELEMENT_ROW_STEPS.has(s.name)) {
       // local's body is emitted through tryCompileElementChild, so its element shape must be
       // established here as well. Use the labels visible at THIS phase, not the outer context.
-      if (s.name === 'local' && (cur === undefined || !isElementChild((s.args ?? [])[0]?.nested, cur))) return null;
+      if (s.name === 'local' && (cur === undefined || !isElementChild((s.args ?? [])[0]?.value?.nested, cur))) return null;
       continue;
     }
     if (!isElementChildStep(s, cur)) return null;
@@ -527,7 +527,7 @@ function scalarRowParts(body: ReturnType<typeof stepChain>, ctx?: ChildCtx): { p
   // Arg shape for the four projections whose args this classifier reads. The generalized
   // producers (call/math/sack/format) carry their own args and validate them in their own
   // StepFns — here they only need the element-prefix + scalar-suffix shape above.
-  if (projection.name === 'values' && (projection.args.length !== 1 || typeof projection.args[0] !== 'string')) return null;
+  if (projection.name === 'values' && (projection.args.length !== 1 || typeof projection.args[0]?.value !== 'string')) return null;
   if ((projection.name === 'id' || projection.name === 'label') && projection.args.length) return null;
   if (projection.name === 'constant' && projection.args.length !== 1) return null;
   return { prefix, projection, suffix };
@@ -547,7 +547,7 @@ const ELEMENT_ARM_BRANCH = new Set(['choose', 'coalesce', 'union']);
 function elementOptionMapScalarBranch(branch: IRStep, ctx: ChildCtx): boolean {
   if (branch.name !== 'choose' || !branch.optionArms) return false;
 
-  const choice = branch.args[0];
+  const choice = branch.args[0].value;
   const choiceIsScalar = isNested(choice)
     ? classifyScalarChild(choice.nested, ctx) !== null
     : isTokenArg(choice)
@@ -596,7 +596,7 @@ export function elementScalarBranchParts(
   if (!scalarRowRun(suffix, armCtx)) return null;
   if (branch.name === 'choose' && (branch as IRStep).optionArms)
     return elementOptionMapScalarBranch(branch as IRStep, armCtx) ? parts : null;
-  const kids = (branch.args ?? []).filter(isNested);
+  const kids = argValues(branch).filter(isNested);
   if (branch.name === 'choose') {
     // predicate-form choose(pred, then, else): only the two value arms must be scalar (the
     // predicate is a gate). Other arities defer to tryLowerScalarChoose's own decline.
@@ -763,7 +763,7 @@ export function classifyProjectionChildRows(
  *  merge covers a map shape. A map body composes at the MAPPING positions; a map ARM stays
  *  unclassifiable (and so fails closed) until a merge exists. */
 export const classifyMapChildRows = (body: ReturnType<typeof stepChain>, ctx?: ChildCtx) =>
-  classifyProjectionChildRows(body, (p) => p.name === 'valueMap' && !p.args.includes(true), ctx);
+  classifyProjectionChildRows(body, (p) => p.name === 'valueMap' && !argValues(p).includes(true), ctx);
 
 /** A RECORD-producing child body: `project(k…)` / a multi-label `select(k…)`. The record builder
  *  (select.ts lowerRecordSelectProject) already threads its carried columns, so — unlike the map
@@ -772,8 +772,8 @@ export const classifyMapChildRows = (body: ReturnType<typeof stepChain>, ctx?: C
  *  select(Column) has its own consumer, so both are excluded. */
 export const classifyRecordChildRows = (body: ReturnType<typeof stepChain>, ctx?: ChildCtx) =>
   classifyProjectionChildRows(body, (p) =>
-    (p.name === 'project' || (p.name === 'select' && p.args.filter((a: any) => typeof a === 'string').length > 1))
-    && !p.args.some(isColumnArg), ctx);
+    (p.name === 'project' || (p.name === 'select' && argValues(p).filter((a: any) => typeof a === 'string').length > 1))
+    && !argValues(p).some(isColumnArg), ctx);
 
 /** PURE. The element-row shape decision shared by compileElementChildRows and the three
  * element predicates. `firstPolicy` keeps a trailing order() as an explicit ordering
@@ -908,7 +908,7 @@ export function classifyArmShape(nested: any, ctx: ChildCtx): BranchArmShape {
  *  error message (fail closed, one authority). */
 function branchValueArgs(kind: BranchKind, step: IRStep): readonly any[] | null {
   if (kind === 'choose' && (step as IRStep).optionArms) return null; // option-map form: a tail CASE projector
-  const nested = (step.args ?? []).filter(isNested);
+  const nested = argValues(step).filter(isNested);
   if (kind === 'union') return nested.length >= 2 ? nested : null;
   if (kind === 'coalesce') return nested.length >= 1 ? nested : null;
   if (kind === 'choose') return nested.length === 3 ? nested.slice(1) : null; // drop the predicate
@@ -1032,7 +1032,7 @@ const NO_TYPE_ASSERT: TypeAssert = { kind: 'none' };
  *  say what it does with each — an arm that only cares about one GType should use `assertsGType`. */
 export function typeOfAssert(step: IRStep): TypeAssert {
   if (step.name !== 'is') return NO_TYPE_ASSERT;
-  const pred = (step.args ?? [])[0];
+  const pred = (step.args ?? [])[0]?.value;
   if (!isPred(pred) || pred.op !== 'typeOf') return NO_TYPE_ASSERT;
   const name = gtypeName(pred.values?.[0]);
   return name ? { kind: 'gtype', gtype: name.toUpperCase() } : { kind: 'opaque' };
@@ -1099,9 +1099,9 @@ export function readOptionMapArms(step: IRStep, params: Record<string, any>): Ch
   const out: ChooseOptionArm[] = [];
   const seen = new Set<OptionPick>();
   for (const opt of step.optionArms ?? []) {
-    const bodyArg = (opt.args ?? []).find(isNested);
+    const bodyArg = argValues(opt).find(isNested);
     if (!bodyArg) return null;
-    const keyArg = (opt.args ?? []).find((x: any) => x !== bodyArg);
+    const keyArg = argValues(opt).find((x: any) => x !== bodyArg);
     const token = isPickArg(keyArg) ? keyArg.pick : undefined;
     if (token !== undefined && token !== 'none' && token !== 'unproductive') return null; // Pick.any
     const pick: OptionPick = keyArg === undefined ? 'none' : token ?? 'key';
@@ -1128,7 +1128,7 @@ export function readOptionMapArms(step: IRStep, params: Record<string, any>): Ch
  *  the emitter handed it an element arm. */
 export const optionMapNeedsPassthrough = (step: IRStep, arms: readonly ChooseOptionArm[], params: Record<string, any>): boolean =>
   !arms.some((o) => o.pick === 'none')
-  || (!arms.some((o) => o.pick === 'unproductive') && choiceCanBeUnproductive(step.args?.[0], params));
+  || (!arms.some((o) => o.pick === 'unproductive') && choiceCanBeUnproductive(step.args?.[0]?.value, params));
 
 /** PURE. Can this CHOICE yield nothing for some input? Only then is an unclaimed
  *  `Pick.unproductive` case reachable — and being precise here is load-bearing in both

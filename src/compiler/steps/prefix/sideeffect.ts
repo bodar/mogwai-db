@@ -1,6 +1,6 @@
 import { derived, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { scalarProp, predicateSql, jsonbGroupArray, elemCtx } from '../../plan/plan.ts';
-import { stepChain } from '../../../gremlin/frontend.ts';
+import { argValues, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { elemRel, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
@@ -27,7 +27,7 @@ import { classifyBy } from '../tail/child-shape.ts';
 // token/general ordered-element modulation.
 
 const aggregateName = (s: any): string => {
-  const name = (s.args ?? []).find((a: any) => typeof a === 'string');
+  const name = argValues(s).find((a: any) => typeof a === 'string');
   if (typeof name !== 'string') throw new Error('aggregate() requires a string side-effect key');
   return name;
 };
@@ -163,7 +163,7 @@ export function lowerScalarAggregate(s: ScalarStream, step: IRStep): ScalarStrea
 // modulators fold onto the step (group/groupCount are BY_HOSTS).
 
 const groupSideEffect = (isCount: boolean): StepFn => (s, st) => {
-  const name = (s.args ?? []).find((a: any) => typeof a === 'string');
+  const name = argValues(s).find((a: any) => typeof a === 'string');
   if (typeof name !== 'string') throw new Error(`${isCount ? 'groupCount' : 'group'}() side-effect key must be a string`);
   if (st.traverserLayout.aliases.size || st.traverserLayout.path)
     throw new Error(`${isCount ? 'groupCount' : 'group'}('${name}') after as()/path() not yet supported`);
@@ -188,7 +188,7 @@ export const groupCount: StepFn = groupSideEffect(true);
  * the canonical one-step child through the same aggregate StepFn, so this syntax is
  * not a second side-effect compiler. */
 export function tryLowerLocalAggregate(st: ElementStream, step: IRStep): ElementStream | null {
-  const nested = step.args[0]?.nested;
+  const nested = step.args[0]?.value?.nested;
   if (!nested) return null;
   const normalized = normalize(stepChain(nested, st.params)).steps;
   if (normalized.length !== 1 || normalized[0].name !== 'aggregate') return null;

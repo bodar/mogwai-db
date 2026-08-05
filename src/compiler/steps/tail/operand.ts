@@ -1,5 +1,5 @@
 import { q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { isNested } from '../../../gremlin/frontend.ts';
+import { isNested, argValues } from '../../../gremlin/frontend.ts';
 import { childSteps } from './child-shape.ts';
 import { embedSql, foldedListSubquery } from './list.ts';
 import { engineOf, type Engine } from '../../engine/deps.ts';
@@ -36,7 +36,7 @@ import type { TraverserLayout, LoweringState, LabelScope } from '../context/cont
  *  independent of the incoming traverser, which is exactly what makes it a plain subquery. */
 const isReSourced = (body: readonly any[]): boolean => {
   const head = body[0];
-  return !!head && (head.name === 'V' || head.name === 'E') && !(head.args ?? []).some(isNested);
+  return !!head && (head.name === 'V' || head.name === 'E') && !argValues(head).some(isNested);
 };
 
 
@@ -58,7 +58,7 @@ function operandSubquery(nested: any, deps: OperandDeps): Expression | null {
  *  leaves the predicate fast path already builds from (plan.ts), so a correlated operand and a
  *  correlated filter agree by construction rather than by parallel implementations. */
 const OPERAND_PROJECTORS: Record<string, (ctx: ScalarCtx, s: IRStep) => Expression | undefined> = {
-  values: (ctx, s) => (typeof s.args?.[0] === 'string' ? scalarProp(ctx, s.args[0]) : undefined),
+  values: (ctx, s) => (typeof s.args?.[0]?.value === 'string' ? scalarProp(ctx, s.args[0].value) : undefined),
   id: (ctx) => ctx.extIdExpr,
   label: (ctx) => ctx.labelNameExpr,
 };

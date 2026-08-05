@@ -4,7 +4,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
 import { STATIC, UNKNOWN, type ListOf, type Shape, type ValueType } from '../../sql/kernel/render.ts';
-import { isNested, isPred } from '../../gremlin/frontend.ts';
+import { isNested, isPred, argValues } from '../../gremlin/frontend.ts';
 import { isLocalScope, sliceOf, sliceParamNames } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { childSteps } from '../steps/tail/child-shape.ts';
@@ -265,7 +265,7 @@ export function listMemberOp(step: IRStep, input: Rel, of: ListOf, fresh: Minter
   if (LIST_LOCAL_TX.has(step.name) && isLocalScope(step)) {
     if (step.name === 'order' || step.name === 'dedup') return null;
     const window = step.name === 'tail'
-      ? { offset: 0, limit: Number((step.args ?? []).find((arg: unknown) => typeof arg === 'number') ?? 1) }
+      ? { offset: 0, limit: Number(argValues(step).find((arg) => typeof arg === 'number') ?? 1) }
       : (() => { try { return sliceOf(step); } catch { return null; } })();
     if (!window) return null;
     const members = membersOf(list, fresh);
@@ -299,7 +299,7 @@ export function listMemberOp(step: IRStep, input: Rel, of: ListOf, fresh: Minter
   // all. `all` is "no member fails", which is not the same as "every member passes" once a predicate
   // can be NULL — hence `IS NOT TRUE` rather than `NOT (…)`.
   if (step.name === 'all' || step.name === 'any' || step.name === 'none') {
-    const args = step.args ?? [];
+    const args = argValues(step);
     if (args.length !== 1) return null;
     const members = membersOf(list, fresh);
     const pred = memberPredicate(memberPayload(of, members), args[0]);
@@ -326,7 +326,7 @@ export function listRetype(
   step: IRStep, input: Rel, of: ListOf, fresh: Minter,
 ): { readonly rel: Rel; readonly type: import('../../sql/kernel/render.ts').ScalarType; readonly result?: 'number' | 'count' } | null {
   if (step.modulators?.length || step.optionArms || !isBareList(of)) return null;
-  const args = step.args ?? [];
+  const args = argValues(step);
   const rel = fenced(input, fresh);
   const list = col(rel.id, LIST_COL);
 
@@ -605,7 +605,7 @@ function operandList(arg: unknown, ctx: ListCtx): { readonly expr: Expr; readonl
   if (!isNested(arg)) return null;
   const inner = childSteps((arg as { readonly nested: unknown }).nested, ctx.params);
   if (inner.length === 2 && inner[0]?.name === 'constant' && inner[1]?.name === 'fold') {
-    const [value, extra] = inner[0].args ?? [];
+    const [value, extra] = argValues(inner[0]);
     if (extra !== undefined || value === undefined) return null;
     return literal([value]);
   }
@@ -616,7 +616,7 @@ export function listSetOp(
   step: IRStep, input: Rel, of: ListOf, terminal: boolean, ctx: ListCtx, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf; readonly set?: boolean } | null {
   if (step.modulators?.length || step.optionArms || !SET_OPS.has(step.name) || !isBareList(of)) return null;
-  const [arg, extra] = step.args ?? [];
+  const [arg, extra] = argValues(step);
   if (extra !== undefined) return null;
   const resolved = operandList(arg, ctx);
   if (!resolved || !isBareList(resolved.of)) return null;

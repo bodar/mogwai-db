@@ -13,9 +13,10 @@
 import { describe, expect, test } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { sliceOf } from '../../src/compiler/ir/step.ts';
+import { arg } from '../../src/gremlin/frontend.ts';
 import { bagOf, run, seededStore } from '../support/harness.ts';
 
-const step = (name: string, ...args: any[]) => ({ name, args } as any);
+const step = (name: string, ...args: any[]) => ({ name, args: args.map((v) => arg(v)) } as any);
 const LOCAL = { scope: 'local' };
 
 describe('sliceOf — one decode of the three slice steps', () => {

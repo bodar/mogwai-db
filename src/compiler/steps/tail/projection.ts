@@ -1,4 +1,4 @@
-import { isColumnArg, isNested, isOrderArg, isTokenArg } from '../../../gremlin/frontend.ts';
+import { argValues, isColumnArg, isNested, isOrderArg, isTokenArg } from '../../../gremlin/frontend.ts';
 import { empty, list, q, raw, Relation, value, type Expression } from '../../../sql/kernel/q.ts';
 import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type Shape } from '../../../sql/kernel/render.ts';
 import { edgeProperties, labels, vertexLabels, vertexProperties } from '../../../sql/schema.ts';
@@ -117,7 +117,7 @@ const MODIFIERS = new Map<string, ModFn>([
     // if no limit/range/skip preceded it — filtering commutes with order() but NOT
     // with a limit that already truncated the stream.
     if (acc.limit !== null || acc.offset > 0) throw new Error('is() after limit()/range()/skip() not yet supported');
-    acc.isPreds.push(s.args[0]);
+    acc.isPreds.push(s.args[0].value);
   }],
   ['fold', reducerMod('fold')],
   ['sum', reducerMod('sum')],
@@ -142,9 +142,9 @@ const VALUE_TAIL_STEPS = new Set<string>([...PROJECTION_NAMES, ...MODIFIERS.keys
  * reason; naming the predicate once is what stops the two disagreeing about which form re-roots.
  */
 const isSingleLabelSelect = (step: IRStep): boolean => step.name === 'select'
-  && (step.args ?? []).filter((a) => typeof a === 'string').length === 1
-  && !(step.args ?? []).some(isNested)
-  && !(step.args ?? []).some(isColumnArg);
+  && argValues(step).filter((a) => typeof a === 'string').length === 1
+  && !argValues(step).some(isNested)
+  && !argValues(step).some(isColumnArg);
 
 /**
  * Can the value-tail accumulator fold this step at all? Set membership, MINUS the re-root.
@@ -194,7 +194,7 @@ export function foldTailAcc(steps: IRStep[], from: number): { acc: TailAcc; stop
     // Scope.local on this ELEMENT tail (scalar tails run through lowerScalarRows): a
     // per-element reduce over a global element stream. sum/min/max/order/dedup(local) are
     // identity; anything else has no worked-out element form → fail closed.
-    if ((s.args ?? []).some((a: any) => a && typeof a === 'object' && a.scope === 'local')) {
+    if (argValues(s).some((a: any) => a && typeof a === 'object' && a.scope === 'local')) {
       if (s.name === 'sum' || s.name === 'min' || s.name === 'max' || s.name === 'order' || s.name === 'dedup') continue; // identity
       throw new Error(`${s.name}(Scope.local) requires a preceding list-producing step (e.g. fold())`);
     }
@@ -223,7 +223,7 @@ export function foldTailAcc(steps: IRStep[], from: number): { acc: TailAcc; stop
 const isMapTypeOf = (step: IRStep): boolean => assertsGType(step, 'MAP');
 
 const hasColumnArg = (step: IRStep): boolean =>
-  (step.args ?? []).some((a: unknown) => isColumnArg(a) && (a.column === 'keys' || a.column === 'values'));
+  argValues(step).some((a: unknown) => isColumnArg(a) && (a.column === 'keys' || a.column === 'values'));
 
 /** valueMap()/elementMap() followers. is(typeOf(MAP)) is identity (skip); count() counts
  *  the maps (one per element → count of elements); select(Column.*) re-types to the
@@ -247,7 +247,7 @@ function lowerValueMapTail(st: ElementStream, proj: IRStep, acc: TailAcc, steps:
   // UNBOUND label selects nothing → empty (TinkerPop). A label bound earlier by as()
   // would need the map to carry path history — defer that.
   if (step.name === 'select') {
-    const labels = (step.args ?? []).filter((a: any) => typeof a === 'string') as string[];
+    const labels = argValues(step).filter((a: any) => typeof a === 'string') as string[];
     if (labels.length && labels.every((l) => !st.traverserLayout.aliases.has(l))) {
       const rel = st.q.cte(q`SELECT NULL AS v WHERE 0`, ['v']);
       return continueLowering(toScalarStream(dropLayoutAtBarrier(loweringStateOf(st)), rel, undefined), i + 1);
@@ -391,9 +391,9 @@ const tailMap: ShapeTailFn<ElementStream> = (st, step, steps, stop) => {
   if (list) return continueLowering(list, stop + 1);
   // map(__.valueMap()) / map(__.project(…)) — the body's FIRST value per parent (both are total,
   // so first == the one).
-  const mapChild = tryCompileMapChild(st, step.args[0]?.nested, 'first');
+  const mapChild = tryCompileMapChild(st, step.args[0]?.value?.nested, 'first');
   if (mapChild) return continueLowering(mapChild, stop + 1);
-  const recordChild = tryCompileRecordChild(st, step.args[0]?.nested, 'first');
+  const recordChild = tryCompileRecordChild(st, step.args[0]?.value?.nested, 'first');
   if (recordChild) return continueLowering(recordChild, stop + 1);
   return continueLowering(lowerMapScalar(st, steps, stop), stop + 1);
 };
@@ -405,7 +405,7 @@ const tailLocal: ShapeTailFn<ElementStream> = (st, step, steps, stop) => {
   if (list) return continueLowering(list, stop + 1);
   const element = tryLowerLocalElement(st, step);
   if (element) return continueLowering(element, stop + 1);
-  const nested = step.args[0]?.nested;
+  const nested = step.args[0]?.value?.nested;
   if (nested && isScalarChild(nested, childCtx(st)))
     return continueLowering(lowerMapScalar(st, steps, stop), stop + 1);
   // A bare list-armed (union(out().fold(), in().fold())) or mixed-shape (union(out(), values('name')))
@@ -428,9 +428,9 @@ const tailLocal: ShapeTailFn<ElementStream> = (st, step, steps, stop) => {
 const tailFlatMap: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
   const generic = tryLowerFlatMap(st, step);
   if (generic) return continueLowering(generic, stop + 1);
-  const mapChild = tryCompileMapChild(st, step.args[0]?.nested, 'all');
+  const mapChild = tryCompileMapChild(st, step.args[0]?.value?.nested, 'all');
   if (mapChild) return continueLowering(mapChild, stop + 1);
-  const recordChild = tryCompileRecordChild(st, step.args[0]?.nested, 'all');
+  const recordChild = tryCompileRecordChild(st, step.args[0]?.value?.nested, 'all');
   if (recordChild) return continueLowering(recordChild, stop + 1);
   return continueLowering(lowerElementFlatMap(step, st), stop + 1);
 };
@@ -439,7 +439,7 @@ const tailFlatMap: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
 // unreachable. Non-total scalar children lower to the tagged scalar-or-original-element
 // VariantStream. No match → null (the fallback foldTailAcc handles a plain element optional).
 const tailOptional: ShapeTailFn<ElementStream> = (st, step, _steps, stop) => {
-  const nested = step.args[0]?.nested;
+  const nested = step.args[0]?.value?.nested;
   const listPlan = classifyListChild(nested, childCtx(st));
   if (listPlan) {
     const lowered = tryCompileListChild(st, nested, ROOT_SCOPE, listPlan);
@@ -549,7 +549,7 @@ const ELEMENT_DISPATCH = new Map<string, ShapeTailFn<ElementStream>>([
   // scope through the ordinary loop instead of through a second implementation.
   ['constant', (st, step, _steps, stop) => {
     const seed = st.traverserLayout.origins.length && !st.traverserLayout.encounter ? mintChildEncounter(st) : st;
-    return continueLowering(lowerConstant(loweringStateOf(seed), seed.rel, step.args), stop + 1);
+    return continueLowering(lowerConstant(loweringStateOf(seed), seed.rel, argValues(step)), stop + 1);
   }],
   // math("<formula>") → one SQL arithmetic scalar (always Double); its variables resolve
   // through the by() modulators folded onto it.
@@ -910,7 +910,7 @@ const SCALAR_DISPATCH = new Map<string, ShapeTailFn<ScalarStream>>([
   ['not', scalarFilter], ['where', firstOf(scalarFilter, aliasCompareRows)],
   // constant(x) rebinds every traverser to the literal x — the scalar form preserves the
   // encounter/origins so it composes inside a child scope (option/project/modulation bodies).
-  ['constant', (s, step, _steps, at) => continueLowering(lowerScalarConstant(s, step.args), at + 1)],
+  ['constant', (s, step, _steps, at) => continueLowering(lowerScalarConstant(s, argValues(step)), at + 1)],
   // sack over a scalar: mutate (fold the current value into the carried sack) or bare read.
   ['sack', (s, step, _steps, at) => continueLowering(lowerScalarSack(s, step), at + 1)],
   ['count', scalarCount],
@@ -957,7 +957,7 @@ const SCALAR_DISPATCH = new Map<string, ShapeTailFn<ScalarStream>>([
   // local: a value body per traverser; local(__.aggregate('x')) is a per-value side-effect
   // register that passes the value through — equivalent to a bare aggregate at this position.
   ['local', (s, step, _steps, at) => {
-    const nested = (step.args ?? [])[0];
+    const nested = (step.args ?? [])[0]?.value;
     if (isNested(nested)) {
       const body = childSteps(nested.nested, s.params);
       if (body.length === 1 && body[0].name === 'aggregate') {
@@ -1071,7 +1071,7 @@ const PROJECTORS = new Map<string, ProjFn>([
     // values() is a genuine flatMap — JOIN the normalized properties table so a
     // multi-valued key yields one row PER value (the INNER JOIN also drops missing-key
     // elements, so no separate IS NOT NULL). Edges are single-valued (one row per key).
-    const keyPred = propertyKeyFilter(c.projStep!.args ?? []);
+    const keyPred = propertyKeyFilter(argValues(c.projStep!));
     if (c.st.elem === 'edge') {
       const ep = edgeProperties.as('ep');
       return {
@@ -1120,17 +1120,17 @@ const PROJECTORS = new Map<string, ProjFn>([
     };
   }],
   ['valueMap', (c) => {
-    const keys = c.projStep!.args.filter((a) => typeof a === 'string') as string[];
+    const keys = argValues(c.projStep!).filter((a) => typeof a === 'string') as string[];
     // valueMap props are ALWAYS {key:[values]} (node: multi from the table; edge: each
     // flat value wrapped in a 1-list) so the handler frames both uniformly.
     return {
-      shape: { kind: 'valueMap', keys: keys.length ? keys : null, tokens: c.projStep!.args.includes(true), labelSet: c.labelSet },
+      shape: { kind: 'valueMap', keys: keys.length ? keys : null, tokens: argValues(c.projStep!).includes(true), labelSet: c.labelSet },
       colsNode: q`${c.extId} AS id, ${c.labelToken} AS label, ${valueMapProps(c.n, c.st.elem)} AS props`, fromNode: c.vJoin,
     };
   }],
   ['elementMap', (c) => {
     if (c.st.elem === 'edge') throw new Error('elementMap() on edges not yet supported'); // needs IN/OUT direction tokens
-    const keys = c.projStep!.args.filter((a) => typeof a === 'string') as string[];
+    const keys = argValues(c.projStep!).filter((a) => typeof a === 'string') as string[];
     return {
       shape: { kind: 'elementMap', keys: keys.length ? keys : null, labelSet: c.labelSet },
       colsNode: q`${c.extId} AS id, ${c.labelToken} AS label, ${valueMapProps(c.n, c.st.elem)} AS props`, fromNode: c.vJoin,
@@ -1291,7 +1291,7 @@ function lowerSackRead(st: ElementStream, step: IRStep): ScalarStream {
 // is shape-agnostic (a scalar stream that registered an aggregate reads it identically); only
 // the group('a') re-emit needs the element parent that stashed it.
 function compileCap(st: ElementStream | ScalarStream, steps: IRStep[], stop: number): LoweringResult {
-  const names = (steps[stop].args ?? []).filter((a: any) => typeof a === 'string');
+  const names = argValues(steps[stop]).filter((a: any) => typeof a === 'string');
   if (names.length !== 1) throw new Error('cap() with multiple side-effect keys not yet supported');
   const def = st.sideEffects?.get(names[0]);
   if (!def) throw new Error(`cap('${names[0]}') references an undefined side-effect`);

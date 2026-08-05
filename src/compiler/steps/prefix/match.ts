@@ -1,7 +1,7 @@
 import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { streamPayloadCols, toElementStream } from '../context/stream.ts';
 import { where } from './filter.ts';
-import { isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
+import { argValues, isNested, stepChain, type Step } from '../../../gremlin/frontend.ts';
 import { MATCH_FILTER_HEADS, type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { appendCte, aliasColsOf, aliasScalarTypeOf, layoutCols, layoutOverAliases, prevRel, withLayout, type AliasEntry, type TraverserLayout, type ElementStream, type StepFn } from '../context/context.ts';
@@ -99,13 +99,13 @@ function parsePattern(chain: Step[], params: Record<string, any>): Pattern {
     const [step] = normalize(chain).steps;
     return { kind: 'filter', step, reads: [...labelsMentioned([step], params)] };
   }
-  if (!chain.length || chain[0].name !== 'as' || typeof chain[0].args[0] !== 'string')
+  if (!chain.length || chain[0].name !== 'as' || typeof chain[0].args[0].value !== 'string')
     throw new Error('match() pattern must start with as("x") or be a where()/not() filter');
-  const start = chain[0].args[0];
+  const start = chain[0].args[0].value;
   let mid = chain.slice(1);
   let end: string | null = null;
   const last = mid[mid.length - 1];
-  if (last?.name === 'as' && typeof last.args[0] === 'string') { end = last.args[0]; mid = mid.slice(0, -1); }
+  if (last?.name === 'as' && typeof last.args[0]?.value === 'string') { end = last.args[0].value; mid = mid.slice(0, -1); }
   return { kind: 'bind', start, body: normalize(mid).steps, end };
 }
 
@@ -261,7 +261,7 @@ function applyPattern(st: ElementStream, p: Extract<Pattern, { kind: 'bind' }>, 
 export const match: StepFn = (s, st) => {
   if (st.elem !== 'vertex') throw new Error('match() on edges not yet supported');
   if (st.traverserLayout.path) throw new Error('path tracking through match() not yet supported');
-  const patArgs = s.args.filter(isNested);
+  const patArgs = argValues(s).filter(isNested);
   if (!patArgs.length) throw new Error('match() needs at least one pattern');
   const pats = patArgs.map((a) => parsePattern(stepChain(a.nested, st.params), st.params));
 

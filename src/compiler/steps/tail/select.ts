@@ -1,4 +1,4 @@
-import { isColumnArg, isNested, isPopArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
+import { argValues, isColumnArg, isNested, isPopArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
 import { empty, list, q, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { PER_ROW, perRowColumnOf, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isLocalScope, SLICE_STEPS, sliceOf, type Slice } from '../../ir/step.ts';
@@ -20,9 +20,9 @@ import { type TailMods } from './projection.ts';
  * shape can vary by key; until that uniform lookup substrate exists, reject it here
  * before any record/single-select builder drops the child and renders an empty SELECT. */
 function staticSelectKeys(step: IRStep): string[] {
-  if (step.name === 'select' && step.args.some(isNested))
+  if (step.name === 'select' && argValues(step).some(isNested))
     throw new Error('select() with a traversal key not yet supported (needs dynamic alias lookup)');
-  return step.args.filter((a): a is string => typeof a === 'string');
+  return argValues(step).filter((a): a is string => typeof a === 'string');
 }
 
 /** Interpret one by() modulator's args into a projected sub-value kind. */
@@ -222,9 +222,9 @@ function tryLowerTraversalRecord(st: ElementStream, proj: IRStep, keys: string[]
  * Lower it to the ordinary element/scalar stream model so movement, projections and
  * barriers after select() are handled by the common dispatcher. */
 export function lowerSingleSelect(st: ElementStream, proj: IRStep): Stream {
-  const pop = proj.args.find(isPopArg);
+  const pop = argValues(proj).find(isPopArg);
   const popMode = pop?.pop ?? 'last';
-  if (proj.args.some(isColumnArg)) throw new Error('select(Column) not yet supported');
+  if (argValues(proj).some(isColumnArg)) throw new Error('select(Column) not yet supported');
   const keys = staticSelectKeys(proj);
   if (keys.length !== 1) throw new Error('lowerSingleSelect requires exactly one label');
   const selected = st.traverserLayout.aliases.get(keys[0]);
@@ -310,16 +310,16 @@ function scalarProjectAliasField(nested: any, s: ScalarStream, params: Record<st
   if (!nested) return null;
   const body = stepChain(nested, params);
   if (body.length !== 1 || body[0].name !== 'select') return null;
-  const strs = body[0].args.filter((a: any): a is string => typeof a === 'string');
-  if (strs.length !== 1 || body[0].args.some((a: unknown) => isColumnArg(a) || isPopArg(a))) return null;
+  const strs = argValues(body[0]).filter((a: any): a is string => typeof a === 'string');
+  if (strs.length !== 1 || argValues(body[0]).some((a: unknown) => isColumnArg(a) || isPopArg(a))) return null;
   const entry = s.traverserLayout.aliases.get(strs[0]);
   return entry && aliasIsElement(entry) ? { label: strs[0], entry } : null;
 }
 
 export function lowerScalarProject(s: ScalarStream, proj: IRStep): RecordStream | null {
   if (proj.name !== 'project') return null;
-  if (proj.args.some((a: unknown) => isColumnArg(a) || isPopArg(a))) return null;
-  const keys = proj.args.filter((a): a is string => typeof a === 'string');
+  if (argValues(proj).some((a: unknown) => isColumnArg(a) || isPopArg(a))) return null;
+  const keys = argValues(proj).filter((a): a is string => typeof a === 'string');
   if (!keys.length) return null;
   const bys = proj.modulators ?? [];
   const byClasses = keys.map((_, i) => classifyBy(byAt(bys, i)));
@@ -384,13 +384,13 @@ export function lowerRecordSelectProject(st: ElementStream, proj: IRStep): Strea
   // A non-last Pop on a multi-label select() reads each label's history; the
   // shared shape-agnostic record builder resolves them. project() (current-object
   // keys) has no Pop dimension. Column args stay rejected below.
-  const pop = proj.args.find(isPopArg);
+  const pop = argValues(proj).find(isPopArg);
   if (pop && pop.pop !== 'last') {
     if (isProject) throw new Error(`project(Pop.${pop.pop}) is not a valid form`);
     const keys = staticSelectKeys(proj);
     return selectRecordFromAlias(st, proj, [...new Set(keys)], pop.pop);
   }
-  if (proj.args.some(isColumnArg)) throw new Error('select(Column) not yet supported');
+  if (argValues(proj).some(isColumnArg)) throw new Error('select(Column) not yet supported');
 
   const keys = staticSelectKeys(proj);
   if (!keys.length) throw new Error(`${proj.name}() requires at least one key`);
@@ -554,11 +554,11 @@ function recordOrderTerms(s: RecordStream, r: Relation, bys: any[][]): Expressio
       const chain = stepChain(by.nested, s.params);
       if (!chain.length || chain[0].name !== 'select')
         throw new Error('order().by(traversal) on a record supports only by(__.select(field)[.values(key)])');
-      const fk = chain[0].args.filter((a: any): a is string => typeof a === 'string');
+      const fk = argValues(chain[0]).filter((a: any): a is string => typeof a === 'string');
       if (fk.length !== 1) throw new Error('order().by(__.select) on a record requires exactly one field');
       key = fk[0];
       if (chain.length === 2 && chain[1].name === 'values') {
-        const vk = chain[1].args.filter((a: any): a is string => typeof a === 'string');
+        const vk = argValues(chain[1]).filter((a: any): a is string => typeof a === 'string');
         if (vk.length !== 1) throw new Error('order().by(__.select(field).values(key)) requires exactly one property key');
         valuesKey = vk[0];
       } else if (chain.length > 1) {
@@ -625,7 +625,7 @@ const recordOrder: ShapeTailFn<RecordStream> = (s, step, steps, at) => {
  *  to ask the relation, which is why `tail` stays out of `SLICE_STEPS` (item 17). */
 const recordWindow = (step: IRStep, members: number): Slice => {
   if (step.name !== 'tail') return sliceOf(step);
-  const limit = Number(step.args.find((a: unknown) => typeof a === 'number') ?? 1);
+  const limit = Number(argValues(step).find((a: unknown) => typeof a === 'number') ?? 1);
   return { scope: isLocalScope(step) ? 'local' : 'global', offset: Math.max(0, members - limit), limit };
 };
 
@@ -658,9 +658,9 @@ const recordSlice: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
 };
 
 const recordSelect: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
-  const pop = step.args.find(isPopArg);
+  const pop = argValues(step).find(isPopArg);
   if (pop && pop.pop !== 'last') throw new Error(`select(Pop.${pop.pop}) on a record not yet supported`);
-  const column = step.args.map((a: unknown) => isColumnArg(a) ? a.column : undefined)
+  const column = argValues(step).map((a: unknown) => isColumnArg(a) ? a.column : undefined)
     .find((c: any) => c === 'keys' || c === 'values') as 'keys' | 'values' | undefined;
   const r = s.rel.as('r');
   if (column) {
@@ -686,7 +686,7 @@ const recordSelect: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
     return continueLowering(toListStream(loweringStateOf(s), rel, of), at + 1);
   }
 
-  const keys = step.args.filter((a): a is string => typeof a === 'string');
+  const keys = argValues(step).filter((a): a is string => typeof a === 'string');
   if (keys.length !== 1) throw new Error('select() on a record requires exactly one key');
   if (step.modulators?.length) throw new Error('by() after selecting a record field not yet supported');
   const field = s.fields.find((f) => f.key === keys[0]);

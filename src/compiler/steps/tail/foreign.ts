@@ -1,6 +1,7 @@
 import { q, value, list, empty, raw, type Relation, type Expression } from '../../../sql/kernel/q.ts';
 import { PER_ROW } from '../../../sql/kernel/render.ts';
 import { type Elem } from '../../plan/plan.ts';
+import { argValues } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import type { ForeignRow, InjectionKind } from '../../../services/spi/types.ts';
 import {
@@ -92,7 +93,7 @@ const foreignScalarStep: ShapeTailFn<ForeignStream> = (s, step, _steps, at) => {
 const foreignValues: ShapeTailFn<ForeignStream> = (s, step, steps, at) => {
   if (at + 1 < steps.length) throw new Error(`step not implemented after a federated values(): ${steps[at + 1].name}()`);
   const p = s.rel.as('p');
-  const keys = step.args.filter((a): a is string => typeof a === 'string');
+  const keys = argValues(step).filter((a): a is string => typeof a === 'string');
   // Each fprops entry is key -> [{t,v},…] (vertex) or key -> {t,v} (edge). Normalize both to an
   // array with json_each over the value (a bare object json_each yields its members; we want the
   // node itself), so read the node's `$.v` as the logical value. Filter by requested keys.

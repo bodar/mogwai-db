@@ -126,7 +126,7 @@ export const isStreamBarrier = (s: IRStep): boolean => isGlobalBarrier(s) && !is
 /** Does this step carry a `Scope.local` token? A local op addresses one VALUE's members — a list's
  *  elements, a record's fields — where the same step name unscoped addresses the stream's ROWS. */
 export const isLocalScope = (s: IRStep): boolean =>
-  (s.args ?? []).some((a: unknown) => isScopeArg(a) && a.scope === 'local');
+  (s.args ?? []).some((a) => isScopeArg(a.value) && a.value.scope === 'local');
 
 /** The three steps that denote a window. `tail` is deliberately NOT one: "the last n" cannot be
  *  turned into an offset without knowing how many there are, which is a question about the STREAM,
@@ -149,7 +149,7 @@ export interface Slice {
  *  and differs only in `scope`. Rejects an illegal range with TinkerPop's own wording. */
 export function sliceOf(step: IRStep): Slice {
   const scope = isLocalScope(step) ? 'local' : 'global';
-  const nums = (step.args ?? []).filter((a: unknown) => !isScopeArg(a)).map(Number);
+  const nums = (step.args ?? []).filter((a) => !isScopeArg(a.value)).map((a) => Number(a.value));
   switch (step.name) {
     case 'limit': return { scope, offset: 0, limit: nums[0] };
     case 'skip': return { scope, offset: nums[0], limit: null };
@@ -164,16 +164,14 @@ export function sliceOf(step: IRStep): Slice {
 
 /** The user PARAMETER names of a slice step's NUMERIC arguments, scope tokens skipped — aligned
  *  index-for-index with `sliceOf`'s `nums` decode, so `sliceParamNames(step)[0]` names `limit`'s
- *  count / `skip`'s offset / `range`'s low regardless of a leading `Scope` token (which shifts the
- *  raw `paramNames` index but not the numeric one). `null` where that argument is a parsed literal.
- *  Only `limit`/`skip` act on it — a single count that can bind untouched (`sliceBound`); `range`
- *  must reduce (arithmetic + validation), so it never reads this. */
+ *  count / `skip`'s offset / `range`'s low regardless of a leading `Scope` token. `null` where that
+ *  argument is a parsed literal. Now that each `Arg` carries its own `name`, dropping the scope token
+ *  drops its name with it — no separate index to keep aligned. Only `limit`/`skip` act on it — a
+ *  single count that can bind untouched (`sliceBound`); `range` must reduce, so it never reads this. */
 export function sliceParamNames(step: IRStep): (string | null)[] {
-  const names = step.paramNames ?? [];
   return (step.args ?? [])
-    .map((a: unknown, i: number) => [a, names[i] ?? null] as const)
-    .filter(([a]) => !isScopeArg(a))
-    .map(([, name]) => name);
+    .filter((a) => !isScopeArg(a.value))
+    .map((a) => a.name);
 }
 
 /**

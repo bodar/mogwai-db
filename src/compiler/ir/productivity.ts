@@ -54,7 +54,7 @@ const isSideEffecting = (s: Step): boolean => {
 function isImpure(steps: readonly Step[], params: Record<string, any>): boolean {
   return steps.some((s) => {
     if (isSideEffecting(s) || s.name === 'as') return true;
-    return s.args.some((a) => isNested(a) && isImpure(stepChain(a.nested, params), params));
+    return s.args.some((a) => isNested(a.value) && isImpure(stepChain(a.value.nested, params), params));
   });
 }
 

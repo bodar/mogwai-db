@@ -30,28 +30,51 @@ export function parseGremlin(query: string) {
 
 // ---------- step extraction ----------
 
-// `argTypes[i]` is the canonical Gremlin type of `args[i]` as declared by its
-// carrying channel — a parsed literal's subtype (numeric suffix, string, boolean,
-// datetime, uuid, list, map) or, for a bound-param reference, the wire DataType the
-// client serialized (applied in Task 6). null when the channel says nothing. Carried
-// in parallel so `args` stays plain values for every consumer; read by bare asNumber()/
-// asDate() (to recover the input subtype the value can't carry) and by the write seam
-// (to store vertex_properties/edge_properties.vtype — see gremlin-types.ts).
+// ---------- Arg: a step argument as ONE object, value + type + name together ----------
+//
+// A step argument is a value, its canonical Gremlin type, and — when the client sent it as a wire
+// parameter — its name. These three were once three PARALLEL arrays on `Step` (`args`/`argTypes`/
+// `paramNames`), index-locked by hand: every site that filtered or reordered arguments had to
+// re-thread all three "in lockstep", and one that forgot (`flattenListArgs`) silently desynced the
+// metadata from the value. `Arg` fuses them so the coupling is structural — reorder/filter/flatten
+// an `Arg[]` and the type and name ride along for free.
+//
+// This is TinkerPop 4's `GValue` (`vendor/tinkerpop/gremlin-core/.../step/GValue.java`): a name→value
+// pair where `name != null` means the client declared a VARIABLE and `name == null` means a value
+// provided literally in the traversal. We carry the canonical `type` alongside (the truth a resolved
+// JS value can't spell — a `5L` long vs a `5` int). It is an IR fact ABOUT the argument, not a
+// wire-format concept leaking in (root CLAUDE.md #5), exactly as the parallel `argTypes` array was.
+export interface Arg {
+  /** The resolved value: a scalar, a tagged token (`{scope}`/`{token}`/…), a `Pred`, a `{nested}`
+   *  traversal, a JS Map/Set, or a bracketed-list array. A parameter still exposes its resolved
+   *  value here — `name` is the only thing that marks it variable, it is not opaque. */
+  readonly value: any;
+  /** The canonical Gremlin type of `value` as its carrying channel declared it — a parsed literal's
+   *  subtype (numeric suffix, string, boolean, datetime, uuid, list, map) or, for a bound-param
+   *  reference, the wire DataType the client serialized. `null` when the channel said nothing (the
+   *  JSON request path), so the write seam infers from the JS value. Read by bare `asNumber()`/
+   *  `asDate()` and by the write seam (to store `vertex_properties`/`edge_properties.vtype`). */
+  readonly type: TypeNode | null;
+  /** The WIRE PARAMETER NAME (`$x` in the `bindings`/`parameters` map), TinkerPop's `GValue.name`:
+   *  non-null ⇒ a user PARAMETER (binds as `?`, spends one of the 100-parameter budget), `null` ⇒ a
+   *  parsed literal (a constant the compiler inlines). The one fact the bind-vs-inline seam reads. */
+  readonly name: string | null;
+}
+
+/** Build an `Arg`. `type`/`name` default to null — a synthetic step argument (compiler-minted, no
+ *  wire provenance) is a plain value with neither. */
+export const arg = (value: any, type: TypeNode | null = null, name: string | null = null): Arg => ({ value, type, name });
+
+/** The plain resolved values of a step's arguments, dropping the type/name metadata — for the
+ *  consumers that genuinely want a value array (a varargs spread, `flattenListArgs`). Prefer reading
+ *  `step.args[i].value` at a single index; this is for whole-array value use. */
+export const argValues = (step: { args: readonly Arg[] }): any[] => step.args.map((a) => a.value);
+
 export interface Step {
   name: string;
-  args: any[];
+  /** The step's arguments, each a value+type+name object (see `Arg`). Was three parallel arrays. */
+  args: Arg[];
   ctx: ParserRuleContext;
-  argTypes?: (TypeNode | null)[];
-  /** `paramNames[i]` is the WIRE PARAMETER NAME of `args[i]` (`$x` in the `bindings`/`parameters`
-   * map) — the value's own name, in TinkerPop 4's `GValue` sense: `name != null` means "the client
-   * declared this VARIABLE", `null` means "a parsed literal". Carried in parallel to `argTypes` (same
-   * boundary precedent) so `args` stays a plain resolved value for every consumer — the difference is
-   * a fact ABOUT the argument, not a wire-format concept leaking into the IR (root CLAUDE.md #5, and
-   * the parameter-budget rule under Environment notes). A lowering reads it to decide bind-vs-inline:
-   * a named value is a user PARAMETER and binds (`?`, the 100-budget), a `null` is a constant it
-   * inlines. Only TOP-LEVEL args are tracked today; a `$x` nested inside a predicate or collection
-   * still flattens to a constant (correct result, no budget saving — see the const-seam decline). */
-  paramNames?: (string | null)[];
   /** `repeat(name, body)` has the same body channel as `repeat(body)`; its name
    * remains explicit metadata for the lowering that owns named loop counters. */
   loopName?: string;
@@ -227,20 +250,17 @@ export function stepChain(tree: any, params: Record<string, any>, paramTypes: Re
     if (cls.startsWith('TraversalSourceSelfMethod')) return;
     const name = stepName(cls, 'TraversalSourceSpawnMethod_') ?? stepName(cls, 'TraversalMethod_');
     if (!insideNested && name) {
-      const { args, types, names } = extractArgs(node, params, paramTypes);
-      // Only carry `paramNames` when a top-level arg is actually a parameter — the common step has
-      // none, so the field stays absent rather than a same-length array of nulls on every step.
-      const paramNames = names.some((n) => n != null) ? names : undefined;
+      const args = extractArgs(node, params, paramTypes);
       // The grammar deliberately exposes the named repeat overload as
       // repeat(name, body), while every repeat consumer needs one uniform body
       // channel. Canonicalize that overload at the front-end boundary and retain
       // the public loop name as metadata; lowerers can therefore either implement
       // named loop counters or reject them without ever misreading a string as a
       // nested traversal. (A repeat body is a nested traversal, never a parameter.)
-      if (name === 'repeat' && typeof args[0] === 'string' && isNested(args[1])) {
-        steps.push({ name, args: [args[1]], ctx: node, argTypes: [types[1]], loopName: args[0] });
+      if (name === 'repeat' && typeof args[0]?.value === 'string' && isNested(args[1]?.value)) {
+        steps.push({ name, args: [args[1]], ctx: node, loopName: args[0].value });
       } else {
-        steps.push({ name, args, ctx: node, argTypes: types, ...(paramNames ? { paramNames } : {}) });
+        steps.push({ name, args, ctx: node });
       }
       // nested traversals inside this step's args must not contribute to the top chain
       for (let i = 0; i < node.getChildCount(); i++) visit(node.getChild(i), true);
@@ -317,10 +337,10 @@ export function extractSack(tree: any, params: Record<string, any>): SackSpec | 
   if (!w) return null;
   const gl = descendants(w, 'GenericLiteralContext')[0];
   if (!gl) throw new Error('withSack() requires an initial value');
-  const out: any[] = [], types: (TypeNode | null)[] = [];
-  walkArgs(gl, out, params, types, []);
+  const out: Arg[] = [];
+  walkArgs(gl, out, params);
   const op = descendants(w, 'TraversalOperatorContext')[0];
-  return { init: out[0], initType: flatType(types[0]), mergeOp: op ? enumSuffix(op) : undefined };
+  return { init: out[0].value, initType: flatType(out[0].type), mergeOp: op ? enumSuffix(op) : undefined };
 }
 
 /** Pull SOURCE-level `g.with(key[, value])` options into a key→value registry.
@@ -336,10 +356,10 @@ export function extractSack(tree: any, params: Record<string, any>): SackSpec | 
 export function extractSourceOptions(tree: any, params: Record<string, any>): Map<string, any> {
   const out = new Map<string, any>();
   for (const w of descendants(tree, 'TraversalSourceSelfMethod_withContext')) {
-    const args: any[] = [];
+    const args: Arg[] = [];
     for (const n of [...descendants(w, 'StringLiteralContext'), ...descendants(w, 'GenericLiteralContext')])
-      walkArgs(n, args, params, [], []);
-    if (typeof args[0] === 'string') out.set(args[0], args.length > 1 ? args[1] : true);
+      walkArgs(n, args, params);
+    if (typeof args[0]?.value === 'string') out.set(args[0].value, args.length > 1 ? args[1].value : true);
   }
   return out;
 }
@@ -355,24 +375,21 @@ export function extractSideEffects(tree: any, params: Record<string, any>): Map<
     const keyNode = descendants(w, 'StringLiteralContext')[0];
     const valNode = descendants(w, 'GenericLiteralContext')[0];
     if (!keyNode || !valNode) continue;
-    const ks: any[] = [], vs: any[] = [];
-    walkArgs(keyNode, ks, params, [], []);
-    walkArgs(valNode, vs, params, [], []);
-    if (typeof ks[0] === 'string') out.set(ks[0], vs[0]);
+    const ks: Arg[] = [], vs: Arg[] = [];
+    walkArgs(keyNode, ks, params);
+    walkArgs(valNode, vs, params);
+    if (typeof ks[0]?.value === 'string') out.set(ks[0].value, vs[0].value);
   }
   return out;
 }
 
-/** Pull literal / predicate / variable arguments out of a step context, plus the parallel
- *  numeric-subtype tags (see Step.argTypes) and the parallel wire-parameter names (see
- *  Step.paramNames — a top-level `$x` records its name, everything else is null). */
-function extractArgs(ctx: any, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): { args: any[]; types: (TypeNode | null)[]; names: (string | null)[] } {
-  const args: any[] = [];
-  const types: (TypeNode | null)[] = [];
-  const names: (string | null)[] = [];
+/** Pull a step context's arguments out as `Arg[]` — each a value + its canonical type + its
+ *  wire-parameter name (a top-level `$x` records its name, everything else null). */
+function extractArgs(ctx: any, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Arg[] {
+  const args: Arg[] = [];
   // skip child 0 (step name token) and parens; walking all children is fine since tokens have no children
-  for (let i = 0; i < ctx.getChildCount(); i++) walkArgs(ctx.getChild(i), args, params, types, names, paramTypes);
-  return { args, types, names };
+  for (let i = 0; i < ctx.getChildCount(); i++) walkArgs(ctx.getChild(i), args, params, paramTypes);
+  return args;
 }
 
 /** The single argument a subtree contributes — used for map-entry values, which
@@ -381,18 +398,17 @@ function extractArgs(ctx: any, params: Record<string, any>, paramTypes: Record<s
  *  (a nested criterion → `{nested}`, a list → array, a scalar → the literal), so
  *  strategy config reuses the one arg walker. */
 function argOf(node: any, params: Record<string, any>): any {
-  const out: any[] = [];
-  walkArgs(node, out, params, [], []);
-  return out.length === 1 ? out[0] : out;
+  const out: Arg[] = [];
+  walkArgs(node, out, params);
+  return out.length === 1 ? out[0].value : out.map((a) => a.value);
 }
 
-/** Walk one AST node, pushing each recognised argument onto `out` (and its numeric subtype, or null,
- *  onto `types`, and its wire-parameter name, or null, onto `names` — all in lockstep). Unrecognised
- *  nodes recurse into children (a literal buried deeper still surfaces). `names` is threaded rather than
- *  defaulted because it must stay index-aligned with `out`/`types` through the recursion; callers that
- *  do not track parameters (map values, collection members, config) pass a throwaway array. */
-function walkArgs(node: any, out: any[], params: Record<string, any>, types: (TypeNode | null)[], names: (string | null)[], paramTypes: Record<string, TypeNode> = {}): void {
-  const emit = (v: any, t: TypeNode | null = null, name: string | null = null) => { out.push(v); types.push(t); names.push(name); };
+/** Walk one AST node, pushing each recognised argument onto `out` as an `Arg` (value + canonical
+ *  type + wire-parameter name, all in one object). Unrecognised nodes recurse into children (a literal
+ *  buried deeper still surfaces). The value+type+name travel together, so no caller has to thread three
+ *  parallel arrays in lockstep any more. */
+function walkArgs(node: any, out: Arg[], params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): void {
+  const emit = (v: any, t: TypeNode | null = null, name: string | null = null) => { out.push(arg(v, t, name)); };
   const cls = node.constructor.name;
   if (cls === 'StringLiteralContext') { emit(unquote(node.getText()), 'string'); return; }
   // long/bigint carry EXACT via BigInt — parseInt would truncate past 2^53 (the
@@ -553,7 +569,7 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (Ty
     return;
   }
   if (cls === 'NestedTraversalContext') { emit({ nested: node }); return; }
-  for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walkArgs(node.getChild(i), out, params, types, names, paramTypes);
+  for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walkArgs(node.getChild(i), out, params, paramTypes);
 }
 
 /** Parse an ISO-8601 date / date-time string to epoch-millis, UTC-normalized. Per
@@ -580,10 +596,10 @@ function enumSuffix(node: any): string {
 function literalItems(nodes: any[], params: Record<string, any>): { values: any[]; items: (TypeNode | null)[] } {
   const values: any[] = [], items: (TypeNode | null)[] = [];
   for (const lit of nodes) {
-    const out: any[] = [], types: (TypeNode | null)[] = [];
-    walkArgs(lit, out, params, types, []);
-    values.push(out.length === 1 ? out[0] : out);
-    items.push(out.length === 1 ? (types[0] ?? null) : null);
+    const out: Arg[] = [];
+    walkArgs(lit, out, params);
+    values.push(out.length === 1 ? out[0].value : out.map((a) => a.value));
+    items.push(out.length === 1 ? (out[0].type ?? null) : null);
   }
   return { values, items };
 }
@@ -608,8 +624,8 @@ function mapLiteral(node: any, params: Record<string, any>): Map<any, any> {
 function mapLiteralType(node: any, params: Record<string, any>): TypeNode {
   const entries: Record<string, MapEntryType | null> = {};
   for (const entry of node.mapEntry()) {
-    const out: any[] = [], types: (TypeNode | null)[] = [];
-    walkArgs(entry.genericLiteral(), out, params, types, []);
+    const out: Arg[] = [];
+    walkArgs(entry.genericLiteral(), out, params);
     // A single scalar/map value carries its captured type; a multi-arg or empty walk
     // (unusual) → null (infer at use). A literal map key is a string/identifier (or a
     // T/Direction token → not a stored scalar), so its type is 'string' or null; a typed
@@ -617,7 +633,7 @@ function mapLiteralType(node: any, params: Record<string, any>): TypeNode {
     const key = mapKeyOf(entry.mapKey());
     entries[String(key)] = {
       key: typeof key === 'string' ? 'string' : null,
-      value: out.length === 1 ? (types[0] ?? null) : null,
+      value: out.length === 1 ? (out[0].type ?? null) : null,
     };
   }
   return { t: 'map', entries };
@@ -682,7 +698,9 @@ function parseComposedPredicate(node: any, params: Record<string, any>): Pred | 
 
 function parsePredicate(node: any, params: Record<string, any>): Pred {
   const m = node.constructor.name.match(/^TraversalPredicate_(\w+)Context$/);
-  const { args: values, names } = extractArgs(node, params); // values + their wire-parameter names
+  const parsed = extractArgs(node, params); // each Arg = value + its wire-parameter name
+  const values = parsed.map((a) => a.value);
+  const names = parsed.map((a) => a.name);
   // P.within/without/inside/between accept both varargs (P.within('a','b')) and a
   // single bracketed list (P.within(['a','b'])). Collection literals now parse as one
   // array value, so unwrap a lone array arg back to the value varargs the predicate

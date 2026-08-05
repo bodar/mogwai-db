@@ -1,5 +1,5 @@
 import { derived, q, list, raw, type Expression } from '../../../sql/kernel/q.ts';
-import { isNested, isTokenArg, stepChain, type Pred } from '../../../gremlin/frontend.ts';
+import { argValues, isNested, isTokenArg, stepChain, type Pred } from '../../../gremlin/frontend.ts';
 import {
     predicateSql,
     hasProp, elemCtx,
@@ -42,7 +42,7 @@ function filterCte(st: ElementStream, test: Expression): ElementStream {
  *  column, default Pop = last). A pass-through CTE keeps id + all carried alias
  *  columns, (re)setting the bound ones to the current id. */
 export const as: StepFn = (s, st) => {
-  const labels = s.args.filter((a): a is string => typeof a === 'string');
+  const labels = argValues(s).filter((a): a is string => typeof a === 'string');
   const aliases = new Map<string, AliasEntry>(st.traverserLayout.aliases);
   const shape = elemShape(st.elem);
   const p = prevRel(st, 'p');
@@ -99,7 +99,7 @@ function pathDistinctTest(st: ElementStream, simple: boolean, from?: string, to?
 export const simplePath: StepFn = (s, st) => filterCte(st, pathDistinctTest(st, true, s.from, s.to));
 export const cyclicPath: StepFn = (s, st) => filterCte(st, pathDistinctTest(st, false, s.from, s.to));
 
-export const hasLabel: StepFn = (s, st) => filterCte(st, labelMatchFor(elemRel(st), st.elem, s.args));
+export const hasLabel: StepFn = (s, st) => filterCte(st, labelMatchFor(elemRel(st), st.elem, argValues(s)));
 
 /** hasId(id…|P): filter the current element by its external id (COALESCE(uid,id)).
  *  A lone predicate passes through; bare ids become a `within` set. */
@@ -107,13 +107,13 @@ export const hasId: StepFn = (s, st) => {
   const n = elemRel(st);
   // hasId(__.V(id).id()) / hasId(P.eq(__.V(id).id())): idPredFromArgs wraps a bare arg into a
   // within(), so resolving operands on the RESULT covers both spellings in one place.
-  const pred = resolveTraversalOperands(idPredFromArgs(s.args), operandDeps(st), { ctx: currentCtx(st), row: prevRel(st, 'p'), labels: labelScope(st) });
+  const pred = resolveTraversalOperands(idPredFromArgs(argValues(s)), operandDeps(st), { ctx: currentCtx(st), row: prevRel(st, 'p'), labels: labelScope(st) });
   return filterCte(st, predicateSql(q`COALESCE(${n.c.uid}, ${n.c.id})`, pred));
 };
 
 export const has: StepFn = (s, st) => {
   const conds: Expression[] = [];
-  let a = s.args;
+  let a = argValues(s);
   // has(label, key, value) — the 3-arg overload folds in a label filter.
   if (a.length === 3 && typeof a[0] === 'string') {
     conds.push(labelMatchFor(elemRel(st), st.elem, [a[0]]));
@@ -173,7 +173,7 @@ export const has: StepFn = (s, st) => {
  * there is no three-valued case for the coalesce to close over.
  */
 export const hasNot: StepFn = (s, st) => {
-  const key = s.args[0];
+  const key = s.args[0].value;
   if (typeof key !== 'string' || s.args.length !== 1) throw new Error('hasNot() takes exactly one property key');
   return filterCte(st, q`NOT ${hasProp(currentCtx(st), key, undefined)}`);
 };
@@ -181,7 +181,7 @@ export const hasNot: StepFn = (s, st) => {
 /** where()/filter()/not(): keep rows satisfying the nested traversal (or an
  *  alias comparison). not() negates via notCoalesce. */
 export const where: StepFn = (s, st) => {
-  const arg0 = s.args[0];
+  const arg0 = s.args[0].value;
   if (isNested(arg0)) {
     const pred = runFastPath(PredicateInliningFastPath, fastPathContextOf(st),
       () => tryInlinePredicate(engineOf(st), stepChain(arg0.nested, st.params), currentCtx(st), st.params, labelScope(st)));
@@ -200,7 +200,7 @@ export const where: StepFn = (s, st) => {
   // table; every other shape reaches the same test through `aliasCompareRows`.
   const resolve = aliasOperandsOf(st.traverserLayout.aliases, prevRel(st, 'p'));
   const left = typeof arg0 === 'string' ? resolve(arg0) : { kind: 'element' as const, id: q`n.id`, elem: st.elem };
-  const rawPred = typeof arg0 === 'string' ? s.args[1] : arg0;
+  const rawPred = typeof arg0 === 'string' ? s.args[1].value : arg0;
   return filterCte(st, aliasCompareTest(s, left, rawPred, resolve));
 };
 
@@ -210,7 +210,7 @@ export const where: StepFn = (s, st) => {
  *  shared-domain child-existence combiner — same result, no support-definer. */
 export const andOr: StepFn = (s, st) => {
   const op = s.name === 'and' ? 'AND' : 'OR';
-  const branches = s.args.filter(isNested);
+  const branches = argValues(s).filter(isNested);
   const pred = runFastPath(PredicateInliningFastPath, fastPathContextOf(st),
     () => combineBranchPreds(engineOf(st), s, currentCtx(st), st.params, op, labelScope(st)));
   if (pred) return filterCte(st, pred);
@@ -267,7 +267,7 @@ export function lowerElementDedup(st: ElementStream, s: IRStep, order?: IRStep):
   // dedup(labels): dedup by the tuple of the given as() labels' current values (optional
   // single by() modulator applied to each). Explicit-scope, so unlike bare dedup it is
   // well-defined under as()/path tracking — the kept traverser rides its carried state.
-  const labelArgs = s.args.filter((a): a is string => typeof a === 'string');
+  const labelArgs = argValues(s).filter((a): a is string => typeof a === 'string');
   if (labelArgs.length) return dedupByLabels(st, s, labelArgs);
   if (s.args.length > 0) throw new Error('dedup(Scope.local, …) over an element stream not yet supported');
   if (st.traverserLayout.aliases.size > 0) throw new Error('dedup() after as() not yet supported (path-distinct semantics)');

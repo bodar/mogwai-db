@@ -3,7 +3,7 @@ import {
     elemCtx, scalarProp, aliasCtx,
     predicateSql, scalarTx, type ScalarCtx, tokenExpr
 } from '../../plan/plan.ts';
-import { isNested, isPickArg, isTokenArg } from '../../../gremlin/frontend.ts';
+import { isNested, isPickArg, isTokenArg, argValues } from '../../../gremlin/frontend.ts';
 import { mathToSql, mathVars } from '../../../gremlin/math.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { aliasElem, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, type ElementStream } from '../context/context.ts';
@@ -19,7 +19,7 @@ import { engineOf } from '../../engine/deps.ts';
  * body is outside the currently origin-safe element vocabulary, so the scalar child
  * fast path (or its clear deferral) should handle it. */
 export function tryLowerMapElement(st: ElementStream, step: IRStep): ElementStream | null {
-  const arg = step.args[0];
+  const arg = step.args[0].value;
   if (!isNested(arg)) return null;
   return tryCompileElementChild(st, arg.nested, 'first')?.stream ?? null;
 }
@@ -28,7 +28,7 @@ export function tryLowerMapElement(st: ElementStream, step: IRStep): ElementStre
  * traverser. The child compiler owns origin-partitioned element barriers, so local
  * no longer needs a movement-only parser or a private window implementation. */
 export function tryLowerLocalElement(st: ElementStream, step: IRStep): ElementStream | null {
-  const arg = step.args[0];
+  const arg = step.args[0].value;
   if (!isNested(arg)) return null;
   return tryCompileElementChild(st, arg.nested, 'all')?.stream ?? null;
 }
@@ -37,7 +37,7 @@ export function tryLowerLocalElement(st: ElementStream, step: IRStep): ElementSt
  * `first` versus `all` an explicit consumer policy over one child compiler, for both
  * element and scalar output shapes. */
 export function tryLowerFlatMap(st: ElementStream, step: IRStep): Stream | null {
-  const arg = step.args[0];
+  const arg = step.args[0].value;
   if (!isNested(arg)) return null;
   return tryCompileElementChild(st, arg.nested, 'all')?.stream
     ?? tryCompileScalarValueChild(st, arg.nested, 'all')
@@ -46,7 +46,7 @@ export function tryLowerFlatMap(st: ElementStream, step: IRStep): Stream | null 
 }
 
 export function tryLowerListChild(st: ElementStream, step: IRStep): ListStream | null {
-  const arg = step.args[0];
+  const arg = step.args[0].value;
   if (!isNested(arg)) return null;
   return tryCompileListChild(st, arg.nested);
 }
@@ -60,7 +60,7 @@ export function tryLowerListChild(st: ElementStream, step: IRStep): ListStream |
  */
 export function lowerMapScalar(st: ElementStream, steps: IRStep[], stop: number): ScalarStream {
   const name = steps[stop].name; // 'map' or a scalar-reduction 'local'
-  const arg = steps[stop].args[0];
+  const arg = steps[stop].args[0].value;
   if (!isNested(arg)) throw new Error(`${name}(traversal) required`);
   const child = tryCompileScalarValueChild(st, arg.nested, name === 'local' ? 'all' : 'first');
   if (child) return child;
@@ -87,7 +87,7 @@ export function lowerMapScalar(st: ElementStream, steps: IRStep[], stop: number)
  */
 export function lowerMath(st: ElementStream, steps: IRStep[], stop: number): ScalarStream {
   const s = steps[stop];
-  const formula = s.args[0];
+  const formula = s.args[0].value;
   if (typeof formula !== 'string') throw new Error('math(string) required');
   const bys = s.modulators ?? [];
   const varOrder = mathVars(formula);
@@ -145,7 +145,7 @@ export function lowerMath(st: ElementStream, steps: IRStep[], stop: number): Sca
  * variable with no by(), a property-key by() (a scalar has no properties).
  */
 export function lowerMathScalar(s: ScalarStream, step: IRStep): ScalarStream | null {
-  const formula = step.args[0];
+  const formula = step.args[0].value;
   if (typeof formula !== 'string') return null;
   const bys = step.modulators ?? [];
   const varOrder = mathVars(formula);
@@ -201,7 +201,7 @@ export function lowerMathScalar(s: ScalarStream, step: IRStep): ScalarStream | n
  */
 export function lowerFormat(st: ElementStream, steps: IRStep[], stop: number): ScalarStream {
   const s = steps[stop];
-  const tmpl = s.args[0];
+  const tmpl = s.args[0].value;
   if (typeof tmpl !== 'string') throw new Error('format(string) required');
   const bys = s.modulators ?? [];
   // Split into alternating literal / token parts. Each `||` operand is a bound literal
@@ -271,7 +271,7 @@ export function lowerFormat(st: ElementStream, steps: IRStep[], stop: number): S
  * (a `%{key}` token, or a `%{_}` with no/property-key by()).
  */
 export function lowerFormatScalar(s: ScalarStream, step: IRStep): ScalarStream | null {
-  const tmpl = step.args[0];
+  const tmpl = step.args[0].value;
   if (typeof tmpl !== 'string') return null;
   const bys = step.modulators ?? [];
   const re = /%\{([^}]*)\}/g;
@@ -332,7 +332,7 @@ export function lowerFormatScalar(s: ScalarStream, step: IRStep): ScalarStream |
  * than fabricating a value TinkerPop would have rejected.
  */
 export function lowerConcatScalar(s: ScalarStream, step: IRStep): ScalarStream | null {
-  const args = step.args ?? [];
+  const args = argValues(step);
   if (!args.some(isNested)) return null; // string-only concat() — the scalarTx leaf handles it
   const specs: ScalarModulationSpec[] = args.filter(isNested).map((a: any) => ({ nested: a.nested, contract: 'apply' }));
   // The scalar-parent child vocabulary (a label re-root, a `V()`/`E()` re-source) lives in
@@ -383,7 +383,7 @@ export function lowerConcatScalar(s: ScalarStream, step: IRStep): ScalarStream |
  * scope and must not filter its parent when it is unproductive.
  */
 export function lowerDateDiffScalar(s: ScalarStream, step: IRStep): ScalarStream | null {
-  const arg = step.args[0];
+  const arg = step.args[0].value;
   if (!isNested(arg)) return null;
   const mods = tryCompileScalarModulations(s, [{ nested: arg.nested, contract: 'apply' }]);
   if (!mods) return null;
@@ -411,7 +411,7 @@ export function lowerDateDiffScalar(s: ScalarStream, step: IRStep): ScalarStream
  */
 export function lowerChooseOptions(st: ElementStream, steps: IRStep[], stop: number): ScalarStream | null {
   const cs = steps[stop];
-  const a0 = cs.args[0];
+  const a0 = cs.args[0].value;
   // A CASE has exactly ONE fallthrough (its ELSE), so it can serve an option map only when the
   // map has exactly one too. Decline otherwise and the arm merge takes over.
   const arms = readOptionMapArms(cs, st.params);
@@ -442,9 +442,9 @@ export function lowerChooseOptions(st: ElementStream, steps: IRStep[], stop: num
   const options: { key: any; mod: number; isNone: boolean }[] = [];
   let sawNone = false;
   for (const opt of cs.optionArms!) {
-    const bodyArg = opt.args.find(isNested);
+    const bodyArg = argValues(opt).find(isNested);
     if (!bodyArg) return null;
-    const keyArg = opt.args.find((x: any) => x !== bodyArg);
+    const keyArg = argValues(opt).find((x: any) => x !== bodyArg);
     let isNone = false;
     if (keyArg === undefined || isPickArg(keyArg)) {
       const pick = isPickArg(keyArg) ? keyArg.pick : 'none';
@@ -514,7 +514,7 @@ export function lowerChooseOptions(st: ElementStream, steps: IRStep[], stop: num
  */
 export function lowerChooseOptionsScalar(s: ScalarStream, steps: IRStep[], stop: number): ScalarStream | null {
   const cs = steps[stop];
-  const a0 = cs.args[0];
+  const a0 = cs.args[0].value;
   const specs: ScalarModulationSpec[] = [];
   if (!isNested(a0)) return null; // scalar choice must be a traversal over the value
   const choiceMod = specs.length;
@@ -523,9 +523,9 @@ export function lowerChooseOptionsScalar(s: ScalarStream, steps: IRStep[], stop:
   const options: { key: any; mod: number; isNone: boolean }[] = [];
   let sawNone = false;
   for (const opt of cs.optionArms ?? []) {
-    const bodyArg = opt.args.find(isNested);
+    const bodyArg = argValues(opt).find(isNested);
     if (!bodyArg) return null;
-    const keyArg = opt.args.find((x: any) => x !== bodyArg);
+    const keyArg = argValues(opt).find((x: any) => x !== bodyArg);
     let isNone = false;
     if (keyArg === undefined || isPickArg(keyArg)) {
       const pick = isPickArg(keyArg) ? keyArg.pick : 'none';

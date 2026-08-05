@@ -1,4 +1,4 @@
-import { isNested, isOperatorArg, isTokenArg, stepChain, type SackSpec, type Step } from '../../../gremlin/frontend.ts';
+import { argValues, isNested, isOperatorArg, isTokenArg, stepChain, type SackSpec, type Step } from '../../../gremlin/frontend.ts';
 import { empty, list, paren, q, raw, Relation, value, type Expression } from '../../../sql/kernel/q.ts';
 import { staticTypeOf } from '../../../sql/kernel/render.ts';
 import { edges } from '../../../sql/schema.ts';
@@ -53,7 +53,7 @@ const walkNodeCtx = (idExpr: Expression): ScalarCtx => {
 function walkPredicate(st: ElementStream, step: Step, kind: 'until' | 'emit'): (id: Expression, depth: Expression, sackExpr: Expression | null) => Expression {
   const engine = engineOf(st);
   const params = st.params;
-  const nested = stepChain(step.args[0]?.nested, params);
+  const nested = stepChain(step.args[0]?.value?.nested, params);
   if (!nested.length) throw new Error(`${kind}() requires a traversal predicate`);
   // A pure sack-reading predicate — until(__.sack().is(P)) / emit(__.sack().is(P)) — reads the
   // walk's ACCUMULATED sack, not an element property, so it can't route through the element
@@ -61,7 +61,7 @@ function walkPredicate(st: ElementStream, step: Step, kind: 'until' | 'emit'): (
   // sack against P. This is the spreading-activation-with-threshold primitive: loop until the
   // decayed relevance crosses a bound. A mixed sack+element predicate stays deferred.
   const sackPred = nested.length === 2 && nested[0].name === 'sack' && (nested[0].args ?? []).length === 0 && nested[1].name === 'is'
-    ? nested[1].args[0] : undefined;
+    ? nested[1].args[0].value : undefined;
   // NB until()/emit() deliberately do NOT gate on PredicateInliningFastPath. The inline route is
   // the only one that can read the walk's PER-ITERATION state (loops(), the sack), so disabling it
   // would lose a capability rather than just speed — which is exactly the fast-path law's
@@ -272,7 +272,7 @@ export function mergeElementArms(base: LoweringState, arms: readonly ElementStre
  *  branch (1b) still defers. */
 export const union: StepFn = (s, st) => {
   assertForkSafe('union', st);
-  const branches = s.args.filter(isNested);
+  const branches = argValues(s).filter(isNested);
   // A SINGLE branch is legal Gremlin — union() is varargs and `union(t)` is just t — and the arm
   // merge handles one arm fine (it is a UNION ALL of one). Rejecting it was the same artificial
   // arity guard and()/or() carried: it broke the metamorphic law `union(q) === q`. ZERO branches
@@ -315,7 +315,7 @@ function tryBatchedElementArm(st: ElementStream, nested: any): ElementStream | n
  * element union emits its existing fail-closed mixed-shape error. */
 export function tryLowerScalarUnion(s: Step, st: ElementStream): ScalarStream | null {
   assertForkSafe('union', st);
-  const branches = s.args.filter(isNested);
+  const branches = argValues(s).filter(isNested);
   // A SINGLE branch is legal Gremlin — union() is varargs and `union(t)` is just t — and the arm
   // merge handles one arm fine (it is a UNION ALL of one). Rejecting it was the same artificial
   // arity guard and()/or() carried: it broke the metamorphic law `union(q) === q`. ZERO branches
@@ -371,7 +371,7 @@ function tryCompileBatchedElementArm(st: ElementStream, nested: any, plan: Retur
 
 export function tryLowerListUnion(s: Step, st: ElementStream): ListStream | null {
   assertForkSafe('union', st);
-  const branches = s.args.filter(isNested);
+  const branches = argValues(s).filter(isNested);
   if (branches.length < 2) return null;
   // classify every arm once (pure, no CTE); emit only if ALL qualify, reusing each parsed
   // body — so a partly-list union never emits arm0's CTEs before a later arm disqualifies.
@@ -402,13 +402,13 @@ export const SingleHopOptionalFastPath: FastPath<[ElementStream, Step[]], Elemen
     const [from, to] = dirsFor(body[0].name)[0];
     const e = edges.as('e');
     const p = prevRel(st, 'p');
-    return appendCte(st, q`SELECT COALESCE(${e.c[to]}, ${p.c.id}) AS id${layoutProjection(st.traverserLayout, p)} FROM ${p} LEFT JOIN ${e} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(body[0].args)}`);
+    return appendCte(st, q`SELECT COALESCE(${e.c[to]}, ${p.c.id}) AS id${layoutProjection(st.traverserLayout, p)} FROM ${p} LEFT JOIN ${e} ON ${e.c[from]}=${p.c.id}${edgeLabelFilter(argValues(body[0]))}`);
   },
 };
 
 export const optional: StepFn = (s, st) => {
   assertForkSafe('optional', st);
-  const body = stepChain(s.args[0]?.nested, st.params);
+  const body = stepChain(s.args[0]?.value?.nested, st.params);
   if (!body.length) throw new Error('optional(traversal) required');
   const fast = runFastPath(SingleHopOptionalFastPath, fastPathContextOf(st), st, body);
   if (fast) return fast;
@@ -416,8 +416,8 @@ export const optional: StepFn = (s, st) => {
   // carries the outer ordinals through, so optional()/coalesce() compose.
   const { seed: forked } = enterBranch(st, 'optional', [body]);
   const { base, seedSt, ord } = originSeed(forked);
-  const end = tryCompileElementTraversal(seedSt, s.args[0].nested)
-    ?? (() => { throw new Error(`optional() branch __.${armDescription(s.args[0].nested, st.params)} not yet supported (scalar/projection body)`); })();
+  const end = tryCompileElementTraversal(seedSt, s.args[0].value.nested)
+    ?? (() => { throw new Error(`optional() branch __.${armDescription(s.args[0].value.nested, st.params)} not yet supported (scalar/projection body)`); })();
   if (end.elem !== st.elem)
     throw new Error('optional() body changing element kind not yet supported (self-on-miss would be mixed-shape)');
   // Two ragged arms: the HIT (body, path extended) and the MISS (base = input unchanged,
@@ -435,7 +435,7 @@ export const optional: StepFn = (s, st) => {
  * parent emits its original element. Both arms retain the same outer carried
  * schema, while the child-only origin is consumed by the anti-existence arm. */
 export function tryLowerVariantOptional(s: Step, st: ElementStream): VariantStream | null {
-  const nested = s.args[0]?.nested;
+  const nested = s.args[0]?.value?.nested;
   const plan = classifyScalarChild(nested, childCtx(st));
   if (!plan) return null;
   // Same fail-closed wall as the three mixed-shape siblings (union/coalesce/choose above): the
@@ -469,7 +469,7 @@ export function tryLowerVariantOptional(s: Step, st: ElementStream): VariantStre
  *  branches only; scalar-body defers. Nests inside coalesce/optional (unique ordinal per depth). */
 export const coalesce: StepFn = (s, st) => {
   assertForkSafe('coalesce', st);
-  const branches = s.args.filter(isNested);
+  const branches = argValues(s).filter(isNested);
   if (branches.length < 1) throw new Error('coalesce() needs at least one branch');
   const { seed: forked } = enterBranch(st, 'coalesce', branches.map((b) => childSteps(b.nested, st.params)));
   const { seedSt, ord } = originSeed(forked); // unique ordinal — nests inside optional/coalesce
@@ -494,7 +494,7 @@ export const coalesce: StepFn = (s, st) => {
  * internal ordinal is removed at the merge boundary while outer carried state stays. */
 export function tryLowerScalarCoalesce(s: Step, st: ElementStream): ScalarStream | null {
   assertForkSafe('coalesce', st);
-  const branches = s.args.filter(isNested);
+  const branches = argValues(s).filter(isNested);
   if (!branches.length) return null;
   const plans = branches.map((b) => classifyScalarChild(b.nested, childCtx(st)));
   if (plans.some((p) => !p)) return null;
@@ -513,7 +513,7 @@ export function tryLowerScalarCoalesce(s: Step, st: ElementStream): ScalarStream
 
 export function tryLowerListCoalesce(s: Step, st: ElementStream): ListStream | null {
   assertForkSafe('coalesce', st);
-  const branches = s.args.filter(isNested);
+  const branches = argValues(s).filter(isNested);
   if (!branches.length) return null;
   const plans = branches.map((b) => classifyListChild(b.nested, childCtx(st)));
   if (plans.some((p) => !p)) return null;
@@ -563,7 +563,7 @@ function branchesAreMixed(branches: readonly any[], ctx: ChildCtx): boolean {
 /** union() over mixed-shape arms → a VariantStream (plain UNION ALL, no gating). */
 export function tryLowerVariantUnion(s: Step, st: ElementStream): VariantStream | null {
   assertForkSafe('union', st);
-  const branches = s.args.filter(isNested);
+  const branches = argValues(s).filter(isNested);
   if (branches.length < 2 || !branchesAreMixed(branches, childCtx(st))) return null;
   if (st.traverserLayout.path) throw new Error('path() through a mixed-shape union() not yet supported');
   const { seed } = enterBranch(st, 'union', branches.map((b) => childSteps(b.nested, st.params)));
@@ -575,7 +575,7 @@ export function tryLowerVariantUnion(s: Step, st: ElementStream): VariantStream 
  *  every arm; arm k emits only for parents no earlier arm produced a row for. */
 export function tryLowerVariantCoalesce(s: Step, st: ElementStream): VariantStream | null {
   assertForkSafe('coalesce', st);
-  const branches = s.args.filter(isNested);
+  const branches = argValues(s).filter(isNested);
   if (!branches.length || !branchesAreMixed(branches, childCtx(st))) return null;
   if (st.traverserLayout.path) throw new Error('path() through a mixed-shape coalesce() not yet supported');
   const { seed } = enterBranch(st, 'coalesce', branches.map((b) => childSteps(b.nested, st.params)));
@@ -590,7 +590,7 @@ export function tryLowerVariantCoalesce(s: Step, st: ElementStream): VariantStre
 export function tryLowerVariantChoose(s: Step, st: ElementStream): VariantStream | null {
   if ((s as IRStep).optionArms) return null;
   assertForkSafe('choose', st);
-  const args = s.args.filter(isNested);
+  const args = argValues(s).filter(isNested);
   if (args.length !== 3) return null; // two-arg choose has an element identity else arm
   const [predArg, thenArg, elseArg] = args;
   const thenShape = armShape(thenArg.nested, childCtx(st));
@@ -611,7 +611,7 @@ export function tryLowerVariantChoose(s: Step, st: ElementStream): VariantStream
 export const flatMap: StepFn = (s, st) => {
   assertForkSafe('flatMap', st); // 1:many is a split too — same sack/fromV concern
   // Single body, no merge — incoming aliases + the appended path ride through on `end`.
-  const nested = s.args[0]?.nested;
+  const nested = s.args[0]?.value?.nested;
   const end = tryCompileElementTraversal(st, nested)
     ?? (() => { throw new Error(`flatMap() branch __.${armDescription(nested, st.params)} not yet supported (scalar/projection body)`); })();
   mergeBranchCarried(st.traverserLayout, [end.traverserLayout]); // single arm: assert rigid cols agree; a new as() label rides on `end`
@@ -662,7 +662,7 @@ export function repeatSackByValue(byArgs: any[] | undefined, curId: Expression, 
     // A constant by() folds a fixed step (decay factor, per-hop increment); anything that
     // reads the graph and could fan out can't live in a single flat recursive SELECT.
     const inner = stepChain(a.nested, {});
-    if (inner.length === 1 && inner[0].name === 'constant') return q`CAST(${value(inner[0].args[0])} AS REAL)`;
+    if (inner.length === 1 && inner[0].name === 'constant') return q`CAST(${value(inner[0].args[0].value)} AS REAL)`;
     throw new Error('sack().by(traversal) in a repeat() body not yet supported (only by(key)/by(T)/by(constant); a fan-out traversal cannot live in a recursive term)');
   }
   throw new Error('unsupported sack().by() modulator in a repeat() body');
@@ -673,9 +673,9 @@ export function repeatSackByValue(byArgs: any[] | undefined, curId: Expression, 
  *  whose freshly-folded sack still satisfies P — TinkerPop's Repeat.feature:664. */
 export function sackWhereGuard(step: Step): any | null {
   if (step.name !== 'where') return null;
-  const inner = stepChain(step.args[0]?.nested, {});
+  const inner = stepChain(step.args[0]?.value?.nested, {});
   if (inner.length === 2 && inner[0].name === 'sack' && (inner[0].args ?? []).length === 0 && inner[1].name === 'is')
-    return inner[1].args[0];
+    return inner[1].args[0].value;
   return null;
 }
 
@@ -724,7 +724,7 @@ function expandRepeatBody(
         // Vertex movement (lands on the far vertex) or vertex→edge step (lands on the edge).
         const [from, to] = dirs[mi++];
         const e = edges.as(`re${mi}`);
-        joins.push(q` JOIN ${e} ON ${e.c[from]}=${curId}${step.args.length ? q` AND ${labelIn(e.c.label, step.args)}` : empty}`);
+        joins.push(q` JOIN ${e} ON ${e.c[from]}=${curId}${step.args.length ? q` AND ${labelIn(e.c.label, argValues(step))}` : empty}`);
         if (TO_EDGE.has(step.name)) { curId = e.c.id; curElem = 'edge'; curEdge = e; }
         else { curId = e.c[to]; curElem = 'vertex'; curEdge = null; }
       } else if (TO_VERTEX.has(step.name)) {
@@ -736,11 +736,11 @@ function expandRepeatBody(
       } else if (step.name === 'has') {
         // has() only (hasLabel/complex has deferred at validation): a correlated EXISTS on the
         // current element (a vertex, or an edge when paused on one after outE()/inE()).
-        conds.push(hasProp(aliasCtx(curId, curElem), step.args[0], step.args[1]));
+        conds.push(hasProp(aliasCtx(curId, curElem), step.args[0].value, step.args[1]?.value));
       } else if (step.name === 'sack') {
         // Mutate sack(op).by(v): fold the by-value (over the current position/kind) into the
         // accumulator. Reuses combineSack verbatim (boundary-agnostic operator semantics).
-        const op = (step.args ?? []).find(isOperatorArg)?.operator;
+        const op = argValues(step).find(isOperatorArg)?.operator;
         if (!op) throw new Error('bare sack() (read) inside a repeat() body is not a fold — use where(__.sack()...) to guard');
         if (!SACK_OPS.has(op)) throw new Error(`sack(Operator.${op}) not yet supported`);
         sackExpr = combineSack(op, repeatSackByValue((step as IRStep).modulators?.[0], curId, curElem), sackExpr);
@@ -814,7 +814,7 @@ export const repeat: StepFn = (s, st) => {
   const emitStep = region.find((c) => c.name === 'emit');
   const hasEmitPred = !!emitStep && emitStep.args.length > 0;
   const timesStep = region.find((c) => c.name === 'times');
-  if (timesStep && typeof timesStep.args[0] !== 'number') throw new Error('times(predicate) not yet supported');
+  if (timesStep && typeof timesStep.args[0]?.value !== 'number') throw new Error('times(predicate) not yet supported');
   const untilStep = region.find((c) => c.name === 'until');
   const hasUntil = !!untilStep;
   // Interactions not built yet — fail closed rather than silently mis-terminate.
@@ -836,7 +836,7 @@ export const repeat: StepFn = (s, st) => {
   // hand-picked single fold. This used to be `absorbModulators` alone, which meant a NESTED
   // repeat/times cluster in the body never folded: the inner `times()` stayed a separate step, so
   // the inner repeat saw no cluster and reported `repeat() requires times(), until(), or emit()`.
-  const body = normalize(stepChain(rep.args[0]?.nested, st.params)).steps;
+  const body = normalize(stepChain(rep.args[0]?.value?.nested, st.params)).steps;
   const simplePathInBody = body.length > 0 && body[body.length - 1].name === 'simplePath';
   // A body-TERMINAL aggregate('x') (bare or local(__.aggregate('x'))) collects every vertex the
   // body emits — i.e. every walk row at depth ≥ 1 — into the named bag, read back by cap('x').
@@ -846,10 +846,10 @@ export const repeat: StepFn = (s, st) => {
   // shape); a mid-body aggregate (out().aggregate().out()) would collect an intermediate frontier and
   // stays deferred. by()-modulated aggregate-in-repeat also defers (collect element rowids only).
   const bodyAggName = (c: Step): string | null => {
-    if (c.name === 'aggregate' && (c.args ?? []).length === 1 && typeof c.args[0] === 'string' && !(c as IRStep).modulators?.length) return c.args[0];
+    if (c.name === 'aggregate' && (c.args ?? []).length === 1 && typeof c.args[0]?.value === 'string' && !(c as IRStep).modulators?.length) return c.args[0].value;
     if (c.name === 'local') {
-      const inner = stepChain(c.args[0]?.nested, st.params);
-      if (inner.length === 1 && inner[0].name === 'aggregate' && typeof inner[0].args[0] === 'string' && !(inner[0] as IRStep).modulators?.length) return inner[0].args[0];
+      const inner = stepChain(c.args[0]?.value?.nested, st.params);
+      if (inner.length === 1 && inner[0].name === 'aggregate' && typeof inner[0].args[0].value === 'string' && !(inner[0] as IRStep).modulators?.length) return inner[0].args[0].value;
     }
     return null;
   };
@@ -864,11 +864,11 @@ export const repeat: StepFn = (s, st) => {
   const moves = core.filter((c) => REPEAT_MOVES.has(c.name) || TO_EDGE.has(c.name));
   const hasEdgeStep = core.some((c) => TO_EDGE.has(c.name) || TO_VERTEX.has(c.name));
   // A body sack fold is a mutate sack(op) step; a sack-reading where guard is where(__.sack().is(P)).
-  const isSackFold = (c: Step): boolean => c.name === 'sack' && (c.args ?? []).some(isOperatorArg);
+  const isSackFold = (c: Step): boolean => c.name === 'sack' && argValues(c).some(isOperatorArg);
   const bodyFoldsSack = core.some(isSackFold);
   const REPEAT_BODY_OK = (c: Step): boolean => REPEAT_MOVE_ALL.has(c.name) || c.name === 'has' || isSackFold(c) || sackWhereGuard(c) !== null;
   // has() in the FLAT expansion: only has(key, value|P) — a 3-arg or T-token form is beyond it.
-  const badHas = core.find((c) => c.name === 'has' && (typeof c.args[0] !== 'string' || c.args.length > 2));
+  const badHas = core.find((c) => c.name === 'has' && (typeof c.args[0]?.value !== 'string' || c.args.length > 2));
   // Does the FLAT expansion (expandRepeatBody) recognize this body? It is the fast path — it walks
   // the frontier lazily instead of materializing the body over every vertex — so it is tried first
   // and the generic body relation is the fallback. A movement-free body is valid only when it folds
@@ -883,7 +883,7 @@ export const repeat: StepFn = (s, st) => {
   const sackCol = st.traverserLayout.sack ?? (bodyFoldsSack ? 'sk' : undefined);
   // times() → its fixed depth (the ONLY depth bound). until()/emit() have none —
   // they terminate at the natural fixpoint (see the docstring). null = no bound.
-  const maxDepth = timesStep ? Number(timesStep.args[0]) : null;
+  const maxDepth = timesStep ? Number(timesStep.args[0].value) : null;
 
   // Path tracking. `wantsPathOutput`: a downstream path() (chain seeded st.carried.path at V).
   // simplePath() in the body needs the accumulated path for its cycle guard even
@@ -1005,7 +1005,7 @@ export const repeat: StepFn = (s, st) => {
       : singleMove
       ? dirsFor(core[0].name).map(([from, to]) => {
           const e = edges.as('e');
-          const guards = [...cycleGuard(e.c[to]), ...(core[0].args.length ? [labelIn('e.label', core[0].args)] : [])];
+          const guards = [...cycleGuard(e.c[to]), ...(core[0].args.length ? [labelIn('e.label', argValues(core[0]))] : [])];
           return mkRec(e.c[to], q`${self} JOIN ${e} ON ${e.c[from]}=${self.c.id}`, sackCol ? self.c[sackCol] : null, guards);
         })
       : expandRepeatBody(self, core, sackCol).map(({ finalId, from, conds, sackExpr }) => mkRec(finalId, from, sackExpr, [...conds, ...cycleGuard(finalId)]));
@@ -1142,7 +1142,7 @@ function gate(st: ElementStream, test: Expression): ElementStream {
  */
 export const choose: StepFn = (s, st) => {
   assertForkSafe('choose', st);
-  const args = s.args.filter(isNested);
+  const args = argValues(s).filter(isNested);
   if (args.length < 2 || args.length > 3)
     throw new Error('choose(): only the predicate form choose(pred, then[, else]) is supported (option-map form not yet supported)');
   const [predArg, thenArg, elseArg] = args;
@@ -1181,7 +1181,7 @@ export const choose: StepFn = (s, st) => {
 export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream | null {
   if ((s as IRStep).optionArms) return null;
   assertForkSafe('choose', st);
-  const args = s.args.filter(isNested);
+  const args = argValues(s).filter(isNested);
   if (args.length !== 3) return null; // two-arg choose has an element identity else arm
   const [predArg, thenArg, elseArg] = args;
   const thenPlan = classifyScalarChild(thenArg.nested, childCtx(st));
@@ -1203,7 +1203,7 @@ export function tryLowerScalarChoose(s: Step, st: ElementStream): ScalarStream |
 export function tryLowerListChoose(s: Step, st: ElementStream): ListStream | null {
   if ((s as IRStep).optionArms) return null;
   assertForkSafe('choose', st);
-  const args = s.args.filter(isNested);
+  const args = argValues(s).filter(isNested);
   if (args.length !== 3) return null;
   const [predArg, thenArg, elseArg] = args;
   const thenPlan = classifyListChild(thenArg.nested, childCtx(st));
@@ -1264,7 +1264,7 @@ const isVariantArmKind = (s: Stream): s is ArmStream =>
 /** Lower `union(b1, b2, …)` in SOURCE position to one merged Stream. */
 export function sourceUnion(engine: Engine, step: IRStep, params: Record<string, any>, sackInit: SackSpec | undefined, facts: ChainFacts): Stream {
   const seed: LoweringState = { q: engine.q, params, traverserLayout: rootLayout() };
-  const branches = (step.args ?? []).filter(isNested);
+  const branches = argValues(step).filter(isNested);
   // union() with no branches emits nothing (TinkerPop: the result is empty). Not an arity error —
   // g.union() is a legal traversal, and one arm is legal too (there is nothing to disagree about).
   if (!branches.length) return emptyElementLike(seed);
@@ -1347,7 +1347,7 @@ export function tryLowerOptionMapBranch(st: ElementStream, step: IRStep): Stream
   const opts = readOptionMapArms(step, st.params);
   const merge = opts && optionMapMerge(step, ctx);
   if (!opts || !merge) return null;
-  const domain = chooseChoiceDomain(st, step.args[0]);
+  const domain = chooseChoiceDomain(st, step.args[0].value);
   if (!domain) return null;
   const d = domain.as('d');
 

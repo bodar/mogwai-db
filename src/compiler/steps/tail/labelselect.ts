@@ -1,5 +1,5 @@
 import { q, list, raw, empty, value, type Expression } from '../../../sql/kernel/q.ts';
-import { isTokenArg } from '../../../gremlin/frontend.ts';
+import { argValues, isTokenArg } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { aliasElem, aliasIsElement, aliasScalarTypeOf, layoutCols, patchLayout, layoutProjection, scalarTypeFromAlias, withShape, type AliasEntry, type AliasScalarType, type TraverserLayout, type LoweringState, type ElementStream } from '../context/context.ts';
 import {
@@ -80,7 +80,7 @@ function currentEntry(s: Exclude<Stream, { kind: 'result' }>, p: any): { entry: 
 /** as() on a non-element stream: append the current object to each label's history,
  *  preserving the stream's shape (a pass-through CTE that rebuilds only the alias cols). */
 export function asOnStream(s: Exclude<Stream, { kind: 'result' | 'elements' }>, step: IRStep): Stream {
-  const labels = step.args.filter((a): a is string => typeof a === 'string');
+  const labels = argValues(step).filter((a): a is string => typeof a === 'string');
   const p = s.rel.as('p');
   const { entry, shape, scalarType, listOf } = currentEntry(s, p);
   const aliases = new Map<string, AliasEntry>(s.traverserLayout.aliases);

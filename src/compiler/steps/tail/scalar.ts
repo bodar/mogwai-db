@@ -1,7 +1,7 @@
 import { empty, list, paren, q, raw, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { hasUnresolvedOperand, operandDeps, resolveTraversalOperands } from './operand.ts';
 import { compareKey, limitOffset, predicateSql, scalarTx, TYPE_PER_ROW, TYPE_STATIC, TYPE_UNKNOWN, typeCtxOf } from '../../plan/plan.ts';
-import { isNested, isOperatorArg, isOrderArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
+import { isNested, isOperatorArg, isOrderArg, isTokenArg, stepChain, argValues } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { isLocalScope, REDUCERS, sliceOf } from '../../ir/step.ts';
 import { armOrderKey, branchFork, layoutProjection, layoutProjectionMinting, layoutCols, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
@@ -95,7 +95,7 @@ const rowPreserving = (s: ScalarStream, suffix: Expression, orderByEncounter = f
 function scalarTransform(step: IRStep, currentAs: ValueType | undefined, expr: Expression, next?: IRStep): { expr: Expression; as?: ValueType } {
   let as: ValueType | undefined;
   if (step.name === 'asNumber') {
-    const spec = numericSpec(step.args[0]);
+    const spec = numericSpec(step.args[0]?.value);
     if (spec) { expr = asNumberSql(spec, expr); as = spec.as; }
     else if (currentAs === 'datetime') as = 'long';
     else if (next?.name === 'asDate') { expr = q`CAST(${expr} AS INTEGER)`; as = 'long'; }
@@ -103,11 +103,11 @@ function scalarTransform(step: IRStep, currentAs: ValueType | undefined, expr: E
   } else if (step.name === 'asDate') {
     expr = asDateSql(expr); as = 'datetime';
   } else if (step.name === 'dateAdd') {
-    expr = q`(${expr} + ${value(Number(step.args[1]) * dtFactor(step.args[0]))})`; as = 'datetime';
+    expr = q`(${expr} + ${value(Number(step.args[1].value) * dtFactor(step.args[0].value))})`; as = 'datetime';
   } else if (step.name === 'dateDiff') {
-    expr = q`(${expr} - ${value(dateDiffOtherMs(step.args[0], {}))})`; as = 'long';
+    expr = q`(${expr} - ${value(dateDiffOtherMs(step.args[0]?.value, {}))})`; as = 'long';
   } else {
-    expr = scalarTx(step.name, step.args ?? [], expr)
+    expr = scalarTx(step.name, argValues(step), expr)
       ?? (() => { throw new Error(`scalar transform ${step.name}() not supported`); })();
   }
   return { expr, as };
@@ -134,8 +134,8 @@ function fuseScalarSegment(s: ScalarStream, steps: readonly IRStep[], from: numb
     // End the fused segment here so lowerScalarRows re-dispatches it — the same way a retyping
     // is(typeOf(LIST)) ends one. Without this the fuse swallows it and reaches the pure leaf,
     // which correctly fails closed but never gives the seam a chance.
-    if ((step.name === 'concat' && (step.args ?? []).some(isNested))
-      || (step.name === 'dateDiff' && isNested(step.args?.[0]) && !isDateDiffConstant(step.args[0], s.params))) break;
+    if ((step.name === 'concat' && argValues(step).some(isNested))
+      || (step.name === 'dateDiff' && isNested(step.args?.[0]?.value) && !isDateDiffConstant(step.args[0].value, s.params))) break;
     if (SCALAR_TRANSFORMS.has(step.name)) {
       const out = scalarTransform(step, as, expr, steps[i + 1]);
       expr = out.expr;
@@ -150,7 +150,7 @@ function fuseScalarSegment(s: ScalarStream, steps: readonly IRStep[], from: numb
       const typeCtx = transformed ? (as ? TYPE_STATIC(as) : TYPE_UNKNOWN) : typeCtxOf(s.type, (name) => p.c[name]);
       // A re-sourced traversal operand (is(__.V(id).values('age'))) becomes a scalar subquery
       // before the pure SQL layer sees it — see steps/tail/operand.ts.
-      predicates.push(predicateSql(expr, resolveTraversalOperands(step.args[0], operandDeps(s), { row: p }), typeCtx));
+      predicates.push(predicateSql(expr, resolveTraversalOperands(step.args[0].value, operandDeps(s), { row: p }), typeCtx));
       continue;
     }
     break;
@@ -255,7 +255,7 @@ function localMeanScalar(s: ScalarStream): ScalarStream {
 
 function appendScalar(s: ScalarStream, step: IRStep): ScalarStream {
   if (step.args.length === 0) return s;
-  if (step.args.some(Array.isArray))
+  if (argValues(step).some(Array.isArray))
     throw new Error('inject(list) into a scalar stream needs a mixed-shape row discriminant');
   // A carried bulk column is benign: thread it (existing rows keep their multiplicity, each
   // appended constant is one bulk-1 traverser). An emission-order encounter is likewise benign:
@@ -269,7 +269,7 @@ function appendScalar(s: ScalarStream, step: IRStep): ScalarStream {
     throw new Error('inject() after typed/reduced/carried scalar state not yet supported');
   const p = s.rel.as('p');
   const n = step.args.length;
-  const appended = step.args.map((v, k) =>
+  const appended = argValues(step).map((v, k) =>
     q`SELECT ${value(v)} AS v${bulk ? q`, 1 AS bulk` : empty}${enc ? q`, ${value(k - n)} AS ${enc}` : empty}`);
   const carryCols = [...(bulk ? [bulk] : []), ...(enc ? [enc] : [])];
   const rel = s.q.cte(
@@ -307,18 +307,18 @@ export function tryInlineScalarPredicate(body: IRStep[], current: Expression, pa
   // transform or constant() changes the value's type, so the stored vtype no longer applies.
   let vtype = vtypeExpr;
   const preds: Expression[] = [];
-  const nestedOf = (s: IRStep) => s.args.filter(isNested);
+  const nestedOf = (s: IRStep) => argValues(s).filter(isNested);
   for (const s of body) {
     if (s.name === 'is') {
       // An unresolved traversal operand is outside THIS inliner's vocabulary (resolving one needs
       // the Engine, which a pure inliner has no access to). Decline so the caller falls through,
       // per the contract above — never throw from inside a fast path.
-      if (hasUnresolvedOperand(s.args[0])) return null;
-      preds.push(predicateSql(expr, s.args[0], vtype ? TYPE_PER_ROW(vtype) : TYPE_UNKNOWN));
+      if (hasUnresolvedOperand(s.args[0].value)) return null;
+      preds.push(predicateSql(expr, s.args[0].value, vtype ? TYPE_PER_ROW(vtype) : TYPE_UNKNOWN));
       continue;
     }
     if (s.name === 'identity') continue;                 // always productive, no rebind
-    if (s.name === 'constant') { expr = value(s.args[0]); vtype = undefined; continue; } // rebind current
+    if (s.name === 'constant') { expr = value(s.args[0].value); vtype = undefined; continue; } // rebind current
     if (s.name === 'and' || s.name === 'or') {
       const arms = nestedOf(s);
       if (!arms.length) return null;
@@ -349,8 +349,8 @@ export function tryInlineScalarPredicate(body: IRStep[], current: Expression, pa
       // recognizer must DECLINE, never throw: its contract is "return null and the caller falls
       // through to the generic gate", so letting the throw escape would define support by
       // vocabulary exhaustion and hard-fail a shape the generic path can still consider.
-      if ((s.args ?? []).some(isNested)) return null;
-      const tx = scalarTx(s.name, s.args ?? [], expr);
+      if (argValues(s).some(isNested)) return null;
+      const tx = scalarTx(s.name, argValues(s), expr);
       if (tx === null) return null; // asBool etc — outside the inline transform vocabulary
       expr = tx;
       vtype = undefined; // the value's type has changed; the stored vtype no longer describes it
@@ -381,11 +381,11 @@ export function lowerScalarFilter(s: ScalarStream, step: IRStep): ScalarStream |
   const cur = p.c.v;
   const vtPerRow = perRowColumnOf(s.type);
   const vt = vtPerRow ? p.c[vtPerRow] : undefined; // per-row stored type → vtype-aware predicates
-  const nested = step.args.filter(isNested);
+  const nested = argValues(step).filter(isNested);
   // where(P)/filter(P): a predicate directly on the value — no traversal child, always inline.
   if ((step.name === 'where' || step.name === 'filter') && !nested.length) {
-    const pred = step.args.find((a: any) => a && typeof a === 'object' && 'op' in a);
-    if (!pred || step.args.some((a: any) => typeof a === 'string')) return null; // where('a',P) → alias compare, decline
+    const pred = argValues(step).find((a: any) => a && typeof a === 'object' && 'op' in a);
+    if (!pred || argValues(step).some((a: any) => typeof a === 'string')) return null; // where('a',P) → alias compare, decline
     return filterScalarByCond(s, p, predicateSql(cur, pred, vt ? TYPE_PER_ROW(vt) : TYPE_UNKNOWN));
   }
   // Traversal-child predicate — the scalarPredicateInlining fast path (ScalarPredicateInliningFastPath
@@ -418,7 +418,7 @@ export function lowerScalarFilter(s: ScalarStream, step: IRStep): ScalarStream |
  * rows as a NULL list. The Scope.local form operates on a list (needs a preceding fold()).
  */
 export function lowerScalarSplit(s: ScalarStream, step: IRStep): ListStream {
-  const args = step.args ?? [];
+  const args = argValues(step);
   if (isLocalScope(step))
     throw new Error('split(Scope.local) requires a preceding list-producing step (e.g. fold())');
   const sep = args[0];
@@ -567,7 +567,7 @@ export function lowerScalarSack(s: ScalarStream, step: IRStep): ScalarStream {
   if (!s.traverserLayout.sack) throw new Error('sack() over a scalar stream requires withSack() or a preceding sack step');
   const sk = s.traverserLayout.sack;
   const p = s.rel.as('p');
-  const op = (step.args ?? []).find(isOperatorArg)?.operator;
+  const op = argValues(step).find(isOperatorArg)?.operator;
   if (!op) {
     // bare sack() read: the sack value becomes the current object.
     if ((step.args ?? []).length) throw new Error('sack(argument) read form not supported (bare sack() only)');
@@ -651,8 +651,8 @@ export function lowerScalarRows(
     if (step.name === 'is' && perRowColumnOf(stream.type) && collectionAssert(step) !== null) break;
     // An apply-style traversal operand needs a child scope per argument, which is a row
     // boundary rather than an expression the fuse can represent. Literal forms stay fused.
-    if ((step.name === 'concat' && (step.args ?? []).some(isNested))
-      || (step.name === 'dateDiff' && isNested(step.args?.[0]) && !isDateDiffConstant(step.args[0], stream.params))) break;
+    if ((step.name === 'concat' && argValues(step).some(isNested))
+      || (step.name === 'dateDiff' && isNested(step.args?.[0]?.value) && !isDateDiffConstant(step.args[0].value, stream.params))) break;
     if (SCALAR_TRANSFORMS.has(step.name) || step.name === 'is') {
       const fused = fuseScalarSegment(stream, steps, i);
       stream = fused.stream;
@@ -667,7 +667,7 @@ export function lowerScalarRows(
       continue;
     }
     if (step.name === 'tail') {
-      const n = Number(step.args.find((a: any) => typeof a === 'number') ?? 1);
+      const n = Number(argValues(step).find((a: any) => typeof a === 'number') ?? 1);
       stream = stream.traverserLayout.origins.length ? partitionedTail(stream, n) : rootTail(stream, n);
       continue;
     }

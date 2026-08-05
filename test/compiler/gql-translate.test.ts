@@ -24,7 +24,7 @@ const HOST_CTX = stepChain(parseGremlin('g.V()'), {})[0].ctx;
  *  point: the assertion and the execution read the same emitted steps. */
 function render(steps: readonly Step[]): string {
   return steps.map((s) => {
-    const args = (s.args ?? []).map((a: any) =>
+    const args = (s.args ?? []).map((arg: any) => arg.value).map((a: any) =>
       a && typeof a === 'object' && 'nested' in a ? `__.${render(a.nested)}` : JSON.stringify(a));
     return `${s.name}(${args.join(',')})`;
   }).join('.');

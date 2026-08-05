@@ -9,7 +9,7 @@ import type { Stmt } from '../../rel/stmt.ts';
 import { EXCLUDED, type ColMeta, type RelId, type RelType } from '../../rel/types.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/strategies.ts';
-import { isNested } from '../../gremlin/frontend.ts';
+import { isNested, argValues } from '../../gremlin/frontend.ts';
 import { gremlinTypeOf, propertyValueBind } from '../../gremlin/types.ts';
 import { propertyFtsEntries } from '../../services/fts-index.ts';
 import { mergeMaps, parseProperty, type MergeMaps, type MergeSpec, type ParsedProperty, type PropSpec } from '../steps/write/write.ts';
@@ -719,7 +719,7 @@ const writeInputChannels = (input: Rel): Channels =>
  *  silently skip. */
 export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IRStep[], ordered: boolean, params: Record<string, any>, cardinality: LabelCardinality, fresh: Minter): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
-  const labels = creationLabels(step.args ?? [], cardinality);
+  const labels = creationLabels(argValues(step), cardinality);
   if (!labels) return null;
   const writes = propertySteps.length ? propertyWrites(propertySteps, 'vertex', params) : [];
   if (!writes) return null;
@@ -841,7 +841,7 @@ export function elementAddE(
   ordered: boolean, params: Record<string, any>, reads: SubReads, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
-  const label = (step.args ?? [])[0];
+  const label = (step.args ?? [])[0]?.value;
   if (typeof label !== 'string') return null;
   try { validateLabel(label); } catch { return null; }
 
@@ -852,7 +852,7 @@ export function elementAddE(
   for (const member of cluster) {
     if (member.name === 'property') { propertySteps.push(member); continue; }
     if (member.modulators?.length || member.optionArms) return null;
-    const parsed = endpointOf((member.args ?? [])[0], reads);
+    const parsed = endpointOf((member.args ?? [])[0]?.value, reads);
     if (!parsed) return null;
     if (member.name === 'from') from = parsed; else to = parsed;
     sides++;
@@ -951,8 +951,8 @@ function endpointOf(arg: unknown, reads: SubReads): Endpoint | null {
   const inner = reads.body(arg);
   if (!inner?.length) return null;
   // `__.select("a")` IS the bare label, spelled longhand.
-  if (inner.length === 1 && inner[0]!.name === 'select' && typeof inner[0]!.args?.[0] === 'string')
-    return { kind: 'alias', label: inner[0]!.args[0] as string };
+  if (inner.length === 1 && inner[0]!.name === 'select' && typeof inner[0]!.args?.[0]?.value === 'string')
+    return { kind: 'alias', label: inner[0]!.args[0].value as string };
   const read = reads.rooted(inner);
   return read && { kind: 'read', rel: read };
 }

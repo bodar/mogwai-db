@@ -1,4 +1,4 @@
-import { stepChain, isNested } from '../../gremlin/frontend.ts';
+import { stepChain, isNested, argValues } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../../compiler/ir/strategies.ts';
 import { DIRECTORY_SERVICE_NAME } from '../spi/types.ts';
 import type { CallSpec, CallParams, InjectionKind } from '../spi/types.ts';
@@ -14,8 +14,8 @@ export function injectionKindOf(nested: any, params: Record<string, any>): Injec
   const body = stepChain(nested, params);
   if (body.length !== 1) return null;
   const s = body[0];
-  if (s.name === 'values' && s.args.length === 1 && typeof s.args[0] === 'string')
-    return { kind: 'values', key: s.args[0] };
+  if (s.name === 'values' && s.args.length === 1 && typeof s.args[0]?.value === 'string')
+    return { kind: 'values', key: s.args[0].value };
   if (s.name === 'id' && s.args.length === 0) return { kind: 'id' };
   if (s.name === 'label' && s.args.length === 0) return { kind: 'label' };
   return null;
@@ -46,7 +46,7 @@ function resolveValueTraversal(nested: any, params: Record<string, any>): unknow
   try {
     const body = stepChain(nested, params);
     if (body.length === 1 && body[0].name === 'constant' && body[0].args.length === 1)
-      return body[0].args[0];
+      return body[0].args[0].value;
   } catch { /* unbound var → not a constant; fall through to serialize */ }
   return { kind: 'traversal', gremlin: nestedTraversalToGremlin(nested) } satisfies TraversalParam;
 }
@@ -72,7 +72,7 @@ function resolveValueTraversal(nested: any, params: Record<string, any>): unknow
 function constFromValueTraversal(nested: any, params: Record<string, any>): unknown {
   const body = stepChain(nested, params);
   if (body.length === 1 && body[0].name === 'constant' && body[0].args.length === 1)
-    return body[0].args[0];
+    return body[0].args[0].value;
   throw new Error('call() parameter value traversal must be __.constant(literal) — richer per-traverser params are not yet supported');
 }
 
@@ -86,8 +86,8 @@ function constMapFromTraversal(nested: any, params: Record<string, any>): CallPa
   const proj = chain[0];
   if (!proj || proj.name !== 'project' || chain.slice(1).some((s) => s.name !== 'by'))
     throw new Error('call() map traversal must be __.project(...).by(__.constant(...)) — richer forms are not yet supported');
-  const keys = proj.args.filter((a): a is string => typeof a === 'string');
-  const byBodies = chain.slice(1).map((s) => s.args[0]);
+  const keys = argValues(proj).filter((a): a is string => typeof a === 'string');
+  const byBodies = chain.slice(1).map((s) => s.args[0]?.value);
   const out: CallParams = {};
   keys.forEach((k, i) => {
     const by = byBodies[i];
@@ -110,7 +110,7 @@ function constMapFromTraversal(nested: any, params: Record<string, any>): CallPa
  *  — injectionKindOf) — precise so the `--list` 3-arg form (a project-traversal) is untouched and
  *  never captured as an injection (that would both mis-route AND retain a huge cyclic antlr node). */
 export function parseCallSpec(step: IRStep, params: Record<string, any>): CallSpec {
-  const [name, ...rest] = step.args;
+  const [name, ...rest] = argValues(step);
   // Bare g.call() ≡ g.call("--list") (the directory). A missing name defaults to it.
   const serviceName = typeof name === 'string' ? name : DIRECTORY_SERVICE_NAME;
 

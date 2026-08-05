@@ -1,4 +1,4 @@
-import { stepChain, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPred, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
+import { stepChain, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPred, isScopeArg, arg, argValues, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { mapEntryType } from '../../gremlin/types.ts';
@@ -173,13 +173,13 @@ export function isAlwaysProductiveFilterNoOp(steps: Step[], params: Record<strin
   return recurseInject(steps, params, (level) => {
     const out: Step[] = [];
     for (const s of level) {
-      const nested = s.args.filter(isNested);
-      if (EXISTENCE_FILTER_HOSTS.has(s.name) && s.args.length === 1 && bodyAlwaysProduces(s.args[0], params)) {
-        if (s.name === 'not') out.push({ name: 'limit', args: [0] } as Step);
+      const nested = s.args.filter((a) => isNested(a.value));
+      if (EXISTENCE_FILTER_HOSTS.has(s.name) && s.args.length === 1 && bodyAlwaysProduces(s.args[0].value, params)) {
+        if (s.name === 'not') out.push({ name: 'limit', args: [arg(0)] } as Step);
         continue; // where()/filter(): inert, drop the step
       }
       if ((s.name === 'and' || s.name === 'or') && nested.length > 0) {
-        const kept = nested.filter((b) => !bodyAlwaysProduces(b, params));
+        const kept = nested.filter((b) => !bodyAlwaysProduces(b.value, params));
         if (kept.length !== nested.length) {
           // or(): one always-true arm satisfies the whole disjunction → inert.
           // and(): the true arms contribute nothing; drop them and keep the rest. An empty
@@ -224,7 +224,7 @@ export const rejectMsg = (name: string) =>
   `(e.g. PartitionStrategy/SubgraphStrategy filtering, ProductiveByStrategy null semantics). Rejected to fail closed.`;
 
 /** A synthetic step (no real parse context of its own — it borrows the strategy's). */
-const synth = (name: string, args: any[], ctx: StrategySpec['ctx']): Step => ({ name, args, ctx });
+const synth = (name: string, args: any[], ctx: StrategySpec['ctx']): Step => ({ name, args: args.map((v) => arg(v)), ctx });
 
 /** Wrap an already-lowered Step[] as a nested-traversal arg (the substrate: stepChain is
  *  idempotent on a Step[], so the synthetic body flows through every consumer verbatim). */
@@ -237,7 +237,7 @@ const nestedArg = (steps: Step[]): any => ({ nested: steps });
  *  ask about the whole body, nested arms included, not just its top level. */
 export function someStepDeep(steps: Step[], params: Record<string, any>, pred: (s: Step) => boolean): boolean {
   return steps.some((s) =>
-    pred(s) || s.args.some((a) => isNested(a) && someStepDeep(stepChain(a.nested, params), params, pred)));
+    pred(s) || s.args.some((a) => isNested(a.value) && someStepDeep(stepChain(a.value.nested, params), params, pred)));
 }
 
 /** Apply a per-chain injection rule at EVERY nesting depth. Postorder: each step's nested
@@ -250,8 +250,8 @@ export function someStepDeep(steps: Step[], params: Record<string, any>, pred: (
 function recurseInject(steps: Step[], params: Record<string, any>, applyLevel: (s: Step[]) => Step[]): Step[] {
   const withRewrittenChildren = steps.map((s) => ({
     ...s,
-    args: s.args.map((a) => isNested(a)
-      ? nestedArg(recurseInject(stepChain(a.nested, params), params, applyLevel))
+    args: s.args.map((a) => isNested(a.value)
+      ? arg(nestedArg(recurseInject(stepChain(a.value.nested, params), params, applyLevel)))
       : a),
   }));
   return applyLevel(withRewrittenChildren);
@@ -302,7 +302,7 @@ export function injectSubgraphRec(steps: Step[], spec: StrategySpec, params: Rec
       // Movement explosion (edge criterion only): land on the edge, filter it, land on the
       // far endpoint, filter it. The NEAR endpoint was filtered by the previous producer.
       if (eCrit && s.name in EXPLODE_EDGE) {
-        out.push(synth(EXPLODE_EDGE[s.name], s.args, s.ctx));
+        out.push(synth(EXPLODE_EDGE[s.name], argValues(s), s.ctx));
         out.push(whereOf(eCrit));
         out.push(synth(EXPLODE_FARV[s.name], [], s.ctx));
         if (vCrit) out.push(vFilter());
@@ -367,10 +367,10 @@ export function verify(spec: StrategySpec, steps: Step[]): void {
     if (spec.config.throwException !== true) return; // default warns only → no-op
     const bad = steps.find((s) => {
       if (!EDGE_TRAVERSAL_STEPS.has(s.name)) return false;
-      if (s.args.some((a) => typeof a === 'string')) return false; // has an edge label → fine
+      if (s.args.some((a) => typeof a.value === 'string')) return false; // has an edge label → fine
       // `to` is a vertex step ONLY in the to(Direction[,labels]) form; the addE endpoint
       // modulators to(__.V(...))/to('alias') are NOT vertex steps → never flag them.
-      if (s.name === 'to') return s.args.some(isDirectionArg);
+      if (s.name === 'to') return s.args.some((a) => isDirectionArg(a.value));
       return true;
     });
     if (bad) throw new Error(`The provided traversal contains a vertex step without any specified edge label: ${bad.name}()`);
@@ -381,8 +381,8 @@ export function verify(spec: StrategySpec, steps: Step[]): void {
     // scalar for leniency. (Before set-literal parsing landed, {a} arrived as a bare scalar.)
     const reserved = new Set<string>(k == null ? ['id', 'label'] : k instanceof Set ? [...k] as string[] : Array.isArray(k) ? k : [k]);
     for (const s of steps)
-      if (s.name === 'property' && typeof s.args[0] === 'string' && reserved.has(s.args[0]))
-        throw new Error(`The provided traversal is setting a property key to a reserved word: ${s.args[0]}`);
+      if (s.name === 'property' && typeof s.args[0]?.value === 'string' && reserved.has(s.args[0].value))
+        throw new Error(`The provided traversal is setting a property key to a reserved word: ${s.args[0].value}`);
   }
 }
 
@@ -404,7 +404,7 @@ export function verify(spec: StrategySpec, steps: Step[]): void {
  *  `property(__.trav)` whose traversal PRODUCES a map is a different arm (it needs the driver's
  *  current object) and is deliberately not matched here. */
 function isPropertyMapForm(s: IRStep): boolean {
-  const args = s.args ?? [];
+  const args = (s.args ?? []).map((a) => a.value);
   const off = isCardinalityArg(args[0]) && !isCardinalityValueArg(args[0]) ? 1 : 0;
   return s.name === 'property' && args.length === off + 1 && args[off] instanceof Map;
 }
@@ -434,18 +434,18 @@ export function desugarPropertyMap(steps: IRStep[]): IRStep[] {
   const out: IRStep[] = [];
   for (const s of steps) {
     if (!isPropertyMapForm(s)) { out.push(s); continue; }
-    const off = isCardinalityArg(s.args[0]) && !isCardinalityValueArg(s.args[0]) ? 1 : 0;
-    const outer = off ? (s.args[0] as { cardinality: string }).cardinality : null;
-    const entryType = s.argTypes?.[off] ?? null;
-    for (const [k, v] of s.args[off] as Map<any, any>) {
+    const off = isCardinalityArg(s.args[0].value) && !isCardinalityValueArg(s.args[0].value) ? 1 : 0;
+    const outer = off ? (s.args[0].value as { cardinality: string }).cardinality : null;
+    const entryType = s.args[off]?.type ?? null;
+    for (const [k, v] of s.args[off].value as Map<any, any>) {
       const cv = isCardinalityValueArg(v) ? v : null;
       const card = cv ? cv.cardinality : outer;
       // The entry's captured value TYPE. A CardinalityValue entry has none (the parser records
       // `value: null` for it), which is the honest answer — its inner value is typed by inference.
       const vt = mapEntryType(entryType, String(k));
       out.push(card === null
-        ? { ...s, args: [k, cv ? cv.value : v], argTypes: [null, vt] }
-        : { ...s, args: [{ cardinality: card }, k, cv ? cv.value : v], argTypes: [null, null, vt] });
+        ? { ...s, args: [arg(k), arg(cv ? cv.value : v, vt)] }
+        : { ...s, args: [arg({ cardinality: card }), arg(k), arg(cv ? cv.value : v, vt)] });
     }
   }
   return out;
@@ -467,7 +467,7 @@ export function desugarIo(steps: IRStep[]): IRStep[] {
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
     if (s.name !== 'io') { out.push(s); continue; }
-    const path = s.args[0];
+    const path = s.args[0].value;
     if (typeof path !== 'string')
       throw new Error('io() takes a string path (the document to read or write)');
     // The direction step is the first NON-with step after io() — with() modulates the call, so it
@@ -477,7 +477,7 @@ export function desugarIo(steps: IRStep[]): IRStep[] {
     const direction = steps[j]?.name;
     if (direction !== 'read' && direction !== 'write')
       throw new Error(`io("${path}") must be followed by read() or write()`);
-    out.push({ ...s, name: 'call', args: [IO_SERVICE_NAME, new Map<string, any>([['path', path], ['direction', direction]])] });
+    out.push({ ...s, name: 'call', args: [arg(IO_SERVICE_NAME), arg(new Map<string, any>([['path', path], ['direction', direction]]))] });
     // Re-emit the with() steps AFTER the call so absorbCallWith folds them, and drop the
     // read()/write() itself — it was the direction, and it is now a param.
     for (let k = i + 1; k < j; k++) out.push(steps[k]);
@@ -494,7 +494,7 @@ export function absorbCallWith(steps: IRStep[]): IRStep[] {
     const withArgs: [string, any][] = [];
     let j = i + 1;
     for (; j < steps.length && steps[j].name === 'with'; j++) {
-      const [k, v] = steps[j].args;
+      const [k, v] = steps[j].args.map((a) => a.value);
       if (typeof k !== 'string') throw new Error('call().with() key must be a string');
       withArgs.push([k, v]);
     }
@@ -542,7 +542,7 @@ function constantOperand(nested: any, params: Record<string, any>): { value: any
   if (body.length !== 1 || body[0].name !== 'constant') return undefined;
   const args = body[0].args ?? [];
   if (args.length !== 1) return undefined;
-  const v = args[0];
+  const v = args[0].value;
   // Primitives only: a nested/objecty constant arg is not a comparable literal, and `undefined`
   // means the parse resolved a placeholder we could not see.
   if (v === null) return { value: null };
@@ -579,15 +579,16 @@ export function foldConstantPredicateOperands(steps: IRStep[], params: Record<st
   return steps.map((s) => {
     const slots = VALUE_OPERAND_SLOTS[s.name]?.(s.args ?? []) ?? [];
     let changed = false;
-    const args = (s.args ?? []).map((a: any, i: number) => {
+    const args = (s.args ?? []).map((argObj, i) => {
+      const a = argObj.value;
       if (slots.includes(i) && isNested(a)) {
         const c = constantOperand(a.nested, params);
-        if (c) { changed = true; return c.value; }
-        return a;
+        if (c) { changed = true; return arg(c.value); }
+        return argObj;
       }
       const folded = foldPredOperands(a, params);
-      if (folded !== a) changed = true;
-      return folded;
+      if (folded !== a) { changed = true; return arg(folded, argObj.type, argObj.name); }
+      return argObj;
     });
     return changed ? { ...s, args } : s;
   });
@@ -611,7 +612,8 @@ function valueArgTraversals(s: Step): any[] {
     ...(READONLY_CHILD_HOSTS[s.name]?.(s.args ?? []) ?? []),
   ];
   const out: any[] = [];
-  (s.args ?? []).forEach((a: any, i: number) => {
+  (s.args ?? []).forEach((arg, i) => {
+    const a = arg.value;
     if (slots.includes(i) && isNested(a)) out.push(a.nested);
     // …and operands wrapped in a predicate: has("name", P.eq(__.addV(…))).
     const preds: any[] = a && typeof a === 'object' && 'op' in a && Array.isArray(a.values) ? [a] : [];
@@ -668,7 +670,7 @@ export function verifyStandard(steps: IRStep[], params: Record<string, any>): vo
       // inside it. `until`/`emit` bodies count as well — the reference reaches them by the same
       // parent walk, and they are arguments of the same cluster here.
       const repeatHost = underRepeat || REPEAT_CLUSTER.has(s.name);
-      for (const a of s.args ?? []) {
+      for (const { value: a } of s.args ?? []) {
         if (!isNested(a)) continue;
         try { scan(stepChain(a.nested, params), repeatHost); } catch (e) { if (isVerificationFailure(e)) throw e; /* unparseable without params — skip */ }
       }
@@ -737,7 +739,7 @@ export function verifyByModulatorArity(steps: IRStep[], params: Record<string, a
         while (chain[i + 1 + n]?.name === 'by') n++;
         if (n > rule.max) throw new Error(rule.message);
       }
-      for (const a of s.args ?? []) {
+      for (const { value: a } of s.args ?? []) {
         if (!isNested(a)) continue;
         try { scan(stepChain(a.nested, params)); } catch { /* unparseable without params — skip */ }
       }
@@ -761,10 +763,10 @@ export function absorbValueMapWith(steps: IRStep[]): IRStep[] {
     const w = steps[i + 1];
     const wargs: any[] = s.name === 'valueMap' && w?.name === 'with' ? (w.args ?? []) : [];
     // Desugar only the all-tokens forms: with(tokens) or with(tokens, all).
-    const allTokens = wargs.length >= 1 && isTokensArg(wargs[0])
-      && (wargs.length === 1 || (wargs.length === 2 && isAllArg(wargs[1])));
+    const allTokens = wargs.length >= 1 && isTokensArg(wargs[0].value)
+      && (wargs.length === 1 || (wargs.length === 2 && isAllArg(wargs[1].value)));
     if (!allTokens) { out.push(s); continue; }
-    out.push(s.args.includes(true) ? s : { ...s, args: [true, ...s.args] });
+    out.push(s.args.some((a) => a.value === true) ? s : { ...s, args: [arg(true), ...s.args] });
     i += 1; // consume the with()
   }
   return out;
@@ -780,8 +782,8 @@ export function collapseFoldCountLocal(steps: IRStep[]): IRStep[] {
     const s = steps[i];
     const next = steps[i + 1];
     if (s.name === 'fold' && !s.modulators && next?.name === 'count'
-      && next.args.some((a: any) => a && typeof a === 'object' && a.scope === 'local')) {
-      out.push({ ...next, args: next.args.filter((a: any) => !(a && typeof a === 'object' && a.scope === 'local')) });
+      && next.args.some((a) => isScopeArg(a.value) && a.value.scope === 'local')) {
+      out.push({ ...next, args: next.args.filter((a) => !(isScopeArg(a.value) && a.value.scope === 'local')) });
       i++; // consume both fold and count(Scope.local)
       continue;
     }
@@ -839,7 +841,7 @@ export function stripTerminal(steps: Step[]): { steps: Step[]; discard: boolean 
 
 /** A BARE connective — the infix `.and()`/`.or()` with no traversal args. The step FORM
  *  `and(__.a, __.b)` carries nested args and is already canonical, so it is left alone. */
-const isBareConnective = (s: Step, name: 'and' | 'or'): boolean => s.name === name && !s.args.some(isNested);
+const isBareConnective = (s: Step, name: 'and' | 'or'): boolean => s.name === name && !s.args.some((a) => isNested(a.value));
 
 /** Steps a connective's LEFT operand must NOT absorb — mirroring TinkerPop's
  *  `ConnectiveStrategy.legalCurrentStep`, which excludes GraphStep/StartStep so that
@@ -917,12 +919,12 @@ export function canonicalizeConnectives(steps: Step[], params: Record<string, an
   const mapped = steps.map((s) => {
     let changed = false;
     const args = s.args.map((a) => {
-      if (!isNested(a)) return a;
-      const inner = stepChain(a.nested, params);
+      if (!isNested(a.value)) return a;
+      const inner = stepChain(a.value.nested, params);
       const folded = canonicalizeConnectives(inner, params);
       if (folded === inner) return a; // untouched → keep the ORIGINAL arg, parse tree intact
       changed = true;
-      return nestedArg(folded);
+      return arg(nestedArg(folded));
     });
     if (!changed) return s;
     anyChild = true;
@@ -1005,13 +1007,13 @@ function tryUnroll(region: Step[], params: Record<string, any>): Step[] | null {
   const rep = region.find((s) => s.name === 'repeat');
   const times = region.find((s) => s.name === 'times');
   if (!rep || !times) return null;
-  const n = (times.args ?? [])[0];
+  const n = (times.args ?? [])[0]?.value;
   if (typeof n !== 'number' || !Number.isInteger(n) || n < 1) return null;
   // A named repeat("a", body) carries a loop counter loops("a") can read; only the single-arg form
   // is a plain n applications.
   const args = rep.args ?? [];
-  if (args.length !== 1 || !isNested(args[0])) return null;
-  const body = stepChain(args[0].nested, params);
+  if (args.length !== 1 || !isNested(args[0].value)) return null;
+  const body = stepChain(args[0].value.nested, params);
   if (!body.length || !body.every(unrollableBodyStep)) return null;
   // Nothing to gain unless a barrier is what was blocking it: a barrier-free body already lowers
   // through the flat expansion, and unrolling it would change the SQL for no capability.
@@ -1055,7 +1057,7 @@ export function formRepeatRegions(steps: Step[]): IRStep[] {
  *  throw — never silently absorbed). */
 function isAliasCompareWhere(s: Step): boolean {
   if (s.name !== 'where' && s.name !== 'not') return false;
-  const a = s.args[0];
+  const a = s.args[0]?.value;
   return typeof a === 'string' || (a != null && typeof a === 'object' && 'op' in a);
 }
 
@@ -1075,10 +1077,12 @@ export function absorbModulators(steps: IRStep[]): IRStep[] {
     let j = i + 1;
     for (; j < steps.length; j++) {
       const m = steps[j];
-      if (m.name === 'by') { modulators.push(m.args); continue; }
+      // Modulator entries stay VALUE-lists (a by()'s resolved args) — every `.modulators` consumer
+      // reads values, and a by($x) modulator param is not wired to bind yet (see the const seam).
+      if (m.name === 'by') { modulators.push(argValues(m)); continue; }
       // from()/to() are path-scoping modulators only on a path-family host.
-      if (pathHost && m.name === 'from' && typeof m.args[0] === 'string') { from = m.args[0]; continue; }
-      if (pathHost && m.name === 'to' && typeof m.args[0] === 'string') { to = m.args[0]; continue; }
+      if (pathHost && m.name === 'from' && typeof m.args[0]?.value === 'string') { from = m.args[0].value; continue; }
+      if (pathHost && m.name === 'to' && typeof m.args[0]?.value === 'string') { to = m.args[0].value; continue; }
       break;
     }
     const folded = modulators.length || from !== undefined || to !== undefined
@@ -1112,7 +1116,7 @@ export function absorbOptionArms(steps: IRStep[]): IRStep[] {
 
 /** PURE. The string labels an `as()` step binds (`as('a','b')` binds both). */
 const asLabelsOf = (s: Step): string[] =>
-  s.name === 'as' ? (s.args ?? []).filter((a: any): a is string => typeof a === 'string') : [];
+  s.name === 'as' ? (s.args ?? []).map((a) => a.value).filter((a: any): a is string => typeof a === 'string') : [];
 
 /** PURE. The labels a `match()` step binds — the `as(start)`/`as(end)` wrapping each of its pattern
  *  arguments. A step's OWN `as()` is not the only way a label enters scope, and match() is the case
@@ -1125,7 +1129,7 @@ const asLabelsOf = (s: Step): string[] =>
 const matchLabelsOf = (s: Step, params: Record<string, any>): string[] => {
   if (s.name !== 'match') return [];
   const out: string[] = [];
-  for (const a of s.args ?? []) {
+  for (const { value: a } of s.args ?? []) {
     if (!isNested(a)) continue;
     const chain = stepChain(a.nested, params);
     if (chain[0]?.name !== 'as') continue;
@@ -1183,9 +1187,9 @@ function rewriteWhereVariables(body: Step[], bound: ReadonlySet<string>, params:
   const last = body[body.length - 1];
   // Recurse THROUGH a connective: each branch carries its own start/end, exactly as upstream's
   // configureStartAndEndSteps walks the ConnectiveStep/NotStep children.
-  if (WHERE_CONNECTIVES.has(last.name) && (last.args ?? []).some(isNested)) {
-    const rebuilt = { ...last, args: last.args.map((a: any) => (isNested(a)
-      ? nestedArg(rewriteWhereVariables(stepChain(a.nested, params), bound, params))
+  if (WHERE_CONNECTIVES.has(last.name) && (last.args ?? []).some((a) => isNested(a.value))) {
+    const rebuilt = { ...last, args: last.args.map((a) => (isNested(a.value)
+      ? arg(nestedArg(rewriteWhereVariables(stepChain(a.value.nested, params), bound, params)))
       : a)) };
     return [...body.slice(0, -1), rebuilt];
   }
@@ -1225,7 +1229,7 @@ function rewriteEndLabel(body: Step[], bound: ReadonlySet<string>): Step[] {
   // constrains BOTH). Any label the enclosing chain never bound stays a bind: drop only the ones
   // consumed, and keep the as() itself when some remain.
   const rest = asLabelsOf(last).filter((l) => !bound.has(l));
-  const head = rest.length ? [...body.slice(0, -1), { ...last, args: rest }] : body.slice(0, -1);
+  const head = rest.length ? [...body.slice(0, -1), { ...last, args: rest.map((v) => arg(v)) }] : body.slice(0, -1);
   if (!head.length) return body; // nothing to constrain against — leave the bind alone
   return [...head, ...labels.map((l) => synth('where', [{ op: 'eq', values: [l] }], last.ctx))];
 }
@@ -1251,9 +1255,9 @@ export function rewriteWhereEndLabels(steps: IRStep[], params: Record<string, an
       // the order they were written in. Every other host binds strictly left-to-right (line below),
       // so seed match's own labels before descending rather than widening the general rule.
       const inner = s.name === 'match' ? new Set([...bound, ...matchLabelsOf(s, params)]) : bound;
-      const args = (s.args ?? []).map((a: any) => {
-        if (!isNested(a)) return a;
-        const body = stepChain(a.nested, params);
+      const args = (s.args ?? []).map((a) => {
+        if (!isNested(a.value)) return a;
+        const body = stepChain(a.value.nested, params);
         // The variable-location rewrite first (it reads the labels visible at the HOST), then the
         // ordinary descent, so a nested where() inside the rewritten body is still visited.
         //
@@ -1269,7 +1273,7 @@ export function rewriteWhereEndLabels(steps: IRStep[], params: Record<string, an
         const walked = walk(scoped, inner);
         if (scoped === body && walked === null) return a;
         stepChanged = true;
-        return nestedArg(walked ?? scoped);
+        return arg(nestedArg(walked ?? scoped));
       });
       // …then this step's own binds become visible to everything after it.
       for (const l of asLabelsOf(s)) bound.add(l);
@@ -1293,15 +1297,15 @@ type PassContextLike = { readonly params: Record<string, any> };
 /** Is this a `match("<gql>")` — the string form rather than the traversal form? The two share a step
  *  name (both the source-spawn and traversal-method grammar rules yield `match`), so the ARGUMENT
  *  decides: the string form's first argument is the pattern text. */
-const isMatchString = (s: IRStep): boolean => s.name === 'match' && typeof (s.args ?? [])[0] === 'string';
+const isMatchString = (s: IRStep): boolean => s.name === 'match' && typeof (s.args ?? [])[0]?.value === 'string';
 
 /** The `$name` bindings a pattern may reference: the optional SECOND argument of
  *  `match(str, [k: v])`, which reaches here as a JS Map (a map literal and a bound map parameter
  *  both arrive that way). Not the wire params — a pattern's `$name` is scoped to its own call. */
 function matchStringParams(step: IRStep): Record<string, any> {
-  const arg = (step.args ?? [])[1];
-  if (arg instanceof Map) return Object.fromEntries(arg);
-  if (arg && typeof arg === 'object') return arg as Record<string, any>;
+  const mp = (step.args ?? [])[1]?.value;
+  if (mp instanceof Map) return Object.fromEntries(mp);
+  if (mp && typeof mp === 'object') return mp as Record<string, any>;
   return {};
 }
 
@@ -1328,7 +1332,7 @@ export function desugarMatchString(steps: IRStep[], _ctx: PassContextLike): IRSt
     // The desugar opens with `V()`. At the head of the chain that IS the source; mid-chain it is a
     // re-source, which is what TinkerPop's mid-traversal match-string does — it ignores the incoming
     // traverser's value and emits the bindings once per traverser (`g.inject(1).match(…)`).
-    out.push(...gqlMatchSteps(s.args[0] as string, matchStringParams(s), s.ctx, i === steps.length - 1) as IRStep[]);
+    out.push(...gqlMatchSteps(s.args[0].value as string, matchStringParams(s), s.ctx, i === steps.length - 1) as IRStep[]);
   });
   return out;
 }

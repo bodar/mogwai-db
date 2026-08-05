@@ -40,13 +40,13 @@ describe('io() desugars to a call() on the internal service', () => {
     const [call, ...rest] = steps('g.io("data/modern.json").read()');
     expect(rest).toEqual([]);                       // read() is consumed — it WAS the direction
     expect(call.name).toBe('call');
-    expect(call.args[0]).toBe('mogwai.io');
-    expect(call.args[1]).toEqual(new Map<string, any>([['path', 'data/modern.json'], ['direction', 'read']]));
+    expect(call.args[0].value).toBe('mogwai.io');
+    expect(call.args[1].value).toEqual(new Map<string, any>([['path', 'data/modern.json'], ['direction', 'read']]));
   });
 
   test('io(path).write() carries direction=write', () => {
     const [call] = steps('g.io("x.json").write()');
-    expect((call.args[1] as Map<string, any>).get('direction')).toBe('write');
+    expect((call.args[1].value as Map<string, any>).get('direction')).toBe('write');
   });
 
   test('an io().with(k,v) modulator folds onto the minted call, as a hand-written call()"s would', () => {

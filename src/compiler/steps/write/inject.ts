@@ -1,6 +1,6 @@
 import { q, value, list } from '../../../sql/kernel/q.ts';
 import { jsonbArrayOf } from '../../plan/plan.ts';
-import { flattenListArgs, isNested, type SackSpec } from '../../../gremlin/frontend.ts';
+import { flattenListArgs, argValues, isNested, type SackSpec } from '../../../gremlin/frontend.ts';
 import { flatType, type CanonicalType } from '../../../gremlin/types.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { patchLayout, rootLayout, type LoweringState } from '../context/context.ts';
@@ -41,7 +41,7 @@ const DECLARED_TYPE_REQUIRED = new Set<CanonicalType>([
  *  would be a second chance to get `char`/`uuid`/`datetime` wrong. Measured: it already was, and
  *  the census caught four traversals reframing before the port used this. */
 export function bareInjectTag(steps: IRStep[], count: number): ValueType | undefined {
-  const argTypes = steps[0].argTypes ?? [];
+  const argTypes = steps[0].args.map((a) => a.type);
   if (!count) return undefined;
   const names = Array.from({ length: count }, (_, i) => flatType(argTypes[i]));
   const uniform = names.every((n) => n === names[0]) ? names[0] : undefined;
@@ -66,14 +66,14 @@ export function foldConstantCoercions(steps: IRStep[], vals: any[]): { at: numbe
     const step = steps[at];
     // A traversal date is an apply-style child value, not a constant coercion. Leave it
     // for the scalar dispatcher, which provisions the correlated child scope.
-    if (step.name === 'dateDiff' && isNested(step.args[0]) && !isDateDiffConstant(step.args[0], {})) break;
+    if (step.name === 'dateDiff' && isNested(step.args[0]?.value) && !isDateDiffConstant(step.args[0]?.value, {})) break;
     if (step.name === 'asBool') {
       for (let i = 0; i < vals.length; i++) vals[i] = asBoolConst(vals[i]);
       as = 'boolean';
       continue;
     }
     if (step.name === 'asNumber') {
-      const spec = numericSpec(step.args[0]);
+      const spec = numericSpec(step.args[0]?.value);
       if (spec) {
         for (let i = 0; i < vals.length; i++) vals[i] = asNumberConst(vals[i], spec);
         as = spec.as;
@@ -82,7 +82,7 @@ export function foldConstantCoercions(steps: IRStep[], vals: any[]): { at: numbe
           as = 'long';
           continue;
         }
-        const argTypes = at === 1 ? (steps[0].argTypes ?? []) : [];
+        const argTypes = at === 1 ? steps[0].args.map((a) => a.type) : [];
         let uniform: ValueType | undefined;
         for (let i = 0; i < vals.length; i++) {
           const out = asNumberBare(vals[i], flatType(argTypes[i]));
@@ -96,18 +96,18 @@ export function foldConstantCoercions(steps: IRStep[], vals: any[]): { at: numbe
       continue;
     }
     if (step.name === 'asDate') {
-      const argTypes = at === 1 ? (steps[0].argTypes ?? []) : [];
+      const argTypes = at === 1 ? steps[0].args.map((a) => a.type) : [];
       for (let i = 0; i < vals.length; i++) vals[i] = asDateConst(vals[i], flatType(argTypes[i]));
       as = 'datetime';
       continue;
     }
     if (step.name === 'dateAdd') {
-      const delta = Number(step.args[1]) * dtFactor(step.args[0]);
+      const delta = Number(step.args[1].value) * dtFactor(step.args[0].value);
       for (let i = 0; i < vals.length; i++) vals[i] = Number(vals[i]) + delta;
       as = 'datetime';
       continue;
     }
-    const other = dateDiffOtherMs(step.args[0], {});
+    const other = dateDiffOtherMs(step.args[0]?.value, {});
     for (let i = 0; i < vals.length; i++) vals[i] = Number(vals[i]) - other;
     as = 'long';
   }
@@ -127,16 +127,16 @@ export function seedInject(carry: LoweringState, steps: IRStep[], sackInit?: Sac
   const Q = carry.q;
 
   // Each all-array argument is one list traverser, not scalar varargs.
-  if (steps[0].args.length >= 1 && steps[0].args.every((a: any) => Array.isArray(a))) {
+  if (steps[0].args.length >= 1 && steps[0].args.every((a) => Array.isArray(a.value))) {
     if (sackInit) throw new Error('withSack() with a list-valued inject() not yet supported');
-    const rows = steps[0].args.map((a: any[]) => q`(${jsonbArrayOf(a)})`);
+    const rows = steps[0].args.map((a) => q`(${jsonbArrayOf(a.value)})`);
     const rel = Q.cte(q`VALUES ${list(rows, ', ')}`, ['list']);
     return { stream: toListStream(carry, rel, { kind: 'scalar' }), at: 1 };
   }
 
   // Mixed list/scalar inject remains the historical flattened representation until
   // ScalarStream gains a per-row shape/type discriminant.
-  const vals = flattenListArgs(steps[0].args);
+  const vals = flattenListArgs(argValues(steps[0]));
   // A bare rich value can still be framed at the root (Duration/Set/Map each has
   // established support), but scalar SQL ordering needs a bindable, typed compare
   // key for EVERY row. Do not let the untyped scalar representation reach SQLite

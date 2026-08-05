@@ -120,7 +120,7 @@ export const aliasListAt = (column: Expr, end: 'first' | 'last'): Expr =>
 export function bindAliases(
   step: IRStep, rel: Rel, aliases: AliasMap, bound: TraverserObject, fresh: Minter,
 ): { readonly rel: Rel; readonly aliases: AliasMap } | null {
-  const labels = step.args ?? [];
+  const labels = (step.args ?? []).map((a) => a.value);
   if (!labels.length || labels.some((label) => typeof label !== 'string')) return null;
   if (step.modulators?.length || step.optionArms) return null;
 
@@ -235,7 +235,7 @@ export function selectOne(
   step: IRStep, rel: Rel, aliases: AliasMap, fresh: Minter,
 ): { readonly rel: Rel; readonly read: AliasRead } | null {
   if (step.modulators?.length || step.optionArms) return null;
-  const args = step.args ?? [];
+  const args = (step.args ?? []).map((a) => a.value);
   const pops = args.filter((arg): arg is { readonly pop: string } =>
     typeof arg === 'object' && arg !== null && typeof (arg as { pop?: unknown }).pop === 'string');
   const labels = args.filter((arg): arg is string => typeof arg === 'string');

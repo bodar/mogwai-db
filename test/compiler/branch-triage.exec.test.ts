@@ -21,7 +21,7 @@ import { MODERN_SEED } from '../fixtures/seed-modern.ts';
  *  classifiers. */
 const nestedOf = (gremlin: string): any => {
   for (const s of normalize(stepChain(parseGremlin(gremlin), {})).steps)
-    for (const a of s.args ?? []) if (a && typeof a === 'object' && 'nested' in a) return a.nested;
+    for (const { value: a } of s.args ?? []) if (a && typeof a === 'object' && 'nested' in a) return a.nested;
   throw new Error(`no nested child body in ${gremlin}`);
 };
 
@@ -113,18 +113,19 @@ describe('classifyBranchArms — the shape verdict', () => {
  *  agree with it for every branch shape, or the prefix fold and the tail cascade have drifted. */
 function tenBooleanBreak(step: IRStep, params: ChildCtx): boolean {
   const nested = (a: any) => a && typeof a === 'object' && 'nested' in a;
-  const unionBranches = step.name === 'union' ? step.args.filter(nested) : [];
+  const argv = step.args.map((a) => a.value);
+  const unionBranches = step.name === 'union' ? argv.filter(nested) : [];
   const scalarUnion = unionBranches.length >= 2 && unionBranches.every((a: any) => isScalarChild(a.nested, params));
   const listUnion = unionBranches.length >= 2 && unionBranches.every((a: any) => isListChild(a.nested, params));
-  const chooseArgs = step.name === 'choose' && !(step as IRStep).optionArms ? step.args.filter(nested) : [];
+  const chooseArgs = step.name === 'choose' && !(step as IRStep).optionArms ? argv.filter(nested) : [];
   const scalarChoose = chooseArgs.length === 3
     && isScalarChild(chooseArgs[1].nested, params) && isScalarChild(chooseArgs[2].nested, params);
   const listChoose = chooseArgs.length === 3
     && isListChild(chooseArgs[1].nested, params) && isListChild(chooseArgs[2].nested, params);
-  const coalesceArgs = step.name === 'coalesce' ? step.args.filter(nested) : [];
+  const coalesceArgs = step.name === 'coalesce' ? argv.filter(nested) : [];
   const scalarCoalesce = coalesceArgs.length > 0 && coalesceArgs.every((a: any) => isScalarChild(a.nested, params));
   const listCoalesce = coalesceArgs.length > 0 && coalesceArgs.every((a: any) => isListChild(a.nested, params));
-  const optionalNested = step.name === 'optional' ? step.args[0]?.nested : null;
+  const optionalNested = step.name === 'optional' ? argv[0]?.nested : null;
   const shapedOptional = !!optionalNested
     && (isListChild(optionalNested, params) || isScalarChild(optionalNested, params));
   const mixedUnion = unionBranches.length >= 2 && unionBranches.some((a: any) => !isElementChild(a.nested, params));

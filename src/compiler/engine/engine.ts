@@ -1,6 +1,6 @@
 import { empty, q, value, list, Query, type Expression } from '../../sql/kernel/q.ts';
 import { type Elem, elemTable } from '../plan/plan.ts';
-import { flattenListArgs, isColumnArg, isOperatorArg, isPopArg } from '../../gremlin/frontend.ts';
+import { flattenListArgs, isColumnArg, isOperatorArg, isPopArg, arg, argValues } from '../../gremlin/frontend.ts';
 import { type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, canCarryEncounter, type ChainFacts } from '../ir/analyze.ts';
 import { layoutCols, rootLayout, trackFromV, type LoweringState, type ElementStream, type StepFn } from '../steps/context/context.ts';
@@ -57,17 +57,17 @@ export { compileTail };
 
 /** A sack step in its mutate form (has an Operator arg); the bare read form is a tail
  *  projection, so it must NOT dispatch as a prefix step. */
-const isSackMutate = (s: IRStep): boolean => (s.args ?? []).some(isOperatorArg);
+const isSackMutate = (s: IRStep): boolean => (s.args ?? []).some((a) => isOperatorArg(a.value));
 
 /** A side-effecting group('a')/groupCount('a') (has a string side-effect key); the bare
  *  form is a terminal barrier handled by compileTail, so it must break out of the prefix. */
-const isSideEffectGroup = (s: IRStep): boolean => (s.args ?? []).some((a: any) => typeof a === 'string');
+const isSideEffectGroup = (s: IRStep): boolean => (s.args ?? []).some((a) => typeof a.value === 'string');
 
 /** Every recognized local() body belongs at shape-aware dispatch. The generic child
  * compiler applies `all` cardinality, so row operators and reducers partition by
  * parent without a prefix-local parser. */
 const isShapedLocal = (s: IRStep, ctx: ChildCtx): boolean => {
-  const nested = (s.args ?? [])[0]?.nested;
+  const nested = (s.args ?? [])[0]?.value?.nested;
   return !!nested && (isElementChild(nested, ctx) || isScalarChild(nested, ctx) || isListChild(nested, ctx));
 };
 
@@ -89,8 +89,8 @@ const isValueShape = (s: Stream): boolean => s.kind === 'scalar' || s.kind === '
 /** select(label…) reading path-history labels (string args), not select(Column). */
 const isLabelSelect = (step: IRStep): boolean =>
   step.name === 'select'
-  && step.args.some((a: any) => typeof a === 'string')
-  && !step.args.some(isColumnArg);
+  && step.args.some((a) => typeof a.value === 'string')
+  && !step.args.some((a) => isColumnArg(a.value));
 
 /** The shape-agnostic label steps: as() binds and select(label) reads a path-history
  *  label. They are dispatched in ONE place (dispatchAlias, at the top of lowerStream);
@@ -98,13 +98,13 @@ const isLabelSelect = (step: IRStep): boolean =>
 const isAliasStep = (step: IRStep): boolean => step.name === 'as' || isLabelSelect(step);
 
 const popOf = (step: IRStep): string =>
-  step.args.find(isPopArg)?.pop ?? 'last';
+  step.args.map((a) => a.value).find(isPopArg)?.pop ?? 'last';
 
 /** Dispatch as()/select(label) over a value-shaped (scalar/list/variant) stream. */
 function dispatchAlias(s: Exclude<Stream, { kind: 'result' }>, steps: IRStep[], at: number): LoweringResult {
   const step = steps[at];
   if (step.name === 'as') return continueLowering(asOnStream(s as any, step), at + 1);
-  const uniq = [...new Set(step.args.filter((a: any): a is string => typeof a === 'string'))];
+  const uniq = [...new Set(argValues(step).filter((a: any): a is string => typeof a === 'string'))];
   const pop = popOf(step);
   return continueLowering(
     uniq.length === 1 ? selectOneFromAlias(s, step, uniq[0], pop) : selectRecordFromAlias(s, step, uniq, pop),
@@ -215,7 +215,7 @@ export class LoweringEngine implements Engine {
     const sel = list(projections, ', ');
     // V(1,[2,3]) ≡ V(1,2,3): flatten any Collection id arg (collection literals + bound
     // list params render inline as [..] and parse as arrays).
-    const ids = flattenListArgs(first.args);
+    const ids = flattenListArgs(argValues(first));
     let body: Expression;
     if (ids.length > 0) {
       // Numeric args match the rowid, string args the user id (uid); the id-relation
@@ -581,7 +581,7 @@ export class LoweringEngine implements Engine {
   compileReadFromElementDriver(steps: IRStep[], params: Record<string, any>, driver: ElementReadDriver): Compiled {
     if (!steps.length) throw new Error('a write driver needs a non-empty read continuation');
     const eng = this.child(params, steps);
-    const source: IRStep = { name: driver.elem === 'edge' ? 'E' : 'V', args: [driver.id], ctx: steps[0].ctx };
+    const source: IRStep = { name: driver.elem === 'edge' ? 'E' : 'V', args: [arg(driver.id)], ctx: steps[0].ctx };
     const seeded = eng.seedSource(source, params, false, undefined, false);
     const cols = layoutCols(driver.traverserLayout);
     for (const col of cols)

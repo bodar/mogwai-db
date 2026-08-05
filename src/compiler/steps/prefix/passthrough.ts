@@ -1,5 +1,6 @@
 import { q, empty, type Expression } from '../../../sql/kernel/q.ts';
 import { isLocalScope, sliceOf, type IRStep } from '../../ir/step.ts';
+import { argValues } from '../../../gremlin/frontend.ts';
 import { limitOffset } from '../../plan/plan.ts';
 import { appendCte, layoutCols, layoutProjection, prevRel, type ElementStream, type StepFn } from '../context/context.ts';
 
@@ -69,7 +70,7 @@ export const skip = elementSlice;
 /** The one numeric argument of `tail`/`sample`, past any scope token. Neither is a `sliceOf` step:
  *  `tail` is a window measured from the far END, `sample` is not a window at all. */
 const armCount = (s: IRStep): number =>
-  Number((s.args ?? []).find((a: unknown) => typeof a === 'number') ?? 1);
+  Number(argValues(s).find((a) => typeof a === 'number') ?? 1);
 
 /**
  * `tail(n)` over an ELEMENT stream — the last n traversers in emission order, which is `limit(n)`

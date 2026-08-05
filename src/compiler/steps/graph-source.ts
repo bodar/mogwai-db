@@ -1,6 +1,6 @@
 import { q, list, value, empty, type Expression } from '../../sql/kernel/q.ts';
 import { elemTable } from '../plan/plan.ts';
-import { flattenListArgs } from '../../gremlin/frontend.ts';
+import { flattenListArgs, argValues } from '../../gremlin/frontend.ts';
 import { layoutCols, layoutProjection, type ElementStream } from './context/context.ts';
 import { loweringStateOf, toElementStream, type ScalarStream } from './context/stream.ts';
 import { type IRStep } from '../ir/strategies.ts';
@@ -33,7 +33,7 @@ export function lowerReSource(s: ScalarStream | ElementStream, step: IRStep): El
   const n = elemTable(elem).as('n');
   const p = s.rel.as('p');
   const cols = layoutCols(s.traverserLayout);
-  const rawIds = flattenListArgs(step.args ?? []);
+  const rawIds = flattenListArgs(argValues(step));
   let where: Expression = empty;
   if (rawIds.length) {
     const nums = rawIds.filter((a) => typeof a === 'number');

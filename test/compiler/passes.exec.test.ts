@@ -90,7 +90,7 @@ describe('ConnectiveStrategy: infix .and()/.or() folds to the step form', () => 
   const fold = (g: string) => canonicalizeConnectives(stepChain(parseGremlin(g), {}), {});
   const shape = (steps: any[]): string =>
     steps.map((s) => {
-      const nested = s.args.filter((a: any) => a && typeof a === 'object' && 'nested' in a);
+      const nested = s.args.map((a: any) => a.value).filter((a: any) => a && typeof a === 'object' && 'nested' in a);
       return nested.length ? `${s.name}(${nested.map((n: any) => shape(stepChain(n.nested, {}))).join(', ')})` : s.name;
     }).join('.');
 

@@ -164,7 +164,7 @@ export function dateDiffOtherMs(arg: any, params: Record<string, any>): number {
   if (isNested(arg)) {
     const inner = stepChain(arg.nested, params);
     if (inner.length === 1 && inner[0].name === 'constant') {
-      const c = inner[0].args[0];
+      const c = inner[0].args[0]?.value;
       return c === null || c === undefined ? 0 : Number(c);
     }
     throw new Error('dateDiff(): only a datetime literal or constant(datetime) argument is supported');

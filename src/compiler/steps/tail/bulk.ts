@@ -1,7 +1,7 @@
 import { q, list } from '../../../sql/kernel/q.ts';
 import { edges } from '../../../sql/schema.ts';
 import { dirsFor, edgeLabelFilter, type EdgeEnd } from '../../plan/plan.ts';
-import { isNested, isTokenArg, stepChain, type SackSpec } from '../../../gremlin/frontend.ts';
+import { argValues, isNested, isTokenArg, stepChain, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { type Compiled } from '../../../sql/kernel/render.ts';
 import { materializeRootStream } from './materialize.ts';
@@ -110,8 +110,8 @@ function suffixBulkSafe(suffix: IRStep[], params: Record<string, any>): boolean 
   if (last && last.name === 'count' && (last.args?.length ?? 0) === 0) {
     return suffix.slice(0, -1).every((s) =>
       BULK_MOVES.has(s.name)
-      || (s.name === 'as' && s.args.every((a: any) => typeof a === 'string'))
-      || (s.name === 'select' && s.args.length > 0 && s.args.every((a: any) => typeof a === 'string') && !(s.modulators?.length)));
+      || (s.name === 'as' && s.args.every((a: any) => typeof a.value === 'string'))
+      || (s.name === 'select' && s.args.length > 0 && s.args.every((a: any) => typeof a.value === 'string') && !(s.modulators?.length)));
   }
 
   // Bare element frontier (repeat(...).times(n) with nothing after, or only movements).
@@ -124,7 +124,7 @@ function suffixBulkSafe(suffix: IRStep[], params: Record<string, any>): boolean 
 
   // A single scalar projection may precede a numeric reducer: values('k').sum().
   if (rest.length === 2 && rest[0].name === 'values' && (rest[0].args?.length ?? 0) === 1
-    && typeof rest[0].args[0] === 'string' && NUMERIC_REDUCERS.has(term.name)
+    && typeof rest[0].args[0].value === 'string' && NUMERIC_REDUCERS.has(term.name)
     && (term.args?.length ?? 0) === 0)
     return true;
 
@@ -167,14 +167,14 @@ function bulkPlan(steps: IRStep[], params: Record<string, any>, sackInit?: SackS
 
   if (cluster.some((c) => c.name === 'until' || c.name === 'emit')) return null; // no compile-time depth
   const timesStep = cluster.find((c) => c.name === 'times');
-  if (!timesStep || typeof timesStep.args[0] !== 'number') return null;
-  const times = Number(timesStep.args[0]);
+  if (!timesStep || typeof timesStep.args[0]?.value !== 'number') return null;
+  const times = Number(timesStep.args[0].value);
   if (times < 0) return null;
 
   // Body: a single out/in/both. simplePath()/multi-step bodies are per-traverser or
   // otherwise not a plain frontier hop → not bulkable here.
   const repStep = cluster.find((c) => c.name === 'repeat');
-  const body = stepChain(repStep?.args[0]?.nested, params);
+  const body = stepChain(repStep?.args[0]?.value?.nested, params);
   if (body.length !== 1 || !['out', 'in', 'both'].includes(body[0].name)) return null;
   const mv = body[0];
 
@@ -182,7 +182,7 @@ function bulkPlan(steps: IRStep[], params: Record<string, any>, sackInit?: SackS
   // bulk-aware terminal the generic tail reduces (count/groupCount/sum/group-by-count/element).
   if (!suffixBulkSafe(steps.slice(repAt + 1), params)) return null;
 
-  return { preLen: repAt, dirs: dirsFor(mv.name), labels: mv.args, times, suffixAt: repAt + 1 };
+  return { preLen: repAt, dirs: dirsFor(mv.name), labels: argValues(mv), times, suffixAt: repAt + 1 };
 }
 
 /** Compile the bulkable repeat. Reuses buildPrefix for the source + leading filters (so

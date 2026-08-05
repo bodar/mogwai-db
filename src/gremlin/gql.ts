@@ -21,7 +21,7 @@
 import { CharStream, CommonTokenStream, BaseErrorListener, type ParserRuleContext } from 'antlr4ng';
 import { GQLLexer } from '../../parser/gql/GQLLexer.ts';
 import { GQLParser } from '../../parser/gql/GQLParser.ts';
-import { integerLiteralValue, floatLiteralValue, type Step } from './frontend.ts';
+import { integerLiteralValue, floatLiteralValue, arg, type Step } from './frontend.ts';
 import { type TypeNode } from './types.ts';
 
 // ---------- parse ----------
@@ -188,8 +188,8 @@ function unquoteGql(s: string): string {
 /** Build one synthesized IR step. Every step borrows the HOST `match` step's parse context, so an
  *  error raised deep in lowering still points at the right source span — the same thing
  *  `strategies.ts`'s `synth` does with a strategy's context. */
-const step = (ctx: ParserRuleContext, name: string, args: any[] = [], argTypes?: (TypeNode | null)[]): Step =>
-  argTypes ? { name, args, ctx, argTypes } : { name, args, ctx };
+const step = (ctx: ParserRuleContext, name: string, args: any[] = [], argTypes: (TypeNode | null)[] = []): Step =>
+  ({ name, args: args.map((v, i) => arg(v, argTypes[i] ?? null)), ctx });
 
 /** A node/edge's constraints as steps applied to whatever element is current: the label, then each
  *  property filter. `{k: null}` becomes `not(__.has(k))` — `hasNot(k)` is not implemented (see
@@ -319,7 +319,7 @@ function terminalProjection(ctx: ParserRuleContext, nodes: readonly PatNode[]): 
   if (declared.length === 1)
     return [
       step(ctx, 'project', [declared[0]], ['string']),
-      { ...step(ctx, 'by', []), name: 'by', args: [{ nested: [step(ctx, 'select', [declared[0]], ['string'])] }] },
+      { ...step(ctx, 'by', []), name: 'by', args: [arg({ nested: [step(ctx, 'select', [declared[0]], ['string'])] })] },
     ];
   throw new Error('a terminal MATCH pattern declaring no variables has no binding map to emit (add a variable, or a select())');
 }

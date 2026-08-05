@@ -2,7 +2,7 @@ import type { GraphStore } from '../../../storage.ts';
 import { q, value, list, raw, render, type Expression, type Query, type Relation } from '../../../sql/kernel/q.ts';
 import { labelIn, labelNameFor, propHasFor, sqlElem, elemTable, type Elem, vertexLabelIn } from '../../plan/plan.ts';
 import { gremlinTypeOf, mapEntryType, propertyValueBind, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
-import { stepChain, isNested, isTokenArg, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isMergeArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
+import { stepChain, arg, argValues, isNested, isTokenArg, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isMergeArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { isStreamBarrier } from '../../ir/step.ts';
 import { normalize } from '../../ir/passes.ts';
@@ -46,8 +46,8 @@ function renderDriverRows(st: { q: Query; rel: Relation; traverserLayout: Traver
 function constFromSelect(nested: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { has: boolean; value: any } {
   if (!isNested(nested)) return { has: false, value: undefined };
   const inner = stepChain(nested.nested, params);
-  if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0] === 'string' && sideEffects?.has(inner[0].args[0]))
-    return { has: true, value: sideEffects.get(inner[0].args[0]) };
+  if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0].value === 'string' && sideEffects?.has(inner[0].args[0].value))
+    return { has: true, value: sideEffects.get(inner[0].args[0].value) };
   return { has: false, value: undefined };
 }
 
@@ -63,7 +63,7 @@ function constFromNested(nested: any, sideEffects: Map<string, any> | undefined,
   if (isNested(nested)) {
     const inner = stepChain(nested.nested, params);
     if (inner.length === 1 && inner[0].name === 'constant')
-      return { has: true, value: inner[0].args[0], vtype: gremlinTypeOf(inner[0].args[0], (inner[0] as Step).argTypes?.[0] ?? null) };
+      return { has: true, value: inner[0].args[0].value, vtype: gremlinTypeOf(inner[0].args[0].value, inner[0].args[0]?.type ?? null) };
   }
   return { has: false, value: undefined, vtype: null };
 }
@@ -83,7 +83,7 @@ function runNested(
   // Seed at the driver element: a synthetic V/E source on the internal rowid (numeric
   // arg → rowid match). It borrows the nested node's parse ctx (no ctx of its own).
   if (seed && driver) throw new Error('nested write read cannot have both a seed and a driver');
-  if (seed) chain = [{ name: seed.elem === 'edge' ? 'E' : 'V', args: [seed.id], ctx: nestedNode } as IRStep, ...chain];
+  if (seed) chain = [{ name: seed.elem === 'edge' ? 'E' : 'V', args: [arg(seed.id)], ctx: nestedNode } as IRStep, ...chain];
   const compiled = driver
     ? engine.compileReadFromElementDriver(chain, params, driver)
     : engine.compileReadCompiled(chain, params);
@@ -379,12 +379,12 @@ function readCardinality(args: any[]): { cardinality: Cardinality; rest: any[]; 
  *  channel declared (Step.argTypes at the value's position), else inferred from the
  *  JS value. `off`+1 is the value's index in the original arg list (key is at off). */
 const propVtype = (step: Step, val: any, off: number): CanonicalType | null =>
-  gremlinTypeOf(val, step.argTypes?.[off + 1] ?? null);
+  gremlinTypeOf(val, step.args[off + 1]?.type ?? null);
 
 /** The property()'s VALUE arg's full recursive TypeNode (Step.argTypes at the value's
  *  position) — carried alongside vtype so a collection value's elements/keys are tagged
  *  losslessly by valueNodeOf. null for an untyped channel (infer per element at storage). */
-const propTypeNode = (step: Step, off: number): TypeNode | null => step.argTypes?.[off + 1] ?? null;
+const propTypeNode = (step: Step, off: number): TypeNode | null => step.args[off + 1]?.type ?? null;
 
 /** One `property()` step, parsed. The three hosts differ ONLY in what they do with a T token —
  *  addV consumes `T.id`/`T.label` into the vertex it is about to create, a mutation on an existing
@@ -400,7 +400,7 @@ export type ParsedProperty =
   | { kind: 'none' };
 
 export function parseProperty(s: Step, sideEffects: Map<string, any> | undefined, params: Record<string, any>): ParsedProperty {
-  const { cardinality, rest, off } = readCardinality(s.args);
+  const { cardinality, rest, off } = readCardinality(argValues(s));
   let [key, val] = rest; const metaArgs = rest.slice(2);
   { const ck = constFromNested(key, sideEffects, params); if (ck.has) key = ck.value; }
   { const cv = constFromSelect(val, sideEffects, params); if (cv.has) val = cv.value; }
@@ -494,11 +494,11 @@ function parseVertexSpec(addV: Step, propSteps: Step[], sideEffects?: Map<string
   // LabelCardinality.ZERO_OR_MORE a bare addV() creates a vertex with NO labels (`g_addV_labels`
   // asserts labels() has a count of 0). insertVertex applies the default, because only it can see
   // the declared cardinality. An empty list here therefore means "unspecified", not "none".
-  let labels: (string | string[] | { nested: any })[] = addV.args.map(asLabel);
+  let labels: (string | string[] | { nested: any })[] = argValues(addV).map(asLabel);
   const props: PropSpec[] = [];
   let uid: string | number | null = null;
   for (const s of propSteps) {
-    if (s.name === 'addLabel') { labels.push(...s.args.map(asLabel)); continue; }
+    if (s.name === 'addLabel') { labels.push(...argValues(s).map(asLabel)); continue; }
     const p = parseProperty(s, sideEffects, params);
     // A T token on a vertex being CREATED is not immutable — it IS the id/label being supplied.
     if (p.kind === 'token') {
@@ -875,7 +875,7 @@ function compileAddV(engine: Engine, steps: IRStep[], params: Record<string, any
   const writeFollower = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop']);
   if (firstFollower < steps.length && !steps.slice(firstFollower).some((s) => writeFollower.has(s.name))) {
     const suffix = steps.slice(firstFollower);
-    const source = (id: number): IRStep => ({ name: 'V', args: [id], ctx: steps[0].ctx });
+    const source = (id: number): IRStep => ({ name: 'V', args: [arg(id)], ctx: steps[0].ctx });
     const probe = engine.compileReadCompiled([source(0), ...suffix], params);
     let created: number | undefined;
     const spec = parseVertexSpec(steps[0], steps.slice(1, firstFollower), sideEffects, params);
@@ -905,17 +905,17 @@ function compileAddV(engine: Engine, steps: IRStep[], params: Record<string, any
 
 interface EdgeCluster { label: string; fromSpec: any; toSpec: any; edgeUid: string | number | null; props: PropSpec[]; next: number; }
 function parseEdgeCluster(steps: Step[], addEIdx: number): EdgeCluster {
-  const label = steps[addEIdx].args[0];
+  const label = steps[addEIdx].args[0].value;
   if (typeof label !== 'string') throw new Error('addE(label): nested-traversal label not supported');
   let fromSpec: any, toSpec: any, edgeUid: string | number | null = null;
   const props: PropSpec[] = [];
   let i = addEIdx + 1;
   for (; i < steps.length && (steps[i].name === 'from' || steps[i].name === 'to' || steps[i].name === 'property'); i++) {
     const m = steps[i];
-    if (m.name === 'from') fromSpec = m.args[0];
-    else if (m.name === 'to') toSpec = m.args[0];
+    if (m.name === 'from') fromSpec = m.args[0].value;
+    else if (m.name === 'to') toSpec = m.args[0].value;
     else {
-      const { cardinality, rest, off } = readCardinality(m.args);
+      const { cardinality, rest, off } = readCardinality(argValues(m));
       const [k, v, ...metaArgs] = rest;
       if (cardinality !== null) throw new Error('Cardinality is not valid on an edge property');
       if (metaArgs.length) throw new Error('meta-properties are not valid on an edge property');
@@ -1015,7 +1015,7 @@ function runWriteChainFull(engine: Engine, store: GraphStore, steps: Step[], par
       currentV = v.id; last = { vertex: { id: v.extId, labels: v.labels, props: readVertexProps(store, v.id) } };
     } else if (s.name === 'as') {
       if (currentV == null) throw new Error('as() before any vertex in write chain');
-      for (const lbl of s.args) if (typeof lbl === 'string') aliases.set(lbl, currentV);
+      for (const lbl of argValues(s)) if (typeof lbl === 'string') aliases.set(lbl, currentV);
     } else if (s.name === 'addE') {
       const cluster = parseEdgeCluster(steps, i);
       i = cluster.next - 1;
@@ -1046,8 +1046,8 @@ function resolveEndpoint(engine: Engine, store: GraphStore, spec: any, d: { alia
     // canonical chain — same normalization runNested does for every other nested arg.
     const inner = normalize(stepChain(spec.nested, params)).steps;
     // __.select("lbl") is exactly the bare as()-label string.
-    if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0] === 'string')
-      return alias(inner[0].args[0], `select("${inner[0].args[0]}")`);
+    if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0].value === 'string')
+      return alias(inner[0].args[0].value, `select("${inner[0].args[0].value}")`);
     // __.addV(...) CREATES the endpoint vertex as a side effect of resolving it (from
     // then to, once per driver, before insertEdge — see applyEdgeCluster). Reuses the
     // #2 value/label resolver via the same insertVertex.
@@ -1139,8 +1139,8 @@ function classifyMergeVal(v: any): any {
 function resolveMergeArg(raw: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): any {
   if (!isNested(raw)) return raw;
   const inner = stepChain(raw.nested, params);
-  if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0] === 'string') {
-    const k = inner[0].args[0];
+  if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0].value === 'string') {
+    const k = inner[0].args[0].value;
     if (sideEffects?.has(k)) return sideEffects.get(k);
     throw new Error(`merge with select('${k}') needs a withSideEffect('${k}', map) constant`);
   }
@@ -1385,14 +1385,14 @@ export function mergeMaps(
 ): MergeMaps {
   if (step.args.length === 0)
     throw new Error(`${op}() with no argument (uses the incoming traverser as the map) not yet supported`);
-  const match = normalizeMergeMap({ op, kind: 'merge' }, step.args[0], step.argTypes?.[0] ?? null, sideEffects, params);
+  const match = normalizeMergeMap({ op, kind: 'merge' }, step.args[0].value, step.args[0]?.type ?? null, sideEffects, params);
 
   let onCreate: MergeSpec | null = null, onMatch: MergeSpec | null = null;
   const optionCount = mods.findIndex((s) => s.name !== 'option');
   const tail = optionCount < 0 ? [] : parsePropertyTail(mods.slice(optionCount), `${op}()`, sideEffects, params);
   for (const s of optionCount < 0 ? mods : mods.slice(0, optionCount)) {
     if (s.name !== 'option') throw new Error(`step not implemented after ${op}(): ${s.name}()`);
-    const [sel, mapArg, cardinalityArg] = s.args;
+    const [sel, mapArg, cardinalityArg] = argValues(s);
     if (!isMergeArg(sel))
       throw new Error(`${op} option() selector must be Merge.onCreate/onMatch`);
     if (cardinalityArg != null && (!isCardinalityArg(cardinalityArg) || isCardinalityValueArg(cardinalityArg)))
@@ -1402,7 +1402,7 @@ export function mergeMaps(
       throw new Error(`${op} option() has unsupported cardinality '${defaultCardinality}'`);
     const kind = sel.merge === 'oncreate' ? 'onCreate' : sel.merge === 'onmatch' ? 'onMatch' : null;
     if (!kind) throw new Error(`${op} option(Merge.${sel.merge}) not supported`);
-    const spec = normalizeMergeMap({ op, kind }, mapArg, s.argTypes?.[1] ?? null, sideEffects, params, defaultCardinality);
+    const spec = normalizeMergeMap({ op, kind }, mapArg, s.args[1]?.type ?? null, sideEffects, params, defaultCardinality);
     if (kind === 'onCreate') onCreate = spec; else onMatch = spec;
   }
 
@@ -1618,7 +1618,7 @@ function compileLabelMutation(engine: Engine, steps: IRStep[], params: Record<st
   // (TinkerPop rejects mixing), which the expansion enforces.
   const argNames = (store: GraphStore): string[] => {
     const out: string[] = [];
-    for (const a of step.args) {
+    for (const a of argValues(step)) {
       const v = isNested(a) ? nestedScalarValue(engine, store, a, params, undefined, sideEffects).value : a;
       if (Array.isArray(v)) {
         if (step.args.length > 1) throw new Error(`${step.name}(): a Collection argument must be the only argument`);
