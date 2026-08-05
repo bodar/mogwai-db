@@ -1,4 +1,4 @@
-import { compilerText, lit, type AggFn, type Expr } from '../../rel/expr.ts';
+import { compilerNull, compilerText, type AggFn, type Expr } from '../../rel/expr.ts';
 import { REDUCER_CLASSES } from '../../gremlin/types.ts';
 
 /**
@@ -64,7 +64,7 @@ export function reducerAggregate(value: Expr, reducer: Reducer, bulk?: Expr): { 
     // the guard passed, so an ineligible value neither contributes to the total nor dilutes it.
     const numerator = bulk ? agg('sum', { kind: 'binary', op: '*', left: arg, right: bulk }) : agg('sum', arg);
     if (!bulk) return { value: agg('avg', arg), type: compilerText('real') };
-    const denominator = agg('sum', { kind: 'case', whens: [[{ kind: 'binary', op: 'is not', left: arg, right: lit(null, 'any') }, bulk]] });
+    const denominator = agg('sum', { kind: 'case', whens: [[{ kind: 'binary', op: 'is not', left: arg, right: compilerNull() }, bulk]] });
     // A `Cast` and NOT legacy's `* 1.0`: it declares the required REAL arithmetic rather than relying
     // on a spelling-level token. Measured: the mean of the reference graph's ages was 30 rather than
     // 30.75 without it.

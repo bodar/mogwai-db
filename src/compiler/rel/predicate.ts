@@ -1,4 +1,4 @@
-import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import { CF_MAX_BINDS } from '../../cf-limits.ts';
 import type { RelId } from '../../rel/types.ts';
 import { gtypeName } from '../../gremlin/frontend.ts';
@@ -35,10 +35,10 @@ const isPred = (value: unknown): value is Pred =>
 
 const binary = (op: Extract<Expr, { kind: 'binary' }>['op'], left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
 /** Gremlin predicates are two-valued: negating SQL NULL is TRUE, not NULL. */
-const negated = (inner: Expr): Expr => binary('is not', inner, lit(1, 'int'));
+const negated = (inner: Expr): Expr => binary('is not', inner, compilerInt(1));
 /** SQLite has no boolean literal; a degenerate set folds to a constant comparison rather than to a
  *  bare `0`, so the expression still reads as a predicate wherever it is spliced. */
-const CONSTANT = { true: binary('=', lit(1, 'int'), lit(1, 'int')), false: binary('=', lit(1, 'int'), lit(0, 'int')) };
+const CONSTANT = { true: binary('=', compilerInt(1), compilerInt(1)), false: binary('=', compilerInt(1), compilerInt(0)) };
 
 const COMPARISON: Readonly<Record<string, Extract<Expr, { kind: 'binary' }>['op']>> =
   { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
@@ -222,7 +222,7 @@ function typeOfExpr(subject: Expr, arg: unknown, type: SubjectType): Expr | null
   if (type.kind === 'unknown') return byStorage;
   return {
     kind: 'case',
-    whens: [[binary('is not', type.vtype, lit(null, 'any')), binary('=', type.vtype, lit(canonical, 'text'))]],
+    whens: [[binary('is not', type.vtype, compilerNull()), binary('=', type.vtype, lit(canonical, 'text'))]],
     else: byStorage,
   };
 }
@@ -242,7 +242,7 @@ const KNOWN_NON_VALUE = new Set(['vertex', 'edge', 'vertexproperty', 'vproperty'
  */
 export function predicateExpr(subject: Expr, pred: unknown, type: SubjectType = SUBJECT_UNKNOWN): Expr | null {
   // `has(key)` with no value: presence, not comparison.
-  if (pred === undefined) return binary('is not', subject, lit(null, 'any'));
+  if (pred === undefined) return binary('is not', subject, compilerNull());
   if (!isPred(pred)) {
     const value = operand(pred);
     return value && binary('=', subject, value);

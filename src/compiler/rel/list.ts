@@ -1,4 +1,4 @@
-import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
@@ -201,12 +201,12 @@ const inferredVtype = (value: Expr): Expr => ({
   whens: [
     [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'text'), compilerText('string')],
     [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'real'), compilerText('double')],
-    [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'null'), lit(null, 'any')],
+    [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'null'), compilerNull()],
     [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'integer'), {
       kind: 'case',
       whens: [[{ kind: 'binary', op: 'and',
-        left: { kind: 'binary', op: '>=', left: value, right: lit(-2147483648, 'int') },
-        right: { kind: 'binary', op: '<=', left: value, right: lit(2147483647, 'int') } }, compilerText('int')]],
+        left: { kind: 'binary', op: '>=', left: value, right: compilerInt(-2147483648) },
+        right: { kind: 'binary', op: '<=', left: value, right: compilerInt(2147483647) } }, compilerText('int')]],
       else: compilerText('long'),
     }],
   ],
@@ -298,10 +298,10 @@ export function listMemberOp(step: IRStep, input: Rel, of: ListOf, fresh: Minter
     const members = membersOf(list, fresh);
     const pred = memberPredicate(memberPayload(of, members), args[0]);
     if (!pred) return null;
-    const failing: Expr = { kind: 'binary', op: 'is not', left: pred, right: lit(1, 'int') };
+    const failing: Expr = { kind: 'binary', op: 'is not', left: pred, right: compilerInt(1) };
     const probe = (test: Expr): Rel => make.project({
       id: fresh('mp'), input: make.filter({ id: fresh('mf'), input: members, channels: [], type: members.type, pred: test }),
-      channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', lit(1, 'int')]],
+      channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]],
     });
     const keep: Expr = step.name === 'all'
       ? { kind: 'exists', plan: probe(failing), negated: true }
@@ -332,7 +332,7 @@ export function listRetype(
     const members = membersOf(list, fresh);
     const present = make.filter({
       id: fresh('mf'), input: members, channels: [], type: members.type,
-      pred: { kind: 'binary', op: 'is not', left: memberPayload(of, members), right: lit(null, 'any') },
+      pred: { kind: 'binary', op: 'is not', left: memberPayload(of, members), right: compilerNull() },
     });
     const joined: Expr = {
       kind: 'scalar',
@@ -530,12 +530,12 @@ const withLossyFlag = (input: Rel, vtype: Expr, fresh: Minter): Rel => make.wind
       whens: [[{
         kind: 'binary',
         op: 'and',
-        left: { kind: 'binary', op: 'is not', left: vtype, right: lit(null, 'any') },
+        left: { kind: 'binary', op: 'is not', left: vtype, right: compilerNull() },
         // `NOT (x IN …)`, not an `InList` with a negation flag — the node has none, and with the
         // `IS NOT NULL` guard on the left the two forms agree (a NULL is already excluded).
         right: { kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: vtype, values: LOSSLESS_VTYPES.map(compilerText) } },
-      }, lit(1, 'int')]],
-      else: lit(0, 'int'),
+      }, compilerInt(1)]],
+      else: compilerInt(0),
     }],
     spec: { partitionBy: [], orderBy: [] },
   }]],
@@ -661,7 +661,7 @@ export function listSetOp(
     return {
       kind: 'exists',
       negated,
-      plan: make.project({ id: fresh('cp'), input: same, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', lit(1, 'int')]] }),
+      plan: make.project({ id: fresh('cp'), input: same, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] }),
     };
   };
 

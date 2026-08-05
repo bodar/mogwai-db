@@ -9,7 +9,7 @@ export type Expr =
   | { readonly kind: 'lit'; readonly value: unknown; readonly type: SqlType; readonly source: 'bound' }
   | { readonly kind: 'lit'; readonly value: string; readonly type: 'text'; readonly source: 'compiler-text' }
   | { readonly kind: 'lit'; readonly value: number; readonly type: 'int'; readonly source: 'compiler-int' }
-  | { readonly kind: 'lit'; readonly value: null; readonly type: 'any'; readonly source: 'compiler-null' }
+  | { readonly kind: 'lit'; readonly value: null; readonly type: SqlType; readonly source: 'compiler-null' }
   | { readonly kind: 'unary'; readonly op: 'not' | 'neg'; readonly arg: Expr }
   | { readonly kind: 'binary'; readonly op: BinaryOp; readonly left: Expr; readonly right: Expr }
   | { readonly kind: 'case'; readonly whens: readonly (readonly [Expr, Expr])[]; readonly else?: Expr }
@@ -62,4 +62,4 @@ export const compilerInt = (value: number): Expr => {
 };
 
 /** SQL NULL selected by the compiler itself. A null supplied by the query/store stays a bound `lit`. */
-export const compilerNull = (): Expr => ({ kind: 'lit', value: null, type: 'any', source: 'compiler-null' });
+export const compilerNull = (type: SqlType = 'any'): Expr => ({ kind: 'lit', value: null, type, source: 'compiler-null' });

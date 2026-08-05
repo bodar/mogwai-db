@@ -1,4 +1,4 @@
-import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { MapOf, Shape } from '../../sql/kernel/render.ts';
@@ -316,7 +316,7 @@ export function groupBarrier(
       };
   const count: Expr = bulked && bulk
     ? { kind: 'agg', fn: 'sum', args: [col(rows.id, bulk.col)] }
-    : { kind: 'agg', fn: 'count', args: [lit(1, 'int')] };
+    : { kind: 'agg', fn: 'count', args: [compilerInt(1)] };
   const value = step.name === 'group' ? groupedValue : count;
   const productive = make.aggregate({
     id: fresh('gb'), input: rows,

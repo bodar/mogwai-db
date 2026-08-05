@@ -1,4 +1,4 @@
-import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../ir/step.ts';
@@ -270,8 +270,8 @@ export function byNode(modulation: Modulation, host: ByHost, fresh: Minter, chil
     // child that yielded nothing from a value it can collect or group.
     return value && {
       kind: 'case',
-      whens: [[{ kind: 'binary', op: 'is', left: value, right: lit(null, 'any') }, lit(null, 'any')]],
-      else: typedNode(value, lit(null, 'text')),
+      whens: [[{ kind: 'binary', op: 'is', left: value, right: compilerNull() }, compilerNull()]],
+      else: typedNode(value, compilerNull('text')),
     };
   }
 
@@ -279,7 +279,7 @@ export function byNode(modulation: Modulation, host: ByHost, fresh: Minter, chil
     if (key.kind !== 'identity') return null;
     // A scalar stream carries its own tag where the value came from a stored property; without one the
     // framer infers from the JS value, which is what an untagged node means.
-    return host.vtype ? typedNode(host.value, host.vtype) : typedNode(host.value, lit(null, 'text'));
+    return host.vtype ? typedNode(host.value, host.vtype) : typedNode(host.value, compilerNull('text'));
   }
 
   // A bare `by()` over an element projects the ELEMENT — not a value with a tag.
@@ -289,7 +289,7 @@ export function byNode(modulation: Modulation, host: ByHost, fresh: Minter, chil
     // A LABEL is always a string; an `id` is whatever `COALESCE(uid, id)` yields, so it stays untagged
     // and the framer infers — the same answer the element projection gives for an external id.
     const value = byExpr(modulation, host, fresh);
-    return value && typedNode(value, key.token === 'label' ? compilerText('string') : lit(null, 'text'));
+    return value && typedNode(value, key.token === 'label' ? compilerText('string') : compilerNull('text'));
   }
 
   // ONE subquery for both halves: the tag IS the row the value came from.
@@ -309,7 +309,7 @@ export function byNode(modulation: Modulation, host: ByHost, fresh: Minter, chil
  *  is dropped. `undefined` where no filter is owed — the host was handed no projection, or
  *  `ProductiveByStrategy` asked for the null-keeping behaviour. */
 export const productivityFilter = (step: IRStep, key: Expr | undefined): Expr | undefined =>
-  key && !isProductiveBy(step) ? { kind: 'binary', op: 'is not', left: key, right: lit(null, 'any') } : undefined;
+  key && !isProductiveBy(step) ? { kind: 'binary', op: 'is not', left: key, right: compilerNull() } : undefined;
 
 /**
  * `order()`'s productivity, which is NARROWER than `dedup()`'s — and the difference is the reference's,

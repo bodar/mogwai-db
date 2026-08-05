@@ -1,4 +1,4 @@
-import { lit, type Expr } from '../../rel/expr.ts';
+import { compilerNull, lit, type Expr } from '../../rel/expr.ts';
 import { isNested } from '../../gremlin/frontend.ts';
 import { JAVA_WHITESPACE } from '../plan/plan.ts';
 import { dtFactor, numericSpec } from '../steps/tail/coerce.ts';
@@ -129,8 +129,8 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[]) => E
     if (args.some((a) => typeof a === 'string')) return body;
     return {
       kind: 'case',
-      whens: [[parts.map((p) => ({ kind: 'binary', op: 'is', left: p, right: lit(null, 'any') }) as Expr)
-        .reduce((left, right) => ({ kind: 'binary', op: 'and', left, right })), lit(null, 'any')]],
+      whens: [[parts.map((p) => ({ kind: 'binary', op: 'is', left: p, right: compilerNull() }) as Expr)
+        .reduce((left, right) => ({ kind: 'binary', op: 'and', left, right })), compilerNull()]],
       else: body,
     };
   },

@@ -1,5 +1,5 @@
 import type { Channel } from '../../channels.ts';
-import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ListOf, Shape } from '../../sql/kernel/render.ts';
@@ -245,7 +245,7 @@ export function pathPositions(
   });
   const missing = make.filter({
     id: fresh('f'), input: projectedMembers, channels: [], type: projectedMembers.type,
-    pred: { kind: 'binary', op: 'is', left: col(projectedMembers.id, 'pv'), right: lit(null, 'any') },
+    pred: { kind: 'binary', op: 'is', left: col(projectedMembers.id, 'pv'), right: compilerNull() },
   });
   const probe = make.project({
     id: fresh('pp'), input: missing, channels: [], type: typeOf(meta('pv', 'any', true)),

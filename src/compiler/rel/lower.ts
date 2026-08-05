@@ -1,5 +1,5 @@
 import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
-import { col, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, planBindCount } from '../../rel/check.ts';
 import { emit, emitRelational } from '../../rel/emit.ts';
@@ -440,7 +440,7 @@ function hasPropertyClause(key: string, val: unknown, subject: Subject, elem: El
       ? and(and(eq(col(props.id, owner), subject.id), eq(col(props.id, 'key'), lit(key, 'text'))), matches)
       : and(eq(col(props.id, owner), subject.id), eq(col(props.id, 'key'), lit(key, 'text'))),
   });
-  const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', lit(1, 'int')]] });
+  const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
   return { kind: 'exists', plan: probe, negated: false };
 }
 
@@ -469,7 +469,7 @@ function hasTokenClause(token: string, val: unknown, subject: Subject, elem: Ele
     const matches = predicateExpr(external, val, SUBJECT_UNKNOWN);
     if (!matches) return null;
     const matching = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: and(eq(col(scan.id, 'id'), subject.id), matches) });
-    const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', lit(1, 'int')]] });
+    const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     return { kind: 'exists', plan: probe, negated: false };
   }
 
@@ -485,7 +485,7 @@ function hasTokenClause(token: string, val: unknown, subject: Subject, elem: Ele
       type: typeOf(meta('id', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
       on: and(and(eq(col(edges.id, 'label'), col(labels.id, 'id')), eq(col(edges.id, 'id'), subject.id)), matches),
     });
-    const probe = make.project({ id: fresh('p'), input: joined, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', lit(1, 'int')]] });
+    const probe = make.project({ id: fresh('p'), input: joined, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     return { kind: 'exists', plan: probe, negated: false };
   }
   const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
@@ -494,7 +494,7 @@ function hasTokenClause(token: string, val: unknown, subject: Subject, elem: Ele
     type: typeOf(meta('node', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
     on: and(and(eq(col(vl.id, 'label'), col(labels.id, 'id')), eq(col(vl.id, 'node'), subject.id)), matches),
   });
-  const probe = make.project({ id: fresh('p'), input: joined, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', lit(1, 'int')]] });
+  const probe = make.project({ id: fresh('p'), input: joined, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
   return { kind: 'exists', plan: probe, negated: false };
 }
 
@@ -624,7 +624,7 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
       exprs: [['id', col(source.id, hop.to)],
         ...(input
           ? carried.map((channel) => [channel.col, col(source.id, channel.col)] as const)
-          : [['bulk', lit(1, 'int')] as const])],
+          : [['bulk', compilerInt(1)] as const])],
     });
   });
   const [first, ...rest] = arms;
@@ -873,14 +873,14 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, ctx: Chain
   if (!ordered) {
     const projected = make.project({
       id: fresh('dd'), input, channels: BULK, type: typeOf(meta('id', 'int'), meta('bulk', 'int')),
-      exprs: [['id', col(input.id, 'id')], ['bulk', lit(1, 'int')]],
+      exprs: [['id', col(input.id, 'id')], ['bulk', compilerInt(1)]],
     });
     return make.distinct({ id: fresh('d'), input: projected, channels: BULK, type: projected.type });
   }
   return make.aggregate({
     id: fresh('dd'), input, channels: input.channels, type: typeOf(...elementCols(input.channels)),
     groupBy: [col(input.id, 'id')],
-    aggs: [['bulk', lit(1, 'int')], ['encounter', { kind: 'agg', fn: 'min', args: [col(input.id, 'encounter')] }]],
+    aggs: [['bulk', compilerInt(1)], ['encounter', { kind: 'agg', fn: 'min', args: [col(input.id, 'encounter')] }]],
   });
 }
 
@@ -945,12 +945,12 @@ function dedupBy(
   });
   const survivors = make.filter({
     id: fresh('f'), input: ranked, channels: ranked.channels, type: ranked.type,
-    pred: eq(col(ranked.id, 'rn'), lit(1, 'int')),
+    pred: eq(col(ranked.id, 'rn'), compilerInt(1)),
   });
   return make.project({
     id: fresh('dk'), input: survivors, channels: input.channels, type: typeOf(...cols),
     exprs: cols.map((column) => [column.name,
-      column.name === 'bulk' ? lit(1, 'int') : col(survivors.id, column.name)] as const),
+      column.name === 'bulk' ? compilerInt(1) : col(survivors.id, column.name)] as const),
   });
 }
 
@@ -1038,7 +1038,7 @@ const coalesce = (rel: Rel, fresh: Minter): Rel =>
 function countExpr(input: Rel): Expr {
   const bulk = input.channels.find((channel) => channel.role === 'bulk');
   return bulk
-    ? { kind: 'call', fn: 'COALESCE', args: [{ kind: 'agg', fn: 'sum', args: [col(input.id, bulk.col)] }, lit(0, 'int')] }
+    ? { kind: 'call', fn: 'COALESCE', args: [{ kind: 'agg', fn: 'sum', args: [col(input.id, bulk.col)] }, compilerInt(0)] }
     : { kind: 'agg', fn: 'count', args: [] };
 }
 
@@ -1721,7 +1721,7 @@ function pathTail(
       if (typeOfAssert(step).kind !== 'gtype') return null;
       rel = make.filter({
         id: fresh('f'), input: rel, channels: rel.channels, type: rel.type,
-        pred: eq(lit(0, 'int'), lit(1, 'int')),
+        pred: eq(compilerInt(0), compilerInt(1)),
       });
       continue;
     }
@@ -1995,7 +1995,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   // `addE` at the SOURCE is one edge with both ends named — the input is a one-row `Values` and the
   // endpoints carry the whole answer, so the mid-chain lowering runs unchanged.
   if (first.name === 'addE') {
-    const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[lit(1, 'int')]] });
+    const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
     const added = addedEdges(one, 'vertex', steps, 0, NO_ALIASES, ctx, fresh);
     if (!added) return null;
     const tail = elementTail(added.effects.result, 'edge', steps, added.at, false, ctx, fresh, NO_ALIASES);
@@ -2003,7 +2003,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   }
 
   if (first.name === 'addV') {
-    const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[lit(1, 'int')]] });
+    const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
     const added = addedVertices(one, steps, 0, ctx, fresh);
     if (!added) return null;
     const tail = elementTail(added.effects.result, 'vertex', steps, added.at, false, ctx, fresh, NO_ALIASES);
@@ -2013,7 +2013,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   // `mergeV` AT THE SOURCE takes the same one-row input the two creations do, and for the same reason:
   // the input is a MULTIPLIER, so one row means the search's answer is emitted once.
   if (first.name === 'mergeV') {
-    const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[lit(1, 'int')]] });
+    const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
     const merged = mergedVertices(one, steps, 0, ctx, fresh);
     if (!merged) return null;
     const tail = elementTail(merged.effects.result, 'vertex', steps, merged.at, false, ctx, fresh, NO_ALIASES);
@@ -2047,7 +2047,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   let rel: Rel = make.project({
     id: fresh('c'), input: source, channels: seedChannels, type: typeOf(...elementCols(seedChannels)),
     exprs: [['id', col(source.id, 'id')], ...seedChannels.map((channel) => [channel.col,
-      channel.role === 'bulk' ? lit(1, 'int')
+      channel.role === 'bulk' ? compilerInt(1)
         : channel.role === 'encounter' ? col(source.id, 'id')
           : seedPath({ kind: 'element', elem, id: col(source.id, 'id') }),
     ] as const)],

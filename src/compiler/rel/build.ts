@@ -1,5 +1,5 @@
 import type { ChannelRole, Channels } from '../../channels.ts';
-import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { relId, type ColMeta, type RelId, type RelType, type SortTerm, type SqlType } from '../../rel/types.ts';
@@ -187,7 +187,7 @@ export function firstOf(rel: Rel, value: Expr, order: Expr, fresh: Minter): Expr
     exprs: [['v', value], ['k', order]],
   });
   const sorted = make.sort({ id: fresh('so'), input: projected, channels: [], type: projected.type, terms: [{ expr: col(projected.id, 'k'), dir: 'asc' }] });
-  const one = make.limit({ id: fresh('li'), input: sorted, channels: [], type: sorted.type, count: lit(1, 'int') });
+  const one = make.limit({ id: fresh('li'), input: sorted, channels: [], type: sorted.type, count: compilerInt(1) });
   const only = make.project({
     id: fresh('p'), input: one, channels: [], type: typeOf(meta('v', 'any', true)),
     exprs: [['v', col(one.id, 'v')]],

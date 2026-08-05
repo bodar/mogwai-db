@@ -1,6 +1,6 @@
 import type { Channels } from '../../channels.ts';
 import { withChannel } from '../../channels.ts';
-import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
@@ -72,8 +72,8 @@ const liveAliases = (aliases: AliasMap, rel: Rel): AliasMap =>
  *  predicate rather than a throw. */
 export const aliasPresent = (column: Expr): Expr => ({
   kind: 'binary', op: 'and',
-  left: { kind: 'binary', op: 'is not', left: column, right: lit(null, 'any') },
-  right: { kind: 'binary', op: '>', left: { kind: 'call', fn: 'json_array_length', args: [column] }, right: lit(0, 'int') },
+  left: { kind: 'binary', op: 'is not', left: column, right: compilerNull() },
+  right: { kind: 'binary', op: '>', left: { kind: 'call', fn: 'json_array_length', args: [column] }, right: compilerInt(0) },
 });
 
 /** Which end of the history a single-value Pop reads. `mixed` over a once-bound label is that lone
