@@ -209,7 +209,11 @@ test('group scalar-list drops members missing the property (json_group_array + n
   // LAST ARRIVING traverser wins. `g.V()` arrives 1..6 = marko,vadas,lop,josh,ripple,peter, so
   // `person` resolves to peter's initial and `software` to ripple's. Verified stable under
   // MOGWAI_REVERSE_UNORDERED=1 — "last arriving" is the carried encounter, not a scan artefact.
-  expect(grouped(run(store, 'g.V().group().by(__.label()).by(__.values("name").substring(0,1))')))
+  // Spine PINNED, not ambient: this is the RelIR answer and legacy still collects a list (§14 — legacy
+  // is what §8 deletes), so reading it off the ambient switch would make the assertion say different
+  // things in `ci` and in `test:legacy-spine`. Pinning is `mise.toml`'s existing rule for a
+  // spine-specific L2 assertion, applied here.
+  expect(grouped(runWith(store, 'g.V().group().by(__.label()).by(__.values("name").substring(0,1))', { spine: 'rel' })))
     .toEqual({ person: 'p', software: 'r' });
 });
 

@@ -28,7 +28,7 @@ import { test, expect, describe } from 'bun:test';
 import { loadScenarios } from './read-features.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { executeQuery } from '../support/executor.ts';
+import { exec, executeQuery } from '../support/executor.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { ZOO_SEED } from '../fixtures/seed-zoo.ts';
 import { LabelCardinality } from '../../src/api.ts';
@@ -239,13 +239,20 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
       // A scenario's own `graph initializer` runs after the fixture seed and before its traversal,
       // exactly as upstream orders them.
       if (s.initializer) executeQuery(store, s.initializer, {}, {}, standardRegistry);
+      // The scenario's OWN traversal, with its spine pinned when the scenario asked for one
+      // (`@SpineRel`/`@SpineLegacy` — see `pinSpine` in read-features.ts). The fixture seed and the
+      // initializer stay ambient on purpose: they are writes that set up a graph, not the answer
+      // under test, so pinning them would widen what the tag claims.
+      const runTraversal = () => s.pinSpine
+        ? exec(store, standardRegistry, undefined, s.pinSpine).buffers(s.gremlin, {}, {})
+        : executeQuery(store, s.gremlin, {}, {}, standardRegistry);
       // An `error` scenario asserts the REFUSAL, so it runs the traversal expecting a throw and
       // nothing below it applies. Upstream compares the message case-insensitively; so do we.
       // An `@RelIR` scenario becomes one of these when RelIR is off — its message is the legacy
       // spine's and not ours to pin, so only the throw itself is asserted.
       if (s.assertion === 'error' || (s.relirOnly && relirOff)) {
         let thrown: unknown;
-        try { await decodeAll(executeQuery(store, s.gremlin, {}, {}, standardRegistry)); }
+        try { await decodeAll(runTraversal()); }
         catch (e) { thrown = e; }
         expect(thrown).toBeInstanceOf(Error);
         if (s.error && s.assertion === 'error') {
@@ -259,7 +266,7 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
       }
       // The standard service registry is injected so call() scenarios (tinker.search / degree)
       // resolve; a non-call scenario is unaffected (it never looks a service up).
-      const decoded = await decodeAll(executeQuery(store, s.gremlin, {}, {}, standardRegistry));
+      const decoded = await decodeAll(runTraversal());
       const got = decoded.map(canon);
       // Element references (`v[marko].id`) resolve against the seeded store, so a scenario copied
       // in verbatim from gremlin-test needs no rewriting around literal ids.

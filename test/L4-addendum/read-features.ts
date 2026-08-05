@@ -25,6 +25,7 @@
 // old reader: an unmapped step must never read as a passing scenario.
 
 import { readdirSync, readFileSync } from 'node:fs';
+import type { Spine } from '../../src/sql/kernel/render.ts';
 // Deep paths into the submodule's install, and they are deliberately the built entry points each
 // package's own `main`/`exports` names: `@cucumber/gherkin` has no `exports` map (so `dist/src`) and
 // `@cucumber/messages` publishes dual builds (so the ESM one).
@@ -54,6 +55,23 @@ export interface Scenario {
    *  skip: it says the two routes DIVERGE and which way round, so `test:legacy-spine` can assert the
    *  refusal instead of reading a deliberate improvement as a regression. */
   relirOnly: boolean;
+  /** `@SpineRel` / `@SpineLegacy` — PIN this scenario's spine, ignoring the ambient switch.
+   *
+   *  A THIRD way for the two routes to diverge, and the one `@RelIR` cannot express: legacy neither
+   *  refuses nor agrees, it ANSWERS DIFFERENTLY — and by §14's decision (legacy is what §8 deletes)
+   *  that difference is accepted rather than fixed. `@RelIR` asserts a THROW under
+   *  `test:legacy-spine`, which is simply false here, and a bare skip would stop asserting the
+   *  scenario in one configuration for no reason: the answer under test is not a property of the
+   *  ambient switch at all.
+   *
+   *  So pin it, which is `mise.toml`'s existing rule for an L2 test that pins a spine's SPELLING —
+   *  "asserting BOTH forms rather than whichever the ambient switch produced" — applied to an
+   *  end-to-end scenario. The assertion then runs identically in both configurations. Legacy's actual
+   *  answer is not lost: the census records it per corpus traversal in its `lms` column.
+   *
+   *  Both directions exist because a legacy-pinned scenario costs nothing to support and the one-sided
+   *  version would be a vocabulary that has to be widened the first time it is needed. */
+  pinSpine: Spine | null;
   expected: string[];
   /** `And the graph should return N for count of "<traversal>"` — upstream's own Then-step for
    *  asserting GRAPH STATE after a write, the only thing that can catch a write that ran and left the
@@ -82,6 +100,7 @@ function toScenario(feature: string, name: string, tags: readonly string[], step
     feature, name, graph: 'empty', initializer: null, gremlin: '',
     assertion: 'unordered', count: null, error: null, expected: [], graphChecks: [],
     relirOnly: tags.includes('@RelIR'),
+    pinSpine: tags.includes('@SpineRel') ? 'rel' : tags.includes('@SpineLegacy') ? 'legacy' : null,
   };
   // The routing the official runner does (`feature-steps.js`): a @MultiLabel scenario's EMPTY graph
   // is the multi-label source, not the plain one. Mirrored so a scenario can be copied in with its

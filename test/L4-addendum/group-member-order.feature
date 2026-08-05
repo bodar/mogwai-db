@@ -19,7 +19,10 @@ Feature: mogwai addendum — group() values preserve member arrival order
   # [marko,vadas,lop,josh,ripple,peter]. Every traverser lands under the same key here, and the child
   # value differs for each one, so Operator.assign's last-arriving rule must select peter rather than
   # collecting all six values (or choosing the highest/lowest value independently of encounter).
-  @gap:group-child-value-assignment
+  # @SpineRel: legacy neither refuses this nor agrees — it collects a LIST, and §14 records the
+  # decision not to spend on legacy. `@RelIR` would assert a THROW under test:legacy-spine, which is
+  # false here, so the scenario pins its spine instead and asserts the same answer in both runs.
+  @gap:group-child-value-assignment @SpineRel
   Scenario: g_V_group_byXconstantXallXX_byXvaluesXnameXX_last_arriving_wins
     Given the modern graph
     And the traversal of
