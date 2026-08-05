@@ -106,11 +106,14 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[]) => E
     const from = { kind: 'binary', op: '+', left: newStart, right: int(1) } as Expr;
     if (end === undefined) return call('substr', v, from);
     const newEnd = index(end);
-    return {
-      kind: 'case',
-      whens: [[{ kind: 'binary', op: '<=', left: newEnd, right: newStart }, text('')]],
-      else: call('substr', v, from, { kind: 'binary', op: '-', left: newEnd, right: newStart }),
-    };
+    // AN EMPTY SLICE IS ARITHMETIC, NOT A BRANCH: `substr(x, from, 0)` is already `''`, so clamping the
+    // length at zero answers exactly what the `CASE WHEN newEnd <= newStart THEN ''` guard did —
+    // verified equal over NULL, `''`, inverted ranges, negative indices and out-of-range bounds.
+    // The guard spelled both bounds a second time, and each bound embeds `length(v)`, so a subject that
+    // is a correlated property subquery was emitted SIX times for one `substring(0,1)`; this is four.
+    // Bind-budget correctness rather than tidiness — see `storedValueOn` for the measured case.
+    return call('substr', v, from,
+      call('MAX', int(0), { kind: 'binary', op: '-', left: newEnd, right: newStart }));
   },
   concat: (v, args) => {
     // A traversal argument is a per-traverser child value (`TraversalUtil.apply`), which makes the step

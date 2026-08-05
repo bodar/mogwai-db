@@ -138,15 +138,44 @@ export function labelIds(names: readonly string[], fresh: Minter): Rel {
   return make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
 }
 
+const COLLECTION_VTYPES = ['list', 'map', 'set'] as const;
+
+/**
+ * Is this vtype a collection, decided at COMPILE time — `true`/`false` where the expression is a
+ * compiler-authored literal, `null` where only the rows can say.
+ *
+ * Only a literal the COMPILER wrote is folded. A `source: 'bound'` literal is query data, and folding
+ * on it would make the statement TEXT a function of the parameter's value — the same defect as
+ * inlining data, and it defeats statement caching for the one input that exists to be varied.
+ */
+const literalCollection = (vtype: Expr): boolean | null => {
+  if (vtype.kind !== 'lit' || vtype.source === 'bound') return null;
+  // A NULL vtype is not a collection: SQL's `NULL IN (…)` is NULL, never true, so the CASE takes ELSE.
+  if (vtype.value === null) return false;
+  return typeof vtype.value === 'string' && (COLLECTION_VTYPES as readonly string[]).includes(vtype.value);
+};
+
 /** The storage-class recovery every stored value goes through on the way out: a JSON-typed value
  *  comes back as JSON, everything else as itself. Shared by `values()` and every other reader of a
- *  property value. */
-export const storedValueOn = (value: Expr, vtype: Expr): Expr => ({
-  kind: 'case',
-  whens: [[{ kind: 'in-list', expr: vtype, values: ['list', 'map', 'set'].map(compilerText) },
-    { kind: 'call', fn: 'json', args: [value] }]],
-  else: value,
-});
+ *  property value.
+ *
+ *  THE TEST IS FOLDED WHERE THE VTYPE IS A COMPILER LITERAL, and that is a bind-budget requirement
+ *  rather than tidiness: the `CASE` spells `value` TWICE, so an undecided test DOUBLES a subject that
+ *  is routinely a whole correlated subquery. A computed scalar's vtype is `compilerNull()`
+ *  (`modulator.ts`), so the `json()` arm was dead and paid for — measured on
+ *  `g.V().group().by(__.values("name").substring(0,1)).by(__.constant(1))`, whose 42 binds carried
+ *  only FOUR distinct values, `"name"` fourteen times. */
+export const storedValueOn = (value: Expr, vtype: Expr): Expr => {
+  const collection = literalCollection(vtype);
+  if (collection === true) return { kind: 'call', fn: 'json', args: [value] };
+  if (collection === false) return value;
+  return {
+    kind: 'case',
+    whens: [[{ kind: 'in-list', expr: vtype, values: COLLECTION_VTYPES.map(compilerText) },
+      { kind: 'call', fn: 'json', args: [value] }]],
+    else: value,
+  };
+};
 
 /** The common case: the value and its type are the `value`/`vtype` COLUMNS of a property scan.
  *  Derived from the general form rather than spelled twice — the same relationship
