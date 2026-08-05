@@ -3059,3 +3059,38 @@ to stop clearing on the other two, not to stop clearing.
 Worth pairing with §13e's confirmed list, which already pins the set-op RESULT types one for one
 (`Intersect`/`Difference`/`Disjunct`/`Merge` → `Set`, `Combine` → `List`, `Product` → `List<List>`): those are
 what PRODUCES the marker, and this is what must not lose it. Corpus: invisible for the surviving cases.
+
+### 13c·2. `AliasEntry.binds` — the FIRST half is a LIVE WRONG ANSWER, not a coverage cost; the second half is genuinely a pre-condition
+
+§13c's fourth bullet splits into two halves and mis-grades both. Measured, RelIR spine:
+
+    g.V(1).as("a").filter(__.identity()).as("a").select(Pop.mixed, "a")
+      ours       a LIST containing marko
+      reference  the bare vertex v[marko]
+
+**§13c calls this "costing only coverage". It is a wrong answer with the wrong wire type.** The reference
+binds `a` ONCE: `ImmutablePath.extend(Set<String> labels)`
+(`gremlin-core/.../traversal/step/util/…/ImmutablePath.java:93-102`) opens
+`if (labels.isEmpty() || this.currentLabels.containsAll(labels)) return this;` — a NO-OP for a label the
+current head already carries. `filter` does not move the traverser, so the second `as('a')` lands on the same
+head and adds no path position. Then `Pop.mixed` is `this.get(label)` (`:141-143`), which yields the bare
+object for a label occupying one position. We count binds TEXTUALLY (`src/compiler/rel/alias.ts:140`,
+`binds: (existing?.binds ?? 0) + 1`), reach 2, and `:255`'s
+`pop === 'mixed' && entry.binds !== 1` then routes to the LIST arm.
+
+**So the actionable fix is not the proposed vocabulary at all: a rebind at the SAME path position must not
+increment.** `AliasEntry` already carries the position (`context.ts` — "Linear path position index this label
+attached to … A rebind overwrites with the latest"), so the discriminator is in hand: increment only when the
+head has moved since the previous bind. That is independent of `repeat` and can land now.
+
+**The second half IS the pre-condition §13c says it is, and it is not reachable today.** Measured: both spines
+DEFER `g.V(1).repeat(__.out().as("a")).times(2).select(Pop.mixed, "a")` with
+`repeat(__.out().as()) not yet supported (body must be row-local: …)` — `as()` inside a repeat body is not
+supported at all, so "binds stays 1 while the runtime binds N" cannot arise yet.
+
+**And the proposed `1 | 'many' | 'unknown'` vocabulary is largely already there.** `binds?: number` documents
+`undefined` as "dynamic depth (bound inside repeat()/a branch arm), where the count is only known at runtime
+and Pop must resolve via SQL", the branch-merge arm (`context.ts:256`) already sets it undefined when arms
+disagree, and `alias.ts:255`'s `!== 1` test makes `undefined` decline the static fast path — fail-closed
+already. What the repeat arm must do is ensure a repeat-bound label reaches that `undefined`, not introduce a
+third state. Worth restating the field's doc in those terms when it lands, rather than widening the type.
