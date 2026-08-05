@@ -14,6 +14,15 @@ import { read, run, runWith, seededStore } from '../support/harness.ts';
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
 
+// A predicate operand is a CONSTANT when it is a parsed literal (inlined as an escaped SQL literal) and
+// BINDS only when it is a wire parameter (docs/2026-08-05-parameters-are-the-only-binds.md). Legacy
+// still binds every operand, so a cross-spine snapshot asserts the value is PRESENT either way: in the
+// bind list, or in the SQL text (a string `'v'`-quoted, a number as a bare token not glued to a word).
+const carries = (plan: { sql: string; binds: readonly unknown[] }, v: string | number): boolean =>
+  plan.binds.includes(v) || (typeof v === 'string'
+    ? plan.sql.includes(`'${v}'`)
+    : new RegExp(`(?<![\\w.])${v}(?![\\w.])`).test(plan.sql));
+
 describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
   test('hasId filters on the external id (COALESCE(uid,id))', () => {
     const one = read('g.V().hasId(1)');
@@ -33,10 +42,9 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
   // `P.typeOf` is RelIR-routed on both `is` and `has`, so the CONTRACT is asserted once per spine —
   // three resolution modes, and the point of each is which evidence it reads, not how it spells it.
   // A canonical type name and a storage class are compiler-authored CONSTANTS: legacy binds them, RelIR
-  // inlines them as escaped literals (the parameter-budget rule). `carries` asserts the value is present
-  // either way, so the contract — that both pieces of evidence appear — holds across the spelling.
-  const carries = (plan: { sql: string; binds: readonly unknown[] }, v: string): boolean =>
-    plan.binds.includes(v) || plan.sql.includes(`'${v}'`);
+  // inlines them as escaped literals (the parameter-budget rule). The module-level `carries` asserts the
+  // value is present either way, so the contract — that both pieces of evidence appear — holds across the
+  // spelling.
   for (const spine of ['legacy', 'rel'] as const) {
     test(`P.typeOf resolves the stored vtype, with a storage-class fallback — ${spine} spine`, () => {
       // value stream + is(): the per-row vtype column (values() reads vp.vtype) answers the type; a
@@ -99,11 +107,11 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
       // the compare-key `END`, RelIR inside each type-space arm so a cross-type compare is FALSE
       // rather than SQLite's storage order — so what is asserted is that the comparison is vtype-aware
       // AT ALL. A raw `value > ?` matches neither alternative.
-      expect(gt.sql).toMatch(/(END\)? > \?|CAST\([^)]+ AS (INT|REAL)\) > \?)/);
-      expect(gt.binds).toContain(30);
+      expect(gt.sql).toMatch(/(END\)? > (?:\?|\d+)|CAST\([^)]+ AS (INT|REAL)\) > (?:\?|\d+))/);
+      expect(carries(gt, 30)).toBe(true);   // bound on legacy, inlined on rel
       // bare literal → equality, with no compareKey (equality on canonical text is exact)
       const eq = read('g.V().values("age").is(29)', { spine });
-      expect(eq.sql).toMatch(/\bv = \?/);
+      expect(eq.sql).toMatch(/\bv = (?:\?|29)/);
       expect(eq.sql).not.toContain('CAST');
     });
 
@@ -286,7 +294,7 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     // spelling differs, so the shared fragments are what is asserted across them.
     for (const spine of ['legacy', 'rel'] as const) {
       expect(read('g.V().where(__.out("knows").has("age", P.gt(30)))', { spine }).sql)
-        .toMatch(/(END\)? > \?|CAST\([^)]+ AS (INT|REAL)\) > \?)/);
+        .toMatch(/(END\)? > (?:\?|\d+)|CAST\([^)]+ AS (INT|REAL)\) > (?:\?|\d+))/);
       expect(read('g.V().where(__.out("created").hasLabel("software"))', { spine }).sql).toMatch(/vertex_labels[^]*labels/);
     }
   });
@@ -347,9 +355,11 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
   // So `compared` accepts either: the operator applied to a compare-key `END`, or applied to a CAST
   // inside one. Both spellings are "the ordering comparison happened, vtype-aware"; neither pins a
   // spine's shape, and a RAW `value >= ?` with no vtype CASE anywhere still fails both alternatives.
+  // The operand is `?` on legacy, an inlined numeric literal on rel — either is "the ordering comparison,
+  // vtype-aware"; a RAW `value >= <x>` with no vtype CASE anywhere still fails both alternatives.
   const compared = (op: string) => {
     const o = op.replace(/[><=]/g, (c) => '\\' + c);
-    return new RegExp(`(END\\)? ${o} \\?|CAST\\([^)]+ AS (INT|REAL)\\) ${o} \\?)`);
+    return new RegExp(`(END\\)? ${o} (?:\\?|-?\\d+(?:\\.\\d+)?)|CAST\\([^)]+ AS (INT|REAL)\\) ${o} (?:\\?|-?\\d+(?:\\.\\d+)?))`);
   };
   for (const spine of ['legacy', 'rel'] as const) {
     test(`P.inside is exclusive-low (distinct from between) — ${spine} spine`, () => {
@@ -360,9 +370,9 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     });
 
     test(`has() compiles every predicate form — ${spine} spine`, () => {
-      expect(read('g.V().has("age", 30)', { spine }).sql).toContain('= ?');          // eq stays a raw exact compare
+      expect(read('g.V().has("age", 30)', { spine }).sql).toMatch(/= (?:\?|30)/);     // eq stays a raw exact compare
       expect(read('g.V().has("age", P.gt(30))', { spine }).sql).toMatch(compared('>')); // range → vtype-aware compareKey
-      expect(read('g.V().has("age", P.within(29,30))', { spine }).sql).toMatch(/in \(\?, ?\?\)/i);
+      expect(read('g.V().has("age", P.within(29,30))', { spine }).sql).toMatch(/in \((?:\?|\d+), ?(?:\?|\d+)\)/i);
       expect(read('g.V().has("age", P.between(29,35))', { spine }).sql).toMatch(compared('>='));
     });
 

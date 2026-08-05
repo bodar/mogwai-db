@@ -1,8 +1,9 @@
-import { col, compilerInt, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import { CF_MAX_BINDS } from '../../cf-limits.ts';
 import type { RelId } from '../../rel/types.ts';
 import { gtypeName } from '../../gremlin/frontend.ts';
-import { normalizeTypeName, STORAGE_CLASS } from '../../gremlin/types.ts';
+import { normalizeTypeName, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
+import { constLit } from './const.ts';
 
 /**
  * `P`/`TextP` AS RelIR EXPRESSIONS — the predicate vocabulary, re-expressed in the algebra.
@@ -46,16 +47,21 @@ const COMPARISON: Readonly<Record<string, Extract<Expr, { kind: 'binary' }>['op'
 const ORDERING = new Set(['gt', 'gte', 'lt', 'lte']);
 
 /**
- * A literal operand this vocabulary can compare against.
+ * An operand this vocabulary can compare against, routed through the one const/param seam.
  *
  * `string`/`number` only, deliberately. A `bigint`, a `Duration` or a `BigDecimal` needs the
  * matching `CAST` on the BOUND side to line up with `compareKey`'s cast on the column side
  * (`plan.ts` `compareBound`), and a nested traversal needs a correlated per-traverser value that
  * no pure predicate can build. All of them decline, and the legacy spine answers them exactly as
  * it does today.
+ *
+ * A parsed literal INLINES (a constant — the value-operand budget win), a wire PARAMETER (`paramName`,
+ * from `Step.paramNames`) BINDS. Storage class does not matter for a comparison operand — SQLite
+ * compares an INTEGER `2` and a REAL `2.0` numerically alike — so a nested operand with no declared
+ * type inlines by its value's own shape without changing any answer.
  */
-const operand = (value: unknown): Expr | null =>
-  typeof value === 'string' ? lit(value, 'text') : typeof value === 'number' ? lit(value, 'real') : null;
+const operand = (value: unknown, type: TypeNode | null = null, paramName: string | null = null): Expr | null =>
+  typeof value === 'string' || typeof value === 'number' ? constLit(value, type, paramName) : null;
 
 /** Above this, a set stops being an IN-list and becomes one JSON bind — the DO 100-parameter wall.
  *  RelIR's remedy for that is `passes/land.ts`, which lowers a `Values`, not an `InList`; until an
@@ -240,11 +246,16 @@ const KNOWN_NON_VALUE = new Set(['vertex', 'edge', 'vertexproperty', 'vproperty'
  * The caller supplies it because the caller is the only one that knows where the `vtype` column lives
  * — the same reason `Col` names a relation.
  */
-export function predicateExpr(subject: Expr, pred: unknown, type: SubjectType = SUBJECT_UNKNOWN): Expr | null {
+export function predicateExpr(
+  subject: Expr, pred: unknown, type: SubjectType = SUBJECT_UNKNOWN,
+  opType: TypeNode | null = null, opParam: string | null = null,
+): Expr | null {
   // `has(key)` with no value: presence, not comparison.
   if (pred === undefined) return binary('is not', subject, compilerNull());
   if (!isPred(pred)) {
-    const value = operand(pred);
+    // The BARE value — the one operand that can be a top-level parameter (`has(k, $x)`, `is($x)`), so it
+    // alone carries the declared type and the param name; a `P.gt(x)` operand is nested and inlines.
+    const value = operand(pred, opType, opParam);
     return value && binary('=', subject, value);
   }
 
@@ -277,7 +288,7 @@ export function predicateExpr(subject: Expr, pred: unknown, type: SubjectType = 
     // nothing is never, without nothing is always.
     if (!values.length) return op === 'within' ? CONSTANT.false : CONSTANT.true;
     if (values.length > SET_BIND_LIMIT) return null;
-    const members = values.map(operand);
+    const members = values.map((v) => operand(v));
     if (members.some((m) => !m)) return null;
     const inList: Expr = { kind: 'in-list', expr: subject, values: members as Expr[] };
     return op === 'within' ? inList : negated(inList);

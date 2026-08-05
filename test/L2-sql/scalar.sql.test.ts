@@ -1181,7 +1181,8 @@ describe('scalar-parent / projection SQL', () => {
     for (const spine of ['legacy', 'rel'] as const) {
       const transformed = read('g.V().values("name").toUpper().is("MARKO")', { spine });
       expect(transformed.sql).toMatch(/upper\([^]*\) AS v/);
-      expect(transformed.sql).toMatch(/WHERE \(?upper\([^]*\) = \?\)?/);
+      // The operand is a parsed literal → inlined on rel (`= 'MARKO'`), bound on legacy (`= ?`).
+      expect(transformed.sql).toMatch(/WHERE \(?upper\([^]*\) = (?:\?|'MARKO')\)?/);
 
       const fused = read('g.V().values("name").toLower().is(P.neq("x")).toUpper()', { spine });
       // the OUTER transform wraps the inner one — left-to-right order preserved through the fusion
@@ -1190,7 +1191,7 @@ describe('scalar-parent / projection SQL', () => {
       // `neq` is now total over NULL (§13a): `(x = ?) IS NOT 1` rather than `x != ?`, because negating
       // SQL NULL must be TRUE where TinkerPop's two-valued `test` says so. Either spelling is the
       // predicate; the POINT of this assertion is that its subject is `lower(…)` and not `upper(lower(…))`.
-      expect(fused.sql).toMatch(/WHERE \(*lower\([^]*\)( != \?|( = \?\)? IS NOT 1))/);
+      expect(fused.sql).toMatch(/WHERE \(*lower\([^]*\)( != (?:\?|'x')|( = (?:\?|'x')\)? IS NOT 1))/);
       expect(fused.sql).not.toMatch(/WHERE \(?upper\(/);
     }
     expect(read('g.V().values("name").toLower().is(P.neq("x")).toUpper()', { spine: 'legacy' }).sql).not.toContain('FROM c2 p)');

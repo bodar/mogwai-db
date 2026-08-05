@@ -130,9 +130,12 @@ describe('a data-sized within() set rides one JSON bind', () => {
     expect(store.query<{ v: number }>(plan.sql, plan.binds)[0].v).toBe(5);
   }, ROW_SCALE_TIMEOUT_MS);
 
-  test('a small set keeps the IN-list form (one bind per member)', () => {
+  test('a small set keeps the IN-list form (members inlined as literals, not one bind each)', () => {
     const plan = compile('g.V().has("name", within("a","b","c")).count()', {});
     if (plan.kind !== 'read') throw new Error('expected read plan');
-    expect(plan.binds.filter((b) => typeof b === 'string' && 'abc'.includes(b)).length).toBe(3);
+    // The members are parsed literals → inlined into the IN-list (the set stays an IN-list, NOT a JSON
+    // bind — only their spelling changed from `?` to an escaped literal, docs/2026-08-05-parameters-are-the-only-binds.md).
+    expect(plan.binds.filter((b) => typeof b === 'string' && 'abc'.includes(b)).length).toBe(0);
+    expect(plan.sql).toMatch(/in \('a', ?'b', ?'c'\)/i);
   });
 });

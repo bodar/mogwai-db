@@ -1,4 +1,4 @@
-import { compilerInt, compilerNull, compilerReal, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import { compilerInt, compilerNull, compilerReal, compilerText, lit, param, type Expr } from '../../rel/expr.ts';
 import { flatType, type TypeNode } from '../../gremlin/types.ts';
 
 // ---------- the one seam for "a value the compiler already holds" ----------
@@ -14,18 +14,26 @@ import { flatType, type TypeNode } from '../../gremlin/types.ts';
 // vocabulary (`flatType`/`TypeNode`) and `src/rel/` is the clean-room the arch check keeps free of
 // `src/gremlin` imports.
 
-/** A held CONSTANT the compiler already knows — inlined as a TYPED SQL literal, its storage class
- *  following the arg's declared canonical type (`Step.argTypes`) rather than being re-derived from the
- *  JS runtime value. A REAL declared type inlines an integer-valued double as `2.0`, not INTEGER `2`.
- *  Values a literal cannot spell (`NaN`/±`Infinity`) stay a bound `lit`; a shape that is a different
- *  traverser — a collection, a map, a nested traversal, or a big-value carrier (bigint/BigDecimal/
- *  Duration, the `oversized` tail) — declines with `null`, exactly as the bound path did. */
-export const constLit = (value: unknown, type: TypeNode | null): Expr | null => {
-  if (value === null) return compilerNull();
-  if (typeof value === 'string') return compilerText(value);
-  if (typeof value === 'boolean') return compilerInt(value ? 1 : 0);
+/** A scalar arg → its RelIR expression, deciding bind-vs-inline the ONE way the whole design turns on:
+ *
+ *  - `paramName != null` — the value is a USER PARAMETER (`$x` in the binding map, `Step.paramNames`).
+ *    It BINDS (`?`), spending one of the 100 by intent — the only free-standing bind the design keeps,
+ *    because a parameter is the user's signal that the value is variable.
+ *  - `paramName == null` — the value is a CONSTANT the compiler holds (a parsed literal). It INLINES as
+ *    a TYPED SQL literal, storage class following the declared canonical type (`argTypes`), so an
+ *    integer-valued double inlines as `2.0` not INTEGER `2`. Spends nothing.
+ *
+ *  Either way, a shape a scalar literal cannot spell — a collection, a map, a nested traversal, or a
+ *  big-value carrier (bigint/BigDecimal/Duration, the `oversized` tail) — declines with `null` for the
+ *  caller to route (a param of that shape is oversized, handled where collections already are). A
+ *  non-finite number (`NaN`/±`Infinity`) has no literal form, so it stays a bound `lit`. */
+export const constLit = (value: unknown, type: TypeNode | null, paramName: string | null = null): Expr | null => {
+  if (value === null) return paramName != null ? param(value) : compilerNull();
+  if (typeof value === 'string') return paramName != null ? param(value, 'text') : compilerText(value);
+  if (typeof value === 'boolean') return paramName != null ? param(value) : compilerInt(value ? 1 : 0);
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) return lit(value, 'real'); // NaN/±Infinity have no literal form
+    if (paramName != null) return param(value);
     if (!Number.isInteger(value)) return compilerReal(value);
     const flat = flatType(type);
     return flat === 'float' || flat === 'double' || flat === 'bigdecimal'

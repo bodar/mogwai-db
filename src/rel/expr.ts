@@ -7,6 +7,7 @@ export type BinaryOp = '+' | '-' | '*' | '/' | '%' | '=' | '!=' | '<' | '<=' | '
 export type Expr =
   | { readonly kind: 'col'; readonly rel: import('./types.ts').RelId; readonly name: string }
   | { readonly kind: 'lit'; readonly value: unknown; readonly type: SqlType; readonly source: 'bound' }
+  | { readonly kind: 'lit'; readonly value: unknown; readonly type: SqlType; readonly source: 'parameter' }
   | { readonly kind: 'lit'; readonly value: string; readonly type: 'text'; readonly source: 'compiler-text' }
   | { readonly kind: 'lit'; readonly value: number; readonly type: 'int'; readonly source: 'compiler-int' }
   | { readonly kind: 'lit'; readonly value: number; readonly type: 'real'; readonly source: 'compiler-real' }
@@ -51,12 +52,21 @@ export const col = (rel: import('./types.ts').RelId, name: string): Expr => ({ k
 /** A value supplied by the query or store: always a bound parameter. */
 export const lit = (value: unknown, type: SqlType = 'any'): Expr => ({ kind: 'lit', value, type, source: 'bound' });
 
-/** Does this `Lit` render as a DO bind parameter (a `?`), rather than inline SQL text? Only a value the
- * query or store supplied binds; a compiler-authored constant (`compiler-*`) renders as an escaped
- * literal and spends none of the 100-parameter budget. The one authority both the emitter switch and
- * the bind-budget counter read, so the counted budget cannot drift from what actually renders — which
- * is the whole of "the 100-bind cap is a parameter budget". */
-export const bindsAsParameter = (e: Extract<Expr, { kind: 'lit' }>): boolean => e.source === 'bound';
+/** A USER PARAMETER — a wire GValue the client sent in the `bindings`/`parameters` map (`$x`). This is
+ * the ONLY free-standing bind the design keeps by intent: it is the user's strongest signal that a value
+ * is variable, and the 100-parameter budget exists precisely to carry it
+ * (docs/2026-08-05-parameters-are-the-only-binds.md). A parsed literal is NOT this — it is a constant,
+ * inlined (see the `compiler-*` sources). `'bound'` remains the MECHANICAL bind (a collection JSON, the
+ * decimal tail — the `oversized` category), distinct from a parameter but rendered the same way. */
+export const param = (value: unknown, type: SqlType = 'any'): Expr => ({ kind: 'lit', value, type, source: 'parameter' });
+
+/** Does this `Lit` render as a DO bind parameter (a `?`), rather than inline SQL text? A user PARAMETER
+ * and a mechanical `'bound'` bind (an oversized collection / decimal tail) both do; a compiler-authored
+ * constant (`compiler-*`) renders as an escaped literal and spends none of the 100-parameter budget. The
+ * one authority both the emitter switch and the bind-budget counter read, so the counted budget cannot
+ * drift from what actually renders — which is the whole of "the 100-bind cap is a parameter budget". */
+export const bindsAsParameter = (e: Extract<Expr, { kind: 'lit' }>): boolean =>
+  e.source === 'bound' || e.source === 'parameter';
 
 /** A compiler-authored string token, rendered as an escaped SQL literal rather than consuming a DO bind.
  * This is deliberately string-only: data stays in `lit`, and the narrow type prevents a caller from

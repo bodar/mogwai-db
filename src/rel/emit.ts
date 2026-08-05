@@ -121,7 +121,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       }
       case 'lit':
         switch (e.source) {
-          case 'bound': return value(e.value);
+          case 'bound': case 'parameter': return value(e.value);
           case 'compiler-text': return textLiteral(e.value);
           case 'compiler-int': return raw(String(e.value));
           // A REAL literal must carry a decimal point or exponent, else SQLite reads an integer-valued

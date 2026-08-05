@@ -12,7 +12,7 @@ import { extractStrategies, parseGremlin, stepChain } from '../src/gremlin/front
 import { runPasses } from '../src/compiler/ir/passes.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
 import { emit } from '../src/rel/emit.ts';
-import type { Expr } from '../src/rel/expr.ts';
+import { bindsAsParameter, type Expr } from '../src/rel/expr.ts';
 import { forEachExpr, forEachRel, relExprs, stmtChildren, stmtExprs } from '../src/rel/walk.ts';
 import { isStmt } from '../src/rel/stmt.ts';
 import { GraphStore } from '../src/storage.ts';
@@ -67,7 +67,9 @@ const comparable = async (query: string, spine: 'rel' | 'legacy') => {
 const countExpr = (expr: Expr, counts: { compiler: number; bound: number }): void =>
   forEachExpr(expr, (node) => {
     if (node.kind !== 'lit') return;
-    if (node.source === 'bound') counts.bound++;
+    // A user PARAMETER and a mechanical `'bound'` bind both render as a `?`; only a `compiler-*`
+    // constant inlines. Count by what BINDS, so the budget number tracks the DO's real measure.
+    if (bindsAsParameter(node)) counts.bound++;
     else counts.compiler++;
   });
 

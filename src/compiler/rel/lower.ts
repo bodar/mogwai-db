@@ -378,14 +378,16 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
     if (args.length === 3) {
       if (typeof args[0] !== 'string' || typeof args[1] !== 'string') return null;
       const labelled = hasLabelClause([args[0]], subject, elem, fresh);
-      const valued = hasPropertyClause(args[1], args[2], subject, elem, fresh);
+      const valued = hasPropertyClause(args[1], args[2], subject, elem, fresh, step.argTypes?.[2] ?? null, step.paramNames?.[2] ?? null);
       return labelled && valued ? and(labelled, valued) : null;
     }
     const [key, val, extra] = args;
     if (extra !== undefined) return null;
-    if (isTokenArg(key)) return hasTokenClause(key.token, val, subject, elem, fresh);
+    const valType = step.argTypes?.[1] ?? null;
+    const valParam = step.paramNames?.[1] ?? null;
+    if (isTokenArg(key)) return hasTokenClause(key.token, val, subject, elem, fresh, valType, valParam);
     if (typeof key !== 'string') return null;
-    return hasPropertyClause(key, val, subject, elem, fresh);
+    return hasPropertyClause(key, val, subject, elem, fresh, valType, valParam);
   }
 
   return null;
@@ -419,7 +421,7 @@ function hasLabelClause(names: readonly string[], subject: Subject, elem: Elem, 
 /** `has(key[, value-or-predicate])` over a stored property, as a clause — an `EXISTS`, correlated on
  *  the outer element, because a property FILTER asks whether a row is there and joining instead would
  *  multiply the traverser once per matching property. */
-function hasPropertyClause(key: string, val: unknown, subject: Subject, elem: Elem, fresh: Minter): Expr | null {
+function hasPropertyClause(key: string, val: unknown, subject: Subject, elem: Elem, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null): Expr | null {
   // A substring `TextP` over a STORED property is `ftsSubstringPredicate`'s, and taking it here
   // would swap a trigram-index seek for a base-table LIKE scan — a regression the census cannot
   // see, reported by the coverage number as progress. §4.7 lifts this.
@@ -431,9 +433,10 @@ function hasPropertyClause(key: string, val: unknown, subject: Subject, elem: El
     type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
   });
   // The property row's own `vtype` is in scope here, so an ordering comparison gets the
-  // vtype-aware key — the whole reason `predicateExpr` takes `compare` as a parameter.
+  // vtype-aware key — the whole reason `predicateExpr` takes `compare` as a parameter. A bare value's
+  // declared type and param name ride through so it inlines (a literal) or binds (a `$x`).
   const matches = val === undefined ? undefined
-    : predicateExpr(col(props.id, 'value'), val, { kind: 'perRow', vtype: col(props.id, 'vtype') });
+    : predicateExpr(col(props.id, 'value'), val, { kind: 'perRow', vtype: col(props.id, 'vtype') }, valType, valParam);
   if (val !== undefined && !matches) return null;
 
   const matching = make.filter({
@@ -459,7 +462,7 @@ function hasPropertyClause(key: string, val: unknown, subject: Subject, elem: El
  * correlated scan so the clause is the same in the source position and after a movement (where the
  * relation carries the rowid alone).
  */
-function hasTokenClause(token: string, val: unknown, subject: Subject, elem: Elem, fresh: Minter): Expr | null {
+function hasTokenClause(token: string, val: unknown, subject: Subject, elem: Elem, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null): Expr | null {
   const name = token.toLowerCase();
   if (name !== 'label' && name !== 'id') return null;
   if (val === undefined || containsTextSearch(val)) return null;
@@ -468,7 +471,7 @@ function hasTokenClause(token: string, val: unknown, subject: Subject, elem: Ele
     const cols = elem === 'edge' ? EDGE_COLS : NODE_COLS;
     const scan = make.scan({ id: fresh('ti'), table: elem === 'edge' ? 'edges' : 'nodes', alias: fresh('rti'), channels: [], type: typeOf(...cols) });
     const external: Expr = { kind: 'call', fn: 'COALESCE', args: [col(scan.id, 'uid'), col(scan.id, 'id')] };
-    const matches = predicateExpr(external, val, SUBJECT_UNKNOWN);
+    const matches = predicateExpr(external, val, SUBJECT_UNKNOWN, valType, valParam);
     if (!matches) return null;
     const matching = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: and(eq(col(scan.id, 'id'), subject.id), matches) });
     const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
@@ -476,7 +479,7 @@ function hasTokenClause(token: string, val: unknown, subject: Subject, elem: Ele
   }
 
   const labels = make.scan({ id: fresh('lb'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
-  const matches = predicateExpr(col(labels.id, 'name'), val, SUBJECT_UNKNOWN);
+  const matches = predicateExpr(col(labels.id, 'name'), val, SUBJECT_UNKNOWN, valType, valParam);
   if (!matches) return null;
   if (elem === 'edge') {
     // An edge's label is a COLUMN, so the join is against whichever expression carries it — the scan's
@@ -1085,7 +1088,7 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { readon
   if (step.name === 'constant') {
     const [value, extra] = args;
     if (extra !== undefined) return null;
-    const literal = constLit(value, step.argTypes?.[0] ?? null);
+    const literal = constLit(value, step.argTypes?.[0] ?? null, step.paramNames?.[0] ?? null);
     if (!literal) return null;
     return {
       rel: make.project({
@@ -1364,7 +1367,7 @@ function scalarTail(
     if (step.name === 'constant') {
       const [value, extra] = args;
       if (extra !== undefined) return null;
-      const literal = constLit(value, step.argTypes?.[0] ?? null);
+      const literal = constLit(value, step.argTypes?.[0] ?? null, step.paramNames?.[0] ?? null);
       if (!literal) return null;
       const carried = rel.channels;
       rel = make.project({
@@ -1403,7 +1406,7 @@ function scalarTail(
           ? { ...tail, framing: { ...tail.framing, set: true } }
           : tail;
       }
-      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType());
+      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), step.argTypes?.[0] ?? null, step.paramNames?.[0] ?? null);
       if (!pred) return null;
       rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
       continue;
@@ -1539,7 +1542,7 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
   // whole stream, so its uniform `as` wins; absent a fold, the value keeps the arg's declared subtype.
   const rowType = (i: number): TypeNode | null =>
     (folded.as as TypeNode | undefined) ?? (folded.at === 1 ? (step.argTypes?.[i] ?? null) : null);
-  const rows = vals.map((arg, i) => constLit(arg, rowType(i)));
+  const rows = vals.map((arg, i) => constLit(arg, rowType(i), step.paramNames?.[i] ?? null));
   if (rows.some((row) => !row)) return null;
   // The tag the FOLD established, else a uniform declared type where there is one, else per-value
   // inference — which is what `UNKNOWN` means and is the honest floor for a heterogeneous inject
@@ -2516,7 +2519,7 @@ const byChild = (ctx: ChainCtx, fresh: Minter): ByChild => (body, host) => {
     // through NULLNESS, which coincides for every buildable body except one that deliberately emits
     // null. Decline until the queued ByChild signature refinement reports emission separately.
     if (args[0] === null) return null;
-    const projected = constLit(args[0], leading.argTypes?.[0] ?? null);
+    const projected = constLit(args[0], leading.argTypes?.[0] ?? null, leading.paramNames?.[0] ?? null);
     if (!projected) return null;
     value = projected;
     at = 1;

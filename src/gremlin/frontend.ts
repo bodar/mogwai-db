@@ -42,6 +42,16 @@ export interface Step {
   args: any[];
   ctx: ParserRuleContext;
   argTypes?: (TypeNode | null)[];
+  /** `paramNames[i]` is the WIRE PARAMETER NAME of `args[i]` (`$x` in the `bindings`/`parameters`
+   * map) — the value's own name, in TinkerPop 4's `GValue` sense: `name != null` means "the client
+   * declared this VARIABLE", `null` means "a parsed literal". Carried in parallel to `argTypes` (same
+   * boundary precedent) so `args` stays a plain resolved value for every consumer — the difference is
+   * a fact ABOUT the argument, not a wire-format concept leaking into the IR (root CLAUDE.md #5, and
+   * the parameter-budget rule under Environment notes). A lowering reads it to decide bind-vs-inline:
+   * a named value is a user PARAMETER and binds (`?`, the 100-budget), a `null` is a constant it
+   * inlines. Only TOP-LEVEL args are tracked today; a `$x` nested inside a predicate or collection
+   * still flattens to a constant (correct result, no budget saving — see the const-seam decline). */
+  paramNames?: (string | null)[];
   /** `repeat(name, body)` has the same body channel as `repeat(body)`; its name
    * remains explicit metadata for the lowering that owns named loop counters. */
   loopName?: string;
@@ -217,17 +227,20 @@ export function stepChain(tree: any, params: Record<string, any>, paramTypes: Re
     if (cls.startsWith('TraversalSourceSelfMethod')) return;
     const name = stepName(cls, 'TraversalSourceSpawnMethod_') ?? stepName(cls, 'TraversalMethod_');
     if (!insideNested && name) {
-      const { args, types } = extractArgs(node, params, paramTypes);
+      const { args, types, names } = extractArgs(node, params, paramTypes);
+      // Only carry `paramNames` when a top-level arg is actually a parameter — the common step has
+      // none, so the field stays absent rather than a same-length array of nulls on every step.
+      const paramNames = names.some((n) => n != null) ? names : undefined;
       // The grammar deliberately exposes the named repeat overload as
       // repeat(name, body), while every repeat consumer needs one uniform body
       // channel. Canonicalize that overload at the front-end boundary and retain
       // the public loop name as metadata; lowerers can therefore either implement
       // named loop counters or reject them without ever misreading a string as a
-      // nested traversal.
+      // nested traversal. (A repeat body is a nested traversal, never a parameter.)
       if (name === 'repeat' && typeof args[0] === 'string' && isNested(args[1])) {
         steps.push({ name, args: [args[1]], ctx: node, argTypes: [types[1]], loopName: args[0] });
       } else {
-        steps.push({ name, args, ctx: node, argTypes: types });
+        steps.push({ name, args, ctx: node, argTypes: types, ...(paramNames ? { paramNames } : {}) });
       }
       // nested traversals inside this step's args must not contribute to the top chain
       for (let i = 0; i < node.getChildCount(); i++) visit(node.getChild(i), true);
@@ -305,7 +318,7 @@ export function extractSack(tree: any, params: Record<string, any>): SackSpec | 
   const gl = descendants(w, 'GenericLiteralContext')[0];
   if (!gl) throw new Error('withSack() requires an initial value');
   const out: any[] = [], types: (TypeNode | null)[] = [];
-  walkArgs(gl, out, params, types);
+  walkArgs(gl, out, params, types, []);
   const op = descendants(w, 'TraversalOperatorContext')[0];
   return { init: out[0], initType: flatType(types[0]), mergeOp: op ? enumSuffix(op) : undefined };
 }
@@ -325,7 +338,7 @@ export function extractSourceOptions(tree: any, params: Record<string, any>): Ma
   for (const w of descendants(tree, 'TraversalSourceSelfMethod_withContext')) {
     const args: any[] = [];
     for (const n of [...descendants(w, 'StringLiteralContext'), ...descendants(w, 'GenericLiteralContext')])
-      walkArgs(n, args, params, []);
+      walkArgs(n, args, params, [], []);
     if (typeof args[0] === 'string') out.set(args[0], args.length > 1 ? args[1] : true);
   }
   return out;
@@ -343,21 +356,23 @@ export function extractSideEffects(tree: any, params: Record<string, any>): Map<
     const valNode = descendants(w, 'GenericLiteralContext')[0];
     if (!keyNode || !valNode) continue;
     const ks: any[] = [], vs: any[] = [];
-    walkArgs(keyNode, ks, params, []);
-    walkArgs(valNode, vs, params, []);
+    walkArgs(keyNode, ks, params, [], []);
+    walkArgs(valNode, vs, params, [], []);
     if (typeof ks[0] === 'string') out.set(ks[0], vs[0]);
   }
   return out;
 }
 
-/** Pull literal / predicate / variable arguments out of a step context, plus the
- *  parallel numeric-subtype tags (see Step.argTypes). */
-function extractArgs(ctx: any, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): { args: any[]; types: (TypeNode | null)[] } {
+/** Pull literal / predicate / variable arguments out of a step context, plus the parallel
+ *  numeric-subtype tags (see Step.argTypes) and the parallel wire-parameter names (see
+ *  Step.paramNames — a top-level `$x` records its name, everything else is null). */
+function extractArgs(ctx: any, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): { args: any[]; types: (TypeNode | null)[]; names: (string | null)[] } {
   const args: any[] = [];
   const types: (TypeNode | null)[] = [];
+  const names: (string | null)[] = [];
   // skip child 0 (step name token) and parens; walking all children is fine since tokens have no children
-  for (let i = 0; i < ctx.getChildCount(); i++) walkArgs(ctx.getChild(i), args, params, types, paramTypes);
-  return { args, types };
+  for (let i = 0; i < ctx.getChildCount(); i++) walkArgs(ctx.getChild(i), args, params, types, names, paramTypes);
+  return { args, types, names };
 }
 
 /** The single argument a subtree contributes — used for map-entry values, which
@@ -367,15 +382,17 @@ function extractArgs(ctx: any, params: Record<string, any>, paramTypes: Record<s
  *  strategy config reuses the one arg walker. */
 function argOf(node: any, params: Record<string, any>): any {
   const out: any[] = [];
-  walkArgs(node, out, params, []);
+  walkArgs(node, out, params, [], []);
   return out.length === 1 ? out[0] : out;
 }
 
-/** Walk one AST node, pushing each recognised argument onto `out` (and its numeric
- *  subtype, or null, onto `types` in lockstep). Unrecognised nodes recurse into
- *  children (a literal buried deeper still surfaces). */
-function walkArgs(node: any, out: any[], params: Record<string, any>, types: (TypeNode | null)[], paramTypes: Record<string, TypeNode> = {}): void {
-  const emit = (v: any, t: TypeNode | null = null) => { out.push(v); types.push(t); };
+/** Walk one AST node, pushing each recognised argument onto `out` (and its numeric subtype, or null,
+ *  onto `types`, and its wire-parameter name, or null, onto `names` — all in lockstep). Unrecognised
+ *  nodes recurse into children (a literal buried deeper still surfaces). `names` is threaded rather than
+ *  defaulted because it must stay index-aligned with `out`/`types` through the recursion; callers that
+ *  do not track parameters (map values, collection members, config) pass a throwaway array. */
+function walkArgs(node: any, out: any[], params: Record<string, any>, types: (TypeNode | null)[], names: (string | null)[], paramTypes: Record<string, TypeNode> = {}): void {
+  const emit = (v: any, t: TypeNode | null = null, name: string | null = null) => { out.push(v); types.push(t); names.push(name); };
   const cls = node.constructor.name;
   if (cls === 'StringLiteralContext') { emit(unquote(node.getText()), 'string'); return; }
   // long/bigint carry EXACT via BigInt — parseInt would truncate past 2^53 (the
@@ -417,8 +434,10 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (Ty
     if (!(name in params)) throw new Error(`Unbound parameter '${name}'`);
     // The param's canonical type is the wire DataType the client serialized it as
     // (paramTypes) — the truth a JS value can't carry; null when the channel said
-    // nothing (JSON request path), so the write seam infers from the JS value.
-    emit(params[name], paramTypes[name] ?? null); return;
+    // nothing (JSON request path), so the write seam infers from the JS value. The NAME rides
+    // alongside (Step.paramNames): the value is still resolved into `out` for every consumer, but a
+    // lowering can now see it was a user PARAMETER and bind it, rather than inline it as a constant.
+    emit(params[name], paramTypes[name] ?? null, name); return;
   }
   // A COMPOSED predicate — `P.gt(20).and(P.lt(30))`, `TextP.startingWith('m').or(…)`,
   // `P.gt(5).negate()`. The grammar's three infix alternatives
@@ -534,7 +553,7 @@ function walkArgs(node: any, out: any[], params: Record<string, any>, types: (Ty
     return;
   }
   if (cls === 'NestedTraversalContext') { emit({ nested: node }); return; }
-  for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walkArgs(node.getChild(i), out, params, types, paramTypes);
+  for (let i = 0; i < (node.getChildCount?.() ?? 0); i++) walkArgs(node.getChild(i), out, params, types, names, paramTypes);
 }
 
 /** Parse an ISO-8601 date / date-time string to epoch-millis, UTC-normalized. Per
@@ -562,7 +581,7 @@ function literalItems(nodes: any[], params: Record<string, any>): { values: any[
   const values: any[] = [], items: (TypeNode | null)[] = [];
   for (const lit of nodes) {
     const out: any[] = [], types: (TypeNode | null)[] = [];
-    walkArgs(lit, out, params, types);
+    walkArgs(lit, out, params, types, []);
     values.push(out.length === 1 ? out[0] : out);
     items.push(out.length === 1 ? (types[0] ?? null) : null);
   }
@@ -590,7 +609,7 @@ function mapLiteralType(node: any, params: Record<string, any>): TypeNode {
   const entries: Record<string, MapEntryType | null> = {};
   for (const entry of node.mapEntry()) {
     const out: any[] = [], types: (TypeNode | null)[] = [];
-    walkArgs(entry.genericLiteral(), out, params, types);
+    walkArgs(entry.genericLiteral(), out, params, types, []);
     // A single scalar/map value carries its captured type; a multi-arg or empty walk
     // (unusual) → null (infer at use). A literal map key is a string/identifier (or a
     // T/Direction token → not a stored scalar), so its type is 'string' or null; a typed
