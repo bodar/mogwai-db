@@ -176,8 +176,13 @@ exists as the alternative when even a value set is too big for binds.)
 
 ## The phased build
 
-**Phase A — bank the unambiguous savings (no `Param` concept; landable alone).** Everything here is a
-value the compiler already holds as a constant; none needs a parameter representation.
+**Phase A — LANDED (commit `2c99c50`).** Banked the unambiguous savings with no `Param` concept.
+Everything here is a value the compiler already holds as a constant; none needed a parameter
+representation. `operandLit` became the typed `constLit` (`compiler/rel/lower.ts`); `compilerReal` +
+the `'compiler-real'` source landed in `src/rel/expr.ts`/`emit.ts`; `bindCount` now counts only
+`source: 'bound'` lits (the shared `bindsAsParameter` predicate) so the budget pre-check reflects the
+real 100; the hygiene gate ratchets `bound` downward. Measured: corpus `bound` lits 829 → 701, binds
+dropped in 40+ families and rose in none. The items below are done:
 - **A1. Stop discarding the type in `operandLit` (`lower.ts:1770–1773`).** Take the arg's canonical
   type from `Step.argTypes` instead of re-deriving `text`/`real`/`int` from the JS runtime value. This
   is a bug on its own.
@@ -216,9 +221,23 @@ value the compiler already holds as a constant; none needs a parameter represent
   oversized value rides as one JSON bind, stopping it competing per-value with the parameter budget —
   turning "100 minus mystery overhead" into "100 parameters."
 
+## Discovered while landing Phase A (follow-ups, not yet done)
+
+- **The `by(key)` modulator constant still binds.** `order()/select()/group().by('name')` renders the
+  key as a bound `?` twice apiece (the ORDER BY read and the null-guard), via the modulator seam
+  (`compiler/rel/modulator.ts`), NOT through any Phase-A site. It is the same principle — a parsed
+  literal key is a constant — and inlining it is the obvious next constant-sweep increment. Deliberately
+  left out of Phase A to keep the enumerated change reviewable. Do it as a Phase-A-style extension (it
+  needs no `Param` node): a `by(key)` is a constant today because the front-end flattens; a `by($x)`
+  becomes a parameter only once Phase B exists.
+- **The census baseline carried pre-existing drift**: 9 `all()/any()/none()`-over-scalar traversals
+  already ran on clean trunk but were recorded `deferred` (a prior commit added the support without
+  re-recording; `deferred → ran` trips no census gate, so it stayed invisible). Re-recorded in
+  `2c99c50`. Nothing to do, noted so the next reader does not attribute it to Phase A.
+
 ## Handoff + guardrail
 
-Phase A is handed to an implementation agent; this doc is the contract. The decisions that must NOT be
+Phase A is landed (`2c99c50`); Phase B is next. This doc is the contract. The decisions that must NOT be
 relitigated by a fresh context (they were each reached against a plausible opposite and the opposite is
 wrong):
 - A bind serves a **user parameter**; the statement cache is the user's payoff, not ours to farm.
