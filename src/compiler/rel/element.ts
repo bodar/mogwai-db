@@ -1,4 +1,4 @@
-import { col, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
@@ -222,7 +222,7 @@ export function elementNode(rowid: Expr, elem: Elem, fresh: Minter): Expr {
   };
   const only = make.project({
     id: fresh('wnp'), input: mine, channels: [], type: typeOf(meta('n', 'json', true)),
-    exprs: [['n', { kind: 'json-object', entries: [['t', lit(elem, 'text')], ['v', payload]], binary: false }]],
+    exprs: [['n', { kind: 'json-object', entries: [['t', compilerText(elem)], ['v', payload]], binary: false }]],
   });
   return { kind: 'scalar', plan: only };
 }

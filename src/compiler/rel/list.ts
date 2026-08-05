@@ -1,4 +1,4 @@
-import { col, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
@@ -121,8 +121,8 @@ const memberVtype = (of: ListOf, members: Rel): Expr | undefined => {
   };
 };
 
-const eqText = (subject: Expr, value: string): Expr => ({ kind: 'binary', op: '=', left: subject, right: lit(value, 'text') });
-const jsonField = (node: Expr, field: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [node, lit(`$.${field}`, 'text')] });
+const eqText = (subject: Expr, value: string): Expr => ({ kind: 'binary', op: '=', left: subject, right: compilerText(value) });
+const jsonField = (node: Expr, field: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [node, compilerText(`$.${field}`)] });
 
 /**
  * The members BACK to a list value — `jsonb(COALESCE(json_group_array(<member> ORDER BY …), '[]'))`.
@@ -142,7 +142,7 @@ const listOfMembers = (members: Rel, member: Expr, order: readonly SortTerm[], f
         kind: 'call',
         fn: 'COALESCE',
         args: [{ kind: 'agg', fn: 'json_group_array', args: [member], orderBy: order },
-          { kind: 'call', fn: 'json', args: [lit('[]', 'text')] }],
+          { kind: 'call', fn: 'json', args: [compilerText('[]')] }],
       }],
     }]],
   }),
@@ -199,18 +199,18 @@ export const isBareList = (of: ListOf): boolean => of.kind === 'scalar';
 const inferredVtype = (value: Expr): Expr => ({
   kind: 'case',
   whens: [
-    [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'text'), lit('string', 'text')],
-    [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'real'), lit('double', 'text')],
+    [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'text'), compilerText('string')],
+    [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'real'), compilerText('double')],
     [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'null'), lit(null, 'any')],
     [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'integer'), {
       kind: 'case',
       whens: [[{ kind: 'binary', op: 'and',
         left: { kind: 'binary', op: '>=', left: value, right: lit(-2147483648, 'int') },
-        right: { kind: 'binary', op: '<=', left: value, right: lit(2147483647, 'int') } }, lit('int', 'text')]],
-      else: lit('long', 'text'),
+        right: { kind: 'binary', op: '<=', left: value, right: lit(2147483647, 'int') } }, compilerText('int')]],
+      else: compilerText('long'),
     }],
   ],
-  else: lit('string', 'text'),
+  else: compilerText('string'),
 });
 
 /**
@@ -501,7 +501,7 @@ export function foldScalars(
           kind: 'call',
           fn: 'COALESCE',
           args: [{ kind: 'agg', fn: 'json_group_array', args: [member], orderBy: order },
-            { kind: 'call', fn: 'json', args: [lit('[]', 'text')] }],
+            { kind: 'call', fn: 'json', args: [compilerText('[]')] }],
         }],
       }]],
     }),
@@ -533,7 +533,7 @@ const withLossyFlag = (input: Rel, vtype: Expr, fresh: Minter): Rel => make.wind
         left: { kind: 'binary', op: 'is not', left: vtype, right: lit(null, 'any') },
         // `NOT (x IN …)`, not an `InList` with a negation flag — the node has none, and with the
         // `IS NOT NULL` guard on the left the two forms agree (a NULL is already excluded).
-        right: { kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: vtype, values: LOSSLESS_VTYPES.map((cls) => lit(cls, 'text')) } },
+        right: { kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: vtype, values: LOSSLESS_VTYPES.map(compilerText) } },
       }, lit(1, 'int')]],
       else: lit(0, 'int'),
     }],

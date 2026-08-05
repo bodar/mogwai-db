@@ -1,5 +1,5 @@
 import type { Channel } from '../../channels.ts';
-import { col, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ListOf, Shape } from '../../sql/kernel/render.ts';
@@ -138,10 +138,10 @@ export function pathPositions(
   const entry = col(members.id, 'pv');
   const rowid: Expr = {
     kind: 'cast',
-    arg: { kind: 'call', fn: 'json_extract', args: [entry, lit('$.v', 'text')] },
+    arg: { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.v')] },
     to: 'int',
   };
-  const tag: Expr = { kind: 'call', fn: 'json_extract', args: [entry, lit('$.k', 'text')] };
+  const tag: Expr = { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.k')] };
   // ONE `case` over the entry's own tag, whatever the path's length — which is the whole reason the entry
   // carries a tag at all. Two arms because only element objects reach the append today; a VALUE position
   // is a third arm here and an append at the retype, not a different encoding.
@@ -196,7 +196,7 @@ export function pathPositions(
               args: [{ kind: 'call', fn: 'json', args: [node] }],
               orderBy: [{ expr: col(members.id, 'po'), dir: 'asc' }],
             },
-            { kind: 'call', fn: 'json', args: [lit('[]', 'text')] },
+            { kind: 'call', fn: 'json', args: [compilerText('[]')] },
           ],
         }],
       }]],

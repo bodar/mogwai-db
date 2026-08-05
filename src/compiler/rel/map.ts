@@ -1,4 +1,4 @@
-import { col, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { MapOf, Shape } from '../../sql/kernel/render.ts';
@@ -98,7 +98,7 @@ function mapOfGroups(grouped: Rel, entry: Entry, order: Expr, fresh: Minter): Re
             }],
             orderBy: [{ expr: order, dir: 'asc' }],
           },
-          { kind: 'call', fn: 'json', args: [lit('[]', 'text')] },
+          { kind: 'call', fn: 'json', args: [compilerText('[]')] },
         ],
       }],
     }]],
@@ -308,10 +308,10 @@ export function groupBarrier(
     // ONE aggregate pass over the grouped block: order the typed `{t,v}` nodes by encounter, collect
     // them as JSON (so the envelope is embedded rather than stringified), then select the last one.
     // The child expression itself already yields only its first value for one parent traverser.
-    ? { kind: 'call', fn: 'json_extract', args: [memberAggregate, lit('$[#-1]', 'text')] }
+    ? { kind: 'call', fn: 'json_extract', args: [memberAggregate, compilerText('$[#-1]')] }
     : {
         kind: 'json-object',
-        entries: [['t', lit('list', 'text')], ['v', memberAggregate]],
+        entries: [['t', compilerText('list')], ['v', memberAggregate]],
         binary: false,
       };
   const count: Expr = bulked && bulk
@@ -331,7 +331,7 @@ export function groupBarrier(
   // assignment arm extracts the child's typed scalar node unchanged.
   const entry: Entry = {
     key: col(productive.id, KEY_COL),
-    val: step.name === 'group' ? col(productive.id, VAL_COL) : typedNode(col(productive.id, VAL_COL), lit('long', 'text')),
+    val: step.name === 'group' ? col(productive.id, VAL_COL) : typedNode(col(productive.id, VAL_COL), compilerText('long')),
     keyOf: { kind: 'scalar' },
     valOf: { kind: 'scalar' },
   };

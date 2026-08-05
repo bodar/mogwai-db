@@ -1,5 +1,5 @@
 import { DO_BIND_CAP } from '../check.ts';
-import { lit, type Expr } from '../expr.ts';
+import { compilerText, lit, type Expr } from '../expr.ts';
 import { explode, project, values } from '../factory.ts';
 import type { Rel } from '../rel.ts';
 import { relId, type RelId } from '../types.ts';
@@ -43,7 +43,7 @@ export function land(plan: Rel, limit: number = DO_BIND_CAP): Rel {
     });
     // Positional `$[i]`: the declared type is the authority for every column, exactly as it is for
     // a statement binding's retained rows, so there is nothing to infer from the payload.
-    const at = (i: number): Expr => ({ kind: 'call', fn: 'json_extract', args: [{ kind: 'col', rel: members.id, name: 'row' }, lit(`$[${i}]`, 'text')] });
+    const at = (i: number): Expr => ({ kind: 'call', fn: 'json_extract', args: [{ kind: 'col', rel: members.id, name: 'row' }, compilerText(`$[${i}]`)] });
     return project({
       id: r.id, channels: r.channels, input: members, type: r.type,
       exprs: r.type.cols.map((column, i) => [column.name, at(i)] as const),

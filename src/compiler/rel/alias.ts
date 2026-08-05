@@ -1,6 +1,6 @@
 import type { Channels } from '../../channels.ts';
 import { withChannel } from '../../channels.ts';
-import { col, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
@@ -85,7 +85,7 @@ const endPath = (end: 'first' | 'last', field: string): string => `${end === 'fi
  *  than SQLite's `->>` operator for the reason the list vocabulary gives: the same SQL value, and the
  *  node set stays closed (§3.3). */
 const fieldAt = (column: Expr, end: 'first' | 'last', field: string): Expr =>
-  ({ kind: 'call', fn: 'json_extract', args: [column, lit(endPath(end, field), 'text')] });
+  ({ kind: 'call', fn: 'json_extract', args: [column, compilerText(endPath(end, field))] });
 
 /** The rowid an ELEMENT label holds, at one end of its history. */
 export const aliasIdAt = (column: Expr, end: 'first' | 'last'): Expr =>

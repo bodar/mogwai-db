@@ -1,4 +1,4 @@
-import { col, lit, type Expr } from '../../rel/expr.ts';
+import { col, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../ir/step.ts';
@@ -289,7 +289,7 @@ export function byNode(modulation: Modulation, host: ByHost, fresh: Minter, chil
     // A LABEL is always a string; an `id` is whatever `COALESCE(uid, id)` yields, so it stays untagged
     // and the framer infers — the same answer the element projection gives for an external id.
     const value = byExpr(modulation, host, fresh);
-    return value && typedNode(value, key.token === 'label' ? lit('string', 'text') : lit(null, 'text'));
+    return value && typedNode(value, key.token === 'label' ? compilerText('string') : lit(null, 'text'));
   }
 
   // ONE subquery for both halves: the tag IS the row the value came from.

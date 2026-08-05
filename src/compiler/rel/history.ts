@@ -1,4 +1,4 @@
-import { lit, type Expr } from '../../rel/expr.ts';
+import { compilerText, lit, type Expr } from '../../rel/expr.ts';
 import type { ListOf, ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { SHAPE_K, elemShape, type AliasShape } from '../steps/context/alias.ts';
@@ -47,7 +47,7 @@ export const objectEntry = (object: TraverserObject): Expr => {
     };
   // A STATIC tag is a compile-time string; a PER-ROW one is the stream's own `vtype` column. An
   // unknown type has nothing honest to record, so the entry carries no tag and readers infer it.
-  const tag = object.type.kind === 'static' ? lit(object.type.type, 'text') : object.vtype;
+  const tag = object.type.kind === 'static' ? compilerText(object.type.type) : object.vtype;
   return {
     kind: 'json-object', binary: true,
     entries: [['k', k], ['v', object.value], ...(tag ? [['t', tag] as const] : [])],
@@ -68,6 +68,6 @@ export const historyAppend = (prev: Expr, entry: Expr): Expr => ({
       kind: 'call', fn: 'COALESCE',
       args: [prev, { kind: 'json-array', items: [], binary: true }],
     },
-    lit('$[#]', 'text'), entry,
+    compilerText('$[#]'), entry,
   ],
 });

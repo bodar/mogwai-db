@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
 import { emitQuery } from '../src/rel/emit.ts';
 import { planOf } from '../src/rel/plan.ts';
-import { col, lit } from '../src/rel/expr.ts';
+import { col, compilerText, lit } from '../src/rel/expr.ts';
 import type { Expr } from '../src/rel/expr.ts';
 import { aggregate, distinct, filter, join, limit, project, recursive, scan as scanRel, sort, union, values, window } from '../src/rel/factory.ts';
 import type { Channels } from '../src/channels.ts';
@@ -25,6 +25,16 @@ const scan = (id: string, alias = id) => scanRel({ id: relId(id), table: 'nodes'
 const eq = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '=', left, right });
 
 describe('RelIR relational-core SQL', () => {
+  test('compiler text is escaped SQL syntax; query data remains a bind', () => {
+    const v = values({
+      id: relId('v'), channels, type: { cols },
+      rows: [[compilerText("O'Reilly"), lit("O'Reilly", 'text')]],
+    });
+    const emitted = emitQuery(planOf(v));
+    expect(emitted.sql).toBe("SELECT v.column1 AS id, v.column2 AS name FROM (VALUES ('O''Reilly', ?)) v");
+    expect(emitted.binds).toEqual(["O'Reilly"]);
+  });
+
   test('pins the rendering of every relational node kind', () => {
     const n = scan('n');
     const v = values({ id: relId('v'), rows: [[lit(1, 'int'), lit('marko', 'text')]], channels, type: { cols } });
