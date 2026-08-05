@@ -376,12 +376,12 @@ function readCardinality(args: any[]): { cardinality: Cardinality; rest: any[]; 
 }
 
 /** The canonical stored type of a property()'s VALUE arg: the type its carrying
- *  channel declared (Step.argTypes at the value's position), else inferred from the
+ *  channel declared (the value Arg's type), else inferred from the
  *  JS value. `off`+1 is the value's index in the original arg list (key is at off). */
 const propVtype = (step: Step, val: any, off: number): CanonicalType | null =>
   gremlinTypeOf(val, step.args[off + 1]?.type ?? null);
 
-/** The property()'s VALUE arg's full recursive TypeNode (Step.argTypes at the value's
+/** The property()'s VALUE arg's full recursive TypeNode (the value Arg's type at the value's
  *  position) — carried alongside vtype so a collection value's elements/keys are tagged
  *  losslessly by valueNodeOf. null for an untyped channel (infer per element at storage). */
 const propTypeNode = (step: Step, off: number): TypeNode | null => step.args[off + 1]?.type ?? null;

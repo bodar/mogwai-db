@@ -65,7 +65,7 @@ const STATIC_ORDERING_DECLINE = new Set(['datetime', 'duration']);
  * it does today.
  *
  * A parsed literal INLINES (a constant — the value-operand budget win), a wire PARAMETER (`paramName`,
- * from `Step.paramNames`) BINDS. Storage class does not matter for a comparison operand — SQLite
+ * the operand's `Arg.name`) BINDS. Storage class does not matter for a comparison operand — SQLite
  * compares an INTEGER `2` and a REAL `2.0` numerically alike — so a nested operand with no declared
  * type inlines by its value's own shape without changing any answer.
  *

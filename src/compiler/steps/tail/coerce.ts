@@ -99,7 +99,7 @@ export const asNumberSql = (spec: { int: boolean; as: ValueType }, e: Expression
   spec.as === 'bigdecimal' ? e : spec.int ? q`CAST(${e} AS INTEGER)` : q`CAST(${e} AS REAL)`;
 
 /** Bare asNumber() over a constant: the output subtype is the INPUT literal's declared
- *  type (`subtype`, from Step.argTypes) — 5b→byte, 5l→long, 5.0→double, 5.75f→float.
+ *  type (`subtype`, from the arg's `Arg.type`) — 5b→byte, 5l→long, 5.0→double, 5.75f→float.
  *  A numeric string parses to int/double by value; a non-numeric string / non-number
  *  throws. Returns the numeric value + its framing tag. */
 export function asNumberBare(v: any, subtype: string | null): { val: any; as: ValueType } {

@@ -228,7 +228,7 @@ export const stepName = (cls: string, prefix: string) =>
 
 /** Collect the top-level step chain (does not descend into nested traversal args).
  *  `paramTypes` names the wire DataType of each bound param (from wire.ts) so a
- *  param-resolved arg records the right canonical type in Step.argTypes. */
+ *  param-resolved arg records the right canonical type on its Arg. */
 export function stepChain(tree: any, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Step[] {
   // A nested-traversal arg's payload (`{nested}`) is normally an ANTLR
   // NestedTraversalContext, lowered lazily here. But a TraversalStrategy rewrite
@@ -451,7 +451,7 @@ function walkArgs(node: any, out: Arg[], params: Record<string, any>, paramTypes
     // The param's canonical type is the wire DataType the client serialized it as
     // (paramTypes) — the truth a JS value can't carry; null when the channel said
     // nothing (JSON request path), so the write seam infers from the JS value. The NAME rides
-    // alongside (Step.paramNames): the value is still resolved into `out` for every consumer, but a
+    // alongside (the Arg's name): the value is still resolved into `out` for every consumer, but a
     // lowering can now see it was a user PARAMETER and bind it, rather than inline it as a constant.
     emit(params[name], paramTypes[name] ?? null, name); return;
   }
