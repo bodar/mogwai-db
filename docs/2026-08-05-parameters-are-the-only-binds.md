@@ -239,12 +239,31 @@ the `constLit` seam. No churn (corpus uses literals), census clean.
 - **hasId($x)** — RelIR declines `hasId` entirely (routes to legacy, which binds); a coverage gap, not
   an operand-seam one.
 
-**Phase C — shrink `oversized`, expose the budget honestly.**
-- **C1. Measure the decimal-TEXT literal** (open question 2). If the CAST-compare holds, the
-  big-decimal/duration/>2⁵³ tail inlines and `oversized` is just collections.
+**Phase C — shrink `oversized`, expose the budget honestly. NOT STARTED — measured, scoped below.**
+
+- **C1. The decimal-TEXT literal — MEASURED FEASIBLE, but context-dependent; do it PER-SITE, not in
+  `constLit`.** SQLite comparison holds: `CAST(col AS REAL) > '9.5'` returns the numeric answer (the TEXT
+  operand converts), so a canonical-decimal TEXT literal compares correctly through the existing
+  `compareKey`/`compareBound` CAST. What blocks a blanket `constLit` change is that inlining the tail is
+  only safe where the FRAMING carries the type:
+    - **`inject(9.99m)` — safe.** Its framing tag comes from `argTypes` (`STATIC('bigdecimal')`), so an
+      inlined `VALUES ('9.99')` frames back as bigdecimal.
+    - **`constant(9.99m)` — UNSAFE.** It frames `UNKNOWN` by design, so an inlined `'9.99'` would read
+      back as a *string*. Must keep declining (or gain a typed framing first).
+    - **A predicate operand — needs the `ordered` CAST.** `has('x', 9.99m)` equality is fine as a bare
+      TEXT literal (`value = '9.99'`, TEXT=TEXT, matching legacy). But `P.gt(9.99m)` ORDERING needs the
+      bound wrapped `CAST('9.99' AS REAL)` (BigDecimal) / `AS INTEGER` (bigint/Duration) to line up with
+      `compareKey`'s per-vtype cast, and `ordered`'s `numericBound` must widen to the tail. This touches
+      the correctness-critical comparison function, so it wants its own change with bigdecimal/duration
+      test data. `predicate.ts` `operand` keeps its `string|number` guard so `constLit` staying
+      tail-declining does NOT affect it — the two seams are already independent.
+  So C1 is three small, INDEPENDENT changes (inject; a typed `constant` framing; the predicate `ordered`
+  cast), not one `constLit` edit. Each is gated by whether it preserves the value's type end-to-end.
 - **C2. Generalise the `json_each` move** (`plan.ts` `jsonbArrayBind`/`SET_BIND_LIMIT`, `land`) so an
   oversized value rides as one JSON bind, stopping it competing per-value with the parameter budget —
-  turning "100 minus mystery overhead" into "100 parameters."
+  turning "100 minus mystery overhead" into "100 parameters." Today a RelIR `within(<set>)` over
+  `SET_BIND_LIMIT` (25) members DECLINES to legacy (`predicate.ts`); the generalisation is a coverage
+  move, not a budget one (legacy already JSON-binds the big set).
 
 ## Discovered while landing Phase A (follow-ups, not yet done)
 
