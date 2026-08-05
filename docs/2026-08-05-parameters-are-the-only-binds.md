@@ -281,11 +281,19 @@ the `constLit` seam. No churn (corpus uses literals), census clean.
     - **`constant(9.99m)` — TODO, blocked.** It frames `UNKNOWN` by design, so an inlined `'9.99'` reads
       back as a *string*. Needs a typed `constant` framing first (or keeps declining) — and, for an
       ordering comparison over it, the same `SubjectType` storage-class enrichment as above.
-- **C2. Generalise the `json_each` move** (`plan.ts` `jsonbArrayBind`/`SET_BIND_LIMIT`, `land`) so an
-  oversized value rides as one JSON bind, stopping it competing per-value with the parameter budget —
-  turning "100 minus mystery overhead" into "100 parameters." Today a RelIR `within(<set>)` over
-  `SET_BIND_LIMIT` (25) members DECLINES to legacy (`predicate.ts`); the generalisation is a coverage
-  move, not a budget one (legacy already JSON-binds the big set).
+- **C2·a — the `land` pass is now WIRED (fixes item-38, a production DO refusal).** An over-budget
+  LITERAL row set — a big `inject(v1…v101)` — now rides as ONE JSON bind exploded by `json_each` and
+  stays on the RelIR spine within the 100-bind cap. `lowerToRel` runs `land` over the whole plan
+  (result + each Rel binding) just before the bind-budget gate (`compiler/rel/lower.ts` `landPlan`), so
+  the set crosses the seam as one value exactly as the root `CLAUDE.md` rule requires. Before, this set
+  DECLINED to legacy, where it compiled to N binds a Durable Object refuses (`docs/outstanding-work.md`
+  the `land`-unwired note + item 38 — "parked on the spine this migration deletes *and* broken on the
+  spine it is parked on"). `land` only rewrites an over-budget `Values` OF LITERALS and is a no-op
+  otherwise, so it is safe over every plan; a non-literal row is left for the budget to fail closed on.
+  Test: `test/rel-spine.test.ts` (101-row inject → 1 bind, DO-legal, rel≡the 101 values).
+- **C2·b — the PARAM-LIST `within` case remains** (`plan.ts` `jsonbArrayBind`/`SET_BIND_LIMIT`). Today a
+  RelIR `within(<set>)` over `SET_BIND_LIMIT` (25) members DECLINES to legacy (`predicate.ts`); the
+  generalisation is a coverage move, not a budget one (legacy already JSON-binds the big set).
 
   **Refined by Phase B — this is now specifically the PARAM-LIST case.** With operand inlining, a big
   set of LITERALS is already 0 binds (each member inlines), so the only set that still needs the JSON

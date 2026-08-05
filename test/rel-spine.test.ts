@@ -361,6 +361,37 @@ describe('the RelIR spine', () => {
     });
   }
 
+  test('an over-budget literal inject LANDS as one JSON bind and stays on RelIR', () => {
+    // The item-38 wall: 101 literal rows are 101 binds, which a Durable Object refuses at 100 — so
+    // before `land` was wired this DECLINED to legacy, where it hit the same wall in production. The
+    // `land` pass rewrites the over-budget `Values` to ONE JSON bind exploded by `json_each`, so the
+    // set crosses the seam as one value (root CLAUDE.md's bind rule) and the plan is DO-legal on RelIR.
+    const gremlin = `g.inject(${Array.from({ length: 101 }, (_, i) => i).join(',')})`;
+    const plan = read(gremlin, { spine: 'rel' });
+    expect(plan.spine).toBe('rel');
+    expect(plan.binds.length).toBeLessThanOrEqual(DO_BIND_CAP);
+    expect(cfLimitViolation(plan.sql, plan.binds)).toBeNull();
+    expect(store.query(plan.sql, plan.binds).map((row: any) => row.v)).toEqual(Array.from({ length: 101 }, (_, i) => i));
+    // A SMALL inject is under budget, so `land` is a no-op and the members stay inlined (0 binds).
+    const small = read('g.inject(1,2,3)', { spine: 'rel' });
+    expect(small.binds).toHaveLength(0);
+  });
+
+  test('limit($x)/skip($x) bind their count as a user parameter (B3)', () => {
+    // A parameter is the only free-standing bind by intent, so a `$x` count is a `?`, not inlined —
+    // the plan is one cached statement over every value. A parsed LITERAL count inlines (0 binds).
+    for (const [gremlin, count] of [['g.V().limit(n)', 2], ['g.V().skip(n)', 1]] as const) {
+      const rel = compile(gremlin, { n: count }, { spine: 'rel' });
+      const legacy = compile(gremlin, { n: count }, { spine: 'legacy' });
+      if (rel.kind !== 'read' || legacy.kind !== 'read') throw new Error('expected read plans');
+      expect(rel.spine).toBe('rel');
+      expect(rel.binds).toContain(count);
+      expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
+    }
+    const literal = compile('g.V().limit(2)', {}, { spine: 'rel' });
+    if (literal.kind === 'read') expect(literal.binds).not.toContain(2);
+  });
+
   test('a slice takes its window from the emission order, not from the scan', () => {
     // Compared UNSORTED and against legacy row-for-row: a slice is the one place where the wrong
     // ORDER is the wrong ANSWER, so sorting before comparing would hide exactly the defect this

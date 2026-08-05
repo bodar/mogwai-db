@@ -6,6 +6,8 @@ import { emit, emitRelational } from '../../rel/emit.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
+import { isStmt } from '../../rel/stmt.ts';
+import { land } from '../../rel/passes/land.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { forEachRel } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
@@ -1949,6 +1951,14 @@ const scalarPayload = (
   };
 };
 
+/** Apply `land` across a whole plan — the result and every Rel binding (a `Stmt` write step has no
+ *  `Values` to land and rides through untouched). Referenced bindings are separate Rel trees a single
+ *  `land(result)` cannot reach, so each is landed in place. A no-op unless a `Values` is over budget. */
+const landPlan = (p: Plan): Plan => program({
+  bindings: p.bindings.map((binding) => isStmt(binding.node) ? binding : { ...binding, node: land(binding.node) }),
+  result: land(p.result),
+});
+
 const lowered = (chain: Tail, collapse: boolean, fresh: Minter): RelLowering | null => {
   const wire = framed(chain, collapse, fresh);
   // A shape whose payload projection is not built yet is COVERAGE WE DO NOT HAVE, so it declines exactly as
@@ -1961,7 +1971,16 @@ const lowered = (chain: Tail, collapse: boolean, fresh: Minter): RelLowering | n
   // on the result alone because a write step has already named its own target's shared nodes; the
   // day a write RESULT needs naming across that boundary, this is where the pass grows to walk a
   // program rather than a tree.
-  const plan = chain.effects ? program({ bindings: [...chain.effects, ...named.bindings], result: named.result }) : named;
+  const built = chain.effects ? program({ bindings: [...chain.effects, ...named.bindings], result: named.result }) : named;
+  // WIRE `land` before the budget gate: an over-budget LITERAL row set — a big `inject(v1…v101)` — becomes
+  // ONE JSON bind exploded by `json_each`, so it stays on the RelIR spine WITHIN the Durable Object's
+  // 100-bind cap instead of declining below to legacy, where the same set compiled to N binds a DO refuses
+  // (docs/outstanding-work.md items 38 + the unwired-`land` note; the C2 mechanism in
+  // docs/2026-08-05-parameters-are-the-only-binds.md — a row set sized by DATA crosses the seam as ONE
+  // value, exactly the root `CLAUDE.md` bind rule). `land` only rewrites an over-budget `Values` OF LITERALS
+  // and is a no-op otherwise, so running it over every plan is safe; it leaves a non-literal row alone and
+  // the budget then fails closed on it rather than mis-executing.
+  const plan = landPlan(built);
   // A PROGRAM's budget is PER STATEMENT — each binding is its own query — so the sum a read plan is
   // measured by (its bindings are CTEs of ONE statement) would refuse a nine-statement cascade on a
   // number no database ever asks. `emit` renders every step and raises `BindBudgetExceeded` on the
