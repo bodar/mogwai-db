@@ -2908,3 +2908,20 @@ plain string a `grep` whose output you have actually seen.
 `prune` dropping columns a non-`Project` parent's own expressions read, `check` having no pass-through type
 law, and the rendered-bind cap being bypassable — all plausible, none yet re-derived, and this section's
 hit rate is now 3-of-4 at best.
+
+**Re-derivation tally for §13k, running.** #2 REFUTED above. **#1 CONFIRMED**, and precisely:
+`src/rel/passes/prune.ts:42` calls `refs(...)` ONLY inside the `project` arm, while the generic branch at
+`:46-47` gives each child either its FULL column list (safe, for a non-`preserves` node) or the narrowed
+`need ∪ channelCols(child.channels)` — for the seven `preserves` kinds
+(`filter`/`sort`/`limit`/`distinct`/`window`/`explode`/`materialize`), whose OWN expressions are never walked
+for references. So a column read only by a `Filter.pred`, `Sort.terms`, `Window.specs` or `Explode.expr`, and
+needed by nothing above, is pruned out from under its reader — §13k's measured
+`relation p has no declared column 'name'`.
+
+The proposed fix ("add each node's own `relExprs` references into its children's need") is well founded:
+`relExprs` already exists in `src/rel/walk.ts:34` and is TOTAL over the node kinds, returning exactly the
+per-kind expression list (`filter` → `[pred]`, `sort` → the term exprs, `window` → the spec exprs, `explode`
+→ `[expr]`, and so on). It is also the function `walk.ts` exists to make callers use instead of re-deriving a
+node's shape — the same argument §13l makes against `bindCount`. So the fix is one call in the generic
+branch, not new machinery. Still latent (the pass has no production caller), and §4.5 calls it Phase 3's
+prerequisite, so it should land before the repeat wedge rather than with it. #3 and #4 remain unverified.
