@@ -7,6 +7,7 @@
  * still sees every rendered statement, including each retained write effect.
  */
 import { cfLimitViolation } from '../src/cf-limits.ts';
+import { compile } from '../src/compiler/compiler.ts';
 import { extractStrategies, parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { runPasses } from '../src/compiler/ir/passes.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
@@ -14,16 +15,52 @@ import { emit } from '../src/rel/emit.ts';
 import type { Expr } from '../src/rel/expr.ts';
 import { forEachExpr, forEachRel, relExprs, stmtChildren, stmtExprs } from '../src/rel/walk.ts';
 import { isStmt } from '../src/rel/stmt.ts';
+import { GraphStore } from '../src/storage.ts';
+import { BunSqlite } from '../src/bun/BunSqlite.ts';
+import { MODERN_SEED } from '../test/fixtures/seed-modern.ts';
+import { exec, executeQuery } from '../test/support/executor.ts';
+import { decodeAll } from '../test/support/decode.ts';
 
 const corpus = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.meta.url)).text())
   .split('\n').filter(Boolean);
 const verbose = Bun.argv.includes('--verbose');
+/**
+ * RelIR is intentionally ahead of the legacy SQL in these cases. Each witness is asserted by the
+ * vendored reference corpus under the pinned TinkerPop revision; do not add a row without one.
+ */
+const RELIR_AHEAD = new Map([
+  ['g.V().group().by(__.values("name").substring(0,1)).by(__.constant(1))', 'gremlin-test/.../sideEffect/Group.feature g_V_group_byXvaluesXnameX_substringX1XX_byXconstantX1XX'],
+  ['g.inject("foo").is(P.gt(1.0d))', 'gremlin-test/.../semantics/Comparability.feature InjectXfooX_gtX1dX'],
+  ['g.inject("foo").is(P.gte(1.0d))', 'gremlin-test/.../semantics/Comparability.feature InjectXfooX_gteX1dX'],
+  ['g.inject(1.0d).is(P.lt("foo"))', 'gremlin-test/.../semantics/Comparability.feature mixed numeric/string ordering'],
+  ['g.inject(1.0d).is(P.lte("foo"))', 'gremlin-test/.../semantics/Comparability.feature mixed numeric/string ordering'],
+  ['g.inject(1.0d).is(P.neq(NaN))', 'gremlin-test/.../semantics/Comparability.feature InjectX1dX_neqXNaNX'],
+  ['g.inject(NaN).is(P.neq(1.0d))', 'gremlin-test/.../semantics/Comparability.feature InjectXNaNX_neqX1dX'],
+  ['g.inject(NaN).is(P.neq(NaN))', 'gremlin-test/.../semantics/Comparability.feature InjectXNaNX_neqXNaNX'],
+  ['g.inject(null).is(P.neq(1.0d))', 'gremlin-test/.../semantics/Comparability.feature InjectXnullX_neqX1dX'],
+  ['g.inject(null).is(P.neq(NaN))', 'gremlin-test/.../semantics/Comparability.feature InjectXnullX_neqXNaNX'],
+]);
 
 interface Metric { binds: number; bytes: number; compiler: number; bound: number; }
 const maxima = new Map<string, Metric>();
 const failures: string[] = [];
 let admitted = 0;
 let statements = 0;
+let pairedReads = 0;
+const store = new GraphStore(new BunSqlite(':memory:'));
+for (const seed of MODERN_SEED) executeQuery(store, seed, {});
+/** Map iteration order is not Gremlin map equality. Lists remain ordered. */
+const canon = (value: any): any =>
+  value instanceof Map ? ['map', [...value].map(([key, item]) => [canon(key), canon(item)])
+    .sort(([a], [b]) => JSON.stringify(a).localeCompare(JSON.stringify(b)))]
+  : Array.isArray(value) ? value.map(canon)
+  : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canon(item)]))
+  : typeof value === 'bigint' ? ['bigint', value.toString()]
+  : Number.isNaN(value) ? ['nan'] : value;
+const comparable = async (query: string, spine: 'rel' | 'legacy') => {
+  try { return { ok: true as const, value: JSON.stringify((await decodeAll(exec(store, undefined, undefined, spine).buffers(query, {}))).map(canon)) }; }
+  catch (error) { return { ok: false as const, error: (error as Error).message }; }
+};
 
 const countExpr = (expr: Expr, counts: { compiler: number; bound: number }): void =>
   forEachExpr(expr, (node) => {
@@ -70,9 +107,31 @@ for (const query of corpus) {
       compiler: Math.max(prior.compiler, next.compiler), bound: Math.max(prior.bound, next.bound),
     });
   }
+  try {
+    const rel = compile(query, {}, { spine: 'rel' });
+    const legacy = compile(query, {}, { spine: 'legacy' });
+    if (rel.kind === 'read' && rel.spine === 'rel' && legacy.kind === 'read') {
+      pairedReads++;
+      for (const [route, plan] of [['rel', rel], ['legacy', legacy]] as const) {
+        const violation = cfLimitViolation(plan.sql, plan.binds);
+        if (violation) failures.push(`${query} [${route}]: ${violation}`);
+      }
+      if (!steps.some((step) => step.name === 'sample')) {
+        const [relAnswer, legacyAnswer] = await Promise.all([comparable(query, 'rel'), comparable(query, 'legacy')]);
+        // A malformed literal is not an executable paired read; the front-end's common refusal is
+        // already L1's contract. A one-sided failure remains a hygiene failure.
+        if (relAnswer.ok !== legacyAnswer.ok) failures.push(`${query}: only one spine frames the read`);
+        else if (relAnswer.ok && legacyAnswer.ok && relAnswer.value !== legacyAnswer.value && !RELIR_AHEAD.has(query))
+          failures.push(`${query}: RelIR and legacy framed answers differ`);
+      }
+    }
+  } catch (error) {
+    failures.push(`${query}: paired compile/frame failed: ${(error as Error).message}`);
+  }
 }
 
 console.log(`sql-hygiene: ${admitted} admitted authored RelIR plans, ${statements} executable statement(s)`);
+console.log(`sql-hygiene: ${pairedReads} paired read(s) framed against the modern seed`);
 console.log(`sql-hygiene: ${maxima.size} traversal family baseline(s)`);
 if (verbose) for (const [family, metric] of [...maxima].sort(([a], [b]) => a.localeCompare(b)))
   console.log(`  ${family}\tbinds=${metric.binds}\tbytes=${metric.bytes}\tcompiler=${metric.compiler}\tbound=${metric.bound}`);
