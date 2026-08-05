@@ -2845,10 +2845,27 @@ Measured today, all three raise instead:
     g.inject(null).all(P.eq(null))      → throws "Incoming traverser for all step can't be null"
     g.inject(7).none(P.eq(7))           → throws "none() after a scalar stream not yet supported"
 
-The first three messages have no counterpart in `origin/master` and should simply go — the rule replacing
-them is "drop the row". The fourth is a DIFFERENT gap (a missing scalar-host arm), so that scenario needs the
-arm as well as the rule. Corpus: **visible**, and §13d already names the three failing scenarios —
-`g_V_valuesXageX_allXgtX32XX`, `g_injectX7X_noneXeqX7XX`, `g_injectXnullX_allXeqXnullXX`.
+**CORRECTION to my own first draft of this paragraph, which said those messages "have no counterpart in
+`origin/master` and should simply go". Two of them ARE upstream's, verbatim** —
+`util/ListFunction.java:106` is `"%s step can only take an array or an Iterable type for incoming
+traversers, encountered %s"`. What is wrong is not the wording but WHICH STEPS reach it:
+
+- `ListFunction` is implemented by exactly eight steps — `Combine`, `Intersect`, `Difference`,
+  `Disjunct`, `Product`, `Merge`, `Conjoin` and `Reverse` — and `convertTraverserToCollection` raising that
+  message for a non-collection traverser is correct for all of them.
+- `AllStep`/`AnyStep`/`NoneStep` extend `FilterStep` and implement `ReadOnlyTraversalParent`. They do **not**
+  implement `ListFunction`, never call `convertTraverserToCollection`, and do their own inline
+  `instanceof Iterable` test ending in `return false`.
+
+So the fix is narrow and must NOT touch the set-ops: `SCALAR_LIST_ONLY` in
+`src/compiler/steps/tail/projection.ts:840` is right for the seven collection steps in it and wrong for the
+two filters — `all` and `any` come OUT of that set and become filters that drop every row, and `none` (which
+is not in the set at all, hence its separate "not yet supported" message) gets the same treatment. The
+`literalNull` throw beside it goes for those three too: a null traverser is `false`, not an error.
+
+The `none()`-over-a-scalar case is additionally a MISSING HOST ARM, not just a wrong message, so that
+scenario needs the arm as well as the rule. Corpus: **visible**, and §13d already names the three failing
+scenarios — `g_V_valuesXageX_allXgtX32XX`, `g_injectX7X_noneXeqX7XX`, `g_injectXnullX_allXeqXnullXX`.
 
 ### A PROCESS NOTE, since it cost work: never edit a file a running delegate was told not to touch
 
