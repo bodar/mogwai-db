@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { compile } from '../src/compiler/compiler.ts';
 import { read, runWith, seededStore } from './support/harness.ts';
 import { CF_MAX_BINDS as DO_BIND_CAP, cfLimitViolation } from '../src/cf-limits.ts';
-import { executeQuery } from './support/executor.ts';
+import { exec, executeQuery } from './support/executor.ts';
 import { decodeAll } from './support/decode.ts';
 
 /**
@@ -20,10 +20,23 @@ import { decodeAll } from './support/decode.ts';
  */
 
 const store = seededStore();
-const rowsVia = (gremlin: string, spine: 'rel' | 'legacy') => {
-  const plan = read(gremlin, { spine });
-  expect(plan.spine).toBe(spine === 'rel' ? 'rel' : 'legacy');
-  return store.query(plan.sql, plan.binds).map((row) => JSON.stringify(row)).sort();
+/**
+ * THE ANSWER a spine gives, as the WIRE sees it — GraphBinary bytes, not the intermediate row.
+ *
+ * It used to compare `store.query` rows, and that made the differential sensitive to a
+ * representation the answer does not depend on. The reducer type-space work is the case that proved
+ * it: `min`/`max` now report the selected row's canonical vtype (`int`, `long`) where legacy reports
+ * SQLite's storage class (`integer`), so the two rows differ in `vt` while framing to byte-identical
+ * GraphBinary. Comparing rows failed on four traversals whose ANSWERS were never in question.
+ *
+ * Framing instead is strictly stronger, not a loosening: it is the level the differential's claim is
+ * actually about, and it also catches a divergence that only appears in the framing layer — which a
+ * row compare cannot see at all. Sync throughout, because `buffers()` is sync; the spine is PINNED
+ * per call through the executor override rather than read from the ambient switch.
+ */
+const answerVia = (gremlin: string, spine: 'rel' | 'legacy') => {
+  expect(read(gremlin, { spine }).spine).toBe(spine === 'rel' ? 'rel' : 'legacy');
+  return exec(store, undefined, undefined, spine).buffers(gremlin, {}).map((b: Buffer) => b.toString('hex')).sort();
 };
 
 /** Every shape the lowering covers today. Growing coverage means growing this list. */
@@ -343,7 +356,7 @@ describe('the RelIR spine', () => {
   for (const gremlin of COVERED) {
     test(`${gremlin} routes to RelIR and agrees with legacy`, () => {
       expect(compile(gremlin, {}, { spine: 'rel' })).toMatchObject({ spine: 'rel' });
-      expect(rowsVia(gremlin, 'rel')).toEqual(rowsVia(gremlin, 'legacy'));
+      expect(answerVia(gremlin, 'rel')).toEqual(answerVia(gremlin, 'legacy'));
     });
   }
 
@@ -555,9 +568,10 @@ describe('the RelIR spine', () => {
     //    still be the min, which is why the pair is asserted together against legacy.
     for (const gremlin of ["g.V().both().both().values('age').sum()", "g.V().both().both().values('age').mean()",
       "g.V().both().both().values('age').min()", "g.V().both().both().values('age').max()"]) {
-      const rel = read(gremlin, { spine: 'rel' });
-      const legacy = read(gremlin, { spine: 'legacy' });
-      expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
+      // The WIRE answer, for `answerVia`'s reason: min/max now report the selected row's canonical
+      // vtype where legacy reports SQLite's storage class, so the rows differ in `vt` while the
+      // GraphBinary is identical. Bulk weighting is what this asserts and it lives in the VALUE.
+      expect(answerVia(gremlin, 'rel')).toEqual(answerVia(gremlin, 'legacy'));
     }
 
     // 3. THE MEAN IS FORCED REAL. Integer division answers 30 for the reference ages where the mean is

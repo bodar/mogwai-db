@@ -9,8 +9,8 @@ import type { IRStep } from '../ir/strategies.ts';
 import { childSteps } from '../steps/tail/child-shape.ts';
 import { LIST_LOCAL_TX, STRING_LOCAL_TX } from '../steps/tail/list.ts';
 import { byEncounter, carriedCols, coalesce, EMPTY_ARRAY, jsonOf, meta, typedNode, typeOf, type Minter } from './build.ts';
-import { predicateExpr, SUBJECT_UNKNOWN } from './predicate.ts';
-import { isReducer, reducerAggregate } from './reducer.ts';
+import { inferredVtype, predicateExpr, SUBJECT_UNKNOWN } from './predicate.ts';
+import { isReducer, localReducerAggregate } from './reducer.ts';
 import { transformExpr } from './transform.ts';
 
 /**
@@ -196,23 +196,6 @@ export const isBareList = (of: ListOf): boolean => of.kind === 'scalar';
  * so naming it here is not a second policy: it is what lets a MIXED list (some members wrapped, some
  * bare, which is exactly what `typed` means) hand every member a type without a second channel.
  */
-const inferredVtype = (value: Expr): Expr => ({
-  kind: 'case',
-  whens: [
-    [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'text'), lit('string', 'text')],
-    [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'real'), lit('double', 'text')],
-    [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'null'), lit(null, 'any')],
-    [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'integer'), {
-      kind: 'case',
-      whens: [[{ kind: 'binary', op: 'and',
-        left: { kind: 'binary', op: '>=', left: value, right: lit(-2147483648, 'int') },
-        right: { kind: 'binary', op: '<=', left: value, right: lit(2147483647, 'int') } }, lit('int', 'text')]],
-      else: lit('long', 'text'),
-    }],
-  ],
-  else: lit('string', 'text'),
-});
-
 /**
  * ONE member predicate for `all`/`any`/`none`, null-aware — the same rule legacy's `memberPredicate`
  * encodes, and it must be stated here too because the two spines render predicates in different
@@ -365,13 +348,12 @@ export function listRetype(
     return { rel: scalarOf(rel, [['v', total]], [meta('v', 'int')], fresh), type: STATIC('long'), result: 'count' };
   }
 
-  // The REDUCER family over the members — the same `reducer.ts` authority the row-level reducers use,
-  // so the eligibility guard, the dynamic result class and `mean`'s forced REAL are stated once. There
-  // is no multiplicity inside a list: a member is one value, so the bulk-weighted form never applies.
+  // The REDUCER family over list members remains the correlated local spelling documented by
+  // `localReducerAggregate`; there is no multiplicity inside a list, so weighting never applies.
   if (isReducer(step.name) && isLocalScope(step)) {
     if (args.some((arg) => typeof arg === 'number')) return null;
     const members = membersOf(list, fresh);
-    const reduced = reducerAggregate(memberPayload(of, members), step.name);
+    const reduced = localReducerAggregate(memberPayload(of, members), step.name);
     const scalar = (value: Expr, name: string, type: 'any' | 'text'): readonly [string, Expr] => [name, {
       kind: 'scalar',
       plan: make.aggregate({
@@ -379,8 +361,6 @@ export function listRetype(
         groupBy: [], aggs: [[name, value]],
       }),
     }];
-    // TWO correlated subqueries over the same members, which is what legacy emits too: the result's
-    // storage class is `typeof(<the aggregate>)`, and SQL has nowhere to name the aggregate once.
     return {
       rel: scalarOf(rel, [scalar(reduced.value, 'v', 'any'), scalar(reduced.type, 'vt', 'text')],
         [meta('v', 'any', true), meta('vt', 'text', true)], fresh),

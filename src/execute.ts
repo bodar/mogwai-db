@@ -7,6 +7,7 @@ import { ioc, Property, t, VertexProperty } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
 import { runProgram } from './program.ts';
+import { REDUCER_ERROR_PREFIX } from './compiler/rel/reducer.ts';
 import type { Spine } from './sql/kernel/render.ts';
 import type { GraphStore } from './storage.ts';
 
@@ -639,10 +640,23 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
       else yield* framed;
       return;
     }
-    // sum(): Int/Long/Double by SQLite storage class. SUM of an empty stream is
-    // NULL → no result (TinkerPop yields nothing, matching SQL sum aggregation).
-    case 'scalar': for (const r of rows) if (r.v !== null || shape.productiveNull)
-      yield r.v === null ? frameValue(null, undefined) : sumBuffer(r.v, r.vt); return;
+    // Reducer framing, and `vt` carries THREE things — which is why every branch tests it directly:
+    //   · `sum`/`mean` report SQLite's aggregate STORAGE class (`integer`/`real`);
+    //   · `min`/`max` report the selected row's own canonical VTYPE (`long`, `int`, `string`, …), so a
+    //     TEXT-carried long reaches the wire as a long instead of as a string;
+    //   · a `REDUCER_ERROR_PREFIX` message is the reducer's fail-closed channel for a refusal only the
+    //     ROWS can decide (a mixed type space, an overflowing integer sum). SQLite cannot RAISE from a
+    //     SELECT, so this is the one path out; the prefix is imported, never re-spelled, because two
+    //     spellings is how the guard is silently lost. See that constant before adding a third use.
+    // An empty stream is NULL → no result, which is what TinkerPop yields for these.
+    case 'scalar': for (const r of rows) {
+      if (typeof r.vt === 'string' && r.vt.startsWith(REDUCER_ERROR_PREFIX))
+        throw new Error(r.vt.slice(REDUCER_ERROR_PREFIX.length));
+      if (r.v !== null || shape.productiveNull)
+        yield r.v === null ? frameValue(null, undefined)
+          : r.vt === 'integer' || r.vt === 'real' ? sumBuffer(r.v, r.vt)
+            : frameValue(r.v, vtypeToValueType(r.vt));
+    } return;
     case 'map': for (const r of rows) yield mapBuffer(r, shape.entries); return;
     // A whole-map VALUE per row: the `map` blob is [[keyNode,valNode],…] of self-describing
     // {t,v} nodes → frame the reconstructed map tree (each key/value its own exact type).

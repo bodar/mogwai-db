@@ -11,7 +11,7 @@ import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { executeQuery } from '../support/executor.ts';
+import { exec, executeQuery } from '../support/executor.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { decode, decodeAll } from '../support/decode.ts';
 import { read, relirOff, run, runWith, seededStore } from '../support/harness.ts';
@@ -191,19 +191,16 @@ describe('scalar-parent / projection SQL', () => {
     expect(avg.sql).toContain(`SUM(${eligible('s.v')} * s.bulk) * 1.0 / SUM(CASE WHEN ${eligible('s.v')} IS NOT NULL THEN s.bulk END)`);
     expect(avg.sql).toContain("'real' AS vt");
 
-    // The RelIR spine states the same POLICY with the class lists BOUND rather than spliced (§3.2), so
-    // the bind values are what to assert — and they are the stronger assertion anyway, since a wrong
-    // class list is a wrong SET and not a wrong string. `min`/`max` admit three classes because
-    // Comparable does; `sum`/`mean` admit two.
-    for (const [gremlin, classes] of [
-      ['g.V().values("age").min()', ['integer', 'real', 'text']],
-      ['g.V().values("age").max()', ['integer', 'real', 'text']],
-      ['g.V().values("age").sum()', ['integer', 'real']],
-      ['g.V().values("age").mean()', ['integer', 'real']],
+    // RelIR decides in Gremlin TYPE SPACE, not SQLite storage class: every numeric subtype shares
+    // one space, strings occupy the other. The canonical type names are compiler-authored binds.
+    for (const [gremlin, spaces] of [
+      ['g.V().values("age").min()', ['number', 'string']],
+      ['g.V().values("age").max()', ['number', 'string']],
+      ['g.V().values("age").sum()', ['number']],
+      ['g.V().values("age").mean()', ['number']],
     ] as const) {
       const p = read(gremlin, { spine: 'rel' });
-      for (const cls of classes) expect(p.binds).toContain(cls);
-      if (classes.length === 2) expect(p.binds).not.toContain('text');
+      for (const space of spaces) expect(p.binds).toContain(space);
       expect(p.shape).toEqual({ kind: 'scalar' });
     }
     // …and the mean is forced REAL by a CAST rather than legacy's `* 1.0`: every RelIR `Lit` is a bind
@@ -225,6 +222,44 @@ describe('scalar-parent / projection SQL', () => {
     // not disturb it; min/max over the same mixed stream stay text-inclusive.
     expect(run(store, 'g.V().union(__.values("age"), __.values("name")).sum()').map((r) => r.v)).toEqual([123]);
     expect(run(store, 'g.V().union(__.values("age"), __.values("name")).min()').map((r) => r.v)).toEqual([27]);
+  });
+
+  test('reducers use Gremlin type space and preserve a TEXT-carried long', async () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    // SPINE PINNED, not ambient. This is the RelIR answer: legacy keeps the storage-class guard and
+    // order (§14 — legacy is what §8 deletes, and the L3 ratchet's two floors are what let RelIR be
+    // ahead), so reading the ambient switch would make every assertion below say a different thing
+    // under `mise run test:legacy-spine`. Pinning is mise.toml's existing rule for a spine-specific
+    // assertion. `sum` weighting needs a write, so the seed stays on the ambient route.
+    const relir = (gremlin: string) => exec(store, undefined, undefined, 'rel').buffers(gremlin, {});
+    expect(await decodeAll(relir('g.inject(9007199254740993L, 1L).sum()')))
+      .toEqual([9007199254740994]);
+    expect(await decodeAll(relir('g.inject(9007199254740993L, 1L).mean()')))
+      .toEqual([4503599627370497]);
+    expect(await decodeAll(relir('g.inject(10L, -9007199254740993L).min()')))
+      .toEqual([-9007199254740993n]);
+    expect(await decodeAll(relir('g.inject(10L, -9007199254740993L).max()')))
+      .toEqual([10]);
+
+    // A MIXED type space FAILS CLOSED. The reference refuses it — `NumberHelper.min`/`max` end in
+    // `a.compareTo(b)` for a non-Number pair, so `Integer.compareTo(String)` throws — and the
+    // alternative is returning SQLite's storage-class extremum (min of [1,"a"] answering 1) silently.
+    // The refusal is a property of the ROWS, so it rides `REDUCER_ERROR_PREFIX` out of the aggregate.
+    for (const reducer of ['min', 'max'])
+      expect(() => relir(`g.inject(1, "a").${reducer}()`))
+        .toThrow(`${reducer}() cannot compare values from mixed Gremlin type spaces`);
+
+    // Admitting exact int64 values makes overflow reachable. SQLite raises instead of wrapping,
+    // agreeing with NumberHelper.mathOperationWithPromote's required failure.
+    expect(() => relir('g.inject(9223372036854775807L, 1L).sum()'))
+      .toThrow('integer overflow');
+
+    // A bulk-weighted term overflows during multiplication, which SQLite would otherwise promote
+    // to REAL before SUM could raise. A self-loop makes both() carry the vertex at bulk two.
+    executeQuery(store, 'g.addV("x").property("n", 9223372036854775807L)', {});
+    executeQuery(store, 'g.V(1).addE("loop").to(__.V(1))', {});
+    expect(() => relir('g.V(1).both().values("n").sum()'))
+      .toThrow('sum() integer overflow');
   });
 
   test('collection literals parse as one array value; varargs-style steps flatten it', () => {
@@ -409,12 +444,12 @@ describe('scalar-parent / projection SQL', () => {
     // An injected row carries NO multiplicity by construction, so the reducer takes the UNWEIGHTED form
     // — the same distinction `count()` draws between `COUNT(*)` and `SUM(bulk)`, read off the channel.
     expect(read('g.inject(1,2,3).sum()', { spine: 'legacy' }).sql).toContain(`SUM(${eligible('s.v')})`);
-    expect(read('g.inject(1,2,3).sum()', { spine: 'rel' }).sql).toMatch(/sum\(CASE WHEN typeof\([^]*\) AS v/);
+    expect(read('g.inject(1,2,3).sum()', { spine: 'rel' }).sql).toMatch(/sum\(CASE WHEN \(\w+\.type_space = \?\) THEN \w+\.compare END\) AS v/);
     expect(read('g.inject(1,2,3).sum()', { spine: 'rel' }).sql).not.toMatch(/\* \?\)\) AS v/);
     // Unweighted mean IS `AVG` — no bulk to weight by, so the weighted form's numerator/denominator
     // pair collapses to the builtin, on both spines.
     expect(read('g.inject(1,2,3).mean()', { spine: 'legacy' }).sql).toContain(`AVG(${eligible('s.v')})`);
-    expect(read('g.inject(1,2,3).mean()', { spine: 'rel' }).sql).toMatch(/avg\(CASE WHEN typeof\(/);
+    expect(read('g.inject(1,2,3).mean()', { spine: 'rel' }).sql).toMatch(/avg\(CASE WHEN \(\w+\.type_space = \?\) THEN \w+\.compare END\)/);
     expect(read('g.inject(1,2,3).count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.inject(1,2,3).fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
     // is() BEFORE count() filters the pre-count stream (WHERE inside the counted set)
@@ -1109,8 +1144,9 @@ describe('scalar-parent / projection SQL', () => {
     // column reading the result's own storage class — with the value inlined rather than aliased.
     const rel = read('g.V().values("age").sum()', { spine: 'rel' });
     expect(rel.shape).toEqual({ kind: 'scalar' });
-    expect(rel.sql).toMatch(/sum\([^]*\* \?\)\) AS v/);
-    expect(rel.sql).toMatch(/typeof\(sum\([^]*\)\) AS vt/);
+    expect(rel.sql).toMatch(/sum\(\(CASE WHEN \(\w+\.type_space = \?\) THEN \w+\.compare END \* \w+\.bulk\)\) AS v/);
+    expect(rel.sql).toMatch(/ELSE typeof\(sum\([^]*END AS vt/);
+    expect(rel.binds).toContain('__mogwai_reducer_error:sum() integer overflow');
   });
 
   test('numeric reducers are scalar streams and preserve dynamic type past filters', () => {
@@ -1192,7 +1228,7 @@ describe('scalar-parent / projection SQL', () => {
     // being summed — not where the cast sits in the select list.
     expect(typedSum.sql).toMatch(/CAST\([^]*AS REAL\)/);
     // …and the sum is BULK-WEIGHTED over an element source, whichever spine emits it.
-    expect(typedSum.sql).toMatch(/(SUM|sum)\([^]*\* (s\.bulk|\?)\)?\)? AS v/);
+    expect(typedSum.sql).toMatch(/(SUM|sum)\([^]*\* \w+\.bulk\)\)? AS v/);
 
     const store = seededStore();
     expect(run(store, 'g.V().values("name").toUpper().is("MARKO")').map((r) => r.v)).toEqual(['MARKO']);

@@ -69,6 +69,39 @@ const CAST_TO_REAL = ['float', 'double', 'bigdecimal'];
 const NUMERIC_CAST_TO_INT = CAST_TO_INT.filter((type) => type !== 'datetime' && type !== 'duration');
 const NUMERIC_VTYPES = [...NUMERIC_CAST_TO_INT, ...CAST_TO_REAL];
 
+/** The Gremlin comparison TYPE SPACE of a canonical vtype. Reducers consume this same authority
+ *  as range predicates: every numeric subtype shares one space, strings occupy the other, and a
+ *  type outside both is not comparable in either position. */
+export const comparableTypeSpaceOn = (vtype: Expr): Expr => ({
+  kind: 'case',
+  whens: [
+    [{ kind: 'in-list', expr: vtype, values: NUMERIC_VTYPES.map((name) => lit(name, 'text')) }, lit('number', 'text')],
+    [binary('=', vtype, lit('string', 'text')), lit('string', 'text')],
+  ],
+});
+
+/** Infer the canonical type carried by an untagged scalar. This is the same storage-class fallback
+ *  used at the wire seam; a real per-row vtype or a static tag always outranks it. */
+export const inferredVtype = (value: Expr): Expr => {
+  const storage = { kind: 'call', fn: 'typeof', args: [value] } as const;
+  return {
+    kind: 'case',
+    whens: [
+      [binary('=', storage, lit('text', 'text')), lit('string', 'text')],
+      [binary('=', storage, lit('real', 'text')), lit('double', 'text')],
+      [binary('=', storage, lit('null', 'text')), lit(null, 'any')],
+      [binary('=', storage, lit('integer', 'text')), {
+        kind: 'case',
+        whens: [[{ kind: 'binary', op: 'and',
+          left: binary('>=', value, lit(-2147483648, 'int')),
+          right: binary('<=', value, lit(2147483647, 'int')) }, lit('int', 'text')]],
+        else: lit('long', 'text'),
+      }],
+    ],
+    else: lit('string', 'text'),
+  };
+};
+
 /**
  * The vtype-aware ordering key for a stored property value: `(value, vtype) -> a correctly-ordered
  * SQLite value`. Pass it as `compare` wherever a per-row `vtype` column is in scope; omit it where
