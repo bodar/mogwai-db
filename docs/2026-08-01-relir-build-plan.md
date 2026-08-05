@@ -3038,3 +3038,24 @@ reference RAISES on (§13g·4) and which this increment makes newly REACHABLE by
 worth a deferral rather than a silent wrap, and worth noting that admitting them is what makes it reachable;
 and the all-NaN case, where the reference propagates `NaN` and SQLite stores it as NULL so we answer `null`
 (§13g·3) — narrow, same two functions, fold it in if it is free and defer it loudly if not.
+
+### 13c·1. The `set` framing marker — CONFIRMED, and the rule is PER FOLLOWER, not a blanket
+
+§13c's fifth bullet is right and the citations resolve exactly, so the fix is a small table rather than a
+judgement call. Our `set` framing marker is cleared by ANY follower; the reference converts a Set to a List at
+some followers and preserves it at others:
+
+| follower | reference | so the `set` marker must |
+|---|---|---|
+| `order(Scope.local)` | `map/OrderLocalStep.java:76,86` — `…collect(Collectors.toList())` | be CLEARED (we are right today) |
+| `range(Scope.local)` | `map/RangeLocalStep.java:118` — `iterable instanceof Set ? new LinkedHashSet() : new LinkedList()`, and the javadoc at `:74-80` states it: "Map becomes Map (order-preserving) / **Set becomes Set (order-preserving)** / Other Collection types become List" | SURVIVE |
+| `all`/`any`/`none` | `FilterStep`s — verified in §13d·1, they test the item and return a boolean, never touching the object | SURVIVE |
+
+So a set op followed by a local SLICE frames as a List where a Set is owed: the right members with the wrong
+wire type, which is the class no `.feature` catches because Gherkin's `s[…]`/`l[…]` distinction is only
+asserted where a scenario writes it. Clearing on `order(Scope.local)` is correct and must be KEPT — the fix is
+to stop clearing on the other two, not to stop clearing.
+
+Worth pairing with §13e's confirmed list, which already pins the set-op RESULT types one for one
+(`Intersect`/`Difference`/`Disjunct`/`Merge` → `Set`, `Combine` → `List`, `Product` → `List<List>`): those are
+what PRODUCES the marker, and this is what must not lose it. Corpus: invisible for the surviving cases.
