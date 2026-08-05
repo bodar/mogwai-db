@@ -1,8 +1,8 @@
-import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
 import { CF_MAX_BINDS } from '../../cf-limits.ts';
-import type { RelId } from '../../rel/types.ts';
+import type { RelId, SqlType } from '../../rel/types.ts';
 import { gtypeName } from '../../gremlin/frontend.ts';
-import { normalizeTypeName, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
+import { BigDecimal, Duration, normalizeTypeName, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
 import { constLit } from './const.ts';
 
 /**
@@ -59,9 +59,25 @@ const ORDERING = new Set(['gt', 'gte', 'lt', 'lte']);
  * from `Step.paramNames`) BINDS. Storage class does not matter for a comparison operand — SQLite
  * compares an INTEGER `2` and a REAL `2.0` numerically alike — so a nested operand with no declared
  * type inlines by its value's own shape without changing any answer.
+ *
+ * The EXACT NUMERIC TAIL — bigint / BigDecimal / Duration — is stored as canonical decimal TEXT
+ * (`storedScalar`), so it inlines as that TEXT literal (equality is TEXT=TEXT, matching legacy) or binds
+ * as a parameter; the ordering CAST that lines it up with `compareKey` is `ordered`'s job (`isExactTail`
+ * → `castBound`). This is why RelIR now COVERS these operands rather than declining them to legacy.
  */
-const operand = (value: unknown, type: TypeNode | null = null, paramName: string | null = null): Expr | null =>
-  typeof value === 'string' || typeof value === 'number' ? constLit(value, type, paramName) : null;
+const operand = (value: unknown, type: TypeNode | null = null, paramName: string | null = null): Expr | null => {
+  if (typeof value === 'string' || typeof value === 'number') return constLit(value, type, paramName);
+  if (isExactTail(value)) return paramName != null ? param(value) : compilerText(String(value));
+  return null;
+};
+
+/** The numeric tail stored as decimal TEXT — a bigint, a BigDecimal, or a Duration (total-nanos). Its
+ *  ordering comparison casts to the column's numeric class (`compareBound`): BigDecimal → REAL, the two
+ *  integrals → INTEGER. */
+const isExactTail = (value: unknown): boolean =>
+  typeof value === 'bigint' || value instanceof BigDecimal || value instanceof Duration;
+const exactTailCast = (value: unknown): SqlType | null =>
+  value instanceof BigDecimal ? 'real' : (typeof value === 'bigint' || value instanceof Duration) ? 'int' : null;
 
 /** Above this, a set stops being an IN-list and becomes one JSON bind — the DO 100-parameter wall.
  *  RelIR's remedy for that is `passes/land.ts`, which lowers a `Values`, not an `InList`; until an
@@ -116,11 +132,16 @@ export const SUBJECT_UNKNOWN: SubjectType = { kind: 'unknown' };
 const ordered = (
   op: Extract<Expr, { kind: 'binary' }>['op'], subject: Expr, bound: Expr, value: unknown, type: SubjectType,
 ): Expr => {
-  const numericBound = typeof value === 'number';
+  const numericBound = typeof value === 'number' || isExactTail(value);
+  // The exact tail rides as decimal TEXT, so its ORDERING bound is cast to the column's numeric class
+  // (`compareBound`) — otherwise `CAST(col AS REAL) > '9.99'` would compare a REAL against unconverted
+  // TEXT. A plain number needs no cast (it already binds/inlines numeric).
+  const tailCast = exactTailCast(value);
+  const castBound: Expr = tailCast ? { kind: 'cast', arg: bound, to: tailCast } : bound;
   if (type.kind === 'static') {
     const canonical = normalizeTypeName(type.type);
     const agrees = numericBound ? canonical !== null && NUMERIC_VTYPES.includes(canonical) : canonical === 'string';
-    return agrees ? binary(op, subject, bound) : CONSTANT.false;
+    return agrees ? binary(op, subject, castBound) : CONSTANT.false;
   }
   const compilerFalse = binary('!=',
     { kind: 'call', fn: 'json_object', args: [] },
@@ -128,15 +149,15 @@ const ordered = (
   if (type.kind === 'perRow') {
     return numericBound
       ? { kind: 'case', whens: [
-        [{ kind: 'in-list', expr: type.vtype, values: NUMERIC_CAST_TO_INT.map(compilerText) }, binary(op, { kind: 'cast', arg: subject, to: 'int' }, bound)],
-        [{ kind: 'in-list', expr: type.vtype, values: CAST_TO_REAL.map(compilerText) }, binary(op, { kind: 'cast', arg: subject, to: 'real' }, bound)],
+        [{ kind: 'in-list', expr: type.vtype, values: NUMERIC_CAST_TO_INT.map(compilerText) }, binary(op, { kind: 'cast', arg: subject, to: 'int' }, castBound)],
+        [{ kind: 'in-list', expr: type.vtype, values: CAST_TO_REAL.map(compilerText) }, binary(op, { kind: 'cast', arg: subject, to: 'real' }, castBound)],
       ], else: compilerFalse }
       : { kind: 'case', whens: [[binary('=', type.vtype, compilerText('string')), binary(op, subject, bound)]], else: compilerFalse };
   }
   const storage = { kind: 'call', fn: 'typeof', args: [subject] } as const;
   return numericBound
     ? { kind: 'case', whens: [[
-      { kind: 'in-list', expr: storage, values: [compilerText('integer'), compilerText('real')] }, binary(op, subject, bound),
+      { kind: 'in-list', expr: storage, values: [compilerText('integer'), compilerText('real')] }, binary(op, subject, castBound),
     ]], else: compilerFalse }
     : { kind: 'case', whens: [[binary('=', storage, compilerText('text')), binary(op, subject, bound)]], else: compilerFalse };
 };

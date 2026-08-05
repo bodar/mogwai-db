@@ -10,6 +10,9 @@ import { test, expect, describe } from 'bun:test';
 import { PER_ROW, STATIC } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { read, run, runWith, seededStore } from '../support/harness.ts';
+import { GraphStore } from '../../src/storage.ts';
+import { BunSqlite } from '../../src/bun/BunSqlite.ts';
+import { executeQuery } from '../support/executor.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -416,5 +419,27 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     expect(b('g.V().has("age", P.gt(xx1))', { xx1: 30 })).toEqual([30, 30]);      // compareKey spells it twice
     expect(b('g.V().has("name", within(xx1,xx2))', { xx1: 'a', xx2: 'b' })).toEqual(['a', 'b']);
     expect(b('g.V().has("age", P.between(xx1,xx2))', { xx1: 29, xx2: 35 })).toEqual([29, 29, 35, 35]);
+  });
+
+  // The exact numeric tail — BigDecimal (`9.99m`), Duration, and a >int64 bigint (`…n`) — is stored as
+  // canonical decimal TEXT, so a RelIR predicate operand of that type inlines as a TEXT literal
+  // (equality) or CASTs to the column's numeric class (ordering, via `compareBound`). RelIR now COVERS
+  // these where it once declined; the answer must equal legacy's, corpus-free (no L1 traversal has one).
+  test('exact numeric tail operands (bigdecimal/bigint) are RelIR-covered and match legacy', () => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    executeQuery(store, "g.addV('t').property('name','a').property('price', 9.99m).property('big', 99999999999999999999n)", {});
+    executeQuery(store, "g.addV('t').property('name','b').property('price', 12.50m).property('big', 11111111111111111111n)", {});
+    const names = (g: string, spine: 'legacy' | 'rel') => (runWith(store, g, { spine }) as { v: string }[]).map((r) => r.v).sort();
+    for (const g of [
+      "g.V().has('price', 9.99m).values('name')",           // eq → TEXT = TEXT
+      "g.V().has('price', P.gt(10.0m)).values('name')",     // ordering → CAST AS REAL
+      "g.V().has('price', P.lt(10.0m)).values('name')",
+      "g.V().has('price', P.between(9.0m, 11.0m)).values('name')",
+      "g.V().has('price', within(9.99m, 5.0m)).values('name')",
+      "g.V().has('big', P.lt(50000000000000000000n)).values('name')", // >int64: exact within int64, matches legacy either way
+    ]) {
+      expect(compile(g, {}, { spine: 'rel' })).toMatchObject({ spine: 'rel' }); // covered, not declined
+      expect(names(g, 'rel')).toEqual(names(g, 'legacy'));                       // and the answer agrees
+    }
   });
 });
