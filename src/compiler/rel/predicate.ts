@@ -46,6 +46,15 @@ const COMPARISON: Readonly<Record<string, Extract<Expr, { kind: 'binary' }>['op'
 /** The four whose SQL comparison must be vtype-aware — see the module header. */
 const ORDERING = new Set(['gt', 'gte', 'lt', 'lte']);
 
+/** STATIC subject types an ordering comparison DECLINES rather than mis-comparing — the temporals, whose
+ *  ONLY static-subject source is a literal (`inject(datetime(…))`/`inject(Duration(…))`) that rides as a
+ *  raw epoch/nanos the static arm cannot line up with the bound. `bigdecimal` is deliberately ABSENT: it
+ *  ALSO arrives as a NATIVE REAL (`values(…).asNumber(GType.BIGDECIMAL)`, a reducer), which compares
+ *  correctly here, and the static type alone cannot tell that apart from a TEXT inject literal — so
+ *  declining it would break the native case (the `asNumber(BIGDECIMAL).is(P.gt(0))` census witness). A
+ *  correctly-compared TEXT bigdecimal static subject is the deferred storage-class enrichment. See `ordered`. */
+const STATIC_ORDERING_DECLINE = new Set(['datetime', 'duration']);
+
 /**
  * An operand this vocabulary can compare against, routed through the one const/param seam.
  *
@@ -131,7 +140,7 @@ export const SUBJECT_UNKNOWN: SubjectType = { kind: 'unknown' };
  * exact numeric value may deliberately be stored as decimal TEXT. */
 const ordered = (
   op: Extract<Expr, { kind: 'binary' }>['op'], subject: Expr, bound: Expr, value: unknown, type: SubjectType,
-): Expr => {
+): Expr | null => {
   const numericBound = typeof value === 'number' || isExactTail(value);
   // The exact tail rides as decimal TEXT, so its ORDERING bound is cast to the column's numeric class
   // (`compareBound`) — otherwise `CAST(col AS REAL) > '9.99'` would compare a REAL against unconverted
@@ -140,6 +149,15 @@ const ordered = (
   const castBound: Expr = tailCast ? { kind: 'cast', arg: bound, to: tailCast } : bound;
   if (type.kind === 'static') {
     const canonical = normalizeTypeName(type.type);
+    // A TEMPORAL (`datetime`/`duration`) STATIC subject cannot be ordered by this arm: its only source is
+    // a literal that rides as a raw epoch/nanos with no per-row `vtype` to drive `compareKey`'s cast, so
+    // comparing it raw against `castBound` is not what TinkerPop's temporal ordering means. Rather than
+    // fold to a wrong `CONSTANT.false` — the empty-result bug an `inject(datetime(…)).is(P.gt(…))` exposes,
+    // where the value is genuinely comparable — DECLINE so the traversal routes to the legacy spine, which
+    // compares it correctly (a coverage gap, never a wrong answer;
+    // docs/2026-08-05-parameters-are-the-only-binds.md C1). A native-numeric static subject (`count()`'s
+    // `long`, an `asNumber(BIGDECIMAL)` REAL) is unaffected and still folds/compares here.
+    if (numericBound && canonical !== null && STATIC_ORDERING_DECLINE.has(canonical)) return null;
     const agrees = numericBound ? canonical !== null && NUMERIC_VTYPES.includes(canonical) : canonical === 'string';
     return agrees ? binary(op, subject, castBound) : CONSTANT.false;
   }
@@ -323,9 +341,11 @@ export function predicateExpr(
   if (op === 'between' || op === 'inside') {
     const [low, high] = [operand(values[0], null, pn(0)), operand(values[1], null, pn(1))];
     if (!low || !high) return null;
-    return binary('and',
+    const [loCmp, hiCmp] = [
       ordered(op === 'inside' ? '>' : '>=', subject, low, values[0], type),
-      ordered('<', subject, high, values[1], type));
+      ordered('<', subject, high, values[1], type),
+    ];
+    return loCmp && hiCmp ? binary('and', loCmp, hiCmp) : null;
   }
 
   const like = likePattern(op, values[0]);

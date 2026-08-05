@@ -258,11 +258,29 @@ the `constLit` seam. No churn (corpus uses literals), census clean.
       the bound `CAST(… AS REAL/INTEGER)` to line up with `compareKey`. RelIR now covers
       `has/is/within/between` over BigDecimal/Duration/bigint; verified rel≡legacy. `constLit` is
       untouched (the `operand` guard keeps the two seams independent), so the two below are unaffected.
-    - **`inject(9.99m)` — TODO, safe.** Framing tag comes from `argTypes` (`STATIC('bigdecimal')`), so an
-      inlined `VALUES ('9.99')` frames back as bigdecimal. Needs inject to inline the tail without
-      routing through `constLit` (which must keep declining it for `constant`).
+    - **`inject(Duration(…))` — LANDED; `inject(9.99m)`/bigint deliberately NOT inlined.** `injectSource`
+      inlines a DURATION tail as its canonical total-nanos TEXT (a `$x` binds); it frames
+      `STATIC('duration')`, so it reads back as a Duration. Only Duration, and the restraint is
+      load-bearing: **BigDecimal** frames `STATIC('bigdecimal')`, a static type that ALSO arrives NATIVE
+      from `values(…).asNumber(GType.BIGDECIMAL)` / a reducer (which compares correctly on `rel` — the
+      census witness `asNumber(BIGDECIMAL).is(P.gt(0))`), and the type name alone cannot tell the TEXT
+      inject literal from the native REAL, so inlining it would create a static subject the ordering arm
+      can neither compare nor safely decline. A **bigint** (`inject(9…L)`) frames `STATIC('long')` — the
+      SAME type native `count()` carries — same collision. Duration has NO native static-subject source,
+      so it is the one tail safe to inline. `constLit` is untouched (still declines the tail).
+    - **Static-subject ORDERING fails closed for temporals (fixes a live bug).** `ordered`'s STATIC arm
+      mis-handled a temporal subject: `datetime`/`duration` were folded to `CONSTANT.false` — a wrong
+      EMPTY result (`inject(datetime(…)).is(P.gt(…))` returned nothing on `rel`, PRE-EXISTING and unrelated
+      to inject). A temporal static subject's only source is a literal with no per-row `vtype` to drive
+      `compareKey`'s cast, so `ordered` now DECLINES (`→ null → legacy`) an ordering over a
+      `datetime`/`duration` static subject rather than answering wrong. `bigdecimal` is deliberately NOT
+      declined (its native `asNumber` case compares correctly and must stay on `rel`). Making a TEXT
+      bigdecimal/duration static subject COMPARABLE on `rel` is the deferred bigger fix: it needs the
+      subject's storage class threaded into `SubjectType`, since the type name cannot distinguish a TEXT
+      inject literal from a native REAL/INT.
     - **`constant(9.99m)` — TODO, blocked.** It frames `UNKNOWN` by design, so an inlined `'9.99'` reads
-      back as a *string*. Needs a typed `constant` framing first (or keeps declining).
+      back as a *string*. Needs a typed `constant` framing first (or keeps declining) — and, for an
+      ordering comparison over it, the same `SubjectType` storage-class enrichment as above.
 - **C2. Generalise the `json_each` move** (`plan.ts` `jsonbArrayBind`/`SET_BIND_LIMIT`, `land`) so an
   oversized value rides as one JSON bind, stopping it competing per-value with the parameter budget —
   turning "100 minus mystery overhead" into "100 parameters." Today a RelIR `within(<set>)` over

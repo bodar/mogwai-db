@@ -1,5 +1,5 @@
 import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
-import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, planBindCount } from '../../rel/check.ts';
 import { emit, emitRelational } from '../../rel/emit.ts';
@@ -13,7 +13,7 @@ import { isLocalScope, sliceOf, sliceParamNames } from '../ir/step.ts';
 import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs, isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
-import type { TypeNode } from '../../gremlin/types.ts';
+import { Duration, type TypeNode } from '../../gremlin/types.ts';
 import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
 import { assertsGType, childSteps, collectionAssert, typeOfAssert } from '../steps/tail/child-shape.ts';
 import { PATH_LIST_OPS } from '../steps/tail/path.ts';
@@ -1556,13 +1556,35 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
   // whole stream, so its uniform `as` wins; absent a fold, the value keeps the arg's declared subtype.
   const rowType = (i: number): TypeNode | null =>
     (folded.as as TypeNode | undefined) ?? (folded.at === 1 ? (step.argTypes?.[i] ?? null) : null);
-  const rows = vals.map((arg, i) => constLit(arg, rowType(i), step.paramNames?.[i] ?? null));
-  if (rows.some((row) => !row)) return null;
   // The tag the FOLD established, else a uniform declared type where there is one, else per-value
   // inference — which is what `UNKNOWN` means and is the honest floor for a heterogeneous inject
   // (there is no per-row vtype column to carry a mixed type on). Same precedence as legacy's, whose
-  // `bareInjectTag` only applies when nothing was folded.
+  // `bareInjectTag` only applies when nothing was folded. Computed before the rows because a tail
+  // member's inline is only sound when the stream frames STATIC (see below).
   const tag = folded.as ?? (folded.at === 1 ? bareInjectTag(steps as IRStep[], vals.length) : undefined);
+  // A scalar arg inlines as a typed literal / binds as a parameter (`constLit`). A DURATION has no
+  // scalar-literal form, so `constLit` declines it — but this inject frames `STATIC('duration')`, and a
+  // Duration rides as its canonical total-nanos TEXT that reads back as a Duration. Sound ONLY when `tag`
+  // is set: a MIXED inject frames UNKNOWN, where a bare TEXT literal would read back as a string, so a tail
+  // member there still declines (C1, docs/2026-08-05-parameters-are-the-only-binds.md). A `$x` binds.
+  //
+  // Only Duration is inlined here, and the restraint is load-bearing. A bigint (`inject(9…L)`) frames
+  // STATIC('long') — the SAME static type native `count()` carries — so a following `is(P.gt(…))` could
+  // not tell the TEXT big-long from a native long. A BigDecimal frames STATIC('bigdecimal'), which ALSO
+  // arrives NATIVE from `asNumber(GType.BIGDECIMAL)`/a reducer, so `ordered` cannot decline its ordering
+  // without breaking that native case. Duration alone has no native static-subject source, so `ordered`
+  // can safely decline `is(P.gt(Duration))` (routing to legacy) while the plain `inject(Duration(…))` and
+  // its equality/`unfold`/… uses lower here. bigint and BigDecimal keep declining whole, as before.
+  const rowExpr = (arg: unknown, i: number): Expr | null => {
+    const paramName = step.paramNames?.[i] ?? null;
+    const literal = constLit(arg, rowType(i), paramName);
+    if (literal) return literal;
+    if (tag !== undefined && arg instanceof Duration)
+      return paramName != null ? param(arg) : compilerText(String(arg));
+    return null;
+  };
+  const rows = vals.map(rowExpr);
+  if (rows.some((row) => !row)) return null;
   return {
     rel: make.values({
       id: fresh('inj'), rows: (rows as Expr[]).map((row) => [row]), channels: [],
