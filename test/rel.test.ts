@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
 import { check } from '../src/rel/check.ts';
 import { col, lit } from '../src/rel/expr.ts';
-import { aggregate as aggregateRel, filter, join, materialize, project as projectRel, recursive as recursiveRel, scan as scanRel, explode, union, values as valuesRel, window as windowRel } from '../src/rel/factory.ts';
+import { aggregate as aggregateRel, distinct as distinctRel, explode, filter, join, limit as limitRel, materialize, project as projectRel, recursive as recursiveRel, scan as scanRel, sort as sortRel, union, values as valuesRel, window as windowRel } from '../src/rel/factory.ts';
 import { emitQuery } from '../src/rel/emit.ts';
 import { planOf } from '../src/rel/plan.ts';
 import { fuse } from '../src/rel/passes/fuse.ts';
@@ -215,6 +215,39 @@ describe('RelIR', () => {
     if (pruned.kind === 'project') expect(pruned.exprs.map(([name]) => name)).toEqual(['id']);
   });
 
+  test('pruning retains a column read only by a Filter predicate', () => {
+    const projected = projectRel({ id: relId('predicateInput'), input: scan, channels, type: { cols },
+      exprs: [['id', col(scan.id, 'id')], ['name', col(scan.id, 'name')]] });
+    const filtered = filter({ id: relId('predicateReader'), input: projected, channels, type: { cols },
+      pred: { kind: 'binary', op: '=', left: col(projected.id, 'name'), right: lit('marko', 'text') } });
+    const pruned = prune(filtered, ['id']);
+    expect(pruned.kind).toBe('filter');
+    if (pruned.kind === 'filter' && pruned.input.kind === 'project')
+      expect(pruned.input.exprs.map(([name]) => name)).toEqual(['id', 'name']);
+    expect(() => check(pruned)).not.toThrow();
+  });
+
+  test('type-preserving nodes declare exactly their input type', () => {
+    const wellFormed = [
+      filter({ id: relId('typedFilter'), input: scan, channels, type: { cols }, pred: lit(1, 'int') }),
+      sortRel({ id: relId('typedSort'), input: scan, channels, type: { cols }, terms: [{ expr: col(scan.id, 'name'), dir: 'asc' }] }),
+      limitRel({ id: relId('typedLimit'), input: scan, channels, type: { cols }, count: lit(1, 'int') }),
+      distinctRel({ id: relId('typedDistinct'), input: scan, channels, type: { cols } }),
+      materialize({ id: relId('typedMaterialize'), name: 'typed_materialize', input: scan, channels, type: { cols } }),
+    ];
+    for (const node of wellFormed) expect(() => check(node)).not.toThrow();
+
+    const narrowed = { cols: [cols[0]] };
+    const malformed = [
+      filter({ id: relId('badTypedFilter'), input: scan, channels, type: narrowed, pred: lit(1, 'int') }),
+      sortRel({ id: relId('badTypedSort'), input: scan, channels, type: narrowed, terms: [{ expr: col(scan.id, 'name'), dir: 'asc' }] }),
+      limitRel({ id: relId('badTypedLimit'), input: scan, channels, type: narrowed, count: lit(1, 'int') }),
+      distinctRel({ id: relId('badTypedDistinct'), input: scan, channels, type: narrowed }),
+      materialize({ id: relId('badTypedMaterialize'), name: 'bad_typed_materialize', input: scan, channels, type: narrowed }),
+    ];
+    for (const node of malformed) expect(() => check(node)).toThrow(`RelIR: ${node.kind} type must match its input's`);
+  });
+
   test('names shared DAG vertices and explicit materialization boundaries', () => {
     const joined = sharedUnderTwoSides();
     expect(name(joined).bindings.map((binding) => binding.node.kind)).toEqual(['project']);
@@ -279,6 +312,19 @@ describe('RelIR', () => {
       type: { cols: [...cols, { name: 'id_r', type: 'int', nullable: false }, { name: 'name_r', type: 'text', nullable: false }, { name: 'bulk', type: 'int', nullable: false }] },
       on: { kind: 'binary', op: '=', left: col(left.id, 'id'), right: col(right.id, 'id') } });
     expect(() => check(invalid)).toThrow("left Join cannot carry rigid channel 'bulk' from its nullable right side");
+  });
+
+  test("a left Join declares every right-side output column nullable", () => {
+    const left = scanRel({ id: relId('nullableLeft'), table: 'nodes', alias: 'nl', channels, type: { cols } });
+    const right = scanRel({ id: relId('nullableRight'), table: 'nodes', alias: 'nr', channels, type: { cols } });
+    const rightOutput = cols.map((column) => ({ ...column, name: `${column.name}_r`, nullable: true as const }));
+    const on = { kind: 'binary' as const, op: '=' as const, left: col(left.id, 'id'), right: col(right.id, 'id') };
+    const valid = join({ id: relId('validLeftJoin'), left, right, join: 'left', channels, type: { cols: [...cols, ...rightOutput] }, on });
+    expect(() => check(valid)).not.toThrow();
+
+    const invalidRight = rightOutput.map((column, i) => i === 0 ? { ...column, nullable: false } : column);
+    const invalid = join({ id: relId('invalidLeftJoin'), left, right, join: 'left', channels, type: { cols: [...cols, ...invalidRight] }, on });
+    expect(() => check(invalid)).toThrow("RelIR: a left Join's right-side output columns must be nullable");
   });
 
   test('rejects a join whose two sides are the same relation', () => {

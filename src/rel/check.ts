@@ -175,9 +175,16 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
 
   /** Structure that is not channels and not expression placement: arity, duplicate names, and the
    * SQLite laws. Also `Record<RelKind, …>`, for the same reason. */
+  const preservingType = (node: Rel & { readonly input: Rel }): void => {
+    if (!sameColumns(node.type.cols, node.input.type.cols))
+      throw new Error(`RelIR: ${node.kind} type must match its input's`);
+  };
   const STRUCTURE: { readonly [K in RelKind]: (node: Extract<Rel, { readonly kind: K }>, scope: Scope) => void } = {
-    scan: () => {}, filter: () => {}, sort: () => {}, limit: () => {}, distinct: () => {},
-    materialize: () => {}, explode: () => {}, window: () => {},
+    scan: () => {},
+    // These five preserve their input type. Window and Explode also preserve columns for pruning,
+    // but legitimately extend their declared type, so the two overlapping sets are not one law.
+    filter: preservingType, sort: preservingType, limit: preservingType, distinct: preservingType,
+    materialize: preservingType, explode: () => {}, window: () => {},
     aggregate: (node) => {
       const declared = node.type.cols.map((column) => column.name);
       if (declared.length !== node.groupBy.length + node.aggs.length)
@@ -222,6 +229,8 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
         throw new Error(`RelIR: a ${node.join} Join emits its sides' ${width} columns; its type declares ${node.type.cols.length}`);
       const declared = node.type.cols.map((column) => column.name);
       if (new Set(declared).size !== declared.length) throw new Error('RelIR: a Join declares a duplicate output name');
+      if (node.join === 'left' && node.type.cols.slice(node.left.type.cols.length).some((column) => !column.nullable))
+        throw new Error("RelIR: a left Join's right-side output columns must be nullable");
     },
     union: (node) => {
       if (node.inputs.length < 2) throw new Error('RelIR: Union requires at least two inputs');

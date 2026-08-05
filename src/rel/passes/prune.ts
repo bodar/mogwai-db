@@ -3,7 +3,7 @@ import type { Expr } from '../expr.ts';
 import { project } from '../factory.ts';
 import type { Rel } from '../rel.ts';
 import type { RelId } from '../types.ts';
-import { forEachExpr, relChildren, rewrite } from '../walk.ts';
+import { forEachExpr, relChildren, relExprs, rewrite } from '../walk.ts';
 
 const refs = (expression: Expr, relation: RelId, out: Set<string>): void =>
   forEachExpr(expression, (e) => { if (e.kind === 'col' && e.rel === relation) out.add(e.name); });
@@ -44,7 +44,9 @@ export function prune(plan: Rel, required: readonly string[] = plan.type.cols.ma
       continue;
     }
     for (const child of relChildren(r)) {
-      require(child, preserves(r) ? [...need, ...channelCols(child.channels)] : child.type.cols.map((col) => col.name));
+      const childNeed = new Set(preserves(r) ? [...need, ...channelCols(child.channels)] : child.type.cols.map((col) => col.name));
+      for (const expression of relExprs(r)) refs(expression, child.id, childNeed);
+      require(child, childNeed);
     }
   }
 
