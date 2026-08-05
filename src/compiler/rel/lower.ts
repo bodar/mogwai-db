@@ -9,12 +9,12 @@ import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { forEachRel } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
-import { isLocalScope, sliceOf } from '../ir/step.ts';
+import { isLocalScope, sliceOf, sliceParamNames } from '../ir/step.ts';
 import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs, isNested, isTokenArg, stepChain } from '../../gremlin/frontend.ts';
 import type { TypeNode } from '../../gremlin/types.ts';
-import { constLit, countLit, itemTypeAt } from './const.ts';
+import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
 import { assertsGType, childSteps, collectionAssert, typeOfAssert } from '../steps/tail/child-shape.ts';
 import { PATH_LIST_OPS } from '../steps/tail/path.ts';
 import type { IRStep } from '../ir/strategies.ts';
@@ -742,10 +742,20 @@ function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel 
   // A COLLAPSED relation's row stands for `bulk` traversers, so `LIMIT n` would take n ROWS and
   // answer a different question. `bulked` says the multiplicity is not provably 1, and then the
   // slice must count traversers — which needs a position to accumulate along, so a bulked relation
-  // with no emission order declines rather than guessing one.
+  // with no emission order declines rather than guessing one. The band arithmetic there computes on
+  // the count, so a parameter REDUCES (bulkSlice reads the numbers, not `paramOf`), the same last
+  // responsible moment `range` reduces at.
   if (bulked && bulk) return encounter ? bulkSlice(input, window, encounter, bulk, 'asc', fresh) : null;
-  return slice(input, window, encounter, 'asc', fresh);
+  return slice(input, { ...window, ...paramOf(step) }, encounter, 'asc', fresh);
 }
+
+/** Which slice bound, if any, carries a user PARAMETER that binds untouched. Only `limit` (its count)
+ *  and `skip` (its offset) qualify — a single value SQL takes as a plain `?`. `range` reduces (its
+ *  count is `hi−lo` and its `lo>hi` throws), so it maps to nothing here and inlines via `sliceOf`. */
+const paramOf = (step: IRStep): { limitParam?: string | null; offsetParam?: string | null } =>
+  step.name === 'limit' ? { limitParam: sliceParamNames(step)[0] ?? null }
+  : step.name === 'skip' ? { offsetParam: sliceParamNames(step)[0] ?? null }
+  : {};
 
 /** The row slice steps this fold serves. `tail` and `sample` are here as DIRECTIONS and a shuffle on
  *  the same op rather than as separate arms, which is what `globalRowOps` says with its own three
@@ -762,7 +772,8 @@ const countArg = (step: IRStep): number =>
  *  position to take a window from only reaches here where the order cannot matter (after `count()`,
  *  whose one row makes `LIMIT 1` and `ORDER BY … LIMIT 1` the same question). */
 function slice(
-  input: Rel, window: { readonly offset: number; readonly limit: number | null },
+  input: Rel,
+  window: { readonly offset: number; readonly limit: number | null; readonly offsetParam?: string | null; readonly limitParam?: string | null },
   encounter: Channel | undefined, dir: 'asc' | 'desc', fresh: Minter,
 ): Rel {
   const source = encounter
@@ -771,10 +782,13 @@ function slice(
       terms: [{ expr: col(input.id, encounter.col), dir }],
     })
     : input;
+  // A `limit($x)`/`skip($x)` count is a user PARAMETER and binds untouched; a parsed literal inlines
+  // (`sliceBound`). The offset is emitted for a nonzero literal OR any parameter (a `skip($x)` where
+  // `$x` happens to resolve to 0 still binds, so the plan is one cached statement over every offset).
   return make.limit({
     id: fresh('li'), input: source, channels: input.channels, type: input.type,
-    ...(window.limit === null ? {} : { count: countLit(window.limit) }),
-    ...(window.offset ? { offset: countLit(window.offset) } : {}),
+    ...(window.limit === null ? {} : { count: sliceBound(window.limit, window.limitParam ?? null) }),
+    ...(window.offset || window.offsetParam != null ? { offset: sliceBound(window.offset, window.offsetParam ?? null) } : {}),
   });
 }
 

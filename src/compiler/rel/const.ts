@@ -53,3 +53,16 @@ export const itemTypeAt = (type: TypeNode | null | undefined, i: number): TypeNo
  *  malformed non-integer (`limit(2.5)`) keeps the bound spelling the legacy spine's error path owns,
  *  rather than throwing from `compilerInt`. */
 export const countLit = (n: number): Expr => Number.isSafeInteger(n) ? compilerInt(n) : lit(n, 'int');
+
+/** A SLICE bound — `limit`/`skip`'s single count — that BINDS its user parameter (`limit($x)`) or
+ *  INLINES a compile-time constant (`limit(2)`), the same bind-vs-inline decision `constLit` makes for
+ *  a scalar operand, applied to the one place a count can honestly stay a `?`.
+ *
+ *  It is NOT the general count seam: `range`'s `hi−lo` and the collapsed-relation band must be computed
+ *  at compile time (and `range`'s `lo>hi` throws a validation SQL cannot carry — root `CLAUDE.md`
+ *  "fail closed"), so those callers REDUCE the value (pass `paramName = null`, `countLit`) at the last
+ *  responsible moment, exactly as `unrollFixedRepeat` reduces `times($x)`
+ *  (docs/2026-08-05-parameters-are-the-only-binds.md B3). A non-integer that somehow reached here has no
+ *  int-bind form, so it reduces too. */
+export const sliceBound = (n: number, paramName: string | null): Expr =>
+  paramName != null && Number.isSafeInteger(n) ? param(n, 'int') : countLit(n);

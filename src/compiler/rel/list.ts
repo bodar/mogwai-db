@@ -1,11 +1,11 @@
 import { col, compilerInt, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
-import { countLit } from './const.ts';
+import { sliceBound } from './const.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
 import { STATIC, UNKNOWN, type ListOf, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import { isNested, isPred } from '../../gremlin/frontend.ts';
-import { isLocalScope, sliceOf } from '../ir/step.ts';
+import { isLocalScope, sliceOf, sliceParamNames } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { childSteps } from '../steps/tail/child-shape.ts';
 import { LIST_LOCAL_TX, STRING_LOCAL_TX } from '../steps/tail/list.ts';
@@ -274,10 +274,15 @@ export function listMemberOp(step: IRStep, input: Rel, of: ListOf, fresh: Minter
       terms: [memberOrder(members, step.name === 'tail' ? 'desc' : 'asc')],
     });
 
+    // A local `limit($x)`/`skip($x)` binds its parameter exactly as the global slice does; `range`
+    // and `tail` reduce (the `window` came from a number, `paramName` null). One `sliceBound` seam,
+    // so the two scopes cannot drift on whether a `$x` count binds.
+    const limitParam = step.name === 'limit' ? sliceParamNames(step)[0] ?? null : null;
+    const offsetParam = step.name === 'skip' ? sliceParamNames(step)[0] ?? null : null;
     const taken = make.limit({
       id: fresh('ml'), input: ordered, channels: [], type: ordered.type,
-      ...(window.limit === null ? {} : { count: countLit(window.limit) }),
-      ...(window.offset ? { offset: countLit(window.offset) } : {}),
+      ...(window.limit === null ? {} : { count: sliceBound(window.limit, limitParam) }),
+      ...(window.offset || offsetParam != null ? { offset: sliceBound(window.offset, offsetParam) } : {}),
     });
     // The AGGREGATE reads the sliced relation, so the member expression and the order term name
     // `taken` rather than the explode — the slice is a relation between them.

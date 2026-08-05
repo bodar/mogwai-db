@@ -162,6 +162,20 @@ export function sliceOf(step: IRStep): Slice {
   }
 }
 
+/** The user PARAMETER names of a slice step's NUMERIC arguments, scope tokens skipped — aligned
+ *  index-for-index with `sliceOf`'s `nums` decode, so `sliceParamNames(step)[0]` names `limit`'s
+ *  count / `skip`'s offset / `range`'s low regardless of a leading `Scope` token (which shifts the
+ *  raw `paramNames` index but not the numeric one). `null` where that argument is a parsed literal.
+ *  Only `limit`/`skip` act on it — a single count that can bind untouched (`sliceBound`); `range`
+ *  must reduce (arithmetic + validation), so it never reads this. */
+export function sliceParamNames(step: IRStep): (string | null)[] {
+  const names = step.paramNames ?? [];
+  return (step.args ?? [])
+    .map((a: unknown, i: number) => [a, names[i] ?? null] as const)
+    .filter(([a]) => !isScopeArg(a))
+    .map(([, name]) => name);
+}
+
 /**
  * The barriers that COLLAPSE — a body ending in one reduces its whole input to a SINGLE traverser.
  * Lowering such a body per-origin does not merely reorder the answer, it returns a different
