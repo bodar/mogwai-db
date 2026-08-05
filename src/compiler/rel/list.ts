@@ -225,7 +225,7 @@ const inferredVtype = (value: Expr): Expr => ({
  * `test/L4-addendum/list-member-predicate.feature`.
  */
 const memberPredicate = (member: Expr, pred: unknown): Expr | null => {
-  if (isPred(pred) && (pred.op === 'eq' || pred.op === 'neq') && pred.values[0] === null)
+  if (isPred(pred) && (pred.op === 'eq' || pred.op === 'neq') && pred.operands[0]?.value === null)
     return { kind: 'binary', op: pred.op === 'eq' ? 'is' : 'is not', left: member, right: compilerNull() };
   return predicateExpr(member, pred, SUBJECT_UNKNOWN);
 };

@@ -1,7 +1,7 @@
 import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
 import { CF_MAX_BINDS } from '../../cf-limits.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
-import { gtypeName } from '../../gremlin/frontend.ts';
+import { gtypeName, type Arg } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, normalizeTypeName, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
 import { constLit } from './const.ts';
 
@@ -30,9 +30,9 @@ import { constLit } from './const.ts';
 
 /** A parsed `P`/`TextP` as the front-end produces it. Structural, because `Step.args` is the
  *  wire boundary and a GLV may supply anything. */
-interface Pred { readonly op: string; readonly values: readonly unknown[]; readonly paramNames?: readonly (string | null)[]; }
+interface Pred { readonly op: string; readonly operands: readonly Arg[]; }
 const isPred = (value: unknown): value is Pred =>
-  value !== null && typeof value === 'object' && 'op' in value && Array.isArray((value as Pred).values);
+  value !== null && typeof value === 'object' && 'op' in value && Array.isArray((value as Pred).operands);
 
 const binary = (op: Extract<Expr, { kind: 'binary' }>['op'], left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
 /** Gremlin predicates are two-valued: negating SQL NULL is TRUE, not NULL. */
@@ -213,7 +213,7 @@ export const storedCompare = (rel: RelId, vtype = 'vtype') => storedCompareOn(co
 export function containsTextSearch(pred: unknown): boolean {
   if (!isPred(pred)) return false;
   if (likePattern(pred.op, '') !== null) return true;
-  return pred.values.some(containsTextSearch);
+  return pred.operands.some((o) => containsTextSearch(o.value));
 }
 
 /** `TextP` -> a LIKE pattern with the user's metacharacters escaped. `null` for an op that is not
@@ -298,17 +298,17 @@ export function predicateExpr(
     return value && binary('=', subject, value);
   }
 
-  const { op, values } = pred;
-  // A nested operand's own parameter name (`P.gt($x)`, `within($x, $y)`) — so a `$x` binds and a parsed
-  // literal inlines, wherever it sits. `null` where the value is a literal or the predicate carries none.
-  const pn = (i: number): string | null => pred.paramNames?.[i] ?? null;
-  const recurse = (p: unknown) => predicateExpr(subject, p, type);
+  const { op, operands } = pred;
+  // Each operand is an `Arg`, so its own value + type + parameter name travel together — a `P.gt($x)`
+  // / `within($x, $y)` operand binds and a parsed literal inlines, wherever it sits, with no separate
+  // parallel-name lookup.
+  const recurse = (o: Arg) => predicateExpr(subject, o.value, type);
   const both = (build: (left: Expr, right: Expr) => Expr): Expr | null => {
-    const [left, right] = [recurse(values[0]), recurse(values[1])];
+    const [left, right] = [recurse(operands[0]), recurse(operands[1])];
     return left && right ? build(left, right) : null;
   };
 
-  if (op === 'not') { const inner = recurse(values[0]); return inner && negated(inner); }
+  if (op === 'not') { const inner = recurse(operands[0]); return inner && negated(inner); }
   // Infix-composed predicates — `P.gt(20).and(P.lt(30))`. Both sides test the SAME subject, so it
   // is a boolean combination that nests to any depth because each side recurses through here.
   if (op === 'and') return both((l, r) => binary('and', l, r));
@@ -316,11 +316,14 @@ export function predicateExpr(
 
   const comparison = COMPARISON[op];
   if (comparison) {
-    const bound = operand(values[0], null, pn(0));
+    // Operand TYPE stays null here — the old `Pred` carried no per-operand type, so passing the Arg's
+    // now-available `.type` would change literal rendering (`P.gt(2.0)` → `2.0` not `2`); that
+    // type-enrichment is a deliberate follow-up, not this behaviour-preserving unification.
+    const bound = operand(operands[0].value, null, operands[0].name);
     if (!bound) return null;
     // Equality stays a RAW compare: canonical text is exact, and it keeps the value index usable
     // for the common case. Only ORDERING needs the cast, and only it pays for one.
-    if (ORDERING.has(op)) return ordered(comparison, subject, bound, values[0], type);
+    if (ORDERING.has(op)) return ordered(comparison, subject, bound, operands[0].value, type);
     const inner = binary(comparison, subject, bound);
     return op === 'neq' ? negated(binary('=', subject, bound)) : inner;
   }
@@ -328,9 +331,9 @@ export function predicateExpr(
   if (op === 'within' || op === 'without') {
     // SQLite rejects an empty `IN ()`, so the degenerate sets fold to their truth value: within
     // nothing is never, without nothing is always.
-    if (!values.length) return op === 'within' ? CONSTANT.false : CONSTANT.true;
-    if (values.length > SET_BIND_LIMIT) return null;
-    const members = values.map((v, i) => operand(v, null, pn(i)));
+    if (!operands.length) return op === 'within' ? CONSTANT.false : CONSTANT.true;
+    if (operands.length > SET_BIND_LIMIT) return null;
+    const members = operands.map((o) => operand(o.value, null, o.name));
     if (members.some((m) => !m)) return null;
     const inList: Expr = { kind: 'in-list', expr: subject, values: members as Expr[] };
     return op === 'within' ? inList : negated(inList);
@@ -339,16 +342,16 @@ export function predicateExpr(
   // between = [lo, hi) — inclusive low; inside = (lo, hi) — exclusive low. Both bounds and the
   // subject go through the ordering key for the same reason a range comparison does.
   if (op === 'between' || op === 'inside') {
-    const [low, high] = [operand(values[0], null, pn(0)), operand(values[1], null, pn(1))];
+    const [low, high] = [operand(operands[0].value, null, operands[0].name), operand(operands[1].value, null, operands[1].name)];
     if (!low || !high) return null;
     const [loCmp, hiCmp] = [
-      ordered(op === 'inside' ? '>' : '>=', subject, low, values[0], type),
-      ordered('<', subject, high, values[1], type),
+      ordered(op === 'inside' ? '>' : '>=', subject, low, operands[0].value, type),
+      ordered('<', subject, high, operands[1].value, type),
     ];
     return loCmp && hiCmp ? binary('and', loCmp, hiCmp) : null;
   }
 
-  const like = likePattern(op, values[0]);
+  const like = likePattern(op, operands[0]?.value);
   if (like) {
     // SQLite's `like(pattern, subject, escape)` FUNCTION, not the infix operator, because the
     // operator's ESCAPE clause is not an expression the algebra has a node for — and adding one
@@ -359,7 +362,7 @@ export function predicateExpr(
     return like.negated ? negated(call) : call;
   }
 
-  if (op === 'typeOf') return values.length === 1 ? typeOfExpr(subject, values[0], type) : null;
+  if (op === 'typeOf') return operands.length === 1 ? typeOfExpr(subject, operands[0].value, type) : null;
 
   // `regex` and `withinList`/`withoutList` (a list-valued traversal operand) remain. Each needs
   // something this module does not have — a regex function, or a run-time member list — so each

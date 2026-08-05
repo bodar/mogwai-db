@@ -232,7 +232,7 @@ export function labelsMentioned(steps: readonly IRStep[], params: Record<string,
         // the first). A scanner that read only bare args would miss it — which for match()'s
         // scheduler means running the filter before "c" is bound.
         else if (a && typeof a === 'object' && 'op' in a)
-          for (const v of ((a as any).values ?? [])) if (typeof v === 'string') out.add(v);
+          for (const o of ((a as any).operands ?? [])) if (typeof o.value === 'string') out.add(o.value);
       }
     }
     for (const a of argValues(s).filter(isNested))
@@ -1034,7 +1034,7 @@ export function typeOfAssert(step: IRStep): TypeAssert {
   if (step.name !== 'is') return NO_TYPE_ASSERT;
   const pred = (step.args ?? [])[0]?.value;
   if (!isPred(pred) || pred.op !== 'typeOf') return NO_TYPE_ASSERT;
-  const name = gtypeName(pred.values?.[0]);
+  const name = gtypeName(pred.operands?.[0]?.value);
   return name ? { kind: 'gtype', gtype: name.toUpperCase() } : { kind: 'opaque' };
 }
 

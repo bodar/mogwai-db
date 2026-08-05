@@ -955,9 +955,9 @@ export function aliasCompareTest(
 ): Expression {
   let negate = step.name === 'not';
   let pred = rawPred;
-  if (pred?.op === 'not') { negate = !negate; pred = pred.values[0]; }
+  if (pred?.op === 'not') { negate = !negate; pred = pred.operands[0].value; }
   if (!(pred?.op in P_OPS)) throw new Error(`where(P.${pred?.op}) alias comparison not yet supported`);
-  const right = resolve(pred.values[0]);
+  const right = resolve(pred.operands[0].value);
   // At most one by(key): `absorbModulators` absorbs every contiguous by(), and a second one is not
   // a valid modulator here — fail closed rather than silently answer a different question.
   if ((step.modulators?.length ?? 0) > 1)

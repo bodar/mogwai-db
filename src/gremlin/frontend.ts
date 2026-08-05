@@ -650,7 +650,14 @@ function mapKeyOf(mk: any): any {
   return mk.getText();
 }
 
-export interface Pred { op: string; values: any[]; paramNames?: (string | null)[]; }
+/** A parsed `P`/`TextP` predicate. Its `operands` are `Arg`s — each an operand's value + canonical
+ *  type + wire-parameter name — the same object a step argument is, so a `P.gt($x)` operand knows it is
+ *  a parameter exactly as a bare `$x` does. Was two parallel arrays (`values` + `paramNames`). */
+export interface Pred { op: string; operands: Arg[]; }
+
+/** The plain operand VALUES of a predicate — for consumers that spread them into an IN-list or bounds
+ *  and do not need the per-operand type/name. Prefer `pred.operands[i].value` at a single index. */
+export const predValues = (pred: Pred): any[] => pred.operands.map((o) => o.value);
 
 /** Is this argument a parsed predicate? `Step.args` is deliberately `any[]` (the front-end
  *  boundary), so every consumer used to open-code `!a || typeof a !== 'object' || a.op !== …`
@@ -690,31 +697,26 @@ function parseComposedPredicate(node: any, params: Record<string, any>): Pred | 
     const composed = parseComposedPredicate(n, params);
     return composed ?? parsePredicate(n.getChild(0), params);
   };
-  if (kw === 'negate') return { op: 'not', values: [operand(left)] };
+  // A composed predicate's operand is itself a Pred — wrapped as an `Arg` (value = the nested Pred)
+  // so `operands` is uniformly `Arg[]` and a consumer reads `operands[i].value`.
+  if (kw === 'negate') return { op: 'not', operands: [arg(operand(left))] };
   const right = node.traversalPredicate(1);
   if (!right) return null;
-  return { op: kw, values: [operand(left), operand(right)] };
+  return { op: kw, operands: [arg(operand(left)), arg(operand(right))] };
 }
 
 function parsePredicate(node: any, params: Record<string, any>): Pred {
   const m = node.constructor.name.match(/^TraversalPredicate_(\w+)Context$/);
-  const parsed = extractArgs(node, params); // each Arg = value + its wire-parameter name
-  const values = parsed.map((a) => a.value);
-  const names = parsed.map((a) => a.name);
-  // P.within/without/inside/between accept both varargs (P.within('a','b')) and a
-  // single bracketed list (P.within(['a','b'])). Collection literals now parse as one
-  // array value, so unwrap a lone array arg back to the value varargs the predicate
-  // consumes (predicateSql spreads them into an IN-list / bounds). A bound-param list
-  // (a JS array from a binding) unwraps the same way, matching the prior flatten.
-  const single = values.length === 1 && Array.isArray(values[0]);
-  const vals = single ? values[0] : values;
-  // A predicate operand carries its own parameter name so it binds while a parsed literal inlines — the
-  // budget must not depend on whether a `$x` sits bare (`has(k, $x)`) or in a predicate (`P.gt($x)`). A
-  // lone bracketed list is unwrapped to members of ONE collection arg, which are not individually
-  // top-level params (a `within(names)` list-param is oversized, not N params), so names apply only to
-  // the varargs form and are dropped for the wrapped list.
-  const paramNames = !single && names.some((n) => n != null) ? names : undefined;
-  return { op: m![1], values: vals, ...(paramNames ? { paramNames } : {}) };
+  const parsed = extractArgs(node, params); // Arg[] — each operand's value + type + wire-parameter name
+  // P.within/without/inside/between accept both varargs (P.within('a','b')) and a single bracketed list
+  // (P.within(['a','b'])). A collection literal parses as ONE array-valued arg; unwrap it back to member
+  // operands (predicateSql spreads them into an IN-list / bounds). A bound-param list unwraps the same
+  // way. The wrapped list's members are NOT individually top-level parameters (a `within(names)`
+  // list-param is oversized, not N params), so they become plain-value `Arg`s with no name — while the
+  // varargs form keeps each operand's own name, so a `$x` binds wherever it sits.
+  const single = parsed.length === 1 && Array.isArray(parsed[0].value);
+  const operands = single ? (parsed[0].value as any[]).map((v) => arg(v)) : parsed;
+  return { op: m![1], operands };
 }
 
 function unquote(s: string): string {

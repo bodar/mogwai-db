@@ -1,5 +1,5 @@
 import { derived, q, list, raw, type Expression } from '../../../sql/kernel/q.ts';
-import { argValues, isNested, isTokenArg, stepChain, type Pred } from '../../../gremlin/frontend.ts';
+import { argValues, isNested, isTokenArg, stepChain, arg, type Pred } from '../../../gremlin/frontend.ts';
 import {
     predicateSql,
     hasProp, elemCtx,
@@ -134,7 +134,7 @@ export const has: StepFn = (s, st) => {
   // (empty) result rather than a mis-execution.
   if (isInjectionMarker(val)) {
     const vals = injectedValues(st.params);
-    if (vals) val = { op: 'within', values: vals } as Pred;
+    if (vals) val = { op: 'within', operands: vals.map((v: any) => arg(v)) } as Pred;
   }
   if (isTokenArg(key)) {
     // has(T.label|T.id, v|P): predicate over the label name / external id. Routing

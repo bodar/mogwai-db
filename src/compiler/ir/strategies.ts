@@ -1,4 +1,4 @@
-import { stepChain, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPred, isScopeArg, arg, argValues, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
+import { stepChain, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPred, isScopeArg, arg, argValues, type Arg, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { mapEntryType } from '../../gremlin/types.ts';
@@ -348,7 +348,7 @@ export function injectPartitionRec(steps: Step[], spec: StrategySpec, params: Re
     for (const s of level) {
       out.push(s);
       if (VERTEX_PRODUCERS.has(s.name) || EDGE_PRODUCERS.has(s.name))
-        out.push(synth('has', [key, { op: 'within', values: readVals }], spec.ctx));
+        out.push(synth('has', [key, { op: 'within', operands: readVals.map((v: any) => arg(v)) }], spec.ctx));
       if (writeVal !== undefined && (s.name === 'addV' || s.name === 'addE'))
         out.push(synth('property', [key, writeVal], spec.ctx));
     }
@@ -563,14 +563,16 @@ const VALUE_OPERAND_SLOTS: Record<string, (args: readonly any[]) => readonly num
   has: (a) => (a.length === 2 ? [1] : a.length === 3 ? [2] : []),
 };
 
-/** Fold constants inside a predicate object's `values`, recursively (P.not(P.gt(…)) nests). */
+/** Fold constants inside a predicate object's `operands`, recursively (P.not(P.gt(…)) nests). */
 function foldPredOperands(pred: any, params: Record<string, any>): any {
-  if (!isPred(pred) || !Array.isArray(pred.values)) return pred;
+  if (!isPred(pred) || !Array.isArray(pred.operands)) return pred;
   return {
     ...pred,
-    values: pred.values.map((v: any) => {
-      if (isNested(v)) { const c = constantOperand(v.nested, params); return c ? c.value : v; }
-      return foldPredOperands(v, params);
+    operands: pred.operands.map((o: Arg) => {
+      const v = o.value;
+      if (isNested(v)) { const c = constantOperand(v.nested, params); return c ? arg(c.value) : o; }
+      const folded = foldPredOperands(v, params);
+      return folded === v ? o : arg(folded);
     }),
   };
 }
@@ -616,12 +618,13 @@ function valueArgTraversals(s: Step): any[] {
     const a = arg.value;
     if (slots.includes(i) && isNested(a)) out.push(a.nested);
     // …and operands wrapped in a predicate: has("name", P.eq(__.addV(…))).
-    const preds: any[] = a && typeof a === 'object' && 'op' in a && Array.isArray(a.values) ? [a] : [];
+    const preds: any[] = a && typeof a === 'object' && 'op' in a && Array.isArray(a.operands) ? [a] : [];
     while (preds.length) {
       const pr = preds.pop();
-      for (const v of pr.values) {
+      for (const o of pr.operands) {
+        const v = o.value;
         if (isNested(v)) out.push(v.nested);
-        else if (v && typeof v === 'object' && 'op' in v && Array.isArray(v.values)) preds.push(v);
+        else if (v && typeof v === 'object' && 'op' in v && Array.isArray(v.operands)) preds.push(v);
       }
     }
   });
@@ -1231,7 +1234,7 @@ function rewriteEndLabel(body: Step[], bound: ReadonlySet<string>): Step[] {
   const rest = asLabelsOf(last).filter((l) => !bound.has(l));
   const head = rest.length ? [...body.slice(0, -1), { ...last, args: rest.map((v) => arg(v)) }] : body.slice(0, -1);
   if (!head.length) return body; // nothing to constrain against — leave the bind alone
-  return [...head, ...labels.map((l) => synth('where', [{ op: 'eq', values: [l] }], last.ctx))];
+  return [...head, ...labels.map((l) => synth('where', [{ op: 'eq', operands: [arg(l)] }], last.ctx))];
 }
 
 /** Apply the end-label rewrite to every `where(traversal)` host in the tree, threading the labels

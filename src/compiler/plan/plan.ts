@@ -1,4 +1,4 @@
-import { flattenListArgs, gtypeName, isNested, type Pred } from '../../gremlin/frontend.ts';
+import { flattenListArgs, gtypeName, isNested, arg, type Pred } from '../../gremlin/frontend.ts';
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from '../../sql/kernel/q.ts';
 import type { FastPath } from '../options/fast-paths.ts';
 import { normalizeTypeName, STORAGE_CLASS, BigDecimal, Duration, coerceBindValue } from '../../gremlin/types.ts';
@@ -300,7 +300,7 @@ export function idPredFromArgs(rawArgs: any[]): any {
   // NOT an array, so it still passes through the check below.
   const args = flattenListArgs(rawArgs);
   if (args.length === 1 && args[0] && typeof args[0] === 'object' && 'op' in args[0]) return args[0];
-  return { op: 'within', values: args.filter((a) => a !== null && a !== undefined) };
+  return { op: 'within', operands: args.filter((a) => a !== null && a !== undefined).map((v) => arg(v)) };
 }
 
 // The GType → SQLite storage-class table moved to `gremlin/types.ts` as `STORAGE_CLASS`: it is the
@@ -418,7 +418,7 @@ function operandSql(v: any): Expression {
 export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = TYPE_UNKNOWN): Expression {
   if (pred === undefined) return q`${expr} is not null`;
   if (pred === null || typeof pred !== 'object' || !('op' in pred)) return q`${expr} = ${operandSql(pred)}`;
-  const { op, values: vals } = pred as Pred;
+  const { op, operands } = pred as Pred; const vals = operands.map((o) => o.value);
   if (op === 'not') return q`NOT (${predicateSql(expr, vals[0], typeCtx)})`;
   // Infix-composed predicates — `P.gt(20).and(P.lt(30))`, `TextP.startingWith('m').or(…)`. Both
   // operands test the SAME expression, so this is a plain boolean combination of the two rendered
@@ -447,7 +447,7 @@ export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = TYP
     // A big set stops being N binds and becomes one JSON bind, reusing the withinList/withoutList
     // membership form below (identical semantics — json_each over the same members).
     if (vals.length > SET_BIND_LIMIT && jsonBindableSet(vals))
-      return predicateSql(expr, { op: `${op}List`, values: [jsonbArrayBind(vals)] } as Pred, typeCtx);
+      return predicateSql(expr, { op: `${op}List`, operands: [arg(jsonbArrayBind(vals))] } as Pred, typeCtx);
     return q`${expr} ${raw(op === 'within' ? 'in' : 'not in')} (${list(vals.map(operandSql), ', ')})`;
   }
   // within/without whose operand is ONE list-valued traversal (`within(__.V()…fold())`) rather
@@ -508,7 +508,7 @@ function ftsSubstringMatch(pred: any): { matchPhrase: string; likePat: string } 
   if (!pred || typeof pred !== 'object' || !('op' in pred)) return null;
   const op = (pred as Pred).op;
   if (op !== 'containing' && op !== 'startingWith' && op !== 'endingWith') return null;
-  const term = (pred as Pred).values[0];
+  const term = (pred as Pred).operands[0]?.value;
   if (typeof term !== 'string' || term.length < TRIGRAM_FLOOR) return null;
   const lp = likePattern(op, term)!;   // never null for these three ops
   // The MATCH arg is FTS query syntax (AND/OR/*/"/^ are operators), so wrap the term as a

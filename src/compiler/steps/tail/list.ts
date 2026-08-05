@@ -181,7 +181,7 @@ function listCte(s: ListStream, c: Relation, listExpr: Expression, of: ListStrea
  */
 const memberPredicate = (of: ListStream['of'], pred: unknown): Expression => {
   const val = memberValue(of);
-  if (isPred(pred) && (pred.op === 'eq' || pred.op === 'neq') && pred.values[0] === null)
+  if (isPred(pred) && (pred.op === 'eq' || pred.op === 'neq') && pred.operands[0]?.value === null)
     return pred.op === 'eq' ? q`${val} IS NULL` : q`${val} IS NOT NULL`;
   return predicateSql(val, pred);
 };

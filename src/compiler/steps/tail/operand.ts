@@ -1,5 +1,5 @@
 import { q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { isNested, argValues } from '../../../gremlin/frontend.ts';
+import { isNested, argValues, arg } from '../../../gremlin/frontend.ts';
 import { childSteps } from './child-shape.ts';
 import { embedSql, foldedListSubquery } from './list.ts';
 import { engineOf, type Engine } from '../../engine/deps.ts';
@@ -159,14 +159,14 @@ export function resolveTraversalOperands(pred: any, deps: OperandDeps, host: Ope
       ?? (host.ctx ? correlatedOperand(pred.nested, deps, host.ctx, host.labels) : null)
       ?? pred;
   }
-  if (!pred || typeof pred !== 'object' || !('op' in pred) || !Array.isArray((pred as any).values)) return pred;
+  if (!pred || typeof pred !== 'object' || !('op' in pred) || !Array.isArray((pred as any).operands)) return pred;
   let changed = false;
-  const values = (pred as any).values.map((v: any) => {
-    const out = resolveTraversalOperands(v, deps, host);
-    if (out !== v) changed = true;
-    return out;
+  const operands = (pred as any).operands.map((o: any) => {
+    const out = resolveTraversalOperands(o.value, deps, host);
+    if (out !== o.value) { changed = true; return arg(out); }
+    return o;
   });
-  return changed ? { ...pred, values } : pred;
+  return changed ? { ...pred, operands } : pred;
 }
 
 /** PURE. Does this predicate still hold a traversal operand nothing could resolve? A FAST PATH
@@ -175,8 +175,8 @@ export function resolveTraversalOperands(pred: any, deps: OperandDeps, host: Ope
  *  vocabulary exhaustion instead. */
 export function hasUnresolvedOperand(pred: any): boolean {
   if (isNested(pred)) return true;
-  if (!pred || typeof pred !== 'object' || !Array.isArray((pred as any).values)) return false;
-  return (pred as any).values.some(hasUnresolvedOperand);
+  if (!pred || typeof pred !== 'object' || !Array.isArray((pred as any).operands)) return false;
+  return (pred as any).operands.some((o: any) => hasUnresolvedOperand(o.value));
 }
 
 /** `within(<traversal>)` / `without(<traversal>)` whose single operand folds a re-sourced read
@@ -188,14 +188,14 @@ export function hasUnresolvedOperand(pred: any): boolean {
 function tryListMembership(pred: any, deps: OperandDeps): any | null {
   if (!pred || typeof pred !== 'object' || !('op' in pred)) return null;
   if (pred.op !== 'within' && pred.op !== 'without') return null;
-  const vals = (pred as any).values;
-  if (!Array.isArray(vals) || vals.length !== 1 || !isNested(vals[0])) return null;
-  const body = childSteps(vals[0].nested, deps.params);
+  const vals = (pred as any).operands;
+  if (!Array.isArray(vals) || vals.length !== 1 || !isNested(vals[0].value)) return null;
+  const body = childSteps(vals[0].value.nested, deps.params);
   if (body[body.length - 1]?.name !== 'fold' || !isReSourced(body)) return null;
   // A recognizer must DECLINE, never throw: the body is rooted by shape, but a source form the
   // seed layer does not yet cover still has to fall through to the caller's clear deferral.
   let listExpr: Expression | null = null;
   try { listExpr = foldedListSubquery(deps.engine, body as IRStep[], deps.params); } catch { return null; }
   if (!listExpr) return null;
-  return { op: pred.op === 'within' ? 'withinList' : 'withoutList', values: [listExpr] };
+  return { op: pred.op === 'within' ? 'withinList' : 'withoutList', operands: [arg(listExpr)] };
 }
