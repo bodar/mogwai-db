@@ -305,8 +305,8 @@ run = "bun scripts/test-shard.ts"
 # within ~7s of `install`, so as a group it is free — it exists to be a JOB, not because anyone needs
 # to run the six separately.
 [tasks.gates]
-description = "The static gates: type-check + lint + architectural + bind-budget + deletion ratchet + worker build"
-depends = ["check", "lint", "arch", "binds", "deletion", "build"]
+description = "The static gates: type-check + lint + architectural + bind-budget + SQL hygiene + deletion ratchet + worker build"
+depends = ["check", "lint", "arch", "binds", "sql-hygiene", "deletion", "build"]
 run = "echo 'gates passed'"
 
 # THE LOCAL one-command gate, and still the complete one: `mise run ci` runs everything CI runs.

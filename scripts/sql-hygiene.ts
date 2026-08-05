@@ -24,6 +24,8 @@ import { decodeAll } from '../test/support/decode.ts';
 const corpus = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.meta.url)).text())
   .split('\n').filter(Boolean);
 const verbose = Bun.argv.includes('--verbose');
+const json = Bun.argv.includes('--json');
+const expected = JSON.parse(await Bun.file(new URL('./sql-hygiene-baseline.json', import.meta.url)).text()) as Record<string, Metric>;
 /**
  * RelIR is intentionally ahead of the legacy SQL in these cases. Each witness is asserted by the
  * vendored reference corpus under the pinned TinkerPop revision; do not add a row without one.
@@ -92,7 +94,9 @@ for (const query of corpus) {
       stmtChildren(binding.node).forEach(visitRel);
     } else visitRel(binding.node);
   }
-  const family = steps.map((step) => step.name).join('.') || 'empty';
+  // The terminal step is the vocabulary family whose generated statement this is; a whole chain
+  // would turn every corpus spelling into a separate baseline and would not detect a family regression.
+  const family = steps.at(-1)?.name ?? 'empty';
   let rendered;
   try { rendered = emit(lowered.plan); }
   catch (error) { failures.push(`${query}: ${(error as Error).message}`); continue; }
@@ -130,13 +134,37 @@ for (const query of corpus) {
   }
 }
 
-console.log(`sql-hygiene: ${admitted} admitted authored RelIR plans, ${statements} executable statement(s)`);
-console.log(`sql-hygiene: ${pairedReads} paired read(s) framed against the modern seed`);
-console.log(`sql-hygiene: ${maxima.size} traversal family baseline(s)`);
-if (verbose) for (const [family, metric] of [...maxima].sort(([a], [b]) => a.localeCompare(b)))
-  console.log(`  ${family}\tbinds=${metric.binds}\tbytes=${metric.bytes}\tcompiler=${metric.compiler}\tbound=${metric.bound}`);
+const baseline = Object.fromEntries([...maxima].sort(([a], [b]) => a.localeCompare(b)));
+const ratchetFailures: string[] = [];
+for (const [family, metric] of Object.entries(baseline)) {
+  const prior = expected[family];
+  if (!prior) {
+    ratchetFailures.push(`${family}: new traversal family needs an explicit baseline`);
+    continue;
+  }
+  for (const field of ['binds', 'bytes'] as const)
+    if (metric[field] > prior[field])
+      ratchetFailures.push(`${family}: ${field} rose from ${prior[field]} to ${metric[field]}`);
+}
+for (const family of Object.keys(expected))
+  if (!baseline[family]) ratchetFailures.push(`${family}: baseline family no longer has coverage`);
+if (json) {
+  console.log(JSON.stringify(baseline, null, 2));
+  if (ratchetFailures.length) throw new Error(`sql-hygiene: ${ratchetFailures.length} ratchet violation(s)`);
+  process.exit(0);
+} else {
+  console.log(`sql-hygiene: ${admitted} admitted authored RelIR plans, ${statements} executable statement(s)`);
+  console.log(`sql-hygiene: ${pairedReads} paired read(s) framed against the modern seed`);
+  console.log(`sql-hygiene: ${maxima.size} traversal family baseline(s)`);
+  if (verbose) for (const [family, metric] of Object.entries(baseline))
+    console.log(`  ${family}\tbinds=${metric.binds}\tbytes=${metric.bytes}\tcompiler=${metric.compiler}\tbound=${metric.bound}`);
+}
 if (failures.length) {
   for (const failure of failures.slice(0, 20)) console.log(`  FAIL ${failure}`);
   throw new Error(`sql-hygiene: ${failures.length} violation(s)`);
+}
+if (ratchetFailures.length) {
+  for (const failure of ratchetFailures) console.log(`  RATCHET ${failure}`);
+  throw new Error(`sql-hygiene: ${ratchetFailures.length} ratchet violation(s)`);
 }
 console.log('sql-hygiene: 0 DO-wall violations; literal provenance counted before emission');

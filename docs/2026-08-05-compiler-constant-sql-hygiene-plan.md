@@ -1,6 +1,8 @@
 # Compiler constants and SQL hygiene — plan
 
-**Status: PLANNED.** This is the plan to finish the distinction begun by `compilerText()`:
+**Status: COMPLETE.** `mise run sql-hygiene` checks authored RelIR plans and paired reads as part of
+`mise run ci`, with a committed per-family bind/statement-size ratchet. The temporary literal-site
+inventory was deleted after each remaining `lit()` site was classified as query/store data.
 query/store data is a bind; a value the compiler itself chose is SQL syntax. The aim is not to make
 RelIR's SQL text byte-identical to legacy's. RelIR is normalized and can legitimately require a
 different CTE shape. The aim is that neither route emits a statement the Durable Object rejects,
@@ -136,8 +138,10 @@ For each traversal:
 
 The artifact records **maxima by vocabulary family**, not one global number. A global max cannot say
 whether a change made predicates better while making path framing worse. The gate is monotone in the
-right direction: no wall violations, zero compiler-constant binds, and no family maximum may rise
-without an explicit new-family baseline. It prints the traversal and statement role for each failure.
+right direction: no wall violations, zero compiler-constant binds, and no family bind or statement-byte
+maximum may rise without an explicit new-family baseline. Compiler/query literal counts remain
+diagnostic provenance data, not an artificial budget. It prints the traversal and statement role for
+each failure.
 
 SQL preparation is hygiene, not a replacement for semantic tests: an `EXPLAIN QUERY PLAN` can prove
 that SQLite accepts the generated statement, but only the GraphBinary differential/census can prove it
