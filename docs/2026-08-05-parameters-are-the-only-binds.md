@@ -223,13 +223,21 @@ concrete value only at the last responsible moment. Same thesis, far smaller bla
 - **B4 (done, for scalars).** The hygiene gate counts a bind by `bindsAsParameter`, so a held constant
   rendered as a bind is caught by the ratchet at the family it inflates.
 
-**Deferred within Phase B (documented, correct-result gaps — no budget saving, never a wrong answer):**
-- A `$x` **nested** inside a predicate (`P.gt($x)`) or a collection (`within($x, $y)`, `inject([$x])`)
-  inlines as a constant — `paramNames` tracks TOP-LEVEL args only.
+**Nested predicate/set parameters — LANDED (commit `ff7397d`).** `P.gt($x)`, `within($x, $y)`,
+`P.between($x, $y)` now bind their parameters, closing the inconsistency where a `$x`'s budget cost
+depended on whether it sat bare or in a predicate. `parsePredicate` keeps the `names` array
+`extractArgs` produces and attaches `Pred.paramNames`; `predicateExpr` threads each operand's name to
+the `constLit` seam. No churn (corpus uses literals), census clean.
+
+**Deferred still (documented, correct-result gaps — no budget saving, never a wrong answer):**
+- A `$x` inside a **collection LITERAL** (`within([$x])`, `inject([$x])`) inlines — a lone bracketed
+  list is unwrapped to members of one arg, which are not individually tracked (a list-param is the
+  oversized bucket, not N params).
 - **`V($x)`/`E($x)` ids** inline (the `flattenListArgs` index desync is why elementScan doesn't thread a
   name); ids-as-parameters are exotic.
 - **`limit($x)`/`range($x)`** inline (needs the B3 SQL-arithmetic move).
-- **hasId($x)** — the id-list path binds today (legacy-shaped), untouched by the operand seam.
+- **hasId($x)** — RelIR declines `hasId` entirely (routes to legacy, which binds); a coverage gap, not
+  an operand-seam one.
 
 **Phase C — shrink `oversized`, expose the budget honestly.**
 - **C1. Measure the decimal-TEXT literal** (open question 2). If the CAST-compare holds, the
