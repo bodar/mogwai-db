@@ -2819,3 +2819,41 @@ both — and on an `ArithmeticException` calls `numberInfo.promoteBits()` and RE
   return result;`), and the javadoc states it: `±Double.POSITIVE_INFINITY` rather than an exception.
 - a `BigInteger`/`BigDecimal` result short-circuits out of the loop before the overflow checks.
 - `if (null == a || null == b) return a;` — a null operand is skipped, consistent with `min`/`max` (§13g·3).
+
+### 13d·1. `all`/`any`/`none` over a NON-COLLECTION: we RAISE where the reference FILTERS
+
+§13d's first bullet is confirmed and its shape is worth stating exactly, because it is the MIRROR of §13b's
+family and so the §13n caution does not apply: there we answer where TinkerPop raises; here we RAISE where
+TinkerPop returns `false`. A fix is unambiguously a fix.
+
+`step/filter/AllStep.java:49-68` — `filter` tests `item instanceof Iterable || item instanceof Iterator ||
+((item != null) && item.getClass().isArray())`, and **ends `return false;`** with no throw. `NoneStep` and
+`AnyStep` are the same shape at the same lines (`AnyStep` differs only in returning `true` from inside the
+loop). Two consequences:
+
+- a NON-COLLECTION traverser makes all three FALSE — including `none`, which is the counter-intuitive one and
+  is spelled as that same bare `return false;` rather than a vacuous truth;
+- a NULL traverser is likewise FALSE, not an error: `item` is null, the `item != null` guard makes the array
+  test false, and control reaches the same `return false`. The only throw in the file is in the CONSTRUCTOR,
+  for a null PREDICATE (`AllStep.java:42-44`).
+
+Measured today, all three raise instead:
+
+    g.V().values("age").all(P.gt(32))   → throws "all step can only take an array or an Iterable type for
+                                          incoming traversers, encountered a …"
+    g.inject(7).any(P.gt(1))            → the same message for `any`
+    g.inject(null).all(P.eq(null))      → throws "Incoming traverser for all step can't be null"
+    g.inject(7).none(P.eq(7))           → throws "none() after a scalar stream not yet supported"
+
+The first three messages have no counterpart in `origin/master` and should simply go — the rule replacing
+them is "drop the row". The fourth is a DIFFERENT gap (a missing scalar-host arm), so that scenario needs the
+arm as well as the rule. Corpus: **visible**, and §13d already names the three failing scenarios —
+`g_V_valuesXageX_allXgtX32XX`, `g_injectX7X_noneXeqX7XX`, `g_injectXnullX_allXeqXnullXX`.
+
+### A PROCESS NOTE, since it cost work: never edit a file a running delegate was told not to touch
+
+The paragraph above had to be written twice. A delegate running under "do NOT edit
+`docs/2026-08-01-relir-build-plan.md`" reverted that file — reasonably, to honour the instruction — and took
+an UNCOMMITTED append of mine with it. The instruction was right and the loss was mine. **Commit
+architect-side doc work BEFORE delegating**, or keep it out of the worktree until the delegate is done; a
+"don't touch X" instruction makes X a file the delegate may restore, not merely one it will leave alone.
