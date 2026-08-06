@@ -207,10 +207,13 @@ describe('scalar-parent / projection SQL', () => {
     expect(avg.sql).toContain("'real' AS vt");
 
     // The class lists are compiler-authored type vocabulary, so RelIR emits them as escaped SQL text
-    // rather than wasting DO binds. Query data remains bound; `integer`/`real`/`text` here must not.
+    // rather than wasting DO binds. `min`/`max` compare in TYPE SPACE, so their vocabulary is
+    // `storedCompareOn`'s Gremlin vtypes (`int`/`long`/`float`/`double`, cast to a numeric); `sum`/`mean`
+    // keep the storage-class eligibility (`integer`/`real`). Either way the class names are LITERALS,
+    // never binds.
     for (const [gremlin, classes] of [
-      ['g.V().values("age").min()', ['integer', 'real', 'text']],
-      ['g.V().values("age").max()', ['integer', 'real', 'text']],
+      ['g.V().values("age").min()', ['int', 'long', 'float', 'double']],
+      ['g.V().values("age").max()', ['int', 'long', 'float', 'double']],
       ['g.V().values("age").sum()', ['integer', 'real']],
       ['g.V().values("age").mean()', ['integer', 'real']],
     ] as const) {

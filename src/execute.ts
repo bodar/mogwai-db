@@ -639,10 +639,17 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
       else yield* framed;
       return;
     }
-    // sum(): Int/Long/Double by SQLite storage class. SUM of an empty stream is
+    // A numeric reducer result. `vt` carries EITHER a Gremlin vtype (`min`/`max` emit the winning
+    // row's own — `int`/`long`/`string`) OR a SQLite storage class (`sum`/`mean` emit `typeof` —
+    // `integer`/`real`/`text`); the two vocabularies are disjoint, so `vtypeToValueType` resolves the
+    // former and returns undefined for the latter. Framing a Gremlin vtype through the same path
+    // `values()` uses is what lets a text-carried long come back a `long` rather than a String;
+    // storage class falls to `sumBuffer` (Int/Long/Double by magnitude). SUM of an empty stream is
     // NULL → no result (TinkerPop yields nothing, matching SQL sum aggregation).
-    case 'scalar': for (const r of rows) if (r.v !== null || shape.productiveNull)
-      yield r.v === null ? frameValue(null, undefined) : sumBuffer(r.v, r.vt); return;
+    case 'scalar': for (const r of rows) if (r.v !== null || shape.productiveNull) {
+      if (r.v === null) yield frameValue(null, undefined);
+      else { const as = vtypeToValueType(r.vt); yield as !== undefined ? frameValue(r.v, as) : sumBuffer(r.v, r.vt); }
+    } return;
     case 'map': for (const r of rows) yield mapBuffer(r, shape.entries); return;
     // A whole-map VALUE per row: the `map` blob is [[keyNode,valNode],…] of self-describing
     // {t,v} nodes → frame the reconstructed map tree (each key/value its own exact type).

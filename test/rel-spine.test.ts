@@ -82,11 +82,12 @@ const COVERED = [
   "g.V().dedup().by(T.label)", "g.E().dedup().by(T.label)", "g.V().dedup().by(T.id)",
   "g.V().out().dedup().by('lang')", "g.V().dedup().by('lang').values('name')",
   "g.V().dedup().by('name').count()", "g.V().values('name').dedup().by()",
-  // THE REDUCER FAMILY — four step names, one `Aggregate`, and Phase 4.3's named deliverable. The
-  // `min`/`max` pair over a STRING stream is the arm a numeric-only guard would silently answer nothing
-  // for, so both are here.
-  "g.V().values('age').sum()", "g.V().values('age').min()", "g.V().values('age').max()",
-  "g.V().values('age').mean()", "g.V().values('name').min()", "g.V().values('name').max()",
+  // THE REDUCER FAMILY — four step names, and Phase 4.3's named deliverable. `sum`/`mean` are here
+  // (they agree with legacy raw-row); `min`/`max` are NOT — they now compare in Gremlin TYPE SPACE and
+  // project the winning row's own Gremlin vtype (`int`/`long`/`string`), where legacy projects a SQLite
+  // storage class, so their raw rows legitimately DIVERGE. They are asserted rel-ahead in their own
+  // test below (`min/max compare in type space and frame the winner's own vtype`).
+  "g.V().values('age').sum()", "g.V().values('age').mean()",
   "g.inject(1,2,3).sum()", "g.inject(1,2,3).mean()", "g.V().out().values('age').sum()",
   "g.V().values('age').asNumber(GType.DOUBLE).sum()", "g.V().values('age').sum().is(P.gt(100))",
   // `ProductiveByStrategy` is the OTHER side of the productivity rule, and it must stay a live
@@ -632,20 +633,23 @@ describe('the RelIR spine', () => {
     // reference fixture makes each visible only under a different traversal — so each gets its own
     // assertion rather than trusting one differential to cover all three.
     //
-    // 1. ELIGIBILITY is arithmetic-vs-comparable: `min`/`max` admit TEXT because Gremlin's Comparable
-    //    does, and a numeric-only guard would answer NULL here rather than a wrong number.
+    // 1. ELIGIBILITY: `min`/`max` admit TEXT because Gremlin's Comparable does, and a numeric-only
+    //    guard would answer NULL here rather than a wrong number.
     const minText = read("g.V().values('name').min()", { spine: 'rel' });
     expect(minText.spine).toBe('rel');
     expect(store.query(minText.sql, minText.binds).map((row: any) => row.v)).toEqual(['josh']);
 
     // 2. BULK WEIGHTING applies to sum/mean and NOT to min/max, and it is only observable once a
     //    collapse upstream has made bulk anything but 1 — `both().both()` is that. A weighted min would
-    //    still be the min, which is why the pair is asserted together against legacy.
+    //    still be the min, which is why the pair is asserted together against legacy. Compare the VALUE
+    //    (`v`), not the whole row: `min`/`max` now project the winner's own GREMLIN vtype (`int`) where
+    //    legacy projects a storage class (`integer`) — same answer, different internal spelling (§10·4:
+    //    assert semantics, not route), and the value is what bulk weighting is about.
     for (const gremlin of ["g.V().both().both().values('age').sum()", "g.V().both().both().values('age').mean()",
       "g.V().both().both().values('age').min()", "g.V().both().both().values('age').max()"]) {
       const rel = read(gremlin, { spine: 'rel' });
       const legacy = read(gremlin, { spine: 'legacy' });
-      expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
+      expect(store.query(rel.sql, rel.binds).map((row: any) => row.v)).toEqual(store.query(legacy.sql, legacy.binds).map((row: any) => row.v));
     }
 
     // 3. THE MEAN IS FORCED REAL. Integer division answers 30 for the reference ages where the mean is
@@ -664,6 +668,31 @@ describe('the RelIR spine', () => {
     expect(store.query(sum.sql, sum.binds)).toEqual([{ v: 123, vt: 'integer' }]);
     const real = read("g.V().values('age').asNumber(GType.DOUBLE).sum()", { spine: 'rel' });
     expect(store.query(real.sql, real.binds)).toEqual([{ v: 123, vt: 'real' }]);
+  });
+
+  test('min/max compare in type space and frame the winner\'s own vtype (rel ahead of legacy)', () => {
+    // §13g·5. min/max ORDER within a Gremlin TYPE SPACE, not by SQLite storage class, and return the
+    // ORIGINAL extremal row's value + its own Gremlin vtype (an argmin/argmax). The covered cases still
+    // agree with legacy on the VALUE; they diverge on the `vt` spelling (Gremlin `int`/`string` vs a
+    // storage class), which the framer reads through the same `values()` path so a text-carried long
+    // frames as a `long` rather than a String.
+    const val = (q: string, spine: 'rel' | 'legacy' = 'rel') => { const p = read(q, { spine }); return store.query(p.sql, p.binds); };
+    expect(val("g.V().values('age').min()")).toEqual([{ v: 27, vt: 'int' }]);
+    expect(val("g.V().values('age').max()")).toEqual([{ v: 35, vt: 'int' }]);
+    expect(val("g.V().values('name').max()")).toEqual([{ v: 'vadas', vt: 'string' }]);
+
+    // THE §13g·5 rows the storage-class order gets WRONG: a `long` past 2^53 rides as decimal TEXT, so
+    // `MIN`/`MAX` by storage class (INTEGER before TEXT) pick the wrong element AND frame it as text.
+    // Type-space comparison + returning the original row fixes both, and RelIR is AHEAD of legacy here
+    // (legacy still answers `10`/`"-9007…"` with a storage-class vt), pinned in both directions.
+    expect(val('g.inject(10L, -9007199254740993L).min()')).toEqual([{ v: '-9007199254740993', vt: 'long' }]);
+    expect(val('g.inject(10L, -9007199254740993L).max()')).toEqual([{ v: 10, vt: 'long' }]);
+    // Legacy is the wrong one — min picks 10 (INTEGER sorts before TEXT), not the numerically smaller long.
+    expect(val('g.inject(10L, -9007199254740993L).min()', 'legacy')[0].v).toBe(10);
+
+    // min/max over an EMPTY stream emit NOTHING (`ReducingBarrierStep` supplies no seed for them,
+    // §10·12·1), where a raw `MIN()` aggregate would emit one NULL row.
+    expect(val("g.V().hasLabel('nope').values('age').min()")).toEqual([]);
   });
 
   test('a cast over a LITERAL must RAISE, so RelIR declines the constant-folded transforms', () => {

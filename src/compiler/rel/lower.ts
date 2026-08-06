@@ -1,5 +1,5 @@
 import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
-import { col, compilerInt, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
 import { emit, emitRelational } from '../../rel/emit.ts';
@@ -20,7 +20,7 @@ import { PATH_LIST_OPS } from '../steps/tail/path.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain } from '../ir/analyze.ts';
 import { normalize } from '../ir/passes.ts';
-import { containsTextSearch, predicateExpr, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
+import { containsTextSearch, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { bareInjectTag, foldConstantCoercions } from '../steps/write/inject.ts';
 import {
   and, byEncounter, carriedCols, EDGE_COLS, eq, labelIds, meta, minter, NODE_COLS, PROPERTIES, renumber, storedValue,
@@ -1467,6 +1467,62 @@ function scalarTail(
     // (§3.5's `barrierChannels`), which is why the channels list is empty rather than trimmed by hand.
     if (isReducer(step.name)) {
       if (args.length || isLocalScope(step)) return null;
+      if (step.name === 'min' || step.name === 'max') {
+        // min/max ORDER rather than reduce, and Gremlin orders within a single TYPE SPACE — not by
+        // SQLite storage class. A `long` carried as decimal TEXT (a value past 2^53) has
+        // `typeof = 'text'`, so a raw `MIN()`/`MAX()` picks by storage-class order (INTEGER before
+        // TEXT) and answers the wrong element AND hands it back framed as text. The compare key is
+        // `storedCompareOn` — the SAME cast authority `order().by()` uses (`modulator.ts`) — so the
+        // two positions cannot drift.
+        //
+        // The winner is the ORIGINAL row, projected whole (an argmin/argmax: rank, take rank 1), not
+        // a `MIN()`/`MAX()` over a cast key: returning the raw storage extremum would round a >2^53
+        // long through a JS number and lose the low bits, where the stored decimal TEXT is exact.
+        // Ranking also makes zero rows emit NOTHING (`ReducingBarrierStep` supplies no seed for
+        // min/max, §10·12·1) rather than the one NULL row a `MIN()` aggregate emits. The `vt` column
+        // is the winner's own GREMLIN vtype (`int`/`long`/`string`, from the per-row column or the
+        // source's static tag), which the `result:'number'` framer reads through `vtypeToValueType`
+        // so a text-carried long frames as a `long` — the vocabulary `values()` frames on. Only the
+        // UNKNOWN case (a heterogeneous stream, no vtype) falls back to `typeof`, whose storage-class
+        // value the framer routes to `sumBuffer`; there neither spine can raise the reference's
+        // cross-type error, so this matches legacy — the documented divergence (§13n).
+        const staticVt = out.kind === 'scalar' ? staticTypeOf(out.type) : undefined;
+        const vtypeExpr = carries('vtype') ? col(rel.id, 'vtype')
+          : staticVt ? compilerText(staticVt) : undefined;
+        const key = vtypeExpr ? storedCompareOn(vtypeExpr)(col(rel.id, 'v')) : col(rel.id, 'v');
+        const dir: 'asc' | 'desc' = step.name === 'min' ? 'asc' : 'desc';
+        const rank = 'red_rank';
+        // NULL is SKIPPED by min/max (`NumberHelper` returns the non-null side), so it never wins.
+        const present = make.filter({
+          id: fresh('rf'), input: rel, channels: rel.channels, type: rel.type,
+          pred: { kind: 'binary', op: 'is not', left: col(rel.id, 'v'), right: compilerNull() },
+        });
+        const ranked = make.window({
+          id: fresh('rw'), input: present, channels: present.channels,
+          type: typeOf(...present.type.cols, meta(rank, 'int')),
+          specs: [[rank, {
+            kind: 'window-expr', fn: 'row_number', args: [],
+            // A total tie-break on the raw value keeps the survivor deterministic under a reversed scan.
+            spec: { partitionBy: [], orderBy: [{ expr: key, dir }, { expr: col(present.id, 'v'), dir }] },
+          }]],
+        });
+        // The rank filter reads a windowed column, so fence it (a window may not sit inside another
+        // SELECT's WHERE without re-inlining — the rule `sample` obeys and §11 records).
+        const frame = make.materialize({ id: fresh('rm'), input: ranked, channels: ranked.channels, type: ranked.type });
+        const winner = make.filter({
+          id: fresh('rk'), input: frame, channels: frame.channels, type: frame.type,
+          pred: { kind: 'binary', op: '=', left: col(frame.id, rank), right: compilerInt(1) },
+        });
+        const vt: Expr = carries('vtype') ? col(winner.id, 'vtype')
+          : staticVt ? compilerText(staticVt)
+          : { kind: 'call', fn: 'typeof', args: [col(winner.id, 'v')] };
+        rel = make.project({
+          id: fresh('red'), input: winner, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
+          exprs: [['v', col(winner.id, 'v')], ['vt', vt]],
+        });
+        out = { kind: 'scalar', type: UNKNOWN, result: 'number' };
+        continue;
+      }
       const bulk = rel.channels.find((channel) => channel.role === 'bulk');
       const reduced = reducerAggregate(col(rel.id, 'v'), step.name, bulk && col(rel.id, bulk.col));
       rel = make.aggregate({
