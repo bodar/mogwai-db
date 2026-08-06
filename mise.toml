@@ -1,3 +1,11 @@
+# `[task_config] shell` below does not exist before this version: an older mise WARNs
+# (`unknown field in …: task_config.shell`) and runs every task through the default shell, so the
+# per-task logs silently never appear — a missing safety net that looks exactly like a working one.
+# Fail closed instead. (The other spelling, the `unix_default_inline_shell_args` SETTING, is not the
+# escape hatch it looks like: 2026.8.x refuses it from a non-global config "for security reasons",
+# so a project cannot set its own task shell that way at all.)
+min_version = "2026.8.2"
+
 [tools]
 # Pinned for reproducibility (CI installs exactly this; the web-session hook links
 # the image's pre-installed bun under this version — see .claude/hooks/session-start.sh).
@@ -14,6 +22,10 @@ WRANGLER_SEND_METRICS = "false"
 # purpose: dependencies execute as sibling tasks whose output never reaches a parent's in-`run`
 # tee, so the shell is the only seam that catches EVERY task — `mise run ci` leaves one clean
 # log per sub-task. Header of the script has the full rationale + the `raw = true` escape hatch.
+#
+# Needs mise >= 2026.8.2 — hence the `min_version` at the top of this file, whose comment has the
+# failure mode. `{{config_root}}` is required, not decoration: the path is exec'd from the TASK's
+# cwd, so a relative one would break the moment a task sets `dir = …`.
 [task_config]
 shell = "{{config_root}}/scripts/teeshell.sh -c"
 
