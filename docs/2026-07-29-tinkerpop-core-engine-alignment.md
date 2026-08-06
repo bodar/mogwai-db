@@ -415,7 +415,7 @@ The one *unambiguous* duplicate found: `{path, simplePath, cyclicPath}` is spell
   and only a user parameter should spend a bind. We DO adopt this pattern (a `Param` concept at every
   layer, reduction deferred to the last responsible moment); we do NOT need the full placeholder/
   `pinVariable` machinery, only the name-carrying value. See
-  `docs/2026-08-05-parameters-are-the-only-binds.md` and the reversal of build-plan §3.4's "no `Param`
+  `docs/archive/2026-08-05-parameters-are-the-only-binds.md` and the reversal of build-plan §3.4's "no `Param`
   node."
 - **A typed core IR / cross-layer shape algebra.** Refuted in
   [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md) §6 and §9.

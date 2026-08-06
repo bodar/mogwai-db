@@ -48,13 +48,13 @@ const COMPARISON: Readonly<Record<string, Extract<Expr, { kind: 'binary' }>['op'
 /** The four whose SQL comparison must be vtype-aware — see the module header. */
 const ORDERING = new Set(['gt', 'gte', 'lt', 'lte']);
 
-/** STATIC subject types an ordering comparison DECLINES rather than mis-comparing — the temporals, whose
- *  ONLY static-subject source is a literal (`inject(datetime(…))`/`inject(Duration(…))`) that rides as a
- *  raw epoch/nanos the static arm cannot line up with the bound. `bigdecimal` is deliberately ABSENT: it
- *  ALSO arrives as a NATIVE REAL (`values(…).asNumber(GType.BIGDECIMAL)`, a reducer), which compares
- *  correctly here, and the static type alone cannot tell that apart from a TEXT inject literal — so
- *  declining it would break the native case (the `asNumber(BIGDECIMAL).is(P.gt(0))` census witness). A
- *  correctly-compared TEXT bigdecimal static subject is the deferred storage-class enrichment. See `ordered`. */
+/** STATIC subject types an ordering comparison DECLINES rather than mis-comparing — a NATIVE temporal
+ *  (`datetime`; also a `duration` that did NOT arrive as a decimal-TEXT tail): it rides as a raw
+ *  epoch/nanos with no per-row `vtype` to line the bound up against. A TEXT tail of the SAME tag is
+ *  handled EARLIER in `ordered` by the `type.text` cast, so `inject(Duration(…))` now orders instead of
+ *  declining. `bigdecimal`/`long`/`bigint` are absent for the same reason — cast when TEXT, native
+ *  otherwise (`asNumber(BIGDECIMAL)`→REAL, `count()`→INTEGER) — the storage-class enrichment that
+ *  disambiguates the two having LANDED (`type.text`; docs/archive/2026-08-05-parameters-are-the-only-binds.md C1). */
 const STATIC_ORDERING_DECLINE = new Set(['datetime', 'duration']);
 
 /**
@@ -164,7 +164,7 @@ const ordered = (
     // NATIVE form of the same tag (`count()`→INTEGER, `asNumber(BIGDECIMAL)`→REAL), which is why the flag —
     // set only where the value is stored as TEXT (`injectSource`) — is what disambiguates the two and lets
     // `inject(9.99m)`/`inject(9…L)`/`inject(Duration(…))` order instead of declining
-    // (docs/2026-08-05-parameters-are-the-only-binds.md C1).
+    // (docs/archive/2026-08-05-parameters-are-the-only-binds.md C1).
     const subjectCast = canonical !== null ? STATIC_SUBJECT_CAST[canonical] : undefined;
     if (numericBound && type.text && subjectCast)
       return binary(op, { kind: 'cast', arg: subject, to: subjectCast }, castBound);

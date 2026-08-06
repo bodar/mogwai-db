@@ -134,7 +134,7 @@ describe('a data-sized within() set rides one JSON bind', () => {
     const plan = compile('g.V().has("name", within("a","b","c")).count()', {});
     if (plan.kind !== 'read') throw new Error('expected read plan');
     // The members are parsed literals → inlined into the IN-list (the set stays an IN-list, NOT a JSON
-    // bind — only their spelling changed from `?` to an escaped literal, docs/2026-08-05-parameters-are-the-only-binds.md).
+    // bind — only their spelling changed from `?` to an escaped literal, docs/archive/2026-08-05-parameters-are-the-only-binds.md).
     expect(plan.binds.filter((b) => typeof b === 'string' && 'abc'.includes(b)).length).toBe(0);
     expect(plan.sql).toMatch(/in \('a', ?'b', ?'c'\)/i);
   });

@@ -584,16 +584,6 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
 typed `throw` deferrals and prose, so a marker grep finds nothing and proves nothing — read the
 deferral clusters in 5c instead.
 
-- **A param-list `within`/`without` — a collection PARAMETER as an IN-set — declines to legacy.**
-  `predicateExpr` (`compiler/rel/predicate.ts`) builds an in-list from scalar operands; a single collection
-  PARAMETER (`within($names)`) has no scalar members to inline and `operand()` returns null, and a literal
-  set over `SET_BIND_LIMIT` (25) members declines too. The generic answer is one `jsonb(?)` bind exploded by
-  `json_each` (`expr IN (SELECT value FROM json_each(?))`), which needs `parsePredicate` to preserve the
-  single-collection-arg distinction (it currently drops single-vs-varargs on unwrap) and a `Minter` threaded
-  into `predicateExpr`. **Coverage-only — legacy JSON-binds the big set correctly today**, so this is
-  fail-closed, never a wrong answer. The sibling exact-tail-CONSTANT ordering case (`inject(9.99m).is(…)`,
-  `constant(9.99m).is(…)`) LANDED 2026-08-06 (the `ScalarType.text` enrichment;
-  `docs/2026-08-05-parameters-are-the-only-binds.md`). *Low-Med.*
 - **A `Scope.local` slice over a SCALAR or ELEMENT-tail value still declines rather than answering.**
   The argument decode is one function (`sliceOf`/`isLocalScope`, `ir/step.ts`) and the rendering one
   more (`limitOffset`, `plan/plan.ts`), so a host can no longer read the scope token as a row count — but

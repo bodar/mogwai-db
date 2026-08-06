@@ -11,7 +11,7 @@
 // The storage class is what disambiguates: `inject(9.99m)` and `asNumber(GType.BIGDECIMAL)` share the
 // tag `bigdecimal`, but the first is decimal TEXT (cast in ordering) and the second a native REAL
 // (untouched). The `text` flag on the static type, set only where the value stores as TEXT
-// (`injectSource`), carries that. See docs/2026-08-05-parameters-are-the-only-binds.md C1.
+// (`injectSource`), carries that. See docs/archive/2026-08-05-parameters-are-the-only-binds.md C1.
 import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';

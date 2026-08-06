@@ -1,18 +1,19 @@
 # Parameters are the only binds — a value that changed layers, not an optimisation
 
-**Status: COMPLETE.** The thesis landed (Phases A, B, B3, nested params, C1-predicate, C1-inject(Duration),
-repeated-parameter dedup — see the LANDED sections below) and, this round (2026-08-06), the framing itself
-resolved: **"oversized" was never a real category.** A held value of ANY size or shape inlines as a typed
-SQL literal — measured byte-identical for a decimal-TEXT literal and for a `jsonb('<text>')` collection —
-while a wire parameter is the only free-standing bind, and *one* bind whatever its size. So the three-way
-split collapsed to two (parameter vs constant), and the leak the plan set out to close is closed: **the
-100-bind cap is now exactly 100 parameters, with no mystery overhead.** Supersedes the constant-SQL-hygiene
-campaign (`docs/archive/2026-08-05-compiler-constant-sql-hygiene-plan.md`) and reverses a locked decision
-(`docs/2026-08-01-relir-build-plan.md` §3.4, "no `Param` node"). The one substantive residual — a
-decimal/bigint/duration CONSTANT in a static ordering comparison — **LANDED this round** (the `ScalarType`
-storage-class enrichment below), and it turned out to fix a legacy *wrong answer*, not just a coverage gap.
-The only thing left is a param-list `within` (a collection PARAMETER as an IN-set), coverage-only and
-legacy-correct, noted in `docs/outstanding-work.md`.
+**Status: COMPLETE — ARCHIVED 2026-08-06. Nothing remains.** The thesis landed (Phases A, B, B3, nested
+params, C1-predicate, C1-inject(Duration), repeated-parameter dedup — see the LANDED sections below) and,
+this final round (2026-08-06), the framing itself resolved and the last two exotic gaps closed:
+**"oversized" was never a real category.** A held value of ANY size or shape inlines as a typed SQL literal
+— measured byte-identical for a decimal-TEXT literal and for a `jsonb('<text>')` collection — while a wire
+parameter is the only free-standing bind, and *one* bind whatever its size. So the three-way split
+collapsed to two (parameter vs constant), and the leak the plan set out to close is closed: **the 100-bind
+cap is now exactly 100 parameters, with no mystery overhead.** Supersedes the constant-SQL-hygiene campaign
+(`docs/archive/2026-08-05-compiler-constant-sql-hygiene-plan.md`) and reverses a locked decision
+(`docs/2026-08-01-relir-build-plan.md` §3.4, "no `Param` node"). The two exotic gaps this round found were
+each a live *wrong answer / defect*, not a coverage gap, and both LANDED: a decimal/bigint/duration
+**constant** in a static ordering comparison (legacy compared decimal TEXT lexically), and a collection
+**parameter** as a `within`/`without` IN-set (its data was flattened into inline statement text). This doc
+is kept in `docs/archive/` for rationale; the durable bind rules live in root `CLAUDE.md`.
 
 ## The thesis
 
@@ -470,7 +471,7 @@ included — to unwrap a new wrapper). The encoding chosen dissolves both worrie
   `Arg.type`, and a member now carries its own captured type on its `Arg` (no more `type.items[i]`
   indexing in the predicate literal path; the bound-list-param fallback still reads `itemTypeAt`).
 
-**The thesis is complete, and the last exotic gap it named is now closed too.**
+**The thesis is complete, and the last two exotic gaps it named are now closed too.**
 - **A decimal/bigint/duration CONSTANT in a static ORDERING comparison** (`inject(9.99m).is(P.gt(…))`,
   `inject(9…L).is(…)`, `inject(Duration(…)).is(…)`, and the `constant(…)` siblings) — **LANDED this round.**
   The fix is the `ScalarType` STORAGE-CLASS enrichment the earlier drafts scoped: `STATIC` now carries a
@@ -481,13 +482,17 @@ included — to unwrap a new wrapper). The encoding chosen dissolves both worrie
   LEXICALLY (`'9.99' > '10.0'` is true), a wrong answer the census had not caught because the traversal was
   recorded on the legacy spine.** Pinned by `test/compiler/inject-tail-ordering.exec.test.ts`; census
   `spine` +1 (the one corpus witness, `inject(Duration).is(gt)`, moved legacy→rel with an identical digest).
-- **The one thing still open — a PARAM-LIST `within`** (a collection PARAMETER as an IN-set) — is
-  coverage-only and NOT thesis work: one `jsonb(?)` bind exploded by `json_each`, needing `parsePredicate`
-  to keep the single-collection-arg distinction and a `Minter` in `predicateExpr`; legacy answers it
-  correctly today. Tracked in `docs/outstanding-work.md`.
+- **A collection PARAMETER as a `within`/`without` IN-set — LANDED (`e56a015`).** `parsePredicate` is now
+  FAITHFUL — a single collection stays one operand (its `.members` for a literal, its `.name` for a param),
+  and each spine owns the set lowering. So a collection parameter crosses as ONE `jsonb(?)` bind exploded by
+  `json_each` — for any size — instead of flattening its data into inline `IN`-list literals (the parameter
+  destroyed, the statement text made a function of the data) or declining a >25-member set to legacy. This
+  too was a live defect, not a coverage gap. RelIR `predicateExpr` + `jsonEachInSet` own it; legacy spreads
+  locally via a shared `collectionMembers` (byte-identical to the former front-end unwrap). Pinned by
+  `test/compiler/within-param.exec.test.ts`. Dead `predValues` deleted in the same change.
 
 The RelIR pass pipeline (`prune`/`fuse` ordering) is a separate architectural question already tracked as
-`docs/outstanding-work.md` item 37 — not thesis work.
+`docs/outstanding-work.md` item 37 — not thesis work (and never was).
 
 This doc is the contract. The decisions that must NOT be
 relitigated by a fresh context (they were each reached against a plausible opposite and the opposite is

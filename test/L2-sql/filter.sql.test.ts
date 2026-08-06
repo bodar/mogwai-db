@@ -18,7 +18,7 @@ import { executeQuery } from '../support/executor.ts';
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
 
 // A predicate operand is a CONSTANT when it is a parsed literal (inlined as an escaped SQL literal) and
-// BINDS only when it is a wire parameter (docs/2026-08-05-parameters-are-the-only-binds.md). Legacy
+// BINDS only when it is a wire parameter (docs/archive/2026-08-05-parameters-are-the-only-binds.md). Legacy
 // still binds every operand, so a cross-spine snapshot asserts the value is PRESENT either way: in the
 // bind list, or in the SQL text (a string `'v'`-quoted, a number as a bare token not glued to a word).
 const carries = (plan: { sql: string; binds: readonly unknown[] }, v: string | number): boolean =>
@@ -404,7 +404,7 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
 
   // The parameter budget must not depend on WHERE a `$x` sits: a wire parameter binds whether it is a
   // bare `has` value or nested in a predicate/set, while a parsed literal inlines either way
-  // (docs/2026-08-05-parameters-are-the-only-binds.md). RelIR-only — the operand seam is the RelIR one.
+  // (docs/archive/2026-08-05-parameters-are-the-only-binds.md). RelIR-only — the operand seam is the RelIR one.
   test('a wire parameter binds whether bare or nested; a literal inlines either way', () => {
     const b = (g: string, params: Record<string, unknown> = {}) => {
       const p = compile(g, params, { spine: 'rel' });
@@ -415,7 +415,7 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     expect(b('g.V().has("age", P.gt(30))')).toEqual([]);
     expect(b('g.V().has("name", within("a","b"))')).toEqual([]);
     // a parameter binds ONCE however many times it is spelled — the budget is for PARAMETERS, not their
-    // uses (docs/2026-08-05-parameters-are-the-only-binds.md, "Repeated parameters"): compareKey spells
+    // uses (docs/archive/2026-08-05-parameters-are-the-only-binds.md, "Repeated parameters"): compareKey spells
     // an ordering operand twice, and both collapse to a single reused placeholder.
     expect(b('g.V().has("age", xx1)', { xx1: 30 })).toEqual([30]);
     expect(b('g.V().has("age", P.gt(xx1))', { xx1: 30 })).toEqual([30]);          // spelled twice, ONE bind

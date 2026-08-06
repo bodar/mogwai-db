@@ -51,7 +51,7 @@ export const paren = (e: Expression): Expression => q`(${e})`;
 /** A bound value carrying a REUSE KEY: two `KeyedValue`s sharing a key render as ONE placeholder + ONE
  *  bind, so a value used at many sites is bound once. The kernel does not interpret the key — the
  *  caller supplies it (the compiler passes a wire parameter's name, `GValue.name`, so N uses of one
- *  `$x` cost one of the DO's 100-bind budget — docs/2026-08-05-parameters-are-the-only-binds.md). A
+ *  `$x` cost one of the DO's 100-bind budget — docs/archive/2026-08-05-parameters-are-the-only-binds.md). A
  *  plain `value()` has no key and never dedups: a mechanical/oversized bind is always its own slot. */
 export class KeyedValue extends Value {
   constructor(value: unknown, readonly key: string) { super(value); }

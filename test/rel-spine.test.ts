@@ -465,7 +465,7 @@ describe('the RelIR spine', () => {
     //
     // A COMPILER-HELD CONSTANT spends none of it: the vtype-aware compare key's class lists, the slice
     // counts, `has`/`by` keys, `V/E` ids, class/type names, AND a `has`/`is` VALUE that is a parsed
-    // literal — all inline as typed SQL literals now (docs/2026-08-05-parameters-are-the-only-binds.md).
+    // literal — all inline as typed SQL literals now (docs/archive/2026-08-05-parameters-are-the-only-binds.md).
     // So `order().by(key)` and `has(k, literal)` are both FREE; a hundred of either cost zero.
     const plan = (gremlin: string, params: Record<string, unknown> = {}) => {
       const p = compile(gremlin, params, { spine: 'rel' });
@@ -504,7 +504,7 @@ describe('the RelIR spine', () => {
 
   test('a repeated wire parameter is ONE bind, reused as a numbered placeholder', () => {
     // The budget is for PARAMETERS, not their USES: a `$p` threaded through two predicates must cost
-    // ONE of the 100 (docs/2026-08-05-parameters-are-the-only-binds.md, "Repeated parameters"). The
+    // ONE of the 100 (docs/archive/2026-08-05-parameters-are-the-only-binds.md, "Repeated parameters"). The
     // client sends one `p` map entry plus the name at each site; RelIR collapses the two `param()`s to
     // a single `?1` reused — legal on bun:sqlite AND on a Durable Object (test/cf-probe).
     const compileRel = (gremlin: string, params: Record<string, unknown>) => {

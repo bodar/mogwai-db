@@ -6,7 +6,7 @@ import type { Arg } from '../../gremlin/frontend.ts';
 //
 // A COMPILER-HELD CONSTANT — a parsed literal, a slice count, a `has`/`by` key, a `V/E` id, a class
 // name, a JSON path — is inlined as a TYPED SQL literal so it spends none of the Durable Object's 100
-// bound parameters (docs/2026-08-05-parameters-are-the-only-binds.md: the 100-bind cap is a PARAMETER
+// bound parameters (docs/archive/2026-08-05-parameters-are-the-only-binds.md: the 100-bind cap is a PARAMETER
 // budget). Every such site routes through here rather than calling `lit()` (a bind) directly, so the
 // storage-class rule lives once and — when Phase B lands the `Param` concept — the single place that
 // decides bind-vs-inline is this module, not N scattered `lit()` calls.
@@ -66,7 +66,7 @@ export const countLit = (n: number): Expr => Number.isSafeInteger(n) ? compilerI
  *  at compile time (and `range`'s `lo>hi` throws a validation SQL cannot carry — root `CLAUDE.md`
  *  "fail closed"), so those callers REDUCE the value (pass `paramName = null`, `countLit`) at the last
  *  responsible moment, exactly as `unrollFixedRepeat` reduces `times($x)`
- *  (docs/2026-08-05-parameters-are-the-only-binds.md B3). A non-integer that somehow reached here has no
+ *  (docs/archive/2026-08-05-parameters-are-the-only-binds.md B3). A non-integer that somehow reached here has no
  *  int-bind form, so it reduces too. */
 export const sliceBound = (n: number, paramName: string | null): Expr =>
   paramName != null && Number.isSafeInteger(n) ? param(n, paramName, 'int') : countLit(n);

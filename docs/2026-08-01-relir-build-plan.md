@@ -233,7 +233,7 @@ prove the seam cannot EXPRESS the shape, not that it has not been handed one.
   the 100-bind budget. A parameter is a first-class product concept and gets a representation at every
   layer (wire → IR → a RelIR `Param`, spelled `lit`'s `source: 'parameter'`), with reduction to a
   concrete value deferred to the last responsible moment (only `unrollFixedRepeat` needs it). Rationale
-  and phased plan: `docs/2026-08-05-parameters-are-the-only-binds.md`. This matches TinkerPop 4's
+  and phased plan: `docs/archive/2026-08-05-parameters-are-the-only-binds.md`. This matches TinkerPop 4's
   `GValue`/placeholder design.
 - **`Correlate`/lateral.** Correlation is a property of an `Expr` referencing an outer `RelId`. P1 is
   why: SQLite's rule is positional, and a node would invite constructing the one position it forbids.

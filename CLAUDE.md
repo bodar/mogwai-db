@@ -205,7 +205,7 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
    constant is a legitimate IR fact (it decides bind-vs-literal), carried on the argument's `Arg`
    object (`name`) alongside its `type`, so the front-end no longer flattens it away (see the bind
    rule under Environment notes and
-   `docs/2026-08-05-parameters-are-the-only-binds.md`). What stays out of the compiler is the wire
+   `docs/archive/2026-08-05-parameters-are-the-only-binds.md`). What stays out of the compiler is the wire
    *format*, not the *fact that the user declared a parameter*.
 
 ## Semantics traps — encode as tests before touching related steps
@@ -296,7 +296,7 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
   (only `unrollFixedRepeat` needs it). The only non-parameter values that may still bind are the
   MECHANICAL exceptions — a collection `{t,v}` tree and, pending measurement, the big-decimal/duration
   tail — a NAMED category, not evidence that "data must bind." Full rationale + phased plan:
-  `docs/2026-08-05-parameters-are-the-only-binds.md`. (Legacy `src/compiler/steps/**` is dead — do not
+  `docs/archive/2026-08-05-parameters-are-the-only-binds.md`. (Legacy `src/compiler/steps/**` is dead — do not
   reclassify its binds.)
 - **DO SQLite caps a query at 100 BOUND PARAMETERS (and 100 KB of statement text) — Bun's cap is
   65,535, so a bind list that scales with ROW COUNT passes every test and fails only in production.**

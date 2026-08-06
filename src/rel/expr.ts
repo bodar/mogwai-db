@@ -55,7 +55,7 @@ export const lit = (value: unknown, type: SqlType = 'any'): Expr => ({ kind: 'li
 /** A USER PARAMETER — a wire GValue the client sent in the `bindings`/`parameters` map (`$x`). This is
  * the ONLY free-standing bind the design keeps by intent: it is the user's strongest signal that a value
  * is variable, and the 100-parameter budget exists precisely to carry it
- * (docs/2026-08-05-parameters-are-the-only-binds.md). A parsed literal is NOT this — it is a constant,
+ * (docs/archive/2026-08-05-parameters-are-the-only-binds.md). A parsed literal is NOT this — it is a constant,
  * inlined (see the `compiler-*` sources). `'bound'` remains the MECHANICAL bind (a collection JSON, the
  * decimal tail — the `oversized` category), distinct from a parameter but rendered the same way.
  *

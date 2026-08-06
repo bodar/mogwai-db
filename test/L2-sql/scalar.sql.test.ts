@@ -34,7 +34,7 @@ const wraps = (fn: string) => new RegExp(`\\b${fn}\\(`);
 
 // A one-value inject const-folds its seed to a COMPILE-TIME CONSTANT, now inlined as a typed SQL literal
 // rather than a bound `?` (the parameter-budget win: a constant the compiler holds spends none of the
-// DO's 100 binds — docs/2026-08-05-parameters-are-the-only-binds.md). So a const-fold test asserts the
+// DO's 100 binds — docs/archive/2026-08-05-parameters-are-the-only-binds.md). So a const-fold test asserts the
 // inlined VALUE here instead of on `.binds`: `1`/`0` for a boolean, epoch-millis for a date, and so on.
 const seed = (q: string): string => {
   const { sql } = read(q);

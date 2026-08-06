@@ -17,7 +17,7 @@ describe('write SQL', () => {
   test('vertex property has(key,val): key AND literal value inlined; only a parameter binds', () => {
     // W4: vertex props are normalized into vertex_properties; has(key,val) is an EXISTS. Both the KEY and
     // a LITERAL value are parsed constants the compiler holds, so RelIR inlines them as ESCAPED SQL
-    // literals rather than spending the DO's 100 binds (docs/2026-08-05-parameters-are-the-only-binds.md);
+    // literals rather than spending the DO's 100 binds (docs/archive/2026-08-05-parameters-are-the-only-binds.md);
     // legacy still binds both. A WIRE PARAMETER (`$x`) is the one operand that binds on RelIR — that is
     // what the 100 budget is FOR. The static (key,value) index serves either spelling.
     expect(read('g.V().has("age",30)', { spine: 'legacy' }).sql)

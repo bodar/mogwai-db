@@ -1584,7 +1584,7 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
   // it rides as its canonical decimal/total-nanos TEXT (exact, reads back as its own type) and stores as
   // TEXT, so it inlines here. Sound ONLY when `tag` is set: a MIXED inject frames UNKNOWN, where a bare
   // TEXT literal would read back as a string, so a tail member there still declines
-  // (C1, docs/2026-08-05-parameters-are-the-only-binds.md). A `$x` binds — a bound tail is TEXT too.
+  // (C1, docs/archive/2026-08-05-parameters-are-the-only-binds.md). A `$x` binds — a bound tail is TEXT too.
   //
   // The subject frames `STATIC(tag, text=true)`: a bigint (`inject(9…L)`) shares the tag `long` with a
   // native `count()`, and a BigDecimal shares `bigdecimal` with a native `asNumber(GType.BIGDECIMAL)`
