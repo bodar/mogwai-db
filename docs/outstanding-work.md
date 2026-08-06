@@ -151,12 +151,16 @@ of gravity is ceiling, not correctness.
    - **`prune` is Phase 3.3's precondition** and prunes nothing below a `Join`/`Union`/`Aggregate`/
      `Recursive` — its own declared remainder. `unroll` replicates repeat bodies, which are mostly
      joins, and §4.5 is what calls pruning the thing that makes replicas affordable.
-   - **`fuse` is the opposite question — ask whether it is wanted at all.** The block assembler
-     already fuses a run into one `SELECT` (§5, and §10·1 records that `fuse` was deliberately NOT
-     given that job). One of its four declared rewrites exists (adjacent filters conjoin); before
-     writing the other three, establish which of them buys anything the assembler does not.
-   *Low each mechanically, Medium as a decision — and the decision is the deliverable: a declared
-   pipeline with an order, or three fewer files.*
+   - **`fuse` — decided: reserved home, wired as a NO-OP.** The block assembler already conjoins adjacent
+     filters (`emit.ts`, `conjoin(b.where, pred)`), so that historical rewrite drops; the file stays as the
+     documented slot for the unbuilt semantic collapses (`Distinct(Distinct)`, `Limit`-over-`Limit`) with a
+     header saying what belongs and what does not, so a file-only reader sees the no-op is intentional.
+   **DESIGN DECIDED (see §4), BUILD deferred to Phase 3.** The pipeline object is NOT built now — an ordered
+   container with one real occupant is the very organic-growth trap to avoid. Instead §4 fixes the design
+   (the `RelPass`/`PlanPass` split, the `perRel` lift, the `SequenceProgram`-style fold, run-order, `RelPass`
+   vs the legacy `Pass`, `fuse` as a no-op), because `flatten`/`unroll`/`prune`-remainder are one coupled
+   Phase-3 body that this object will order — so it is built WITH them, dropping into a named home.
+   *Mechanically Low; the deliverable was the decision, now recorded in §4.*
    → [relir-build-plan](./2026-08-01-relir-build-plan.md) §4
 
 3. **`repeat()` — the row-local vocabulary gate, and it DISSOLVES rather than being widened.**

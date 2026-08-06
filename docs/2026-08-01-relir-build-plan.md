@@ -289,9 +289,42 @@ sack belong to ONE member, and a grouping would take whichever row SQLite reache
 
 ## 4. The passes
 
-All `Rel → Rel`, total, order-declared. **Structure is declared ONCE** in `src/rel/walk.ts` with no
-`default` arm anywhere, so `noImplicitReturns` makes a new node kind a compile error rather than a
-silently skipped case. Rewriting is memoised, so the DAG stays a DAG (§3.4).
+**The pipeline is one ordered list applied by a FOLD — Calcite's `SequenceProgram` shape, and NONE of
+its planners.** `Programs.sequence` runs each sub-program once, output→input
+(`vendor/calcite/core/src/main/java/org/apache/calcite/tools/Programs.java`, `SequenceProgram` at
+`:394`), which is a fold of TOTAL functions — exactly our passes. We do NOT want `HepPlanner` (fixpoint
+rule-firing) or `VolcanoPlanner` (cost-based search): a rewrite here fires once, deterministically. We
+also deliberately DECLINE TinkerPop's ordering machinery — `TraversalStrategies` topologically sorts
+strategies by per-item `applyPrior`/`applyPost` inside category bands
+(`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/TraversalStrategies.java`,
+`sortStrategies`). A fixed linear list is simpler and sufficient; the order below is short and
+hand-declarable, so a t-sort would only add a cycle-detection failure mode for nothing. **Do not
+"upgrade" the list to a category-sort.**
+
+**Two element types, one lift.** Most passes are **`RelPass = (Rel) => Rel`** — total, memoised so the
+DAG stays a DAG (§3.4), structure declared ONCE in `src/rel/walk.ts` with no `default` arm so a new node
+kind is a compile error not a skipped case. Two are **`PlanPass = (Plan) => Plan`**: `name` (mints
+bindings) and `check` (verifies the whole program). A `RelPass` is LIFTED to a `PlanPass` by **`perRel`**
+— map it over `{bindings, result}`, a `Stmt` binding untouched — which is the generic form of today's
+hand-rolled `landPlan`. **`prune` is the one `RelPass` whose lift is NOT a naive map**: each binding's
+required columns are the UNION over its `Ref` consumers, so its lift reads the whole program — which is
+why Calcite makes field-trimming a whole-tree transformer (`RelFieldTrimmer.trim`,
+`vendor/calcite/core/src/main/java/org/apache/calcite/sql2rel/RelFieldTrimmer.java:173`) and NOT a
+node-local rule ("each `RelNode` needs to return a different set of fields after trimming").
+
+**`RelPass`, NOT `Pass` — the name is load-bearing.** `Pass` is TAKEN: the LEGACY `Step[] → Step[]`
+system (`src/compiler/ir/pass.ts`, categories `extract < decoration < canonicalize < simplify < verify`,
+`src/compiler/CLAUDE.md`). A `RelPass` rewrites the RELATIONAL tree, a different layer, so it takes a
+different name and lives in `src/rel/passes/`. An agent adding a step-chain rewrite grows the legacy
+`Pass` pipeline; one adding a relational rewrite grows THIS one. The `arch-check` gate governs the legacy
+`Pass` only — a `RelPass` is unrelated to it.
+
+**Order is RUN-order, and it differs from the build-order numbers below.** `check` is numbered 4.1
+because it was built first and is always-on in dev/tests — but it RUNS LAST: a terminal verifier over the
+fully-rewritten plan that analyses and throws, exactly as TinkerPop's `VerificationStrategy` is the
+terminal category (`.../traversal/TraversalStrategy.java`, "analyze the traversal and throw… no more
+behavioral tweaking") and exactly as `checkPlan` runs inside `emit` today. Run-order:
+**`flatten → unroll → fuse → prune → land → name → (recognize, Phase 4) → check`.**
 
 - **4.1 `check`** — the fail-closed verifier and the first thing built: column resolution, `Agg` only in
   `Aggregate`, `WindowExpr` only in `Window`, `SelfRef` only in its `Recursive.step`, the §3.5
@@ -301,29 +334,51 @@ silently skipped case. Rewriting is memoised, so the DAG stays a DAG (§3.4).
 - **4.3 `unroll`** — replicate a subplan *n* times and chain it: P4's `times(n)` route, 48 of 53 barrier
   bodies. With no `Recursive` in the output there is no recursive term, so every P1/P3 prohibition
   evaporates and a barrier is an ordinary `Aggregate`/`Window`.
-- **4.4 `fuse`** — SEMANTIC rewrites only, deliberately small: adjacent `Filter`s conjoin,
-  `Distinct(Distinct x)` collapses, `Limit` over `Limit` composes, a `Sort` dead before a barrier goes.
-  **`Sort`+`Limit` is NOT this pass's job** — that is one SELECT's slots, and it belongs to the assembler
-  (§5). The assembler, not `fuse`, is what deletes `TailAcc`.
-- **4.5 `prune`** — column pruning; a node's need is the UNION over its consumers. Load-bearing rather
-  than cosmetic: it is what makes `unroll`'s replicas affordable.
+- **4.4 `fuse`** — the reserved home for SEMANTIC algebraic rewrites, and **wire it as a NO-OP** (identity)
+  with the contract written into `fuse.ts`'s own header, so an agent who reads the FILE and not this plan
+  sees the emptiness is intentional, not forgotten. The header must say both halves:
+  - **Belongs here** (unbuilt, add when a case is shown to buy something the assembler cannot):
+    `Distinct(Distinct x)` collapses, `Limit` over `Limit` composes, a `Sort` dead before a barrier goes —
+    same-semantics collapses across ADJACENT nodes.
+  - **Does NOT belong here, and each has a home:** adjacent `Filter`s conjoin — the ASSEMBLER already does
+    this (`src/rel/emit.ts`, `conjoin(b.where, pred)`), so `fuse` must not (this was its one historical
+    rewrite; drop it when wiring); `Sort`+`Limit` is one SELECT's slots (§5, the assembler); collapsing a
+    run into a `Select` mega-node is REFUSED outright — it puts the SQL surface inside the IR (§5, §7). The
+    assembler, not `fuse`, is what deletes `TailAcc`. So `fuse` stays a no-op until a rewrite from the
+    "belongs here" list earns its place.
+- **4.5 `prune`** — column pruning; a node's need is the UNION over its consumers (Calcite's "trim unused
+  fields", `RelFieldTrimmer`). Load-bearing rather than cosmetic: it is what makes `unroll`'s replicas
+  affordable. **Two facts gate it, both Phase-3 work, not follow-up:** today it prunes NOTHING below a
+  `Join`/`Union`/`Aggregate`/`Recursive` (its own declared remainder) — and a flattened `repeat` body is
+  MOSTLY joins, so on exactly the plans `unroll` produces the current `prune` is a no-op; and it carries a
+  latent correctness bug — it collects column refs only inside the `project` arm, so a non-`Project` parent
+  that itself reads a column can have it pruned from under it. Closing the remainder AND fixing that
+  reference-collection are prerequisites to `unroll`.
 - **4.5b `land`** — the bind-budget lowering (§3.6). Declines a row holding anything but a `Lit`, and the
-  budget then fails closed on it.
+  budget then fails closed on it. **WIRED today, ad-hoc, via `landPlan` (`compiler/rel/lower.ts`)** — which
+  IS the `perRel` lift written by hand (map over `{bindings, result}`, `Stmt` untouched). When the pipeline
+  object lands, `landPlan` dissolves into `perRel(land)` at its declared position; Calcite models this same
+  late, over-budget-only rewrite as a trailing "physical tweaks" phase + `ConditionalProgram`
+  (`Programs.java` `:351`, `:415`).
 - **4.6 `name`** — named CTE versus inlined derived table for every shared node, honouring
   `Materialize`. One policy applied with the whole plan visible, instead of a judgement call at 163
   `q.cte` sites.
 - **4.7 `recognize`** *(Phase 4 only)* — the fast paths as plan rewrites, so equivalence is structural
   and recognition failure is "no rewrite fired" rather than a separate code path.
 
-**DECLARED IS NOT WIRED, and the gap is worth stating because "order-declared" above implies a pipeline
-that does not exist.** Only `name` has a production caller (`lower.ts`). `fuse`, `prune` and `land` are
-built and tested and reachable from no route, and there is no object anywhere that orders them — the
-order above lives in this list. Two consequences, one per pass, and they pull different ways:
-`land` is the declared remedy for a row set sized by DATA, so while it is unwired that whole class
-DECLINES instead (§11's bind wall) — a capability parked on the spine this plan deletes. `fuse` is the
-opposite question: the assembler already fuses a run into one `SELECT`, so before wiring it, ask which
-of its four rewrites still buys anything the assembler does not (only one of the four is even
-implemented — adjacent filters). `prune` is Phase 3's prerequisite, below.
+**DECLARED, PARTLY WIRED — and the pipeline OBJECT is deferred to Phase 3 ON PURPOSE, not by neglect.**
+`check` (inside `emit`), `name`, and now `land` (ad-hoc `landPlan`) have production callers; `fuse` and
+`prune` do not, and no object yet applies the run-order above — it lives in this list. Building that object
+NOW would mean an ordered container with one real occupant, which is the same organic-growth-in-the-
+easiest-place this section exists to prevent. The three unbuilt passes that give the pipeline its weight —
+`flatten` (§4.2), `unroll` (§4.3), and `prune`'s closed remainder (§4.5) — are ONE COUPLED Phase-3 body:
+`unroll` replicates a flattened, join-heavy body; `prune` is what makes the replicas affordable; the
+pipeline object is what orders `flatten → unroll → prune → land → name`. And `unroll` is itself downstream
+of Phase 3.1 (a `Recursive` node — no production caller today, so every `repeat()` still declines to
+legacy). **So the design is FIXED here — the `RelPass`/`PlanPass` split, the `perRel` lift, the fold, the
+run-order, `RelPass` vs the legacy `Pass`, `fuse` as a documented no-op — so that Phase 3 drops those
+passes into a named home instead of inventing one.** Until then `land`'s ad-hoc wire is correct, and
+`fuse`/`prune` stay unwired by design.
 
 ---
 
