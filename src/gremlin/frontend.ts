@@ -672,10 +672,6 @@ function mapKeyOf(mk: any): any {
  *  a parameter exactly as a bare `$x` does. Was two parallel arrays (`values` + `paramNames`). */
 export interface Pred { op: string; operands: Arg[]; }
 
-/** The plain operand VALUES of a predicate — for consumers that spread them into an IN-list or bounds
- *  and do not need the per-operand type/name. Prefer `pred.operands[i].value` at a single index. */
-export const predValues = (pred: Pred): any[] => pred.operands.map((o) => o.value);
-
 /** Is this argument a parsed predicate? `Step.args` is deliberately `any[]` (the front-end
  *  boundary), so every consumer used to open-code `!a || typeof a !== 'object' || a.op !== …`
  *  before reading `.op`/`.values`. This is the narrowing guard, the same role `isTokenArg` and
@@ -724,23 +720,27 @@ function parseComposedPredicate(node: any, params: Record<string, any>): Pred | 
 
 function parsePredicate(node: any, params: Record<string, any>): Pred {
   const m = node.constructor.name.match(/^TraversalPredicate_(\w+)Context$/);
-  const parsed = extractArgs(node, params); // Arg[] — each operand's value + type + wire-parameter name
-  // P.within/without/inside/between accept both varargs (P.within('a','b')) and a single collection
-  // (P.within(['a','b'])). A single collection arg unwraps back to member operands (predicateSql spreads
-  // them into an IN-list / bounds). A LITERAL `[…]` carries its members as `Arg`s (`.members`): each keeps
-  // its captured TYPE and its wire-parameter NAME, so a `$x` member BINDS exactly as a bare `$x` operand
-  // does (the predicate operand seam threads `o.name`). A bound list-PARAM has a raw array value and NO
-  // members — it is ONE oversized param, so its members inline as TYPED (the container's `type.items[i]`),
-  // nameless literals, the documented oversized rule. The varargs form keeps each operand's own name.
-  const single = parsed.length === 1 && Array.isArray(parsed[0]!.value);
-  const listType = single ? parsed[0]!.type : null;
-  const itemType = (i: number): TypeNode | null =>
-    listType != null && typeof listType === 'object' && 'items' in listType ? (listType.items[i] ?? null) : null;
-  const operands: Arg[] = !single ? parsed
-    : parsed[0]!.members ? [...parsed[0]!.members]
-    : (parsed[0]!.value as any[]).map((v, i) => arg(v, itemType(i)));
-  return { op: m![1], operands };
+  // FAITHFUL translation, no unwrap. `P.within/without/inside/between` accept both varargs
+  // (`P.within('a','b')`) and a single collection (`P.within(['a','b'])` / `P.within($list)`), and a
+  // single collection stays ONE operand — `extractArgs` already produced it as a collection `Arg`
+  // (`.members` for a literal `[…]`, a raw array `value` + `.name` for a bound list-PARAM). HOW that
+  // collection lowers is a per-SPINE decision, not a translation fact: the RelIR predicate spreads a
+  // literal to an inline IN-list and crosses a PARAMETER as ONE `jsonb(?)` bind exploded by `json_each`
+  // (the parameter stays a bind, its data never enters the statement text); legacy spreads to member
+  // operands. Each consumer calls `collectionMembers`; varargs pass straight through.
+  return { op: m![1], operands: extractArgs(node, params) };
 }
+
+/** A set/range collection operand's members as `Arg`s — its `.members` for a literal `[…]`, or its raw
+ *  array `value` mapped to TYPED nameless `Arg`s for a bound list-PARAM (`within($list)`). The per-spine
+ *  predicate consumers (RelIR `predicateExpr`, legacy `predicateSql`) call this to SPREAD a
+ *  within/without/between/inside collection into member operands; `parsePredicate` stays faithful so the
+ *  spread is the consumer's choice, not a front-end lowering. */
+export const collectionMembers = (a: Arg): Arg[] =>
+  a.members ? [...a.members]
+    : (a.value as any[]).map((v, i) =>
+        arg(v, a.type != null && typeof a.type === 'object' && 'items' in a.type
+          ? ((a.type as { items: readonly (TypeNode | null)[] }).items[i] ?? null) : null));
 
 function unquote(s: string): string {
   const body = s.slice(1, -1);

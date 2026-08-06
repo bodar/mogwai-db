@@ -1,4 +1,4 @@
-import { flattenListArgs, gtypeName, isNested, arg, type Pred } from '../../gremlin/frontend.ts';
+import { flattenListArgs, gtypeName, isNested, arg, collectionMembers, type Pred } from '../../gremlin/frontend.ts';
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from '../../sql/kernel/q.ts';
 import type { FastPath } from '../options/fast-paths.ts';
 import { normalizeTypeName, STORAGE_CLASS, BigDecimal, Duration, coerceBindValue } from '../../gremlin/types.ts';
@@ -187,6 +187,10 @@ const jsonBindableSet = (xs: readonly any[]): boolean =>
  *  its size must stop being the statement's bind count. Deliberately NOT a runtime-divergent
  *  branch: the same threshold applies on both runtimes, so what CI compiles is what a DO runs. */
 const SET_BIND_LIMIT = Math.floor(CF_MAX_BINDS / 4);
+
+/** The predicate ops that accept a single-collection form (`within([a,b])`/`between([lo,hi])`) and so
+ *  need `collectionMembers` spread here — the faithful front-end leaves the collection as one operand. */
+const SET_RANGE_OPS = new Set(['within', 'without', 'between', 'inside']);
 
 /** Optional ` AND e.label IN (…)` appended to a movement JOIN's ON, as a node
  *  (empty text when no labels). Replaces ~7 hand-rolled `?`-splice + bind-push copies. */
@@ -418,7 +422,15 @@ function operandSql(v: any): Expression {
 export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = TYPE_UNKNOWN): Expression {
   if (pred === undefined) return q`${expr} is not null`;
   if (pred === null || typeof pred !== 'object' || !('op' in pred)) return q`${expr} = ${operandSql(pred)}`;
-  const { op, operands } = pred as Pred; const vals = operands.map((o) => o.value);
+  const op = (pred as Pred).op;
+  // A single collection operand (`within([a,b])`/`within($list)`) spreads to member operands HERE — the
+  // faithful front-end no longer unwraps it (each spine spreads for itself). Reproduces the former
+  // front-end unwrap exactly (`.members` for a literal, typed nameless args for a bound list-PARAM), so
+  // legacy semantics are byte-identical to before.
+  const rawOps = (pred as Pred).operands;
+  const operands = SET_RANGE_OPS.has(op) && rawOps.length === 1 && Array.isArray(rawOps[0]!.value)
+    ? collectionMembers(rawOps[0]!) : rawOps;
+  const vals = operands.map((o) => o.value);
   if (op === 'not') return q`NOT (${predicateSql(expr, vals[0], typeCtx)})`;
   // Infix-composed predicates — `P.gt(20).and(P.lt(30))`, `TextP.startingWith('m').or(…)`. Both
   // operands test the SAME expression, so this is a plain boolean combination of the two rendered

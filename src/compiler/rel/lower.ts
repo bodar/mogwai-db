@@ -436,7 +436,7 @@ function hasPropertyClause(key: string, val: unknown, subject: Subject, elem: El
   // vtype-aware key — the whole reason `predicateExpr` takes `compare` as a parameter. A bare value's
   // declared type and param name ride through so it inlines (a literal) or binds (a `$x`).
   const matches = val === undefined ? undefined
-    : predicateExpr(col(props.id, 'value'), val, { kind: 'perRow', vtype: col(props.id, 'vtype') }, valType, valParam);
+    : predicateExpr(col(props.id, 'value'), val, { kind: 'perRow', vtype: col(props.id, 'vtype') }, valType, valParam, fresh);
   if (val !== undefined && !matches) return null;
 
   const matching = make.filter({
@@ -471,7 +471,7 @@ function hasTokenClause(token: string, val: unknown, subject: Subject, elem: Ele
     const cols = elem === 'edge' ? EDGE_COLS : NODE_COLS;
     const scan = make.scan({ id: fresh('ti'), table: elem === 'edge' ? 'edges' : 'nodes', alias: fresh('rti'), channels: [], type: typeOf(...cols) });
     const external: Expr = { kind: 'call', fn: 'COALESCE', args: [col(scan.id, 'uid'), col(scan.id, 'id')] };
-    const matches = predicateExpr(external, val, SUBJECT_UNKNOWN, valType, valParam);
+    const matches = predicateExpr(external, val, SUBJECT_UNKNOWN, valType, valParam, fresh);
     if (!matches) return null;
     const matching = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: and(eq(col(scan.id, 'id'), subject.id), matches) });
     const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
@@ -479,7 +479,7 @@ function hasTokenClause(token: string, val: unknown, subject: Subject, elem: Ele
   }
 
   const labels = make.scan({ id: fresh('lb'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
-  const matches = predicateExpr(col(labels.id, 'name'), val, SUBJECT_UNKNOWN, valType, valParam);
+  const matches = predicateExpr(col(labels.id, 'name'), val, SUBJECT_UNKNOWN, valType, valParam, fresh);
   if (!matches) return null;
   if (elem === 'edge') {
     // An edge's label is a COLUMN, so the join is against whichever expression carries it — the scan's
@@ -1424,7 +1424,7 @@ function scalarTail(
           ? { ...tail, framing: { ...tail.framing, set: true } }
           : tail;
       }
-      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), step.args[0]?.type ?? null, step.args[0]?.name ?? null);
+      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh);
       if (!pred) return null;
       rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
       continue;

@@ -16,14 +16,18 @@ import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { executeQuery } from '../support/executor.ts';
+import { exec } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
 
 const store = new GraphStore(new BunSqlite(':memory:'));
 /** 'rel' iff the traversal lowers on the RelIR spine rather than declining to legacy. */
 const onRel = (g: string) => { const p = compile(g, {}, { spine: 'rel' }); return p.kind === 'read' ? p.spine : 'legacy'; };
+// FORCE the RelIR spine for the answer: this pins RelIR's CORRECT result, and legacy's wrong lexical
+// answer is documented in the header, not asserted — so the file is `test:legacy-spine`-safe (ambient
+// `executeQuery` would run these on legacy under MOGWAI_RELIR=0 and hit the very bug it documents).
+const relExec = exec(store, undefined, undefined, 'rel');
 const vals = async (g: string) =>
-  (await decodeAll(executeQuery(store, g, {}))).map((x: any) => x?.constructor ? `${x.constructor.name}:${x.toString()}` : String(x));
+  (await decodeAll(relExec.buffers(g, {}, {}))).map((x: any) => x?.constructor ? `${x.constructor.name}:${x.toString()}` : String(x));
 
 describe('inject() exact-tail ordering — numeric on rel, fixing legacy lexical compare', () => {
   test('BigDecimal subject casts to REAL: gt/lt are numeric, not lexical', async () => {

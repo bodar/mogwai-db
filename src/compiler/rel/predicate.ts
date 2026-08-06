@@ -1,7 +1,9 @@
 import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
+import * as make from '../../rel/factory.ts';
+import { meta, typeOf, type Minter } from './build.ts';
 import { CF_MAX_BINDS } from '../../cf-limits.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
-import { gtypeName, arg, type Arg } from '../../gremlin/frontend.ts';
+import { gtypeName, arg, collectionMembers, type Arg } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, normalizeTypeName, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
 import { constLit } from './const.ts';
 
@@ -299,9 +301,21 @@ const KNOWN_NON_VALUE = new Set(['vertex', 'edge', 'vertexproperty', 'vproperty'
  * The caller supplies it because the caller is the only one that knows where the `vtype` column lives
  * — the same reason `Col` names a relation.
  */
+/** A collection PARAMETER as an IN-set: `subject IN (SELECT wv FROM json_each(jsonb(?)))`. The whole
+ *  array crosses as ONE `jsonb(?)` bind exploded by `json_each` (root `CLAUDE.md`'s data-sized-set rule),
+ *  so the parameter stays a bind of any size and the statement text never becomes a function of its data.
+ *  The bind is a PARAMETER (`param`, named), so it reuses the repeated-parameter dedup like any other. */
+const jsonEachInSet = (subject: Expr, value: readonly unknown[], name: string, fresh: Minter, negated: boolean): Expr => ({
+  kind: 'in-query', negated, expr: subject,
+  plan: make.explode({
+    id: fresh('wset'), channels: [], expr: { kind: 'call', fn: 'jsonb', args: [param(JSON.stringify(value), name)] },
+    as: { value: 'wv' }, type: typeOf(meta('wv', 'any', true)),
+  }),
+});
+
 export function predicateExpr(
   subject: Expr, pred: unknown, type: SubjectType = SUBJECT_UNKNOWN,
-  opType: TypeNode | null = null, opParam: string | null = null,
+  opType: TypeNode | null = null, opParam: string | null = null, fresh?: Minter,
 ): Expr | null {
   // `has(key)` with no value: presence, not comparison.
   if (pred === undefined) return binary('is not', subject, compilerNull());
@@ -316,7 +330,7 @@ export function predicateExpr(
   // Each operand is an `Arg`, so its own value + type + parameter name travel together — a `P.gt($x)`
   // / `within($x, $y)` operand binds and a parsed literal inlines, wherever it sits, with no separate
   // parallel-name lookup.
-  const recurse = (o: Arg) => predicateExpr(subject, o.value, type);
+  const recurse = (o: Arg) => predicateExpr(subject, o.value, type, null, null, fresh);
   const both = (build: (left: Expr, right: Expr) => Expr): Expr | null => {
     const [left, right] = [recurse(operands[0]), recurse(operands[1])];
     return left && right ? build(left, right) : null;
@@ -343,24 +357,37 @@ export function predicateExpr(
   }
 
   if (op === 'within' || op === 'without') {
+    // A single collection operand — the faithful front-end leaves it whole. A bound list-PARAMETER
+    // crosses as ONE `jsonb(?)` bind exploded by `json_each` (the parameter stays a bind of any size and
+    // its data never enters the statement text); a LITERAL spreads to its members, each inlining or
+    // binding by its own name. Varargs are already member operands.
+    const coll = operands.length === 1 && Array.isArray(operands[0].value) ? operands[0] : null;
+    if (coll && coll.name != null && !coll.members) {
+      if (!fresh) return null;   // no relation minter reached this caller — decline (fail closed)
+      return jsonEachInSet(subject, coll.value as readonly unknown[], coll.name, fresh, op === 'without');
+    }
+    const memberArgs = coll ? collectionMembers(coll) : operands;
     // SQLite rejects an empty `IN ()`, so the degenerate sets fold to their truth value: within
     // nothing is never, without nothing is always.
-    if (!operands.length) return op === 'within' ? CONSTANT.false : CONSTANT.true;
-    if (operands.length > SET_BIND_LIMIT) return null;
-    const members = operands.map((o) => operand(o.value, o.type, o.name));
+    if (!memberArgs.length) return op === 'within' ? CONSTANT.false : CONSTANT.true;
+    if (memberArgs.length > SET_BIND_LIMIT) return null;   // a big LITERAL set still declines (unchanged)
+    const members = memberArgs.map((o) => operand(o.value, o.type, o.name));
     if (members.some((m) => !m)) return null;
     const inList: Expr = { kind: 'in-list', expr: subject, values: members as Expr[] };
     return op === 'within' ? inList : negated(inList);
   }
 
   // between = [lo, hi) — inclusive low; inside = (lo, hi) — exclusive low. Both bounds and the
-  // subject go through the ordering key for the same reason a range comparison does.
+  // subject go through the ordering key for the same reason a range comparison does. A single
+  // collection bound (`between([lo,hi])`) spreads to its two members first.
   if (op === 'between' || op === 'inside') {
-    const [low, high] = [operand(operands[0].value, operands[0].type, operands[0].name), operand(operands[1].value, operands[1].type, operands[1].name)];
+    const bounds = operands.length === 1 && Array.isArray(operands[0].value) ? collectionMembers(operands[0]) : operands;
+    if (bounds.length !== 2) return null;
+    const [low, high] = [operand(bounds[0].value, bounds[0].type, bounds[0].name), operand(bounds[1].value, bounds[1].type, bounds[1].name)];
     if (!low || !high) return null;
     const [loCmp, hiCmp] = [
-      ordered(op === 'inside' ? '>' : '>=', subject, low, operands[0].value, type),
-      ordered('<', subject, high, operands[1].value, type),
+      ordered(op === 'inside' ? '>' : '>=', subject, low, bounds[0].value, type),
+      ordered('<', subject, high, bounds[1].value, type),
     ];
     return loCmp && hiCmp ? binary('and', loCmp, hiCmp) : null;
   }
