@@ -48,31 +48,31 @@ export const values = (xs: readonly any[]): Expression => list(xs.map(value), ',
 /** Parenthesise an expression: `(<e>)`. */
 export const paren = (e: Expression): Expression => q`(${e})`;
 
-/** A bound value that CARRIES its wire-parameter name (TinkerPop's `GValue.name`). Repeated uses of
- *  one `$x` reach the render boundary as several `ParamValue`s sharing a name; `renderStatement`
- *  collapses them to ONE numbered placeholder + ONE bind, because the DO's 100-bind budget is for
- *  PARAMETERS, not their uses (docs/2026-08-05-parameters-are-the-only-binds.md). A plain `value()`
- *  has no name and never dedups — a mechanical/oversized bind is its own slot. */
-export class ParamValue extends Value {
-  constructor(value: unknown, readonly paramName: string) { super(value); }
+/** A bound value carrying a REUSE KEY: two `KeyedValue`s sharing a key render as ONE placeholder + ONE
+ *  bind, so a value used at many sites is bound once. The kernel does not interpret the key — the
+ *  caller supplies it (the compiler passes a wire parameter's name, `GValue.name`, so N uses of one
+ *  `$x` cost one of the DO's 100-bind budget — docs/2026-08-05-parameters-are-the-only-binds.md). A
+ *  plain `value()` has no key and never dedups: a mechanical/oversized bind is always its own slot. */
+export class KeyedValue extends Value {
+  constructor(value: unknown, readonly key: string) { super(value); }
 }
 
-/** A bound value tagged with its wire-parameter name, so repeated uses of one `$x` share a bind.
+/** A bound value tagged with a reuse key, so occurrences sharing the key collapse to one bind.
  *  `undefined` → null, matching lazyrecords' `value()`. */
-export const paramValue = (v: unknown, paramName: string): Expression => new ParamValue(v === undefined ? null : v, paramName);
+export const keyedValue = (v: unknown, key: string): Expression => new KeyedValue(v === undefined ? null : v, key);
 
-/** Does any wire parameter appear more than once in this tree? Only then is it worth switching the
+/** Does any reuse key appear more than once in this tree? Only then is it worth switching the
  *  statement to numbered placeholders; the common no-repeat case keeps the anonymous-`?` render
  *  byte-for-byte, so no existing SQL (or snapshot) moves. Walks via `generate` (the same in-order
  *  visit the renderer uses) rather than `for…of`, because lazyrecords' generated `Sql` d.ts declares
  *  `Iterable` without emitting the `[Symbol.iterator]` member — `generate` is the exposed walk. */
-function hasRepeatedParam(tree: Sql): boolean {
+function hasRepeatedKey(tree: Sql): boolean {
   const seen = new Set<string>();
   let repeated = false;
   tree.generate((e) => {
-    if (e instanceof ParamValue) {
-      if (seen.has(e.paramName)) repeated = true;
-      else seen.add(e.paramName);
+    if (e instanceof KeyedValue) {
+      if (seen.has(e.key)) repeated = true;
+      else seen.add(e.key);
     }
     return '';
   });
@@ -80,18 +80,18 @@ function hasRepeatedParam(tree: Sql): boolean {
 }
 
 /**
- * Render a finished `Sql` tree to `{sql, binds}`, DEDUPING repeated wire parameters.
+ * Render a finished `Sql` tree to `{sql, binds}`, DEDUPING values that share a reuse key.
  *
- * When some `$x` appears more than once, the whole statement switches to NUMBERED placeholders
- * (`?1, ?2, …`): the first appearance of a distinct parameter name — and each nameless value by
- * position — takes the next ordinal and contributes one bind; a repeat of that name re-emits its
- * ordinal and contributes NONE. SQLite binds exactly `sqlite3_bind_parameter_count` values, which is
- * that deduped count, so N uses of one `$x` cost ONE of the 100 (verified on bun:sqlite and on a
+ * When some key appears more than once, the whole statement switches to NUMBERED placeholders
+ * (`?1, ?2, …`): the first appearance of a distinct key — and each keyless value by position — takes
+ * the next ordinal and contributes one bind; a repeat of that key re-emits its ordinal and contributes
+ * NONE. SQLite binds exactly `sqlite3_bind_parameter_count` values, which is that deduped count, so N
+ * uses of one keyed value (a `$x` parameter) cost ONE of the 100 (verified on bun:sqlite and on a
  * Durable Object, `test/cf-probe`). With no repeat we defer to lazyrecords' anonymous-`?` statement
  * unchanged, so the overwhelmingly common case is byte-identical to before.
  */
 function renderStatement(tree: Sql): { sql: string; binds: any[] } {
-  if (!hasRepeatedParam(tree)) {
+  if (!hasRepeatedKey(tree)) {
     const { text, args } = statement(tree);
     return { sql: text, binds: args };
   }
@@ -102,10 +102,10 @@ function renderStatement(tree: Sql): { sql: string; binds: any[] } {
     // Our kernel emits identifiers as `raw(quote(...))` Text, never lazyrecords `Identifier` nodes, so
     // this arm is a defensive fallback; `quote` is the kernel's own identifier authority all the same.
     if (e instanceof Identifier) return quote(e.identifier);
-    if (e instanceof ParamValue) {
-      const seen = ordinals.get(e.paramName);
+    if (e instanceof KeyedValue) {
+      const seen = ordinals.get(e.key);
       if (seen !== undefined) return `?${seen}`;
-      ordinals.set(e.paramName, ++next);
+      ordinals.set(e.key, ++next);
       binds.push(e.value);
       return `?${next}`;
     }

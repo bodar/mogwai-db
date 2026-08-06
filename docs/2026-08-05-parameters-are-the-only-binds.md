@@ -372,7 +372,8 @@ the instrument and the platform agree after dedup.
 1. The name rides on the bind: `param(value, name, type?)` (`src/rel/expr.ts`), fed from the
    `paramName` `constLit`/`sliceBound` already held (`compiler/rel/const.ts`, `lower.ts`,
    `predicate.ts`). A parameter lit now knows its name, mirroring `Arg`/`GValue`.
-2. A keyed kernel node (`ParamValue extends Value`, carrying the name) and a dedup-aware render at OUR
+2. A keyed kernel node (`KeyedValue extends Value`, carrying a reuse KEY the compiler fills with the
+   parameter name — the kernel stays generic SQL machinery, unaware of "parameters") and a dedup-aware render at OUR
    boundary (`src/sql/kernel/q.ts` `renderStatement`, routed from both `render()` and `Query.render()`;
    the vendored `ordinalPlaceholder` is untouched). When some name repeats, the whole statement
    switches to numbered `?N`: the first appearance of a distinct name — and each nameless mechanical/
