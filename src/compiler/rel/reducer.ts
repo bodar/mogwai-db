@@ -1,4 +1,4 @@
-import { compilerNull, compilerText, type AggFn, type Expr } from '../../rel/expr.ts';
+import { compilerInt, compilerNull, compilerText, type AggFn, type Expr } from '../../rel/expr.ts';
 import { REDUCER_CLASSES } from '../../gremlin/types.ts';
 
 /**
@@ -37,6 +37,32 @@ export const isReducer = (name: string): name is Reducer => REL_REDUCERS.has(nam
 
 const agg = (fn: AggFn, arg: Expr): Expr => ({ kind: 'agg', fn, args: [arg] });
 const call = (fn: string, arg: Expr): Expr => ({ kind: 'call', fn, args: [arg] });
+
+const SAFE_INT = 9007199254740991; // 2^53 - 1: the widest a JS number (thus a plain SQLite read) holds exactly.
+const LONG_SUM_CLASSES: ReadonlySet<string> = new Set(['long', 'bigint']);
+export const isLongSumClass = (vt: string): vt is 'long' | 'bigint' => LONG_SUM_CLASSES.has(vt);
+
+/**
+ * The `sum` result's VALUE and its Gremlin-class `vt`, for a `long`/`bigint` input — the classes whose
+ * sum the eligibility guard used to get WRONG: a value carried as decimal TEXT past 2^53 has
+ * `typeof = 'text'` ∉ arithmetic, so it was EXCLUDED (`inject(9007199254740993L, 1L).sum()` answered
+ * `1`). Casting through `storedCompareOn` at the call site admits it exactly; here the result stays its
+ * own class (SQLite's int64 caps it — a genuine >2^63 overflow is a `NumberHelper` RAISE not built yet)
+ * and rides as decimal TEXT once past 2^53 so the exact int64 survives the JS-number read. `frameValue`'s
+ * `long`/`bigint` arm reads a number OR a decimal string through `BigInt`, so the two forms frame the same.
+ *
+ * The narrower/wider INTEGER classes (`byte`+`1` → `short` promotion, `Sum.feature`'s `d[128].s`) are a
+ * separate increment: they are not tagged at the `inject` source today, and tagging them is a both-spine
+ * framing-vocabulary change with its own census reap (see §13g·4 in the build plan).
+ */
+export function sumTower(sum: Expr, inputClass: 'long' | 'bigint'): { value: Expr; type: Expr } {
+  const value: Expr = {
+    kind: 'case',
+    whens: [[{ kind: 'binary', op: '>', left: call('abs', sum), right: compilerInt(SAFE_INT) }, { kind: 'cast', arg: sum, to: 'text' }]],
+    else: sum,
+  };
+  return { value, type: compilerText(inputClass) };
+}
 
 /** The eligibility guard: the value where its storage class qualifies, NULL otherwise. */
 const eligible = (value: Expr, reducer: Reducer): Expr => ({

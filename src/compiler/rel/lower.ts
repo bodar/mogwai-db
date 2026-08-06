@@ -30,7 +30,7 @@ import { bindAliases, selectOne, type AliasRead } from './alias.ts';
 import type { AliasMap } from '../steps/context/context.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, type ByChild, type ByHost, type Modulation } from './modulator.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
-import { isReducer, reducerAggregate } from './reducer.ts';
+import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddV, elementDrop, elementMergeV, elementProperty, propertyWrites, type Effects, type SubReads } from './write.ts';
 import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList, type ListCtx } from './list.ts';
 import { elementHost, groupBarrier, mapPayload } from './map.ts';
@@ -1524,6 +1524,26 @@ function scalarTail(
         continue;
       }
       const bulk = rel.channels.find((channel) => channel.role === 'bulk');
+      const staticSumVt = out.kind === 'scalar' ? staticTypeOf(out.type) : undefined;
+      if (step.name === 'sum' && staticSumVt && isLongSumClass(staticSumVt)) {
+        // §13g·5 rows 1–2. A `sum` over a known `long`/`bigint` class must INCLUDE a value carried as
+        // decimal TEXT past 2^53, which the storage-class eligibility guard silently EXCLUDED
+        // (`typeof = 'text'` ∉ arithmetic) — answering `1` for `inject(9007199254740993L, 1L).sum()`.
+        // Casting every value through `storedCompareOn` for the KNOWN class admits the text-carried one
+        // exactly, and `sumTower` keeps the class and rides the >2^53 result as exact TEXT. Only a STATIC
+        // `long`/`bigint` takes this path; every other stream keeps the storage-class form below, which is
+        // correct for the corpus's `values().sum()`/bare-int cases. (The byte/short/int PROMOTION tower —
+        // `Sum.feature`'s `d[128].s` — needs those classes tagged at the source, a separate increment.)
+        const casted = storedCompareOn(compilerText(staticSumVt))(col(rel.id, 'v'));
+        const weighted = bulk ? { kind: 'binary', op: '*', left: casted, right: col(rel.id, bulk.col) } as Expr : casted;
+        const tower = sumTower({ kind: 'agg', fn: 'sum', args: [weighted] }, staticSumVt);
+        rel = make.aggregate({
+          id: fresh('red'), input: rel, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
+          groupBy: [], aggs: [['v', tower.value], ['vt', tower.type]],
+        });
+        out = { kind: 'scalar', type: UNKNOWN, result: 'number' };
+        continue;
+      }
       const reduced = reducerAggregate(col(rel.id, 'v'), step.name, bulk && col(rel.id, bulk.col));
       rel = make.aggregate({
         id: fresh('red'), input: rel, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),

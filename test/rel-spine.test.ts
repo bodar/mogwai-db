@@ -695,6 +695,19 @@ describe('the RelIR spine', () => {
     expect(val("g.V().hasLabel('nope').values('age').min()")).toEqual([]);
   });
 
+  test('sum over a long carried as decimal TEXT includes it exactly (§13g·5 rows 1-2, rel ahead)', () => {
+    // A `long` past 2^53 rides as decimal TEXT (`typeof = 'text'`), so the storage-class eligibility
+    // guard EXCLUDED it from arithmetic — `inject(9007199254740993L, 1L).sum()` answered `1`. The tower
+    // casts through `storedCompareOn` for the known `long` class (admitting it) and rides the >2^53
+    // result as exact TEXT tagged `long`, so it frames as a `long` rather than losing the low bits.
+    const val = (q: string, spine: 'rel' | 'legacy' = 'rel') => { const p = read(q, { spine }); return store.query(p.sql, p.binds); };
+    expect(val('g.inject(9007199254740993L, 1L).sum()')).toEqual([{ v: '9007199254740994', vt: 'long' }]);
+    // RelIR is ahead: legacy still excludes the TEXT-carried long and sums only the small one.
+    expect(val('g.inject(9007199254740993L, 1L).sum()', 'legacy')[0].v).toBe(1);
+    // A small long sum stays exact and keeps its class (value fits a JS number, framed as a long).
+    expect(val('g.inject(10L, 20L).sum()')).toEqual([{ v: 30, vt: 'long' }]);
+  });
+
   test('a cast over a LITERAL must RAISE, so RelIR declines the constant-folded transforms', () => {
     // The one place a differential is blind by construction: these six traversals must produce an
     // ERROR, and comparing rows against legacy cannot see a missing throw. TinkerPop requires the exact
