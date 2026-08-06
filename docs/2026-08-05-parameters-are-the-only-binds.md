@@ -1,9 +1,17 @@
 # Parameters are the only binds — a value that changed layers, not an optimisation
 
-**Status: DESIGN / PROPOSAL.** Supersedes the framing of the constant-SQL-hygiene campaign
-(`docs/archive/2026-08-05-compiler-constant-sql-hygiene-plan.md`) and reverses a locked decision
-(`docs/2026-08-01-relir-build-plan.md` §3.4, "no `Param` node"). Written to be reacted to whole,
-not yet actioned.
+**Status: COMPLETE.** The thesis landed (Phases A, B, B3, nested params, C1-predicate, C1-inject(Duration),
+repeated-parameter dedup — see the LANDED sections below) and, this round (2026-08-06), the framing itself
+resolved: **"oversized" was never a real category.** A held value of ANY size or shape inlines as a typed
+SQL literal — measured byte-identical for a decimal-TEXT literal and for a `jsonb('<text>')` collection —
+while a wire parameter is the only free-standing bind, and *one* bind whatever its size. So the three-way
+split collapsed to two (parameter vs constant), and the leak the plan set out to close is closed: **the
+100-bind cap is now exactly 100 parameters, with no mystery overhead.** Supersedes the constant-SQL-hygiene
+campaign (`docs/archive/2026-08-05-compiler-constant-sql-hygiene-plan.md`) and reverses a locked decision
+(`docs/2026-08-01-relir-build-plan.md` §3.4, "no `Param` node"). Nothing in the plan remains open; two
+exotic *coverage* residuals (a decimal/bigint CONSTANT in a static ordering comparison; a param-list
+`within`) are a `ScalarType` enrichment and a coverage item, not thesis work, and live in
+`docs/outstanding-work.md`.
 
 ## The thesis
 
@@ -40,29 +48,39 @@ Two objections to pre-empt, because both were raised while reaching this design 
 ## The budget leak this fixes (the user-visible defect)
 
 The DO caps a statement at **100 bound parameters**. In the ideal world that is a clean platform
-fact a user can reason about: *you may use up to 100 parameters.* Today it is not, because the bind
-list is polluted by binds the user never asked for — a parsed literal, an `as()` label, a storedValue
-class list, an arm ordinal. So whether a user hits the wall **depends on which unrelated features
-their query happens to use**, a coupling they cannot see or predict. Making parameters the only
-"free-standing" binds restores the clean fact: the 100 budget is 100 *parameters*, minus only the two
-named mechanical exceptions, which we then work to remove.
+fact a user can reason about: *you may use up to 100 parameters.* Before this work it was not, because
+the bind list was polluted by binds the user never asked for — a parsed literal, an `as()` label, a
+storedValue class list, an arm ordinal, and (the leak the scalar-only framing missed) a held collection
+or decimal. So whether a user hit the wall **depended on which unrelated features their query happened
+to use**, a coupling they could not see or predict. Making parameters the only free-standing binds — with
+every held value of any size or shape inlined as a typed literal — restores the clean fact with **no
+exceptions left**: the 100 budget is 100 *parameters*, full stop.
 
-## The three categories (replacing the two-way `lit`/`compiler*` split)
+## Two categories — where the value entered decides (the "oversized" row dissolved)
 
-The RelIR `Lit.source` union (`src/rel/expr.ts:9–12`) is where the current conflation lives:
-`source: 'bound'` means *both* "user parameter" *and* "query/store data that needed a bind." Split it.
+The RelIR `Lit.source` union (`src/rel/expr.ts`) is where the old conflation lived: `source: 'bound'`
+meant *both* "user parameter" *and* "held data that needed a bind." The split that resolved it is **not**
+three-way. The original proposal carried a third row — **Oversized** — for "a value that cannot be a
+literal: a collection `{t,v}` tree, a big-decimal / duration / >2⁵³ tail." Research (four agents, measured
+on `bun:sqlite` and against the vendored references) refuted the premise: both ARE spellable as typed
+literals, byte-for-byte identical to their bound forms. So the rule is two-way:
+
+> **Where did the value enter?** A wire **parameter** → **one** bind of the right shape (`?`, `jsonb(?)`,
+> or one decimal-TEXT bind). Anything the compiler **holds at compile time** → a **typed SQL literal** of
+> the right shape (a scalar literal, `jsonb('<text>')` for a collection, a decimal-TEXT literal for a
+> decimal). **Size never decides — provenance does.**
 
 | Category | What it is | Renders as | Budget |
 |---|---|---|---|
-| **Parameter** | a wire GValue (`$x` in the binding map) | a bind (`?`) | counts against 100 — *this is what the 100 is for* |
-| **Constant** | a parsed literal, an ordinal, a class name, a JSON path, an `as()` label — any value the compiler holds at compile time | a **typed** escaped SQL literal | zero |
-| **Oversized** | a value that cannot be a literal: a collection `{t,v}` tree, a big-decimal / duration / >2⁵³ tail | a bind (`jsonb(?)` / decimal-TEXT) | counts today — *the leak we want to close* |
+| **Parameter** | a wire GValue (`$x` in the binding map) | one bind: `?` / `jsonb(?)` / decimal-TEXT `?` | counts against 100 — *this is what the 100 is for* |
+| **Constant** | any value the compiler holds at compile time — a parsed scalar/collection/decimal literal, an ordinal, a class name, a JSON path, an `as()` label | a **typed** SQL literal: scalar literal / `jsonb('<text>')` / decimal-TEXT literal | zero |
 
-"Constant" is decided by **where the value entered**, exactly as the archived plan already said ("the
-source is the rule, not the apparent value"), with one correction: the source it keys on is not
-"compiler vs query" but **"parameter vs everything the compiler holds."** A parsed literal is a
-constant even though it came from the query string, because by compile time the compiler holds it and
-knows its type.
+"Constant" is decided by **where the value entered** — "parameter vs everything the compiler holds" — and
+its *size or shape is irrelevant*: a 200-element list literal and a `30` are both constants, and both
+inline. Inlining is in fact MORE type-faithful than binding: a typed literal's storage class follows its
+syntactic form, which Bun and the DO parse identically, whereas a native integer binds INTEGER on Bun and
+REAL on the DO. The measured evidence and the TinkerPop `GValue` / Calcite `RexLiteral` prior art are in
+the LANDED sections; the two objections to inlining (statement cache, "provenance tracking") are next.
 
 ## The type is already known — stop throwing it away
 
@@ -451,19 +469,23 @@ included — to unwrap a new wrapper). The encoding chosen dissolves both worrie
   `Arg.type`, and a member now carries its own captured type on its `Arg` (no more `type.items[i]`
   indexing in the predicate literal path; the bound-list-param fallback still reads `itemTypeAt`).
 
-**What remains is coverage-only / exotic / an open design question — each needs a decision before it is
-worth the risk on the shared spine:**
-- **C1-constant + TEXT exact-tail static ORDERING** both want the same enrichment: `SubjectType` (and
-  behind it `ScalarType`) carrying the subject's STORAGE CLASS, so `ordered`'s static arm can cast a
-  TEXT-stored `bigdecimal`/`duration` subject instead of declining. Cross-layer; exotic trigger
-  (`inject(9.99m).is(P.gt(…))`, `constant(9.99m).is(…)`).
-- **C2·b — the PARAM-LIST `within`** needs `parsePredicate` to preserve the single-collection-arg
-  distinction plus a `json_each` in-query for a collection PARAMETER (one `jsonb(?)` bind exploded by
-  `json_each`; a `Minter` in `predicateExpr`). Substantial; coverage-only (legacy JSON-binds the big
-  set correctly today).
-- **The RelIR pass pipeline** (`docs/outstanding-work.md` item 37) is an OPEN DESIGN QUESTION for
-  `prune`/`fuse` — whether the three passes (`fuse`/`prune`/`name`) become one ordered pipeline object,
-  and whether `fuse` is wanted at all, is undecided.
+**The thesis is complete — nothing in this plan remains open.** The two capability residuals below are
+NOT "parameters are the only binds" work (that is done): both fail closed today — a correct decline, never
+a wrong answer — and both now live in `docs/outstanding-work.md` so this plan can close:
+- **A decimal/bigint/duration CONSTANT in a static ORDERING comparison** (`inject(9.99m).is(P.gt(…))`,
+  `constant(9.99m).is(…)`) still declines. The fix is a `ScalarType` STORAGE-CLASS enrichment
+  (governed by `docs/2026-07-28-shape-vocabulary-architecture.md` +
+  `docs/2026-07-28-scalartype-refactoring-pattern.md`): `STATIC` must carry whether a scalar is TEXT-stored,
+  so `ordered`'s static arm can cast the SUBJECT — because `STATIC('bigdecimal')` today is ambiguous between
+  our inlined decimal-TEXT and a native `asNumber(BIGDECIMAL)` REAL, and casting blindly would break the
+  native case. Cross-layer (the carrier is `ScalarType` in `sql/kernel/render.ts`), high blast radius,
+  exotic trigger — a vocabulary change to make deliberately, not a bind decision.
+- **The PARAM-LIST `within`** (a collection PARAMETER as an IN-set) is coverage-only — one `jsonb(?)` bind
+  exploded by `json_each`, needing `parsePredicate` to keep the single-collection-arg distinction and a
+  `Minter` in `predicateExpr`; legacy answers it correctly today.
+
+The RelIR pass pipeline (`prune`/`fuse` ordering) is a separate architectural question already tracked as
+`docs/outstanding-work.md` item 37 — not thesis work.
 
 This doc is the contract. The decisions that must NOT be
 relitigated by a fresh context (they were each reached against a plausible opposite and the opposite is
@@ -471,9 +493,18 @@ wrong):
 - A bind serves a **user parameter**; the statement cache is the user's payoff, not ours to farm.
 - A **parsed literal is a constant** — inline it as a typed SQL literal; we know the type (`argTypes`).
 - The **100-bind cap is a parameter budget**; polluting it with compiler binds is the defect.
-- `oversized` (collection / decimal tail) binds are a **mechanical necessity, a separate category**,
-  not evidence that "data must bind."
-- TinkerPop's `GValue` **is** this design; the alignment doc's "buys nothing without a plan cache" is
-  superseded — the payoff is the bind budget + honouring intent, both real without a cache.
+- **"Oversized" is NOT a category** (a proposed third row, refuted by measurement). A held collection or
+  decimal inlines as a typed literal (`jsonb('<text>')` / decimal-TEXT), byte-identical to its bound form.
+  Only a wire parameter binds, and *one* bind whatever its size.
+- **A held value inlines UNCONDITIONALLY — never trade text back for binds** (2026-08-06). The 100-bind and
+  100 KB-text caps are not equivalent budgets; a held value has no claim on the parameter budget, so it
+  spends text. The `land` pass (a >100-value → one-bind conversion) is DELETED: it handled a scenario not
+  in the corpus and converted a 0-bind literal set into a 1-bind one. An over-100-PARAMETER statement fails
+  closed. "Show me the 100 KB / 100-parameter query first."
+- TinkerPop's `GValue` **is** this design — a uniform name→value wrapper with no size/shape/type branch, so
+  a collection and a decimal are the same concept as a scalar. One correction: `GValue` carries no type
+  (`GType` is a separate `typeOf` enum); our per-argument type (`Arg.type`) is our own enrichment. The
+  alignment doc's "buys nothing without a plan cache" is superseded — the payoff is the bind budget +
+  honouring intent + cross-runtime type agreement, all real without a cache.
 - **Legacy is dead** — do not spend effort classifying or fixing `src/compiler/steps/**` or `plan.ts`
   legacy binds.

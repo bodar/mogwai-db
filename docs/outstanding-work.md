@@ -584,6 +584,22 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
 typed `throw` deferrals and prose, so a marker grep finds nothing and proves nothing — read the
 deferral clusters in 5c instead.
 
+- **A decimal/bigint/duration CONSTANT in a static ORDERING comparison declines** —
+  `inject(9.99m).is(P.gt(…))`, `inject(9L).is(…)`, `constant(9.99m).is(…)`. The residual from the
+  parameters-are-the-only-binds thesis (`docs/2026-08-05-parameters-are-the-only-binds.md`, now COMPLETE):
+  a held decimal/bigint tail inlines as decimal-TEXT everywhere EXCEPT a static ordering comparison, where
+  `ordered`'s static arm (`compiler/rel/predicate.ts`) cannot cast the SUBJECT because `STATIC('bigdecimal')`
+  is ambiguous between our inlined decimal-TEXT and a native `asNumber(BIGDECIMAL)` REAL — casting blindly
+  breaks the native case (the `asNumber(BIGDECIMAL).is(P.gt(0))` census witness). The fix is a `ScalarType`
+  STORAGE-CLASS enrichment: `STATIC` carries whether the scalar is TEXT-stored (the carrier is `ScalarType`
+  in `sql/kernel/render.ts`, threaded from `injectSource`/`constant` framing into `SubjectType`), so the arm
+  casts a TEXT subject and leaves a native one alone. This also lets `inject(Duration).is(P.gt(…))` compare
+  instead of declining (`STATIC_ORDERING_DECLINE`). Cross-layer, high blast radius, exotic trigger — a
+  deliberate vocabulary change, governed by
+  [shape-vocabulary-architecture](./2026-07-28-shape-vocabulary-architecture.md) +
+  [scalartype-refactoring-pattern](./2026-07-28-scalartype-refactoring-pattern.md). Fail-closed today
+  (declines to legacy; never a wrong answer). *Low-Med.* Its sibling — a param-list `within` (a collection
+  PARAMETER as one `jsonb(?)` IN-set) — is coverage-only and legacy-correct today.
 - **A `Scope.local` slice over a SCALAR or ELEMENT-tail value still declines rather than answering.**
   The argument decode is one function (`sliceOf`/`isLocalScope`, `ir/step.ts`) and the rendering one
   more (`limitOffset`, `plan/plan.ts`), so a host can no longer read the scope token as a row count — but
