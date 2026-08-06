@@ -355,13 +355,15 @@ documented decision that a `$x` inside a collection literal (`within([$x])`, `in
 part of the **oversized** bucket (correct result, no budget saving), by making each member a tracked
 parameter that BINDS. That is a capability/semantics change (member params start counting against the
 100), so it wants an explicit decision before landing rather than being swept in with the encoding
-tidy. Two independent pieces if taken: (a) `parsePredicate`'s wrapped-list unwrap can already thread
-`itemTypeAt(parsed[0].type, i)` into each member `Arg` (pure type-preservation, safe); (b) tracking a
-member's NAME requires the front-end to stop flattening a collection member's `$x`, which is the
-oversized→N-params reversal. **Predicate operand TYPE is the same shape of deferred enrichment** —
-`Pred.operands[i].type` is populated but `predicate.ts` passes `null` at the render seam; threading it
-makes `P.gt(2.0)` render `2.0`. Both are typed-literal correctness wins, both change SQL, neither is
-the pure unification the first four chunks were.
+tidy. Two independent pieces: (a) the TYPE half — LANDED (`85bf026`). `predicate.ts` now threads each
+operand's `Arg.type` (was `null`) and `parsePredicate` threads a bracketed member's `type.items[i]`,
+so `P.gt(2.0)` and `within([1L, 2L])` members inline as TYPED literals — the thesis's "stop throwing
+the type away", finished for predicate operands. Measured result-invariant (SQLite compares INTEGER
+and REAL alike): census clean, every L2 snapshot unmoved. (b) The NAME half — STILL OPEN, and it is a
+product decision, not a refactor: tracking a collection member's `$x` so it BINDS requires the
+front-end to stop flattening the member, which REVERSES the documented "collection params inline as
+oversized" rule and changes what counts against the 100-parameter budget. Left untouched pending that
+call.
 
 **What remains is coverage-only / exotic / an open design question — each needs a decision before it is
 worth the risk on the shared spine:**
