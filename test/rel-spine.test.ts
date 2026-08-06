@@ -361,18 +361,16 @@ describe('the RelIR spine', () => {
     });
   }
 
-  test('an over-budget literal inject LANDS as one JSON bind and stays on RelIR', () => {
-    // The item-38 wall: 101 literal rows are 101 binds, which a Durable Object refuses at 100 — so
-    // before `land` was wired this DECLINED to legacy, where it hit the same wall in production. The
-    // `land` pass rewrites the over-budget `Values` to ONE JSON bind exploded by `json_each`, so the
-    // set crosses the seam as one value (root CLAUDE.md's bind rule) and the plan is DO-legal on RelIR.
+  test('a large literal inject inlines as 0-bind literals and stays on RelIR', () => {
+    // There is no >100-value conversion. A literal inject spends NO binds — each member inlines as a
+    // typed SQL literal (`constLit`) — so even 101 members is 0 binds and trivially DO-legal on RelIR.
+    // The 100-bind cap is a PARAMETER budget and a held literal is not a parameter (root CLAUDE.md).
     const gremlin = `g.inject(${Array.from({ length: 101 }, (_, i) => i).join(',')})`;
     const plan = read(gremlin, { spine: 'rel' });
     expect(plan.spine).toBe('rel');
-    expect(plan.binds.length).toBeLessThanOrEqual(DO_BIND_CAP);
+    expect(plan.binds).toHaveLength(0);
     expect(cfLimitViolation(plan.sql, plan.binds)).toBeNull();
     expect(store.query(plan.sql, plan.binds).map((row: any) => row.v)).toEqual(Array.from({ length: 101 }, (_, i) => i));
-    // A SMALL inject is under budget, so `land` is a no-op and the members stay inlined (0 binds).
     const small = read('g.inject(1,2,3)', { spine: 'rel' });
     expect(small.binds).toHaveLength(0);
   });

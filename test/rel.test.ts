@@ -6,7 +6,6 @@ import { aggregate as aggregateRel, distinct as distinctRel, explode, filter, jo
 import { emitQuery } from '../src/rel/emit.ts';
 import { planOf } from '../src/rel/plan.ts';
 import { fuse } from '../src/rel/passes/fuse.ts';
-import { land } from '../src/rel/passes/land.ts';
 import { name } from '../src/rel/passes/name.ts';
 import { prune } from '../src/rel/passes/prune.ts';
 import type { Channels } from '../src/channels.ts';
@@ -178,26 +177,6 @@ describe('RelIR', () => {
     const oneCol = [{ name: 'v', type: 'int', nullable: false }] as const;
     const overBudget = valuesRel({ id: relId('many'), rows: Array.from({ length: 101 }, (_, i) => [lit(i, 'int')]), channels, type: { cols: oneCol } });
     expect(() => check(overBudget)).toThrow('101 binds exceeds Durable Objects cap of 100');
-  });
-
-  test('lands an over-budget Values as ONE JSON bind, and declines what it cannot serialise', () => {
-    const oneCol = [{ name: 'v', type: 'int', nullable: false }] as const;
-    const overBudget = valuesRel({ id: relId('many'), rows: Array.from({ length: 101 }, (_, i) => [lit(i, 'int')]), channels, type: { cols: oneCol } });
-    const landed = land(overBudget);
-    const emitted = emitQuery(planOf(landed));
-    expect(emitted.binds).toHaveLength(1);   // the whole payload; the compiler-owned `$[i]` path is SQL syntax
-    expect(emitted.binds.filter((bind) => typeof bind !== 'string')).toEqual([]);
-    const db = new Database(':memory:');
-    expect(db.query(emitted.sql).all(...emitted.binds)).toEqual(Array.from({ length: 101 }, (_, i) => ({ v: i })));
-    db.close();
-
-    // A row holding something other than a Lit has no compile-time JSON, so the pass leaves it and
-    // the budget fails closed rather than the plan silently executing a different query.
-    const computed = valuesRel({ id: relId('computed'), channels, type: { cols: oneCol },
-      rows: Array.from({ length: 102 }, (_, i) => [i ? lit(i, 'int') : { kind: 'call' as const, fn: 'random', args: [] }]),
-    });
-    expect(land(computed)).toBe(computed);
-    expect(() => check(computed)).toThrow('exceeds Durable Objects cap');
   });
 
   test('prunes unobserved project columns while retaining requested output', () => {

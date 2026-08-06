@@ -88,9 +88,9 @@ const isExactTail = (value: unknown): boolean =>
 const exactTailCast = (value: unknown): SqlType | null =>
   value instanceof BigDecimal ? 'real' : (typeof value === 'bigint' || value instanceof Duration) ? 'int' : null;
 
-/** Above this, a set stops being an IN-list and becomes one JSON bind — the DO 100-parameter wall.
- *  RelIR's remedy for that is `passes/land.ts`, which lowers a `Values`, not an `InList`; until an
- *  `InList` lowering exists a big set DECLINES rather than emitting binds it cannot afford. */
+/** Above this, a big set DECLINES rather than emitting binds it cannot afford — the DO 100-parameter
+ *  wall. A big LITERAL set inlines (0 binds) and is unaffected; only a big PARAM/data set is capped.
+ *  There is deliberately no >100-value blob conversion (removed 2026-08-06). */
 const SET_BIND_LIMIT = Math.floor(CF_MAX_BINDS / 4);
 
 /** Storage classes `compareKey` casts to, as `plan.ts` measured them. A fixed compile-time

@@ -276,10 +276,12 @@ sack belong to ONE member, and a grouping would take whichever row SQLite reache
 - **Binds.** Query and store data render as binds; compiler-authored SQL vocabulary may render as a
   safely escaped literal. A plan carries `bindCount()` and **fails closed above the DO cap of 100**
   rather than emitting SQL that only fails in production. The cap is also checked against the RENDERED
-  bind list, because a fused block can spell one data value more than once. An over-budget `Values`
-  or a statement's retained rows land as ONE JSON bind exploded by `json_each` — done by the `land`
-  pass (§4.5b), so `emit` never learns about chunking. This makes the DO cap a *plan property* `check`
-  can prove instead of an idiom `mise run binds` greps for.
+  bind list, because a fused block can spell one data value more than once. A statement's retained rows
+  cross as ONE JSON bind exploded by `json_each` — done by the EMITTER — and a collection parameter is
+  one `jsonb(?)` bind, so a data-sized set is one value, never N binds. A held literal set inlines
+  (0 binds) regardless of size; only an over-100-PARAMETER statement can breach the cap, and it fails
+  closed. This makes the DO cap a *plan property* `check` can prove instead of an idiom `mise run binds`
+  greps for.
 - **Statement text.** DO caps at 100 KB. `unroll` multiplies plan size, so it consults the rendered size
   and declines above a ceiling, falling back to `Recursive` — which then refuses a barrier body as a
   clean deferral. P4 says the corpus max is `times(10)`, so the ceiling exists to make a hand-written
@@ -305,8 +307,7 @@ hand-declarable, so a t-sort would only add a cycle-detection failure mode for n
 DAG stays a DAG (§3.4), structure declared ONCE in `src/rel/walk.ts` with no `default` arm so a new node
 kind is a compile error not a skipped case. Two are **`PlanPass = (Plan) => Plan`**: `name` (mints
 bindings) and `check` (verifies the whole program). A `RelPass` is LIFTED to a `PlanPass` by **`perRel`**
-— map it over `{bindings, result}`, a `Stmt` binding untouched — which is the generic form of today's
-hand-rolled `landPlan`. **`prune` is the one `RelPass` whose lift is NOT a naive map**: each binding's
+— map it over `{bindings, result}`, a `Stmt` binding untouched. **`prune` is the one `RelPass` whose lift is NOT a naive map**: each binding's
 required columns are the UNION over its `Ref` consumers, so its lift reads the whole program — which is
 why Calcite makes field-trimming a whole-tree transformer (`RelFieldTrimmer.trim`,
 `vendor/calcite/core/src/main/java/org/apache/calcite/sql2rel/RelFieldTrimmer.java:173`) and NOT a
@@ -324,7 +325,7 @@ because it was built first and is always-on in dev/tests — but it RUNS LAST: a
 fully-rewritten plan that analyses and throws, exactly as TinkerPop's `VerificationStrategy` is the
 terminal category (`.../traversal/TraversalStrategy.java`, "analyze the traversal and throw… no more
 behavioral tweaking") and exactly as `checkPlan` runs inside `emit` today. Run-order:
-**`flatten → unroll → fuse → prune → land → name → (recognize, Phase 4) → check`.**
+**`flatten → unroll → fuse → prune → name → (recognize, Phase 4) → check`.**
 
 - **4.1 `check`** — the fail-closed verifier and the first thing built: column resolution, `Agg` only in
   `Aggregate`, `WindowExpr` only in `Window`, `SelfRef` only in its `Recursive.step`, the §3.5
@@ -354,12 +355,12 @@ behavioral tweaking") and exactly as `checkPlan` runs inside `emit` today. Run-o
   latent correctness bug — it collects column refs only inside the `project` arm, so a non-`Project` parent
   that itself reads a column can have it pruned from under it. Closing the remainder AND fixing that
   reference-collection are prerequisites to `unroll`.
-- **4.5b `land`** — the bind-budget lowering (§3.6). Declines a row holding anything but a `Lit`, and the
-  budget then fails closed on it. **WIRED today, ad-hoc, via `landPlan` (`compiler/rel/lower.ts`)** — which
-  IS the `perRel` lift written by hand (map over `{bindings, result}`, `Stmt` untouched). When the pipeline
-  object lands, `landPlan` dissolves into `perRel(land)` at its declared position; Calcite models this same
-  late, over-budget-only rewrite as a trailing "physical tweaks" phase + `ConditionalProgram`
-  (`Programs.java` `:351`, `:415`).
+- **4.5b `land` — REMOVED (2026-08-06).** This was a bind-budget lowering that folded an over-budget
+  literal `Values` into one JSON bind. It handled a scenario not in the corpus (a >100-value `inject`),
+  and after constant-inlining a big literal set is already 0 binds — so `land` converted a 0-bind plan
+  into a 1-bind one, the opposite of a saving. A genuine collection parameter is already ONE `jsonb(?)`
+  bind; the only real over-budget case is 100+ distinct PARAMETERS, which fails closed by design. The pass
+  and its `landPlan` wiring are deleted; there is no bind-budget lowering step.
 - **4.6 `name`** — named CTE versus inlined derived table for every shared node, honouring
   `Materialize`. One policy applied with the whole plan visible, instead of a judgement call at 163
   `q.cte` sites.
@@ -367,18 +368,17 @@ behavioral tweaking") and exactly as `checkPlan` runs inside `emit` today. Run-o
   and recognition failure is "no rewrite fired" rather than a separate code path.
 
 **DECLARED, PARTLY WIRED — and the pipeline OBJECT is deferred to Phase 3 ON PURPOSE, not by neglect.**
-`check` (inside `emit`), `name`, and now `land` (ad-hoc `landPlan`) have production callers; `fuse` and
+`check` (inside `emit`) and `name` have production callers; `fuse` and
 `prune` do not, and no object yet applies the run-order above — it lives in this list. Building that object
 NOW would mean an ordered container with one real occupant, which is the same organic-growth-in-the-
 easiest-place this section exists to prevent. The three unbuilt passes that give the pipeline its weight —
 `flatten` (§4.2), `unroll` (§4.3), and `prune`'s closed remainder (§4.5) — are ONE COUPLED Phase-3 body:
 `unroll` replicates a flattened, join-heavy body; `prune` is what makes the replicas affordable; the
-pipeline object is what orders `flatten → unroll → prune → land → name`. And `unroll` is itself downstream
+pipeline object is what orders `flatten → unroll → prune → name`. And `unroll` is itself downstream
 of Phase 3.1 (a `Recursive` node — no production caller today, so every `repeat()` still declines to
 legacy). **So the design is FIXED here — the `RelPass`/`PlanPass` split, the `perRel` lift, the fold, the
 run-order, `RelPass` vs the legacy `Pass`, `fuse` as a documented no-op — so that Phase 3 drops those
-passes into a named home instead of inventing one.** Until then `land`'s ad-hoc wire is correct, and
-`fuse`/`prune` stay unwired by design.
+passes into a named home instead of inventing one.** Until then `fuse`/`prune` stay unwired by design.
 
 ---
 
@@ -2620,12 +2620,10 @@ node, `Spool`, where it is semantics); §3 says `HAVING`-as-`Filter` and distinc
 COLLAPSE, but `Aggregate.having` and `Union.all` are still live fields that nothing ever constructs — dead
 surface in a set the doc calls CLOSED; §3.6 credits `unroll` with a statement-text ceiling that does not
 exist (the 100 KB cap is enforced only at the router) and §§4.2/4.3/4.7 describe `flatten`/`unroll`/
-`recognize` in the present tense while `src/rel/passes/` holds only `fuse`/`land`/`name`/`prune` — worse,
+`recognize` in the present tense while `src/rel/passes/` holds only `fuse`/`name`/`prune` — worse,
 `check.ts` throws a message instructing the reader to "run flatten first", a pass that cannot be run; §3.0's
 three write-in-read-position examples (`union(__.addV(), __.V())`, `optional(__.addV())`,
-`repeat(__.addV())`) all THROW on both spines, so they are the model's intent rather than behaviour; and
-§3.6 credits the `land` pass with the retained-rows JSON transport, which is the EMITTER's (`land` only
-rewrites `Values`).
+`repeat(__.addV())`) all THROW on both spines, so they are the model's intent rather than behaviour.
 
 **Confirmed exact, and not to be re-litigated:** §3.2's node counts (15 expression kinds, 19
 relational/statement kinds); both Calcite anchors resolve at the pin; filter-after-aggregate → `HAVING`

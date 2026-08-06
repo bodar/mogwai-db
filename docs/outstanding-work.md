@@ -137,17 +137,14 @@ of gravity is ceiling, not correctness.
    rewriting all 17**: some defer for a reason the table does not capture. *Low.*
 
 37. **Two RelIR passes are declared, built, tested — and reachable from no route. There is no
-   pipeline that orders them.** `src/rel/passes/` holds `fuse`, `prune`, `land` and `name`; `name`
-   and now `land` have production callers (`compiler/rel/lower.ts`), `fuse`/`prune` do not. The
+   pipeline that orders them.** `src/rel/passes/` holds `fuse`, `prune` and `name`; `name` has a
+   production caller (`compiler/rel/lower.ts`), `fuse`/`prune` do not. The
    plan's §4 says the passes are "`Rel → Rel`, total, order-declared", and the declared order lives
-   in that prose — no object applies it, so "which passes ran" is answered per call site. **The
-   remaining two are not one job and pull different ways:**
-   - **`land` — DONE.** `lowerToRel` now runs it across the whole plan (result + each Rel binding)
-     just before the bind-budget gate (`landPlan`), so an over-budget literal `Values` — a big
-     `inject(v1…v101)` — lands to ONE JSON bind exploded by `json_each` and stays on RelIR within the
-     100-bind cap instead of declining to legacy (item 38). Pinned by `test/rel-spine.test.ts`. It is
-     wired ad-hoc at the one site that needs it, NOT via a pass-pipeline object — that ordering
-     question (below) is still open for `prune`/`fuse`.
+   in that prose — no object applies it, so "which passes ran" is answered per call site. (A fourth
+   pass, `land`, was built and briefly wired, then DELETED 2026-08-06 — its >100-value→one-JSON-bind
+   conversion handled a scenario not in the corpus; a big literal inject inlines to 0 binds and a
+   genuine over-100-parameter statement fails closed. See item 38.) **The remaining two are not one
+   job and pull different ways:**
    - **`prune` is Phase 3.3's precondition** and prunes nothing below a `Join`/`Union`/`Aggregate`/
      `Recursive` — its own declared remainder. `unroll` replicates repeat bodies, which are mostly
      joins, and §4.5 is what calls pruning the thing that makes replicas affordable.
@@ -315,13 +312,15 @@ of gravity is ceiling, not correctness.
    harness `test/cloudflare.test.ts`, about a minute per probe.
    **A second, unrelated wall the same instrument cannot see, found while probing this:** legacy
    compiles `g.inject(v1…v101)` to **101 binds** and a Durable Object refuses at 100. No corpus
-   traversal injects that many, so `test:cf-limits` never runs it — the instrument covers what the
-   suite executes, which is the blind spot in its own row of §11's table. **RESOLVED on the RelIR
-   side (`land` is now wired — see item 37):** `lowerToRel` lands an over-budget literal `Values` to
-   one JSON bind before the budget gate, so `g.inject(v1…v101)` stays on RelIR at one bind, and
-   `test/rel-spine.test.ts` now runs exactly that case. Legacy still hits the wall, but legacy is the
-   spine this migration deletes, so its answer is deletion, not a fix.
-   *Low-Med, and it is a PREREQUISITE for Phase 2 rather than one of its exit criteria.*
+   traversal injects that many (measured: the widest corpus `inject` is ~20 args), so `test:cf-limits`
+   never runs it. **NON-ISSUE on the RelIR side:** a literal `inject`/set inlines as 0-bind typed
+   literals regardless of size (`constLit`), so `g.inject(v1…v101)` is 0 binds and DO-legal with nothing
+   to convert (`test/rel-spine.test.ts` pins this). The `land` pass that once folded it into one JSON
+   bind was DELETED 2026-08-06 (item 37) — it handled an invented scenario and, worse, converted a
+   0-bind literal set into a 1-bind one. The only real >100-bind case is 100+ distinct PARAMETERS in one
+   statement, which fails closed by design. Legacy still hits the wall, but legacy is the spine this
+   migration deletes, so its answer is deletion, not a fix.
+   *Low, and it is a PREREQUISITE for Phase 2 rather than one of its exit criteria.*
 
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member shape,
    so a path/element-list label cannot frame its members as vertices. *Low-Med.*

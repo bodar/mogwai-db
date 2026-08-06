@@ -153,8 +153,7 @@ SQL genuinely cannot carry it.
 (`ir/passes.ts:107`) replicates a `repeat` body `times(n)` times: `n` changes the *statement structure*,
 not a value inside it, so it must be a concrete number. If `times($x)` ever arrives as a parameter, the
 unroller is the lowering that reduces it — the textbook "last responsible moment," done by the one pass
-that structurally requires it, exactly like TinkerPop's `reduce()`. (Also the `land`/JSON path already
-exists as the alternative when even a value set is too big for binds.)
+that structurally requires it, exactly like TinkerPop's `reduce()`.
 
 ## Resolved answers to the earlier open questions
 
@@ -292,16 +291,16 @@ the `constLit` seam. No churn (corpus uses literals), census clean.
     - **`constant(9.99m)` — TODO, blocked.** It frames `UNKNOWN` by design, so an inlined `'9.99'` reads
       back as a *string*. Needs a typed `constant` framing first (or keeps declining) — and, for an
       ordering comparison over it, the same `SubjectType` storage-class enrichment as above.
-- **C2·a — the `land` pass is now WIRED (fixes item-38, a production DO refusal).** An over-budget
-  LITERAL row set — a big `inject(v1…v101)` — now rides as ONE JSON bind exploded by `json_each` and
-  stays on the RelIR spine within the 100-bind cap. `lowerToRel` runs `land` over the whole plan
-  (result + each Rel binding) just before the bind-budget gate (`compiler/rel/lower.ts` `landPlan`), so
-  the set crosses the seam as one value exactly as the root `CLAUDE.md` rule requires. Before, this set
-  DECLINED to legacy, where it compiled to N binds a Durable Object refuses (`docs/outstanding-work.md`
-  the `land`-unwired note + item 38 — "parked on the spine this migration deletes *and* broken on the
-  spine it is parked on"). `land` only rewrites an over-budget `Values` OF LITERALS and is a no-op
-  otherwise, so it is safe over every plan; a non-literal row is left for the budget to fail closed on.
-  Test: `test/rel-spine.test.ts` (101-row inject → 1 bind, DO-legal, rel≡the 101 values).
+- **C2·a — REMOVED (2026-08-06, human decision). There is no >100-value conversion.** A held literal
+  `inject`/set inlines as 0-bind typed literals regardless of size (`constLit`), so it is already DO-legal
+  on RelIR with *nothing to convert*; a genuine collection PARAMETER is already ONE `jsonb(?)` bind and is
+  never spread. The only construct that can exceed 100 binds is a hand-written `inject($p0…$p100)` of 100+
+  distinct PARAMETERS — a scenario **not in the L3 corpus** (measured: the widest corpus `inject` is ~20
+  args, the widest `within`/`has` is 4) and judged not worth a pass. The `land` pass, its `landPlan`
+  wiring and its tests are DELETED; an over-100-parameter statement fails closed at the bind-budget gate
+  (`cfLimitViolation`) rather than being blobbed into one bind. Rationale: the 100-bind cap is a *parameter*
+  budget; folding >100 parameters into one JSON bind is a way to *exceed* that budget, which we do not want.
+  "Show me the 100 KB / 100-parameter query first."
 - **C2·b — the PARAM-LIST `within` case remains** (`plan.ts` `jsonbArrayBind`/`SET_BIND_LIMIT`). Today a
   RelIR `within(<set>)` over `SET_BIND_LIMIT` (25) members DECLINES to legacy (`predicate.ts`); the
   generalisation is a coverage move, not a budget one (legacy already JSON-binds the big set).
@@ -313,9 +312,9 @@ the `constLit` seam. No churn (corpus uses literals), census clean.
   `parsePredicate` DROPS the single-vs-varargs distinction on unwrap (`single ? undefined`), so
   `predicateExpr` cannot tell a param list (→ one JSON bind, `json_each` in-query) from literal varargs
   (→ inline). C2 therefore needs: (a) `parsePredicate` to preserve "this set is one collection arg"
-  (and its param name), and (b) a `json_each` in-query landing in the `within` case — which needs a
-  `Minter` threaded into `predicateExpr`, or a post-pass over the `in-list` Expr mirroring `land`'s
-  Values landing. Substantial; coverage-only (legacy is correct today).
+  (and its param name), and (b) a `json_each` in-query for the `within` case — a collection PARAMETER
+  crosses as ONE `jsonb(?)` bind and `json_each`-explodes, which needs a `Minter` threaded into
+  `predicateExpr`. Substantial; coverage-only (legacy is correct today).
 
 ## Discovered while landing Phase A (follow-ups, not yet done)
 
@@ -406,11 +405,12 @@ free-standing binds, and now the budget counts *parameters*, not their uses.
 
 ## Handoff + guardrail
 
-**Status (current).** Phases A, B, B3 (limit/skip), nested predicate/set params, C1-predicate,
-C1-inject(Duration) + the static-temporal ordering fail-closed fix, and C2·a (the `land` pass wired for
-over-budget literal injects) are all LANDED. The parameters-are-the-only-binds thesis is complete for
-every common case: a user parameter is the only free-standing bind, a parsed literal inlines as a typed
-literal, and an over-budget literal set rides as one JSON bind. The `by(key)` constant is inlined too.
+**Status (current).** Phases A, B, B3 (limit/skip), nested predicate/set params, C1-predicate, and
+C1-inject(Duration) + the static-temporal ordering fail-closed fix are all LANDED; C2·a was BUILT then
+REMOVED (see above). The parameters-are-the-only-binds thesis is complete for every common case: a user
+parameter is the only free-standing bind, a parsed literal inlines as a typed literal (of any size — a
+big literal set is 0 binds, not a JSON bind), and an over-100-parameter statement fails closed rather than
+being blobbed. The `by(key)` constant is inlined too.
 
 **Encoding follow-through — the `Arg` object LANDED across every IR shape** (`Step.args` `52abcc6`,
 `Pred.operands` `8ac00ad`, `Arg.members` `097020b`). The Phase B parallel-array deviation is reversed
@@ -458,11 +458,12 @@ worth the risk on the shared spine:**
   TEXT-stored `bigdecimal`/`duration` subject instead of declining. Cross-layer; exotic trigger
   (`inject(9.99m).is(P.gt(…))`, `constant(9.99m).is(…)`).
 - **C2·b — the PARAM-LIST `within`** needs `parsePredicate` to preserve the single-collection-arg
-  distinction plus a `json_each` in-query landing (a `Minter` in `predicateExpr` or an in-list post-pass
-  mirroring `land`). Substantial; coverage-only (legacy JSON-binds the big set correctly today).
+  distinction plus a `json_each` in-query for a collection PARAMETER (one `jsonb(?)` bind exploded by
+  `json_each`; a `Minter` in `predicateExpr`). Substantial; coverage-only (legacy JSON-binds the big
+  set correctly today).
 - **The RelIR pass pipeline** (`docs/outstanding-work.md` item 37) is an OPEN DESIGN QUESTION for
-  `prune`/`fuse` — `land` is now wired ad-hoc at its one site, but whether the four passes become one
-  ordered pipeline object, and whether `fuse` is wanted at all, is undecided.
+  `prune`/`fuse` — whether the three passes (`fuse`/`prune`/`name`) become one ordered pipeline object,
+  and whether `fuse` is wanted at all, is undecided.
 
 This doc is the contract. The decisions that must NOT be
 relitigated by a fresh context (they were each reached against a plausible opposite and the opposite is
