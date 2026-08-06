@@ -3109,6 +3109,31 @@ worth a deferral rather than a silent wrap, and worth noting that admitting them
 and the all-NaN case, where the reference propagates `NaN` and SQLite stores it as NULL so we answer `null`
 (§13g·3) — narrow, same two functions, fold it in if it is free and defer it loudly if not.
 
+**SCOPE CORRECTION (attempted + reverted 2026-08-06) — "one existing authority" undersells it; min/max is
+THREE coupled changes, not a `storedCompareOn` swap.** I built the min/max half as a type-space argmin (rank
+by `storedCompareOn` key, take the ORIGINAL extremal row's value + vtype — which sidesteps the >2^53
+round-trip because the winner is the stored decimal TEXT, exact) and it revealed the coupling the audit did
+not:
+- **The `result:'number'` framing arm reads a STORAGE class in `vt`** (`typeof(result)` →
+  `integer`/`real`/`text`), NOT a Gremlin vtype. So projecting the winner's own `vtype` column (`int`/`long`)
+  breaks the contract — `rel-spine.test.ts`'s reducer-policy witness fails, RelIR/legacy raw rows diverge —
+  and projecting `typeof(winner.v)` instead keeps `vt='text'` for a text-carried long, i.e. the very §13g·5
+  bug. **Framing a text-carried long as a `long` needs the number arm to carry a Gremlin vtype the way the
+  `values()` scalar arm already does — a framing-layer change, not a lowering one.**
+- **The measured cases route to LEGACY, so a RelIR-only fix does not touch them.** `injectSource`
+  (`lower.ts`) declines the heterogeneous/big-long inject (`inject(10L, -9007199254740993L)`), so
+  `…​.min()`/`.max()` fall to the legacy spine. Fixing rows 3–4 needs `injectSource` to COVER that shape
+  first (rows 1–2 are the sum/mean tower + >2^53 transport; rows 5–6 mixed are the documented divergence —
+  neither spine can raise from SQL, §13n).
+- **The `values()`/covered path is already correct** (small ints: `MIN(v)` and argmin agree), so the argmin
+  change alone is corpus-invisible AND adds a bind (the `rank = 1` literal — use `compilerInt`, not `lit`) and
+  churns the reducer-policy test, without fixing a visible defect.
+
+So the honest unit of work is: (a) number framing carries a Gremlin vtype for reducer results (both spines,
+because `values()` already does it — share, don't re-derive); (b) `injectSource` covers the big-long/
+heterogeneous inject; (c) THEN min/max become type-space argmin and rows 3–4 close. That (a) is a framing
+CONTRACT decision — the open question this increment actually turns on.
+
 ### 13c·1. The `set` framing marker — CONFIRMED, and the rule is PER FOLLOWER, not a blanket
 
 §13c's fifth bullet is right and the citations resolve exactly, so the fix is a small table rather than a
