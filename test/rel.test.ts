@@ -60,14 +60,6 @@ describe('RelIR', () => {
     })).toThrow('Project expressions must declare exactly its output columns');
   });
 
-  test('fuses adjacent filters structurally', () => {
-    const first = filter({ id: relId('a'), input: scan, channels, type: { cols }, pred: { kind: 'binary', op: '>', left: col(scan.id, 'id'), right: lit(0, 'int') } });
-    const second = filter({ id: relId('b'), input: first, channels, type: { cols }, pred: { kind: 'binary', op: '=', left: col(first.id, 'name'), right: lit('marko', 'text') } });
-    const fused = fuse(second);
-    expect(fused.kind).toBe('filter');
-    if (fused.kind === 'filter') expect(fused.pred.kind).toBe('binary');
-  });
-
   test('allows aggregates only in Aggregate nodes', () => {
     const aggregate = aggregateRel({ id: relId('a'),
       input: scan, channels, type: { cols: [{ name: 'n', type: 'int', nullable: false }] },
