@@ -3134,6 +3134,25 @@ because `values()` already does it — share, don't re-derive); (b) `injectSourc
 heterogeneous inject; (c) THEN min/max become type-space argmin and rows 3–4 close. That (a) is a framing
 CONTRACT decision — the open question this increment actually turns on.
 
+**SECOND ATTEMPT (also reverted 2026-08-06) mapped the test surface, which is the part worth banking.**
+Building (a)+(c) — the framer reads a Gremlin vtype when `vt` is one (disjoint from storage class, so
+`vtypeToValueType` resolves the former and returns `undefined` for the latter → `sumBuffer`), and min/max
+project the winner's own vtype (`col(winner,'vtype')` / the source static tag / `typeof` fallback) — is
+correct and the CENSUS STAYS GREEN: for the covered `values()` int/string cases the FRAMED bytes are
+identical (`intSerializer(27)` ≡ `anySerializer(27)`), so no answer changes. What breaks is five
+RAW-ROW DIFFERENTIAL tests, because min/max now emit `vt='int'` where legacy emits `vt='integer'` — same
+answer, different spelling — and they compare `store.query(rel)` to `store.query(legacy)` byte-for-byte:
+the `COVERED` loop in `test/rel-spine.test.ts` (`rowsVia` JSON-stringifies whole rows — the 4 `values().min/max`
+entries), the `scalar.sql.test.ts` class-list assertion (min/max SQL now carries the `storedCompareOn`
+vtype vocabulary — `int`/`long`/`float`/`double` — not the storage-class eligibility `integer`/`real`/`text`),
+and the bulk-weighting loop. These are ROUTE assertions (`test/CLAUDE.md`: assert semantics not spelling) and
+the divergence is legitimate rel-ahead, so the fix updates them to compare VALUES/framed answers — but that
+is real harness work, not incidental. **Net: (a)+(c) alone is correct, census-green, and observably a no-op
+on today's corpus (the visible rows 1–6 are `inject`, which declines to legacy until (b); the `values()`
+big-long case needs a >2^53 property no fixture has). So the increment only PAYS OFF assembled with (b) and
+the sum/mean tower (§13g·4), landed together with the differential-test updates — a dedicated effort, not a
+one-liner. Do NOT land (a)+(c) alone: it churns five tests for zero visible gain.**
+
 ### 13c·1. The `set` framing marker — CONFIRMED, and the rule is PER FOLLOWER, not a blanket
 
 §13c's fifth bullet is right and the citations resolve exactly, so the fix is a small table rather than a
