@@ -246,9 +246,10 @@ depended on whether it sat bare or in a predicate. `parsePredicate` keeps the `n
 the `constLit` seam. No churn (corpus uses literals), census clean.
 
 **Deferred still (documented, correct-result gaps — no budget saving, never a wrong answer):**
-- A `$x` inside a **collection LITERAL** (`within([$x])`, `inject([$x])`) inlines — a lone bracketed
-  list is unwrapped to members of one arg, which are not individually tracked (a list-param is the
-  oversized bucket, not N params).
+- A `$x` inside a **collection LITERAL** (`within([$x])`, `inject([$x])`) — **now BINDS (LANDED,
+  `097020b`)**, closing the inconsistency with the bare-`$x` and `within($x, $y)` varargs cases. The
+  literal's members ride as `Arg[]` on `Arg.members` (see "the collection-member case" below); a bound
+  list-PARAM (`within($list)`) has no members and stays the oversized single-param case.
 - **`V($x)`/`E($x)` ids** inline (the `flattenListArgs` index desync is why elementScan doesn't thread a
   name); ids-as-parameters are exotic.
 - **`range($x, $y)`** reduces its parameters (inlines) BY DESIGN — validation + arithmetic force the
@@ -336,34 +337,44 @@ over-budget literal injects) are all LANDED. The parameters-are-the-only-binds t
 every common case: a user parameter is the only free-standing bind, a parsed literal inlines as a typed
 literal, and an over-budget literal set rides as one JSON bind. The `by(key)` constant is inlined too.
 
-**Encoding follow-through — the `Arg` object LANDED (`Step.args` `52abcc6`, `Pred.operands` `8ac00ad`).**
-The Phase B parallel-array deviation is reversed on both shared IR types: a step argument is one
-`Arg { value, type, name }` (`Step.args: Arg[]`) and a predicate's operands are `Pred.operands: Arg[]`,
-the faithful GValue representation the thesis called for — no parallel `argTypes`/`paramNames`/`values`
-arrays left on either. Remaining consolidation of the SAME shape, each its own gated chunk (all
-behaviour-preserving):
+**Encoding follow-through — the `Arg` object LANDED across every IR shape** (`Step.args` `52abcc6`,
+`Pred.operands` `8ac00ad`, `Arg.members` `097020b`). The Phase B parallel-array deviation is reversed
+everywhere a value once travelled beside a separate type/name/items array: a step argument is one
+`Arg { value, type, name }` (`Step.args: Arg[]`), a predicate's operands are `Pred.operands: Arg[]`, and
+a collection literal's members are `Arg[]` on `Arg.members` — the faithful GValue representation the
+thesis called for, with no parallel `argTypes`/`paramNames`/`values`/`items` arrays left anywhere. The
+consolidation is now complete; the landed chunks:
 - **RelIR `constLit` takes an `Arg` — LANDED (`fe3bcf7`).** `constLit(value, type, paramName)` →
   `constLit(a: Arg)`, so the same object the front-end carries flows into the bind-vs-inline seam and
   the step-arg callers drop their `?? null` trio. (`sliceBound` left as-is — a count + name, no type.)
+- **Collection members `Arg[]` on `Arg.members` — LANDED (`097020b`).** Encoding (a raw-value-preserving
+  sidecar) and semantics (a member `$x` binds) both landed; see "the collection-member case" below.
 
-**Now a DESIGN DECISION, not a mechanical chunk — the collection-member case.** `literalItems` returns
-`{values, items}` (member VALUES paralleling member TYPES in the arg's `type.items`), and
-`flattenListArgs` / `parsePredicate`'s bracketed-list unwrap spread the values while DROPPING the
-per-member type and name. Unifying collection members to `Arg[]` is what would dissolve that desync
-"for real" — but it is NOT a behaviour-preserving refactor like chunks 1/2/4. It would REVERSE the
-documented decision that a `$x` inside a collection literal (`within([$x])`, `inject([$x])`) inlines as
-part of the **oversized** bucket (correct result, no budget saving), by making each member a tracked
-parameter that BINDS. That is a capability/semantics change (member params start counting against the
-100), so it wants an explicit decision before landing rather than being swept in with the encoding
-tidy. Two independent pieces: (a) the TYPE half — LANDED (`85bf026`). `predicate.ts` now threads each
-operand's `Arg.type` (was `null`) and `parsePredicate` threads a bracketed member's `type.items[i]`,
-so `P.gt(2.0)` and `within([1L, 2L])` members inline as TYPED literals — the thesis's "stop throwing
-the type away", finished for predicate operands. Measured result-invariant (SQLite compares INTEGER
-and REAL alike): census clean, every L2 snapshot unmoved. (b) The NAME half — STILL OPEN, and it is a
-product decision, not a refactor: tracking a collection member's `$x` so it BINDS requires the
-front-end to stop flattening the member, which REVERSES the documented "collection params inline as
-oversized" rule and changes what counts against the 100-parameter budget. Left untouched pending that
-call.
+**The collection-member case — FULLY LANDED (`097020b`), decided the way the whole thesis points.**
+The earlier framing parked this as a design decision because the parallel-array origin (`literalItems`
+returned `{values, items}`, member VALUES beside member TYPES in `type.items`, and the bracketed-list
+unwrap DROPPED the per-member name) made "unify to `Arg[]`" look inseparable from "reverse the oversized
+rule", and the reversal seemed high-risk (it read as forcing every collection consumer — legacy
+included — to unwrap a new wrapper). The encoding chosen dissolves both worries:
+
+- **Encoding — a `members` SIDECAR, not a value wrapper.** A collection literal's `Arg.value` STAYS the
+  raw JS array/`Set`, so every data/storage consumer and the entire legacy oracle spine read a
+  collection byte-for-byte as before (zero churn there). The member `Arg[]` rides ALONGSIDE on a typed
+  `Arg.members` field, built by one `collectionArg(kind, members)` factory that derives `value`/`type`/
+  `members` together so they cannot desync. Only the two seams that individually lower a member opt in,
+  through a TYPED field rather than an `any`-sniff: `parsePredicate` (`within([…])`) and `injectList`
+  (`inject([…])`).
+- **Semantics — the NAME half, decided BIND.** A `$x` member now binds, so `within([$x])`/`inject([$x])`
+  cost one parameter each, consistent with the bare-`$x` and `within($x, $y)` varargs cases that already
+  bound (`ff7397d`). This is what the thesis says everywhere — a `$x` is a parameter wherever it sits —
+  and it FAILS CLOSED (an over-100 literal of params trips the budget gate, never mis-executes). A bound
+  list-PARAM (`within($list)`) has a raw array value and NO members, so it stays the ONE oversized param
+  (inlines its members as typed nameless literals); that value/members asymmetry is precisely what tells
+  a literal from a param list. The census stayed clean because the corpus carries no parametrised
+  collection literal — the change is latent capability, verified across the full L1–L5 ladder.
+- **The TYPE half (a) had already landed (`85bf026`)** and remains: `predicate.ts` threads each operand's
+  `Arg.type`, and a member now carries its own captured type on its `Arg` (no more `type.items[i]`
+  indexing in the predicate literal path; the bound-list-param fallback still reads `itemTypeAt`).
 
 **What remains is coverage-only / exotic / an open design question — each needs a decision before it is
 worth the risk on the shared spine:**
