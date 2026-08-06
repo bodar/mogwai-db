@@ -198,8 +198,10 @@ export function byExpr(
       return firstOf(mine, external, col(mine.id, 'id'), fresh);
     }
     // A LABEL is one indirection for an edge (a column into `labels`) and two for a vertex (a side
-    // table, which may hold several — insertion order names the first). Same question, two physical
-    // shapes, which is the asymmetry `Scan` exists to make visible.
+    // table, which may hold several — the FK into `labels` names the first, i.e. the order the label
+    // NAME was first interned graph-wide, NOT this vertex's own label-insertion order). Same question,
+    // two physical shapes, which is the asymmetry `Scan` exists to make visible. Picking the first at
+    // all is OUR multi-label extension — TinkerPop's `Element.label()` is single-valued upstream.
     //
     // A `Join`'s outputs are addressed through the JOIN, never through its sides — the sides are in
     // scope inside `on` and nowhere else — so the right side's `id` is declared as `lid`. Two columns
@@ -221,9 +223,10 @@ export function byExpr(
       type: typeOf(meta('node', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
       on: and(eq(col(vl.id, 'label'), col(labels.id, 'id')), eq(col(vl.id, 'node'), host.id)),
     });
-    // Ordered by the LABEL id, not the join's — a vertex with several labels reports them in label
-    // order, which is what the element projection's `json_group_array(… ORDER BY vertex_labels.label)`
-    // already does, so `by(T.label)` picks the same first one a client would see first.
+    // Ordered by the `vertex_labels.label` FK (the labels-dictionary id), not the join's — a vertex
+    // with several labels reports them in that interning order, which is what the element projection's
+    // `json_group_array(… ORDER BY vertex_labels.label)` already does, so `by(T.label)` picks the same
+    // first one a client would see first.
     return firstOf(joined, col(joined.id, 'name'), col(joined.id, 'label'), fresh);
   }
 
@@ -324,7 +327,7 @@ export const productivityFilter = (step: IRStep, key: Expr | undefined): Expr | 
  * says so rather than an inference.** `OrderGlobalStep.processAllStarts()` is
  * `this.createProjectedTraverser(this.starts.next()).ifPresent(traverserSet::add)` under TinkerPop's own
  * comment "only add the traverser if the comparator traversal was productive"
- * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/OrderGlobalStep.java:82`).
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/OrderGlobalStep.java:85`; `:82` is the method signature, `:84` the comment).
  * So a child that yields nothing drops the traverser exactly as a missing property does. Before the seam
  * this comment read "only a property KEY can be unproductive", which was TRUE only because no other
  * projection could yield nothing — the narrowing was accidental, and a reducing child body

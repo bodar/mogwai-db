@@ -2501,13 +2501,15 @@ discriminate any of these three columns. Silence, per §10·8, not permission.
 
 ### 13i. Doc corrections from the audit
 
-- `modulator.ts` cites `OrderGlobalStep.java:82` for the productivity quote; `:82` is the method signature
-  and the deciding line is `:85`. The claim is right, the line is off by three.
-- `modulator.ts`'s `by(T.label)` comment says "insertion order names the first", but it orders by
+- ~~`modulator.ts` cites `OrderGlobalStep.java:82` for the productivity quote; `:82` is the method signature
+  and the deciding line is `:85`. The claim is right, the line is off by three.~~ **FIXED 2026-08-06** —
+  citation now `:85` (verified against the pin), noting `:82` is the signature and `:84` the comment.
+- ~~`modulator.ts`'s `by(T.label)` comment says "insertion order names the first", but it orders by
   `vertex_labels.label` — a FK into the `labels` dictionary — which is the order the label NAME was first
-  interned graph-wide, not this vertex's insertion order. (The property arm beside it orders by a rowid and
-  IS insertion order, exactly as its comment says.) Note TinkerPop says nothing here: `Element.label()` is
-  single-valued upstream, so multi-label tie-breaking is our own extension.
+  interned graph-wide, not this vertex's insertion order.~~ **FIXED 2026-08-06** — both comments now say
+  the FK/interning order and that picking the first at all is OUR multi-label extension (`Element.label()`
+  is single-valued upstream). (The property arm beside it orders by a rowid and IS insertion order, exactly
+  as its comment says — left unchanged.)
 - **Confirmed correct and not to be re-litigated:** the `count`-seeds-0 versus reducers-emit-nothing
   contract and its citation (exact); `dedupBy`'s `setBulk(1L)` citation (literally that line) and its
   unobservability today; `group`/`groupCount` over zero traversers being one empty-map traverser
