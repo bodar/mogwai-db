@@ -59,11 +59,30 @@ export interface Arg {
    *  non-null ⇒ a user PARAMETER (binds as `?`, spends one of the 100-parameter budget), `null` ⇒ a
    *  parsed literal (a constant the compiler inlines). The one fact the bind-vs-inline seam reads. */
   readonly name: string | null;
+  /** For a bracketed collection LITERAL (`[a, b]` / `{a, b}`) ONLY: its members, each as its own
+   *  `Arg` (value + captured type + wire-parameter name). `value` still holds the raw JS array/`Set`
+   *  so every DATA consumer reads a collection exactly as before; `members` rides ALONGSIDE for the
+   *  two lowering seams that individually lower a member — a predicate IN-list (`within([$x])`) and
+   *  `inject([…])` — so a `$x` member BINDS and keeps its type, with no parallel `values`/`items`/names
+   *  triple. Absent (`undefined`) on every other arg, including a bound list-PARAM (`within($list)`),
+   *  whose whole array is ONE oversized param, not N members — that asymmetry is exactly what tells the
+   *  two apart. Built only by `collectionArg`, which derives `value`/`type`/`members` together. */
+  readonly members?: readonly Arg[];
 }
 
 /** Build an `Arg`. `type`/`name` default to null — a synthetic step argument (compiler-minted, no
- *  wire provenance) is a plain value with neither. */
+ *  wire provenance) is a plain value with neither, and no `members` (not a collection literal). */
 export const arg = (value: any, type: TypeNode | null = null, name: string | null = null): Arg => ({ value, type, name });
+
+/** Build a collection-LITERAL `Arg` from its member `Arg`s. Derives all three views in ONE place so
+ *  they cannot desync: `value` is the raw wire/storage form (a JS array for a list, a JS `Set` for a
+ *  set) that every data consumer reads; `type` is the container node whose `items` ARE the members'
+ *  types (no separate parallel array); `members` carries each element's value+type+name for the
+ *  predicate/inject seams that bind a `$x` member. A collection literal is the only arg with members. */
+export const collectionArg = (kind: 'list' | 'set', members: readonly Arg[]): Arg => {
+  const values = members.map((m) => m.value);
+  return { value: kind === 'set' ? new Set(values) : values, type: { t: kind, items: members.map((m) => m.type) }, name: null, members };
+};
 
 /** The plain resolved values of a step's arguments, dropping the type/name metadata — for the
  *  consumers that genuinely want a value array (a varargs spread, `flattenListArgs`). Prefer reading
@@ -556,16 +575,14 @@ function walkArgs(node: any, out: Arg[], params: Record<string, any>, paramTypes
   // back to varargs in parsePredicate; a step consuming a real list value (inject,
   // Tier-1 list substrate) reads the array directly.
   if (cls === 'GenericCollectionLiteralContext') {
-    const { values, items } = literalItems(node.genericLiteral(), params);
-    emit(values, { t: 'list', items });
+    out.push(collectionArg('list', literalItems(node.genericLiteral(), params)));
     return;
   }
-  // A brace set literal {a, b, c} — a real JS Set + a {t:'set'} TypeNode. Without this
-  // case the generic recursion below flattened it to N varargs (set-ness + boundary lost),
-  // so a stored set was indistinguishable from a list. Mirrors the collection-literal case.
+  // A brace set literal {a, b, c} — `value` a real JS Set, `type` {t:'set'}, members carried. Without
+  // this case the generic recursion below flattened it to N varargs (set-ness + boundary lost), so a
+  // stored set was indistinguishable from a list. Mirrors the collection-literal case.
   if (cls === 'GenericSetLiteralContext') {
-    const { values, items } = literalItems(node.genericLiteral(), params);
-    emit(new Set(values), { t: 'set', items });
+    out.push(collectionArg('set', literalItems(node.genericLiteral(), params)));
     return;
   }
   if (cls === 'NestedTraversalContext') { emit({ nested: node }); return; }
@@ -589,19 +606,19 @@ function enumSuffix(node: any): string {
   return node.getText().split('.').pop().toLowerCase();
 }
 
-/** Walk a list/set literal's element nodes, capturing each element's value AND its
- *  parsed TypeNode in lockstep (a nested list/map/set → its own container node; a typed
- *  scalar → its subtype; a nested traversal / multi-arg → null). The per-element type is
- *  what the collection storage tags each leaf with (full-fidelity elements). */
-function literalItems(nodes: any[], params: Record<string, any>): { values: any[]; items: (TypeNode | null)[] } {
-  const values: any[] = [], items: (TypeNode | null)[] = [];
-  for (const lit of nodes) {
+/** Walk a list/set literal's element nodes into member `Arg`s — each element's value, parsed
+ *  TypeNode, and wire-parameter name in ONE object (a nested list/map/set → its own container node; a
+ *  typed scalar → its subtype; a `$x` element → its name so a member can bind; a nested traversal /
+ *  multi-arg element → a nameless, typeless member). One member per element, in order — the per-element
+ *  type is what the collection storage tags each leaf with (full-fidelity elements). */
+function literalItems(nodes: any[], params: Record<string, any>): Arg[] {
+  return nodes.map((lit) => {
     const out: Arg[] = [];
     walkArgs(lit, out, params);
-    values.push(out.length === 1 ? out[0].value : out.map((a) => a.value));
-    items.push(out.length === 1 ? (out[0].type ?? null) : null);
-  }
-  return { values, items };
+    // A single-arg element IS its `Arg` (value + type + name — a `$x` element keeps its name); a rare
+    // multi-arg element collapses to a nameless array-valued member.
+    return out.length === 1 ? out[0]! : arg(out.map((a) => a.value));
+  });
 }
 
 /** A `[k: v, …]` / `[:]` map literal → a JS Map, keyed by the classified map
@@ -708,18 +725,20 @@ function parseComposedPredicate(node: any, params: Record<string, any>): Pred | 
 function parsePredicate(node: any, params: Record<string, any>): Pred {
   const m = node.constructor.name.match(/^TraversalPredicate_(\w+)Context$/);
   const parsed = extractArgs(node, params); // Arg[] — each operand's value + type + wire-parameter name
-  // P.within/without/inside/between accept both varargs (P.within('a','b')) and a single bracketed list
-  // (P.within(['a','b'])). A collection literal parses as ONE array-valued arg; unwrap it back to member
-  // operands (predicateSql spreads them into an IN-list / bounds). A bound-param list unwraps the same
-  // way. A member carries its own captured TYPE (the container's `type.items[i]`), so it inlines as a
-  // TYPED literal — but NOT a name: the wrapped list's members are not individually top-level parameters
-  // (a `within(names)` list-param is oversized, not N params). The varargs form keeps each operand's
-  // own name, so a `$x` binds wherever it sits.
-  const single = parsed.length === 1 && Array.isArray(parsed[0].value);
-  const listType = single ? parsed[0].type : null;
+  // P.within/without/inside/between accept both varargs (P.within('a','b')) and a single collection
+  // (P.within(['a','b'])). A single collection arg unwraps back to member operands (predicateSql spreads
+  // them into an IN-list / bounds). A LITERAL `[…]` carries its members as `Arg`s (`.members`): each keeps
+  // its captured TYPE and its wire-parameter NAME, so a `$x` member BINDS exactly as a bare `$x` operand
+  // does (the predicate operand seam threads `o.name`). A bound list-PARAM has a raw array value and NO
+  // members — it is ONE oversized param, so its members inline as TYPED (the container's `type.items[i]`),
+  // nameless literals, the documented oversized rule. The varargs form keeps each operand's own name.
+  const single = parsed.length === 1 && Array.isArray(parsed[0]!.value);
+  const listType = single ? parsed[0]!.type : null;
   const itemType = (i: number): TypeNode | null =>
     listType != null && typeof listType === 'object' && 'items' in listType ? (listType.items[i] ?? null) : null;
-  const operands = single ? (parsed[0].value as any[]).map((v, i) => arg(v, itemType(i))) : parsed;
+  const operands: Arg[] = !single ? parsed
+    : parsed[0]!.members ? [...parsed[0]!.members]
+    : (parsed[0]!.value as any[]).map((v, i) => arg(v, itemType(i)));
   return { op: m![1], operands };
 }
 

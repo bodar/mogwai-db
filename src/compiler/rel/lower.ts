@@ -1615,9 +1615,14 @@ function injectList(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFramin
   const args = argValues(step);
   if (step.modulators?.length || step.optionArms || !args.length) return null;
   if (!args.every((arg) => Array.isArray(arg))) return null;
-  const rows = (args as readonly unknown[][]).map((members, ai) => {
-    const listType = step.args[ai]?.type ?? null;
-    const items = members.map((member, mi) => constLit(arg(member, itemTypeAt(listType, mi))));
+  const rows = (args as readonly unknown[][]).map((values, ai) => {
+    const listArg = step.args[ai]!;
+    // A LITERAL `[…]` carries member `Arg`s (`.members`) — each with its captured type AND its
+    // wire-parameter name, so a `$x` member BINDS. A bound list-PARAM (no members) inlines each member
+    // as a TYPED, nameless literal from the container's `type.items[i]` (the documented oversized rule).
+    const members = listArg.members;
+    const items = values.map((value, mi) =>
+      constLit(members ? members[mi]! : arg(value, itemTypeAt(listArg.type ?? null, mi))));
     return items.some((item) => !item) ? null : [{ kind: 'json-array', items: items as Expr[], binary: true } as Expr];
   });
   if (rows.some((row) => !row)) return null;
