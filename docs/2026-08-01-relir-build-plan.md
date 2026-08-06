@@ -3145,11 +3145,25 @@ no-op that "declines to legacy", and the code refuted both.** What actually ship
   `test:legacy-spine` gained no failure (fixed one; the legacy L3 floor is unchanged — min/max is RelIR-only,
   pinned in both directions).
 
-**What is LEFT of §13g·5:** rows 1–2 (`sum`/`mean` over a TEXT-carried int64) and the numeric-tower result
-class are §13g·4 — a different mechanism (sum/mean PROMOTE and need exact >2^53 result transport, where
-min/max just return an input value), so they are their own increment. Rows 5–6 (a MIXED number+string
-`min`/`max`) stay the documented divergence: neither spine can raise the reference's cross-type error from
-SQL (§13n), and `storedCompareOn` leaves the cross-type order to SQLite there.
+**SUM ROWS 1–2 LANDED (2026-08-06, `7618b71`).** A `sum`/`mean` over a TEXT-carried int64 was WRONG for
+the eligibility reason, not the tower reason: a `long` past 2^53 rides as decimal TEXT (`typeof = 'text'`
+∉ arithmetic), so the guard EXCLUDED it and `inject(9007199254740993L, 1L).sum()` answered `1`. For a
+STATIC `long`/`bigint` class the sum now casts every value through `storedCompareOn` (admitting it exactly)
+and `sumTower` keeps the class, riding the >2^53 result as exact decimal TEXT tagged `long` so it frames
+as a `long` through the vtype-aware reducer framer (`84c9619`'s contract) rather than losing the low bits.
+`mean` is unchanged (already forced REAL). Pinned rel-ahead of legacy in `rel-spine.test.ts`; ci green,
+`test:cf-limits` green, `test:legacy-spine` no new failure.
+
+**What is LEFT of §13g·5 / §13g·4:** the numeric-tower PROMOTION for the narrower/wider integer classes —
+`inject(127b, 1b).sum()` → `d[128].s`, the 6 `Sum.feature` scenarios. `sumTower` was deliberately reduced
+to `long`/`bigint` because the promotion needs `byte`/`short`/`int` TAGGED at the `inject` source, and
+tagging them (measured 2026-08-06) is a both-spine framing-vocabulary change — a `byte` starts framing as
+Byte everywhere, with its own census reap — that ALSO regresses inject-after-typed-inject (`inject(1,3)
+.inject(100,300)` starts declining "inject after typed scalar state not yet supported"). So the promotion
+tower is a dedicated increment (exact-type inject framing + the second-inject path + the tower's climbing
+arms re-added), gated on the human decision about exact-type literal framing. Rows 5–6 (a MIXED
+number+string `min`/`max`) stay the documented divergence: neither spine can raise the reference's
+cross-type error from SQL (§13n), and `storedCompareOn` leaves the cross-type order to SQLite there.
 
 ### 13c·1. The `set` framing marker — CONFIRMED, and the rule is PER FOLLOWER, not a blanket
 
