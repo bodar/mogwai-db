@@ -39,9 +39,9 @@ import { extractStrategies, parseGremlin, stepChain } from '../src/gremlin/front
 import { runPasses } from '../src/compiler/ir/passes.ts';
 import type { IRStep } from '../src/compiler/ir/step.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
-import { DO_BIND_CAP, planBindCount } from '../src/rel/check.ts';
+import { DO_BIND_CAP } from '../src/rel/check.ts';
 import { emit, emitRelational } from '../src/rel/emit.ts';
-import { retained } from '../src/rel/plan.ts';
+import { retained, type Plan } from '../src/rel/plan.ts';
 import { render } from '../src/sql/kernel/q.ts';
 import { cfLimitViolation } from '../src/cf-limits.ts';
 
@@ -121,13 +121,13 @@ let emitted = 0;
 /**
  * THE ADMITTED COUNT MUST BOUND THE ENFORCED COUNT.
  *
- * `lowerToRel` declines above the cap on `planBindCount`, which counts IR OCCURRENCES; the wall
- * counts the RENDERED bind list, and the two are different numbers — the assembler can spell one
- * `Lit` more than once when it fuses a clause reader into the block that computes its subject
- * (measured in the algebra: 91 occurrences rendering as 181 binds). A seam that admits on the first
- * and meets the wall on the second admits on a number that is not the wall, and the refusal then
- * arrives past the point where another route could have been chosen — the fail-closed violation the
- * routing switch cannot absorb.
+ * `lowerToRel` decides the cap on the RENDERED bind list itself — it renders `emitRelational` and
+ * counts, with no cheaper pre-count — because any estimate diverges from what the assembler spells: it
+ * can count one `Lit` the block fuses in twice as one (measured in the algebra: 91 occurrences
+ * rendering as 181 binds), or sum a repeated parameter the render dedups to a single reused `?N`. A
+ * seam that admitted on such an estimate would meet the wall on a different number, and the refusal
+ * would then arrive past the point where another route could have been chosen — the fail-closed
+ * violation the routing switch cannot absorb.
  *
  * `renderedSteps` therefore renders and asks the real list, so the property swept here is the one that
  * matters: **a plan the seam ADMITTED renders within the platform cap.** It is what makes the wall
@@ -144,7 +144,7 @@ let emitted = 0;
  * because each of its statements meets the wall on its own — summing them would report a number no
  * database ever asks.
  */
-const renderedSteps = (plan: Parameters<typeof planBindCount>[0]) =>
+const renderedSteps = (plan: Plan) =>
   plan.bindings.some((binding) => retained(binding))
     ? emit(plan).map((step) => step.emitted)
     : [render(emitRelational(plan))];

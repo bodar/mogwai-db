@@ -1,7 +1,7 @@
 import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
 import { col, compilerInt, compilerText, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
-import { BindBudgetExceeded, DO_BIND_CAP, planBindCount } from '../../rel/check.ts';
+import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
 import { emit, emitRelational } from '../../rel/emit.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import { render } from '../../sql/kernel/q.ts';
@@ -1606,7 +1606,7 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
  * `jsonb_array(…)` is the member encoding, and it is BARE — legacy's `jsonbArrayOf` spells it
  * `jsonb(json_array(…))`, the same value. The members are query-text-bounded literals, so a bind
  * each is right here and a JSON bind is not (the root rule is about sets sized by DATA); an
- * over-budget list declines through `planBindCount` like anything else.
+ * over-budget list declines at the rendered-bind gate like anything else.
  *
  * MIXED arguments decline: `inject([1,2], 3)` is a list traverser and a scalar traverser in one
  * stream, which is the VARIANT shape rather than either of them.
@@ -1880,20 +1880,22 @@ const settle = (opts: Lowering): Required<Lowering> => ({
  * legacy's 2 — three in one chain would exceed the cap. Making that a decline is what keeps the wall
  * out of production; making the key cheaper is a separate increment.
  *
- * **The number asked must be the number the WALL measures.** `planBindCount` counts IR OCCURRENCES;
- * the platform counts the RENDERED bind list, and the two differ whenever the assembler spells one
- * `Lit` twice — fusing a clause reader into the block that computes its subject does exactly that.
- * Measured over every corpus prefix: 50 distinct divergences, the widest 42 rendered against 31
- * counted, so a plan admitted at 75 can render past 100. Deciding on the cheap count would therefore
- * admit on a number that is not the wall, and the refusal would then land at emission — past the
- * point where this seam could still have chosen the other route. So RENDER once and ask the real
- * list. The render costs ~30µs against a compile and buys the only count worth checking.
+ * **The number asked must be the number the WALL measures — so there is no pre-count, only the
+ * render.** Any cheap estimate diverges from what the assembler actually spells: it can count a `Lit`
+ * the block fuses in twice as one (UNDER), or sum a parameter shared across CTEs once per binding
+ * where the render dedups it to a single reused `?N` (OVER). Measured over every corpus prefix: 50
+ * divergences, the widest 42 rendered against 31 counted. An under-estimate would admit a plan that
+ * renders past 100 and refuse only at emission — past the point this seam could still choose the other
+ * route; an over-estimate would decline a valid plan to legacy, which does not dedup and renders it
+ * FATTER. So RENDER once and ask the real list. The render costs ~30µs against a compile and is the
+ * only count worth checking.
  *
- * It goes through `emitRelational` + the kernel's own `render` rather than `emitQuery`, and that is
- * not a shortcut: `emitQuery` answers an over-budget plan by THROWING, so a `catch` here would have
- * to swallow it — and the same `catch` would swallow a checker violation, turning the one failure
- * `rel-sweep` exists to see into a silent decline. `checkPlan` still runs inside `emitRelational`,
- * so a genuine violation still escapes; only the cap decision is taken here.
+ * It goes through `emitRelational` + the kernel's own `render` rather than `emitQuery` (which refuses
+ * an over-budget plan by throwing a bare number). The decline is a TYPED catch — `BindBudgetExceeded`
+ * only, the same discrimination the effects branch makes: `checkPlan` (inside `emitRelational`) raises
+ * that class for a per-binding over-budget, a real cap decision, while a structural checker violation
+ * is a different class that still escapes — so the one failure `rel-sweep` exists to see is never
+ * swallowed.
  */
 /**
  * THE PAYLOAD PROJECTION, APPLIED — the fold's last act, and the §10·10 boundary in one function.
@@ -1997,8 +1999,20 @@ const lowered = (chain: Tail, collapse: boolean, fresh: Minter): RelLowering | n
     }
     return { plan, shape: wire.shape };
   }
-  if (planBindCount(plan) > DO_BIND_CAP) return null;
-  return render(emitRelational(plan)).binds.length > DO_BIND_CAP ? null : { plan, shape: wire.shape };
+  // A read is ONE statement, so the number the DO measures is exactly its rendered bind list — ask
+  // that, nothing coarser. A pre-count summed per binding could only DECLINE a valid plan on an
+  // over-estimate: a parameter shared across CTEs is one bind after dedup but was summed once per
+  // binding, and declining a repeated-parameter plan hands it to legacy — which does NOT dedup and
+  // renders it FATTER, failing on the DO the very plan RelIR could fit. `emitRelational` renders
+  // through `checkPlan`, whose per-binding budget guard throws `BindBudgetExceeded`; catch THAT as a
+  // decline (a genuine over-budget binding is a genuine over-budget statement) exactly as the effects
+  // branch does, while a real checker violation is a different class and still escapes.
+  try {
+    return render(emitRelational(plan)).binds.length > DO_BIND_CAP ? null : { plan, shape: wire.shape };
+  } catch (error) {
+    if (!(error instanceof BindBudgetExceeded)) throw error;
+    return null;
+  }
 };
 
 export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLowering | null {

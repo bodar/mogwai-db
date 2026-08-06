@@ -62,9 +62,12 @@ const sameNames = (left: readonly string[], right: readonly string[]): boolean =
  * uses of one `$x` cost a single bind — hence distinct names, via the Set. A mechanical `'bound'` bind
  * (an oversized collection / decimal tail) has no name and does not dedup, so it is counted by
  * OCCURRENCE: a shared node the `Name` pass inlines twice contributes twice, and counting the DAG once
- * could under-report — the failure that only appears in production. (This is a per-node pre-check; the
- * true authority is the rendered bind list, `renderStep`. Summing distinct names per binding across the
- * CTEs of one read statement can over-report a param shared between them, which only fails closed.) */
+ * could under-report — the failure that only appears in production.
+ *
+ * PER NODE. `check` uses it as the per-binding budget guard (each `Stmt` is its own statement); it is
+ * NOT summed across a read plan's CTEs — the whole-statement authority is the rendered bind list, which
+ * `lowerToRel` renders and counts directly, catching this guard's throw as a decline. So a parameter
+ * shared across CTEs is one bind (the render dedups it), never the double-count a naive sum would make. */
 export function bindCount(plan: Rel | Stmt): number {
   const paramNames = new Set<string>();
   let mechanical = 0;
@@ -92,18 +95,6 @@ export function bindCount(plan: Rel | Stmt): number {
   } else rel(plan);
   return paramNames.size + mechanical;
 }
-
-/**
- * THE WHOLE PROGRAM's binds — what the database actually counts.
- *
- * `bindCount` answers for one node, and `check` applies the cap per BINDING, which is the right
- * question for a `Stmt` boundary (each is its own statement). A read plan's bindings are CTEs of ONE
- * statement, so its budget is the SUM — and that is the number DO's 100-parameter cap is measured
- * against. Kept beside `bindCount` rather than derived at a call site, because the two must not
- * disagree about what counts as a bind.
- */
-export const planBindCount = ({ bindings, result }: Plan): number =>
-  bindings.reduce((total, binding) => total + bindCount(binding.node), 0) + bindCount(result);
 
 export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt> = new Map()): void {
   /** SQLite's recursive-term law is positional, not merely a reference count. */

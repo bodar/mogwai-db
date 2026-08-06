@@ -383,9 +383,15 @@ the instrument and the platform agree after dedup.
    why a single ordering param dropped from two binds to one.) The `RowsBind` marker keeps its own
    ordinal slot, so the executor's positional fill still lines up, and text+binds are produced in ONE
    pass so they cannot drift.
-3. `bindCount` (`rel/check.ts`) counts DISTINCT parameter names once + mechanical binds by occurrence.
-   (Per-node; summing across the CTEs of one read statement can over-report a param shared between
-   them, which only fails closed — the true authority is the rendered list, `renderStep`.)
+3. `bindCount` (`rel/check.ts`) counts DISTINCT parameter names once + mechanical binds by occurrence,
+   PER NODE — it is `check`'s per-binding budget guard, no longer summed across a plan. `lowerToRel`
+   decides the cap on the RENDERED bind list directly (the coarse `planBindCount` sum is deleted): a
+   read renders as ONE statement and its `.binds.length` is exactly what the DO measures, so a
+   parameter shared across CTEs counts once and no valid plan is declined on an over-estimate. The
+   decline is a typed `BindBudgetExceeded` catch mirroring the effects branch, so a genuine over-budget
+   binding declines while a structural checker violation still escapes. (Declining a repeated-parameter
+   plan to legacy would be doubly wrong — legacy does not dedup and would render it fatter, failing on
+   the DO the very plan RelIR fits.)
 4. Tests: `rel-spine.test.ts` — a repeated `$p` is one bind reused as `?1`, distinct params get
    distinct ordinals, a param-free statement stays anonymous; `L2-sql/filter.sql.test.ts` updated
    (`P.gt($x)` 2→1 bind, `P.between($x,$y)` 4→2). Full ladder + `rel-sweep` (53,980 admitted plans)
