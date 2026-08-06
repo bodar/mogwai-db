@@ -75,6 +75,12 @@ Full vocabulary table, the worked cases, and the four TinkerPop patterns we deli
 
 ## Tooling
 
+**Every `mise run <task>` tees its full output to `.logs/<task>.log`** (one file per task, last run,
+via the `[task_config]` shell in `mise.toml`). So when a run is red or long, `grep`/`Read` the printed
+log path — `mise run ci` leaves `.logs/check.log`, `.logs/test.log`, … — instead of re-running the
+suite because a `tail` scrolled the part you needed past. **Do not pipe a suite through `tail`/`grep`
+and then re-run when you miss something; the whole run is already in the file.**
+
 Every tool below is driven by the LSP inside our **pinned `typescript`** (`tsc --lsp --stdio`), so
 none of them can disagree with what `mise run check` gates on. That property is the whole point —
 it is why a second linter is not wanted and why adopting `tsserver` would be a real trade, not a

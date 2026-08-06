@@ -2,6 +2,8 @@ node_modules/
 dist/
 build/
 *.log
+# Per-task run logs from scripts/teeshell.sh (mise task shell) — .logs/<task>.log
+.logs/
 *.sqlite
 *.sqlite3
 *.db

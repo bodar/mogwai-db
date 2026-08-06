@@ -7,6 +7,16 @@ bun = "1.3.11"
 # Keep wrangler non-interactive in CI (no telemetry prompt / phone-home).
 WRANGLER_SEND_METRICS = "false"
 
+# Every task runs through scripts/teeshell.sh, which tees its combined stdout+stderr to
+# `.logs/<task>.log` (the last run of that task) and prints the path. So a run's full output
+# is always in a file to `grep`/`Read` — no re-running a suite just because a `tail` or `grep`
+# swallowed the part you needed. This is the task SHELL rather than a `tee` per `run =` on
+# purpose: dependencies execute as sibling tasks whose output never reaches a parent's in-`run`
+# tee, so the shell is the only seam that catches EVERY task — `mise run ci` leaves one clean
+# log per sub-task. Header of the script has the full rationale + the `raw = true` escape hatch.
+[task_config]
+shell = "{{config_root}}/scripts/teeshell.sh -c"
+
 # Build graph: submodule ─▶ install ─┬─▶ check ─┐
 #                                    ├─▶ test  ─┤
 #                                    └─▶ build ─┴─▶ ci
