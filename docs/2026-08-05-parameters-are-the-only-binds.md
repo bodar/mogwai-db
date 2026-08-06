@@ -8,10 +8,11 @@ while a wire parameter is the only free-standing bind, and *one* bind whatever i
 split collapsed to two (parameter vs constant), and the leak the plan set out to close is closed: **the
 100-bind cap is now exactly 100 parameters, with no mystery overhead.** Supersedes the constant-SQL-hygiene
 campaign (`docs/archive/2026-08-05-compiler-constant-sql-hygiene-plan.md`) and reverses a locked decision
-(`docs/2026-08-01-relir-build-plan.md` §3.4, "no `Param` node"). Nothing in the plan remains open; two
-exotic *coverage* residuals (a decimal/bigint CONSTANT in a static ordering comparison; a param-list
-`within`) are a `ScalarType` enrichment and a coverage item, not thesis work, and live in
-`docs/outstanding-work.md`.
+(`docs/2026-08-01-relir-build-plan.md` §3.4, "no `Param` node"). The one substantive residual — a
+decimal/bigint/duration CONSTANT in a static ordering comparison — **LANDED this round** (the `ScalarType`
+storage-class enrichment below), and it turned out to fix a legacy *wrong answer*, not just a coverage gap.
+The only thing left is a param-list `within` (a collection PARAMETER as an IN-set), coverage-only and
+legacy-correct, noted in `docs/outstanding-work.md`.
 
 ## The thesis
 
@@ -469,20 +470,21 @@ included — to unwrap a new wrapper). The encoding chosen dissolves both worrie
   `Arg.type`, and a member now carries its own captured type on its `Arg` (no more `type.items[i]`
   indexing in the predicate literal path; the bound-list-param fallback still reads `itemTypeAt`).
 
-**The thesis is complete — nothing in this plan remains open.** The two capability residuals below are
-NOT "parameters are the only binds" work (that is done): both fail closed today — a correct decline, never
-a wrong answer — and both now live in `docs/outstanding-work.md` so this plan can close:
+**The thesis is complete, and the last exotic gap it named is now closed too.**
 - **A decimal/bigint/duration CONSTANT in a static ORDERING comparison** (`inject(9.99m).is(P.gt(…))`,
-  `constant(9.99m).is(…)`) still declines. The fix is a `ScalarType` STORAGE-CLASS enrichment
-  (governed by `docs/2026-07-28-shape-vocabulary-architecture.md` +
-  `docs/2026-07-28-scalartype-refactoring-pattern.md`): `STATIC` must carry whether a scalar is TEXT-stored,
-  so `ordered`'s static arm can cast the SUBJECT — because `STATIC('bigdecimal')` today is ambiguous between
-  our inlined decimal-TEXT and a native `asNumber(BIGDECIMAL)` REAL, and casting blindly would break the
-  native case. Cross-layer (the carrier is `ScalarType` in `sql/kernel/render.ts`), high blast radius,
-  exotic trigger — a vocabulary change to make deliberately, not a bind decision.
-- **The PARAM-LIST `within`** (a collection PARAMETER as an IN-set) is coverage-only — one `jsonb(?)` bind
-  exploded by `json_each`, needing `parsePredicate` to keep the single-collection-arg distinction and a
-  `Minter` in `predicateExpr`; legacy answers it correctly today.
+  `inject(9…L).is(…)`, `inject(Duration(…)).is(…)`, and the `constant(…)` siblings) — **LANDED this round.**
+  The fix is the `ScalarType` STORAGE-CLASS enrichment the earlier drafts scoped: `STATIC` now carries a
+  `text` flag (`sql/kernel/render.ts`), set only where the value stores as decimal/nanos TEXT
+  (`injectSource`, the `constant` sites), and `ordered`'s static arm casts a TEXT subject to its numeric
+  class — identity on the native form of the same tag (`count()`, `asNumber(BIGDECIMAL)`), the conversion on
+  the TEXT form. **It was not merely a coverage gap: routing these to legacy compared the decimal TEXT
+  LEXICALLY (`'9.99' > '10.0'` is true), a wrong answer the census had not caught because the traversal was
+  recorded on the legacy spine.** Pinned by `test/compiler/inject-tail-ordering.exec.test.ts`; census
+  `spine` +1 (the one corpus witness, `inject(Duration).is(gt)`, moved legacy→rel with an identical digest).
+- **The one thing still open — a PARAM-LIST `within`** (a collection PARAMETER as an IN-set) — is
+  coverage-only and NOT thesis work: one `jsonb(?)` bind exploded by `json_each`, needing `parsePredicate`
+  to keep the single-collection-arg distinction and a `Minter` in `predicateExpr`; legacy answers it
+  correctly today. Tracked in `docs/outstanding-work.md`.
 
 The RelIR pass pipeline (`prune`/`fuse` ordering) is a separate architectural question already tracked as
 `docs/outstanding-work.md` item 37 — not thesis work.

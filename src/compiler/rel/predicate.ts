@@ -88,6 +88,12 @@ const isExactTail = (value: unknown): boolean =>
 const exactTailCast = (value: unknown): SqlType | null =>
   value instanceof BigDecimal ? 'real' : (typeof value === 'bigint' || value instanceof Duration) ? 'int' : null;
 
+/** The numeric class a TEXT-stored static SUBJECT casts to in an ordering compare, keyed by canonical
+ *  type (`normalizeTypeName` output). The cast is IDENTITY on the native form of the same tag (a native
+ *  `long` is already INTEGER, an `asNumber(BIGDECIMAL)` REAL) and the conversion on the decimal/nanos-TEXT
+ *  form (`inject(9.99m)` → REAL), so it is correct once `type.text` says which storage class is in hand. */
+const STATIC_SUBJECT_CAST: Record<string, SqlType> = { bigdecimal: 'real', long: 'int', bigint: 'int', duration: 'int' };
+
 /** Above this, a big set DECLINES rather than emitting binds it cannot afford — the DO 100-parameter
  *  wall. A big LITERAL set inlines (0 binds) and is unaffected; only a big PARAM/data set is capped.
  *  There is deliberately no >100-value blob conversion (removed 2026-08-06). */
@@ -126,8 +132,10 @@ const NUMERIC_VTYPES = [...NUMERIC_CAST_TO_INT, ...CAST_TO_REAL];
  * the RelIR side must speak `Expr` (§2, the clean-room boundary). Same three cases, different layer.
  */
 export type SubjectType =
-  /** A compile-time canonical Gremlin type name — `count()`'s `long`, a typed `inject`. */
-  | { readonly kind: 'static'; readonly type: string }
+  /** A compile-time canonical Gremlin type name — `count()`'s `long`, a typed `inject`. `text` marks a
+   *  decimal-TEXT-stored exact tail (`inject(9.99m)`, a bound big long/Duration) so an ordering compare
+   *  casts the subject to its numeric class; unset means a native REAL/INT of the same tag. */
+  | { readonly kind: 'static'; readonly type: string; readonly text?: boolean }
   /** The subject came from a stored property, so its type is the row's own `vtype` column. */
   | { readonly kind: 'perRow'; readonly vtype: Expr }
   /** Nothing is known — an untyped computed scalar. */
@@ -149,14 +157,20 @@ const ordered = (
   const castBound: Expr = tailCast ? { kind: 'cast', arg: bound, to: tailCast } : bound;
   if (type.kind === 'static') {
     const canonical = normalizeTypeName(type.type);
-    // A TEMPORAL (`datetime`/`duration`) STATIC subject cannot be ordered by this arm: its only source is
-    // a literal that rides as a raw epoch/nanos with no per-row `vtype` to drive `compareKey`'s cast, so
-    // comparing it raw against `castBound` is not what TinkerPop's temporal ordering means. Rather than
-    // fold to a wrong `CONSTANT.false` — the empty-result bug an `inject(datetime(…)).is(P.gt(…))` exposes,
-    // where the value is genuinely comparable — DECLINE so the traversal routes to the legacy spine, which
-    // compares it correctly (a coverage gap, never a wrong answer;
-    // docs/2026-08-05-parameters-are-the-only-binds.md C1). A native-numeric static subject (`count()`'s
-    // `long`, an `asNumber(BIGDECIMAL)` REAL) is unaffected and still folds/compares here.
+    // A TEXT-stored exact-tail subject (`inject(9.99m)`, a bound big long/Duration — `type.text`) rides as
+    // decimal/total-nanos TEXT, so ordering casts it to its numeric class. The SAME cast is identity on the
+    // NATIVE form of the same tag (`count()`→INTEGER, `asNumber(BIGDECIMAL)`→REAL), which is why the flag —
+    // set only where the value is stored as TEXT (`injectSource`) — is what disambiguates the two and lets
+    // `inject(9.99m)`/`inject(9…L)`/`inject(Duration(…))` order instead of declining
+    // (docs/2026-08-05-parameters-are-the-only-binds.md C1).
+    const subjectCast = canonical !== null ? STATIC_SUBJECT_CAST[canonical] : undefined;
+    if (numericBound && type.text && subjectCast)
+      return binary(op, { kind: 'cast', arg: subject, to: subjectCast }, castBound);
+    // A NATIVE temporal (`datetime`, or a `duration` that did not arrive as a TEXT tail) cannot be ordered
+    // by this arm: it rides as a raw epoch/nanos with no per-row `vtype` to drive `compareKey`'s cast, so
+    // comparing it raw is not what TinkerPop's temporal ordering means. DECLINE (a coverage gap, never a
+    // wrong answer) rather than fold to a wrong `CONSTANT.false`. A native-numeric static subject
+    // (`count()`'s `long`, an `asNumber(BIGDECIMAL)` REAL) is unaffected and still folds/compares here.
     if (numericBound && canonical !== null && STATIC_ORDERING_DECLINE.has(canonical)) return null;
     const agrees = numericBound ? canonical !== null && NUMERIC_VTYPES.includes(canonical) : canonical === 'string';
     return agrees ? binary(op, subject, castBound) : CONSTANT.false;

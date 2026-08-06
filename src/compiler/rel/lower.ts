@@ -12,8 +12,8 @@ import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { isLocalScope, sliceOf, sliceParamNames } from '../ir/step.ts';
 import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
-import { flattenListArgs, isNested, isTokenArg, stepChain, argValues, arg } from '../../gremlin/frontend.ts';
-import { Duration, type TypeNode } from '../../gremlin/types.ts';
+import { flattenListArgs, isNested, isTokenArg, stepChain, argValues, arg, type Arg } from '../../gremlin/frontend.ts';
+import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
 import { assertsGType, childSteps, collectionAssert, typeOfAssert } from '../steps/tail/child-shape.ts';
 import { PATH_LIST_OPS } from '../steps/tail/path.ts';
@@ -1103,16 +1103,19 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { readon
     const [, extra] = args;
     if (extra !== undefined) return null;
     const literal = constLit(step.args[0]);
-    if (!literal) return null;
+    const tail = literal ? null : exactTailConst(step.args[0]);
+    if (!literal && !tail) return null;
     return {
       rel: make.project({
         id: fresh('ct'), input, channels: input.channels,
         type: typeOf(meta('v', 'any', true), ...carriedCols(input.channels)),
-        exprs: [['v', literal], ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
+        exprs: [['v', literal ?? tail!.expr], ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
       }),
-      // UNKNOWN, not a tag inferred from the JS value: that is what legacy frames here, and a
-      // compile-time tag would be a claim the argument's declared type does not support.
-      framing: { kind: 'scalar', type: UNKNOWN },
+      // UNKNOWN for an untyped constant, not a tag inferred from the JS value: that is what legacy frames
+      // here, and a compile-time tag would be a claim the argument's declared type does not support. An
+      // EXACT TAIL is the exception — its declared type IS known, so it frames STATIC(type, text) so a
+      // following ordering compare can cast it (C1).
+      framing: { kind: 'scalar', type: tail ? STATIC(tail.tag as never, true) : UNKNOWN },
     };
   }
 
@@ -1247,7 +1250,7 @@ function scalarTail(
   // `TypeCtx`, in the algebra's own expression vocabulary.
   const subjectType = (): SubjectType =>
     carries('vtype') ? { kind: 'perRow', vtype: col(rel.id, 'vtype') }
-      : out.kind === 'scalar' && out.type.kind === 'static' ? { kind: 'static', type: out.type.type }
+      : out.kind === 'scalar' && out.type.kind === 'static' ? { kind: 'static', type: out.type.type, text: out.type.text }
         : SUBJECT_UNKNOWN;
 
   // A BOUNDARY before a CLAUSE-POSITION READER, and it is not cosmetic. Fusing a `Filter` or a
@@ -1382,14 +1385,15 @@ function scalarTail(
       const [, extra] = args;
       if (extra !== undefined) return null;
       const literal = constLit(step.args[0]);
-      if (!literal) return null;
+      const tail = literal ? null : exactTailConst(step.args[0]);
+      if (!literal && !tail) return null;
       const carried = rel.channels;
       rel = make.project({
         id: fresh('ct'), input: rel, channels: carried,
         type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
-        exprs: [['v', literal], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+        exprs: [['v', literal ?? tail!.expr], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
       });
-      out = { kind: 'scalar', type: UNKNOWN };
+      out = { kind: 'scalar', type: tail ? STATIC(tail.tag as never, true) : UNKNOWN };
       continue;
     }
 
@@ -1528,6 +1532,19 @@ function scalarTail(
  * (`Values([])` rendered as invalid SQL that only failed at the database), and the algebra's answer
  * is a `Filter(false)` over something, which there is nothing here to be over.
  */
+/** An EXACT-TAIL constant argument — a Duration, a BigDecimal, or a big BigInt (>2^53) — for the
+ *  `constant(c)` sites. It has no scalar-literal form, so `constLit` declines it; but its declared type
+ *  is known, so it inlines as its canonical decimal/total-nanos TEXT (exact, framed back as its own
+ *  type) and frames `STATIC(type, text=true)` — the `text` flag telling a following ordering compare to
+ *  cast it to its numeric class (C1). A `$x` binds (TEXT too). `null` for a non-tail (`constLit` handled
+ *  it) or an untyped tail (no declared type to frame). */
+const exactTailConst = (a: Arg | undefined): { expr: Expr; tag: string } | null => {
+  const v = a?.value;
+  const tag = flatType(a?.type ?? null);
+  if (tag == null || !(v instanceof Duration || v instanceof BigDecimal || typeof v === 'bigint')) return null;
+  return { expr: a!.name != null ? param(v, a!.name) : compilerText(String(v)), tag };
+};
+
 function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; framing: RelFraming; at: number } | null {
   const step = steps[0]!;
   if (step.modulators?.length || step.optionArms) return null;
@@ -1562,25 +1579,27 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
   // `bareInjectTag` only applies when nothing was folded. Computed before the rows because a tail
   // member's inline is only sound when the stream frames STATIC (see below).
   const tag = folded.as ?? (folded.at === 1 ? bareInjectTag(steps as IRStep[], vals.length) : undefined);
-  // A scalar arg inlines as a typed literal / binds as a parameter (`constLit`). A DURATION has no
-  // scalar-literal form, so `constLit` declines it — but this inject frames `STATIC('duration')`, and a
-  // Duration rides as its canonical total-nanos TEXT that reads back as a Duration. Sound ONLY when `tag`
-  // is set: a MIXED inject frames UNKNOWN, where a bare TEXT literal would read back as a string, so a tail
-  // member there still declines (C1, docs/2026-08-05-parameters-are-the-only-binds.md). A `$x` binds.
+  // A scalar arg inlines as a typed literal / binds as a parameter (`constLit`). An EXACT TAIL — a
+  // Duration, a BigDecimal, or a big BigInt — has no scalar-literal form, so `constLit` declines it; but
+  // it rides as its canonical decimal/total-nanos TEXT (exact, reads back as its own type) and stores as
+  // TEXT, so it inlines here. Sound ONLY when `tag` is set: a MIXED inject frames UNKNOWN, where a bare
+  // TEXT literal would read back as a string, so a tail member there still declines
+  // (C1, docs/2026-08-05-parameters-are-the-only-binds.md). A `$x` binds — a bound tail is TEXT too.
   //
-  // Only Duration is inlined here, and the restraint is load-bearing. A bigint (`inject(9…L)`) frames
-  // STATIC('long') — the SAME static type native `count()` carries — so a following `is(P.gt(…))` could
-  // not tell the TEXT big-long from a native long. A BigDecimal frames STATIC('bigdecimal'), which ALSO
-  // arrives NATIVE from `asNumber(GType.BIGDECIMAL)`/a reducer, so `ordered` cannot decline its ordering
-  // without breaking that native case. Duration alone has no native static-subject source, so `ordered`
-  // can safely decline `is(P.gt(Duration))` (routing to legacy) while the plain `inject(Duration(…))` and
-  // its equality/`unfold`/… uses lower here. bigint and BigDecimal keep declining whole, as before.
+  // The subject frames `STATIC(tag, text=true)`: a bigint (`inject(9…L)`) shares the tag `long` with a
+  // native `count()`, and a BigDecimal shares `bigdecimal` with a native `asNumber(GType.BIGDECIMAL)`
+  // REAL — the storage classes differ (TEXT here, native there) and only the `text` flag distinguishes
+  // them, so `ordered` casts THIS subject to its numeric class while leaving the native one alone. That
+  // is what lets `inject(9.99m)`/`inject(9…L)`/`inject(Duration(…))` order correctly instead of declining.
+  let textTail = false;
   const rowExpr = (value: unknown, i: number): Expr | null => {
     const paramName = step.args[i]?.name ?? null;
     const literal = constLit(arg(value, rowType(i), paramName));
     if (literal) return literal;
-    if (tag !== undefined && value instanceof Duration)
+    if (tag !== undefined && (value instanceof Duration || value instanceof BigDecimal || typeof value === 'bigint')) {
+      textTail = true;
       return paramName != null ? param(value, paramName) : compilerText(String(value));
+    }
     return null;
   };
   const rows = vals.map(rowExpr);
@@ -1590,7 +1609,7 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
       id: fresh('inj'), rows: (rows as Expr[]).map((row) => [row]), channels: [],
       type: typeOf(meta('v', 'any', true)),
     }),
-    framing: { kind: 'scalar', type: tag ? STATIC(tag as never) : UNKNOWN },
+    framing: { kind: 'scalar', type: tag ? STATIC(tag as never, textTail) : UNKNOWN },
     at: folded.at,
   };
 }

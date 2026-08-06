@@ -1113,7 +1113,7 @@ ran	rel	1	1	d8d8deff1394c7cb	1901c06d7489e988	ran	d8d8deff1394c7cb	g.inject(Dura
 ran	rel	1	1	3a1d69fd76629ad8	d74fbd7f73880da5	ran	3a1d69fd76629ad8	g.inject(Duration(30, 0))
 ran	rel	1	1	3a1d69fd76629ad8	d74fbd7f73880da5	ran	3a1d69fd76629ad8	g.inject(Duration(30, 0, false))
 ran	rel	1	1	c66e8fa75c56e281	33e6d819e865ec28	ran	c66e8fa75c56e281	g.inject(Duration(9000, 0))
-ran	legacy	1	1	c66e8fa75c56e281	33e6d819e865ec28	ran	c66e8fa75c56e281	g.inject(Duration(9000, 0)).is(P.gt(Duration(3600, 0)))
+ran	rel	1	1	c66e8fa75c56e281	33e6d819e865ec28	ran	c66e8fa75c56e281	g.inject(Duration(9000, 0)).is(P.gt(Duration(3600, 0)))
 ran	rel	1	1	0a3a90e26131f0ea	a479aa341230a781	ran	0a3a90e26131f0ea	g.inject(Infinity).is(P.eq(+Infinity))
 ran	rel	1	1	0a3a90e26131f0ea	a479aa341230a781	ran	0a3a90e26131f0ea	g.inject(Infinity).is(P.gt(-Infinity))
 ran	rel	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	ran	e3b0c44298fc1c14	g.inject(Infinity).is(P.lt(-Infinity))

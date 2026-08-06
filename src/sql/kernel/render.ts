@@ -127,11 +127,19 @@ export type { ValueType };
 // a {t,v} envelope only inside a JSON blob). Conflating the two is what caused the dead end
 // recorded in docs/archive/2026-07-25-type-channel-unification.md.
 export type ScalarType =
-  | { kind: 'static'; type: ValueType }   // a cast, a typed literal, count()→long
+  // `text`: this static scalar is stored as decimal TEXT — an inlined or bound EXACT TAIL
+  // (`inject(9.99m)`, a bound big long/Duration) rather than a native REAL/INT (`count()`,
+  // `asNumber(BIGDECIMAL)`). The two share a tag (`bigdecimal`/`long`) but not a storage class, so an
+  // ordering comparison must cast a `text` subject to its numeric class and leave a native one alone.
+  | { kind: 'static'; type: ValueType; text?: boolean }   // a cast, a typed literal, count()→long
   | { kind: 'perRow'; column: string }    // a stored-vtype column — the only heterogeneous-safe case
   | { kind: 'unknown' };                  // the JS-client seam; infer from the JS value at framing
 
-export const STATIC = (type: ValueType): ScalarType => ({ kind: 'static', type });
+export const STATIC = (type: ValueType, text = false): ScalarType =>
+  text ? { kind: 'static', type, text: true } : { kind: 'static', type };
+
+/** Whether a static scalar is stored as decimal TEXT (an exact tail), so an ordering compare must cast it. */
+export const staticIsText = (t: ScalarType | undefined): boolean => t?.kind === 'static' && t.text === true;
 export const PER_ROW = (column: string): ScalarType => ({ kind: 'perRow', column });
 export const UNKNOWN: ScalarType = { kind: 'unknown' };
 
