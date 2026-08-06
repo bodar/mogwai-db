@@ -1,4 +1,4 @@
-import { empty, identifier, list, q, raw, render, textLiteral, value, type Expression } from '../sql/kernel/q.ts';
+import { empty, identifier, list, paramValue, q, raw, render, textLiteral, value, type Expression } from '../sql/kernel/q.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, checkPlan } from './check.ts';
 import type { Expr } from './expr.ts';
 import { recursiveSelf } from './factory.ts';
@@ -121,7 +121,11 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       }
       case 'lit':
         switch (e.source) {
-          case 'bound': case 'parameter': return value(e.value);
+          // A user PARAMETER carries its wire name, so repeated uses of one `$x` collapse to a single
+          // placeholder + a single bind at render (`paramValue` → the dedup pass in q.ts). A mechanical
+          // `'bound'` bind (an oversized collection / decimal tail) has no name and stays its own `?`.
+          case 'parameter': return paramValue(e.value, e.name);
+          case 'bound': return value(e.value);
           case 'compiler-text': return textLiteral(e.value);
           case 'compiler-int': return raw(String(e.value));
           // A REAL literal must carry a decimal point or exponent, else SQLite reads an integer-valued

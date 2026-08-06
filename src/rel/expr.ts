@@ -7,7 +7,7 @@ export type BinaryOp = '+' | '-' | '*' | '/' | '%' | '=' | '!=' | '<' | '<=' | '
 export type Expr =
   | { readonly kind: 'col'; readonly rel: import('./types.ts').RelId; readonly name: string }
   | { readonly kind: 'lit'; readonly value: unknown; readonly type: SqlType; readonly source: 'bound' }
-  | { readonly kind: 'lit'; readonly value: unknown; readonly type: SqlType; readonly source: 'parameter' }
+  | { readonly kind: 'lit'; readonly value: unknown; readonly type: SqlType; readonly source: 'parameter'; readonly name: string }
   | { readonly kind: 'lit'; readonly value: string; readonly type: 'text'; readonly source: 'compiler-text' }
   | { readonly kind: 'lit'; readonly value: number; readonly type: 'int'; readonly source: 'compiler-int' }
   | { readonly kind: 'lit'; readonly value: number; readonly type: 'real'; readonly source: 'compiler-real' }
@@ -57,8 +57,13 @@ export const lit = (value: unknown, type: SqlType = 'any'): Expr => ({ kind: 'li
  * is variable, and the 100-parameter budget exists precisely to carry it
  * (docs/2026-08-05-parameters-are-the-only-binds.md). A parsed literal is NOT this — it is a constant,
  * inlined (see the `compiler-*` sources). `'bound'` remains the MECHANICAL bind (a collection JSON, the
- * decimal tail — the `oversized` category), distinct from a parameter but rendered the same way. */
-export const param = (value: unknown, type: SqlType = 'any'): Expr => ({ kind: 'lit', value, type, source: 'parameter' });
+ * decimal tail — the `oversized` category), distinct from a parameter but rendered the same way.
+ *
+ * `name` is the wire-parameter name (TinkerPop's `GValue.name`), carried so REPEATED uses of one `$x`
+ * collapse to a single placeholder + a single bind at render (`src/sql/kernel/q.ts`) — the budget is
+ * for PARAMETERS, not their uses. Two `param()`s with the same name are the same logical parameter (the
+ * client guarantees same-name ⇒ same-value); a mechanical `'bound'` bind has no name and never dedups. */
+export const param = (value: unknown, name: string, type: SqlType = 'any'): Expr => ({ kind: 'lit', value, type, source: 'parameter', name });
 
 /** Does this `Lit` render as a DO bind parameter (a `?`), rather than inline SQL text? A user PARAMETER
  * and a mechanical `'bound'` bind (an oversized collection / decimal tail) both do; a compiler-authored

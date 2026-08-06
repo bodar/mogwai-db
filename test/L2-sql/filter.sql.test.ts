@@ -414,11 +414,13 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     expect(b('g.V().has("age", 30)')).toEqual([]);
     expect(b('g.V().has("age", P.gt(30))')).toEqual([]);
     expect(b('g.V().has("name", within("a","b"))')).toEqual([]);
-    // a parameter binds — bare, in a comparison, in a set, and in a range.
+    // a parameter binds ONCE however many times it is spelled — the budget is for PARAMETERS, not their
+    // uses (docs/2026-08-05-parameters-are-the-only-binds.md, "Repeated parameters"): compareKey spells
+    // an ordering operand twice, and both collapse to a single reused placeholder.
     expect(b('g.V().has("age", xx1)', { xx1: 30 })).toEqual([30]);
-    expect(b('g.V().has("age", P.gt(xx1))', { xx1: 30 })).toEqual([30, 30]);      // compareKey spells it twice
+    expect(b('g.V().has("age", P.gt(xx1))', { xx1: 30 })).toEqual([30]);          // spelled twice, ONE bind
     expect(b('g.V().has("name", within(xx1,xx2))', { xx1: 'a', xx2: 'b' })).toEqual(['a', 'b']);
-    expect(b('g.V().has("age", P.between(xx1,xx2))', { xx1: 29, xx2: 35 })).toEqual([29, 29, 35, 35]);
+    expect(b('g.V().has("age", P.between(xx1,xx2))', { xx1: 29, xx2: 35 })).toEqual([29, 35]); // each bound once
   });
 
   // The exact numeric tail — BigDecimal (`9.99m`), Duration, and a >int64 bigint (`…n`) — is stored as

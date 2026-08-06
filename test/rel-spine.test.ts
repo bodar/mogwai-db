@@ -504,6 +504,42 @@ describe('the RelIR spine', () => {
     }
   });
 
+  test('a repeated wire parameter is ONE bind, reused as a numbered placeholder', () => {
+    // The budget is for PARAMETERS, not their USES: a `$p` threaded through two predicates must cost
+    // ONE of the 100 (docs/2026-08-05-parameters-are-the-only-binds.md, "Repeated parameters"). The
+    // client sends one `p` map entry plus the name at each site; RelIR collapses the two `param()`s to
+    // a single `?1` reused — legal on bun:sqlite AND on a Durable Object (test/cf-probe).
+    const compileRel = (gremlin: string, params: Record<string, unknown>) => {
+      const p = compile(gremlin, params, { spine: 'rel' });
+      if (p.kind !== 'read') throw new Error('expected read plan');
+      return p;
+    };
+    const gremlin = "g.V().has('age', gt(p)).has('age', gt(p))";
+    const one = compileRel(gremlin, { p: 20 });
+    expect(one.spine).toBe('rel');
+    expect(one.binds).toEqual([20]);                                // ONE bind, however many uses
+    // The one placeholder is reused at every site — here 4 times, because the vtype-aware compare key
+    // spells each operand twice and there are two predicates; the point is reuse, not the exact count.
+    expect((one.sql.match(/\?1(?!\d)/g) ?? []).length).toBeGreaterThan(1);
+
+    // Distinct parameters get distinct ordinals (`?1`, `?2`) and one bind each — dedup is BY NAME, so
+    // different names never share a slot even though each is itself spelled twice by the compare key.
+    const two = compileRel("g.V().has('age', gt(p)).has('age', lt(q))", { p: 20, q: 40 });
+    expect(two.binds).toEqual([20, 40]);
+    expect(two.sql).toContain('?1');
+    expect(two.sql).toContain('?2');
+
+    // A statement with NO wire parameter is untouched — mechanical/literal binds keep the anonymous-`?`
+    // render byte-for-byte, so no existing SQL (or snapshot) moves.
+    expect(read("g.V().has('age', 30)", { spine: 'rel' }).sql).not.toContain('?1');
+
+    // Dedup changed only the bind list, not the answer: same rows as legacy.
+    const legacy = compile(gremlin, { p: 20 }, { spine: 'legacy' });
+    if (legacy.kind !== 'read') throw new Error('expected read plan');
+    expect(store.query(one.sql, one.binds).map((row) => JSON.stringify(row)).sort())
+      .toEqual(store.query(legacy.sql, legacy.binds).map((row) => JSON.stringify(row)).sort());
+  });
+
   test('tail(n) reads the emission order backwards, and sample(n) is a size not a sequence', () => {
     // `tail` is the one slice where the order IS the answer twice over: which n, and in what order
     // they are reported (backwards from the end, forwards on the wire). Row-for-row against legacy.

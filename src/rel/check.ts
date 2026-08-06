@@ -55,13 +55,24 @@ const sameColumns = (left: Rel['type']['cols'], right: Rel['type']['cols']): boo
   });
 const sameNames = (left: readonly string[], right: readonly string[]): boolean =>
   left.length === right.length && left.every((name, i) => name === right[i]);
-/** Occurrences, not distinct nodes: a shared node the `Name` pass decides to inline contributes
- * its binds twice, so counting the DAG once could under-report — and under-reporting is the failure
- * that only appears in production. Over-reporting a shared-and-named node merely fails closed. */
+/**
+ * The binds this node will render, counting a repeated wire PARAMETER ONCE.
+ *
+ * A user parameter renders as a numbered placeholder deduped BY NAME (`renderStatement`, q.ts), so N
+ * uses of one `$x` cost a single bind — hence distinct names, via the Set. A mechanical `'bound'` bind
+ * (an oversized collection / decimal tail) has no name and does not dedup, so it is counted by
+ * OCCURRENCE: a shared node the `Name` pass inlines twice contributes twice, and counting the DAG once
+ * could under-report — the failure that only appears in production. (This is a per-node pre-check; the
+ * true authority is the rendered bind list, `renderStep`. Summing distinct names per binding across the
+ * CTEs of one read statement can over-report a param shared between them, which only fails closed.) */
 export function bindCount(plan: Rel | Stmt): number {
-  let n = 0;
+  const paramNames = new Set<string>();
+  let mechanical = 0;
   const expr = (e: Expr): void => {
-    if (e.kind === 'lit' && bindsAsParameter(e)) n++;
+    if (e.kind === 'lit' && bindsAsParameter(e)) {
+      if (e.source === 'parameter') paramNames.add(e.name);
+      else mechanical++;
+    }
     exprRels(e).forEach(rel);
     exprChildren(e).forEach(expr);
   };
@@ -79,7 +90,7 @@ export function bindCount(plan: Rel | Stmt): number {
     };
     stmt(plan);
   } else rel(plan);
-  return n;
+  return paramNames.size + mechanical;
 }
 
 /**

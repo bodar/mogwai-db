@@ -329,14 +329,14 @@ the `constLit` seam. No churn (corpus uses literals), census clean.
   re-recording; `deferred → ran` trips no census gate, so it stayed invisible). Re-recorded in
   `2c99c50`. Nothing to do, noted so the next reader does not attribute it to Phase A.
 
-## Repeated parameters — completing "100 = 100 parameters" (RESEARCHED, not yet built)
+## Repeated parameters — completing "100 = 100 parameters" (LANDED)
 
-The thesis made a parameter the only free-standing bind. There is one more step to make the budget
-say what it claims: a parameter used **more than once** in a query still spends one budget slot *per
-use*, so the honest reading today is "100 parameter USES", not "100 parameters". A GLV user who
-threads one value through several steps — `has('age', gt(x)).…​.where(__.values('age').is(x))` — pays
-twice for one `$x`. Closing this is what the user asked for: bind a repeated parameter ONCE and
-reference it at each site.
+The thesis made a parameter the only free-standing bind. This last step makes the budget say what it
+claims: before, a parameter used **more than once** spent one budget slot *per use*, so the honest
+reading was "100 parameter USES", not "100 parameters" — a GLV user threading one value through
+several steps (`has('age', gt(x)).…​.where(__.values('age').is(x))`) paid twice for one `$x`, and even
+a SINGLE ordering `has('age', gt(x))` cost two, because the vtype-aware compare key spells its operand
+twice. Now a repeated parameter binds ONCE, reused at every site.
 
 **The client already models this, and the wire preserves it.** A GLV binding is a `GValue` (a
 name→value pair — the same object our `Arg`/`param` mirror). `gremlin-lang.ts:127–139` (the v4 script
@@ -368,28 +368,34 @@ deduped budget. `cf-limits.ts` already counts `binds.length`, so a deduped array
 platform figure with no change there; the real platform cap is on distinct bound parameters too, so
 the instrument and the platform agree after dedup.
 
-**The build (a rendering-layer change; the algebra is untouched).**
-1. Thread the name onto the bind: `param(value, type, name)` (`src/rel/expr.ts`), fed from the
-   `paramName` `constLit`/`sliceBound` already hold. This is the whole IR change — a parameter lit
-   now knows its name, mirroring how `Arg`/`GValue` already do.
-2. A keyed value node in the kernel (`ParamValue extends Value`, carrying the name) and a
-   dedup-aware placeholder pass at OUR render boundary (`src/sql/kernel` — we own `render()`/
-   `Query.render()`; the vendored `ordinalPlaceholder` stays untouched). Emit `?N` **uniformly**
-   (never mix `?N` and `?` in one statement): first appearance of a distinct parameter name — and
-   each nameless mechanical/oversized `Value`/`RowsBind` by identity — takes the next ordinal and
-   pushes one arg; a repeat of a seen name re-emits its ordinal and pushes nothing. The `RowsBind`
-   marker keeps its own ordinal slot, so the executor's positional fill still lines up.
-3. `bindCount` (`rel/check.ts:61`) must count DISTINCT parameter names once (today it counts
-   occurrences — safe-but-pessimistic for a repeat, since over-counting only fails closed, but it
-   should reflect the real post-dedup figure).
-4. Tests: an L2/`rel-spine` assertion that a repeated `$x` emits its ordinal twice + one bind; a
-   `cf-constructs` probe pinning `?1+?1` as a one-bind platform fact; census clean (the corpus
-   carries no repeated parameter, so this is latent capability like the collection-member case).
+**What landed (a rendering-layer change; the algebra is untouched).**
+1. The name rides on the bind: `param(value, name, type?)` (`src/rel/expr.ts`), fed from the
+   `paramName` `constLit`/`sliceBound` already held (`compiler/rel/const.ts`, `lower.ts`,
+   `predicate.ts`). A parameter lit now knows its name, mirroring `Arg`/`GValue`.
+2. A keyed kernel node (`ParamValue extends Value`, carrying the name) and a dedup-aware render at OUR
+   boundary (`src/sql/kernel/q.ts` `renderStatement`, routed from both `render()` and `Query.render()`;
+   the vendored `ordinalPlaceholder` is untouched). When some name repeats, the whole statement
+   switches to numbered `?N`: the first appearance of a distinct name — and each nameless mechanical/
+   oversized `Value`/`RowsBind` by position — takes the next ordinal and pushes one arg; a repeat
+   re-emits its ordinal and pushes nothing. A statement with NO repeated name keeps the vendored
+   anonymous-`?` render byte-for-byte, so no existing SQL/snapshot moves. (In practice most param-
+   bearing statements DO switch, because the compare key spells an operand twice — which is exactly
+   why a single ordering param dropped from two binds to one.) The `RowsBind` marker keeps its own
+   ordinal slot, so the executor's positional fill still lines up, and text+binds are produced in ONE
+   pass so they cannot drift.
+3. `bindCount` (`rel/check.ts`) counts DISTINCT parameter names once + mechanical binds by occurrence.
+   (Per-node; summing across the CTEs of one read statement can over-report a param shared between
+   them, which only fails closed — the true authority is the rendered list, `renderStep`.)
+4. Tests: `rel-spine.test.ts` — a repeated `$p` is one bind reused as `?1`, distinct params get
+   distinct ordinals, a param-free statement stays anonymous; `L2-sql/filter.sql.test.ts` updated
+   (`P.gt($x)` 2→1 bind, `P.between($x,$y)` 4→2). Full ladder + `rel-sweep` (53,980 admitted plans)
+   + census green. The `?1+?1`/`:x` one-bind platform fact was confirmed live on a Durable Object via
+   `test/cf-probe` during the research.
 
 **Scope.** Only NAMED wire parameters dedup — a constant inlines (0 binds) and two mechanical binds
 that happen to share a value are not the same logical parameter, so the dedup key is the name and
 nothing else. This is the transport-layer completion of the thesis: parameters are the only
-free-standing binds (landed), and now the budget counts *parameters*, not their uses.
+free-standing binds, and now the budget counts *parameters*, not their uses.
 
 ## Handoff + guardrail
 

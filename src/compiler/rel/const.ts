@@ -32,12 +32,12 @@ import type { Arg } from '../../gremlin/frontend.ts';
  *  non-finite number (`NaN`/±`Infinity`) has no literal form, so it stays a bound `lit`. */
 export const constLit = (a: Arg): Expr | null => {
   const { value, type, name: paramName } = a;
-  if (value === null) return paramName != null ? param(value) : compilerNull();
-  if (typeof value === 'string') return paramName != null ? param(value, 'text') : compilerText(value);
-  if (typeof value === 'boolean') return paramName != null ? param(value) : compilerInt(value ? 1 : 0);
+  if (value === null) return paramName != null ? param(value, paramName) : compilerNull();
+  if (typeof value === 'string') return paramName != null ? param(value, paramName, 'text') : compilerText(value);
+  if (typeof value === 'boolean') return paramName != null ? param(value, paramName) : compilerInt(value ? 1 : 0);
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) return lit(value, 'real'); // NaN/±Infinity have no literal form
-    if (paramName != null) return param(value);
+    if (paramName != null) return param(value, paramName);
     if (!Number.isInteger(value)) return compilerReal(value);
     const flat = flatType(type);
     return flat === 'float' || flat === 'double' || flat === 'bigdecimal'
@@ -69,4 +69,4 @@ export const countLit = (n: number): Expr => Number.isSafeInteger(n) ? compilerI
  *  (docs/2026-08-05-parameters-are-the-only-binds.md B3). A non-integer that somehow reached here has no
  *  int-bind form, so it reduces too. */
 export const sliceBound = (n: number, paramName: string | null): Expr =>
-  paramName != null && Number.isSafeInteger(n) ? param(n, 'int') : countLit(n);
+  paramName != null && Number.isSafeInteger(n) ? param(n, paramName, 'int') : countLit(n);

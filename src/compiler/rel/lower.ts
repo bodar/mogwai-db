@@ -1582,7 +1582,7 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
     const literal = constLit(arg(value, rowType(i), paramName));
     if (literal) return literal;
     if (tag !== undefined && value instanceof Duration)
-      return paramName != null ? param(value) : compilerText(String(value));
+      return paramName != null ? param(value, paramName) : compilerText(String(value));
     return null;
   };
   const rows = vals.map(rowExpr);

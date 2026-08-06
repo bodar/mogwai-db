@@ -17,7 +17,8 @@
 //   • render(node) — the node → {sql, binds} boundary for standalone (non-CTE) SQL.
 
 import { text as raw, empty, type Text } from '@bodar/lazyrecords/sql/template/Text.ts';
-import { value } from '@bodar/lazyrecords/sql/template/Value.ts';
+import { value, Value } from '@bodar/lazyrecords/sql/template/Value.ts';
+import { Identifier } from '@bodar/lazyrecords/sql/template/Identifier.ts';
 import { sql, type Sql } from '@bodar/lazyrecords/sql/template/Sql.ts';
 import { list as lrList } from '@bodar/lazyrecords/sql/template/Compound.ts';
 import { statement } from '@bodar/lazyrecords/sql/statement/ordinalPlaceholder.ts';
@@ -47,12 +48,78 @@ export const values = (xs: readonly any[]): Expression => list(xs.map(value), ',
 /** Parenthesise an expression: `(<e>)`. */
 export const paren = (e: Expression): Expression => q`(${e})`;
 
+/** A bound value that CARRIES its wire-parameter name (TinkerPop's `GValue.name`). Repeated uses of
+ *  one `$x` reach the render boundary as several `ParamValue`s sharing a name; `renderStatement`
+ *  collapses them to ONE numbered placeholder + ONE bind, because the DO's 100-bind budget is for
+ *  PARAMETERS, not their uses (docs/2026-08-05-parameters-are-the-only-binds.md). A plain `value()`
+ *  has no name and never dedups — a mechanical/oversized bind is its own slot. */
+export class ParamValue extends Value {
+  constructor(value: unknown, readonly paramName: string) { super(value); }
+}
+
+/** A bound value tagged with its wire-parameter name, so repeated uses of one `$x` share a bind.
+ *  `undefined` → null, matching lazyrecords' `value()`. */
+export const paramValue = (v: unknown, paramName: string): Expression => new ParamValue(v === undefined ? null : v, paramName);
+
+/** Does any wire parameter appear more than once in this tree? Only then is it worth switching the
+ *  statement to numbered placeholders; the common no-repeat case keeps the anonymous-`?` render
+ *  byte-for-byte, so no existing SQL (or snapshot) moves. Walks via `generate` (the same in-order
+ *  visit the renderer uses) rather than `for…of`, because lazyrecords' generated `Sql` d.ts declares
+ *  `Iterable` without emitting the `[Symbol.iterator]` member — `generate` is the exposed walk. */
+function hasRepeatedParam(tree: Sql): boolean {
+  const seen = new Set<string>();
+  let repeated = false;
+  tree.generate((e) => {
+    if (e instanceof ParamValue) {
+      if (seen.has(e.paramName)) repeated = true;
+      else seen.add(e.paramName);
+    }
+    return '';
+  });
+  return repeated;
+}
+
+/**
+ * Render a finished `Sql` tree to `{sql, binds}`, DEDUPING repeated wire parameters.
+ *
+ * When some `$x` appears more than once, the whole statement switches to NUMBERED placeholders
+ * (`?1, ?2, …`): the first appearance of a distinct parameter name — and each nameless value by
+ * position — takes the next ordinal and contributes one bind; a repeat of that name re-emits its
+ * ordinal and contributes NONE. SQLite binds exactly `sqlite3_bind_parameter_count` values, which is
+ * that deduped count, so N uses of one `$x` cost ONE of the 100 (verified on bun:sqlite and on a
+ * Durable Object, `test/cf-probe`). With no repeat we defer to lazyrecords' anonymous-`?` statement
+ * unchanged, so the overwhelmingly common case is byte-identical to before.
+ */
+function renderStatement(tree: Sql): { sql: string; binds: any[] } {
+  if (!hasRepeatedParam(tree)) {
+    const { text, args } = statement(tree);
+    return { sql: text, binds: args };
+  }
+  const ordinals = new Map<string, number>();
+  const binds: any[] = [];
+  let next = 0;
+  const text = tree.generate((e) => {
+    // Our kernel emits identifiers as `raw(quote(...))` Text, never lazyrecords `Identifier` nodes, so
+    // this arm is a defensive fallback; `quote` is the kernel's own identifier authority all the same.
+    if (e instanceof Identifier) return quote(e.identifier);
+    if (e instanceof ParamValue) {
+      const seen = ordinals.get(e.paramName);
+      if (seen !== undefined) return `?${seen}`;
+      ordinals.set(e.paramName, ++next);
+      binds.push(e.value);
+      return `?${next}`;
+    }
+    if (e instanceof Value) { binds.push(e.value); return `?${++next}`; }
+    return '';
+  });
+  return { sql: text, binds };
+}
+
 /** Render a standalone node (a fragment or a whole tree) to `{sql, binds}` — the
  *  boundary for the few spots that need SQL text without the `Query` CTE machinery
  *  (e.g. a merge run-closure's match query). Binds fall out of the tree. */
 export function render(node: Expression): { sql: string; binds: any[] } {
-  const { text, args } = statement(sql(node));
-  return { sql: text, binds: args };
+  return renderStatement(sql(node));
 }
 
 /** Identifier-shaped name → spliced raw; else double-quoted. SQL keyword legality is
@@ -207,13 +274,12 @@ export class Query {
    *  With no CTEs, render the bare tail — an empty `with ` prefix is malformed SQL
    *  (the only zero-CTE read is a constant source like `g.inject()`). */
   render(tail: Expression): { sql: string; binds: any[] } {
-    if (this.ctes.length === 0) { const { text, args } = statement(q`${tail}`); return { sql: text, binds: args }; }
+    if (this.ctes.length === 0) return renderStatement(q`${tail}`);
     const heads = this.ctes.map((c) =>
       q`${raw(c.name)}${c.cols ? raw(`(${c.cols.join(', ')})`) : empty} as (${c.body})`);
     const recursive = this.ctes.some((c) => c.recursive) ? raw('recursive ') : empty;
     const tree = q`with ${recursive}${list(heads)} ${tail}`;
-    const { text, args } = statement(tree);
-    return { sql: text, binds: args };
+    return renderStatement(tree);
   }
 }
 

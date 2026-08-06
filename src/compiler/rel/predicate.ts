@@ -76,7 +76,7 @@ const STATIC_ORDERING_DECLINE = new Set(['datetime', 'duration']);
  */
 const operand = (value: unknown, type: TypeNode | null = null, paramName: string | null = null): Expr | null => {
   if (typeof value === 'string' || typeof value === 'number') return constLit(arg(value, type, paramName));
-  if (isExactTail(value)) return paramName != null ? param(value) : compilerText(String(value));
+  if (isExactTail(value)) return paramName != null ? param(value, paramName) : compilerText(String(value));
   return null;
 };
 
