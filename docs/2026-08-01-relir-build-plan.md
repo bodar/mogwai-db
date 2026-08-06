@@ -2376,6 +2376,10 @@ assembler can inline.** `limit`/`range`/`tail` are unaffected because their sort
   `FoldStep` collects in ARRIVAL order and a group's value list is that list. **Fix: add `group`/`groupCount`
   to `COLLECTING_CONSUMERS`**, which makes the emission position exist by construction and the `'id'`
   fallback unreachable — and `analyze.ts`'s own docblock already states the argument for why they belong.
+  **RESOLVED (verified 2026-08-06): `group` alone was added** (`src/compiler/ir/analyze.ts` —
+  `COLLECTING_CONSUMERS = {fold, aggregate, cap, group}`), which is §13h·1's refinement (`groupCount`
+  carries no member column and would demand a channel no arm reads). Witnessed by
+  `test/L4-addendum/group-member-order.feature` under `MOGWAI_REVERSE_UNORDERED=1`.
 - **`elementOrder`'s tie-break is the element id where the reference is a STABLE sort.** `List.sort` is a
   stable merge sort, so ties keep arrival order; we tie-break on id, and the two spines disagree
   (`g.V().both().order().by(T.label)`). Same root cause as above: a position after a fan-out.
@@ -2549,6 +2553,11 @@ executes SQL, and the census only runs the L1 corpus, which contains no `<reduce
 **Fix:** block the `project` arm when the block is grouped and the projection reads none of its select
 names (Calcite's `fieldsUsed.isEmpty()`); the safe superset is to block on any `grouped(b)` with an empty
 `groupBy`. Then add the family to an L4 `.feature`, because it is a shape the corpus does not carry.
+
+**RESOLVED (verified 2026-08-06).** The `project` arm at `src/rel/emit.ts` takes exactly the safe
+superset — `inputBlock(r.input, outer, (input) => input.distinct || (grouped(input) && input.groupBy?.length === 0))`
+opens a nested SELECT over a whole-relation aggregate, citing `SqlImplementor.java:2223-2241`. Pinned in
+`test/rel-spine.test.ts` and `test/rel-l2-equivalence.test.ts`.
 
 ### 13k. The verifier proves less than the plan doc claims `DEFECT` (laws claimed, not enforced)
 
