@@ -65,8 +65,12 @@ deferral or a fix; the gate holds the count from growing meanwhile.
 2. **No traversal stops executing** — support lost.
 3. **No executing traversal changes its answer in either pinned position** — *the regression
    nothing else can see.*
-4. **The legacy position does not change status** — two-way, because gaining and losing a shape
-   both require a written reason. This is not the one-way coverage ratchet.
+4. **The legacy position loses nothing the RelIR position holds** — the UNION is the floor
+   (`docs/2026-08-01-relir-build-plan.md` §6·1). Legacy shedding a shape RelIR now answers is legal
+   and prints; legacy *gaining* one still fails, because a floor move belongs in the artifact. **Gate 2
+   is what holds the union**, and only because the `status` column is the RelIR-pinned position with
+   its legacy FALLBACK: a chain RelIR does not cover is compiled by legacy inside that same run, so
+   `status` means "some spine answered" and losing the last spine turns it non-executing there.
 5. **No clean deferral becomes a crash**, and the crash count does not grow.
 6. **The RelIR spine covers at least as much as the baseline** — the `spine` column, and the
    migration's COVERAGE counter (`docs/2026-08-01-relir-build-plan.md` §10·4). Two assertions, which

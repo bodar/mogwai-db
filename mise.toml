@@ -192,14 +192,23 @@ run = "bun test"
 # suite does exercise at scale.
 # The RelIR DIFFERENTIAL, in the same mould as test:perturbed and test:cf-limits: run the WHOLE
 # suite with the RelIR spine switched OFF, so every corpus traversal it covers is compiled by the
-# legacy lowering instead (docs/2026-08-01-relir-build-plan.md §10·4).
+# legacy lowering instead (docs/2026-08-01-relir-build-plan.md §6·1).
 #
 # Green here AND green in `ci` is the differential: the two spines agree on the L1–L5 ladder, the
 # census multisets and the L2 contract. That is strictly stronger than §5a's eleven hand-built
 # families, and it costs nothing to build because both oracles already existed.
 #
-# It must run GREEN, not "green except the SQL snapshots" — a differential that cannot pass in both
-# positions is not one. So an L2 test that pins a spine's SPELLING pins it with `{spine}` passed
+# WHAT IT IS AN ORACLE OVER: the INTERSECTION — traversals both spines answer. It is not a parity
+# demand. RelIR is expected to answer shapes legacy cannot, and legacy is expected to lose some as
+# increments land (§6·1); the intersection shrinking is the migration working, not the oracle
+# breaking. So a deliberate asymmetry is EXPRESSED, never left to fail. Three mechanisms, and between
+# them there is no reason for a red run here: an assertion about SQL or a plan only RelIR produces
+# passes `{ spine: 'rel' }` (`read`/`compile`/`exec`), an assertion about an ANSWER only RelIR
+# produces uses `relirAhead` (test/support/harness.ts — it PROVES legacy refuses rather than skipping),
+# and the conformance floors + the census's legacy gate settle on the UNION of the two positions.
+#
+# It must still run GREEN, not "green except the SQL snapshots" — a differential that cannot pass in
+# both positions is not one. So an L2 test that pins a spine's SPELLING pins it with `{spine}` passed
 # explicitly, asserting BOTH forms rather than whichever the ambient switch produced.
 #
 # An ENV switch rather than a parameter, for test:perturbed's reason — the suite under test must

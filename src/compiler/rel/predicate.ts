@@ -196,14 +196,36 @@ const ordered = (
     : { kind: 'case', whens: [[binary('=', storage, compilerText('text')), binary(op, subject, bound)]], else: compilerFalse };
 };
 
-export const storedCompareOn = (vtype: Expr) => (subject: Expr): Expr => ({
-  kind: 'case',
-  whens: [
-    [{ kind: 'in-list', expr: vtype, values: CAST_TO_INT.map(compilerText) }, { kind: 'cast', arg: subject, to: 'int' }],
-    [{ kind: 'in-list', expr: vtype, values: CAST_TO_REAL.map(compilerText) }, { kind: 'cast', arg: subject, to: 'real' }],
-  ],
-  else: subject,
-});
+/**
+ * A COMPILE-TIME vtype picks the arm HERE, not in SQLite.
+ *
+ * The general form asks the engine `'bigint' IN ('byte','short','int','long',…)` — a comparison
+ * between two values the compiler is holding, and the same rule that inlines a held constant as a
+ * typed literal (root CLAUDE.md) says a type we KNOW must not travel to the engine as a question.
+ * It is also not paid once: the exact-tail overflow guard spells its aggregate three times, so a
+ * static `sum()` carried the coercion CASE three times over. Measured on
+ * `g.V().values("int").asNumber(GType.BIGINT).is(P.typeOf(GType.BIGINT)).sum()` — 1,727 bytes of
+ * statement text against a 1,233-byte family baseline, which is what caught it.
+ *
+ * Total and equivalence-preserving by construction: the folded arm is the one the CASE would have
+ * selected, and a vtype in neither vocabulary folds to the CASE's own `else` (the bare subject).
+ */
+export const storedCompareOn = (vtype: Expr) => (subject: Expr): Expr => {
+  const staticVtype = vtype.kind === 'lit' && vtype.source === 'compiler-text' ? vtype.value : undefined;
+  if (staticVtype !== undefined) {
+    if (CAST_TO_INT.includes(staticVtype)) return { kind: 'cast', arg: subject, to: 'int' };
+    if (CAST_TO_REAL.includes(staticVtype)) return { kind: 'cast', arg: subject, to: 'real' };
+    return subject;
+  }
+  return {
+    kind: 'case',
+    whens: [
+      [{ kind: 'in-list', expr: vtype, values: CAST_TO_INT.map(compilerText) }, { kind: 'cast', arg: subject, to: 'int' }],
+      [{ kind: 'in-list', expr: vtype, values: CAST_TO_REAL.map(compilerText) }, { kind: 'cast', arg: subject, to: 'real' }],
+    ],
+    else: subject,
+  };
+};
 
 /** The common case: the `vtype` is a COLUMN of a relation in scope. Derived from the general form
  *  rather than a second copy of the type lists — `modulator.ts` builds the key inside a scalar

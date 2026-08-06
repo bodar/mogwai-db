@@ -36,8 +36,11 @@ const wraps = (fn: string) => new RegExp(`\\b${fn}\\(`);
 // rather than a bound `?` (the parameter-budget win: a constant the compiler holds spends none of the
 // DO's 100 binds — docs/archive/2026-08-05-parameters-are-the-only-binds.md). So a const-fold test asserts the
 // inlined VALUE here instead of on `.binds`: `1`/`0` for a boolean, epoch-millis for a date, and so on.
+// PINNED to the RelIR spine, because inlining the folded constant IS the claim: legacy still binds it,
+// so an ambient read asserts the new spine's spelling under the old spine's name and goes red in the
+// differential's off position (§6·1 — the asymmetry is expressed, never left to fail).
 const seed = (q: string): string => {
-  const { sql } = read(q);
+  const { sql } = read(q, { spine: 'rel' });
   const m = /\(VALUES \((.+?)\)\)/.exec(sql);
   if (!m) throw new Error(`no single-value inject VALUES seed in: ${sql}`);
   return m[1]!;
@@ -250,9 +253,10 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().hasId([1,2])').sql).toBe(read('g.V().hasId(1,2)').sql);
     // hasId(1,[2,6]) ≡ hasId(1,2,6): HasIdStep flattens every Collection arg.
     expect(read('g.V().hasId(1,[2,6])').binds).toEqual([1, 2, 6]);
-    // inject members are parsed literals bounded by the query text → inlined into the `jsonb_array`, no binds.
-    expect(read('g.inject([1,2,3])').sql).toContain('jsonb_array(1, 2, 3)');
-    expect(read('g.inject([1,2,3])').binds).toEqual([]);
+    // inject members are parsed literals bounded by the query text → inlined into the `jsonb_array`, no
+    // binds. RelIR's spelling, pinned as such: legacy binds them (§6·1).
+    expect(read('g.inject([1,2,3])', { spine: 'rel' }).sql).toContain('jsonb_array(1, 2, 3)');
+    expect(read('g.inject([1,2,3])', { spine: 'rel' }).binds).toEqual([]);
     // A lone P predicate arg is not an array → still passes through, not flattened.
     expect(read('g.V().hasId(P.within([1,2]))').sql).toContain('COALESCE(n.uid, n.id) in (?, ?)');
     // Scope.local is now captured on the step (was silently dropped) — a bare
@@ -417,9 +421,10 @@ describe('scalar-parent / projection SQL', () => {
 
   test('inject() is a value stream that reducers/modifiers chain onto', () => {
     expect(read('g.inject(1,2,3)').shape).toEqual({ kind: 'value', type: UNKNOWN });
-    // parsed literals are constants, inlined as VALUES rows (no binds) on the RelIR spine.
-    expect(read('g.inject(1,2,3)').sql).toContain('VALUES (1), (2), (3)');
-    expect(read('g.inject(1,2,3)').binds).toEqual([]);
+    // parsed literals are constants, inlined as VALUES rows (no binds) on the RelIR spine — so pinned
+    // there, since legacy spells the same rows `(?), (?), (?)`.
+    expect(read('g.inject(1,2,3)', { spine: 'rel' }).sql).toContain('VALUES (1), (2), (3)');
+    expect(read('g.inject(1,2,3)', { spine: 'rel' }).binds).toEqual([]);
     // every inject() value across the chain folds into one VALUES seed (so the tail's
     // dedup/order/reducer see the whole stream) — a chained inject().inject() routes legacy (binds).
     expect(read('g.inject(1,3).inject(100,300)').binds).toEqual([1, 3, 100, 300]);

@@ -5,7 +5,7 @@ import { afterAll, beforeEach, expect, test } from 'bun:test';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readState, spineGap, writeState, type L3StateFile, type ScenarioRow } from './telemetry.ts';
+import { partitionLegacyRegressions, readState, spineGap, unionPassing, writeState, type L3State, type L3StateFile, type ScenarioRow } from './telemetry.ts';
 
 const STATE = join(tmpdir(), `mogwai-l3-state-${process.pid}.json`);
 const relRows: ScenarioRow[] = [
@@ -75,6 +75,45 @@ test('each spine reads back exactly its own write', () => {
     passing: 1, total: 2, passed: ['legacy-a'], failed: ['legacy-failed'],
   });
   expect(readState(STATE, 'rel')).not.toEqual(readState(STATE, 'legacy'));
+});
+
+// ── The asymmetric floor (§6·1): legacy may shed what RelIR holds ────────────────────────────────
+
+const floor = (passed: string[]): L3State =>
+  ({ passing: passed.length, total: passed.length, passed, failed: [] });
+
+test('a legacy regression the RelIR floor holds is shed, not a regression', () => {
+  const split = partitionLegacyRegressions(
+    [{ name: 'held-by-rel', passed: false }, { name: 'held-by-nobody', passed: false }],
+    floor(['held-by-rel']),
+  );
+
+  expect(split.shed.map((r) => r.name)).toEqual(['held-by-rel']);
+  expect(split.uncompensated.map((r) => r.name)).toEqual(['held-by-nobody']);
+});
+
+test('the union floor holds when legacy sheds a name RelIR gained', () => {
+  const before = unionPassing(floor(['shared']), floor(['shared', 'moved']));
+  const after = unionPassing(floor(['shared', 'moved']), floor(['shared']));
+
+  // Gain 1 on RelIR, lose 1 on legacy: each floor moved, the union did not. This is the trade the
+  // gate must permit — the whole point of the asymmetry.
+  expect(after.size).toBe(before.size);
+});
+
+test('the union floor falls when a name leaves both spines', () => {
+  const before = unionPassing(floor(['shared']), floor(['shared', 'legacy-only']));
+  const after = unionPassing(floor(['shared']), floor(['shared']));
+
+  expect(after.size).toBeLessThan(before.size);
+});
+
+test('the union is a NAME set, so repeated scenario names cannot inflate it', () => {
+  // `passing` counts scenarios and legitimately double-counts names (see test/CLAUDE.md), which is
+  // exactly why the floor is a union of identities rather than a sum of the two counts.
+  const union = unionPassing(floor(['dup', 'dup']), floor(['dup', 'dup', 'legacy-only']));
+
+  expect([...union].sort()).toEqual(['dup', 'legacy-only']);
 });
 
 test('spineGap reports both set directions despite repeated scenario names', () => {

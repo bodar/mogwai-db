@@ -49,9 +49,13 @@
 - **L2** (`test/L2-sql/`) — the compile-to-SQL contract, split by step family.
 - **L3** (`test/L3-conformance/`) — the official cucumber suite over GraphBinary, **ratcheted**:
   one committed `l3-state.json` holds TWO floors. The top level is the default/RelIR-on floor and
-  `legacySpine` is the legacy floor; each configuration gates and records only its own section. A
-  legacy run never rewrites the prose conformance count. Their scenario-name set difference (not
-  merely the count subtraction) is the migration metric. Telemetry is always on. Runbook:
+  `legacySpine` is the legacy floor; each configuration records only its own section, and a legacy run
+  never rewrites the prose conformance count. Their scenario-name set difference (not merely the count
+  subtraction) is the migration metric. **The two floors GATE ASYMMETRICALLY, on purpose** (RelIR plan
+  §6·1): the RelIR floor is a hard ratchet, while the legacy floor may shed any name the RelIR floor
+  holds and fails only on a name NO spine holds — the union of the two `passed` sets is the real floor.
+  Legacy is a route with an end date; a RelIR increment that costs legacy five scenarios and gains five
+  is progress, and the gate must not be the thing that forbids it. Telemetry is always on. Runbook:
   `README-cucumber.md`.
   - **L3 is the floor, not the goal.** The count measures documented scenarios that pass; it does
     NOT measure how much of the grammar composes. The goal is the *ceiling* — generic lowering that
@@ -104,7 +108,9 @@ throwing + the message). `mise run census`; re-record with `mise run census-reco
 
 Seven gates: the artifact covers exactly the corpus · no traversal stops executing · **no executing
 traversal changes its answer in either pinned spine position** (the regression nothing else can
-see) · the legacy position does not change status · no clean deferral becomes a crash · **the
+see) · the legacy position loses nothing the RelIR position holds (the UNION is the floor — a shed
+shape is legal and prints; losing the LAST spine fails at gate 2, because the RelIR position carries
+the legacy fallback) · no clean deferral becomes a crash · **the
 RelIR spine covers at least as much as the baseline** (the `spine` column — the migration's coverage
 ratchet, §10·4 of the RelIR build plan) · a coverage floor. The census is spine-differential by
 construction, independent of the ambient switch. Runbook + the status vocabulary:

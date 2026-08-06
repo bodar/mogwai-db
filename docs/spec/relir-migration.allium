@@ -91,9 +91,22 @@ contract DifferentialOracle {
     compare: (traversal: CorpusTraversal) -> RowMultiset
 
     @invariant BothSpinesAgree
-        -- With the switch on and off, a covered traversal returns the same multiset. The whole
-        -- corpus plus the generated property suite is therefore the oracle for every increment,
-        -- strictly stronger than a hand-built family list.
+        -- With the switch on and off, a traversal BOTH positions answer returns the same multiset.
+        -- The whole corpus plus the generated property suite is therefore the oracle for every
+        -- increment, strictly stronger than a hand-built family list. The quantifier is the
+        -- INTERSECTION, not RelIR's coverage: a disagreement is a defect, a legacy DECLINE is not.
+
+    @invariant AsymmetryIsRecordedNeverForbidden
+        -- RelIR answering a shape legacy cannot express is the migration working, and legacy losing
+        -- a shape RelIR holds is an admissible price for an increment. Neither is a regression and
+        -- neither may be prevented in order to keep a floor symmetric: legacy is a route with an
+        -- end date, so holding it to RelIR's bar buys parity with dead code. What the oracle forbids
+        -- is the two answering DIFFERENTLY, whose usual cause is shared substrate, not two engines.
+
+    @invariant TheUnionIsTheFloor
+        -- Support is "some spine answers it", so the set that may never shrink is the union of the
+        -- two floors. Either floor alone may fall. A name no spine answers any more is the only
+        -- conformance regression there is, and it is invisible to a per-spine ratchet.
 
     @invariant ScaffoldingNotLoadBearing
         -- The differential dies with the legacy spine, deliberately and once, at the point
@@ -175,8 +188,14 @@ entity CensusEntry {
     baseline_spine: Spine
     result_digest: String
     baseline_digest: String
+    rel_answers: Boolean
+    legacy_answers: Boolean
+    baseline_legacy_answers: Boolean
 
     regressed: baseline_spine = rel and spine = legacy
+
+    -- Legacy stopped answering. Compensated when RelIR answers it: the union held, so the floor did.
+    shed: baseline_legacy_answers and not legacy_answers and rel_answers
 
     invariant CoverageOnlyRises {
         baseline_spine = rel implies spine = rel
@@ -184,6 +203,14 @@ entity CensusEntry {
 
     invariant BehaviourIsUnchangedByRouting {
         result_digest = baseline_digest
+    }
+
+    -- The union floor at the traversal grain. Legacy may go dark on a shape RelIR holds (`shed`);
+    -- it may not take the last spine that answered with it. Already enforced where the census
+    -- measures `rel_answers`, because an uncovered chain FALLS BACK to legacy inside the RelIR
+    -- position — so that position answers "some spine did" and losing the last one is visible there.
+    invariant SomeSpineStillAnswers {
+        baseline_legacy_answers and not legacy_answers implies rel_answers
     }
 }
 
@@ -482,6 +509,17 @@ rule ReportCoverageRegression {
     @guidance
         -- A lowering that silently stopped firing is a failure with a name, not a coverage
         -- number nobody read.
+}
+
+rule ReportShedShape {
+    when: entry: CensusEntry.created
+    requires: entry.shed
+    ensures: LegacyShedShape(query: entry.query)
+
+    @guidance
+        -- Reported, never failed. Legacy going dark on something RelIR answers is the migration
+        -- working; what it costs is one line of the legacy floor, so it is written down rather than
+        -- prevented. The gate is `SomeSpineStillAnswers`, which is a different condition.
 }
 
 rule RecordDeletionFloor {

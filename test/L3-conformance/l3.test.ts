@@ -3,8 +3,10 @@
 // TinkerPop's own Gherkin corpus and its own JS step definitions (both vendored via the
 // `vendor/tinkerpop` submodule, tracking `origin/master`) drive mogwai-db over GraphBinary. The
 // number of passing scenarios is THE conformance number; this test ratchets it against the last
-// committed run recorded in l3-state.json: a regression or a lower count fails the build, and a clean
-// local run re-records the state (CI never rewrites it, so there is no push-back / re-trigger loop).
+// committed run recorded in l3-state.json, and a clean local run re-records the state (CI never
+// rewrites it, so there is no push-back / re-trigger loop). The two floors gate DIFFERENTLY: the
+// RelIR floor is a hard ratchet, the legacy floor may only lose what the RelIR floor holds — see the
+// gates below and §6·1 of docs/2026-08-01-relir-build-plan.md.
 // Telemetry (the compact `.`/`E` progress line + the systematic-gap summary) is always on.
 //
 // ── ONE PROCESS, NO SOCKET ────────────────────────────────────────────────────────────────────────
@@ -32,7 +34,7 @@ import { installInMemoryTransport, type InMemoryTransport } from '../support/in-
 import { runFeatures, GLV } from '../support/cucumber.ts';
 import { L3_TAGS } from './tags.ts';
 import { ambientSpine } from '../../src/compiler/options/spine.ts';
-import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readState, writeState, stateOf, delta, formatDelta, formatSpineGap, expectedErrorSubstrings } from './telemetry.ts';
+import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readState, writeState, stateOf, delta, formatDelta, formatSpineGap, partitionLegacyRegressions, unionPassing, expectedErrorSubstrings } from './telemetry.ts';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 // A GLOB, not a bare directory: cucumber 13 (the submodule's runner since the master bump)
@@ -183,18 +185,41 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
   writeFileSync(artifact, JSON.stringify({ ...sum, scenarios: rows }, null, 2) + '\n');
   console.log(`L3 telemetry summary → ${artifact}`);
 
-  // Gate 1: no scenario may regress (named in the delta above). Gate 2: the count never falls.
-  expect(d.regressed).toHaveLength(0);
-  expect(passing).toBeGreaterThanOrEqual(prev.passing);
+  // ── THE GATES, and they are ASYMMETRIC by design (§6·1) ──────────────────────────────────────
+  //
+  // The RelIR floor is a hard ratchet: no scenario may regress (named in the delta above) and the
+  // count never falls.
+  //
+  // The LEGACY floor is not, because legacy is a route with an end date. A RelIR increment that
+  // re-expresses a shape legacy only half-supported may cost legacy a scenario, and that trade is
+  // fine — gaining five and losing five on a spine scheduled for deletion is progress, not a
+  // regression. So the legacy side gates on the UNION: legacy may shed anything the RelIR floor
+  // holds, and may not lose a name no spine holds. Two assertions that fail differently on purpose
+  // (the second also catches a name that left SCOPE, which `delta` cannot see).
+  const shed = spine === 'legacy' ? partitionLegacyRegressions(d.regressed, recordedRel) : undefined;
+  if (shed?.shed.length) {
+    console.log(`L3 [legacy spine] shed ${shed.shed.length} scenario(s) the RelIR floor holds — ` +
+      `legal (§6·1), lowers the legacy floor:\n${shed.shed.map((r) => `  - ${r.name}`).join('\n')}`);
+  }
+  expect(shed ? shed.uncompensated : d.regressed).toHaveLength(0);
+  if (spine === 'rel') {
+    expect(passing).toBeGreaterThanOrEqual(prev.passing);
+  } else {
+    const before = unionPassing(recordedRel, recordedLegacy).size;
+    const after = unionPassing(recordedRel, current).size;
+    if (after !== before) console.log(`L3 union floor: ${before} → ${after} distinct scenario names`);
+    expect(after).toBeGreaterThanOrEqual(before);
+  }
 
   // Clean local run: record the current run as the selected spine's last-known state. CI never
   // rewrites (no push-back loop) — it only reports the delta.
   const changed = d.gained.length > 0 || d.regressed.length > 0 || rows.length !== prev.total;
   if (changed) {
     if (process.env.CI) {
-      if (d.gained.length) {
+      if (d.gained.length || shed?.shed.length) {
         const prose = spine === 'rel' ? ' (+ README + feature-support-matrix)' : '';
-        console.log(`L3 [${spineLabel}] ahead by +${d.gained.length} — run locally to record l3-state.json${prose}, then commit (CI does not rewrite them).`);
+        const move = d.gained.length ? `ahead by +${d.gained.length}` : `shed ${shed!.shed.length}`;
+        console.log(`L3 [${spineLabel}] ${move} — run locally to record l3-state.json${prose}, then commit (CI does not rewrite them).`);
       }
     } else {
       writeState(STATE, rows, spine);

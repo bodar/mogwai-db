@@ -151,13 +151,14 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     const sw = read('g.V().has("name", TextP.startingWith("jo"))');   // has(stored) → legacy (FTS decline)
     expect(sw.sql).toContain("like ? escape ?"); // node renderer: lowercase kw, escape bound
     expect(sw.binds).toContain('jo%');
-    // values().is(TextP) is RelIR-routed → the pattern inlines into the like() call.
-    expect(read('g.V().values("name").is(TextP.containing("ar"))').sql).toContain("like('%ar%',");
+    // values().is(TextP) is RelIR-routed → the pattern inlines into the like() call. PINNED, because the
+    // inlining is the claim and legacy spells the same filter `p.v like ? escape ?` (§6·1).
+    expect(read('g.V().values("name").is(TextP.containing("ar"))', { spine: 'rel' }).sql).toContain("like('%ar%',");
     // negation → NOT LIKE
     expect(read('g.V().has("name", TextP.notEndingWith("o"))').sql).toContain("not like ? escape ?");
     // metachars in the user value are escaped, never spliced — on both spellings.
     expect(read('g.V().has("name", TextP.containing("50%_x"))').binds).toContain('%50\\%\\_x%'); // legacy bind
-    expect(read('g.V().values("name").is(TextP.containing("50%_x"))').sql).toContain("like('%50\\%\\_x%',"); // rel inline
+    expect(read('g.V().values("name").is(TextP.containing("50%_x"))', { spine: 'rel' }).sql).toContain("like('%50\\%\\_x%',"); // rel inline
   });
 
   test('ftsSubstringPredicate: has(k, >=3-char substring) routes through property_fts, LIKE fallback equivalent', () => {

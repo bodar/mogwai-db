@@ -206,7 +206,32 @@ Gremlin reaches RelIR through a SECOND lowering that grows step by step. A trave
 covered routes RelIR end-to-end; anything else routes to legacy — **never mixed inside one traversal**, so no
 opaque node ever exists and RelIR stays a real algebra. `RelIR on` vs `off` is a **differential switch**
 (`mise run test:legacy-spine`), making the whole corpus + L5's generated traversals the oracle. It must pass
-in BOTH positions.
+in BOTH positions — over the INTERSECTION, which is the next rule.
+
+**THE FLOOR IS THE UNION OF THE TWO SPINES, NEVER EITHER ONE — legacy may lose what RelIR holds.**
+Legacy is a route with an end date, so it is not held to RelIR's bar: gaining five and losing five is
+progress, and "legacy would have to support it too" is not a cost of a RelIR increment. Three gates say so
+mechanically, because a rule only in prose is one an instrument will overrule:
+
+- the L3 floors gate ASYMMETRICALLY — the RelIR floor is a hard ratchet, the `legacySpine` floor may only
+  shed names the RelIR floor holds, and the union of the two `passed` sets may not shrink (`l3.test.ts`,
+  `unionPassing`/`partitionLegacyRegressions`).
+- the census's legacy gate accepts a shed shape RelIR answers. Losing the LAST spine still fails, at gate 2,
+  and only because the census's RelIR position carries the legacy FALLBACK — `status` means "some spine
+  answered this", so the union floor was already there (`test/census/README.md` gate 4).
+- an assertion about a capability only RelIR expresses SAYS SO, so one deliberate asymmetry cannot cost the
+  differential its whole signal: `{ spine: 'rel' }` for a plan/SQL claim (the constant-inlining spellings are
+  all of these), `relirAhead` for an ANSWER claim — which proves legacy refuses instead of skipping. Eight
+  sites were silently relying on the ambient switch, which is why the off position was red on trunk.
+
+What stays HARD, and it is the whole reason the differential is worth having: **where both spines ANSWER,
+they must agree** (census gate 3, both positions, row-for-row). A disagreement there is never a shed
+capability — it is the wrong-answer-with-right-arity class, and its usual cause is a shared substrate
+(§6·4) breaking under a change that only looked local. So read a legacy failure by direction: legacy now
+DECLINES where RelIR answers is the migration; legacy now ANSWERS DIFFERENTLY is a bug in shared code.
+Fixing legacy is still right when it is cheap AND the defect is real — twice it was one predicate reading a
+step NAME where the answer depends on the step's ARGUMENTS, worth +2 L3 on each spine. That is a
+cost/benefit call per case, not an obligation.
 
 - **No opaque escape node, ever** — not as a bridge, not behind a flag. A shape that genuinely cannot be
   expressed is a §3 node-set discussion under §7's bar, recorded here.
@@ -259,7 +284,7 @@ touches ORDER. What each is blind to:
 | instrument | blind to |
 |---|---|
 | census (`ms` digest) | a wrong SHAPE over an empty result; a required THROW that became a plausible value; a lost fast path (same rows) |
-| row-for-row vs legacy | a MISSING throw; a wrong ORDER both spines share |
+| row-for-row vs legacy | a MISSING throw; a wrong ORDER both spines share; anything outside the INTERSECTION — it compares where both spines answer, and that set shrinks on purpose (§6·1) |
 | L2 shape assertions | a wrong VALUE with the right shape |
 | L3 conformance | anything the corpus doesn't exercise — but the ONLY thing that sees a required error message |
 | `rel-sweep` | correctness — it asserts the lowering doesn't THROW and an admitted plan renders within the cap; it calls `lowerToRel`, so a decline at `spine.ts` is invisible to it (the census's `spine` column catches that) |
@@ -348,7 +373,9 @@ Ordered by the discipline (§6·4): each closes a family and lets a deletion-rat
    - **The numeric-tower PROMOTION** (`inject(127b,1b).sum()` → `d[128].s`, 6 `Sum.feature` scenarios).
      Blocked on exact-type literal framing — see Open Decisions.
    - **The `set` framing marker** survives `range(local)`/`all`/`any`/`none` and is dropped only by
-     `order(local)`/`unfold()` — a state-threading change through the list tail's follower loop, both spines.
+     `order(local)`/`unfold()` — a state-threading change through the list tail's follower loop. That loop is
+     duplicated (`src/compiler/rel/list.ts`'s `ListOf.set` vs the legacy `ListStream.set`), so this lands in
+     RelIR and legacy sheds the shapes it gets wrong (§6·1). Do it twice only if the second copy is free.
    - **`AliasEntry.binds`** must not increment on a rebind at the SAME path position (a wrong Pop.mixed wire
      type today) — needs head-position tracking on the RelIR `AliasEntry`.
    - **Checker hardening (Phase 3 prereqs):** refuse `Distinct`/`Limit`/`Sort` inside a recursive term (P3);
@@ -361,11 +388,13 @@ Ordered by the discipline (§6·4): each closes a family and lets a deletion-rat
 
 ## §11. Open design decisions — HUMAN input needed
 
-1. **Exact-type literal framing (both spines).** Should a typed numeric literal frame with its exact Gremlin
-   type — `127b` → Byte, not the magnitude-inferred Int we emit today? Yes unblocks the numeric-tower
-   promotion (item 5), but it is a both-spine framing-vocabulary change with a census reap AND it regresses
-   inject-after-typed-inject (`inject(1,3).inject(100,300)` starts declining). It is a dedicated increment,
-   not a side effect.
+1. **Exact-type literal framing.** Should a typed numeric literal frame with its exact Gremlin type — `127b`
+   → Byte, not the magnitude-inferred Int we emit today? Yes unblocks the numeric-tower promotion (item 5),
+   but it is a framing-vocabulary change with a census reap AND it regresses inject-after-typed-inject
+   (`inject(1,3).inject(100,300)` starts declining). It reaches BOTH spines whether or not you want it to —
+   the framer and the typed-inject tag table are single shared authorities (§2, §12), so this is a
+   shared-code blast radius, NOT the parity obligation §6·1 retires. It is a dedicated increment, not a
+   side effect.
 2. **Phase 2.6's `property` residue.** A NESTED value, three `withSideEffect` constants, and a `T`-token key
    each need per-traverser evaluation of a sub-traversal — the row-at-a-time surface this migration exists to
    delete. Decide per case: a pre-lowering VERIFY refusal, a genuine per-traverser substrate, or a permanent
@@ -384,11 +413,13 @@ Ordered by the discipline (§6·4): each closes a family and lets a deletion-rat
 silently drops a filter is invisible to the differential (both spines are asked; only one asks right). A
 module whose contract is `null` must not let a throw escape. **A fast path is never silently dropped**
 (`has(k,containing(t))` routes the trigram index; it DECLINES until §4.7 — coverage measures whether the new
-spine CAN express, never whether it is entitled to take a specialized lowering). **Fix a defect in BOTH
-spines or decline in RelIR — never let them disagree on purpose** (that leaves `test:legacy-spine`
-permanently red). **A decline is only right when the OTHER spine is right** (§13n's lesson): measure the
-other spine first; four "answer where TinkerPop raises" findings were kept because legacy answered
-identically wrongly and declining bought zero correctness.
+spine CAN express, never whether it is entitled to take a specialized lowering). **Never let the two spines
+answer the same traversal DIFFERENTLY on purpose** — that is the §6·1 hard half, and it is not the same
+demand as parity: RelIR answering where legacy declines is legal, recorded, and expected. So a defect the
+migration exposes is fixed in RelIR; legacy is fixed too when that is cheap and the defect is legacy's own,
+and otherwise left to shed the shape. **A decline is only right when the OTHER spine is right** (§13n's
+lesson): measure the other spine first; four "answer where TinkerPop raises" findings were kept because
+legacy answered identically wrongly and declining bought zero correctness.
 
 **Wrong answers with the right arity** (the class no ladder level sees):
 

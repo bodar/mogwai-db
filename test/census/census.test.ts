@@ -3,7 +3,7 @@
 // Seven gates, ordered most-diagnostic first. Each asserts on an array of pre-formatted strings so
 // the test runner's own diff IS the report.
 import { test, expect, describe } from 'bun:test';
-import { EXECUTES, loadCorpus, readBaseline, runCensus, type Row } from './census.ts';
+import { EXECUTES, loadCorpus, readBaseline, runCensus, type Row, type Status } from './census.ts';
 
 /** Measured 1,425 at the baseline. The floor sits below it so ordinary progress does not trip it,
  *  while a change that guts executability does — without this, a run where everything throws would
@@ -19,6 +19,10 @@ const showLegacy = (r: Row | undefined): string =>
   !r?.lstatus ? 'absent'
     : EXECUTES.has(r.lstatus) ? `${r.lstatus} ms=${r.lms ?? '-'}`
     : r.lstatus;
+
+/** Did a position ANSWER? A row with no recorded status did not, so `absent` reads as a non-answer
+ *  rather than throwing the union gate off (an artifact predates the legacy columns). */
+const answers = (s: Status | undefined): boolean => s !== undefined && EXECUTES.has(s);
 
 // Run once at module scope, not per test: each corpus traversal is executed in both pinned spine
 // positions and all seven gates read the same rows. Doing it in a `beforeAll` would buy nothing and
@@ -66,14 +70,34 @@ describe('census — the refactor guard', () => {
     expect(changed).toEqual([]);
   });
 
-  test('the legacy position does not change status', () => {
-    // This is not the coverage ratchet (`spine`, one-way). Like the answer gate it is two-way:
-    // legacy losing OR gaining a shape is a change that needs a written reason.
-    const changed = rows
-      .filter((r) => baseline.get(r.query) && EXECUTES.has(baseline.get(r.query)!.status) &&
-        baseline.get(r.query)!.lstatus !== r.lstatus)
-      .map((r) => `  ${r.query}\n    was ${showLegacy(baseline.get(r.query))}\n    now ${showLegacy(r)}`);
-    expect(changed).toEqual([]);
+  test('the legacy position loses nothing the RelIR position does not hold', () => {
+    // Not the coverage ratchet (`spine`, one-way) and no longer a two-way status gate. The floor is
+    // the UNION of the two positions (§6·1): a RelIR increment may cost legacy a shape, and legacy
+    // is a route with an end date, so paying five to gain five is progress.
+    //
+    // **GATE 2 IS ALREADY THE UNION FLOOR HERE, and that is not obvious.** The `status` column is the
+    // RelIR-PINNED position, and a chain RelIR does not cover FALLS BACK to legacy inside that same
+    // compile — so `status` is "some spine answered it" and gate 2 is exactly "no traversal loses its
+    // last spine". A shed shape RelIR covers keeps `status` executing; one nothing covers turns
+    // `status` non-executing and fails there. So this gate is free to accept the shed.
+    //
+    // Legacy GAINING a shape still lands here: a floor move belongs in the artifact, and re-recording
+    // is how it gets written down. The predicate reads rows whose RelIR position executed at baseline
+    // because a non-executing baseline row carries no `lstatus` at all (deferrals.tsv has no legacy
+    // columns) — widening it past that compares against `undefined` for 4,832 rows.
+    const changed = rows.filter((r) => {
+      const b = baseline.get(r.query);
+      return b && EXECUTES.has(b.status) && b.lstatus !== r.lstatus;
+    });
+    const shed = changed.filter((r) => answers(baseline.get(r.query)!.lstatus) &&
+      !answers(r.lstatus) && EXECUTES.has(r.status));
+    if (shed.length) console.log(`census: legacy shed ${shed.length} traversal(s) the RelIR spine holds ` +
+      `— legal (§6·1), re-record to bank it:\n` + shed.slice(0, 20).map((r) => `    - ${r.query}`).join('\n'));
+
+    const unaccounted = changed.filter((r) => !shed.includes(r))
+      .map((r) => `  ${r.query}\n    was ${showLegacy(baseline.get(r.query))}\n    now ${showLegacy(r)}` +
+        `\n    RelIR now ${show(r)}`);
+    expect(unaccounted).toEqual([]);
   });
 
   test('no clean deferral becomes a crash', () => {
