@@ -2939,6 +2939,12 @@ The `none()`-over-a-scalar case is additionally a MISSING HOST ARM, not just a w
 scenario needs the arm as well as the rule. Corpus: **visible**, and §13d already names the three failing
 scenarios — `g_V_valuesXageX_allXgtX32XX`, `g_injectX7X_noneXeqX7XX`, `g_injectXnullX_allXeqXnullXX`.
 
+**RESOLVED (verified 2026-08-06).** `FALSE_ON_NON_COLLECTION = {all, any, none}` and
+`scalarFalseOnNonCollection` (`projection.ts`) gate a non-collection scalar to `0` (false) instead of
+throwing — wired at the dispatch (the `FALSE_ON_NON_COLLECTION.map(... scalarFalseOnNonCollection)` entry),
+with `none` gaining its scalar host arm. All three scenarios now PASS on BOTH spines (checked against
+`l3-state.json`: default and `legacySpine` both list them in `passed[]`).
+
 ### A PROCESS NOTE, since it cost work: never edit a file a running delegate was told not to touch
 
 The paragraph above had to be written twice. A delegate running under "do NOT edit
@@ -3060,6 +3066,9 @@ the nullable right side. What is genuinely missing is the TYPE law beside it: a 
 columns that came from the RIGHT side must be `nullable: true`. Since a Join's output is POSITIONAL and
 §13m confirms that holds, the law is exactly "for `join === 'left'`, every column at an index ≥
 `left.type.cols.length` is nullable" — checkable, and distinct from `sameColumns`.
+**RESOLVED (verified 2026-08-06): the TYPE law LANDED** — `src/rel/check.ts` throws "a left Join's
+right-side output columns must be nullable" for exactly `node.type.cols.slice(node.left.type.cols.length)`.
+Vacuous today (no lowering emits a `left` join yet), so it fails closed on the first that does.
 
 ### 13g·5. The REDUCER COMPARISON cluster, measured — six wrong answers, two root causes, one existing authority
 
