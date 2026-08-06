@@ -316,10 +316,10 @@ export function predicateExpr(
 
   const comparison = COMPARISON[op];
   if (comparison) {
-    // Operand TYPE stays null here — the old `Pred` carried no per-operand type, so passing the Arg's
-    // now-available `.type` would change literal rendering (`P.gt(2.0)` → `2.0` not `2`); that
-    // type-enrichment is a deliberate follow-up, not this behaviour-preserving unification.
-    const bound = operand(operands[0].value, null, operands[0].name);
+    // The operand inlines as a TYPED literal, storage class following its declared canonical type —
+    // the thesis's "we know the type, stop throwing it away" (an integer-valued `P.gt(2.0)` renders
+    // `2.0`, not `2`). Result-invariant: SQLite compares an INTEGER and a REAL numerically alike.
+    const bound = operand(operands[0].value, operands[0].type, operands[0].name);
     if (!bound) return null;
     // Equality stays a RAW compare: canonical text is exact, and it keeps the value index usable
     // for the common case. Only ORDERING needs the cast, and only it pays for one.
@@ -333,7 +333,7 @@ export function predicateExpr(
     // nothing is never, without nothing is always.
     if (!operands.length) return op === 'within' ? CONSTANT.false : CONSTANT.true;
     if (operands.length > SET_BIND_LIMIT) return null;
-    const members = operands.map((o) => operand(o.value, null, o.name));
+    const members = operands.map((o) => operand(o.value, o.type, o.name));
     if (members.some((m) => !m)) return null;
     const inList: Expr = { kind: 'in-list', expr: subject, values: members as Expr[] };
     return op === 'within' ? inList : negated(inList);
@@ -342,7 +342,7 @@ export function predicateExpr(
   // between = [lo, hi) — inclusive low; inside = (lo, hi) — exclusive low. Both bounds and the
   // subject go through the ordering key for the same reason a range comparison does.
   if (op === 'between' || op === 'inside') {
-    const [low, high] = [operand(operands[0].value, null, operands[0].name), operand(operands[1].value, null, operands[1].name)];
+    const [low, high] = [operand(operands[0].value, operands[0].type, operands[0].name), operand(operands[1].value, operands[1].type, operands[1].name)];
     if (!low || !high) return null;
     const [loCmp, hiCmp] = [
       ordered(op === 'inside' ? '>' : '>=', subject, low, operands[0].value, type),

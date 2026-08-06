@@ -711,11 +711,15 @@ function parsePredicate(node: any, params: Record<string, any>): Pred {
   // P.within/without/inside/between accept both varargs (P.within('a','b')) and a single bracketed list
   // (P.within(['a','b'])). A collection literal parses as ONE array-valued arg; unwrap it back to member
   // operands (predicateSql spreads them into an IN-list / bounds). A bound-param list unwraps the same
-  // way. The wrapped list's members are NOT individually top-level parameters (a `within(names)`
-  // list-param is oversized, not N params), so they become plain-value `Arg`s with no name — while the
-  // varargs form keeps each operand's own name, so a `$x` binds wherever it sits.
+  // way. A member carries its own captured TYPE (the container's `type.items[i]`), so it inlines as a
+  // TYPED literal — but NOT a name: the wrapped list's members are not individually top-level parameters
+  // (a `within(names)` list-param is oversized, not N params). The varargs form keeps each operand's
+  // own name, so a `$x` binds wherever it sits.
   const single = parsed.length === 1 && Array.isArray(parsed[0].value);
-  const operands = single ? (parsed[0].value as any[]).map((v) => arg(v)) : parsed;
+  const listType = single ? parsed[0].type : null;
+  const itemType = (i: number): TypeNode | null =>
+    listType != null && typeof listType === 'object' && 'items' in listType ? (listType.items[i] ?? null) : null;
+  const operands = single ? (parsed[0].value as any[]).map((v, i) => arg(v, itemType(i))) : parsed;
   return { op: m![1], operands };
 }
 
