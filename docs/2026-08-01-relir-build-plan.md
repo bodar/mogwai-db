@@ -155,6 +155,11 @@ answer (`bulk` adds, `encounter` earliest; alias/path/origin/sack belong to one 
 Structure is declared ONCE in `src/rel/walk.ts` (no `default` arm anywhere), so `noImplicitReturns` makes a
 new kind a compile error. Rewriting is memoised, so the DAG stays a DAG.
 
+**Call this tier `rewrite`, not `Pass` (§6·5).** `Pass` names the `Step[]→Step[]` pipeline in
+`ir/passes.ts`, which runs ABOVE the routing switch; these run below it. The distinction is load-bearing,
+not cosmetic — a refusal raised here would be a throw out of a lowering whose contract is `null`, and
+legacy would never see the traversal. No `Pass` TYPE exists in `src/rel/`, so this is a prose+comment fix.
+
 - **`check`** — the fail-closed verifier (column resolution, `Agg`/`WindowExpr` placement, the §3.5
   obligations, both §3.6 budgets). Always on in dev/tests.
 - **`name` (§4.6)** — named CTE vs inlined derived table for every shared node, honouring `Materialize`. The
@@ -273,6 +278,119 @@ Choose the increment by *which deletion-ratchet name it lets you delete*, with m
 tiebreak. Sweep for DUPLICATION every round: **share DATA and pure computation across spines; re-express only
 the EMISSION** (a re-derived `JAVA_WHITESPACE` missing a code point is wrong in a way no test names).
 
+### §6·5 — TWO reasons wear one `null`, and conflating them makes the exit criterion unreachable
+
+§12's "`null` is the only decline" stays true, but two FACTS spell it: **"not learned yet"** (temporary,
+ratchets to zero) and **"the answer is an ERROR"** (permanent — never a capability). Both are
+`catch { return null }` inside the lowering today, and the second lies to the census: a REFUSED traversal
+counts as an uncovered gap forever, so coverage cannot reach 100% and §6·1's end date is unreachable **by
+construction**. A whole-migration blocker that merely surfaced in the write family.
+
+**A refusal on the traversal's own TEXT belongs to the IR `Pass` tier, above both spines** — not new
+machinery: `runPasses` runs in `compiler.ts` BEFORE the spine route, the role is already *rewrites the
+chain, or verifies and throws*, `verify` is already its last category, and `withStrategies` verifications
+already raise from there. The Pass **calls the shared parse** (`parseProperty`, `mergeMaps`) and does NOT
+catch: one authority, one message, above the routing switch, surviving legacy's deletion. Deletes the
+`try/catch → null` idiom at every write site and closes `refusal_belongs_to_legacy`
+(`docs/spec/relir-migration.allium`) by MOVING the check — that spec's own proposed resolution.
+
+**A GRAPH-dependent refusal cannot move there** (`mergeV`'s `T.id` via `assertAvailableElementId`, label
+mutation under `labelCardinality.mutable`). Those become a **guard binding**: a `Plan` binding whose
+relation the executor checks, raising a named message. O(plan size), inside P5, the same move that made the
+`mergeV` snapshot work — and what takes write coverage to 100% rather than 100%-minus-two, so there is **no
+permanent documented exception** in the answer.
+
+**Naming:** `Pass` names two tiers on opposite sides of the routing switch. Load-bearing, not cosmetic — a
+refusal raised in a RelIR rewrite is a throw out of a lowering whose contract is `null`, and legacy never
+sees the traversal. §4's tier is `rewrite`; `Pass` means the pre-lowering chain tier only.
+
+### §6·6 — ONE child seam: a child body has THREE total answers
+
+Four spellings of "lower an inner body" exist: `ByChild` (correlated scalar, `compiler/rel/modulator.ts`),
+`SubReads.body`/`rooted`/`matching` (`compiler/rel/write.ts`), `ListCtx.subRead`, and
+`FilterCtx.correlatedChildren` → `correlatedExists`. One interface, three total answers — correlated
+**scalar**, correlated **predicate**, **rooted** relation.
+
+The split is why the write vocabulary LOOKS like it needs a per-traverser substrate and does not:
+`property`'s nested value and `mergeV`/`mergeE`'s nested label/key/value need the SCALAR arm, which is
+built, injected, serving the whole `by()` vocabulary, and simply not handed to the write seam. P2 says a
+correlated scalar is legal; nothing row-at-a-time is involved. Unify, and the by()-child matrix (§10·4)
+grows in ONE place instead of four — a child body works wherever a child body is legal, not wherever a host
+was taught it. Phase 2.6's third piece is smaller still: the `withSideEffect` constants are compile-time
+(the front-end registers them) and the seam is just not handed them.
+
+### §6·7 — a scalar row's TYPE rides PER ROW; a static tag is an OPTIMIZATION, never the carrier
+
+**THE RULE: what arrives on the wire is CARRIED until something naturally changes it.** Never re-derived,
+never re-guessed, and never DISCARDED because modelling its carriage through a layer looked like work. That
+discard is the failure being replaced: the declared type was dropped at the source and the framer guessed it
+back from a JS value — which cannot tell a UUID from a string, a datetime from a long, or a big long from
+either. Carrying costs one column and helps EVERY type at once; guessing is per-type and lossy. The payoff
+is not only at the wire: a step that DOES change a value's type decides with the type still in hand.
+
+`ScalarType` (`src/sql/kernel/render.ts`) is already the total union — `static | perRow | unknown` — so the
+vocabulary was never the problem. The carrier was: only a stored-vtype read may use `perRow`, so every other
+producer must prove a *uniform* compile-time tag or give up. One missing carrier, four symptoms, one bug —
+`bareInjectTag`'s whitelist + uniformity test (`steps/write/inject.ts`, a shared non-derivable-fact
+authority that exists only because the channel is missing); `injectSource` falling back to `UNKNOWN` for a
+mixed inject, discarding four declared types because it could not carry two; `mergeArms`'s `sameFraming`
+equality test, which DECLINES two scalar arms whose tags differ, so the whole branch family cares what its
+arms' tags are; and `UNKNOWN` meaning both "the JS client genuinely cannot say" and "our source cannot carry
+mixed". Legacy already got the merge half right (`steps/tail/scalar.ts`: *a PER-ROW type survives because
+the column now crosses the merge*) — proof this is carriage, not semantics.
+
+**The mechanism.** A producer that knows its per-value types states them per row; `static` survives as the
+degenerate agreeing case, because it costs no column. One lattice where two scalar streams meet —
+`static ∧ static(same) → static` · `static ∧ static(differ) → perRow` (each side projecting its tag as a
+literal `vt`) · `perRow ∧ x → perRow` · `unknown ∧ x → unknown` — called by the inject source, the arm merge
+and the reducer, the three places that spell it differently today.
+
+**What it buys, in descending order of worth** — the order matters, because leading with the last is how
+someone talks themselves into building tag machinery downstream: (1) the branch-family declines go, straight
+coverage; (2) the types a JS value CANNOT recover survive a heterogeneous stream — uuid, datetime, char,
+duration, bigdecimal, each a wrong wire CLASS rather than a wrong tag; (3) `bareInjectTag` and
+`DECLARED_TYPE_REQUIRED` are deleted, and with them a second chance to get `char`/`uuid`/`datetime` wrong
+(measured: it already had been); (4) `UNKNOWN` regains its declared meaning; (5) exact numeric literal
+framing (`127b` → Byte) falls out free — **worth little on its own, so spend nothing extending it.**
+`AliasScalarType`/`aliasScalarTypeOf` (`steps/context/context.ts`) is a lossy coarsening invented for the
+same missing carrier — same increment or the next. A `vt` column materializes only where tags disagree, so
+it is no width tax; both spines read the lattice, so legacy CONVERGES rather than growing a second copy.
+
+**PASS-THROUGH is exact; ARITHMETIC is SQLite's.** Carrying the type is what makes the informed decision
+possible at the point something changes it — and there SQLite is the engine, so its storage class governs:
+the narrowest tag in the Number family that holds the result **without narrowing** (magnitude-based
+Int/Long for `integer`, Double for `real` — what we already emit). Widening there is a DECISION taken with
+the type in hand, not the old discard. Two hard edges: **never narrow** (`frameValue`'s `case 'byte'` calls
+a strict `byteSerializer`; tagging 128 a Byte overflows it — a crash, not an inaccuracy), and **never leave
+the Number family gratuitously** (BigInteger/BigDecimal decode to a JS BigInt / BigDecimal object and
+`1123n !== 1123` — the `countBuffer` defect; `g_V_age_injectX1000nX_sum` asserts `d[1123].n` and PASSES only
+because we frame something that decodes to a Number).
+
+**Widening INSIDE the family changes no answer Gremlin can be asked** — a citation, not a convenience:
+`gremlin-core/.../util/GremlinValueComparator.java` treats every `Number` subclass as ONE type
+(`f instanceof Number && s instanceof Number`), routes both Comparability and Orderability to
+`NumberHelper.compare`, exempts Numbers from the `equals` hashCode shortcut, and states it — *"does not
+provide a stable order for numerics because of type promotion equivalence semantics."* So `Short 128` and
+`Integer 128` are equal and identically ordered to `P.eq`, `P.lt`, `dedup()`, `order()`, a `group().by()`
+key. **Not licensed by the JS client's blindness** (`feature-steps.js` captures only the numeral from
+`d[…].[bsilfdmn]`): Java and .NET do preserve the class, and the honest residual is theirs — `Short s =
+…sum().next()` is a CCE. Host-language typing, outside Gremlin's value semantics, and upstream's own
+promotion already makes `sum()`'s class data-dependent.
+
+**So NumberHelper's promotion tower is NOT built** — measured: all fourteen narrow-type `Sum.feature`
+scenarios pass on both spines (`l3-state.json`). Promotion is also sticky and ORDER-dependent
+(`mathOperationWithPromote` re-derives the class from the accumulator: `[100b,100b,-100b]` → Short 100 where
+classifying the total gives Byte 100), so reproducing it needs a prefix window (`SUM(v) OVER (ORDER BY
+encounter ROWS UNBOUNDED PRECEDING)`) — a streaming O(1) reducer becomes a sort plus an O(N) sorter on every
+sum narrower than 64 bits, to choose between two tags the reference comparator calls equivalent. Deviation
+documented, not silent: same value, never narrower, inside the one family.
+
+Three platform walls, belonging beside P1–P5 rather than in a coverage counter: **128-bit arithmetic
+declines** (no arbitrary precision, no UDFs — fail closed; do NOT raise, since `!fp && bits ≥ 64` is Long's
+rule and the reference answers for BigInteger); **int64 overflow raises natively**, at exactly upstream's
+rethrow point, so only the executor-side translation is ours; **32-bit float arithmetic is not expressible**
+(SQLite REAL is always a double; `1f+2f+3f` is exact, so nothing observes it).
+
 ### The instruments — run all of them, not the cheapest
 
 Most are inside `ci` (`check`, `lint`, `arch`, `binds`, `deletion`, `rel-sweep`, `test` over L1–L5 + the
@@ -353,10 +471,13 @@ Read coverage from the census; this is the qualitative map of what RelIR already
 
 Ordered by the discipline (§6·4): each closes a family and lets a deletion-ratchet name fall.
 
-1. **Phase 2.6 — delete the legacy write dispatcher.** The prerequisite (alias-through-a-creation) is met,
-   but the gate is write coverage being COMPLETE. Remaining write declines (measure with `rel-blockers`):
-   `property`'s residue, `addE`/`mergeV`/`mergeE`/`addV` tails, `mergeE` (needs a position-correlated
-   `RETURNING`). **`property`'s residue is a substrate question, not an increment** — see Open Decisions.
+1. **Phase 2.6 — delete the legacy write dispatcher.** Prerequisite (alias-through-a-creation) met; the gate
+   is write coverage being COMPLETE. Remaining declines (`rel-blockers`, it moves): `property`'s residue,
+   `addE`/`mergeV`/`mergeE`/`addV` tails, `mergeE` (position-correlated `RETURNING`). **`property`'s residue
+   is not one question and not per-traverser** — a text-level refusal (§6·5), a compile-time constant not
+   handed over (§6·6), a correlated scalar the child seam already builds (§6·6), a graph-dependent refusal
+   that becomes a guard binding (§6·5). Both laws reach past this phase: §6·5 is what lets the coverage
+   counter reach zero at all, §6·6 is what item 4's by()-child matrix needs anyway.
 2. **Phase 3 — the repeat wedge.** `flatten` (P1 legality in `check`; a body that cannot be made legal throws
    a clear deferral) → route `repeat()`'s body through ordinary lowering → `unroll` for `times(n)` (take
    `dedup` first, one barrier per commit with an L4 pin; `prune`'s remainder — pruning below
@@ -370,8 +491,13 @@ Ordered by the discipline (§6·4): each closes a family and lets a deletion-rat
    `local`/`match`/`where`/`path` tails, and the by()-child matrix (`group`←reducer, `project` as a step,
    `select` multi-label, moving/collecting child bodies).
 5. **Correctness follow-ups** (each cited, corpus-mostly-invisible, none a one-liner):
-   - **The numeric-tower PROMOTION** (`inject(127b,1b).sum()` → `d[128].s`, 6 `Sum.feature` scenarios).
-     Blocked on exact-type literal framing — see Open Decisions.
+   - **The per-row scalar type channel (§6·7)** — the decided carrier change: one `ScalarType` lattice, the
+     inject source and the arm merge going `perRow`, `bareInjectTag`/`DECLARED_TYPE_REQUIRED` deleted. It is
+     the prerequisite for the next bullet and it removes the branch family's tag-agreement declines.
+   - ~~The numeric-tower PROMOTION~~ — **CLOSED; the claim it rested on was false.** It said 6 `Sum.feature`
+     scenarios were blocked. Measured (`l3-state.json`): all fourteen narrow-type Sum scenarios pass, on both
+     spines. Not built (§6·7). The real `sum`-adjacent failures are other families — `group().by(…sum)`,
+     `sack`, `aggregate` side effects, `math`, `order().by(sum(local))`.
    - **The `set` framing marker** survives `range(local)`/`all`/`any`/`none` and is dropped only by
      `order(local)`/`unfold()` — a state-threading change through the list tail's follower loop. That loop is
      duplicated (`src/compiler/rel/list.ts`'s `ListOf.set` vs the legacy `ListStream.set`), so this lands in
@@ -386,24 +512,21 @@ Ordered by the discipline (§6·4): each closes a family and lets a deletion-rat
 
 ---
 
-## §11. Open design decisions — HUMAN input needed
+## §11. Open design decisions — NONE OPEN
 
-1. **Exact-type literal framing.** Should a typed numeric literal frame with its exact Gremlin type — `127b`
-   → Byte, not the magnitude-inferred Int we emit today? Yes unblocks the numeric-tower promotion (item 5),
-   but it is a framing-vocabulary change with a census reap AND it regresses inject-after-typed-inject
-   (`inject(1,3).inject(100,300)` starts declining). It reaches BOTH spines whether or not you want it to —
-   the framer and the typed-inject tag table are single shared authorities (§2, §12), so this is a
-   shared-code blast radius, NOT the parity obligation §6·1 retires. It is a dedicated increment, not a
-   side effect.
-2. **Phase 2.6's `property` residue.** A NESTED value, three `withSideEffect` constants, and a `T`-token key
-   each need per-traverser evaluation of a sub-traversal — the row-at-a-time surface this migration exists to
-   delete. Decide per case: a pre-lowering VERIFY refusal, a genuine per-traverser substrate, or a permanent
-   documented exception. This is the question Phase 2.6 actually turns on (`refusal_belongs_to_legacy` in the
-   migration spec).
-3. **The numeric-tower PROMOTION rule**, when built: `getHighestCommonNumberInfo` keeps the narrowest common
-   class and promotes on overflow; **integer overflow at ≥64 bits RAISES** (not a silent wrap, not auto-
-   BigInteger) — so the reducer must raise there rather than widen into the int64-as-TEXT representation
-   (`vendor/.../util/NumberHelper.java`).
+All three are decided and recorded as laws; the section stays so the §-numbering (and the code comments
+citing §12) does not move. Re-open one only with evidence, not with a preference.
+
+1. ~~Exact-type literal framing~~ → **§6·7**. The tag table was the wrong lever; the missing per-row carrier
+   was the defect. Exact framing becomes free, and the regression that blocked it disappears.
+2. ~~Phase 2.6's `property` residue~~ → **§6·5** + **§6·6**. Not one question and not per-traverser: a
+   text-level refusal, a compile-time constant not handed over, a correlated scalar the child seam already
+   builds, and a graph-dependent refusal that becomes a guard binding. No permanent exception.
+3. ~~The numeric-tower PROMOTION rule~~ → **§6·7**, resolved by NOT building it. The rule is real
+   (`NumberHelper.getHighestCommonNumberInfo` keeps the narrowest common class, promotes on overflow, and
+   RAISES at ≥64 bits non-fp) and reproducing it changes no answer Gremlin can be asked, while costing a
+   sort. Preserve the wire type through pass-through; let SQLite's storage class govern arithmetic; never
+   narrow; never leave the Number family gratuitously.
 
 ---
 
@@ -420,6 +543,14 @@ migration exposes is fixed in RelIR; legacy is fixed too when that is cheap and 
 and otherwise left to shed the shape. **A decline is only right when the OTHER spine is right** (§13n's
 lesson): measure the other spine first; four "answer where TinkerPop raises" findings were kept because
 legacy answered identically wrongly and declining bought zero correctness.
+
+**Before reproducing a reference distinction, ask what a client can SEE.** Three bands: it changes the
+VALUE → build it; it changes the decoded CLASS across a boundary every GLV has (Number ↔ BigInt/BigDecimal/
+Date/UUID/string, scalar ↔ Array/Set/Map) → build it; it changes only the GraphBinary TAG inside a band
+every GLV collapses → do not build it, document the deviation. Band 3 is never a reason to DISCARD upstream
+(§6·7 — carriage is cheap and helps every type); it is only a reason not to build machinery downstream to
+RECONSTRUCT what nothing can observe. That test retired `NumberHelper`'s promotion tower after it had been
+carried in this plan as blocking work; apply it at design time, not after.
 
 **Wrong answers with the right arity** (the class no ladder level sees):
 
