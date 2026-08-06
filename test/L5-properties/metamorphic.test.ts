@@ -26,6 +26,7 @@ import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
 import { prefix } from './generate.ts';
 import { LAWS } from './laws.ts';
 import { L5_SEED } from './seed.ts';
+import { summary, detail } from '../support/output.ts';
 
 const SEED = L5_SEED;
 
@@ -97,11 +98,13 @@ describe('L5 — metamorphic laws', () => {
         { seed: SEED + i, numRuns: RUNS, verbose: true },
       );
 
-      if (broken.length) console.log(`LAW BROKEN — ${law.name}\n  why: ${law.why}\n${broken.join('\n')}`);
+      if (broken.length) summary(`LAW BROKEN — ${law.name}\n  why: ${law.why}\n${broken.join('\n')}`);
       expect(broken).toEqual([]);
       // A law that never evaluated proves nothing — surface it rather than passing silently.
       expect(evaluated).toBeGreaterThan(0);
-      console.log(`  ${law.name}: ${evaluated} evaluated`
+      // Per-law census: one line × every law is the single biggest block of green-run output here,
+      // and none of it moves unless a law or the generator changes. The gate is the assertions above.
+      detail(() => `  ${law.name}: ${evaluated} evaluated`
         + `, ${prefixUnsupported} prefix-unsupported, ${lawFormUnsupported} law-form-unsupported`
         + `, ${orderDiffs} order-only, ${countOnly} window-count-only, ${undetermined} window-undetermined`
         + (knownBrokenHits ? `, ${knownBrokenHits} KNOWN-BROKEN (diagnosed in laws.ts)` : ''));

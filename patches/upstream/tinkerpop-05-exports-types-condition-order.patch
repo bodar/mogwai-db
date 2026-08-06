@@ -1,0 +1,58 @@
+From: mogwai-db <https://github.com/bodar/mogwai-db>
+Subject: [PATCH] gremlin-javascript: put "types" first in every exports condition
+
+Export conditions are matched IN ORDER, so a "types" condition placed after "import"/"require" is
+dead: TypeScript resolves "." (and "./language", "./io") through the earlier condition, gets the
+.js, and never sees the .d.ts. Every consumer on moduleResolution node16/nodenext/bundler therefore
+resolves the client as untyped, silently — the declarations are built and shipped, they are just
+unreachable through the exports map. esbuild reports it directly:
+
+  ▲ [WARNING] The condition "types" here will never be used as it comes after both "import" and
+    "require" [package.json]
+
+Node's own documentation states the rule: "types" must come first. See
+https://nodejs.org/api/packages.html#community-conditions-definitions.
+
+The top-level "types" field (line 22) is what currently rescues most consumers, but it is the
+LEGACY path — it is ignored entirely once "exports" is present under node16/nodenext, which is the
+default for any package that is itself "type": "module".
+
+This moves the condition rather than restructuring the map, so behaviour for import/require is
+byte-identical.
+
+Note for a follow-up (deliberately NOT in this patch): "." is dual — ESM and CJS — and both arms
+currently share one ESM-flavoured .d.ts. Strictly that wants per-condition types
+("import": { "types": …, "default": … }, "require": { "types": …, "default": … }) with a .d.cts
+built for the CJS arm. That needs a build change; this patch fixes the resolution bug on its own.
+---
+ gremlin-js/gremlin-javascript/package.json | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/gremlin-js/gremlin-javascript/package.json b/gremlin-js/gremlin-javascript/package.json
+index 1111111..2222222 100644
+--- a/gremlin-js/gremlin-javascript/package.json
++++ b/gremlin-js/gremlin-javascript/package.json
+@@ -26,17 +26,17 @@
+   },
+   "exports": {
+     ".": {
++      "types": "./build/esm/index.d.ts",
+       "import": "./build/esm/index.js",
+-      "require": "./build/cjs/index.cjs",
+-      "types": "./build/esm/index.d.ts"
++      "require": "./build/cjs/index.cjs"
+     },
+     "./language": {
+-      "import": "./build/esm/language/index.js",
+-      "types": "./build/esm/language/index.d.ts"
++      "types": "./build/esm/language/index.d.ts",
++      "import": "./build/esm/language/index.js"
+     },
+     "./io": {
+-      "import": "./build/esm/structure/io/binary/GraphBinary.js",
+-      "types": "./build/esm/structure/io/binary/GraphBinary.d.ts"
++      "types": "./build/esm/structure/io/binary/GraphBinary.d.ts",
++      "import": "./build/esm/structure/io/binary/GraphBinary.js"
+     }
+   },
+   "typesVersions": {

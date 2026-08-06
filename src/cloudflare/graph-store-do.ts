@@ -8,6 +8,7 @@ import { extendedRegistry } from '../services/standard.ts';
 import { DurableObjectSqlite } from './DurableObjectSqlite.ts';
 import { CloudflareGraphManager } from './cloudflare-graph-manager.ts';
 import { R2IoStore } from './R2IoStore.ts';
+import { rpcTry, type RpcResult } from './rpc.ts';
 
 export interface Env {
   GRAPH: DurableObjectNamespace<GraphDatabase>;
@@ -68,15 +69,15 @@ export class GraphDatabase extends DurableObject<Env> {
    *  Worker parsed the wire and resolved the graph; it wraps the returned framed buffers into the
    *  HTTP response (concern C). Returning the materialized array (bytes only) keeps HTTP out of
    *  the storage tier. */
-  async framed(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<Framed[]> {
-    return this.executor().framedAsync(gremlin, params, paramTypes);
+  async framed(gremlin: string, params: Record<string, any>, paramTypes: Record<string, TypeNode> = {}): Promise<RpcResult<Framed[]>> {
+    return rpcTry(() => this.executor().framedAsync(gremlin, params, paramTypes));
   }
 
   /** Data-plane RPC: the INTERNAL raw-row path — a federated hop FROM a sibling DO lands here.
    *  Returns detached ForeignRow[] (no GraphBinary; the client edge frames only the final
    *  result). `depth` is the federation recursion depth of this hop (guarded in the service). */
-  async raw(gremlin: string, params: Record<string, any>, depth: number): Promise<ForeignRow[]> {
-    return this.executor().raw(gremlin, params, depth);
+  async raw(gremlin: string, params: Record<string, any>, depth: number): Promise<RpcResult<ForeignRow[]>> {
+    return rpcTry(() => this.executor().raw(gremlin, params, depth));
   }
 
   // ---- lifecycle RPC (called by CloudflareGraphManager) ----

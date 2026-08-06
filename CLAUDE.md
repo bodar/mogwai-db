@@ -324,6 +324,15 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
   DO `ctx.storage.sql` (prod). Compiler + frame tier are storage-agnostic; the HTTP edge never
   touches a store. **Bind-type gotcha:** DO SQLite throws on `boolean`/`bigint` binds — `GraphStore`
   coerces them at the one seam so both runtimes agree.
+- **A QUERY FAILURE IS NOT A CRASH, at either boundary it crosses.** Server-side it is returned to
+  the client on the GraphBinary trailer and NOT logged — the router's default `QueryLogger` is
+  silent (`src/router.ts`; `$MOGWAI_LOG=1` for the access log), because the common failure is an
+  unsupported traversal, i.e. someone else's typo, not our incident. DO-side it crosses the RPC
+  boundary as a VALUE (`src/cloudflare/rpc.ts`): a throw out of a Durable Object RPC method is an
+  *uncaught exception* to workerd, which logs a stack and counts it in the DO's error rate, so
+  every user typo would read as a DO crash in production observability. The DO-side stack travels
+  with the value and is rethrown on the caller side, so nothing that was diagnosable stops being so.
+  Test-output discipline follows from the same rule and lives in `test/CLAUDE.md`.
 - **A SECOND storage seam, `IoStore` (`src/iostore.ts`), hides where a graph's DOCUMENTS live** —
   `Sql` hides where its rows do. ASYNC (an object store's get/put are promises, which costs nothing
   because `io()` is a barrier service): a rooted directory on Bun (`$MOGWAI_IO_DIR`, so a path cannot

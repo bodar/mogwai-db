@@ -24,7 +24,12 @@ async function waitForReady(url: string, timeoutMs = 50_000): Promise<void> {
 graphContract('cloudflare', {
   async start() {
     proc = Bun.spawn(
-      ['./node_modules/.bin/wrangler', 'dev', '--port', String(PORT), '--ip', '127.0.0.1'],
+      // `--log-level error`: wrangler dev's default `info` narrates every request (`[wrangler:info]
+      // POST /gremlin/… 200 OK`) and re-prints an esbuild warning about the VENDORED client's
+      // package.json export conditions — ~70 lines per suite run, none of it about this repo's code.
+      // Startup failures and real errors still print, which is the only thing this spawn needs to say.
+      ['./node_modules/.bin/wrangler', 'dev', '--port', String(PORT), '--ip', '127.0.0.1',
+        '--log-level', 'error'],
       {
         cwd: ROOT,
         env: { ...process.env, WRANGLER_SEND_METRICS: 'false' },

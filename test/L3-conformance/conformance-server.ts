@@ -24,6 +24,7 @@ import { LabelCardinality } from '../../src/api.ts';
 import { UID_SEED } from '../fixtures/seed-uid.ts';
 import { loadGraphson } from '../../src/formats/graphson.ts';
 import { readFileSync } from 'node:fs';
+import { VERBOSE } from '../support/output.ts';
 
 // Reference graphs load from their canonical GraphSON v3 files in the pinned submodule, through the
 // TYPED reader + bulk loader (src/formats/graphson.ts) rather than as write traversals. Two things
@@ -134,15 +135,23 @@ export async function buildConformanceApp(graphs: readonly string[] = Object.key
   const tpath = telemetryPath();
   clearTelemetry(tpath);
   const served = new LoggingGraphManager(manager, tpath);
-  // A compact live progress line — `.` a query that ran, `·` an EXPECTED throw (its message
-  // satisfies a negative scenario's assertion, so the scenario passes), `E` a real compile/exec
-  // gap. A wrong-answer still shows `.`, matching the NDJSON's ok:true. Keying `·` off the
-  // corpus's own expected-error strings (not our message shape) keeps a real bug that throws a
-  // canonical-looking error as `E`. The test terminates the line before the aggregate report.
+  // A compact live progress line, under `$MOGWAI_VERBOSE` — `.` a query that ran, `·` an EXPECTED
+  // throw (its message satisfies a negative scenario's assertion, so the scenario passes), `E` a
+  // real compile/exec gap. A wrong-answer still shows `.`, matching the NDJSON's ok:true. Keying
+  // `·` off the corpus's own expected-error strings (not our message shape) keeps a real bug that
+  // throws a canonical-looking error as `E`. The test terminates the line before the aggregate
+  // report.
+  //
+  // Off by default because `bun test` now runs its OWN dots reporter (bunfig.toml): two streams of
+  // bare dots on one line are not a progress bar, they are an unreadable smear where you cannot tell
+  // a finished test from a run query. Nothing is lost — every mark is derived from the NDJSON the
+  // decorator above captures unconditionally, and the aggregate report ranks it.
   const expected = expectedErrorSubstrings(
     new URL('../../vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/', import.meta.url).pathname,
   );
-  const log = (e: { ok: boolean; error?: string }) => process.stdout.write(progressMark(e, expected));
+  const log = VERBOSE
+    ? (e: { ok: boolean; error?: string }) => { process.stdout.write(progressMark(e, expected)); }
+    : undefined;
   const app = application({ manager: served, log });
   return { fetch: app.router as (req: Request) => Promise<Response>, manager, served };
 }

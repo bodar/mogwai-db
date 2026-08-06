@@ -24,6 +24,7 @@
 // to a handler (`test/support/in-memory-transport.ts`) and there is no port to lose.
 
 import { Writable } from 'node:stream';
+import { VERBOSE } from './output.ts';
 
 const HERE = new URL('.', import.meta.url).pathname;
 
@@ -94,6 +95,23 @@ export async function runFeatures(options: RunFeaturesOptions): Promise<RunFeatu
     },
   }, environment);
 
-  const { success } = await api.runCucumber({ ...(runConfiguration as object) }, environment);
-  return { success, stdout: chunks.join('') };
+  // Upstream's step definitions `console.error('Error encountered:', message, stack)` on every step
+  // that throws (`vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/feature-steps.js`).
+  // For THEIR suite that is one message on a broken build; for ours the deferred set is a ratcheted,
+  // expected population, so it was 291 messages × 3 lines — ~64% of everything `mise run test`
+  // printed, for information the telemetry report already summarizes and the JSON artifact keeps in
+  // full. `console.error` writes to `process.stderr` directly, so cucumber's own captured `stdout`
+  // (above) cannot filter it; this can, and it drops ONLY that one call site — anything else a step
+  // logs still gets through, and the original is always restored.
+  const realError = console.error;
+  console.error = (...args: unknown[]) => {
+    if (!VERBOSE && typeof args[0] === 'string' && args[0].startsWith('Error encountered:')) return;
+    realError(...args);
+  };
+  try {
+    const { success } = await api.runCucumber({ ...(runConfiguration as object) }, environment);
+    return { success, stdout: chunks.join('') };
+  } finally {
+    console.error = realError;
+  }
 }

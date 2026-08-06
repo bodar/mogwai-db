@@ -40,7 +40,8 @@ git checkout -b <branch> origin/master
 git apply ../../patches/upstream/tinkerpop-01-cucumber-uuid-import.patch
 ```
 
-Verified to apply cleanly from a clean `origin/master` tree: 01 on 2026-07-26, 04 on 2026-08-04.
+Verified to apply cleanly from a clean `origin/master` tree: 01 on 2026-07-26, 04 on 2026-08-04,
+05 on 2026-08-06.
 
 ### 01 — the generated cucumber `gremlin.js` references an undefined `uuid`
 
@@ -93,7 +94,20 @@ L3 still swaps the holder, because upstream's cucumber world constructs its conn
 Verified: applies cleanly to `origin/master` at the pinned gitlink, and `tsc --noEmit` is clean in the
 patched client.
 
-## Not here
+### 05 — the client's `exports` map ships types nobody can resolve
+
+`tinkerpop-05-exports-types-condition-order.patch`. Export conditions match IN ORDER, so the
+`"types"` entry that sits AFTER `"import"`/`"require"` in all three exports (`.`, `./language`,
+`./io`) is dead: a consumer on `moduleResolution` `node16`/`nodenext`/`bundler` resolves the `.js`
+and never reaches the `.d.ts`. The declarations are built and published — just unreachable. The
+top-level `"types"` field is what rescues most consumers today, and it is the legacy path that
+`exports` supersedes. Moving the condition is the whole fix; import/require behaviour is
+byte-identical.
+
+Not a harness bug like 01/04 — this one is in the PUBLISHED client, and it hits every TypeScript
+user of `gremlin`, not just us. esbuild says so on every bundle, which is how we found it: the
+warning is the last remaining line of unattributable noise in `mise run build`. We leave it printing
+until this lands rather than filtering it, because the warning is CORRECT.
 
 - **`toNumeric` cannot produce a BigInteger** — already written and pushed as
   `danielbodart/tinkerpop@fix-cucumber-bigint-numeric-parsing`; it needs a PR raised, not a patch.

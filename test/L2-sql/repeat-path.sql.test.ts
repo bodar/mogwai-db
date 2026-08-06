@@ -14,6 +14,7 @@ import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery, executeFramed } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
 import { grouped, read, relirOff, run, runWith, seededStore } from '../support/harness.ts';
+import { detail } from '../support/output.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -95,13 +96,14 @@ describe('repeat / path SQL', () => {
 
     // A flavour of the gap at a depth the recursive path still finishes (times(4) ≈ tens of ms):
     // the bulk unroll is orders of magnitude faster. Loose bound (real gap ~170×) so a busy CI box
-    // never flakes; the numbers are logged for the record.
+    // never flakes; the measured numbers print under `$MOGWAI_VERBOSE` (a benchmark line on every
+    // green run is exactly the output nobody reads).
     const ms = (bulk: boolean) => {
       const p = read('g.V().repeat(__.both()).times(4).count()', { fastPaths: { bulkRepeatCount: bulk } });
       const t = performance.now(); store.query(p.sql, p.binds); return performance.now() - t;
     };
     const bulkMs = ms(true), recursiveMs = ms(false);
-    console.log(`bulk repeat times(4) on K12: bulk ${bulkMs.toFixed(2)}ms vs recursive ${recursiveMs.toFixed(1)}ms (${(recursiveMs / bulkMs).toFixed(0)}×)`);
+    detail(() => `bulk repeat times(4) on K12: bulk ${bulkMs.toFixed(2)}ms vs recursive ${recursiveMs.toFixed(1)}ms (${(recursiveMs / bulkMs).toFixed(0)}×)`);
     expect(recursiveMs).toBeGreaterThan(bulkMs * 5);
   });
 

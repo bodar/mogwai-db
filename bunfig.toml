@@ -3,3 +3,12 @@
 # suites, which aren't ours to pass.
 [test]
 root = "test"
+
+# Dots reporter for EVERY `bun test` invocation — mise tasks, the shards, a bare `bun test`.
+# One char per test instead of a line, so a green run is a few lines and a failure is not buried
+# under 1,800 passing names. Failures still print in full. Config-level rather than a `--dots` on
+# each `run =` in mise.toml: a new test task cannot forget it. (`reporter` is a TABLE — the string
+# spelling `reporter = "dots"` is a bunfig load ERROR; the CLI equivalents are `--dots` /
+# `--reporter=dots`.)
+[test.reporter]
+dots = true

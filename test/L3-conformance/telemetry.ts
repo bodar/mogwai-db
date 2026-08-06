@@ -443,12 +443,16 @@ export function formatReport(sum: TelemetrySummary, scenarios: ScenarioRow[]): s
   L.push(`queries: ${sum.totalQueries} total, ${sum.uniqueQueries} unique, ${sum.uniqueFailed} real gaps (expected negative-test throws excluded)`);
   L.push(`scenarios: ${passed}/${scenarios.length} passed`);
   L.push('');
-  L.push('── deferral buckets (real gaps, most frequent first) ──');
-  for (const b of sum.buckets.slice(0, 30)) {
+  // TOP TEN, not thirty. The ranking is a worklist and nobody works the 23rd-biggest wall; the tail
+  // was 40 lines of standing output on every green run. The FULL ranking is in the
+  // `l3-telemetry.summary.json` artifact this report's caller writes, so nothing is lost.
+  const TOP = 10;
+  L.push(`── deferral buckets (real gaps, top ${TOP} of ${sum.buckets.length}) ──`);
+  for (const b of sum.buckets.slice(0, TOP)) {
     L.push(`  ${String(b.count).padStart(4)}  ${b.key}`);
     L.push(`        e.g. ${b.example.slice(0, 110)}`);
   }
-  if (sum.buckets.length > 30) L.push(`  … ${sum.buckets.length - 30} more buckets`);
+  if (sum.buckets.length > TOP) L.push(`  … ${sum.buckets.length - TOP} more buckets (full ranking in the summary artifact)`);
   L.push('');
   L.push('── steps present in failing chains (frequency) ──');
   L.push('  ' + sum.failingSteps.slice(0, 30).map((s) => `${s.step}:${s.count}`).join('  '));

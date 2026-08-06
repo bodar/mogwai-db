@@ -31,9 +31,8 @@ function json(body: unknown, status = 200): Response {
 }
 
 // Per-query observability is a pluggable presentation seam (data capture is a
-// separate manager decorator — see test/L3-conformance/telemetry.ts). The default is
-// the verbose one-line-per-query log both runtimes have always emitted (CF → wrangler
-// tail); the conformance host swaps in a compact `.`/`E` progress reporter.
+// separate manager decorator — see test/L3-conformance/telemetry.ts); the conformance
+// host swaps in a compact `.`/`E` progress reporter.
 export type QueryLogger = (event: {
   id: string;
   gremlin: string;
@@ -42,7 +41,19 @@ export type QueryLogger = (event: {
   error?: string;
 }) => void;
 
-const verboseLogger: QueryLogger = (e) =>
+/** The DEFAULT: say nothing. A server that narrates every request is unreadable under any load,
+ *  and it buried the suite's own output (~100 `OK …` lines per `mise run test`).
+ *
+ *  Silent on FAILURE too, which is the less obvious half: a failed traversal is already reported
+ *  to the caller on the GraphBinary trailer, so logging it as well duplicates a message that has
+ *  a proper channel — and the overwhelmingly common failure here is an unsupported traversal,
+ *  i.e. someone else's typo, not our incident. Logging those made the conformance run (where an
+ *  expected-deferral population is RATCHETED, ~290 of them) print a wall of red. `verboseLogger`
+ *  is the opt-in access log: `$MOGWAI_LOG=1` on the Bun entry point. */
+export const silentLogger: QueryLogger = () => {};
+
+/** The one-line-per-query access log, opt-in (CF → wrangler tail; Bun → `$MOGWAI_LOG`). */
+export const verboseLogger: QueryLogger = (e) =>
   console.log(e.ok ? `OK   [${e.id}] ${e.gremlin} -> ${e.results} result(s)` : `ERR  ${e.error}`);
 
 // Parse the wire, resolve the graph id (path wins over body `g`, default 'g'), run
@@ -65,7 +76,7 @@ async function runQuery(mgr: GraphManager, pathId: string | null, req: Request, 
 export function makeRouter(
   mgr: GraphManager,
   pathPrefix = 'gremlin',
-  log: QueryLogger = verboseLogger,
+  log: QueryLogger = silentLogger,
 ): (req: Request) => Promise<Response> {
   const graphPath = new RegExp(`^/${escapeRe(pathPrefix)}/([^/]+)/?$`);
   const { DOCS_HTML, OPENAPI_JSON } = buildDocs(pathPrefix);

@@ -1,6 +1,7 @@
 import type { GraphManager, GraphInfo, RemoteExecutor, ForeignRow } from '../api.ts';
 import { type Framed } from '../execute.ts';
 import type { GraphDatabase } from './graph-store-do.ts';
+import { rpcUnwrap, type RpcResult } from './rpc.ts';
 
 /** The Cloudflare half of the graph-lifecycle seam AND the executor factory / federation source.
  *  The DO namespace maps a graph id to its DO (`getByName`); `executor(id)` returns an adapter
@@ -15,9 +16,14 @@ export class CloudflareGraphManager implements GraphManager {
     // Across a DO RPC boundary everything is async, so this adapter offers only the RemoteExecutor
     // surface (framedAsync/raw). The sync framed()/buffers() need a local store and live on the
     // DO's OWN in-process executor, not here.
+    // `rpcUnwrap` turns a query failure back into a throw on THIS side of the boundary — the DO
+    // returns it as a value so workerd does not report a user's unsupported traversal as an
+    // uncaught DO exception (src/cloudflare/rpc.ts).
     return {
-      framedAsync: (gremlin, params, paramTypes = {}) => stub.framed(gremlin, params, paramTypes) as Promise<Framed[]>,
-      raw: (gremlin, params, depth) => stub.raw(gremlin, params, depth) as Promise<ForeignRow[]>,
+      framedAsync: async (gremlin, params, paramTypes = {}) =>
+        rpcUnwrap(await stub.framed(gremlin, params, paramTypes) as RpcResult<Framed[]>),
+      raw: async (gremlin, params, depth) =>
+        rpcUnwrap(await stub.raw(gremlin, params, depth) as RpcResult<ForeignRow[]>),
     };
   }
   create(id: string): Promise<void> {

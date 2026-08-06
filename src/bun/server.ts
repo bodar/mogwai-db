@@ -1,4 +1,5 @@
 import { application } from '../application.ts';
+import { verboseLogger } from '../router.ts';
 import { BunGraphManager } from './BunGraphManager.ts';
 import { FileIoStore } from './FileIoStore.ts';
 import { extendedRegistry } from '../services/standard.ts';
@@ -20,7 +21,9 @@ export function startServer(
   // Production injects the EXTENDED registry (federation on). The single place the registry
   // choice is made; the conformance host injects standardRegistry at its own construction.
   const manager = new BunGraphManager(dir, extendedRegistry, undefined, ioDir ? new FileIoStore(ioDir) : undefined);
-  const app = application({ manager, pathPrefix });
+  // Silent by default (router.ts `silentLogger` — a failure reaches the client on the wire, which
+  // is its channel). `$MOGWAI_LOG=1` turns the one-line-per-query access log back on.
+  const app = application({ manager, pathPrefix, log: process.env.MOGWAI_LOG ? verboseLogger : undefined });
   return Bun.serve({ port, fetch: app.router });
 }
 

@@ -1,6 +1,7 @@
 import { test, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
+import { summary, detail } from '../support/output.ts';
 
 const lines = readFileSync(new URL('./corpus.txt', import.meta.url), 'utf8')
   .split('\n').filter(Boolean);
@@ -22,16 +23,14 @@ test('corpus parses and chains at 100%', () => {
   }
 
   const pct = (n: number) => ((100 * n) / lines.length).toFixed(1) + '%';
-  console.log(`corpus: ${lines.length} traversals`);
-  console.log(`parse:  ${parsed} (${pct(parsed)})`);
-  console.log(`chain:  ${chained} (${pct(chained)})`);
+  summary(`corpus: ${lines.length} traversals — parse ${pct(parsed)}, chain ${pct(chained)}`);
+  // A parse failure is the assertion below going red; naming the first few is diagnosis, not noise.
   if (parseFails.length) {
-    console.log('\nfirst parse failures:');
-    parseFails.slice(0, 5).forEach((q) => console.log('  ' + q.slice(0, 90)));
+    summary('first parse failures:\n' + parseFails.slice(0, 5).map((q) => '  ' + q.slice(0, 90)).join('\n'));
   }
-  console.log('\ntop 25 steps by corpus frequency (implementation priority order):');
-  [...stepCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25)
-    .forEach(([k, v]) => console.log(`  ${String(v).padStart(4)} ${k}`));
+  detail(() => 'top 25 steps by corpus frequency (implementation priority order):\n'
+    + [...stepCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25)
+        .map(([k, v]) => `  ${String(v).padStart(4)} ${k}`).join('\n'));
 
   expect(parsed).toBe(lines.length);
   expect(chained).toBe(lines.length);

@@ -17,6 +17,7 @@ import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { traversal } from './generate.ts';
 import { TRANSITIONS, SHAPES, namesByShape, type Shape } from './shape.ts';
 import { L5_SEED } from './seed.ts';
+import { summary, detail } from '../support/output.ts';
 
 const SEED = L5_SEED;
 const RUNS = Number(process.env.L5_RUNS ?? 300);
@@ -63,8 +64,9 @@ describe('L5 shape table', () => {
       if (unseen.length) missing.push(`  ${shape}: ${unseen.join(', ')}`);
     }
     const total = SHAPES.reduce((n, s) => n + namesByShape()[s].size, 0);
-    console.log(`L5 table: ${total} transitions across ${SHAPES.length} shapes; ${emitted.size} distinct step names emitted`);
-    if (missing.length) console.log('unexercised transitions:\n' + missing.join('\n'));
+    summary(`L5 table: ${total} transitions across ${SHAPES.length} shapes; ${emitted.size} distinct step names emitted`
+      + (missing.length ? `, ${missing.length} shape(s) with unexercised transitions` : ''));
+    detail(() => 'unexercised transitions:\n' + missing.join('\n'));
     // Not asserted at zero: `steps`/`depth` bound the walk, so a deep-shape transition can be
     // legitimately rare. Asserted as a floor, so a table edit that strands a whole shape fails.
     expect(missing.length).toBeLessThan(3);
@@ -95,9 +97,9 @@ describe('L5 shape table', () => {
       .filter(([name]) => !known.has(name))
       .sort((a, b) => b[1] - a[1]);
 
-    console.log(`L5 table covers ${known.size} step names; corpus uses ${corpusSteps.size}`);
-    console.log('top unmodelled steps (table growth order):');
-    for (const [name, n] of gap.slice(0, 20)) console.log(`  ${String(n).padStart(4)} ${name}`);
+    summary(`L5 table covers ${known.size} step names; corpus uses ${corpusSteps.size} (${gap.length} unmodelled)`);
+    detail(() => 'top unmodelled steps (table growth order):\n'
+      + gap.slice(0, 20).map(([name, n]) => `  ${String(n).padStart(4)} ${name}`).join('\n'));
     expect(corpusSteps.size).toBeGreaterThan(0); // the corpus parsed at all
   }, 120_000);
 

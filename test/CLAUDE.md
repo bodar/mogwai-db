@@ -1,5 +1,20 @@
 # test — the build discipline
 
+- **A green run is QUIET, and that is a rule, not a default.** `bun test` runs the dots reporter
+  (`bunfig.toml` `[test.reporter] dots = true` — the string spelling `reporter = "dots"` is a bunfig
+  load error), and a test file may print at most a standing SUMMARY line or two: a number worth
+  watching move. Instrument dumps (corpus step frequencies, unmodelled steps, the per-law
+  metamorphic census, L3's live progress marks) go through `test/support/output.ts` —
+  `summary()` always, `detail()` only under `$MOGWAI_VERBOSE=1`. Measured: `mise run test` printed
+  1,364 lines and now prints 110, of which the L3 telemetry report is half. Nothing is hidden from a
+  FAILURE — an assertion prints its full diagnosis either way, and L3's complete bucket ranking is in
+  `l3-telemetry.summary.json` regardless. Two sources of noise were not ours and are fixed at the
+  source rather than filtered: upstream's cucumber steps `console.error` every throw (dropped by
+  exactly that call site in `test/support/cucumber.ts`, because our deferred set is a ratcheted
+  expected population, not a broken build), and `wrangler dev` narrates every request at its default
+  `info` (spawned with `--log-level error`). The server's own per-query log is off by default too —
+  `src/router.ts` `silentLogger`, with `$MOGWAI_LOG=1` for the access log.
+
 - **Run `mise run test`, NOT bare `bun test`.** The mise task carries the `depends` that set up
   the environment — `install`, `submodule`, and crucially `check` (`tsc --noEmit`). Bare `bun test`
   skips type-checking and the submodule, so green there can hide broken types. `bun test <file>` is
