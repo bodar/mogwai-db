@@ -1,9 +1,9 @@
-import { q, value, raw, type Relation } from '../../sql/kernel/q.ts';
-import { propertyFts } from '../../sql/schema.ts';
-import { elemTable, propOwnerCol, propRel, propertyPayload, PROPERTY_PAYLOAD, sqlElem, type Elem } from '../../compiler/plan/plan.ts';
-import { toPropertyStream, type PropertyStream } from '../../compiler/steps/context/stream.ts';
-import { rootLayout, type TraverserLayout } from '../../compiler/steps/context/context.ts';
-import type { Service, StreamCallSite, CallParams } from '../spi/types.ts';
+import * as make from '../../rel/factory.ts';
+import { col, compilerInt, compilerText } from '../../rel/expr.ts';
+import { and, eq, meta, typeOf } from '../../compiler/rel/build.ts';
+import { propertyJoin } from '../../compiler/rel/property.ts';
+import { sqlElem, type Elem } from '../../compiler/plan/plan.ts';
+import type { Service, RelCallSite, RelContribution, CallParams } from '../spi/types.ts';
 
 // ---------- tinker.search — full-text search over property values (pure, Start) ----------
 //
@@ -56,34 +56,45 @@ function searchPattern(params: CallParams): string {
   return `%${term.replace(/[\\%_]/g, (c) => '\\' + c)}%`;
 }
 
-/** The empty PropertyStream (type=VertexProperty, or a genuinely unmatched scope): a
- *  PROPERTY_PAYLOAD CTE with no rows. */
-function emptyProperties(ctx: StreamCallSite, ownerElem: Elem): PropertyStream {
-  const layout: TraverserLayout = rootLayout();
-  // The column names are the fixed PROPERTY_PAYLOAD list (SQL identifiers, never user data),
-  // so a raw `NULL AS <col>` projection with a WHERE 0 guard yields the empty relation.
-  const proj = raw(PROPERTY_PAYLOAD.map((c) => `NULL AS ${c}`).join(', '));
-  const rel = ctx.q.cte(q`SELECT ${proj} WHERE 0`, [...PROPERTY_PAYLOAD]);
-  return toPropertyStream({ q: ctx.q, params: ctx.boundParams, traverserLayout: layout }, rel, ownerElem);
-}
-
-/** Build the matched-properties PropertyStream for a node/edge scope. Joins property_fts
- *  (kind='value', the searched scope, text LIKE %term%) back to the property table for the
- *  full payload (pk/pv/pvtype/meta) and to the owner + its label. */
-function searchProperties(ctx: StreamCallSite, ownerElem: Elem, pattern: string): PropertyStream {
-  const layout: TraverserLayout = rootLayout();
-  const f = propertyFts.as('f');
-  const likeMatch = q`${f.c.text} LIKE ${value(pattern)} ESCAPE ${value('\\')}`;
-  const scope = q`${f.c.owner_elem}=${value(sqlElem(ownerElem))} AND ${f.c.kind}=${value('value')} AND ${likeMatch}`;
-  // The PAYLOAD is `lowerProperties`' — this service differs only in how the rows are
-  // PROVISIONED (an FTS hit rather than a traverser), so it must not have its own opinion
-  // about what a property row carries.
-  const pr = propRel(ownerElem);
-  const owner = elemTable(ownerElem).as('n');
-  const body = q`SELECT ${propertyPayload(ownerElem, pr, owner)}
-      FROM ${f} JOIN ${pr} ON ${pr.c.id}=${f.c.pid} JOIN ${owner} ON ${owner.c.id}=${pr.c[propOwnerCol(ownerElem)]} WHERE ${scope}`;
-  const rel: Relation = ctx.q.cte(body, [...PROPERTY_PAYLOAD]);
-  return toPropertyStream({ q: ctx.q, params: ctx.boundParams, traverserLayout: layout }, rel, ownerElem);
+/**
+ * The matched properties as a RelIR relation — an FTS scan joined back to the property table for the
+ * payload, which is `propertyJoin`'s caller-supplied ON in its second form: this producer has no
+ * element input and matches the property's own id against the hit, where `properties()` matches the
+ * owner. Both go through the one join so neither grows its own opinion of what a property row is.
+ *
+ * The scope predicate is `owner_elem` + `kind='value'` + the LIKE. Only `kind='value'` rows are
+ * matched: they hold each property's logical toString(), which is exactly what TinkerPop's
+ * `.*(term).*` matches, and the finer jsonkey/jsonleaf rows exist for a different capability — one
+ * row per matched property is the contract `element()` walks.
+ *
+ * The term is a parsed LITERAL, so it inlines as a typed SQL literal and spends none of the DO's 100
+ * parameters. A bind serves a user PARAMETER; this is a constant the compiler already holds.
+ */
+function searchProperties(site: RelCallSite, ownerElem: Elem, pattern: string, empty = false): RelContribution {
+  const fts = make.scan({
+    id: site.fresh('fts'), table: 'property_fts', alias: site.fresh('rf'), channels: [],
+    type: typeOf(meta('owner_elem', 'text'), meta('pid', 'int'), meta('kind', 'text'), meta('text', 'text', true)),
+  });
+  const scoped = make.filter({
+    id: site.fresh('ffl'), input: fts, channels: [], type: fts.type,
+    pred: and(
+      and(eq(col(fts.id, 'owner_elem'), compilerText(sqlElem(ownerElem))),
+        eq(col(fts.id, 'kind'), compilerText('value'))),
+      // SQLite's `like(pattern, subject, escape)` FUNCTION, not the infix operator — the algebra has
+      // no node for an ESCAPE clause and §7 keeps the node set closed, so the function says it
+      // instead. The same form `predicate.ts` emits for every TextP substring op.
+      empty
+        // THE EMPTY RELATION, spelled as the algebra spells one: a `Filter(false)` over something
+        // (§3.3). `Values([])` is unrepresentable — it rendered as invalid SQL that only failed at the
+        // database — and here there IS something to be over, so meta-property search yields no rows
+        // rather than declining. Declining would be wrong now: legacy refuses a `rel` contribution, so
+        // a decline leaves NOTHING answering a shape that used to return empty.
+        ? eq(compilerInt(0), compilerInt(1))
+        : { kind: 'call', fn: 'like', args: [compilerText(pattern), col(fts.id, 'text'), compilerText('\\')] },
+    ),
+  });
+  const rel = propertyJoin(scoped, ownerElem, (props) => eq(col(props, 'id'), col(scoped.id, 'pid')), site.fresh);
+  return { rel, framing: { kind: 'property', ownerElem } };
 }
 
 export const searchService: Service = {
@@ -91,13 +102,17 @@ export const searchService: Service = {
   type: 'start',
   describeParams: () => ({ search: 'string (substring, ≥3 chars, case-insensitive)', type: 'Vertex | Edge | VertexProperty (default Vertex)' }),
   resolve: () => ({
-    kind: 'stream',
-    build: (c) => {
+    kind: 'rel',
+    buildRel: (c) => {
       const scope = ownerScopeOf(c.params);
       const pattern = searchPattern(c.params);
-      // VertexProperty (meta-property) search is empty on the reference graphs — a static,
-      // documented gap. Return an empty vertex-owner PropertyStream so .element() is empty.
-      if (scope === 'vertexproperty') return emptyProperties(c, 'vertex');
+      // VertexProperty (meta-property) search is empty on the reference graphs — a static, documented
+      // gap. It DECLINES rather than building an empty relation: the algebra's empty relation is a
+      // `Filter(false)` over something, and legacy already answers this shape, so handing it over is
+      // both cheaper and honest (§3.3's reasoning, the same one `--list` declines an empty list for).
+      // VertexProperty (meta-property) search is empty on the reference graphs — a static, documented
+      // gap — so it yields the EMPTY relation rather than declining. See `searchProperties`.
+      if (scope === 'vertexproperty') return searchProperties(c, 'vertex', pattern, true);
       return searchProperties(c, scope, pattern);
     },
   }),

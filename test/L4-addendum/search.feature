@@ -8,8 +8,14 @@ Feature: mogwai addendum — tinker.search over collection + nested-JSON propert
   # case-insensitive (a documented divergence — what lets the trigram index serve LIKE). We walk
   # each matched property to its owner and read a stable scalar ("title") so results compare.
   # @gap:search marks the family for an upstream gremlin-test give-back (no official coverage).
+  #
+  # @SpineRel on every scenario: `tinker.search` contributes `kind: 'rel'`, and a service implements
+  # `stream` XOR `rel` — two implementations of one service is the duplicated lowering
+  # `steps/CLAUDE.md` forbids. So the legacy spine has no lowering for it and REFUSES, which is not a
+  # divergence to assert here: `@RelIR` would claim a throw is the interesting answer, when the
+  # interesting answer is the rows. `services.test.ts` asserts the refusal itself, once per service.
 
-  @gap:search
+  @gap:search @SpineRel
   Scenario: search a list-valued property by one of its elements
     Given the search graph
     And the traversal of
@@ -21,7 +27,7 @@ Feature: mogwai addendum — tinker.search over collection + nested-JSON propert
       | result |
       | chapter one |
 
-  @gap:search
+  @gap:search @SpineRel
   Scenario: search a list-valued property by a case-insensitive element substring
     Given the search graph
     And the traversal of
@@ -33,7 +39,7 @@ Feature: mogwai addendum — tinker.search over collection + nested-JSON propert
       | result |
       | chapter one |
 
-  @gap:search
+  @gap:search @SpineRel
   Scenario: search a nested map property by a KEY
     Given the search graph
     And the traversal of
@@ -45,7 +51,7 @@ Feature: mogwai addendum — tinker.search over collection + nested-JSON propert
       | result |
       | chapter two |
 
-  @gap:search
+  @gap:search @SpineRel
   Scenario: search a nested map property by a leaf VALUE
     Given the search graph
     And the traversal of
@@ -57,7 +63,7 @@ Feature: mogwai addendum — tinker.search over collection + nested-JSON propert
       | result |
       | chapter two |
 
-  @gap:search
+  @gap:search @SpineRel
   Scenario: a scalar title is still searchable alongside the collections
     Given the search graph
     And the traversal of

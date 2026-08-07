@@ -14,7 +14,7 @@ import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, ty
 import type { Elem } from '../plan/plan.ts';
 import type { RelFraming } from './framing.ts';
 import { propertyElement, propertyKey, propertyPayload, propertyRelation, propertyValue } from './property.ts';
-import type { RelCallSite, RelContribution, Service } from '../../services/spi/types.ts';
+import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
 import { flattenListArgs, isNested, isTokenArg, stepChain, argValues, arg, type Arg } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/types.ts';
@@ -2178,15 +2178,22 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
     const site: RelCallSite = {
       params: spec.params, boundParams: params, federationDepth: 0, fresh,
     };
-    let contributed: RelContribution | null = null;
-    try {
-      const contribution = service.resolve(site);
-      if (contribution.kind !== 'rel') return null;
-      contributed = contribution.buildRel(site);
-    } catch { return null; }
+    // A SERVICE'S OWN THROW IS NOT CAUGHT, and that is §6·5's distinction rather than an oversight.
+    // Two facts wear a `null` in this module — "not learned yet" and "the answer is an ERROR" — and a
+    // service rejecting its params is the second, permanently. `tinker.search` refuses a `regex` param
+    // and a term below the trigram floor with messages the USER must see; swallowing them into a
+    // decline hands the traversal to legacy, which refuses a `rel` contribution and reports the wrong
+    // thing entirely ("this service lowers on the RelIR spine" for what is really "a term shorter than
+    // 3 characters cannot be served by the trigram index"). Legacy raised these same messages before
+    // the migration, so propagating is also what keeps the answer unchanged.
+    const contribution = service.resolve(site);
+    if (contribution.kind !== 'rel') return null;
+    const contributed = contribution.buildRel(site);
     if (!contributed) return null;
-    if (contributed.framing.kind !== 'scalar') return null;
-    return scalarTail(contributed.rel, contributed.framing, steps, 1, false, ctx, fresh);
+    // Through the ONE dispatcher, so a service's shape is not a special case here. It was scalar-only
+    // while `--list` was the only `rel` service; `tinker.search` contributes a PROPERTY, and a source
+    // arm that enumerated shapes would be a second place to teach every new one.
+    return continueAs(contributed.rel, contributed.framing, steps, 1, false, ctx, fresh, NO_ALIASES);
   }
 
   // `addV` AT THE SOURCE is one vertex, and that is the only thing that differs from the mid-chain

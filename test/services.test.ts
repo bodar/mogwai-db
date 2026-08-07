@@ -286,6 +286,16 @@ describe('--list (DirectoryService) — end to end over GraphBinary', () => {
   const run = async (g: string, params: Record<string, any> = {}) =>
     decodeAll(exec(store, reg, undefined, 'rel').buffers(g, params, {}));
 
+  test('the legacy spine REFUSES a `rel` service — both migrated services, named', () => {
+    // Asserted for `tinker.search` too, because the two arrived by different routes: `--list` builds
+    // a `Values` source, `tinker.search` an FTS join carrying a PROPERTY shape. The refusal is the
+    // routing that lets services migrate one at a time, so it is worth pinning per service rather
+    // than trusting one example to stand for the arm.
+    expect(() => exec(store, standardRegistry, undefined, 'legacy')
+      .buffers('g.call("tinker.search").with("search","vada").element()', {}, {}))
+      .toThrow('lowers on the RelIR spine');
+  });
+
   test('the legacy spine REFUSES the directory — a `rel` service has no lowering there', () => {
     // The routing that lets services migrate one at a time, asserted from the legacy side. Reaching
     // this in production means RelIR declined the traversal for some OTHER step, so the message says

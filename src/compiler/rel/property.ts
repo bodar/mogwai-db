@@ -1,7 +1,7 @@
 import { col, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { ColMeta } from '../../rel/types.ts';
+import type { ColMeta, RelId } from '../../rel/types.ts';
 import { and, byEncounter, carriedCols, eq, jsonOf, meta, PROPERTIES, storedValueOn, typeOf, type Minter } from './build.ts';
 import { PER_ROW, STATIC } from '../../sql/kernel/render.ts';
 import type { RelFraming } from './framing.ts';
@@ -38,7 +38,17 @@ const propCols = (owner: string, hasMeta: boolean): readonly ColMeta[] => [
 const PROP = (name: string): string => `p_${name}`;
 
 /**
- * `properties(keys…)` — one traverser PER matching property, so a JOIN and not an `EXISTS`.
+ * THE PROPERTY JOIN, with the match left to the caller — one traverser PER matching property, so a
+ * JOIN and not an `EXISTS`.
+ *
+ * The ON is a callback because the two producers match on DIFFERENT things and must not each grow
+ * their own copy of the column contract: `properties()` matches the OWNER against an element
+ * relation, while `tinker.search` matches the property's own id against an FTS hit and has no element
+ * input at all. What they share is what a property ROW is — which is the thing that must have one
+ * authority, since `propertyPayload` and the three retypes all read it.
+ *
+ * The callback is handed the property scan's RelId and spells REAL column names against it; the `p_`
+ * prefix applies only to the join's declared OUTPUTS, so a caller never sees it.
  *
  * The same join `values()` builds, kept at the property row rather than projected down to the value.
  * `keys` is bounded by the QUERY TEXT and never by row count, so an `InList` is right here and a JSON
@@ -47,20 +57,26 @@ const PROP = (name: string): string => `p_${name}`;
  * A non-string key DECLINES at the caller rather than being guessed at: answering "every key" for one
  * would be answering a different question.
  */
-export function propertyRelation(input: Rel, elem: Elem, keys: readonly string[], fresh: Minter): Rel {
+export function propertyJoin(input: Rel, elem: Elem, on: (props: RelId) => Expr, fresh: Minter): Rel {
   const { table, owner } = PROPERTIES[elem];
-  const hasMeta = elem === 'vertex';
-  const cols = propCols(owner, hasMeta);
+  const cols = propCols(owner, elem === 'vertex');
   const props = make.scan({
     id: fresh('pr'), table, alias: fresh('rpr'), channels: [], type: typeOf(...cols),
   });
   return make.join({
     id: fresh('pj'), left: input, right: props, join: 'inner', channels: input.channels,
     type: typeOf(...input.type.cols, ...cols.map((c) => meta(PROP(c.name), c.type, c.nullable))),
-    on: and(eq(col(props.id, owner), col(input.id, 'id')), keys.length
-      ? { kind: 'in-list', expr: col(props.id, 'key'), values: keys.map((k) => compilerText(k)) }
-      : undefined),
+    on: on(props.id),
   });
+}
+
+/** `properties(keys…)` off an ELEMENT relation — the join matched on the OWNER. */
+export function propertyRelation(input: Rel, elem: Elem, keys: readonly string[], fresh: Minter): Rel {
+  const { owner } = PROPERTIES[elem];
+  return propertyJoin(input, elem, (props) =>
+    and(eq(col(props, owner), col(input.id, 'id')), keys.length
+      ? { kind: 'in-list', expr: col(props, 'key'), values: keys.map((k) => compilerText(k)) }
+      : undefined), fresh);
 }
 
 /**
