@@ -13,7 +13,7 @@ import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, s
 import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { RelFraming } from './framing.ts';
-import { propertyPayload, propertyRelation } from './property.ts';
+import { propertyElement, propertyKey, propertyPayload, propertyRelation, propertyValue } from './property.ts';
 import type { RelCallSite, RelContribution, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
 import { flattenListArgs, isNested, isTokenArg, stepChain, argValues, arg, type Arg } from '../../gremlin/frontend.ts';
@@ -2470,12 +2470,43 @@ function continueAs(
     // filters and slices before them. None of that is lowered yet, so a step after `properties()`
     // DECLINES — the map arm's reasoning exactly, and for the same reason: a loop that silently
     // dropped the property would answer a different question rather than defer.
-    case 'property': return from === steps.length ? { rel, framing, aliases: labels } : null;
+    case 'property': return propertyTail(rel, framing.ownerElem, steps, from, ctx, fresh, labels);
     // Nothing survives a discard, so nothing can follow one. `drop()` is a terminal step in the
     // grammar and the passes reject a chain that continues past it, so this is unreachable rather
     // than a decline — and saying so keeps the switch total.
     case 'discard': return null;
   }
+}
+
+/**
+ * THE PROPERTY LOOP — a property traverser is not terminal.
+ *
+ * `properties()` feeds `key()`, `value()` and — for a VertexProperty, which IS an Element —
+ * `element()`. Each is a RETYPE rather than a step of its own: same rows, different shape, so it
+ * hands the relation plus its new framing straight back to `continueAs` and whichever loop owns that
+ * shape takes the rest of the chain. That is why this loop is four lines and not a second fold.
+ *
+ * Anything else DECLINES. A filter or a slice over a property stream is expressible and is simply
+ * not built yet; declining hands it to legacy rather than dropping the property silently.
+ */
+function propertyTail(
+  rel: Rel, elem: Elem, steps: readonly IRStep[], from: number,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | null {
+  if (from === steps.length) return { rel, framing: { kind: 'property', ownerElem: elem }, aliases: labels };
+  const step = steps[from]!;
+  if (step.modulators?.length || step.optionArms || (step.args ?? []).length) return null;
+  const retyped = step.name === 'key' ? propertyKey(rel, fresh)
+    : step.name === 'value' ? propertyValue(rel, fresh)
+      : step.name === 'element' ? propertyElement(rel, elem, fresh)
+        // `count()` is shape-agnostic and needs no property-specific arm: `countExpr` reads the BULK
+        // CHANNEL, and `properties()` carries the parent's channels through its join — so a
+        // bulk-collapsed parent's properties sum their multiplicity rather than counting rows, which
+        // is the same answer for the same reason it is on an element relation.
+        : step.name === 'count' ? countTail(rel, fresh)
+          : null;
+  if (!retyped) return null;
+  return continueAs(retyped.rel, retyped.framing, steps, from + 1, false, ctx, fresh, labels);
 }
 
 /** An alias READ, as a framing. The label decides the shape; `continueAs` decides the loop. */

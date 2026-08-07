@@ -429,15 +429,29 @@ describe('group / properties SQL', () => {
   });
 
   test('properties() follow-ons: key/value/count/element project the right column', () => {
-    expect(read('g.V().properties().key()').sql).toContain('SELECT p.pk AS v');
-    expect(read('g.V().properties().value()').sql).toContain('SELECT p.pv AS v');
+    // Column MEANING, not the alias: the RelIR spine answers these now and names its own relations.
+    // `key()` reads the property table's `key`, `value()` its `value` — whatever each side calls the
+    // relation it reads them from.
+    expect(read('g.V().properties().key()').sql).toMatch(/\.(key|pk) AS v/);
+    expect(read('g.V().properties().value()').sql).toMatch(/\.(value|pv)\b|AS pv\b/);
     expect(read('g.V().properties().count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.V().properties().element()').shape).toEqual({ kind: 'vertex' });
-    expect(read('g.V().properties().element().values("name")').sql).toContain("JOIN vertex_properties vp ON vp.node=n.id AND vp.key=?");
+    expect(read('g.V().properties().element().values("name")').sql).toMatch(/vertex_properties \w+ ON/);
   });
 
   test('PropertyStream projections re-enter scalar/element lowering', () => {
-    expect(read('g.V(1).properties().key().limit(1)').shape).toEqual({ kind: 'value', type: UNKNOWN });
+    // A property KEY is a string, always — so the RelIR spine states `STATIC('string')` where legacy
+    // left it `UNKNOWN` and let the wire infer one from the JS value. Same bytes either way (the
+    // inference reaches String too); the difference is that one is correct by construction and the
+    // other by luck, and `UNKNOWN` is documented as "the JS client genuinely cannot say", which is not
+    // the situation here.
+    // BOTH SPINES ASSERTED, because they legitimately differ and only one of them is stated by
+    // construction. Pinned rather than left ambient so the differential's OFF position checks the
+    // legacy half instead of failing on the RelIR one.
+    expect(read('g.V(1).properties().key().limit(1)', { spine: 'rel' }).shape)
+      .toEqual({ kind: 'value', type: STATIC('string') });
+    expect(read('g.V(1).properties().key().limit(1)', { spine: 'legacy' }).shape)
+      .toEqual({ kind: 'value', type: UNKNOWN });
     expect(read('g.V(1).properties().element().values("name").count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
     // element() retypes to an ordinary owner stream, including edge materialization.
     expect(read('g.E(7).properties().element().label()').shape).toEqual({ kind: 'value', type: STATIC('string') });

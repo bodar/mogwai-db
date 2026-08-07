@@ -2,7 +2,9 @@ import { col, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
-import { and, byEncounter, eq, jsonOf, meta, PROPERTIES, storedValueOn, typeOf, type Minter } from './build.ts';
+import { and, byEncounter, carriedCols, eq, jsonOf, meta, PROPERTIES, storedValueOn, typeOf, type Minter } from './build.ts';
+import { PER_ROW, STATIC } from '../../sql/kernel/render.ts';
+import type { RelFraming } from './framing.ts';
 import type { Elem } from '../plan/plan.ts';
 
 // ---------- the PROPERTY shape: a traverser that IS a property, not its value ----------
@@ -89,4 +91,71 @@ export function propertyPayload(input: Rel, elem: Elem, fresh: Minter): Rel {
     id: fresh('ppl'), input: ordered, channels: [], type: typeOf(...payload.map(([column]) => column)),
     exprs: payload.map(([column, expression]) => [column.name, expression] as const),
   });
+}
+
+// ---------- re-entering a property stream: key() / value() / element() ----------
+//
+// A property traverser is not terminal — TinkerPop's `PropertiesStep` feeds `key()`, `value()` and
+// (for a VertexProperty, which IS an Element) `element()`. Each is a RETYPE: same rows, a different
+// shape, so each hands back the relation plus its new `RelFraming` and the fold's one dispatcher
+// decides which loop owns the rest of the chain.
+//
+// They live HERE rather than in the fold because the `p_` prefix is this module's private business.
+// Exporting the prefix so `lower.ts` could spell `col(rel, 'p_key')` would put the join's internal
+// naming into the caller — the thing that goes wrong the first time the prefix has to change.
+//
+// Every one preserves the carried channels: a retype changes what a row IS, never how many
+// traversers there are or what state they carry.
+
+/** The channel columns, projected through a retype unchanged. */
+const carryThrough = (input: Rel) =>
+  input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const);
+
+/** `key()` — the property's KEY as a string scalar. Always a string, so a STATIC tag is honest here
+ *  where the VALUE's is not. */
+export function propertyKey(input: Rel, fresh: Minter): { rel: Rel; framing: RelFraming } {
+  return {
+    rel: make.project({
+      id: fresh('pk'), input, channels: input.channels,
+      type: typeOf(meta('v', 'text'), ...carriedCols(input.channels)),
+      exprs: [['v', col(input.id, PROP('key'))], ...carryThrough(input)],
+    }),
+    framing: { kind: 'scalar', type: STATIC('string') },
+  };
+}
+
+/** `value()` — the property's VALUE, typed PER ROW off the stored `vtype`. One compile-time tag would
+ *  be a lie for an untyped property key, which is `values()`'s reasoning and the same channel. */
+export function propertyValue(input: Rel, fresh: Minter): { rel: Rel; framing: RelFraming } {
+  return {
+    rel: make.project({
+      id: fresh('pv'), input, channels: input.channels,
+      type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...carriedCols(input.channels)),
+      exprs: [
+        ['v', storedValueOn(col(input.id, PROP('value')), col(input.id, PROP('vtype')))],
+        ['vtype', col(input.id, PROP('vtype'))],
+        ...carryThrough(input),
+      ],
+    }),
+    framing: { kind: 'scalar', type: PER_ROW('vtype') },
+  };
+}
+
+/** `element()` — the OWNING element, back to an ordinary element stream, so movement and filters
+ *  compose after it exactly as they would have before the `properties()`.
+ *
+ *  The owner column already rides on the join (it is what the join matched on), so this is a
+ *  projection and not a second lookup. Multiplicity is deliberately NOT collapsed: three properties
+ *  of one vertex yield that vertex three times, because traversers are a multiset and only `dedup()`
+ *  collapses one. */
+export function propertyElement(input: Rel, elem: Elem, fresh: Minter): { rel: Rel; framing: RelFraming } {
+  const { owner } = PROPERTIES[elem];
+  return {
+    rel: make.project({
+      id: fresh('pe'), input, channels: input.channels,
+      type: typeOf(meta('id', 'int'), ...carriedCols(input.channels)),
+      exprs: [['id', col(input.id, PROP(owner))], ...carryThrough(input)],
+    }),
+    framing: { kind: 'elements', elem },
+  };
 }

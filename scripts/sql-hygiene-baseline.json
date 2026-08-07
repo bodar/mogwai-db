@@ -137,6 +137,12 @@
     "compiler": 4,
     "bound": 0
   },
+  "element": {
+    "binds": 0,
+    "bytes": 840,
+    "compiler": 5,
+    "bound": 0
+  },
   "fold": {
     "binds": 0,
     "bytes": 153,
@@ -381,6 +387,12 @@
     "binds": 0,
     "bytes": 746,
     "compiler": 4,
+    "bound": 0
+  },
+  "value": {
+    "binds": 0,
+    "bytes": 333,
+    "compiler": 8,
     "bound": 0
   },
   "values": {
