@@ -597,7 +597,10 @@ Read coverage from the census; this is the qualitative map of what RelIR already
   `Sort`/`Limit`/`Distinct`/`Window`); the scalar transform + reducer families; `has()`'s three argument
   shapes; the leading coercion prefix (`asNumber`/… folded at compile time, reusing legacy's parse).
 - **Shapes:** the LIST shape (collection literal + `fold()`, member frame, set-ops, `unfold()`); the MAP
-  shape (`group`/`groupCount`, value `by()`); the ALIAS channel (`as()`/`select(label)`); the PATH channel
+  shape (`group`/`groupCount`, value `by()`); the **PROPERTY shape** (`properties()` and its three
+  retypes `key()`/`value()`/`element()`, plus `count()` — which needed no arm of its own, since
+  `countExpr` reads the BULK CHANNEL and the property join carries the parent's channels through);
+  the ALIAS channel (`as()`/`select(label)`); the PATH channel
   (one JSONB array, entry encoding shared with alias, `by()` per position); element payload; scalar/value
   payload. All payload projection is inside the algebra (`element.ts`/`list.ts`/`map.ts`/`path.ts`).
 - **The CHILD SEAM (§6·6):** one injected `ChildSeam`, three total answers. Its scalar arm has the
@@ -728,17 +731,48 @@ What it actually costs, per service:
 | service | kind | what RelIR needs | sizing |
 |---|---|---|---|
 | `federate`, `io` | `barrier` | **nothing.** A barrier `Contribution` has no `build` — its rows come from an awaited sibling and `apply` runs at EXECUTION time, in the executor's segment loop. Spine-independent already. | zero |
-| `directory` (`--list`) | `stream` | a `Values` relation of strings + scalar-string framing — which is `injectSource` minus the coercion fold | trivial |
-| `search` (`tinker.search`) | `stream` | `scan(propertyFts)` → two joins → filter (the LIKE + two equalities) → the `PROPERTY_PAYLOAD` project. Every node exists and §10·10 already put the property payload arm in the algebra, so this is translation, not design | mechanical |
-| `degree.centrality` | `stream` | a per-parent movement count — the child seam's scalar arm, which already answers `__.out().count()`. This is also why `scopedMovementCount` is not a kernel (§8): it IS this seam | reuse |
+| ✅ `directory` (`--list`) | `rel` | a `Values` relation of strings + scalar-string framing — which is `injectSource` minus the coercion fold | trivial, as predicted |
+| ✅ `search` (`tinker.search`) | `rel` | ~~translation, not design~~ — **this sizing was WRONG.** `RelFraming` had six arms and none was a PROPERTY, so the shape had to be built first (below). The service itself then was mechanical | **shape first**, then mechanical |
+| `degree.centrality` | `stream` | a per-parent movement count. `ChildSeam.scalar(body, host)` answers it — but the CONTRIBUTION is a per-parent `Expr`, not a `Rel`, which is the open design point below | reuse + a union arm |
 
 The genuinely new piece is `call()` as a STEP in `lowerToRel` — the source form (`g.call(…)`) and the
 mid-traversal form (`V().call(…)`, which pushes a child scope) — plus making the SPI RelIR-native rather
 than generic. Generic is the wrong answer here precisely because there is no second consumer to be generic
 FOR once legacy's call route is gone; a type parameter would be scaffolding with no end date.
 
-Until it lands the four service rows stay LIVE in `scripts/steps-edges.tsv` — deliberately not exempt, since
-they fail the bar above in exactly the way the bar exists to catch.
+**LANDED so far: four of the six steps, and the edge ratchet is at TWO live rows** — both
+`degree.centrality`'s (`scopedMovementCount`, and the SPI's `ChildFrameStack`/`ChildParent`/`Stream`).
+
+1. ✅ `RelFraming` → its own leaf (`rel/framing.ts`), so a producer outside the fold can name it.
+2. ✅ the registry stops at the DI boundary. `servicesNamedBy` resolves names in `compiler.ts`, where the
+   app scope is, and the lowering receives the SETTLED services — not the registry. `ChainCtx` holds only
+   settled values, and a `ServiceRegistry` is an ambient capability (`compiler/CLAUDE.md`).
+3. ✅ the `rel` arm, plus `CallSite` split into the common contract with `StreamCallSite`/`RelCallSite`
+   extending it — `CallSite` used to carry `q: Query` outright, which made it legacy-shaped.
+4. ✅ `call()` as a SOURCE in `lowerChain`, routed through `continueAs` so a service's shape is not a
+   special case there.
+5. ✅ `--list`, then `tinker.search` (after the property shape).
+6. ⬜ `degree.centrality`, then delete the `stream` arm + legacy's call route together.
+
+**THE OPEN DESIGN POINT, and it is worth settling before the last service rather than during it:** a
+mid-traversal service contributes a per-parent VALUE, not a relation. `degree.centrality` is
+`type: 'streaming'`, and what it produces per input vertex is one number — `ChildSeam.scalar(body,
+host)` already answers exactly that, given a synthetic `[{name: direction}, {name:'count'}]` body, which
+is what legacy's `scopedMovementCount` builds too. So `RelContribution` wants to be a union —
+`{kind:'relation', rel, framing}` for a SOURCE service, `{kind:'value', expr}` for a per-parent one —
+and that split is not ours to invent: it is TinkerPop's own `Service.Type`, `start` versus `streaming`.
+Making the product follow the declared type is what stops the mid-traversal form becoming a second
+call-lowering.
+
+Until it lands the two remaining service rows stay LIVE in `scripts/steps-edges.tsv` — deliberately not
+exempt, since they fail the bar above in exactly the way the bar exists to catch.
+
+**One lesson from the two that landed, both of which cost a debugging cycle and neither of which CI
+caught:** migrating a service makes legacy REFUSE it, so (a) a service's own validation THROW must
+propagate rather than being caught as a decline — §6·5's "the answer is an ERROR" — because legacy is no
+longer there to raise the message, and (b) a shape the service used to answer EMPTY must still answer
+empty rather than declining, since a decline now leaves nothing answering at all. Both were found by
+probing the service by hand; the suites went green through both defects.
 
 ### Phase 1 — writes: three capabilities, then the first cut
 
