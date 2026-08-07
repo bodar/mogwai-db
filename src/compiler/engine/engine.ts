@@ -26,7 +26,7 @@ import { BulkRepeatCountFastPath } from '../steps/tail/bulk.ts';
 import { runFastPath, fastPathContext, type FastPathConfig } from '../options/fast-paths.ts';
 import type { ServiceRegistry } from '../../services/spi/types.ts';
 import { lowerScalarRows } from '../steps/tail/scalar.ts';
-import { seedCall, isBarrierPoint, type BarrierPoint, type MidBarrierPoint } from '../steps/tail/call.ts';
+import { seedCall, type BarrierPoint, type MidBarrierPoint } from '../steps/tail/call.ts';
 import { materializeRootStream } from '../steps/tail/materialize.ts';
 import { compileFromVariant } from '../steps/tail/variant.ts';
 import { compileFromForeign, landForeignElements, resumeMidBarrier } from '../steps/tail/foreign.ts';
@@ -259,10 +259,13 @@ export class LoweringEngine implements Engine {
       const rel = this.q.cte(q`SELECT NULL AS v`, ['v']);
       return { stream: toScalarStream({ q: this.q, params, traverserLayout: rootLayout() }, rel), at: 0 };
     }
+    // A `call()` SOURCE inside a rooted arm cannot be a barrier — its rows arrive from an awaited
+    // sibling, and only `compileRead` (which owns the segment loop) can suspend for that. Every pure
+    // service lowers on the RelIR spine now, so `seedCall` here can only refuse or barrier, and both
+    // are errors at this position.
     if (first.name === 'call') {
-      const seed = seedCall(first, this.q, params, this.registry, steps, this.federationDepth);
-      if (isBarrierPoint(seed)) throw new Error('a barrier/federated call() source is only supported at the head of a traversal');
-      return { stream: seed, at: 1 };
+      seedCall(first, params, this.registry, steps, this.federationDepth);
+      throw new Error('a barrier/federated call() source is only supported at the head of a traversal');
     }
     throw new Error(`unsupported source step: ${first.name}`);
   }
@@ -505,12 +508,11 @@ export class LoweringEngine implements Engine {
     // lowering loop takes over from step 1. A peer of the buildPrefix (V/E/union) path, not
     // inside it, because a call() source is not necessarily element-shaped.
     if (steps[0].name === 'call') {
-      const seed = seedCall(steps[0], this.q, params, this.registry, steps, this.federationDepth);
-      // A barrier source (Phase 6 federate): its rows come from an awaited sibling call, so the
-      // compile suspends into a SegmentPlan. resume lands the awaited ForeignRow[] as a fresh
-      // foreign root stream and finishes lowering the rest of the chain synchronously.
-      if (isBarrierPoint(seed)) return this.segmentFromBarrier(seed, params);
-      return materializeRootStream(this.lowerStepsStrict(seed, steps, 1));
+      // A barrier source (federate): its rows come from an awaited sibling call, so the compile
+      // suspends into a SegmentPlan. resume lands the awaited ForeignRow[] as a fresh foreign root
+      // stream and finishes lowering the rest of the chain synchronously. A pure service never
+      // reaches here — it is a `rel` contribution and `seedCall` refuses with the message that says so.
+      return this.segmentFromBarrier(seedCall(steps[0], params, this.registry, steps, this.federationDepth), params);
     }
 
     // Traverser bulking: a `repeat(...).times(n).count()` (path/as/sack-free) compiles to

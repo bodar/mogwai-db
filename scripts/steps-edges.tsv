@@ -9,9 +9,6 @@
 # Phase 0 (docs/2026-08-01-relir-build-plan.md §10) is OVER when the exempt rows are the only
 # rows left. See scripts/edges-check.ts.
 file	floor	exempt	note
-src/compiler/engine/engine.ts	78	yes	the legacy dispatcher itself — deleted whole in Phase 4
+src/compiler/engine/engine.ts	77	yes	the legacy dispatcher itself — deleted whole in Phase 4
 src/compiler/engine/deps.ts	5	yes	the legacy Engine INTERFACE — legacy's object model typing legacy's own engine; reached only from steps/ + the legacy Query.engine field, and RelIR needs no Engine (see RelRequest, rel/spine.ts). Dies with engine.ts
-src/services/catalog/search.ts	4	no	propertyPayload is a kernel; PropertyStream/TraverserLayout are the object model
-src/services/spi/types.ts	3	no	THE UNNAMED PIN — the service SPI typed on legacy Stream/ChildFrameStack
 src/compiler/compiler.ts	1	yes	the routing switch (routeWrite) — Phase 1 cuts the write arm, Phase 4 the rest
-src/services/catalog/degree-centrality.ts	1	no	kernel — scopedMovementCount

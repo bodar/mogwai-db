@@ -410,23 +410,6 @@ export function resourceElement(seed: ScalarStream, head: IRStep, after: IRStep[
   return lowerElementBody(el, after);
 }
 
-/** GENERIC child-seam primitive: the per-parent neighbour count in a direction —
- *  pushChildScope → one movement over the pushed seed → scopedElementRowCount (LEFT JOIN domain,
- *  so a parent with no such edges scores 0). Not service-specific: it is "scoped movement
- *  count", the substrate a bare `both().count()` child also is. tinker.degree.centrality is
- *  its first caller; it composes this from the service, keeping child-seam internals here. */
-export function scopedMovementCount(parent: ElementStream, scope: ChildFrameStack, direction: 'out' | 'in' | 'both'): ScalarStream {
-  if (parent.elem !== 'vertex') throw new Error(`${direction}() degree expects a vertex input`);
-  const pushed = pushChildScope(parent, scope);
-  // A synthetic movement step — the StepFn reads only name/args, never .ctx.
-  const moveStep = { name: direction, args: [], ctx: null as any } as IRStep;
-  const { stream: moved, next } = engineOf(pushed.seed).lowerElementSteps([moveStep], pushed.seed);
-  if (next !== 1) throw new Error(`could not lower ${direction}()`);
-  // The pushed ordinal deliberately stays live (the call() seam's contract — an existence
-  // consumer correlates on it); only the count's own encounter is minted on top.
-  return scopedElementRowCount(moved, pushed).stream;
-}
-
 /** Continue a scalar child body's ROW TAIL by hand, inside the pushed child scope.
  *
  * This is the ONE thing `lowerStepsStrict` cannot be handed the body for: everything in the tail

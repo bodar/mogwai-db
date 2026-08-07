@@ -1,6 +1,3 @@
-import type { Stream } from '../../compiler/steps/context/stream.ts';
-import type { ChildFrameStack, ChildParent } from '../../compiler/steps/tail/child-shape.ts';
-import type { Query } from '../../sql/kernel/q.ts';
 import type { ForeignRow } from '../../api.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Minter } from '../../compiler/rel/build.ts';
@@ -71,40 +68,40 @@ export interface CallSite {
 }
 
 /**
- * WHAT `resolve` NEEDS is the common part, and the two spines' BUILD sites extend it.
+ * **`CallSite` IS THE WHOLE CONTRACT `resolve` NEEDS, and the spine-specific half is BUILD's.**
  *
- * `CallSite` used to carry `q: Query` outright, which made it legacy-shaped: a `Query` is the
- * q-kernel's CTE accumulator, so a RelIR service could not be handed one — it composes an algebra
- * that RelIR names and renders once, and holding a `Query` would mean building SQL beside the plan
- * rather than inside it (the second bind-ordering authority §5 exists to prevent).
+ * It used to carry `q: Query` outright, which made it legacy-shaped: a `Query` is the q-kernel's CTE
+ * accumulator, so a RelIR service could not be handed one — it composes an algebra that RelIR names
+ * and renders once, and holding a `Query` would mean building SQL beside the plan rather than inside
+ * it (the second bind-ordering authority §5 exists to prevent).
  *
  * Measured against the services: `resolve` reads only params and the hop depth — every catalog
- * service either ignores its site entirely or reads `params`/`federationDepth`. The spine-specific
- * pieces are needed at BUILD time, which is what the two extensions say.
+ * service either ignores its site entirely or reads `params`/`federationDepth`. `RelCallSite` below
+ * is the one remaining extension, for a contribution that BUILDS. `StreamCallSite` was the other and
+ * is gone with the `stream` arm: it typed the SPI on legacy's `Stream`/`ChildParent`/`ChildFrameStack`
+ * and was the last direct import of `src/compiler/steps/` from outside it (§10 Phase 0).
  */
-export interface StreamCallSite extends CallSite {
-  readonly q: Query;
-  readonly parent?: ChildParent;                 // present only for mid-traversal call()
-  readonly scope?: ChildFrameStack;
-}
 
 /** ForeignRow lives in the outer API surface (src/api.ts) — it's a leaf data type on the
  *  federated-transfer contract. Re-exported here so service-author code keeps one import. */
 export type { ForeignRow } from '../../api.ts';
 
-/** How a Service contributes to the plan. 'stream' is a pure, inline-SQL contribution
- *  (Phases 1-5): it lowers to SQL synchronously and the generic engine takes over. 'barrier'
- *  is the Phase-6 async/federated shape: it does NOT lower to a Stream at compile time (its
- *  rows come from an awaited sibling call), so it yields no `build`; instead `apply` runs at
- *  EXECUTION time (the one await in the executor's segment loop) and returns the foreign rows
- *  the executor lands + resumes from.
+/** How a Service contributes to the plan. 'rel' is a pure, inline contribution: it lowers into the
+ *  RelIR plan synchronously and the fold takes over. 'barrier' is the async/federated shape: it does
+ *  NOT lower at compile time (its rows come from an awaited sibling call), so it yields no builder;
+ *  instead `apply` runs at EXECUTION time (the one await in the executor's segment loop) and returns
+ *  the foreign rows the executor lands + resumes from.
+ *
+ *  **A THIRD arm, `stream`, is DELETED.** It was the legacy spine's inline contribution, and the
+ *  transitional pair existed so services could migrate ONE AT A TIME — a `rel` service made legacy's
+ *  call route decline, a `stream` service made RelIR's decline. All three pure services are `rel`
+ *  now, so the arm and legacy's stream call route go together, exactly as §6·1 demands of a harness.
  *
  *  `apply` takes ONLY the drained input rows (empty for a source-form call) — the one value that
  *  is genuinely per-execution. Everything it used to take positionally now arrives where it
  *  belongs: the FederationSource at construction (an app-scope dependency), the params and this
  *  hop's federation depth off the `CallSite` that `resolve` already receives. */
 export type Contribution =
-  | { readonly kind: 'stream'; build(site: StreamCallSite): Stream }
   | { readonly kind: 'rel'; buildRel(site: RelCallSite): RelContribution | null }
   | { readonly kind: 'barrier'; apply(rows: readonly ForeignRow[]): Promise<ForeignRow[]> };
 

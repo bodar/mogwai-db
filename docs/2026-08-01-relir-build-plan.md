@@ -740,8 +740,9 @@ mid-traversal form (`V().call(…)`, which pushes a child scope) — plus making
 than generic. Generic is the wrong answer here precisely because there is no second consumer to be generic
 FOR once legacy's call route is gone; a type parameter would be scaffolding with no end date.
 
-**LANDED so far: four of the six steps, and the edge ratchet is at TWO live rows** — both
-`degree.centrality`'s (`scopedMovementCount`, and the SPI's `ChildFrameStack`/`ChildParent`/`Stream`).
+**✅ ALL SIX STEPS LANDED, and the edge ratchet has NO live rows left — `mise run edges` prints
+"PHASE 0 IS OVER".** The exempt trio (`engine/engine.ts`, `engine/deps.ts`, `compiler.ts`) are the only
+files reaching into `src/compiler/steps/`, which is the criterion this phase was written against.
 
 1. ✅ `RelFraming` → its own leaf (`rel/framing.ts`), so a producer outside the fold can name it.
 2. ✅ the registry stops at the DI boundary. `servicesNamedBy` resolves names in `compiler.ts`, where the
@@ -752,7 +753,12 @@ FOR once legacy's call route is gone; a type parameter would be scaffolding with
 4. ✅ `call()` as a SOURCE in `lowerChain`, routed through `continueAs` so a service's shape is not a
    special case there.
 5. ✅ `--list`, then `tinker.search` (after the property shape).
-6. ⬜ `degree.centrality`, then delete the `stream` arm + legacy's call route together.
+6. ✅ `degree.centrality`, then the `stream` arm and legacy's stream call route deleted together.
+   `Contribution` is back to two arms with `rel` in `stream`'s place, `StreamCallSite` is gone (it was
+   THE UNNAMED PIN — the SPI typed on legacy's `Stream`/`ChildFrameStack`/`ChildParent`), and
+   `scopedMovementCount` went with its only caller. What survives in `steps/tail/call.ts` is the
+   BARRIER half only: federation's rows arrive from an awaited sibling, so `seedCall` builds a
+   `BarrierPoint` or refuses, and the segment machinery is Phase 4's to delete with the engine.
 
 ### `degree.centrality` was blocked on `project()` — the RECORD shape is what unblocks it
 
@@ -811,8 +817,19 @@ and that split is not ours to invent: it is TinkerPop's own `Service.Type`, `sta
 Making the product follow the declared type is what stops the mid-traversal form becoming a second
 call-lowering.
 
-Until it lands the two remaining service rows stay LIVE in `scripts/steps-edges.tsv` — deliberately not
-exempt, since they fail the bar above in exactly the way the bar exists to catch.
+Both rows are CUT now. Two things came out of the migration that are not this service's, and both are
+the same shape of finding — a decline that was measuring the ROUTER rather than the algebra:
+
+- **`servicesNamedBy` only scanned the TOP-LEVEL chain**, so `where(__.call(dc).is(3))` and
+  `group().by(__.call(dc))` reached a lowering that had never been HANDED the service. §6·6's lesson,
+  in the same function `rel-blockers` once had it in. It now walks nested arguments, `by()`
+  modulators, `with()` values, option arms and repeat regions.
+- **`valuePredicate`** — a body that PROJECTS a value and then TESTS it is a COMPARISON, not an
+  existence question, which is the seam's third predicate answer and the one the other two could not
+  give (`correlatedExists` declines every body whose head is not a movement). SQL's null semantics
+  give the productivity rule for free. It closed the branch/where family's shared gap at the same
+  time: `choose(__.values('age').is(P.gt(30)), …)` and `where(__.values('age').is(P.gt(30)))` route
+  with identical answers.
 
 **One lesson from the two that landed, both of which cost a debugging cycle and neither of which CI
 caught:** migrating a service makes legacy REFUSE it, so (a) a service's own validation THROW must

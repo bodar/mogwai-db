@@ -39,7 +39,7 @@ const stubService = (name: string, internal = false): Service => ({
   type: 'start',
   internal,
   describeParams: () => ({}),
-  resolve: () => ({ kind: 'stream', build: () => { throw new Error('stub'); } }),
+  resolve: () => ({ kind: 'rel', buildRel: () => { throw new Error('stub'); } }),
 });
 
 describe('ServiceRegistry', () => {
@@ -198,10 +198,7 @@ describe('call() routing (seedCall)', () => {
       name: '--list',
       type: 'start',
       describeParams: () => ({}),
-      resolve: () => ({
-        kind: 'stream',
-        build: (c) => { seenParams = c.params; throw new Error('probe-reached'); },
-      }),
+      resolve: (c) => { seenParams = c.params; throw new Error('probe-reached'); },
     };
     const reg = createRegistry([probe]);
     expect(() => compile('g.call("--list").with("service", "tinker.search")', {}, { registry: () => reg }))

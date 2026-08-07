@@ -1,9 +1,8 @@
 import { isNested, argValues } from '../../../gremlin/frontend.ts';
-import { type Query } from '../../../sql/kernel/q.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { type Stream, type LoweringResult, continueLowering, suspendLowering } from '../context/stream.ts';
+import { type LoweringResult, suspendLowering } from '../context/stream.ts';
 import { type ElementStream } from '../context/context.ts';
-import { type ServiceRegistry, type StreamCallSite, type Contribution, type ForeignRow, type CallParams, type InjectionKind } from '../../../services/spi/types.ts';
+import { type ServiceRegistry, type CallSite, type Contribution, type ForeignRow, type CallParams, type InjectionKind } from '../../../services/spi/types.ts';
 import { parseCallSpec, injectionKindOf } from '../../../services/params/call-params.ts';
 import { type ChildFrame, type ChildFrameStack } from './child-shape.ts';
 import { buildCallHead } from './call-head.ts';
@@ -43,9 +42,6 @@ export interface BarrierPoint {
   readonly boundParams: Record<string, any>;
 }
 
-export const isBarrierPoint = (x: unknown): x is BarrierPoint =>
-  x != null && typeof x === 'object' && (x as any).kind === 'barrier-point';
-
 /** A compile SUSPENDED at a MID-TRAVERSAL barrier call() (Phase 6b) — the V().call(federate) twin
  *  of BarrierPoint. Unlike the source form (head=null, resume lands a fresh root), this carries:
  *  - `head` — a COMPLETE Compiled projecting each parent's (id, label, props[, src, tgt], o, injVal);
@@ -73,10 +69,10 @@ export interface MidBarrierPoint {
 export const isMidBarrierPoint = (x: unknown): x is MidBarrierPoint =>
   x != null && typeof x === 'object' && (x as any).kind === 'mid-barrier-point';
 
-/** Resolve the service + take its Contribution. A 'stream' kind is returned for inline lowering;
- *  a 'barrier' kind is returned as-is so the caller (seedCall/lowerCall) can build a BarrierPoint.
- *  Shared by the source and mid-traversal paths. */
-function resolveContribution(spec: ReturnType<typeof parseCallSpec>, registry: ServiceRegistry, ctx: StreamCallSite): Contribution {
+/** Resolve the service + take its Contribution. Only a 'barrier' kind has a legacy lowering now —
+ *  every pure service is `rel` — so the two callers below build a BarrierPoint or refuse. Shared by
+ *  the source and mid-traversal paths. */
+function resolveContribution(spec: ReturnType<typeof parseCallSpec>, registry: ServiceRegistry, ctx: CallSite): Contribution {
   const service = registry.get(spec.serviceName);
   if (!service) throw new Error(`call(): unknown service '${spec.serviceName}'`);
   return service.resolve(ctx);
@@ -99,18 +95,16 @@ function refuseRelContribution(serviceName: string): never {
   );
 }
 
-/** g.call(...) as a SOURCE. A pure 'stream' service builds its initial Stream inline (--list,
- *  tinker.search) — fed straight into lowerSteps/materializeRootStream by compileRead. A 'barrier'
- *  service (Phase 6 federate) returns a BarrierPoint instead: its rows arrive from an awaited
- *  sibling call, so it cannot lower synchronously; compileRead surfaces it to the segment
- *  orchestrator, which resumes lowering from `restSteps` once the rows land. */
-export function seedCall(first: IRStep, query: Query, params: Record<string, any>, registry: ServiceRegistry, steps: IRStep[], depth: number): Stream | BarrierPoint {
+/** g.call(...) as a SOURCE — a BARRIER service only, since every pure service is a `rel`
+ *  contribution and lowers on the other spine. Its rows arrive from an awaited sibling call, so it
+ *  cannot lower synchronously; compileRead surfaces the BarrierPoint to the segment orchestrator,
+ *  which resumes lowering from `restSteps` once the rows land. */
+export function seedCall(first: IRStep, params: Record<string, any>, registry: ServiceRegistry, steps: IRStep[], depth: number): BarrierPoint {
   const spec = parseCallSpec(first, params);
   // depth is this compile's federation depth (request-scoped DI, captured from CompileOptions) —
   // on the ctx, so the service's apply closure captures it and a recursive federate hops at depth+1.
-  const ctx: StreamCallSite = { params: spec.params, q: query, boundParams: params, federationDepth: depth };
+  const ctx: CallSite = { params: spec.params, boundParams: params, federationDepth: depth };
   const contribution = resolveContribution(spec, registry, ctx);
-  if (contribution.kind === 'stream') return contribution.build(ctx);
   if (contribution.kind === 'rel') refuseRelContribution(spec.serviceName);
   return {
     kind: 'barrier-point',
@@ -144,16 +138,12 @@ export function seedCall(first: IRStep, query: Query, params: Record<string, any
 export function lowerCall(step: IRStep, parent: ElementStream, scope: ChildFrameStack, steps: IRStep[], stop: number): LoweringResult {
   const spec = parseCallSpec(step, parent.params);
   const registry = engineOf(parent).registry;
-  const ctx: StreamCallSite = {
+  const ctx: CallSite = {
     params: spec.params,
-    q: parent.q,
     boundParams: parent.params,
     federationDepth: engineOf(parent).federationDepth,
-    parent,
-    scope,
   };
   const contribution = resolveContribution(spec, registry, ctx);
-  if (contribution.kind === 'stream') return continueLowering(contribution.build(ctx), stop + 1);
 
   // A mid-traversal barrier (federate): build the per-parent head + suspend. The head projects
   // (id, label, props[, src, tgt], o, injVal); apply (already closed over this compile's federation
