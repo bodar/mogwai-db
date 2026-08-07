@@ -8,6 +8,7 @@ import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { LabelCardinality } from '../src/api.ts';
 import { createAppScope } from '../src/scopes.ts';
+import { MODERN_SEED } from './fixtures/seed-modern.ts';
 
 /**
  * THE RelIR SPINE — routing, coverage and the per-traversal differential (§10·4).
@@ -508,6 +509,79 @@ describe('the RelIR spine', () => {
     // to `() -> null` and raises, so a one-row seed carrying no incoming vertex must decline here rather
     // than invent one.
     expect(compile('g.addE("self")', {}, { spine: 'rel' }).kind).not.toBe('program');
+  });
+
+  test('a T token on addE supplies the edge\'s id and label, behind BOTH graph-dependent guards', () => {
+    // `AddEdgeStep` carries `T.id` (`getElementId`/`setElementId`) and reads `T.label` out of the same
+    // `internalParameters` its constructor writes the step's own label into, so both tokens configure
+    // the edge being created — `addV`'s partition on the other host.
+    for (const gremlin of [
+      "g.V(1).addE('knows').to(__.V(2)).property(T.id,7).property('weight',0.5)",
+      "g.V(1).addE('knows').to(__.V(2)).property(T.id,'e7')",
+      "g.V(1).addE('knows').to(__.V(2)).property(T.label,'other')",
+    ]) expect(compile(gremlin, {}, { spine: 'rel' }).kind, gremlin).toBe('program');
+
+    const store = () => new GraphStore(new BunSqlite(':memory:'));
+    const write = (s: GraphStore, gremlin: string, spine: 'rel' | 'legacy') =>
+      exec(s, undefined, undefined, spine).buffers(gremlin, {});
+    const twoPeople = (s: GraphStore, spine: 'rel' | 'legacy') => {
+      for (const i of [1, 2]) write(s, `g.addV('person').property(T.id,${i})`, spine);
+      return s;
+    };
+
+    // A NUMERIC id is the rowid and a STRING id is the `uid` — `addVertex`'s rule on `edges`.
+    for (const [supplied, expected] of [['7', { id: 7, uid: null }], ["'e7'", { id: 1, uid: 'e7' }]] as const) {
+      const rows = (spine: 'rel' | 'legacy') => {
+        const s = twoPeople(store(), spine);
+        write(s, `g.V(1).addE('knows').to(__.V(2)).property(T.id,${supplied})`, spine);
+        return JSON.stringify(s.query('SELECT id, uid, src, tgt FROM edges', []));
+      };
+      expect(JSON.parse(rows('rel')), supplied).toEqual([{ ...expected, src: 1, tgt: 2 }]);
+      expect(rows('rel'), supplied).toEqual(rows('legacy'));
+    }
+
+    // `property(T.label, l)` REPLACES the step's own label rather than adding to it.
+    const relabelled = twoPeople(store(), 'rel');
+    write(relabelled, "g.V(1).addE('knows').to(__.V(2)).property(T.label,'other')", 'rel');
+    expect(relabelled.query('SELECT l.name FROM edges e JOIN labels l ON l.id = e.label', []))
+      .toEqual([{ name: 'other' }]);
+
+    // THE TWO GUARDS, and the second is the one `addV` does not need. `addV` proves single-row at
+    // compile time (its one-row case is a literal `Values`); an `addE` mid-chain input is a traverser
+    // relation, so "N rows would insert N edges carrying one id" becomes a guard binding — and the
+    // message is upstream's own, raised on its second loop iteration. Both spines, both directions.
+    for (const spine of ['rel', 'legacy'] as const) {
+      const taken = twoPeople(store(), spine);
+      write(taken, "g.V(1).addE('knows').to(__.V(2)).property(T.id,7)", spine);
+      expect(() => write(taken, "g.V(1).addE('knows').to(__.V(2)).property(T.id,7)", spine), spine)
+        .toThrow('edge id already exists: 7');
+
+      const many = store();
+      for (const i of [1, 2, 3]) write(many, `g.addV('person').property(T.id,${i})`, spine);
+      expect(() => write(many, "g.V().addE('knows').to(__.V(2)).property(T.id,9)", spine), spine)
+        .toThrow('edge id already exists: 9');
+    }
+  });
+
+  test('the hand-authored modern seed compiles WHOLE on RelIR, byte-identical to legacy', () => {
+    // The plan named these seeds as the last thing pinning legacy writes for corpus LOADING (§ Phase 1):
+    // the reference graphs are GraphSON-bulk-loaded, so `MODERN_SEED` and its crew sibling are the two
+    // that go through the compiler. Every statement must ROUTE, and the resulting graph must be the
+    // same one legacy builds — a seed that differs silently re-bases every test above it.
+    for (const gremlin of MODERN_SEED)
+      expect(compile(gremlin, {}, { spine: 'rel' }).kind, gremlin).toBe('program');
+
+    const built = (spine: 'rel' | 'legacy') => {
+      const store = new GraphStore(new BunSqlite(':memory:'));
+      for (const gremlin of MODERN_SEED) exec(store, undefined, undefined, spine).buffers(gremlin, {});
+      return JSON.stringify({
+        nodes: store.query('SELECT id, uid FROM nodes ORDER BY id', []),
+        edges: store.query('SELECT id, uid, src, label, tgt FROM edges ORDER BY id', []),
+        vprops: store.query('SELECT node, key, value FROM vertex_properties ORDER BY node, key', []),
+        eprops: store.query('SELECT edge, key, value FROM edge_properties ORDER BY edge, key', []),
+      });
+    };
+    expect(built('rel')).toEqual(built('legacy'));
   });
 
   test('addLabel adds labels idempotently over a vertex stream (multi-label graph)', () => {

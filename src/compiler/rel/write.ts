@@ -1058,9 +1058,8 @@ export function elementAddE(
   ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
-  const label = (step.args ?? [])[0]?.value;
-  if (typeof label !== 'string') return null;
-  try { validateLabel(label); } catch { return null; }
+  const stepLabel = (step.args ?? [])[0]?.value;
+  if (typeof stepLabel !== 'string') return null;
 
   let from: Endpoint = { kind: 'traverser' };
   let to: Endpoint = { kind: 'traverser' };
@@ -1089,17 +1088,51 @@ export function elementAddE(
   // Refusing on the kind alone declined every one of them.
   const implicit = from.kind === 'traverser' || to.kind === 'traverser';
   if (implicit && (elem !== 'vertex' || !input.type.cols.some((column) => column.name === 'id'))) return null;
-  const writes = propertySteps.length ? propertyWrites(propertySteps, 'edge', child) : [];
+  // The `T` TOKENS are `addV`'s partition on the edge host — `creationTokens` is host-agnostic because
+  // `parseProperty` reports a token neutrally and lets the host decide (write-args.ts). Both tokens are
+  // the reference's on this step: `AddEdgeStep` carries `T.id` (`getElementId`/`setElementId`) and reads
+  // `T.label` out of the same `internalParameters` its constructor writes the step's own label into
+  // (`AddEdgeStep.java:100-112`), so `property(T.label, l)` REPLACES the label exactly as it does on
+  // `addV`. Validating the WINNER rather than the step's argument is what makes that true.
+  const tokens = creationTokens(propertySteps, child);
+  if (!tokens) return null;
+  const label = tokens.label ?? stepLabel;
+  try { validateLabel(label); } catch { return null; }
+  const writes = tokens.rest.length ? propertyWrites(tokens.rest, 'edge', child) : [];
   if (!writes) return null;
 
   const carried = input.channels.filter((channel) => channel.role === 'alias');
   const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
-  const { bindings, bind } = effectScope(fresh);
+  const { bindings, bind, guard } = effectScope(fresh);
   const incoming = seeded ? bind(seeded.result, true, writeInputChannels(input)) : input;
 
   const src = endpointExpr(from, incoming, aliases, fresh);
   const tgt = endpointExpr(to, incoming, aliases, fresh);
   if (!src || !tgt) return null;
+
+  // A SUPPLIED PUBLIC ID needs BOTH graph-dependent refusals, and `addV` only needs the first because it
+  // can prove the second at compile time (its one-row case is a literal `Values`). An `addE` mid-chain
+  // input is a traverser relation — `g.V(1)` yields one row and `g.V()` yields six, and nothing static
+  // separates them — so the arithmetic `addV` settles by declining becomes a guard here:
+  //
+  // - **is the id TAKEN** — `elementIdGuard`, the existing binding, verbatim;
+  // - **is the input MORE THAN ONE ROW** — N rows would insert N edges carrying the same public id and
+  //   the second would collide on a UNIQUE the guard is not the authority for, surfacing as a raw SQLite
+  //   error rather than the reference's sentence. Upstream reaches the same verdict by looping and
+  //   raising `id already exists` on its second iteration, so the MESSAGE IS THE SAME ONE — which is why
+  //   this is a guard and not a decline (a decline would hand back a traversal the algebra can express).
+  //
+  // `Limit{offset: 1, count: 1}` is the row-count test written as a relation: it is non-empty exactly
+  // when a second row exists, which is what `raiseWhen: 'rows'` asks.
+  if (tokens.id !== null) {
+    const taken = elementIdGuard(tokens.id, 'edge', fresh);
+    guard(taken.node, taken.guard);
+    const second = make.limit({
+      id: fresh('li'), input: incoming, channels: incoming.channels, type: incoming.type,
+      count: compilerInt(1), offset: compilerInt(1),
+    });
+    guard(make.project({ id: fresh('p'), input: second, channels: [], type: ID_TYPE, exprs: [['id', col(second.id, 'id')]] }), taken.guard);
+  }
 
   const labelRow = internLabels([label], bind, fresh)!;
 
@@ -1113,14 +1146,23 @@ export function elementAddE(
     id: fresh('j'), left: inOrder, right: labelRow, join: 'cross', channels: [],
     type: typeOf(...inOrder.type.cols, meta('lbl', 'int')),
   });
+  // A CALLER-SUPPLIED PUBLIC ID lands in one of two columns and the choice is the value's own type,
+  // exactly as `addVertex` spells it for `nodes`: a NUMBER is the rowid, a STRING is the `uid`. Absent,
+  // the row names neither and takes whatever rowid SQLite assigns.
+  const idCol = tokens.id === null ? null : typeof tokens.id === 'number' ? 'id' : 'uid';
+  const idMeta = idCol === 'id' ? meta('id', 'int') : meta('uid', 'text', true);
+  const idExpr: Expr | null = tokens.id === null ? null : typeof tokens.id === 'number' ? compilerInt(tokens.id) : text(tokens.id);
   const rows = make.project({
     id: fresh('p'), input: paired, channels: [],
-    type: typeOf(meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
-    exprs: [['src', reScope(src, incoming.id, paired.id)], ['label', col(paired.id, 'lbl')], ['tgt', reScope(tgt, incoming.id, paired.id)]],
+    type: typeOf(...(idCol ? [idMeta] : []), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
+    exprs: [
+      ...(idCol ? [[idCol, idExpr!] as const] : []),
+      ['src', reScope(src, incoming.id, paired.id)], ['label', col(paired.id, 'lbl')], ['tgt', reScope(tgt, incoming.id, paired.id)],
+    ],
   });
   const edgesTarget = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('wt'), channels: [], type: typeOf(...EDGE_ROW_COLS) });
   const created = bind(insert({
-    target: edgesTarget, cols: ['src', 'label', 'tgt'], source: rows, channels: [], type: ID_TYPE,
+    target: edgesTarget, cols: [...(idCol ? [idCol] : []), 'src', 'label', 'tgt'], source: rows, channels: [], type: ID_TYPE,
     returning: [['id', col(edgesTarget.id, 'id')]],
   }));
 
