@@ -5,6 +5,7 @@ import {
 } from '../../plan/plan.ts';
 import { isNested, isPickArg, isTokenArg, argValues } from '../../../gremlin/frontend.ts';
 import { compileMath, mathVars, type MathOps } from '../../../gremlin/math.ts';
+import { FORMAT_FROM_BY, formatTemplate } from '../../../gremlin/format.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { aliasElem, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, type ElementStream } from '../context/context.ts';
 import { aliasId, aliasScalar } from '../../plan/alias.ts';
@@ -76,7 +77,7 @@ export function lowerMapScalar(st: ElementStream, steps: IRStep[], stop: number)
  * SQL expansions that are not derivable from an operator name (`log`→`LN`, `cbrt`'s sign split,
  * `signum`'s three-way CASE). What is per-layer is only the CONSTRUCTION, and this is legacy's: a
  * `q` `Expression`. It lives here rather than in the kernel because it is legacy's object model and
- * dies with `steps/`; RelIR's counterpart composes `Expr` in `compiler/rel/math.ts` off the same
+ * dies with `steps/`; RelIR's counterpart composes `Expr` in `compiler/rel/projector.ts` off the same
  * table, so the two spines cannot disagree about what `cbrt` expands to.
  *
  * Spelling is preserved from the fused version deliberately — `(a + b)`, `MOD(a, b)`, `5.0`,
@@ -230,17 +231,16 @@ export function lowerFormat(st: ElementStream, steps: IRStep[], stop: number): S
   const tmpl = s.args[0].value;
   if (typeof tmpl !== 'string') throw new Error('format(string) required');
   const bys = s.modulators ?? [];
-  // Split into alternating literal / token parts. Each `||` operand is a bound literal
-  // (a plain string) or a resolved value expression; concatenate them all.
-  const re = /%\{([^}]*)\}/g;
+  // The TEMPLATE PARSE is `gremlin/format.ts`'s, shared with the RelIR spine — it carries the
+  // reference's own pattern, including the `%%{x}` escape this loop's hand-rolled regex missed.
+  // Each `||` operand is then a bound literal or a resolved value expression.
   const specs: ScalarModulationSpec[] = [];
   const parts: ({ kind: 'literal'; text: string } | { kind: 'property'; key: string } | { kind: 'mod'; index: number })[] = [];
-  let last = 0, m: RegExpExecArray | null, u = 0, hadToken = false;
-  while ((m = re.exec(tmpl)) !== null) {
-    if (m.index > last) parts.push({ kind: 'literal', text: tmpl.slice(last, m.index) });
-    const tok = m[1];
+  let u = 0, hadToken = false;
+  for (const part of formatTemplate(tmpl)) {
+    if (part.kind === 'literal') { parts.push(part); continue; }
     hadToken = true;
-    if (tok === '_') {
+    if (part.name === FORMAT_FROM_BY) {
       if (!bys.length) throw new Error(`format("${tmpl}"): a %{_} placeholder needs a by() modulator`);
       const by = classifyByAt(bys, u++);
       if (by.kind === 'nested') {
@@ -249,13 +249,11 @@ export function lowerFormat(st: ElementStream, steps: IRStep[], stop: number): S
         parts.push({ kind: 'mod', index });
       } else if (by.kind === 'key') parts.push({ kind: 'property', key: by.key });
       else throw new Error(`format("${tmpl}"): a by() modulator must be a property key or a traversal`);
-    } else {
-      // A named token → the current element's property (first-under-multi for a node).
-      parts.push({ kind: 'property', key: tok });
+      continue;
     }
-    last = m.index + m[0].length;
+    // A named token → the current element's property (first-under-multi for a node).
+    parts.push({ kind: 'property', key: part.name });
   }
-  if (last < tmpl.length) parts.push({ kind: 'literal', text: tmpl.slice(last) });
   const mods = specs.length ? tryCompileScalarModulations(st, specs) : null;
   if (specs.length && !mods) throw new Error(`format("${tmpl}"): traversal modulator not supported by generic child lowering`);
   const p = (mods?.rel ?? st.rel).as('p');
@@ -300,23 +298,19 @@ export function lowerFormatScalar(s: ScalarStream, step: IRStep): ScalarStream |
   const tmpl = step.args[0].value;
   if (typeof tmpl !== 'string') return null;
   const bys = step.modulators ?? [];
-  const re = /%\{([^}]*)\}/g;
   const specs: ScalarModulationSpec[] = [];
   const parts: ({ kind: 'literal'; text: string } | { kind: 'mod'; index: number })[] = [];
-  let last = 0, m: RegExpExecArray | null, u = 0, hadToken = false;
-  while ((m = re.exec(tmpl)) !== null) {
-    if (m.index > last) parts.push({ kind: 'literal', text: tmpl.slice(last, m.index) });
-    const tok = m[1];
+  let u = 0, hadToken = false;
+  for (const part of formatTemplate(tmpl)) {
+    if (part.kind === 'literal') { parts.push(part); continue; }
     hadToken = true;
-    if (tok !== '_') return null; // a %{key} token reads a property — a scalar has none
+    if (part.name !== FORMAT_FROM_BY) return null; // a %{key} token reads a property — a scalar has none
     if (!bys.length) return null;
     const by = classifyByAt(bys, u++);
     if (by.kind !== 'nested') return null; // a property-key by() has no scalar meaning
     parts.push({ kind: 'mod', index: specs.length });
     specs.push({ nested: by.nested, contract: 'produce' });
-    last = m.index + m[0].length;
   }
-  if (last < tmpl.length) parts.push({ kind: 'literal', text: tmpl.slice(last) });
   const mods = specs.length ? tryCompileScalarModulations(s, specs) : null;
   if (specs.length && !mods) return null;
   const p = (mods?.rel ?? s.rel).as('p');

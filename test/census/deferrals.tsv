@@ -283,7 +283,6 @@ deferred	legacy	step not implemented: pageRank()	g.V().pageRank().with("~tinkerp
 deferred	legacy	step not implemented: pageRank()	g.V().pageRank().with("~tinkerpop.pageRank.propertyName","pageRank").as("a").out("knows").values("pageRank").as("b").select("a", "b").by().by(__.math("ceil(_ * 100)"))
 deferred	legacy	step not implemented: peerPressure()	g.V().peerPressure().has("gremlin.peerPressureVertexProgram.cluster")
 deferred	legacy	step not implemented: peerPressure()	g.V().peerPressure().with("~tinkerpop.peerPressure.propertyName","cluster").with("~tinkerpop.peerPressure.edges",__.outE("knows")).pageRank(1.0).with("~tinkerpop.pageRank.propertyName", "rank").with("~tinkerpop.pageRank.edges", __.outE("knows")).with("~tinkerpop.pageRank.times", 1).group().by("cluster").by(__.values("rank").sum()).limit(100)
-deferred	legacy	format() on a record value not yet supported	g.V().project("name","count").by(values("name")).by(bothE().count()).format("%{name} has %{count} connections")
 deferred	legacy	by(traversal) modulator not yet supported	g.V().project("x").by(__.coalesce(__.values("age").is(P.gt(29)), __.discard())). select("x")
 deferred	legacy	step not implemented after properties(): asString()	g.V().properties().asString()
 deferred	legacy	step not implemented after properties(): hasLabel()	g.V().properties().hasLabel(null)

@@ -35,7 +35,7 @@ import type { AliasMap } from '../plan/alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, propertyVtype, type Modulation } from './modulator.ts';
 import type { ChildHost, ChildSeam, ChildValue, HostRow, RootedRead, Subject } from './child.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
-import { mathTail, mathValue } from './math.ts';
+import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementMergeE, elementMergeV, elementProperty, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
@@ -1275,7 +1275,7 @@ const CLAUSE_READERS = new Set(['is', 'order']);
  *  inline because the blanket `step.modulators?.length` decline must exempt exactly these — a host
  *  added to the fold without being added here silently loses its modulator, which is the failure mode
  *  the modulator seam exists to end. */
-const BY_READERS = new Set(['order', 'dedup', 'project', 'math']);
+const BY_READERS = new Set(['order', 'dedup', 'project', 'math', 'format']);
 
 /**
  * An `order()`'s sort terms over any host, or `null` to decline.
@@ -1456,14 +1456,14 @@ function scalarTail(
       return continueAs(record.rel, { kind: 'record', fields: record.fields }, steps, at + 1, bulked, ctx, fresh, labels);
     }
 
-    // `math()` over a VALUE traverser — `_` IS the value, and a named variable is a scope key. One
-    // lowering at both hosts, for `project()`'s reason: a shape works wherever it is legal, not
+    // THE PROJECTORS over a VALUE traverser — `_` IS the value, and a named variable is a scope key.
+    // One lowering at every host, for `project()`'s reason: a shape works wherever it is legal, not
     // wherever a host was taught it.
-    if (step.name === 'math') {
-      const projected = mathTail(rel, step, host, childSeam(ctx, fresh), fresh);
+    if (REL_PROJECTORS.has(step.name)) {
+      const projected = projectorTail(rel, step, host, childSeam(ctx, fresh), fresh);
       if (!projected) return null;
-      rel = projected;
-      out = { kind: 'scalar', type: STATIC('double') };
+      rel = projected.rel;
+      out = projected.framing;
       continue;
     }
 
@@ -2604,16 +2604,16 @@ function elementTail(
     // carries and a following `select(label)` still finds its label. That is the whole difference from
     // the `group()` arm above, and it is the reference's (`ProjectStep extends ScalarMapStep`, while
     // `GroupStep extends ReducingBarrierStep`).
-    // `math()` — a RETYPE from an element traverser to a Double, exactly as `values()`/`count()` are,
-    // so it hands the relation to `continueAs` and the scalar tail takes the rest of the chain. It is
-    // not in `terminal()` with them because it HOSTS a `by()`, which every arm there declines.
-    if (step.name === 'math') {
+    // THE PROJECTORS — a RETYPE from an element traverser to a value, exactly as `values()`/`count()`
+    // are, so they hand the relation to `continueAs` and the scalar tail takes the rest of the chain.
+    // They are not in `terminal()` with them because they HOST a `by()`, which every arm there declines.
+    if (REL_PROJECTORS.has(step.name)) {
       // A carried PATH declines for `terminal()`'s reason: the value is a new traverser object and
       // nothing here appends it as a path position.
       if (pathCarried(rel)) return null;
-      const projected = mathTail(rel, step, elementHost(rel, elem, labels), childSeam(ctx, fresh), fresh);
+      const projected = projectorTail(rel, step, elementHost(rel, elem, labels), childSeam(ctx, fresh), fresh);
       if (!projected) return null;
-      return continueAs(projected, { kind: 'scalar', type: STATIC('double') }, steps, at + 1, bulked, ctx, fresh, labels);
+      return continueAs(projected.rel, projected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
     if (step.name === 'project') {
       // A carried PATH declines for `terminal()`'s reason: the record is a new traverser object and
@@ -2869,15 +2869,15 @@ function recordTail(
       return continueAs(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
 
-    // `math()` OVER A RECORD'S FIELDS, and it needs nothing record-specific: a math variable NAMES A
+    // THE PROJECTORS OVER A RECORD'S FIELDS, and they need nothing record-specific: a variable NAMES A
     // SCOPE KEY, `Scoping.getScopeValue` tries the traverser's own Map first, and the record host is
-    // what carries that Map — so `project('a','b')…math('a / b')` resolves against the FIELDS by the
-    // same rule `by(__.select('a'))` already followed here. `_` is the whole map and not a Number, so
-    // it declines through the identity guard rather than projecting one.
-    if (step.name === 'math') {
-      const projected = mathTail(rel, step, host, childSeam(ctx, fresh), fresh);
+    // what carries that Map — so `project('a','b')…math('a / b')` and `…format('%{a}/%{b}')` resolve
+    // against the FIELDS by the same rule `by(__.select('a'))` already followed here. `_` is the whole
+    // map, so it declines through the identity guard rather than projecting one.
+    if (REL_PROJECTORS.has(step.name)) {
+      const projected = projectorTail(rel, step, host, childSeam(ctx, fresh), fresh);
       if (!projected) return null;
-      return continueAs(projected, { kind: 'scalar', type: STATIC('double') }, steps, at + 1, bulked, ctx, fresh, labels);
+      return continueAs(projected.rel, projected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
 
     // Everything else DECLINES. A record is an ordinary per-row traverser, so `dedup()`, a local-scope
@@ -3215,14 +3215,15 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     // unknown and the framer infers — the same split `byNode`'s token arm makes.
     if (leading.name === 'label') type = STATIC('string');
     at = 1;
-  } else if (leading?.name === 'math') {
-    // `by(__.math('a + b').by('age'))` — a math body NAMES ITS SUBJECT through its own variables, so it
-    // leads a body exactly as `values(k)` and `call(…)` do. Its `_` is this host, which is why it needs
-    // no arm of its own here and why the whole by()-child matrix gains it at once.
-    const projected = mathValue(leading, host, childSeam(ctx, fresh), fresh);
+  } else if (REL_PROJECTORS.has(leading?.name ?? '')) {
+    // `by(__.math('a + b').by('age'))`, `by(__.format('%{name}'))` — a projector body NAMES ITS
+    // SUBJECT through its own variables, so it leads a body exactly as `values(k)` and `call(…)` do.
+    // Its `_` is this host, which is why it needs no arm of its own here and why the whole
+    // by()-child matrix gains both at once.
+    const projected = projectorValue(leading!, host, childSeam(ctx, fresh), fresh);
     if (!projected) return null;
-    value = projected;
-    type = STATIC('double');
+    value = projected.value;
+    type = projected.framing.kind === 'scalar' ? projected.framing.type : UNKNOWN;
     at = 1;
   } else if (leading?.name === 'constant') {
     const args = argValues(leading);
@@ -3256,11 +3257,11 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
  *
  * Both child arms end here because past the leading step they ask an identical question, and the two
  * copies had already begun to differ in what they carried. It is also where a shape composes: a
- * `math()` mid-run reads the value the run has reached, so `by(__.values('age').math('_ * 2'))` is the
- * same lowering as the chain form and needs no by()-specific arm.
+ * PROJECTOR mid-run reads the value the run has reached, so `by(__.values('age').math('_ * 2'))` is
+ * the same lowering as the chain form and needs no by()-specific arm.
  *
  * `type` and `vtype` follow the same rule for every member: a step that RETYPES says so
- * (`asNumber`/`asDate`/`dateAdd`/`dateDiff`, and `math()` which is always a Double); one that does not
+ * (`asNumber`/`asDate`/`dateAdd`/`dateDiff`, and the projectors, always a Double / a String); one that does not
  * CLEARS the tag rather than letting the incoming one ride through, since keeping a stale tag is worse
  * than claiming none (`asDate().asString()` would frame text as a Date). The STORED per-row carrier
  * stops at the first step whatever it claims for itself — it describes the value as READ, and every
@@ -3276,12 +3277,12 @@ function valueRun(
   let vtype = seed.vtype;
   for (let at = from; at < body.length; at++) {
     const step = body[at]!;
-    if (step.name === 'math') {
+    if (REL_PROJECTORS.has(step.name)) {
       const host: ChildHost = { kind: 'scalar', value, ...(vtype ? { vtype } : {}), ...(row ? { row } : {}) };
-      const projected = mathValue(step, host, child, fresh);
+      const projected = projectorValue(step, host, child, fresh);
       if (!projected) return null;
-      value = projected;
-      type = STATIC('double');
+      value = projected.value;
+      type = projected.framing.kind === 'scalar' ? projected.framing.type : UNKNOWN;
       vtype = undefined;
       continue;
     }

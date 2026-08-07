@@ -667,17 +667,35 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('format("…%{token}…") templates a string from properties + by() modulators', () => {
-    // a constant template → one string literal, no filter.
-    expect(read('g.V().format("Hello world")').shape).toEqual({ kind: 'value', type: UNKNOWN });
-    // named tokens read the element's property; the `||` chain NULLs (drops) on a miss.
-    const f = read('g.V().format("%{name} is %{age}")');
-    expect(f.sql).toContain(' || ');
-    expect(f.sql).toContain('is not null'); // missing-property filter
-    // %{_} placeholders pull by() modulators positionally (round-robin), like math().
-    expect(read('g.V().format("%{_} is %{_}").by(values("name")).by(values("age"))').sql).toContain(' || ');
-    // a by()-traversal placeholder (bothE().count()) resolves as a correlated scalar.
-    expect(read('g.V().format("%{name} has %{_}").by(__.bothE().count())').sql).toContain('COUNT');
-    expect(read('g.V().format("%{name}").count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
+    // A CONSTANT template owes NO filter — the reference only filters an unresolved reference, and
+    // a template with no reference has none. RelIR frames it `string` (`FormatStep extends
+    // MapStep<S, String>`, the reference's own declared type); legacy claims nothing and lets the
+    // framer infer, which for a text value is the same wire class.
+    expect(read('g.V().format("Hello world")', { spine: 'rel' }).shape).toEqual({ kind: 'value', type: STATIC('string') });
+    expect(read('g.V().format("Hello world")', { spine: 'legacy' }).shape).toEqual({ kind: 'value', type: UNKNOWN });
+    for (const spine of ['rel', 'legacy'] as const) {
+      expect(read('g.V().format("Hello world")', { spine }).sql.toLowerCase()).not.toContain('is not null');
+      // named tokens read the element's property; the `||` chain NULLs (drops) on a miss.
+      const f = read('g.V().format("%{name} is %{age}")', { spine });
+      expect(f.sql).toContain(' || ');
+      expect(f.sql.toLowerCase()).toContain('is not null'); // missing-property filter
+      // %{_} placeholders pull by() modulators positionally (round-robin), and the ring advances
+      // ONLY for `_` — a named token resolves without touching it (`FormatStep`).
+      expect(read('g.V().format("%{_} is %{_}").by(values("name")).by(values("age"))', { spine }).sql).toContain(' || ');
+      // a by()-traversal placeholder (bothE().count()) resolves as a correlated scalar — asserted by
+      // the ANSWER, because the two spines spell the reduction differently (`COUNT(c.id)` vs the
+      // bulk channel's `sum`) while agreeing on every row.
+      expect((runWith(seededStore(), 'g.V().hasLabel("person").format("%{name} has %{_}").by(__.bothE().count())',
+        { spine }) as any[]).map((row) => row.v).sort())
+        .toEqual(['josh has 3', 'marko has 3', 'peter has 1', 'vadas has 1']);
+      expect(read('g.V().format("%{name}").count()', { spine }).shape).toEqual({ kind: 'value', type: STATIC('long') });
+      // THE ESCAPE, which both spines get right only because the PATTERN is shared: the reference's
+      // `(?<!%)` lookbehind means `%%{name}` is not a reference at all and copies through as text.
+      // Each spine used to carry its own `%\{([^}]*)\}`, which read it as one and then filtered
+      // every traverser for which `name` did not resolve — a wrong answer with the right arity.
+      expect(runWith(seededStore(), 'g.V().hasLabel("person").format("100%%{name}")', { spine }) as any[])
+        .toHaveLength(4);
+    }
   });
 
   test('math() variables: `_` = current, an identifier = a SCOPE KEY', () => {
@@ -711,20 +729,35 @@ describe('scalar-parent / projection SQL', () => {
     expect(() => compile('g.V().math("a + b").by("age")', {})).toThrow('no such variable "a"');
   });
 
-  test('math() is one lowering at EVERY host — element, value and record', () => {
+  test('the PROJECTORS are one lowering at EVERY host — element, value, record and child body', () => {
     // §6·6 one level up: a shape works wherever it is LEGAL, not wherever a host was taught it. A
-    // math variable is a scope key, so the RECORD host resolves it against the traverser's own Map
-    // (map scope beats path scope), and the VALUE host answers `_` directly with no by() at all.
-    // All three are RelIR-only capabilities today, so they say so (§6·1).
-    expect(read('g.V().values("age").math("_ * 2")', { spine: 'rel' }).shape)
-      .toEqual({ kind: 'value', type: STATIC('double') });
-    expect(read('g.V().hasLabel("person").project("a","b").by("age").by("age").math("a + b")', { spine: 'rel' }).shape)
-      .toEqual({ kind: 'value', type: STATIC('double') });
-    // and as a CHILD BODY, which is what makes the whole by()-child matrix gain it at once
-    expect(read('g.V().hasLabel("person").order().by(__.math("_ * -1").by("age"))', { spine: 'rel' }).spine)
-      .toBe('rel');
-    expect(read('g.V().hasLabel("person").project("d").by(__.values("age").math("_ * 2"))', { spine: 'rel' }).spine)
-      .toBe('rel');
+    // projector's variable is a SCOPE KEY, so the RECORD host resolves it against the traverser's
+    // own Map (map scope beats path scope) and the VALUE host answers `_` directly with no by() at
+    // all — which is why `math()` and `format()` gained all four positions in one increment rather
+    // than one host at a time. Every line here is a RelIR-only capability today, so it says so (§6·1).
+    const relShape = (gremlin: string) => read(gremlin, { spine: 'rel' }).shape;
+    const DOUBLE = { kind: 'value', type: STATIC('double') } as const;
+    const STRING = { kind: 'value', type: STATIC('string') } as const;
+
+    // a VALUE host — `_` IS the value
+    expect(relShape('g.V().values("age").math("_ * 2")')).toEqual(DOUBLE);
+    expect(relShape('g.V().values("name").format("<%{_}>")')).toEqual(STRING);
+    // a RECORD host — the variables name FIELDS
+    expect(relShape('g.V().hasLabel("person").project("a","b").by("age").by("age").math("a + b")')).toEqual(DOUBLE);
+    expect(relShape('g.V().hasLabel("person").project("n","a").by("name").by("age").format("%{n}=%{a}")')).toEqual(STRING);
+    // a CHILD BODY, leading and mid-run — what makes the whole by()-child matrix gain both at once
+    for (const gremlin of [
+      'g.V().hasLabel("person").order().by(__.math("_ * -1").by("age"))',
+      'g.V().hasLabel("person").order().by(__.format("%{name}"))',
+      'g.V().hasLabel("person").project("d").by(__.values("age").math("_ * 2"))',
+      'g.V().hasLabel("person").group().by(__.format("%{name}!"))',
+    ]) expect(read(gremlin, { spine: 'rel' }).spine).toBe('rel');
+
+    // AND THE DECLINE THAT IS THE REFERENCE'S, not a gap: a scope key holding an ELEMENT would be
+    // appended by its Java `toString()` (`v[1]`), which no SQL expression reproduces — and `_` over
+    // an element under a bare by() is the same problem (`MathStep` raises outright there).
+    expect(() => compile('g.V().hasLabel("person").as("p").values("name").format("%{_} of %{p}")', {}))
+      .toThrow('not yet supported');
   });
 
   test('asDate() casts to a date-tagged epoch-millis value (const-fold + runtime)', () => {
