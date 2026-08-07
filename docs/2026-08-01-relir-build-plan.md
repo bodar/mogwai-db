@@ -286,19 +286,34 @@ ratchets to zero) and **"the answer is an ERROR"** (permanent — never a capabi
 counts as an uncovered gap forever, so coverage cannot reach 100% and §6·1's end date is unreachable **by
 construction**. A whole-migration blocker that merely surfaced in the write family.
 
-**A refusal on the traversal's own TEXT belongs to the IR `Pass` tier, above both spines** — not new
-machinery: `runPasses` runs in `compiler.ts` BEFORE the spine route, the role is already *rewrites the
-chain, or verifies and throws*, `verify` is already its last category, and `withStrategies` verifications
-already raise from there. The Pass **calls the shared parse** (`parseProperty`, `mergeMaps`) and does NOT
-catch: one authority, one message, above the routing switch, surviving legacy's deletion. Deletes the
-`try/catch → null` idiom at every write site and closes `refusal_belongs_to_legacy`
+**A refusal on the traversal's own TEXT belongs to the IR `Pass` tier, above both spines** — done. The
+`writeArguments` verify Pass calls the shared parse and re-raises: one authority, one message, above the
+routing switch. Three facts about how it had to be built, each of which cost a wrong turn:
+
+- **the parse had to MOVE first.** It lived inside the legacy interpreter, which imports `normalize`
+  from the Pass tier — so a Pass importing it was a cycle. `src/compiler/ir/write-args.ts` is what
+  SURVIVES legacy's deletion (Phase 2.6 removes the imperative closure around the parse, never the
+  parse); pure, no `Engine`/`GraphStore`/SQL. **A symbol on the deletion ratchet does NOT move with
+  it** — `parseVertexSpec` is legacy's own, and the ratchet said so (6 → 7 references).
+- **the split needs a distinguishable throw**, not a message match: `Deferral` for "not learned yet",
+  a plain `Error` for everything else. The Pass swallows the first and re-raises the second. The
+  question is WHO OWES THE ANSWER, not severity.
+- **a verifier must never narrow what the lowerings may attempt.** Legacy hands `mergeMaps` the whole
+  chain after the merge and lets it refuse a read tail; slicing the same way in the Pass would have
+  raised legacy's own deferral for `mergeV(…).values('name')`, which the RelIR fold continues past.
+  The Pass slices the `option()`/`property()` RUN.
+
+It also has to be handed the compile's constant environments — `params` and the `withSideEffect`
+registry now travel with a body through `runPasses`/`normalize`/`childSteps`, and `compilePlan`
+extracts the registry BEFORE the passes. Closes `refusal_belongs_to_legacy`
 (`docs/spec/relir-migration.allium`) by MOVING the check — that spec's own proposed resolution.
 
 **A GRAPH-dependent refusal cannot move there** (`mergeV`'s `T.id` via `assertAvailableElementId`, label
-mutation under `labelCardinality.mutable`). Those become a **guard binding**: a `Plan` binding whose
-relation the executor checks, raising a named message. O(plan size), inside P5, the same move that made the
-`mergeV` snapshot work — and what takes write coverage to 100% rather than 100%-minus-two, so there is **no
-permanent documented exception** in the answer.
+mutation under `labelCardinality.mutable`) — this half is NOT built. Those become a **guard binding**: a
+`Plan` binding whose relation the executor checks, raising a named message. O(plan size), inside P5, the
+same move that made the `mergeV` snapshot work — and what takes write coverage to 100% rather than
+100%-minus-two, so there is **no permanent documented exception** in the answer. `mergeE` needs the same
+mechanism for "Vertex does not exist for mergeE", so the two arrive together.
 
 **Naming:** `Pass` names two tiers on opposite sides of the routing switch. Load-bearing, not cosmetic — a
 refusal raised in a RelIR rewrite is a throw out of a lowering whose contract is `null`, and legacy never
