@@ -184,31 +184,51 @@ GraphQL endpoint with introspection and tooling, zero config.
 
 ---
 
-## 5. Placement: edge-side translation first
+## 5. Placement: the edge — **locked**
 
-Two placements, and the first is strictly cheaper.
+**GraphQL translation runs in the Worker, not in the Durable Object.** This is no longer a trade to
+weigh, because it is not really a question about GraphQL: a DO is single-threaded, and translation
+needs no store. Putting it in the DO would spend a graph's serial budget on parsing a document —
+occupancy that no other caller of that graph can use — for work a horizontally-scaled runtime does in
+parallel. The full argument is `docs/2026-08-07-edge-compilation-plan.md` §1; it applies here
+unchanged, and this front end is simply another thing on the elastic side of the same line.
 
-**(a) Translate at the edge, emit a Gremlin string + params.** The router already parses a request
-and hands `{gremlin, params, paramTypes}` across the `GraphManager` seam (`src/router.ts`,
-`src/api.ts:160`). A GraphQL endpoint at `/graphql/{g}` that produces those three values needs
-**zero changes to the manager or executor contract**, and keeps a GraphQL parser out of the DO
-bundle. It also makes the translation *auditable*: `?explain` returns the generated Gremlin, which is
-both the debugging story and a real escape ladder for users (read it, then hand-edit it).
+So the path is `document → Gremlin + params → plan → DO`, with everything left of the DO in the
+Worker. The translator emits a **Gremlin string**, which is a deliberate choice and not a stepping
+stone: it makes the translation auditable (`?explain` returns the generated Gremlin), gives users a
+real escape ladder (read it, then hand-edit it), and keeps `wrangler tail` legible. The rejected
+alternative was emitting `Step[]` directly to skip a re-parse — measured at 0.142 ms per query
+(`docs/2026-08-07-edge-compilation-plan.md` §2·3), and paid for with a bespoke traversal
+serialization. Not a trade worth making.
 
-**(b) Translate in the store tier, emit `Step[]` directly.** No text round-trip, but needs a new
-executor method and puts the GraphQL parser in the DO.
+### 5·1 The dependency
 
-**Do (a) first.** The GraphQL surface is identical under both, so (b) is a later, invisible swap if
-re-parse cost measures badly — and *whether it does* is a measurement nobody has taken. Note it as an
-open number (§9), not a reason to pre-optimize.
+Everything right of the translator belongs to the edge-compilation plan. GraphQL does not need to
+build any of it, and must not build a private version:
 
-Both placements sit *above* a separate question — whether the request path should ship compiled plans
-to the DO rather than query text at all — which is a property of the whole engine and not of this
-front end. That is `docs/2026-08-07-edge-compilation-plan.md`; it neither blocks nor is blocked by
-anything here, and if it lands, (a) and (b) converge because the translation and the compilation
-would already be happening in the same place.
+- **the compile half** — turning that Gremlin string into a plan, in the Worker, and shipping the
+  plan rather than the text. That is `docs/2026-08-07-edge-compilation-plan.md` Phase 1. Until it
+  lands, the translator hands `{gremlin, params, paramTypes}` across the existing `GraphManager` seam
+  (`src/router.ts`, `src/api.ts:160`) exactly as a Gremlin client does, needing **zero changes** to
+  the manager or executor contract.
+- **the DO-side execution** — unchanged either way.
 
----
+So GraphQL is **not blocked** by that plan; it is aligned with it. What is locked is that Phase 2
+below must not be designed as though the translator might one day live in the DO, because it must
+not.
+
+### 5·2 The one thing GraphQL adds that edge compilation does not have
+
+Compilation is a pure function of the query (`…edge-compilation-plan.md` §2·1). **Translation is
+not** — it is a pure function of the query *and the schema*, and the schema is read from the store
+(§4).
+
+That is a genuine addition to the edge's job, not a detail: the Worker must hold a per-graph schema,
+fetched from the DO, and it must be invalidated when a write changes the label or property set. This
+is the one cache in either document that has a real invalidation problem, and it exists because
+without it there is nothing to translate against — it is a requirement, not an optimization. The
+write counter §4 already proposes is what it keys on; moving it to the edge means the counter has to
+travel, which is one extra field on a response, not a mechanism.
 
 ## 6. Variables are parameters — the bind rule lands exactly right
 
@@ -270,8 +290,8 @@ Gremlin. Hand-rolling a GraphQL parser would also mean hand-rolling the spec's ~
 which is the genuinely expensive half and the half a reference implementation gives away.
 
 The rejected alternative was dev/test-only — hand-roll parse+validate for production, keep graphql-js
-as the oracle. It duplicates the expensive half (the validation rules) to save ~500 KB in a bundle
-that may not even carry it under placement (a).
+as the oracle. It duplicates the expensive half (the validation rules) to save ~500 KB in a Worker
+bundle — the elastic side, where §5 puts it and where size costs least.
 
 So: parse, validate and introspection types come from the reference implementation, and we own only
 translation. The dependency is not added yet — it arrives with Phase 2, and `package.json` should
@@ -303,9 +323,11 @@ rest of this plan — 2 through 5 are the engine's main line whether GraphQL eve
 **Phase 1 — schema reflection as a service.** `call('schema')` → the label/property/edge model.
 SDL printing on top. Cached against a write counter.
 
-**Phase 2 — the translator.** `src/graphql/` — document AST + reflected schema → Gremlin string +
-params. Router: `POST /graphql/{g}`, `GET /graphql/{g}` for introspection/GraphiQL, `?explain` for
-the generated Gremlin.
+**Phase 2 — the translator, in the Worker (§5).** `src/graphql/` — document AST + reflected schema →
+Gremlin string + params, plus the edge-side schema cache §5·2 requires. Router: `POST /graphql/{g}`,
+`GET /graphql/{g}` for introspection/GraphiQL, `?explain` for the generated Gremlin. Hands its output
+across the existing manager seam; picks up plan-shipping for free when
+`docs/2026-08-07-edge-compilation-plan.md` Phase 1 lands.
 
 **Phase 3 — the oracles.** `graphql-http` `serverAudits` as a ratcheted suite; the graphql-js
 differential; the introspection round-trip. Wire into `mise run ci`.
@@ -333,9 +355,9 @@ cross-DO federation is not it); persisted queries; a declarative SDL-with-direct
   literals inline, only variables bind — but "should" is not a measurement, and the 100-bind cap is
   the wall that has shipped twice.
 - Whether a depth-4 selection set's SQL stays under the DO's 100 KB statement-text cap.
-- Gremlin re-parse cost per GraphQL request under placement (a). Bounded above by the measured parse
-  cost of 0.14 ms per query (`docs/2026-08-07-edge-compilation-plan.md` §2·3), so this is a small
-  question rather than an open one.
+- **Schema-cache invalidation cost** (§5·2) — how often a write actually changes the label/property
+  set, and therefore whether the write counter is a cheap check or a constant refetch. The only new
+  unknown §5 introduces.
 
 **Two findings from the probes run for §5 are bigger than this document**, and both have their own
 plan: a point-lookup-plus-1-hop on a 20 000-vertex graph takes 9.8 s because SQLite has no statistics
