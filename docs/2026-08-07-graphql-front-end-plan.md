@@ -1,23 +1,16 @@
 # A GraphQL front end — design and build plan
 
-> **STATUS: PLAN. Nothing below has landed.** Written 2026-08-07 against trunk at `bae05c7`,
-> tinkerpop submodule at the current pin. Every capability claim in §2 is a **probe result** on the
-> modern graph, run through `test/support/executor.ts`; the method is at the bottom (§10). One
-> decision needs Dan's approval before Phase 2 (§7·3).
->
-> **REVISED same day, at `41c897d`.** The original §2 reported the probe as run on "both spines,
-> identical verdicts". That claim was hollow and is retracted — `lowerToRel` *declines* to legacy for
-> an uncovered chain rather than failing, so pinning `rel` measured legacy twice. §2·2 is the honest
-> answer, and it re-scopes Phase 0 (§8).
+> **STATUS: PLAN. Nothing below has landed.** Written 2026-08-07 against trunk at `41c897d`,
+> tinkerpop submodule at the current pin. Every capability claim in §2 is a **probe result**; the
+> method is at the bottom (§10). The one dependency this needs is approved (§7·4).
 
 The question this answers: *how well does GraphQL map onto a graph database, and if it maps well,
 what is the natural layer to attach it to — Gremlin, the RelIR, or SQLite?*
 
 Short answer: **it maps well on shape and badly on traversal**, the natural layer is **the IR**, and
 the work is dominated not by GraphQL but by gaps GraphQL merely forces. Which is the good outcome:
-the expensive part is already on the roadmap. Where it lands changed on revision — the gaps are not
-legacy-spine holes to patch, they are the **top four families of the RelIR migration's own worklist**
-(§2·2), so Phase 0 builds them in the RelIR fold and closes both at once.
+those gaps are the **top families of the RelIR fold's own worklist** (§2), so one build closes the
+GraphQL requirement and moves the engine's main line at the same time.
 
 ---
 
@@ -70,84 +63,35 @@ is the same constraint the project already lives under, arriving from a second d
 
 ---
 
-## 2. What already works — measured, not estimated
+## 2. What the engine covers — measured, not estimated
 
-Probe: the modern graph, `project('n','k').by(values('name')).by(<ARM>)`, executed end to end. This
-section is what the SHIPPING engine answers today; §2·2 is which spine answered it.
+GraphQL's whole structural requirement, expressed in Gremlin, is one shape:
+`project(k…)` whose `by()` arms are themselves traversals that project, filter, order and slice.
+Every selection set at every depth is that, and nothing else.
 
-**Works today:**
+So the question "how much of GraphQL already works" is exactly "how much of that shape does the
+RelIR fold lower". `lowerToRel` answers with a plan or `null`, so the probe is direct: feed it every
+prefix of a chain and name the step after the longest one it accepts.
 
-| by-arm | result |
-|---|---|
-| `out('knows').count()` | `{n: marko, k: 2}` |
-| `out('knows').values('name').fold()` | `{n: marko, k: [vadas, josh]}` |
-| `out('knows').has('age', gt(20)).values('name').fold()` | filtered list ✅ |
-| `out('knows').fold()` | full element list (id/label/properties) ✅ |
-| `out('knows').out('created').values('name').fold()` | depth-2 traversal inside the arm ✅ |
-
-**Fails, all with the same deferral** — `by(traversal) modulator not yet supported`
-(`src/compiler/steps/tail/select.ts:33`):
-
-| by-arm | what GraphQL needs it for |
-|---|---|
-| `out('knows').elementMap('name').fold()` | **any nested object field** |
-| `out('knows').valueMap('name').fold()` | same |
-| `out('knows').project('name').by(values('name')).fold()` | **any selection set at depth ≥ 2** |
-| `out('knows').elementMap('name')` | a to-one object field |
-| `out('knows').limit(1).values('name').fold()` | `first:` on a nested list |
-| `out('knows').order().by('name').values('name').fold()` | `orderBy:` on a nested list |
-| `out('knows').dedup().values('name').fold()` | `distinct:` |
-
-Read the two tables together and the shape of the work is exact: **filtering and traversal inside a
-child arm already compose to arbitrary depth; producing a MAP inside a child arm, and slicing/ordering
-a child arm, do not.** Those two are 100% of GraphQL's structural requirement and 0% of its surface
-syntax.
-
-### 2·1 Root cause, precisely located
-
-Three findings, in dependency order:
-
-1. **`ListOf` has no record member** — `src/sql/kernel/render.ts:16`. The union is
-   `elem | property | scalar | list`. A *list of maps* has no representation at the render boundary,
-   so nothing above it can produce one. **This is the substrate item.**
-2. **The record-field classifier offers no record arm** — `recordChildPlan`,
-   `src/compiler/steps/tail/select.ts:87`, tries `classifyScalarChild → classifyListChild →
-   classifyElementChild` and returns `null` otherwise. Meanwhile **`tryCompileRecordChild` already
-   exists** (same file, ~line 440) and is wired only into the child-body path, not into a record
-   *field*. The provider is built; the classifier does not offer it.
-3. **`classifyListChild` accepts one body shape** — `src/compiler/steps/tail/child-shape.ts:807`:
-   the pre-`fold()` body must be a scalar projection or a bare element run. A `limit`/`order`/`dedup`
-   in front of it falls out, and so does a record projection. (The `limit` half is the
-   **child-scope-limit gap** already recorded from the canonical-emission-order work — this plan does
-   not discover it, it collides with it.)
-
-None of the three is GraphQL-specific. Fixing them makes
-`g.V().project('a','b').by(…).by(out().project(…).fold())` work for Gremlin users first.
-
-Those three locations are the LEGACY spine's. §2·2 is why the fix should not go there.
-
-### 2·2 Which spine answers any of this — the retraction
-
-`lowerToRel` returns a plan or `null` and never throws; an uncovered chain **declines** and the
-legacy spine answers it (`scripts/rel-sweep.ts` exists to protect exactly that contract). So pinning
-`spine: 'rel'` does not prove the RelIR path ran. The original probe pinned both and got identical
-answers because it ran legacy twice.
-
-Probed properly — longest prefix that `lowerToRel` accepts, then name the step after it:
-
-| chain | RelIR |
+| chain | fold |
 |---|---|
 | `hasLabel('person').out('created').dedup().values('name')` | **covered** |
-| every GraphQL depth-1 shape from §2 (all five) | declines at `project` (2/3) |
-| every GraphQL depth-2+ shape from §2 (all five) | declines at `project` (2/3) |
-| `hasLabel('person').valueMap('name','age')` | declines at `valueMap` |
-| `hasLabel('person').elementMap('name')` | declines at `elementMap` |
-| `hasLabel('person').order().by('name').limit(10).valueMap()` | declines at `valueMap` (4/5) |
-| `hasLabel('person').group().by('age').by(values('name').fold())` | declines at `group` |
-| `repeat(out('knows')).times(2).dedup().values('name')` | declines at `repeat` (2/5) |
+| `project('n','k').by(values('name')).by(out('knows').count())` | gives up at `project` (2/3) |
+| `…by(out('knows').values('name').fold())` | gives up at `project` (2/3) |
+| `…by(out('knows').has('age',gt(20)).values('name').fold())` | gives up at `project` (2/3) |
+| `…by(out('knows').fold())` | gives up at `project` (2/3) |
+| `…by(out('knows').elementMap('name').fold())` | gives up at `project` (2/3) |
+| `…by(out('knows').project('name').by(values('name')).fold())` | gives up at `project` (2/3) |
+| `…by(out('knows').limit(1).values('name').fold())` | gives up at `project` (2/3) |
+| `…by(out('knows').order().by('name').values('name').fold())` | gives up at `project` (2/3) |
+| `hasLabel('person').valueMap('name','age')` | gives up at `valueMap` |
+| `hasLabel('person').elementMap('name')` | gives up at `elementMap` |
+| `hasLabel('person').order().by('name').limit(10).valueMap()` | gives up at `valueMap` (4/5) |
+| `hasLabel('person').group().by('age').by(values('name').fold())` | gives up at `group` |
+| `repeat(out('knows')).times(2).dedup().values('name')` | gives up at `repeat` (2/5) |
 
-One of eighteen. Corpus-wide, `mise run rel-blockers` reports **793 / 2298 traversals fully covered
-(34.5%)**, and its family ranking is:
+One of eighteen probed chains, and it is the one with no GraphQL content in it. Corpus-wide,
+`mise run rel-blockers` reports **793 / 2298 traversals fully covered (34.5%)**, ranked by family:
 
 ```
 78  the map shape       group*:52 groupCount*:26
@@ -160,15 +104,30 @@ One of eighteen. Corpus-wide, `mise run rel-blockers` reports **793 / 2298 trave
     (in no family yet)  repeat:86 … project:16 …
 ```
 
-**Read that against §1·1.** GraphQL needs `project`, `select`, `valueMap`, `elementMap`, `fold`,
-`order`, `limit`, `dedup`, and eventually `group`. That is the same list, in roughly rank order —
-the map shape, aliases, the property shape, row ops, and the list shape are five of the top seven
-families, and they are precisely a selection set with per-level arguments.
+### 2·1 The ranking IS the scoping instruction
 
-This is not a coincidence worth remarking on; it is a scoping instruction. A selection set with
-per-level arguments IS the relational shape RelIR was built to express — nested projection with
-per-level filter, order and slice — so the RelIR fold is not merely *a* place to build it, it is the
-place where the shape is native rather than retrofitted onto a step-tail accumulator.
+Read that list against §1·1. GraphQL needs `project`, `select`, `valueMap`, `elementMap`, `fold`,
+`order`, `limit`, `dedup`, and eventually `group`. **That is the same list, in roughly the same
+order** — the map shape, aliases, the property shape, row ops and the list shape are five of the top
+seven families, and together they are precisely *a selection set with per-level arguments*.
+
+This is not a coincidence to remark on and move past. A selection set with per-level arguments IS the
+relational shape the fold exists to express — nested projection with per-level filter, order and
+slice, which is `rel2sql`'s home ground (`vendor/calcite`). GraphQL is not asking for a feature the
+engine lacks a concept for; it is asking for the concepts the fold is furthest through designing and
+has not finished lowering.
+
+### 2·2 The one item that is not a family
+
+**`ListOf` has no record member** — `src/sql/kernel/render.ts:16`. The union is
+`elem | property | scalar | list`. A *list of maps* has no representation at the render boundary, so
+no producer above it can emit one, whatever the fold learns to lower.
+
+Every GraphQL to-many object field is a list of maps, at every depth ≥ 2. So this is the substrate
+item and it comes first — it is a vocabulary gap at the boundary where shape is DECLARED, not a
+lowering gap, and it is the shape of cleanup `docs/2026-07-28-scalartype-refactoring-pattern.md`
+describes: a total union gaining the arm that makes the vocabulary complete, rather than a coarse
+view bolted beside it.
 
 ---
 
@@ -183,12 +142,13 @@ concept; a GQL grammar bump moves two files. It went 0 → 25/25 on `MatchString
 (`docs/archive/2026-07-28-match-string-frontend-design.md`). GraphQL is the same move with a bigger
 schema story: **a sibling front end under locked decision #5.**
 
-**Why not RelIR.** Tempting — a GraphQL tree → relational tree is structure-preserving, where a flat
-step chain looks like an information detour. But everything that makes an element an element lives at
-or above the IR: `COALESCE(uid, id)` external ids, label interning, typed property values (`vtype`),
-property-shape polymorphism, the canonical emission order. Entering below that duplicates all of it,
-onto a spine still mid-migration (`docs/2026-08-01-relir-build-plan.md`). RelIR is where the *fix* in
-§2·1 lands — it is not the entry point.
+**Why not straight into RelIR.** Tempting — a GraphQL tree → relational tree is structure-preserving,
+where a flat step chain looks like an information detour. But everything that makes an element an
+element lives at or above the IR: `COALESCE(uid, id)` external ids, label interning, typed property
+values (`vtype`), property-shape polymorphism, the canonical emission order. A front end that
+constructs relational nodes directly has to reproduce all of it, and would be the second producer of
+a vocabulary that has exactly one (`docs/2026-07-28-shape-vocabulary-architecture.md`: a layer may
+CONSULT shape, never CONSTRUCT it). RelIR is where the §2 work lands — it is not the entry point.
 
 **Why not SQL.** Reimplements the compiler. Nothing to weigh.
 
@@ -242,6 +202,26 @@ executor method and puts the GraphQL parser in the DO.
 re-parse cost measures badly — and *whether it does* is a measurement nobody has taken. Note it as an
 open number (§9), not a reason to pre-optimize.
 
+### 5·1 The placement question generalizes past GraphQL
+
+Compilation reads nothing from the store (§9), so `compile()` is a pure function of the query and its
+parameters. That makes the DO's serial budget — the thing a per-object request queue makes scarce —
+spendable on I/O alone, if what crosses the seam is the *plan* rather than the query text. Every
+number in §9 is really about this, not about GraphQL.
+
+What can cross is decided by whether `Executable` is data. Today `Compiled` is
+(`{kind:'read', sql, binds, shape, spine}`), and `Program` — RelIR's several-statement form — is too:
+`{kind:'program', program: RelPlan, tail?: {sql, binds}, shape, spine}`, explicitly *data the algebra
+produced* rather than a machine that walks the store, with a `RowsBind` marker the executor fills
+from rows it retained. Only the legacy `WritePlan` is a closure, and it is already on the deletion
+list that `Program` exists to replace.
+
+**So the split is not read-only in principle — it is read-only until that deletion lands.** When
+`Executable` narrows to `Compiled | Program`, writes ship exactly the same way: the plan crosses, the
+execution stays in the DO (it must — retained rows between statements and the transaction around them
+are the whole point of the form), and nothing about the seam changes shape. Worth knowing before
+anyone designs the read version in a way that assumes it is the only version.
+
 ---
 
 ## 6. Variables are parameters — the bind rule lands exactly right
@@ -290,10 +270,11 @@ long tail no hand-written corpus reaches.
 the SDL our reflector generated. A one-assertion test that validates the entire schema layer, and the
 thing every GraphQL client tool depends on.
 
-### 7·4 The dependency decision — **needs approval**
+### 7·4 The dependency decision — **APPROVED (Dan, 2026-08-07)**
 
-All three oracles want `graphql` (graphql-js): MIT, zero runtime dependencies of its own.
-`graphql-http` is dev-only.
+`graphql` (graphql-js) as a RUNTIME dependency, `graphql-http` as dev-only. Recorded here because the
+no-new-dependencies rule makes the approval, not the choice, the thing that needs writing down.
+graphql-js is MIT with zero runtime dependencies of its own.
 
 Locked decision #2's reasoning — *generate the parser from upstream's own grammar, never hand-edit* —
 **does not transfer**: GraphQL's grammar is EBNF prose inside the spec document, and no
@@ -302,49 +283,36 @@ GraphQL, **graphql-js *is* the authoritative artefact**, occupying the same role
 Gremlin. Hand-rolling a GraphQL parser would also mean hand-rolling the spec's ~20 validation rules,
 which is the genuinely expensive half and the half a reference implementation gives away.
 
-Three options:
+The rejected alternative was dev/test-only — hand-roll parse+validate for production, keep graphql-js
+as the oracle. It duplicates the expensive half (the validation rules) to save ~500 KB in a bundle
+that may not even carry it under placement (a).
 
-1. **Runtime dependency on `graphql`, dev dependency on `graphql-http`.** Parse + validate +
-   introspection types come from the reference implementation; we own only translation.
-   **Recommended.**
-2. **Dev/test only** — hand-roll parse+validate for production, keep graphql-js as the oracle.
-   Duplicates the expensive half to save ~500 KB in a bundle that may not even carry it under
-   placement (a).
-3. Neither — no GraphQL. (Stated for completeness.)
-
-Recommending (1). Flagging it rather than doing it, per the no-new-dependencies rule.
+So: parse, validate and introspection types come from the reference implementation, and we own only
+translation. The dependency is not added yet — it arrives with Phase 2, and `package.json` should
+carry it with the same comment discipline as `antlr4ng`'s pin.
 
 ---
 
 ## 8. Phases
 
-**Phase 0 — the substrate, built in the RelIR fold (no GraphQL in it at all).**
+**Phase 0 — the substrate (no GraphQL in it at all).** §2's families, in dependency order rather than
+by size:
 
-The original draft put this in `src/compiler/steps/` — the three §2·1 locations. §2·2 says not to.
-Patching the legacy spine buys the RelIR migration nothing and has to be paid for a second time when
-those families migrate; building it in the fold closes the GraphQL gap and moves the migration's top
-families in one pass. The legacy spine keeps answering these chains until the fold covers them,
-because that is exactly what the decline contract is for — so this is not a flag day and there is no
-window where a shape stops working.
-
-The order is the dependency order, not the family ranking:
-
-1. **`ListOf` gains a `record` arm** (`src/sql/kernel/render.ts:16`). A list of maps has no
-   representation at the render boundary, so nothing above can produce one. Unblocks everything else
-   and is the one item that is genuinely shared — the legacy tail needs it too, so it is a render
-   boundary change either way, not a spine choice.
-2. **The property shape in the fold** — `valueMap` / `elementMap` (51 declines). The smallest family
-   that is pure projection, and every GraphQL leaf object depends on it.
-3. **Row ops inside a child scope** — `order` / `dedup` / `range` / `limit` (30 declines). This is
-   GraphQL's per-level `first:` / `orderBy:` / `distinct:`, and the pre-existing child-scope-limit gap.
+1. **`ListOf` gains a `record` arm** (`src/sql/kernel/render.ts:16`) — §2·2. A vocabulary gap at the
+   render boundary, so it unblocks everything after it and nothing unblocks it.
+2. **The property shape** — `valueMap` / `elementMap` (51). The smallest family that is pure
+   projection, and every GraphQL leaf object depends on it.
+3. **Row ops inside a child scope** — `order` / `dedup` / `range` / `limit` (30). GraphQL's per-level
+   `first:` / `orderBy:` / `distinct:`.
 4. **Aliases and the record shape** — `select` / `project` (55 + 16). The selection set itself.
 5. **The map shape** — `group` / `groupCount` (78). The largest family, and what GraphQL aggregation
    fields need later (§9). Last because nothing above depends on it.
 
 Tests are ordinary L1/L2 Gremlin — `project().by(out().project(…).fold())` and friends at depth 3,
 plus the neighbouring valid compositions (`valueMap`, `elementMap`, `select`, inside `local()`,
-inside a branch arm) — with `mise run rel-blockers` as the progress instrument and `mise run census`
-proving both spines still answer identically. Ships value with or without the rest of this plan.
+inside a branch arm). `mise run rel-blockers` is the progress instrument: each item should move its
+family off the ranking, and if it does not, the diagnosis was wrong. Ships value with or without the
+rest of this plan — 2 through 5 are the engine's main line whether GraphQL ever exists.
 
 **Phase 1 — schema reflection as a service.** `call('schema')` → the label/property/edge model.
 SDL printing on top. Cached against a write counter.
@@ -374,16 +342,15 @@ Apollo Federation (a different spec with its own subgraph-compatibility suite �
 cross-DO federation is not it); persisted queries; a declarative SDL-with-directives mapping layer
 (§4 — the override, later).
 
-**Measured since the first draft** (§5's placement question, which is what turned these up):
+**Measured** — all of it came out of §5's placement question:
 
 - **Compile never touches the store** — 0 `store.query` calls across all eight probe shapes. So
-  `(gremlin, params) → {sql, binds, shape}` is a pure function and placement (b) is viable, not just
-  (a). `WritePlan` is `{run: (store) => …}`, a closure, so this holds for reads only — edge-side
-  compilation is structurally read-first rather than by choice.
+  `compile()` is a pure function of the query and its parameters, which is what makes placement (b)
+  viable and what §5·1 generalizes.
 - **Compile is a fixed ~4 ms per query shape**, independent of graph size (it must be — see above),
   against an execution cost that scales. So compile is 66% of a request on the 6-vertex modern graph,
   77% at 200 vertices, 44% at 1 000, 19.5% at 4 000. The agent-memory shape sits left of that
-  crossover.
+  crossover. All four measured on `ANALYZE`d graphs — see §10.
 - **Parse is 2.7% of a request** (0.14 ms of 5.3 ms). The cost is the compiler, not the parser —
   which is why §5 ships `{sql, binds, shape}` rather than `Step[]`.
 - **ANTLR cold start is 422×** — 45.2 ms first parse in a fresh process vs 0.107 ms warm.
@@ -405,27 +372,22 @@ on a 20 000-vertex graph takes 9.8 s because SQLite has no statistics and invert
 
 ## 10. Method
 
-Probes run from a worktree at `bae05c7` (§2·2 and §9 re-measured at `41c897d`) via
-`test/support/executor.ts` against `test/fixtures/seed-modern.ts`, decoded through
-`test/support/decode.ts`. §2's table is the shipping engine's answer with no spine pinned.
-§2·2 does NOT go through the executor — pinning a spine cannot distinguish "RelIR handled it" from
-"RelIR declined and legacy handled it", which is the error the first draft made. It calls
-`lowerToRel` directly on `runPasses(stepChain(…))` output, over every prefix, and reports the step
-after the longest one that returns non-null — the same method `scripts/rel-blockers.ts` uses, so the
-per-chain answers and the corpus-wide ranking are computed the same way.
-Deferral messages are quoted verbatim from the thrown `Error`;
-source locations were read at the pin and are cited inline.
+**§2's coverage probe does not go through the executor**, and that is load-bearing: running a
+traversal proves only that *something* answered it. It calls `lowerToRel` directly on
+`runPasses(stepChain(…))` output, over every prefix of the chain, and reports the step after the
+longest prefix that returns non-null — the same method `scripts/rel-blockers.ts` uses, so the
+per-chain answers and the corpus-wide ranking are computed identically and can be compared. Source
+locations were read at the pin and are cited inline.
 
 The §9 timings come from throwaway benchmark scripts, not committed: a synthetic graph (N `person`
 + N `software` vertices, 4 `knows` + 1 `created` edge per person) bulk-loaded into
 `new GraphStore(new BunSqlite(':memory:'))`, each query warmed then timed over 20–200 iterations,
 with `parseGremlin` / `compilePlan` / `framed` timed separately so exec+frame is the residual. The
-store-touch gate wraps `store.query` with a counter and runs `compilePlan` alone. Sizes were
-`ANALYZE`d — see `docs/2026-08-07-query-plan-stability.md` for why that qualifier is load-bearing and
-what the first, unanalyzed run wrongly showed.
+store-touch gate wraps `store.query` with a counter and runs `compilePlan` alone. Every size was
+`ANALYZE`d — see `docs/2026-08-07-query-plan-stability.md` for why that qualifier is load-bearing.
 
 Related: `docs/archive/2026-07-28-match-string-frontend-design.md` (the precedent front end),
-`docs/2026-08-01-relir-build-plan.md` (where Phase 0 now lands, and whose worklist it shares),
+`docs/2026-08-01-relir-build-plan.md` (where Phase 0 lands, and whose worklist it shares),
 `docs/2026-08-07-query-plan-stability.md` (the bigger finding these probes turned up),
 `docs/2026-07-28-property-based-testing-l5.md` (the differential-oracle pattern Phase 3 reuses),
 `docs/2026-07-17-agent-memory-vision.md` (the consumer that most wants this surface).
