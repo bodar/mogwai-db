@@ -202,25 +202,11 @@ executor method and puts the GraphQL parser in the DO.
 re-parse cost measures badly — and *whether it does* is a measurement nobody has taken. Note it as an
 open number (§9), not a reason to pre-optimize.
 
-### 5·1 The placement question generalizes past GraphQL
-
-Compilation reads nothing from the store (§9), so `compile()` is a pure function of the query and its
-parameters. That makes the DO's serial budget — the thing a per-object request queue makes scarce —
-spendable on I/O alone, if what crosses the seam is the *plan* rather than the query text. Every
-number in §9 is really about this, not about GraphQL.
-
-What can cross is decided by whether `Executable` is data. Today `Compiled` is
-(`{kind:'read', sql, binds, shape, spine}`), and `Program` — RelIR's several-statement form — is too:
-`{kind:'program', program: RelPlan, tail?: {sql, binds}, shape, spine}`, explicitly *data the algebra
-produced* rather than a machine that walks the store, with a `RowsBind` marker the executor fills
-from rows it retained. Only the legacy `WritePlan` is a closure, and it is already on the deletion
-list that `Program` exists to replace.
-
-**So the split is not read-only in principle — it is read-only until that deletion lands.** When
-`Executable` narrows to `Compiled | Program`, writes ship exactly the same way: the plan crosses, the
-execution stays in the DO (it must — retained rows between statements and the transaction around them
-are the whole point of the form), and nothing about the seam changes shape. Worth knowing before
-anyone designs the read version in a way that assumes it is the only version.
+Both placements sit *above* a separate question — whether the request path should ship compiled plans
+to the DO rather than query text at all — which is a property of the whole engine and not of this
+front end. That is `docs/2026-08-07-edge-compilation-plan.md`; it neither blocks nor is blocked by
+anything here, and if it lands, (a) and (b) converge because the translation and the compilation
+would already be happening in the same place.
 
 ---
 
@@ -342,31 +328,21 @@ Apollo Federation (a different spec with its own subgraph-compatibility suite �
 cross-DO federation is not it); persisted queries; a declarative SDL-with-directives mapping layer
 (§4 — the override, later).
 
-**Measured** — all of it came out of §5's placement question:
-
-- **Compile never touches the store** — 0 `store.query` calls across all eight probe shapes. So
-  `compile()` is a pure function of the query and its parameters, which is what makes placement (b)
-  viable and what §5·1 generalizes.
-- **Compile is a fixed ~4 ms per query shape**, independent of graph size (it must be — see above),
-  against an execution cost that scales. So compile is 66% of a request on the 6-vertex modern graph,
-  77% at 200 vertices, 44% at 1 000, 19.5% at 4 000. The agent-memory shape sits left of that
-  crossover. All four measured on `ANALYZE`d graphs — see §10.
-- **Parse is 2.7% of a request** (0.14 ms of 5.3 ms). The cost is the compiler, not the parser —
-  which is why §5 ships `{sql, binds, shape}` rather than `Step[]`.
-- **ANTLR cold start is 422×** — 45.2 ms first parse in a fresh process vs 0.107 ms warm.
-
-**Still unmeasured:**
+**Unmeasured:**
 - Whether a deep selection set generates a plan whose bind count stays O(plan size). It should — all
   literals inline, only variables bind — but "should" is not a measurement, and the 100-bind cap is
   the wall that has shipped twice.
 - Whether a depth-4 selection set's SQL stays under the DO's 100 KB statement-text cap.
-- Gremlin re-parse cost per GraphQL request under placement (a) — now bounded above by the parse
-  number, so this is a small question rather than an open one.
+- Gremlin re-parse cost per GraphQL request under placement (a). Bounded above by the measured parse
+  cost of 0.14 ms per query (`docs/2026-08-07-edge-compilation-plan.md` §2·3), so this is a small
+  question rather than an open one.
 
-**And a finding from the same probes that is bigger than this document:** a point-lookup-plus-1-hop
-on a 20 000-vertex graph takes 9.8 s because SQLite has no statistics and inverts the join order;
-0.5 ms of `PRAGMA optimize` makes it 19 ms. Nothing here is worth tuning until that is fixed —
-`docs/2026-08-07-query-plan-stability.md`.
+**Two findings from the probes run for §5 are bigger than this document**, and both have their own
+plan: a point-lookup-plus-1-hop on a 20 000-vertex graph takes 9.8 s because SQLite has no statistics
+and inverts the join order (`docs/2026-08-07-query-plan-stability.md`), and compilation turns out to
+touch the store zero times, which makes the whole request path splittable
+(`docs/2026-08-07-edge-compilation-plan.md`). Neither is a prerequisite here. The first is a
+prerequisite for caring about performance at all.
 
 ---
 
@@ -379,15 +355,9 @@ longest prefix that returns non-null — the same method `scripts/rel-blockers.t
 per-chain answers and the corpus-wide ranking are computed identically and can be compared. Source
 locations were read at the pin and are cited inline.
 
-The §9 timings come from throwaway benchmark scripts, not committed: a synthetic graph (N `person`
-+ N `software` vertices, 4 `knows` + 1 `created` edge per person) bulk-loaded into
-`new GraphStore(new BunSqlite(':memory:'))`, each query warmed then timed over 20–200 iterations,
-with `parseGremlin` / `compilePlan` / `framed` timed separately so exec+frame is the residual. The
-store-touch gate wraps `store.query` with a counter and runs `compilePlan` alone. Every size was
-`ANALYZE`d — see `docs/2026-08-07-query-plan-stability.md` for why that qualifier is load-bearing.
-
 Related: `docs/archive/2026-07-28-match-string-frontend-design.md` (the precedent front end),
 `docs/2026-08-01-relir-build-plan.md` (where Phase 0 lands, and whose worklist it shares),
-`docs/2026-08-07-query-plan-stability.md` (the bigger finding these probes turned up),
+`docs/2026-08-07-query-plan-stability.md` and `docs/2026-08-07-edge-compilation-plan.md` (the two
+findings §5's probes turned up, each now its own plan),
 `docs/2026-07-28-property-based-testing-l5.md` (the differential-oracle pattern Phase 3 reuses),
 `docs/2026-07-17-agent-memory-vision.md` (the consumer that most wants this surface).

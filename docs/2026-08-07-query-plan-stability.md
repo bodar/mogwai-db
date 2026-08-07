@@ -156,18 +156,18 @@ priority changes accordingly.
 
 ## 6. Priority against the other levers
 
-The thread this came out of was measuring compile time, on the theory that moving parse+compile to
-the edge is a throughput lever. It is — compile is a fixed ~4 ms per query shape and 66% of a request
-on a small graph. But it is now clearly third:
+This was found while benchmarking compile time, on the theory that moving compilation to the edge is
+a throughput lever. It is one — `docs/2026-08-07-edge-compilation-plan.md` — but it is clearly third:
 
 | lever | magnitude |
 |---|---|
 | plan stability (this doc) | ~9 800 ms → ~19 ms on a mid-size graph |
-| edge-side compile | ~4 ms moved off the DO's serial budget |
+| edge-side compile | ~4 ms fixed, moved off the DO's serial budget |
 | ANTLR cold start | ~45 ms, once per isolate |
 
 The first is a correctness-shaped problem wearing performance clothing: a 9.8-second traversal does
-not return slowly, it exceeds the request budget and fails.
+not return slowly, it exceeds the request budget and fails. Nothing in the other two is worth tuning
+while this is outstanding.
 
 ## 7. Method
 
