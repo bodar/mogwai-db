@@ -43,7 +43,7 @@
  * blocked traversals themselves, so the shape of the work is read off the instrument rather than
  * guessed at from a number.
  */
-import { extractSack, extractSideEffects, extractStrategies, parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
+import { argValues, extractSack, extractSideEffects, extractStrategies, parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { runPasses } from '../src/compiler/ir/passes.ts';
 import type { IRStep } from '../src/compiler/ir/step.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
@@ -88,7 +88,13 @@ const FAMILIES: Readonly<Record<string, readonly string[]>> = {
  * fires only where the step's own arguments decide it, and every other blocker keeps its plain name.
  */
 function blame(step: IRStep): string {
-  const args = step.args ?? [];
+  // `argValues`, NOT `step.args` — an `Arg` is `{value, type, name}` since a user PARAMETER became a
+  // first-class IR fact, so every test below reads the VALUE and not the wrapper. Reading the wrapper
+  // made `typeof args[0] === 'string'` permanently false, which filed EVERY labelled `group("a")`,
+  // `aggregate("a")` and `store("a")` under the unkeyed `*` bucket — so the map shape looked like the
+  // largest family on the board while the named-collection substrate looked absent, which is the
+  // opposite of the truth. An instrument that ranks the work has to be read as code that can rot.
+  const args = argValues(step);
   // An ARRAY or a SET argument seeds one traverser that IS a collection, so what is missing is the list
   // traverser shape. A `Map` argument is the MAP shape and a `Duration` is a rich SCALAR — neither is the
   // list shape, so neither is re-attributed here even though both also block at `inject`. Guessing which
