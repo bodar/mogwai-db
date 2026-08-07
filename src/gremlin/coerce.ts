@@ -1,6 +1,7 @@
 import { q, type Expression } from '../sql/kernel/q.ts';
 import { type ValueType } from '../sql/kernel/render.ts';
-import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain } from './frontend.ts';
+import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain, type Step } from './frontend.ts';
+import { flatType } from './types.ts';
 
 // ---------- scalar value coercion (asBool / asNumber / asDate + date arithmetic) ----------
 //
@@ -177,3 +178,79 @@ export const isDateDiffConstant = (arg: any, params: Record<string, any>): boole
  *  instant; ×1000 → millis). */
 export const asDateSql = (e: Expression): Expression =>
   q`(CASE WHEN typeof(${e}) IN ('integer', 'real') THEN CAST(${e} AS INTEGER) ELSE unixepoch(${e}) * 1000 END)`;
+
+// ---------- the LEADING coercion prefix: the fold that IS the parse ----------
+
+/** The coercion steps that fold at COMPILE TIME when their input is still a JS constant. */
+const CONST_COERCIONS = new Set(['asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff']);
+
+/**
+ * Apply the leading coercion prefix while the values are still JS constants, returning the index of
+ * the first ordinary step (which enters the relational dispatcher) and the framing tag the fold
+ * settled on. Later coercions remain normal scalar transforms, or fail closed there.
+ *
+ * **The fold IS the parse, and the parse RAISES TinkerPop's exact messages** (`Can't parse string
+ * '1,000' as number.`, the per-type overflow wording). SQL cannot raise either, which is why this
+ * happens at compile time on BOTH spines and why it is one function rather than two: a second
+ * implementation is a second chance to get an overflow boundary or a date format wrong.
+ *
+ * It MUTATES `vals`, and a caller whose contract is `null` must catch — a value that does not parse
+ * throws from here, and that throw belongs to whichever spine owns the message.
+ *
+ * Typed on `Step`, not the compiler's `IRStep`: the fold reads `name` and `args` only, so it stays
+ * on the front-end side of the boundary with the coercion semantics it is made of.
+ */
+export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at: number; as?: ValueType } {
+  let at = 1;
+  let as: ValueType | undefined;
+  for (; at < steps.length && CONST_COERCIONS.has(steps[at].name); at++) {
+    const step = steps[at];
+    // A traversal date is an apply-style child value, not a constant coercion. Leave it
+    // for the scalar dispatcher, which provisions the correlated child scope.
+    if (step.name === 'dateDiff' && isNested(step.args[0]?.value) && !isDateDiffConstant(step.args[0]?.value, {})) break;
+    if (step.name === 'asBool') {
+      for (let i = 0; i < vals.length; i++) vals[i] = asBoolConst(vals[i]);
+      as = 'boolean';
+      continue;
+    }
+    if (step.name === 'asNumber') {
+      const spec = numericSpec(step.args[0]?.value);
+      if (spec) {
+        for (let i = 0; i < vals.length; i++) vals[i] = asNumberConst(vals[i], spec);
+        as = spec.as;
+      } else {
+        if (as === 'datetime') {
+          as = 'long';
+          continue;
+        }
+        const argTypes = at === 1 ? steps[0].args.map((a) => a.type) : [];
+        let uniform: ValueType | undefined;
+        for (let i = 0; i < vals.length; i++) {
+          const out = asNumberBare(vals[i], flatType(argTypes[i]));
+          vals[i] = out.val;
+          if (uniform === undefined) uniform = out.as;
+          else if (uniform !== out.as)
+            throw new Error('asNumber() over a stream of mixed numeric subtypes not yet supported');
+        }
+        as = uniform;
+      }
+      continue;
+    }
+    if (step.name === 'asDate') {
+      const argTypes = at === 1 ? steps[0].args.map((a) => a.type) : [];
+      for (let i = 0; i < vals.length; i++) vals[i] = asDateConst(vals[i], flatType(argTypes[i]));
+      as = 'datetime';
+      continue;
+    }
+    if (step.name === 'dateAdd') {
+      const delta = Number(step.args[1].value) * dtFactor(step.args[0].value);
+      for (let i = 0; i < vals.length; i++) vals[i] = Number(vals[i]) + delta;
+      as = 'datetime';
+      continue;
+    }
+    const other = dateDiffOtherMs(step.args[0]?.value, {});
+    for (let i = 0; i < vals.length; i++) vals[i] = Number(vals[i]) - other;
+    as = 'long';
+  }
+  return { at, as };
+}

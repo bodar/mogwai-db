@@ -1,4 +1,5 @@
-import { isScopeArg, type Step } from '../../gremlin/frontend.ts';
+import { gtypeName, isPred, isScopeArg, type Step } from '../../gremlin/frontend.ts';
+import { normalizeTypeName } from '../../gremlin/types.ts';
 
 // ---------- the compiler's step node ----------
 //
@@ -262,6 +263,56 @@ export type BranchKind = 'union' | 'choose' | 'coalesce' | 'optional';
 export const BRANCH_KINDS: ReadonlySet<string> = new Set<string>(['union', 'choose', 'coalesce', 'optional']);
 export const asBranchKind = (name: string): BranchKind | null =>
   BRANCH_KINDS.has(name) ? name as BranchKind : null;
+
+// ---------- `is(typeOf(GType.X))`: ONE decode, three readings ----------
+//
+// A `typeOf` assert is read by the group, path, list and scalar arms, and before this was one
+// function they had already DRIFTED — the group arm THREW on a non-MAP assert where the path arm
+// returned an empty relation. This is the one decode, and it sits beside `sliceOf` because it is
+// the same kind of thing: THE total decode of one step's arguments, so no consumer re-reads
+// `step.args[0]` for itself.
+//
+// What a NON-matching assert MEANS is deliberately not decided here. It genuinely differs per arm
+// and both answers are defensible — an empty relation (the assert is a filter that matched nothing)
+// or a throw (this arm has no lowering for the shape the caller claims). Naming the decode
+// separately from the policy is what lets the two stop drifting without forcing one on both.
+
+export type TypeAssert =
+  /** `is(typeOf(GType.X))`; `gtype` is X in Gremlin's own UPPERCASE spelling ('MAP', 'PATH', …). */
+  | { readonly kind: 'gtype'; readonly gtype: string }
+  /** The predicate IS `typeOf`, but its argument names no GType we can read. */
+  | { readonly kind: 'opaque' }
+  /** Not an `is(typeOf(…))` at all — a different step, or an is() with a different predicate. */
+  | { readonly kind: 'none' };
+
+const NO_TYPE_ASSERT: TypeAssert = { kind: 'none' };
+
+/** PURE. Decode an `is(typeOf(GType.X))` follower. Total over the three outcomes so a reader must
+ *  say what it does with each — an arm that only cares about one GType should use `assertsGType`. */
+export function typeOfAssert(step: IRStep): TypeAssert {
+  if (step.name !== 'is') return NO_TYPE_ASSERT;
+  const pred = (step.args ?? [])[0]?.value;
+  if (!isPred(pred) || pred.op !== 'typeOf') return NO_TYPE_ASSERT;
+  const name = gtypeName(pred.operands?.[0]?.value);
+  return name ? { kind: 'gtype', gtype: name.toUpperCase() } : { kind: 'opaque' };
+}
+
+/** PURE. Does `step` assert exactly this GType? The boolean reading of `typeOfAssert`, for the arms
+ *  whose own shape answers exactly one GType (`'MAP'` for map/group/valueMap, `'PATH'` for path). */
+export const assertsGType = (step: IRStep, gtype: string): boolean => {
+  const a = typeOfAssert(step);
+  return a.kind === 'gtype' && a.gtype === gtype;
+};
+
+/** PURE. The COLLECTION reading of `typeOfAssert`: the canonical collection name a scalar value
+ *  stream is being retyped to (`is(typeOf(GType.LIST|SET|MAP))`), else null. A derived coarse view
+ *  of the one decode, not a second one. */
+export function collectionAssert(step: IRStep): 'list' | 'set' | 'map' | null {
+  const a = typeOfAssert(step);
+  if (a.kind !== 'gtype') return null;
+  const c = normalizeTypeName(a.gtype);
+  return c === 'list' || c === 'set' || c === 'map' ? c : null;
+}
 
 // ---------- the SHAPE-LOCAL vocabularies: what a step name means over one VALUE ----------
 //

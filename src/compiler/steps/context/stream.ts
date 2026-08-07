@@ -15,7 +15,7 @@
 
 import { type Expression, type Query, type Relation } from '../../../sql/kernel/q.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { type Elem } from '../../plan/plan.ts';
+import { PROPERTY_PAYLOAD, type Elem } from '../../plan/plan.ts';
 import { perRowCols, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from '../../../sql/kernel/render.ts';
 import { layoutCols, type LoweringState, type ElementStream } from './context.ts';
 
@@ -136,11 +136,9 @@ export interface PropertyStream extends LoweringState {
   readonly ownerElem: Elem;
 }
 
-/** The physical payload columns of a PropertyStream relation, in order. One row per
- *  VertexProperty/edge-Property instance: `vpid` the VertexProperty id (NULL for edge
- *  props), `owner` the owning element rowid, `pk`/`pv` key/value, `pvtype` the value's
- *  canonical stored type (so materialization frames it exactly), `pmeta` a meta bag. */
-export const PROPERTY_PAYLOAD = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pvtype', 'pmeta'] as const;
+/** The physical payload columns of a PropertyStream relation, in order — re-exported from
+ *  `plan/plan.ts`, where they sit beside `propertyPayload`, the projection that builds them. */
+export { PROPERTY_PAYLOAD };
 
 /** One field of a per-traverser select()/project() record. Unlike MapStream, whose
  * two columns describe an entry stream for a global group barrier, a RecordStream

@@ -1,6 +1,6 @@
 import { q, value, list } from '../../../sql/kernel/q.ts';
 import { jsonbArrayOf } from '../../plan/plan.ts';
-import { flattenListArgs, argValues, isNested, type SackSpec } from '../../../gremlin/frontend.ts';
+import { flattenListArgs, argValues, type SackSpec } from '../../../gremlin/frontend.ts';
 import { flatType, type CanonicalType } from '../../../gremlin/types.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { patchLayout, rootLayout, type LoweringState } from '../context/context.ts';
@@ -8,12 +8,7 @@ import { toListStream, toScalarStream, type Stream } from '../context/stream.ts'
 import type { Engine } from '../../engine/deps.ts';
 import { materializeRootStream } from '../tail/materialize.ts';
 import { type Compiled, type ValueType } from '../../../sql/kernel/render.ts';
-import {
-    numericSpec, asBoolConst, asNumberConst, asNumberBare, asDateConst,
-    dtFactor, dateDiffOtherMs, isDateDiffConstant,
-} from '../../../gremlin/coerce.ts';
-
-const CONST_COERCIONS = new Set(['asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff']);
+import { foldConstantCoercions } from '../../../gremlin/coerce.ts';
 
 // Canonical types whose stored form does NOT determine their Gremlin type, so JS-value
 // framing would infer the wrong one. Two reasons, both needing the declared type:
@@ -46,72 +41,6 @@ export function bareInjectTag(steps: IRStep[], count: number): ValueType | undef
   const names = Array.from({ length: count }, (_, i) => flatType(argTypes[i]));
   const uniform = names.every((n) => n === names[0]) ? names[0] : undefined;
   return uniform && DECLARED_TYPE_REQUIRED.has(uniform) ? (uniform as ValueType) : undefined;
-}
-
-/** Apply the leading coercion prefix while the inject values are still JS constants.
- * These steps have TinkerPop parse/overflow errors SQL cannot reproduce faithfully.
- * The returned index is the first ordinary step, which enters the shared relational
- * dispatcher. Later coercions remain normal scalar transforms (or fail closed there).
- *
- * EXPORTED for the RelIR lowering, for `bareInjectTag`'s reason and more sharply: the fold IS the
- * parse, and the parse RAISES TinkerPop's exact messages (`Can't parse string '1,000' as number.`).
- * A second implementation would be a second chance to get an overflow boundary or a date format
- * wrong, and SQL cannot raise either message — which is why this happens at compile time on both
- * spines. It MUTATES `vals`, and a caller whose contract is `null` must catch: a value that does not
- * parse throws from here, and that throw belongs to whichever spine owns the message. */
-export function foldConstantCoercions(steps: IRStep[], vals: any[]): { at: number; as?: ValueType } {
-  let at = 1;
-  let as: ValueType | undefined;
-  for (; at < steps.length && CONST_COERCIONS.has(steps[at].name); at++) {
-    const step = steps[at];
-    // A traversal date is an apply-style child value, not a constant coercion. Leave it
-    // for the scalar dispatcher, which provisions the correlated child scope.
-    if (step.name === 'dateDiff' && isNested(step.args[0]?.value) && !isDateDiffConstant(step.args[0]?.value, {})) break;
-    if (step.name === 'asBool') {
-      for (let i = 0; i < vals.length; i++) vals[i] = asBoolConst(vals[i]);
-      as = 'boolean';
-      continue;
-    }
-    if (step.name === 'asNumber') {
-      const spec = numericSpec(step.args[0]?.value);
-      if (spec) {
-        for (let i = 0; i < vals.length; i++) vals[i] = asNumberConst(vals[i], spec);
-        as = spec.as;
-      } else {
-        if (as === 'datetime') {
-          as = 'long';
-          continue;
-        }
-        const argTypes = at === 1 ? steps[0].args.map((a) => a.type) : [];
-        let uniform: ValueType | undefined;
-        for (let i = 0; i < vals.length; i++) {
-          const out = asNumberBare(vals[i], flatType(argTypes[i]));
-          vals[i] = out.val;
-          if (uniform === undefined) uniform = out.as;
-          else if (uniform !== out.as)
-            throw new Error('asNumber() over a stream of mixed numeric subtypes not yet supported');
-        }
-        as = uniform;
-      }
-      continue;
-    }
-    if (step.name === 'asDate') {
-      const argTypes = at === 1 ? steps[0].args.map((a) => a.type) : [];
-      for (let i = 0; i < vals.length; i++) vals[i] = asDateConst(vals[i], flatType(argTypes[i]));
-      as = 'datetime';
-      continue;
-    }
-    if (step.name === 'dateAdd') {
-      const delta = Number(step.args[1].value) * dtFactor(step.args[0].value);
-      for (let i = 0; i < vals.length; i++) vals[i] = Number(vals[i]) + delta;
-      as = 'datetime';
-      continue;
-    }
-    const other = dateDiffOtherMs(step.args[0]?.value, {});
-    for (let i = 0; i < vals.length; i++) vals[i] = Number(vals[i]) - other;
-    as = 'long';
-  }
-  return { at, as };
 }
 
 /** Seed `inject(v1, v2, …)` as a shaped SOURCE on `carry`'s Query → the initial Stream plus the

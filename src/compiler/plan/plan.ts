@@ -744,6 +744,46 @@ export function elementPayloadObject(ctx: ScalarCtx, elem: Elem): Expression {
   ], ', ')})`;
 }
 
+// ---------- the PROPERTY payload — `elementPayload`'s twin, one row per property instance ----------
+//
+// A property row is a fixed tuple exactly as an element row is, so it gets the same treatment: the
+// column NAMES and the projection that builds them live together, and the projection is DERIVED
+// from the names rather than transcribing them. Adding a column is then a compile error here
+// instead of a silently-short SELECT at a caller.
+//
+// It sits beside `elementPayload` rather than with the PropertyStream that carries it because the
+// tuple is the shared fact and the stream is one consumer's object model — the same split that put
+// `elemColumns`/`pathColumns` in `steps/context/stream.ts` and their builders here.
+
+/** The physical payload columns of a property relation, in order. One row per
+ *  VertexProperty/edge-Property instance: `vpid` the VertexProperty id (NULL for edge
+ *  props), `owner` the owning element rowid, `pk`/`pv` key/value, `pvtype` the value's
+ *  canonical stored type (so materialization frames it exactly), `pmeta` a meta bag. */
+export const PROPERTY_PAYLOAD = ['vpid', 'owner', 'ownerLabel', 'pk', 'pv', 'pvtype', 'pmeta'] as const;
+
+/** `expr AS name, …` for one property row, read off the property relation `pr` and its owner
+ *  element `n`. **The one authority on what a property row is.**
+ *
+ *  The whole vertex/edge difference is TinkerPop's VertexProperty-vs-Property split: a
+ *  VertexProperty is itself an element (its own id) and carries meta-properties; an edge
+ *  Property is neither, so `vpid`/`pmeta` are NULL there.
+ *
+ *  Two callers, deliberately: `lowerProperties` (the properties() step, keyed off a traverser)
+ *  and `tinker.search` (keyed off the FTS index). They provision the ROWS differently and share
+ *  the payload — which is what stops a schema change from having to land in two places. */
+export function propertyPayload(elem: Elem, pr: Relation, n: Relation): Expression {
+  const cols: Record<(typeof PROPERTY_PAYLOAD)[number], Expression> = {
+    vpid: elem === 'edge' ? raw('NULL') : pr.c.id,
+    owner: n.c.id,
+    ownerLabel: labelNameFor(n, elem),
+    pk: pr.c.key,
+    pv: storedValueExpr(pr.c.value, pr.c.vtype),
+    pvtype: pr.c.vtype,
+    pmeta: elem === 'edge' ? raw('NULL') : q`json(${pr.c.meta})`,
+  };
+  return list(PROPERTY_PAYLOAD.map((c) => q`${cols[c]} AS ${raw(c)}`), ', ');
+}
+
 // ---------- W4 property source seam (vertex_properties table vs edge JSONB) ----------
 //
 // Vertex properties are normalized rows; edge properties are a flat JSONB blob. The

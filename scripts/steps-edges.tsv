@@ -6,12 +6,12 @@
 # rows left. See scripts/edges-check.ts.
 file	floor	exempt	note
 src/compiler/engine/engine.ts	78	yes	the legacy dispatcher itself — deleted whole in Phase 4
-src/compiler/rel/lower.ts	7	no	bareInjectTag dies with the per-row type channel (§6·7); the rest are kernels
-src/services/catalog/search.ts	6	no	propertyPayload is a kernel; PropertyStream/TraverserLayout are the object model
 src/compiler/engine/deps.ts	5	no	the object model — LoweringState/Stream/TraverserLayout
 src/compiler/rel/alias.ts	4	no	the alias object model — rel/ should own its own AliasEntry
+src/services/catalog/search.ts	4	no	propertyPayload is a kernel; PropertyStream/TraverserLayout are the object model
 src/services/catalog/directory.ts	3	no	the object model
 src/services/spi/types.ts	3	no	THE UNNAMED PIN — the service SPI typed on legacy Stream/ChildFrameStack
+src/compiler/rel/lower.ts	2	no	bareInjectTag dies with the per-row type channel (§6·7); the rest are kernels
 src/compiler/compiler.ts	1	yes	the routing switch (routeWrite) — Phase 1 cuts the write arm, Phase 4 the rest
 src/compiler/rel/write.ts	1	no	kernel — validateLabel/validatePropertyKey; AliasMap is the object model
 src/services/catalog/degree-centrality.ts	1	no	kernel — scopedMovementCount

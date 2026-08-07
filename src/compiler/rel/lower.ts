@@ -9,18 +9,18 @@ import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { forEachRel } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
-import { isLocalScope, PATH_LIST_OPS, sliceOf, sliceParamNames } from '../ir/step.ts';
+import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
 import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs, isNested, isTokenArg, stepChain, argValues, arg, type Arg } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
-import { assertsGType, childSteps, collectionAssert, typeOfAssert } from '../steps/tail/child-shape.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain } from '../ir/analyze.ts';
-import { normalize } from '../ir/passes.ts';
+import { childSteps, normalize } from '../ir/passes.ts';
 import { containsTextSearch, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
-import { bareInjectTag, foldConstantCoercions } from '../steps/write/inject.ts';
+import { bareInjectTag } from '../steps/write/inject.ts';
+import { foldConstantCoercions } from '../../gremlin/coerce.ts';
 import {
   and, byEncounter, carriedCols, EDGE_COLS, eq, labelIds, meta, minter, NODE_COLS, PROPERTIES, renumber, storedValue,
   typeOf, type Minter,

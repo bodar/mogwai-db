@@ -9,13 +9,12 @@ import {
     elemCtx,
     elementPayload,
     elemTable,
-    labelNameFor,
     predicateSql,
+    propertyPayload,
     propExtract,
     propOwnerCol,
     propRel,
     scalarProp,
-    storedValueExpr,
     typedScalarNode,
     vertexLabelIn,
     vertexLabelsJson,
@@ -840,31 +839,6 @@ function deriveGroupMap(s: GroupStream): { rel: Relation; keyOf: MapOf; valOf: M
 }
 
 // ---------- properties() ----------
-
-/** The `PROPERTY_PAYLOAD` projection for one property row, given the ALIASED property table
- *  `pr` and its owner element `n`. **The one authority on what a property row is**, and it is
- *  derived FROM `PROPERTY_PAYLOAD` rather than transcribing it, so adding a payload column is a
- *  compile error here instead of a silently-short SELECT at one of the two callers.
- *
- *  The whole vertex/edge difference is TinkerPop's VertexProperty-vs-Property split: a
- *  VertexProperty is itself an element (its own id) and carries meta-properties; an edge
- *  Property is neither, so `vpid`/`pmeta` are NULL there.
- *
- *  Two callers, deliberately: `lowerProperties` (the properties() step, keyed off a traverser)
- *  and `tinker.search` (keyed off the FTS index). They provision the ROWS differently and share
- *  the payload — which is what stops a schema change from having to land in two places. */
-export function propertyPayload(elem: Elem, pr: Relation, n: Relation): Expression {
-  const cols: Record<(typeof PROPERTY_PAYLOAD)[number], Expression> = {
-    vpid: elem === 'edge' ? raw('NULL') : pr.c.id,
-    owner: n.c.id,
-    ownerLabel: labelNameFor(n, elem),
-    pk: pr.c.key,
-    pv: storedValueExpr(pr.c.value, pr.c.vtype),
-    pvtype: pr.c.vtype,
-    pmeta: elem === 'edge' ? raw('NULL') : q`json(${pr.c.meta})`,
-  };
-  return list(PROPERTY_PAYLOAD.map((c) => q`${cols[c]} AS ${raw(c)}`), ', ');
-}
 
 /** properties()/properties(keys) is a genuine shape transition. The property row
  * stays relational so filters and projections can consume it one step at a time. */

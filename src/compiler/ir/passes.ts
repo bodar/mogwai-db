@@ -1,4 +1,4 @@
-import { isNested, type Step, type StrategyUse } from '../../gremlin/frontend.ts';
+import { isNested, stepChain, type Step, type StrategyUse } from '../../gremlin/frontend.ts';
 import { PASS_CATEGORIES, type Pass, type PassCategory, type PassContext } from './pass.ts';
 import {
     stripTerminal, desugarMatchString, desugarPropertyMap, formRepeatRegions, unrollFixedRepeat, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
@@ -248,6 +248,27 @@ export function normalize(
 /** No `withSideEffect` declared. One shared value, so a caller that has none allocates nothing and
  *  every empty registry is the same object. */
 const NO_SIDE_EFFECTS: Map<string, any> = new Map();
+
+/** A nested `__.…` argument PARSED and normalized into a child body — the one entry point every
+ *  child-bearing step reaches for. Child chains cross the same normalization seam as the root; in
+ *  particular `order().by()` must arrive as ONE `IRStep` before any shape-aware lowering sees it.
+ *
+ *  The constant environments travel WITH the body, because normalizing re-runs the whole Pass
+ *  pipeline and the write-argument verifier in it resolves a `__.select(k)` against the side-effect
+ *  registry. A caller that has none passes none.
+ *
+ *  `discard` rides out-of-band (a `__.discard()` body is stripped to nothing by the pipeline, and
+ *  the caller must still be able to SEE that it discarded), so the terminal step is re-appended.
+ *
+ *  It lives beside `normalize` rather than with the child seam that grew it: parsing a nested arg
+ *  into IR is IR production, and the classifier, both lowering spines and the service SPI all need
+ *  it without also needing a lowering. Contrast `rootedSteps` (`rel/lower.ts`), which is
+ *  deliberately NOT this — a ROOTED nested body must keep its source, where this strips one. */
+export const childSteps = (nested: any, params: Record<string, any>, sideEffects?: Map<string, any>): IRStep[] => {
+  const rawSteps = stepChain(nested, params);
+  const normalized = normalize(rawSteps, params, sideEffects);
+  return normalized.discard ? [...normalized.steps, rawSteps.at(-1)! as IRStep] : normalized.steps;
+};
 
 /** Fold PASSES over the chain in category order — the SINGLE pre-lowering rewrite entry, replacing
  *  both the inside-out normalize() nesting AND the applyStrategies if/else ladder.

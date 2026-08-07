@@ -1,8 +1,7 @@
 import { q, value, raw, type Relation } from '../../sql/kernel/q.ts';
 import { propertyFts } from '../../sql/schema.ts';
-import { elemTable, propOwnerCol, propRel, sqlElem, type Elem } from '../../compiler/plan/plan.ts';
-import { propertyPayload } from '../../compiler/steps/tail/group.ts';
-import { PROPERTY_PAYLOAD, toPropertyStream, type PropertyStream } from '../../compiler/steps/context/stream.ts';
+import { elemTable, propOwnerCol, propRel, propertyPayload, PROPERTY_PAYLOAD, sqlElem, type Elem } from '../../compiler/plan/plan.ts';
+import { toPropertyStream, type PropertyStream } from '../../compiler/steps/context/stream.ts';
 import { rootLayout, type TraverserLayout } from '../../compiler/steps/context/context.ts';
 import type { Service, CallSite, CallParams } from '../spi/types.ts';
 
