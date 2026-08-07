@@ -7,6 +7,8 @@ import { PASSES } from '../../src/compiler/ir/passes.ts';
 import { PASS_CATEGORIES } from '../../src/compiler/ir/pass.ts';
 import { canonicalizeConnectives } from '../../src/compiler/ir/strategies.ts';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
+import { compile } from '../../src/compiler/compiler.ts';
+import { runPasses, EMPTY_STRATEGY_USE } from '../../src/compiler/ir/passes.ts';
 
 const names = PASSES.map((p) => p.name);
 const ord = (name: string) => names.indexOf(name);
@@ -133,5 +135,50 @@ describe('ConnectiveStrategy: infix .and()/.or() folds to the step form', () => 
 
   test('an empty operand throws rather than silently dropping a conjunct', () => {
     expect(() => fold('g.V().and().has("name","marko")')).toThrow(/malformed infix/);
+  });
+});
+
+describe('the writeArguments verify Pass — a text-level refusal is not a spine\'s business (§6·5)', () => {
+  const passes = (gremlin: string) =>
+    runPasses(stepChain(parseGremlin(gremlin), {}), EMPTY_STRATEGY_USE, {});
+
+  test('a text-level write ERROR raises from the Pass tier, above the routing switch', () => {
+    // The point is WHERE, and it is what makes the coverage counter able to reach 100%. Raised from
+    // a lowering whose contract is `null` these were `catch { return null }` at every write site,
+    // so the census counted a traversal TinkerPop itself REFUSES as an uncovered gap forever.
+    // Asserted against runPasses directly: no engine, no store, no spine chosen yet.
+    for (const [gremlin, message] of [
+      ['g.addV().property("k","v","acl")', /meta-properties must be key\/value pairs/],
+      ['g.addV().property("k","v",1,"x")', /meta-property key must be a string/],
+      ['g.mergeV(["name":"marko"]).option(Merge.onCreate, ["name":"stephen"])', /cannot override values from merge/],
+    ] as const) {
+      expect(() => passes(gremlin), gremlin).toThrow(message);
+      // …and identically whichever spine would have run it, which is the property one authority buys.
+      for (const spine of ['rel', 'legacy'] as const)
+        expect(() => compile(gremlin, {}, { spine }), `${spine}: ${gremlin}`).toThrow(message);
+    }
+  });
+
+  test('a DEFERRAL is swallowed there and left to the spines', () => {
+    // "not learned yet" is the other fact wearing the same `null`, and raising it above both spines
+    // would freeze a shape a lowering could learn tomorrow. `mergeV(…).values(…)` is exactly that:
+    // legacy refuses the read tail, the RelIR fold continues past it — so the verifier must not
+    // decide, and it must slice the option()/property() RUN rather than the rest of the chain.
+    const gremlin = 'g.mergeV([(T.label):"person"]).values("name")';
+    expect(() => passes(gremlin)).not.toThrow();
+    expect(() => compile(gremlin, {}, { spine: 'rel' })).not.toThrow();
+    expect(() => compile(gremlin, {}, { spine: 'legacy' })).toThrow(/step not implemented after mergeV/);
+  });
+
+  test('the Pass resolves a withSideEffect constant rather than refusing for want of one', () => {
+    // It runs BEFORE the spine route and therefore before anything else has read the registry, so
+    // `compilePlan` extracts it first. Verifying without it would refuse a traversal for a fact the
+    // compile already holds.
+    const gremlin = 'g.withSideEffect("c", [(T.label):"person","name":"marko"]).mergeV(__.select("c"))';
+    for (const spine of ['rel', 'legacy'] as const)
+      expect(() => compile(gremlin, {}, { spine }), spine).not.toThrow();
+    // …and without the declaration the very same text is a refusal, from the same place.
+    expect(() => compile('g.mergeV(__.select("c"))', {}, { spine: 'rel' }))
+      .toThrow(/needs a withSideEffect/);
   });
 });

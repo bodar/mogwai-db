@@ -38,6 +38,12 @@ export type PassCategory = typeof PASS_CATEGORIES[number];
  *  for the lowering half. Built once per compilePlan() call. */
 export interface PassContext {
   readonly params: Record<string, any>;
+  /** The `withSideEffect(name, constant)` registry the front-end extracted — the SECOND compile-scope
+   *  constant environment a step's arguments resolve against, beside the wire bindings in `params`.
+   *  A verify Pass that parses a write step needs it for the same reason the lowerings do: a
+   *  `__.select(k)` key or value IS the constant, and verifying without it would refuse a traversal
+   *  for a fact the compile already holds. Empty where a caller declared none. */
+  readonly sideEffects: Map<string, any>;
   /** Parsed withStrategies/withoutStrategies specs, already filtered: withoutStrategies-suppressed
    *  and no-op strategies are removed before the pipeline runs, so a decoration/verify Pass's
    *  `applies` only ever asks "is this strategy named", never re-litigates suppression. */

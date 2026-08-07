@@ -13,7 +13,7 @@ import { arg, isNested, argValues } from '../../gremlin/frontend.ts';
 import type { ChildSeam } from './child.ts';
 import { gremlinTypeOf, propertyValueBind } from '../../gremlin/types.ts';
 import { propertyFtsEntries } from '../../services/fts-index.ts';
-import { mergeMaps, parseProperty, type MergeMaps, type MergeSpec, type ParsedProperty, type PropSpec } from '../steps/write/write.ts';
+import { Deferral, mergeMaps, parseProperty, type MergeMaps, type MergeSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
 import { validateLabel, validatePropertyKey } from '../steps/write/validate.ts';
 import { and, carriedCols, eq, meta, renumber, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
@@ -522,9 +522,12 @@ export function propertyWrites(steps: readonly IRStep[], elem: Elem, child: Chil
   for (const step of steps) {
     if (step.modulators?.length || step.optionArms) return null;
     let parsed: ParsedProperty;
-    // `parseProperty` RAISES on a malformed meta pair, and the message is legacy's business — catch
-    // and decline so the spine that owns it raises it, exactly as the coercion prefix does.
-    try { parsed = parseProperty(step, child.sideEffects, child.params); } catch { return null; }
+    // A `Deferral` is "not learned yet" and DECLINES; anything else has already been raised by the
+    // `writeArguments` verify Pass, above the routing switch, so it cannot arrive here (§6·5). The
+    // narrowed catch is the point: the blanket one swallowed a text-level ERROR too, and the census
+    // then counted a REFUSED traversal as an uncovered gap forever.
+    try { parsed = parseProperty(step, child.sideEffects, child.params); }
+    catch (e) { if (!(e instanceof Deferral)) throw e; return null; }
     if (parsed.kind !== 'prop') return null;
     const write = writeOf(parsed.spec, elem);
     if (!write) return null;
@@ -1114,9 +1117,10 @@ export function elementMergeV(
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
   let maps: MergeMaps;
-  // The parse RAISES for every map shape it refuses, and those messages are the legacy spine's to
-  // raise — catch and decline, exactly as the `property()` run does.
-  try { maps = mergeMaps(step, options, 'mergeV', child.sideEffects, child.params); } catch { return null; }
+  // `propertyWrites`' rule, one host up: a `Deferral` declines, a text-level ERROR was already
+  // raised by the `writeArguments` verify Pass and cannot reach here (§6·5).
+  try { maps = mergeMaps(step, options, 'mergeV', child.sideEffects, child.params); }
+  catch (e) { if (!(e instanceof Deferral)) throw e; return null; }
   const { match, onCreate, onMatch } = maps;
   for (const spec of [match, onCreate, onMatch]) {
     if (!spec) continue;

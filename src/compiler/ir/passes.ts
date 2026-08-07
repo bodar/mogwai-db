@@ -9,6 +9,7 @@ import {
     NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
     type IRStep,
 } from './strategies.ts';
+import { verifyWriteArgs } from './write-args.ts';
 
 // ---------- the Pass pipeline: the concrete PASSES array + the driver ----------
 //
@@ -202,7 +203,27 @@ const VERIFY: Pass[] = group('verify', [
       return steps;
     },
   })),
+  // A WRITE STEP'S ARGUMENTS, parsed for their errors alone (§6·5). Always on: `property(k, v, m)`
+  // with an odd meta run, a merge map keyed `T.key`, an `option()` whose selector is not
+  // `Merge.onCreate`/`onMatch` — each is an ERROR whichever spine would have run the traversal, so
+  // it belongs above the routing switch and not inside a lowering whose contract is `null`. A
+  // `Deferral` ("not learned yet") is swallowed and left to the spines; see `verifyWriteArgs`.
+  //
+  // Against `ctx.originalChain` for the reason every verify Pass is: an injected PartitionStrategy
+  // write stamp is not the user's text, and the desugars that a write parse DOES depend on
+  // (`desugarPropertyMap`) are `extract`-category, so they are already applied in that snapshot.
+  {
+    name: 'writeArguments',
+    applies: (_steps, ctx) => ctx.originalChain.some((s) => WRITE_ARG_HOSTS.has(s.name)),
+    run: function writeArgumentsPass(steps, ctx) {
+      verifyWriteArgs(ctx.originalChain as IRStep[], ctx.params, ctx.sideEffects);
+      return steps;
+    },
+  },
 ]);
+
+/** The steps whose ARGUMENTS the write parse owns — the cheap gate for the Pass above. */
+const WRITE_ARG_HOSTS = new Set(['property', 'mergeV', 'mergeE']);
 
 /** The ordered pipeline. Declaration order across groups fixes cross-category order (extract <
  *  decoration < canonicalize < simplify < verify); the Stage 3 test checks THIS array against
@@ -218,9 +239,15 @@ const DECORATION_ORDINAL = PASS_CATEGORIES.indexOf('decoration');
  *  entry point every NESTED sub-chain uses (child bodies, match patterns, write targets, correlated
  *  predicates). A sub-chain carries no withStrategies of its own, so EMPTY_STRATEGY_USE is exactly
  *  right; this is `runPasses` with no strategies, named for the sub-chain intent. */
-export function normalize(steps: Step[]): { steps: IRStep[]; discard: boolean } {
-  return runPasses(steps, EMPTY_STRATEGY_USE);
+export function normalize(
+  steps: Step[], params: Record<string, any> = {}, sideEffects: Map<string, any> = NO_SIDE_EFFECTS,
+): { steps: IRStep[]; discard: boolean } {
+  return runPasses(steps, EMPTY_STRATEGY_USE, params, sideEffects);
 }
+
+/** No `withSideEffect` declared. One shared value, so a caller that has none allocates nothing and
+ *  every empty registry is the same object. */
+const NO_SIDE_EFFECTS: Map<string, any> = new Map();
 
 /** Fold PASSES over the chain in category order — the SINGLE pre-lowering rewrite entry, replacing
  *  both the inside-out normalize() nesting AND the applyStrategies if/else ladder.
@@ -230,13 +257,15 @@ export function normalize(steps: Step[]): { steps: IRStep[]; discard: boolean } 
  *  do something (drop withoutStrategies-suppressed + no-op entries); then require every remaining
  *  named strategy to be claimed by SOME pass's `applies` — the fail-closed catch-all, now a pipeline
  *  invariant instead of a ladder `else throw`. `discard` rides out-of-band on ctx.out. */
-export function runPasses(steps: Step[], use: StrategyUse, params: Record<string, any> = {}): { steps: IRStep[]; discard: boolean } {
+export function runPasses(
+  steps: Step[], use: StrategyUse, params: Record<string, any> = {}, sideEffects: Map<string, any> = NO_SIDE_EFFECTS,
+): { steps: IRStep[]; discard: boolean } {
   for (const name of use.without)
     if (ALWAYS_ON_STRATEGIES.has(name))
       throw new Error(`withoutStrategies(${name}) is not supported: its effect (infix .and()/.or() folding) is unconditionally applied by this compiler and cannot be disabled.`);
   const removed = new Set(use.without);
   const active = use.with.filter((s) => !removed.has(s.name) && !NO_OP_STRATEGIES.has(s.name));
-  const ctx: PassContext = { params, strategies: { with: active, without: use.without }, originalChain: [], out: { discard: false } };
+  const ctx: PassContext = { params, sideEffects, strategies: { with: active, without: use.without }, originalChain: [], out: { discard: false } };
 
   // Fail-closed invariant: every active (non-suppressed, non-no-op) strategy must be claimed by a
   // decoration/verify pass of the same name, else it is a semantic/unknown strategy that would

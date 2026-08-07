@@ -1,8 +1,8 @@
 import type { GraphStore } from '../../../storage.ts';
 import { q, value, list, raw, render, type Expression, type Query, type Relation } from '../../../sql/kernel/q.ts';
 import { labelIn, labelNameFor, propHasFor, sqlElem, elemTable, type Elem, vertexLabelIn } from '../../plan/plan.ts';
-import { gremlinTypeOf, mapEntryType, propertyValueBind, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
-import { stepChain, arg, argValues, isNested, isTokenArg, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isMergeArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
+import { gremlinTypeOf, propertyValueBind, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
+import { stepChain, arg, argValues, isNested, isTokenArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { isStreamBarrier } from '../../ir/step.ts';
 import { normalize } from '../../ir/passes.ts';
@@ -15,6 +15,16 @@ import { bindChunks, deleteWhereIn, placeholders } from '../../../rowbatch.ts';
 import { layoutCols, type ElementStream, type TraverserLayout } from '../context/context.ts';
 import { DEFAULT_VERTEX_CARDINALITY, DEFAULT_VERTEX_LABEL, LABEL_MUTATION_UNSUPPORTED, type VertexCardinality } from '../../../api.ts';
 import { validateLabel, validatePropertyKey } from './validate.ts';
+import {
+    Deferral, labelNames, mergeMaps, parseProperty,
+    parsePropertyTail,
+    propTypeNode,
+    readCardinality, singleProps, validateNoOverrides, validateResolvedMergeSpec,
+    assertEdgePropertySpec, constFromNested,
+    type Cardinality,
+    type MergeSpec,
+    type PropSpec
+} from '../../ir/write-args.ts';
 
 /** The driver row set a write consumes, IN EMISSION ORDER when the chain carries one.
  *
@@ -39,34 +49,6 @@ function renderDriverRows(st: { q: Query; rel: Relation; traverserLayout: Traver
 // A CORRELATED arg (its value depends on the current element) is seeded at the driver
 // element by prepending a V(<rowid>)/E(<rowid>) source (numeric arg → rowid match), then
 // compiled + run + extracted per driver row. See docs/archive/2026-07-16-write-args-through-read-spine.md.
-
-// A nested `__.select(k)` where k is a withSideEffect(k, const) key resolves to the
-// constant at compile time (correct-by-construction — the value never changes). Returns
-// {has:false} for any other nested shape so the caller falls through to its own handling.
-function constFromSelect(nested: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { has: boolean; value: any } {
-  if (!isNested(nested)) return { has: false, value: undefined };
-  const inner = stepChain(nested.nested, params);
-  if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0].value === 'string' && sideEffects?.has(inner[0].args[0].value))
-    return { has: true, value: sideEffects.get(inner[0].args[0].value) };
-  return { has: false, value: undefined };
-}
-
-// A nested value that is a compile-time INVARIANT — no seed / no read spine needed:
-//   __.select(k) of a withSideEffect(k, const)  (via constFromSelect), or
-//   __.constant(v)  (source-less; the vtype comes from the constant's own parsed argType,
-//                    so UUID(..)/datetime(..) keep their type, not a JS-inferred string/int).
-// This is what lets a global mergeV (no driver to seed a V/E source at) resolve a nested
-// value, and what resolves a nested property KEY. {has:false} → fall through to a seeded read.
-function constFromNested(nested: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
-  const c = constFromSelect(nested, sideEffects, params);
-  if (c.has) return { has: true, value: c.value, vtype: gremlinTypeOf(c.value, null) };
-  if (isNested(nested)) {
-    const inner = stepChain(nested.nested, params);
-    if (inner.length === 1 && inner[0].name === 'constant')
-      return { has: true, value: inner[0].args[0].value, vtype: gremlinTypeOf(inner[0].args[0].value, inner[0].args[0]?.type ?? null) };
-  }
-  return { has: false, value: undefined, vtype: null };
-}
 
 // Compile a nested traversal (optionally seeded at a driver element) and run it against
 // the store, returning its raw result rows + the compiled shape. Seeding prepends a
@@ -169,6 +151,67 @@ function resolveSpecKey(engine: Engine, store: GraphStore, sp: PropSpec, id: num
   if (!r.has) throw new Error('property() key traversal produced no value');
   if (typeof r.value !== 'string') throw new Error(`property() key traversal must produce a string, got ${typeof r.value}`);
   return r.value;
+}
+
+/** Apply a parsed `property()` tail to ONE element the enclosing step just emitted. Both merge
+ *  compilers reach the SAME storage waists through this, so a meta-property or a declared
+ *  cardinality in a merge tail behaves exactly as it does after `g.V(…)` — neither merge lowering
+ *  learns that either exists. Values resolve per element (`resolveSpecValue`), so a correlated
+ *  `property(k, __.trav)` in the tail is seeded at the merged element, not at the driver. */
+function applyPropertyTail(engine: Engine, store: GraphStore, specs: readonly PropSpec[], id: number, elem: Elem, params: Record<string, any>, sideEffects?: Map<string, any>): void {
+  for (const sp of specs) {
+    const r = resolveSpecValue(engine, store, sp, id, elem, params, sideEffects);
+    if (!r.has) continue;
+    const key = resolveSpecKey(engine, store, sp, id, elem, params, sideEffects);
+    if (elem === 'edge') insertEdgeProperty(store, id, key, r.value, r.vtype, r.typeNode);
+    else applyVertexProperty(store, id, key, r.values, r.vtype, sp.meta, sp.cardinality, r.typeNode);
+  }
+}
+
+/** `labels` is a LIST because a vertex carries a set: `addV("a","b")` is two labels, and
+ *  `addV()` with no argument is the single default 'vertex'. Under LabelCardinality.ONE a spec
+ *  with more than one is rejected at insert time rather than silently truncated. */
+interface VertexSpec { labels: (string | string[] | { nested: any })[]; props: PropSpec[]; uid: string | number | null; }
+
+// An addV(...) step + its trailing property() steps → a vertex spec. A property key or
+// value that is __.select(k) of a withSideEffect constant resolves at parse time.
+/** `addV(…)` plus its followers. An `addLabel(…)` follower on a JUST-CREATED vertex is simply more
+ *  labels — `addV("person").addLabel("employee")` is the same vertex as `addV("person","employee")`
+ *  — so it folds into the spec here rather than routing to the mutation compiler, whose prefix
+ *  would be the addV itself and therefore not a readable element stream. */
+function parseVertexSpec(addV: Step, propSteps: Step[], sideEffects?: Map<string, any>, params: Record<string, any> = {}): VertexSpec {
+  // A nested-traversal label (addV(__.…)) stays UNRESOLVED here (it needs the store) —
+  // insertVertex evaluates it at run time. A __.select(sideEffectConst) collapses now.
+  // addV() takes N labels. Each stays UNRESOLVED if it is a traversal (insertVertex evaluates
+  // it against the store); a __.select(sideEffectConst) collapses now. No argument at all is
+  // the single default label 'vertex'.
+  // A resolved constant keeps its SHAPE: `addV(constant(["a","b"]))` is two labels, and
+  // String()-ing it here turned them into the single label "a,b".
+  const asLabel = (a: any): string | string[] | { nested: any } =>
+    typeof a === 'string' ? a
+    : isNested(a) ? ((c) => c.has ? (Array.isArray(c.value) ? c.value.map(String) : String(c.value)) : a)(constFromNested(a, sideEffects, params))
+    : String(a);
+  // No argument means "whatever this graph's default is", which is NOT always 'vertex': under
+  // LabelCardinality.ZERO_OR_MORE a bare addV() creates a vertex with NO labels (`g_addV_labels`
+  // asserts labels() has a count of 0). insertVertex applies the default, because only it can see
+  // the declared cardinality. An empty list here therefore means "unspecified", not "none".
+  let labels: (string | string[] | { nested: any })[] = argValues(addV).map(asLabel);
+  const props: PropSpec[] = [];
+  let uid: string | number | null = null;
+  for (const s of propSteps) {
+    if (s.name === 'addLabel') { labels.push(...argValues(s).map(asLabel)); continue; }
+    const p = parseProperty(s, sideEffects, params);
+    // A T token on a vertex being CREATED is not immutable — it IS the id/label being supplied.
+    if (p.kind === 'token') {
+      if (p.meta) throw new Error(`property(T.${p.token}) does not take meta-properties`);
+      if (p.token === 'id') uid = p.value;
+      else if (p.token === 'label') labels = [String(p.value)];
+      else throw new Deferral(`property(T.${p.token}) not supported`);
+      continue;
+    }
+    if (p.kind === 'prop') props.push(p.spec);
+  }
+  return { labels, props, uid };
 }
 
 // ---------- write compilers ----------
@@ -351,167 +394,6 @@ function compileSetProperty(engine: Engine, steps: IRStep[], params: Record<stri
 // shared value tail in projection.ts (compileInject). WRITE_RULES routes it here
 // only because it has no V/E source; see the import at the top of this file.
 
-/** What the STEP declared. `null` is a real state, not a missing one: it means the traversal
- *  named no cardinality, so the graph's default applies — and only the storage waist may resolve
- *  it, because collapsing `null` to `'single'` here is exactly the bug that made a repeated
- *  `property(k, v)` overwrite. */
-type Cardinality = VertexCardinality | null;
-// `vtype` names the OUTER stored shape (the value column's sibling type); `typeNode` is
-// the FULL recursive type tree, threaded so a collection value tags each element/entry/key
-// losslessly (valueNodeOf). A scalar's typeNode is redundant with vtype; a nested-traversal
-// value has no literal typeNode (its type is resolved at run time as a scalar).
-export interface PropSpec { key: string | { nested: any }; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null; meta: Record<string, any> | null; cardinality: Cardinality; }
-/** `labels` is a LIST because a vertex carries a set: `addV("a","b")` is two labels, and
- *  `addV()` with no argument is the single default 'vertex'. Under LabelCardinality.ONE a spec
- *  with more than one is rejected at insert time rather than silently truncated. */
-interface VertexSpec { labels: (string | string[] | { nested: any })[]; props: PropSpec[]; uid: string | number | null; }
-
-// A leading Cardinality token on property() args, else null (= the graph's default, applied at
-// the storage waist). Returns it plus the remaining [key, value, ...metaArgs], and `off` — how
-// many leading args were consumed (0 or 1) so the caller can index the parallel argTypes.
-function readCardinality(args: any[]): { cardinality: Cardinality; rest: any[]; off: number } {
-  if (isCardinalityArg(args[0]))
-    return { cardinality: args[0].cardinality as Cardinality, rest: args.slice(1), off: 1 };
-  return { cardinality: null, rest: args, off: 0 };
-}
-
-/** The canonical stored type of a property()'s VALUE arg: the type its carrying
- *  channel declared (the value Arg's type), else inferred from the
- *  JS value. `off`+1 is the value's index in the original arg list (key is at off). */
-const propVtype = (step: Step, val: any, off: number): CanonicalType | null =>
-  gremlinTypeOf(val, step.args[off + 1]?.type ?? null);
-
-/** The property()'s VALUE arg's full recursive TypeNode (the value Arg's type at the value's
- *  position) — carried alongside vtype so a collection value's elements/keys are tagged
- *  losslessly by valueNodeOf. null for an untyped channel (infer per element at storage). */
-const propTypeNode = (step: Step, off: number): TypeNode | null => step.args[off + 1]?.type ?? null;
-
-/** One `property()` step, parsed. The three hosts differ ONLY in what they do with a T token —
- *  addV consumes `T.id`/`T.label` into the vertex it is about to create, a mutation on an existing
- *  element refuses (ids and labels are immutable there, which is TinkerPop's own rule), and a merge
- *  tail refuses for the same reason — so the token is REPORTED here rather than decided here. This
- *  loop existed twice before the merge tail needed it a third time; the copies had already drifted
- *  (only one of them collapsed a `__.select(sideEffectConst)` VALUE). */
-export type ParsedProperty =
-  | { kind: 'prop'; spec: PropSpec }
-  | { kind: 'token'; token: string; value: any; meta: boolean }
-  /** `property(null, …)` — a null KEY adds nothing, which is TinkerPop's null case. (The map form
-   *  never reaches here: `desugarPropertyMap` expanded it before lowering ever saw the chain.) */
-  | { kind: 'none' };
-
-export function parseProperty(s: Step, sideEffects: Map<string, any> | undefined, params: Record<string, any>): ParsedProperty {
-  const { cardinality, rest, off } = readCardinality(argValues(s));
-  let [key, val] = rest; const metaArgs = rest.slice(2);
-  { const ck = constFromNested(key, sideEffects, params); if (ck.has) key = ck.value; }
-  { const cv = constFromSelect(val, sideEffects, params); if (cv.has) val = cv.value; }
-  if (key == null || (typeof key === 'object' && !isNested(key) && !isTokenArg(key))) return { kind: 'none' };
-  if (isTokenArg(key)) return { kind: 'token', token: key.token, value: val, meta: metaArgs.length > 0 };
-  return { kind: 'prop', spec: { key, value: val, vtype: propVtype(s, val, off), typeNode: propTypeNode(s, off), meta: metaOf(metaArgs), cardinality } };
-}
-
-/** What an EDGE property may not carry. TinkerPop's edge `Property` has neither a cardinality nor
- *  meta-properties (it is single-valued by spec — the `UNIQUE(edge,key)` constraint is the same
- *  rule at the schema level), so both are refusals wherever an edge property is written. */
-function assertEdgePropertySpec(sp: PropSpec): void {
-  if (sp.cardinality !== null) throw new Error('Cardinality is not valid on an edge property');
-  if (sp.meta) throw new Error('meta-properties are not valid on an edge property');
-}
-
-/** Apply a parsed `property()` tail to ONE element the enclosing step just emitted. Both merge
- *  compilers reach the SAME storage waists through this, so a meta-property or a declared
- *  cardinality in a merge tail behaves exactly as it does after `g.V(…)` — neither merge lowering
- *  learns that either exists. Values resolve per element (`resolveSpecValue`), so a correlated
- *  `property(k, __.trav)` in the tail is seeded at the merged element, not at the driver. */
-function applyPropertyTail(engine: Engine, store: GraphStore, specs: readonly PropSpec[], id: number, elem: Elem, params: Record<string, any>, sideEffects?: Map<string, any>): void {
-  for (const sp of specs) {
-    const r = resolveSpecValue(engine, store, sp, id, elem, params, sideEffects);
-    if (!r.has) continue;
-    const key = resolveSpecKey(engine, store, sp, id, elem, params, sideEffects);
-    if (elem === 'edge') insertEdgeProperty(store, id, key, r.value, r.vtype, r.typeNode);
-    else applyVertexProperty(store, id, key, r.values, r.vtype, sp.meta, sp.cardinality, r.typeNode);
-  }
-}
-
-/** A run of `property()` steps → their specs, for a host on an element that ALREADY EXISTS (a
- *  mutation tail, a merge tail). A T token is immutable on such an element, so it is the refusal. */
-function parsePropertyTail(steps: readonly Step[], what: string, sideEffects: Map<string, any> | undefined, params: Record<string, any>): PropSpec[] {
-  const specs: PropSpec[] = [];
-  for (const s of steps) {
-    if (s.name !== 'property') throw new Error(`step not implemented after ${what}: ${s.name}()`);
-    const p = parseProperty(s, sideEffects, params);
-    if (p.kind === 'token') throw new Error(`property(T.${p.token}) on an existing element not yet supported`);
-    if (p.kind === 'prop') specs.push(p.spec);
-  }
-  return specs;
-}
-
-// Trailing property() args after (key, value) are meta-property key/value pairs
-// (VertexProperty meta-properties). A meta value must be a scalar (no traversal / no
-// meta-of-meta).
-function metaOf(metaArgs: any[]): Record<string, any> | null {
-  if (!metaArgs.length) return null;
-  if (metaArgs.length % 2 !== 0) throw new Error('property() meta-properties must be key/value pairs');
-  const m: Record<string, any> = {};
-  for (let i = 0; i < metaArgs.length; i += 2) {
-    const mk = metaArgs[i];
-    if (typeof mk !== 'string') throw new Error('property() meta-property key must be a string');
-    const mv = metaArgs[i + 1];
-    if (isNested(mv)) throw new Error('property() meta-property value must be a scalar');
-    m[mk] = mv;
-  }
-  return m;
-}
-
-// A single-cardinality prop bag (a merge map) → PropSpecs. The vtype comes from the
-// captured propTypes (the map's TypeNode: a literal subtype or a typed client's wire
-// DataType; a nested value's read-shape type), falling back to JS inference where the
-// channel said nothing (a JS client that dropped the type / an untyped bound map).
-const singleProps = (rec: Record<string, any>, types: Record<string, TypeNode | null> = {}, cardinalities: Record<string, Cardinality> = {}): PropSpec[] =>
-  Object.entries(rec).map(([key, value]) => ({
-    key, value, typeNode: types[key] ?? null,
-    vtype: gremlinTypeOf(value, types[key] ?? null), meta: null, cardinality: cardinalities[key] ?? null,
-  }));
-
-// An addV(...) step + its trailing property() steps → a vertex spec. A property key or
-// value that is __.select(k) of a withSideEffect constant resolves at parse time.
-/** `addV(…)` plus its followers. An `addLabel(…)` follower on a JUST-CREATED vertex is simply more
- *  labels — `addV("person").addLabel("employee")` is the same vertex as `addV("person","employee")`
- *  — so it folds into the spec here rather than routing to the mutation compiler, whose prefix
- *  would be the addV itself and therefore not a readable element stream. */
-function parseVertexSpec(addV: Step, propSteps: Step[], sideEffects?: Map<string, any>, params: Record<string, any> = {}): VertexSpec {
-  // A nested-traversal label (addV(__.…)) stays UNRESOLVED here (it needs the store) —
-  // insertVertex evaluates it at run time. A __.select(sideEffectConst) collapses now.
-  // addV() takes N labels. Each stays UNRESOLVED if it is a traversal (insertVertex evaluates
-  // it against the store); a __.select(sideEffectConst) collapses now. No argument at all is
-  // the single default label 'vertex'.
-  // A resolved constant keeps its SHAPE: `addV(constant(["a","b"]))` is two labels, and
-  // String()-ing it here turned them into the single label "a,b".
-  const asLabel = (a: any): string | string[] | { nested: any } =>
-    typeof a === 'string' ? a
-    : isNested(a) ? ((c) => c.has ? (Array.isArray(c.value) ? c.value.map(String) : String(c.value)) : a)(constFromNested(a, sideEffects, params))
-    : String(a);
-  // No argument means "whatever this graph's default is", which is NOT always 'vertex': under
-  // LabelCardinality.ZERO_OR_MORE a bare addV() creates a vertex with NO labels (`g_addV_labels`
-  // asserts labels() has a count of 0). insertVertex applies the default, because only it can see
-  // the declared cardinality. An empty list here therefore means "unspecified", not "none".
-  let labels: (string | string[] | { nested: any })[] = argValues(addV).map(asLabel);
-  const props: PropSpec[] = [];
-  let uid: string | number | null = null;
-  for (const s of propSteps) {
-    if (s.name === 'addLabel') { labels.push(...argValues(s).map(asLabel)); continue; }
-    const p = parseProperty(s, sideEffects, params);
-    // A T token on a vertex being CREATED is not immutable — it IS the id/label being supplied.
-    if (p.kind === 'token') {
-      if (p.meta) throw new Error(`property(T.${p.token}) does not take meta-properties`);
-      if (p.token === 'id') uid = p.value;
-      else if (p.token === 'label') labels = [String(p.value)];
-      else throw new Error(`property(T.${p.token}) not supported`);
-      continue;
-    }
-    if (p.kind === 'prop') props.push(p.spec);
-  }
-  return { labels, props, uid };
-}
 
 // INSERT one row into nodes/edges with the shared optional-uid/id column splice.
 // A string uid writes the `uid` column; a numeric uid writes the rowid `id`
@@ -1076,193 +958,6 @@ function resolveEndpoint(engine: Engine, store: GraphStore, spec: any, d: { alia
 // propTypes carries each prop VALUE's canonical type: from the map's TypeNode (a literal
 // subtype or a typed client's wire DataType) for a literal value, or from the read shape
 // for a nested value (filled by resolveMergeSpec). null = infer from the JS value.
-/**
- * WHICH map this is. The spec-mandated validation differs per role and cannot be re-derived from
- * the spec's contents — `option(onMatch)` admits only String keys (plus `T.label`, for multi-label
- * replacement) where the merge argument and `option(onCreate)` admit the element's id/label (and,
- * for `mergeE`, its endpoint directions). Carrying it on the spec is what lets ONE validation run
- * at the ONE place every map becomes concrete, instead of three near-copies at three call sites.
- */
-export interface MergeRole {
-  readonly op: 'mergeV' | 'mergeE';
-  readonly kind: 'merge' | 'onCreate' | 'onMatch';
-}
-
-export interface MergeSpec {
-  readonly role: MergeRole;
-  /** A LIST because a merge map's T.label may be `["a","b"]`; null = the key was absent. */
-  label: string[] | null | { nested: any };
-  id: any;
-  outV: any;
-  inV: any;
-  /** Props are keyed by a stable internal slot until resolveMergeSpec turns a nested
-   * map key into its actual string. Static keys use themselves as the slot. */
-  props: Record<string, any>;
-  propTypes: Record<string, TypeNode | null>;
-  propKeys: Record<string, string | { nested: any }>;
-  /** The per-key property cardinality. A map's CardinalityValueTraversal wins over
-   * its enclosing option(..., Cardinality.x) default, matching TinkerPop. */
-  propCardinalities: Record<string, Cardinality>;
-}
-
-function classifyMergeKey(k: any): { kind: 'label' | 'id' | 'outV' | 'inV' | 'prop'; name?: string } {
-  const enumName = (typeName: string) => k && typeof k === 'object' && k.typeName === typeName ? String(k.elementName).toLowerCase() : null;
-  const t = enumName('T') ?? (isTokenArg(k) ? k.token : null);
-  if (t) { if (t === 'label') return { kind: 'label' }; if (t === 'id') return { kind: 'id' }; throw new Error(`merge map key T.${t} not supported`); }
-  const d = enumName('Direction') ?? (isDirectionArg(k) ? k.direction : null);
-  if (d) {
-    if (d === 'out' || d === 'from') return { kind: 'outV' };
-    if (d === 'in' || d === 'to') return { kind: 'inV' };
-    throw new Error(`merge map key Direction.${d} not supported`);
-  }
-  return { kind: 'prop', name: String(k) };
-}
-
-function classifyMergeVal(v: any): any {
-  const m = v && typeof v === 'object' ? (v.typeName === 'Merge' ? String(v.elementName).toLowerCase() : (isMergeArg(v) ? v.merge : null)) : null;
-  return m ? { incoming: m } : v;
-}
-
-// Resolve a WHOLE-ARG merge traversal (mergeV(__.…) / option(Merge.x, __.…)) to a
-// concrete map. A withSideEffect(key, map) constant read back by __.select(key) is a
-// per-driver-invariant constant, so substitute it directly (correct-by-construction).
-// The other legal whole-arg forms each need substrate this seam doesn't own — fail
-// CLOSED naming exactly what's missing (never mis-execute):
-//   - __.identity() / any traversal reading the incoming traverser AS the map needs a
-//     map-VALUED driver model (merge drivers are element rowids today).
-//   - a compound slice (__.select(k).limit(Scope.local,1).unfold()) needs local map
-//     ops in the resolver.
-//   - a side-effecting body (__.sideEffect(__.properties(k).drop()).select(m)) needs
-//     nested-WRITE execution (runNested runs reads only).
-// Per-VALUE nested traversals inside a map literal ([k: __.trav]) do NOT come here —
-// they stay in the map and resolveMergeSpec resolves them correlated per driver.
-function resolveMergeArg(raw: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): any {
-  if (!isNested(raw)) return raw;
-  const inner = stepChain(raw.nested, params);
-  if (inner.length === 1 && inner[0].name === 'select' && typeof inner[0].args[0].value === 'string') {
-    const k = inner[0].args[0].value;
-    if (sideEffects?.has(k)) return sideEffects.get(k);
-    throw new Error(`merge with select('${k}') needs a withSideEffect('${k}', map) constant`);
-  }
-  const names = inner.map((s) => s.name).join('.');
-  if (inner[0].name === 'identity' || inner.some((s) => s.name === 'select'))
-    throw new Error(`merge whole-arg traversal __.${names} not yet supported (needs a map-valued driver / local-map / nested-write substrate; a map literal [k: __.trav] IS supported)`);
-  throw new Error(`merge whole-arg traversal __.${names} not yet supported`);
-}
-
-/**
- * The spec-mandated shape of ONE merge map, checked against its role — `MergeElementStep.validate`
- * in gremlin-core, which we did not perform at all. Two rules, both about the KEY:
- *
- *  - a token key must be one this role admits (`getAllowedTokens`): `mergeV` takes `T.id`/`T.label`,
- *    `mergeE` adds `Direction.IN`/`OUT`, and `option(onMatch)` takes none of them except `T.label`,
- *    because onMatch writes properties onto an element whose identity is already settled;
- *  - a token key may not carry a null value, which would otherwise reach `labelNames(null)` and
- *    write the LABEL `"null"`.
- *
- * The rules about the identifier ITSELF (hidden namespace, empty) are `validate.ts`, and they run
- * on the RESOLVED spec instead — a nested map key produces its string per driver, so a compile-time
- * check would see a traversal, not `~id`.
- */
-function validateMergeKey(role: MergeRole, k: any, v: any, kind: ReturnType<typeof classifyMergeKey>['kind']): void {
-  if (kind === 'prop') return; // a String key; validate.ts checks it once resolved
-  const token = kind === 'label' ? 'T.label' : kind === 'id' ? 'T.id' : kind === 'outV' ? 'Direction.OUT' : 'Direction.IN';
-  if (role.kind === 'onMatch') {
-    // T.label survives: onMatch replaces/extends an element's labels where the graph allows it.
-    if (kind !== 'label')
-      throw new Error(`option(onMatch) expects keys in Map to be of String - check: ${token}`);
-  } else {
-    const allowed = role.op === 'mergeV' ? kind === 'label' || kind === 'id' : true;
-    if (!allowed)
-      throw new Error(`${role.op}() and option(onCreate) args expect keys in Map to be either String or [id, label] - check: ${token}`);
-  }
-  if (v === null || v === undefined)
-    throw new Error(`${role.op}() does not allow null Map values - check: ${String(k && typeof k === 'object' && 'elementName' in k ? k.elementName : token)}`);
-}
-
-/**
- * The element-identifier rules over a RESOLVED merge map's property keys.
- *
- * The two storage waists (`labelNames`, `applyVertexProperty`/`insertEdgeProperty`) already reject
- * a bad identifier on the way IN, and a merge map's labels go through `labelNames` — but a merge
- * map's property keys are SEARCH criteria first and only reach a writer if the branch happens to
- * create. `g.mergeV(['~id':1])` against a graph that matches would otherwise write nothing, find
- * something, and never be told the key was illegal. So the map is validated as a map, whichever
- * branch it takes.
- */
-function validateResolvedMergeSpec(spec: MergeSpec): void {
-  for (const k of Object.keys(spec.props)) validatePropertyKey(k);
-}
-
-/**
- * `MergeElementStep.validateNoOverrides`: `option(onCreate)` may RESTATE a key the merge argument
- * already bound, but not change it — the merge argument IS the existence criterion, so an onCreate
- * that contradicts it would create something the search could never have found.
- *
- * Compared over the normalized spec rather than the raw maps, which is why the four token slots are
- * named individually: `label`/`id`/`outV`/`inV` ARE the map's `T.label`/`T.id`/`Direction.*` keys
- * after classification. A slot still holding a nested traversal is skipped — two traversals are not
- * comparable, and the create-branch call sees them resolved.
- */
-function validateNoOverrides(merge: MergeSpec, onCreate: MergeSpec): void {
-  const clash = (token: string, a: any, b: any) => {
-    if (a === undefined || a === null || b === undefined || b === null) return;
-    if (isNested(a) || isNested(b)) return;
-    if (JSON.stringify(a) !== JSON.stringify(b))
-      throw new Error(`option(onCreate) cannot override values from merge() argument: (${token}, ${JSON.stringify(b)})`);
-  };
-  clash('label', merge.label, onCreate.label);
-  clash('id', merge.id, onCreate.id);
-  clash('OUT', merge.outV, onCreate.outV);
-  clash('IN', merge.inV, onCreate.inV);
-  for (const [k, v] of Object.entries(onCreate.props))
-    if (k in merge.props) clash(k, merge.props[k], v);
-}
-
-function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null, sideEffects?: Map<string, any>, params: Record<string, any> = {}, defaultCardinality: Cardinality = null): MergeSpec {
-  raw = resolveMergeArg(raw, sideEffects, params);
-  const spec: MergeSpec = { role, label: null, id: null, outV: undefined, inV: undefined, props: {}, propTypes: {}, propKeys: {}, propCardinalities: {} };
-  if (raw == null) return spec; // mergeV(null) — match anything
-  if (!(raw instanceof Map))
-    throw new Error('merge argument must be a map ([k:v] / bound Map), null, or empty ([:])');
-  for (const [k, v] of raw) {
-    // Parameters resolves map KEYS with TraversalUtil.apply as well as values. A
-    // traversal key cannot be classified until it has the incoming driver, so retain it
-    // under an internal slot for resolveMergeSpec rather than coercing it to
-    // "[object Object]" at parse time.
-    if (isNested(k)) {
-      const slot = `@nested-key:${Object.keys(spec.props).length}`;
-      spec.props[slot] = v;
-      spec.propTypes[slot] = null;
-      spec.propKeys[slot] = k;
-      spec.propCardinalities[slot] = defaultCardinality;
-      continue;
-    }
-    const c = classifyMergeKey(k);
-    validateMergeKey(role, k, v, c.kind);
-    // label/id/prop VALUES may be nested traversals — keep them UNRESOLVED (deferred to
-    // resolveMergeSpec, per driver). Only a non-nested label collapses to a string now.
-    if (c.kind === 'label') spec.label = isNested(v) ? v : labelNames(v, true, 'mergeV');
-    else if (c.kind === 'id') spec.id = v;
-    else if (c.kind === 'outV') spec.outV = classifyMergeVal(v);
-    else if (c.kind === 'inV') spec.inV = classifyMergeVal(v);
-    else {
-      const cardinalityValue = isCardinalityValueArg(v) ? v : null;
-      const value = cardinalityValue ? cardinalityValue.value : v;
-      const cardinality = cardinalityValue?.cardinality ?? defaultCardinality;
-      if (cardinality !== null && cardinality !== 'single' && cardinality !== 'list' && cardinality !== 'set')
-        throw new Error(`unsupported merge property cardinality '${cardinality}'`);
-      spec.props[c.name!] = value;
-      spec.propKeys[c.name!] = c.name!;
-      // A literal value's FULL type tree comes from the map's TypeNode (the parser subtype /
-      // the typed client's wire DataType) — kept whole so a collection value's elements/keys
-      // stay typed; a nested value's type is filled per driver (a scalar, in resolveMergeSpec).
-      spec.propTypes[c.name!] = isNested(value) ? null : mapEntryType(typeNode, String(k));
-      spec.propCardinalities[c.name!] = cardinality;
-    }
-  }
-  return spec;
-}
 
 // Produce a concrete MergeSpec for ONE driver: every nested label/id/prop value is
 // resolved correlated at `seed` (the incoming traverser element, or undefined = global).
@@ -1346,69 +1041,6 @@ function mergeDrivers(engine: Engine, prefix: IRStep[], params: Record<string, a
   return (store) => store.query<{ id: number }>(sel.sql, sel.binds).map((r) => r.id);
 }
 
-/**
- * THE MERGE MAPS — the merge argument, its `option()` arms and the `property()` tail after them,
- * normalized against their roles and cross-validated.
- *
- * Exported because the RelIR write route needs the identical parse (§10·8, and the same argument
- * `parseProperty` already carries): the role-dependent token rules, the `validateNoOverrides` check,
- * `Cardinality.x(v)` beating an enclosing option default, and the per-argument type channel are five
- * things a second parser would have five chances to get differently — and one of them had already
- * drifted between two copies inside this file. What the other route re-expresses is the EMISSION.
- *
- * `validateNoOverrides` runs STATICALLY, before anything else — TinkerPop's
- * `validateStaticNoOverrides`, which is why the corpus expects a contradicting onCreate to raise even
- * where the merge argument MATCHES and no create would have happened. The create branch re-checks the
- * RESOLVED specs, for the slots that still held a nested traversal here.
- *
- * The `option()`s must come FIRST and the `property()` tail after them: an option modulates the merge,
- * the tail acts on its OUTPUT. The tail is not a merge feature at all — `mergeV(map).property(k, v)` is
- * an ordinary AddPropertyStep over whatever the merge emitted, matched and created alike, and TinkerPop
- * compiles it as exactly that. So it goes through the same `parsePropertyTail` a mutation tail uses,
- * which is what makes a meta-property or a declared cardinality work in that position without either
- * merge lowering knowing they exist.
- *
- * This absorbed `parseMergeOptions`, which was on §8's deletion list and could not honestly reach zero
- * once the parse became SHARED: what Phase 2.6 deletes is the imperative closure around it, never the
- * parse, so the name had to become this one rather than linger as a target nothing could remove.
- */
-export interface MergeMaps {
-  readonly match: MergeSpec;
-  readonly onCreate: MergeSpec | null;
-  readonly onMatch: MergeSpec | null;
-  readonly tail: readonly PropSpec[];
-}
-
-export function mergeMaps(
-  step: IRStep, mods: readonly Step[], op: MergeRole['op'],
-  sideEffects: Map<string, any> | undefined, params: Record<string, any>,
-): MergeMaps {
-  if (step.args.length === 0)
-    throw new Error(`${op}() with no argument (uses the incoming traverser as the map) not yet supported`);
-  const match = normalizeMergeMap({ op, kind: 'merge' }, step.args[0].value, step.args[0]?.type ?? null, sideEffects, params);
-
-  let onCreate: MergeSpec | null = null, onMatch: MergeSpec | null = null;
-  const optionCount = mods.findIndex((s) => s.name !== 'option');
-  const tail = optionCount < 0 ? [] : parsePropertyTail(mods.slice(optionCount), `${op}()`, sideEffects, params);
-  for (const s of optionCount < 0 ? mods : mods.slice(0, optionCount)) {
-    if (s.name !== 'option') throw new Error(`step not implemented after ${op}(): ${s.name}()`);
-    const [sel, mapArg, cardinalityArg] = argValues(s);
-    if (!isMergeArg(sel))
-      throw new Error(`${op} option() selector must be Merge.onCreate/onMatch`);
-    if (cardinalityArg != null && (!isCardinalityArg(cardinalityArg) || isCardinalityValueArg(cardinalityArg)))
-      throw new Error(`${op} option() third argument must be Cardinality.single/list/set`);
-    const defaultCardinality = cardinalityArg?.cardinality ?? null;
-    if (defaultCardinality !== null && defaultCardinality !== 'single' && defaultCardinality !== 'list' && defaultCardinality !== 'set')
-      throw new Error(`${op} option() has unsupported cardinality '${defaultCardinality}'`);
-    const kind = sel.merge === 'oncreate' ? 'onCreate' : sel.merge === 'onmatch' ? 'onMatch' : null;
-    if (!kind) throw new Error(`${op} option(Merge.${sel.merge}) not supported`);
-    const spec = normalizeMergeMap({ op, kind }, mapArg, s.args[1]?.type ?? null, sideEffects, params, defaultCardinality);
-    if (kind === 'onCreate') onCreate = spec; else onMatch = spec;
-  }
-
-  if (onCreate) validateNoOverrides(match, onCreate);
-  return { match, onCreate, onMatch, tail };
-}
 
 // g.mergeV(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
 function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
@@ -1556,22 +1188,6 @@ interface WriteRule { match: (steps: IRStep[]) => boolean; compile: (engine: Eng
  *  answer rather than a gap: `AddLabel.feature`/`DropLabel.feature` assert the message on a
  *  single-label graph. Edges refuse under every cardinality (edge label cardinality is fixed at
  *  ONE by spec), which is why the check reads the element kind rather than a global flag. */
-/** A label value in a merge map / an addV() argument is a string OR a list of strings; a list is
- *  only legal as the sole argument (TinkerPop rejects mixing, with a message naming Collection).
- *  Returns the flattened names. `sole` says whether this value was the only argument. */
-function labelNames(v: any, sole: boolean, step: string): string[] {
-  // THE waist every label name passes through — addV, addLabel, mergeV and mergeE alike — so the
-  // element-identifier rules (validate.ts) are enforced once here rather than at each caller.
-  if (!Array.isArray(v)) return [validateLabel(v)];
-  // Upstream words the two rejections differently and the scenarios match on the text, so this
-  // is not one shared message: AddVertex asserts "must produce a scalar String when multiple
-  // traversals are provided", AddLabel asserts "Collection".
-  if (!sole) throw new Error(step === 'addV'
-    ? `${step}(): a label traversal must produce a scalar String when multiple traversals are provided`
-    : `${step}(): a Collection argument must be the only argument`);
-  return v.map(validateLabel);
-}
-
 const LABEL_MUTATIONS = new Set(['addLabel', 'dropLabel', 'dropLabels']);
 /** Steps that CONFIGURE the vertex addV() is creating, rather than reading from it. */
 const ADDV_FOLLOWERS = new Set(['property', 'addLabel']);

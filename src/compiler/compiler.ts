@@ -45,11 +45,13 @@ function applyDiscard(plan: Executable): Executable {
  *  widened — only execute.ts's orchestrator consumes a Plan. */
 export function compilePlan(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, TypeNode> = {}): Plan {
   const tree = parseGremlin(gremlin);
-  const { steps, discard } = runPasses(stepChain(tree, params, paramTypes), extractStrategies(tree, params), params);
-  if (steps.length === 0) throw new Error('empty traversal');
-
   const sackInit = extractSack(tree, params);
+  // BEFORE `runPasses`, because a `verify` Pass parses the write steps' arguments and a
+  // `__.select(k)` key or value IS a `withSideEffect` constant — verifying without the registry
+  // would refuse a traversal for a fact this compile already holds (§6·5).
   const sideEffects = extractSideEffects(tree, params);
+  const { steps, discard } = runPasses(stepChain(tree, params, paramTypes), extractStrategies(tree, params), params, sideEffects);
+  if (steps.length === 0) throw new Error('empty traversal');
 
   // The DI scopes: an app scope (from options, or a default one for callers that pass loose
   // fields / nothing), the REQUEST scope this traversal fixes (its bound params, its federation

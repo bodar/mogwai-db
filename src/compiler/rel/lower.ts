@@ -229,8 +229,8 @@ interface ChainCtx extends FilterCtx {
 
 /** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
  *  throw there is a deferral rather than a bug. */
-const bodyOf = (nested: unknown, params: Record<string, any>): readonly IRStep[] | null => {
-  try { return childSteps(nested, params); } catch { return null; }
+const bodyOf = (nested: unknown, params: Record<string, any>, sideEffects?: Map<string, any>): readonly IRStep[] | null => {
+  try { return childSteps(nested, params, sideEffects); } catch { return null; }
 };
 
 /**
@@ -2626,7 +2626,9 @@ const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
     ? correlatedExists(body, subject, elem, fresh, ctx, true)
     : bodyPredicate(body, subject, elem, fresh, ctx)),
   rooted: (steps) => rootedRead(steps, ctx, fresh),
-  body: (nested, scope) => (scope === 'child' ? bodyOf(nested, ctx.params) : rootedSteps(nested, ctx.params)),
+  body: (nested, scope) => (scope === 'child'
+    ? bodyOf(nested, ctx.params, ctx.sideEffects)
+    : rootedSteps(nested, ctx.params, ctx.sideEffects)),
 });
 
 /**
@@ -2656,8 +2658,8 @@ function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter): Roo
  *  `normalize(stepChain(…))` and not `childSteps`, which strips a source and answers the empty chain,
  *  i.e. an endpoint that silently matched nothing. Legacy's `resolveEndpoint` reaches the same two
  *  functions, so the two routes normalize a nested endpoint identically. */
-function rootedSteps(nested: unknown, params: Record<string, any>): readonly IRStep[] | null {
-  try { return normalize(stepChain(nested, params)).steps as IRStep[]; } catch { return null; }
+function rootedSteps(nested: unknown, params: Record<string, any>, sideEffects?: Map<string, any>): readonly IRStep[] | null {
+  try { return normalize(stepChain(nested, params), params, sideEffects).steps as IRStep[]; } catch { return null; }
 }
 
 /** A nested body as a VALUE expression — the seam's correlated-SCALAR answer. Collection, selection

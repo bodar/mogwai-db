@@ -69,9 +69,12 @@ export type ChildParent = ElementStream | PropertyStream | ScalarStream;
 
 /** Child chains cross the same normalization seam as the root. In particular,
  * order().by() must arrive as one IRStep before shape-aware scalar lowering. */
-export const childSteps = (nested: any, params: Record<string, any>) => {
+export const childSteps = (nested: any, params: Record<string, any>, sideEffects?: Map<string, any>) => {
   const rawSteps = stepChain(nested, params);
-  const normalized = normalize(rawSteps);
+  // The constant environments travel WITH the body: normalizing re-runs the whole Pass pipeline,
+  // and the write-argument verifier in it resolves a `__.select(k)` against the side-effect
+  // registry. A caller that has none passes none, exactly as before (§6·5).
+  const normalized = normalize(rawSteps, params, sideEffects);
   return normalized.discard ? [...normalized.steps, rawSteps.at(-1)!] : normalized.steps;
 };
 
