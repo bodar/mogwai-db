@@ -25,6 +25,9 @@ const corpus = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.me
   .split('\n').filter(Boolean);
 const verbose = Bun.argv.includes('--verbose');
 const json = Bun.argv.includes('--json');
+/** Bank the new baseline in place — see the `--record` block near the bottom for which ratchet
+ *  failures a recorder may legitimately bank and which one it must refuse. */
+const record = Bun.argv.includes('--record');
 const expected = JSON.parse(await Bun.file(new URL('./sql-hygiene-baseline.json', import.meta.url)).text()) as Record<string, Metric>;
 /**
  * RelIR is intentionally ahead of the legacy SQL in these cases. Each witness is asserted by the
@@ -212,8 +215,38 @@ for (const [family, metric] of Object.entries(baseline)) {
     if (metric[field] > prior[field])
       ratchetFailures.push(`${family}: ${field} rose from ${prior[field]} to ${metric[field]}`);
 }
-for (const family of Object.keys(expected))
-  if (!baseline[family]) ratchetFailures.push(`${family}: baseline family no longer has coverage`);
+const lostCoverage = Object.keys(expected).filter((family) => !baseline[family]);
+for (const family of lostCoverage) ratchetFailures.push(`${family}: baseline family no longer has coverage`);
+/**
+ * `--record` BANKS the new baseline, and the reason it lives in the script rather than in a shell
+ * redirect is that not every ratchet failure means the same thing to a recorder.
+ *
+ * A `binds`/`bytes`/`bound` RISE and a NEW family are what you are recording — refusing them would
+ * make the recorder unable to record, so it prints them and banks anyway; the justification belongs
+ * in the commit message, which is what the ratchet is actually for.
+ *
+ * **LOST COVERAGE is the one that does not.** A family in the baseline with no plan behind it any
+ * more means the corpus stopped reaching a lowering, and banking that would delete the evidence
+ * instead of moving it — the ratchet would come back green having quietly forgotten what it was
+ * measuring. So it fails, names the families, and banks nothing.
+ *
+ * This was `bun scripts/sql-hygiene.ts --json > … || true` in `mise.toml` for exactly one commit.
+ * That form had to swallow the exit code (the `--json` path prints and THEN throws on the rises it
+ * just found), and swallowing it took the coverage check with it — a real regression made invisible
+ * by a shell idiom, which is why the decision moved in here where the three cases are separable.
+ */
+if (record) {
+  const path = new URL('./sql-hygiene-baseline.json', import.meta.url);
+  if (lostCoverage.length) {
+    for (const family of lostCoverage) console.log(`  LOST ${family}`);
+    throw new Error(`sql-hygiene --record: ${lostCoverage.length} family/families lost coverage; banked nothing`);
+  }
+  await Bun.write(path, `${JSON.stringify(baseline, null, 2)}\n`);
+  const moved = ratchetFailures.filter((failure) => !failure.includes('no longer has coverage'));
+  for (const failure of moved) console.log(`  BANKED ${failure}`);
+  console.log(`sql-hygiene --record: banked ${Object.keys(baseline).length} families, ${moved.length} ratchet move(s) — put the reason in the commit message`);
+  process.exit(0);
+}
 if (json) {
   console.log(JSON.stringify(baseline, null, 2));
   if (ratchetFailures.length) throw new Error(`sql-hygiene: ${ratchetFailures.length} ratchet violation(s)`);
