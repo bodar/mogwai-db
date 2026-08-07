@@ -428,6 +428,43 @@ describe('the RelIR spine', () => {
     expect(compile('g.V().addV().property(T.id, 5)', {}, { spine: 'rel' }).kind).not.toBe('program');
   });
 
+  test('mergeE routes to RelIR for both endpoint kinds, and duplicates get ONE edge', async () => {
+    // The corpus cannot see this and neither can L3: every parameterized `mergeE` arrives as a bound
+    // Map (`m[{"t[label]":…,"D[OUT]":"M[outV]"}]` on the wire), and those L3 scenarios already PASSED
+    // on legacy — so moving them to the RelIR spine changes no counter the build gates on. This test
+    // IS the record that they moved.
+    const T = (name: string) => ({ typeName: 'T', elementName: name });
+    const D = (name: string) => ({ typeName: 'Direction', elementName: name });
+    const M = (name: string) => ({ typeName: 'Merge', elementName: name });
+    const cases: [string, Record<string, unknown>][] = [
+      // BOTH endpoints the incoming traverser — the shape every L3 mergeE scenario uses.
+      ['g.V().mergeE(xx1)', { xx1: new Map<any, any>([[T('label'), 'self'], [D('OUT'), M('outV')], [D('IN'), M('inV')]]) }],
+      ['g.V().has("person","name","marko").mergeE(xx1)',
+        { xx1: new Map<any, any>([[T('label'), 'self'], [D('OUT'), M('outV')], [D('IN'), M('inV')]]) }],
+      // MIXED: one endpoint the traverser, one a constant id — one lowering serves both.
+      ['g.V().hasLabel("person").mergeE(xx1)',
+        { xx1: new Map<any, any>([[T('label'), 'pt'], [D('OUT'), M('outV')], [D('IN'), 3]]) }],
+      // DUPLICATE incoming rows must get ONE edge and two traversers — upstream's second loop
+      // iteration matching what its first created, which here is `Distinct` over the endpoint pair
+      // rather than a re-read. `both().both()` revisits vertices, which is what makes it a witness.
+      ['g.V(1).both().both().mergeE(xx1)',
+        { xx1: new Map<any, any>([[T('label'), 'dup'], [D('OUT'), M('outV')], [D('IN'), M('inV')]]) }],
+    ];
+    for (const [gremlin, params] of cases) {
+      const plan = compile(gremlin, params, { spine: 'rel' });
+      expect(plan.kind === 'program' ? plan.spine : plan.kind, gremlin).toBe('rel');
+      // The ANSWER and the GRAPH, because a merge that creates a duplicate edge still emits a
+      // plausible traverser count — the edge total is the half that sees it.
+      const via = async (spine: 'rel' | 'legacy') => {
+        const store = seededStore();
+        const run = exec(store, undefined, undefined, spine);
+        const emitted = await decodeAll(run.buffers(gremlin, params, {}));
+        return { emitted: emitted.length, edges: await decodeAll(run.buffers('g.E().count()', {}, {})) };
+      };
+      expect(await via('rel'), gremlin).toEqual(await via('legacy'));
+    }
+  });
+
   test('mergeE with CONSTANT endpoints is mergeV\'s shape plus a guard', async () => {
     // The endpoints are what mergeE adds, and a constant one keeps the search input-independent —
     // so this is mergeV's two-total-statement shape exactly, and `crossed()` applies unchanged.

@@ -2170,7 +2170,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   // the input is a MULTIPLIER, so one row means the search's answer is emitted once.
   if (first.name === 'mergeV' || first.name === 'mergeE') {
     const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
-    const merged = mergedElements(one, steps, 0, ctx, fresh);
+    const merged = mergedElements(one, 'vertex', steps, 0, ctx, fresh);
     if (!merged) return null;
     const tail = elementTail(merged.effects.result, first.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, NO_ALIASES);
     return tail && { ...tail, effects: [...merged.effects.bindings, ...(tail.effects ?? [])] };
@@ -2331,7 +2331,7 @@ function elementTail(
     }
     if (step.name === 'mergeV' || step.name === 'mergeE') {
       if (pathCarried(rel)) return null;
-      const merged = mergedElements(rel, steps, at, ctx, fresh);
+      const merged = mergedElements(rel, elem, steps, at, ctx, fresh);
       if (!merged) return null;
       // The LABELS carry for `addV`'s reason and by `addV`'s mechanism, but the correlation is a cross
       // join rather than a positional one: a merge emits the elements its SEARCH found, and no incoming
@@ -2762,9 +2762,11 @@ function addedVertices(
  *  than as one set.
  *
  *  ONE cluster scanner for both merges, because the cluster is the same: what differs is only the
- *  element the map describes, which is the lowering's business and not the scan's. */
+ *  element the map describes, which is the lowering's business and not the scan's. `elem` is the
+ *  INCOMING stream's kind, which only `mergeE` reads — a `Merge.outV`/`Merge.inV` endpoint IS the
+ *  incoming traverser, so a non-vertex stream cannot supply one. */
 function mergedElements(
-  input: Rel, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
+  input: Rel, elem: Elem, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
 ): { readonly effects: Effects; readonly at: number } | null {
   let options = at + 1;
   while (options < steps.length && steps[options]!.name === 'option') options++;
@@ -2774,7 +2776,7 @@ function mergedElements(
   const tail = steps.slice(options, end);
   const child = childSeam(ctx, fresh);
   const effects = steps[at]!.name === 'mergeE'
-    ? elementMergeE(input, steps[at]!, arms, tail, ctx.ordered, child, fresh)
+    ? elementMergeE(input, elem, steps[at]!, arms, tail, ctx.ordered, child, fresh)
     : elementMergeV(input, steps[at]!, arms, tail, ctx.ordered, ctx.labelCardinality, child, fresh);
   return effects && { effects, at: end };
 }
