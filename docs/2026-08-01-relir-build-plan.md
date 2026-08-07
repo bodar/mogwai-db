@@ -895,6 +895,17 @@ is real work, but it is not load-bearing for running the suite and must not gate
   Left: a meta-property under an UNDECLARED cardinality (the `set` arm PATCHES rather than inserts, an
   `UPDATE` this route does not emit yet).
 - **the nested-value/label children** (`property(k, __.trav)`, `addV(__.trav)`, `addE(__.trav)`).
+  **First, the case that is not a child body at all and was being counted as one:** a
+  `ConstantTraversal` is TinkerPop's own wrapper for a LITERAL, and every write host unwraps it before
+  anything else looks at it (`AddVertexStep.java:253-259`, `AddEdgeStep.java:180-181`,
+  `AddPropertyStep.java:106-110` — *"Exclude ConstantTraversal which is used internally by TinkerPop to
+  wrap literal values"*). So it never reaches the reference's per-traverser path, and folding it is the
+  reference's behaviour rather than an approximation of it. ✅ LANDED for LABELS, through one authority
+  (`constLabelArg`) because three hosts ask it; `addE(__.constant(l))` is `relirAhead`, since legacy
+  refuses a nested addE label outright where the reference resolves the constant. **The VALUE fold is
+  deliberately NOT in that change** — it touches the typed value channel (§6·7) and owes an answer about
+  which vtype survives the fold, which is exactly the wrong-wire-class defect that channel exists to
+  prevent. What is left below is therefore the genuinely PER-ROW body.
   **The reference is ASYMMETRIC and that decides the shape of the work** — read, not inferred:
   - A nested **KEY** resolves through `Parameters.get(traverser, T.key, …)`, which calls
     `TraversalUtil.apply` and takes `.get(0)`
