@@ -2,6 +2,9 @@ import type { Stream } from '../../compiler/steps/context/stream.ts';
 import type { ChildFrameStack, ChildParent } from '../../compiler/steps/tail/child-shape.ts';
 import type { Query } from '../../sql/kernel/q.ts';
 import type { ForeignRow } from '../../api.ts';
+import type { Rel } from '../../rel/rel.ts';
+import type { Minter } from '../../compiler/rel/build.ts';
+import type { RelFraming } from '../../compiler/rel/framing.ts';
 
 // ---------- the call() service seam ----------
 //
@@ -86,7 +89,45 @@ export type { ForeignRow } from '../../api.ts';
  *  hop's federation depth off the `CallSite` that `resolve` already receives. */
 export type Contribution =
   | { readonly kind: 'stream'; build(site: CallSite): Stream }
+  | { readonly kind: 'rel'; buildRel(site: RelCallSite): RelContribution | null }
   | { readonly kind: 'barrier'; apply(rows: readonly ForeignRow[]): Promise<ForeignRow[]> };
+
+// ---------- the `rel` arm: the same contribution, lowered into the RelIR fold ----------
+//
+// `stream` and `rel` are the SAME contribution expressed for the two spines, and a service implements
+// exactly ONE of them — never both, which would be the duplicated lowering `steps/CLAUDE.md` forbids
+// outright. The discriminant is what routes: a `rel` service makes LEGACY's call route decline, a
+// `stream` service makes RELIR's call step decline (the ordinary "not learned yet" `null`, needing no
+// special case on either side). So services migrate one at a time, each its own green commit, and the
+// `stream` arm is deleted with legacy's call route when none is left.
+//
+// `barrier` is untouched by either: it contributes no lowering at all — its rows arrive from an
+// awaited sibling and `apply` runs at EXECUTION time, in the executor's segment loop. Federation and
+// io are spine-independent already, and the planned iterative graph algorithms
+// (`docs/2026-07-24-graph-algorithms-plan.md`) are barrier contributions for the same reason.
+
+/** A `rel` contribution's product: a relation, plus what the fold must know it HOLDS.
+ *  `null` declines, the one decline convention this route has. */
+export interface RelContribution {
+  readonly rel: Rel;
+  readonly framing: RelFraming;
+}
+
+/** What a `rel` contribution is handed. The `CallSite` fields that survive are the ones that are
+ *  genuinely about THIS call — its resolved params and the traversal's wire bindings — plus the id
+ *  minter, which is the only thing a producer cannot reach on its own (`make` is an ordinary module
+ *  import, so there is nothing to inject but `fresh`; `injectSource(steps, fresh)` is the same shape).
+ *
+ *  `q` is absent and its absence is the point: a `Query` is legacy's CTE accumulator, and a `rel`
+ *  service composes an algebra that RelIR names and renders once. A service holding a `Query` would
+ *  be building SQL beside the plan rather than inside it — the second bind-ordering authority §5
+ *  exists to prevent. */
+export interface RelCallSite {
+  readonly params: CallParams;
+  readonly boundParams: Record<string, any>;
+  readonly federationDepth: number;
+  readonly fresh: Minter;
+}
 
 export interface Service {
   readonly name: string;

@@ -82,6 +82,23 @@ function resolveContribution(spec: ReturnType<typeof parseCallSpec>, registry: S
   return service.resolve(ctx);
 }
 
+/**
+ * A `rel` contribution has no legacy lowering, BY CONSTRUCTION — a service implements `stream` or
+ * `rel`, never both, because two implementations of one service is the duplicated lowering this
+ * package forbids. So reaching one here is not a bug in the service; it means RelIR was offered this
+ * traversal first (`compiler.ts` routes there before legacy) and declined for some OTHER reason —
+ * an unlearned step further along the chain.
+ *
+ * Fail CLOSED and say which of the two it is. Silently answering would need a second lowering of the
+ * service, and answering nothing would be a wrong result rather than an error.
+ */
+function refuseRelContribution(serviceName: string): never {
+  throw new Error(
+    `call("${serviceName}"): this service lowers on the RelIR spine, and the traversal declined there — `
+    + 'so some other step in the chain is not yet supported by that spine. The service has no legacy lowering.',
+  );
+}
+
 /** g.call(...) as a SOURCE. A pure 'stream' service builds its initial Stream inline (--list,
  *  tinker.search) — fed straight into lowerSteps/materializeRootStream by compileRead. A 'barrier'
  *  service (Phase 6 federate) returns a BarrierPoint instead: its rows arrive from an awaited
@@ -94,6 +111,7 @@ export function seedCall(first: IRStep, query: Query, params: Record<string, any
   const ctx: CallSite = { params: spec.params, q: query, boundParams: params, federationDepth: depth };
   const contribution = resolveContribution(spec, registry, ctx);
   if (contribution.kind === 'stream') return contribution.build(ctx);
+  if (contribution.kind === 'rel') refuseRelContribution(spec.serviceName);
   return {
     kind: 'barrier-point',
     serviceName: spec.serviceName,
@@ -152,6 +170,7 @@ export function lowerCall(step: IRStep, parent: ElementStream, scope: ChildFrame
   if (thirdTrav && !injection)
     throw new Error(`call("${spec.serviceName}"): injection must be a direct value read — __.values(key), __.id(), or __.label()`);
   const { head, frame } = buildCallHead(parent, scope, spec.injectionTraversal);
+  if (contribution.kind === 'rel') refuseRelContribution(spec.serviceName);
   const apply = contribution.apply;
   const point: MidBarrierPoint = {
     kind: 'mid-barrier-point',
