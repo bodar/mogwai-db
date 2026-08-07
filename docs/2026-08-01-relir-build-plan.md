@@ -733,7 +733,7 @@ What it actually costs, per service:
 | `federate`, `io` | `barrier` | **nothing.** A barrier `Contribution` has no `build` — its rows come from an awaited sibling and `apply` runs at EXECUTION time, in the executor's segment loop. Spine-independent already. | zero |
 | ✅ `directory` (`--list`) | `rel` | a `Values` relation of strings + scalar-string framing — which is `injectSource` minus the coercion fold | trivial, as predicted |
 | ✅ `search` (`tinker.search`) | `rel` | ~~translation, not design~~ — **this sizing was WRONG.** `RelFraming` had six arms and none was a PROPERTY, so the shape had to be built first (below). The service itself then was mechanical | **shape first**, then mechanical |
-| `degree.centrality` | `stream` | a per-parent movement count. `ChildSeam.scalar(body, host)` answers it — but the CONTRIBUTION is a per-parent `Expr`, not a `Rel`, which is the open design point below | reuse + a union arm |
+| `degree.centrality` | `stream` | **BLOCKED, and not on the seam** — see below. The seam part was built and MEASURED working; what stops it is `project()` | blocked on `project()` |
 
 The genuinely new piece is `call()` as a STEP in `lowerToRel` — the source form (`g.call(…)`) and the
 mid-traversal form (`V().call(…)`, which pushes a child scope) — plus making the SPI RelIR-native rather
@@ -754,11 +754,37 @@ FOR once legacy's call route is gone; a type parameter would be scaffolding with
 5. ✅ `--list`, then `tinker.search` (after the property shape).
 6. ⬜ `degree.centrality`, then delete the `stream` arm + legacy's call route together.
 
-**THE OPEN DESIGN POINT, and it is worth settling before the last service rather than during it:** a
+### `degree.centrality` is blocked on `project()`, and this was MEASURED, not predicted
+
+The seam half works. Built and probed: a mid-traversal `call` in `terminal()` (which is exactly where
+an element relation retypes to a scalar), the host and `ChildSeam.scalar` on the site, and the service
+reduced to handing the seam a synthetic `[{name: direction}, {name:'count'}]` body — the same body
+legacy's `scopedMovementCount` synthesises. `g.V().call("tinker.degree.centrality")` and its `OUT`
+variant answered **identically to legacy** (`[0,1,3,1,1,0]` / `[3,0,0,2,0,1]` on the modern graph), as
+did `.is(3)` and `.count()` after it.
+
+**It was reverted anyway, and the reason is the pre-flight check every service migration needs.**
+Migrating a service makes legacy REFUSE it, so a shape where RelIR declines for an unrelated step stops
+being a fallback and becomes a THROW. All six corpus traversals that use this service are such shapes:
+
+- **five go through `project()`** — `g.V().as("v").call(…).project("vertex","degree").by(select("v")).by()`
+  — and `project()` is not on the RelIR spine at all. Measured directly:
+  `g.V().project("a").by(__.out().count())` routes to legacy. That is a whole family, not a gap next to
+  this service.
+- **one is `g.V().where(call(…).is(3))`** — a call inside a `where()` CHILD BODY. This one is genuinely
+  close: `g.V().where(__.in().count().is(3))` already routes to RelIR, so only the child-body position
+  cannot reach the `call` handling, which lives in the element tail.
+
+So migrating it would have fixed ZERO corpus traversals and broken SIX. **The order is therefore
+`project()` first, then this service** — and the check is cheap: compile the traversals that USE a
+service before moving it, not after. Nothing was kept from the attempt, because a `{kind:'value'}`
+contribution arm and a mid-traversal call step with no service to exercise them are untested code, and
+the finding is worth more than the diff.
+
+**THE DESIGN POINT the attempt settled, so it need not be re-derived:** a
 mid-traversal service contributes a per-parent VALUE, not a relation. `degree.centrality` is
-`type: 'streaming'`, and what it produces per input vertex is one number — `ChildSeam.scalar(body,
-host)` already answers exactly that, given a synthetic `[{name: direction}, {name:'count'}]` body, which
-is what legacy's `scopedMovementCount` builds too. So `RelContribution` wants to be a union —
+`type: 'streaming'`, and what it produces per input vertex is one number. So `RelContribution` wants to
+be a union —
 `{kind:'relation', rel, framing}` for a SOURCE service, `{kind:'value', expr}` for a per-parent one —
 and that split is not ours to invent: it is TinkerPop's own `Service.Type`, `start` versus `streaming`.
 Making the product follow the declared type is what stops the mid-traversal form becoming a second
