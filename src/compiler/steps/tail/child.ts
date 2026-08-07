@@ -2,7 +2,7 @@ import { derived, empty, list, paren, q, type Expression, type Relation } from '
 import { perRowCols } from '../../../sql/kernel/render.ts';
 import { argValues, isNested, isPopArg, stepChain } from '../../../gremlin/frontend.ts';
 import { appendCte, patchLayout, trackFromV, withoutFromV, layoutProjection, layoutProjectionMinting, layoutCols, partitionOver, prevRel, withLayout, type TraverserLayout, type ElementStream } from '../context/context.ts';
-import { aliasId } from '../context/alias.ts';
+import { aliasId } from '../../plan/alias.ts';
 import { asOnStream, selectOneFromAlias } from './labelselect.ts';
 import { loweringStateOf, streamPayloadCols, toScalarStream, withRelationAndLayout, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream, type RelationalStream } from '../context/stream.ts';
 import { engineOf } from '../../engine/deps.ts';

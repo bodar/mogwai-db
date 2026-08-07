@@ -5,7 +5,7 @@ import { argValues, isNested, stepChain, type Step } from '../../../gremlin/fron
 import { MATCH_FILTER_HEADS, type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { appendCte, aliasColsOf, aliasScalarTypeOf, layoutCols, layoutOverAliases, prevRel, withLayout, type AliasEntry, type TraverserLayout, type ElementStream, type StepFn } from '../context/context.ts';
-import { aliasEntry, aliasId, aliasScalar, aliasSeed, elemEntry, elemShape, isElementShape, nodeEntry, shapeElem, type AliasShape } from '../context/alias.ts';
+import { aliasEntry, aliasId, aliasScalar, aliasSeed, elemEntry, elemShape, isElementShape, nodeEntry, shapeElem, type AliasShape } from '../../plan/alias.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { type Stream } from '../context/stream.ts';
 import { isGlobalBarrier, labelsMentioned, ROOT_SCOPE } from '../tail/child-shape.ts';

@@ -4,7 +4,7 @@ import { PER_ROW, perRowColumnOf, STATIC, UNKNOWN, type ScalarType } from '../..
 import { isLocalScope, SLICE_STEPS, sliceOf, type Slice } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { elemCtx, elementPayload, elemTable, labelNameFor, limitOffset, propScalarFor, predicateSql, propExtract, storedPropFor } from '../../plan/plan.ts';
-import { aliasId, aliasPop, aliasPresent, aliasScalar, entryTypeTag, shapeElem } from '../context/alias.ts';
+import { aliasId, aliasPop, aliasPresent, aliasScalar, entryTypeTag, shapeElem } from '../../plan/alias.ts';
 import { aliasElem, aliasIsElement, layoutCols, layoutProjection, scalarTypeFromAlias, type AliasMap, type ElementStream } from '../context/context.ts';
 import { continueLowering, dispatchShapeTail, loweringStateOf, recordFieldColumns, toElementStream, toListStream, toRecordStream, toScalarStream, toVariantStream, type ListOf, type LoweringResult, type RecordField, type RecordStream, type ScalarStream, type ShapeTailFn, type Stream } from '../context/stream.ts';
 import { globalRowOps, lowerGlobalCount, reprojectRows, aliasCompareRows } from './barrier.ts';

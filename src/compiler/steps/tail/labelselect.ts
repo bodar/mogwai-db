@@ -5,7 +5,7 @@ import { aliasElem, aliasIsElement, aliasScalarTypeOf, layoutCols, patchLayout, 
 import {
     aliasAppend, aliasEntry, aliasId, aliasPop, aliasPresent, aliasScalar, aliasSeed, elemEntry, entryTypeTag, shapeElem,
     type AliasShape,
-} from '../context/alias.ts';
+} from '../../plan/alias.ts';
 import {
     loweringStateOf, withRelationAndLayout, pathColumns, streamColumns, toElementStream, toListStream, toPropertyStream, toScalarStream, PROPERTY_PAYLOAD,
     type ListOf, type PropertyStream, type Stream,

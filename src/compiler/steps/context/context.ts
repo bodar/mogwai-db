@@ -1,6 +1,6 @@
 import { q, list, empty, raw, Query, Relation, type Expression } from '../../../sql/kernel/q.ts';
 import { aliasCtx, type Elem, type ScalarCtx, elemTable, P_OPS, propScalarFor } from '../../plan/plan.ts';
-import { aliasId, aliasPresent, aliasScalar, type AliasShape } from './alias.ts';
+import { aliasId, aliasPresent, aliasScalar, type AliasShape } from '../../plan/alias.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import type { ValueType, ListOf, ScalarType } from '../../../sql/kernel/render.ts';
 import { CHANNEL_BARRIER_POLICY, CHANNEL_MERGE_POLICY, type BarrierPolicy, type Channels, type MergePolicy, type RigidPolicy } from '../../../channels.ts';

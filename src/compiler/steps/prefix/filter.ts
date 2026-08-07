@@ -11,12 +11,12 @@ import {
 import { runFastPath } from '../../options/fast-paths.ts';
 import { tryInlinePredicate, combineBranchPreds, PredicateInliningFastPath } from './predicate.ts';
 import { aliasCompareTest, aliasOperandsOf, appendCte, layoutCols, patchLayout, layoutProjection, elemRel, labelCtx, labelScope, prevRel, scopePathCols, withShape, type AliasEntry, type ElementStream, type StepFn } from '../context/context.ts';
-import { aliasAppend, aliasSeed, elemEntry, elemShape } from '../context/alias.ts';
+import { aliasAppend, aliasSeed, elemEntry, elemShape } from '../../plan/alias.ts';
 import { tryCombineByChildExistence, tryCompileScalarValueRows, tryFilterByChildExistence } from '../tail/child.ts';
 import { operandDeps, resolveTraversalOperands } from '../tail/operand.ts';
 import { directElementModulation, elementOrderDrop, elementOrderSql } from '../tail/modulation.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { isInjectionMarker, injectedValues } from '../injection.ts';
+import { isInjectionMarker, injectedValues } from '../../ir/injection.ts';
 import { engineOf, fastPathContextOf } from '../../engine/deps.ts';
 
 // ---------- filter (predicates over the current traverser) ----------

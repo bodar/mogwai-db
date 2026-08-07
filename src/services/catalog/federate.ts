@@ -3,7 +3,7 @@ import type { ForeignRow } from '../../api.ts';
 import type { FederationSource } from '../../compiler/segment.ts';
 import { isTraversalParam } from '../params/call-params.ts';
 import { guardFederationDepth } from '../params/federation-depth.ts';
-import { INJECT_VALUES_KEY } from '../../compiler/steps/injection.ts';
+import { INJECT_VALUES_KEY } from '../../compiler/ir/injection.ts';
 
 // ---------- mogwai.graph.federate — cross-graph query pushdown (async, Barrier) ----------
 //

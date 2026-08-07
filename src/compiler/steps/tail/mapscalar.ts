@@ -7,7 +7,7 @@ import { isNested, isPickArg, isTokenArg, argValues } from '../../../gremlin/fro
 import { mathToSql, mathVars } from '../../../gremlin/math.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { aliasElem, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, type ElementStream } from '../context/context.ts';
-import { aliasId, aliasScalar } from '../context/alias.ts';
+import { aliasId, aliasScalar } from '../../plan/alias.ts';
 import { loweringStateOf, toScalarStream, type ListStream, type ScalarStream, type Stream } from '../context/stream.ts';
 import { tryCompileElementChild, tryCompileBranchChildAllCard, tryCompileListChild, tryCompileScalarModulations, tryCompileScalarValueChild, type ModulationFallback, type ScalarModulationSpec } from './child.ts';
 import { childSteps, classifyByAt, optionMapIsCase, readOptionMapArms } from './child-shape.ts';

@@ -4,7 +4,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ListOf, Shape } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
-import { SHAPE_K } from '../steps/context/alias.ts';
+import { SHAPE_K } from '../plan/alias.ts';
 import { byEncounter, carriedCols, jsonOf, meta, typeOf, type Minter } from './build.ts';
 import { elementNode } from './element.ts';
 import { historyAppend, historySeed, objectEntry, type TraverserObject } from './history.ts';

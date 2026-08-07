@@ -3,7 +3,7 @@ import {
   argValues, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isMergeArg, isNested, isTokenArg,
   stepChain, type Step,
 } from '../../gremlin/frontend.ts';
-import { validateLabel, validatePropertyKey } from '../steps/write/validate.ts';
+import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
 import type { VertexCardinality } from '../../api.ts';
 import type { IRStep } from './strategies.ts';
 

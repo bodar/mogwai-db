@@ -14,7 +14,7 @@ import { describe, expect, test } from 'bun:test';
 import { runWith } from '../support/harness.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { validateLabel, validatePropertyKey } from '../../src/compiler/steps/write/validate.ts';
+import { validateLabel, validatePropertyKey } from '../../src/gremlin/validate.ts';
 
 const store = () => new GraphStore(new BunSqlite(':memory:'));
 const rejects = (q: string, message: string) => expect(() => runWith(store(), q)).toThrow(message);

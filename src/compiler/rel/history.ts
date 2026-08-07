@@ -1,7 +1,7 @@
 import { compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import type { ListOf, ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
-import { SHAPE_K, elemShape, type AliasShape } from '../steps/context/alias.ts';
+import { SHAPE_K, elemShape, type AliasShape } from '../plan/alias.ts';
 
 /**
  * ONE TRAVERSER-OBJECT HISTORY ENCODING, shared by the LABEL channel and the PATH channel.

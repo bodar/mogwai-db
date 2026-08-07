@@ -14,7 +14,7 @@ import type { ChildSeam } from './child.ts';
 import { gremlinTypeOf, propertyValueBind } from '../../gremlin/types.ts';
 import { propertyFtsEntries } from '../../services/fts-index.ts';
 import { Deferral, mergeMaps, parseProperty, type MergeMaps, type MergeSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
-import { validateLabel, validatePropertyKey } from '../steps/write/validate.ts';
+import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
 import { and, carriedCols, eq, meta, renumber, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';

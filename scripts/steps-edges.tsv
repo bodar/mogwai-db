@@ -10,14 +10,10 @@ src/compiler/rel/lower.ts	8	no	bareInjectTag dies with the per-row type channel 
 src/services/catalog/search.ts	6	no	propertyPayload is a kernel; PropertyStream/TraverserLayout are the object model
 src/compiler/engine/deps.ts	5	no	the object model — LoweringState/Stream/TraverserLayout
 src/compiler/rel/alias.ts	4	no	the alias object model — rel/ should own its own AliasEntry
-src/compiler/rel/history.ts	3	no	kernel — SHAPE_K/elemShape
-src/compiler/rel/write.ts	3	no	kernel — validateLabel/validatePropertyKey; AliasMap is the object model
 src/services/catalog/directory.ts	3	no	the object model
 src/services/spi/types.ts	3	no	THE UNNAMED PIN — the service SPI typed on legacy Stream/ChildFrameStack
-src/compiler/ir/write-args.ts	2	no	kernel — validateLabel/validatePropertyKey
 src/compiler/rel/list.ts	2	no	kernel — LIST_LOCAL_TX/STRING_LOCAL_TX
 src/compiler/rel/transform.ts	2	no	kernel — dtFactor/numericSpec
 src/compiler/compiler.ts	1	yes	the routing switch (routeWrite) — Phase 1 cuts the write arm, Phase 4 the rest
-src/compiler/rel/path.ts	1	no	kernel — SHAPE_K
+src/compiler/rel/write.ts	1	no	kernel — validateLabel/validatePropertyKey; AliasMap is the object model
 src/services/catalog/degree-centrality.ts	1	no	kernel — scopedMovementCount
-src/services/catalog/federate.ts	1	no	kernel — INJECT_VALUES_KEY

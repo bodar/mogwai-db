@@ -14,7 +14,7 @@ import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../../../servic
 import { bindChunks, deleteWhereIn, placeholders } from '../../../rowbatch.ts';
 import { layoutCols, type ElementStream, type TraverserLayout } from '../context/context.ts';
 import { DEFAULT_VERTEX_CARDINALITY, DEFAULT_VERTEX_LABEL, LABEL_MUTATION_UNSUPPORTED, type VertexCardinality } from '../../../api.ts';
-import { validateLabel, validatePropertyKey } from './validate.ts';
+import { validateLabel, validatePropertyKey } from '../../../gremlin/validate.ts';
 import {
     Deferral, labelNames, mergeMaps, parseProperty,
     parsePropertyTail,
