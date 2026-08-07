@@ -1,7 +1,7 @@
 import { col, compilerInt, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
-import type { Binding } from '../../rel/plan.ts';
+import type { Binding, Guard } from '../../rel/plan.ts';
 import type { Rel, Table } from '../../rel/rel.ts';
 import type { Channels } from '../../channels.ts';
 import { insert, remove } from '../../rel/stmt-factory.ts';
@@ -296,8 +296,9 @@ function cardinalityOf(owner: Expr, key: string, declared: VertexCardinality | n
  *
  *  The pid is known only at run time and the (kind, text) pairs only at compile time, so the two
  *  meet as a cross join — one row per written property per index entry. `Values` is exactly the
- *  right node for a compile-time row set, and there is always at least one entry (the value row),
- *  which is what makes it constructible. */
+ *  right node for a compile-time row set. The CALLER checks that there is at least one entry —
+ *  `ftsRowsFor` drops empty text, so `property(k, "")` indexes as none and an empty `Values` is not
+ *  a relation this algebra can express. */
 function indexWritten(written: Rel, elem: Elem, write: PropertySet, fresh: Minter): Stmt {
   const entries = make.values({
     id: fresh('fv'), channels: [], type: typeOf(meta('kind', 'text'), meta('text', 'text')),
@@ -451,12 +452,25 @@ function propertyStatements(elem: Elem, owners: Rel, write: PropertyWrite, bind:
   });
   // The insert's `RETURNING` is RETAINED by construction (a statement binding always is), which is
   // what lets the index rows join against pids that did not exist a statement ago.
-  bind(indexWritten(bind(rowsWritten), elem, write, fresh));
+  //
+  // A value indexing as NO entries writes no index statement, and that is a real state rather than a
+  // guard: `ftsRowsFor` drops empty text, so `property(k, "")` has nothing to index and the `Values`
+  // of (kind, text) pairs would be EMPTY — a relation §3.3 records `Values` as refusing to express,
+  // i.e. a throw out of a lowering whose contract is `null`. It only became REACHABLE when
+  // `property(T.id, …)` let `addV("p").property(T.id,1).property("name","")` route here at all,
+  // which is what the CSV round-trip corpus caught.
+  const written = bind(rowsWritten);
+  if (write.fts.length) bind(indexWritten(written, elem, write, fresh));
 }
 
 /** Push a binding and hand back a `Ref` to it — the one place a name is minted, so a statement can
  *  read the rows of the statement before it without the caller threading names. */
 type Binder = (node: Stmt | Rel, snapshot?: boolean, channels?: Channels) => Rel;
+
+/** Push a GUARD binding — a refusal the graph decides, carried by the plan (§6·5). Separate from
+ *  `Binder` because nothing reads its `Ref`: what it returns is a step, not a relation, and giving
+ *  the caller one would invite a read of rows whose only purpose is to be counted. */
+type Guarder = (node: Rel, guard: Guard) => void;
 
 /**
  * A run of `property()` steps over the elements a read prefix selected — the effects, plus the SAME
@@ -605,7 +619,10 @@ const VERTEX_LABEL_COLS: readonly ColMeta[] = [meta('node', 'int'), meta('label'
  *   is the traverser stream, so `g.V().addV('x')` creates one per vertex, which is the semantics
  *   rather than a special case.
  */
-export function addVertex(input: Rel, labels: readonly string[], writes: readonly PropertyWrite[], ordered: boolean, bind: Binder, fresh: Minter): Rel {
+export function addVertex(
+  input: Rel, labels: readonly string[], uid: string | number | null, writes: readonly PropertyWrite[],
+  ordered: boolean, bind: Binder, fresh: Minter,
+): Rel {
   // ZERO labels is a real state and it is the whole reason this takes a LIST: under
   // `LabelCardinality.ZERO_OR_MORE` a bare `addV()` creates a vertex carrying none, and a merge map
   // with no `T.label` does the same. Nothing to intern and nothing to pair, so both statements are
@@ -629,12 +646,19 @@ export function addVertex(input: Rel, labels: readonly string[], writes: readonl
     // dropped-channel defect the obligation table exists to catch, and it caught this one.
     ? make.sort({ id: fresh('so'), input, channels: input.channels, type: input.type, terms: [{ expr: col(input.id, ORD), dir: 'asc' }] })
     : input;
+  // A CALLER-SUPPLIED PUBLIC ID lands in one of two columns and the choice is the value's own type,
+  // exactly as `insertRow` spells it: a NUMBER is the rowid, a STRING is the `uid`. Absent, the row
+  // carries a NULL `uid` and takes whatever rowid SQLite assigns. Whether the id is still FREE is not
+  // a question this layer can answer — the caller pushes an `elementIdGuard` before this statement.
+  const column = uid === null ? 'uid' : typeof uid === 'number' ? 'id' : 'uid';
+  const supplied: Expr = uid === null ? compilerNull('text') : typeof uid === 'number' ? compilerInt(uid) : text(uid);
   const rowPerInput = make.project({
-    id: fresh('p'), input: inOrder, channels: [], type: typeOf(meta('uid', 'text', true)),
-    exprs: [['uid', compilerNull('text')]],
+    id: fresh('p'), input: inOrder, channels: [],
+    type: typeOf(column === 'id' ? meta('id', 'int') : meta('uid', 'text', true)),
+    exprs: [[column, supplied]],
   });
   const created = bind(insert({
-    target: nodesTarget, cols: ['uid'], source: rowPerInput, channels: [], type: ID_TYPE,
+    target: nodesTarget, cols: [column], source: rowPerInput, channels: [], type: ID_TYPE,
     returning: [['id', col(nodesTarget.id, 'id')]],
   }));
 
@@ -695,7 +719,7 @@ const ENCOUNTER_CHANNEL = { col: 'encounter', role: 'encounter' } as const;
 
 /** The bindings a write step accumulates, plus the `Binder` that pushes them — the shape every write
  *  host opens with, so a name is minted in ONE place. */
-export function effectScope(fresh: Minter): { readonly bindings: Binding[]; readonly bind: Binder } {
+export function effectScope(fresh: Minter): { readonly bindings: Binding[]; readonly bind: Binder; readonly guard: Guarder } {
   const bindings: Binding[] = [];
   // A `Ref` DECLARES what it carries, like every other relation. Most of them carry nothing — a
   // statement's `RETURNING` is a bare row set — but a snapshot of the input relation still holds that
@@ -705,7 +729,38 @@ export function effectScope(fresh: Minter): { readonly bindings: Binding[]; read
     bindings.push({ name, node, ...(snapshot ? { snapshot: true } : {}) });
     return make.ref({ id: fresh('r'), name, channels, type: node.type });
   };
-  return { bindings, bind };
+  // POSITION IS THE WHOLE CONTRACT: a guard must be pushed BEFORE the statement it protects, because
+  // the executor runs bindings in list order and a check after the write has nothing left to refuse.
+  const guard: Guarder = (node, spec) => { bindings.push({ name: `${fresh('gw')}`, node, guard: spec }); };
+  return { bindings, bind, guard };
+}
+
+/**
+ * IS THIS PUBLIC ELEMENT ID STILL FREE — the relation a guard binding counts.
+ *
+ * `assertAvailableElementId` asks the same question with the same two columns: a NUMERIC id is the
+ * rowid, a STRING id is the `uid`. The message is legacy's verbatim, because a decline hands the
+ * traversal to a spine that raises exactly this — what the guard buys is the string without the
+ * decline, and a reworded one would be a different answer to the conformance suite.
+ *
+ * `Limit 1` because the count is only ever compared against zero, and the projection is one column
+ * because nothing reads it.
+ */
+function elementIdGuard(uid: string | number, elem: Elem, fresh: Minter): { readonly node: Rel; readonly guard: Guard } {
+  const table: Table = elem === 'edge' ? 'edges' : 'nodes';
+  const scan = make.scan({
+    id: fresh('t'), table, alias: fresh('wt'), channels: [],
+    type: typeOf(meta('id', 'int'), meta('uid', 'text', true)),
+  });
+  const taken = make.filter({
+    id: fresh('f'), input: scan, channels: [], type: scan.type,
+    pred: typeof uid === 'number' ? eq(col(scan.id, 'id'), compilerInt(uid)) : eq(col(scan.id, 'uid'), text(uid)),
+  });
+  const one = make.project({ id: fresh('p'), input: taken, channels: [], type: ID_TYPE, exprs: [['id', col(taken.id, 'id')]] });
+  return {
+    node: make.limit({ id: fresh('li'), input: one, channels: [], type: ID_TYPE, count: compilerInt(1) }),
+    guard: { message: `${elem === 'edge' ? 'edge' : 'vertex'} id already exists: ${uid}`, raiseWhen: 'rows' },
+  };
 }
 
 /** The channels a write's input snapshot still carries — the twin of `writeInputCols`, which decides
@@ -723,19 +778,69 @@ const writeInputChannels = (input: Rel): Channels =>
  *  silently skip. */
 export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IRStep[], ordered: boolean, cardinality: LabelCardinality, child: ChildSeam, fresh: Minter): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
-  const labels = creationLabels(argValues(step), cardinality);
+  const tokens = creationTokens(propertySteps, child);
+  if (!tokens) return null;
+  // `property(T.label, …)` REPLACES the step's own labels rather than adding to them — `insertVertex`
+  // reads the same way, and it is not an addition: `addV('a').property(T.label,'b')` is a vertex
+  // labelled `b`. The count rule then applies to whichever list won.
+  const labels = creationLabels(tokens.label === null ? argValues(step) : [tokens.label], cardinality);
   if (!labels) return null;
-  const writes = propertySteps.length ? propertyWrites(propertySteps, 'vertex', child) : [];
+  const writes = tokens.rest.length ? propertyWrites(tokens.rest, 'vertex', child) : [];
   if (!writes) return null;
+  // ONE ROW ONLY for a supplied id, and the refusal is arithmetic rather than caution: N input rows
+  // would insert N vertices carrying the SAME public id, so the second collides on a UNIQUE the guard
+  // is not the authority for. Upstream reaches the same place by a different route — it loops, and its
+  // second iteration raises `id already exists` — so a decline here and a raise there agree about the
+  // traversal being wrong; they disagree only about which spine says so, which the census records.
+  if (tokens.id !== null && !(input.kind === 'values' && input.rows.length === 1)) return null;
   // A MID-CHAIN input is SNAPSHOTTED, and this one is not about a later statement: `INSERT INTO
   // nodes … SELECT … FROM nodes` reads the table it is writing, which SQLite does not promise to
   // evaluate before the first insert. The snapshot makes the source `json_each(?)`, so the question
   // "which traversers were there" is answered once and cannot be changed by the answer.
   // A `Values` source is one literal row and has nothing to snapshot.
   const seeded = input.kind === 'values' ? null : orderedInput(input, fresh);
-  const { bindings, bind } = effectScope(fresh);
-  const result = addVertex(seeded ? bind(seeded.result, true, writeInputChannels(input)) : input, labels, writes, ordered, bind, fresh);
+  const { bindings, bind, guard } = effectScope(fresh);
+  // BEFORE the creation, because a check after the insert has nothing left to refuse.
+  if (tokens.id !== null) { const check = elementIdGuard(tokens.id, 'vertex', fresh); guard(check.node, check.guard); }
+  const result = addVertex(seeded ? bind(seeded.result, true, writeInputChannels(input)) : input, labels, tokens.id, writes, ordered, bind, fresh);
   return { bindings: [...(seeded?.bindings ?? []), ...bindings], result };
+}
+
+/**
+ * A creation's `property()` run split into its `T` TOKENS and the ordinary writes — or `null` to
+ * decline.
+ *
+ * `T.id` and `T.label` on a vertex being CREATED are not property writes at all and not the
+ * immutability refusal they are on an existing element: they SUPPLY the new vertex's public id and
+ * its label. `parseProperty` already separates them (`kind: 'token'`), so this is a partition of the
+ * run rather than a second parse — which is what keeps the `T`-token rules in one place while the
+ * two hosts emit differently.
+ *
+ * A meta run on a token declines: `property(T.id, 1, 'k', 'v')` is meaningless and legacy raises for
+ * it, so the spine that owns the message is the one to say so.
+ */
+function creationTokens(
+  steps: readonly IRStep[], child: ChildSeam,
+): { readonly id: string | number | null; readonly label: string | null; readonly rest: readonly IRStep[] } | null {
+  let id: string | number | null = null;
+  let label: string | null = null;
+  const rest: IRStep[] = [];
+  for (const step of steps) {
+    if (step.modulators?.length || step.optionArms) return null;
+    let parsed: ParsedProperty;
+    try { parsed = parseProperty(step, child.sideEffects, child.params); }
+    catch (e) { if (!(e instanceof Deferral)) throw e; return null; }
+    if (parsed.kind !== 'token') { rest.push(step); continue; }
+    if (parsed.meta) return null;
+    if (parsed.token === 'id') {
+      if (typeof parsed.value !== 'string' && typeof parsed.value !== 'number') return null;
+      id = parsed.value;
+    } else if (parsed.token === 'label') {
+      if (typeof parsed.value !== 'string') return null;
+      label = parsed.value;
+    } else return null;
+  }
+  return { id, label, rest };
 }
 
 /**
@@ -1179,7 +1284,8 @@ export function elementMergeV(
     id: fresh('f'), input: absent, channels: [], type: absent.type,
     pred: { kind: 'exists', plan: matched, negated: true },
   });
-  const created = addVertex(creating, createLabels, createWrites, false, bind, fresh);
+  // A merge map's `T.id` still DECLINES above, so the creation supplies none.
+  const created = addVertex(creating, createLabels, null, createWrites, false, bind, fresh);
 
   // THE MERGED ELEMENT(S) — the pre-write matches, or the one creation. Exactly one side is ever
   // non-empty, so a UNION ALL states "whichever branch happened" without either knowing about the

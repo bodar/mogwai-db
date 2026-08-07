@@ -393,6 +393,41 @@ describe('the RelIR spine', () => {
     }
   });
 
+  test('a GUARD BINDING carries a refusal only the graph can decide (§6·5)', async () => {
+    // The other fact that wore a `null`. A text-level error moved to the Pass tier; THIS one cannot
+    // go there, because the question is about the graph's contents rather than the traversal's — is
+    // this public id still free. Declining instead would hand the traversal to legacy and the census
+    // would count it as vocabulary the algebra cannot express. It can; it just has to say no.
+    const taken = 'g.addV().property(T.id, 1)';
+    expect(compile(taken, {}, { spine: 'rel' })).toMatchObject({ spine: 'rel' });
+    // THE MESSAGE IS THE REFERENCE'S, verbatim and identical on both spines — a reworded one is a
+    // different answer to the conformance suite, and the whole point of the guard is that string.
+    for (const spine of ['rel', 'legacy'] as const)
+      expect(() => exec(seededStore(), undefined, undefined, spine).buffers(taken, {}, {}), spine)
+        .toThrow('vertex id already exists: 1');
+
+    // …and it must not fire when the id IS free, nor cost the creation its answer.
+    for (const gremlin of [
+      'g.addV().property(T.id, 99)',
+      'g.addV().property(T.label, "person")',
+      'g.addV("person").property("name","mike").property(T.id,"1")',
+      'g.addV().property(T.id, 99).property("name","x")',
+      // An empty-string value indexes as NO fts entries, so its index statement is absent rather
+      // than an empty `Values` — reachable only once T.id let this shape route here (§3.3).
+      'g.addV("p").property(T.id, 98).property("name","").property("other","x")',
+    ]) {
+      expect(compile(gremlin, {}, { spine: 'rel' }), gremlin).toMatchObject({ spine: 'rel' });
+      const via = (spine: 'rel' | 'legacy') =>
+        decodeAll(exec(seededStore(), undefined, undefined, spine).buffers(gremlin, {}, {}));
+      expect(await via('rel'), gremlin).toEqual(await via('legacy'));
+    }
+
+    // A supplied id over MANY input rows declines: one statement would insert N vertices carrying
+    // the same public id, and the second collides on a UNIQUE the guard is not the authority for.
+    // Upstream reaches the same verdict by looping and raising on its second iteration.
+    expect(compile('g.V().addV().property(T.id, 5)', {}, { spine: 'rel' }).kind).not.toBe('program');
+  });
+
   test('a large literal inject inlines as 0-bind literals and stays on RelIR', () => {
     // There is no >100-value conversion. A literal inject spends NO binds — each member inlines as a
     // typed SQL literal (`constLit`) — so even 101 members is 0 binds and trivially DO-legal on RelIR.

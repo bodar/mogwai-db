@@ -40,7 +40,16 @@ export function runProgram(store: RowSource, program: Plan, tail?: Emitted): rea
   for (const step of steps) {
     const binds = step.emitted.binds.map((bind) => (isRowsBind(bind) ? payload(bind.rowsOf, declared, retained) : bind));
     const rows = store.query<Record<string, unknown>>(step.emitted.sql, binds);
-    if (step.binding) retained.set(step.binding, rows);
+    if (step.binding) {
+      retained.set(step.binding, rows);
+      // A GUARD BINDING is the refusal only the graph can decide (§6·5): the plan CARRIES it, so a
+      // traversal whose answer is an error stays a traversal this algebra expressed rather than one
+      // it declined — which is the difference between a coverage counter that can reach 100% and one
+      // that cannot. The rows are already in hand; the test is their count.
+      const guard = declared.get(step.binding)?.guard;
+      if (guard && (guard.raiseWhen === 'rows' ? rows.length > 0 : rows.length === 0))
+        throw new Error(guard.message);
+    }
     if (step.result) result = rows;
   }
   return result;

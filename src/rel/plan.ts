@@ -15,6 +15,8 @@ import { isStmt, type Stmt } from './stmt.ts';
  *   `RETURNING` rows, and the same `Ref` resolves to them.
  * - a binding whose node is a `Rel` and which is marked `snapshot` → a **read boundary**: it runs as
  *   its own step, its rows are retained, and every later `Ref` reads the value it had THEN.
+ * - a binding carrying a `guard` → a **refusal the graph decides**: it runs as its own step and the
+ *   executor raises the guard's message when its row count is the wrong one. Nothing reads it.
  *
  * Ordering IS this list — there is no `Sequence` node privately owning execution order — and
  * **effects are legal only at a binding**, which is what makes a write in a read position
@@ -40,6 +42,44 @@ export interface Binding {
    * program with effects, a `Rel` binding read by more than one step MUST carry it.
    */
   readonly snapshot?: boolean;
+  /**
+   * THE ANSWER IS AN ERROR, AND ONLY THE GRAPH KNOWS — a refusal the plan CARRIES rather than one a
+   * lowering has to decline for (§6·5).
+   *
+   * Two facts wear one `null` in a lowering: "not learned yet" and "the answer is an ERROR". A
+   * text-level error moved above both spines (the `writeArguments` verify Pass); this is the
+   * residue that CANNOT move there, because the question is about the graph's contents rather than
+   * the traversal's: is this public element id still free? does this vertex exist? A Pass cannot
+   * ask, and a lowering asking would need a store at compile time.
+   *
+   * So the check becomes a STEP: a binding whose relation the executor runs and then tests, raising
+   * `message` when the row count is the wrong one. It costs O(plan size) — one statement, not one
+   * per row — and it stays inside P5, which is the same move that made the `mergeV` snapshot work.
+   * The alternative is what it replaces: DECLINING the whole traversal to the other spine, which
+   * the coverage census then counts as vocabulary this algebra cannot express. It can; it simply
+   * has to be allowed to say no.
+   *
+   * A guard is RETAINED by construction (see `retained`) — a check that is not a step of its own
+   * would be folded into a CTE and never run.
+   */
+  readonly guard?: Guard;
+}
+
+/**
+ * WHEN a guard binding raises, and with what.
+ *
+ * `raiseWhen` is stated rather than always-empty because both directions are real and neither is the
+ * negation of a mistake: `'rows'` is an id COLLISION (`vertex id already exists: 7` — the check finds
+ * the row it hoped was absent), `'empty'` is a MISSING referent (`Vertex does not exist for mergeE` —
+ * the check fails to find the row it needs). One field, two messages, no second mechanism.
+ *
+ * The message is the REFERENCE's, verbatim, and it is the reason a guard exists at all: a decline
+ * hands the traversal to a spine that raises this same string, so what the guard buys is the string
+ * WITHOUT the decline.
+ */
+export interface Guard {
+  readonly message: string;
+  readonly raiseWhen: 'rows' | 'empty';
 }
 export interface Plan { readonly bindings: readonly Binding[]; readonly result: Rel; }
 
@@ -47,7 +87,8 @@ export interface Plan { readonly bindings: readonly Binding[]; readonly result: 
  * both how a `Ref` to it renders and whether it is an execution step of its own. Asked by the
  * emitter's `Ref` arm, its step assembler and `checkPlan`'s snapshot rule, so it is one predicate
  * rather than three spellings of `isStmt(node) || snapshot`. */
-export const retained = (binding: Binding): boolean => isStmt(binding.node) || binding.snapshot === true;
+export const retained = (binding: Binding): boolean =>
+  isStmt(binding.node) || binding.snapshot === true || binding.guard !== undefined;
 
 /** A plan with no bindings — the common read case, and what a bare relation means. */
 export const planOf = (result: Rel): Plan => plan({ bindings: [], result });

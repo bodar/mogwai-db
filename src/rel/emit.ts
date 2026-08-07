@@ -526,9 +526,12 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         effects.push({ binding: binding.name, result: binding.name === lastRetained, emitted: renderStep(withCtes(ctes, body)) });
       };
       // `isStmt` first because it NARROWS the union `retained` only answers a question about, so the
-      // CTE arm below has a `Rel`.
+      // CTE arm below has a `Rel`. Then `retained`, not `binding.snapshot`: this is the STEP
+      // ASSEMBLER, one of the three readers that predicate exists for, and spelling it inline here
+      // is what silently made a GUARD binding a CTE — emitted, never run, and the refusal it carried
+      // reached the caller as SQLite's own constraint error instead of the reference's message.
       if (isStmt(binding.node)) { retain(statement(binding.node)); continue; }
-      if (binding.snapshot) { retain(renderRel(binding.node, EMPTY_SCOPE)); continue; }
+      if (retained(binding)) { retain(renderRel(binding.node, EMPTY_SCOPE)); continue; }
       ctes.push(q`${ident(binding.name)} AS (${renderBuilt(build(binding.node, EMPTY_SCOPE))})`);
     }
     if (lastRetained) return { effects };
