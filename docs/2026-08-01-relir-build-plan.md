@@ -908,23 +908,32 @@ blind; only the reference is not.**
 
 **The cut:** delete the write route, `steps/write/write.ts`, and the write half of the differential.
 
-### Phase 2 — sack, then the extracted families
+### Phase 2 — ✅ sack, then the extracted families
 
-**`sack` first, because it is the cheapest thing on this list and nobody had noticed.** Its entire surface
-outside legacy is **three references, all in `compiler.ts`** — `extractSack` at :48, the route gate
-`!sackInit` at :89, and the two legacy call sites. And `src/channels.ts` ALREADY models it: `sack` is a
-first-class `ChannelRole` with a merge policy (`identical`), a barrier policy (`drop`), a slot in
-`ROLE_ORDER`, and a group policy of `undefined` — it correctly refuses an N→1 collapse.
+**✅ `sack` LANDED** (`src/compiler/rel/sack.ts`), and the prediction held: `src/channels.ts` already
+modelled the role completely — merge `identical`, barrier `drop`, a `ROLE_ORDER` slot, a group policy of
+`undefined` — so seeding, folding and reading it is three projections. Legacy's 94 lines had no
+counterpart to port: they hand-roll the layout re-projection, THROW on
+`aliases.size || path` (a sack may not coexist with any other per-traverser channel) and defer
+sack-through-repeat/barrier/local and split/merge-on-fork, which are exactly the questions §3.5's
+obligations checker answers for every channel at once. Coexistence is now what happens when nobody
+prevents it.
 
-Legacy's version is the shoehorn, and its own code says so: `steps/prefix/sack.ts` throws on
-`st.traverserLayout.aliases.size || st.traverserLayout.path` — **sack refuses to coexist with any other
-per-traverser channel** — hand-rolls its layout re-projection with a comment explaining that appending the
-column in the wrong slot silently desyncs, and splits across three files (mutate in `prefix/sack.ts`, read
-in `projection.ts`'s `compileSackRead`, seed in `withSack()`). Its header defers sack-through-repeat/
-barrier/local and split/merge-on-fork. **Every one of those is a channel-obligation question, and §3.5's
-obligations checker answers that class by construction.** So this is not "port 94 lines" — it is delete the
-gate and let the machinery that already exists carry it. It also removes a permanent asymmetry at the top
-of the compiler.
+**One correction to what this section used to say, because it read as cheaper than it was:** "delete the
+gate and let the machinery that already exists carry it" overstates it. Deleting the gate alone makes a
+sack traversal DECLINE — the CHANNEL existed, the STEPS did not. The gate deletion is what makes the work
+REACHABLE; the lowering is new code. Small, but new.
+
+**THE LAST ROUTE-LEVEL GATE IS GONE WITH IT.** `compiler.ts`'s `!sackInit` never OFFERED a `withSack()`
+traversal to this route, whatever else was in it; the seed now travels as a settled value like
+`labelCardinality`, and what the route cannot express declines inside the lowering. That is §6·6's lesson
+at the routing switch — and the same defect turned up twice more in the same increment, which is why it is
+worth naming as a class rather than as three bugs: `rel-blockers` was not handing the lowering the seed
+either (825 → 850 with no code change), and `servicesNamedBy` scanned only the top-level chain.
+
+Two DECLINES remain, both honest: `withSack(seed, Operator.x)` names a MERGE operator, which is a third
+policy answer for the role and therefore a channels-core change rather than a step lowering; and
+`barrier(Barrier.normSack)` is its own step.
 
 Then the families whose kernels Phase 0 extracted and whose only remaining legacy content is emission —
 **`math` first as the proof case** (§6·4), then the scalar-transform tail, the property shape
