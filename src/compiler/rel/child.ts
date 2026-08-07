@@ -4,7 +4,7 @@ import type { Elem } from '../plan/plan.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { Binding } from '../../rel/plan.ts';
-import type { RelFraming } from './framing.ts';
+import type { RecordField, RelFraming } from './framing.ts';
 
 /**
  * THE CHILD SEAM — ONE interface, THREE total answers to "lower an inner body" (§6·6).
@@ -128,7 +128,12 @@ export type BodyScope = 'child' | 'rooted';
  */
 export type ChildHost =
   | { readonly kind: 'element'; readonly id: Expr; readonly elem: Elem; readonly row?: HostRow }
-  | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly row?: HostRow };
+  | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly row?: HostRow }
+  /** A RECORD traverser — its own MAP SCOPE. `Scoping.getScopeValue` tries the traverser's Map before
+   *  the side effects and the path labels, so `by(__.select('b'))` over a `project('a','b')` names the
+   *  FIELD and not a same-named `as()` label. The fields ride on the host rather than on `HostRow`
+   *  because they are what the traverser IS, not state carried beside it. */
+  | { readonly kind: 'record'; readonly fields: readonly RecordField[]; readonly row?: HostRow };
 
 /**
  * THE ROW the host traverser rides on — its relation and the labels bound on it.

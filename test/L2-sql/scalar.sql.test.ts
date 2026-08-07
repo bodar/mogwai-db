@@ -1100,19 +1100,44 @@ describe('scalar-parent / projection SQL', () => {
     });
   });
 
-  test('order() on a record stream sorts by a by(__.select(field)) modulator', () => {
-    const p = read("g.V().out('created').project('a','b').by('name').by(__.in('created').count()).order().by(__.select('b'), Order.desc).select('a')");
+  test('order() on a record stream sorts by a by(__.select(field)) modulator — legacy', () => {
+    const legacy = { spine: 'legacy' } as const;
+    const p = read("g.V().out('created').project('a','b').by('name').by(__.in('created').count()).order().by(__.select('b'), Order.desc).select('a')", legacy);
     expect(p.shape).toEqual({ kind: 'value', type: PER_ROW('e0_vtype') });
     // the order CTE sorts the record rows by field b's value column, descending
     expect(p.sql).toContain('ORDER BY r.e1_v DESC');
     // a following limit fuses into the same ORDER BY query (LIMIT after the sort)
-    const lim = read("g.V().out('created').project('a','b').by('name').by(__.in('created').count()).order().by(__.select('b'), Order.desc).limit(2).select('a')");
+    const lim = read("g.V().out('created').project('a','b').by('name').by(__.in('created').count()).order().by(__.select('b'), Order.desc).limit(2).select('a')", legacy);
     expect(lim.sql).toContain('ORDER BY r.e1_v DESC LIMIT 2');
     // an element field orders by its external id
-    expect(read("g.V(1).project('self','b').by().by(__.out().count()).order().by(__.select('self')).select('b')").sql)
+    expect(read("g.V(1).project('self','b').by().by(__.out().count()).order().by(__.select('self')).select('b')", legacy).sql)
       .toContain('ORDER BY r.e0_id ASC');
     // bare order() / a list field defer with a clear error
-    expect(() => compile("g.V().project('a').by('name').order().select('a')", {})).toThrow('requires a by(field)');
+    expect(() => compile("g.V().project('a').by('name').order().select('a')", {}, legacy)).toThrow('requires a by(field)');
+  });
+
+  test('a RECORD is an ordinary per-row traverser — order, slice, count — RelIR', () => {
+    const rel = { spine: 'rel' } as const;
+    // MAP SCOPE BEATS PATH SCOPE, so `by(__.select('b'))` over a record names the FIELD
+    // (`Scoping.getScopeValue` — the traverser's Map, then side effects, then the path labels). The
+    // field is a COLUMN, which is the whole reason the record keeps its fields addressable.
+    const p = read("g.V().out('created').project('a','b').by('name').by(__.in('created').count()).order().by(__.select('b'), Order.desc).select('a')", rel);
+    expect(p.spine).toBe('rel');
+    expect(p.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
+    // The sort RE-MINTS the emission order rather than trailing an `ORDER BY`, which is what makes a
+    // following slice take its window from the new positions (§12). The field's expression is inlined
+    // into the window because SQL cannot name a select alias in an `OVER` clause — the same
+    // re-inlining every clause reader on this route does.
+    expect(p.sql).toMatch(/row_number\(\) OVER \(ORDER BY [^]*DESC\) AS encounter/);
+    expect(p.sql).toContain('AS f1_v');
+    // The row-algebraic ops need NO record arm at all: a slice reads the emission-order channel and
+    // `count()` reads the bulk channel, and neither asks what the payload is.
+    expect(read("g.V().project('a').by('name').limit(2)", rel).spine).toBe('rel');
+    expect(read("g.V().project('a').by('name').count()", rel).shape).toEqual({ kind: 'value', type: STATIC('long') });
+    // A bare `order()` over a record has no comparable value — the traverser is a whole map — so this
+    // route DECLINES rather than picking a field, and legacy raises the message it owns. The decline
+    // is what routes it there, which is why the assertion is the MESSAGE and not a spine.
+    expect(() => compile("g.V().project('a').by('name').order().select('a')", {}, rel)).toThrow('requires a by(field)');
   });
 
   test('order() on a record executes: sort by a projected count, then extract a field', () => {

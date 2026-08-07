@@ -100,6 +100,13 @@ export interface RecordField {
   readonly optional: boolean;
 }
 
+/** A record's field by KEY, or `undefined`. Here rather than in `record.ts` because the by()
+ *  vocabulary needs it too — `Scoping.getScopeValue` tries the traverser's own MAP before the path
+ *  labels, so `by(__.select('b'))` over a record must ask this first — and `record.ts` imports
+ *  `modulator.ts`, so the lookup cannot live on that side of the DAG. */
+export const fieldNamed = (fields: readonly RecordField[], key: string): RecordField | undefined =>
+  fields.find((field) => field.key === key);
+
 /** A record field's column, under its prefix. The ONE spelling, because the builder, the field
  *  re-entry and the map assembly must agree, and a prefix composed three ways is three chances to
  *  disagree. */

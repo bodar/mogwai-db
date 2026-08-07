@@ -271,11 +271,6 @@ export function recordField(
   };
 }
 
-/** A record's field by KEY, or `undefined` — the lookup `select(key)` needs, kept beside the builder so
- *  the key vocabulary has one owner. */
-export const fieldNamed = (fields: readonly RecordField[], key: string): RecordField | undefined =>
-  fields.find((field) => field.key === key);
-
 /**
  * `select(keys…)` AT EVERY ARITY — ONE lowering, because it is one question asked N times.
  *

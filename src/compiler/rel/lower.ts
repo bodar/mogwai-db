@@ -12,8 +12,8 @@ import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
 import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
-import type { RecordField, RelFraming } from './framing.ts';
-import { fieldNamed, recordField, recordOf, recordPayload, selectKeys } from './record.ts';
+import { fieldNamed, type RecordField, type RelFraming } from './framing.ts';
+import { recordField, recordOf, recordPayload, selectKeys } from './record.ts';
 import { propertyElement, propertyKey, propertyPayload, propertyRelation, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
@@ -2680,21 +2680,81 @@ function propertyTail(
  * the spine that answers rather than dropping the record's fields silently.
  */
 function recordTail(
-  rel: Rel, fields: readonly RecordField[], steps: readonly IRStep[], from: number,
-  bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+  seed: Rel, fields: readonly RecordField[], steps: readonly IRStep[], from: number,
+  bulked: boolean, ctx: ChainCtx, fresh: Minter, aliases: AliasMap,
 ): Tail | null {
-  if (from === steps.length) return { rel, framing: { kind: 'record', fields }, aliases: labels };
-  const step = steps[from]!;
-  if (step.name !== 'select' || step.modulators?.length || step.optionArms) return null;
-  const args = argValues(step);
-  if (args.length !== 1 || typeof args[0] !== 'string') return null;
-  const field = fieldNamed(fields, args[0]);
-  if (!field) {
-    const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh);
-    return selected && continueAs(selected.rel, selected.framing, steps, from + 1, bulked, ctx, fresh, labels);
+  let rel = seed;
+  let labels = aliases;
+  for (let at = from; at < steps.length; at++) {
+    const step = steps[at]!;
+    if (step.optionArms) return null;
+    if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
+    // The record's own MAP SCOPE rides on the host, which is what makes `by(__.select('a'))` read the
+    // FIELD rather than a same-named `as()` label (§ `scopeValue`).
+    const host: ChildHost = { kind: 'record', fields, row: { rel, aliases: labels } };
+
+    if (step.name === 'identity' || step.name === 'barrier') { if (argValues(step).length) return null; continue; }
+
+    if (step.name === 'as') {
+      // A record is not a `TraverserObject` this route can bind: the alias history encodes an element
+      // rowid, a value or a list, and a MAP binding declines at `readOf` on the way back out anyway.
+      return null;
+    }
+
+    if (step.name === 'select') {
+      const args = argValues(step);
+      // MAP SCOPE BEATS PATH SCOPE (`Scoping.getScopeValue`), so a key that names a FIELD re-enters
+      // that field and only a miss falls through to the alias channel. A modulated or multi-key
+      // select over a record is `selectKeys`' business either way.
+      const field = args.length === 1 && typeof args[0] === 'string' && !step.modulators?.length
+        ? fieldNamed(fields, args[0])
+        : undefined;
+      if (field) {
+        const entered = recordField(rel, field, fresh);
+        return entered && continueAs(entered.rel, entered.framing, steps, at + 1, bulked, ctx, fresh, labels);
+      }
+      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh);
+      return selected && continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
+    }
+
+    if (step.name === 'order') {
+      const sort = sortTerms(step, host, ctx, fresh);
+      if (!sort) return null;
+      if (sort.drop) rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: sort.drop });
+      // A sort SUPERSEDES the arriving order and must RE-MINT the position, for the scalar tail's
+      // reason: a later slice reads the channel, and taking its window from the stale seed returns the
+      // right multiset from the wrong place.
+      const encounter = encounterOf(rel.channels);
+      const channels = encounter ? rel.channels : withChannel(rel.channels, ENCOUNTER);
+      rel = renumber(
+        rel,
+        encounter ? [...sort.terms, { expr: col(rel.id, encounter.col), dir: 'asc' }] : sort.terms,
+        encounter ? rel.type.cols : [...rel.type.cols, meta(ENCOUNTER.col, 'int')],
+        channels, fresh,
+      );
+      continue;
+    }
+
+    // THE ROW-ALGEBRAIC OPS ARE SHAPE-AGNOSTIC, which is the whole reason a record needs no copy of
+    // them: a slice reads the emission-order channel and a `count()` reads the bulk channel, and
+    // neither asks what the payload IS. `sliceOp` and `countExpr` are the same functions every other
+    // tail calls.
+    const sliced = sliceOp(step, rel, bulked, fresh);
+    if (sliced) { rel = sliced; continue; }
+
+    if (step.name === 'count') {
+      if (argValues(step).length) return null;
+      const counted = countTail(rel, fresh);
+      return continueAs(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
+    }
+
+    // Everything else DECLINES. A record is an ordinary per-row traverser, so `dedup()`, a local-scope
+    // slice over its ENTRIES, `math()` over its fields and `unfold()` to `Map.Entry` rows are all
+    // expressible and simply not built yet — declining hands them to the spine that answers rather
+    // than dropping the record's fields silently.
+    return null;
   }
-  const entered = recordField(rel, field, fresh);
-  return entered && continueAs(entered.rel, entered.framing, steps, from + 1, bulked, ctx, fresh, labels);
+  return { rel, framing: { kind: 'record', fields }, aliases: labels };
 }
 
 /**

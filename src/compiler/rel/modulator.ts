@@ -4,10 +4,11 @@ import { isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
 import { PER_ROW, STATIC, UNKNOWN } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
-import { framingCols, type RelFraming } from './framing.ts';
+import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
 import { and, eq, EDGE_COLS, firstOf, meta, NODE_COLS, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
 import { storedCompareOn } from './predicate.ts';
 import { aliasProjection, readFraming, type Pop } from './alias.ts';
+import type { ColMeta } from '../../rel/types.ts';
 import { elementNode } from './element.ts';
 
 /**
@@ -198,14 +199,13 @@ export function byExpr(
   }
 
   if (key.kind === 'alias') {
-    // A VALUE label yields its stored scalar and, where the history recorded a per-row type, the
-    // ordering wrapper reads that recorded tag rather than a column — the entry's own `t` field IS the
-    // type, which is what makes `as('a')` on a big long still compare as a number after `select('a')`.
-    // An ELEMENT or LIST label has no comparable value here: ordering by a rowid is not what
-    // `order().by(__.select('a'))` means over an element, and legacy raises for it.
-    const projected = aliasField(key, host);
-    if (!projected || projected.read.kind !== 'value') return null;
-    const [value, type] = [projected.payload[0]![1], projected.payload[1]?.[1]];
+    // A VALUE yields its stored scalar and, where the source recorded a per-row type, the ordering
+    // wrapper reads that recorded tag rather than a column — which is what makes `as('a')` on a big
+    // long still compare as a number after `select('a')`. An ELEMENT or LIST has no comparable value
+    // here: ordering by a rowid is not what `order().by(__.select('a'))` means, and legacy raises.
+    const scoped = scopeValue(key, host);
+    if (!scoped || scoped.framing.kind !== 'scalar') return null;
+    const [value, type] = [scoped.payload[0]![1], scoped.payload[1]?.[1]];
     return ordering && type ? storedCompareOn(type)(value) : value;
   }
 
@@ -216,6 +216,11 @@ export function byExpr(
     if (key.kind !== 'identity') return null;
     return ordering && host.vtype ? storedCompareOn(host.vtype)(host.value) : host.value;
   }
+
+  // A RECORD's only projections are its FIELDS, which the alias arm above answered. A bare `by()` over
+  // one is the whole map — not a comparable value and not a property source — so everything left here
+  // declines rather than picking a field.
+  if (host.kind === 'record') return null;
 
   if (key.kind === 'identity') return host.id;
 
@@ -281,13 +286,43 @@ export function byExpr(
   return firstOf(mine, value, col(mine.id, 'id'), fresh);
 }
 
-/** One alias `by()` slot resolved against the host's ROW, or `null` where the host carries no row (a
- *  path position projects from a rowid, not from a relation) or the label is not readable there. The
- *  answer is `select()`'s own — `aliasProjection` is the single authority — so a by()-position read
- *  and a chain-position read of one label cannot come apart. */
-const aliasField = (
+/**
+ * A SCOPE KEY resolved against the host — MAP SCOPE FIRST, then the path labels.
+ *
+ * That order is `Scoping.getScopeValue`'s and not a preference: the traverser's own Map is tried
+ * before the side effects and before the path labels
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:117-131`),
+ * so `project('a','b').order().by(__.select('a'))` reads the FIELD even where an `as('a')` label is
+ * also bound. One function so the three by() answers cannot disagree about which scope won.
+ *
+ * `null` where the host carries no row (a path position projects from a rowid, not from a relation)
+ * or the key is readable in neither scope.
+ */
+function scopeValue(
   key: Extract<ByKey, { kind: 'alias' }>, host: ChildHost,
-): ReturnType<typeof aliasProjection> => (host.row ? aliasProjection(host.row.rel, host.row.aliases, key.label, key.pop) : null);
+): { readonly payload: readonly (readonly [ColMeta, Expr])[]; readonly framing: RelFraming; readonly optional: boolean } | null {
+  const row = host.row;
+  const field = host.kind === 'record' ? fieldNamed(host.fields, key.label) : undefined;
+  if (field && row) {
+    // A `Pop` names a position in a path HISTORY; a map key has no history, so a Pop-qualified read
+    // of a field is a form Gremlin does not have and declining beats picking an end.
+    if (key.pop !== 'last') return null;
+    const cols = framingCols(field.framing);
+    if (!cols) return null;
+    return {
+      payload: cols.map((column) => [column, col(row.rel.id, fieldCol(field.prefix, column.name))] as const),
+      framing: field.framing,
+      optional: field.optional,
+    };
+  }
+  if (!row) return null;
+  const projected = aliasProjection(row.rel, row.aliases, key.label, key.pop);
+  return projected && {
+    payload: projected.payload,
+    framing: readFraming(projected.read),
+    optional: projected.entry.binds === undefined,
+  };
+}
 
 /**
  * A `by()` projection as a SELF-DESCRIBING `{t,v}` NODE rather than a bare value — what a MAP entry
@@ -322,19 +357,18 @@ export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, c
   }
 
   if (key.kind === 'alias') {
-    const projected = aliasField(key, host);
-    if (!projected) return null;
-    // An ELEMENT label becomes a `{t:'vertex', v:{…}}` member, which is the encoding the typed tree
-    // already frames at any depth — so a map keyed or valued by a labelled element needs nothing new.
-    if (projected.read.kind === 'element')
-      return elementNode(projected.payload[0]![1], projected.read.elem, fresh);
-    // A LIST label's payload is a naked JSON array, which the framer reads as a list of bare members —
-    // but the member ENCODING (`ListOf`) is not something a `{t,v}` node can carry, so a list-valued
-    // label declines here and stays the field vocabulary's business.
-    if (projected.read.kind === 'list') return null;
-    // A VALUE label carries its recorded type in the history entry's own `t` field — the one place a
-    // per-row `vtype` COLUMN survives becoming JSON.
-    return typedNode(projected.payload[0]![1], projected.payload[1]?.[1] ?? compilerNull('text'));
+    const scoped = scopeValue(key, host);
+    if (!scoped) return null;
+    // An ELEMENT becomes a `{t:'vertex', v:{…}}` member, which is the encoding the typed tree already
+    // frames at any depth — so a map keyed or valued by a labelled element needs nothing new.
+    if (scoped.framing.kind === 'elements')
+      return elementNode(scoped.payload[0]![1], scoped.framing.elem, fresh);
+    // Anything else — a LIST, a nested RECORD — needs a member encoding a `{t,v}` node cannot carry
+    // from here, so it declines and stays the FIELD vocabulary's business.
+    if (scoped.framing.kind !== 'scalar') return null;
+    // A VALUE carries its recorded type in the history entry's own `t` field — the one place a per-row
+    // `vtype` COLUMN survives becoming JSON.
+    return typedNode(scoped.payload[0]![1], scoped.payload[1]?.[1] ?? compilerNull('text'));
   }
 
   if (host.kind === 'scalar') {
@@ -343,6 +377,11 @@ export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, c
     // framer infers from the JS value, which is what an untagged node means.
     return host.vtype ? typedNode(host.value, host.vtype) : typedNode(host.value, compilerNull('text'));
   }
+
+  // A RECORD as a `{t:'map', v:[…]}` node is `recordValue`'s (`record.ts`) and reachable only through
+  // the FIELD vocabulary, which is on the other side of this module's DAG edge. A non-field projection
+  // over one declines here.
+  if (host.kind === 'record') return null;
 
   // A bare `by()` over an element projects the ELEMENT — not a value with a tag.
   if (key.kind === 'identity') return null;
@@ -428,15 +467,15 @@ export function byField(
     // labelled ELEMENT beside a computed value is the ordinary shape of `project('vertex','degree')
     // .by(__.select('v')).by()`. Because the payload keeps the rowid, the field re-enters as a vertex
     // stream — which a `{t,v}` node could not do.
-    const projected = aliasField(key, host);
-    if (!projected) return null;
+    const scoped = scopeValue(key, host);
+    if (!scoped) return null;
     return {
-      exprs: projected.payload.map(([column, expr]) => [column.name, expr] as const),
-      framing: readFraming(projected.read),
-      // A STATICALLY bound label is present on every row that reached here; one first bound inside a
-      // branch arm or a repeat body may be missing, and then the key is absent from the map. Same
-      // distinction `readProjection` draws to decide whether it owes a presence filter.
-      optional: projected.entry.binds === undefined && droppable(),
+      exprs: scoped.payload.map(([column, expr]) => [column.name, expr] as const),
+      framing: scoped.framing,
+      // A STATICALLY bound label (or a non-optional field) is present on every row that reached here;
+      // one first bound inside a branch arm or a repeat body may be missing, and then the key is
+      // absent from the map. Same distinction `aliasGuard` draws for a presence filter.
+      optional: scoped.optional && droppable(),
     };
   }
 
@@ -459,6 +498,8 @@ export function byField(
     }
     return { exprs, framing: produced.framing, optional: droppable() };
   }
+
+  if (host.kind === 'record') return null;
 
   if (key.kind === 'token') {
     const value = byExpr(modulation, host, fresh);
