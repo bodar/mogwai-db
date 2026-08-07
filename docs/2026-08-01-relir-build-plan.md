@@ -510,22 +510,44 @@ exists.
 | pinned file | lines | imported symbols | pinned by |
 |---|---|---|---|
 | `tail/child.ts` | 1241 | `scopedMovementCount` | `services/catalog/degree-centrality.ts` |
-| `tail/child-shape.ts` | 1183 | `ChildFrameStack`, `ChildParent`, `childSteps`, `assertsGType`, `collectionAssert`, `typeOfAssert` | `services/spi/types.ts`, `rel/lower.ts` |
-| `tail/group.ts` | 1125 | `propertyPayload` | `services/catalog/search.ts` |
+| `tail/child-shape.ts` | 1183 | ~~`childSteps`, `assertsGType`, `collectionAssert`, `typeOfAssert`~~ · `ChildFrameStack`, `ChildParent` | `services/spi/types.ts`, ~~`rel/lower.ts`~~ |
+| ~~`tail/group.ts`~~ | 1125 | ~~`propertyPayload`~~ | ~~`services/catalog/search.ts`~~ |
 | `context/context.ts` | 991 | `LoweringState`, `ElementStream`, `TraverserLayout`, `rootLayout`, `AliasMap`, `AliasEntry`, `aliasScalarTypeOf`, `withShape` | `rel/{lower,write,alias}.ts`, `engine/deps.ts`, `services/catalog/{directory,search}.ts` |
-| `tail/list.ts` | 742 | `LIST_LOCAL_TX`, `STRING_LOCAL_TX` | `rel/list.ts` |
-| `context/stream.ts` | 480 | `Stream`, `LoweringSuspension`, `toScalarStream`, `toPropertyStream`, `PropertyStream`, `PROPERTY_PAYLOAD` | `services/spi/types.ts`, `engine/deps.ts`, `services/catalog/{directory,search}.ts` |
-| `tail/path.ts` | 409 | `PATH_LIST_OPS` | `rel/lower.ts` |
-| `tail/coerce.ts` | 188 | `dtFactor`, `numericSpec` | `rel/transform.ts` |
-| `write/inject.ts` | 179 | `bareInjectTag`, `foldConstantCoercions` | `rel/lower.ts` |
-| `context/alias.ts` | 103 | `SHAPE_K`, `elemShape`, `AliasShape` | `rel/{path,history}.ts` |
-| `write/validate.ts` | 39 | `validateLabel`, `validatePropertyKey` | `rel/write.ts`, `ir/write-args.ts` |
-| `injection.ts` | 35 | `INJECT_VALUES_KEY` | `services/catalog/federate.ts` |
+| ~~`tail/list.ts`~~ | 742 | ~~`LIST_LOCAL_TX`, `STRING_LOCAL_TX`~~ | ~~`rel/list.ts`~~ |
+| `context/stream.ts` | 480 | `Stream`, `LoweringSuspension`, `toScalarStream`, `toPropertyStream`, `PropertyStream` · ~~`PROPERTY_PAYLOAD`~~ | `services/spi/types.ts`, `engine/deps.ts`, `services/catalog/{directory,search}.ts` |
+| ~~`tail/path.ts`~~ | 409 | ~~`PATH_LIST_OPS`~~ | ~~`rel/lower.ts`~~ |
+| ~~`tail/coerce.ts`~~ | 188 | ~~`dtFactor`, `numericSpec`~~ | ~~`rel/transform.ts`~~ |
+| `write/inject.ts` | 179 | `bareInjectTag` · ~~`foldConstantCoercions`~~ | `rel/lower.ts` |
+| ~~`context/alias.ts`~~ | 103 | ~~`SHAPE_K`, `elemShape`, `AliasShape`~~ | ~~`rel/{path,history}.ts`~~ |
+| ~~`write/validate.ts`~~ | 39 | ~~`validateLabel`, `validatePropertyKey`~~ | ~~`rel/write.ts`, `ir/write-args.ts`~~ |
+| ~~`injection.ts`~~ | 35 | ~~`INJECT_VALUES_KEY`~~ | ~~`services/catalog/federate.ts`~~ |
 
 Those twelve transitively drag `branch.ts` (1415), `projection.ts` (1321), `select.ts` (740), `scalar.ts`
 (724) and the rest. **Read the table honestly in both directions:** it is a FILE-level closure, so it
 over-counts what an edge costs (most edges take one to three symbols, so cutting the edge frees far more
 than the row suggests) — and it under-counts nothing, because 39/39 really are reachable.
+
+**Struck rows are CUT** — the kernel half of Phase 0 landed, and `scripts/steps-edges.tsv` is the live
+count (this table is the ORIGINAL measurement, kept so the shape of the remaining work stays legible
+against it). Fourteen non-exempt importers → eight. What the strike-through shows, and the reason the
+kernel pass was worth doing first: **every row that fell was a table or a total function**, and no row
+fell because a capability moved. What is LEFT on all eight is the object model —
+`LoweringState`/`Stream`/`TraverserLayout`/`AliasMap`/`ChildFrameStack`/`ChildParent` and the four
+accessors over them — plus `scopedMovementCount` (the child seam, not a kernel: the plan filed it under
+"pure kernels" and it is not one — it reaches `pushChildScope` and `engineOf`) and `bareInjectTag` (§6·7
+deletes it). Where each kernel went, since "a neutral module" was the instruction and the ANSWER is the
+durable part:
+
+| kernel | new home | why there |
+|---|---|---|
+| `validateLabel`/`validatePropertyKey` | `gremlin/validate.ts` | TinkerPop's `ElementHelper` rules; zero imports, `gremlin/math.ts`'s profile |
+| `dtFactor`/`numericSpec`/`foldConstantCoercions` + the whole coercion file | `gremlin/coerce.ts` | the const-fold RAISES TinkerPop's exact messages — Gremlin semantics, not lowering |
+| `INJECT_VALUES_KEY` | `ir/injection.ts` | a parsed IR operand shape + a reserved params key; its own header already called it a dependency-free leaf |
+| `SHAPE_K`/`elemShape`/`aliasEntry`/the Pop slices | `plan/alias.ts` | the as()-label history ENCODING, beside `JAVA_WHITESPACE`/`STORAGE_CLASS` — data both spines must agree on |
+| `PROPERTY_PAYLOAD`/`propertyPayload` | `plan/plan.ts` | beside `elementPayload`, its element twin |
+| `SCALAR_TRANSFORMS`/`LIST_LOCAL_TX`/`STRING_LOCAL_TX`/`PATH_LIST_OPS` | `ir/step.ts` | it already IS the step-name vocabulary home, and three of the four are exactly the "derive with a named difference, never merge" case it enforces |
+| `typeOfAssert`/`assertsGType`/`collectionAssert` | `ir/step.ts` | beside `sliceOf` — the other total decode of one step's arguments |
+| `childSteps` | `ir/passes.ts` | beside the `normalize` it is built on; parsing a nested arg into IR is IR production |
 
 **THE UNNAMED PIN, and the one that would make a late deletion fail expensively:
 `src/services/spi/types.ts:1-2` types the whole service SPI on legacy's `Stream` and
@@ -538,13 +560,12 @@ is written against legacy's object model. No phase of this plan named it before.
 |---|---|
 | `mathToSql`, `mathVars` | ✅ `src/gremlin/math.ts` — the worked example |
 | `JAVA_WHITESPACE` | ✅ `src/compiler/plan/plan.ts` |
-| `SACK_OPS`, `combineSack` | ❌ `tail/scalar.ts` |
-| `LIST_LOCAL_TX`, `STRING_LOCAL_TX` | ❌ `tail/list.ts` |
-| `dtFactor`, `numericSpec` | ❌ `tail/coerce.ts` |
-| `PATH_LIST_OPS` | ❌ `tail/path.ts` |
-| `validateLabel`, `validatePropertyKey` | ❌ `write/validate.ts` |
-| `propertyPayload` | ❌ `tail/group.ts` |
-| `scopedMovementCount` | ❌ `tail/child.ts` |
+| `LIST_LOCAL_TX`, `STRING_LOCAL_TX`, `PATH_LIST_OPS`, `SCALAR_TRANSFORMS` | ✅ `src/compiler/ir/step.ts` |
+| `dtFactor`, `numericSpec`, `foldConstantCoercions` | ✅ `src/gremlin/coerce.ts` |
+| `validateLabel`, `validatePropertyKey` | ✅ `src/gremlin/validate.ts` |
+| `propertyPayload`, `PROPERTY_PAYLOAD` | ✅ `src/compiler/plan/plan.ts` |
+| `SACK_OPS`, `combineSack` | ❌ `tail/scalar.ts` — no edge yet; Phase 2 moves it with `sack` |
+| `scopedMovementCount` | ❌ `tail/child.ts` — **not a kernel**: it reaches `pushChildScope`/`engineOf`, so it falls out of the object-model work, not this list |
 
 **The exit criterion, restated: the import graph is severed and `repeat()` works.** `mise run deletion`
 gates the floors in `scripts/deletion-ratchet.tsv` (that file IS the list; editing prose here changes
@@ -608,12 +629,16 @@ phase that makes every later deletion a `rm` instead of a re-derivation.
 
 §8's table IS the worklist. Three kinds of edge, and they are not equally hard:
 
-- **Pure kernels — move to a neutral module.** `SACK_OPS`/`combineSack`, `LIST_LOCAL_TX`/`STRING_LOCAL_TX`,
-  `dtFactor`/`numericSpec`, `PATH_LIST_OPS`, `validateLabel`/`validatePropertyKey`, `INJECT_VALUES_KEY`,
-  `SHAPE_K`/`elemShape`, `propertyPayload`, `scopedMovementCount`. Each is a table or a small total
-  function; `src/gremlin/math.ts` is the shape to copy. Hours, not days.
+- ✅ **Pure kernels — move to a neutral module.** DONE; §8's table names where each landed. It was hours,
+  as predicted, and it cut six of the fourteen non-exempt importers outright. Two corrections the work
+  produced: **`scopedMovementCount` was never a kernel** (it reaches `pushChildScope` and `engineOf`, so
+  it severs with the object model, not before it), and **the right neutral module was almost never a new
+  file** — seven of the eight kernels had an existing home that already owned their concern
+  (`ir/step.ts` for step-name vocabularies and argument decodes, `plan/plan.ts` for payload tuples,
+  `ir/passes.ts` for IR production, `gremlin/` for TinkerPop semantics). Only `gremlin/validate.ts`,
+  `gremlin/coerce.ts` and `ir/injection.ts` are new paths, and all three are whole-file MOVES.
 - **Already scheduled to die.** `bareInjectTag` goes with §6·7's per-row type channel — do not move it,
-  build that instead.
+  build that instead. It is now the ONLY non-object-model symbol left on any edge.
 - **The object model — the real work, and the reason this is a phase and not a chore.** `LoweringState` /
   `Stream` / `TraverserLayout` / `AliasMap`, and the service SPI built on them. Retype
   `services/spi/types.ts` off legacy's `Stream`/`ChildFrameStack`; give `src/compiler/rel/` its own alias
