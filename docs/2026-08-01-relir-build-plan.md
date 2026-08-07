@@ -871,8 +871,22 @@ the corpus LOADS without legacy writes once these capabilities land:
   the incoming traverser (`AddEdgeStepContract.java:88-92`), so both-implicit is a self-loop, not a refusal;
   the SOURCE form still declines (it carries no incoming vertex). Pinned in `test/rel-spine.test.ts` — the
   corpus exercises it only under PartitionStrategy.
-- **`property(T.id, …)` on `addE`** — the two hand-authored seeds. §6·5's `T`-token guard binding landed for
-  `elementAddV`; this is the same mechanism on the edge insert.
+- ✅ **`property(T.id, …)` / `property(T.label, …)` on `addE`** — LANDED, and it was NOT quite "the same
+  mechanism on the edge insert". The partition is shared (`creationTokens` is host-agnostic, because
+  `parseProperty` reports a token neutrally and lets the host decide) and both tokens are the reference's
+  on this step. What differs is that **a supplied id needs TWO graph-dependent refusals here where `addV`
+  needs one**: `addV` proves single-row at COMPILE time — its one-row case is a literal `Values` — while an
+  `addE` mid-chain input is a traverser relation, and nothing static separates `g.V(1)` from `g.V()`. So the
+  arithmetic `addV` settles by DECLINING becomes a second guard binding: `Limit{offset: 1, count: 1}` +
+  `raiseWhen: 'rows'`, non-empty exactly when a second row exists. Without it, N rows sharing one public id
+  collide on a UNIQUE the guard is not the authority for and surface as a RAW SQLITE ERROR rather than the
+  reference's sentence — and upstream raises `id already exists` on its second loop iteration, so the
+  message is the same one. **That is the general lesson for the rest of the write family: where a refusal is
+  arithmetic over the INPUT's row count, a host that cannot count statically needs a guard, not a decline.**
+
+**The payoff is the criterion itself: `MODERN_SEED` now compiles WHOLE on RelIR** — every statement a
+program, and the nodes/edges/properties byte-identical to what legacy builds (pinned in
+`test/rel-spine.test.ts`, because a seed that differs silently re-bases every test above it).
 
 **Separate "can the corpus load" from "is write coverage complete" and cut at the first.** The residue below
 is real work, but it is not load-bearing for running the suite and must not gate the deletion:
