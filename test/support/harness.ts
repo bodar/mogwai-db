@@ -124,7 +124,7 @@ export const grouped = (rows: readonly any[]): Record<string, unknown> => {
 };
 
 /**
- * WHAT A WRITE ECHOED, as `{labels, props}` — from EITHER spine.
+ * WHAT A WRITE ECHOED, as `{id, labels, props}` — from EITHER spine.
  *
  * The two spell the row differently and both are right. The legacy write closure returns its own
  * `{vertex: {id, labels, props}}` record; a RelIR program frames its result rows through the READ
@@ -134,12 +134,18 @@ export const grouped = (rows: readonly any[]): Record<string, unknown> => {
  * A test that asserted one spelling was asserting the ROUTE: the day the step joined the RelIR spine
  * it failed, having found no defect. What these tests mean to assert is what was WRITTEN, so that is
  * what this reads, and it reads it the same way whichever route answered.
+ *
+ * `id` is here for that same reason and arrived the same way — a `property(T.id, …)` test reached for
+ * `row.edge.id`, which is the legacy spelling and nothing else. The PUBLIC id (`COALESCE(uid, id)`) is
+ * as much a thing a write test means to assert as the labels are, so it belongs to the one authority
+ * rather than to a `?? row` dance re-spelled per test.
  */
-export const written = (row: any): { labels: unknown[]; props: Record<string, unknown[]> } => {
+export const written = (row: any): { id: unknown; labels: unknown[]; props: Record<string, unknown[]> } => {
   const echo = row?.vertex ?? row?.edge;
-  if (echo) return { labels: echo.labels ?? [echo.label], props: bare(echo.props) };
+  if (echo) return { id: echo.id, labels: echo.labels ?? [echo.label], props: bare(echo.props) };
   const label = row?.label;
   return {
+    id: row?.id,
     labels: typeof label === 'string' && label.startsWith('[') ? JSON.parse(label) : [label],
     props: bare(typeof row?.props === 'string' ? JSON.parse(row.props) : row?.props ?? {}),
   };

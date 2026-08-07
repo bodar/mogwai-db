@@ -276,7 +276,10 @@ test('addE mid-traversal with as() alias endpoint (per incoming traverser)', () 
 test('addE sets its own uid via property(T.id)', () => {
   const store = seededStore();
   const res = run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property(T.id, "e:marko-vadas")');
-  expect((res[0] as any).edge.id).toBe('e:marko-vadas');
+  // `written` and not `res[0].edge.id`, which is the LEGACY spelling: a RelIR program frames the
+  // created edge through the read element projection, so the echo is flat. Both carry the same public
+  // id, which is what this test means to assert.
+  expect(written(res[0]).id).toBe('e:marko-vadas');
   expect(run(store, 'g.E("e:marko-vadas").label()').map((r) => r.v)).toEqual(['knows']);
 });
 

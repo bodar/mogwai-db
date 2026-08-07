@@ -519,6 +519,11 @@ describe('the RelIR spine', () => {
       "g.V(1).addE('knows').to(__.V(2)).property(T.id,7).property('weight',0.5)",
       "g.V(1).addE('knows').to(__.V(2)).property(T.id,'e7')",
       "g.V(1).addE('knows').to(__.V(2)).property(T.label,'other')",
+      // THE SOURCE FORM, and it is here because leaving it out cost a red CI: its input is the one-row
+      // `Values` seed, which carries no `id` column at all, so a row-count guard that reads one throws
+      // out of a lowering whose contract is `null`. Both positions of the same step, always.
+      "g.addE('knows').from(__.V(1)).to(__.V(2)).property(T.id,7)",
+      "g.addE('knows').from(__.V(1)).to(__.V(2)).property(T.id,'e7')",
     ]) expect(compile(gremlin, {}, { spine: 'rel' }).kind, gremlin).toBe('program');
 
     const store = () => new GraphStore(new BunSqlite(':memory:'));
@@ -554,6 +559,9 @@ describe('the RelIR spine', () => {
       const taken = twoPeople(store(), spine);
       write(taken, "g.V(1).addE('knows').to(__.V(2)).property(T.id,7)", spine);
       expect(() => write(taken, "g.V(1).addE('knows').to(__.V(2)).property(T.id,7)", spine), spine)
+        .toThrow('edge id already exists: 7');
+      // …and from the SOURCE form too, whose guard runs over a seed relation rather than a traverser one.
+      expect(() => write(taken, "g.addE('knows').from(__.V(1)).to(__.V(2)).property(T.id,7)", spine), spine)
         .toThrow('edge id already exists: 7');
 
       const many = store();

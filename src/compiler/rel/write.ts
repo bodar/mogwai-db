@@ -1164,7 +1164,12 @@ export function elementAddE(
       id: fresh('li'), input: incoming, channels: incoming.channels, type: incoming.type,
       count: compilerInt(1), offset: compilerInt(1),
     });
-    guard(make.project({ id: fresh('p'), input: second, channels: [], type: ID_TYPE, exprs: [['id', col(second.id, 'id')]] }), taken.guard);
+    // A CONSTANT, never a column of the input: this guard asks ONLY "is there a second row", so reading
+    // a column would couple it to a shape it has no business knowing. It bit exactly that way —
+    // projecting `id` threw `no declared column 'id'` for the SOURCE form (`g.addE(l).from(x).to(y)`),
+    // whose input is the one-row `Values` seed that carries no `id` by construction (the same fact the
+    // implicit-endpoint guard above relies on). A row-count test is column-agnostic or it is wrong.
+    guard(make.project({ id: fresh('p'), input: second, channels: [], type: ID_TYPE, exprs: [['id', compilerInt(1)]] }), taken.guard);
   }
 
   const labelRow = internLabels([label], bind, fresh)!;
