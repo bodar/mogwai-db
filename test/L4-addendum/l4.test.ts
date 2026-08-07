@@ -100,11 +100,13 @@ function expectedCanon(tok: string, refs?: ReadonlyMap<string, unknown>): string
   if (t === 'null') return 'null';
   // v[marko].id — an element reference, resolved against the seeded store by the caller.
   if (refs?.has(t)) return canon(refs.get(t));
-  // v[marko] — the ELEMENT itself, not its id. Canonicalizes to the same `E<id>` a decoded vertex
-  // does, because upstream compares element results by identity. Vertices only: `elementRefs`
-  // caches by the `name` property, which edges in these fixtures do not carry.
-  const vref = t.match(/^v\[(.+)\]$/);
-  if (vref && refs?.has(`v[${vref[1]}].id`)) return 'E' + String(refs.get(`v[${vref[1]}].id`));
+  // v[marko] / e[marko-knows->vadas] — the ELEMENT itself, not its id. Canonicalizes to the same
+  // `E<id>` a decoded element does, because upstream compares element results by identity. Both
+  // kinds resolve through `elementRefs`, which keys vertices by their `name` and edges by their
+  // (outV, label, inV) triple — an edge's identity IS that triple, which is why upstream spells it
+  // that way and why no fixture needs a synthetic edge name.
+  const eref = t.match(/^[ve]\[(.+)\]$/);
+  if (eref && refs?.has(`${t}.id`)) return 'E' + String(refs.get(`${t}.id`));
   // Match the JS client's actual GraphBinary decode: a bigint (`.n`, BigInteger 0x23) is ALWAYS a
   // JS BigInt; a long (`.l`, Int64 0x02) decodes to a Number within ±2^53 and a BigInt beyond
   // (the client's Long deserializer is magnitude-dependent) — so count()/groupCount() longs, which
@@ -217,6 +219,19 @@ function elementRefs(store: GraphStore): Map<string, unknown> {
   for (const r of store.query<{ name: unknown; id: unknown }>(
     'SELECT vp.value AS name, vp.node AS id FROM vertex_properties vp WHERE vp.key = ?', ['name']))
     refs.set(`v[${String(r.name)}].id`, r.id);
+  // EDGES, keyed by upstream's own notation — `e[marko-knows->vadas].id`. Until this existed L4
+  // could not assert ANY edge-valued result: the cache was keyed on a `name` property, which no
+  // fixture edge carries, so `e[…]` fell through to a bare string and compared against `E<id>`.
+  // An edge has no name of its own, but it has something better — it IS its (outV, label, inV)
+  // triple, which is exactly why upstream spells it that way. Resolved by joining both endpoints
+  // back to their names, so it needs no fixture change and reads the same as the corpus.
+  for (const r of store.query<{ out: unknown; label: unknown; in: unknown; id: unknown }>(
+    `SELECT ov.value AS "out", l.name AS label, iv.value AS "in", e.id AS id
+       FROM edges e
+       JOIN labels l ON l.id = e.label
+       JOIN vertex_properties ov ON ov.node = e.src AND ov.key = ?
+       JOIN vertex_properties iv ON iv.node = e.tgt AND iv.key = ?`, ['name', 'name']))
+    refs.set(`e[${String(r.out)}-${String(r.label)}->${String(r.in)}].id`, r.id);
   return refs;
 }
 

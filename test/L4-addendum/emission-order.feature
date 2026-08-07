@@ -163,3 +163,37 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
       | result |
       | marko |
       | vadas |
+
+  @gap:emission-order
+  Scenario: g_V_out_path_limitX3X
+    Given the modern graph
+    And the traversal of
+      """
+      g.V().out().path().limit(3)
+      """
+    # The PATH shape's slice, and the last consumer that spelled `LIMIT` with no `ORDER BY` while a
+    # canonical `encounter` was live on its input — so it took whichever rows the scan yielded.
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | p[v[marko],v[vadas]] |
+      | p[v[marko],v[lop]] |
+      | p[v[marko],v[josh]] |
+
+  @gap:emission-order
+  Scenario: g_E_identity_whereXvaluesXweightXX_path_limitX2X
+    Given the modern graph
+    And the traversal of
+      """
+      g.E().identity().where(__.values("weight")).path().limit(2)
+      """
+    # L5's witness for the above, verbatim — found on a HEAD-derived seed CI drew. It surfaced as a
+    # fast-path DIVERGENCE (the whereExists path drives the scan off `edges`, the generic filter off
+    # the carried relation, so the unordered LIMIT took different edges), but both routes were
+    # unordered: this is the defect-in-both class the differential is documented to be blind to, and
+    # the divergence was only how it became visible.
+    When iterated to list
+    Then the result should be ordered
+      | result |
+      | p[e[marko-knows->vadas]] |
+      | p[e[marko-knows->josh]] |

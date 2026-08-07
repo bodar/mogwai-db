@@ -210,7 +210,17 @@ export function lowerPath(st: ElementStream, proj: IRStep, acc: TailAcc): PathSt
 
   const dist = acc.distinct ? 'DISTINCT ' : '';
   const whereNode = whereParts.length ? q` WHERE ${list(whereParts, ' AND ')}` : empty;
-  const tailSql = (acc.limit !== null || acc.offset > 0) ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
+  // A SLICE HERE OBEYS THE SAME RULE AS EVERY OTHER SLICE: deterministic when the chain carries
+  // emission order, order-free when it does not (`prefix/passthrough.ts` orderByEncounter, Stage B).
+  // This site was the one place that spelled the LIMIT WITHOUT the ORDER BY while `encounter` was
+  // live, so `path().limit(n)` took whichever n rows the scan happened to yield — and since the
+  // whereExists fast path and the generic filter drive that scan differently, the two answered with
+  // different paths. Found by L5 on a HEAD-derived seed CI drew; the divergence is only how it
+  // SURFACED, not what it was: BOTH routes were unordered, so this is the both-paths class the
+  // differential is documented to be blind to.
+  const sliced = acc.limit !== null || acc.offset > 0;
+  const orderSql = sliced && st.traverserLayout.encounter ? q` ORDER BY ${p.c[st.traverserLayout.encounter]}` : empty;
+  const tailSql = sliced ? q` LIMIT ${acc.limit ?? -1} OFFSET ${acc.offset}` : empty;
   // A LINEAR path is ROW-PRESERVING — one row in, one Path row out — so unlike a reducing
   // barrier it can honestly carry the incoming as() label history forward, and `select(label)`
   // after path() must resolve (TinkerPop Select.feature
@@ -224,7 +234,7 @@ export function lowerPath(st: ElementStream, proj: IRStep, acc: TailAcc): PathSt
   };
   const aliasCols = layoutCols(outCarried);
   const carryCols = aliasCols.length ? list(aliasCols.map((c) => q`, ${p.c[c]}`), '') : empty;
-  const node = q`SELECT ${dist}${list(cols, ', ')}${carryCols} FROM ${p}${list(joins, '')}${whereNode}${tailSql}`;
+  const node = q`SELECT ${dist}${list(cols, ', ')}${carryCols} FROM ${p}${list(joins, '')}${whereNode}${orderSql}${tailSql}`;
   const layout = { kind: 'linear' as const, positions };
   const rel = st.q.cte(node, [...pathColumns(layout), ...aliasCols]);
   return toPathStream(loweringStateOf(st, outCarried), rel, layout);
