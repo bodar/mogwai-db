@@ -1,47 +1,13 @@
 import { q, value, list } from '../../../sql/kernel/q.ts';
 import { jsonbArrayOf } from '../../plan/plan.ts';
 import { flattenListArgs, argValues, type SackSpec } from '../../../gremlin/frontend.ts';
-import { flatType, type CanonicalType } from '../../../gremlin/types.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { patchLayout, rootLayout, type LoweringState } from '../context/context.ts';
 import { toListStream, toScalarStream, type Stream } from '../context/stream.ts';
 import type { Engine } from '../../engine/deps.ts';
 import { materializeRootStream } from '../tail/materialize.ts';
-import { type Compiled, type ValueType } from '../../../sql/kernel/render.ts';
-import { foldConstantCoercions } from '../../../gremlin/coerce.ts';
-
-// Canonical types whose stored form does NOT determine their Gremlin type, so JS-value
-// framing would infer the wrong one. Two reasons, both needing the declared type:
-//   - it rides as decimal/char TEXT (do-sqlite-bind-precision): a long > 2^53 would frame
-//     as a string, a bigdecimal/char/duration likewise;
-//   - it is storage-ambiguous with another type: a datetime is epoch-millis (→ Long) and a
-//     uuid is TEXT (→ String), so neither is recoverable from the value alone.
-// NOTE this set is CanonicalType (the `flatType`/argTypes vocabulary), not render.ts's
-// ValueType — they spell datetime/boolean differently, and comparing across the two is
-// exactly the bug this replaced: 'datetime' never matched a Set<ValueType>, so a bare
-// inject(datetime(…)) lost its type and a following is(typeOf(DATETIME)) filtered it out.
-const DECLARED_TYPE_REQUIRED = new Set<CanonicalType>([
-  'long', 'bigint', 'bigdecimal', 'char', 'duration', 'datetime', 'uuid',
-]);
-
-/** A bare inject(v1, v2, …) with no leading coercion carries no `as`, so a value whose stored
- *  form is ambiguous (a big long, a datetime, a uuid, …) would frame by JS inference — wrongly.
- *  Derive the framing tag from a UNIFORM declared arg type for exactly those types, translating
- *  the canonical name into the framing vocabulary. Mixed types keep per-value inference
- *  (undefined): inject has no per-row vtype column to carry a heterogeneous type on, and the
- *  client hands over plain JS values, so per-value inference is the honest floor there.
- *
- *  EXPORTED for the RelIR lowering, which must reach the SAME tag from the same `argTypes` — this
- *  is the one part of `inject` that is not derivable from the values, so a second implementation
- *  would be a second chance to get `char`/`uuid`/`datetime` wrong. Measured: it already was, and
- *  the census caught four traversals reframing before the port used this. */
-export function bareInjectTag(steps: IRStep[], count: number): ValueType | undefined {
-  const argTypes = steps[0].args.map((a) => a.type);
-  if (!count) return undefined;
-  const names = Array.from({ length: count }, (_, i) => flatType(argTypes[i]));
-  const uniform = names.every((n) => n === names[0]) ? names[0] : undefined;
-  return uniform && DECLARED_TYPE_REQUIRED.has(uniform) ? (uniform as ValueType) : undefined;
-}
+import { type Compiled } from '../../../sql/kernel/render.ts';
+import { foldConstantCoercions, uniformInjectType } from '../../../gremlin/coerce.ts';
 
 /** Seed `inject(v1, v2, …)` as a shaped SOURCE on `carry`'s Query → the initial Stream plus the
  * index of the first step the generic lowering loop takes over at (a leading constant-coercion
@@ -87,7 +53,7 @@ export function seedInject(carry: LoweringState, steps: IRStep[], sackInit?: Sac
     : Q.cte(sackInit ? q`SELECT NULL AS v, NULL AS sk WHERE 0` : q`SELECT NULL AS v WHERE 0`, cols);
   // A bare inject (no coercion consumed, folded.at===1) of a uniform TEXT-stored literal keeps
   // its declared type so it frames correctly (e.g. a long > 2^53 as a Long, not a string).
-  const as = folded.as ?? (folded.at === 1 ? bareInjectTag(steps, vals.length) : undefined);
+  const as = folded.as ?? (folded.at === 1 ? uniformInjectType(steps, vals.length) : undefined);
   // A bare inject(null) seeds a single compile-time-known null traverser. Flag it so a following
   // collection step raises TinkerPop's null-incoming message rather than the scalar-incoming one.
   const literalNull = vals.length === 1 && vals[0] === null;

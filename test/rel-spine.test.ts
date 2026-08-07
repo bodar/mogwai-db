@@ -366,6 +366,45 @@ describe('the RelIR spine', () => {
     });
   }
 
+  test("a heterogeneous inject CARRIES each value's declared type per row (§6·7)", async () => {
+    // THE CARRIER, and the one place its absence was a wrong wire CLASS rather than a wrong tag.
+    // A bare `inject(…)` has only what the front-end captured per ARGUMENT, and a `datetime`, a
+    // `uuid`, a `char` and a long past 2^53 all arrive as ordinary JS numbers or strings — so a
+    // stream that cannot carry two declared types has to discard BOTH and guess at the wire.
+    //
+    // This cannot be a census row or a coverage counter: the traversal RAN before, with the right
+    // arity and plausible rows. Only the decoded TYPE moved. And it is not a spine differential
+    // either — legacy still frames the mixed case by inference, which is what makes the assertion
+    // below an absolute one against the reference's answer rather than a comparison.
+
+    // UNIFORM tags stay STATIC and cost no column — the degenerate arm, and the common case.
+    expect(read('g.inject(datetime("2023-08-08T00:00:00Z"))', { spine: 'rel' }).sql).not.toContain('vt');
+    // MIXED tags materialize `vt`, holding each row's canonical name — the SAME vocabulary a
+    // stored-vtype read uses, which is why the framer needs nothing new for this and an
+    // unrecognized name degrades to inference instead of misframing.
+    const mixed = read('g.inject("zzz",datetime("2023-08-08T00:00:00Z"))', { spine: 'rel' }).sql;
+    expect(mixed).toContain('AS vt');
+    expect(mixed).toContain("'datetime'");
+
+    // A row whose argument declared nothing gets a NULL tag — the per-row spelling of "infer this
+    // one from the value", so a PARTIALLY typed inject needs no third state.
+    expect(mixed).toContain('NULL');
+
+    const framed = async (gremlin: string, spine: 'rel' | 'legacy') =>
+      (await decodeAll(exec(seededStore(), undefined, undefined, spine).buffers(gremlin, {}, {})))
+        .map((v: any) => v?.constructor?.name);
+
+    // The payoff: the datetime survives the heterogeneous stream as a Date.
+    expect(await framed('g.inject("zzz",datetime("2023-08-08T00:00:00Z"))', 'rel'))
+      .toEqual(['String', 'Date']);
+    // …and it did NOT before. Legacy reads the same authority (`uniformInjectType`) but through its
+    // coarse UNIFORM view, having no per-row column to carry two tags on, so it still frames the
+    // instant as the Number it is stored as. Pinned rather than fixed: legacy is a route with an end
+    // date (§6·1), and the shared half is the derivation, not the carrier.
+    expect(await framed('g.inject("zzz",datetime("2023-08-08T00:00:00Z"))', 'legacy'))
+      .toEqual(['String', 'Number']);
+  });
+
   test('a withSideEffect CONSTANT is resolved by the write parse, not refused by the router', async () => {
     // §6·6's third piece. `withSideEffect(k, <literal>)` is a compile-time constant the front-end
     // already extracted, and the shared write parse (`parseProperty`/`mergeMaps`) has always taken

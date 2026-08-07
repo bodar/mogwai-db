@@ -10,7 +10,7 @@ import type { Rel } from '../../rel/rel.ts';
 import { forEachRel } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
-import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
+import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { flattenListArgs, isNested, isTokenArg, stepChain, argValues, arg, type Arg } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/types.ts';
@@ -19,8 +19,7 @@ import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain } from '../ir/analyze.ts';
 import { childSteps, normalize } from '../ir/passes.ts';
 import { containsTextSearch, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
-import { bareInjectTag } from '../steps/write/inject.ts';
-import { foldConstantCoercions } from '../../gremlin/coerce.ts';
+import { foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
   and, byEncounter, carriedCols, EDGE_COLS, eq, labelIds, meta, minter, NODE_COLS, PROPERTIES, renumber, storedValue,
   typeOf, type Minter,
@@ -1645,12 +1644,26 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
   // whole stream, so its uniform `as` wins; absent a fold, the value keeps the arg's declared subtype.
   const rowType = (i: number): TypeNode | null =>
     (folded.as as TypeNode | undefined) ?? (folded.at === 1 ? (step.args[i]?.type ?? null) : null);
-  // The tag the FOLD established, else a uniform declared type where there is one, else per-value
-  // inference — which is what `UNKNOWN` means and is the honest floor for a heterogeneous inject
-  // (there is no per-row vtype column to carry a mixed type on). Same precedence as legacy's, whose
-  // `bareInjectTag` only applies when nothing was folded. Computed before the rows because a tail
-  // member's inline is only sound when the stream frames STATIC (see below).
-  const tag = folded.as ?? (folded.at === 1 ? bareInjectTag(steps as IRStep[], vals.length) : undefined);
+  // THE TYPE CHANNEL (§6·7). A coercion fold retypes the whole stream, so its `as` wins outright.
+  // Absent one, each argument's DECLARED type is read on its own — `injectValueTypes`, the same
+  // authority legacy reads through its uniform view, so neither spine re-derives what a `char`, a
+  // `uuid`, a `datetime` or a long past 2^53 frames as.
+  //
+  // Where the declared tags AGREE the stream is STATIC and costs no column, which is the common
+  // case and why `static` survives as the degenerate arm. Where they DISAGREE the type rides PER
+  // ROW in a `vt` column, exactly as a stored-vtype read does — same vocabulary, so `frameScalar`
+  // needs nothing new and an unrecognized name degrades to inference rather than misframing.
+  //
+  // That second arm is the point. It used to be `UNKNOWN`, and `UNKNOWN` here was a LIE told twice:
+  // it means "the JS client genuinely cannot say", and this was "our source cannot carry two". A
+  // mixed `inject(UUID(…), datetime(…))` discarded BOTH declared types and framed both by guessing
+  // at a JS string and a JS number — a wrong wire CLASS, not a wrong tag.
+  const declared: readonly (ValueType | null)[] = folded.at === 1 ? injectValueTypes(steps, vals.length) : [];
+  const uniform = declared.length > 0 && declared.every((t) => t !== null && t === declared[0]);
+  const perRowType = declared.some((t) => t !== null) && !uniform;
+  // Computed before the rows because a tail member's inline is only sound when the stream frames
+  // STATIC (see below) — a per-row or unknown stream reads a bare TEXT literal back as a string.
+  const tag = folded.as ?? (uniform ? declared[0]! : undefined);
   // A scalar arg inlines as a typed literal / binds as a parameter (`constLit`). An EXACT TAIL — a
   // Duration, a BigDecimal, or a big BigInt — has no scalar-literal form, so `constLit` declines it; but
   // it rides as its canonical decimal/total-nanos TEXT (exact, reads back as its own type) and stores as
@@ -1676,12 +1689,22 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
   };
   const rows = vals.map(rowExpr);
   if (rows.some((row) => !row)) return null;
+  // The per-row arm widens each VALUES row to `(v, vt)`. A row whose argument declared nothing gets
+  // a NULL tag, which is the honest per-row spelling of "infer this one from the value" — the
+  // framer already reads an absent/unrecognized vtype that way, so a partially-typed mixed inject
+  // needs no third state.
+  const cells: Expr[][] = perRowType
+    ? (rows as Expr[]).map((row, i) => [row, declared[i] ? compilerText(declared[i]!) : compilerNull()])
+    : (rows as Expr[]).map((row) => [row]);
   return {
     rel: make.values({
-      id: fresh('inj'), rows: (rows as Expr[]).map((row) => [row]), channels: [],
-      type: typeOf(meta('v', 'any', true)),
+      id: fresh('inj'), rows: cells, channels: [],
+      type: perRowType ? typeOf(meta('v', 'any', true), meta('vt', 'text', true)) : typeOf(meta('v', 'any', true)),
     }),
-    framing: { kind: 'scalar', type: tag ? STATIC(tag as never, textTail) : UNKNOWN },
+    framing: {
+      kind: 'scalar',
+      type: tag ? STATIC(tag as never, textTail) : perRowType ? PER_ROW('vt') : UNKNOWN,
+    },
     at: folded.at,
   };
 }

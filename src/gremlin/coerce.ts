@@ -1,7 +1,7 @@
 import { q, type Expression } from '../sql/kernel/q.ts';
 import { type ValueType } from '../sql/kernel/render.ts';
 import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain, type Step } from './frontend.ts';
-import { flatType } from './types.ts';
+import { flatType, type CanonicalType } from './types.ts';
 
 // ---------- scalar value coercion (asBool / asNumber / asDate + date arithmetic) ----------
 //
@@ -178,6 +178,53 @@ export const isDateDiffConstant = (arg: any, params: Record<string, any>): boole
  *  instant; ×1000 → millis). */
 export const asDateSql = (e: Expression): Expression =>
   q`(CASE WHEN typeof(${e}) IN ('integer', 'real') THEN CAST(${e} AS INTEGER) ELSE unixepoch(${e}) * 1000 END)`;
+
+// ---------- what an inject() literal's DECLARED type says, per argument ----------
+//
+// A bare `inject(v1, v2, …)` (no leading coercion to retype the stream) carries only what the
+// front-end captured on each argument. That fact is NOT derivable from the values: a `char`, a
+// `uuid`, a `datetime` and a long past 2^53 all arrive as ordinary JS strings or numbers, so
+// framing by inference reframes them as the wrong wire CLASS. Measured — before the RelIR seed
+// used this, the census caught four corpus traversals (`inject("a"c)`, `inject(UUID(…))` and
+// friends) with right arity, plausible rows, and the wrong GraphBinary type.
+//
+// PER ARGUMENT is the shape, and it is the whole of build plan §6·7's carrier: what arrives on the
+// wire is CARRIED until something changes it, never re-guessed and never DISCARDED because
+// modelling its carriage looked like work. The uniform reading is DERIVED below rather than
+// computed separately — one authority, a coarse view over it, which is the `ScalarType` pattern
+// (`docs/2026-07-28-scalartype-refactoring-pattern.md`).
+
+/** Canonical types whose STORED form does not determine their Gremlin type, so JS-value inference
+ *  would get them wrong. Two reasons, both needing the declared type: it rides as decimal/char
+ *  TEXT (a long > 2^53 would frame as a string; bigdecimal/char/duration likewise), or it is
+ *  storage-ambiguous with another type (a datetime is epoch-millis → Long, a uuid is TEXT →
+ *  String). Everything else is recoverable from the value, so declaring it buys nothing. */
+const DECLARED_TYPE_REQUIRED = new Set<CanonicalType>([
+  'long', 'bigint', 'bigdecimal', 'char', 'duration', 'datetime', 'uuid',
+]);
+
+/** The declared framing tag of EACH of a bare inject's first `count` arguments — `null` where the
+ *  argument declared nothing, or declared a type inference already recovers, or declared a
+ *  COLLECTION (a list/map/set is reached through the list substrate, never framed by a scalar tag,
+ *  which is what `ValueType` excludes). */
+export function injectValueTypes(steps: readonly Step[], count: number): (ValueType | null)[] {
+  const argTypes = steps[0].args.map((a) => a.type);
+  return Array.from({ length: count }, (_, i) => {
+    const name = flatType(argTypes[i]);
+    return name && DECLARED_TYPE_REQUIRED.has(name) ? (name as ValueType) : null;
+  });
+}
+
+/** The UNIFORM reading of the above: one tag for the whole stream, or `undefined` where the
+ *  arguments disagree (or none needed declaring). A coarse view, derived — a caller that can carry
+ *  a heterogeneous stream should read `injectValueTypes` and project the tags PER ROW instead,
+ *  which is strictly more information and the reason this is the derived half rather than the
+ *  authority. */
+export function uniformInjectType(steps: readonly Step[], count: number): ValueType | undefined {
+  if (!count) return undefined;
+  const tags = injectValueTypes(steps, count);
+  return tags.every((t) => t !== null && t === tags[0]) ? tags[0]! : undefined;
+}
 
 // ---------- the LEADING coercion prefix: the fold that IS the parse ----------
 

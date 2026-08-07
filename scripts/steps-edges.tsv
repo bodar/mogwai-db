@@ -15,5 +15,4 @@ src/services/catalog/search.ts	4	no	propertyPayload is a kernel; PropertyStream/
 src/services/catalog/directory.ts	3	no	the object model
 src/services/spi/types.ts	3	no	THE UNNAMED PIN — the service SPI typed on legacy Stream/ChildFrameStack
 src/compiler/compiler.ts	1	yes	the routing switch (routeWrite) — Phase 1 cuts the write arm, Phase 4 the rest
-src/compiler/rel/lower.ts	1	no	bareInjectTag dies with the per-row type channel (§6·7); the rest are kernels
 src/services/catalog/degree-centrality.ts	1	no	kernel — scopedMovementCount
