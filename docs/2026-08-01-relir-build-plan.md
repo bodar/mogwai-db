@@ -840,16 +840,22 @@ probing the service by hand; the suites went green through both defects.
 
 ### Phase 1 — writes: three capabilities, then the first cut
 
-**Measured, and it is much nearer than "write coverage COMPLETE" implied.** Of the corpus's 341
-`Given the graph initializer of` occurrences (131 distinct), **322 already compile on the RelIR write path
-and none throws**; the reference graphs are GraphSON-bulk-loaded and bypass the compiler entirely, bar two
-hand-authored seeds. So the corpus LOADS without legacy writes once three capabilities land:
+**Measured, and it is much nearer than "write coverage COMPLETE" implied.** Re-measured 2026-08-07 over
+every `graph initializer of` block: **127 of 131 distinct initializers already compile on the RelIR write
+path and none throws** (multi-label `addV` included, once the graph's cardinality is `ONE_OR_MORE`). The
+reference graphs are GraphSON-bulk-loaded and bypass the compiler entirely, bar two hand-authored seeds. So
+the corpus LOADS without legacy writes once these capabilities land:
 
-- **multi-label `addV("a","b")` / `addLabel()`** — 16 scenarios. §6·5 already settled the shape: label
-  mutation is NOT a guard binding. `labelCardinality.mutable` is request-scope DI, settled before a compile
-  starts, so `addLabel` under an immutable graph is a COMPILE-TIME refusal with the value threaded (as
-  `Lowering.labelCardinality` already is).
-- **`addE` with implicit endpoints** (`…addV().addE("self")`) — 3 scenarios.
+- **multi-label `addV("a","b")`** — ✅ already routes under `ONE_OR_MORE` (the `internLabels` CROSS JOIN is
+  N-label by construction). Left in this family: **`addLabel()`** as a standalone sideEffect mutation over an
+  element stream (and its `dropLabel`/`dropLabels` mirrors). §6·5 already settled the shape: label mutation is
+  NOT a guard binding. `labelCardinality.mutable` is request-scope DI, settled before a compile starts, so
+  `addLabel` under an immutable graph (or on an edge) is a COMPILE-TIME refusal
+  (`"Label mutation is not supported"`) with the value threaded (as `Lowering.labelCardinality` already is).
+- ✅ **`addE` with implicit endpoints** (`addV(…).addE("self")`) — LANDED. An unset `from`/`to` defaults to
+  the incoming traverser (`AddEdgeStepContract.java:88-92`), so both-implicit is a self-loop, not a refusal;
+  the SOURCE form still declines (it carries no incoming vertex). Pinned in `test/rel-spine.test.ts` — the
+  corpus exercises it only under PartitionStrategy.
 - **`property(T.id, …)` on `addE`** — the two hand-authored seeds. §6·5's `T`-token guard binding landed for
   `elementAddV`; this is the same mechanism on the edge insert.
 
