@@ -754,7 +754,7 @@ FOR once legacy's call route is gone; a type parameter would be scaffolding with
 5. ✅ `--list`, then `tinker.search` (after the property shape).
 6. ⬜ `degree.centrality`, then delete the `stream` arm + legacy's call route together.
 
-### `degree.centrality` is blocked on `project()`, and this was MEASURED, not predicted
+### `degree.centrality` was blocked on `project()` — the RECORD shape is what unblocks it
 
 The seam half works. Built and probed: a mid-traversal `call` in `terminal()` (which is exactly where
 an element relation retypes to a scalar), the host and `ChildSeam.scalar` on the site, and the service
@@ -780,6 +780,27 @@ So migrating it would have fixed ZERO corpus traversals and broken SIX. **The or
 service before moving it, not after. Nothing was kept from the attempt, because a `{kind:'value'}`
 contribution arm and a mid-traversal call step with no service to exercise them are untested code, and
 the finding is worth more than the diff.
+
+**`project()` LANDED as the RECORD shape** (`src/compiler/rel/record.ts`, `RelFraming.record`), and the
+shape is why it is not "a step": a record is a map whose KEYS ARE KNOWN AT COMPILE TIME, so its fields
+stay addressable columns and a following `select(key)` re-roots to a stream of that field's own shape.
+Collapsing it to the map VALUE `group()` already emits happens once, at the wire — which is also why it
+needed no new `Shape` and no `execute.ts` arm. Three pieces came out of it that are not `project`'s:
+
+- **`payloadCols(framing)`** — the payload column names each framing's relation carries, as a total
+  function. Implicit knowledge until a record had to hold N of them side by side; field re-entry is now
+  that list applied in reverse.
+- **`byField()`** — the by() vocabulary's third question about itself, beside `byExpr`/`byNode`. Those
+  two collapse a projection to one comparable value or one typed node, and both therefore lose what the
+  projection IS. Multi-label `select()` and `valueMap()` are its next callers.
+- **the child seam's `scalar` arm returns `{expr, framing, vtype?}`** — §6·7 one layer in. It was
+  discarding a type it already had (`countTail` says `long`, `transformExpr` reports the cast
+  subfamily's target, a leading `values(k)` has a stored vtype), so every child projection reached the
+  wire to be guessed at.
+
+What is LEFT before the service can move is the by() arm this service's own traversals need:
+`by(__.select('v'))` over a SCALAR host, which is an ALIAS read rather than a correlated child — the
+alias column is on the row, not behind a subquery.
 
 **THE DESIGN POINT the attempt settled, so it need not be re-derived:** a
 mid-traversal service contributes a per-parent VALUE, not a relation. `degree.centrality` is
