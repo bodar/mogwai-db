@@ -3,7 +3,7 @@ import { type Query } from '../../../sql/kernel/q.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { type Stream, type LoweringResult, continueLowering, suspendLowering } from '../context/stream.ts';
 import { type ElementStream } from '../context/context.ts';
-import { type ServiceRegistry, type CallSite, type Contribution, type ForeignRow, type CallParams, type InjectionKind } from '../../../services/spi/types.ts';
+import { type ServiceRegistry, type StreamCallSite, type Contribution, type ForeignRow, type CallParams, type InjectionKind } from '../../../services/spi/types.ts';
 import { parseCallSpec, injectionKindOf } from '../../../services/params/call-params.ts';
 import { type ChildFrame, type ChildFrameStack } from './child-shape.ts';
 import { buildCallHead } from './call-head.ts';
@@ -76,7 +76,7 @@ export const isMidBarrierPoint = (x: unknown): x is MidBarrierPoint =>
 /** Resolve the service + take its Contribution. A 'stream' kind is returned for inline lowering;
  *  a 'barrier' kind is returned as-is so the caller (seedCall/lowerCall) can build a BarrierPoint.
  *  Shared by the source and mid-traversal paths. */
-function resolveContribution(spec: ReturnType<typeof parseCallSpec>, registry: ServiceRegistry, ctx: CallSite): Contribution {
+function resolveContribution(spec: ReturnType<typeof parseCallSpec>, registry: ServiceRegistry, ctx: StreamCallSite): Contribution {
   const service = registry.get(spec.serviceName);
   if (!service) throw new Error(`call(): unknown service '${spec.serviceName}'`);
   return service.resolve(ctx);
@@ -108,7 +108,7 @@ export function seedCall(first: IRStep, query: Query, params: Record<string, any
   const spec = parseCallSpec(first, params);
   // depth is this compile's federation depth (request-scoped DI, captured from CompileOptions) —
   // on the ctx, so the service's apply closure captures it and a recursive federate hops at depth+1.
-  const ctx: CallSite = { params: spec.params, q: query, boundParams: params, federationDepth: depth };
+  const ctx: StreamCallSite = { params: spec.params, q: query, boundParams: params, federationDepth: depth };
   const contribution = resolveContribution(spec, registry, ctx);
   if (contribution.kind === 'stream') return contribution.build(ctx);
   if (contribution.kind === 'rel') refuseRelContribution(spec.serviceName);
@@ -144,7 +144,7 @@ export function seedCall(first: IRStep, query: Query, params: Record<string, any
 export function lowerCall(step: IRStep, parent: ElementStream, scope: ChildFrameStack, steps: IRStep[], stop: number): LoweringResult {
   const spec = parseCallSpec(step, parent.params);
   const registry = engineOf(parent).registry;
-  const ctx: CallSite = {
+  const ctx: StreamCallSite = {
     params: spec.params,
     q: parent.q,
     boundParams: parent.params,

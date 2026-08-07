@@ -1,7 +1,7 @@
 import { stepChain, isNested, argValues } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../../compiler/ir/strategies.ts';
 import { DIRECTORY_SERVICE_NAME } from '../spi/types.ts';
-import type { CallSpec, CallParams, InjectionKind } from '../spi/types.ts';
+import type { CallSpec, CallParams, InjectionKind, Service, ServiceRegistry } from '../spi/types.ts';
 import { nestedTraversalToGremlin } from './traversal-param.ts';
 
 /** Classify a mid-traversal call()'s per-parent INJECTION traversal (the 3rd positional arg) into
@@ -138,4 +138,43 @@ export function parseCallSpec(step: IRStep, params: Record<string, any>): CallSp
   }
 
   return { serviceName, params: merged, injectionTraversal };
+}
+
+// ---------- resolving the services a chain names, at the DI boundary ----------
+//
+// **THE REGISTRY IS A DEPENDENCY AND MUST NOT REACH A LOWERING.** `compiler/CLAUDE.md` draws the
+// line: ambient capabilities (registry, fastPaths, federationDepth) are DI, held by scope; a
+// lowering receives settled VALUES. `ChainCtx` obeys it today — every field on it is a settled
+// value (`collapse`, `ordered`, `tracksPath`, `labelCardinality`, `sideEffects`), and
+// `labelCardinality`'s own comment says why it qualifies: it is request-scope DI settled BEFORE a
+// compile starts, so what crosses is the value the dependency produced, never the dependency.
+//
+// A `ServiceRegistry` is the other kind — an object you ask `.get(name)`. Threading it would put an
+// ambient capability into per-chain state. So the boundary resolves instead, and what crosses is
+// the services THIS chain names: the same category as `sideEffects`, a constant environment
+// resolved once and read as data.
+//
+// The split is by what each half needs. Name → `Service` needs only the registry and nothing from
+// the lowering, so it happens here. `Service.resolve(site)` needs the `CallSite` — params, and for
+// a mid-traversal call its parent position — which is per-position and known only inside the fold,
+// so that stays there.
+//
+// An unregistered name resolves to nothing rather than throwing: the lowering then declines and
+// legacy raises `unknown service`, which is its message to own.
+
+/** Every service name this chain's `call()` steps refer to, resolved against the registry. Uses
+ *  `parseCallSpec` rather than re-reading `args[0]`, so the bare-`g.call()`-means-`--list` default
+ *  cannot be spelled twice. */
+export function servicesNamedBy(
+  steps: readonly IRStep[], params: Record<string, any>, registry: ServiceRegistry,
+): ReadonlyMap<string, Service> {
+  const found = new Map<string, Service>();
+  for (const step of steps) {
+    if (step.name !== 'call') continue;
+    const { serviceName } = parseCallSpec(step, params);
+    if (found.has(serviceName)) continue;
+    const service = registry.get(serviceName);
+    if (service) found.set(serviceName, service);
+  }
+  return found;
 }

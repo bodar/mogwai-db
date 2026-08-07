@@ -13,6 +13,8 @@ import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, s
 import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { RelFraming } from './framing.ts';
+import type { RelCallSite, RelContribution, Service } from '../../services/spi/types.ts';
+import { parseCallSpec } from '../../services/params/call-params.ts';
 import { flattenListArgs, isNested, isTokenArg, stepChain, argValues, arg, type Arg } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
@@ -182,6 +184,8 @@ interface ChainCtx extends FilterCtx {
   readonly labelCardinality: LabelCardinality;
   /** The `withSideEffect(name, constant)` registry the FRONT END extracted. See `Lowering`. */
   readonly sideEffects: Map<string, any>;
+  /** The services this chain names, resolved at the DI boundary. See `Lowering.services`. */
+  readonly services: ReadonlyMap<string, Service>;
 }
 
 /** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
@@ -1903,6 +1907,14 @@ export interface Lowering {
    */
   readonly labelCardinality?: LabelCardinality;
   /**
+   * The services this chain's `call()` steps name, RESOLVED — a settled environment, not the
+   * registry. `servicesNamedBy` (`services/params/call-params.ts`) does the lookup at the DI
+   * boundary, because a `ServiceRegistry` is an ambient capability and `compiler/CLAUDE.md` keeps
+   * those out of a lowering. Same category as `sideEffects` below: a constant environment resolved
+   * once and read here as data. An absent name simply is not in the map, and the call declines.
+   */
+  readonly services?: ReadonlyMap<string, Service>;
+  /**
    * The `withSideEffect(name, constant)` registry — the SECOND compile-scope constant environment a
    * nested argument resolves against, beside the wire `bindings` in `params`.
    *
@@ -1930,10 +1942,15 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   correlatedChildren: opts.correlatedChildren ?? true,
   labelCardinality: opts.labelCardinality ?? LabelCardinality.ONE,
   sideEffects: opts.sideEffects ?? NO_SIDE_EFFECTS,
+  services: opts.services ?? NO_SERVICES,
 });
 
 /** No `withSideEffect` declared. One shared value, for `NO_ALIASES`' reason. */
 const NO_SIDE_EFFECTS: Map<string, any> = new Map();
+
+/** No services resolved — an instrument or a test lowering without a registry. Every `call()` then
+ *  declines, which is the same answer an unregistered name gets. */
+const NO_SERVICES: ReadonlyMap<string, Service> = new Map();
 
 /**
  * THE BIND BUDGET IS A COVERAGE QUESTION, not a crash.
@@ -2100,7 +2117,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  *   pass walk them is the general fix if a case ever needs it.)
  */
 function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Tail | null {
-  const { params, collapse, correlatedChildren, labelCardinality, sideEffects } = settle(opts);
+  const { params, collapse, correlatedChildren, labelCardinality, sideEffects, services } = settle(opts);
   // EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step.
   // `analyzeChain` is the same authority the legacy source seeds from, so the two cannot disagree
   // about which chains have an order to take a window from. A chain that demands one and reaches a
@@ -2110,7 +2127,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   const facts = analyzeChain(steps as IRStep[]);
   const ordered = facts.demandsEncounter;
   const tracksPath = facts.tracksPath;
-  const ctx: ChainCtx = { params, correlatedChildren, collapse, ordered, tracksPath, labelCardinality, sideEffects };
+  const ctx: ChainCtx = { params, correlatedChildren, collapse, ordered, tracksPath, labelCardinality, sideEffects, services };
   const orderedChannels = ordered ? withChannel(BULK, ENCOUNTER) : BULK;
   const seedChannels = tracksPath ? withChannel(orderedChannels, PATH_CHANNEL) : orderedChannels;
   const first = steps[0];
@@ -2124,6 +2141,34 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
     const injected = injectSource(steps, fresh);
     if (!injected) return null;
     return scalarTail(injected.rel, injected.framing, steps, injected.at, false, ctx, fresh);
+  }
+
+  // `g.call(...)` AS A SOURCE. The service was resolved at the DI boundary (`servicesNamedBy`), so
+  // what happens here is the part that genuinely needs the site: `resolve(site)` picks the
+  // contribution for THIS call, and only a `rel` one lowers here. A `stream` service declines —
+  // the ordinary "not learned yet" null — and legacy answers it, which is what lets services
+  // migrate one at a time. A `barrier` declines too, permanently and for a different reason: its
+  // rows arrive from an awaited sibling, so there is nothing to lower at compile time at all.
+  //
+  // `resolve` may THROW (a service validates its params: `tinker.search` rejects a regex or a
+  // sub-trigram term). That throw belongs to the spine that owns the message, and this module's
+  // contract is `null`, so it is caught exactly as the coercion fold's is.
+  if (first.name === 'call') {
+    const spec = parseCallSpec(first, params);
+    const service = ctx.services.get(spec.serviceName);
+    if (!service) return null;
+    const site: RelCallSite = {
+      params: spec.params, boundParams: params, federationDepth: 0, fresh,
+    };
+    let contributed: RelContribution | null = null;
+    try {
+      const contribution = service.resolve(site);
+      if (contribution.kind !== 'rel') return null;
+      contributed = contribution.buildRel(site);
+    } catch { return null; }
+    if (!contributed) return null;
+    if (contributed.framing.kind !== 'scalar') return null;
+    return scalarTail(contributed.rel, contributed.framing, steps, 1, false, ctx, fresh);
   }
 
   // `addV` AT THE SOURCE is one vertex, and that is the only thing that differs from the mid-chain

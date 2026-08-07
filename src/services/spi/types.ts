@@ -63,11 +63,26 @@ export interface CallSite {
   /** THIS call's resolved params — `g.call(name, {k: v})` / `.with(k, v)`. Not to be confused with
    *  `boundParams`: these are the call's arguments, those are the traversal's wire bindings. */
   readonly params: CallParams;
-  readonly q: Query;
   readonly boundParams: Record<string, any>;   // the traversal's bound-param table (wire bindings)
   /** This compile's federation hop depth — request-scoped, so a barrier's `apply` closure can
    *  capture it at resolve time and recurse at depth+1 without an `apply` parameter. */
   readonly federationDepth: number;
+}
+
+/**
+ * WHAT `resolve` NEEDS is the common part, and the two spines' BUILD sites extend it.
+ *
+ * `CallSite` used to carry `q: Query` outright, which made it legacy-shaped: a `Query` is the
+ * q-kernel's CTE accumulator, so a RelIR service could not be handed one — it composes an algebra
+ * that RelIR names and renders once, and holding a `Query` would mean building SQL beside the plan
+ * rather than inside it (the second bind-ordering authority §5 exists to prevent).
+ *
+ * Measured against the services: `resolve` reads only params and the hop depth — every catalog
+ * service either ignores its site entirely or reads `params`/`federationDepth`. The spine-specific
+ * pieces are needed at BUILD time, which is what the two extensions say.
+ */
+export interface StreamCallSite extends CallSite {
+  readonly q: Query;
   readonly parent?: ChildParent;                 // present only for mid-traversal call()
   readonly scope?: ChildFrameStack;
 }
@@ -88,7 +103,7 @@ export type { ForeignRow } from '../../api.ts';
  *  belongs: the FederationSource at construction (an app-scope dependency), the params and this
  *  hop's federation depth off the `CallSite` that `resolve` already receives. */
 export type Contribution =
-  | { readonly kind: 'stream'; build(site: CallSite): Stream }
+  | { readonly kind: 'stream'; build(site: StreamCallSite): Stream }
   | { readonly kind: 'rel'; buildRel(site: RelCallSite): RelContribution | null }
   | { readonly kind: 'barrier'; apply(rows: readonly ForeignRow[]): Promise<ForeignRow[]> };
 
@@ -122,10 +137,7 @@ export interface RelContribution {
  *  service composes an algebra that RelIR names and renders once. A service holding a `Query` would
  *  be building SQL beside the plan rather than inside it — the second bind-ordering authority §5
  *  exists to prevent. */
-export interface RelCallSite {
-  readonly params: CallParams;
-  readonly boundParams: Record<string, any>;
-  readonly federationDepth: number;
+export interface RelCallSite extends CallSite {
   readonly fresh: Minter;
 }
 

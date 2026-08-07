@@ -4,6 +4,7 @@ import { emitProgram } from '../../rel/emit.ts';
 import { cfLimitViolation } from '../../cf-limits.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { LabelCardinality } from '../../api.ts';
+import type { Service } from '../../services/spi/types.ts';
 import { lowerToRel } from './lower.ts';
 
 /**
@@ -20,6 +21,11 @@ import { lowerToRel } from './lower.ts';
  * survives Phase 4 will supply these two values, and it will not be an `Engine`.
  */
 export interface RelRequest {
+  /** The services this chain's `call()` steps name, RESOLVED at the DI boundary
+   *  (`servicesNamedBy`). Deliberately the resolved map and NOT the `ServiceRegistry`: a registry
+   *  is an ambient capability, and `compiler/CLAUDE.md` keeps those in DI rather than threading
+   *  them into a lowering. What crosses is the value the dependency produced. */
+  readonly services: ReadonlyMap<string, Service>;
   /** Whether the bulk `SUM(bulk)` movement collapse is enabled — a lowering STRATEGY the algebra can
    *  state, which is why it is offered rather than assumed (both positions stay expressible, so the
    *  differential has two forms to compare). */
@@ -102,6 +108,7 @@ export function compileViaRel(
     // compile starts (request-scope DI). Coverage is still not a function of configuration: what the
     // cardinality changes is the ANSWER, not whether there is one.
     labelCardinality: request.labelCardinality,
+    services: request.services,
     // NOT a strategy switch either — a `withSideEffect(k, <literal>)` is a compile-time CONSTANT the
     // front-end already extracted, and the write parse has always taken it. What used to happen is
     // that `compiler.ts` refused to OFFER this route at all when one was declared, so the whole

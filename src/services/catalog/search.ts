@@ -3,7 +3,7 @@ import { propertyFts } from '../../sql/schema.ts';
 import { elemTable, propOwnerCol, propRel, propertyPayload, PROPERTY_PAYLOAD, sqlElem, type Elem } from '../../compiler/plan/plan.ts';
 import { toPropertyStream, type PropertyStream } from '../../compiler/steps/context/stream.ts';
 import { rootLayout, type TraverserLayout } from '../../compiler/steps/context/context.ts';
-import type { Service, CallSite, CallParams } from '../spi/types.ts';
+import type { Service, StreamCallSite, CallParams } from '../spi/types.ts';
 
 // ---------- tinker.search — full-text search over property values (pure, Start) ----------
 //
@@ -58,7 +58,7 @@ function searchPattern(params: CallParams): string {
 
 /** The empty PropertyStream (type=VertexProperty, or a genuinely unmatched scope): a
  *  PROPERTY_PAYLOAD CTE with no rows. */
-function emptyProperties(ctx: CallSite, ownerElem: Elem): PropertyStream {
+function emptyProperties(ctx: StreamCallSite, ownerElem: Elem): PropertyStream {
   const layout: TraverserLayout = rootLayout();
   // The column names are the fixed PROPERTY_PAYLOAD list (SQL identifiers, never user data),
   // so a raw `NULL AS <col>` projection with a WHERE 0 guard yields the empty relation.
@@ -70,7 +70,7 @@ function emptyProperties(ctx: CallSite, ownerElem: Elem): PropertyStream {
 /** Build the matched-properties PropertyStream for a node/edge scope. Joins property_fts
  *  (kind='value', the searched scope, text LIKE %term%) back to the property table for the
  *  full payload (pk/pv/pvtype/meta) and to the owner + its label. */
-function searchProperties(ctx: CallSite, ownerElem: Elem, pattern: string): PropertyStream {
+function searchProperties(ctx: StreamCallSite, ownerElem: Elem, pattern: string): PropertyStream {
   const layout: TraverserLayout = rootLayout();
   const f = propertyFts.as('f');
   const likeMatch = q`${f.c.text} LIKE ${value(pattern)} ESCAPE ${value('\\')}`;

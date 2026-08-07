@@ -10,6 +10,7 @@ import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type Compile
 import { resolveSpine } from './options/spine.ts';
 import { compileViaRel } from './rel/spine.ts';
 import { createAppScope, createRequestScope } from '../scopes.ts';
+import { servicesNamedBy } from '../services/params/call-params.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
 export type { Compiled, Executable, Program, WritePlan, WriteResult, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from '../sql/kernel/render.ts';
 export { staticTypeOf, perRowColumnOf, PER_ROW, STATIC, UNKNOWN } from '../sql/kernel/render.ts';
@@ -94,7 +95,13 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   // by construction. Deleting this gate is a small change, not a prerequisite-laden one.
   if (resolveSpine(options) === 'rel' && !sackInit) {
     const viaRel = compileViaRel(
-      { collapse: engine.fastPaths.movementCollapse, labelCardinality: engine.labelCardinality },
+      {
+        collapse: engine.fastPaths.movementCollapse,
+        labelCardinality: engine.labelCardinality,
+        // The registry is an app-scope DEPENDENCY and stops here: this is the boundary that holds
+        // it, so it resolves the names and hands the lowering the settled services.
+        services: servicesNamedBy(steps, request.params, engine.registry),
+      },
       steps, request.params, sideEffects,
     );
     if (viaRel) return { kind: 'sql', compiled: discard ? applyDiscard(viaRel) : viaRel };
