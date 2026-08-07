@@ -10,8 +10,9 @@ import type { Rel } from '../../rel/rel.ts';
 import { forEachRel } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
-import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
+import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
+import type { RelFraming } from './framing.ts';
 import { flattenListArgs, isNested, isTokenArg, stepChain, argValues, arg, type Arg } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
@@ -65,48 +66,6 @@ import { LabelCardinality } from '../../api.ts';
  * therefore this layer's work, and `Shape` is the boundary. `list.ts` and `map.ts` already do it the
  * intended way for their two shapes; the element payload is the keystone that is left.
  */
-
-/**
- * WHAT THE FRAMING LAYER MUST BUILD over the result relation — the shape half of a lowering.
- *
- * Shape does not enter the NODE SET (§2) — but this LOWERING both knows it and says so, which is what
- * `RelFraming` is. A lowering hands back a relation plus the minimum needed to build that relation's
- * payload projection and pick its `Shape`. Deliberately a union rather than a widened record: an element
- * stream has no scalar type and a scalar stream has no element kind, and pretending otherwise is how a
- * shape vocabulary starts leaking into `src/rel/`, which is the boundary that matters.
- *
- * It grows one arm per stream kind the spine learns, and every consumer switches on it TOTALLY, so a
- * shape this route learns to produce is a compile error until its projection and its `Shape` are
- * declared. Per §10·10 that projection belongs here rather than in legacy's materializer; two arms
- * (`list`, `map`) are already built that way and the rest follow.
- */
-export type RelFraming =
-  | { readonly kind: 'elements'; readonly elem: Elem }
-  | { readonly kind: 'scalar'; readonly type: ScalarType; readonly result?: 'value' | 'count' | 'number' }
-  /** A traverser whose VALUE is a collection — one JSONB `list` column per row (§ the list
-   *  vocabulary, `list.ts`). `of` describes the MEMBER encoding, which is what the framing layer
-   *  needs to know how to expand each one; `set` is a framing marker only (a SET frames differently,
-   *  the member substrate is shared). */
-  | { readonly kind: 'list'; readonly of: ListOf; readonly set?: boolean }
-  /** A traverser whose value is a PATH — the LIST arm's relation exactly (one JSONB `list` column of
-   *  typed-tree positions), and only the wire form differs (`framePath` over the same per-member buffers).
-   *  `scalars` says every position is a `by()`-projected value rather than an element, which is what decides
-   *  whether the path may RE-ENTER the list vocabulary: a member op decodes to a scalar stream, and that
-   *  stream has no element arm (see `pathPositions`). It is a required field, not an optional marker — a
-   *  path always knows the answer, and defaulting it either way is how a wrong shape gets framed. */
-  | { readonly kind: 'path'; readonly of: ListOf; readonly scalars: boolean }
-  /** A traverser whose VALUE is a MAP — one JSONB `map` column per row holding an ordered
-   *  `[[keyNode, valNode], …]` pairs array, which is the same self-describing tree a stored map
-   *  property uses. The LIST arm's twin, deliberately: `keyOf`/`valOf` describe each side's shape for
-   *  the framing layer exactly as `of` does for a list, and a pairs ARRAY rather than a JSON object is
-   *  what keeps the entry order ours to state and lets a key be something other than a string. */
-  | { readonly kind: 'map'; readonly keyOf: MapOf; readonly valOf: MapOf }
-  /** NOTHING to frame. A write whose Gremlin result is no traverser at all (`drop()`, and `iterate()`
-   *  over any of them) ends on a statement with an empty `RETURNING`, so the plan's result relation
-   *  has no columns and there is no shape to interpret. It is an arm of this union rather than an
-   *  absent framing because `spine.ts` switches TOTALLY: "there is nothing here" has to be something
-   *  the lowering can SAY. */
-  | { readonly kind: 'discard' };
 
 /**
  * A covered chain, lowered: the program, and what to frame over it.

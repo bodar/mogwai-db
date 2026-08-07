@@ -3,7 +3,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { Binding } from '../../rel/plan.ts';
-import type { RelFraming } from './lower.ts';
+import type { RelFraming } from './framing.ts';
 
 /**
  * THE CHILD SEAM — ONE interface, THREE total answers to "lower an inner body" (§6·6).
