@@ -983,7 +983,6 @@ export function elementAddE(
 
   let from: Endpoint = { kind: 'traverser' };
   let to: Endpoint = { kind: 'traverser' };
-  let sides = 0;
   const propertySteps: IRStep[] = [];
   for (const member of cluster) {
     if (member.name === 'property') { propertySteps.push(member); continue; }
@@ -991,13 +990,16 @@ export function elementAddE(
     const parsed = endpointOf((member.args ?? [])[0]?.value, child, fresh);
     if (!parsed) return null;
     if (member.name === 'from') from = parsed; else to = parsed;
-    sides++;
   }
-  // BOTH ends implicit is not a traversal the grammar means anything by, and both ends EXPLICIT is
-  // fine (the input is then only a multiplier). At the SOURCE there is no incoming traverser at
-  // all, so an implicit end has nothing to be: the one-row seed carries no `id`, and asking it for
-  // one is a throw rather than a decline unless it is asked here (`rel-sweep` found exactly that on
-  // `addE.from`).
+  // BOTH ends implicit is a SELF-LOOP on the incoming vertex, not a meaningless shape:
+  // `AddEdgeStep` defaults an unset endpoint to `traverser::get`
+  // (`vendor/tinkerpop/gremlin-core/.../step/map/AddEdgeStepContract.java:88-92`), so `addE("self")`
+  // with no `from`/`to` attaches an edge from the current traverser to itself. `addV(…).addE("self")`
+  // is exactly that. The one form that is genuinely nothing is the SOURCE (`AddEdgeStartStep` defaults
+  // both to `() -> null`, `AddEdgeStartStep.java:127,136`, and raises), and the `id`-carrying guard
+  // below already declines it: a one-row `Values` seed carries no `id`, so an implicit end has nothing
+  // to be — asking it for one is a throw rather than a decline unless it is asked here (`rel-sweep`
+  // found exactly that on `addE.from`).
   //
   // **The INPUT'S element kind only matters where an end is implicit**, and that is why it is asked
   // here rather than at the top: an implicit end IS the incoming traverser, so an edge stream would be
@@ -1005,7 +1007,7 @@ export function elementAddE(
   // which is exactly the second `addE` of a seeder chain, whose input is the first `addE`'s edge.
   // Refusing on the kind alone declined every one of them.
   const implicit = from.kind === 'traverser' || to.kind === 'traverser';
-  if (sides === 0 || (implicit && (elem !== 'vertex' || !input.type.cols.some((column) => column.name === 'id')))) return null;
+  if (implicit && (elem !== 'vertex' || !input.type.cols.some((column) => column.name === 'id'))) return null;
   const writes = propertySteps.length ? propertyWrites(propertySteps, 'edge', child) : [];
   if (!writes) return null;
 

@@ -1,4 +1,10 @@
 {
+  "addE": {
+    "binds": 12,
+    "bytes": 790,
+    "compiler": 7,
+    "bound": 34
+  },
   "addV": {
     "binds": 4,
     "bytes": 828,

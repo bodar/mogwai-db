@@ -481,6 +481,31 @@ describe('the RelIR spine', () => {
     expect(compile('g.V().addV().property(T.id, 5)', {}, { spine: 'rel' }).kind).not.toBe('program');
   });
 
+  test('addE with IMPLICIT endpoints is a self-loop on the incoming vertex', async () => {
+    // `AddEdgeStep` defaults an unset `from`/`to` to `traverser::get`
+    // (`vendor/tinkerpop/gremlin-core/.../step/map/AddEdgeStepContract.java:88-92`), so `addE("self")`
+    // with neither side named attaches an edge from the current vertex to itself. The corpus exercises
+    // this only under PartitionStrategy (unbuilt), so the pin lives here — a family whose corpus
+    // presence is gated needs a test, not a counter.
+    for (const gremlin of [
+      'g.addV("person").property("name","marko").addE("self")',
+      'g.V(1).addE("self")',
+      'g.V().addE("self")',
+      // one side named, one implicit — the implicit side is still the incoming vertex
+      'g.V(1).as("a").addE("self").from("a")',
+    ]) {
+      expect(compile(gremlin, {}, { spine: 'rel' }).kind, gremlin).toBe('program');
+      const via = (spine: 'rel' | 'legacy') =>
+        decodeAll(exec(seededStore(), undefined, undefined, spine).buffers(gremlin, {}, {}));
+      expect(await via('rel'), gremlin).toEqual(await via('legacy'));
+    }
+
+    // The one shape that is genuinely nothing is the SOURCE: `AddEdgeStartStep` defaults both endpoints
+    // to `() -> null` and raises, so a one-row seed carrying no incoming vertex must decline here rather
+    // than invent one.
+    expect(compile('g.addE("self")', {}, { spine: 'rel' }).kind).not.toBe('program');
+  });
+
   test('mergeE routes to RelIR for both endpoint kinds, and duplicates get ONE edge', async () => {
     // The corpus cannot see this and neither can L3: every parameterized `mergeE` arrives as a bound
     // Map (`m[{"t[label]":…,"D[OUT]":"M[outV]"}]` on the wire), and those L3 scenarios already PASSED
