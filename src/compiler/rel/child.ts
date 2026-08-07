@@ -1,6 +1,7 @@
 import type { Expr } from '../../rel/expr.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../plan/plan.ts';
+import type { AliasMap } from '../plan/alias.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { Binding } from '../../rel/plan.ts';
 import type { RelFraming } from './framing.ts';
@@ -126,8 +127,23 @@ export type BodyScope = 'child' | 'rooted';
  * a stored property, which is the same distinction `predicateExpr`'s `compare` parameter draws.
  */
 export type ChildHost =
-  | { readonly kind: 'element'; readonly id: Expr; readonly elem: Elem }
-  | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr };
+  | { readonly kind: 'element'; readonly id: Expr; readonly elem: Elem; readonly row?: HostRow }
+  | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly row?: HostRow };
+
+/**
+ * THE ROW the host traverser rides on — its relation and the labels bound on it.
+ *
+ * A `by()` projection is not always a question about the traverser's VALUE. `by(__.select('v'))` reads
+ * the ALIAS CHANNEL, which is carried state on the row rather than anything a correlated subquery over
+ * the traverser could find, and `Scoping.getScopeValue` puts it in the same slot as a property read
+ * (the map, then side-effects, then the path labels). The predicate arm has had this all along as
+ * `Subject.rel`; the projection arms need it for the same reason.
+ *
+ * OPTIONAL because not every host has one to give — a `by()` inside a path position is projecting from
+ * a rowid, not from a row of the outer relation — and the alias arm declines rather than guessing when
+ * it is absent.
+ */
+export interface HostRow { readonly rel: Rel; readonly aliases: AliasMap; }
 
 /**
  * What a correlated PREDICATE may read about the row it is filtering. `label` is present only where

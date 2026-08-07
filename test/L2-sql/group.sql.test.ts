@@ -11,7 +11,7 @@ import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decode, decodeAll } from '../support/decode.ts';
-import { bagOf, read, relirOff, run, seededStore } from '../support/harness.ts';
+import { bagOf, read, relirOff, run, runWith, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -689,5 +689,85 @@ describe('group / properties SQL', () => {
     expect(new Set(byId.map((r) => r.gk)).size).toBe(2); // two distinct property ids, not one owner id
     // T.label lowers to the key column, not an owner-label subquery.
     expect(read("g.V().properties().group().by(T.label).by(__.value())").sql).toContain('p.pk AS gk');
+  });
+});
+
+/**
+ * `by(__.select(label))` — THE ALIAS ARM of the by() vocabulary.
+ *
+ * It reads as a nested traversal and is not one: the answer is the alias CHANNEL on the host's own
+ * row, not a correlated subquery over the traverser. `Scoping.getScopeValue` makes no distinction
+ * between a `select()` in a `by()` and one in the chain (the map, then side-effects, then the path
+ * labels — `vendor/tinkerpop/gremlin-core/.../step/Scoping.java:117-131`), so the arm lives in
+ * `modulator.ts` and EVERY host gained it at once.
+ *
+ * Every shape here is one legacy REFUSES, which is the §6·1 state "RelIR is ahead" — so each asserts
+ * the RelIR answer absolutely, against the reference's semantics, rather than comparing spines.
+ */
+describe('by(__.select(label)) — the alias arm', () => {
+  const entries = (row: any): [any, any][] => JSON.parse(row.map);
+  const node = (v: any): any => (v && typeof v === 'object' && 't' in v
+    ? (v.t === 'vertex' || v.t === 'edge' ? v.v.props.name[0].v : v.t === 'list' ? v.v.map(node) : v.v)
+    : v);
+  /** What ROUTE answers this, counting a legacy THROW as legacy — a refusal is an answer about which
+   *  spine owns the shape, and swallowing it into a compile error would hide the very asymmetry the
+   *  §6·1 "RelIR is ahead" state exists to record. */
+  const routeOf = (gremlin: string): string => {
+    try {
+      const plan = compile(gremlin, {}, { spine: 'rel' });
+      return plan.kind === 'read' ? plan.spine : 'legacy';
+    } catch { return 'legacy'; }
+  };
+
+  test('an ELEMENT label is a first-class group KEY — the shape the map module said it was blocked on', () => {
+    const store = seededStore();
+    const grouped = runWith(store, 'g.V().as("a").out().group().by(__.select("a"))', { spine: 'rel' });
+    // ONE map value, keyed by the labelled VERTEX itself: the key rides as a `{t:'vertex', v:{…}}`
+    // member of the self-describing tree, which `frameTypedNode` already walks at any depth. Nothing
+    // in the wire vocabulary needed adding — that was the whole claim, and `mapPayload`'s own comment
+    // named an element key as the thing it declined.
+    expect(grouped).toHaveLength(1);
+    expect(entries(grouped[0]).map(([k, v]) => [node(k), node(v)])).toEqual([
+      ['marko', ['vadas', 'lop', 'josh']],
+      ['josh', ['lop', 'ripple']],
+      ['peter', ['lop']],
+    ]);
+    // Legacy refuses the whole form, so this is `relirAhead` rather than a differential.
+    expect(routeOf('g.V().as("a").out().group().by(__.select("a"))')).toBe('rel');
+    expect(() => runWith(store, 'g.V().as("a").out().group().by(__.select("a"))', { spine: 'legacy' }))
+      .toThrow(/group\(\)\.by\(traversal\) key not supported/);
+  });
+
+  test('a VALUE label is an ordering key over a stream that has no properties at all', () => {
+    const store = seededStore();
+    // A scalar stream's `by()` is identity-only — a value has no properties — so legacy refuses the
+    // whole form. The alias channel is not a property, and the entry's own `t` field is what makes
+    // the comparison numeric rather than lexical.
+    expect(runWith(store, 'g.V().as("a").values("age").as("b").order().by(__.select("b"))', { spine: 'rel' })
+      .map((r) => r.v)).toEqual([27, 29, 32, 35]);
+    expect(() => runWith(store, 'g.V().as("a").values("age").as("b").order().by(__.select("b"))', { spine: 'legacy' }))
+      .toThrow(/order\(\)\.by\(key\/traversal\) on a scalar stream/);
+  });
+
+  test('a RECORD field keeps the label as an ELEMENT, so it re-enters as a vertex stream', () => {
+    const store = seededStore();
+    // The record's payoff, stated as a property rather than as a spelling: the field holds the
+    // ROWID, so `select()` on it re-roots to elements and the chain carries on. A blob could not —
+    // by then the element is an expanded payload with no id to move from.
+    expect(new Set(runWith(store, 'g.V().as("v").out().project("vertex","n").by(__.select("v")).by("name").select("vertex").values("name")', { spine: 'rel' })
+      .map((r) => r.v))).toEqual(new Set(['marko', 'josh', 'peter']));
+    const plan = read('g.V().as("v").out().project("vertex","n").by(__.select("v")).by("name")', { spine: 'rel' });
+    expect(plan.spine).toBe('rel');
+    expect(plan.shape).toEqual({ kind: 'mapValue' });
+  });
+
+  test('an unreadable label DECLINES rather than answering a different question', () => {
+    // A label this relation does not carry, a `Pop.all` LIST result and a multi-label `select` in a
+    // by() slot are all shapes the arm cannot express. Each must route away, never guess.
+    for (const gremlin of [
+      'g.V().out().project("x").by(__.select("nope"))',
+      'g.V().as("a").out().as("a").project("x").by(__.select(Pop.all, "a"))',
+      'g.V().as("a").as("b").out().project("x").by(__.select("a","b"))',
+    ]) expect(routeOf(gremlin), gremlin).toBe('legacy');
   });
 });

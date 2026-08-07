@@ -121,7 +121,7 @@ export const fieldCol = (prefix: string, name: string): string => `${prefix}_${n
  * declines rather than omissions — the switch is total, so a shape that becomes reachable as a field is
  * a compile error here until its columns are declared.
  */
-export function payloadCols(framing: RelFraming): readonly ColMeta[] | null {
+export function framingCols(framing: RelFraming): readonly ColMeta[] | null {
   switch (framing.kind) {
     case 'elements': return [{ name: 'id', type: 'int', nullable: true }];
     case 'scalar': {
@@ -140,7 +140,7 @@ export function payloadCols(framing: RelFraming): readonly ColMeta[] | null {
     case 'record': {
       const nested: ColMeta[] = [];
       for (const field of framing.fields) {
-        const cols = payloadCols(field.framing);
+        const cols = framingCols(field.framing);
         if (!cols) return null;
         for (const column of cols) nested.push({ ...column, name: fieldCol(field.prefix, column.name), nullable: true });
       }

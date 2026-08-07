@@ -4,9 +4,11 @@ import { isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
 import { PER_ROW, STATIC, UNKNOWN } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
-import { payloadCols, type RelFraming } from './framing.ts';
+import { framingCols, type RelFraming } from './framing.ts';
 import { and, eq, EDGE_COLS, firstOf, meta, NODE_COLS, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
 import { storedCompareOn } from './predicate.ts';
+import { aliasProjection, readFraming, type Pop } from './alias.ts';
+import { elementNode } from './element.ts';
 
 /**
  * `by()` AS ONE VOCABULARY — the modulator seam.
@@ -63,6 +65,12 @@ type ByKey =
   | { readonly kind: 'identity' }
   | { readonly kind: 'property'; readonly key: string }
   | { readonly kind: 'token'; readonly token: 'id' | 'label' }
+  /** `by(__.select(label))` — an ALIAS read, not a correlated child. Spelled as a nested traversal and
+   *  therefore parsed as one, but the answer is a column on the host's own row rather than a subquery
+   *  over the traverser, so it is its own projection kind. Recognized HERE so every by() host gains it
+   *  at once — `Scoping.getScopeValue` makes no distinction between a `select()` in a by() and one in
+   *  the chain, and neither should the vocabulary. */
+  | { readonly kind: 'alias'; readonly label: string; readonly pop: Pop }
   | { readonly kind: 'child'; readonly body: readonly IRStep[] };
 
 /** One parsed `by()`. `order` is present only where the modulator named a comparator. */
@@ -128,7 +136,7 @@ export function modulations(step: IRStep, max: number, child: ChildSeam): readon
         // keeps every host from having to re-derive that semantic identity.
         key = body.length === 1 && body[0]?.name === 'identity'
           ? { kind: 'identity' }
-          : { kind: 'child', body };
+          : aliasKey(body) ?? { kind: 'child', body };
         projected = true;
         continue;
       }
@@ -140,6 +148,25 @@ export function modulations(step: IRStep, max: number, child: ChildSeam): readon
     parsed.push(order === undefined ? { key } : { key, order });
   }
   return parsed;
+}
+
+/**
+ * A nested body that is EXACTLY one `select(label)` — the alias projection, or `undefined` to leave it
+ * a correlated child.
+ *
+ * Only the single-label form: a multi-label `select('a','b')` in a `by()` is a RECORD-valued projection
+ * and a `select(Column.keys)` a map re-entry, both of which belong to hosts this arm does not serve.
+ * They stay `child` bodies, which decline — the honest answer rather than a plausible one.
+ */
+function aliasKey(body: readonly IRStep[]): Extract<ByKey, { kind: 'alias' }> | undefined {
+  const step = body.length === 1 ? body[0]! : undefined;
+  if (!step || step.name !== 'select' || step.modulators?.length || step.optionArms) return undefined;
+  const args = (step.args ?? []).map((a) => a.value);
+  const pops = args.filter((arg): arg is { readonly pop: string } =>
+    typeof arg === 'object' && arg !== null && typeof (arg as { pop?: unknown }).pop === 'string');
+  const labels = args.filter((arg): arg is string => typeof arg === 'string');
+  if (labels.length !== 1 || pops.length + labels.length !== args.length) return undefined;
+  return { kind: 'alias', label: labels[0]!, pop: (pops[0]?.pop ?? 'last') as Pop };
 }
 
 /** Does this host keep a traverser its `by()` yields nothing for? `ProductiveByStrategy` says yes;
@@ -168,6 +195,18 @@ export function byExpr(
     // The seam's framing is the FIELD vocabulary's business (`byField`); a bare ordering/grouping key
     // only ever needed the value.
     return child.scalar(key.body, host)?.expr ?? null;
+  }
+
+  if (key.kind === 'alias') {
+    // A VALUE label yields its stored scalar and, where the history recorded a per-row type, the
+    // ordering wrapper reads that recorded tag rather than a column — the entry's own `t` field IS the
+    // type, which is what makes `as('a')` on a big long still compare as a number after `select('a')`.
+    // An ELEMENT or LIST label has no comparable value here: ordering by a rowid is not what
+    // `order().by(__.select('a'))` means over an element, and legacy raises for it.
+    const projected = aliasField(key, host);
+    if (!projected || projected.read.kind !== 'value') return null;
+    const [value, type] = [projected.payload[0]![1], projected.payload[1]?.[1]];
+    return ordering && type ? storedCompareOn(type)(value) : value;
   }
 
   if (host.kind === 'scalar') {
@@ -242,6 +281,14 @@ export function byExpr(
   return firstOf(mine, value, col(mine.id, 'id'), fresh);
 }
 
+/** One alias `by()` slot resolved against the host's ROW, or `null` where the host carries no row (a
+ *  path position projects from a rowid, not from a relation) or the label is not readable there. The
+ *  answer is `select()`'s own — `aliasProjection` is the single authority — so a by()-position read
+ *  and a chain-position read of one label cannot come apart. */
+const aliasField = (
+  key: Extract<ByKey, { kind: 'alias' }>, host: ChildHost,
+): ReturnType<typeof aliasProjection> => (host.row ? aliasProjection(host.row.rel, host.row.aliases, key.label, key.pop) : null);
+
 /**
  * A `by()` projection as a SELF-DESCRIBING `{t,v}` NODE rather than a bare value — what a MAP entry
  * needs, because a map's sides are framed per entry from their own tags (§ the map shape) and a
@@ -272,6 +319,22 @@ export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, c
       whens: [[{ kind: 'binary', op: 'is', left: value, right: compilerNull() }, compilerNull()]],
       else: typedNode(value, compilerNull('text')),
     };
+  }
+
+  if (key.kind === 'alias') {
+    const projected = aliasField(key, host);
+    if (!projected) return null;
+    // An ELEMENT label becomes a `{t:'vertex', v:{…}}` member, which is the encoding the typed tree
+    // already frames at any depth — so a map keyed or valued by a labelled element needs nothing new.
+    if (projected.read.kind === 'element')
+      return elementNode(projected.payload[0]![1], projected.read.elem, fresh);
+    // A LIST label's payload is a naked JSON array, which the framer reads as a list of bare members —
+    // but the member ENCODING (`ListOf`) is not something a `{t,v}` node can carry, so a list-valued
+    // label declines here and stays the field vocabulary's business.
+    if (projected.read.kind === 'list') return null;
+    // A VALUE label carries its recorded type in the history entry's own `t` field — the one place a
+    // per-row `vtype` COLUMN survives becoming JSON.
+    return typedNode(projected.payload[0]![1], projected.payload[1]?.[1] ?? compilerNull('text'));
   }
 
   if (host.kind === 'scalar') {
@@ -320,7 +383,7 @@ export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, c
  * after it).
  */
 export interface ByField {
-  /** The field's payload, keyed by the CANONICAL column names `payloadCols(framing)` declares — the
+  /** The field's payload, keyed by the CANONICAL column names `framingCols(framing)` declares — the
    *  record builder prefixes them, the field re-entry strips the prefix back off. */
   readonly exprs: readonly (readonly [string, Expr])[];
   readonly framing: RelFraming;
@@ -350,8 +413,8 @@ export function byField(
   const droppable = (): boolean => !isProductiveBy(step);
 
   if (key.kind === 'identity') {
-    const cols = payloadCols(hostFraming);
-    // A PROPERTY or a DISCARD host has no field-shaped payload (`payloadCols`), so a bare `by()` over
+    const cols = framingCols(hostFraming);
+    // A PROPERTY or a DISCARD host has no field-shaped payload (`framingCols`), so a bare `by()` over
     // one declines here rather than in the record builder — the by() vocabulary is where "this
     // projection cannot be a field" belongs.
     if (!cols) return null;
@@ -359,6 +422,23 @@ export function byField(
   }
 
   if (!host) return null;
+
+  if (key.kind === 'alias') {
+    // The ALIAS ARM IS THE ONE A RECORD MOST NEEDS, and the reason is `Scoping`'s precedence: a
+    // labelled ELEMENT beside a computed value is the ordinary shape of `project('vertex','degree')
+    // .by(__.select('v')).by()`. Because the payload keeps the rowid, the field re-enters as a vertex
+    // stream — which a `{t,v}` node could not do.
+    const projected = aliasField(key, host);
+    if (!projected) return null;
+    return {
+      exprs: projected.payload.map(([column, expr]) => [column.name, expr] as const),
+      framing: readFraming(projected.read),
+      // A STATICALLY bound label is present on every row that reached here; one first bound inside a
+      // branch arm or a repeat body may be missing, and then the key is absent from the map. Same
+      // distinction `readProjection` draws to decide whether it owes a presence filter.
+      optional: projected.entry.binds === undefined && droppable(),
+    };
+  }
 
   if (key.kind === 'child') {
     if (!child) return null;
@@ -369,7 +449,7 @@ export function byField(
     // `vt` (the aggregate's runtime `typeof`) has neither — recomputing the aggregate a second time is
     // the duplication a shaped seam exists to avoid — so it DECLINES rather than dropping the type.
     // `count()` is unaffected: its type is the compile-time `long`.
-    const cols = payloadCols(produced.framing);
+    const cols = framingCols(produced.framing);
     if (!cols) return null;
     const exprs: (readonly [string, Expr])[] = [];
     for (const column of cols) {

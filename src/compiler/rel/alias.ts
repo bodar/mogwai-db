@@ -9,6 +9,7 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { Elem } from '../plan/plan.ts';
 import { aliasScalarTypeOf, withShape, type AliasEntry, type AliasMap } from '../plan/alias.ts';
 import { carriedCols, meta, payloadCols, typeOf, type Minter } from './build.ts';
+import type { RelFraming } from './framing.ts';
 import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject } from './history.ts';
 
 /**
@@ -216,6 +217,59 @@ function readProjection(
 }
 
 /**
+ * ONE LABEL'S PAYLOAD, read off the row — the shape decision and the expressions, without the
+ * relation the reader wants them in.
+ *
+ * Split out of `selectOne` because `select(label)` is not the only reader any more: a `by()` slot may
+ * BE an alias read (`project('v','n').by(__.select('v')).by()`, `order().by(__.select('b'))`), and
+ * there the payload lands in a record field's columns rather than in a re-rooted stream of its own.
+ * One function so the two cannot disagree about which end of the history a `Pop` names or about which
+ * columns a shape needs — the by() host reads the identical answer `select()` does, which is what
+ * `Scoping.getScopeValue` says it is reading.
+ *
+ * `null` for every shape `select()` itself declines: a `Pop.all`/`mixed` LIST result, a mixed-shape
+ * history, a map/property binding, and a label this relation no longer physically carries.
+ */
+export function aliasProjection(
+  rel: Rel, aliases: AliasMap, label: string, pop: Pop,
+): { readonly entry: AliasEntry; readonly read: AliasRead; readonly payload: readonly (readonly [ColMeta, Expr])[] } | null {
+  // Asked of the RELATION, so a label a barrier consumed reads as unbound — which is the same
+  // DECLINE as a label never bound, and correct for both (TinkerPop drops every traverser either way).
+  const entry = liveAliases(aliases, rel).get(label);
+  if (!entry) return null;
+  // `mixed` over a once-bound label IS that lone entry (TinkerPop's "singleton unwrapped, else
+  // List"), decided by the compile-time binding count; every other `all`/`mixed` is a LIST value and
+  // is a further arm's business.
+  if (pop === 'all' || (pop === 'mixed' && entry.binds !== 1)) return null;
+  const end: 'first' | 'last' = pop === 'first' ? 'first' : 'last';
+  const vtype = 'vtype';
+  const read = readOf(entry, vtype);
+  if (!read) return null;
+  const column = col(rel.id, entry.col);
+  if (read.kind === 'element') return { entry, read, payload: [[meta('id', 'int', true), aliasIdAt(column, end)]] };
+  if (read.kind === 'list') return { entry, read, payload: [[meta('list', 'json', true), aliasListAt(column, end)]] };
+  // A per-row type comes back as a COLUMN, because that is the only form the scalar tail's
+  // `carries('vtype')` reads — the same channel name `values()` produces, so a following
+  // `is(P.gt(…))` gets the vtype-aware compare key with no further plumbing.
+  return {
+    entry, read,
+    payload: [
+      [meta('v', 'any', true), aliasValueAt(column, end)],
+      ...(read.type.kind === 'perRow' ? [[meta(vtype, 'text', true), aliasTypeAt(column, end)] as const] : []),
+    ],
+  };
+}
+
+/** An alias READ, as a framing. The label decides the shape; `continueAs` decides the loop. Here
+ *  rather than in the fold because both readers — `select()` re-entry and a `by()` slot — need the
+ *  identical mapping, and the alias vocabulary is what owns it. */
+export const readFraming = (read: AliasRead): RelFraming =>
+  read.kind === 'element' ? { kind: 'elements', elem: read.elem }
+    : read.kind === 'list' ? { kind: 'list', of: read.of }
+      // The label's own recorded type, restored by `aliasProjection` (a per-row type lands in `vtype`).
+      : { kind: 'scalar', type: read.type };
+
+/**
  * `select(label)` / `select(Pop, label)` with ONE label — the label's history, re-entered as a
  * stream of its own shape.
  *
@@ -242,37 +296,10 @@ export function selectOne(
   if (labels.length !== 1 || pops.length + labels.length !== args.length) return null;
   const pop = (pops[0]?.pop ?? 'last') as Pop;
 
-  // Asked of the RELATION, so a label a barrier consumed reads as unbound — which is the same
-  // DECLINE as a label never bound, and correct for both (TinkerPop drops every traverser either way).
-  const entry = liveAliases(aliases, rel).get(labels[0]!);
   // A label bound NOWHERE drops every traverser. The honest lowering of that is the empty relation,
-  // which §3.3 records `Values` as refusing to express — so this declines and legacy answers, rather
-  // than filtering on a column that does not exist.
-  if (!entry) return null;
-  // `mixed` over a once-bound label IS that lone entry (TinkerPop's "singleton unwrapped, else
-  // List"), decided by the compile-time binding count; every other `all`/`mixed` is a LIST value and
-  // is the arm above's business.
-  if (pop === 'all' || (pop === 'mixed' && entry.binds !== 1)) return null;
-  const end: 'first' | 'last' = pop === 'first' ? 'first' : 'last';
-
-  const vtype = 'vtype';
-  const read = readOf(entry, vtype);
-  if (!read) return null;
-  const column = col(rel.id, entry.col);
-
-  if (read.kind === 'element')
-    return { rel: readProjection(rel, entry, [[meta('id', 'int'), aliasIdAt(column, end)]], fresh), read };
-  if (read.kind === 'list')
-    return { rel: readProjection(rel, entry, [[meta('list', 'json'), aliasListAt(column, end)]], fresh), read };
-  // A per-row type comes back as a COLUMN, because that is the only form the scalar tail's
-  // `carries('vtype')` reads — the same channel name `values()` produces, so a following
-  // `is(P.gt(…))` gets the vtype-aware compare key with no further plumbing.
-  const perRow = read.type.kind === 'perRow';
-  return {
-    rel: readProjection(rel, entry, [
-      [meta('v', 'any', true), aliasValueAt(column, end)],
-      ...(perRow ? [[meta(vtype, 'text', true), aliasTypeAt(column, end)] as const] : []),
-    ], fresh),
-    read,
-  };
+  // which §3.3 records `Values` as refusing to express — so `aliasProjection` declines and legacy
+  // answers, rather than filtering on a column that does not exist.
+  const projected = aliasProjection(rel, aliases, labels[0]!, pop);
+  if (!projected) return null;
+  return { rel: readProjection(rel, projected.entry, projected.payload, fresh), read: projected.read };
 }

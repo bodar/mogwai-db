@@ -6,7 +6,7 @@ import type { IRStep } from '../ir/step.ts';
 import { carriedCols, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { elementNode } from './element.ts';
-import { fieldCol, payloadCols, type RecordField, type RelFraming } from './framing.ts';
+import { fieldCol, framingCols, type RecordField, type RelFraming } from './framing.ts';
 import { MAP_COL, mapPayload } from './map.ts';
 import { byField, modulations } from './modulator.ts';
 
@@ -31,7 +31,7 @@ import { byField, modulations } from './modulator.ts';
  *   while the field is still a rowid;
  * - `order().by(__.select('b'))` sorts on a field, which wants a column and not a JSON extraction.
  *
- * So the record carries one prefixed column-set per field (`payloadCols`, `framing.ts`) and BECOMES a
+ * So the record carries one prefixed column-set per field (`framingCols`, `framing.ts`) and BECOMES a
  * map exactly once, at the boundary that needs a value — the wire here, and later a list member or a
  * group key. One direction only: nothing turns a map back into a record, because the information is
  * genuinely gone by then.
@@ -60,7 +60,7 @@ import { byField, modulations } from './modulator.ts';
 const prefixAt = (index: number): string => `f${index}`;
 
 /** Compose an OUTER prefix with an inner column name. A record nested inside a record has its fields'
- *  columns at `<outer>_<inner>_<name>`, which is exactly what `payloadCols`' recursive arm declares —
+ *  columns at `<outer>_<inner>_<name>`, which is exactly what `framingCols`' recursive arm declares —
  *  so the reader composes the same way or it reads a column that is not there. */
 const qualify = (at: string, name: string): string => (at ? fieldCol(at, name) : name);
 
@@ -103,12 +103,12 @@ export function recordOf(
     fields.push({ key, prefix, framing: built.framing, optional: built.optional });
   }
 
-  // The declared type comes from `payloadCols` and the expressions are looked UP by it, rather than
+  // The declared type comes from `framingCols` and the expressions are looked UP by it, rather than
   // both being built in parallel from the same loop. The two must agree in ORDER as well as in name,
   // and a `Project` whose exprs and declared type disagree is the join-width class of defect that
   // surfaces three nodes later — so the authority that the field re-entry and the map assembly read is
   // also the authority the builder emits against.
-  const cols = payloadCols({ kind: 'record', fields });
+  const cols = framingCols({ kind: 'record', fields });
   if (!cols) return null;
   const payload = cols.map((column) => {
     const expr = exprs.get(column.name);
@@ -129,7 +129,7 @@ export function recordOf(
  *  for an element, `v` for a value, `list`/`map` for a collection — which is the same convention
  *  `aliasPresent` reads and the reason a field's columns are declared nullable. */
 function presence(rel: Rel, field: RecordField, at: string): Expr | null {
-  const cols = payloadCols(field.framing);
+  const cols = framingCols(field.framing);
   const first = cols?.[0];
   if (!first) return null;
   return {
@@ -233,7 +233,7 @@ export function recordPayload(
 /**
  * ONE FIELD, RE-ENTERED AS A STREAM OF ITS OWN SHAPE — `project('a','b').select('a')`.
  *
- * The rename is `payloadCols` applied in reverse: the field's prefixed columns come back under their
+ * The rename is `framingCols` applied in reverse: the field's prefixed columns come back under their
  * canonical names and whichever tail loop owns `field.framing` takes the rest of the chain, exactly as
  * `selectOne` hands an alias read to `continueAs`. That is the whole payoff of keeping a record's
  * fields as columns — there is no decoding step and no shape to re-derive.
@@ -246,14 +246,14 @@ export function recordPayload(
 export function recordField(
   rel: Rel, field: RecordField, fresh: Minter,
 ): { readonly rel: Rel; readonly framing: RelFraming } | null {
-  const cols = payloadCols(field.framing);
+  const cols = framingCols(field.framing);
   if (!cols) return null;
   const present = field.optional ? presence(rel, field, '') : null;
   if (field.optional && !present) return null;
   const source = present
     ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: present })
     : rel;
-  // `payloadCols` already names the CANONICAL columns; the record relation holds them under the
+  // `framingCols` already names the CANONICAL columns; the record relation holds them under the
   // field's prefix, so the rename is that one composition applied in reverse. The nullability stays
   // whatever the field carried: after the presence filter the first column is in fact non-null, and
   // saying so buys nothing while claiming it wrongly is a checker violation.

@@ -29,7 +29,7 @@ import {
   and, byEncounter, carriedCols, EDGE_COLS, eq, labelIds, meta, minter, NODE_COLS, PROPERTIES, renumber, storedValue,
   typeOf, type Minter,
 } from './build.ts';
-import { bindAliases, selectOne, type AliasRead } from './alias.ts';
+import { bindAliases, readFraming, selectOne } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, propertyVtype, type Modulation } from './modulator.ts';
 import type { ChildHost, ChildSeam, ChildValue, RootedRead, Subject } from './child.ts';
@@ -816,11 +816,11 @@ function bulkSlice(
   });
 }
 
-function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, ctx: ChainCtx, fresh: Minter): Rel | null {
+function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, ctx: ChainCtx, fresh: Minter, aliases: AliasMap): Rel | null {
   if (step.optionArms) return null;
   if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
   if (step.name === 'identity' || step.name === 'barrier') return (step.args ?? []).length ? null : input;
-  if (step.name === 'order') return elementOrder(step, input, elem, ctx, fresh);
+  if (step.name === 'order') return elementOrder(step, input, elem, ctx, fresh, aliases);
   const sliced = sliceOp(step, input, bulked, fresh);
   if (sliced) return sliced;
   if (step.name === 'dedup' && pathCarried(input)) return null;
@@ -840,7 +840,7 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, ctx: Chain
   const ordered = !!encounterOf(input.channels);
   const bys = modulations(step, 1, childSeam(ctx, fresh));
   if (!bys) return null;
-  if (bys[0]) return dedupBy(step, bys[0], input, elem, ctx, fresh);
+  if (bys[0]) return dedupBy(step, bys[0], input, elem, ctx, fresh, aliases);
 
   // `dedup()` RESETS the multiplicity: the survivor stands for itself, not for the sum of the
   // duplicates it replaced.
@@ -888,13 +888,13 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, ctx: Chain
  * stays correct if that safety rule is ever relaxed, at no cost today.
  */
 function dedupBy(
-  step: IRStep, modulation: Modulation, input: Rel, elem: Elem, ctx: ChainCtx, fresh: Minter,
+  step: IRStep, modulation: Modulation, input: Rel, elem: Elem, ctx: ChainCtx, fresh: Minter, aliases: AliasMap,
 ): Rel | null {
   // A comparator on `dedup()` is not a form Gremlin has — `DedupGlobalStep` is not a comparator host —
   // so an `Order` in its `by()` is a chain `verifyByModulatorArity` never sees. Decline rather than
   // silently ignoring it.
   if (modulation.order !== undefined) return null;
-  const key = byExpr(modulation, { kind: 'element', id: col(input.id, 'id'), elem }, fresh, false, childSeam(ctx, fresh));
+  const key = byExpr(modulation, elementHost(input, elem, aliases), fresh, false, childSeam(ctx, fresh));
   if (!key) return null;
 
   const productive = productivityFilter(step, key);
@@ -966,8 +966,8 @@ const remintOrder = (rel: Rel, encounter: Channel, fresh: Minter): Rel => renumb
  * Minting the channel is what makes the order survive the join, and it is also what makes `order()`
  * COMPOSE: a fold into the framing `ORDER BY` can only happen once, at the end.
  */
-function elementOrder(step: IRStep, input: Rel, elem: Elem, ctx: ChainCtx, fresh: Minter): Rel | null {
-  const sort = sortTerms(step, { kind: 'element', id: col(input.id, 'id'), elem }, ctx, fresh);
+function elementOrder(step: IRStep, input: Rel, elem: Elem, ctx: ChainCtx, fresh: Minter, aliases: AliasMap): Rel | null {
+  const sort = sortTerms(step, elementHost(input, elem, aliases), ctx, fresh);
   if (!sort) return null;
   const domain = sort.drop
     ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: sort.drop })
@@ -1253,7 +1253,12 @@ function scalarTail(
     if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
     // A value's own `vtype` is in scope only where it came from a stored property, which is the same
     // distinction `compare()` above draws and the reason `ChildHost` carries it as an optional.
-    const host: ChildHost = { kind: 'scalar', value: col(rel.id, 'v'), ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}) };
+    // The ROW rides with the host so a `by(__.select(label))` can read the alias channel — which is
+    // carried state on this relation, not a question a correlated subquery over the value could answer.
+    const host: ChildHost = {
+      kind: 'scalar', value: col(rel.id, 'v'), row: { rel, aliases: labels },
+      ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}),
+    };
 
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
 
@@ -2388,7 +2393,7 @@ function elementTail(
     // vocabulary (unfold to entries, select(Column.*)) exists, so this cannot silently drop a tail.
     if (step.name === 'groupCount' || step.name === 'group') {
       if (pathCarried(rel)) return null;
-      const grouped = groupBarrier(rel, elementHost(rel, elem), step, bulked, childSeam(ctx, fresh), fresh);
+      const grouped = groupBarrier(rel, elementHost(rel, elem, labels), step, bulked, childSeam(ctx, fresh), fresh);
       if (!grouped) return null;
       return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
@@ -2401,7 +2406,7 @@ function elementTail(
       // nothing here appends it as a path position, so a later `path()` would report a history with a
       // step missing rather than fail.
       if (pathCarried(rel)) return null;
-      const record = recordOf(rel, elementHost(rel, elem), { kind: 'elements', elem }, step, childSeam(ctx, fresh), fresh);
+      const record = recordOf(rel, elementHost(rel, elem, labels), { kind: 'elements', elem }, step, childSeam(ctx, fresh), fresh);
       if (!record) return null;
       return continueAs(record.rel, { kind: 'record', fields: record.fields }, steps, at + 1, bulked, ctx, fresh, labels);
     }
@@ -2455,7 +2460,7 @@ function elementTail(
       const dropped = elementDrop(rel, elem, fresh);
       return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: dropped.bindings };
     }
-    const row = rowOp(step, rel, elem, bulked, ctx, fresh);
+    const row = rowOp(step, rel, elem, bulked, ctx, fresh, labels);
     if (!row) break;
     rel = row;
   }
@@ -2577,13 +2582,6 @@ function recordTail(
   const entered = recordField(rel, field, fresh);
   return entered && continueAs(entered.rel, entered.framing, steps, from + 1, bulked, ctx, fresh, labels);
 }
-
-/** An alias READ, as a framing. The label decides the shape; `continueAs` decides the loop. */
-const readFraming = (read: AliasRead): RelFraming =>
-  read.kind === 'element' ? { kind: 'elements', elem: read.elem }
-    : read.kind === 'list' ? { kind: 'list', of: read.of }
-      // The label's own recorded type, restored by `selectOne` (a per-row type lands back in `vtype`).
-      : { kind: 'scalar', type: read.type };
 
 /**
  * `union(a, b, …)` — the ARM MERGE, and the first production caller of the channel core's peer merge.

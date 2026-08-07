@@ -8,6 +8,7 @@ import { and, byEncounter, jsonOf, meta, typeOf, typedNode, type Minter } from '
 import { elementNode } from './element.ts';
 import { byNode, modulations, productivityFilter } from './modulator.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
+import type { AliasMap } from '../plan/alias.ts';
 import { isReducer } from './reducer.ts';
 
 /**
@@ -347,8 +348,13 @@ export function groupBarrier(
 }
 
 /** The host a `by()` projects from, for an ELEMENT relation — the shape `groupBarrier` needs handed to
- *  it, kept here so the two callers (element and scalar tails) cannot describe it differently. */
-export const elementHost = (rel: Rel, elem: Elem): ChildHost => ({ kind: 'element', id: col(rel.id, 'id'), elem });
+ *  it, kept here so the two callers (element and scalar tails) cannot describe it differently.
+ *
+ *  `aliases` rides along because a `by()` may BE an alias read (`by(__.select('v'))`), which is state on
+ *  the ROW rather than a question about the traverser. Optional so a caller with no label map in hand
+ *  still gets a host; the alias arm then declines instead of guessing. */
+export const elementHost = (rel: Rel, elem: Elem, aliases?: AliasMap): ChildHost =>
+  ({ kind: 'element', id: col(rel.id, 'id'), elem, ...(aliases ? { row: { rel, aliases } } : {}) });
 
 /**
  * THE MAP PAYLOAD — one row's `map` column as the JSON the framing layer reads (§10·10), or `null` to
