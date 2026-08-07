@@ -884,19 +884,19 @@ describe('scalar-parent / projection SQL', () => {
     expect(viaRel.shape).toEqual(p.shape);
   });
 
-  test('single-label select().by(key) → scalar value from the alias column', () => {
-    const p = read('g.V().as("a").out().select("a").by("name")');
+  test('single-label select().by(key) → scalar value from the alias column — legacy', () => {
+    const p = read('g.V().as("a").out().select("a").by("name")', { spine: 'legacy' });
     expect(p.shape).toEqual({ kind: 'value', type: UNKNOWN });
     expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS v");
     expect(p.sql).toContain('ON n.id=CAST(p.a0 ->> ? AS INTEGER)');
-    const child = read('g.V(1).as("a").out().select("a").by(__.out().count())');
+    const child = read('g.V(1).as("a").out().select("a").by(__.out().count())', { spine: 'legacy' });
     expect(child.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(child.sql).toContain('SELECT CAST(p.a0 ->> ? AS INTEGER) AS id');
     expect(child.sql).toContain('GROUP BY d.o0');
   });
 
-  test('multi-label select → map shape with per-entry prefixed columns', () => {
-    const p = read('g.V().as("a").out().as("b").select("a","b")');
+  test('multi-label select → map shape with per-entry prefixed columns — legacy', () => {
+    const p = read('g.V().as("a").out().as("b").select("a","b")', { spine: 'legacy' });
     expect(p.shape).toEqual({ kind: 'map', entries: [
       { key: 'a', prefix: 'e0', sub: 'vertex' },
       { key: 'b', prefix: 'e1', sub: 'vertex' },
@@ -907,13 +907,13 @@ describe('scalar-parent / projection SQL', () => {
     expect(p.sql).toContain('JOIN nodes e1n ON e1n.id=CAST(p.a1 ->> ? AS INTEGER)');
   });
 
-  test('select().by(key) maps every entry to a scalar; by mods cycle', () => {
-    const both = read('g.V().as("a").out().as("b").select("a","b").by("name")');
+  test('select().by(key) maps every entry to a scalar; by mods cycle — legacy', () => {
+    const both = read('g.V().as("a").out().as("b").select("a","b").by("name")', { spine: 'legacy' });
     expect(both.shape).toEqual({ kind: 'map', entries: [
       { key: 'a', prefix: 'e0', sub: 'value', type: PER_ROW('e0_vtype') },
       { key: 'b', prefix: 'e1', sub: 'value', type: PER_ROW('e1_vtype') },
     ] });
-    const cyc = read('g.V().as("a").out().as("b").select("a","b").by("age").by("name")');
+    const cyc = read('g.V().as("a").out().as("b").select("a","b").by("age").by("name")', { spine: 'legacy' });
     // e0 uses by('age'), e1 uses by('name')
     expect(cyc.sql).toContain('AS e0_vtype');
     expect(cyc.sql).toContain('AS e1_vtype');
@@ -983,6 +983,59 @@ describe('scalar-parent / projection SQL', () => {
       .toEqual({ kind: 'value', type: STATIC('long') });
   });
 
+  /**
+   * `select(keys…)` AT EVERY ARITY — ONE lowering, and the RECORD substrate is what made the
+   * multi-label form cost nothing beyond the arity difference.
+   *
+   * Row-for-row comparison is not the assertion here and cannot be: the two spines spell a record
+   * differently (prefixed columns vs one map value), and a property `by()` carries the label's stored
+   * `vtype` beside the value on this spine and not on legacy. So these assert the ANSWER, decoded, and
+   * against the reference where the two spines disagree about it.
+   */
+  test('select() at every arity is one lowering — RelIR', () => {
+    const store = seededStore();
+    const entries = (row: any): [string, any][] =>
+      (JSON.parse(row.map) as [string, any][]).map(([k, v]) => [k, v && typeof v === 'object' && 't' in v
+        ? (v.t === 'vertex' || v.t === 'edge' ? v.v.props.name[0].v : v.v) : v]);
+
+    // ONE key with a `by()` — `SelectOneStep`: the label's value, then the by() applied to IT. The
+    // stored `vtype` rides along, which is what keeps a selected uuid/datetime exact at the wire.
+    const one = read("g.V().as('a').out().select('a').by('name')", { spine: 'rel' });
+    expect(one.spine).toBe('rel');
+    expect(one.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
+    expect(runWith(store, "g.V().as('a').out().select('a').by('name')", { spine: 'rel' }).map((r) => r.v).sort())
+      .toEqual(['josh', 'josh', 'marko', 'marko', 'marko', 'peter']);
+
+    // SEVERAL keys — `SelectStep`: a RECORD, whose by() ring applies to what each label held rather
+    // than to the current traverser. So this is two property reads off two different elements.
+    const many = read("g.V().as('a').out().as('b').select('a','b').by('name')", { spine: 'rel' });
+    expect(many.spine).toBe('rel');
+    expect(many.shape).toEqual({ kind: 'mapValue' });
+    expect((runWith(store, "g.V().as('a').out().as('b').select('a','b').by('name')", { spine: 'rel' }) as any[])
+      .map(entries).sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y))))
+      .toEqual([
+        [['a', 'josh'], ['b', 'lop']], [['a', 'josh'], ['b', 'ripple']],
+        [['a', 'marko'], ['b', 'josh']], [['a', 'marko'], ['b', 'lop']], [['a', 'marko'], ['b', 'vadas']],
+        [['a', 'peter'], ['b', 'lop']],
+      ]);
+    // A bare multi-label select packages the ELEMENTS themselves — the field keeps the rowid, so the
+    // record's value side is a `{t:'vertex', …}` member and not a re-derived payload.
+    expect((runWith(store, "g.V(1).as('a').out('knows').as('b').select('a','b')", { spine: 'rel' }) as any[])
+      .map(entries)).toEqual([[['a', 'marko'], ['b', 'vadas']], [['a', 'marko'], ['b', 'josh']]]);
+
+    // AN UNPRODUCTIVE by() DROPS THE TRAVERSER, which is `select()`'s rule and the exact OPPOSITE of
+    // `project()`'s (which omits the key and keeps it). Legacy has the two the wrong way round; the
+    // reference expects FOUR rows, without lop and ripple (Select.feature:844-847).
+    expect((runWith(store, 'g.V().as("a","n").select("a","n").by("age").by("name")', { spine: 'rel' }) as any[])
+      .map(entries)).toEqual([
+        [['a', 29], ['n', 'marko']], [['a', 27], ['n', 'vadas']],
+        [['a', 32], ['n', 'josh']], [['a', 35], ['n', 'peter']],
+      ]);
+    // …and `ProductiveByStrategy` turns the drop off, at BOTH arities.
+    expect(runWith(store, 'g.withStrategies(ProductiveByStrategy).V().as("a").select("a").by("age")', { spine: 'rel' })
+      .map((r) => r.v)).toEqual([29, 27, null, 32, null, 35]);
+  });
+
   test('a record FIELD re-enters as a stream of its own shape — RelIR', () => {
     // The whole point of carrying fields as columns: `select(key)` is a RENAME, so whichever tail
     // loop owns the field's framing takes the rest of the chain and nothing is decoded back out of a
@@ -1023,8 +1076,8 @@ describe('scalar-parent / projection SQL', () => {
       .toEqual({ kind: 'value', type: PER_ROW('vtype') });
   });
 
-  test('multi-select traversal fields re-root generic children on each labelled element', () => {
-    const selected = read('g.V(1).as("a").out("knows").as("b").select("a","b").by(__.out().count()).by(__.values("name"))');
+  test('multi-select traversal fields re-root generic children on each labelled element — legacy', () => {
+    const selected = read('g.V(1).as("a").out("knows").as("b").select("a","b").by(__.out().count()).by(__.values("name"))', { spine: 'legacy' });
     expect(selected.shape).toEqual({
       kind: 'map',
       entries: [
@@ -1035,9 +1088,9 @@ describe('scalar-parent / projection SQL', () => {
     expect(selected.sql).toContain('SELECT CAST(p0.a0 ->> ? AS INTEGER) AS id');
     expect(selected.sql).toContain('SELECT CAST(p1.a1 ->> ? AS INTEGER) AS id');
     expect(selected.sql).toContain('ON b1.o0=b0.o0');
-    const mixed = read('g.V(1).as("a").out("knows").as("b").select("a","b").by("name").by(__.out().count())');
+    const mixed = read('g.V(1).as("a").out("knows").as("b").select("a","b").by("name").by(__.out().count())', { spine: 'legacy' });
     expect(mixed.sql).toContain('SELECT value FROM vertex_properties WHERE node=CAST(p0.a0 ->> ? AS INTEGER) AND key=?');
-    const element = read('g.V(1).as("a").out("knows").as("b").select("a","b").by().by(__.out().count())');
+    const element = read('g.V(1).as("a").out("knows").as("b").select("a","b").by().by(__.out().count())', { spine: 'legacy' });
     expect(element.shape).toEqual({
       kind: 'map',
       entries: [

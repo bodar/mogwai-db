@@ -3,12 +3,15 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Shape } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
-import { carriedCols, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
+import { and, carriedCols, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { elementNode } from './element.ts';
 import { fieldCol, framingCols, type RecordField, type RelFraming } from './framing.ts';
 import { MAP_COL, mapPayload } from './map.ts';
 import { byField, modulations } from './modulator.ts';
+import { aliasGuard, aliasPresent, aliasProjection, readFraming, readProjection, selectSpec, type AliasRead } from './alias.ts';
+import type { AliasMap } from '../plan/alias.ts';
+import type { ColMeta } from '../../rel/types.ts';
 
 /**
  * THE RECORD SHAPE — a map whose KEYS ARE KNOWN AT COMPILE TIME, carried as columns.
@@ -272,3 +275,106 @@ export function recordField(
  *  the key vocabulary has one owner. */
 export const fieldNamed = (fields: readonly RecordField[], key: string): RecordField | undefined =>
   fields.find((field) => field.key === key);
+
+/**
+ * `select(keys…)` AT EVERY ARITY — ONE lowering, because it is one question asked N times.
+ *
+ * TinkerPop splits it across two step classes (`SelectOneStep` and `SelectStep`) and the split is real
+ * but SMALL: read each label's history at the `Pop` the call names, apply the `by()` ring to what came
+ * back, and package the results — as the value itself for one key, as a RECORD for several. Writing
+ * that twice is how a modulated `select('a').by('name')` ends up supported and `select('a','b')
+ * .by('name')` does not, which is exactly where this route was.
+ *
+ * **A MISSING KEY DROPS THE TRAVERSER — every key, at every arity, and this is the asymmetry with
+ * `project()`.** `SelectStep` breaks out of the key loop and returns `EmptyTraverser` when a `by()` is
+ * unproductive, and catches `KeyNotFoundException` to the same answer
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SelectStep.java:74-84`),
+ * where `ProjectStep` omits the key and keeps the traverser. So the drops are a CONJUNCTION applied
+ * once to the input, and every field is `optional: false` by the time the record exists.
+ *
+ * The `by()` ring applies to the SELECTED value, not to the current traverser — which is what makes
+ * `select('a','b').by('name')` two property reads off two different elements. `byField` is handed a
+ * host built from the alias payload for exactly that reason.
+ */
+export function selectKeys(
+  step: IRStep, rel: Rel, aliases: AliasMap, child: ChildSeam, fresh: Minter,
+): { readonly rel: Rel; readonly framing: RelFraming } | null {
+  const spec = selectSpec(step);
+  if (!spec) return null;
+  const bys = modulations(step, spec.labels.length, child);
+  if (!bys) return null;
+
+  const fields: RecordField[] = [];
+  const exprs = new Map<string, Expr>();
+  const single: (readonly [ColMeta, Expr])[] = [];
+  /** The columns whose NULL drops the traverser, named after the projection exists. */
+  const required: string[] = [];
+  const bound: string[] = [];
+
+  for (const [index, label] of spec.labels.entries()) {
+    const projected = aliasProjection(rel, aliases, label, spec.pop);
+    if (!projected) return null;
+    const payload = new Map(projected.payload.map(([column, expr]) => [column.name, expr] as const));
+    if (aliasGuard(rel, projected.entry)) bound.push(projected.entry.col);
+    const framing = readFraming(projected.read);
+    const by = bys.length ? bys[index % bys.length]! : { key: { kind: 'identity' } as const };
+    const built = byField(step, by, selectedHost(projected.read, payload, rel, aliases), framing,
+      (name) => payload.get(name) ?? compilerNull(), fresh, child);
+    if (!built) return null;
+    const prefix = prefixAt(index);
+    const only = spec.labels.length === 1;
+    const cols = framingCols(built.framing);
+    if (!cols) return null;
+    for (const column of cols) {
+      const expr = built.exprs.find(([name]) => name === column.name)?.[1];
+      if (!expr) return null;
+      const name = only ? column.name : fieldCol(prefix, column.name);
+      if (only) single.push([column, expr]); else exprs.set(name, expr);
+    }
+    // The by()'s own productivity is a DROP, not an omission — named by the field's FIRST column,
+    // which every shape has (a rowid, `v`, `list`, `map`).
+    if (built.optional) required.push(only ? cols[0]!.name : fieldCol(prefix, cols[0]!.name));
+    fields.push({ key: label, prefix, framing: built.framing, optional: false });
+  }
+
+  // ONE key is not a record: `SelectOneStep` yields the value itself, so the payload lands under its
+  // canonical names and whichever tail loop owns that shape takes the rest of the chain.
+  const framing: RelFraming = spec.labels.length === 1 ? fields[0]!.framing : { kind: 'record', fields };
+  let payload = single;
+  if (spec.labels.length > 1) {
+    const cols = framingCols(framing);
+    if (!cols) return null;
+    payload = cols.map((column) => {
+      const expr = exprs.get(column.name);
+      if (!expr) throw new Error(`RelIR lowering: select field column ${column.name} has no expression`);
+      return [column, expr] as const;
+    });
+  }
+  const projected = readProjection(rel, payload, fresh);
+  const guards = [
+    ...bound.map((column) => aliasPresent(col(projected.id, column))),
+    ...required.map((column) => ({ kind: 'binary', op: 'is not', left: col(projected.id, column), right: compilerNull() }) as Expr),
+  ];
+  const guard = guards.reduce<Expr | undefined>((left, right) => (left ? and(left, right) : right), undefined);
+  return {
+    rel: guard
+      ? make.filter({ id: fresh('sf'), input: projected, channels: projected.channels, type: projected.type, pred: guard })
+      : projected,
+    framing,
+  };
+}
+
+/**
+ * The `by()` host for a SELECTED value — the label's own payload, not the current traverser.
+ *
+ * `null` for a LIST label, which has no `ChildHost` arm at all: a bare `by()` over one still works
+ * (identity reads the host FRAMING's columns, which `byField` takes separately), and a property or
+ * child `by()` over a collection declines, which is the honest answer until the by() vocabulary grows
+ * a list host.
+ */
+function selectedHost(read: AliasRead, payload: ReadonlyMap<string, Expr>, rel: Rel, aliases: AliasMap): ChildHost | null {
+  if (read.kind === 'element') return { kind: 'element', id: payload.get('id')!, elem: read.elem, row: { rel, aliases } };
+  if (read.kind === 'list') return null;
+  const vtype = payload.get('vtype');
+  return { kind: 'scalar', value: payload.get('v')!, row: { rel, aliases }, ...(vtype ? { vtype } : {}) };
+}

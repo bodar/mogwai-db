@@ -49,6 +49,13 @@ const RELIR_AHEAD = new Map([
   // with an end date. §6·1 — legacy sheds the shape.
   ['g.V().project("a", "b"). by(__.inE().count()). by("age")',
     'gremlin-test/.../map/Project.feature g_V_projectXa_bX_byXinE_countX_byXageX'],
+  // The MIRROR of the row above, and the pair is worth reading together: `select()` DROPS a traverser
+  // whose `by()` is unproductive (`break` → `EmptyTraverser`, SelectStep.java:74-81) where `project()`
+  // omits the key and keeps it. Legacy has the two rules the wrong way round on both hosts. The
+  // reference expects FOUR rows here — lop and ripple have no `age`, so they are gone entirely
+  // (Select.feature:844-847), against legacy's six with a null `a`.
+  ['g.V().as("a","n").select("a","n").by("age").by("name")',
+    'gremlin-test/.../map/Select.feature g_V_asXa_nX_selectXa_nX_byXageX_byXnameX'],
 ]);
 
 interface Metric { binds: number; bytes: number; compiler: number; bound: number; }

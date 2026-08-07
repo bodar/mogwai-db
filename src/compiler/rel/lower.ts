@@ -13,7 +13,7 @@ import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, s
 import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { RecordField, RelFraming } from './framing.ts';
-import { fieldNamed, recordField, recordOf, recordPayload } from './record.ts';
+import { fieldNamed, recordField, recordOf, recordPayload, selectKeys } from './record.ts';
 import { propertyElement, propertyKey, propertyPayload, propertyRelation, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
@@ -29,7 +29,7 @@ import {
   and, byEncounter, carriedCols, EDGE_COLS, eq, labelIds, meta, minter, NODE_COLS, PROPERTIES, renumber, storedValue,
   typeOf, type Minter,
 } from './build.ts';
-import { bindAliases, readFraming, selectOne } from './alias.ts';
+import { bindAliases } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, propertyVtype, type Modulation } from './modulator.ts';
 import type { ChildHost, ChildSeam, ChildValue, RootedRead, Subject } from './child.ts';
@@ -1389,9 +1389,9 @@ function scalarTail(
     // function: the shape boundary runs both ways and `selectTail` is the one place that decides which
     // loop the label's shape belongs to.
     if (step.name === 'select') {
-      const selected = selectOne(step, rel, labels, fresh);
+      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh);
       if (!selected) return null;
-      return continueAs(selected.rel, readFraming(selected.read), steps, at + 1, bulked, ctx, fresh, labels);
+      return continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
 
     if (step.name === 'union') {
@@ -1885,9 +1885,9 @@ function listTail(
     // shape and `selectTail` decides the loop, so a label holding an element re-enters `elementTail`
     // from here exactly as it does from the scalar tail.
     if (step.name === 'select') {
-      const selected = selectOne(step, rel, labels, fresh);
+      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh);
       if (!selected) return null;
-      return continueAs(selected.rel, readFraming(selected.read), steps, at + 1, false, ctx, fresh, labels);
+      return continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
     }
 
     if (step.name === 'unfold') {
@@ -2467,9 +2467,9 @@ function elementTail(
     }
     if (step.name === 'select') {
       if (pathCarried(rel)) return null;
-      const selected = selectOne(step, rel, labels, fresh);
+      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh);
       if (!selected) return null;
-      return continueAs(selected.rel, readFraming(selected.read), steps, at + 1, bulked, ctx, fresh, labels);
+      return continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
     if (step.name === 'union' || step.name === 'choose') {
       const framing = { kind: 'elements', elem } as const;
@@ -2690,8 +2690,8 @@ function recordTail(
   if (args.length !== 1 || typeof args[0] !== 'string') return null;
   const field = fieldNamed(fields, args[0]);
   if (!field) {
-    const selected = selectOne(step, rel, labels, fresh);
-    return selected && continueAs(selected.rel, readFraming(selected.read), steps, from + 1, bulked, ctx, fresh, labels);
+    const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh);
+    return selected && continueAs(selected.rel, selected.framing, steps, from + 1, bulked, ctx, fresh, labels);
   }
   const entered = recordField(rel, field, fresh);
   return entered && continueAs(entered.rel, entered.framing, steps, from + 1, bulked, ctx, fresh, labels);

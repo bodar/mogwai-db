@@ -41,7 +41,6 @@ deferred	legacy	group('m') after as()/path() not yet supported	g.V().as("a").gro
 deferred	legacy	group('m') after as()/path() not yet supported	g.V().as("a").group("m").by().by(__.bothE().count()).barrier().select("m").select(__.select("a")).by(__.math("_+_"))
 unbound	legacy	Unbound parameter 'xx1'	g.V().as("a").in().as("b").in().as("c").select("a","b","c").by("name").limit(Scope.local, xx1)
 deferred	legacy	where(P.or) alias comparison not yet supported	g.V().as("a").out("created").as("b").in("created").as("c").both("knows").both("knows").as("d").where("c", P.not(P.eq("a").or(P.eq("d")))).select("a", "b", "c", "d")
-deferred	legacy	order() after select()/project() not yet supported	g.V().as("a").out("created").as("b").order().by(Order.shuffle).select("a", "b")
 deferred	legacy	select() with a traversal key not yet supported (needs dynamic alias lookup)	g.V().as("a").out("knows").as("a").select(Pop.all, __.constant("a"))
 deferred	legacy	by(traversal) modulator not yet supported	g.V().as("a").out().as("a").in().as("a"). select(Pop.all, "a", "a", "a"). by(unfold().values('name').fold())
 deferred	legacy	by(traversal) child shape not yet supported	g.V().as("a").out().as("a").out().as("a").select("a").by(__.unfold().values("name").fold()).tail(Scope.local).unfold()

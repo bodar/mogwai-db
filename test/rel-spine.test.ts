@@ -249,6 +249,12 @@ const COVERED = [
   'g.V().as("a").out().as("b")', 'g.V().as("a").out().as("a")',
   'g.V().as("a").out().select("a")', 'g.V().as("a").out().as("b").select("b")',
   'g.V().as("a").out().select("a").out()', 'g.V().as("a").out().select("a").count()',
+  // A MODULATED select reads the SELECTED element and a MULTI-label one packages several — one
+  // lowering at every arity (`selectKeys`). Only the CHILD-modulated form is row-comparable here: a
+  // property `by()` carries the label's stored `vtype` beside the value on this spine and not on
+  // legacy, and a multi-label select is a RECORD, which the two spell differently by construction.
+  // Both are answer-identical and both are pinned in `test/L2-sql/scalar.sql.test.ts`.
+  "g.V().as('a').out().select('a').by(__.out().count())",
   'g.V().as("a").out().as("a").select(Pop.first,"a")', 'g.V().as("a").out().as("a").select(Pop.last,"a")',
   // …over a VALUE stream, where the label's own `t` field is the only place a per-row `vtype` COLUMN
   // can survive becoming JSON — which is what keeps the comparison numeric after the round trip.
@@ -307,9 +313,7 @@ const COVERED = [
  */
 const DECLINED = [
   "g.V().bothE().otherV()",           // otherV reads the entering vertex — carried state not modelled
-  "g.V().as('a').out().select('a','b')", // MULTI-label select is the map/record shape, not this one
   "g.V().as('a').out().as('a').select(Pop.all,'a')", // Pop.all is the history as a LIST value
-  "g.V().as('a').out().select('a').by('name')", // a modulated select reads the SELECTED element
   "g.V().out().select('a')",           // a label bound NOWHERE drops every traverser — the empty relation
   "g.V().union(__.out())",             // a SINGLE arm: `union(t) === t`, not a merge at all
   "g.V().union(__.as('b').out(), __.in())",  // an arm that BINDS a label owes each arm a remap + NULL pad

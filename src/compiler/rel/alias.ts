@@ -194,18 +194,25 @@ const scalarTypeOfAlias = (entry: AliasEntry, vtype: string): ScalarType =>
     : entry.scalarType?.kind === 'perRow' ? { kind: 'perRow', column: vtype }
       : { kind: 'unknown' };
 
-/** The projection every `select(label)` shares: the label's payload, then the carried channels
- *  through unchanged, filtered to the rows where the label is bound. */
-function readProjection(
-  rel: Rel, entry: AliasEntry, payload: readonly (readonly [ColMeta, Expr])[], fresh: Minter,
+/** The presence predicate one label OWES, or `undefined` where it can never be false. A STATICALLY
+ *  bound label is present on every row that reached here, so the guard is emitted only for one first
+ *  bound inside a branch arm or a repeat body — same SQL as legacy in both cases, and one fewer clause
+ *  for the fused block to re-inline. */
+export const aliasGuard = (rel: Rel, entry: AliasEntry): Expr | undefined =>
+  (entry.binds === undefined ? aliasPresent(col(rel.id, entry.col)) : undefined);
+
+/** The projection every `select()` shares: the payload under its canonical column names, then the
+ *  carried channels through unchanged.
+ *
+ *  It does NOT filter, and the DROP is the caller's for a structural reason rather than a stylistic
+ *  one: the payload expressions are written in `rel`'s scope, so a `Filter` between them and `rel`
+ *  makes it a GRANDCHILD and every column reference falls out of scope (§3.3 — a `Col` names a
+ *  relation in SCOPE, and scope is a node's direct children). The guard therefore sits ABOVE the
+ *  projection and reads its COLUMNS, which is also one fewer inlining of a correlated `by()`. */
+export function readProjection(
+  rel: Rel, payload: readonly (readonly [ColMeta, Expr])[], fresh: Minter,
 ): Rel {
-  const column = col(rel.id, entry.col);
-  // A STATICALLY-bound label is present on every row that reached here, so the guard is emitted only
-  // where it can actually be false — a label first bound inside a branch arm or a repeat body. Same
-  // SQL as legacy in both cases, and one fewer clause for the fused block to re-inline.
-  const source = entry.binds === undefined
-    ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: aliasPresent(column) })
-    : rel;
+  const source = rel;
   return make.project({
     id: fresh('sel'), input: source, channels: source.channels,
     type: typeOf(...payload.map(([column_]) => column_), ...carriedCols(source.channels)),
@@ -270,36 +277,21 @@ export const readFraming = (read: AliasRead): RelFraming =>
       : { kind: 'scalar', type: read.type };
 
 /**
- * `select(label)` / `select(Pop, label)` with ONE label — the label's history, re-entered as a
- * stream of its own shape.
+ * THE KEYS A `select()` NAMES, and which end of each label's history it reads.
  *
- * Host-agnostic like `bindAliases`, and for the same reason: nothing here reads the CURRENT
- * traverser, only the alias column and the carried channels. That is legacy's finding too
- * (`selectOneFromAlias` was written against an element stream and nothing in it needed one) and it is
- * what lets `values('name').select('a')` reach the identical answer as `out().select('a')`.
- *
- * Three declines, each a shape rather than a step: a `Pop.all`/`Pop.mixed` LIST result (the history
- * as a whole is a collection, which needs the member frame over an alias column — a further arm of
- * this same module, not a different one), a modulated `select(label).by(…)` (the by() vocabulary
- * reads the SELECTED element's properties, which is the next arm), and an unbound label whose
- * EMPTY-result answer legacy spells as a degenerate relation this algebra deliberately cannot
- * express (`Values([])`, §3.3).
+ * The parse alone, exported because both readers need the identical answer: `selectKeys`
+ * (`record.ts`) builds the stream, and nothing else may re-derive which arguments are labels.
+ * `null` declines an argument that is neither a label nor a `Pop` — a `Column` token or a nested
+ * traversal names a different family (map re-entry, a dynamic key), and reading one as "no labels"
+ * would answer a different question.
  */
-export function selectOne(
-  step: IRStep, rel: Rel, aliases: AliasMap, fresh: Minter,
-): { readonly rel: Rel; readonly read: AliasRead } | null {
-  if (step.modulators?.length || step.optionArms) return null;
+export function selectSpec(step: IRStep): { readonly labels: readonly string[]; readonly pop: Pop } | null {
+  if (step.optionArms) return null;
   const args = (step.args ?? []).map((a) => a.value);
   const pops = args.filter((arg): arg is { readonly pop: string } =>
     typeof arg === 'object' && arg !== null && typeof (arg as { pop?: unknown }).pop === 'string');
   const labels = args.filter((arg): arg is string => typeof arg === 'string');
-  if (labels.length !== 1 || pops.length + labels.length !== args.length) return null;
-  const pop = (pops[0]?.pop ?? 'last') as Pop;
-
-  // A label bound NOWHERE drops every traverser. The honest lowering of that is the empty relation,
-  // which §3.3 records `Values` as refusing to express — so `aliasProjection` declines and legacy
-  // answers, rather than filtering on a column that does not exist.
-  const projected = aliasProjection(rel, aliases, labels[0]!, pop);
-  if (!projected) return null;
-  return { rel: readProjection(rel, projected.entry, projected.payload, fresh), read: projected.read };
+  if (!labels.length || pops.length + labels.length !== args.length) return null;
+  return { labels, pop: (pops[0]?.pop ?? 'last') as Pop };
 }
+

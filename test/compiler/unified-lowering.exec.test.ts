@@ -439,11 +439,17 @@ describe('unified lowering characterization', () => {
     const record = read('g.V(1).values("name").as("a").select("a")');
     expect(record.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // a → element (vertex), b → its name (scalar): a heterogeneous record
-    const mixed = read('g.V(1).as("a").values("name").as("b").select("a","b")');
+    // A HETEROGENEOUS record — an element field beside a value field — pinned per spine, because
+    // the two carry it differently and both are right: legacy as a wide relation of prefixed
+    // columns, RelIR as the one map VALUE its map vocabulary already frames.
+    const mixed = read('g.V(1).as("a").values("name").as("b").select("a","b")', { spine: 'legacy' });
     expect(mixed.shape).toEqual({ kind: 'map', entries: [
       { key: 'a', prefix: 'e0', sub: 'vertex' },
       { key: 'b', prefix: 'e1', sub: 'value', type: PER_ROW('e1_vtype') },
     ] });
+    const viaRel = read('g.V(1).as("a").values("name").as("b").select("a","b")', { spine: 'rel' });
+    expect(viaRel.spine).toBe('rel');
+    expect(viaRel.shape).toEqual({ kind: 'mapValue' });
   });
 });
 describe('child body with movement under path tracking (pushChildScope ordinal-order)', () => {

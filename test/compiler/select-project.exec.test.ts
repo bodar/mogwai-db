@@ -41,21 +41,24 @@ test('select("a").by(key) projects a property of the labelled element', () => {
     .toEqual(['vadas', 'vadas', 'vadas']);
 });
 
-test('multi-label select yields the paired elements per traverser', () => {
+test('multi-label select yields the paired elements per traverser — legacy', () => {
   const store = seededStore();
-  // map shape: each row has e0_/e1_ columns; verify the (a,b) name pairs
-  const rows = run(store, 'g.V(1).as("a").out("knows").as("b").select("a","b").by("name")');
+  // Pinned LEGACY throughout: a multi-label select is a RECORD, and the two spines carry one
+  // differently — prefixed columns here, one map value on the RelIR spine. Both are right and both
+  // are live until Phase 4; the RelIR answers are asserted decoded in test/L2-sql/scalar.sql.test.ts.
+  const legacy = (g: string) => runWith(store, g, { spine: 'legacy' }) as any[];
+  const rows = legacy('g.V(1).as("a").out("knows").as("b").select("a","b").by("name")');
   const pairs = rows.map((r) => [r.e0_v, r.e1_v]).sort((x, y) => x[1].localeCompare(y[1]));
   expect(pairs).toEqual([['marko', 'josh'], ['marko', 'vadas']]);
-  expect(run(store, 'g.V(1).as("a").out("knows").as("b").select("a","b").by(__.out().count()).by(__.values("name"))')
+  expect(legacy('g.V(1).as("a").out("knows").as("b").select("a","b").by(__.out().count()).by(__.values("name"))')
     .map((r) => [r.e0_v, r.e1_v]).sort((x, y) => x[1].localeCompare(y[1])))
     .toEqual([[3, 'josh'], [3, 'vadas']]);
-  expect(run(store, 'g.V(1).as("a").out("knows").as("b").select("a","b").by("name").by(__.out().count())')
+  expect(legacy('g.V(1).as("a").out("knows").as("b").select("a","b").by("name").by(__.out().count())')
     .map((r) => [r.e0_v, r.e1_v]).sort((x, y) => x[1] - y[1]))
     .toEqual([['marko', 0], ['marko', 2]]);
-  expect(run(store, 'g.V(1).as("a").out("knows").as("b").select("a","b").by().by(__.out().count()).select("a").out().count()')
+  expect(legacy('g.V(1).as("a").out("knows").as("b").select("a","b").by().by(__.out().count()).select("a").out().count()')
     .map((r) => r.v)).toEqual([6]);
-  const lists = run(store, 'g.V(1).as("a").out("knows").as("b").select("a","b").by(__.out().values("name").fold()).by(__.out().values("name").fold())');
+  const lists = legacy('g.V(1).as("a").out("knows").as("b").select("a","b").by(__.out().values("name").fold()).by(__.out().values("name").fold())');
   expect(lists.map((r) => JSON.parse(r.e0_list))).toEqual([
     ['vadas', 'lop', 'josh'], ['vadas', 'lop', 'josh'],
   ]);

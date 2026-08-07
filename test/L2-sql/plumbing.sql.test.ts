@@ -411,7 +411,11 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     // a label bound NOWHERE drops every traverser → empty result (TinkerPop drops, never errors)
     expect(run(seededStore(), 'g.V().select(Pop.first,"a")')).toEqual([]);
     expect(run(seededStore(), 'g.V().select("x")')).toEqual([]);
-    expect(() => compile('g.V().as("a").select("a").by(T.id)', {})).toThrow('by(T.id) modulator not yet supported');
+    // A `T` token in a modulated `select()` is LEGACY's deferral, pinned by name: the RelIR spine
+    // answers it (`byField`'s token arm), which is the by() vocabulary reaching a host legacy never
+    // taught. Asserted per spine rather than deleted, because legacy is still a live route.
+    expect(() => compile('g.V().as("a").select("a").by(T.id)', {}, { spine: 'legacy' })).toThrow('by(T.id) modulator not yet supported');
+    expect(read('g.V().as("a").select("a").by(T.id)', { spine: 'rel' }).spine).toBe('rel');
     expect(() => compile('g.V().as("a").out().as("b").select("a","b").order()', {})).toThrow('order() on a record requires a by(field)');
     // order().by() deferred modulators must throw, not silently sort by id — but a `T` token is
     // no longer one of them. The tail accumulator carries the token to `tailOrderTerm`, which
