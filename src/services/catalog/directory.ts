@@ -1,7 +1,8 @@
-import { q, value, list } from '../../sql/kernel/q.ts';
-import { toScalarStream } from '../../compiler/steps/context/stream.ts';
-import { rootLayout, type LoweringState } from '../../compiler/steps/context/context.ts';
-import type { Service, StreamCallSite } from '../spi/types.ts';
+import * as make from '../../rel/factory.ts';
+import { compilerText } from '../../rel/expr.ts';
+import { meta, typeOf } from '../../compiler/rel/build.ts';
+import { STATIC } from '../../sql/kernel/render.ts';
+import type { Service, RelCallSite, RelContribution } from '../spi/types.ts';
 import { DIRECTORY_SERVICE_NAME } from '../spi/types.ts';
 import type { AppScope } from '../../scopes.ts';
 
@@ -13,14 +14,26 @@ import type { AppScope } from '../../scopes.ts';
 // already excludes it). Because it reads the live registry, a service added to the
 // registry later shows up here with no change.
 
-/** Build a scalar-string stream from a list of already-computed string rows, seeded from
- *  a VALUES CTE exactly like inject() does. An empty list yields the empty stream. */
-function scalarStrings(ctx: StreamCallSite, rows: string[]) {
-  const carry: LoweringState = { q: ctx.q, params: ctx.boundParams, traverserLayout: rootLayout() };
-  const rel = rows.length
-    ? ctx.q.cte(q`VALUES ${list(rows.map((r) => q`(${value(r)})`), ', ')}`, ['v'])
-    : ctx.q.cte(q`SELECT NULL AS v WHERE 0`, ['v']);
-  return toScalarStream(carry, rel, 'string');
+/** The already-computed string rows as a RelIR scalar source — a `Values` relation and the framing
+ *  that says it holds strings. The same thing `injectSource` builds for `g.inject('a','b')`, minus
+ *  the coercion fold, which is why this service is the one that proves the `rel` arm.
+ *
+ *  NO CHANNELS: each row is one traverser by construction, so there is no multiplicity to carry and
+ *  nothing has established an emission order — `injectSource`'s reasoning verbatim.
+ *
+ *  An EMPTY list declines (`null`) rather than emitting `Values([])`, which §3.3 records as
+ *  unrepresentable: it rendered as invalid SQL that only failed at the database. The algebra's empty
+ *  relation is a `Filter(false)` over something, and here there is nothing to be over. Reachable via
+ *  `--list` with a `service` filter matching nothing, so it declines to legacy rather than guessing. */
+function scalarStrings(site: RelCallSite, rows: string[]): RelContribution | null {
+  if (!rows.length) return null;
+  return {
+    rel: make.values({
+      id: site.fresh('svc'), channels: [], type: typeOf(meta('v', 'text')),
+      rows: rows.map((r) => [compilerText(r)]),
+    }),
+    framing: { kind: 'scalar', type: STATIC('string') },
+  };
 }
 
 /** The directory takes the registry it enumerates as a CONSTRUCTION dependency, read off the app
@@ -32,8 +45,8 @@ export const createDirectoryService = (app: AppScope): Service => ({
   internal: true,   // TinkerPop's rule: the directory never lists itself.
   describeParams: () => ({ service: 'string (filter)', verbose: 'boolean' }),
   resolve: () => ({
-    kind: 'stream',
-    build: (c) => {
+    kind: 'rel',
+    buildRel: (c) => {
       const services = app.registry.list();
       const filter = c.params.service;
       const chosen = typeof filter === 'string' ? services.filter((s) => s.name === filter) : services;
