@@ -6,7 +6,8 @@ import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/step.ts';
 import { and, byEncounter, jsonOf, meta, typeOf, typedNode, type Minter } from './build.ts';
 import { elementNode } from './element.ts';
-import { byNode, modulations, productivityFilter, type ByChild, type ByHost } from './modulator.ts';
+import { byNode, modulations, productivityFilter } from './modulator.ts';
+import type { ChildHost, ChildSeam } from './child.ts';
 import { isReducer } from './reducer.ts';
 
 /**
@@ -149,7 +150,7 @@ const ORD_COL = 'go';
  * assigns one node. A REDUCING child value is a different group-scoped shape and remains declined here.
  */
 export function groupBarrier(
-  input: Rel, host: ByHost, step: IRStep, bulked: boolean, params: Record<string, any>, child: ByChild, fresh: Minter,
+  input: Rel, host: ChildHost, step: IRStep, bulked: boolean, child: ChildSeam, fresh: Minter,
 ): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } | null {
   if (step.optionArms || (step.args ?? []).length > 0) return null;
   if (step.name !== 'groupCount' && step.name !== 'group') return null;
@@ -161,7 +162,7 @@ export function groupBarrier(
   // TWO SLOTS for `group()`, one for `groupCount()`, and that is the whole of the arity difference:
   // `GroupStep` takes a key `by()` and a value `by()`, `GroupCountStep` only a key.
   const collecting = step.name === 'group';
-  const bys = modulations(step, collecting ? 2 : 1, params);
+  const bys = modulations(step, collecting ? 2 : 1, child);
   // A bare `groupCount()` groups by the TRAVERSER, so an element stream would need an element key —
   // which the materializer expands per pair rather than tagging. Over a SCALAR stream the traverser IS
   // a value, so `by()`-less is exactly the identity projection and works.
@@ -286,7 +287,7 @@ export function groupBarrier(
     // value came from), so it is written back as it is. `json()` around it for the list module's own
     // reason: without it `json_group_array` re-encodes the envelope as a JSON STRING.
     ? jsonOf(col(rows.id, MEMBER_COL))
-    : jsonOf(elementNode(col(rows.id, MEMBER_COL), (host as Extract<ByHost, { kind: 'element' }>).elem, fresh));
+    : jsonOf(elementNode(col(rows.id, MEMBER_COL), (host as Extract<ChildHost, { kind: 'element' }>).elem, fresh));
   // THE VALUE'S PRODUCTIVITY DROPS THE MEMBER, NOT THE TRAVERSER AND NOT THE GROUP — and getting that
   // wrong has three distinguishable answers, which is why the reference is quoted rather than reasoned
   // from. `g.V().group().by("name").by("age")` over the modern graph: `ripple` and `lop` have no `age`,
@@ -347,7 +348,7 @@ export function groupBarrier(
 
 /** The host a `by()` projects from, for an ELEMENT relation — the shape `groupBarrier` needs handed to
  *  it, kept here so the two callers (element and scalar tails) cannot describe it differently. */
-export const elementHost = (rel: Rel, elem: Elem): ByHost => ({ kind: 'element', id: col(rel.id, 'id'), elem });
+export const elementHost = (rel: Rel, elem: Elem): ChildHost => ({ kind: 'element', id: col(rel.id, 'id'), elem });
 
 /**
  * THE MAP PAYLOAD — one row's `map` column as the JSON the framing layer reads (§10·10), or `null` to

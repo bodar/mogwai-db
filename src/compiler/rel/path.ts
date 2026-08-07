@@ -9,7 +9,8 @@ import { byEncounter, carriedCols, jsonOf, meta, typeOf, type Minter } from './b
 import { elementNode } from './element.ts';
 import { historyAppend, historySeed, objectEntry, type TraverserObject } from './history.ts';
 import { LIST_COL, TYPED_LIST } from './list.ts';
-import { byNode, modulations, type ByChild, type Modulation } from './modulator.ts';
+import { byNode, modulations, type Modulation } from './modulator.ts';
+import type { ChildSeam } from './child.ts';
 
 /**
  * THE PATH CHANNEL — where the traverser has BEEN, as one carried column.
@@ -122,10 +123,10 @@ export function extendPath(rel: Rel, object: TraverserObject, fresh: Minter): Re
  * deep inside a table-valued function argument.
  */
 export function pathPositions(
-  rel: Rel, step: IRStep, params: Record<string, any>, child: ByChild, fresh: Minter,
+  rel: Rel, step: IRStep, child: ChildSeam, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf; readonly scalars: boolean } | null {
   if (!pathCarried(rel)) return null;
-  const parsed = modulations(step, step.modulators?.length ?? 0, params);
+  const parsed = modulations(step, step.modulators?.length ?? 0, child);
   if (!parsed) return null;
   const fenced = rel.kind === 'materialize'
     ? rel

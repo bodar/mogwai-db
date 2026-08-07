@@ -9,7 +9,8 @@ import type { Stmt } from '../../rel/stmt.ts';
 import { EXCLUDED, type ColMeta, type RelId, type RelType } from '../../rel/types.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/strategies.ts';
-import { isNested, argValues } from '../../gremlin/frontend.ts';
+import { arg, isNested, argValues } from '../../gremlin/frontend.ts';
+import type { ChildSeam } from './child.ts';
 import { gremlinTypeOf, propertyValueBind } from '../../gremlin/types.ts';
 import { propertyFtsEntries } from '../../services/fts-index.ts';
 import { mergeMaps, parseProperty, type MergeMaps, type MergeSpec, type ParsedProperty, type PropSpec } from '../steps/write/write.ts';
@@ -838,7 +839,7 @@ function endpointExpr(end: Endpoint, over: Rel, aliases: AliasMap, fresh: Minter
  */
 export function elementAddE(
   input: Rel, elem: Elem, step: IRStep, cluster: readonly IRStep[], aliases: AliasMap,
-  ordered: boolean, params: Record<string, any>, reads: SubReads, fresh: Minter,
+  ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
   const label = (step.args ?? [])[0]?.value;
@@ -852,7 +853,7 @@ export function elementAddE(
   for (const member of cluster) {
     if (member.name === 'property') { propertySteps.push(member); continue; }
     if (member.modulators?.length || member.optionArms) return null;
-    const parsed = endpointOf((member.args ?? [])[0]?.value, reads);
+    const parsed = endpointOf((member.args ?? [])[0]?.value, child, fresh);
     if (!parsed) return null;
     if (member.name === 'from') from = parsed; else to = parsed;
     sides++;
@@ -870,7 +871,7 @@ export function elementAddE(
   // Refusing on the kind alone declined every one of them.
   const implicit = from.kind === 'traverser' || to.kind === 'traverser';
   if (sides === 0 || (implicit && (elem !== 'vertex' || !input.type.cols.some((column) => column.name === 'id')))) return null;
-  const writes = propertySteps.length ? propertyWrites(propertySteps, 'edge', params) : [];
+  const writes = propertySteps.length ? propertyWrites(propertySteps, 'edge', child.params) : [];
   if (!writes) return null;
 
   const carried = input.channels.filter((channel) => channel.role === 'alias');
@@ -945,39 +946,54 @@ export function elementAddE(
 /** One `from()`/`to()` argument → the endpoint it names, or `null` for a form this route declines
  *  (`__.addV(…)`, which CREATES its endpoint as a side effect of resolving it, and anything whose
  *  nested chain the read fold does not cover). */
-function endpointOf(arg: unknown, reads: SubReads): Endpoint | null {
-  if (typeof arg === 'string') return { kind: 'alias', label: arg };
-  if (!isNested(arg)) return null;
-  const inner = reads.body(arg);
+function endpointOf(value: unknown, child: ChildSeam, fresh: Minter): Endpoint | null {
+  if (typeof value === 'string') return { kind: 'alias', label: value };
+  if (!isNested(value)) return null;
+  const inner = child.body(value.nested, 'rooted');
   if (!inner?.length) return null;
   // `__.select("a")` IS the bare label, spelled longhand.
   if (inner.length === 1 && inner[0]!.name === 'select' && typeof inner[0]!.args?.[0]?.value === 'string')
     return { kind: 'alias', label: inner[0]!.args[0].value as string };
-  const read = reads.rooted(inner);
+  const read = rootedVertices(inner, child, fresh);
   return read && { kind: 'read', rel: read };
 }
 
 /**
- * THE READ FOLD, handed to the write vocabulary as two functions.
+ * A ROOTED chain as a one-column relation of VERTEX rowids — the child seam's third answer plus THIS
+ * vocabulary's own admission rule (§6·6).
  *
- * An endpoint like `to(__.V(2))` is a ROOTED CHAIN LOWERED INSIDE ANOTHER — the sub-read seam — and
- * the fold that does it lives in `lower.ts`, which imports this module. Passing the two entry points
- * in keeps the import graph a DAG (`build ◂ … ◂ write ◂ lower ◂ spine`) and keeps the decline
- * contract intact: an inner chain this route does not cover propagates outward as a decline, one
- * level down, exactly as the set-op operand seam already does.
+ * The rule is the write's, not the seam's: an endpoint must be a VERTEX stream (an edge has no end an
+ * edge can attach to), and a rooted chain with EFFECTS of its own is refused rather than spliced —
+ * that endpoint is `__.addV(…)`, whose creation has to be ORDERED against the edge insert, and whose
+ * statements are `Plan` bindings a spliced relation would silently drop.
  */
-export interface SubReads {
-  /** A nested argument's normalized body, or `null` where normalizing it RAISES. */
-  readonly body: (nested: unknown) => readonly IRStep[] | null;
-  /** A rooted VERTEX chain as a one-column relation of rowids, or `null` if it is not covered. */
-  readonly rooted: (steps: readonly IRStep[]) => Rel | null;
-  /**
-   * THE VERTICES A MERGE MAP MATCHES — its criteria handed BACK to the read fold as the
-   * `V().hasLabel(l)….has(k, v)…` chain they are, rather than re-expressed as a second predicate
-   * vocabulary. Every name must be carried (so one `hasLabel` per name, since one step listing them
-   * all is ANY-of) and every entry is an ANY-value property match, which is what `has` already means.
-   */
-  readonly matching: (labels: readonly string[], props: readonly (readonly [string, unknown])[]) => Rel | null;
+function rootedVertices(steps: readonly IRStep[], child: ChildSeam, fresh: Minter): Rel | null {
+  const read = child.rooted(steps);
+  if (!read || read.effects?.length || read.framing.kind !== 'elements' || read.framing.elem !== 'vertex') return null;
+  return make.project({ id: fresh('ep'), input: read.rel, channels: [], type: ID_TYPE, exprs: [['id', col(read.rel.id, 'id')]] });
+}
+
+/**
+ * THE VERTICES A MERGE MAP MATCHES — its criteria handed BACK to the read fold as the
+ * `V().hasLabel(l)….has(k, v)…` chain they are, rather than re-expressed as a second predicate
+ * vocabulary. Every name must be carried (so one `hasLabel` per name, since one step listing them all
+ * is ANY-of) and every entry is an ANY-value property match, which is what `has` already means.
+ *
+ * SYNTHESIZED STEPS, deliberately: writing the criteria as the steps they are and sending them through
+ * the seam is the only spelling under which the merge's search and `has()`'s answer cannot drift apart.
+ * It also means the search inherits whatever `has` learns next — the vtype-aware compare it already
+ * has, the FTS arm §4.7 lifts. `args` is the whole of an `IRStep` these two steps read; the passes have
+ * already run on the chain this belongs to, so re-running them over a synthesized fragment would ask a
+ * question about a traversal nobody wrote.
+ */
+function matching(
+  labels: readonly string[], props: readonly (readonly [string, unknown])[], child: ChildSeam, fresh: Minter,
+): Rel | null {
+  return rootedVertices([
+    { name: 'V', args: [] },
+    ...labels.map((label) => ({ name: 'hasLabel', args: [arg(label)] })),
+    ...props.map(([key, value]) => ({ name: 'has', args: [arg(key), arg(value)] })),
+  ] as IRStep[], child, fresh);
 }
 
 /** Rewrite a `Col` written against `from` so it names `to` instead — what a CROSS JOIN's projection
@@ -1061,7 +1077,7 @@ function positioned(created: Rel, fresh: Minter): Rel {
  * must be carried, so one step per name rather than one step listing them, which is ANY), and a
  * property entry is `has(key, value)` — an ANY-value `EXISTS` over the normalized table, which is
  * already what `has` means. So the search is built by handing those steps back to the READ FOLD
- * (`SubReads.matching`) instead of by writing a second predicate vocabulary. Legacy's
+ * (`matching`, over the child seam) instead of by writing a second predicate vocabulary. Legacy's
  * `commonMergeConds` is those same three clauses spelled a second time, and it is the copy this route
  * does not make — every improvement to `has` (the FTS arm, a vtype-aware compare) serves the merge for
  * free, and a divergence between "what mergeV searches for" and "what has() finds" is not expressible.
@@ -1094,14 +1110,13 @@ function positioned(created: Rel, fresh: Minter): Rel {
  */
 export function elementMergeV(
   input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
-  ordered: boolean, params: Record<string, any>, cardinality: LabelCardinality,
-  reads: SubReads, fresh: Minter,
+  ordered: boolean, cardinality: LabelCardinality, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
   let maps: MergeMaps;
   // The parse RAISES for every map shape it refuses, and those messages are the legacy spine's to
   // raise — catch and decline, exactly as the `property()` run does.
-  try { maps = mergeMaps(step, options, 'mergeV', undefined, params); } catch { return null; }
+  try { maps = mergeMaps(step, options, 'mergeV', undefined, child.params); } catch { return null; }
   const { match, onCreate, onMatch } = maps;
   for (const spec of [match, onCreate, onMatch]) {
     if (!spec) continue;
@@ -1121,12 +1136,12 @@ export function elementMergeV(
     propTypes: { ...match.propTypes, ...onCreate.propTypes },
     propCardinalities: { ...match.propCardinalities, ...onCreate.propCardinalities },
   } : match, 'vertex');
-  const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'vertex', params) : [];
+  const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'vertex', child.params) : [];
   if (!matchWrites || !createWrites || !tailWrites) return null;
   const createLabels = creationLabels(((onCreate?.label ?? match.label) as string[] | null) ?? [], cardinality);
   if (!createLabels) return null;
 
-  const searched = reads.matching((match.label as string[] | null) ?? [], Object.entries(match.props));
+  const searched = matching((match.label as string[] | null) ?? [], Object.entries(match.props), child, fresh);
   if (!searched) return null;
 
   const carried = writeInputChannels(input);

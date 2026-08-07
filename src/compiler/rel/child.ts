@@ -1,0 +1,113 @@
+import type { Expr } from '../../rel/expr.ts';
+import type { Rel } from '../../rel/rel.ts';
+import type { Elem } from '../plan/plan.ts';
+import type { IRStep } from '../ir/step.ts';
+import type { Binding } from '../../rel/plan.ts';
+import type { RelFraming } from './lower.ts';
+
+/**
+ * THE CHILD SEAM — ONE interface, THREE total answers to "lower an inner body" (§6·6).
+ *
+ * Four spellings of this question used to exist, each grown where a host first needed one: `ByChild`
+ * (`modulator.ts`, a correlated scalar), `SubReads.body`/`rooted`/`matching` (`write.ts`, a rooted
+ * relation), `ListCtx.subRead` (`list.ts`, a rooted relation read as a value) and
+ * `FilterCtx.correlatedChildren` → `correlatedExists` (`lower.ts`, a correlated predicate). They are
+ * one concept answered four times, and the cost was not duplication for its own sake: a host gained a
+ * child body only where it had been TAUGHT one, so `by(__.out().count())` worked and
+ * `property('k', __.out().count())` did not — the same body, the same fold, the same correlated
+ * scalar, refused because the write vocabulary had been handed the ROOTED answer and no other.
+ *
+ * With one seam a child body works wherever a child body is LEGAL, and the by()-child matrix grows in
+ * one place instead of four.
+ *
+ * ## Why exactly three, and why that is a closed set
+ *
+ * A child body can only be consumed three ways, and the distinction is what the CONSUMER does with the
+ * rows rather than what the body contains:
+ *
+ * - **`scalar`** — the body's single value, correlated to one host traverser. A `by()` projection, a
+ *   `property()` value, a nested `addV` label. Renders as a correlated scalar subquery, which P2
+ *   confirms is legal even inside a recursive term.
+ * - **`predicate`** — does the body PRODUCE anything for this traverser. A `where()`/`filter()`/`not()`
+ *   body, a `choose()` condition. Renders as a conjunction of ordinary clauses where the body never
+ *   leaves the traverser, and as a correlated `EXISTS` where it moves.
+ * - **`rooted`** — the body is a whole chain of its OWN (`__.V(2)`, a set-op operand, a merge search),
+ *   correlated to nothing. Renders as an ordinary relation, spliced in.
+ *
+ * There is no fourth because there is no fourth THING to do with rows: read one value, ask whether any
+ * exist, or take the relation. A body applied to a whole relation of hosts at once is not a child at
+ * all — it is the ordinary fold with that relation as its input, which is what `rooted` re-enters.
+ *
+ * ## The two rules, inherited unchanged from `predicate.ts` and `modulator.ts`
+ *
+ * - **No answer throws.** Every arm returns `null` for a form it cannot express, and the whole
+ *   traversal routes to the legacy spine, which raises the message it owns. `body()` is part of that
+ *   contract and not a convenience: normalizing a nested body RE-RUNS the Pass pipeline over it, and
+ *   `rewriteWhereVariables` legitimately hard-errors on a `where(__.as(l))` start variable the body's
+ *   own scope never bound. A raise there is the owning spine's answer, not this route's crash.
+ * - **No answer answers a DIFFERENT question.** An arm reproduces the reference semantics exactly or
+ *   declines.
+ *
+ * ## Why the interface is INJECTED rather than imported
+ *
+ * The implementations live beside the fold (`lower.ts`) because every one of them re-enters it; the
+ * declaration lives here because four modules consume it and the fold imports all four. Injecting the
+ * seam is what keeps the module DAG one-way — `build ◂ {modulator, list, write} ◂ lower ◂ spine` — and
+ * it is the same dependency inversion each of the four spellings used separately, now spelled once.
+ */
+export interface ChildSeam {
+  /** The bound parameters a nested body parses against. On the seam rather than beside it because
+   *  every consumer needed both and threading two values is how they drift apart. */
+  readonly params: Record<string, any>;
+  /** A correlated sub-traversal as ONE VALUE over the host traverser, or `null` to decline. */
+  readonly scalar: (body: readonly IRStep[], host: ChildHost) => Expr | null;
+  /** A correlated sub-traversal as a BOOLEAN over the subject row, or `null` to decline. */
+  readonly predicate: (body: readonly IRStep[], subject: Subject, elem: Elem, negated: boolean) => Expr | null;
+  /** A ROOTED chain — one correlated to nothing — lowered as a relation, or `null` to decline. */
+  readonly rooted: (steps: readonly IRStep[]) => RootedRead | null;
+  /** A nested argument's normalized body, or `null` where normalizing it RAISES. */
+  readonly body: (nested: unknown, scope: BodyScope) => readonly IRStep[] | null;
+}
+
+/**
+ * WHICH normalization a nested argument gets, and the two are not interchangeable.
+ *
+ * A `child` body is rooted at the CURRENT traverser (`__.out().count()`), so `childSteps` strips no
+ * source and the Pass pipeline runs with the parent's scope in view. A `rooted` body is a chain of its
+ * own (`__.V(2)`), so it goes through `normalize(stepChain(…))` — running `childSteps` on one strips
+ * its source and answers the empty chain, i.e. an endpoint that silently matched nothing.
+ */
+export type BodyScope = 'child' | 'rooted';
+
+/**
+ * The traverser a child body is rooted AT — a union rather than a bag of optional fields, because the
+ * two cases admit DIFFERENT projections and the type is what makes that visible: an element has
+ * properties and tokens, a scalar value has neither. `vtype` is present only where the value came from
+ * a stored property, which is the same distinction `predicateExpr`'s `compare` parameter draws.
+ */
+export type ChildHost =
+  | { readonly kind: 'element'; readonly id: Expr; readonly elem: Elem }
+  | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr };
+
+/**
+ * What a correlated PREDICATE may read about the row it is filtering. `label` is present only where
+ * the relation physically carries it — an edge SCAN does, a moved id-relation does not — so the edge
+ * label test can take the direct column read at the source and the membership form elsewhere, without
+ * either position having to know which it is in.
+ */
+export interface Subject { readonly id: Expr; readonly label?: Expr; readonly rel: Rel; }
+
+/**
+ * A ROOTED chain, lowered — the relation plus what it holds and what it ran first.
+ *
+ * Deliberately POLICY-FREE: the seam answers what the chain IS, and each consumer applies its own
+ * admission rule over that answer. An `addE` endpoint wants a vertex relation with no effects; a set-op
+ * operand wants a list framing. Putting either test in here would make the seam the union of its
+ * callers' requirements, which is the shape it exists to collapse.
+ */
+export interface RootedRead {
+  readonly rel: Rel;
+  readonly framing: RelFraming;
+  /** The statements this chain runs before its result is read — absent for every pure read. */
+  readonly effects?: readonly Binding[];
+}

@@ -2,8 +2,7 @@ import { col, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../ir/step.ts';
-import type { Elem } from '../plan/plan.ts';
-import { childSteps } from '../steps/tail/child-shape.ts';
+import type { ChildHost, ChildSeam } from './child.ts';
 import { and, eq, EDGE_COLS, firstOf, meta, NODE_COLS, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
 import { storedCompareOn } from './predicate.ts';
 
@@ -64,25 +63,11 @@ type ByKey =
   | { readonly kind: 'token'; readonly token: 'id' | 'label' }
   | { readonly kind: 'child'; readonly body: readonly IRStep[] };
 
-/** The injected lowerer for a nested `by()` body. It lives beside the vocabulary while its
- * implementation lives beside the fold, which keeps the module DAG one-way. */
-export type ByChild = (body: readonly IRStep[], host: ByHost) => Expr | null;
-
 /** One parsed `by()`. `order` is present only where the modulator named a comparator. */
 export interface Modulation {
   readonly key: ByKey;
   readonly order?: 'asc' | 'desc' | 'shuffle';
 }
-
-/**
- * The traverser a `by()` projects FROM — a union rather than a bag of optional fields, because the two
- * cases admit DIFFERENT projections and the type is what makes that visible: an element has properties
- * and tokens, a scalar value has neither. `vtype` is present only where the value came from a stored
- * property, which is the same distinction `predicateExpr`'s `compare` parameter draws.
- */
-export type ByHost =
-  | { readonly kind: 'element'; readonly id: Expr; readonly elem: Elem }
-  | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr };
 
 const ORDERS = new Set(['asc', 'desc', 'shuffle']);
 /** The two `T` tokens that name a value a `by()` can project. `T.key`/`T.value` are a PROPERTY
@@ -99,8 +84,12 @@ const TOKENS: Readonly<Record<string, 'id' | 'label'>> = { id: 'id', label: 'lab
  * An empty result means the host was handed no `by()` at all; the host's own default applies, and the
  * distinction matters because it is not always identity — bare `dedup()` is a whole-row `Distinct`,
  * a genuinely different lowering from `dedup().by()`.
+ *
+ * The child seam is what a nested `by()` body is NORMALIZED through, not merely what lowers it later:
+ * normalizing re-runs the Pass pipeline and can legitimately RAISE, and this module's contract is
+ * `null` (§12). Calling `childSteps` directly here let that throw escape.
  */
-export function modulations(step: IRStep, max: number, params: Record<string, any>): readonly Modulation[] | null {
+export function modulations(step: IRStep, max: number, child: ChildSeam): readonly Modulation[] | null {
   const bys = step.modulators ?? [];
   if (bys.length > max) return null;
   const parsed: Modulation[] = [];
@@ -131,7 +120,8 @@ export function modulations(step: IRStep, max: number, params: Record<string, an
       if (isNested(arg)) {
         // A second projection in one `by()` is not a form Gremlin has; declining beats picking one.
         if (projected) return null;
-        const body = childSteps(arg.nested, params);
+        const body = child.body(arg.nested, 'child');
+        if (!body) return null;
         // `by(__.identity())` is a bare `by()`: both project the element itself. Normalizing it here
         // keeps every host from having to re-derive that semantic identity.
         key = body.length === 1 && body[0]?.name === 'identity'
@@ -165,7 +155,7 @@ const isProductiveBy = (step: IRStep): boolean => step.productiveBy === true;
  * exactly where legacy puts it.
  */
 export function byExpr(
-  modulation: Modulation, host: ByHost, fresh: Minter, ordering = false, child?: ByChild,
+  modulation: Modulation, host: ChildHost, fresh: Minter, ordering = false, child?: ChildSeam,
 ): Expr | null {
   const { key } = modulation;
 
@@ -173,7 +163,7 @@ export function byExpr(
     if (!child) return null;
     // A child projection has no `vtype` column, so an ordering key cannot honestly use the stored-value
     // comparison wrapper. Its expression passes through unchanged and frames by value inference.
-    return child(key.body, host);
+    return child.scalar(key.body, host);
   }
 
   if (host.kind === 'scalar') {
@@ -262,12 +252,12 @@ export function byExpr(
  * a framed element, which the materializer expands per pair rather than tagging) and anything `byExpr`
  * already refuses.
  */
-export function byNode(modulation: Modulation, host: ByHost, fresh: Minter, child?: ByChild): Expr | null {
+export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, child?: ChildSeam): Expr | null {
   const { key } = modulation;
 
   if (key.kind === 'child') {
     if (!child) return null;
-    const value = child(key.body, host);
+    const value = child.scalar(key.body, host);
     // For `T.id`'s reason, a child has no recorded type: leave it untagged and let the framer infer.
     // Preserve SQL NULL outside the node: it is how the shared productivity filter distinguishes a
     // child that yielded nothing from a value it can collect or group.

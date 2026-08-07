@@ -7,7 +7,7 @@ import { STATIC, UNKNOWN, type ListOf, type Shape, type ValueType } from '../../
 import { isNested, isPred, argValues } from '../../gremlin/frontend.ts';
 import { isLocalScope, sliceOf, sliceParamNames } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
-import { childSteps } from '../steps/tail/child-shape.ts';
+import type { ChildSeam } from './child.ts';
 import { LIST_LOCAL_TX, STRING_LOCAL_TX } from '../steps/tail/list.ts';
 import { byEncounter, carriedCols, coalesce, EMPTY_ARRAY, jsonOf, meta, typedNode, typeOf, type Minter } from './build.ts';
 import { predicateExpr, SUBJECT_UNKNOWN } from './predicate.ts';
@@ -577,19 +577,6 @@ const SET_RESULT = new Set(['intersect', 'difference', 'disjunct', 'merge']);
 const OPERAND = { value: 'ov', ord: 'oo' } as const;
 
 /**
- * What a list op needs beyond the step and the relation: the bound parameters a nested body parses
- * against, and the lowerer for a nested rooted SUB-READ.
- *
- * `subRead` is INJECTED rather than imported, which is what keeps the module DAG a DAG — an operand
- * that needs a whole chain lowered would otherwise make this module import the fold that imports it.
- * It is the same dependency-inversion `FilterCtx.correlatedChildren` uses for the same reason.
- */
-export interface ListCtx {
-  readonly params: Record<string, any>;
-  readonly subRead: (steps: readonly IRStep[]) => { readonly expr: Expr; readonly of: ListOf } | null;
-}
-
-/**
  * A set-op OPERAND as a list expression, or `null` to decline — three forms, one question.
  *
  * A literal ARRAY and `constant(c).fold()` are both COMPILE-TIME lists (the second a one-member one,
@@ -597,28 +584,38 @@ export interface ListCtx {
  * SUB-READ is a relation: its members are only known at run time, so it is lowered by the same fold
  * and read through a `Scalar` expression — no escape node, and if the inner chain is not covered the
  * decline propagates outward, which is the contract one level down.
+ *
+ * The ADMISSION RULE over the seam's answer is this module's, not the seam's (§6·6): an operand must
+ * be LIST-framed, because legacy shares one rule between the set-op operands and the predicate ones
+ * (`foldedListSubquery`) and the two cannot be allowed to disagree about which traversals qualify — a
+ * scalar-valued sub-read is not a collection. An operand with EFFECTS is refused for a harder reason:
+ * its statements are `Plan` bindings the operand expression cannot carry, so splicing only the
+ * relation would drop the write and leave a `Ref` naming a binding that was never made.
  */
-function operandList(arg: unknown, ctx: ListCtx): { readonly expr: Expr; readonly of: ListOf } | null {
+function operandList(arg: unknown, child: ChildSeam): { readonly expr: Expr; readonly of: ListOf } | null {
   const literal = (members: readonly unknown[]) =>
     ({ expr: { kind: 'call', fn: 'jsonb', args: [lit(JSON.stringify(members), 'text')] } as Expr, of: BARE_LIST });
   if (Array.isArray(arg)) return literal(arg);
   if (!isNested(arg)) return null;
-  const inner = childSteps((arg as { readonly nested: unknown }).nested, ctx.params);
+  const inner = child.body((arg as { readonly nested: unknown }).nested, 'child');
+  if (!inner?.length) return null;
   if (inner.length === 2 && inner[0]?.name === 'constant' && inner[1]?.name === 'fold') {
     const [value, extra] = argValues(inner[0]);
     if (extra !== undefined || value === undefined) return null;
     return literal([value]);
   }
-  return ctx.subRead(inner);
+  const read = child.rooted(inner);
+  if (!read || read.effects?.length || read.framing.kind !== 'list') return null;
+  return { expr: { kind: 'scalar', plan: read.rel }, of: read.framing.of };
 }
 
 export function listSetOp(
-  step: IRStep, input: Rel, of: ListOf, terminal: boolean, ctx: ListCtx, fresh: Minter,
+  step: IRStep, input: Rel, of: ListOf, terminal: boolean, child: ChildSeam, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf; readonly set?: boolean } | null {
   if (step.modulators?.length || step.optionArms || !SET_OPS.has(step.name) || !isBareList(of)) return null;
   const [arg, extra] = argValues(step);
   if (extra !== undefined) return null;
-  const resolved = operandList(arg, ctx);
+  const resolved = operandList(arg, child);
   if (!resolved || !isBareList(resolved.of)) return null;
   const rel = fenced(input, fresh);
 

@@ -28,11 +28,12 @@ import {
 } from './build.ts';
 import { bindAliases, selectOne, type AliasRead } from './alias.ts';
 import type { AliasMap } from '../steps/context/context.ts';
-import { byExpr, modulations, orderProductivity, productivityFilter, type ByChild, type ByHost, type Modulation } from './modulator.ts';
+import { byExpr, modulations, orderProductivity, productivityFilter, type Modulation } from './modulator.ts';
+import type { ChildHost, ChildSeam, RootedRead, Subject } from './child.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
-import { elementAddE, elementAddV, elementDrop, elementMergeV, elementProperty, propertyWrites, type Effects, type SubReads } from './write.ts';
-import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList, type ListCtx } from './list.ts';
+import { elementAddE, elementAddV, elementDrop, elementMergeV, elementProperty, propertyWrites, type Effects } from './write.ts';
+import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
 import { elementHost, groupBarrier, mapPayload } from './map.ts';
 import { elementPayload } from './element.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
@@ -202,12 +203,6 @@ const elementCols = (channels: Channels): readonly ColMeta[] => [meta('id', 'int
  * neither changes the relation's cardinality contract nor consumes a channel, and the plan is data
  * so a later step can still see the columns.
  */
-/** What a filter may read about the element it is filtering. `label` is present only where the
- *  relation physically carries it — an edge SCAN does, a moved id-relation does not — so the edge
- *  label test can take the direct column read at the source and the membership form elsewhere,
- *  without either position having to know which it is in. */
-interface Subject { readonly id: Expr; readonly label?: Expr; readonly rel: Rel; }
-
 /** What a filter needs beyond the step and its subject: the bound parameters a nested body parses
  *  against, and whether the correlated-child form is this compile's to emit (see `Lowering`). */
 interface FilterCtx { readonly params: Record<string, any>; readonly correlatedChildren: boolean; }
@@ -878,7 +873,7 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, ctx: Chain
   if (!groupableChannels(input.channels)) return null;
 
   const ordered = !!encounterOf(input.channels);
-  const bys = modulations(step, 1, ctx.params);
+  const bys = modulations(step, 1, childSeam(ctx, fresh));
   if (!bys) return null;
   if (bys[0]) return dedupBy(step, bys[0], input, elem, ctx, fresh);
 
@@ -934,7 +929,7 @@ function dedupBy(
   // so an `Order` in its `by()` is a chain `verifyByModulatorArity` never sees. Decline rather than
   // silently ignoring it.
   if (modulation.order !== undefined) return null;
-  const key = byExpr(modulation, { kind: 'element', id: col(input.id, 'id'), elem }, fresh, false, byChild(ctx, fresh));
+  const key = byExpr(modulation, { kind: 'element', id: col(input.id, 'id'), elem }, fresh, false, childSeam(ctx, fresh));
   if (!key) return null;
 
   const productive = productivityFilter(step, key);
@@ -1184,14 +1179,14 @@ const BY_READERS = new Set(['order', 'dedup']);
  * so it is a `Call` rather than a projection, and the census sees it through the multiset digest only.
  */
 function sortTerms(
-  step: IRStep, host: ByHost, ctx: ChainCtx, fresh: Minter,
+  step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: Minter,
 ): { readonly terms: readonly SortTerm[]; readonly drop?: Expr } | null {
   if (isLocalScope(step) || (step.args ?? []).length) return null;
   // EVERY slot: TinkerPop's `order()` takes a comparator per key, so `by('performances',desc).by('name')`
   // is a two-term sort and the number of slots is whatever the chain wrote. `SortTerm[]` was always a
   // LIST, so a multi-key order is the same lowering — taking only the first would have sorted by the
   // wrong thing where the first key ties, which is a wrong ORDER with the right multiset.
-  const bys = modulations(step, (step.modulators ?? []).length, ctx.params);
+  const bys = modulations(step, (step.modulators ?? []).length, childSeam(ctx, fresh));
   if (!bys) return null;
   const parsed: readonly Modulation[] = bys.length ? bys : [{ key: { kind: 'identity' } }];
   // `shuffle` has no subject at all — `RANDOM()` re-evaluates per row and that IS the semantics — so it
@@ -1209,7 +1204,7 @@ function sortTerms(
   // does over its whole clause list.
   const drops: Expr[] = [];
   for (const modulation of parsed) {
-    const key = byExpr(modulation, host, fresh, true, byChild(ctx, fresh));
+    const key = byExpr(modulation, host, fresh, true, childSeam(ctx, fresh));
     if (!key) return null;
     terms.push({ expr: key, dir: modulation.order === 'desc' ? 'desc' : 'asc' });
     const drop = orderProductivity(step, modulation, key);
@@ -1279,8 +1274,8 @@ function scalarTail(
     // through `modulator.ts` and declines the projections a value stream cannot serve.
     if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
     // A value's own `vtype` is in scope only where it came from a stored property, which is the same
-    // distinction `compare()` above draws and the reason `ByHost` carries it as an optional.
-    const host: ByHost = { kind: 'scalar', value: col(rel.id, 'v'), ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}) };
+    // distinction `compare()` above draws and the reason `ChildHost` carries it as an optional.
+    const host: ChildHost = { kind: 'scalar', value: col(rel.id, 'v'), ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}) };
 
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
 
@@ -1449,8 +1444,8 @@ function scalarTail(
       // (legacy emits the identical `SELECT DISTINCT p.v` for both). `by(key)`/`by(token)` decline
       // through the vocabulary, which is where the "a value has no properties" rule lives.
       if (args.length || isLocalScope(step)) return null;
-      const deduped = modulations(step, 1, ctx.params);
-      if (!deduped || (deduped[0] && !byExpr(deduped[0], host, fresh, false, byChild(ctx, fresh)))) return null;
+      const deduped = modulations(step, 1, childSeam(ctx, fresh));
+      if (!deduped || (deduped[0] && !byExpr(deduped[0], host, fresh, false, childSeam(ctx, fresh)))) return null;
       if (deduped[0]?.order !== undefined) return null;
       const payload = rel.type.cols.filter((column) => !rel.channels.some((channel) => channel.col === column.name));
       if (!payload.length) return null;
@@ -1744,7 +1739,7 @@ function listTail(
   // The sub-read lowerer is INJECTED rather than imported, which is what keeps the module DAG a DAG
   // (`build ◂ {predicate, modulator, transform, reducer, list} ◂ lower ◂ spine`): a list op that needs
   // a nested chain lowered would otherwise import the fold that imports it.
-  const listCtx: ListCtx = { params: ctx.params, subRead: (inner: readonly IRStep[]) => subReadList(inner, ctx, fresh) };
+  const seam = childSeam(ctx, fresh);
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
     if (step.name === 'identity' || step.name === 'barrier') { if ((step.args ?? []).length) return null; continue; }
@@ -1811,7 +1806,7 @@ function listTail(
     // The SET-OP family, which needs to know whether it is TERMINAL: the four deduping ops frame as a
     // GraphBinary SET only at the end of a chain — with a follower TinkerPop treats the deduped
     // content as a plain List, which is what the suite asserts.
-    const setOp = listSetOp(step, rel, items, at + 1 >= steps.length, listCtx, fresh);
+    const setOp = listSetOp(step, rel, items, at + 1 >= steps.length, seam, fresh);
     if (setOp) {
       rel = setOp.rel;
       items = setOp.of;
@@ -1893,25 +1888,6 @@ function pathTail(
   return { rel, framing: { kind: 'path', of, scalars }, aliases: labels };
 }
 
-/**
- * A ROOTED SUB-READ used as a LIST VALUE — `__.V().values('name').fold()` and friends.
- *
- * The operand's members are only known at RUN TIME, so this is a relation rather than a literal, and
- * the outer plan reads it through a `Scalar` expression. What it must be is LIST-framed: legacy shares
- * the same rule between the set-op operands and the predicate ones (`foldedListSubquery`), so the two
- * cannot disagree about which traversals qualify — a scalar-valued sub-read is not a collection and
- * declines here rather than being folded on its behalf.
- *
- * NO opaque escape node is involved and none is needed (§10·4): the sub-read is lowered by the SAME
- * fold into the SAME algebra, spliced in as an ordinary relation. If the inner chain is not covered,
- * this declines and the whole traversal goes to legacy — the decline contract, one level down.
- */
-function subReadList(steps: readonly IRStep[], opts: Lowering, fresh: Minter): { readonly expr: Expr; readonly of: ListOf } | null {
-  if (!steps.length) return null;
-  const inner = lowerChain(steps, opts, fresh);
-  if (!inner || inner.framing.kind !== 'list') return null;
-  return { expr: { kind: 'scalar', plan: inner.rel }, of: inner.framing.of };
-}
 
 /**
  * Lower a whole rooted chain, or decline.
@@ -2308,7 +2284,7 @@ function elementTail(
     if (step.name === 'path') {
       if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length
         || step.from !== undefined || step.to !== undefined) return null;
-      const positions = pathPositions(rel, step, ctx.params, byChild(ctx, fresh), fresh);
+      const positions = pathPositions(rel, step, childSeam(ctx, fresh), fresh);
       if (!positions) return null;
       return continueAs(positions.rel, { kind: 'path', of: positions.of, scalars: positions.scalars }, steps, at + 1, false, ctx, fresh, labels);
     }
@@ -2329,7 +2305,7 @@ function elementTail(
     // vocabulary (unfold to entries, select(Column.*)) exists, so this cannot silently drop a tail.
     if (step.name === 'groupCount' || step.name === 'group') {
       if (pathCarried(rel)) return null;
-      const grouped = groupBarrier(rel, elementHost(rel, elem), step, bulked, ctx.params, byChild(ctx, fresh), fresh);
+      const grouped = groupBarrier(rel, elementHost(rel, elem), step, bulked, childSeam(ctx, fresh), fresh);
       if (!grouped) return null;
       return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
@@ -2608,15 +2584,65 @@ function addedEdges(
   let end = at + 1;
   while (end < steps.length && CLUSTER.has(steps[end]!.name)) end++;
   const effects = elementAddE(
-    input, elem, steps[at]!, steps.slice(at + 1, end), aliases, ctx.ordered, ctx.params, subReads(ctx, fresh), fresh,
+    input, elem, steps[at]!, steps.slice(at + 1, end), aliases, ctx.ordered, childSeam(ctx, fresh), fresh,
   );
   return effects && { effects, at: end };
 }
 
-/** A nested `by()` body as a VALUE expression. The recursive folds stay here; the modulator vocabulary
- * receives only this injected leaf and therefore never imports its caller. Collection, selection and
- * branching still decline for later arms. */
-const byChild = (ctx: ChainCtx, fresh: Minter): ByChild => (body, host) => {
+/**
+ * THE CHILD SEAM, IMPLEMENTED — `child.ts` declares the three answers, this builds them (§6·6).
+ *
+ * One object rather than the four it replaces, and the reason is not tidiness: every consumer now
+ * reaches every answer, so a child body works wherever a child body is LEGAL rather than wherever a
+ * host happened to be taught one. The recursive folds stay HERE while the declaration lives beside the
+ * vocabularies that consume it, which is what keeps the module DAG one-way — the four spellings each
+ * used that inversion separately and this is the same move made once.
+ */
+const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
+  params: ctx.params,
+  scalar: (body, host) => scalarChild(body, host, ctx, fresh),
+  predicate: (body, subject, elem, negated) => (negated
+    ? correlatedExists(body, subject, elem, fresh, ctx, true)
+    : bodyPredicate(body, subject, elem, fresh, ctx)),
+  rooted: (steps) => rootedRead(steps, ctx, fresh),
+  body: (nested, scope) => (scope === 'child' ? bodyOf(nested, ctx.params) : rootedSteps(nested, ctx.params)),
+});
+
+/**
+ * A ROOTED chain, lowered — the seam's third answer, POLICY-FREE.
+ *
+ * The admission rules that used to live here (a vertex stream for an endpoint, a list framing for a
+ * set-op operand, no effects for either) belong to the CONSUMERS, and moving them out is what makes
+ * this one answer rather than the union of its callers' requirements. What stays is the one thing that
+ * is the seam's own: an empty chain has nothing to lower.
+ *
+ * NO opaque escape node is involved and none is needed (§6·1): the sub-read is lowered by the SAME
+ * fold into the SAME algebra, spliced in as an ordinary relation. If the inner chain is not covered,
+ * this declines and the whole traversal goes to legacy — the decline contract, one level down.
+ */
+function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter): RootedRead | null {
+  if (!steps.length) return null;
+  const chain = lowerChain(steps, {
+    params: ctx.params, collapse: ctx.collapse,
+    correlatedChildren: ctx.correlatedChildren, labelCardinality: ctx.labelCardinality,
+  }, fresh);
+  if (!chain) return null;
+  return chain.effects ? { rel: chain.rel, framing: chain.framing, effects: chain.effects } : { rel: chain.rel, framing: chain.framing };
+}
+
+/** A nested ROOTED traversal's steps, normalized — or `null` where normalizing RAISES (a deferral
+ *  the spine that owns the message will raise for itself). A rooted body goes through
+ *  `normalize(stepChain(…))` and not `childSteps`, which strips a source and answers the empty chain,
+ *  i.e. an endpoint that silently matched nothing. Legacy's `resolveEndpoint` reaches the same two
+ *  functions, so the two routes normalize a nested endpoint identically. */
+function rootedSteps(nested: unknown, params: Record<string, any>): readonly IRStep[] | null {
+  try { return normalize(stepChain(nested, params)).steps as IRStep[]; } catch { return null; }
+}
+
+/** A nested body as a VALUE expression — the seam's correlated-SCALAR answer. Collection, selection
+ * and branching still decline for later arms. */
+function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fresh: Minter): Expr | null {
+  if (!body.length) return null;
   if (host.kind !== 'element') return null;
 
   // THE MOVEMENT-THEN-REDUCER ARM is `correlatedExists` minus EXISTS: root the first hop directly at
@@ -2696,41 +2722,6 @@ const byChild = (ctx: ChainCtx, fresh: Minter): ByChild => (body, host) => {
     value = transformed.expr;
   }
   return value;
-};
-
-/** The read fold, as the two functions the write vocabulary needs of it (`SubReads`). A rooted
- *  chain with EFFECTS of its own is refused rather than spliced: an endpoint that writes is
- *  `__.addV(…)`, whose creation is ordered against the edge insert and is a further increment. */
-const subReads = (ctx: ChainCtx, fresh: Minter): SubReads => ({
-  // An endpoint's body is ROOTED (`__.V(2)`), not a CHILD of the current traverser, so it goes
-  // through `normalize(stepChain(…))` and not `childSteps` — which strips a source and answers the
-  // empty chain, i.e. an endpoint that silently matched nothing. Legacy's `resolveEndpoint` reaches
-  // the same two functions, so the two routes normalize a nested endpoint identically.
-  body: (nested) => rootedBody(nested, ctx.params),
-  rooted: (steps) => {
-    const chain = lowerChain(steps, { params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren, labelCardinality: ctx.labelCardinality }, fresh);
-    if (!chain || chain.effects || chain.framing.kind !== 'elements' || chain.framing.elem !== 'vertex') return null;
-    return make.project({ id: fresh('ep'), input: chain.rel, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(chain.rel.id, 'id')]] });
-  },
-  // SYNTHESIZED STEPS, deliberately: the criteria ARE a `has()` chain, so writing them as one and
-  // sending it through `rooted` is the only spelling under which the merge's search and `has()`'s
-  // answer cannot drift apart. It also means the search inherits whatever `has` learns next — the
-  // vtype-aware compare it already has, the FTS arm §4.7 lifts — without this seam being touched.
-  // `args` is the whole of an `IRStep` these two steps read; the passes have already run on the chain
-  // this belongs to, so re-running them over a synthesized fragment would ask a question about a
-  // traversal nobody wrote.
-  matching: (labels, props) => subReads(ctx, fresh).rooted([
-    { name: 'V', args: [] },
-    ...labels.map((label) => ({ name: 'hasLabel', args: [arg(label)] })),
-    ...props.map(([key, value]) => ({ name: 'has', args: [arg(key), arg(value)] })),
-  ] as IRStep[]),
-});
-
-/** A nested ROOTED traversal's steps, normalized — or `null` where normalizing RAISES (a deferral
- *  the spine that owns the message will raise for itself). */
-function rootedBody(nested: unknown, params: Record<string, any>): readonly IRStep[] | null {
-  if (!isNested(nested)) return null;
-  try { return normalize(stepChain((nested as { nested: unknown }).nested, params)).steps as IRStep[]; } catch { return null; }
 }
 
 function addedVertices(
@@ -2754,7 +2745,7 @@ function mergedVertices(
   while (end < steps.length && steps[end]!.name === 'property') end++;
   const effects = elementMergeV(
     input, steps[at]!, steps.slice(at + 1, options), steps.slice(options, end),
-    ctx.ordered, ctx.params, ctx.labelCardinality, subReads(ctx, fresh), fresh,
+    ctx.ordered, ctx.labelCardinality, childSeam(ctx, fresh), fresh,
   );
   return effects && { effects, at: end };
 }
