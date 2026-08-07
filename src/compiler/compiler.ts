@@ -66,13 +66,26 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   });
   const engine = new LoweringEngine(request, { fastPaths: collapseSafeFastPaths(request.fastPaths, analyzeChain(steps)) });
 
-  // THE SPINE ROUTE (§10·4). A chain the RelIR lowering covers end-to-end compiles there; anything
-  // else — a step it has not learned, a write, a sack, a side effect — falls through to the legacy
+  // THE SPINE ROUTE (§6·1). A chain the RelIR lowering covers end-to-end compiles there; anything
+  // else — a step it has not learned, a write it cannot express, a sack — falls through to the legacy
   // spine WHOLE. Never mixed inside one traversal, which is what keeps RelIR a real algebra rather
   // than a wrapper around opaque SQL. `MOGWAI_RELIR=0` (or `options.spine`) is the differential's
   // off position, and it and this branch are both deleted when the legacy spine is.
-  if (resolveSpine(options) === 'rel' && !sackInit && sideEffects.size === 0) {
-    const viaRel = compileViaRel(engine, steps, request.params);
+  //
+  // **`withSideEffect` USED TO BE A ROUTE-LEVEL REFUSAL HERE, AND THAT MADE A HAND-OVER LOOK LIKE A
+  // GAP.** `sideEffects.size === 0` meant a traversal declaring one was never OFFERED to the lowering,
+  // so `mergeV(__.select(c))` and `property(k, __.select(c))` counted as uncovered vocabulary when what
+  // was actually missing is that the seam had not been handed a map the front-end already held (§6·6).
+  // Coverage must measure what the algebra can EXPRESS, never what the router remembered to ask.
+  // The steps that genuinely need a named-collection substrate (`aggregate`/`store`/`cap`, and the
+  // reducer form of `withSideEffect`, which the front-end leaves unregistered) decline inside the
+  // lowering like any other unlearned step — which is where a decline belongs.
+  //
+  // `sackInit` stays, and the asymmetry is real rather than an oversight: a sack is a per-traverser
+  // carried CHANNEL that every step must thread, not a constant an argument resolves against, so
+  // offering the route would need the channel first.
+  if (resolveSpine(options) === 'rel' && !sackInit) {
+    const viaRel = compileViaRel(engine, steps, request.params, sideEffects);
     if (viaRel) return { kind: 'sql', compiled: discard ? applyDiscard(viaRel) : viaRel };
   }
 

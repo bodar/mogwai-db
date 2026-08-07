@@ -56,9 +56,17 @@ import type { RelFraming } from './lower.ts';
  * it is the same dependency inversion each of the four spellings used separately, now spelled once.
  */
 export interface ChildSeam {
-  /** The bound parameters a nested body parses against. On the seam rather than beside it because
-   *  every consumer needed both and threading two values is how they drift apart. */
+  /**
+   * THE TWO COMPILE-SCOPE CONSTANT ENVIRONMENTS a nested argument resolves against — the wire
+   * `bindings` map and the `withSideEffect(name, constant)` registry the front-end extracted.
+   *
+   * On the seam rather than beside it for one reason: every consumer that parses a nested argument
+   * needs both, and threading them separately is how they drift apart. `parseProperty` and
+   * `mergeMaps` take exactly this pair, and the write vocabulary reaching them through the seam is
+   * what stopped `mergeV(__.select(c))` reading as an uncovered gap.
+   */
   readonly params: Record<string, any>;
+  readonly sideEffects: Map<string, any>;
   /** A correlated sub-traversal as ONE VALUE over the host traverser, or `null` to decline. */
   readonly scalar: (body: readonly IRStep[], host: ChildHost) => Expr | null;
   /** A correlated sub-traversal as a BOOLEAN over the subject row, or `null` to decline. */

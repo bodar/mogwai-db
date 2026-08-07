@@ -517,14 +517,14 @@ export function elementProperty(target: Rel, elem: Elem, writes: readonly Proper
  *   legacy refuses with a message it owns).
  * - an **edge** carrying a cardinality or meta at all, which TinkerPop's `Property` has neither of.
  */
-export function propertyWrites(steps: readonly IRStep[], elem: Elem, params: Record<string, any>): readonly PropertyWrite[] | null {
+export function propertyWrites(steps: readonly IRStep[], elem: Elem, child: ChildSeam): readonly PropertyWrite[] | null {
   const writes: PropertyWrite[] = [];
   for (const step of steps) {
     if (step.modulators?.length || step.optionArms) return null;
     let parsed: ParsedProperty;
     // `parseProperty` RAISES on a malformed meta pair, and the message is legacy's business — catch
     // and decline so the spine that owns it raises it, exactly as the coercion prefix does.
-    try { parsed = parseProperty(step, undefined, params); } catch { return null; }
+    try { parsed = parseProperty(step, child.sideEffects, child.params); } catch { return null; }
     if (parsed.kind !== 'prop') return null;
     const write = writeOf(parsed.spec, elem);
     if (!write) return null;
@@ -718,11 +718,11 @@ const writeInputChannels = (input: Rel): Channels =>
  *  per vertex). A label that is a nested traversal or an invalid one declines — the label validator is
  *  the shared waist, and a name it refuses is an ERROR legacy raises, not a write this route may
  *  silently skip. */
-export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IRStep[], ordered: boolean, params: Record<string, any>, cardinality: LabelCardinality, fresh: Minter): Effects | null {
+export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IRStep[], ordered: boolean, cardinality: LabelCardinality, child: ChildSeam, fresh: Minter): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
   const labels = creationLabels(argValues(step), cardinality);
   if (!labels) return null;
-  const writes = propertySteps.length ? propertyWrites(propertySteps, 'vertex', params) : [];
+  const writes = propertySteps.length ? propertyWrites(propertySteps, 'vertex', child) : [];
   if (!writes) return null;
   // A MID-CHAIN input is SNAPSHOTTED, and this one is not about a later statement: `INSERT INTO
   // nodes … SELECT … FROM nodes` reads the table it is writing, which SQLite does not promise to
@@ -871,7 +871,7 @@ export function elementAddE(
   // Refusing on the kind alone declined every one of them.
   const implicit = from.kind === 'traverser' || to.kind === 'traverser';
   if (sides === 0 || (implicit && (elem !== 'vertex' || !input.type.cols.some((column) => column.name === 'id')))) return null;
-  const writes = propertySteps.length ? propertyWrites(propertySteps, 'edge', child.params) : [];
+  const writes = propertySteps.length ? propertyWrites(propertySteps, 'edge', child) : [];
   if (!writes) return null;
 
   const carried = input.channels.filter((channel) => channel.role === 'alias');
@@ -1116,7 +1116,7 @@ export function elementMergeV(
   let maps: MergeMaps;
   // The parse RAISES for every map shape it refuses, and those messages are the legacy spine's to
   // raise — catch and decline, exactly as the `property()` run does.
-  try { maps = mergeMaps(step, options, 'mergeV', undefined, child.params); } catch { return null; }
+  try { maps = mergeMaps(step, options, 'mergeV', child.sideEffects, child.params); } catch { return null; }
   const { match, onCreate, onMatch } = maps;
   for (const spec of [match, onCreate, onMatch]) {
     if (!spec) continue;
@@ -1136,7 +1136,7 @@ export function elementMergeV(
     propTypes: { ...match.propTypes, ...onCreate.propTypes },
     propCardinalities: { ...match.propCardinalities, ...onCreate.propCardinalities },
   } : match, 'vertex');
-  const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'vertex', child.params) : [];
+  const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'vertex', child) : [];
   if (!matchWrites || !createWrites || !tailWrites) return null;
   const createLabels = creationLabels(((onCreate?.label ?? match.label) as string[] | null) ?? [], cardinality);
   if (!createLabels) return null;

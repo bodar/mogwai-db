@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { compile } from '../src/compiler/compiler.ts';
 import { read, runWith, seededStore } from './support/harness.ts';
 import { CF_MAX_BINDS as DO_BIND_CAP, cfLimitViolation } from '../src/cf-limits.ts';
-import { executeQuery } from './support/executor.ts';
+import { exec, executeQuery } from './support/executor.ts';
 import { decodeAll } from './support/decode.ts';
 
 /**
@@ -332,7 +332,11 @@ const DECLINED = [
   'g.V().order().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
   'g.V().dedup().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
   'g.withSack(0).V()',                // a carried sack the source seed would have to declare
-  'g.withSideEffect("a",1).V()',      // a side effect
+  // The REDUCER form of withSideEffect (`(k, seed, BiFunction)`) is left UNREGISTERED by the
+  // front-end, so it is not a compile-time constant — and `aggregate`/`cap` are a named-collection
+  // substrate this route has not learned. Both halves decline, which is what makes lifting the
+  // route-level `sideEffects.size === 0` gate safe rather than a wager.
+  'g.withSideEffect("a", 1, Operator.max).V().aggregate("a").by("age").cap("a")',
   'g.addV("person")',                 // a write
   "g.V().has('name',TextP.containing('ark'))",  // ftsSubstringPredicate's — see below
   "g.V().has('name',P.within(__.V().values('name').fold()))", // a run-time member list, not a set
@@ -361,6 +365,33 @@ describe('the RelIR spine', () => {
       expect(plan.kind === 'read' ? plan.spine : 'legacy').toBe('legacy');
     });
   }
+
+  test('a withSideEffect CONSTANT is resolved by the write parse, not refused by the router', async () => {
+    // §6·6's third piece. `withSideEffect(k, <literal>)` is a compile-time constant the front-end
+    // already extracted, and the shared write parse (`parseProperty`/`mergeMaps`) has always taken
+    // one — but `compiler.ts` gated the whole RelIR route on `sideEffects.size === 0`, so these
+    // never reached the lowering at all and read as uncovered vocabulary. They are WRITES, so they
+    // compile to a `program` rather than a `read`, which is why the COVERED loop above cannot hold
+    // them: it compares rendered SQL, and a program is a sequence of statements.
+    const cases = [
+      'g.withSideEffect("a", "marko").addV().property("name", __.select("a")).values("name")',
+      'g.withSideEffect("a", "name").addV().property(__.select("a"), "marko").values("name")',
+      'g.withSideEffect("c", [(T.label):"person", "name":"stephen"]).mergeV(__.select("c"))',
+      'g.withSideEffect("c", [(T.label):"person", "name":"marko"]).withSideEffect("m", ["age":19]).mergeV(__.select("c")).option(Merge.onMatch, __.select("m"))',
+    ];
+    for (const gremlin of cases) {
+      const plan = compile(gremlin, {}, { spine: 'rel' });
+      expect(plan.kind === 'program' ? plan.spine : plan.kind, gremlin).toBe('rel');
+      // The ANSWER, not just the route: each spine runs against its OWN store so both see the same
+      // starting graph, and the wire bytes are compared decoded rather than as rendered SQL (a
+      // write's plan is a sequence of statements, and the spines spell those differently on purpose).
+      // `decodeAll` is ASYNC (the client's deserializers read from a StreamReader), so this AWAITS:
+      // comparing the two promises compares two pending objects and passes on any pair of answers.
+      const via = (spine: 'rel' | 'legacy') =>
+        decodeAll(exec(seededStore(), undefined, undefined, spine).buffers(gremlin, {}, {}));
+      expect(await via('rel'), gremlin).toEqual(await via('legacy'));
+    }
+  });
 
   test('a large literal inject inlines as 0-bind literals and stays on RelIR', () => {
     // There is no >100-value conversion. A literal inject spends NO binds — each member inlines as a

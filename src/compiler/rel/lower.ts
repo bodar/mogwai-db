@@ -223,6 +223,8 @@ interface ChainCtx extends FilterCtx {
    *  its own gets. Threaded for the reason `ordered` is: it is settled before a step is lowered, so a
    *  step that asked the store instead would be asking at the wrong time. */
   readonly labelCardinality: LabelCardinality;
+  /** The `withSideEffect(name, constant)` registry the FRONT END extracted. See `Lowering`. */
+  readonly sideEffects: Map<string, any>;
 }
 
 /** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
@@ -1919,6 +1921,20 @@ export interface Lowering {
    * lowers without an engine measures the default graph rather than a regime nothing runs.
    */
   readonly labelCardinality?: LabelCardinality;
+  /**
+   * The `withSideEffect(name, constant)` registry — the SECOND compile-scope constant environment a
+   * nested argument resolves against, beside the wire `bindings` in `params`.
+   *
+   * `withSideEffect(k, v)` with a literal value is a COMPILE-TIME constant: the front-end
+   * (`extractSideEffects`) reads it off the parse tree, and a later `__.select(k)` in a write's key,
+   * value or merge map resolves to it with no read at all. The shared write parse
+   * (`parseProperty`/`mergeMaps`) has always taken it; this route was passing `undefined` and
+   * `compiler.ts` did not even OFFER the RelIR spine to a traversal that declared one, so the
+   * whole `mergeV(__.select(c))` family read as an uncovered gap (§6·6).
+   *
+   * Defaults to EMPTY, which is what a lowering with no source options has.
+   */
+  readonly sideEffects?: Map<string, any>;
 }
 
 /**
@@ -1932,7 +1948,11 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   collapse: opts.collapse ?? true,
   correlatedChildren: opts.correlatedChildren ?? true,
   labelCardinality: opts.labelCardinality ?? LabelCardinality.ONE,
+  sideEffects: opts.sideEffects ?? NO_SIDE_EFFECTS,
 });
+
+/** No `withSideEffect` declared. One shared value, for `NO_ALIASES`' reason. */
+const NO_SIDE_EFFECTS: Map<string, any> = new Map();
 
 /**
  * THE BIND BUDGET IS A COVERAGE QUESTION, not a crash.
@@ -2099,7 +2119,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  *   pass walk them is the general fix if a case ever needs it.)
  */
 function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Tail | null {
-  const { params, collapse, correlatedChildren, labelCardinality } = settle(opts);
+  const { params, collapse, correlatedChildren, labelCardinality, sideEffects } = settle(opts);
   // EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step.
   // `analyzeChain` is the same authority the legacy source seeds from, so the two cannot disagree
   // about which chains have an order to take a window from. A chain that demands one and reaches a
@@ -2109,7 +2129,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   const facts = analyzeChain(steps as IRStep[]);
   const ordered = facts.demandsEncounter;
   const tracksPath = facts.tracksPath;
-  const ctx: ChainCtx = { params, correlatedChildren, collapse, ordered, tracksPath, labelCardinality };
+  const ctx: ChainCtx = { params, correlatedChildren, collapse, ordered, tracksPath, labelCardinality, sideEffects };
   const orderedChannels = ordered ? withChannel(BULK, ENCOUNTER) : BULK;
   const seedChannels = tracksPath ? withChannel(orderedChannels, PATH_CHANNEL) : orderedChannels;
   const first = steps[0];
@@ -2340,7 +2360,7 @@ function elementTail(
       // tail after the run is the ordinary fold and nothing here knows it happened.
       let end = at;
       while (end < steps.length && steps[end]!.name === 'property') end++;
-      const writes = propertyWrites(steps.slice(at, end), elem, ctx.params);
+      const writes = propertyWrites(steps.slice(at, end), elem, childSeam(ctx, fresh));
       if (!writes) return null;
       const written = elementProperty(rel, elem, writes, fresh);
       if (!written) return null;
@@ -2600,6 +2620,7 @@ function addedEdges(
  */
 const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   params: ctx.params,
+  sideEffects: ctx.sideEffects,
   scalar: (body, host) => scalarChild(body, host, ctx, fresh),
   predicate: (body, subject, elem, negated) => (negated
     ? correlatedExists(body, subject, elem, fresh, ctx, true)
@@ -2623,8 +2644,8 @@ const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
 function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter): RootedRead | null {
   if (!steps.length) return null;
   const chain = lowerChain(steps, {
-    params: ctx.params, collapse: ctx.collapse,
-    correlatedChildren: ctx.correlatedChildren, labelCardinality: ctx.labelCardinality,
+    params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren,
+    labelCardinality: ctx.labelCardinality, sideEffects: ctx.sideEffects,
   }, fresh);
   if (!chain) return null;
   return chain.effects ? { rel: chain.rel, framing: chain.framing, effects: chain.effects } : { rel: chain.rel, framing: chain.framing };
@@ -2729,7 +2750,7 @@ function addedVertices(
 ): { readonly effects: Effects; readonly at: number } | null {
   let end = at + 1;
   while (end < steps.length && steps[end]!.name === 'property') end++;
-  const effects = elementAddV(input, steps[at]!, steps.slice(at + 1, end), ctx.ordered, ctx.params, ctx.labelCardinality, fresh);
+  const effects = elementAddV(input, steps[at]!, steps.slice(at + 1, end), ctx.ordered, ctx.labelCardinality, childSeam(ctx, fresh), fresh);
   return effects && { effects, at: end };
 }
 

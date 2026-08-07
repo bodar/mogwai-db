@@ -44,7 +44,9 @@ import { lowerToRel } from './lower.ts';
  * Nothing legacy enters a `Rel`, and nothing RelIR-shaped enters legacy. There is no opaque escape node
  * and never will be (§10·4: "not as a bridge, not temporarily, not behind a flag").
  */
-export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<string, any>): Compiled | Program | null {
+export function compileViaRel(
+  engine: Engine, steps: IRStep[], params: Record<string, any>, sideEffects: Map<string, any>,
+): Compiled | Program | null {
   // ONE fast-path switch reaches the lowering. `movementCollapse` picks the grouped `SUM(bulk)`,
   // which is a lowering STRATEGY the algebra can state, so both positions stay expressible and the
   // differential has two forms to compare. (The FTS case is the contrast: it selects a physical
@@ -78,6 +80,13 @@ export function compileViaRel(engine: Engine, steps: IRStep[], params: Record<st
     // compile starts (request-scope DI). Coverage is still not a function of configuration: what the
     // cardinality changes is the ANSWER, not whether there is one.
     labelCardinality: engine.labelCardinality,
+    // NOT a strategy switch either — a `withSideEffect(k, <literal>)` is a compile-time CONSTANT the
+    // front-end already extracted, and the write parse has always taken it. What used to happen is
+    // that `compiler.ts` refused to OFFER this route at all when one was declared, so the whole
+    // `mergeV(__.select(c))` family read as an uncovered gap rather than as a value not handed over
+    // (§6·6). The REDUCER form (`withSideEffect(k, seed, BiFunction)`) is left unregistered by the
+    // front-end, so a `select(k)` over one finds no constant and declines exactly as before.
+    sideEffects,
   });
   if (!lowered) return null;
 
