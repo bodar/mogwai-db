@@ -515,10 +515,24 @@ Ordered by the discipline (§6·4): each closes a family and lets a deletion-rat
 1. **Phase 2.6 — delete the legacy write dispatcher.** Prerequisite (alias-through-a-creation) met; the
    gate is write coverage being COMPLETE. Ranked by what is left (`rel-blockers` + the L3 merge split,
    both move):
-   - **`mergeE` — not lowered at all, and the largest single piece in the phase.** 35 L3 scenarios pass
-     on legacy and would MOVE to RelIR; 24 fail on both spines, so some are gains rather than moves. It
-     is `mergeV`'s two-total-statement shape plus ENDPOINTS, and its own question is the
-     position-correlated `RETURNING` (P5b): a created edge must find the input row that made it.
+   - ~~**`mergeE` — not lowered at all**~~ — LOWERED, both endpoint kinds. Three findings worth
+     keeping, because each refutes something this plan assumed:
+     - **P5b did not arise.** The plan expected a position-correlated `RETURNING`; an edge's
+       `(src, tgt)` IS its correlation key, so the `RETURNING` projects the endpoints and created
+       edges join back BY VALUE. Nothing depends on the order rows come back in.
+     - **The constant and incoming endpoint cases are ONE lowering**, not two. Carry the endpoint
+       PAIR beside each incoming row; `Distinct` over the pair is what makes duplicate traversers
+       right (one edge, N traversers — upstream's second iteration matching its first), and a
+       constant endpoint is the degenerate case where every row carries the same pair.
+     - **No gated counter moved, and that is not a null result.** Every parameterized `mergeE`
+       arrives as a bound Map, which the corpus cannot express (so the census `spine` column cannot
+       see it), and the L3 scenarios it moves already PASSED on legacy. `test/rel-spine.test.ts` is
+       the record instead. **A family whose corpus presence is parameterized needs a test, not a
+       counter** — worth checking before ranking the next one by census delta.
+     What is LEFT of mergeE is `option(Merge.outV/inV, …)`: the shared parse refuses the selector,
+     so ~7 L3 scenarios fail on BOTH spines. Admitting it is a `MergeMaps` change both spines read,
+     and the endpoint vocabulary it needs (incoming | constant | ALIAS) is `elementAddE`'s `Endpoint`
+     union under a different spelling.
    - **`property`'s residue is not one question and not per-traverser.** The text-level refusal and the
      `T`-token/guard-binding halves are done (§6·5); what is left is a meta-property under an
      UNDECLARED cardinality (the `set` arm PATCHES rather than inserts, an `UPDATE` this route does
