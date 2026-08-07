@@ -695,17 +695,33 @@ because that is the only lowered form there is. Retyping the SPI to a spine-neut
 sever exactly one row (`spi/types.ts`) and leave the three catalog services holding the same edge through
 their own imports. **The edge is not the type; it is that the capability lives on one spine.**
 
-So this is scheduled as its own unit, before Phase 4 and after the write cut. It is NOT hard — the sizing
-below is measured, not estimated — but it is a capability migration plus a deletion, which is Phase-1-shaped
-work and not something Phase 0 (which "deletes nothing and moves no counter") can absorb.
+So this is scheduled as its own unit, before Phase 4. It is NOT hard — the sizing below is measured, not
+estimated — but it is a capability migration plus a deletion, which is Phase-1-shaped work and not something
+Phase 0 (which "deletes nothing and moves no counter") can absorb. **Phase 0 therefore ends with four LIVE
+service rows, and that is the honest state**: they are not exempt, they fail the bar, and the phase that
+clears them is written down.
 
-**THE CRUX, and the reason it cannot be done incrementally per service:** a service cannot produce BOTH a
-legacy `Stream` and a `Rel` without two implementations of itself, which is the one thing
-`steps/CLAUDE.md` forbids outright. Legacy composes q-kernel CTEs and cannot consume a `Rel`. So `call()`
-migrates ALL AT ONCE and legacy's call route (`steps/tail/call.ts`, `seedCall`, the `BarrierPoint`/
-`MidBarrierPoint` surface on `engine.ts`) is DELETED in the same change. That is the clean shape, not a
-compromise: after it, `call()` traversals route to RelIR only, and no capability is lost because the three
-stream services are fully re-expressed.
+**THE CRUX: one SERVICE may never have two implementations — but that does not make the PHASE indivisible,
+and conflating those two is the trap.** A service that produced both a legacy `Stream` and a `Rel` would be
+the duplicated lowering `steps/CLAUDE.md` forbids outright, and legacy composes q-kernel CTEs so it cannot
+consume a `Rel`. The first reading of that was "so `call()` migrates all at once". Wrong: it means each
+service migrates all at once.
+
+`Contribution` is ALREADY a discriminated union (`stream` | `barrier`) for exactly this kind of reason, so
+the migration rides the discriminant. Add a third arm — `{kind:'rel', buildRel(site): …}` — and the routing
+falls out with no service implementing anything twice:
+
+- a `rel` service makes LEGACY's call route decline, so the traversal reaches RelIR;
+- a `stream` service makes RELIR's call step decline, so it falls to legacy, which is the ordinary
+  "not learned yet" `null` and needs no special case;
+- `barrier` is untouched by either, since it contributes no lowering at all.
+
+So the order is: `call()` into `lowerToRel` (declining every service still on `stream`) → `directory` →
+`degree.centrality` → `search`, each its own green commit and its own census movement. When no `stream` arm
+remains, the arm and legacy's call route (`steps/tail/call.ts`, `seedCall`, and the
+`BarrierPoint`/`MidBarrierPoint` surface on `engine.ts`) are deleted together, and `Contribution` goes back
+to two arms with `rel` in `stream`'s place. The transitional arm has an end date written into the phase,
+which is what §6·1 demands of any harness.
 
 What it actually costs, per service:
 
