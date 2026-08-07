@@ -323,9 +323,13 @@ becomes the union of its callers' requirements, which is the shape it collapsed.
 the DECLINE contract and not a convenience: normalizing re-runs the Pass pipeline and can legitimately
 raise, and two of the four spellings called `childSteps` bare.
 
-Phase 2.6's third piece is smaller still: the `withSideEffect` constants are compile-time (the
-front-end registers them) and the seam is just not handed them — `compiler.ts` does not even OFFER the
-RelIR route to a traversal that declares one.
+Phase 2.6's third piece was smaller still and is done: the `withSideEffect` constants ride on the seam
+beside `params`, and the route-level `sideEffects.size === 0` refusal in `compiler.ts` is gone. **The
+lesson generalizes past this case — coverage must measure what the algebra can EXPRESS, never what the
+router remembered to ask.** A gate at the routing switch reads identically to a missing lowering in
+every counter the migration owns, and `rel-blockers` was measuring the same gap it caused (it called
+`lowerToRel` without the registry). When a family looks uncovered, check what it was HANDED before
+concluding what it cannot express — §7's rule, one layer up.
 
 ### §6·7 — a scalar row's TYPE rides PER ROW; a static tag is an OPTIMIZATION, never the carrier
 
@@ -481,13 +485,26 @@ Read coverage from the census; this is the qualitative map of what RelIR already
 
 Ordered by the discipline (§6·4): each closes a family and lets a deletion-ratchet name fall.
 
-1. **Phase 2.6 — delete the legacy write dispatcher.** Prerequisite (alias-through-a-creation) met; the gate
-   is write coverage being COMPLETE. Remaining declines (`rel-blockers`, it moves): `property`'s residue,
-   `addE`/`mergeV`/`mergeE`/`addV` tails, `mergeE` (position-correlated `RETURNING`). **`property`'s residue
-   is not one question and not per-traverser** — a text-level refusal (§6·5), a compile-time constant not
-   handed over (§6·6), a correlated scalar the child seam already builds (§6·6), a graph-dependent refusal
-   that becomes a guard binding (§6·5). Both laws reach past this phase: §6·5 is what lets the coverage
-   counter reach zero at all, §6·6 is what item 4's by()-child matrix needs anyway.
+1. **Phase 2.6 — delete the legacy write dispatcher.** Prerequisite (alias-through-a-creation) met; the
+   gate is write coverage being COMPLETE. Ranked by what is left (`rel-blockers` + the L3 merge split,
+   both move):
+   - **`mergeE` — not lowered at all, and the largest single piece in the phase.** 35 L3 scenarios pass
+     on legacy and would MOVE to RelIR; 24 fail on both spines, so some are gains rather than moves. It
+     is `mergeV`'s two-total-statement shape plus ENDPOINTS, and its own question is the
+     position-correlated `RETURNING` (P5b): a created edge must find the input row that made it.
+   - **`property`'s residue is not one question and not per-traverser** — a text-level refusal (§6·5), a
+     graph-dependent refusal that becomes a guard binding (§6·5), a meta-property under an UNDECLARED
+     cardinality (the `set` arm patches rather than inserts, an `UPDATE` this route does not emit yet),
+     and a correlated scalar the child seam already builds (§6·6).
+   - **the nested-value/label children** (`property(k, __.trav)`, `addV(__.trav)`, `addE(__.trav)`) —
+     the seam has the arm, but `AddPropertyStep` uses `TraversalUtil.applyAll` where the seam's scalar
+     answer is `apply`: ALL results, not the first, throwing under `single` cardinality above one and
+     writing each under `list`/`set`. A body that is provably single-row (a reducer, a token, a
+     constant) is safe today; a `values()`-headed one needs a HOST-KEYED relation answer, which is the
+     one honest candidate for a fourth seam arm and is item 4's `local`/`properties` shape as well.
+   - **`PartitionStrategy` on a merge**, and `addE` after `addV` in one chain.
+   Both laws reach past this phase: §6·5 is what lets the coverage counter reach zero at all, §6·6 is
+   what item 4's by()-child matrix needs anyway.
 2. **Phase 3 — the repeat wedge.** `flatten` (P1 legality in `check`; a body that cannot be made legal throws
    a clear deferral) → route `repeat()`'s body through ordinary lowering → `unroll` for `times(n)` (take
    `dedup` first, one barrier per commit with an L4 pin; `prune`'s remainder — pruning below
