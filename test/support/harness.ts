@@ -78,11 +78,16 @@ export const relirOff = ambientSpine() === 'legacy';
  * is a gap.
  *
  * `body` runs only on the RelIR side; `gremlin` is the traversal whose refusal is the claim.
+ *
+ * `options` are the COMPILE options the refusal needs to be about the right thing. A traversal that
+ * names a `call()` service refuses for two different reasons without a registry — "unknown service"
+ * rather than "legacy does not serve this one" — and a proof of the wrong refusal is not a proof.
  */
-export const relirAhead = (gremlin: string, body: () => void) => (): void => {
-  if (!relirOff) return body();
-  expect(() => runWith(seededStore(), gremlin)).toThrow();
-};
+export const relirAhead = (gremlin: string, body: () => void | Promise<void>, options?: CompileOptions) =>
+  async (): Promise<void> => {
+    if (!relirOff) return body();
+    expect(() => runWith(seededStore(), gremlin, options)).toThrow();
+  };
 
 // A write-response echo carries each prop value as a self-describing {t,v} typed node (so the wire
 // frames it exactly). Tests that assert the written VALUES, not their types, unwrap to plain values.

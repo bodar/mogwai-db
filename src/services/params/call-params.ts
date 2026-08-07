@@ -169,12 +169,46 @@ export function servicesNamedBy(
   steps: readonly IRStep[], params: Record<string, any>, registry: ServiceRegistry,
 ): ReadonlyMap<string, Service> {
   const found = new Map<string, Service>();
-  for (const step of steps) {
-    if (step.name !== 'call') continue;
-    const { serviceName } = parseCallSpec(step, params);
-    if (found.has(serviceName)) continue;
-    const service = registry.get(serviceName);
-    if (service) found.set(serviceName, service);
-  }
+  const visit = (chain: readonly IRStep[]): void => {
+    for (const step of chain) {
+      if (step.name === 'call') {
+        const { serviceName } = parseCallSpec(step, params);
+        const service = found.has(serviceName) ? undefined : registry.get(serviceName);
+        if (service) found.set(serviceName, service);
+      }
+      // An `option()` arm and a `repeat()` region are already NORMALIZED sub-chains, so they recurse
+      // directly; a nested ARGUMENT is still a raw parse tree and needs one `stepChain`.
+      visit([...(step.optionArms ?? []), ...(step.repeatRegion ?? [])] as IRStep[]);
+      for (const nested of nestedArgs(step)) {
+        // `stepChain`, deliberately not `childSteps`: this is a NAME scan, and re-running the whole
+        // Pass pipeline over every nested body can legitimately RAISE (a `where(__.as(l))` start
+        // variable the body's own scope never bound), which would turn a registry lookup into a
+        // compile error. A `call`'s name is in its first argument before any pass touches it.
+        try { visit(stepChain(nested, params) as IRStep[]); } catch { /* an unparseable body names nothing */ }
+      }
+    }
+  };
+  visit(steps);
   return found;
+}
+
+/**
+ * EVERY nested traversal a step carries in its ARGUMENTS — positional args, `by()` modulators and
+ * `with()` values — reached through Maps and lists as well as directly.
+ *
+ * **This walk is §6·6's lesson stated one layer up, and its absence cost a real decline.** Scanning
+ * only the top-level chain meant `where(__.call(dc).is(3))` and `group().by(__.call(dc))` reached a
+ * lowering that had never been HANDED the service, so the fold declined and every counter read it as
+ * a gap in what the algebra can EXPRESS. It was measuring the router's memory instead — the same
+ * defect, in the same function, that `rel-blockers` once had.
+ */
+function* nestedArgs(step: IRStep): Generator<any> {
+  const walk = function* (value: unknown): Generator<any> {
+    if (isNested(value)) { yield value.nested; return; }
+    if (Array.isArray(value)) { for (const item of value) yield* walk(item); return; }
+    if (value instanceof Map) for (const [key, item] of value) { yield* walk(key); yield* walk(item); }
+  };
+  for (const arg of step.args ?? []) yield* walk(arg.value);
+  for (const by of step.modulators ?? []) yield* walk(by);
+  for (const [, value] of step.withArgs ?? []) yield* walk(value);
 }

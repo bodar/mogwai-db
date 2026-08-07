@@ -285,6 +285,12 @@ const COVERED = [
   'g.V().where(__.out().order())', 'g.V().where(__.out().count().is(P.gt(1)))',
   'g.V().where(__.out().hasLabel("person").order().by("name").range(1,2))',
   'g.V().where(__.out().limit(1))', 'g.V().not(__.out().count().is(P.gt(2)))',
+  // A body that PROJECTS a value and then TESTS it is a COMPARISON, not an existence question — the
+  // seam's third predicate answer. `correlatedExists` declines every body whose head is not a
+  // movement, so these were the branch/where family's shared gap; SQL's own null semantics give the
+  // productivity rule for free (an unproductive projection is NULL, and NULL is not true).
+  "g.V().where(__.values('age').is(P.gt(30)))", "g.V().not(__.values('age').is(P.gt(30)))",
+  "g.V().choose(__.values('age').is(P.gt(30)), __.out(), __.in())",
   // A SUB-TRAVERSAL `by()` projection — the child seam. A flat value body is an EXPRESSION over the
   // outer row; a body that MOVES and then REDUCES is `correlatedExists` minus the EXISTS, read for its
   // value. Both arms reach every by() host at once, which is why one entry per host is worth having.
@@ -312,9 +318,6 @@ const DECLINED = [
   "g.V().where(__.out().values('age').sum())",  // a NUMERIC reducer over an EMPTY child: SQL yields one
   // NULL row where Gremlin yields NO traverser, so a bare EXISTS would answer true where the
   // reference rejects. count()/fold() are not this — both emit a traverser for an empty child.
-  "g.V().choose(__.values('age').is(P.gt(30)), __.out(), __.in())",  // a PROJECTING condition: a value
-  // comparison over a correlated sub-read, which is the branch family's remaining gap and is shared
-  // with where()/match()/is() in the blocker residue.
   "g.V().choose(__.label()).option('person', __.out()).option(Pick.none, __.identity())",  // the OPTION
   // form is a CASE over a projected KEY rather than a boolean — a different question, next arm.
   "g.V().order().by('name').union(__.out(), __.in())",  // a live emission order: the merge key needs the origin

@@ -7,7 +7,7 @@ import { DIRECTORY_SERVICE_NAME, type Service, type ServiceRegistry } from '../s
 import { parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { normalize } from '../src/compiler/ir/passes.ts';
 import { parseCallSpec, injectionKindOf } from '../src/services/params/call-params.ts';
-import { compile, compilePlan } from '../src/compiler/compiler.ts';
+import { compile, compilePlan, type CompileOptions } from '../src/compiler/compiler.ts';
 import type { ForeignRow } from '../src/services/spi/types.ts';
 import type { FederationSource } from '../src/compiler/segment.ts';
 import { GraphStore } from '../src/storage.ts';
@@ -16,6 +16,7 @@ import { exec, executeQuery } from './support/executor.ts';
 import { Executor } from '../src/execute.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { decode, decodeAll } from './support/decode.ts';
+import { relirAhead } from './support/harness.ts';
 
 /** Parse a gremlin string, normalize, and return the (single) folded call IRStep. */
 const callStep = (gremlin: string, params: Record<string, any> = {}) => {
@@ -361,49 +362,71 @@ describe('tinker.degree.centrality — per-vertex edge count', () => {
   const IN = { marko: 0, vadas: 1, lop: 3, josh: 1, ripple: 1, peter: 0 };
   const OUT = { marko: 3, vadas: 0, lop: 0, josh: 2, ripple: 0, peter: 1 };
 
-  test('g_V_callXdcX — IN degree per vertex, projected with its vertex', async () => {
-    expect(await projMap('g.V().as("v").call("tinker.degree.centrality").project("vertex","degree").by(select("v")).by()'))
-      .toEqual(IN);
-  });
+  // EVERY DEGREE TEST IS `relirAhead` NOW, and that is the migration rather than a weakening.
+  // `tinker.degree.centrality` contributes `kind: 'rel'`, and a service implements `stream` XOR `rel`
+  // — so with the RelIR spine off there is nobody to answer, and the differential must be TOLD which
+  // way round the divergence goes or it reads the migration as a regression (§6·1). Each marker
+  // PROVES the refusal in the off position, with the registry, so "legacy refuses this" stays a
+  // measured fact and not an assumption.
+  const AHEAD: CompileOptions = { registry: standardRegistry };
 
-  test('g_V_callXdcX_withXdirection_OUTX — OUT degree', async () => {
-    expect(await projMap('g.V().as("v").call("tinker.degree.centrality").with("direction", OUT).project("vertex","degree").by(select("v")).by()'))
-      .toEqual(OUT);
-  });
+  test('g_V_callXdcX — IN degree per vertex, projected with its vertex', relirAhead(
+    'g.V().as("v").call("tinker.degree.centrality").project("vertex","degree").by(select("v")).by()',
+    async () => {
+      expect(await projMap('g.V().as("v").call("tinker.degree.centrality").project("vertex","degree").by(select("v")).by()'))
+        .toEqual(IN);
+    }, AHEAD));
 
-  test('g_V_callXdc_mapX_withXdirection_OUTX — a (ignored) map arg + with(direction) OUT', async () => {
-    expect(await projMap('g.V().as("v").call("tinker.degree.centrality", xx1).with("direction", OUT).project("vertex","degree").by(select("v")).by()',
-      { xx1: new Map([['x', 'y']]) })).toEqual(OUT);
-  });
+  test('g_V_callXdcX_withXdirection_OUTX — OUT degree', relirAhead(
+    'g.V().as("v").call("tinker.degree.centrality").with("direction", OUT).project("vertex","degree").by(select("v")).by()',
+    async () => {
+      expect(await projMap('g.V().as("v").call("tinker.degree.centrality").with("direction", OUT).project("vertex","degree").by(select("v")).by()'))
+        .toEqual(OUT);
+    }, AHEAD));
 
-  test('g_V_callXdc_traversalX — direction via __.project(direction).by(__.constant(OUT))', async () => {
-    expect(await projMap('g.V().as("v").call("tinker.degree.centrality", __.project("direction").by(__.constant(OUT))).project("vertex","degree").by(select("v")).by()'))
-      .toEqual(OUT);
-  });
+  test('g_V_callXdc_mapX_withXdirection_OUTX — a (ignored) map arg + with(direction) OUT', relirAhead(
+    'g.V().as("v").call("tinker.degree.centrality").with("direction", OUT).project("vertex","degree").by(select("v")).by()',
+    async () => {
+      expect(await projMap('g.V().as("v").call("tinker.degree.centrality", xx1).with("direction", OUT).project("vertex","degree").by(select("v")).by()',
+        { xx1: new Map([['x', 'y']]) })).toEqual(OUT);
+    }, AHEAD));
 
-  test('bare mid-traversal degree (no project) yields one scalar per vertex', async () => {
-    // Order-independent: the multiset of degrees matches IN's values.
-    expect((await run('g.V().call("tinker.degree.centrality")')).map(Number).sort())
-      .toEqual(Object.values(IN).sort());
-  });
+  test('g_V_callXdc_traversalX — direction via __.project(direction).by(__.constant(OUT))', relirAhead(
+    'g.V().as("v").call("tinker.degree.centrality", __.project("direction").by(__.constant(OUT))).project("vertex","degree").by(select("v")).by()',
+    async () => {
+      expect(await projMap('g.V().as("v").call("tinker.degree.centrality", __.project("direction").by(__.constant(OUT))).project("vertex","degree").by(select("v")).by()'))
+        .toEqual(OUT);
+    }, AHEAD));
+
+  test('bare mid-traversal degree (no project) yields one scalar per vertex', relirAhead(
+    'g.V().call("tinker.degree.centrality")',
+    async () => {
+      // Order-independent: the multiset of degrees matches IN's values.
+      expect((await run('g.V().call("tinker.degree.centrality")')).map(Number).sort())
+        .toEqual(Object.values(IN).sort());
+    }, AHEAD));
 
   // Step 5b: a call() body inside where() is recognized as a scalar child via the generalized
   // "lowers-to-scalar" classifier (not a hardcoded values/id/label vocabulary). The child scope
   // is derived from the parent stream so the service reduces per input vertex.
-  test('g_V_whereXcallXdcXX — where(call(dc).is(3)) keeps only IN-degree-3 vertices (lop)', async () => {
-    const names = async (g: string) =>
-      (await decodeAll(executeQuery(store, g, {}, {}, standardRegistry)))
-        .map((v: any) => v.properties?.find((p: any) => p.label === 'name')?.value);
-    // Only `lop` has IN-degree 3 in the modern graph.
-    expect(await names('g.V().where(call("tinker.degree.centrality").is(3))')).toEqual(['lop']);
-  });
+  test('g_V_whereXcallXdcXX — where(call(dc).is(3)) keeps only IN-degree-3 vertices (lop)', relirAhead(
+    'g.V().where(call("tinker.degree.centrality").is(3))',
+    async () => {
+      const names = async (g: string) =>
+        (await decodeAll(executeQuery(store, g, {}, {}, standardRegistry)))
+          .map((v: any) => v.properties?.find((p: any) => p.label === 'name')?.value);
+      // Only `lop` has IN-degree 3 in the modern graph.
+      expect(await names('g.V().where(call("tinker.degree.centrality").is(3))')).toEqual(['lop']);
+    }, AHEAD));
 
-  test('where(call(dc).with(direction,OUT).is(3)) keeps only OUT-degree-3 vertices (marko)', async () => {
-    const names = async (g: string) =>
-      (await decodeAll(executeQuery(store, g, {}, {}, standardRegistry)))
-        .map((v: any) => v.properties?.find((p: any) => p.label === 'name')?.value);
-    expect(await names('g.V().where(call("tinker.degree.centrality").with("direction", OUT).is(3))')).toEqual(['marko']);
-  });
+  test('where(call(dc).with(direction,OUT).is(3)) keeps only OUT-degree-3 vertices (marko)', relirAhead(
+    'g.V().where(call("tinker.degree.centrality").with("direction", OUT).is(3))',
+    async () => {
+      const names = async (g: string) =>
+        (await decodeAll(executeQuery(store, g, {}, {}, standardRegistry)))
+          .map((v: any) => v.properties?.find((p: any) => p.label === 'name')?.value);
+      expect(await names('g.V().where(call("tinker.degree.centrality").with("direction", OUT).is(3))')).toEqual(['marko']);
+    }, AHEAD));
 });
 
 describe('barrier source form via Executor (stub source → drive → land → frame)', () => {

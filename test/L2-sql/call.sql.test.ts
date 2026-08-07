@@ -9,30 +9,43 @@
 import { test, expect, describe } from 'bun:test';
 import { type CompileOptions } from '../../src/compiler/compiler.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
-import { read, run, runWith, seededStore } from '../support/harness.ts';
+import { read, relirAhead, run, runWith, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
 
 describe('call / search service SQL', () => {
-  test('a call() scalar body lowers through the generalized "lowers-to-scalar" child classifier', () => {
+  test('a call() scalar body is a correlated VALUE, compared in place', relirAhead(
+    'g.V().where(call("tinker.degree.centrality").is(3))', () => {
     const store = seededStore();
     const withReg: CompileOptions = { registry: standardRegistry };
-    // where(call(dc).is(3)): the classifier now recognizes call() (not just values/id/label) as a
-    // scalar producer, so it lowers via the generic child seam — a scoped-count LEFT JOIN over a
-    // pushed child ordinal, gated by a correlated EXISTS — with NO bespoke reader.
-    const wsql = read('g.V().where(call("tinker.degree.centrality").is(3))', withReg).sql;
-    expect(wsql).toContain('EXISTS');
-    expect(wsql).toContain('LEFT JOIN');
+    // `tinker.degree.centrality` is a `rel` contribution now, so LEGACY refuses it outright and this
+    // is RelIR's answer absolutely rather than a differential (§6·1). What it asserts is the SHAPE of
+    // that answer: a `streaming` service contributes a per-parent VALUE, and a body that projects a
+    // value and then tests it is a COMPARISON — so there is no EXISTS, no pushed child ordinal and no
+    // LEFT JOIN rejoin, which is what legacy's scoped-count seam needed to ask the same question.
+    const wsql = read('g.V().where(call("tinker.degree.centrality").is(3))', { ...withReg, spine: 'rel' }).sql;
+    expect(wsql).not.toContain('EXISTS');
+    expect(wsql).not.toContain('LEFT JOIN');
+    expect(wsql).toContain('= 3');
+    expect(wsql).toContain('rme2.tgt = rn.id');
     // The nested child scope rides the carried origin: only lop (IN-degree 3) survives. (Result
     // shape/values are asserted end-to-end over GraphBinary in test/services.test.ts.)
     const nameOf = (id: unknown) => (run(store, `g.V(${id}).values("name")`) as any[])[0]?.v;
     const kept = runWith(store, 'g.V().where(call("tinker.degree.centrality").is(3))', withReg) as any[];
     expect(kept.map((r) => nameOf(r.id))).toEqual(['lop']);
-    // group().by(call(dc)) also flows through the same generalized seam (a scalar group key).
-    expect(read('g.V().group().by(call("tinker.degree.centrality")).by("name")', withReg).sql)
-      .toContain('LEFT JOIN');
-  });
+    // The SAME seam serves a by() slot, which is the whole reason the service hands its body to
+    // `ChildSeam.scalar` rather than owning a per-traverser substrate: a group KEY is that value.
+    const grouped = runWith(store, 'g.V().group().by(call("tinker.degree.centrality")).by("name")', { ...withReg, spine: 'rel' }) as any[];
+    expect(JSON.parse(grouped[0]!.map).map(([k, v]: [any, any]) => [k.v, v.v.map((n: any) => n.v)])).toEqual([
+      [0, ['marko', 'peter']], [1, ['vadas', 'josh', 'ripple']], [3, ['lop']],
+    ]);
+    // A `start` position for a `streaming` service is invalid Gremlin, and once legacy stopped
+    // serving this service there is nobody else to raise it — so the check is a THROW, not a decline
+    // (§6·5, "the answer is an ERROR").
+    expect(() => read('g.call("tinker.degree.centrality")', withReg))
+      .toThrow(/must be called mid-traversal on vertices/);
+  }, { registry: standardRegistry }));
 
   test('tinker.search: a source PropertyStream backed by the property_fts trigram index', () => {
     const store = seededStore();

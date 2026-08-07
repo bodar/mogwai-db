@@ -273,10 +273,45 @@ function bodyPredicate(
   let clause: Expr | undefined;
   for (const step of body) {
     const filter = sourceFilter(step, subject, elem, fresh, ctx);
-    if (!filter) return correlatedExists(body, subject, elem, fresh, ctx, false);
+    if (!filter) return correlatedExists(body, subject, elem, fresh, ctx, false) ?? valuePredicate(body, subject, elem, fresh, ctx, false);
     clause = and(clause, filter);
   }
   return clause ?? null;
+}
+
+/**
+ * A body that PROJECTS a value and then TESTS it — `where(__.values('age').is(P.gt(30)))`,
+ * `where(__.call(dc).is(3))` — as a comparison rather than an existence question.
+ *
+ * The third answer to "does this body produce output for this traverser", and the one the other two
+ * could not give: a filter-only body is a conjunction over the same row, a body that MOVES is a
+ * correlated `EXISTS`, and a body that projects a correlated VALUE is that value compared. Asking it
+ * through an EXISTS would need the projection as a relation first, which is why `correlatedExists`
+ * declines every body whose head is not a movement.
+ *
+ * PRODUCTIVITY falls out of SQL's own null semantics and needs no clause: an unproductive projection
+ * is NULL, every comparison against NULL is NULL, and NULL is not true — which is TinkerPop's answer
+ * (the traverser is dropped) reached without a second test to keep in step.
+ *
+ * A FALLBACK rather than the first thing tried, deliberately: every shape `correlatedExists` already
+ * answers keeps the lowering it has, so this is new coverage and not a re-spelling of existing SQL.
+ */
+function valuePredicate(
+  body: readonly IRStep[], subject: Subject, elem: Elem, fresh: Minter, ctx: ChainCtx, negate: boolean,
+): Expr | null {
+  const last = body.at(-1);
+  if (body.length < 2 || last?.name !== 'is' || last.modulators?.length || last.optionArms) return null;
+  const produced = scalarChild(body.slice(0, -1), { kind: 'element', id: subject.id, elem }, ctx, fresh);
+  if (!produced) return null;
+  const args = argValues(last);
+  if (args.length !== 1) return null;
+  // The value's own type is what a range comparison needs — a big long carried as decimal TEXT orders
+  // lexically otherwise — and the seam now reports it, so the subject type is read rather than assumed.
+  const type: SubjectType = produced.framing.kind === 'scalar' && produced.framing.type.kind === 'static'
+    ? { kind: 'static', type: produced.framing.type.type, text: produced.framing.type.text }
+    : SUBJECT_UNKNOWN;
+  const pred = predicateExpr(produced.expr, args[0], type, last.args[0]?.type ?? null, last.args[0]?.name ?? null, fresh);
+  return pred && (negate ? { kind: 'unary', op: 'not', arg: pred } : pred);
 }
 
 function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter, ctx: ChainCtx): Expr | null {
@@ -318,7 +353,11 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
     // which is the same instrument-shaped finding as the four before it.
     const body = bodyOf(nested.nested, ctx.params);
     if (!body?.length) return null;
-    return correlatedExists(body, subject, elem, fresh, ctx, step.name === 'not');
+    // A body whose head is a correlated VALUE rather than a movement is not an existence question at
+    // all (`valuePredicate`) — `correlatedExists` declines it, and the fallback is what makes
+    // `where(__.values('age').is(P.gt(30)))` and `where(__.call(dc).is(3))` ordinary clauses.
+    return correlatedExists(body, subject, elem, fresh, ctx, step.name === 'not')
+      ?? valuePredicate(body, subject, elem, fresh, ctx, step.name === 'not');
   }
 
   // `hasNot(key)` is a bare `has(key)` NEGATED, and it reuses that clause rather than spelling a second
@@ -1043,9 +1082,18 @@ const countTail = (input: Rel, fresh: Minter): { rel: Rel; framing: RelFraming }
  * that both arms change the STREAM KIND: everything before produces elements and frames as the
  * element payload, and these produce one scalar per row and frame through the value projection.
  */
-function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { readonly rel: Rel; readonly framing: RelFraming } | null {
+function terminal(
+  step: IRStep, input: Rel, elem: Elem, fresh: Minter, ctx: ChainCtx, aliases: AliasMap,
+): { readonly rel: Rel; readonly framing: RelFraming } | null {
   if (step.modulators?.length || step.optionArms) return null;
   const args = argValues(step);
+
+  // A MID-TRAVERSAL `call()` IS A RETYPE, and this is exactly the right place for it: a `streaming`
+  // service produces ONE VALUE per input traverser, so an element relation becomes a scalar one —
+  // which is what every other arm of this function does. The service is handed the host row and the
+  // ONE child seam (§6·6), so `tinker.degree.centrality` asks the identical question a
+  // `by(__.in().count())` asks and needs no per-traverser substrate of its own.
+  if (step.name === 'call') return midCall(step, input, elem, fresh, ctx, aliases);
 
   // count() is the RLE traverser TOTAL, not the row count: a collapse merges convergent walks into
   // (row, N) pairs, so the answer is SUM(bulk) — identical to COUNT(*) only while bulk is 1
@@ -1129,6 +1177,66 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { readon
   }
 
   return null;
+}
+
+/**
+ * `V().call(name, …)` — a `streaming` service's per-parent VALUE, projected beside the host row.
+ *
+ * The whole lowering, because there is nothing else to it: the service returns a `ChildValue`, and a
+ * value per input traverser over an element relation is the same retype `values()` and `count()` are.
+ * The CHANNELS ride through untouched — a service changes the traverser's VALUE, not its identity or
+ * its multiplicity — which is what makes a following `is(3)`, `count()` or `project()` the ordinary
+ * scalar tail with nothing to know about services.
+ *
+ * A `stream` service DECLINES here (the ordinary "not learned yet" `null`, so legacy answers it and
+ * services migrate one at a time), and so does an unregistered name — legacy owns `unknown service`.
+ * A service's OWN throw is not caught, for the source arm's reason (§6·5): a `streaming` service
+ * called at a position it cannot serve raises a message the user must see, and swallowing it would
+ * hand the traversal to a spine that now refuses the service and reports something else entirely.
+ */
+function midCall(
+  step: IRStep, input: Rel, elem: Elem, fresh: Minter, ctx: ChainCtx, aliases: AliasMap,
+): { readonly rel: Rel; readonly framing: RelFraming } | null {
+  const produced = serviceValue(step, elementHost(input, elem, aliases), ctx, fresh);
+  if (!produced) return null;
+  const { expr, framing, vtype } = produced;
+  const typeCol = vtype ? [meta('vtype', 'text', true)] : [];
+  return {
+    rel: make.project({
+      id: fresh('cv'), input, channels: input.channels,
+      type: typeOf(meta('v', 'any', true), ...typeCol, ...carriedCols(input.channels)),
+      exprs: [['v', expr], ...(vtype ? [['vtype', vtype] as const] : []),
+        ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
+    }),
+    framing,
+  };
+}
+
+/**
+ * A `streaming` SERVICE'S per-parent value over one host traverser, or `null` to decline.
+ *
+ * Split out of `midCall` because a `call()` is not only a chain step: it is a child body
+ * (`where(__.call(dc).is(3))`, `group().by(__.call(dc))`), and there the answer wanted is the VALUE
+ * rather than a relation carrying it. One function so the two positions cannot come apart — which is
+ * the same reason the service is handed the child seam rather than a scope of its own.
+ */
+function serviceValue(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
+  if (step.modulators?.length || step.optionArms) return null;
+  const spec = parseCallSpec(step, ctx.params);
+  // An INJECTION traversal is the federated per-parent value read (`fprops`/`fid`/`flabel` rejoin),
+  // which belongs to a `barrier` contribution and not to this arm at all. Declining on its presence
+  // keeps the two apart rather than silently ignoring the argument.
+  if (spec.injectionTraversal !== undefined) return null;
+  const service = ctx.services.get(spec.serviceName);
+  if (!service) return null;
+  const site: RelCallSite = {
+    params: spec.params, boundParams: ctx.params, federationDepth: 0, fresh,
+    host, child: childSeam(ctx, fresh),
+  };
+  const contribution = service.resolve(site);
+  if (contribution.kind !== 'rel') return null;
+  const contributed = contribution.buildRel(site);
+  return contributed && contributed.kind === 'value' ? contributed.value : null;
 }
 
 /** The tail steps that read the traverser's value from a clause SQL cannot alias into — a `WHERE`
@@ -2207,6 +2315,12 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
     if (contribution.kind !== 'rel') return null;
     const contributed = contribution.buildRel(site);
     if (!contributed) return null;
+    // A SOURCE call contributes a RELATION. A `value` product here would be a `streaming` service
+    // asked to produce rows from nothing — there is no host traverser at the head of a chain — and
+    // the service itself raises for that (it is the same "must be called mid-traversal" message
+    // legacy owns), so reaching here with one is a service ignoring its own declared type rather than
+    // a shape to interpret.
+    if (contributed.kind !== 'relation') return null;
     // Through the ONE dispatcher, so a service's shape is not a special case here. It was scalar-only
     // while `--list` was the only `rel` service; `tinker.search` contributes a PROPERTY, and a source
     // arm that enumerated shapes would be a second place to teach every new one.
@@ -2468,7 +2582,7 @@ function elementTail(
   if (at === steps.length) return { rel, framing: { kind: 'elements', elem }, aliases: labels };
 
   if (pathCarried(rel)) return null;
-  const retyped = terminal(steps[at], rel, elem, fresh);
+  const retyped = terminal(steps[at], rel, elem, fresh, ctx, labels);
   if (!retyped) return null;
 
   // Through the ONE dispatcher rather than straight to `scalarTail`. It was hardcoded while every
@@ -2783,7 +2897,7 @@ const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   sideEffects: ctx.sideEffects,
   scalar: (body, host) => scalarChild(body, host, ctx, fresh),
   predicate: (body, subject, elem, negated) => (negated
-    ? correlatedExists(body, subject, elem, fresh, ctx, true)
+    ? correlatedExists(body, subject, elem, fresh, ctx, true) ?? valuePredicate(body, subject, elem, fresh, ctx, true)
     : bodyPredicate(body, subject, elem, fresh, ctx)),
   rooted: (steps) => rootedRead(steps, ctx, fresh),
   body: (nested, scope) => (scope === 'child'
@@ -2884,6 +2998,16 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     if (!projected) return null;
     value = projected;
     vtype = propertyVtype(args[0], host, fresh);
+    at = 1;
+  } else if (leading?.name === 'call') {
+    // A `streaming` SERVICE is a value projection like any other, so it leads a body exactly as
+    // `values(k)` does — which is what makes `where(__.call(dc).is(3))` and `group().by(__.call(dc))`
+    // fall out of the seam rather than needing a call-aware reader at each host. The service is
+    // handed THIS host, so a call inside a by() inside a call composes by construction.
+    const produced = serviceValue(leading, host, ctx, fresh);
+    if (!produced) return null;
+    value = produced.expr;
+    if (produced.framing.kind === 'scalar') type = produced.framing.type;
     at = 1;
   } else if (leading?.name === 'label' || leading?.name === 'id') {
     if ((leading.args ?? []).length) return null;

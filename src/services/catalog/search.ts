@@ -94,7 +94,7 @@ function searchProperties(site: RelCallSite, ownerElem: Elem, pattern: string, e
     ),
   });
   const rel = propertyJoin(scoped, ownerElem, (props) => eq(col(props, 'id'), col(scoped.id, 'pid')), site.fresh);
-  return { rel, framing: { kind: 'property', ownerElem } };
+  return { kind: 'relation', rel, framing: { kind: 'property', ownerElem } };
 }
 
 export const searchService: Service = {

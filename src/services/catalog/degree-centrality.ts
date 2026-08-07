@@ -1,13 +1,16 @@
-import type { Service } from '../spi/types.ts';
-import { scopedMovementCount } from '../../compiler/steps/tail/child.ts';
+import type { IRStep } from '../../compiler/ir/step.ts';
+import type { RelCallSite, RelContribution, Service } from '../spi/types.ts';
 
 // ---------- tinker.degree.centrality — per-vertex edge count (pure, Streaming) ----------
 //
-// Per input vertex, count its incident edges in `direction` (default IN). Lowers through
-// the scoped-count child-scope seam (scopedDegreeCount → pushChildScope +
-// lowerScopedScalarReducer) — the SAME per-parent-merged-by-ordinal substrate a count()
-// child uses, so where(call("tinker.degree.centrality").is(n)) falls out of the child
-// seam for free, and the result is a bulk-aware scalar per input.
+// Per input vertex, count its incident edges in `direction` (default IN).
+//
+// It is a `streaming` service and therefore contributes a per-parent VALUE, not a relation — which
+// is TinkerPop's own `Service.Type` distinction and the reason `RelContribution` is a union. The
+// value is built by handing the CHILD SEAM the body `[<direction>, count]`: the very same
+// correlated movement-then-reducer a `by(__.in().count())` is, so this service needs no substrate
+// of its own and gains bulk-awareness, productivity and the `long` tag from the seam that already
+// has them. `where(call("tinker.degree.centrality").is(3))` composes for the same reason.
 
 /** Read the `direction` param: OUT/IN/BOTH (default IN). The value arrives either as a
  *  Direction enum token ({direction:'out'}) or a bare string. */
@@ -24,16 +27,28 @@ function directionOf(params: Record<string, unknown>): 'out' | 'in' | 'both' {
   throw new Error(`tinker.degree.centrality: unsupported direction '${raw}'`);
 }
 
+/** The body the seam lowers — a movement in `direction`, then `count()`. Written as IR rather than
+ *  parsed from Gremlin text because that is what it IS: the service is not quoting a traversal, it is
+ *  naming two steps. `scopedMovementCount` (legacy) synthesised the identical pair. */
+const degreeBody = (direction: 'out' | 'in' | 'both'): readonly IRStep[] =>
+  [{ name: direction, args: [] }, { name: 'count', args: [] }] as unknown as readonly IRStep[];
+
 export const degreeCentralityService: Service = {
   name: 'tinker.degree.centrality',
   type: 'streaming',
   describeParams: () => ({ direction: 'Direction (OUT | IN | BOTH), default IN' }),
   resolve: () => ({
-    kind: 'stream',
-    build: (c) => {
-      if (!c.parent || c.parent.kind !== 'elements' || !c.scope)
+    kind: 'rel',
+    buildRel: (site: RelCallSite): RelContribution | null => {
+      // THE POSITION CHECK IS A THROW, NOT A DECLINE — §6·5's "the answer is an ERROR". A `start`
+      // position for a `streaming` service is not a shape some other spine answers; it is invalid
+      // Gremlin, and once legacy no longer serves this service there is nobody else to raise it.
+      if (!site.host || !site.child)
         throw new Error('tinker.degree.centrality must be called mid-traversal on vertices (e.g. g.V().call(...))');
-      return scopedMovementCount(c.parent, c.scope, directionOf(c.params));
+      if (site.host.kind !== 'element')
+        throw new Error('tinker.degree.centrality must be called mid-traversal on vertices (e.g. g.V().call(...))');
+      const value = site.child.scalar(degreeBody(directionOf(site.params)), site.host);
+      return value && { kind: 'value', value };
     },
   }),
 };

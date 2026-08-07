@@ -28,6 +28,7 @@ import type { AppScope } from '../../scopes.ts';
 function scalarStrings(site: RelCallSite, rows: string[]): RelContribution | null {
   if (!rows.length) return null;
   return {
+    kind: 'relation',
     rel: make.values({
       id: site.fresh('svc'), channels: [], type: typeOf(meta('v', 'text')),
       rows: rows.map((r) => [compilerText(r)]),

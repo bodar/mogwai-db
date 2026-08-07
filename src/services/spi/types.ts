@@ -5,6 +5,7 @@ import type { ForeignRow } from '../../api.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Minter } from '../../compiler/rel/build.ts';
 import type { RelFraming } from '../../compiler/rel/framing.ts';
+import type { ChildHost, ChildSeam, ChildValue } from '../../compiler/rel/child.ts';
 
 // ---------- the call() service seam ----------
 //
@@ -121,12 +122,24 @@ export type Contribution =
 // io are spine-independent already, and the planned iterative graph algorithms
 // (`docs/2026-07-24-graph-algorithms-plan.md`) are barrier contributions for the same reason.
 
-/** A `rel` contribution's product: a relation, plus what the fold must know it HOLDS.
- *  `null` declines, the one decline convention this route has. */
-export interface RelContribution {
-  readonly rel: Rel;
-  readonly framing: RelFraming;
-}
+/**
+ * A `rel` contribution's product. `null` declines, the one decline convention this route has.
+ *
+ * **THE UNION FOLLOWS `Service.Type`, and that split is not ours to invent.** TinkerPop already
+ * distinguishes a `start` service (a SOURCE — it produces rows from nothing) from a `streaming` one
+ * (per input traverser — it produces ONE VALUE for each), and the two contribute genuinely different
+ * things to a relational plan: a source is a RELATION spliced in at the head of the chain, while a
+ * per-parent service is a correlated VALUE the retype projects beside its host row. Making the
+ * product follow the declared type is what stops the mid-traversal form growing a second
+ * call-lowering that assembles a relation and then joins it back to the parent it came from.
+ *
+ * The `value` arm reuses `ChildValue` rather than restating it: a per-parent service IS a correlated
+ * child body — `tinker.degree.centrality` literally hands the seam `[<direction>, count]` — so the
+ * expression, its framing and its per-row type are the same three facts the seam already carries.
+ */
+export type RelContribution =
+  | { readonly kind: 'relation'; readonly rel: Rel; readonly framing: RelFraming }
+  | { readonly kind: 'value'; readonly value: ChildValue };
 
 /** What a `rel` contribution is handed. The `CallSite` fields that survive are the ones that are
  *  genuinely about THIS call — its resolved params and the traversal's wire bindings — plus the id
@@ -139,6 +152,18 @@ export interface RelContribution {
  *  exists to prevent. */
 export interface RelCallSite extends CallSite {
   readonly fresh: Minter;
+  /**
+   * The enclosing traverser and the child seam — present ONLY for a mid-traversal `call()`, which is
+   * the `StreamCallSite.parent`/`scope` pair expressed for this spine.
+   *
+   * A `streaming` service needs both and a `start` service ignores both, which is the same asymmetry
+   * `StreamCallSite` has. What is different is what they ARE: legacy hands over a `ChildParent` plus
+   * a `ChildFrameStack` — its own per-traverser scope machinery — where this is the host row and the
+   * ONE child seam (§6·6), so a service asks the identical question every `by()` body asks and gets
+   * the identical answer.
+   */
+  readonly host?: ChildHost;
+  readonly child?: ChildSeam;
 }
 
 export interface Service {
