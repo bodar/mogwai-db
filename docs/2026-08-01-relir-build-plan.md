@@ -306,18 +306,26 @@ sees the traversal. §4's tier is `rewrite`; `Pass` means the pre-lowering chain
 
 ### §6·6 — ONE child seam: a child body has THREE total answers
 
-Four spellings of "lower an inner body" exist: `ByChild` (correlated scalar, `compiler/rel/modulator.ts`),
-`SubReads.body`/`rooted`/`matching` (`compiler/rel/write.ts`), `ListCtx.subRead`, and
-`FilterCtx.correlatedChildren` → `correlatedExists`. One interface, three total answers — correlated
-**scalar**, correlated **predicate**, **rooted** relation.
+`src/compiler/rel/child.ts` declares it and `childSeam(ctx, fresh)` (`lower.ts`) builds it: correlated
+**scalar**, correlated **predicate**, **rooted** relation, plus the `body()` normalizer all three share.
+It replaced four spellings of one question — `ByChild` (`modulator.ts`), `SubReads.body`/`rooted`/
+`matching` (`write.ts`), `ListCtx.subRead`, `FilterCtx.correlatedChildren` → `correlatedExists`.
 
-The split is why the write vocabulary LOOKS like it needs a per-traverser substrate and does not:
-`property`'s nested value and `mergeV`/`mergeE`'s nested label/key/value need the SCALAR arm, which is
-built, injected, serving the whole `by()` vocabulary, and simply not handed to the write seam. P2 says a
-correlated scalar is legal; nothing row-at-a-time is involved. Unify, and the by()-child matrix (§10·4)
-grows in ONE place instead of four — a child body works wherever a child body is legal, not wherever a host
-was taught it. Phase 2.6's third piece is smaller still: the `withSideEffect` constants are compile-time
-(the front-end registers them) and the seam is just not handed them.
+**The rule the seam exists to hold: a child body works wherever a child body is LEGAL, not wherever a
+host was taught one.** That split is why the write vocabulary LOOKS like it needs a per-traverser
+substrate and does not — `property`'s nested value and `mergeV`/`mergeE`'s nested label/key/value need
+the SCALAR arm, which was built, injected and serving the whole `by()` vocabulary while the write seam
+held only the ROOTED one. P2 says a correlated scalar is legal; nothing row-at-a-time is involved.
+
+`rooted` is deliberately POLICY-FREE — a consumer's admission rule (a vertex stream for an `addE`
+endpoint, a list framing for a set-op operand, no effects for either) is the consumer's, or the seam
+becomes the union of its callers' requirements, which is the shape it collapsed. `body()` is part of
+the DECLINE contract and not a convenience: normalizing re-runs the Pass pipeline and can legitimately
+raise, and two of the four spellings called `childSteps` bare.
+
+Phase 2.6's third piece is smaller still: the `withSideEffect` constants are compile-time (the
+front-end registers them) and the seam is just not handed them — `compiler.ts` does not even OFFER the
+RelIR route to a traversal that declares one.
 
 ### §6·7 — a scalar row's TYPE rides PER ROW; a static tag is an OPTIMIZATION, never the carrier
 
@@ -449,8 +457,10 @@ Read coverage from the census; this is the qualitative map of what RelIR already
   shape (`group`/`groupCount`, value `by()`); the ALIAS channel (`as()`/`select(label)`); the PATH channel
   (one JSONB array, entry encoding shared with alias, `by()` per position); element payload; scalar/value
   payload. All payload projection is inside the algebra (`element.ts`/`list.ts`/`map.ts`/`path.ts`).
-- **The `by(__.traversal)` CHILD SEAM:** an injected lowerer; the expression arm (flat value+transform), the
-  reducer arm (`__.out().count()`), with the reference's productivity/seed rules cited.
+- **The CHILD SEAM (§6·6):** one injected `ChildSeam`, three total answers. Its scalar arm has the
+  expression form (flat value+transform) and the reducer form (`__.out().count()`), with the
+  reference's productivity/seed rules cited; its predicate arm is the filter-conjunction /
+  correlated-`EXISTS` pair; its rooted arm is the fold re-entered.
 - **Writes (Phase 2.1–2.5):** `drop()` → `Delete`; `property()` on an existing element (incl. collection
   values, FTS rows); `addV`/`addE` → `Insert … SELECT … RETURNING` (alias-through-a-creation, label
   cardinality from request-scope DI); `mergeV` (the branch is not control flow — two total statements each a
