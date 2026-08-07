@@ -133,7 +133,9 @@ view bolted beside it.
 
 ## 3. Where the layer goes: the IR
 
-**The IR. Not RelIR, not SQL, not a generated Gremlin string re-parsed by accident.**
+**The IR — `Step[]`. Not RelIR, not SQL.** (Whether the translator *reaches* it by emitting Gremlin
+text and re-parsing, or by constructing `Step[]` directly, is §5·2 and is open. Either way the layer
+the compiler sees is the IR, which is what this section is about.)
 
 And this is not a new architectural bet — **`src/gremlin/gql.ts` already did it.** The MATCH-string
 front end takes a *second, foreign query language* embedded in a string argument, parses it with its
@@ -151,8 +153,6 @@ a vocabulary that has exactly one (`docs/2026-07-28-shape-vocabulary-architectur
 CONSULT shape, never CONSTRUCT it). RelIR is where the §2 work lands — it is not the entry point.
 
 **Why not SQL.** Reimplements the compiler. Nothing to weigh.
-
-**Why not "generate a Gremlin string"** — actually, do exactly that, at first. See §5.
 
 ---
 
@@ -184,51 +184,119 @@ GraphQL endpoint with introspection and tooling, zero config.
 
 ---
 
-## 5. Placement: the edge — **locked**
+## 5. Placement — **locked**. Emission — **open, decide by spike**
 
-**GraphQL translation runs in the Worker, not in the Durable Object.** This is no longer a trade to
-weigh, because it is not really a question about GraphQL: a DO is single-threaded, and translation
-needs no store. Putting it in the DO would spend a graph's serial budget on parsing a document —
-occupancy that no other caller of that graph can use — for work a horizontally-scaled runtime does in
-parallel. The full argument is `docs/2026-08-07-edge-compilation-plan.md` §1; it applies here
-unchanged, and this front end is simply another thing on the elastic side of the same line.
+### 5·1 Placement: the Worker. Locked.
 
-So the path is `document → Gremlin + params → plan → DO`, with everything left of the DO in the
-Worker. The translator emits a **Gremlin string**, which is a deliberate choice and not a stepping
-stone: it makes the translation auditable (`?explain` returns the generated Gremlin), gives users a
-real escape ladder (read it, then hand-edit it), and keeps `wrangler tail` legible. The rejected
-alternative was emitting `Step[]` directly to skip a re-parse — measured at 0.142 ms per query
-(`docs/2026-08-07-edge-compilation-plan.md` §2·3), and paid for with a bespoke traversal
-serialization. Not a trade worth making.
+**GraphQL translation runs in the Worker, not in the Durable Object.** Not a trade to weigh, and not
+really a question about GraphQL: a DO is single-threaded, and translation needs no store. Putting it
+in the DO would spend a graph's serial budget parsing a document — occupancy no other caller of that
+graph can use — for work a horizontally-scaled runtime does in parallel. Full argument:
+`docs/2026-08-07-edge-compilation-plan.md` §1. It applies here unchanged; this front end is one more
+thing on the elastic side of the same line.
 
-### 5·1 The dependency
+So the path is `document → (Gremlin) → plan → DO`, with everything left of the DO in the Worker.
 
-Everything right of the translator belongs to the edge-compilation plan. GraphQL does not need to
-build any of it, and must not build a private version:
+### 5·2 Emission: a Gremlin string, or `Step[]` directly — OPEN
 
-- **the compile half** — turning that Gremlin string into a plan, in the Worker, and shipping the
-  plan rather than the text. That is `docs/2026-08-07-edge-compilation-plan.md` Phase 1. Until it
-  lands, the translator hands `{gremlin, params, paramTypes}` across the existing `GraphManager` seam
-  (`src/router.ts`, `src/api.ts:160`) exactly as a Gremlin client does, needing **zero changes** to
-  the manager or executor contract.
-- **the DO-side execution** — unchanged either way.
+Both translation and compilation now happen in the same Worker process, which retires the two
+arguments that used to settle this: nothing is serialized (so emitting IR is not "reinventing the
+bytecode TinkerPop 4 deleted" — a `Step[]` is an in-process object handed to `runPasses`), and the
+re-parse is 0.142 ms of local CPU (`…edge-compilation-plan.md` §2·3), i.e. nothing.
 
-So GraphQL is **not blocked** by that plan; it is aligned with it. What is locked is that Phase 2
-below must not be designed as though the translator might one day live in the DO, because it must
-not.
+What is left is a genuine trade, and it is about where fragility lands.
 
-### 5·2 The one thing GraphQL adds that edge compilation does not have
+**For emitting a Gremlin string:**
 
-Compilation is a pure function of the query (`…edge-compilation-plan.md` §2·1). **Translation is
-not** — it is a pure function of the query *and the schema*, and the schema is read from the store
-(§4).
+- **Grammar-legality by construction.** A string that parses is legal by definition. A hand-built
+  `Step[]` can be a chain the grammar could never produce, and **nothing checks** —
+  `src/gremlin/validate.ts` covers identifier rules only (hidden keys, empty labels); there is no
+  structural IR validator. The compiler's input contract is "whatever a front end produced", and
+  every existing front end is grammar-driven. Emitting IR is a fail-open surface.
+- **It lands on the tested door.** L1–L5, the corpus, `rel-blockers`, the census, `test:perturbed` —
+  everything enters through `parseGremlin`. A translator emitting strings can have its output run
+  through every instrument already in the tree.
+- **Readable in a log**, where a `Step[]` is JSON soup.
 
-That is a genuine addition to the edge's job, not a detail: the Worker must hold a per-graph schema,
-fetched from the DO, and it must be invalidated when a write changes the label or property set. This
-is the one cache in either document that has a real invalidation problem, and it exists because
-without it there is nothing to translate against — it is a requirement, not an optimization. The
-write counter §4 already proposes is what it keys on; moving it to the edge means the counter has to
-travel, which is one extra field on a response, not a mechanism.
+**For emitting `Step[]`:**
+
+- **No text-generation layer to get wrong, and the sharp case is types.** Gremlin encodes numeric
+  type *lexically* — `30` vs `30L` vs `30.0`. GraphQL's `Int` is 32-bit, `Float` is a double, custom
+  scalars are whatever they declare. Emitting text means mapping GraphQL types onto Gremlin literal
+  FORMS and trusting the parser to infer back what was meant; emitting `arg(30, 'int')` states it.
+  Against the typed-property-values work, this is the strongest argument on either side. (Partly
+  mitigated: most user values arrive as *variables*, which travel in the params map with
+  `paramTypes`, so their type is stated either way. It is inline literals in the document where the
+  lexical form bites.)
+- **It is the in-repo idiom.** `src/gremlin/gql.ts` — the precedent front end §3 cites — emits
+  `Step[]` directly through a local `step(ctx, name, args, argTypes)` helper with explicit
+  `TypeNode`s per argument. `math.ts` does the same, and the compiler synthesizes steps itself
+  (`strategies.ts`'s `synth`). Building IR programmatically is the established pattern here.
+
+**The framing that may decide it:** a `Step[] → Gremlin` renderer is wanted either way (§5·3), and
+it is the fragile part. If the string is the pipeline, a quoting or type-suffix bug is a **wrong
+answer**; if the string is only a rendering, the same bug is a **display** bug. That argues IR — but
+it trades away grammar-legality-by-construction and the tested-door property, which are this repo's
+fail-closed instincts, so it should not be traded away casually.
+
+**A hybrid may get both**, and is worth trying in the spike: emit `Step[]`, write the renderer for
+display, and assert in tests that `parseGremlin(render(steps))` is equivalent to `steps`. That
+restores grammar-legality as a *property* rather than a construction — if it renders and re-parses
+equivalently, the chain was expressible, therefore legal — and it is the same shape as the L5
+differential oracles already in the tree.
+
+**Decide by spike, not by this document.** Both options are a single file. The two things a spike
+answers that argument cannot: how bad `Step[]` construction is ergonomically for a deeply nested
+selection set, and how bad Gremlin text generation is for typed literals. Whoever does the work
+decides; nothing else in this plan depends on the answer.
+
+### 5·3 Explain is an `extensions` entry, not a query parameter
+
+GraphQL-over-HTTP defines exactly four request parameters — `query`, `operationName`, `variables`,
+`extensions` — and states that all other property names are reserved, that implementers MUST extend
+by other means, and that the RECOMMENDED means is an implementer-scoped entry in `extensions`.
+
+So a top-level `?explain` is **non-conformant**, and `graphql-http`'s `serverAudits` (§7·1) is
+exactly the thing that would catch it. The shape is `extensions: {"mogwai:explain": true}` on the
+request, answered under a scoped key in the response's `extensions`.
+
+The affordance is still wanted — showing a user the Gremlin their document became is the debugging
+story and a real escape ladder (read it, then hand-edit it). Note only that it does **not** come free
+with the string option: the scoped-extension plumbing is the same either way, and only the payload is
+lying around.
+
+### 5·4 The dependency, and the one thing GraphQL adds
+
+Everything right of the translator belongs to `docs/2026-08-07-edge-compilation-plan.md`. GraphQL
+must not build a private version of it, and does not need to: until that plan's Phase 1 lands, the
+translator hands `{gremlin, params, paramTypes}` across the existing `GraphManager` seam
+(`src/router.ts`, `src/api.ts:160`) exactly as a Gremlin client does, needing **zero changes** to the
+manager or executor contract. So GraphQL is not blocked by it — only aligned with it.
+
+**The one asymmetry.** Compilation is a pure function of the query (`…edge-compilation-plan.md`
+§2·1). **Translation is not** — it is a function of the query *and the schema*, and the schema is
+read from the store (§4).
+
+**Start by fetching the schema per request.** Correct, no invalidation, simplest thing that works.
+The cost is that a GraphQL request becomes **two DO round trips** instead of one, and that is DO
+occupancy — the scarce resource — which makes this the mirror image of a cache that would spend the
+abundant one. Whether it matters is unmeasured and genuinely unknown: the reflection is a few
+`GROUP BY`s over `labels` / `vertex_labels` / `vertex_properties` / `edges`, index-covered, so on a
+small graph the extra hop dominates and on a large one `DISTINCT key` over a million property rows
+does not.
+
+**Batching cannot collapse it, and the reason is worth writing down.** SQLite has no multiple-result-
+set concept — DO's `exec` accepts several statements but returns one cursor — but that is not the
+obstacle. The obstacle is that the second query's **text does not exist yet**: it is computed in
+JavaScript, in the Worker, from the first query's results. That is a *compilation* dependency, not a
+data dependency, and no amount of statement batching resolves it. The two-hop shape is inherent to
+translating anywhere but inside the DO.
+
+**If it measures, the answer is a compare-and-swap, not a TTL.** Send the plan together with the
+schema version it was compiled against; the DO executes if the version still holds, and otherwise
+returns the fresh schema instead of results, for the Worker to retry. One hop in steady state, two
+only when the schema actually moved — and *correct* under staleness rather than merely fast, which a
+time-based cache is not. The write counter §4 already proposes is what it keys on.
 
 ## 6. Variables are parameters — the bind rule lands exactly right
 
@@ -323,11 +391,12 @@ rest of this plan — 2 through 5 are the engine's main line whether GraphQL eve
 **Phase 1 — schema reflection as a service.** `call('schema')` → the label/property/edge model.
 SDL printing on top. Cached against a write counter.
 
-**Phase 2 — the translator, in the Worker (§5).** `src/graphql/` — document AST + reflected schema →
-Gremlin string + params, plus the edge-side schema cache §5·2 requires. Router: `POST /graphql/{g}`,
-`GET /graphql/{g}` for introspection/GraphiQL, `?explain` for the generated Gremlin. Hands its output
-across the existing manager seam; picks up plan-shipping for free when
-`docs/2026-08-07-edge-compilation-plan.md` Phase 1 lands.
+**Phase 2 — the translator, in the Worker (§5·1).** Opens with a **spike settling §5·2** — emit a
+Gremlin string or `Step[]` — because argument has taken it as far as it goes. Then `src/graphql/`:
+document AST + reflected schema → whichever the spike chose, fetching the schema per request (§5·4).
+Router: `POST /graphql/{g}`, `GET /graphql/{g}` for introspection/GraphiQL, explain as a scoped
+`extensions` entry (§5·3). Hands its output across the existing manager seam; picks up plan-shipping
+for free when `docs/2026-08-07-edge-compilation-plan.md` Phase 1 lands.
 
 **Phase 3 — the oracles.** `graphql-http` `serverAudits` as a ratcheted suite; the graphql-js
 differential; the introspection round-trip. Wire into `mise run ci`.
@@ -355,9 +424,9 @@ cross-DO federation is not it); persisted queries; a declarative SDL-with-direct
   literals inline, only variables bind — but "should" is not a measurement, and the 100-bind cap is
   the wall that has shipped twice.
 - Whether a depth-4 selection set's SQL stays under the DO's 100 KB statement-text cap.
-- **Schema-cache invalidation cost** (§5·2) — how often a write actually changes the label/property
-  set, and therefore whether the write counter is a cheap check or a constant refetch. The only new
-  unknown §5 introduces.
+- **What the schema reflection costs a DO** (§5·4) — the number that decides whether fetch-per-request
+  is fine or the compare-and-swap is needed. Measure it as occupancy, against graph size, since the
+  two ends of that range plausibly disagree.
 
 **Two findings from the probes run for §5 are bigger than this document**, and both have their own
 plan: a point-lookup-plus-1-hop on a 20 000-vertex graph takes 9.8 s because SQLite has no statistics
