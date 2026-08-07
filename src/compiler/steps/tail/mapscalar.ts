@@ -1,10 +1,10 @@
-import { q, list, value, type Expression } from '../../../sql/kernel/q.ts';
+import { q, list, raw, value, type Expression } from '../../../sql/kernel/q.ts';
 import {
     elemCtx, scalarProp, aliasCtx,
     predicateSql, scalarTx, type ScalarCtx, tokenExpr
 } from '../../plan/plan.ts';
 import { isNested, isPickArg, isTokenArg, argValues } from '../../../gremlin/frontend.ts';
-import { mathToSql, mathVars } from '../../../gremlin/math.ts';
+import { compileMath, mathVars, type MathOps } from '../../../gremlin/math.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { aliasElem, layoutProjection, layoutProjectionMinting, layoutCols, patchLayout, elemRel, type ElementStream } from '../context/context.ts';
 import { aliasId, aliasScalar } from '../../plan/alias.ts';
@@ -70,6 +70,32 @@ export function lowerMapScalar(st: ElementStream, steps: IRStep[], stop: number)
 // ---------- math (scalar arithmetic projector) ----------
 
 /**
+ * THE `q`-KERNEL SIDE of `math()` — the EMISSION half of the kernel/emission split (§6·4).
+ *
+ * `src/gremlin/math.ts` holds the lexer, the precedence climb, the function NAME set and the three
+ * SQL expansions that are not derivable from an operator name (`log`→`LN`, `cbrt`'s sign split,
+ * `signum`'s three-way CASE). What is per-layer is only the CONSTRUCTION, and this is legacy's: a
+ * `q` `Expression`. It lives here rather than in the kernel because it is legacy's object model and
+ * dies with `steps/`; RelIR's counterpart composes `Expr` in `compiler/rel/math.ts` off the same
+ * table, so the two spines cannot disagree about what `cbrt` expands to.
+ *
+ * Spelling is preserved from the fused version deliberately — `(a + b)`, `MOD(a, b)`, `5.0`,
+ * `CAST(… AS REAL)` — so the L2 SQL assertions still describe what legacy emits.
+ */
+const qMathOps = (resolveVar: (name: string) => Expression): MathOps<Expression> => ({
+  variable: (name) => q`CAST(${resolveVar(name)} AS REAL)`,
+  // The text is lexer-validated numeric, so raw splicing is injection-safe.
+  real: (text) => raw(/[.eE]/.test(text) ? text : `${text}.0`),
+  binary: (op, left, right) => q`(${left} ${raw(op)} ${right})`,
+  negate: (a) => q`(-${a})`,
+  call: (fn, args) => q`${raw(fn)}(${list(args, ', ')})`,
+  conditional: (whens, otherwise) =>
+    q`(CASE ${list(whens.map(([when, then]) => q`WHEN ${when} THEN ${then}`), ' ')} ELSE ${otherwise} END)`,
+  compare: (op, left, right) => q`${left} ${raw(op)} ${right}`,
+  nul: () => raw('NULL'),
+});
+
+/**
  * math("<formula>") → a per-traverser Double scalar. The formula (src/math.ts)
  * becomes one SQL arithmetic expression; its variables resolve here:
  *   - `_`        → the current traverser (elemCtx).
@@ -124,7 +150,7 @@ export function lowerMath(st: ElementStream, steps: IRStep[], stop: number): Sca
     return scalarProp(ctx, r.key!);
   };
 
-  const mathExpr = mathToSql(formula, resolveVar);
+  const mathExpr = compileMath(formula, qMathOps(resolveVar));
 
   // Drop a non-productive by() or SQL domain-error result (both yield NULL).
   const rel = st.q.cte(
@@ -153,7 +179,7 @@ export function lowerMathScalar(s: ScalarStream, step: IRStep): ScalarStream | n
   // Fast path: `_`-only, no by() — one expression straight over the value, encounter preserved.
   if (!bys.length && varOrder.every((name) => name === '_')) {
     const p = s.rel.as('p');
-    const mathExpr = mathToSql(formula, () => p.c.v);
+    const mathExpr = compileMath(formula, qMathOps(() => p.c.v));
     const rel = s.q.cte(
       q`SELECT ${mathExpr} AS v${layoutProjection(s.traverserLayout, p)} FROM ${p} WHERE ${predicateSql(mathExpr, undefined)}`,
       ['v', ...layoutCols(s.traverserLayout)],
@@ -179,7 +205,7 @@ export function lowerMathScalar(s: ScalarStream, step: IRStep): ScalarStream | n
     const mod = resolved.get(name);
     return mod !== undefined ? p.c[mods!.values[mod].value] : p.c.v; // `_` = the value (idCol='v')
   };
-  const mathExpr = mathToSql(formula, resolveVar);
+  const mathExpr = compileMath(formula, qMathOps(resolveVar));
   const rel = s.q.cte(
     q`SELECT ${mathExpr} AS v${layoutProjection(s.traverserLayout, p)} FROM ${p} WHERE ${predicateSql(mathExpr, undefined)}`,
     ['v', ...layoutCols(s.traverserLayout)],

@@ -43,8 +43,8 @@
   },
   "asNumber": {
     "binds": 0,
-    "bytes": 219,
-    "compiler": 5,
+    "bytes": 1106,
+    "compiler": 11,
     "bound": 0
   },
   "asString": {
@@ -219,6 +219,12 @@
     "binds": 0,
     "bytes": 1377,
     "compiler": 29,
+    "bound": 0
+  },
+  "math": {
+    "binds": 0,
+    "bytes": 1233,
+    "compiler": 12,
     "bound": 0
   },
   "max": {

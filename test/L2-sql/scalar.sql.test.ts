@@ -628,28 +628,42 @@ describe('scalar-parent / projection SQL', () => {
     expect(() => compile('g.inject(5b,5l).asNumber()', {})).toThrow('mixed numeric subtypes');
   });
 
-  test('math("<formula>") compiles to one Double scalar; leaves coerced to REAL', () => {
-    // `_` resolves through the by() modulator; result always tagged Double.
-    const p = read('g.V().math("_+_").by("age")');
-    expect(p.shape).toEqual({ kind: 'value', type: STATIC('double') });
-    expect(p.sql).toContain("(CAST((SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS REAL) + CAST((SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS REAL)) AS v");
-    // a missing by() value makes the arithmetic NULL → the traverser is filtered
-    expect(p.sql).toContain('is not null');
-    // `0-_` (subtraction-based negation) on an edge property
-    expect(read('g.V().outE().math("0-_").by("weight")').sql).toContain("(0.0 - CAST((SELECT value FROM edge_properties WHERE edge=n.id AND key=?) AS REAL))");
-    // integer literals emit REAL form so `/` is real division, not SQLite integer div
-    expect(read('g.V().math("_ / 2").by("age")').sql).toContain('/ 2.0)');
-    // `^` → POW, `%` → MOD (SQLite `%` truncates operands to int)
-    expect(read('g.V().math("_ ^ 2").by("age")').sql).toContain('POW(');
-    expect(read('g.V().math("_ % 10").by("age")').sql).toContain('MOD(');
-    // functions: parenthesised call and juxtaposition; exp4j `log` → natural log (LN)
-    expect(read('g.V().math("ceil(_ * 100)").by("age")').sql).toContain('CEIL((');
-    expect(read('g.V().math("sin _").by("age")').sql).toContain('SIN(');
-    expect(read('g.V().math("log _").by("age")').sql).toContain('LN(');
-    // cbrt splits on sign (POW domain-errors on a negative base + fractional exponent)
-    expect(read('g.V().math("cbrt(_)").by("age")').sql).toContain('CASE WHEN');
-    // math is a relational producer; a later barrier is dispatched independently.
-    expect(read('g.V().math("_").by("age").is(P.gt(30)).count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
+  test('math("<formula>") compiles to one Double scalar; leaves coerced to REAL — on BOTH spines', () => {
+    // EVERY ASSERTION HERE RUNS TWICE, and that is what the ops record buys. The lexer, the
+    // precedence climb, the function NAME set and the three expansions that are SQL FACTS rather
+    // than operator names live once in `src/gremlin/math.ts`; each spine supplies only the
+    // construction primitives (`qMathOps` / `relMathOps`). A spine that disagreed about
+    // `log`→`LN`, `cbrt`'s sign split or `signum`'s three-way CASE would be a second
+    // implementation of a non-derivable fact — the failure mode §12 names and that no per-spine
+    // assertion could see. Spelling is deliberately NOT pinned (§5a); each `toContain` is a
+    // semantic claim about what the formula compiled TO.
+    for (const spine of ['rel', 'legacy'] as const) {
+      // `_` resolves through the by() modulator; result always tagged Double.
+      const p = read('g.V().math("_+_").by("age")', { spine });
+      expect(p.shape).toEqual({ kind: 'value', type: STATIC('double') });
+      // a leaf is coerced to REAL, so `math()` is all-double arithmetic whatever the column holds
+      expect(p.sql).toContain('AS REAL)');
+      // a missing by() value makes the arithmetic NULL → the traverser is filtered
+      expect(p.sql.toLowerCase()).toContain('is not null');
+      // `0-_` (subtraction-based negation) on an edge property
+      expect(read('g.V().outE().math("0-_").by("weight")', { spine }).sql).toContain('(0.0 - CAST(');
+      // integer literals emit REAL form so `/` is real division, not SQLite integer div
+      expect(read('g.V().math("_ / 2").by("age")', { spine }).sql).toContain('/ 2.0)');
+      // `^` → POW, `%` → MOD (SQLite `%` truncates operands to int)
+      expect(read('g.V().math("_ ^ 2").by("age")', { spine }).sql).toContain('POW(');
+      expect(read('g.V().math("_ % 10").by("age")', { spine }).sql).toContain('MOD(');
+      // functions: parenthesised call and juxtaposition; exp4j `log` → natural log (LN)
+      expect(read('g.V().math("ceil(_ * 100)").by("age")', { spine }).sql).toContain('CEIL((');
+      expect(read('g.V().math("sin _").by("age")', { spine }).sql).toContain('SIN(');
+      expect(read('g.V().math("log _").by("age")', { spine }).sql).toContain('LN(');
+      // cbrt and signum split on sign — cbrt because POW domain-errors on a negative base with a
+      // fractional exponent, signum because SQLite has no builtin for it at all.
+      expect(read('g.V().math("cbrt(_)").by("age")', { spine }).sql).toContain('CASE WHEN');
+      expect(read('g.V().math("signum(_)").by("age")', { spine }).sql).toContain('CASE WHEN');
+      // math is a relational producer; a later barrier is dispatched independently.
+      expect(read('g.V().math("_").by("age").is(P.gt(30)).count()', { spine }).shape)
+        .toEqual({ kind: 'value', type: STATIC('long') });
+    }
   });
 
   test('format("…%{token}…") templates a string from properties + by() modulators', () => {
@@ -666,23 +680,51 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().format("%{name}").count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
   });
 
-  test('math() variables: `_` = current, an identifier = an as()-bound alias', () => {
-    // named aliases resolve via the carried rowid column (correlated subquery); one
-    // by() feeds every variable (round-robin), N by()s feed N variables positionally.
-    const shared = read('g.V().as("a").out("knows").as("b").math("a + b").by("age")');
-    expect(shared.sql).toContain("(SELECT value FROM vertex_properties WHERE node=CAST(p.a0 ->> ? AS INTEGER) AND key=? ORDER BY id LIMIT 1)");
-    expect(shared.sql).toContain("(SELECT value FROM vertex_properties WHERE node=CAST(p.a1 ->> ? AS INTEGER) AND key=? ORDER BY id LIMIT 1)");
-    // per-variable by(): first-seen order (`b` before `a`), nested traversal + key
-    const perVar = read('g.V().as("a").out("created").as("b").math("b + a").by(__.in("created").count()).by("age")');
-    expect(perVar.sql).toContain('COUNT(c.id) AS v');         // b ← generic child count, total per origin
-    expect(perVar.sql).toContain('ROW_NUMBER() OVER () AS o0');
-    expect(perVar.sql).toContain("node=CAST(p.a0 ->> ? AS INTEGER) AND key=?");      // a ← by("age")
-    // math() composes with a trailing typed cast (result narrows to the cast's subtype)
-    expect(read('g.V().as("a").out("knows").as("b").math("a + b").by("age").asNumber(GType.INT)').shape)
-      .toEqual({ kind: 'value', type: STATIC('int') });
-    // defers: a variable with no by(), and an unbound identifier
+  test('math() variables: `_` = current, an identifier = a SCOPE KEY', () => {
+    // A math variable NAMES A HOST and the ring's by() PROJECTS a value out of it — which is
+    // `Scoping.getScopeValue` plus the ordinary by() vocabulary, not machinery of math's own
+    // (`compiler/rel/math.ts`; `MathStep.processNextStart` reads the same two halves). So both
+    // spines resolve `a`/`b` through the carried alias channel and read the property off THAT
+    // element, and one by() feeds every variable (round-robin) while N by()s feed N positionally.
+    for (const spine of ['rel', 'legacy'] as const) {
+      const shared = read('g.V().as("a").out("knows").as("b").math("a + b").by("age")', { spine });
+      // two DISTINCT correlated property reads — one per alias, not one read used twice
+      expect(new Set(shared.sql.match(/vertex_properties/g)).size).toBe(1);
+      expect((shared.sql.match(/vertex_properties/g) ?? []).length).toBeGreaterThanOrEqual(4);
+      // PER-VARIABLE by(), asserted by the ANSWER rather than by SQL — the claim is that the ring
+      // binds in FIRST-SEEN order (`b` gets the child count, `a` gets `by("age")`), and the two
+      // spines spell that reduction differently (`count(c.id)` vs the bulk channel's `sum`) while
+      // agreeing on every row. Reading the rows is what pins the rule; reading the aggregate's
+      // spelling would pin a spine.
+      const perVar = runWith(seededStore(),
+        'g.V().as("a").out("created").as("b").math("b + a").by(__.in("created").count()).by("age")', { spine }) as any[];
+      expect(perVar.map((row) => row.v).sort()).toEqual([32, 33, 35, 38]);
+      // math() composes with a trailing typed cast (result narrows to the cast's subtype)
+      expect(read('g.V().as("a").out("knows").as("b").math("a + b").by("age").asNumber(GType.INT)', { spine }).shape)
+        .toEqual({ kind: 'value', type: STATIC('int') });
+    }
+    // DECLINES, and they are the reference's rather than a spine's limit: an ELEMENT under an
+    // identity by() is `traverser.get()`, which is not a Number — `MathStep` raises rather than
+    // coercing, so RelIR declines and legacy raises the message it owns. An unbound identifier
+    // resolves in neither scope.
     expect(() => compile('g.V().math("_+_")', {})).toThrow('needs a by() modulator');
     expect(() => compile('g.V().math("a + b").by("age")', {})).toThrow('no such variable "a"');
+  });
+
+  test('math() is one lowering at EVERY host — element, value and record', () => {
+    // §6·6 one level up: a shape works wherever it is LEGAL, not wherever a host was taught it. A
+    // math variable is a scope key, so the RECORD host resolves it against the traverser's own Map
+    // (map scope beats path scope), and the VALUE host answers `_` directly with no by() at all.
+    // All three are RelIR-only capabilities today, so they say so (§6·1).
+    expect(read('g.V().values("age").math("_ * 2")', { spine: 'rel' }).shape)
+      .toEqual({ kind: 'value', type: STATIC('double') });
+    expect(read('g.V().hasLabel("person").project("a","b").by("age").by("age").math("a + b")', { spine: 'rel' }).shape)
+      .toEqual({ kind: 'value', type: STATIC('double') });
+    // and as a CHILD BODY, which is what makes the whole by()-child matrix gain it at once
+    expect(read('g.V().hasLabel("person").order().by(__.math("_ * -1").by("age"))', { spine: 'rel' }).spine)
+      .toBe('rel');
+    expect(read('g.V().hasLabel("person").project("d").by(__.values("age").math("_ * 2"))', { spine: 'rel' }).spine)
+      .toBe('rel');
   });
 
   test('asDate() casts to a date-tagged epoch-millis value (const-fold + runtime)', () => {

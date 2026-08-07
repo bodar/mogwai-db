@@ -33,8 +33,9 @@ import {
 import { bindAliases } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, propertyVtype, type Modulation } from './modulator.ts';
-import type { ChildHost, ChildSeam, ChildValue, RootedRead, Subject } from './child.ts';
+import type { ChildHost, ChildSeam, ChildValue, HostRow, RootedRead, Subject } from './child.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
+import { mathTail, mathValue } from './math.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementMergeE, elementMergeV, elementProperty, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
@@ -1274,7 +1275,7 @@ const CLAUSE_READERS = new Set(['is', 'order']);
  *  inline because the blanket `step.modulators?.length` decline must exempt exactly these — a host
  *  added to the fold without being added here silently loses its modulator, which is the failure mode
  *  the modulator seam exists to end. */
-const BY_READERS = new Set(['order', 'dedup', 'project']);
+const BY_READERS = new Set(['order', 'dedup', 'project', 'math']);
 
 /**
  * An `order()`'s sort terms over any host, or `null` to decline.
@@ -1453,6 +1454,17 @@ function scalarTail(
       const record = recordOf(rel, host, out, step, childSeam(ctx, fresh), fresh);
       if (!record) return null;
       return continueAs(record.rel, { kind: 'record', fields: record.fields }, steps, at + 1, bulked, ctx, fresh, labels);
+    }
+
+    // `math()` over a VALUE traverser — `_` IS the value, and a named variable is a scope key. One
+    // lowering at both hosts, for `project()`'s reason: a shape works wherever it is legal, not
+    // wherever a host was taught it.
+    if (step.name === 'math') {
+      const projected = mathTail(rel, step, host, childSeam(ctx, fresh), fresh);
+      if (!projected) return null;
+      rel = projected;
+      out = { kind: 'scalar', type: STATIC('double') };
+      continue;
     }
 
     if (step.name === 'order') {
@@ -2592,6 +2604,17 @@ function elementTail(
     // carries and a following `select(label)` still finds its label. That is the whole difference from
     // the `group()` arm above, and it is the reference's (`ProjectStep extends ScalarMapStep`, while
     // `GroupStep extends ReducingBarrierStep`).
+    // `math()` — a RETYPE from an element traverser to a Double, exactly as `values()`/`count()` are,
+    // so it hands the relation to `continueAs` and the scalar tail takes the rest of the chain. It is
+    // not in `terminal()` with them because it HOSTS a `by()`, which every arm there declines.
+    if (step.name === 'math') {
+      // A carried PATH declines for `terminal()`'s reason: the value is a new traverser object and
+      // nothing here appends it as a path position.
+      if (pathCarried(rel)) return null;
+      const projected = mathTail(rel, step, elementHost(rel, elem, labels), childSeam(ctx, fresh), fresh);
+      if (!projected) return null;
+      return continueAs(projected, { kind: 'scalar', type: STATIC('double') }, steps, at + 1, bulked, ctx, fresh, labels);
+    }
     if (step.name === 'project') {
       // A carried PATH declines for `terminal()`'s reason: the record is a new traverser object and
       // nothing here appends it as a path position, so a later `path()` would report a history with a
@@ -2846,10 +2869,21 @@ function recordTail(
       return continueAs(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
 
+    // `math()` OVER A RECORD'S FIELDS, and it needs nothing record-specific: a math variable NAMES A
+    // SCOPE KEY, `Scoping.getScopeValue` tries the traverser's own Map first, and the record host is
+    // what carries that Map — so `project('a','b')…math('a / b')` resolves against the FIELDS by the
+    // same rule `by(__.select('a'))` already followed here. `_` is the whole map and not a Number, so
+    // it declines through the identity guard rather than projecting one.
+    if (step.name === 'math') {
+      const projected = mathTail(rel, step, host, childSeam(ctx, fresh), fresh);
+      if (!projected) return null;
+      return continueAs(projected, { kind: 'scalar', type: STATIC('double') }, steps, at + 1, bulked, ctx, fresh, labels);
+    }
+
     // Everything else DECLINES. A record is an ordinary per-row traverser, so `dedup()`, a local-scope
-    // slice over its ENTRIES, `math()` over its fields and `unfold()` to `Map.Entry` rows are all
-    // expressible and simply not built yet — declining hands them to the spine that answers rather
-    // than dropping the record's fields silently.
+    // slice over its ENTRIES and `unfold()` to `Map.Entry` rows are all expressible and simply not
+    // built yet — declining hands them to the spine that answers rather than dropping the record's
+    // fields silently.
     return null;
   }
   return { rel, framing: { kind: 'record', fields }, aliases: labels };
@@ -3109,7 +3143,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   // (`by(__.math('_ * 10'))`, `by(dateAdd(DT.day, 1))`) is well-formed rather than the nonsense it
   // would be over an element. That is the "A BODY MUST NAME ITS SUBJECT" guard below read the other
   // way round — the guard exists because an element is not a value, and here there is one.
-  if (host.kind === 'scalar') return scalarHostChild(body, host);
+  if (host.kind === 'scalar') return scalarHostChild(body, host, childSeam(ctx, fresh), fresh);
   if (host.kind !== 'element') return null;
 
   // THE MOVEMENT-THEN-REDUCER ARM is `correlatedExists` minus EXISTS: root the first hop directly at
@@ -3181,6 +3215,15 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     // unknown and the framer infers — the same split `byNode`'s token arm makes.
     if (leading.name === 'label') type = STATIC('string');
     at = 1;
+  } else if (leading?.name === 'math') {
+    // `by(__.math('a + b').by('age'))` — a math body NAMES ITS SUBJECT through its own variables, so it
+    // leads a body exactly as `values(k)` and `call(…)` do. Its `_` is this host, which is why it needs
+    // no arm of its own here and why the whole by()-child matrix gains it at once.
+    const projected = mathValue(leading, host, childSeam(ctx, fresh), fresh);
+    if (!projected) return null;
+    value = projected;
+    type = STATIC('double');
+    at = 1;
   } else if (leading?.name === 'constant') {
     const args = argValues(leading);
     if (args.length !== 1) return null;
@@ -3204,19 +3247,49 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   // it; an element is not one. Measured on this very increment, so it is a guard with a witness.
   if (at === 0) return null;
 
-  for (; at < body.length; at++) {
+  return valueRun(body, at, { value, type, vtype }, host.row, childSeam(ctx, fresh), fresh);
+}
+
+/**
+ * THE VALUE RUN — a child body's tail once its SUBJECT is named: a sequence of steps that each turn
+ * one value into another.
+ *
+ * Both child arms end here because past the leading step they ask an identical question, and the two
+ * copies had already begun to differ in what they carried. It is also where a shape composes: a
+ * `math()` mid-run reads the value the run has reached, so `by(__.values('age').math('_ * 2'))` is the
+ * same lowering as the chain form and needs no by()-specific arm.
+ *
+ * `type` and `vtype` follow the same rule for every member: a step that RETYPES says so
+ * (`asNumber`/`asDate`/`dateAdd`/`dateDiff`, and `math()` which is always a Double); one that does not
+ * CLEARS the tag rather than letting the incoming one ride through, since keeping a stale tag is worse
+ * than claiming none (`asDate().asString()` would frame text as a Date). The STORED per-row carrier
+ * stops at the first step whatever it claims for itself — it describes the value as READ, and every
+ * member of this run produces a new one.
+ */
+function valueRun(
+  body: readonly IRStep[], from: number,
+  seed: { readonly value: Expr; readonly type: ScalarType; readonly vtype: Expr | undefined },
+  row: HostRow | undefined, child: ChildSeam, fresh: Minter,
+): ChildValue | null {
+  let value = seed.value;
+  let type = seed.type;
+  let vtype = seed.vtype;
+  for (let at = from; at < body.length; at++) {
     const step = body[at]!;
+    if (step.name === 'math') {
+      const host: ChildHost = { kind: 'scalar', value, ...(vtype ? { vtype } : {}), ...(row ? { row } : {}) };
+      const projected = mathValue(step, host, child, fresh);
+      if (!projected) return null;
+      value = projected;
+      type = STATIC('double');
+      vtype = undefined;
+      continue;
+    }
     if (!REL_TRANSFORMS.has(step.name)) return null;
     const transformed = transformExpr(step, value, false);
     if (!transformed) return null;
     value = transformed.expr;
-    // A transform that RETYPES says so (`asNumber`/`asDate`/`dateAdd`/`dateDiff`); one that does not
-    // CLEARS the type rather than letting the incoming one ride through. `transformExpr`'s own comment
-    // records why the string family claims nothing — it matches the spine being replaced — and keeping
-    // a stale tag would be worse than claiming none: `asDate().asString()` would frame text as a Date.
     type = transformed.type ?? UNKNOWN;
-    // The STORED tag describes the value as read; a transform is a new value, so the per-row carrier
-    // stops here whatever the transform claims for itself.
     vtype = undefined;
   }
   return vtype
@@ -3233,7 +3306,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
  * and it is the same fold the element arm uses.
  */
 function scalarHostChild(
-  body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }>,
+  body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }>, child: ChildSeam, fresh: Minter,
 ): ChildValue | null {
   let value: Expr = host.value;
   let type: ScalarType = UNKNOWN;
@@ -3254,18 +3327,7 @@ function scalarHostChild(
     if (argValues(leading).length) return null;
     at = 1;
   }
-  for (; at < body.length; at++) {
-    const step = body[at]!;
-    if (!REL_TRANSFORMS.has(step.name)) return null;
-    const transformed = transformExpr(step, value, false);
-    if (!transformed) return null;
-    value = transformed.expr;
-    type = transformed.type ?? UNKNOWN;
-    vtype = undefined;
-  }
-  return vtype
-    ? { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype }
-    : { expr: value, framing: { kind: 'scalar', type } };
+  return valueRun(body, at, { value, type, vtype }, host.row, child, fresh);
 }
 
 function addedVertices(

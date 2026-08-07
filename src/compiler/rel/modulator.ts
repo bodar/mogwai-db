@@ -325,6 +325,38 @@ function scopeValue(
 }
 
 /**
+ * A SCOPE KEY re-rooted as a HOST — the traverser a nested projection runs AGAINST, rather than the
+ * value it yields.
+ *
+ * `byExpr`/`byNode`/`byField` all answer "what does this `by()` project out of the host". This is the
+ * other half of `Scoping`: `math("a + b").by("age")` resolves `a` to the labelled traverser and THEN
+ * applies the ring's `by()` to it (`MathStep.processNextStart` —
+ * `TraversalUtil.produce(getNullableScopeValue(Pop.last, var, traverser), traversalRing.next())`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MathStep.java:70-73`).
+ * So the label names a HOST and the modulator names a projection over it, and expressing that as
+ * `scopedHost` + the existing `byExpr` is what stops a scope-resolving host growing its own copy of
+ * the by() vocabulary. `format()`'s named tokens and `where(label, …)` want the identical thing.
+ *
+ * `null` where the key resolves in neither scope, or where what it holds is not a traverser a nested
+ * projection can run against (a LIST, a MAP, a nested RECORD): declining beats picking an element of
+ * one, which would answer a different question.
+ */
+export function scopedHost(label: string, host: ChildHost): ChildHost | null {
+  const scoped = scopeValue({ kind: 'alias', label, pop: 'last' }, host);
+  if (!scoped) return null;
+  const row = host.row ? { row: host.row } : {};
+  if (scoped.framing.kind === 'elements')
+    return { kind: 'element', id: scoped.payload[0]![1], elem: scoped.framing.elem, ...row };
+  if (scoped.framing.kind === 'scalar') {
+    // The recorded per-row type rides along: it is what makes an ordering/comparison over the scoped
+    // value read as its Gremlin type rather than as its storage class, exactly as the host's own does.
+    const vtype = scoped.payload[1]?.[1];
+    return { kind: 'scalar', value: scoped.payload[0]![1], ...(vtype ? { vtype } : {}), ...row };
+  }
+  return null;
+}
+
+/**
  * A `by()` projection as a SELF-DESCRIBING `{t,v}` NODE rather than a bare value — what a MAP entry
  * needs, because a map's sides are framed per entry from their own tags (§ the map shape) and a
  * heterogeneous map has to round-trip each one exactly.
