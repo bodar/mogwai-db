@@ -12,7 +12,7 @@ import type { ForeignRow } from '../src/services/spi/types.ts';
 import type { FederationSource } from '../src/compiler/segment.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { executeQuery } from './support/executor.ts';
+import { exec, executeQuery } from './support/executor.ts';
 import { Executor } from '../src/execute.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { decode, decodeAll } from './support/decode.ts';
@@ -273,8 +273,26 @@ describe('--list (DirectoryService) — end to end over GraphBinary', () => {
     createDirectoryService(app), stubService('tinker.search'), stubService('tinker.degree.centrality'),
   ]);
   const store = new GraphStore(new BunSqlite(':memory:'));
+  // THE SPINE IS PINNED, because `--list` now has exactly ONE lowering. The directory contributes
+  // `kind: 'rel'`, and a service implements `stream` XOR `rel` — two implementations of one service
+  // is the duplicated lowering `steps/CLAUDE.md` forbids. So these assert the answer on the spine
+  // that HAS one, rather than on whichever the ambient `MOGWAI_RELIR` switch selects; unpinned, the
+  // differential's OFF position would run them against a spine that correctly refuses.
+  //
+  // Not a skip, and not a weakening: the refusal is the other half of the same fact and is asserted
+  // directly below. That is the convention `l4.test.ts` already states — a skip says the same thing
+  // right up until both spines answer and answer differently, which is a defect rather than a
+  // declared divergence.
   const run = async (g: string, params: Record<string, any> = {}) =>
-    decodeAll(executeQuery(store, g, params, {}, reg));
+    decodeAll(exec(store, reg, undefined, 'rel').buffers(g, params, {}));
+
+  test('the legacy spine REFUSES the directory — a `rel` service has no lowering there', () => {
+    // The routing that lets services migrate one at a time, asserted from the legacy side. Reaching
+    // this in production means RelIR declined the traversal for some OTHER step, so the message says
+    // so instead of pretending the service is unknown.
+    expect(() => exec(store, reg, undefined, 'legacy').buffers('g.call("--list")', {}, {}))
+      .toThrow('lowers on the RelIR spine');
+  });
 
   test('g_call — bare g.call() lists every service (directory excluded)', async () => {
     expect((await run('g.call()')).sort()).toEqual(['tinker.degree.centrality', 'tinker.search']);

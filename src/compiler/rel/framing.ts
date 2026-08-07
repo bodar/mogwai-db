@@ -52,6 +52,11 @@ export type RelFraming =
    *  the framing layer exactly as `of` does for a list, and a pairs ARRAY rather than a JSON object is
    *  what keeps the entry order ours to state and lets a key be something other than a string. */
   | { readonly kind: 'map'; readonly keyOf: MapOf; readonly valOf: MapOf }
+  /** A traverser that IS a property — `properties()`, not `values()`. A VertexProperty on a vertex
+   *  (its own id, its own meta-properties) and a Property on an edge, which is neither an Element
+   *  nor able to carry meta; `ownerElem` is what decides that, and it is required because the two
+   *  differ in the payload's columns rather than only in their values. */
+  | { readonly kind: 'property'; readonly ownerElem: Elem }
   /** NOTHING to frame. A write whose Gremlin result is no traverser at all (`drop()`, and `iterate()`
    *  over any of them) ends on a statement with an empty `RETURNING`, so the plan's result relation
    *  has no columns and there is no shape to interpret. It is an arm of this union rather than an

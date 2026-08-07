@@ -13,6 +13,7 @@ import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, s
 import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { RelFraming } from './framing.ts';
+import { propertyPayload, propertyRelation } from './property.ts';
 import type { RelCallSite, RelContribution, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
 import { flattenListArgs, isNested, isTokenArg, stepChain, argValues, arg, type Arg } from '../../gremlin/frontend.ts';
@@ -1077,6 +1078,19 @@ function terminal(step: IRStep, input: Rel, elem: Elem, fresh: Minter): { readon
     };
   }
 
+  if (step.name === 'properties') {
+    // The PROPERTY twin of `values()` below — same join, stopped at the property row instead of
+    // projected down to its value. TinkerPop's `PropertiesStep` with no keys means EVERY key; a
+    // non-string key declines rather than being read as "every", which would answer a different
+    // question.
+    const keys = args.filter((a): a is string => typeof a === 'string');
+    if (keys.length !== args.length) return null;
+    return {
+      rel: propertyRelation(input, elem, keys, fresh),
+      framing: { kind: 'property', ownerElem: elem },
+    };
+  }
+
   if (step.name === 'values') {
     // TinkerPop's `PropertiesStep` is `element.properties(keys)`: no keys means EVERY key, several
     // mean membership in the set. A non-string key is a decline rather than a guess — answering
@@ -2005,6 +2019,10 @@ const framed = (chain: Tail, collapse: boolean, fresh: Minter): { readonly rel: 
     case 'list': return listPayload(chain.rel, framing.of, !!framing.set, fresh);
     case 'path': return pathPayload(chain.rel, framing.of, fresh);
     case 'map': return mapPayload(chain.rel, framing.keyOf, framing.valOf, fresh);
+    case 'property': return {
+      rel: propertyPayload(chain.rel, framing.ownerElem, fresh),
+      shape: { kind: 'property' },
+    };
     // A DISCARD has nothing to project: the result relation is a statement with an empty `RETURNING`, so it
     // has no columns and `discard` is already the whole contract. The algebra owes the framing layer nothing
     // further, which is exactly what every other arm here now also means.
@@ -2416,7 +2434,11 @@ function elementTail(
   const retyped = terminal(steps[at], rel, elem, fresh);
   if (!retyped) return null;
 
-  return scalarTail(retyped.rel, retyped.framing, steps, at + 1, bulked, ctx, fresh, labels);
+  // Through the ONE dispatcher rather than straight to `scalarTail`. It was hardcoded while every
+  // `terminal` arm produced a scalar; `properties()` produces a PROPERTY, and hardcoding is exactly
+  // how a second copy of the fold starts. `continueAs` routes a scalar identically, so this is a
+  // generalization with no behaviour change for the arms that were already here.
+  return continueAs(retyped.rel, retyped.framing, steps, at + 1, bulked, ctx, fresh, labels);
 }
 
 /**
@@ -2444,6 +2466,11 @@ function continueAs(
     // entries, `select(Column.keys/values)`, a local reducer. None of that is lowered yet, so the
     // honest answer is a DECLINE and not a loop that silently drops the map.
     case 'map': return from === steps.length ? { rel, framing, aliases: labels } : null;
+    // A PROPERTY traverser re-enters through `element()`/`key()`/`value()`, and through the ordinary
+    // filters and slices before them. None of that is lowered yet, so a step after `properties()`
+    // DECLINES — the map arm's reasoning exactly, and for the same reason: a loop that silently
+    // dropped the property would answer a different question rather than defer.
+    case 'property': return from === steps.length ? { rel, framing, aliases: labels } : null;
     // Nothing survives a discard, so nothing can follow one. `drop()` is a terminal step in the
     // grammar and the passes reject a chain that continues past it, so this is unreachable rather
     // than a decline — and saying so keeps the switch total.
@@ -2606,6 +2633,10 @@ const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
         // A MAP arm would be a branch whose arms each produce a whole map — expressible in principle,
         // and nothing builds one yet, so an equality that guessed would be untested code.
         : left.kind === 'map' ? false
+          // Two PROPERTY arms could merge when they agree on the owner kind, but the columns differ
+          // between vertex and edge (`vpid`/`meta`), so a blanket equality would union relations of
+          // different widths. Nothing builds a property-valued branch yet; decline until one does.
+          : left.kind === 'property' ? false
           : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
 
 const sameColumns = (left: readonly ColMeta[], right: readonly ColMeta[]): boolean =>

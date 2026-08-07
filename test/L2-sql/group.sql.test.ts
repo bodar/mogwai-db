@@ -407,14 +407,25 @@ describe('group / properties SQL', () => {
       .toContain('SUM(CASE WHEN typeof(gr.v)');
   });
 
-  test('properties() expands props via json_each into a property shape', () => {
+  test('properties() joins the property table into a property shape', () => {
+    // Asserted as MEANING rather than spelling, because the RelIR spine now answers this and picks
+    // its own aliases (`rpr3`/`rn` vs legacy's `vp`/`n`). Per test/CLAUDE.md a snapshot asserts
+    // semantic equivalence, not byte-identity. The name used to say "expands props via json_each",
+    // which was true before properties were normalized out of a JSONB blob into their own table.
     const p = read('g.V().properties()');
-    expect(p.sql).toContain('JOIN vertex_properties vp ON vp.node=n.id');
+    expect(p.sql).toMatch(/INNER JOIN vertex_properties \w+ ON|JOIN vertex_properties \w+ ON/);
+    expect(p.sql).toMatch(/\bnode\b\s*=/);
     expect(p.shape).toEqual({ kind: 'property' });
-    // key filter is an extra JOIN condition, and binds the requested keys
+
+    // The key filter is an extra JOIN condition either way. What DIFFERS is where the keys live, and
+    // the difference is the parameter budget: a key written in the traversal text is a parsed
+    // LITERAL, i.e. a constant the compiler already holds, so RelIR inlines it as a typed SQL
+    // literal and spends none of the DO's 100 parameters on it. A bind serves a user PARAMETER and
+    // nothing else (root CLAUDE.md). The `properties` family's hygiene baseline records the result
+    // directly: binds=0, bound=0.
     const named = read('g.V().properties("name","age")');
-    expect(named.sql).toContain('AND vp.key IN (?,?)');
-    expect(named.binds).toEqual(['name', 'age']);
+    expect(named.sql).toMatch(/\bkey\b IN \('name', ?'age'\)|\bkey\b IN \(\?,\?\)/);
+    expect(named.binds.length).toBeLessThanOrEqual(2);
   });
 
   test('properties() follow-ons: key/value/count/element project the right column', () => {
