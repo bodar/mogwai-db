@@ -1,8 +1,12 @@
 import { q, list, empty, raw, Query, Relation, type Expression } from '../../../sql/kernel/q.ts';
 import { aliasCtx, type Elem, type ScalarCtx, elemTable, P_OPS, propScalarFor } from '../../plan/plan.ts';
-import { aliasId, aliasPresent, aliasScalar, type AliasShape } from '../../plan/alias.ts';
+import {
+  aliasElem, aliasId, aliasIsElement, aliasPresent, aliasScalar, aliasScalarTypeOf, mergeAliasScalarTypes,
+  scalarTypeFromAlias, withShape,
+  type AliasEntry, type AliasMap, type AliasScalarType, type AliasShape,
+} from '../../plan/alias.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import type { ValueType, ListOf, ScalarType } from '../../../sql/kernel/render.ts';
+import type { ValueType, ListOf } from '../../../sql/kernel/render.ts';
 import { CHANNEL_BARRIER_POLICY, CHANNEL_MERGE_POLICY, type BarrierPolicy, type Channels, type MergePolicy, type RigidPolicy } from '../../../channels.ts';
 
 // ---------- prefix-compilation state ----------
@@ -15,81 +19,13 @@ import { CHANNEL_BARRIER_POLICY, CHANNEL_MERGE_POLICY, type BarrierPolicy, type 
 // builder (src/sql/kernel/q.ts): a StepFn calls `st.q.cte(body)` and gets back a Relation
 // handle it references downstream exactly like a base table.
 
-/** Bound as() labels: label → its carried column (a0, a1, … — user strings never
- *  enter SQL identifiers) + the SET of shapes the label has held across its bindings
- *  (a label's history can be heterogeneous, e.g. [vertex, string]). The column holds
- *  a JSONB history array (see src/compiler/steps/context/alias.ts); `shapes` is the compile-time
- *  summary a consumer uses to decide framing (homogeneous element → fast concrete
- *  path; heterogeneous/list → variant). */
-export type AliasEntry = {
-  col: string;
-  shapes: ReadonlySet<AliasShape>;
-  /** The scalar type channel after it has crossed into JSON history. A per-row
-   * stream no longer has its original relation column, so it is represented by
-   * the entry's own `t` field and restored into a fresh `vtype` column on select. */
-  scalarType?: AliasScalarType;
-  /** Member descriptor for a list value held in history. This is deliberately
-   * alias-local: it says how to re-enter THIS JSON list, not what a Stream is. */
-  listOf?: ListOf;
-  /** Compile-time binding count along the traverser's path: 1 for a once-bound label,
-   *  >1 after rebinds. `undefined` = dynamic depth (bound inside repeat()/a branch arm),
-   *  where the count is only known at runtime and Pop must resolve via SQL. Lets Pop.all/
-   *  mixed/first/last resolve statically for the common linear case. */
-  binds?: number;
-  /** Linear path position index this label attached to (the current element's position
-   *  at bind time — `path.cols.length - 1`). Set only while path tracking is active on a
-   *  linear chain, so path().from(l)/to(l) can resolve a label to a static position slice.
-   *  A rebind overwrites with the latest; `undefined` = no path / dynamic position. */
-  pathPos?: number;
-  /** Owner element kind when the label holds a PropertyStream payload. */
-  propertyElem?: Elem;
+/** The as()-label channel's COMPILE-TIME description — re-exported from `plan/alias.ts`, where it
+ *  sits with the tagged-entry ENCODING those descriptions describe. Both spines build these entries
+ *  and both read them back, which is why one home rather than a copy per spine. */
+export {
+  aliasElem, aliasIsElement, aliasScalarTypeOf, scalarTypeFromAlias, withShape,
+  type AliasEntry, type AliasMap, type AliasScalarType,
 };
-export type AliasMap = ReadonlyMap<string, AliasEntry>;
-
-export type AliasScalarType =
-  | { readonly kind: 'static'; readonly type: ValueType }
-  | { readonly kind: 'perRow' }
-  | { readonly kind: 'unknown' };
-
-export const aliasScalarTypeOf = (type: ScalarType): AliasScalarType =>
-  type.kind === 'static' ? { kind: 'static', type: type.type }
-    : type.kind === 'perRow' ? { kind: 'perRow' }
-      : { kind: 'unknown' };
-
-/** Restore an alias history type to a scalar relation. `perRow` deliberately
- * names the NEW projection column, not the source relation's vanished column. */
-export const scalarTypeFromAlias = (type: AliasScalarType | undefined, vtype = 'vtype'): ScalarType =>
-  type?.kind === 'static' ? { kind: 'static', type: type.type }
-    : type?.kind === 'perRow' ? { kind: 'perRow', column: vtype }
-      : { kind: 'unknown' };
-
-const mergeAliasScalarTypes = (types: readonly (AliasScalarType | undefined)[]): AliasScalarType | undefined => {
-  const present = types.filter((type): type is AliasScalarType => type !== undefined);
-  if (!present.length) return undefined;
-  if (present.every((type) => type.kind === 'static' && type.type === (present[0] as any).type)) return present[0];
-  if (present.every((type) => type.kind === 'unknown')) return { kind: 'unknown' };
-  // Different static tags and branch-local types are all faithfully represented by
-  // the JSON entry's `t`; a selected relation must expose that per-row channel.
-  return { kind: 'perRow' };
-};
-
-/** The element kind of a homogeneously-element label (node/edge). Throws if the
- *  label is a value/list/map or a mixed-shape history — callers that need a single
- *  element kind must have already established the label is element-homogeneous. */
-export function aliasElem(entry: AliasEntry): Elem {
-  if (entry.shapes.size !== 1) throw new Error('alias with mixed-shape history has no single element kind');
-  const [s] = entry.shapes;
-  if (s !== 'vertex' && s !== 'edge') throw new Error(`alias holds a ${s}, not an element`);
-  return s;
-}
-
-/** True iff every binding of the label is the same element kind (node XOR edge). */
-export const aliasIsElement = (entry: AliasEntry): boolean =>
-  entry.shapes.size === 1 && (entry.shapes.has('vertex') || entry.shapes.has('edge'));
-
-/** Merge a shape into a label's shape set (rebind may add a new shape). */
-export const withShape = (prev: ReadonlySet<AliasShape> | undefined, shape: AliasShape): Set<AliasShape> =>
-  new Set([...(prev ?? []), shape]);
 
 /** Path tracking. Two regimes (see docs/2026-07-12-path-tracking-prior-art.md):
  *  - `cols` (linear): each emitted element is a carried column (p0, p1, … — one per

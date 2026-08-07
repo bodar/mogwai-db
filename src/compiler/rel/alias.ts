@@ -7,7 +7,7 @@ import type { ColMeta } from '../../rel/types.ts';
 import type { ListOf, ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { Elem } from '../plan/plan.ts';
-import { aliasScalarTypeOf, withShape, type AliasEntry, type AliasMap } from '../steps/context/context.ts';
+import { aliasScalarTypeOf, withShape, type AliasEntry, type AliasMap } from '../plan/alias.ts';
 import { carriedCols, meta, payloadCols, typeOf, type Minter } from './build.ts';
 import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject } from './history.ts';
 

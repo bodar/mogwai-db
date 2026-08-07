@@ -18,7 +18,7 @@ import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
 import { and, carriedCols, eq, meta, renumber, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
-import type { AliasMap } from '../steps/context/context.ts';
+import type { AliasMap } from '../plan/alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, DEFAULT_VERTEX_LABEL, type LabelCardinality, type VertexCardinality } from '../../api.ts';
 
 /**

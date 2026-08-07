@@ -1,5 +1,6 @@
 import { q, value, empty, type Expression } from '../../sql/kernel/q.ts';
 import { type Elem } from './plan.ts';
+import type { ListOf, ScalarType, ValueType } from '../../sql/kernel/render.ts';
 
 // ---------- as() label encoding: per-traverser path history ----------
 //
@@ -100,3 +101,96 @@ export const kindShape = (k: number): AliasShape => K_SHAPE[k];
  *  never an error — matching select() semantics for a never-seen label. */
 export const aliasPresent = (col: Expression): Expression =>
   q`${col} IS NOT NULL AND json_array_length(${col}) > 0`;
+
+// ---------- the same channel's COMPILE-TIME description ----------
+//
+// Above is what a label's history looks like IN THE DATABASE. Below is what the compiler knows about
+// it while building a plan: which column holds it, which shapes it has held, what type its scalar
+// bindings carry. The two belong together for the reason `SHAPE_K` is shared rather than copied — a
+// second spelling of either is a second chance for the two to drift, and here they would drift
+// SILENTLY, since a wrong compile-time summary produces valid SQL against a correct encoding.
+//
+// It used to live in `steps/context/context.ts`, beside `LoweringState` and `TraverserLayout`. That
+// made it look like legacy's object model, which it never was: `rel/alias.ts` builds and reads the
+// same entries, and its own header records why ("the shared type stays because select() re-entry
+// still needs the same entry shape the legacy host reads"). The build plan's Phase 0 proposed giving
+// `rel/` its own alias types instead; that predates §10·10 removing the TraverserLayout bridge, and
+// it would have bought a second encoding to keep in step. One home, no bridge.
+
+/** Bound as() labels: label → its carried column (a0, a1, … — user strings never
+ *  enter SQL identifiers) + the SET of shapes the label has held across its bindings
+ *  (a label's history can be heterogeneous, e.g. [vertex, string]). The column holds
+ *  a JSONB history array (see src/compiler/steps/context/alias.ts); `shapes` is the compile-time
+ *  summary a consumer uses to decide framing (homogeneous element → fast concrete
+ *  path; heterogeneous/list → variant). */
+export type AliasEntry = {
+  col: string;
+  shapes: ReadonlySet<AliasShape>;
+  /** The scalar type channel after it has crossed into JSON history. A per-row
+   * stream no longer has its original relation column, so it is represented by
+   * the entry's own `t` field and restored into a fresh `vtype` column on select. */
+  scalarType?: AliasScalarType;
+  /** Member descriptor for a list value held in history. This is deliberately
+   * alias-local: it says how to re-enter THIS JSON list, not what a Stream is. */
+  listOf?: ListOf;
+  /** Compile-time binding count along the traverser's path: 1 for a once-bound label,
+   *  >1 after rebinds. `undefined` = dynamic depth (bound inside repeat()/a branch arm),
+   *  where the count is only known at runtime and Pop must resolve via SQL. Lets Pop.all/
+   *  mixed/first/last resolve statically for the common linear case. */
+  binds?: number;
+  /** Linear path position index this label attached to (the current element's position
+   *  at bind time — `path.cols.length - 1`). Set only while path tracking is active on a
+   *  linear chain, so path().from(l)/to(l) can resolve a label to a static position slice.
+   *  A rebind overwrites with the latest; `undefined` = no path / dynamic position. */
+  pathPos?: number;
+  /** Owner element kind when the label holds a PropertyStream payload. */
+  propertyElem?: Elem;
+};
+export type AliasMap = ReadonlyMap<string, AliasEntry>;
+
+export type AliasScalarType =
+  | { readonly kind: 'static'; readonly type: ValueType }
+  | { readonly kind: 'perRow' }
+  | { readonly kind: 'unknown' };
+
+export const aliasScalarTypeOf = (type: ScalarType): AliasScalarType =>
+  type.kind === 'static' ? { kind: 'static', type: type.type }
+    : type.kind === 'perRow' ? { kind: 'perRow' }
+      : { kind: 'unknown' };
+
+/** Restore an alias history type to a scalar relation. `perRow` deliberately
+ * names the NEW projection column, not the source relation's vanished column. */
+export const scalarTypeFromAlias = (type: AliasScalarType | undefined, vtype = 'vtype'): ScalarType =>
+  type?.kind === 'static' ? { kind: 'static', type: type.type }
+    : type?.kind === 'perRow' ? { kind: 'perRow', column: vtype }
+      : { kind: 'unknown' };
+
+/** Merge the scalar types of several bindings of one label — the alias channel's own join, used
+ *  when a branch merge unions arms that bound the same label differently. */
+export const mergeAliasScalarTypes = (types: readonly (AliasScalarType | undefined)[]): AliasScalarType | undefined => {
+  const present = types.filter((type): type is AliasScalarType => type !== undefined);
+  if (!present.length) return undefined;
+  if (present.every((type) => type.kind === 'static' && type.type === (present[0] as any).type)) return present[0];
+  if (present.every((type) => type.kind === 'unknown')) return { kind: 'unknown' };
+  // Different static tags and branch-local types are all faithfully represented by
+  // the JSON entry's `t`; a selected relation must expose that per-row channel.
+  return { kind: 'perRow' };
+};
+
+/** The element kind of a homogeneously-element label (node/edge). Throws if the
+ *  label is a value/list/map or a mixed-shape history — callers that need a single
+ *  element kind must have already established the label is element-homogeneous. */
+export function aliasElem(entry: AliasEntry): Elem {
+  if (entry.shapes.size !== 1) throw new Error('alias with mixed-shape history has no single element kind');
+  const [s] = entry.shapes;
+  if (s !== 'vertex' && s !== 'edge') throw new Error(`alias holds a ${s}, not an element`);
+  return s;
+}
+
+/** True iff every binding of the label is the same element kind (node XOR edge). */
+export const aliasIsElement = (entry: AliasEntry): boolean =>
+  entry.shapes.size === 1 && (entry.shapes.has('vertex') || entry.shapes.has('edge'));
+
+/** Merge a shape into a label's shape set (rebind may add a new shape). */
+export const withShape = (prev: ReadonlySet<AliasShape> | undefined, shape: AliasShape): Set<AliasShape> =>
+  new Set([...(prev ?? []), shape]);

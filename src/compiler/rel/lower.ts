@@ -26,7 +26,7 @@ import {
   typeOf, type Minter,
 } from './build.ts';
 import { bindAliases, selectOne, type AliasRead } from './alias.ts';
-import type { AliasMap } from '../steps/context/context.ts';
+import type { AliasMap } from '../plan/alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, type Modulation } from './modulator.ts';
 import type { ChildHost, ChildSeam, RootedRead, Subject } from './child.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
