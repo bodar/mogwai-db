@@ -5,10 +5,15 @@ relational algebra between the Gremlin front-end and the `q` SQL kernel. It repl
 compile-straight-to-SQL spine, whose `Query.ctes` is a private append-only array — the query never exists
 as data, so every optimization had to happen *before* lowering or be hand-built around.
 
-**Two counters run the migration, and both live in committed, `ci`-gated artifacts — never copied here**
-(a number in prose goes stale): coverage is `test/census/goldens.tsv` (the `spine` column), the deletion
-list is `scripts/deletion-ratchet.tsv`. Read them from a `ci` run. The blocker ranking is
-`mise run rel-blockers` — re-run it every round, it moves.
+**The migration finishes when the IMPORT GRAPH is severed and `repeat()` works — not when coverage reaches
+100%** (§8 measures why: coverage gates the route, the import graph gates the code, and only the second one
+decides how much you can delete). Coverage is a SIGNAL for ranking an increment, never the finish line.
+
+**Three instruments run it, all in committed, `ci`-gated artifacts — never copied here** (a number in prose
+goes stale): the coverage signal is `test/census/goldens.tsv` (the `spine` column), the name countdown is
+`scripts/deletion-ratchet.tsv`, and the deletion criterion is the import edge count into
+`src/compiler/steps/` (§10 Phase 0 — one `grep`, and it should be a gate). Read them from a `ci` run. The
+blocker ranking is `mise run rel-blockers` — re-run it every round, it moves.
 
 **This document is DIRECTION + TRAPS, not history.** What landed and at which SHA is `git log`'s job. A
 parallel, machine-checkable statement of the same rules is `docs/spec/relir-algebra.allium` and
@@ -242,12 +247,14 @@ cost/benefit call per case, not an obligation.
   expressed is a §3 node-set discussion under §7's bar, recorded here.
 - **No permanent exceptions.** A traversal routes to legacy for exactly one reason: a step's lowering is
   not yet written. Not "hard", not "rare", not "fast enough". No allowlist.
-- **Both counters ratchet** (coverage rises, the deletion list shrinks); a stalled countdown in a phase is
-  the finding of the phase.
-- **THE END DATE is deleting the legacy spine — a STEP OF THE PLAN.** Coverage at 100% with a non-empty
-  deletion list is a FAILED migration. "We would lose the differential" is not a reason to keep legacy: at
-  100% the compared-against thing is dead code, and what remains is L5's metamorphic oracle + the census +
-  L1–L4.
+- **THE EXIT CRITERION IS NOT COVERAGE.** It was, and that was measurably the wrong gate — see §8. It is
+  now: **the import graph is severed, and `repeat()` works.** Everything else legacy still answers on the
+  day of deletion becomes a clear deferral, not a blocker. Coverage remains a SIGNAL — read it to rank an
+  increment, never to decide whether the migration may finish.
+- **The differential is cut PER PHASE, with the code it compares.** Not kept whole until the last commit:
+  when the write route goes (Phase 1), the write half of the harness goes with it. What survives each cut
+  is L5's metamorphic oracle + the census + L1–L4. "We would lose the differential" is not a reason to keep
+  a route whose code is already deleted.
 
 ### §6·2 (was §10·5) — a data-sized row set is a VALUE, not a control-flow loop
 
@@ -270,21 +277,38 @@ list/map/record blob — RelIR's, in `src/compiler/rel/`), **byte framing** (`(r
 `execute.ts`, permanent). Calcite's decomposition is the model: a map is a TYPE plus an aggregate FUNCTION,
 never a kind of stream (`Aggregate` yields a relation; `COLLECT`/`JSON_OBJECTAGG` build the value).
 
-### §6·4 (was §10·7/§10·8) — the unit of work is the FAMILY; order by DELETION
+### §6·4 (was §10·7/§10·8) — split every file at the KERNEL/EMISSION line; the unit of work is the FAMILY
 
-Read the blocker table to find WHERE the fold gives up, then land the whole FAMILY that step belongs to —
-never the step alone (a ragged edge re-derives the parse/projection/type-context the next increment needs).
-Choose the increment by *which deletion-ratchet name it lets you delete*, with marginal coverage as the
-tiebreak. Sweep for DUPLICATION every round: **share DATA and pure computation across spines; re-express only
-the EMISSION** (a re-derived `JAVA_WHITESPACE` missing a code point is wrong in a way no test names).
+**Share DATA and pure computation across spines; re-express only the EMISSION** (a re-derived
+`JAVA_WHITESPACE` missing a code point is wrong in a way no test names). That was always the rule. What
+§8's measurement adds is that it is also the DELETION mechanism, and it must run FIRST:
 
-### §6·5 — TWO reasons wear one `null`, and conflating them makes the exit criterion unreachable
+**Every legacy file splits at one line — the pure kernel, and the emission that spends it on legacy's
+object model.** `math` is the worked example and the proof the split is real: `mathToSql`/`mathVars` already
+live in `src/gremlin/math.ts` importing nothing but the `q` kernel, while `lowerMath`/`lowerMathScalar`
+(`steps/tail/mapscalar.ts`) are ~85 lines of `traverserLayout`/`aliasCtx`/`layoutProjection` plumbing,
+duplicated once per dispatch table. So migrating `math` is *calling the same kernel with a different
+`resolveVar`*, and `mapscalar.ts` is safe to delete **because the valuable part already left**.
+
+**EXTRACT THE KERNEL BEFORE DELETING THE FILE.** A kernel still trapped inside `steps/` is what turns every
+deletion into a re-derivation — and re-deriving a table is the one failure mode no test names. This is not
+a separate refactor from the migration; it is the migration's first step, done first instead of last (§10
+Phase 0, which carries the inventory).
+
+Then the ordinary rule: read the blocker table to find WHERE the fold gives up, and land the whole FAMILY
+that step belongs to — never the step alone (a ragged edge re-derives the parse/projection/type-context the
+next increment needs). Rank by **which import EDGE it cuts**, then by which deletion-ratchet name it lets
+you delete, with marginal coverage as the tiebreak.
+
+### §6·5 — TWO reasons wear one `null`, and conflating them corrupts the ranking signal
 
 §12's "`null` is the only decline" stays true, but two FACTS spell it: **"not learned yet"** (temporary,
 ratchets to zero) and **"the answer is an ERROR"** (permanent — never a capability). Both are
 `catch { return null }` inside the lowering today, and the second lies to the census: a REFUSED traversal
-counts as an uncovered gap forever, so coverage cannot reach 100% and §6·1's end date is unreachable **by
-construction**. A whole-migration blocker that merely surfaced in the write family.
+counts as an uncovered gap forever. That no longer blocks the exit (§6·1 moved it off coverage), but it
+still CORRUPTS THE SIGNAL the exit is ranked by — a permanent error banked as a permanent gap makes a
+finished family look unfinished, and misranks the next increment. A whole-migration defect that merely
+surfaced in the write family.
 
 **A refusal on the traversal's own TEXT belongs to the IR `Pass` tier, above both spines** — done. The
 `writeArguments` verify Pass calls the shared parse and re-raises: one authority, one message, above the
@@ -472,17 +496,67 @@ be handed"). If Phase 2 ever grows an `ElementReadDriver` analogue, it has faile
 
 ## §8. What this deletes — the EXIT CRITERION
 
-`mise run deletion` gates the floors in `scripts/deletion-ratchet.tsv` (that file IS the list; editing prose
-here changes nothing). The migration is over when every floor is 0. Non-zero today:
+**COVERAGE GATES THE ROUTE. THE IMPORT GRAPH GATES THE CODE — and this plan used to model only the route.**
+That is why the migration felt all-or-nothing and why iteration slowed: measured over `src/`, **all 39
+files in `src/compiler/steps/` are transitively reachable from non-legacy code**, so no incremental
+deletion is possible at all under the current coupling. Deleting the legacy route AND `engine/engine.ts`
+today frees **7 files / 2,466 of 17,634 lines — 14%**. The other 15,168 stay, pinned not by coverage but by
+**14 direct import edges**.
 
-- **Phase 2.6 (write dispatcher):** `runWriteChainFull`, `parseEdgeCluster`, `parseVertexSpec`,
+**The pinned-edge inventory — Phase 0's worklist.** Ranked by the size of what the edge drags in. The
+symbols column is what is actually imported; the file's remaining lines are pinned only because the edge
+exists.
+
+| pinned file | lines | imported symbols | pinned by |
+|---|---|---|---|
+| `tail/child.ts` | 1241 | `scopedMovementCount` | `services/catalog/degree-centrality.ts` |
+| `tail/child-shape.ts` | 1183 | `ChildFrameStack`, `ChildParent`, `childSteps`, `assertsGType`, `collectionAssert`, `typeOfAssert` | `services/spi/types.ts`, `rel/lower.ts` |
+| `tail/group.ts` | 1125 | `propertyPayload` | `services/catalog/search.ts` |
+| `context/context.ts` | 991 | `LoweringState`, `ElementStream`, `TraverserLayout`, `rootLayout`, `AliasMap`, `AliasEntry`, `aliasScalarTypeOf`, `withShape` | `rel/{lower,write,alias}.ts`, `engine/deps.ts`, `services/catalog/{directory,search}.ts` |
+| `tail/list.ts` | 742 | `LIST_LOCAL_TX`, `STRING_LOCAL_TX` | `rel/list.ts` |
+| `context/stream.ts` | 480 | `Stream`, `LoweringSuspension`, `toScalarStream`, `toPropertyStream`, `PropertyStream`, `PROPERTY_PAYLOAD` | `services/spi/types.ts`, `engine/deps.ts`, `services/catalog/{directory,search}.ts` |
+| `tail/path.ts` | 409 | `PATH_LIST_OPS` | `rel/lower.ts` |
+| `tail/coerce.ts` | 188 | `dtFactor`, `numericSpec` | `rel/transform.ts` |
+| `write/inject.ts` | 179 | `bareInjectTag`, `foldConstantCoercions` | `rel/lower.ts` |
+| `context/alias.ts` | 103 | `SHAPE_K`, `elemShape`, `AliasShape` | `rel/{path,history}.ts` |
+| `write/validate.ts` | 39 | `validateLabel`, `validatePropertyKey` | `rel/write.ts`, `ir/write-args.ts` |
+| `injection.ts` | 35 | `INJECT_VALUES_KEY` | `services/catalog/federate.ts` |
+
+Those twelve transitively drag `branch.ts` (1415), `projection.ts` (1321), `select.ts` (740), `scalar.ts`
+(724) and the rest. **Read the table honestly in both directions:** it is a FILE-level closure, so it
+over-counts what an edge costs (most edges take one to three symbols, so cutting the edge frees far more
+than the row suggests) — and it under-counts nothing, because 39/39 really are reachable.
+
+**THE UNNAMED PIN, and the one that would make a late deletion fail expensively:
+`src/services/spi/types.ts:1-2` types the whole service SPI on legacy's `Stream` and
+`ChildFrameStack`/`ChildParent`.** Every service — `call()`, FTS search, degree-centrality, federation —
+is written against legacy's object model. No phase of this plan named it before.
+
+**The trapped kernels ARE the import edges** (§6·4), which is why Phase 0 is one job and not two:
+
+| kernel | where it lives |
+|---|---|
+| `mathToSql`, `mathVars` | ✅ `src/gremlin/math.ts` — the worked example |
+| `JAVA_WHITESPACE` | ✅ `src/compiler/plan/plan.ts` |
+| `SACK_OPS`, `combineSack` | ❌ `tail/scalar.ts` |
+| `LIST_LOCAL_TX`, `STRING_LOCAL_TX` | ❌ `tail/list.ts` |
+| `dtFactor`, `numericSpec` | ❌ `tail/coerce.ts` |
+| `PATH_LIST_OPS` | ❌ `tail/path.ts` |
+| `validateLabel`, `validatePropertyKey` | ❌ `write/validate.ts` |
+| `propertyPayload` | ❌ `tail/group.ts` |
+| `scopedMovementCount` | ❌ `tail/child.ts` |
+
+**The exit criterion, restated: the import graph is severed and `repeat()` works.** `mise run deletion`
+gates the floors in `scripts/deletion-ratchet.tsv` (that file IS the list; editing prose here changes
+nothing) and stays the countdown for the NAMES. It is no longer the finish line on its own — a floor may
+reach 0 by deletion rather than by migration, which is the point. Non-zero today:
+
+- **Phase 1 (write dispatcher):** `runWriteChainFull`, `parseEdgeCluster`, `parseVertexSpec`,
   `resolveEndpoint`, `materializeElementDrivers`, `WritePlan`.
 - **Phase 3 (repeat):** `expandRepeatBody`, `REPEAT_BODY_OK`.
-- **Phase 4.2 (block assembler):** `TailAcc`.
-- **Phase 4.1 (row-algebraic):** `globalRowOps` — legacy-side only now (every step name routes through RelIR
-  when the rest of the chain does).
-- **Phase 4.4 (fast paths as rewrites):** `runFastPath`, `appliesWhen`, the five-copy `count` adapter, the
-  four-copy `where` adapter.
+- **Phase 4 (block assembler / row-algebraic / fast paths):** `TailAcc`; `globalRowOps` (legacy-side only
+  now — every step name routes through RelIR when the rest of the chain does); `runFastPath`, `appliesWhen`,
+  the five-copy `count` adapter, the four-copy `where` adapter.
 
 ---
 
@@ -515,106 +589,204 @@ Read coverage from the census; this is the qualitative map of what RelIR already
   `long`.
 - **The L3 ratchet has TWO floors** (default + `legacySpine`), each gating and recording only its own
   section; the census records BOTH pinned spine positions. "RelIR is ahead" is a first-class state
-  (`relirAhead`), the scenario-name set difference the migration metric.
+  (`relirAhead`), the scenario-name set difference. **All of this is HARNESS** — it is cut per phase with
+  the code it compares and gone entirely by Phase 4 (§6·1), so do not build on it.
 
 ---
 
-## §10. What is LEFT to do
+## §10. The phases
 
-Ordered by the discipline (§6·4): each closes a family and lets a deletion-ratchet name fall.
+**Ordering principle: FOCUS before volume, volume before capability.** Phase 0 deletes nothing and moves no
+counter — that is the point, and saying it out loud is how it does not read as stalling. It is also the
+phase that makes every later deletion a `rm` instead of a re-derivation.
 
-1. **Phase 2.6 — delete the legacy write dispatcher.** Prerequisite (alias-through-a-creation) met; the
-   gate is write coverage being COMPLETE. Ranked by what is left (`rel-blockers` + the L3 merge split,
-   both move):
-   - ~~**`mergeE` — not lowered at all**~~ — LOWERED, both endpoint kinds. Three findings worth
-     keeping, because each refutes something this plan assumed:
-     - **P5b did not arise.** The plan expected a position-correlated `RETURNING`; an edge's
-       `(src, tgt)` IS its correlation key, so the `RETURNING` projects the endpoints and created
-       edges join back BY VALUE. Nothing depends on the order rows come back in.
-     - **The constant and incoming endpoint cases are ONE lowering**, not two. Carry the endpoint
-       PAIR beside each incoming row; `Distinct` over the pair is what makes duplicate traversers
-       right (one edge, N traversers — upstream's second iteration matching its first), and a
-       constant endpoint is the degenerate case where every row carries the same pair.
-     - **No gated counter moved, and that is not a null result.** Every parameterized `mergeE`
-       arrives as a bound Map, which the corpus cannot express (so the census `spine` column cannot
-       see it), and the L3 scenarios it moves already PASSED on legacy. `test/rel-spine.test.ts` is
-       the record instead. **A family whose corpus presence is parameterized needs a test, not a
-       counter** — worth checking before ranking the next one by census delta.
-     `option(Merge.outV/inV, …)` landed too, and it corrected a shared MISREADING: a `Merge.outV` in
-     a map's `Direction` slot is a REFERENCE to that option, not to the incoming traverser, and its
-     absence is an error (`MergeEdgeStep.resolveVertex`, gremlin-core .../step/map/
-     MergeEdgeStep.java:231-251). Both spines substituted the current traverser — agreeing, so no
-     differential could see it, and every corpus scenario using the token also supplies the option.
-     **Where both spines share a reading, the corpus and the differential are BOTH blind; only the
-     reference is not.** L3 1736 → 1741.
-   - **`property`'s residue is not one question and not per-traverser.** The text-level refusal and the
-     `T`-token/guard-binding halves are done (§6·5); what is left is a meta-property under an
-     UNDECLARED cardinality (the `set` arm PATCHES rather than inserts, an `UPDATE` this route does
-     not emit yet) and the nested value below.
-   - **the nested-value/label children** (`property(k, __.trav)`, `addV(__.trav)`, `addE(__.trav)`).
-     **The reference is ASYMMETRIC and that decides the shape of the work** — read, not inferred:
-     - A nested **KEY** resolves through `Parameters.get(traverser, T.key, …)`, which calls
-       `TraversalUtil.apply` and takes `.get(0)`
-       (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/Parameters.java:120-128`,
-       `…/util/TraversalUtil.java:41-53`). `apply` is `traversal.next()` — the FIRST result, raising
-       *"The provided traverser does not map to a value"* when there is none. **That is exactly the
-       seam's `scalar` arm**, so a nested key needs no new machinery at all; the same is true of a
-       nested `addV`/`addE` LABEL (`insertVertex` resolves one value).
-     - A nested **VALUE** does not. `AddPropertyStep.sideEffect` detects a `Traversal` value that is
-       not a `ConstantTraversal` and routes to `handleTraversalValue`, which collects ALL results via
-       `TraversalUtil.applyAll`
-       (`…/process/traversal/step/sideEffect/AddPropertyStep.java:105-199`) and then:
-       **0 results → NO mutation, the element passes through unchanged** (`:140-142`);
-       **>1 under `single`** (declared, else `graph().features().vertex().getCardinality(key)`) →
-       `IllegalArgumentException` *"Single-cardinality property requires exactly one value, but
-       traversal produced N results"* (`:172-182`);
-       **>1 under `list`/`set`** → each written as its own value, and a non-Vertex element is an
-       `IllegalStateException` (`:184-195`);
-       otherwise `results.get(0)` (`:199`).
-       The single-argument `property(traversal)` MAP form is a third case, flagged by `mapForm` rather
-       than by inspecting the key, and it REQUIRES a Map result (`:150-168`).
-     So: **the key, the label and any provably single-row value are the seam's existing `scalar` arm
-     and can land now.** Only a possibly-multi-row VALUE needs more, and what it needs is a HOST-KEYED
-     relation — the child body applied to the whole owners relation at once, carrying the owner key.
-     That is not a lateral and not a new node: it is the ordinary fold with that relation as its input.
-     It is also item 4's `local`/`properties` shape, so it is the one honest candidate for a FOURTH
-     seam answer (§6·6 says three; this is the case that would make it four, deliberately). The
-     `single`-cardinality-above-one throw is graph-dependent, so it is a GUARD BINDING — the same
-     mechanism §6·5's second half owes `mergeE`.
-   - **`PartitionStrategy` on a merge**, and `addE` after `addV` in one chain.
-   Both laws reach past this phase: §6·5 is what lets the coverage counter reach zero at all, §6·6 is
-   what item 4's by()-child matrix needs anyway.
-2. **Phase 3 — the repeat wedge.** `flatten` (P1 legality in `check`; a body that cannot be made legal throws
-   a clear deferral) → route `repeat()`'s body through ordinary lowering → `unroll` for `times(n)` (take
-   `dedup` first, one barrier per commit with an L4 pin; `prune`'s remainder — pruning below
-   Join/Union/Aggregate — is a precondition). The 5 `until()`/`emit()` barrier bodies throw the P3 wall.
-3. **Phase 4.2–4.4 — finish the read migration + fast paths.** Block assembler replaces `TailAcc`;
-   `ELEMENT_DISPATCH` joins the shared substrate; aggregate/count handlers become one `Aggregate`;
-   `recognize` makes the fast paths plan rewrites (which lifts the FTS decline).
-4. **The remaining families** (blocker ranking, re-measure — it moves): side effects (`aggregate`/`group`/
-   `groupCount` with a string label — needs a named-collection substrate), the property shape
-   (`properties`/`valueMap`), the map shape's mid-chain consumers, scalar-transform/branch/`sack`/`repeat`/
-   `local`/`match`/`where`/`path` tails, and the by()-child matrix (`group`←reducer, `project` as a step,
-   `select` multi-label, moving/collecting child bodies).
-5. **Correctness follow-ups** (each cited, corpus-mostly-invisible, none a one-liner):
-   - **The per-row scalar type channel (§6·7)** — the decided carrier change: one `ScalarType` lattice, the
-     inject source and the arm merge going `perRow`, `bareInjectTag`/`DECLARED_TYPE_REQUIRED` deleted. It is
-     the prerequisite for the next bullet and it removes the branch family's tag-agreement declines.
-   - ~~The numeric-tower PROMOTION~~ — **CLOSED; the claim it rested on was false.** It said 6 `Sum.feature`
-     scenarios were blocked. Measured (`l3-state.json`): all fourteen narrow-type Sum scenarios pass, on both
-     spines. Not built (§6·7). The real `sum`-adjacent failures are other families — `group().by(…sum)`,
-     `sack`, `aggregate` side effects, `math`, `order().by(sum(local))`.
-   - **The `set` framing marker** survives `range(local)`/`all`/`any`/`none` and is dropped only by
-     `order(local)`/`unfold()` — a state-threading change through the list tail's follower loop. That loop is
-     duplicated (`src/compiler/rel/list.ts`'s `ListOf.set` vs the legacy `ListStream.set`), so this lands in
-     RelIR and legacy sheds the shapes it gets wrong (§6·1). Do it twice only if the second copy is free.
-   - **`AliasEntry.binds`** must not increment on a rebind at the SAME path position (a wrong Pop.mixed wire
-     type today) — needs head-position tracking on the RelIR `AliasEntry`.
-   - **Checker hardening (Phase 3 prereqs):** refuse `Distinct`/`Limit`/`Sort` inside a recursive term (P3);
-     a whole-row `Distinct` may not carry a per-row-unique channel; an `aggs` entry may not reference an
-     input column outside an `Agg`; `name` should walk expression subplans (a shared node in a
-     `Scalar`/`Exists` body is inlined twice).
-6. **The last step:** delete the legacy spine and the routing switch (§6·1).
+**Naming.** The old work-unit names (`Phase 2.6` = the write dispatcher, `Phase 3` = repeat, `Phase 4.1/4.2/
+4.4`) survive in `scripts/deletion-ratchet.tsv`'s notes and in code comments. Mapping: 2.6 → Phase 1,
+3 → Phase 3, 4.x → Phase 4. Nothing else moved.
+
+### Phase 0 — extract the kernels, sever the import graph
+
+§8's table IS the worklist. Three kinds of edge, and they are not equally hard:
+
+- **Pure kernels — move to a neutral module.** `SACK_OPS`/`combineSack`, `LIST_LOCAL_TX`/`STRING_LOCAL_TX`,
+  `dtFactor`/`numericSpec`, `PATH_LIST_OPS`, `validateLabel`/`validatePropertyKey`, `INJECT_VALUES_KEY`,
+  `SHAPE_K`/`elemShape`, `propertyPayload`, `scopedMovementCount`. Each is a table or a small total
+  function; `src/gremlin/math.ts` is the shape to copy. Hours, not days.
+- **Already scheduled to die.** `bareInjectTag` goes with §6·7's per-row type channel — do not move it,
+  build that instead.
+- **The object model — the real work, and the reason this is a phase and not a chore.** `LoweringState` /
+  `Stream` / `TraverserLayout` / `AliasMap`, and the service SPI built on them. Retype
+  `services/spi/types.ts` off legacy's `Stream`/`ChildFrameStack`; give `src/compiler/rel/` its own alias
+  and child-frame types rather than borrowing legacy's.
+
+**Done when `src/compiler/steps/` is imported by exactly two files: `engine/engine.ts` and `compiler.ts`.**
+Nothing user-visible changes; the differential is at FULL value throughout, since no capability moves and
+the two spines must therefore agree everywhere.
+
+**THE GATE — `mise run edges` (`scripts/edges-check.ts`), floors in `scripts/steps-edges.tsv`.** This is the
+criterion every later phase spends, so it is an instrument, not a `grep` someone remembers to run. It counts
+DIRECT imports of `src/compiler/steps/**` from outside it, per importing file, with the symbols named — the
+same shape as `scripts/deletion-ratchet.tsv` and for the same reason: **a floor may only be re-recorded
+DOWNWARD** (`mise run edges-record`), a rise or a NEW importer fails the build, and prose here changes
+nothing. It is a RATCHET rather than a zero-gate because zero is the wrong target — `engine/engine.ts` and
+`compiler.ts` are the legacy routers and keep their edges until Phase 4 deletes them outright. Those two are
+the declared exemptions; **Phase 0 is over when they are the only rows left.**
+
+Deliberately DIRECT edges only, not the transitive closure. The closure is what §8 measures to size the
+prize, and it is the wrong thing to gate on: it moves when an unrelated file changes an import three hops
+away, so it would fire on work that has nothing to do with severing anything. The direct edge is the thing a
+commit actually cuts.
+
+### Phase 1 — writes: three capabilities, then the first cut
+
+**Measured, and it is much nearer than "write coverage COMPLETE" implied.** Of the corpus's 341
+`Given the graph initializer of` occurrences (131 distinct), **322 already compile on the RelIR write path
+and none throws**; the reference graphs are GraphSON-bulk-loaded and bypass the compiler entirely, bar two
+hand-authored seeds. So the corpus LOADS without legacy writes once three capabilities land:
+
+- **multi-label `addV("a","b")` / `addLabel()`** — 16 scenarios. §6·5 already settled the shape: label
+  mutation is NOT a guard binding. `labelCardinality.mutable` is request-scope DI, settled before a compile
+  starts, so `addLabel` under an immutable graph is a COMPILE-TIME refusal with the value threaded (as
+  `Lowering.labelCardinality` already is).
+- **`addE` with implicit endpoints** (`…addV().addE("self")`) — 3 scenarios.
+- **`property(T.id, …)` on `addE`** — the two hand-authored seeds. §6·5's `T`-token guard binding landed for
+  `elementAddV`; this is the same mechanism on the edge insert.
+
+**Separate "can the corpus load" from "is write coverage complete" and cut at the first.** The residue below
+is real work, but it is not load-bearing for running the suite and must not gate the deletion:
+
+- **`property`'s residue** — the text-level refusal and the `T`-token/guard-binding halves are done (§6·5).
+  Left: a meta-property under an UNDECLARED cardinality (the `set` arm PATCHES rather than inserts, an
+  `UPDATE` this route does not emit yet).
+- **the nested-value/label children** (`property(k, __.trav)`, `addV(__.trav)`, `addE(__.trav)`).
+  **The reference is ASYMMETRIC and that decides the shape of the work** — read, not inferred:
+  - A nested **KEY** resolves through `Parameters.get(traverser, T.key, …)`, which calls
+    `TraversalUtil.apply` and takes `.get(0)`
+    (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/Parameters.java:120-128`,
+    `…/util/TraversalUtil.java:41-53`). `apply` is `traversal.next()` — the FIRST result, raising
+    *"The provided traverser does not map to a value"* when there is none. **That is exactly the seam's
+    `scalar` arm**, so a nested key needs no new machinery; same for a nested `addV`/`addE` LABEL.
+  - A nested **VALUE** does not. `AddPropertyStep.sideEffect` detects a `Traversal` value that is not a
+    `ConstantTraversal` and routes to `handleTraversalValue`, which collects ALL results via
+    `TraversalUtil.applyAll` (`…/process/traversal/step/sideEffect/AddPropertyStep.java:105-199`) and then:
+    **0 results → NO mutation, the element passes through unchanged** (`:140-142`);
+    **>1 under `single`** (declared, else `graph().features().vertex().getCardinality(key)`) →
+    `IllegalArgumentException` *"Single-cardinality property requires exactly one value, but traversal
+    produced N results"* (`:172-182`); **>1 under `list`/`set`** → each written as its own value, and a
+    non-Vertex element is an `IllegalStateException` (`:184-195`); otherwise `results.get(0)` (`:199`).
+    The single-argument `property(traversal)` MAP form is a third case, flagged by `mapForm` rather than by
+    inspecting the key, and it REQUIRES a Map result (`:150-168`).
+  So: **the key, the label and any provably single-row value are the seam's existing `scalar` arm and can
+  land now.** Only a possibly-multi-row VALUE needs more, and what it needs is a HOST-KEYED relation — the
+  child body applied to the whole owners relation at once, carrying the owner key. Not a lateral and not a
+  new node: the ordinary fold with that relation as its input. It is also Phase 4's `local`/`properties`
+  shape, so it is the one honest candidate for a FOURTH seam answer (§6·6 says three; this is the case that
+  would make it four, deliberately). The `single`-cardinality-above-one throw is graph-dependent, so it is a
+  GUARD BINDING.
+- **`PartitionStrategy` on a merge**, and `addE` after `addV` in one chain.
+
+**`inject()` is not a write and must move with this phase.** `routeWrite` owns it as a SOURCE
+(`steps/write/write.ts:1295`), and measured over the full suite it is the dispatcher's largest tenant by a
+wide margin: of **944 distinct traversals the legacy dispatcher answers, 591 (63%) contain no mutating step
+at all**, 543 of them `g.inject(…)` reads. Deleting "the write dispatcher" without moving `inject` deletes
+a third of what it does.
+
+**`mergeE` landed, both endpoint kinds.** Three findings kept because each refutes something this plan
+assumed: **P5b did not arise** (an edge's `(src, tgt)` IS its correlation key, so created edges join back BY
+VALUE and nothing depends on `RETURNING` order); **the constant and incoming endpoint cases are ONE
+lowering** (carry the endpoint PAIR beside each incoming row; `Distinct` over the pair is what makes
+duplicate traversers right, and a constant endpoint is the degenerate case); and **no gated counter moved,
+which is not a null result** — every parameterized `mergeE` arrives as a bound Map the corpus cannot
+express, so `test/rel-spine.test.ts` is the record instead. **A family whose corpus presence is
+parameterized needs a test, not a counter.** `option(Merge.outV/inV, …)` landed too and corrected a shared
+MISREADING: a `Merge.outV` in a map's `Direction` slot is a REFERENCE to that option, not to the incoming
+traverser, and its absence is an error (`MergeEdgeStep.resolveVertex`, gremlin-core
+`.../step/map/MergeEdgeStep.java:231-251`). Both spines substituted the current traverser — agreeing, so no
+differential could see it. **Where both spines share a reading, the corpus and the differential are BOTH
+blind; only the reference is not.**
+
+**The cut:** delete the write route, `steps/write/write.ts`, and the write half of the differential.
+
+### Phase 2 — sack, then the extracted families
+
+**`sack` first, because it is the cheapest thing on this list and nobody had noticed.** Its entire surface
+outside legacy is **three references, all in `compiler.ts`** — `extractSack` at :48, the route gate
+`!sackInit` at :89, and the two legacy call sites. And `src/channels.ts` ALREADY models it: `sack` is a
+first-class `ChannelRole` with a merge policy (`identical`), a barrier policy (`drop`), a slot in
+`ROLE_ORDER`, and a group policy of `undefined` — it correctly refuses an N→1 collapse.
+
+Legacy's version is the shoehorn, and its own code says so: `steps/prefix/sack.ts` throws on
+`st.traverserLayout.aliases.size || st.traverserLayout.path` — **sack refuses to coexist with any other
+per-traverser channel** — hand-rolls its layout re-projection with a comment explaining that appending the
+column in the wrong slot silently desyncs, and splits across three files (mutate in `prefix/sack.ts`, read
+in `projection.ts`'s `compileSackRead`, seed in `withSack()`). Its header defers sack-through-repeat/
+barrier/local and split/merge-on-fork. **Every one of those is a channel-obligation question, and §3.5's
+obligations checker answers that class by construction.** So this is not "port 94 lines" — it is delete the
+gate and let the machinery that already exists carry it. It also removes a permanent asymmetry at the top
+of the compiler.
+
+Then the families whose kernels Phase 0 extracted and whose only remaining legacy content is emission —
+**`math` first as the proof case** (§6·4), then the scalar-transform tail, the property shape
+(`properties`/`valueMap`), the map shape's mid-chain consumers, branch, aliases, `local`, `match`, `where`,
+`path` tails, the by()-child matrix (`group`←reducer, `project` as a step, `select` multi-label), and the
+named-collection substrate the string-label `aggregate`/`store`/`cap` side effects need.
+
+### Phase 3 — `repeat()` — THE GATE
+
+The one family whose absence disqualifies the server, so deletion waits on it and on nothing else.
+`flatten` (P1 legality in `check`; a body that cannot be made legal throws a clear deferral) → route
+`repeat()`'s body through ordinary lowering → `unroll` for `times(n)` (take `dedup` first, one barrier per
+commit with an L4 pin; `prune`'s remainder — pruning below Join/Union/Aggregate — is a precondition). Per §1
+P4 that is the 48 `times(n)`-bounded majority; the 5 `until()`/`emit()` barrier bodies throw the P3 wall.
+
+Phase 4's read-side work rides along where it is a prerequisite: the block assembler replaces `TailAcc`,
+`ELEMENT_DISPATCH` joins the shared substrate, aggregate/count handlers become one `Aggregate`, and
+`recognize` (§4.7) makes the fast paths plan rewrites, which lifts the FTS decline.
+
+### Phase 4 — `rm -rf src/compiler/steps/`
+
+Phase 0 severed the graph and Phase 3 cleared the gate, so this is a deletion, not a migration. Sweep
+SYMBOL-level, not file-level — `bun scripts/refs.ts` and `mise run orphans`, since a file-level closure
+over-counts (§8). Everything legacy still answered on the day becomes a clear deferral, NOT a blocker: that
+is the exit criterion (§6·1), and a traversal that stops working is a recorded regression to be re-earned in
+RelIR, never a reason to keep the route. The routing switch, `options/spine.ts`, `MOGWAI_RELIR`,
+`test:legacy-spine`, the `legacySpine` L3 floor with `unionPassing`/`partitionLegacyRegressions`/`spineGap`,
+the census's legacy pinned position, `relirAhead` and the per-test `{spine}` pins all go with it.
+
+### Phase 5 — the docs sweep
+
+The corpus of `docs/` was written against a two-spine world and most of it will be lying by here.
+
+1. **Archive every plan that only describes the old pipeline** — move to `docs/archive/`, do not edit in
+   place. A plan whose subject no longer exists is not a stale plan, it is history.
+2. **Edit every plan that PARTLY survives down to what still applies.** Delete the superseded half rather
+   than annotating it; a doc that argues with itself costs more than one that is short. This file included.
+3. **Sweep the citations.** Code comments and `scripts/deletion-ratchet.tsv` notes cite `§`-numbers and the
+   old phase names; a deleted section must not leave a dangling reference (root `CLAUDE.md`'s pointer list
+   and `src/compiler/CLAUDE.md` both name files that will move).
+4. **Then, and only then, refresh `docs/feature-support-matrix.md` and `docs/outstanding-work.md`** — the
+   matrix per step against what actually compiles post-deletion, the index re-derived and COMPACTED.
+   Doing these before the sweep records a world that is about to change.
+
+### §10·6 Correctness follow-ups — orthogonal to the phases
+
+Each cited, corpus-mostly-invisible, none a one-liner. Rank them against phase work, do not queue them
+behind it.
+
+- **The per-row scalar type channel (§6·7)** — one `ScalarType` lattice, the inject source and the arm merge
+  going `perRow`, `bareInjectTag`/`DECLARED_TYPE_REQUIRED` deleted. Removes the branch family's
+  tag-agreement declines, and Phase 0 depends on it to avoid moving `bareInjectTag` pointlessly.
+- **The `set` framing marker** survives `range(local)`/`all`/`any`/`none` and is dropped only by
+  `order(local)`/`unfold()` — a state-threading change through the list tail's follower loop. That loop is
+  duplicated (`src/compiler/rel/list.ts`'s `ListOf.set` vs the legacy `ListStream.set`); land it in RelIR and
+  let legacy shed the shapes it gets wrong (§6·1).
+- **`AliasEntry.binds`** must not increment on a rebind at the SAME path position (a wrong `Pop.mixed` wire
+  type today) — needs head-position tracking on the RelIR `AliasEntry`.
+- **Checker hardening (Phase 3 prereqs):** refuse `Distinct`/`Limit`/`Sort` inside a recursive term (P3); a
+  whole-row `Distinct` may not carry a per-row-unique channel; an `aggs` entry may not reference an input
+  column outside an `Agg`; `name` should walk expression subplans (a shared node in a `Scalar`/`Exists` body
+  is inlined twice).
+
 
 ---
 

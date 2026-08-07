@@ -144,6 +144,22 @@ description = "Bank a lowered deletion floor (downward only; commit scripts/dele
 depends = ["install"]
 run = "bun scripts/deletion-check.ts --record"
 
+# Phase 0's countdown (docs/2026-08-01-relir-build-plan.md §8/§10). A GATE, but a ratchet rather than
+# a zero-gate like arch/lint/binds: zero is the wrong target, because engine/engine.ts and compiler.ts
+# ARE the legacy routers and keep their edges until Phase 4 deletes them outright. They are the two
+# `exempt` rows, and Phase 0 is over when they are the ONLY rows. Direct edges only — the transitive
+# closure moves when an unrelated file three hops away changes an import, so it would fire on work
+# that severed nothing.
+[tasks.edges]
+description = "Edge ratchet: direct imports of src/compiler/steps/ from outside it (Phase 0's countdown)"
+depends = ["install"]
+run = "bun scripts/edges-check.ts"
+
+[tasks.edges-record]
+description = "Bank a cut edge (downward only; commit scripts/steps-edges.tsv)"
+depends = ["install"]
+run = "bun scripts/edges-check.ts --record"
+
 # The ROOT of the graph now — `install` depends on it, because `gremlin` is a link: dep. It runs its
 # own `bun install` inside the submodule (a separate bun project) and builds the client there, so it
 # needs bun but never the superproject's node_modules; that is what keeps the inverted edge
@@ -336,8 +352,8 @@ run = "bun scripts/test-shard.ts"
 # within ~7s of `install`, so as a group it is free — it exists to be a JOB, not because anyone needs
 # to run the six separately.
 [tasks.gates]
-description = "The static gates: type-check + lint + architectural + bind-budget + SQL hygiene + deletion ratchet + worker build"
-depends = ["check", "lint", "arch", "binds", "sql-hygiene", "deletion", "build"]
+description = "The static gates: type-check + lint + architectural + bind-budget + SQL hygiene + deletion & edge ratchets + worker build"
+depends = ["check", "lint", "arch", "binds", "sql-hygiene", "deletion", "edges", "build"]
 run = "echo 'gates passed'"
 
 # THE LOCAL one-command gate, and still the complete one: `mise run ci` runs everything CI runs.

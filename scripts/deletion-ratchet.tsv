@@ -1,7 +1,7 @@
 # The DELETION ratchet — every name a plan has promised to remove, and how much of it is left.
 # GENERATED FLOOR: `floor` is re-recorded DOWNWARD by `mise run deletion-record`. It may never
-# rise; a rise is the gate failing. The migration owning a plan is finished when every one of
-# its floors is 0 — coverage reaching 100% with a non-empty list here is a FAILED migration.
+# rise; a rise is the gate failing. Every floor at 0 means the NAMES are gone — it is not by
+# itself the exit criterion (see scripts/edges-check.ts, and the plan §8).
 # `kind=symbol` is measured by LSP references (declaration included) across src/ scripts/ test/;
 # `kind=pattern` is a regex counted over src/. See scripts/deletion-check.ts.
 plan	kind	key	floor	note

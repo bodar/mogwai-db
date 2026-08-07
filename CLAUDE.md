@@ -96,6 +96,7 @@ free upgrade.
 | `mise run arch` (`scripts/arch-check.ts`) | no Pass reaches `ChainFacts`/fast paths | **CI gate**, at zero |
 | `mise run lint` (`scripts/lint.ts`) | unused locals/params/value-position type imports | **CI gate**, at zero |
 | `mise run binds` (`scripts/binds-check.ts`) | no bind list sized by ROW COUNT outside `RowBatch` | **CI gate**, at zero |
+| `mise run edges` (`scripts/edges-check.ts`) | direct imports of `src/compiler/steps/` from outside it | **CI gate**, a RATCHET |
 | `mise run orphans` (`scripts/orphans.ts`) | exports nothing imports | instrument — findings need judgement |
 | `scripts/lsp.ts` | the shared session library — build new tools on it | library |
 
@@ -154,6 +155,16 @@ every `placeholders(…)` call inside a function that also chunks (enclosing ext
 NOT try to decide whether an arbitrary `binds` array is bounded — that is dataflow over every
 `store.query` call, and `store.query(plan.sql, plan.binds)` is unbounded to any local analysis and
 perfectly correct. What is decidable is the IDIOM, and the idiom is what produced both walls.
+
+**`mise run edges`** (`scripts/edges-check.ts`) is the fourth, and the only one that is a RATCHET rather
+than a zero-gate: it counts DIRECT imports of `src/compiler/steps/` from outside it, per file, with the
+symbols named, against floors in `scripts/steps-edges.tsv` that may only be re-recorded downward
+(`mise run edges-record`). Zero is the wrong target — `engine/engine.ts` and `compiler.ts` ARE the legacy
+routers and are declared `exempt`, so **the criterion is that they become the only rows**. It exists because
+coverage gates the legacy ROUTE while the import graph gates the CODE, and only the second decides how much
+a deletion actually removes (`docs/2026-08-01-relir-build-plan.md` §8). Direct edges only: a transitive
+closure moves when an unrelated file three hops away changes an import, so it would fire on work that
+severed nothing.
 
 One INSTRUMENT, deliberately not a gate, because its answer needs judgement:
 **`mise run orphans`** (`scripts/orphans.ts`) reports exports nothing imports, split into

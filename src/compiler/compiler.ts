@@ -83,9 +83,15 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   // reducer form of `withSideEffect`, which the front-end leaves unregistered) decline inside the
   // lowering like any other unlearned step — which is where a decline belongs.
   //
-  // `sackInit` stays, and the asymmetry is real rather than an oversight: a sack is a per-traverser
-  // carried CHANNEL that every step must thread, not a constant an argument resolves against, so
-  // offering the route would need the channel first.
+  // **`sackInit` IS THE LAST ROUTE-LEVEL GATE, AND IT IS SCHEDULED TO GO** (plan §10 Phase 2). The
+  // reasoning that kept it — "a sack is a per-traverser carried CHANNEL, so offering the route would
+  // need the channel first" — was checked and does not hold: `src/channels.ts` ALREADY models `sack`
+  // as a first-class `ChannelRole` with a merge policy (`identical`), a barrier policy (`drop`), a
+  // `ROLE_ORDER` slot and a group policy of `undefined` (it refuses an N→1 collapse). The channel is
+  // built. Legacy's `steps/prefix/sack.ts` is the shoehorn — it throws outright when any OTHER
+  // per-traverser channel is present (`aliases.size || path`) and defers sack through repeat/barrier/
+  // local and split/merge-on-fork, which are exactly the questions §3.5's obligations checker answers
+  // by construction. Deleting this gate is a small change, not a prerequisite-laden one.
   if (resolveSpine(options) === 'rel' && !sackInit) {
     const viaRel = compileViaRel(engine, steps, request.params, sideEffects);
     if (viaRel) return { kind: 'sql', compiled: discard ? applyDiscard(viaRel) : viaRel };

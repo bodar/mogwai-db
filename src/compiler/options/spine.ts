@@ -9,11 +9,12 @@ import type { CompileOptions } from './fast-paths.ts';
  * oracle for every coverage increment, which is strictly stronger than the eleven hand-built
  * families of §5a's gate and costs nothing to run — the instrument already exists, twice over.
  *
- * **It is a HARNESS with an end date, and this module is scheduled for deletion with it.** When
- * coverage reaches 100% and §8's list is empty, the legacy spine goes and the differential's off
- * position goes with it. That is a deliberate, accepted, one-time trade at the point where the
- * thing being compared against is dead code (§10·4·5): nobody may cite "we would lose the
- * differential" as a reason to keep two engines alive.
+ * **It is a HARNESS with an end date, and this module is scheduled for deletion with it.** The end
+ * date is NOT coverage reaching 100% — that was the old exit criterion and §8 measures why it was
+ * the wrong one. The spine goes when the import graph into `steps/` is severed and `repeat()` works
+ * (§6·1); whatever legacy still answered that day becomes a clear deferral. The differential is cut
+ * PER PHASE with the code it compares, not kept whole until the last commit: nobody may cite "we
+ * would lose the differential" as a reason to keep a route whose code is already deleted.
  *
  * An ENV switch rather than a plumbed parameter, deliberately, and for `test:perturbed`'s reason:
  * the suite under test must not be able to see which position it is in. A `CompileOptions` field

@@ -4,12 +4,17 @@
  *
  *   bun scripts/deletion-check.ts [--record] [--json]
  *
- * A migration has two counters and they fail differently. Coverage says the new thing works;
- * deletion says the old thing is GONE, and it is the second one that stalls while the first looks
- * finished (`docs/2026-08-01-relir-build-plan.md` §10·4: *"Coverage at 100% with a non-empty §8
- * list is a FAILED migration, not a finished one"*). A number that is merely printed drifts, so
- * this is a ratchet with a committed floor — `scripts/deletion-ratchet.tsv` — in the same mould as
- * L3's `l3-state.json`: it may only ever go DOWN.
+ * A migration has several counters and they fail differently. Coverage says the new thing works;
+ * deletion says the old NAME is gone, and it is the second one that stalls while the first looks
+ * finished. A number that is merely printed drifts, so this is a ratchet with a committed floor —
+ * `scripts/deletion-ratchet.tsv` — in the same mould as L3's `l3-state.json`: it may only ever go
+ * DOWN.
+ *
+ * **It is NOT the exit criterion, and used to be described as half of one.** That was coverage-at-100%
+ * plus an empty list here, and `docs/2026-08-01-relir-build-plan.md` §8 measures why it was wrong: the
+ * import graph, not coverage, decides how much code a deletion actually removes. A floor here may now
+ * reach 0 by DELETION rather than by migration, which is the point. The severing criterion is its own
+ * gate — `mise run edges` (`scripts/edges-check.ts`).
  *
  * It is deliberately GENERIC. A row names one thing a plan has promised to delete, and the plan
  * that owns it; nothing about RelIR is hardcoded here. A future migration adds rows, not a script.
@@ -54,8 +59,8 @@ const COLS = 'plan\tkind\tkey\tfloor\tnote';
 const HEADER = [
   '# The DELETION ratchet — every name a plan has promised to remove, and how much of it is left.',
   '# GENERATED FLOOR: `floor` is re-recorded DOWNWARD by `mise run deletion-record`. It may never',
-  '# rise; a rise is the gate failing. The migration owning a plan is finished when every one of',
-  '# its floors is 0 — coverage reaching 100% with a non-empty list here is a FAILED migration.',
+  '# rise; a rise is the gate failing. Every floor at 0 means the NAMES are gone — it is not by',
+  '# itself the exit criterion (see scripts/edges-check.ts, and the plan §8).',
   '# `kind=symbol` is measured by LSP references (declaration included) across src/ scripts/ test/;',
   '# `kind=pattern` is a regex counted over src/. See scripts/deletion-check.ts.',
 ].join('\n');
