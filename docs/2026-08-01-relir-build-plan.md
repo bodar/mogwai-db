@@ -981,39 +981,51 @@ Two DECLINES remain, both honest: `withSack(seed, Operator.x)` names a MERGE ope
 policy answer for the role and therefore a channels-core change rather than a step lowering; and
 `barrier(Barrier.normSack)` is its own step.
 
-#### `math` — what the separation actually costs, and why the obvious split is the wrong one
+#### ✅ `math` — the OPS RECORD landed, and the resolver turned out to be the interesting half
 
-**MEASURED, NOT ESTIMATED** (`src/gremlin/math.ts`, 148 lines). What is genuinely shared and what is not:
+**The split was where the correction said it was** (`src/gremlin/math.ts`): the lexer, the
+precedence/associativity climb, the juxtaposition rule (`sin _`), the messages and the function NAME
+set are shareable; `realLit`'s `raw()`, every `q\`\`` in the climb and all twenty `FN` entries were
+CONSTRUCTION. `compileMath<T>(formula, ops: MathOps<T>)` is the shape — seven primitives (`variable`,
+`real`, `binary`, `negate`, `call`, `conditional`, `compare`, `nul`), each spine supplying its own
+(`qMathOps` in `steps/tail/mapscalar.ts`, `relMathOps` in `compiler/rel/math.ts`).
 
-| shareable — DATA and PARSE | per-layer — CONSTRUCTION |
-|---|---|
-| the lexer, the precedence/associativity climb, the juxtaposition rule (`sin _`), the trailing-input and unexpected-character messages | `realLit`'s `raw()`, every `q\`\`` in the climb, all twenty `FN` entries |
-| the function NAME set, and `mathVars` reading it | |
+**The AST split stays refuted and it is worth keeping the reason**: three of the twenty entries are
+non-derivable SQL facts, not operator names — `log` is exp4j's NATURAL log and maps to `LN` while
+SQLite's own `log()` is log10; `cbrt` splits on sign because `POW` domain-errors to NULL on a negative
+base with a fractional exponent; `signum` is a three-way `CASE`. An AST whose nodes are `{fn:'cbrt'}`
+makes each spine re-derive that expansion (§12's "a non-derivable fact must not be re-implemented"),
+and the `conditional` primitive is exactly what an ops record has and an AST does not. The gate that
+holds it is now a TEST rather than a claim: both L2 math tests run every kernel assertion in a loop
+over both spines, which is the one thing no per-spine assertion could see.
 
-So the work is to parameterize the builder over its OUTPUT TYPE. Two ways, and they are not equivalent:
+**THE PREDICTION ABOUT THE RESOLVER UNDERSOLD IT.** "`scopeValue` answers both" was right and the
+consequence is bigger than a saved parse: a math variable NAMES A HOST, and the ring's `by()`
+PROJECTS a value out of it (`MathStep.processNextStart` —
+`TraversalUtil.produce(getNullableScopeValue(Pop.last, var, traverser), traversalRing.next())`). So
+the whole resolver is `scopedHost` (new, `modulator.ts` — the by() vocabulary's fourth answer about
+itself, beside `byExpr`/`byNode`/`byField`) composed with an UNCHANGED `byExpr`. What falls out
+rather than being built:
 
-- **An AST split** — `parseMath(formula): MathNode`, pure, with each spine folding it. Obvious, and
-  WRONG here: three of the twenty entries are non-derivable SQL facts, not operator names. `log` is
-  exp4j's NATURAL log and maps to `LN` while SQLite's own `log()` is log10; `cbrt` splits on sign because
-  `POW` domain-errors to NULL on a negative base with a fractional exponent, and a real cube root of a
-  negative is defined; `signum` is a three-way `CASE`. An AST whose nodes are `{fn: 'cbrt'}` makes each
-  spine re-derive that expansion, which is §12's "a non-derivable fact must not be re-implemented" —
-  a second implementation is a second chance to get it wrong, and no test names the difference.
-- **An OPS RECORD** — `mathToSql<T>(formula, ops)` where the layer supplies only the primitives
-  (`variable`, `literal`, `binary`, `call`, `conditional`). `FN` stays ONE table and `cbrt`/`signum`
-  are expressed once in terms of those primitives. **This is the one to build.** The `case`/conditional
-  primitive is what makes it work at all, and it is what an ops record has and an AST does not.
+- **element, VALUE and RECORD hosts all work**, including the `project()` blocker this section
+  predicted (`project('a','b')…math('a / b')` reads the FIELDS by map-scope-first);
+- **`math()` as a CHILD BODY**, leading and mid-run, so the whole by()-child matrix gains it at once.
+  The two child arms' transform loops were byte-identical and are now one `valueRun`, which is where
+  mid-run composition (`by(__.values('age').math('_ * 2'))`) lives;
+- **a `by()`-less `math("a + b")` over labelled values ANSWERS**, because `TraversalRing.next()`
+  yields nothing for an empty ring and `TraversalUtil.produce` hands back the scoped value. Legacy
+  throws there — RelIR ahead, recorded, not reconciled (§6·1).
 
-**The resolver side is already there**, which is why this is now worth doing rather than earlier: a math
-variable is an `as()` label or a `by()` slot, and `scopeValue` (`modulator.ts`) answers both — MAP scope
-first, then the path labels — so `project('a','b')…order().by(math('a / b'))` resolves its variables
-against the RECORD's fields by the same rule `Scoping.getScopeValue` states. `_` is the host's own value.
+Two rules the increment settled: the productivity filter is ONE `v IS NOT NULL`, because SQL's NULL
+propagation IS `MathStep`'s `productive` flag (every operator and both sign-split CASEs return NULL
+for a NULL argument); and an ELEMENT under an identity `by()` DECLINES, because the reference RAISES
+there (`traverser.get()` is not a Number) and projecting a rowid would answer a different question.
 
-Worth 15 corpus traversals at `math`, plus the one `project()` blocker that needs math over record fields.
+Measured: census 862 → 881 (+19), 0 changed answers, L3 flat in both positions. `binds`/`bound` stayed
+at 0 — a property key is a compiler-held constant — so only statement text moved (`sql-hygiene`).
 
 Then the families whose kernels Phase 0 extracted and whose only remaining legacy content is emission —
-**`math` first as the proof case** (§6·4, and read its correction first: the file is a kernel with an
-emission tail still fused to it), then the scalar-transform tail, the property shape
+`math` was the proof case (§6·4) — then the scalar-transform tail, the property shape
 (`properties`/`valueMap`), the map shape's mid-chain consumers, branch, aliases, `local`, `match`, `where`,
 `path` tails, the by()-child matrix (`group`←reducer, `project` as a step, `select` multi-label), and the
 named-collection substrate the string-label `aggregate`/`store`/`cap` side effects need.
