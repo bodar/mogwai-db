@@ -1,4 +1,4 @@
-import { compilerNull, lit, type Expr } from '../../rel/expr.ts';
+import { compilerInt, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
 import { isNested, argValues } from '../../gremlin/frontend.ts';
 import { JAVA_WHITESPACE } from '../plan/plan.ts';
 import { dtFactor, numericSpec } from '../../gremlin/coerce.ts';
@@ -60,8 +60,16 @@ export interface Transformed {
 }
 
 const call = (fn: string, ...args: Expr[]): Expr => ({ kind: 'call', fn, args });
+/** A value the USER wrote, which may be a wire parameter: `argValues` flattened the `Arg` away, so
+ *  the name is not reachable here and it binds. Threading the name is
+ *  `docs/archive/2026-08-05-parameters-are-the-only-binds.md`'s remaining work, not this module's. */
 const text = (value: string): Expr => lit(value, 'text');
 const int = (value: number): Expr => lit(value, 'int');
+/** A value the COMPILER authored — a whitespace set, an epoch factor, an off-by-one — which is a
+ *  CONSTANT and inlines at zero cost to the 100-parameter budget. `mise run sql-hygiene`'s `bound`
+ *  ratchet is what catches one of these leaking back into a bind, and it caught `dateAdd`'s. */
+const held = (value: string): Expr => compilerText(value);
+const heldInt = (value: number): Expr => compilerInt(value);
 
 /**
  * The PURE value transforms — a SQLite scalar function over `v`, and nothing else.
@@ -76,9 +84,9 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[]) => E
   asString: (v) => ({ kind: 'cast', arg: v, to: 'text' }),
   // Gremlin's `trim()` trims JAVA's whitespace set, not SQLite's default space — hence the explicit
   // second argument, and hence importing the list rather than restating it.
-  trim: (v) => call('trim', v, text(JAVA_WHITESPACE)),
-  lTrim: (v) => call('ltrim', v, text(JAVA_WHITESPACE)),
-  rTrim: (v) => call('rtrim', v, text(JAVA_WHITESPACE)),
+  trim: (v) => call('trim', v, held(JAVA_WHITESPACE)),
+  lTrim: (v) => call('ltrim', v, held(JAVA_WHITESPACE)),
+  rTrim: (v) => call('rtrim', v, held(JAVA_WHITESPACE)),
   replace: (v, args) => {
     const [from, to] = args.filter((a): a is string => typeof a === 'string');
     return from === undefined || to === undefined ? null : call('replace', v, text(from), text(to));
@@ -96,14 +104,14 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[]) => E
     if (start === undefined) return null;
     const length = (): Expr => call('length', v);
     const index = (at: number): Expr => at >= 0
-      ? call('MIN', int(at), length())
-      : call('MAX', int(0), {
+      ? call('MIN', heldInt(at), length())
+      : call('MAX', heldInt(0), {
         kind: 'binary', op: '%',
-        left: { kind: 'binary', op: '+', left: length(), right: int(at) },
+        left: { kind: 'binary', op: '+', left: length(), right: heldInt(at) },
         right: length(),
       });
     const newStart = index(start);
-    const from = { kind: 'binary', op: '+', left: newStart, right: int(1) } as Expr;
+    const from = { kind: 'binary', op: '+', left: newStart, right: heldInt(1) } as Expr;
     if (end === undefined) return call('substr', v, from);
     const newEnd = index(end);
     // AN EMPTY SLICE IS ARITHMETIC, NOT A BRANCH: `substr(x, from, 0)` is already `''`, so clamping the
@@ -113,7 +121,7 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[]) => E
     // is a correlated property subquery was emitted SIX times for one `substring(0,1)`; this is four.
     // Bind-budget correctness rather than tidiness — see `storedValueOn` for the measured case.
     return call('substr', v, from,
-      call('MAX', int(0), { kind: 'binary', op: '-', left: newEnd, right: newStart }));
+      call('MAX', heldInt(0), { kind: 'binary', op: '-', left: newEnd, right: newStart }));
   },
   concat: (v, args) => {
     // A traversal argument is a per-traverser child value (`TraversalUtil.apply`), which makes the step
@@ -124,7 +132,7 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[]) => E
     const operands = args.map((a) => (typeof a === 'string' ? text(a) : typeof a === 'number' ? lit(a, 'real') : null));
     if (operands.some((o) => !o)) return null;
     const parts = [v, ...operands as Expr[]];
-    const body = call('concat_ws', text(''), ...parts);
+    const body = call('concat_ws', held(''), ...parts);
     // `concat_ws` SKIPS nulls, so an all-null concat must yield NULL and not `''`. A non-null literal
     // argument makes the result non-null regardless of `v`, so the guard is only owed without one —
     // and it tests that every operand IS NULL, never that the concatenation is empty, because an
@@ -210,9 +218,9 @@ export function transformExpr(step: IRStep, v: Expr, literal: boolean): Transfor
     return {
       expr: {
         kind: 'case',
-        whens: [[{ kind: 'in-list', expr: call('typeof', v), values: [text('integer'), text('real')] },
+        whens: [[{ kind: 'in-list', expr: call('typeof', v), values: [held('integer'), held('real')] },
           { kind: 'cast', arg: v, to: 'int' }]],
-        else: { kind: 'binary', op: '*', left: call('unixepoch', v), right: int(1000) },
+        else: { kind: 'binary', op: '*', left: call('unixepoch', v), right: heldInt(1000) },
       },
       type: STATIC('datetime'),
     };
@@ -224,7 +232,7 @@ export function transformExpr(step: IRStep, v: Expr, literal: boolean): Transfor
     if (typeof args[1] !== 'number') return null;
     let factor;
     try { factor = dtFactor(args[0]); } catch { return null; }
-    return { expr: { kind: 'binary', op: '+', left: v, right: int(args[1] * factor) }, type: STATIC('datetime') };
+    return { expr: { kind: 'binary', op: '+', left: v, right: heldInt(args[1] * factor) }, type: STATIC('datetime') };
   }
 
   if (step.name === 'dateDiff') {

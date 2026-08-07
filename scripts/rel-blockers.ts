@@ -43,7 +43,7 @@
  * blocked traversals themselves, so the shape of the work is read off the instrument rather than
  * guessed at from a number.
  */
-import { extractSideEffects, extractStrategies, parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
+import { extractSack, extractSideEffects, extractStrategies, parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { runPasses } from '../src/compiler/ir/passes.ts';
 import type { IRStep } from '../src/compiler/ir/step.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
@@ -127,10 +127,16 @@ for (const query of CORPUS) {
   // constant the lowering is not handed reads as an uncovered gap, which is precisely the
   // measurement error this instrument exists to avoid.
   let sideEffects: Map<string, any>;
+  // The SACK SEED rides with the chain for the same reason the `withSideEffect` registry does, and
+  // its absence was the same measurement error one step further on: a `withSack()` traversal lowered
+  // with no seed declines at its first `sack()` and reads as vocabulary the algebra cannot express,
+  // when what happened is that this instrument did not hand it one (§6·6).
+  let sack: ReturnType<typeof extractSack>;
   try {
     const tree = parseGremlin(query);
     steps = runPasses(stepChain(tree, {}), extractStrategies(tree, {}), {}).steps as IRStep[];
     sideEffects = extractSideEffects(tree, {});
+    sack = extractSack(tree, {});
   } catch { unparsed++; continue; }
   if (!steps.length) continue;
   // EVERY prefix, never stopping at the first decline — because coverage is NOT monotonic in prefix
@@ -148,7 +154,7 @@ for (const query of CORPUS) {
   for (let n = 1; n <= steps.length; n++) {
     // A throw counts as a decline. `mise run rel-sweep` is what asserts there are none; here it would
     // only distort the count to treat one differently.
-    try { if (lowerToRel(steps.slice(0, n), { sideEffects })) longest = n; } catch { /* a declining prefix, not the end */ }
+    try { if (lowerToRel(steps.slice(0, n), { sideEffects, sack })) longest = n; } catch { /* a declining prefix, not the end */ }
   }
   if (longest === steps.length) { covered++; continue; }
   // When even the SOURCE declines, the source is the blocker.

@@ -800,10 +800,15 @@ describe('scalar-parent / projection SQL', () => {
       // Adjacent transforms FUSE into one expression while preserving left-to-right order. RelIR gets
       // that from the block assembler rather than a hand-rolled segment fold, which is the point.
       expect(read('g.inject("a").concat("b").toUpper()', { spine }).sql).toMatch(/upper\(concat_ws\(/);
-      // trim family → SQLite trim/ltrim/rtrim over the JAVA-whitespace char set (a bound second arg)
-      expect(read('g.inject(" a ").trim()', { spine }).sql).toMatch(/\btrim\([^]*, \?\)/);
-      expect(read('g.inject(" a ").lTrim()', { spine }).sql).toMatch(/ltrim\([^]*, \?\)/);
-      expect(read('g.inject(" a ").rTrim()', { spine }).sql).toMatch(/rtrim\([^]*, \?\)/);
+      // trim family → SQLite trim/ltrim/rtrim over the JAVA-whitespace char set. INLINED, not bound:
+      // the set is a compiler-authored constant and a bind serves a user PARAMETER, so it spends none
+      // of the DO's 100 (root CLAUDE.md). Legacy still binds it, hence the per-spine expectation.
+      expect(read('g.inject(" a ").trim()', { spine }).sql)
+        .toMatch(spine === 'legacy' ? /\btrim\([^]*, \?\)/ : /\btrim\([^]*, '/);
+      expect(read('g.inject(" a ").lTrim()', { spine }).sql)
+        .toMatch(spine === 'legacy' ? /ltrim\([^]*, \?\)/ : /ltrim\([^]*, '/);
+      expect(read('g.inject(" a ").rTrim()', { spine }).sql)
+        .toMatch(spine === 'legacy' ? /rtrim\([^]*, \?\)/ : /rtrim\([^]*, '/);
     }
     // reverse: a string reverses its chars via a RECURSIVE CTE inside an expression, which RelIR has no
     // node for at all (`Recursive` is a relation, not a scalar subquery) — so it stays legacy's, and

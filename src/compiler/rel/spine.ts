@@ -5,6 +5,7 @@ import { cfLimitViolation } from '../../cf-limits.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { LabelCardinality } from '../../api.ts';
 import type { Service } from '../../services/spi/types.ts';
+import type { SackSpec } from '../../gremlin/frontend.ts';
 import { lowerToRel } from './lower.ts';
 
 /**
@@ -36,6 +37,11 @@ export interface RelRequest {
   readonly propertySeek: boolean;
   /** This graph's declared VERTEX label cardinality. NOT a strategy switch — see below. */
   readonly labelCardinality: LabelCardinality;
+  /** `withSack(seed)`'s seed, as the front end extracted it, or `null`. A SOURCE-level declaration
+   *  settled before a compile starts, so it crosses as a value exactly as `labelCardinality` does —
+   *  and it is here rather than being a route GATE because a gate reads identically to a missing
+   *  lowering in every counter the migration owns (§6·6). */
+  readonly sack: SackSpec | null;
 }
 
 /**
@@ -114,6 +120,7 @@ export function compileViaRel(
     labelCardinality: request.labelCardinality,
     propertySeek: request.propertySeek,
     services: request.services,
+    sack: request.sack,
     // NOT a strategy switch either — a `withSideEffect(k, <literal>)` is a compile-time CONSTANT the
     // front-end already extracted, and the write parse has always taken it. What used to happen is
     // that `compiler.ts` refused to OFFER this route at all when one was declared, so the whole

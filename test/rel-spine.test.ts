@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { compile } from '../src/compiler/compiler.ts';
-import { read, runWith, seededStore } from './support/harness.ts';
+import { read, relirAhead, runWith, seededStore } from './support/harness.ts';
 import { CF_MAX_BINDS as DO_BIND_CAP, cfLimitViolation } from '../src/cf-limits.ts';
 import { exec, executeQuery } from './support/executor.ts';
 import { decodeAll } from './support/decode.ts';
@@ -249,6 +249,14 @@ const COVERED = [
   'g.V().as("a").out().as("b")', 'g.V().as("a").out().as("a")',
   'g.V().as("a").out().select("a")', 'g.V().as("a").out().as("b").select("b")',
   'g.V().as("a").out().select("a").out()', 'g.V().as("a").out().select("a").count()',
+  // THE SACK — a per-traverser accumulator, and an ordinary carried CHANNEL here rather than a
+  // shoehorn: `src/channels.ts` already declared the role's merge/barrier/group policies, so seeding,
+  // folding and reading it is three projections. It composes with the alias and path channels for
+  // free, which legacy refuses outright (`sack(Operator.x) after as()/path() state`).
+  'g.withSack(0).V()', 'g.withSack(0L).V().sack(sum).by("age").sack()',
+  'g.withSack(0.0d).V().outE().sack(Operator.sum).by("weight").inV().sack().sum()',
+  'g.withSack(2).V().sack(Operator.div).by(__.constant(4.0d)).sack()',
+  'g.V().sack(assign).by("age").sack()',
   // A MODULATED select reads the SELECTED element and a MULTI-label one packages several — one
   // lowering at every arity (`selectKeys`). Only the CHILD-modulated form is row-comparable here: a
   // property `by()` carries the label's stored `vtype` beside the value on this spine and not on
@@ -338,7 +346,6 @@ const DECLINED = [
   'g.V().group().by("name").by(__.out().count())', // a reducing child VALUE reduces over the GROUP, not per traverser
   'g.V().order().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
   'g.V().dedup().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
-  'g.withSack(0).V()',                // a carried sack the source seed would have to declare
   // The REDUCER form of withSideEffect (`(k, seed, BiFunction)`) is left UNREGISTERED by the
   // front-end, so it is not a compile-time constant — and `aggregate`/`cap` are a named-collection
   // substrate this route has not learned. Both halves decline, which is what makes lifting the
@@ -1143,6 +1150,22 @@ describe('the RelIR spine', () => {
     const endpoints = (xs: any[]) => xs.map((e) => `${e.outV.id}->${e.inV.id}`).sort();
     expect(endpoints(knows)).toEqual(endpoints(top));
   });
+
+  test('a sack COEXISTS with every other per-traverser channel', relirAhead(
+    'g.V().as("a").sack(assign).by("age").sack()',
+    () => {
+      // Legacy THROWS `sack(Operator.x) after as()/path() state not yet supported` — it hand-rolls the
+      // carried-column re-projection and refuses rather than get the slot order wrong. Here a sack is
+      // an ordinary channel: `withChannel` puts it in its `ROLE_ORDER` slot and every node's declared
+      // type is rebuilt from the channel list, so coexistence is what happens when nobody prevents it.
+      const store = seededStore();
+      expect(runWith(store, 'g.V().as("a").sack(assign).by("age").sack()', { spine: 'rel' }).map((r) => r.v))
+        .toEqual([29, 27, 32, 35]);
+      // …and the label is still readable AFTER the sack read, which is the property that makes it a
+      // channel rather than a mode: nothing was spent.
+      expect(runWith(store, 'g.V().as("a").sack(assign).by("age").sack().select("a").values("name")', { spine: 'rel' })
+        .map((r) => r.v)).toEqual(['marko', 'vadas', 'josh', 'peter']);
+    }));
 
   test('the emitted SQL does not depend on how many traversals were compiled before it', () => {
     // Relation ids are minted per lowering. A module-global counter would make two compiles of one

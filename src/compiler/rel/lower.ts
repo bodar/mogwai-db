@@ -18,7 +18,7 @@ import { recordField, recordOf, recordPayload, selectKeys } from './record.ts';
 import { propertyElement, propertyKey, propertyPayload, propertyRelation, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
-import { flattenListArgs, isNested, isTokenArg, stepChain, argValues, arg, type Arg } from '../../gremlin/frontend.ts';
+import { flattenListArgs, isNested, isTokenArg, stepChain, argValues, arg, type Arg, type SackSpec } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
 import type { IRStep } from '../ir/strategies.ts';
@@ -42,6 +42,7 @@ import { elementHost, groupBarrier, mapPayload } from './map.ts';
 import { elementPayload } from './element.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
 import { LabelCardinality } from '../../api.ts';
+import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 
 /**
  * THE SECOND LOWERING — `Step[] -> RelIR` (§10·4 of `docs/2026-08-01-relir-build-plan.md`).
@@ -189,6 +190,8 @@ interface ChainCtx extends FilterCtx {
   readonly sideEffects: Map<string, any>;
   /** The services this chain names, resolved at the DI boundary. See `Lowering.services`. */
   readonly services: ReadonlyMap<string, Service>;
+  /** `withSack(seed)`'s seed, or `null`. See `Lowering.sack`. */
+  readonly sack: SackSpec | null;
 }
 
 /** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
@@ -1111,6 +1114,11 @@ function terminal(
   // `by(__.in().count())` asks and needs no per-traverser substrate of its own.
   if (step.name === 'call') return midCall(step, input, elem, fresh, ctx, aliases);
 
+  // A bare `sack()` makes the ACCUMULATOR the current object — an element relation becomes a scalar
+  // one, which is exactly what this function is for. The channel rides through: reading a sack does
+  // not spend it.
+  if (step.name === 'sack' && !args.length) return sackRead(input, fresh);
+
   // count() is the RLE traverser TOTAL, not the row count: a collapse merges convergent walks into
   // (row, N) pairs, so the answer is SUM(bulk) — identical to COUNT(*) only while bulk is 1
   // everywhere. Reading it off the carried channel rather than off the step is what keeps the two
@@ -1423,6 +1431,24 @@ function scalarTail(
     // what a bare `by()` projects. One lowering at both hosts is the point (§6·6's rule one level up: a
     // shape works wherever it is legal, not wherever a host was taught it), and it is what
     // `call(…)`'s scalar result then reaches through.
+    // `sack()` over a VALUE traverser — the same two forms, and the same two answers. The mutate arm
+    // is shape-preserving and the read arm replaces the value, so neither needs a scalar-specific
+    // lowering: `sackMutate` takes the host it is given and `sackRead` re-projects `v`.
+    if (step.name === 'sack') {
+      if (sackOperator(step) === undefined) {
+        if (args.length) return null;
+        const read = sackRead(rel, fresh);
+        if (!read) return null;
+        rel = read.rel;
+        out = read.framing;
+        continue;
+      }
+      const folded = sackMutate(step, rel, host, childSeam(ctx, fresh), fresh);
+      if (!folded) return null;
+      rel = folded;
+      continue;
+    }
+
     if (step.name === 'project') {
       const record = recordOf(rel, host, out, step, childSeam(ctx, fresh), fresh);
       if (!record) return null;
@@ -2075,6 +2101,10 @@ export interface Lowering {
    * once and read here as data. An absent name simply is not in the map, and the call declines.
    */
   readonly services?: ReadonlyMap<string, Service>;
+  /** `withSack(seed)`'s seed, as the front end extracted it — a SOURCE-level declaration, settled
+   *  before a step is lowered, so it is a settled value like `labelCardinality` rather than a step
+   *  argument. `null`/absent means the traversal declares no sack and no channel is minted. */
+  readonly sack?: SackSpec | null;
   /**
    * The `withSideEffect(name, constant)` registry — the SECOND compile-scope constant environment a
    * nested argument resolves against, beside the wire `bindings` in `params`.
@@ -2105,6 +2135,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   labelCardinality: opts.labelCardinality ?? LabelCardinality.ONE,
   sideEffects: opts.sideEffects ?? NO_SIDE_EFFECTS,
   services: opts.services ?? NO_SERVICES,
+  sack: opts.sack ?? null,
 });
 
 /** No `withSideEffect` declared. One shared value, for `NO_ALIASES`' reason. */
@@ -2291,7 +2322,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  *   pass walk them is the general fix if a case ever needs it.)
  */
 function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Tail | null {
-  const { params, collapse, correlatedChildren, labelCardinality, sideEffects, services } = settle(opts);
+  const { params, collapse, correlatedChildren, labelCardinality, sideEffects, services, sack } = settle(opts);
   // EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step.
   // `analyzeChain` is the same authority the legacy source seeds from, so the two cannot disagree
   // about which chains have an order to take a window from. A chain that demands one and reaches a
@@ -2301,20 +2332,30 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   const facts = analyzeChain(steps as IRStep[]);
   const ordered = facts.demandsEncounter;
   const tracksPath = facts.tracksPath;
-  const ctx: ChainCtx = { params, correlatedChildren, collapse, ordered, tracksPath, labelCardinality, sideEffects, services };
+  const ctx: ChainCtx = { params, correlatedChildren, collapse, ordered, tracksPath, labelCardinality, sideEffects, services, sack };
   const orderedChannels = ordered ? withChannel(BULK, ENCOUNTER) : BULK;
   const seedChannels = tracksPath ? withChannel(orderedChannels, PATH_CHANNEL) : orderedChannels;
   const first = steps[0];
   if (!first) return null;
 
+  /** `withSack(seed)`'s channel, layered onto whatever a source produced — one helper for every
+   *  source, because seeding it is the same act wherever the traverser came from. A declared sack
+   *  the seed vocabulary cannot express declines the WHOLE chain rather than compiling a traversal
+   *  with no accumulator in it. */
+  const sacked = (rel: Rel): Rel | null => (ctx.sack ? seedSack(rel, ctx.sack, fresh) : rel);
+
   if (first.name === 'inject') {
     // A COLLECTION literal seeds a LIST traverser, an ordinary value a SCALAR one — two shapes, and
     // the argument decides which, so the list arm is asked first and declines a scalar inject.
     const listed = injectList(first, fresh);
-    if (listed) return listTail(listed.rel, (listed.framing as { readonly of: ListOf }).of, steps, 1, ctx, fresh);
+    if (listed) {
+      const withSack = sacked(listed.rel);
+      return withSack && listTail(withSack, (listed.framing as { readonly of: ListOf }).of, steps, 1, ctx, fresh);
+    }
     const injected = injectSource(steps, fresh);
     if (!injected) return null;
-    return scalarTail(injected.rel, injected.framing, steps, injected.at, false, ctx, fresh);
+    const withSack = sacked(injected.rel);
+    return withSack && scalarTail(withSack, injected.framing, steps, injected.at, false, ctx, fresh);
   }
 
   // `g.call(...)` AS A SOURCE. The service was resolved at the DI boundary (`servicesNamedBy`), so
@@ -2426,7 +2467,8 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
     ] as const)],
   });
 
-  return elementTail(rel, elem, steps, at, false, ctx, fresh, NO_ALIASES);
+  const withSack = sacked(rel);
+  return withSack && elementTail(withSack, elem, steps, at, false, ctx, fresh, NO_ALIASES);
 }
 
 /**
@@ -2558,6 +2600,15 @@ function elementTail(
       const record = recordOf(rel, elementHost(rel, elem, labels), { kind: 'elements', elem }, step, childSeam(ctx, fresh), fresh);
       if (!record) return null;
       return continueAs(record.rel, { kind: 'record', fields: record.fields }, steps, at + 1, bulked, ctx, fresh, labels);
+    }
+    // `sack(Operator.x).by(v)` MUTATES the accumulator and leaves the traverser alone, so it is an
+    // ordinary shape-preserving step of this loop. The bare READ form is a RETYPE and falls through
+    // to `terminal()`, which is where every element→value boundary lives.
+    if (step.name === 'sack' && sackOperator(step) !== undefined) {
+      const folded = sackMutate(step, rel, elementHost(rel, elem, labels), childSeam(ctx, fresh), fresh);
+      if (!folded) return null;
+      rel = folded;
+      continue;
     }
     if (step.name === 'mergeV' || step.name === 'mergeE') {
       if (pathCarried(rel)) return null;
@@ -3042,6 +3093,11 @@ function rootedSteps(nested: unknown, params: Record<string, any>, sideEffects?:
  */
 function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
   if (!body.length) return null;
+  // A SCALAR host names its own subject: the traverser IS the value, so a transform-only body
+  // (`by(__.math('_ * 10'))`, `by(dateAdd(DT.day, 1))`) is well-formed rather than the nonsense it
+  // would be over an element. That is the "A BODY MUST NAME ITS SUBJECT" guard below read the other
+  // way round — the guard exists because an element is not a value, and here there is one.
+  if (host.kind === 'scalar') return scalarHostChild(body, host);
   if (host.kind !== 'element') return null;
 
   // THE MOVEMENT-THEN-REDUCER ARM is `correlatedExists` minus EXISTS: root the first hop directly at
@@ -3149,6 +3205,50 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     type = transformed.type ?? UNKNOWN;
     // The STORED tag describes the value as read; a transform is a new value, so the per-row carrier
     // stops here whatever the transform claims for itself.
+    vtype = undefined;
+  }
+  return vtype
+    ? { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype }
+    : { expr: value, framing: { kind: 'scalar', type } };
+}
+
+/**
+ * A child body over a SCALAR host — the transform run applied to the traverser's own value.
+ *
+ * Split from the element arm because almost nothing is shared: there is no movement to correlate, no
+ * property to read and no token to project, so what is left is the value plus whatever the body does
+ * to it. `constant()` is the one leading step that REPLACES the value rather than transforming it,
+ * and it is the same fold the element arm uses.
+ */
+function scalarHostChild(
+  body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }>,
+): ChildValue | null {
+  let value: Expr = host.value;
+  let type: ScalarType = UNKNOWN;
+  let vtype = host.vtype;
+  let at = 0;
+  const leading = body[0];
+  if (leading?.name === 'constant') {
+    const args = argValues(leading);
+    // Productivity is EMISSION, not NULLNESS — the element arm's own citation. A deliberate
+    // `constant(null)` declines there and declines here for the identical reason.
+    if (args.length !== 1 || args[0] === null) return null;
+    const literal = constLit(leading.args[0]);
+    if (!literal) return null;
+    value = literal;
+    vtype = undefined;
+    at = 1;
+  } else if (leading?.name === 'identity') {
+    if (argValues(leading).length) return null;
+    at = 1;
+  }
+  for (; at < body.length; at++) {
+    const step = body[at]!;
+    if (!REL_TRANSFORMS.has(step.name)) return null;
+    const transformed = transformExpr(step, value, false);
+    if (!transformed) return null;
+    value = transformed.expr;
+    type = transformed.type ?? UNKNOWN;
     vtype = undefined;
   }
   return vtype

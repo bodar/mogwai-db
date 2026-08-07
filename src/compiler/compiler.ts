@@ -84,16 +84,14 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   // reducer form of `withSideEffect`, which the front-end leaves unregistered) decline inside the
   // lowering like any other unlearned step — which is where a decline belongs.
   //
-  // **`sackInit` IS THE LAST ROUTE-LEVEL GATE, AND IT IS SCHEDULED TO GO** (plan §10 Phase 2). The
-  // reasoning that kept it — "a sack is a per-traverser carried CHANNEL, so offering the route would
-  // need the channel first" — was checked and does not hold: `src/channels.ts` ALREADY models `sack`
-  // as a first-class `ChannelRole` with a merge policy (`identical`), a barrier policy (`drop`), a
-  // `ROLE_ORDER` slot and a group policy of `undefined` (it refuses an N→1 collapse). The channel is
-  // built. Legacy's `steps/prefix/sack.ts` is the shoehorn — it throws outright when any OTHER
-  // per-traverser channel is present (`aliases.size || path`) and defers sack through repeat/barrier/
-  // local and split/merge-on-fork, which are exactly the questions §3.5's obligations checker answers
-  // by construction. Deleting this gate is a small change, not a prerequisite-laden one.
-  if (resolveSpine(options) === 'rel' && !sackInit) {
+  // **THERE IS NO ROUTE-LEVEL GATE LEFT.** The last one was `!sackInit` — a traversal declaring a
+  // `withSack()` was never OFFERED to this route, whatever else was in it — and it is gone with the
+  // sack lowering (plan §10 Phase 2). The seed now travels as a settled VALUE like
+  // `labelCardinality`: `src/compiler/rel/sack.ts` mints the channel `src/channels.ts` already
+  // modelled, and a seed or a merge operator that route cannot express declines INSIDE the lowering
+  // like any other unlearned step. That is the whole content of §6·6's lesson at the routing switch:
+  // a gate here reads identically to a missing lowering in every counter the migration owns.
+  if (resolveSpine(options) === 'rel') {
     const viaRel = compileViaRel(
       {
         collapse: engine.fastPaths.movementCollapse,
@@ -102,6 +100,7 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
         // The registry is an app-scope DEPENDENCY and stops here: this is the boundary that holds
         // it, so it resolves the names and hands the lowering the settled services.
         services: servicesNamedBy(steps, request.params, engine.registry),
+        sack: sackInit,
       },
       steps, request.params, sideEffects,
     );

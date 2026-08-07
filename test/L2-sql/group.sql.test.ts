@@ -579,28 +579,58 @@ describe('group / properties SQL', () => {
     }
   });
 
-  test('sack(op).by(key) mutates a carried sk column; bare sack() reads it', () => {
-    const p = read('g.V().sack(assign).by("age").sack()');
+  // THE TWO SPINES CARRY A SACK DIFFERENTLY, and every assertion below says which one it means.
+  // Legacy threads an `sk` column through a CTE per step and hand-rolls the re-projection; RelIR
+  // mints an ordinary `sack` CHANNEL, so the whole run FUSES into one SELECT and there is no
+  // intermediate relation to name. Both are live routes until Phase 4.
+  test('sack(op).by(key) mutates a carried sk column; bare sack() reads it — legacy', () => {
+    const legacy = { spine: 'legacy' } as const;
+    const p = read('g.V().sack(assign).by("age").sack()', legacy);
     expect(p.shape).toEqual({ kind: 'value', type: UNKNOWN });
     expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS sk");
     expect(p.sql).toContain('SELECT p.sk AS v, p.sk, p.bulk FROM'); // scalar CTE reads + carries the sack
-    expect(read('g.withSack(1).V().sack().fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
+    expect(read('g.withSack(1).V().sack().fold()', legacy).shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
     // sum accumulator references the prior sk; div forces REAL division.
-    expect(read('g.withSack(0.0d).V().sack(sum).by("age").sack()').sql).toContain('(p.sk + (SELECT value FROM vertex_properties WHERE node=n.id AND key=?');
-    expect(read('g.withSack(2).V().sack(div).by(__.constant(4.0d)).sack()').sql).toContain('(CAST(d.sk AS REAL) / f.v)');
-    expect(read('g.withSack(0).V().sack(assign).by(__.outE().count()).sack()').sql)
+    expect(read('g.withSack(0.0d).V().sack(sum).by("age").sack()', legacy).sql).toContain('(p.sk + (SELECT value FROM vertex_properties WHERE node=n.id AND key=?');
+    expect(read('g.withSack(2).V().sack(div).by(__.constant(4.0d)).sack()', legacy).sql).toContain('(CAST(d.sk AS REAL) / f.v)');
+    expect(read('g.withSack(0).V().sack(assign).by(__.outE().count()).sack()', legacy).sql)
       .toContain('ROW_NUMBER() OVER (PARTITION BY');
     // sack + a co-carried column (otherV's fromV): the mutate CTE re-projects sk in its
     // layoutCols SLOT, not appended last — so the sk/fv columns don't desync. Regression
     // for the pre-existing bug where sk silently got the fromV rowid.
-    expect(read('g.withSack(0).V(1).outE().sack(assign).by(T.label).otherV().sack()').sql)
+    expect(read('g.withSack(0).V(1).outE().sack(assign).by(T.label).otherV().sack()', legacy).sql)
       .toContain('(SELECT name FROM labels WHERE id=n.label) AS sk'); // sk = the label, not the fv rowid
     // local(__.sack(op).by(...)) folds the sack inside a child scope: a mutate sack is an
     // element-preserving child step, so it lowers through the same engine per pushed parent.
-    const localSack = read('g.withSack(0L).V().local(__.sack(sum).by("age")).sack()');
+    const localSack = read('g.withSack(0L).V().local(__.sack(sum).by("age")).sack()', legacy);
     expect(localSack.shape).toEqual({ kind: 'value', type: UNKNOWN });
     expect(localSack.sql).toContain('ROW_NUMBER() OVER ()'); // the child-scope ordinal
     expect(localSack.sql).toContain('AS sk'); // the fold lands in the sk slot within the scope
+  });
+
+  test('a sack is an ordinary carried CHANNEL — RelIR', () => {
+    const store = seededStore();
+    const rel = { spine: 'rel' } as const;
+    // THE WHOLE RUN FUSES. Legacy spends a CTE per sack step because each one re-projects the layout
+    // by hand; here the seed, the fold and the read are three `Project`s over one relation, and the
+    // block assembler puts them in one SELECT. So the assertion worth making is that the SEED is a
+    // compile-time constant inlined into the fold, not that a named relation carries it.
+    const p = read('g.withSack(0.0d).V().sack(sum).by("age").sack()', rel);
+    expect(p.spine).toBe('rel');
+    expect(p.shape).toEqual({ kind: 'value', type: UNKNOWN });
+    expect(p.sql).toContain('(0.0 + (SELECT');
+    expect(p.binds).toEqual([]);
+    // `div` forces REAL division — SQLite's `/` is integer division on integer operands, which is the
+    // one operator whose obvious spelling answers a different question.
+    expect(read('g.withSack(2).V().sack(div).by(__.constant(4.0d)).sack()', rel).sql).toContain('CAST(2 AS REAL) / 4.0');
+    // `assign` needs no prior value, so it MINTS the channel where no `withSack()` seeded one.
+    expect(runWith(store, 'g.V().sack(assign).by("age").sack()', rel).map((r) => r.v)).toEqual([29, 27, 32, 35]);
+    // The by() is the ordinary modulator seam, so a CHILD body works here the day it works anywhere —
+    // legacy's `sackByValue` refuses a nested traversal outright.
+    expect(runWith(store, 'g.withSack(0).V().sack(assign).by(__.outE().count()).sack()', rel).map((r) => r.v).sort())
+      .toEqual([0, 0, 0, 1, 2, 3]);
+    // A `by()` that yields nothing DROPS the traverser — the vocabulary's rule, not this host's.
+    expect(runWith(store, 'g.V().sack(assign).by("age").sack()', rel)).toHaveLength(4);
   });
 
   test('side-effecting group(a)/groupCount(a) → registered spec re-emitted by cap(a)', () => {
@@ -617,8 +647,8 @@ describe('group / properties SQL', () => {
     expect(read('g.V().group("a").by("name")').shape).toEqual({ kind: 'vertex' });
   });
 
-  test('withSack() seeds the sk column at the source as a bound value', () => {
-    const p = read('g.withSack(0.0d).V().outE().sack(sum).by("weight").inV().sack()');
+  test('withSack() seeds the sk column at the source as a bound value — legacy', () => {
+    const p = read('g.withSack(0.0d).V().outE().sack(sum).by("weight").inV().sack()', { spine: 'legacy' });
     expect(p.sql).toContain('? AS sk, 1 AS bulk FROM nodes'); // seeded at V()
     expect(p.binds[0]).toBe(0);
     expect(p.sql).toContain('p.sk, p.bulk FROM edges'); // carried through outE()/inV()

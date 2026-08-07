@@ -3,7 +3,7 @@ import { hasUnresolvedOperand, operandDeps, resolveTraversalOperands } from './o
 import { compareKey, limitOffset, predicateSql, scalarTx, TYPE_PER_ROW, TYPE_STATIC, TYPE_UNKNOWN, typeCtxOf } from '../../plan/plan.ts';
 import { isNested, isOperatorArg, isOrderArg, isTokenArg, stepChain, argValues } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { isLocalScope, REDUCERS, SCALAR_TRANSFORMS, sliceOf } from '../../ir/step.ts';
+import { isLocalScope, REDUCERS, SACK_OPS, SCALAR_TRANSFORMS, sliceOf } from '../../ir/step.ts';
 import { armOrderKey, branchFork, layoutProjection, layoutProjectionMinting, layoutCols, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
 import { loweringStateOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec } from '../../../gremlin/coerce.ts';
@@ -53,7 +53,10 @@ export function scalarMapRetype(s: ScalarStream): MapStream | null {
 
 export { SCALAR_TRANSFORMS } from '../../ir/step.ts';
 
-export const SACK_OPS = new Set(['assign', 'sum', 'minus', 'mult', 'div', 'min', 'max']);
+
+/** Re-exported so legacy's three readers keep one import while the SET itself lives in the
+ *  step-name vocabulary both spines share (`ir/step.ts`). */
+export { SACK_OPS };
 
 /** Fold a merge value into the sack under an Operator. assign replaces; the rest
  *  combine with the prior sack (required — via withSack() or a prior assign). div forces

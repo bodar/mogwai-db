@@ -69,6 +69,12 @@ export const EDGE_SOURCE: ReadonlySet<string> = new Set(['E']);
 /** The path-family steps: they thread a path AND host from()/to() scoping modulators. */
 export const PATH_FAMILY: ReadonlySet<string> = new Set(['path', 'simplePath', 'cyclicPath']);
 
+/** The `Operator` tokens a `sack()` may fold with — TinkerPop's `Operator` enum, minus the ones no
+ *  spine expresses (`and`/`or`/`addAll`/`sumLong`). DATA both spines must agree on, so it lives here
+ *  beside the other step-name vocabularies rather than in either lowering: the SQL for each operator
+ *  is emission and belongs to whichever layer emits it (§6·4's split, applied to a set of six). */
+export const SACK_OPS: ReadonlySet<string> = new Set(['assign', 'sum', 'minus', 'mult', 'div', 'min', 'max']);
+
 /** The numeric reducers — every one a bulk-aware SQL aggregate over a scalar stream. */
 const NUMERIC_REDUCER_NAMES = ['sum', 'min', 'max', 'mean'] as const;
 export const NUMERIC_REDUCERS: ReadonlySet<string> = new Set(NUMERIC_REDUCER_NAMES);
