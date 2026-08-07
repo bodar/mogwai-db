@@ -2,16 +2,22 @@
 
 > **STATUS: PLAN. Nothing below has landed.** Written 2026-08-07 against trunk at `bae05c7`,
 > tinkerpop submodule at the current pin. Every capability claim in §2 is a **probe result** on the
-> modern graph, run through `test/support/executor.ts` on **both** spines (`legacy` and `rel`); the
-> method is at the bottom (§10). One decision needs Dan's approval before Phase 2 (§7·3).
+> modern graph, run through `test/support/executor.ts`; the method is at the bottom (§10). One
+> decision needs Dan's approval before Phase 2 (§7·3).
+>
+> **REVISED same day, at `41c897d`.** The original §2 reported the probe as run on "both spines,
+> identical verdicts". That claim was hollow and is retracted — `lowerToRel` *declines* to legacy for
+> an uncovered chain rather than failing, so pinning `rel` measured legacy twice. §2·2 is the honest
+> answer, and it re-scopes Phase 0 (§8).
 
 The question this answers: *how well does GraphQL map onto a graph database, and if it maps well,
 what is the natural layer to attach it to — Gremlin, the RelIR, or SQLite?*
 
 Short answer: **it maps well on shape and badly on traversal**, the natural layer is **the IR**, and
-the work is dominated not by GraphQL but by **two pre-existing child-scope gaps** that GraphQL merely
-forces. Which is the good outcome: the expensive part is already on the roadmap and pays off for
-Gremlin users whether or not GraphQL ships.
+the work is dominated not by GraphQL but by gaps GraphQL merely forces. Which is the good outcome:
+the expensive part is already on the roadmap. Where it lands changed on revision — the gaps are not
+legacy-spine holes to patch, they are the **top four families of the RelIR migration's own worklist**
+(§2·2), so Phase 0 builds them in the RelIR fold and closes both at once.
 
 ---
 
@@ -66,8 +72,8 @@ is the same constraint the project already lives under, arriving from a second d
 
 ## 2. What already works — measured, not estimated
 
-Probe: the modern graph, `project('n','k').by(values('name')).by(<ARM>)`, both spines. **Both spines
-give byte-identical verdicts**, so this is not a legacy-route artefact.
+Probe: the modern graph, `project('n','k').by(values('name')).by(<ARM>)`, executed end to end. This
+section is what the SHIPPING engine answers today; §2·2 is which spine answered it.
 
 **Works today:**
 
@@ -117,6 +123,52 @@ Three findings, in dependency order:
 
 None of the three is GraphQL-specific. Fixing them makes
 `g.V().project('a','b').by(…).by(out().project(…).fold())` work for Gremlin users first.
+
+Those three locations are the LEGACY spine's. §2·2 is why the fix should not go there.
+
+### 2·2 Which spine answers any of this — the retraction
+
+`lowerToRel` returns a plan or `null` and never throws; an uncovered chain **declines** and the
+legacy spine answers it (`scripts/rel-sweep.ts` exists to protect exactly that contract). So pinning
+`spine: 'rel'` does not prove the RelIR path ran. The original probe pinned both and got identical
+answers because it ran legacy twice.
+
+Probed properly — longest prefix that `lowerToRel` accepts, then name the step after it:
+
+| chain | RelIR |
+|---|---|
+| `hasLabel('person').out('created').dedup().values('name')` | **covered** |
+| every GraphQL depth-1 shape from §2 (all five) | declines at `project` (2/3) |
+| every GraphQL depth-2+ shape from §2 (all five) | declines at `project` (2/3) |
+| `hasLabel('person').valueMap('name','age')` | declines at `valueMap` |
+| `hasLabel('person').elementMap('name')` | declines at `elementMap` |
+| `hasLabel('person').order().by('name').limit(10).valueMap()` | declines at `valueMap` (4/5) |
+| `hasLabel('person').group().by('age').by(values('name').fold())` | declines at `group` |
+| `repeat(out('knows')).times(2).dedup().values('name')` | declines at `repeat` (2/5) |
+
+One of eighteen. Corpus-wide, `mise run rel-blockers` reports **793 / 2298 traversals fully covered
+(34.5%)**, and its family ranking is:
+
+```
+78  the map shape       group*:52 groupCount*:26
+67  scalar transforms   math:15 asNumber:12 …
+63  branch              choose:36 union:20 …
+55  aliases             select:52 as:3
+51  the property shape  valueMap:38 elementMap:7 value:4 properties:2
+30  row ops             order:17 dedup:11 range:2
+24  the list shape      fold:24
+    (in no family yet)  repeat:86 … project:16 …
+```
+
+**Read that against §1·1.** GraphQL needs `project`, `select`, `valueMap`, `elementMap`, `fold`,
+`order`, `limit`, `dedup`, and eventually `group`. That is the same list, in roughly rank order —
+the map shape, aliases, the property shape, row ops, and the list shape are five of the top seven
+families, and they are precisely a selection set with per-level arguments.
+
+This is not a coincidence worth remarking on; it is a scoping instruction. A selection set with
+per-level arguments IS the relational shape RelIR was built to express — nested projection with
+per-level filter, order and slice — so the RelIR fold is not merely *a* place to build it, it is the
+place where the shape is native rather than retrofitted onto a step-tail accumulator.
 
 ---
 
@@ -266,13 +318,33 @@ Recommending (1). Flagging it rather than doing it, per the no-new-dependencies 
 
 ## 8. Phases
 
-**Phase 0 — the substrate (no GraphQL in it at all).** The §2·1 findings, in order:
-`ListOf` gains a `record` arm at the render boundary; `recordChildPlan` offers
-`tryCompileRecordChild` as a fourth arm; `classifyListChild` accepts a record-projection body and a
-slice/order/dedup prefix. Tests are ordinary L1/L2 Gremlin — `project().by(out().project(…).fold())`
-and friends at depth 3, plus the neighbouring valid compositions (`valueMap`, `elementMap`, `select`,
-inside `local()`, inside a branch arm). Ships value with or without the rest of this plan, and closes
-a gap the conformance corpus does exercise.
+**Phase 0 — the substrate, built in the RelIR fold (no GraphQL in it at all).**
+
+The original draft put this in `src/compiler/steps/` — the three §2·1 locations. §2·2 says not to.
+Patching the legacy spine buys the RelIR migration nothing and has to be paid for a second time when
+those families migrate; building it in the fold closes the GraphQL gap and moves the migration's top
+families in one pass. The legacy spine keeps answering these chains until the fold covers them,
+because that is exactly what the decline contract is for — so this is not a flag day and there is no
+window where a shape stops working.
+
+The order is the dependency order, not the family ranking:
+
+1. **`ListOf` gains a `record` arm** (`src/sql/kernel/render.ts:16`). A list of maps has no
+   representation at the render boundary, so nothing above can produce one. Unblocks everything else
+   and is the one item that is genuinely shared — the legacy tail needs it too, so it is a render
+   boundary change either way, not a spine choice.
+2. **The property shape in the fold** — `valueMap` / `elementMap` (51 declines). The smallest family
+   that is pure projection, and every GraphQL leaf object depends on it.
+3. **Row ops inside a child scope** — `order` / `dedup` / `range` / `limit` (30 declines). This is
+   GraphQL's per-level `first:` / `orderBy:` / `distinct:`, and the pre-existing child-scope-limit gap.
+4. **Aliases and the record shape** — `select` / `project` (55 + 16). The selection set itself.
+5. **The map shape** — `group` / `groupCount` (78). The largest family, and what GraphQL aggregation
+   fields need later (§9). Last because nothing above depends on it.
+
+Tests are ordinary L1/L2 Gremlin — `project().by(out().project(…).fold())` and friends at depth 3,
+plus the neighbouring valid compositions (`valueMap`, `elementMap`, `select`, inside `local()`,
+inside a branch arm) — with `mise run rel-blockers` as the progress instrument and `mise run census`
+proving both spines still answer identically. Ships value with or without the rest of this plan.
 
 **Phase 1 — schema reflection as a service.** `call('schema')` → the label/property/edge model.
 SDL printing on top. Cached against a write counter.
@@ -302,24 +374,58 @@ Apollo Federation (a different spec with its own subgraph-compatibility suite �
 cross-DO federation is not it); persisted queries; a declarative SDL-with-directives mapping layer
 (§4 — the override, later).
 
-**Unmeasured:**
-- Gremlin re-parse cost per GraphQL request under placement (a). Decides whether (b) is ever worth it.
+**Measured since the first draft** (§5's placement question, which is what turned these up):
+
+- **Compile never touches the store** — 0 `store.query` calls across all eight probe shapes. So
+  `(gremlin, params) → {sql, binds, shape}` is a pure function and placement (b) is viable, not just
+  (a). `WritePlan` is `{run: (store) => …}`, a closure, so this holds for reads only — edge-side
+  compilation is structurally read-first rather than by choice.
+- **Compile is a fixed ~4 ms per query shape**, independent of graph size (it must be — see above),
+  against an execution cost that scales. So compile is 66% of a request on the 6-vertex modern graph,
+  77% at 200 vertices, 44% at 1 000, 19.5% at 4 000. The agent-memory shape sits left of that
+  crossover.
+- **Parse is 2.7% of a request** (0.14 ms of 5.3 ms). The cost is the compiler, not the parser —
+  which is why §5 ships `{sql, binds, shape}` rather than `Step[]`.
+- **ANTLR cold start is 422×** — 45.2 ms first parse in a fresh process vs 0.107 ms warm.
+
+**Still unmeasured:**
 - Whether a deep selection set generates a plan whose bind count stays O(plan size). It should — all
   literals inline, only variables bind — but "should" is not a measurement, and the 100-bind cap is
   the wall that has shipped twice.
 - Whether a depth-4 selection set's SQL stays under the DO's 100 KB statement-text cap.
+- Gremlin re-parse cost per GraphQL request under placement (a) — now bounded above by the parse
+  number, so this is a small question rather than an open one.
+
+**And a finding from the same probes that is bigger than this document:** a point-lookup-plus-1-hop
+on a 20 000-vertex graph takes 9.8 s because SQLite has no statistics and inverts the join order;
+0.5 ms of `PRAGMA optimize` makes it 19 ms. Nothing here is worth tuning until that is fixed —
+`docs/2026-08-07-query-plan-stability.md`.
 
 ---
 
 ## 10. Method
 
-Probes run from a worktree at `bae05c7` via `test/support/executor.ts` against
-`test/fixtures/seed-modern.ts`, decoded through `test/support/decode.ts`, each query executed twice
-with the spine pinned to `legacy` and to `rel`. Verdicts were identical on both, which is why §2
-reports one table rather than two. Deferral messages are quoted verbatim from the thrown `Error`;
+Probes run from a worktree at `bae05c7` (§2·2 and §9 re-measured at `41c897d`) via
+`test/support/executor.ts` against `test/fixtures/seed-modern.ts`, decoded through
+`test/support/decode.ts`. §2's table is the shipping engine's answer with no spine pinned.
+§2·2 does NOT go through the executor — pinning a spine cannot distinguish "RelIR handled it" from
+"RelIR declined and legacy handled it", which is the error the first draft made. It calls
+`lowerToRel` directly on `runPasses(stepChain(…))` output, over every prefix, and reports the step
+after the longest one that returns non-null — the same method `scripts/rel-blockers.ts` uses, so the
+per-chain answers and the corpus-wide ranking are computed the same way.
+Deferral messages are quoted verbatim from the thrown `Error`;
 source locations were read at the pin and are cited inline.
 
+The §9 timings come from throwaway benchmark scripts, not committed: a synthetic graph (N `person`
++ N `software` vertices, 4 `knows` + 1 `created` edge per person) bulk-loaded into
+`new GraphStore(new BunSqlite(':memory:'))`, each query warmed then timed over 20–200 iterations,
+with `parseGremlin` / `compilePlan` / `framed` timed separately so exec+frame is the residual. The
+store-touch gate wraps `store.query` with a counter and runs `compilePlan` alone. Sizes were
+`ANALYZE`d — see `docs/2026-08-07-query-plan-stability.md` for why that qualifier is load-bearing and
+what the first, unanalyzed run wrongly showed.
+
 Related: `docs/archive/2026-07-28-match-string-frontend-design.md` (the precedent front end),
-`docs/2026-08-01-relir-build-plan.md` (where the Phase 0 fix lands),
+`docs/2026-08-01-relir-build-plan.md` (where Phase 0 now lands, and whose worklist it shares),
+`docs/2026-08-07-query-plan-stability.md` (the bigger finding these probes turned up),
 `docs/2026-07-28-property-based-testing-l5.md` (the differential-oracle pattern Phase 3 reuses),
 `docs/2026-07-17-agent-memory-vision.md` (the consumer that most wants this surface).
