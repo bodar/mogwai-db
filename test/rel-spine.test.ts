@@ -563,6 +563,49 @@ describe('the RelIR spine', () => {
     }
   });
 
+  test('a ConstantTraversal LABEL is a literal, at every write host', () => {
+    // TinkerPop wraps a literal in a `ConstantTraversal` internally and every write host unwraps it
+    // before anything else looks at it — `AddVertexStep.java:253-259`, `AddEdgeStep.java:180-181`,
+    // and `AddPropertyStep.java:106-110`, whose comment states the rule outright. So a folded constant
+    // is the reference's own behaviour, not an approximation, and it never reaches the per-traverser path.
+    const multi = createAppScope({ labelCardinality: LabelCardinality.ONE_OR_MORE });
+    for (const [gremlin, app] of [
+      ['g.addV(__.constant("person"))', undefined],
+      ['g.V(1).addE(__.constant("knows")).to(__.V(2))', undefined],
+      ['g.addV(__.constant(["a","b"]))', multi],       // a collection as the SOLE argument
+      ['g.addV(__.constant("a"), __.constant("b"))', multi],
+    ] as const) expect(compile(gremlin, {}, { spine: 'rel', app }).kind, gremlin).toBe('program');
+
+    // A genuinely NESTED label still declines — the fold is for a literal in traversal clothing, and
+    // widening it to a per-row body would be a different feature wearing the same spelling.
+    expect(compile('g.addV(__.V().has("name","marko").label())', {}, { spine: 'rel' }).kind).not.toBe('program');
+
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    const write = (gremlin: string) => exec(store, undefined, undefined, 'rel').buffers(gremlin, {});
+    write('g.addV(__.constant("person"))');
+    write('g.addV(__.constant("person"))');
+    write('g.V(1).addE(__.constant("knows")).to(__.V(2))');
+    expect(store.query('SELECT l.name FROM vertex_labels vl JOIN labels l ON l.id = vl.label', []))
+      .toEqual([{ name: 'person' }, { name: 'person' }]);
+    expect(store.query('SELECT l.name FROM edges e JOIN labels l ON l.id = e.label', []))
+      .toEqual([{ name: 'knows' }]);
+  });
+
+  // RelIR is AHEAD here, and the assertion says so rather than relying on the ambient switch (§6·1):
+  // legacy REFUSES a nested `addE` label outright ("nested-traversal label not supported") where the
+  // reference resolves a ConstantTraversal to its literal. `addV` has no such gap, so this is the one
+  // host where the fold changes an ANSWER rather than only a route.
+  test('addE folds a ConstantTraversal label where legacy refuses', relirAhead(
+    'g.V(1).addE(__.constant("knows")).to(__.V(2))',
+    () => {
+      const store = new GraphStore(new BunSqlite(':memory:'));
+      const write = (gremlin: string) => exec(store, undefined, undefined, 'rel').buffers(gremlin, {});
+      for (const person of ['a', 'b']) write(`g.addV("${person}")`);
+      write('g.V(1).addE(__.constant("knows")).to(__.V(2))');
+      expect(store.query('SELECT src, tgt FROM edges', [])).toEqual([{ src: 1, tgt: 2 }]);
+    },
+  ));
+
   test('the hand-authored modern seed compiles WHOLE on RelIR, byte-identical to legacy', () => {
     // The plan named these seeds as the last thing pinning legacy writes for corpus LOADING (§ Phase 1):
     // the reference graphs are GraphSON-bulk-loaded, so `MODERN_SEED` and its crew sibling are the two

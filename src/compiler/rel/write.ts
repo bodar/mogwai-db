@@ -885,7 +885,7 @@ export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IR
   // `property(T.label, …)` REPLACES the step's own labels rather than adding to them — `insertVertex`
   // reads the same way, and it is not an addition: `addV('a').property(T.label,'b')` is a vertex
   // labelled `b`. The count rule then applies to whichever list won.
-  const labels = creationLabels(tokens.label === null ? argValues(step) : [tokens.label], cardinality);
+  const labels = creationLabels(tokens.label === null ? argValues(step) : [tokens.label], cardinality, child);
   if (!labels) return null;
   const writes = tokens.rest.length ? propertyWrites(tokens.rest, 'vertex', child) : [];
   if (!writes) return null;
@@ -962,8 +962,37 @@ function creationTokens(
  * Deduped as a SET before counting, exactly as `insertVertex` does — `addV('a','a')` is one label, so
  * it must not fail a `max: 1` graph.
  */
-function creationLabels(args: readonly unknown[], cardinality: LabelCardinality): readonly string[] | null {
-  const named = args.length === 1 && Array.isArray(args[0]) ? args[0] as unknown[] : args;
+/**
+ * A LABEL argument that is really a LITERAL, unwrapped — or `undefined` for a nested body this route
+ * cannot fold.
+ *
+ * **`ConstantTraversal` is TinkerPop's own wrapper for a literal and every write host unwraps it
+ * explicitly**, so folding one is the reference's behaviour rather than an approximation of it:
+ * `AddVertexStep.java:253-259` ("Handles ConstantTraversal, which can be resolved to a" literal),
+ * `AddEdgeStep.java:180-181`, and `AddPropertyStep.java:106-110`, whose comment states the rule
+ * outright — *"Exclude ConstantTraversal which is used internally by TinkerPop to wrap literal
+ * values."* A constant is therefore NOT a traversal value at all; it never reaches the reference's
+ * per-traverser path.
+ *
+ * ONE authority for the question because three hosts ask it (`addV`'s labels, a merge map's
+ * `T.label`, `addE`'s label), and a per-host copy is a per-host chance to fold differently. It is
+ * deliberately the LABEL fold only: a label is always a string, so nothing here touches the typed
+ * value channel (§6·7) the way a folded property VALUE would — that one owes an answer about which
+ * vtype survives the fold, and owes it in its own change.
+ *
+ * `undefined` rather than `null` is the miss, because `null` is a legal folded value elsewhere and a
+ * label list must not silently gain one.
+ */
+function constLabelArg(value: unknown, child: ChildSeam): unknown {
+  if (!isNested(value)) return value;
+  const folded = constFromNested(value, child.sideEffects, child.params);
+  return folded.has ? folded.value : undefined;
+}
+
+function creationLabels(args: readonly unknown[], cardinality: LabelCardinality, child: ChildSeam): readonly string[] | null {
+  const folded = args.map((arg) => constLabelArg(arg, child));
+  if (folded.some((arg) => arg === undefined)) return null;
+  const named = folded.length === 1 && Array.isArray(folded[0]) ? folded[0] as unknown[] : folded;
   if (named.some((arg) => typeof arg !== 'string')) return null;
   const labels = [...new Set(named as string[])];
   try { for (const label of labels) validateLabel(label); } catch { return null; }
@@ -1058,7 +1087,11 @@ export function elementAddE(
   ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
-  const stepLabel = (step.args ?? [])[0]?.value;
+  // FOLDED, so `addE(__.constant("knows"))` is the edge label it names — `AddEdgeStep.java:180-181`
+  // unwraps a `ConstantTraversal` before anything else looks at it. Legacy THROWS for this shape
+  // ("nested-traversal label not supported"), so RelIR is ahead here rather than at parity, which
+  // §6·1 makes a first-class state.
+  const stepLabel = constLabelArg((step.args ?? [])[0]?.value, child);
   if (typeof stepLabel !== 'string') return null;
 
   let from: Endpoint = { kind: 'traverser' };
@@ -1397,7 +1430,7 @@ export function elementMergeV(
   } : match, 'vertex');
   const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'vertex', child) : [];
   if (!matchWrites || !createWrites || !tailWrites) return null;
-  const createLabels = creationLabels(((onCreate?.label ?? match.label) as string[] | null) ?? [], cardinality);
+  const createLabels = creationLabels(((onCreate?.label ?? match.label) as string[] | null) ?? [], cardinality, child);
   if (!createLabels) return null;
 
   const searched = matching((match.label as string[] | null) ?? [], Object.entries(match.props), child, fresh);
