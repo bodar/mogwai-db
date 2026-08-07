@@ -447,6 +447,17 @@ touches ORDER. What each is blind to:
 | `rel-sweep` | correctness — it asserts the lowering doesn't THROW and an admitted plan renders within the cap; it calls `lowerToRel`, so a decline at `spine.ts` is invisible to it (the census's `spine` column catches that) |
 | `test:perturbed` | values — the only thing that sees an order right only by SQLite's scan luck |
 
+**A FIXTURE-CORRUPTING bug HANGS instead of failing, and no instrument in that table reports it.**
+The census shares ONE store across every non-write traversal, so a write MISCLASSIFIED as a read
+mutates the fixture every later traversal reads. Measured: `isWrite()` asked `compile(q, {})` — the
+AMBIENT spine — and swallowed the throw as "read", so under `MOGWAI_RELIR=0` a new `mergeE` shape was
+filed as a read, ran against the shared store, and created six SELF-LOOPS; the 86 corpus `repeat()`s
+then walked a cyclic graph, which is infinite per the spec. The suite did not fail, it stopped.
+Two rules fall out, both now encoded: **a spine-sensitive CLASSIFIER must ask both spines** (§6·1's
+union rule is not only about coverage), and **a throw is not evidence of readness.** When a suite
+hangs after a coverage increment, suspect the shared fixture before suspecting a loop in the new
+code — the new code is usually the one traversal that is fine.
+
 ---
 
 ## §7. Scope control — the node set is CLOSED
@@ -529,10 +540,13 @@ Ordered by the discipline (§6·4): each closes a family and lets a deletion-rat
        see it), and the L3 scenarios it moves already PASSED on legacy. `test/rel-spine.test.ts` is
        the record instead. **A family whose corpus presence is parameterized needs a test, not a
        counter** — worth checking before ranking the next one by census delta.
-     What is LEFT of mergeE is `option(Merge.outV/inV, …)`: the shared parse refuses the selector,
-     so ~7 L3 scenarios fail on BOTH spines. Admitting it is a `MergeMaps` change both spines read,
-     and the endpoint vocabulary it needs (incoming | constant | ALIAS) is `elementAddE`'s `Endpoint`
-     union under a different spelling.
+     `option(Merge.outV/inV, …)` landed too, and it corrected a shared MISREADING: a `Merge.outV` in
+     a map's `Direction` slot is a REFERENCE to that option, not to the incoming traverser, and its
+     absence is an error (`MergeEdgeStep.resolveVertex`, gremlin-core .../step/map/
+     MergeEdgeStep.java:231-251). Both spines substituted the current traverser — agreeing, so no
+     differential could see it, and every corpus scenario using the token also supplies the option.
+     **Where both spines share a reading, the corpus and the differential are BOTH blind; only the
+     reference is not.** L3 1736 → 1741.
    - **`property`'s residue is not one question and not per-traverser.** The text-level refusal and the
      `T`-token/guard-binding halves are done (§6·5); what is left is a meta-property under an
      UNDECLARED cardinality (the `set` arm PATCHES rather than inserts, an `UPDATE` this route does
