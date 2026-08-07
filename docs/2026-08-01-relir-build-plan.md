@@ -511,12 +511,36 @@ Ordered by the discipline (§6·4): each closes a family and lets a deletion-rat
      graph-dependent refusal that becomes a guard binding (§6·5), a meta-property under an UNDECLARED
      cardinality (the `set` arm patches rather than inserts, an `UPDATE` this route does not emit yet),
      and a correlated scalar the child seam already builds (§6·6).
-   - **the nested-value/label children** (`property(k, __.trav)`, `addV(__.trav)`, `addE(__.trav)`) —
-     the seam has the arm, but `AddPropertyStep` uses `TraversalUtil.applyAll` where the seam's scalar
-     answer is `apply`: ALL results, not the first, throwing under `single` cardinality above one and
-     writing each under `list`/`set`. A body that is provably single-row (a reducer, a token, a
-     constant) is safe today; a `values()`-headed one needs a HOST-KEYED relation answer, which is the
-     one honest candidate for a fourth seam arm and is item 4's `local`/`properties` shape as well.
+   - **the nested-value/label children** (`property(k, __.trav)`, `addV(__.trav)`, `addE(__.trav)`).
+     **The reference is ASYMMETRIC and that decides the shape of the work** — read, not inferred:
+     - A nested **KEY** resolves through `Parameters.get(traverser, T.key, …)`, which calls
+       `TraversalUtil.apply` and takes `.get(0)`
+       (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/util/Parameters.java:120-128`,
+       `…/util/TraversalUtil.java:41-53`). `apply` is `traversal.next()` — the FIRST result, raising
+       *"The provided traverser does not map to a value"* when there is none. **That is exactly the
+       seam's `scalar` arm**, so a nested key needs no new machinery at all; the same is true of a
+       nested `addV`/`addE` LABEL (`insertVertex` resolves one value).
+     - A nested **VALUE** does not. `AddPropertyStep.sideEffect` detects a `Traversal` value that is
+       not a `ConstantTraversal` and routes to `handleTraversalValue`, which collects ALL results via
+       `TraversalUtil.applyAll`
+       (`…/process/traversal/step/sideEffect/AddPropertyStep.java:105-199`) and then:
+       **0 results → NO mutation, the element passes through unchanged** (`:140-142`);
+       **>1 under `single`** (declared, else `graph().features().vertex().getCardinality(key)`) →
+       `IllegalArgumentException` *"Single-cardinality property requires exactly one value, but
+       traversal produced N results"* (`:172-182`);
+       **>1 under `list`/`set`** → each written as its own value, and a non-Vertex element is an
+       `IllegalStateException` (`:184-195`);
+       otherwise `results.get(0)` (`:199`).
+       The single-argument `property(traversal)` MAP form is a third case, flagged by `mapForm` rather
+       than by inspecting the key, and it REQUIRES a Map result (`:150-168`).
+     So: **the key, the label and any provably single-row value are the seam's existing `scalar` arm
+     and can land now.** Only a possibly-multi-row VALUE needs more, and what it needs is a HOST-KEYED
+     relation — the child body applied to the whole owners relation at once, carrying the owner key.
+     That is not a lateral and not a new node: it is the ordinary fold with that relation as its input.
+     It is also item 4's `local`/`properties` shape, so it is the one honest candidate for a FOURTH
+     seam answer (§6·6 says three; this is the case that would make it four, deliberately). The
+     `single`-cardinality-above-one throw is graph-dependent, so it is a GUARD BINDING — the same
+     mechanism §6·5's second half owes `mergeE`.
    - **`PartitionStrategy` on a merge**, and `addE` after `addV` in one chain.
    Both laws reach past this phase: §6·5 is what lets the coverage counter reach zero at all, §6·6 is
    what item 4's by()-child matrix needs anyway.
