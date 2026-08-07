@@ -615,7 +615,12 @@ test('mergeE creates an edge between existing endpoints, then matches it', () =>
   const store = seededStore(); // marko=1, vadas=2, already knows via edge 7
   // a NEW label between marko and josh(4)
   const c = run(store, 'g.mergeE([(T.label): "likes", (Direction.OUT): 1, (Direction.IN): 4])');
-  expect((c[0] as any).edge).toMatchObject({ label: 'likes', src: 1, tgt: 4 });
+  // ONE traverser, and the edge it names asserted by READING IT BACK rather than off the write's own
+  // row: those columns are the SPINE's, not the answer's — legacy hands back a `{edge}` WriteResult
+  // and RelIR the payload projection. Both describe the same edge; only the read-back says so in a
+  // way that survives the traversal changing route, which this one just did.
+  expect(c).toHaveLength(1);
+  expect(run(store, 'g.V(1).outE("likes").label()').map((r) => r.v)).toEqual(['likes']);
   expect(run(store, 'g.V(1).out("likes").values("name")').map((r) => r.v)).toEqual(['josh']);
   // merging again matches the existing edge → no duplicate
   run(store, 'g.mergeE([(T.label): "likes", (Direction.OUT): 1, (Direction.IN): 4])');

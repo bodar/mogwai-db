@@ -428,6 +428,34 @@ describe('the RelIR spine', () => {
     expect(compile('g.V().addV().property(T.id, 5)', {}, { spine: 'rel' }).kind).not.toBe('program');
   });
 
+  test('mergeE with CONSTANT endpoints is mergeV\'s shape plus a guard', async () => {
+    // The endpoints are what mergeE adds, and a constant one keeps the search input-independent —
+    // so this is mergeV's two-total-statement shape exactly, and `crossed()` applies unchanged.
+    // `Merge.outV`/`Merge.inV` make the search vary per input row and are the next arm.
+    const cases = [
+      // matches the seeded marko->vadas knows edge
+      'g.mergeE([(T.label):"knows",(Direction.OUT):1,(Direction.IN):2])',
+      // no such edge -> the create arm
+      'g.mergeE([(T.label):"zzz",(Direction.OUT):1,(Direction.IN):2])',
+      'g.mergeE([(T.label):"knows",(Direction.OUT):1,(Direction.IN):2]).option(Merge.onMatch,["weight":0.9])',
+      'g.mergeE([(T.label):"zzz",(Direction.OUT):1,(Direction.IN):2]).option(Merge.onCreate,["w":"new"])',
+    ];
+    for (const gremlin of cases) {
+      const plan = compile(gremlin, {}, { spine: 'rel' });
+      expect(plan.kind === 'program' ? plan.spine : plan.kind, gremlin).toBe('rel');
+      const via = (spine: 'rel' | 'legacy') =>
+        decodeAll(exec(seededStore(), undefined, undefined, spine).buffers(gremlin, {}, {}));
+      expect(await via('rel'), gremlin).toEqual(await via('legacy'));
+    }
+    // The GUARD's other direction (§6·5): a missing endpoint is `raiseWhen: 'empty'`, and the
+    // message is `MergeEdgeStep`'s, identical on both spines.
+    const missing = 'g.mergeE([(T.label):"zzz",(Direction.OUT):1,(Direction.IN):999])';
+    expect(compile(missing, {}, { spine: 'rel' })).toMatchObject({ spine: 'rel' });
+    for (const spine of ['rel', 'legacy'] as const)
+      expect(() => exec(seededStore(), undefined, undefined, spine).buffers(missing, {}, {}), spine)
+        .toThrow('Vertex does not exist for mergeE');
+  });
+
   test('a large literal inject inlines as 0-bind literals and stays on RelIR', () => {
     // There is no >100-value conversion. A literal inject spends NO binds — each member inlines as a
     // typed SQL literal (`constLit`) — so even 101 members is 0 binds and trivially DO-legal on RelIR.

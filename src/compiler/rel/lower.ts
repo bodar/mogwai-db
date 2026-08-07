@@ -32,7 +32,7 @@ import { byExpr, modulations, orderProductivity, productivityFilter, type Modula
 import type { ChildHost, ChildSeam, RootedRead, Subject } from './child.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
-import { elementAddE, elementAddV, elementDrop, elementMergeV, elementProperty, propertyWrites, type Effects } from './write.ts';
+import { elementAddE, elementAddV, elementDrop, elementMergeE, elementMergeV, elementProperty, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
 import { elementHost, groupBarrier, mapPayload } from './map.ts';
 import { elementPayload } from './element.ts';
@@ -2168,11 +2168,11 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
 
   // `mergeV` AT THE SOURCE takes the same one-row input the two creations do, and for the same reason:
   // the input is a MULTIPLIER, so one row means the search's answer is emitted once.
-  if (first.name === 'mergeV') {
+  if (first.name === 'mergeV' || first.name === 'mergeE') {
     const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
-    const merged = mergedVertices(one, steps, 0, ctx, fresh);
+    const merged = mergedElements(one, steps, 0, ctx, fresh);
     if (!merged) return null;
-    const tail = elementTail(merged.effects.result, 'vertex', steps, merged.at, false, ctx, fresh, NO_ALIASES);
+    const tail = elementTail(merged.effects.result, first.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, NO_ALIASES);
     return tail && { ...tail, effects: [...merged.effects.bindings, ...(tail.effects ?? [])] };
   }
 
@@ -2329,14 +2329,14 @@ function elementTail(
       if (!grouped) return null;
       return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
-    if (step.name === 'mergeV') {
+    if (step.name === 'mergeV' || step.name === 'mergeE') {
       if (pathCarried(rel)) return null;
-      const merged = mergedVertices(rel, steps, at, ctx, fresh);
+      const merged = mergedElements(rel, steps, at, ctx, fresh);
       if (!merged) return null;
       // The LABELS carry for `addV`'s reason and by `addV`'s mechanism, but the correlation is a cross
       // join rather than a positional one: a merge emits the elements its SEARCH found, and no incoming
       // row produced any of them.
-      const tail = elementTail(merged.effects.result, 'vertex', steps, merged.at, false, ctx, fresh, labels);
+      const tail = elementTail(merged.effects.result, step.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, labels);
       if (!tail) return null;
       return { ...tail, effects: [...merged.effects.bindings, ...(tail.effects ?? [])] };
     }
@@ -2756,19 +2756,25 @@ function addedVertices(
   return effects && { effects, at: end };
 }
 
-/** `mergeV(map)` plus its cluster — the `option()` arms that MODULATE it, then the `property()` run
- *  that acts on its OUTPUT. The order is upstream's and it is load-bearing (an `option()` after a
- *  property tail is not a merge arm), so the two runs are taken in sequence rather than as one set. */
-function mergedVertices(
+/** `mergeV(map)`/`mergeE(map)` plus its cluster — the `option()` arms that MODULATE it, then the
+ *  `property()` run that acts on its OUTPUT. The order is upstream's and it is load-bearing (an
+ *  `option()` after a property tail is not a merge arm), so the two runs are taken in sequence rather
+ *  than as one set.
+ *
+ *  ONE cluster scanner for both merges, because the cluster is the same: what differs is only the
+ *  element the map describes, which is the lowering's business and not the scan's. */
+function mergedElements(
   input: Rel, steps: readonly IRStep[], at: number, ctx: ChainCtx, fresh: Minter,
 ): { readonly effects: Effects; readonly at: number } | null {
   let options = at + 1;
   while (options < steps.length && steps[options]!.name === 'option') options++;
   let end = options;
   while (end < steps.length && steps[end]!.name === 'property') end++;
-  const effects = elementMergeV(
-    input, steps[at]!, steps.slice(at + 1, options), steps.slice(options, end),
-    ctx.ordered, ctx.labelCardinality, childSeam(ctx, fresh), fresh,
-  );
+  const arms = steps.slice(at + 1, options);
+  const tail = steps.slice(options, end);
+  const child = childSeam(ctx, fresh);
+  const effects = steps[at]!.name === 'mergeE'
+    ? elementMergeE(input, steps[at]!, arms, tail, ctx.ordered, child, fresh)
+    : elementMergeV(input, steps[at]!, arms, tail, ctx.ordered, ctx.labelCardinality, child, fresh);
   return effects && { effects, at: end };
 }
