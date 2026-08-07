@@ -37,6 +37,10 @@
  */
 import { extractStrategies, parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { runPasses } from '../src/compiler/ir/passes.ts';
+import { verifyWriteArgs } from '../src/compiler/ir/write-args.ts';
+
+/** No `withSideEffect` declared — the sweep parses the corpus text alone. */
+const NO_SIDE_EFFECTS = new Map<string, any>();
 import type { IRStep } from '../src/compiler/ir/step.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
 import { DO_BIND_CAP } from '../src/rel/check.ts';
@@ -149,8 +153,18 @@ const renderedSteps = (plan: Plan) =>
     ? emit(plan).map((step) => step.emitted)
     : [render(emitRelational(plan))];
 
-/** Sweep ONE configuration, recording both properties above. */
+/**
+ * Sweep ONE configuration, recording both properties above.
+ *
+ * A PREFIX the verify Pass would reject is skipped, because `lowerToRel` never sees one in
+ * production: `compilePlan` runs `verifyWriteArgs` over the whole chain BEFORE the spine route, so a
+ * text-level refusal is the traversal's answer and the lowering is never asked (§6·5). Truncation is
+ * what makes this reachable here and only here — `mergeE([… Merge.outV …])` sliced before its
+ * `option(Merge.outV, …)` is a chain nobody wrote, and refusing it is CORRECT for that text. Without
+ * this the instrument would demand that the lowerings keep the blanket `catch` §6·5 exists to remove.
+ */
 function sweepOne(chain: IRStep[], collapse: boolean, correlatedChildren: boolean, at: () => string): void {
+  try { verifyWriteArgs(chain, {}, NO_SIDE_EFFECTS); } catch { return; }
   try {
     const lowered = lowerToRel(chain, { collapse, correlatedChildren });
     if (!lowered) return;

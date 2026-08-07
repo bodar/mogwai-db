@@ -113,9 +113,19 @@ for (const query of corpus) {
       compiler: Math.max(prior.compiler, next.compiler), bound: Math.max(prior.bound, next.bound),
     });
   }
+  // THE TWO COMPILES ARE SPLIT, and it is §6·1 rather than tidiness: RelIR answering where legacy
+  // DECLINES is the migration — legal, expected, and the whole point of the coverage counter — so a
+  // legacy throw here is not a hygiene violation. Catching both together made it one the moment a
+  // family started routing (measured: `mergeE` with `option(Merge.outV, …)`, which legacy sheds).
+  // A RelIR throw stays a failure: `lowerToRel` already ADMITTED this plan above, so failing to
+  // compile it is this route contradicting itself.
+  let rel;
+  try { rel = compile(query, {}, { spine: 'rel' }); }
+  catch (error) { failures.push(`${query}: RelIR admitted the plan, then failed to compile it: ${(error as Error).message}`); continue; }
+  let legacy;
+  try { legacy = compile(query, {}, { spine: 'legacy' }); }
+  catch { continue; }
   try {
-    const rel = compile(query, {}, { spine: 'rel' });
-    const legacy = compile(query, {}, { spine: 'legacy' });
     if (rel.kind === 'read' && rel.spine === 'rel' && legacy.kind === 'read') {
       pairedReads++;
       for (const [route, plan] of [['rel', rel], ['legacy', legacy]] as const) {

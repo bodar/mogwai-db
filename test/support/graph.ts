@@ -44,7 +44,20 @@ export type StoreFactory = () => GraphStore;
  *  here and is reported as a non-write, which is correct (no `call()` form is a write today). Do
  *  NOT reuse this as a general "does it compile" probe — see the header on test/census/census.ts. */
 export function isWrite(q: string): boolean {
-  try { return compile(q, {}).kind !== 'read'; } catch { return false; }
+  // ASK BOTH SPINES, and treat a throw as no answer rather than as "read" — §6·1's union rule
+  // applied to CLASSIFICATION, which the migration makes load-bearing: a traversal one spine
+  // refuses and the other executes as a write is exactly what a coverage increment creates.
+  //
+  // It used to ask `compile(q, {})`, i.e. whichever spine the AMBIENT switch selected, and swallow
+  // the throw. The failure that found it: under `MOGWAI_RELIR=0`, `mergeE(…).option(Merge.outV, …)`
+  // threw on legacy, was filed as a READ, and the census then ran it against its SHARED store —
+  // where the RelIR position happily created six SELF-LOOPS. Every later traversal saw a cyclic
+  // graph, and a cyclic `repeat()` without `simplePath()` is infinite per the spec, so the suite
+  // hung rather than failed. A misclassified write does not corrupt one row; it corrupts the fixture.
+  for (const spine of ['rel', 'legacy'] as const) {
+    try { if (compile(q, {}, { spine }).kind !== 'read') return true; } catch { /* no answer from this spine */ }
+  }
+  return false;
 }
 
 /**

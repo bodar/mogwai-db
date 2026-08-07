@@ -411,6 +411,23 @@ export interface MergeMaps {
   readonly onCreate: MergeSpec | null;
   readonly onMatch: MergeSpec | null;
   readonly tail: readonly PropSpec[];
+  /**
+   * `option(Merge.outV, …)` / `option(Merge.inV, …)` — WHERE AN ENDPOINT TOKEN IS RESOLVED, raw.
+   *
+   * **A `Merge.outV` in the merge map does NOT mean "the incoming traverser".** It means "look at
+   * `option(Merge.outV, …)`", and `MergeEdgeStep.resolveVertex`
+   * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeEdgeStep.java:231-251`)
+   * throws `option(outV) must be specified if it is used for OUT` when the option is absent. Both
+   * spines used to substitute the current traverser instead — the same wrong answer on both, which
+   * is why no differential could see it and why the corpus could not either: every scenario that
+   * uses the token also supplies the option.
+   *
+   * Left RAW rather than resolved, because the two spines resolve it differently and neither belongs
+   * in a parse: the value is a nested traversal evaluated AT the incoming traverser, so it is an
+   * alias read on one side and a correlated child on the other.
+   */
+  readonly outV?: unknown;
+  readonly inV?: unknown;
 }
 
 export function mergeMaps(
@@ -422,6 +439,7 @@ export function mergeMaps(
   const match = normalizeMergeMap({ op, kind: 'merge' }, step.args[0].value, step.args[0]?.type ?? null, sideEffects, params);
 
   let onCreate: MergeSpec | null = null, onMatch: MergeSpec | null = null;
+  let outV: unknown, inV: unknown;
   const optionCount = mods.findIndex((s) => s.name !== 'option');
   const tail = optionCount < 0 ? [] : parsePropertyTail(mods.slice(optionCount), `${op}()`, sideEffects, params);
   for (const s of optionCount < 0 ? mods : mods.slice(0, optionCount)) {
@@ -434,6 +452,15 @@ export function mergeMaps(
     const defaultCardinality = cardinalityArg?.cardinality ?? null;
     if (defaultCardinality !== null && defaultCardinality !== 'single' && defaultCardinality !== 'list' && defaultCardinality !== 'set')
       throw new Error(`${op} option() has unsupported cardinality '${defaultCardinality}'`);
+    // `Merge.outV`/`Merge.inV` name an ENDPOINT rather than an arm: the option supplies the vertex a
+    // `Direction` slot holding that token resolves to. Kept raw (see `MergeMaps.outV`), and only for
+    // `mergeE` — a vertex merge has no endpoints, so the selector there is the reference's own error.
+    if (sel.merge === 'outv' || sel.merge === 'inv') {
+      if (op !== 'mergeE') throw new Error(`${op} option(Merge.${sel.merge}) is not valid — only an edge has endpoints`);
+      if (cardinalityArg != null) throw new Error(`${op} option(Merge.${sel.merge}) does not take a cardinality`);
+      if (sel.merge === 'outv') outV = mapArg; else inV = mapArg;
+      continue;
+    }
     const kind = sel.merge === 'oncreate' ? 'onCreate' : sel.merge === 'onmatch' ? 'onMatch' : null;
     if (!kind) throw new Deferral(`${op} option(Merge.${sel.merge}) not supported`);
     const spec = normalizeMergeMap({ op, kind }, mapArg, s.args[1]?.type ?? null, sideEffects, params, defaultCardinality);
@@ -441,7 +468,29 @@ export function mergeMaps(
   }
 
   if (onCreate) validateNoOverrides(match, onCreate);
-  return { match, onCreate, onMatch, tail };
+  // THE TOKEN REQUIRES ITS OPTION, and the check is decidable from the TEXT — so it belongs here and
+  // therefore fires from the `writeArguments` verify Pass, above both spines (§6·5). `resolveVertex`
+  // raises it per traverser; raising it once, before either spine is chosen, is the same answer.
+  requireEndpointOption(match, onCreate, outV, 'outV');
+  requireEndpointOption(match, onCreate, inV, 'inV');
+  return { match, onCreate, onMatch, tail, ...(outV === undefined ? {} : { outV }), ...(inV === undefined ? {} : { inV }) };
+}
+
+/** `Merge.outV` in a `Direction` slot is a REFERENCE to `option(Merge.outV, …)`, so the option has to
+ *  be there — `MergeEdgeStep.resolveVertex`'s own refusal, worded as it words it. A slot holding a
+ *  plain id needs no option, and an option with no slot to fill is simply unread (the reference
+ *  returns early on `!map.containsKey(direction)`), so neither is an error. */
+function requireEndpointOption(
+  match: MergeSpec, onCreate: MergeSpec | null, option: unknown, side: 'outV' | 'inV',
+): void {
+  if (option !== undefined) return;
+  const token = side === 'outV' ? 'outv' : 'inv';
+  const uses = (spec: MergeSpec | null): boolean => {
+    const slot = spec?.[side];
+    return slot !== null && typeof slot === 'object' && (slot as { incoming?: unknown }).incoming === token;
+  };
+  if (uses(match) || uses(onCreate))
+    throw new Error(`option(${side}) must be specified if it is used for ${side === 'outV' ? 'OUT' : 'IN'}`);
 }
 
 /** A label value in a merge map / an addV() argument is a string OR a list of strings; a list is

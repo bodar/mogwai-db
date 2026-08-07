@@ -1119,14 +1119,29 @@ function edgeMatchQuery(spec: MergeSpec, outV: number, inV: number): { sql: stri
 // g.mergeE(map) [.option(Merge.onCreate, map)] [.option(Merge.onMatch, map)]
 function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, any>, sideEffects?: Map<string, any>): WritePlan {
   const meIdx = steps.findIndex((s) => s.name === 'mergeE');
-  const { match: matchSpecRaw, onCreate, onMatch, tail } = mergeMaps(steps[meIdx], steps.slice(meIdx + 1), 'mergeE', sideEffects, params);
+  const { match: matchSpecRaw, onCreate, onMatch, tail, outV: outVOption, inV: inVOption } =
+    mergeMaps(steps[meIdx], steps.slice(meIdx + 1), 'mergeE', sideEffects, params);
+  // `option(Merge.outV/inV, …)` resolves a vertex by running a traversal AT the incoming traverser,
+  // and this route's merge drivers are bare rowids — no alias scope, so `select("x")` has nothing to
+  // read. It SHEDS the shape rather than answering it (§6·1: the floor is the union of the two
+  // spines, and RelIR expresses this one).
+  if (outVOption !== undefined || inVOption !== undefined)
+    throw new Error('mergeE option(Merge.outV/inV) not yet supported');
   for (const sp of tail) assertEdgePropertySpec(sp);
   const drivers = mergeDrivers(engine, steps.slice(0, meIdx), params);
   return {
     kind: 'write',
     run: (store) => {
-      const endpoint = (spec: any, oc: any, cur: number | null, role: string): number => {
-        const raw = spec?.incoming !== undefined ? cur : spec ?? (oc?.incoming !== undefined ? cur : oc);
+      const endpoint = (spec: any, oc: any, role: string): number => {
+        // A `Merge.outV`/`Merge.inV` TOKEN in the slot is a reference to `option(Merge.outV, …)`, not
+        // to the incoming traverser — `MergeEdgeStep.resolveVertex` (gremlin-core .../step/map/
+        // MergeEdgeStep.java:231-251). Substituting `cur` here is what this route used to do, and it
+        // is a WRONG ANSWER wherever the option names a different vertex. It is now unreachable —
+        // `mergeMaps` raises when the token has no option, and the option itself is refused above —
+        // so this throws rather than guessing, which is what makes the unreachability checkable.
+        if (spec?.incoming !== undefined || (spec === undefined && oc?.incoming !== undefined))
+          throw new Error(`mergeE ${role} token requires option(${role}), which this route refuses`);
+        const raw = spec ?? oc;
         // MergeEdgeStep's own wording (gremlin-core .../step/map/MergeEdgeStep.java:314) for the
         // same refusal. Ours fires EARLIER than the reference's — it checks on the create path,
         // after the search found nothing, while we need both endpoints to build the match query at
@@ -1146,8 +1161,8 @@ function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, a
         // map named none) is the only acceptable state, exactly as on the addE/property() path.
         if (Object.values(oc?.propCardinalities ?? {}).some((c) => c !== null) || Object.values(om?.propCardinalities ?? {}).some((c) => c !== null))
           throw new Error('mergeE option() does not support vertex-property cardinality');
-        const outV = endpoint(matchSpec.outV, oc?.outV, cur, 'outV');
-        const inV = endpoint(matchSpec.inV, oc?.inV, cur, 'inV');
+        const outV = endpoint(matchSpec.outV, oc?.outV, 'outV');
+        const inV = endpoint(matchSpec.inV, oc?.inV, 'inV');
         const match = edgeMatchQuery(matchSpec, outV, inV);
         const matches = store.query<any>(match.sql, match.binds);
         if (matches.length) {

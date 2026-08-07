@@ -102,6 +102,8 @@ ran	legacy	6	6	fd5b375348611c01	b599f68b2e3bcf9e	ran	fd5b375348611c01	g.V().as("
 ran	legacy	6	6	495c772ec897fe55	a7072793c726cafe	ran	495c772ec897fe55	g.V().as("v").call("tinker.degree.centrality").with("direction", OUT).project("vertex", "degree").by(select("v")).by()
 ran	legacy	6	6	495c772ec897fe55	a7072793c726cafe	ran	495c772ec897fe55	g.V().as("v").call("tinker.degree.centrality", __.project("direction").by(__.constant(OUT))).project("vertex", "degree").by(select("v")).by()
 ran	legacy	6	6	1dac643f9a6d9367	8537c1f0d1753a43	ran	1dac643f9a6d9367	g.V().as("v").map(__.bothE().values("weight").fold()).sum(Scope.local).as("s").select("v", "s").order().by(__.select("s"), Order.desc).by(__.select("v").values("name"))
+ran	rel	6	6	73e856605a440641	dad77d22b76868cd	deferred		g.V().as("v").mergeE([T.label:"self",(OUT):Merge.outV,(IN):Merge.inV]).option(Merge.onCreate,null).option(Merge.outV,select("v")).option(Merge.inV,select("v"))
+ran	rel	6	6	73e856605a440641	dad77d22b76868cd	deferred		g.V().as("v").mergeE([T.label:"self",(OUT):Merge.outV,(IN):Merge.inV]).option(Merge.outV,select("v")).option(Merge.inV,select("v"))
 ran	legacy	1	1	7fc65384355678a2	6b98198020d34b6c	ran	7fc65384355678a2	g.V().both(). group().by().by(__.out().dedup().fold()). unfold(). select(Column.values). unfold(). out().order().by("name").limit(1).values("name")
 ran	legacy	6	3	403a27f25762c952	9e2c73bc51f820df	ran	403a27f25762c952	g.V().both().as('a').both().as('b').simplePath().path().by('age').from('a').to('b')
 ran	rel	1	1	ee7599e2d7b7d66c	c901c6630c665571	ran	ee7599e2d7b7d66c	g.V().both().both().count()

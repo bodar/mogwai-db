@@ -933,11 +933,17 @@ type Endpoint =
   | { readonly kind: 'alias'; readonly label: string }
   /** A ROOTED sub-read (`to(__.V(2))`, `from(V().has(…))`) — a relation, read through a scalar
    *  subquery. Legacy takes its FIRST row, so this takes one row of the same relation. */
-  | { readonly kind: 'read'; readonly rel: Rel };
+  | { readonly kind: 'read'; readonly rel: Rel }
+  /** A PUBLIC ID naming an existing vertex — `mergeE`'s only extra form, because a merge map states
+   *  its endpoints by id where `from()`/`to()` state them by label or traversal. Whether the vertex
+   *  is THERE is the graph's answer, so it arrives with a guard (§6·5). */
+  | { readonly kind: 'vertex'; readonly uid: string | number };
 
-/** The endpoint as an expression over the relation the edge insert selects FROM. */
-function endpointExpr(end: Endpoint, over: Rel, aliases: AliasMap, fresh: Minter): Expr | null {
+/** The endpoint as an expression over the relation the edge insert selects FROM. `guard` is required
+ *  only by the `vertex` arm, whose refusal the graph decides; a host with no such arm passes none. */
+function endpointExpr(end: Endpoint, over: Rel, aliases: AliasMap, fresh: Minter, guard?: Guarder): Expr | null {
   if (end.kind === 'traverser') return col(over.id, 'id');
+  if (end.kind === 'vertex') return guard ? endpointRowid(end.uid, guard, fresh) : null;
   if (end.kind === 'read') {
     const one = make.limit({ id: fresh('li'), input: end.rel, channels: end.rel.channels, type: end.rel.type, count: compilerInt(1) });
     const only = make.project({ id: fresh('p'), input: one, channels: [], type: ID_TYPE, exprs: [['id', col(one.id, 'id')]] });
@@ -1069,8 +1075,12 @@ export function elementAddE(
 /** One `from()`/`to()` argument → the endpoint it names, or `null` for a form this route declines
  *  (`__.addV(…)`, which CREATES its endpoint as a side effect of resolving it, and anything whose
  *  nested chain the read fold does not cover). */
-function endpointOf(value: unknown, child: ChildSeam, fresh: Minter): Endpoint | null {
-  if (typeof value === 'string') return { kind: 'alias', label: value };
+function endpointOf(value: unknown, child: ChildSeam, fresh: Minter, ids = false): Endpoint | null {
+  // A bare STRING is an `as()` label to `from()`/`to()`, and a public vertex id to a merge map's
+  // endpoint option — the same characters meaning different things because the two hosts declare
+  // different vocabularies. `ids` is which host is asking, stated rather than sniffed.
+  if (typeof value === 'string') return ids ? { kind: 'vertex', uid: value } : { kind: 'alias', label: value };
+  if (ids && typeof value === 'number') return { kind: 'vertex', uid: value };
   if (!isNested(value)) return null;
   const inner = child.body(value.nested, 'rooted');
   if (!inner?.length) return null;
@@ -1369,7 +1379,7 @@ export function elementMergeV(
  */
 export function elementMergeE(
   input: Rel, elem: Elem, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
-  ordered: boolean, child: ChildSeam, fresh: Minter,
+  aliases: AliasMap, ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
   let maps: MergeMaps;
@@ -1387,8 +1397,8 @@ export function elementMergeE(
   // mutation this route may make — it is one the reference refuses outright.
   if (onMatch?.label) return null;
 
-  const out = mergeEndpoint(match.outV, onCreate?.outV);
-  const to = mergeEndpoint(match.inV, onCreate?.inV);
+  const out = mergeEndpoint(match.outV, onCreate?.outV, maps.outV, child, fresh);
+  const to = mergeEndpoint(match.inV, onCreate?.inV, maps.inV, child, fresh);
   if (!out || !to) return null;
   const labels = ((onCreate?.label ?? match.label) as string[] | null) ?? [];
   if (labels.length !== 1) return null;
@@ -1407,8 +1417,8 @@ export function elementMergeE(
   // AN INCOMING ENDPOINT NEEDS AN INCOMING VERTEX. At the source the one-row seed carries no `id`,
   // and an edge stream is not a vertex — either way there is nothing to be an endpoint, which is the
   // refusal `MergeEdgeStep` words as "Out Vertex not specified in onCreate".
-  const incomingEndpoint = out.kind === 'incoming' || to.kind === 'incoming';
-  if (incomingEndpoint && (elem !== 'vertex' || !input.type.cols.some((column) => column.name === 'id'))) return null;
+  if ((out.kind === 'traverser' || to.kind === 'traverser')
+    && (elem !== 'vertex' || !input.type.cols.some((column) => column.name === 'id'))) return null;
 
   const carried = writeInputChannels(input);
   if (carried.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
@@ -1416,9 +1426,12 @@ export function elementMergeE(
   const { bindings, bind, guard } = effectScope(fresh);
   const incoming = seeded ? bind(seeded.result, true, carried) : input;
 
-  // THE ENDPOINTS FIRST, so a missing vertex refuses before anything is written.
-  const endpointExpr = (end: MergeEndpoint): Expr =>
-    end.kind === 'incoming' ? col(incoming.id, 'id') : endpointRowid(end.uid, guard, fresh);
+  // THE ENDPOINTS FIRST, so a missing vertex refuses before anything is written. The vocabulary is
+  // `addE`'s `Endpoint` — an alias, a rooted read, the incoming traverser, a public id — because a
+  // merge's endpoints and a creation's ARE the same four things under different spellings.
+  const src = endpointExpr(out, incoming, aliases, fresh, guard);
+  const tgt = endpointExpr(to, incoming, aliases, fresh, guard);
+  if (!src || !tgt) return null;
   // EVERY ROW CARRIES ITS OWN PAIR, whether or not the pair varies — which is what lets the constant
   // and incoming cases be one lowering rather than two. `ord` names the row that asked; a source seed
   // has no position of its own and is one row, so a literal is the honest answer for it.
@@ -1426,7 +1439,7 @@ export function elementMergeE(
   const pairs = bind(make.project({
     id: fresh('p'), input: incoming, channels: [],
     type: typeOf(meta(ORD, 'int'), meta('src', 'int'), meta('tgt', 'int')),
-    exprs: [[ORD, position], ['src', endpointExpr(out)], ['tgt', endpointExpr(to)]],
+    exprs: [[ORD, position], ['src', src], ['tgt', tgt]],
   }), true);
 
   const criteria = edgeCriteria(labels[0]!, Object.entries(match.props), child, fresh);
@@ -1495,25 +1508,31 @@ export function elementMergeE(
   return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(incoming, emitted, carried, ordered, fresh, true) };
 }
 
-/** Which vertex an edge endpoint slot names — the incoming traverser, or a constant public id. */
-type MergeEndpoint = { readonly kind: 'incoming' } | { readonly kind: 'constant'; readonly uid: string | number };
-
 /**
- * A merge map's endpoint slot, resolved — or `null` to decline.
+ * A merge map's endpoint slot, resolved to the shared `Endpoint` vocabulary — or `null` to decline.
  *
- * `MergeEdgeStep`'s own fallback order, and it is not symmetric with the property maps: the merge
- * argument's slot wins and the `onCreate` arm supplies one it left out. `Merge.outV`/`Merge.inV` in
- * EITHER means the incoming traverser (`{ incoming }`, `classifyMergeVal`) — the token names the
- * ROLE, not which slot it sits in, which is why both spell the same answer here.
+ * Two rules, both `MergeEdgeStep`'s and neither symmetric with the property maps:
  *
- * `undefined` from `null` matters: a slot the map never mentioned falls through to `onCreate`, while
- * a slot naming something that is neither a token nor an id is a decline.
+ * - **the merge argument's slot wins, and `onCreate` supplies one it left out.** `undefined` from
+ *   `null` therefore matters: a slot the map never mentioned falls through, a slot naming something
+ *   unusable is a decline.
+ * - **a `Merge.outV`/`Merge.inV` TOKEN is a reference to `option(Merge.outV, …)`, not to the
+ *   incoming traverser** (`resolveVertex`, gremlin-core .../step/map/MergeEdgeStep.java:231-251).
+ *   The option is guaranteed present — `mergeMaps` raises otherwise, from the verify Pass — so the
+ *   token simply redirects to it. Reading it as "the current traverser" is what both spines used to
+ *   do, and it is a wrong ANSWER wherever the option names a different vertex; `option(outV,
+ *   select("x")).option(inV, select("y"))` over two aliased vertices is exactly that traversal.
+ *
+ * The option's own value goes through `endpointOf`, so an alias, a rooted read and a public id all
+ * arrive already spelled the way `endpointExpr` reads them.
  */
-function mergeEndpoint(fromMatch: unknown, fromCreate: unknown): MergeEndpoint | null {
+function mergeEndpoint(
+  fromMatch: unknown, fromCreate: unknown, option: unknown, child: ChildSeam, fresh: Minter,
+): Endpoint | null {
   const named = fromMatch === undefined ? fromCreate : fromMatch;
   if (named !== null && typeof named === 'object' && (named as { incoming?: unknown }).incoming !== undefined)
-    return { kind: 'incoming' };
-  return typeof named === 'string' || typeof named === 'number' ? { kind: 'constant', uid: named } : null;
+    return option === undefined ? null : endpointOf(option, child, fresh, true);
+  return typeof named === 'string' || typeof named === 'number' ? { kind: 'vertex', uid: named } : null;
 }
 
 /**

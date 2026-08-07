@@ -436,18 +436,22 @@ describe('the RelIR spine', () => {
     const T = (name: string) => ({ typeName: 'T', elementName: name });
     const D = (name: string) => ({ typeName: 'Direction', elementName: name });
     const M = (name: string) => ({ typeName: 'Merge', elementName: name });
+    const self = new Map<any, any>([[T('label'), 'self'], [D('OUT'), M('outV')], [D('IN'), M('inV')]]);
+    const opts = '.option(Merge.outV,__.select("v")).option(Merge.inV,__.select("v"))';
     const cases: [string, Record<string, unknown>][] = [
-      // BOTH endpoints the incoming traverser — the shape every L3 mergeE scenario uses.
-      ['g.V().mergeE(xx1)', { xx1: new Map<any, any>([[T('label'), 'self'], [D('OUT'), M('outV')], [D('IN'), M('inV')]]) }],
-      ['g.V().has("person","name","marko").mergeE(xx1)',
-        { xx1: new Map<any, any>([[T('label'), 'self'], [D('OUT'), M('outV')], [D('IN'), M('inV')]]) }],
-      // MIXED: one endpoint the traverser, one a constant id — one lowering serves both.
-      ['g.V().hasLabel("person").mergeE(xx1)',
+      // BOTH endpoints resolved by their option — the shape every L3 mergeE scenario uses.
+      [`g.V().as("v").mergeE(xx1)${opts}`, { xx1: self }],
+      [`g.V().has("person","name","marko").as("v").mergeE(xx1)${opts}`, { xx1: self }],
+      // MIXED: one endpoint from an option, one a constant id in the map — one lowering serves both.
+      ['g.V().hasLabel("person").as("v").mergeE(xx1).option(Merge.outV,__.select("v"))',
         { xx1: new Map<any, any>([[T('label'), 'pt'], [D('OUT'), M('outV')], [D('IN'), 3]]) }],
+      // A ROOTED read as the endpoint, at the SOURCE, where there is no incoming traverser at all.
+      ['g.mergeE(xx1).option(Merge.outV,__.V(1)).option(Merge.inV,__.V(2))',
+        { xx1: new Map<any, any>([[T('label'), 'knows'], [D('OUT'), M('outV')], [D('IN'), M('inV')]]) }],
       // DUPLICATE incoming rows must get ONE edge and two traversers — upstream's second loop
       // iteration matching what its first created, which here is `Distinct` over the endpoint pair
       // rather than a re-read. `both().both()` revisits vertices, which is what makes it a witness.
-      ['g.V(1).both().both().mergeE(xx1)',
+      [`g.V(1).both().both().as("v").mergeE(xx1)${opts}`,
         { xx1: new Map<any, any>([[T('label'), 'dup'], [D('OUT'), M('outV')], [D('IN'), M('inV')]]) }],
     ];
     for (const [gremlin, params] of cases) {
@@ -461,8 +465,28 @@ describe('the RelIR spine', () => {
         const emitted = await decodeAll(run.buffers(gremlin, params, {}));
         return { emitted: emitted.length, edges: await decodeAll(run.buffers('g.E().count()', {}, {})) };
       };
-      expect(await via('rel'), gremlin).toEqual(await via('legacy'));
+      // Legacy SHEDS `option(Merge.outV/inV)` — it resolves an endpoint by running a traversal at the
+      // incoming traverser and its merge drivers are bare rowids, so `select("v")` has nothing to
+      // read. §6·1: the floor is the union, so RelIR answering where legacy declines is the
+      // migration. Where legacy DOES answer, the two must agree row for row.
+      const answer = await via('rel');
+      let baseline: typeof answer | null = null;
+      try { baseline = await via('legacy'); } catch { baseline = null; }
+      if (baseline) expect(answer, gremlin).toEqual(baseline);
+      else expect(answer.emitted, `${gremlin} (relirAhead)`).toBeGreaterThan(0);
     }
+  });
+
+  test('a Merge.outV token in the map REQUIRES its option — both spines, from the Pass tier', () => {
+    // `MergeEdgeStep.resolveVertex` (gremlin-core .../step/map/MergeEdgeStep.java:231-251): the token
+    // is a REFERENCE to `option(Merge.outV, …)`, not to the incoming traverser, and its absence is an
+    // error. Both spines used to substitute the current traverser — the same wrong answer on both, so
+    // no differential could see it, and every corpus scenario that uses the token also supplies the
+    // option. The check is decidable from the TEXT, so it raises above both spines (§6·5).
+    const gremlin = 'g.V().mergeE([(T.label):"self",(Direction.OUT):Merge.outV,(Direction.IN):Merge.inV])';
+    for (const spine of ['rel', 'legacy'] as const)
+      expect(() => compile(gremlin, {}, { spine }), spine)
+        .toThrow('option(outV) must be specified if it is used for OUT');
   });
 
   test('mergeE with CONSTANT endpoints is mergeV\'s shape plus a guard', async () => {
