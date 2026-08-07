@@ -284,11 +284,18 @@ never a kind of stream (`Aggregate` yields a relation; `COLLECT`/`JSON_OBJECTAGG
 §8's measurement adds is that it is also the DELETION mechanism, and it must run FIRST:
 
 **Every legacy file splits at one line — the pure kernel, and the emission that spends it on legacy's
-object model.** `math` is the worked example and the proof the split is real: `mathToSql`/`mathVars` already
-live in `src/gremlin/math.ts` importing nothing but the `q` kernel, while `lowerMath`/`lowerMathScalar`
-(`steps/tail/mapscalar.ts`) are ~85 lines of `traverserLayout`/`aliasCtx`/`layoutProjection` plumbing,
-duplicated once per dispatch table. So migrating `math` is *calling the same kernel with a different
-`resolveVar`*, and `mapscalar.ts` is safe to delete **because the valuable part already left**.
+object model.** `math` is the worked example: `mathToSql`/`mathVars` already live in `src/gremlin/math.ts`
+importing nothing but the `q` kernel, while `lowerMath`/`lowerMathScalar` (`steps/tail/mapscalar.ts`) are
+~85 lines of `traverserLayout`/`aliasCtx`/`layoutProjection` plumbing, duplicated once per dispatch table.
+`mapscalar.ts` is safe to delete **because the valuable part already left**.
+
+**THE SPLIT IS ONE LINE FURTHER IN THAN THIS SECTION CLAIMED, and the correction is the interesting
+part** — measured 2026-08-07, before writing any of it. "Migrating `math` is *calling the same kernel with
+a different `resolveVar`*" is FALSE: `mathToSql` is typed `(formula, resolveVar) => Expression`, and every
+arm of it — `realLit`'s `raw()`, all twenty `FN` entries, every `q\`\`` in the precedence climb —
+CONSTRUCTS a q-kernel `Expression`. RelIR composes `Expr`. So the file is a kernel with an EMISSION TAIL
+still fused to it, which is the same shape `steps/` files have, one layer down. See Phase 2 for what the
+separation costs and why the obvious AST split is the wrong one.
 
 **EXTRACT THE KERNEL BEFORE DELETING THE FILE.** A kernel still trapped inside `steps/` is what turns every
 deletion into a re-derivation — and re-deriving a table is the one failure mode no test names. This is not
@@ -941,8 +948,39 @@ Two DECLINES remain, both honest: `withSack(seed, Operator.x)` names a MERGE ope
 policy answer for the role and therefore a channels-core change rather than a step lowering; and
 `barrier(Barrier.normSack)` is its own step.
 
+#### `math` — what the separation actually costs, and why the obvious split is the wrong one
+
+**MEASURED, NOT ESTIMATED** (`src/gremlin/math.ts`, 148 lines). What is genuinely shared and what is not:
+
+| shareable — DATA and PARSE | per-layer — CONSTRUCTION |
+|---|---|
+| the lexer, the precedence/associativity climb, the juxtaposition rule (`sin _`), the trailing-input and unexpected-character messages | `realLit`'s `raw()`, every `q\`\`` in the climb, all twenty `FN` entries |
+| the function NAME set, and `mathVars` reading it | |
+
+So the work is to parameterize the builder over its OUTPUT TYPE. Two ways, and they are not equivalent:
+
+- **An AST split** — `parseMath(formula): MathNode`, pure, with each spine folding it. Obvious, and
+  WRONG here: three of the twenty entries are non-derivable SQL facts, not operator names. `log` is
+  exp4j's NATURAL log and maps to `LN` while SQLite's own `log()` is log10; `cbrt` splits on sign because
+  `POW` domain-errors to NULL on a negative base with a fractional exponent, and a real cube root of a
+  negative is defined; `signum` is a three-way `CASE`. An AST whose nodes are `{fn: 'cbrt'}` makes each
+  spine re-derive that expansion, which is §12's "a non-derivable fact must not be re-implemented" —
+  a second implementation is a second chance to get it wrong, and no test names the difference.
+- **An OPS RECORD** — `mathToSql<T>(formula, ops)` where the layer supplies only the primitives
+  (`variable`, `literal`, `binary`, `call`, `conditional`). `FN` stays ONE table and `cbrt`/`signum`
+  are expressed once in terms of those primitives. **This is the one to build.** The `case`/conditional
+  primitive is what makes it work at all, and it is what an ops record has and an AST does not.
+
+**The resolver side is already there**, which is why this is now worth doing rather than earlier: a math
+variable is an `as()` label or a `by()` slot, and `scopeValue` (`modulator.ts`) answers both — MAP scope
+first, then the path labels — so `project('a','b')…order().by(math('a / b'))` resolves its variables
+against the RECORD's fields by the same rule `Scoping.getScopeValue` states. `_` is the host's own value.
+
+Worth 15 corpus traversals at `math`, plus the one `project()` blocker that needs math over record fields.
+
 Then the families whose kernels Phase 0 extracted and whose only remaining legacy content is emission —
-**`math` first as the proof case** (§6·4), then the scalar-transform tail, the property shape
+**`math` first as the proof case** (§6·4, and read its correction first: the file is a kernel with an
+emission tail still fused to it), then the scalar-transform tail, the property shape
 (`properties`/`valueMap`), the map shape's mid-chain consumers, branch, aliases, `local`, `match`, `where`,
 `path` tails, the by()-child matrix (`group`←reducer, `project` as a step, `select` multi-label), and the
 named-collection substrate the string-label `aggregate`/`store`/`cap` side effects need.
