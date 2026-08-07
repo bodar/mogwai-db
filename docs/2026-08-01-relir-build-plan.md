@@ -1024,8 +1024,40 @@ there (`traverser.get()` is not a Number) and projecting a rowid would answer a 
 Measured: census 862 → 881 (+19), 0 changed answers, L3 flat in both positions. `binds`/`bound` stayed
 at 0 — a property key is a compiler-held constant — so only statement text moved (`sql-hygiene`).
 
+#### ✅ `format` — the family was two members, and the shared PATTERN was a correctness fix
+
+**`math()` and `format()` are ONE question**, and naming that is what made the second member nearly
+free: a small language over the traverser's SCOPE, one value per row, with a productivity rule that
+drops the traverser when a reference does not resolve. Upstream says so too — both are `MapStep`,
+`ByModulating`, `TraversalParent`, `Scoping`, `PathProcessor`, both driving a `TraversalRing` — and
+legacy's own header called them one section while giving each its own copy of the ring, the
+resolution and the projection. `compiler/rel/projector.ts` is the family; what differs is three
+fields (`projectorValue`), and the relation they land in is shared. `format()` therefore arrived at
+all four positions at once (element, VALUE, RECORD, child body) where legacy has the element host
+only.
+
+**The template PARSE moved to `gremlin/format.ts`, and it is a PLAIN PART LIST rather than an ops
+record — the asymmetry with `math` is the point.** A template part carries no non-derivable SQL
+fact, so the shared form is exactly as large as the shared content. What it BOUGHT is a correctness
+fix on both spines at once: the reference's pattern is `(?<!%)%\{(.*?)\}` and **the lookbehind is an
+ESCAPE**. Each spine carried its own `%\{([^}]*)\}`, which read `%%{name}` as a reference and then
+filtered every traverser for which `name` did not resolve — a wrong answer with the right arity,
+AGREED ON BY BOTH SPINES, so neither the differential nor the census could see it. §12's rule with a
+fresh witness: agreement between the two spines is evidence of a shared cause, not of correctness,
+and only the reference is not blind.
+
+Three semantics read off `FormatStep.processNextStart` rather than inferred: the ring advances ONLY
+for `%{_}`; `%{name}` is a PROPERTY FIRST and then a scope key with a NULL traversal (so a named
+token takes no `by()` at all, and `COALESCE(property, scoped)` IS that fallthrough — with the
+property branch guarded by `current instanceof Element`, which is why a VALUE host reads the scope
+key directly rather than declining as legacy does); and the filter is
+`!productive || get() == null`, i.e. a productive-but-NULL token filters too, which is exactly what
+`||` does. A token-free template is a constant and owes no filter at all.
+
+Measured: census 881 → 888, 0 changed answers, L3 1744 → 1745.
+
 Then the families whose kernels Phase 0 extracted and whose only remaining legacy content is emission —
-`math` was the proof case (§6·4) — then the scalar-transform tail, the property shape
+`math`/`format` were the proof case (§6·4) — then the scalar-transform tail, the property shape
 (`properties`/`valueMap`), the map shape's mid-chain consumers, branch, aliases, `local`, `match`, `where`,
 `path` tails, the by()-child matrix (`group`←reducer, `project` as a step, `select` multi-label), and the
 named-collection substrate the string-label `aggregate`/`store`/`cap` side effects need.
