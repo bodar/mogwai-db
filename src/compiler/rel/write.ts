@@ -13,7 +13,7 @@ import { arg, isNested, argValues } from '../../gremlin/frontend.ts';
 import type { ChildSeam } from './child.ts';
 import { gremlinTypeOf, propertyValueBind } from '../../gremlin/types.ts';
 import { propertyFtsEntries } from '../../services/fts-index.ts';
-import { Deferral, mergeMaps, parseProperty, type MergeMaps, type MergeSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
+import { constFromNested, Deferral, mergeMaps, parseProperty, type MergeMaps, type MergeSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
 import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
 import { and, carriedCols, eq, meta, renumber, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
@@ -510,6 +510,87 @@ export function elementProperty(target: Rel, elem: Elem, writes: readonly Proper
   });
   // The target's own CTEs first: they are read by the snapshot's step alone, which is the case
   // `checkSnapshots` leaves alone.
+  return { bindings: [...seeded.bindings, ...bindings], result };
+}
+
+/**
+ * `addLabel(...)` over an EXISTING vertex stream — a sideEffect that ADDS labels idempotently and
+ * passes the SAME vertices through. It is `internLabels`' creation pairing applied to rows that
+ * already exist rather than freshly-inserted ones, plus `elementProperty`'s snapshot-then-pass-through.
+ *
+ * The REFUSALS decline here rather than throw, and the two are not the same choice: `lowerToRel` must
+ * never throw (the `rel-sweep` decline-contract gate), so a genuine error is legacy's to raise while
+ * its route lives — declining hands the traversal to legacy, which throws the message the conformance
+ * suite matches (`"Label mutation is not supported"`). Declined:
+ *
+ * - an EDGE (edge label cardinality is fixed at ONE by spec — `AddLabel.feature` `g_E_addLabelXfriendX`);
+ * - an immutable graph (`labelCardinality.mutable === false` — `g_V_addLabelXemployeeX_single_label_graph`);
+ * - a collection argument mixed with others (TinkerPop rejects it), or a nested traversal that is not
+ *   a compile-time `constant(...)` (a per-row label value legacy resolves at run time).
+ *
+ * `addLabel` needs no post-mutation count guard: every MUTABLE cardinality has `max = Infinity`, so a
+ * label added to a vertex can never overstep it. (`dropLabels`, which can fall BELOW `min`, is the case
+ * that would — a guard binding, and not this step.) The `vertex_labels` PRIMARY KEY (node, label) makes
+ * a repeated `addLabel(x)` a no-op via `ON CONFLICT DO NOTHING`.
+ */
+export function elementAddLabel(
+  input: Rel, elem: Elem, step: IRStep, cardinality: LabelCardinality,
+  sideEffects: Map<string, any> | undefined, params: Record<string, any>, fresh: Minter,
+): Effects | null {
+  if (elem === 'edge' || !cardinality.mutable) return null;
+
+  // The arguments are label NAMES: a bare string, a compile-time `constant(...)` (a string or a list),
+  // or a collection as the SOLE argument. A non-constant nested traversal needs a per-row value and is
+  // legacy's for now; a mixed collection is an error legacy raises.
+  const args = argValues(step);
+  const names: string[] = [];
+  for (const value of args) {
+    let resolved: unknown = value;
+    if (isNested(value)) {
+      const folded = constFromNested(value, sideEffects, params);
+      if (!folded.has) return null;
+      resolved = folded.value;
+    }
+    if (Array.isArray(resolved)) {
+      if (args.length > 1) return null;
+      names.push(...resolved.map(String));
+    } else names.push(String(resolved));
+  }
+  if (!names.length) return null;
+  try { for (const name of names) validateLabel(name); } catch { return null; }
+
+  // A snapshot of the incoming vertices, exactly as `elementProperty` takes it — a role this route
+  // cannot carry through the snapshot is a decline, not a dropped channel.
+  const carried = writeInputChannels(input);
+  if (carried.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
+  const seeded = inputRows(input, writeInputCols(input), fresh);
+  const { bindings, bind } = effectScope(fresh);
+  const owners = bind(seeded.result, true, carried);
+
+  const labelRow = internLabels(names, bind, fresh)!; // `names` is non-empty, so never the null arm
+  const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
+  // A CROSS JOIN pairs every incoming vertex with every new label — `addVertex`'s pairing, but the left
+  // side is EXISTING ids. Both sides project to a single `id` column so the join's positional output is
+  // exactly (node, label).
+  const ownerIds = make.project({ id: fresh('p'), input: owners, channels: [], type: ID_TYPE, exprs: [['id', col(owners.id, 'id')]] });
+  const pairs = make.join({
+    id: fresh('j'), left: ownerIds, right: labelRow, join: 'cross', channels: [],
+    type: typeOf(meta('node', 'int'), meta('label', 'int')),
+  });
+  bind(insert({
+    target: labelTargetRows, cols: ['node', 'label'], source: pairs, channels: [], type: typeOf(), returning: [],
+    onConflict: { target: ['node', 'label'], set: [] },
+  }));
+
+  // Back to an ELEMENT relation, element-PRESERVING exactly as `elementProperty` is: the snapshot IS
+  // the pass-through, `bulk` re-minted at 1 because the snapshot did not carry it.
+  const channels: Channels = [...carried.filter((channel) => channel.role === 'alias'), BULK_CHANNEL,
+    ...carried.filter((channel) => channel.role === 'encounter')];
+  const cols: readonly ColMeta[] = [meta('id', 'int'), ...carriedCols(channels)];
+  const result = make.project({
+    id: fresh('c'), input: owners, channels, type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, column.name === 'bulk' ? compilerInt(1) : col(owners.id, column.name)] as const),
+  });
   return { bindings: [...seeded.bindings, ...bindings], result };
 }
 

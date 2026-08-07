@@ -36,7 +36,7 @@ import { byExpr, modulations, orderProductivity, productivityFilter, propertyVty
 import type { ChildHost, ChildSeam, ChildValue, RootedRead, Subject } from './child.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
-import { elementAddE, elementAddV, elementDrop, elementMergeE, elementMergeV, elementProperty, propertyWrites, type Effects } from './write.ts';
+import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementMergeE, elementMergeV, elementProperty, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
 import { elementHost, groupBarrier, mapPayload } from './map.ts';
 import { elementPayload } from './element.ts';
@@ -2650,6 +2650,18 @@ function elementTail(
       // Effects run BEFORE anything the tail computes, and a tail of its own (a nested write) lands
       // after them — one flat list, in the order the fold produced it.
       return { ...tail, effects: [...written.bindings, ...(tail.effects ?? [])] };
+    }
+    if (step.name === 'addLabel') {
+      if (pathCarried(rel)) return null;
+      if (step.modulators?.length || step.optionArms) return null;
+      // A sideEffect that ADDS labels and passes the SAME vertices through, so the tail is the
+      // ordinary fold after it. `elementAddLabel` declines the refusal cases (edge/immutable/mixed
+      // collection) to legacy, which owns the message while its route lives.
+      const mutated = elementAddLabel(rel, elem, step, ctx.labelCardinality, ctx.sideEffects, ctx.params, fresh);
+      if (!mutated) return null;
+      const tail = elementTail(mutated.result, elem, steps, at + 1, bulked, ctx, fresh, labels);
+      if (!tail) return null;
+      return { ...tail, effects: [...mutated.bindings, ...(tail.effects ?? [])] };
     }
     if (step.name === 'drop') {
       if (pathCarried(rel)) return null;

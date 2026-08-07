@@ -4,6 +4,10 @@ import { read, relirAhead, runWith, seededStore } from './support/harness.ts';
 import { CF_MAX_BINDS as DO_BIND_CAP, cfLimitViolation } from '../src/cf-limits.ts';
 import { exec, executeQuery } from './support/executor.ts';
 import { decodeAll } from './support/decode.ts';
+import { GraphStore } from '../src/storage.ts';
+import { BunSqlite } from '../src/bun/BunSqlite.ts';
+import { LabelCardinality } from '../src/api.ts';
+import { createAppScope } from '../src/scopes.ts';
 
 /**
  * THE RelIR SPINE — routing, coverage and the per-traversal differential (§10·4).
@@ -504,6 +508,47 @@ describe('the RelIR spine', () => {
     // to `() -> null` and raises, so a one-row seed carrying no incoming vertex must decline here rather
     // than invent one.
     expect(compile('g.addE("self")', {}, { spine: 'rel' }).kind).not.toBe('program');
+  });
+
+  test('addLabel adds labels idempotently over a vertex stream (multi-label graph)', () => {
+    // A MULTI-LABEL graph (mutable cardinality) is what makes `addLabel` legal; an immutable graph or
+    // an edge refuses, and that refusal is legacy's while its route lives (RelIR declines to it).
+    const multi = createAppScope({ labelCardinality: LabelCardinality.ONE_OR_MORE });
+    for (const gremlin of [
+      'g.addV("person").addLabel("employee").property("name","marko")',
+      'g.V().addLabel("employee")',
+      'g.V().addLabel("a","b")',
+      'g.V().addLabel(constant("x"))',
+      'g.V().addLabel(constant(["a","b"]))',
+    ]) expect(compile(gremlin, {}, { spine: 'rel', app: multi }).kind, gremlin).toBe('program');
+
+    // The DIFFERENTIAL over a fresh multi-label store: RelIR and legacy leave the same label set,
+    // and a repeated label is a no-op (PRIMARY KEY(node,label) + ON CONFLICT DO NOTHING).
+    const labelRows = (spine: 'rel' | 'legacy') => {
+      const store = new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ONE_OR_MORE);
+      for (const write of [
+        'g.addV("person").property("name","marko")',
+        'g.addV("person").property("name","josh")',
+        'g.V().addLabel("employee")',   // a new label on both
+        'g.V().addLabel("person")',     // an EXISTING label — idempotent
+      ]) exec(store, undefined, undefined, spine).buffers(write, {});
+      return JSON.stringify(store.query(
+        'SELECT vl.node, l.name FROM vertex_labels vl JOIN labels l ON l.id = vl.label ORDER BY vl.node, l.name', []));
+    };
+    const rel = labelRows('rel');
+    expect(rel).toEqual(labelRows('legacy'));
+    // Two vertices, each carrying exactly {employee, person} — the repeated `addLabel("person")`
+    // added no duplicate row.
+    expect(JSON.parse(rel)).toEqual([
+      { node: 1, name: 'employee' }, { node: 1, name: 'person' },
+      { node: 2, name: 'employee' }, { node: 2, name: 'person' },
+    ]);
+
+    // An immutable graph refuses with the reference's message, identically on both spines — RelIR
+    // declines and legacy raises it (the census counts this as vocabulary, never a gap).
+    for (const spine of ['rel', 'legacy'] as const)
+      expect(() => exec(new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ONE), undefined, undefined, spine)
+        .buffers('g.V().addLabel("x")', {}), spine).toThrow('Label mutation is not supported');
   });
 
   test('mergeE routes to RelIR for both endpoint kinds, and duplicates get ONE edge', async () => {

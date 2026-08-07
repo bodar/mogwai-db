@@ -489,7 +489,12 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       case 'insert':
         return q`INSERT INTO ${ident(target.table)} (${list(s.cols.map(ident))}) ${s.onConflict ? upsertSource(s.source) : renderRel(s.source, EMPTY_SCOPE)}${
           s.onConflict
-            ? q` ON CONFLICT (${list(s.onConflict.target.map(ident))}) DO UPDATE SET ${list(s.onConflict.set.map(([name, expression]) => q`${ident(name)} = ${expr(expression, merging)}`))}`
+            // An empty `set` is DO NOTHING — the idempotent set-insert (a repeated `addLabel(x)` on a
+            // vertex that already carries `x` is a no-op, exactly `INSERT OR IGNORE`). A non-empty set
+            // is the ordinary upsert.
+            ? s.onConflict.set.length
+              ? q` ON CONFLICT (${list(s.onConflict.target.map(ident))}) DO UPDATE SET ${list(s.onConflict.set.map(([name, expression]) => q`${ident(name)} = ${expr(expression, merging)}`))}`
+              : q` ON CONFLICT (${list(s.onConflict.target.map(ident))}) DO NOTHING`
             : empty
         }${returning(s.returning)}`;
       case 'update': {
