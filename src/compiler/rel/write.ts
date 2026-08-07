@@ -624,7 +624,7 @@ export function propertyWrites(steps: readonly IRStep[], elem: Elem, child: Chil
     try { parsed = parseProperty(step, child.sideEffects, child.params); }
     catch (e) { if (!(e instanceof Deferral)) throw e; return null; }
     if (parsed.kind !== 'prop') return null;
-    const write = writeOf(parsed.spec, elem);
+    const write = writeOf(parsed.spec, elem, child);
     if (!write) return null;
     writes.push(write);
   }
@@ -641,8 +641,24 @@ export function propertyWrites(steps: readonly IRStep[], elem: Elem, child: Chil
  * the other wrapped it in `jsonb(…)` would be two encodings of one property, and only one of them
  * reads back.
  */
-function writeOf(spec: PropSpec, elem: Elem): PropertyWrite | null {
-  if (typeof spec.key !== 'string' || isNested(spec.value)) return null;
+function writeOf(spec: PropSpec, elem: Elem, child: ChildSeam): PropertyWrite | null {
+  if (typeof spec.key !== 'string') return null;
+  // A `ConstantTraversal` VALUE is a literal in traversal clothing and the reference says so where it
+  // decides the question — `AddPropertyStep.java:106-110` excludes it from the traversal-value path
+  // outright ("used internally by TinkerPop to wrap literal values"), so it never reaches
+  // `handleTraversalValue` and none of that step's per-traverser rules (0 results → no mutation,
+  // >1 under `single` → raise) apply to it.
+  //
+  // **The FOLD CARRIES THE DECLARED TYPE, which is the whole reason this could not land beside the
+  // label fold.** A label is always a string; a value is not, and `vtype` alone names only the OUTER
+  // stored shape. `constFromNested` now returns the constant's own `TypeNode` too, so a collection
+  // constant tags each element losslessly (`valueNodeOf`) instead of being re-inferred from the JS
+  // value — which cannot tell a uuid from a string or a datetime from a long (§6·7).
+  const folded = isNested(spec.value) ? constFromNested(spec.value, child.sideEffects, child.params) : null;
+  if (folded && !folded.has) return null;
+  const value = folded ? folded.value : spec.value;
+  const vtype = folded ? folded.vtype : spec.vtype;
+  const typeNode = folded ? folded.typeNode : spec.typeNode;
   // The key waist, shared: an invalid key is an ERROR legacy raises, never a silently skipped write.
   try { validatePropertyKey(spec.key); } catch { return null; }
   // TinkerPop's null-VALUE rule, and the reason the return type is a union: a null value REMOVES every
@@ -654,8 +670,8 @@ function writeOf(spec: PropSpec, elem: Elem): PropertyWrite | null {
   // consults neither, so `property(k, null, 'acl', null)` is an ordinary removal and the meta pair is
   // simply not part of the answer. Asking about meta first made that traversal decline for a reason
   // that does not apply to it.
-  if (spec.value === null) return { kind: 'remove', key: spec.key };
-  if (spec.value === undefined) return null;
+  if (value === null) return { kind: 'remove', key: spec.key };
+  if (value === undefined) return null;
   if (elem === 'edge' && (spec.cardinality !== null || spec.meta)) return null;
   // A META-PROPERTY is a JSONB object on the property row, so it is `storedExpr`'s question again with
   // a different column. It is admitted only where the cardinality is DECLARED `single` or `list`, and
@@ -665,10 +681,10 @@ function writeOf(spec: PropSpec, elem: Elem): PropertyWrite | null {
   // it would silently drop the meta on that arm.
   const meta = spec.meta ? JSON.stringify(spec.meta) : null;
   if (meta !== null && spec.cardinality !== 'single' && spec.cardinality !== 'list') return null;
-  const { stored, collection } = propertyValueBind(spec.value, spec.vtype, spec.typeNode);
+  const { stored, collection } = propertyValueBind(value, vtype, typeNode);
   return {
-    kind: 'set', key: spec.key, stored, collection, meta, vtype: spec.vtype, cardinality: spec.cardinality,
-    fts: propertyFtsEntries(spec.value, spec.typeNode),
+    kind: 'set', key: spec.key, stored, collection, meta, vtype, cardinality: spec.cardinality,
+    fts: propertyFtsEntries(value, typeNode),
   };
 }
 
@@ -1424,7 +1440,7 @@ export function elementMergeV(
   // that already exists, which is a different statement and a different refusal.
   if (onMatch?.label) return null;
 
-  const matchWrites = mergeWrites(onMatch, 'vertex');
+  const matchWrites = mergeWrites(onMatch, 'vertex', child);
   // `onCreate` WINS per key, and `validateNoOverrides` has already proved the two cannot contradict —
   // so the spread is a merge of two agreeing maps, not a precedence rule this route invented.
   const createWrites = mergeWrites(onCreate ? {
@@ -1432,7 +1448,7 @@ export function elementMergeV(
     props: { ...match.props, ...onCreate.props },
     propTypes: { ...match.propTypes, ...onCreate.propTypes },
     propCardinalities: { ...match.propCardinalities, ...onCreate.propCardinalities },
-  } : match, 'vertex');
+  } : match, 'vertex', child);
   const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'vertex', child) : [];
   if (!matchWrites || !createWrites || !tailWrites) return null;
   const createLabels = creationLabels(((onCreate?.label ?? match.label) as string[] | null) ?? [], cardinality, child);
@@ -1566,14 +1582,14 @@ export function elementMergeE(
   const labels = ((onCreate?.label ?? match.label) as string[] | null) ?? [];
   if (labels.length !== 1) return null;
 
-  const matchWrites = mergeWrites(onMatch, 'edge');
+  const matchWrites = mergeWrites(onMatch, 'edge', child);
   // `onCreate` WINS per key, and `validateNoOverrides` has already proved the two cannot contradict.
   const createWrites = mergeWrites(onCreate ? {
     ...onCreate,
     props: { ...match.props, ...onCreate.props },
     propTypes: { ...match.propTypes, ...onCreate.propTypes },
     propCardinalities: { ...match.propCardinalities, ...onCreate.propCardinalities },
-  } : match, 'edge');
+  } : match, 'edge', child);
   const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'edge', child) : [];
   if (!matchWrites || !createWrites || !tailWrites) return null;
 
@@ -1773,7 +1789,7 @@ function pairedWith(pairs: Rel, criteria: Rel, fresh: Minter): Rel {
  * element's own declaration may resolve.
  */
 function mergeWrites(
-  spec: Pick<MergeSpec, 'props' | 'propTypes' | 'propCardinalities'> | null, elem: Elem,
+  spec: Pick<MergeSpec, 'props' | 'propTypes' | 'propCardinalities'> | null, elem: Elem, child: ChildSeam,
 ): readonly PropertyWrite[] | null {
   if (!spec) return [];
   const writes: PropertyWrite[] = [];
@@ -1782,7 +1798,7 @@ function mergeWrites(
     const write = writeOf({
       key, value, vtype: gremlinTypeOf(value, typeNode), typeNode, meta: null,
       cardinality: spec.propCardinalities[key] ?? null,
-    }, elem);
+    }, elem, child);
     if (!write) return null;
     writes.push(write);
   }

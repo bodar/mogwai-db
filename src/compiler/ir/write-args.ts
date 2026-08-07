@@ -57,15 +57,29 @@ function constFromSelect(nested: any, sideEffects: Map<string, any> | undefined,
 //                    so UUID(..)/datetime(..) keep their type, not a JS-inferred string/int).
 // This is what lets a global mergeV (no driver to seed a V/E source at) resolve a nested
 // value, and what resolves a nested property KEY. {has:false} → fall through to a seeded read.
-export function constFromNested(nested: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { has: boolean; value: any; vtype: CanonicalType | null } {
+export function constFromNested(nested: any, sideEffects: Map<string, any> | undefined, params: Record<string, any>): { has: boolean; value: any; vtype: CanonicalType | null; typeNode: TypeNode | null } {
   const c = constFromSelect(nested, sideEffects, params);
-  if (c.has) return { has: true, value: c.value, vtype: gremlinTypeOf(c.value, null) };
+  // A `withSideEffect` constant is a raw JS value out of the registry with no wire arg behind it, so
+  // it HAS no TypeNode and `null` is the honest answer rather than a gap — `gremlinTypeOf(v, null)`
+  // infers the same way every JSON-path value does. The `constant(…)` arm below is the one that has a
+  // declared type to carry, and the asymmetry is the provenance, not an omission.
+  if (c.has) return { has: true, value: c.value, vtype: gremlinTypeOf(c.value, null), typeNode: null };
   if (isNested(nested)) {
     const inner = stepChain(nested.nested, params);
+    // THE TYPE NODE RIDES ALONG, because the constant's own `Arg` already holds it and dropping it
+    // here is §6·7's discard in miniature: `vtype` names only the OUTER stored shape, while the
+    // TypeNode is the full recursive tree a COLLECTION needs to tag each element losslessly
+    // (`valueNodeOf`). Returning the vtype alone forced every caller wanting a typed value to either
+    // re-infer from the JS value — which cannot tell a uuid from a string — or decline the collection
+    // case outright. It costs one field and helps every type at once.
     if (inner.length === 1 && inner[0].name === 'constant')
-      return { has: true, value: inner[0].args[0].value, vtype: gremlinTypeOf(inner[0].args[0].value, inner[0].args[0]?.type ?? null) };
+      return {
+        has: true, value: inner[0].args[0].value,
+        vtype: gremlinTypeOf(inner[0].args[0].value, inner[0].args[0]?.type ?? null),
+        typeNode: inner[0].args[0]?.type ?? null,
+      };
   }
-  return { has: false, value: undefined, vtype: null };
+  return { has: false, value: undefined, vtype: null, typeNode: null };
 }
 
 /**

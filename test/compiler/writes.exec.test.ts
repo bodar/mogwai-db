@@ -6,7 +6,7 @@ import { UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { bare, read, relirAhead, relirOff, run, seededStore, written } from '../support/harness.ts';
+import { read, relirAhead, relirOff, run, seededStore, written } from '../support/harness.ts';
 import { emit } from '../../src/rel/emit.ts';
 import { executeQuery } from '../support/executor.ts';
 import { CF_MAX_BINDS } from '../../src/cf-limits.ts';
@@ -303,7 +303,9 @@ test('addV inline property NESTED value routes through resolveSpecValue', () => 
   const store = new GraphStore(new BunSqlite(':memory:'));
   // __.constant(v) as an inline property value — evaluated at the new vertex.
   const res = run(store, 'g.addV("person").property("age", __.constant(29)).property("name", "marko")');
-  expect(bare((res[0] as any).vertex)).toMatchObject({ labels: ['person'], props: { name: ['marko'], age: [29] } });
+  // `written` and not `res[0].vertex`: a constant value FOLDS now, so this routes to RelIR, whose echo
+  // is the flat read element projection. What the test means is what was written, which is what it reads.
+  expect(written(res[0])).toMatchObject({ labels: ['person'], props: { name: ['marko'], age: [29] } });
   expect(run(store, 'g.V().has("person","age",29).values("name")').map((r) => r.v)).toEqual(['marko']);
 });
 
@@ -316,8 +318,9 @@ test('addV nested property value seeds at the NEW (edge-less) vertex → out().c
 test('addE inline property NESTED value resolves + response echoes the resolved value', () => {
   const store = seededStore();
   const res = run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property("w", __.constant(0.7))');
-  // the framed response carries the resolved scalar, never a {nested} blob
-  expect(bare((res[0] as any).edge.props)).toEqual({ w: 0.7 });
+  // the framed response carries the resolved scalar, never a {nested} blob — read through `written`,
+  // since a folded constant routes to RelIR and its echo is flat rather than `{edge: …}`.
+  expect(written(res[0]).props).toEqual({ w: 0.7 });
   expect(run(store, 'g.V(1).outE("knows").values("w")').map((r) => r.v)).toEqual([0.7]);
 });
 

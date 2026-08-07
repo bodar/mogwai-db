@@ -140,7 +140,11 @@ export const grouped = (rows: readonly any[]): Record<string, unknown> => {
  * as much a thing a write test means to assert as the labels are, so it belongs to the one authority
  * rather than to a `?? row` dance re-spelled per test.
  */
-export const written = (row: any): { id: unknown; labels: unknown[]; props: Record<string, unknown[]> } => {
+// `props` values are `unknown` and not `unknown[]` because the two elements genuinely differ: a VERTEX
+// property is multi-valued (it has a cardinality, so each key holds a list), while an EDGE property is
+// single by construction — TinkerPop's `Property` has no cardinality at all, which is the same fact
+// `writeOf` enforces when it refuses a cardinality or a meta on an edge.
+export const written = (row: any): { id: unknown; labels: unknown[]; props: Record<string, unknown> } => {
   const echo = row?.vertex ?? row?.edge;
   if (echo) return { id: echo.id, labels: echo.labels ?? [echo.label], props: bare(echo.props) };
   const label = row?.label;

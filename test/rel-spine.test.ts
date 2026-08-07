@@ -599,6 +599,41 @@ describe('the RelIR spine', () => {
       .toEqual([{ name: 'knows' }]);
   });
 
+  test('a ConstantTraversal VALUE keeps its DECLARED type through the fold', () => {
+    // The value half of the same rule, and it needed one thing the label half did not: a label is
+    // always a string, while `vtype` names only the OUTER stored shape of a value. So the fold carries
+    // the constant's own `TypeNode` (§6·7 — carriage is cheap, guessing is per-type and lossy). The
+    // `datetime` row is the assertion that matters: re-inferring from the JS value yields a NUMBER, a
+    // wrong wire class rather than a wrong tag.
+    for (const gremlin of [
+      'g.addV("p").property("name", __.constant("marko"))',
+      'g.addV("p").property("age", __.constant(29))',
+      'g.addV("p").property("when", __.constant(datetime("2018-03-22T00:35:44Z")))',
+      'g.addV("p").property("tags", __.constant(["a","b"]))',
+      'g.V(1).property("name", __.constant("x"))',
+    ]) expect(compile(gremlin, {}, { spine: 'rel' }).kind, gremlin).toBe('program');
+
+    // A genuinely PER-ROW value still declines — that one is `AddPropertyStep.handleTraversalValue`,
+    // whose rules (0 results → no mutation, >1 under `single` → raise) a correlated scalar cannot state.
+    for (const gremlin of [
+      'g.V(1).property("name", __.V(2).values("name"))',
+      'g.V().property("deg", __.out().count())',
+    ]) expect(compile(gremlin, {}, { spine: 'rel' }).kind, gremlin).not.toBe('program');
+
+    const stored = (spine: 'rel' | 'legacy') => {
+      const store = new GraphStore(new BunSqlite(':memory:'));
+      exec(store, undefined, undefined, spine).buffers(
+        'g.addV("p").property("name", __.constant("marko")).property("age", __.constant(29))'
+        + '.property("when", __.constant(datetime("2018-03-22T00:35:44Z"))).property("tags", __.constant(["a","b"]))', {});
+      return store.query('SELECT key, vtype FROM vertex_properties ORDER BY key', []);
+    };
+    expect(stored('rel')).toEqual([
+      { key: 'age', vtype: 'int' }, { key: 'name', vtype: 'string' },
+      { key: 'tags', vtype: 'list' }, { key: 'when', vtype: 'datetime' },
+    ]);
+    expect(stored('rel')).toEqual(stored('legacy'));
+  });
+
   // RelIR is AHEAD here, and the assertion says so rather than relying on the ambient switch (§6·1):
   // legacy REFUSES a nested `addE` label outright ("nested-traversal label not supported") where the
   // reference resolves a ConstantTraversal to its literal. `addV` has no such gap, so this is the one
