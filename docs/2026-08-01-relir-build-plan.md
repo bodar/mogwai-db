@@ -853,12 +853,20 @@ path and none throws** (multi-label `addV` included, once the graph's cardinalit
 reference graphs are GraphSON-bulk-loaded and bypass the compiler entirely, bar two hand-authored seeds. So
 the corpus LOADS without legacy writes once these capabilities land:
 
-- **multi-label `addV("a","b")`** — ✅ already routes under `ONE_OR_MORE` (the `internLabels` CROSS JOIN is
-  N-label by construction). Left in this family: **`addLabel()`** as a standalone sideEffect mutation over an
-  element stream (and its `dropLabel`/`dropLabels` mirrors). §6·5 already settled the shape: label mutation is
-  NOT a guard binding. `labelCardinality.mutable` is request-scope DI, settled before a compile starts, so
-  `addLabel` under an immutable graph (or on an edge) is a COMPILE-TIME refusal
-  (`"Label mutation is not supported"`) with the value threaded (as `Lowering.labelCardinality` already is).
+- ✅ **multi-label `addV("a","b")`** — already routed under `ONE_OR_MORE` (the `internLabels` CROSS JOIN is
+  N-label by construction). ✅ **`addLabel()`** — LANDED as a sideEffect over an existing vertex stream:
+  `internLabels`' creation pairing applied to rows that already exist, plus `elementProperty`'s
+  snapshot-then-pass-through. `vertex_labels` is `PRIMARY KEY (node, label)`, so a repeat is a no-op through
+  the emitter's new **`ON CONFLICT … DO NOTHING`** arm (an empty `onConflict.set` used to render an empty
+  `DO UPDATE SET` — invalid SQL nothing could reach; it is the generic idempotent set-insert, not this step's).
+  **The refusals DECLINE rather than throw, and that is the migration-shaped choice, not a weaker one:**
+  `lowerToRel` may never throw (`rel-sweep`'s decline-contract gate), so while legacy's route lives it owns
+  the message the suite matches — an edge (edge label cardinality is fixed at ONE by spec), an immutable
+  graph, a mixed collection, a non-constant nested label. Both spines therefore raise
+  `"Label mutation is not supported"` identically. Moving that refusal ABOVE both spines is §6·5's `verify`
+  Pass work, and it is what `dropLabel`/`dropLabels` should land with — `dropLabels` can fall below `min`,
+  so it is the one that genuinely needs a guard binding; `addLabel` needs none, because every MUTABLE
+  cardinality has `max = Infinity`.
 - ✅ **`addE` with implicit endpoints** (`addV(…).addE("self")`) — LANDED. An unset `from`/`to` defaults to
   the incoming traverser (`AddEdgeStepContract.java:88-92`), so both-implicit is a self-loop, not a refusal;
   the SOURCE form still declines (it carries no incoming vertex). Pinned in `test/rel-spine.test.ts` — the
