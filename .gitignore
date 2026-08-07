@@ -21,3 +21,6 @@ test/L3-conformance/*.summary.json
 # Local Claude Code overrides only — shared config, hooks, and skills are tracked
 .claude/settings.local.json
 mise.local.toml
+
+# Claude Code worktrees live inside the repo; they are checkouts, never content.
+.claude/worktrees/
