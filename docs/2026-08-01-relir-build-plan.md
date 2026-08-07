@@ -308,12 +308,24 @@ registry now travel with a body through `runPasses`/`normalize`/`childSteps`, an
 extracts the registry BEFORE the passes. Closes `refusal_belongs_to_legacy`
 (`docs/spec/relir-migration.allium`) by MOVING the check — that spec's own proposed resolution.
 
-**A GRAPH-dependent refusal cannot move there** (`mergeV`'s `T.id` via `assertAvailableElementId`, label
-mutation under `labelCardinality.mutable`) — this half is NOT built. Those become a **guard binding**: a
-`Plan` binding whose relation the executor checks, raising a named message. O(plan size), inside P5, the
-same move that made the `mergeV` snapshot work — and what takes write coverage to 100% rather than
-100%-minus-two, so there is **no permanent documented exception** in the answer. `mergeE` needs the same
-mechanism for "Vertex does not exist for mergeE", so the two arrive together.
+**A GRAPH-dependent refusal cannot move there**, so it becomes a **guard binding** — built:
+`Binding.guard = { message, raiseWhen: 'rows' | 'empty' }`, a binding whose relation the executor runs
+and whose ROW COUNT it tests, raising the message. O(plan size), one statement, inside P5. **The
+message is the reference's verbatim**, because a decline already hands the traversal to a spine that
+raises that same string: what a guard buys is the string WITHOUT the decline, and therefore without
+the census counting a traversal this algebra expressed as vocabulary it cannot.
+
+`raiseWhen` has both directions because both are real: `'rows'` is a COLLISION (the check finds the
+row it hoped was absent — `assertAvailableElementId`), `'empty'` is a MISSING referent
+(`mergeE`'s *"Vertex does not exist"*, unbuilt, and the reason the field is not just "raise if
+non-empty"). The `single`-cardinality-above-one throw of a multi-row `property(k, __.trav)` is a
+third consumer.
+
+First consumer landed: `elementAddV`'s `T` tokens — `property(T.id, x)` supplies the public id behind
+an availability guard, `property(T.label, l)` replaces the labels. **Label MUTATION is NOT this
+mechanism** and the plan used to say it was: `labelCardinality.mutable` is request-scope DI, settled
+before a compile starts, so `addLabel` under an immutable graph is a COMPILE-TIME refusal that needs
+the value threaded (as `Lowering.labelCardinality` already is) rather than a query.
 
 **Naming:** `Pass` names two tiers on opposite sides of the routing switch. Load-bearing, not cosmetic — a
 refusal raised in a RelIR rewrite is a throw out of a lowering whose contract is `null`, and legacy never
@@ -507,10 +519,10 @@ Ordered by the discipline (§6·4): each closes a family and lets a deletion-rat
      on legacy and would MOVE to RelIR; 24 fail on both spines, so some are gains rather than moves. It
      is `mergeV`'s two-total-statement shape plus ENDPOINTS, and its own question is the
      position-correlated `RETURNING` (P5b): a created edge must find the input row that made it.
-   - **`property`'s residue is not one question and not per-traverser** — a text-level refusal (§6·5), a
-     graph-dependent refusal that becomes a guard binding (§6·5), a meta-property under an UNDECLARED
-     cardinality (the `set` arm patches rather than inserts, an `UPDATE` this route does not emit yet),
-     and a correlated scalar the child seam already builds (§6·6).
+   - **`property`'s residue is not one question and not per-traverser.** The text-level refusal and the
+     `T`-token/guard-binding halves are done (§6·5); what is left is a meta-property under an
+     UNDECLARED cardinality (the `set` arm PATCHES rather than inserts, an `UPDATE` this route does
+     not emit yet) and the nested value below.
    - **the nested-value/label children** (`property(k, __.trav)`, `addV(__.trav)`, `addE(__.trav)`).
      **The reference is ASYMMETRIC and that decides the shape of the work** — read, not inferred:
      - A nested **KEY** resolves through `Parameters.get(traverser, T.key, …)`, which calls
