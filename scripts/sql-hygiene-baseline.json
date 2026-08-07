@@ -163,8 +163,8 @@
   },
   "has": {
     "binds": 0,
-    "bytes": 1571,
-    "compiler": 36,
+    "bytes": 2418,
+    "compiler": 67,
     "bound": 0
   },
   "hasLabel": {
@@ -193,7 +193,7 @@
   },
   "is": {
     "binds": 2,
-    "bytes": 2334,
+    "bytes": 2488,
     "compiler": 25,
     "bound": 2
   },
@@ -205,8 +205,8 @@
   },
   "limit": {
     "binds": 0,
-    "bytes": 3582,
-    "compiler": 41,
+    "bytes": 3734,
+    "compiler": 43,
     "bound": 0
   },
   "lTrim": {
@@ -259,8 +259,8 @@
   },
   "order": {
     "binds": 0,
-    "bytes": 3779,
-    "compiler": 49,
+    "bytes": 3934,
+    "compiler": 51,
     "bound": 0
   },
   "out": {
@@ -307,8 +307,8 @@
   },
   "range": {
     "binds": 0,
-    "bytes": 3600,
-    "compiler": 43,
+    "bytes": 3754,
+    "compiler": 45,
     "bound": 0
   },
   "replace": {
@@ -332,7 +332,7 @@
   "select": {
     "binds": 4,
     "bytes": 3442,
-    "compiler": 42,
+    "compiler": 44,
     "bound": 2
   },
   "skip": {
@@ -403,8 +403,8 @@
   },
   "values": {
     "binds": 12,
-    "bytes": 2075,
-    "compiler": 51,
+    "bytes": 2632,
+    "compiler": 95,
     "bound": 33
   },
   "where": {

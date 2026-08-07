@@ -139,6 +139,24 @@ description = "Instrument: RelIR authored-corpus literal provenance and DO SQL-w
 depends = ["install"]
 run = "bun scripts/sql-hygiene.ts"
 
+# Re-bank the per-family literal/size baseline. A `binds`/`bytes`/`bound` RISE is legitimate only
+# with a reason in the commit message — the ratchet exists so an unexplained one fails the build.
+#
+# Via a temp file because the script READS the baseline it is about to overwrite, and a shell
+# redirect truncates it before the process starts. `|| true` because `--json` prints the new baseline
+# and THEN exits non-zero on the violations it just found — which is the state you are recording in,
+# so a recorder that propagated it could never record. The parse+non-empty check is what `|| true`
+# would otherwise throw away: a crashed run leaves a truncated file, and banking that would erase the
+# ratchet rather than move it.
+[tasks.sql-hygiene-record]
+description = "Bank the sql-hygiene per-family baseline (a rise needs a reason; commit scripts/sql-hygiene-baseline.json)"
+depends = ["install"]
+run = """
+bun scripts/sql-hygiene.ts --json > scripts/sql-hygiene-baseline.json.tmp || true
+bun -e 'const f="scripts/sql-hygiene-baseline.json.tmp"; const b=await Bun.file(f).json(); if(!Object.keys(b).length) throw new Error("sql-hygiene-record: refusing to bank an empty baseline")'
+mv scripts/sql-hygiene-baseline.json.tmp scripts/sql-hygiene-baseline.json
+"""
+
 [tasks.deletion-record]
 description = "Bank a lowered deletion floor (downward only; commit scripts/deletion-ratchet.tsv)"
 depends = ["install"]

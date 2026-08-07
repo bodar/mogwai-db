@@ -82,12 +82,19 @@ describe('movement / edge sources SQL', () => {
     // An edge `has()` is RelIR-routed, and the two spellings say the same thing two ways: legacy
     // re-joins `edges` per filter CTE, RelIR conjoins into the source scan's own WHERE.
     expect(read('g.E().has("weight",0.5)', { spine: 'legacy' }).sql).toContain('FROM edges n JOIN c0 p ON n.id=p.id');
-    // `FROM edges re … WHERE EXISTS(…re.id…)` — the filter is still conjoined into the source scan's own
-    // clause; what sits between them is the payload join RelIR now builds for itself (§10·10).
-    expect(read('g.E().has("weight",0.5)', { spine: 'rel' }).sql).toContain('FROM edges re ');
+    // The filter is still conjoined into the source scan's own clause (the EXISTS below); what leads
+    // the FROM is the DRIVING SEEK `src/rel/passes/seek.ts` lifts out of it — the same predicate as a
+    // relation, so the plan starts at `ep_key_value(key,value)` instead of checking it last. `DISTINCT`
+    // is what stops a repeated (key,value) multiplying the traverser, and the `CROSS JOIN` is the order
+    // fence that keeps the seek in the outer loop (`docs/2026-08-07-query-plan-stability.md` §3·2).
+    expect(read('g.E().has("weight",0.5)', { spine: 'rel' }).sql).toContain(
+      "FROM (SELECT DISTINCT rsk0.edge AS sid FROM edge_properties rsk0 WHERE ((rsk0.key = 'weight') AND (rsk0.value = 0.5))) sd0 CROSS JOIN edges re ON (re.id = sd0.sid)");
     expect(read('g.E().has("weight",0.5)', { spine: 'rel' }).sql).toContain('WHERE EXISTS (SELECT 1 AS one FROM edge_properties rp2 WHERE (((rp2.edge = re.id)');
     expect(read('g.V(1).outE().values("weight")', { spine: 'legacy' }).sql).toContain('JOIN edge_properties ep ON ep.edge=n.id AND ep.key=?');
-    expect(read('g.V(1).outE().values("weight")', { spine: 'rel' }).sql).toMatch(/INNER JOIN edge_properties \w+ ON \(\(\w+\.edge = \w+\.id\) AND \w+\.key IN/);
+    // `CROSS JOIN`, not `INNER` — the stream drives and the property table is PROBED. SQLite's CROSS
+    // JOIN is an inner join whose order is pinned (`src/rel/emit.ts` joinText); the fence is what
+    // stops the planner leading with a `key=?` scan of every property in the graph.
+    expect(read('g.V(1).outE().values("weight")', { spine: 'rel' }).sql).toMatch(/CROSS JOIN edge_properties \w+ ON \(\(\w+\.edge = \w+\.id\) AND \w+\.key IN/);
   });
 
   test('single select and record projection preserve edge element typing', () => {

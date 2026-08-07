@@ -113,7 +113,7 @@ export function mapRelChildren(r: Rel, f: (child: Rel) => Rel): Rel {
     case 'window': return make.window({ id, channels, type, input: f(r.input), specs: r.specs });
     case 'explode': return make.explode({ id, channels, type, ...(r.input ? { input: f(r.input) } : {}), expr: r.expr, as: r.as });
     case 'materialize': return make.materialize({ id, channels, type, input: f(r.input), name: r.name });
-    case 'join': return make.join({ id, channels, type, left: f(r.left), right: f(r.right), join: r.join, on: r.on });
+    case 'join': return make.join({ id, channels, type, left: f(r.left), right: f(r.right), join: r.join, on: r.on, ordered: r.ordered });
     case 'union': return make.union({ id, channels, type, inputs: r.inputs.map(f), all: r.all });
     case 'recursive': return make.recursive({ id, channels, type, name: r.name, cols: r.cols, seed: f(r.seed), step: (self) => f(r.step(self)) });
   }
@@ -141,7 +141,7 @@ export function mapRelExprs(r: Rel, f: (e: Expr) => Expr): Rel {
       return make.window({ id, channels, type, input: r.input, specs });
     }
     case 'explode': return make.explode({ id, channels, type, ...(r.input ? { input: r.input } : {}), expr: f(r.expr), as: r.as });
-    case 'join': return make.join({ id, channels, type, left: r.left, right: r.right, join: r.join, on: r.on && f(r.on) });
+    case 'join': return make.join({ id, channels, type, left: r.left, right: r.right, join: r.join, on: r.on && f(r.on), ordered: r.ordered });
   }
 }
 

@@ -46,6 +46,24 @@ export interface FastPathConfig {
    * array (positions are recorded per iteration). Both are guarded at the same site.
    */
   readonly repeatBodyExpansion: boolean;
+  /**
+   * Lift a correlated property `EXISTS` over a bare element scan in front of that scan, as a
+   * `DISTINCT` relation of owner ids the plan is DRIVEN from (`src/rel/passes/seek.ts`). Disabling
+   * leaves the predicate where the lowering put it — same rows, checked instead of sought.
+   *
+   * **The EIGHTH switch, and the first that selects a physical ACCESS PATH rather than a lowering
+   * strategy.** That is normally the mark of something RelIR declines rather than implements (the
+   * FTS contrast in `compileViaRel`), and the difference is that this one changes no algebra at all:
+   * the predicate it lifts stays exactly where it was, so both positions return the same rows out of
+   * the same predicate and there is no second semantics to keep in step.
+   *
+   * It is switchable anyway, and for the reason `repeatBodyExpansion` is: a rewrite whose agreement
+   * with the unrewritten form is asserted by its own header comment and by nothing else is a rewrite
+   * with no differential. L5's per-switch sweep is the check, and `order` divergence there is
+   * telemetry (`test/L5-properties/oracle.ts`) — which it has to be, since driving from a different
+   * relation legitimately changes the emission order of a traversal that never called `order()`.
+   */
+  readonly propertySeek: boolean;
 }
 
 export interface CompileOptions {
@@ -81,6 +99,7 @@ export const DEFAULT_FAST_PATHS: FastPathConfig = Object.freeze({
   scalarPredicateInlining: true,
   movementCollapse: true,
   repeatBodyExpansion: true,
+  propertySeek: true,
 });
 
 export const resolveFastPaths = (options?: CompileOptions): FastPathConfig => ({
@@ -118,6 +137,15 @@ export const GATE_ONLY_FAST_PATHS: Readonly<Record<string, string>> = Object.fre
     + 'keyed relation can express, compiled both ways. Its first run found exactly one disagreement '
     + '(known.ts: the walk has no emission order, so a positional consumer after it picks a different '
     + 'window from the same multiset), which is what the switch existed to make visible.',
+  propertySeek:
+    'test/L5-properties/differential.test.ts — the per-switch sweep, over every corpus and generated '
+    + 'traversal whose source carries a valued has(). The equivalence is stronger than a differential '
+    + 'usually gets, because the rewrite REUSES the predicate rather than restating it: the lifted '
+    + "seek is the EXISTS's own sub-plan minus its correlation conjunct, and the EXISTS stays in the "
+    + 'filter, so the two positions decide the surviving rows with one expression. What the sweep is '
+    + 'actually watching for is the DISTINCT — a Cardinality.list key holding one value twice would '
+    + 'multiply a traverser through the seek and not through the filter — and, as telemetry, the '
+    + 'emission-order changes that driving from a different relation legitimately causes.',
 });
 
 // ---------- the FastPath contract ----------

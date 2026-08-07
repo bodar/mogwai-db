@@ -63,8 +63,12 @@ export function propertyJoin(input: Rel, elem: Elem, on: (props: RelId) => Expr,
   const props = make.scan({
     id: fresh('pr'), table, alias: fresh('rpr'), channels: [], type: typeOf(...cols),
   });
+  // `ordered`: the input stream drives and the property table is PROBED. Both producers want that —
+  // an element relation probes `vp_node_key(node,key)`, an FTS hit list probes the property rowid —
+  // and neither wants the planner leading with a `key=?` scan of every property in the graph, which
+  // is what it picks on a graph with no `sqlite_stat1` (see `joinText` in `src/rel/emit.ts`).
   return make.join({
-    id: fresh('pj'), left: input, right: props, join: 'inner', channels: input.channels,
+    id: fresh('pj'), left: input, right: props, join: 'inner', ordered: true, channels: input.channels,
     type: typeOf(...input.type.cols, ...cols.map((c) => meta(PROP(c.name), c.type, c.nullable))),
     on: on(props.id),
   });

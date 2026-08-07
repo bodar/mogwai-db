@@ -26,7 +26,15 @@ type RawRel =
    *  local slice over one traverser's members, not over the stream's rows. */
   | (RelBase & { readonly kind: 'explode'; readonly id: RelId; readonly input?: Rel; readonly expr: Expr; readonly as: { readonly key?: string; readonly value: string; readonly ord?: string; readonly type?: string } })
   | (RelBase & { readonly kind: 'materialize'; readonly id: RelId; readonly input: Rel; readonly name?: string })
-  | (RelBase & { readonly kind: 'join'; readonly id: RelId; readonly left: Rel; readonly right: Rel; readonly join: 'inner' | 'left' | 'cross' | 'semi' | 'anti'; readonly on?: Expr })
+  /** `ordered` pins the LEFT side as the outer loop. It is not an algebraic property — the join
+   *  means the same thing either way — but a PHYSICAL one, and the only place the algebra states a
+   *  fact about execution rather than about rows. It exists because a traversal already fixes the
+   *  order its steps run in and SQLite does not know that: with the order left free the planner
+   *  re-derives it from cardinality guesses, and on a graph with no `sqlite_stat1` those guesses put
+   *  the most selective seek LAST (measured: 1 492 ms vs 0.3 ms on a 4 000-vertex 1-hop). Only an
+   *  `inner` join may carry it — a `left` join's order is already fixed by its semantics, and a
+   *  `cross` join has no ON to reorder around. */
+  | (RelBase & { readonly kind: 'join'; readonly id: RelId; readonly left: Rel; readonly right: Rel; readonly join: 'inner' | 'left' | 'cross' | 'semi' | 'anti'; readonly on?: Expr; readonly ordered?: boolean })
   | (RelBase & { readonly kind: 'union'; readonly id: RelId; readonly inputs: readonly Rel[]; readonly all: boolean })
   | (RelBase & { readonly kind: 'recursive'; readonly id: RelId; readonly name: string; readonly cols: readonly string[]; readonly seed: Rel; readonly step: (self: Rel) => Rel });
 

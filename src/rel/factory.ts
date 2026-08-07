@@ -84,6 +84,7 @@ export const joinWidth = (init: Pick<RelNode<'join'>, 'left' | 'right' | 'join'>
 export const join = (init: WithId<'join'>): Node<'join'> => {
   if (init.join === 'cross' && init.on) throw new Error('RelIR: cross join must not have an ON expression');
   if ((init.join === 'inner' || init.join === 'left') && !init.on) throw new Error(`RelIR: ${init.join} join requires an ON expression`);
+  if (init.ordered && init.join !== 'inner') throw new Error(`RelIR: only an inner Join may pin its order; ${init.join} may not`);
   const width = joinWidth(init);
   if (init.type.cols.length !== width)
     throw new Error(`RelIR: a ${init.join} Join emits its sides' ${width} columns; its type declares ${init.type.cols.length}`);

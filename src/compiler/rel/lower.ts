@@ -4,6 +4,7 @@ import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
 import { emit, emitRelational } from '../../rel/emit.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
+import { seek } from '../../rel/passes/seek.ts';
 import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -417,9 +418,16 @@ function hasLabelClause(names: readonly string[], subject: Subject, elem: Elem, 
   return { kind: 'in-query', expr: subject.id, plan: owners, negated: false };
 }
 
-/** `has(key[, value-or-predicate])` over a stored property, as a clause — an `EXISTS`, correlated on
- *  the outer element, because a property FILTER asks whether a row is there and joining instead would
- *  multiply the traverser once per matching property. */
+/**
+ * `has(key[, value-or-predicate])` over a stored property, as a clause — an `EXISTS`, correlated on
+ * the outer element, because a property FILTER asks whether a row is there and joining instead would
+ * multiply the traverser once per matching property.
+ *
+ * **This shape is what `src/rel/passes/seek.ts` recognises**, and the recognition is by shape rather
+ * than by anything this function announces: a correlated `EXISTS` over a property scan can be
+ * CHECKED but never DRIVEN FROM, so on a bare source the pass lifts it in front of the scan as an
+ * index seek. Nothing here needs to change for that, which is the point of putting it in a pass.
+ */
 function hasPropertyClause(key: string, val: unknown, subject: Subject, elem: Elem, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null): Expr | null {
   // A substring `TextP` over a STORED property is `ftsSubstringPredicate`'s, and taking it here
   // would swap a trigram-index seek for a base-table LIKE scan — a regression the census cannot
@@ -612,15 +620,23 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
         { kind: 'in-query', expr: col(e.id, 'label'), plan: labelIds(labels as string[], fresh), negated: false })
       : eq(col(e.id, hop.from), incoming);
     // A correlated hop FILTERS the edge table against the outer id; a rooted one JOINS the incoming
-    // frontier, `edges` on the LEFT — the join order the legacy spine emits, so the access path
-    // stays the one the covering indexes were built for. The projection is identical either way,
-    // which is what keeps the second hop from needing a second implementation. A correlated body's
-    // `bulk` is synthetic: an EXISTS asks whether a row is there, never how many traversers it is.
+    // frontier. The projection is identical either way, which is what keeps the second hop from
+    // needing a second implementation. A correlated body's `bulk` is synthetic: an EXISTS asks
+    // whether a row is there, never how many traversers it is.
+    //
+    // **THE INCOMING FRONTIER IS THE LEFT SIDE, AND THE JOIN IS `ordered`** — a hop is "for each
+    // traverser I have, find its edges", so the stream drives and `edges` is probed through
+    // `e_out(src,label,tgt)` / `e_in(tgt,label,src)`. This USED to be `edges` on the left and free
+    // to reorder, copied from the legacy spine "so the access path stays the one the covering
+    // indexes were built for" — measured, and it is the opposite: with the order free SQLite chose
+    // `e_in` and scanned the whole edge table for a hop off ONE vertex, taking a 4 000-vertex
+    // `has(name).out(knows).values(name)` to 1 492 ms. Pinned, it seeks `e_out` and takes 0.3 ms.
+    // The covering indexes were never in question — which of them the planner reaches for was.
     const source = input
       ? make.join({
-        id: fresh('j'), left: e, right: input, join: 'inner', on, channels: carried,
-        type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int'), meta('pid', 'int'),
-          ...carriedCols(carried)),
+        id: fresh('j'), left: input, right: e, join: 'inner', ordered: true, on, channels: carried,
+        type: typeOf(meta('pid', 'int'), ...carriedCols(carried),
+          meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
       })
       : make.filter({ id: fresh('f'), input: e, channels: [], type: e.type, pred: on });
     // The arm carries the INCOMING position through unchanged; re-minting happens once over the
@@ -1153,9 +1169,12 @@ function terminal(
       type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
     });
     // A JOIN, not an EXISTS: `values()` emits one traverser PER matching property, so multiplying
-    // the row is the answer rather than the bug it would be in a filter.
+    // the row is the answer rather than the bug it would be in a filter. `ordered` for the same
+    // reason the hop is: the stream drives and `vp_node_key(node,key)` is probed, rather than the
+    // planner leading with `vp_key_value(key)` — every `name` row in the graph — and rediscovering
+    // the traverser afterwards.
     const joined = make.join({
-      id: fresh('j'), left: input, right: props, join: 'inner', channels: input.channels,
+      id: fresh('j'), left: input, right: props, join: 'inner', ordered: true, channels: input.channels,
       type: typeOf(...elementCols(input.channels), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
       // The key set is bounded by the QUERY TEXT, never by row count, so an `InList` is right here
       // and a JSON bind is not (root CLAUDE.md's rule is about data-sized sets).
@@ -2029,6 +2048,10 @@ export interface Lowering {
   readonly params?: Record<string, any>;
   readonly collapse?: boolean;
   readonly correlatedChildren?: boolean;
+  /** May the driving property seek run (`src/rel/passes/seek.ts`)? A PHYSICAL rewrite over the
+   *  finished algebra, so unlike every other flag here it changes no lowering decision — which is
+   *  why it is read once, at the pass, rather than threaded into the fold. */
+  readonly propertySeek?: boolean;
   /**
    * The GRAPH's declared vertex-label cardinality — a CAPABILITY, not a strategy, which is why it is
    * here rather than being read from a store at lowering time.
@@ -2078,6 +2101,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   params: opts.params ?? {},
   collapse: opts.collapse ?? true,
   correlatedChildren: opts.correlatedChildren ?? true,
+  propertySeek: opts.propertySeek ?? true,
   labelCardinality: opts.labelCardinality ?? LabelCardinality.ONE,
   sideEffects: opts.sideEffects ?? NO_SIDE_EFFECTS,
   services: opts.services ?? NO_SERVICES,
@@ -2188,13 +2212,20 @@ const scalarPayload = (
   };
 };
 
-const lowered = (chain: Tail, collapse: boolean, fresh: Minter): RelLowering | null => {
+const lowered = (chain: Tail, collapse: boolean, propertySeek: boolean, fresh: Minter): RelLowering | null => {
   const wire = framed(chain, collapse, fresh);
   // A shape whose payload projection is not built yet is COVERAGE WE DO NOT HAVE, so it declines exactly as
   // an unlearned step does. It must not throw: legacy answers these, and `rel-sweep` is the gate that
   // proves this seam never raises where the other spine has an answer.
   if (!wire) return null;
-  const named = nameBindings(wire.rel);
+  // PHYSICAL PASSES RUN BEFORE NAMING, because naming decides CTE boundaries from the DAG's sharing
+  // and a rewrite that changes the DAG after that decision would be naming a plan that no longer
+  // exists. `seek` is the first of them (`src/rel/passes/seek.ts`); it is a `Rel → Rel` identity on
+  // every shape it does not recognise, so this line is where the next one joins rather than a
+  // special case for this one. The switch is read HERE and not inside the pass: a pass is a total
+  // function of its input, and a pass that consulted a config would be one more place a
+  // configuration could change coverage rather than only performance.
+  const named = nameBindings(propertySeek ? seek(wire.rel) : wire.rel);
   // EFFECTS FIRST, then whatever CTEs the result still needs — `checkPlan` proves a `Ref` resolves
   // only backwards, so the order the executor runs IS the order the checker walked. `name` is called
   // on the result alone because a write step has already named its own target's shared nodes; the
@@ -2240,7 +2271,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   const fresh = minter();
   const settled = settle(opts);
   const chain = lowerChain(steps, settled, fresh);
-  return chain && lowered(chain, settled.collapse, fresh);
+  return chain && lowered(chain, settled.collapse, settled.propertySeek, fresh);
 }
 
 /**
@@ -2378,6 +2409,10 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
     pred = and(pred, clause);
   }
 
+  // The `Filter` this builds over a bare element scan is what `src/rel/passes/seek.ts` reads: a
+  // selective property predicate here can only be CHECKED, and the pass is what turns it into the
+  // relation the plan is driven from. Deliberately not decided here — recognising it on the ALGEBRA
+  // means it cannot drift with which STEPS happen to fold into this run.
   const source = pred ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred }) : seeded.scan;
   // The seed of the emission order is the ROWID, exactly as the legacy source seeds it: a scan's
   // natural order is the only order a bare source has, and naming it makes every later slice ask

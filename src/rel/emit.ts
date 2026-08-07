@@ -54,7 +54,7 @@ const qualified = (alias: string, name: string): Expression => q`${ident(alias)}
 
 /** A FROM item: a table, a CTE name, a derived SELECT or a table-valued function, plus its alias. */
 interface FromItem { readonly text: Expression; readonly alias: string; }
-interface JoinItem { readonly kind: 'inner' | 'left' | 'cross'; readonly item: FromItem; readonly on?: Expression; }
+interface JoinItem { readonly kind: 'inner' | 'left' | 'cross'; readonly item: FromItem; readonly on?: Expression; readonly ordered?: boolean; }
 
 /** How a relation in scope spells each of its columns IN THE BLOCK BEING ASSEMBLED. Fusing a node
  * into the block means its outputs are spelled as the expressions that compute them, not as a
@@ -177,8 +177,23 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
   // ---------- rendering a finished block ----------
 
   const fromText = (item: FromItem): Expression => q`${item.text} ${ident(item.alias)}`;
+  /**
+   * `CROSS JOIN` IS SQLITE'S ORDER FENCE, and it is the ONLY one that works here — which is why an
+   * `ordered` inner join renders with that keyword AND keeps its `ON`.
+   *
+   * SQLite reorders the terms of a `FROM` freely, whatever their textual order, and `CROSS JOIN` is
+   * the documented exception: the tables to its left stay in the outer loop. It is not a cartesian
+   * product in SQLite — `A CROSS JOIN B ON p` means exactly `A INNER JOIN B ON p` with the order
+   * pinned (measured: same rows, and the ON is accepted by the parser). The algebra's own `cross`
+   * kind is the cartesian one and carries no ON, so the two never collide.
+   *
+   * Measured alternatives that do NOT fence: a plain inner join in pipeline order, a `WITH …
+   * MATERIALIZED` source CTE, and an `IN (SELECT …)` in place of a correlated `EXISTS`. Each reached
+   * the selective index and each still ran 1 480–1 490 ms on the 4 000-vertex 1-hop, because the
+   * planner put the same table in the outer loop regardless. The fence ran it in 0.3 ms.
+   */
   const joinText = (join: JoinItem): Expression => {
-    const keyword = join.kind === 'cross' ? raw('CROSS JOIN') : raw(`${join.kind.toUpperCase()} JOIN`);
+    const keyword = join.kind === 'cross' || join.ordered ? raw('CROSS JOIN') : raw(`${join.kind.toUpperCase()} JOIN`);
     return q` ${keyword} ${fromText(join.item)}${join.on ? q` ON ${join.on}` : empty}`;
   };
 
@@ -407,7 +422,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         return {
           kind: 'block', select,
           from: left.from,
-          joins: [...left.joins, { kind: r.join, item: right.from, on }, ...right.joins],
+          joins: [...left.joins, { kind: r.join, item: right.from, on, ordered: r.ordered }, ...right.joins],
           where: conjoin(left.where, right.where),
           distinct: false, windowed: false,
           scope: withRel(scope, r.id, new Map(select)),

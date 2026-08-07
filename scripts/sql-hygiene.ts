@@ -61,6 +61,10 @@ const RELIR_AHEAD = new Map([
 interface Metric { binds: number; bytes: number; compiler: number; bound: number; }
 const maxima = new Map<string, Metric>();
 const failures: string[] = [];
+/** Traversals where the two spines return the SAME rows in a different order — telemetry, never a
+ *  gate, exactly as the census treats the same fact. A number worth watching move, so it is printed
+ *  on a green run too (the summary line below). */
+const reordered: string[] = [];
 let admitted = 0;
 let statements = 0;
 let pairedReads = 0;
@@ -74,9 +78,34 @@ const canon = (value: any): any =>
   : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canon(item)]))
   : typeof value === 'bigint' ? ['bigint', value.toString()]
   : Number.isNaN(value) ? ['nan'] : value;
+/**
+ * A framed answer as TWO comparisons, because the two spines agreeing on WHICH traversers come back
+ * and agreeing on the ORDER they come back in are different claims with different standing.
+ *
+ * `value` is the ordered rendering; `multiset` is the same rows sorted, so it is blind to order and
+ * to nothing else. Only the multiset GATES. A traversal that does not call `order()` has no
+ * specified emission order — traversers are a multiset (root `CLAUDE.md`) — so two spines emitting
+ * the same rows in different orders are both right, and failing the build on it would make any plan
+ * change to either spine a build break.
+ *
+ * **This is the census's rule, not a new one.** `test/census/` gates on "no executing traversal
+ * changes its answer" and reports emission-order change as telemetry that never gates; this script
+ * measured the same axis and gated on it, which was the two instruments disagreeing about the
+ * standing of one fact rather than a stricter check. Measured when the RelIR spine's join order was
+ * pinned (`docs/2026-08-07-query-plan-stability.md` §3·2): 53 corpus traversals reordered, every one
+ * of them multiset-identical, and BOTH spines' orders stable under `MOGWAI_REVERSE_UNORDERED=1` —
+ * so neither was passing by luck, and neither was more correct.
+ *
+ * What this does NOT concede: an order the language DOES specify is `order()`'s, which is an
+ * `ORDER BY` in the emitted SQL and therefore survives any plan change. If that ever diverges
+ * between spines the rows themselves diverge with it, and the multiset gate below catches it.
+ */
 const comparable = async (query: string, spine: 'rel' | 'legacy') => {
-  try { return { ok: true as const, value: JSON.stringify((await decodeAll(exec(store, undefined, undefined, spine).buffers(query, {}))).map(canon)) }; }
-  catch (error) { return { ok: false as const, error: (error as Error).message }; }
+  try {
+    const rows = (await decodeAll(exec(store, undefined, undefined, spine).buffers(query, {}))).map(canon);
+    const rendered = rows.map((row) => JSON.stringify(row));
+    return { ok: true as const, value: JSON.stringify(rendered), multiset: JSON.stringify([...rendered].sort()) };
+  } catch (error) { return { ok: false as const, error: (error as Error).message }; }
 };
 
 const countExpr = (expr: Expr, counts: { compiler: number; bound: number }): void =>
@@ -152,8 +181,12 @@ for (const query of corpus) {
         // A malformed literal is not an executable paired read; the front-end's common refusal is
         // already L1's contract. A one-sided failure remains a hygiene failure.
         if (relAnswer.ok !== legacyAnswer.ok) failures.push(`${query}: only one spine frames the read`);
-        else if (relAnswer.ok && legacyAnswer.ok && relAnswer.value !== legacyAnswer.value && !RELIR_AHEAD.has(query))
-          failures.push(`${query}: RelIR and legacy framed answers differ`);
+        else if (relAnswer.ok && legacyAnswer.ok && !RELIR_AHEAD.has(query)) {
+          // WHICH ROWS gates; WHAT ORDER is telemetry. See `comparable` for why the two claims have
+          // different standing, and for the measurement that separated them.
+          if (relAnswer.multiset !== legacyAnswer.multiset) failures.push(`${query}: RelIR and legacy framed answers differ`);
+          else if (relAnswer.value !== legacyAnswer.value) reordered.push(query);
+        }
       }
     }
   } catch (error) {
@@ -189,6 +222,11 @@ if (json) {
   console.log(`sql-hygiene: ${admitted} admitted authored RelIR plans, ${statements} executable statement(s)`);
   console.log(`sql-hygiene: ${pairedReads} paired read(s) framed against the modern seed`);
   console.log(`sql-hygiene: ${maxima.size} traversal family baseline(s)`);
+  // Same standing and same spelling as the census's own line: a number worth watching move, never a
+  // gate. The NAMES are verbose-only, because 50-odd of them is a wall of text and the count is what
+  // a reader is watching.
+  console.log(`  ${reordered.length} spine emission-order difference(s) — telemetry, never gates`);
+  if (verbose) for (const query of reordered) console.log(`  ORDER ${query}`);
   if (verbose) for (const [family, metric] of Object.entries(baseline))
     console.log(`  ${family}\tbinds=${metric.binds}\tbytes=${metric.bytes}\tcompiler=${metric.compiler}\tbound=${metric.bound}`);
 }

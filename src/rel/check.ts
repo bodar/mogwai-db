@@ -224,6 +224,8 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
       const needsOn = node.join === 'inner' || node.join === 'left';
       if ((node.join === 'cross' && node.on) || (needsOn && !node.on))
         throw new Error(`RelIR: ${node.join} join ${node.join === 'cross' ? 'must not' : 'requires'} an ON expression`);
+      if (node.ordered && node.join !== 'inner')
+        throw new Error(`RelIR: only an inner Join may pin its order; ${node.join} may not`);
       // The emitter names the join's output positionally from both sides, so the declared width and
       // the uniqueness of those names are what make a `Col` against the join resolvable at all.
       const width = joinWidth(node);

@@ -105,7 +105,11 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(uaRel.spine).toBe('rel');
     expect(uaRel.sql).toContain('UNION ALL');
     expect(uaRel.sql).toMatch(/WITH r0 AS \(/);
-    expect(uaRel.sql.match(/FROM edges \w+ INNER JOIN r0 /g)).toHaveLength(2);
+    // The incoming frontier is the join's LEFT side and `edges` is probed, pinned with SQLite's
+    // CROSS JOIN order fence — a hop is "for each traverser I have, find its edges", and leaving the
+    // order to the planner is what took a 1-hop on a 4 000-vertex graph to 1 492 ms
+    // (`docs/2026-08-07-query-plan-stability.md` §3·2).
+    expect(uaRel.sql.match(/FROM r0 \w+ CROSS JOIN edges \w+ /g)).toHaveLength(2);
     expect(uaRel.shape).toEqual(ua.shape);
     // a NEW as() bound INSIDE one arm now forks/merges: the label unions into the merged
     // set and the arm that never bound it pads an empty (NULL) history.

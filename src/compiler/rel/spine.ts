@@ -30,6 +30,10 @@ export interface RelRequest {
    *  state, which is why it is offered rather than assumed (both positions stay expressible, so the
    *  differential has two forms to compare). */
   readonly collapse: boolean;
+  /** Whether the driving property seek (`src/rel/passes/seek.ts`) may lift a correlated property
+   *  `EXISTS` in front of the scan it filters. A physical rewrite over the finished algebra rather
+   *  than a lowering choice, which is why it arrives here as a flag and is applied by a pass. */
+  readonly propertySeek: boolean;
   /** This graph's declared VERTEX label cardinality. NOT a strategy switch — see below. */
   readonly labelCardinality: LabelCardinality;
 }
@@ -108,6 +112,7 @@ export function compileViaRel(
     // compile starts (request-scope DI). Coverage is still not a function of configuration: what the
     // cardinality changes is the ANSWER, not whether there is one.
     labelCardinality: request.labelCardinality,
+    propertySeek: request.propertySeek,
     services: request.services,
     // NOT a strategy switch either — a `withSideEffect(k, <literal>)` is a compile-time CONSTANT the
     // front-end already extracted, and the write parse has always taken it. What used to happen is
