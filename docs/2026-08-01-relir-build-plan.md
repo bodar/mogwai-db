@@ -554,6 +554,12 @@ durable part:
 `ChildFrameStack`/`ChildParent`.** Every service — `call()`, FTS search, degree-centrality, federation —
 is written against legacy's object model. No phase of this plan named it before.
 
+**And naming it as a TYPING problem was still wrong** — measured while cutting the rest of Phase 0.
+`call()` exists only on the legacy spine, so the SPI is typed on `Stream` because that is the only lowered
+form there is; retyping it severs one row and leaves the three catalog services holding the same edge. It is
+a CAPABILITY MIGRATION, it is scheduled as its own unit before Phase 4, and the sizing is in
+"Phase 0's residue" under §10.
+
 **The trapped kernels ARE the import edges** (§6·4), which is why Phase 0 is one job and not two:
 
 | kernel | where it lives |
@@ -637,12 +643,21 @@ phase that makes every later deletion a `rm` instead of a re-derivation.
   (`ir/step.ts` for step-name vocabularies and argument decodes, `plan/plan.ts` for payload tuples,
   `ir/passes.ts` for IR production, `gremlin/` for TinkerPop semantics). Only `gremlin/validate.ts`,
   `gremlin/coerce.ts` and `ir/injection.ts` are new paths, and all three are whole-file MOVES.
-- **Already scheduled to die.** `bareInjectTag` goes with §6·7's per-row type channel — do not move it,
-  build that instead. It is now the ONLY non-object-model symbol left on any edge.
-- **The object model — the real work, and the reason this is a phase and not a chore.** `LoweringState` /
-  `Stream` / `TraverserLayout` / `AliasMap`, and the service SPI built on them. Retype
-  `services/spi/types.ts` off legacy's `Stream`/`ChildFrameStack`; give `src/compiler/rel/` its own alias
-  and child-frame types rather than borrowing legacy's.
+- ✅ **Already scheduled to die.** `bareInjectTag` went with §6·7's per-row type channel — built, not moved.
+  The `undefined` it returned for disagreeing declared types became `UNKNOWN`, which means "the JS client
+  cannot say" and here meant "our source cannot carry two" — §6·5's mistake in the type channel, costing a
+  wrong wire CLASS. The authority is now per ARGUMENT (`injectValueTypes`, `gremlin/coerce.ts`) with the
+  uniform reading DERIVED from it; RelIR projects disagreeing tags into a `vt` column, in the stored-vtype
+  vocabulary so the framer needed nothing new. `g.inject("zzz", datetime(…))` frames `['String','Date']`
+  where legacy still frames `['String','Number']` — pinned in `test/rel-spine.test.ts`, because a coverage
+  number cannot see it and the differential is blind to a reading both spines shared.
+- **The object model.** ✅ for the ALIAS half: `AliasEntry`/`AliasMap`/`AliasScalarType` and their five
+  functions now live in `plan/alias.ts` with the tagged-entry ENCODING they describe. **The plan's own
+  instruction here was wrong and is superseded** — "give `src/compiler/rel/` its own alias and child-frame
+  types" predates §10·10 retiring the `TraverserLayout` bridge, and a per-spine copy would have bought a
+  second encoding to keep in step, silently (a wrong compile-time summary emits valid SQL against a correct
+  encoding). What is LEFT of the object model is `LoweringState`/`Stream`/`TraverserLayout`/`ChildFrameStack`
+  on the four SERVICE rows — and that is the residue below, which is not a retype at all.
 
 **Done when `src/compiler/steps/` is imported by exactly two files: `engine/engine.ts` and `compiler.ts`.**
 Nothing user-visible changes; the differential is at FULL value throughout, since no capability moves and
@@ -653,14 +668,61 @@ criterion every later phase spends, so it is an instrument, not a `grep` someone
 DIRECT imports of `src/compiler/steps/**` from outside it, per importing file, with the symbols named — the
 same shape as `scripts/deletion-ratchet.tsv` and for the same reason: **a floor may only be re-recorded
 DOWNWARD** (`mise run edges-record`), a rise or a NEW importer fails the build, and prose here changes
-nothing. It is a RATCHET rather than a zero-gate because zero is the wrong target — `engine/engine.ts` and
-`compiler.ts` are the legacy routers and keep their edges until Phase 4 deletes them outright. Those two are
-the declared exemptions; **Phase 0 is over when they are the only rows left.**
+nothing. It is a RATCHET rather than a zero-gate because zero is the wrong target — some importers ARE
+legacy and keep their edges until Phase 4 deletes them outright. **Phase 0 is over when the exempt rows are
+the only rows left.**
+
+**THE BAR FOR AN EXEMPTION IS NARROW, and the narrowness is the whole value of the gate.** A file qualifies
+only if it is reached ONLY by legacy AND does not exist after Phase 4. Three do: the two routers
+(`engine/engine.ts`, `compiler.ts`) and the Engine INTERFACE they are typed by (`engine/deps.ts`).
+**"Legacy still needs it" is NOT the bar** — that admits anything. A file that RelIR or a SERVICE reaches
+must be severed however awkward, because it OUTLIVES the deletion, and an exemption there converts scheduled
+work into a Phase 4 surprise. `deps.ts` only came to clear that bar because `compileViaRel` stopped taking an
+`Engine` (it read two fields off it) and now takes a `RelRequest`; before that change it did not qualify,
+which is why the bar is written in `scripts/edges-check.ts` and the TSV rather than left to a phrase.
 
 Deliberately DIRECT edges only, not the transitive closure. The closure is what §8 measures to size the
 prize, and it is the wrong thing to gate on: it moves when an unrelated file changes an import three hops
 away, so it would fire on work that has nothing to do with severing anything. The direct edge is the thing a
 commit actually cuts.
+
+### Phase 0's residue — `call()` IS A CAPABILITY MIGRATION, and it was mis-filed as a retype
+
+Phase 0 assumed the service rows were a TYPING problem: "retype `services/spi/types.ts` off legacy's
+`Stream`/`ChildFrameStack`". Measured, they are not. **`call()` exists only on the legacy spine** —
+`lowerToRel` has no `call` step at all — so `Contribution.build(site): Stream` returns a legacy `Stream`
+because that is the only lowered form there is. Retyping the SPI to a spine-neutral type parameter would
+sever exactly one row (`spi/types.ts`) and leave the three catalog services holding the same edge through
+their own imports. **The edge is not the type; it is that the capability lives on one spine.**
+
+So this is scheduled as its own unit, before Phase 4 and after the write cut. It is NOT hard — the sizing
+below is measured, not estimated — but it is a capability migration plus a deletion, which is Phase-1-shaped
+work and not something Phase 0 (which "deletes nothing and moves no counter") can absorb.
+
+**THE CRUX, and the reason it cannot be done incrementally per service:** a service cannot produce BOTH a
+legacy `Stream` and a `Rel` without two implementations of itself, which is the one thing
+`steps/CLAUDE.md` forbids outright. Legacy composes q-kernel CTEs and cannot consume a `Rel`. So `call()`
+migrates ALL AT ONCE and legacy's call route (`steps/tail/call.ts`, `seedCall`, the `BarrierPoint`/
+`MidBarrierPoint` surface on `engine.ts`) is DELETED in the same change. That is the clean shape, not a
+compromise: after it, `call()` traversals route to RelIR only, and no capability is lost because the three
+stream services are fully re-expressed.
+
+What it actually costs, per service:
+
+| service | kind | what RelIR needs | sizing |
+|---|---|---|---|
+| `federate`, `io` | `barrier` | **nothing.** A barrier `Contribution` has no `build` — its rows come from an awaited sibling and `apply` runs at EXECUTION time, in the executor's segment loop. Spine-independent already. | zero |
+| `directory` (`--list`) | `stream` | a `Values` relation of strings + scalar-string framing — which is `injectSource` minus the coercion fold | trivial |
+| `search` (`tinker.search`) | `stream` | `scan(propertyFts)` → two joins → filter (the LIKE + two equalities) → the `PROPERTY_PAYLOAD` project. Every node exists and §10·10 already put the property payload arm in the algebra, so this is translation, not design | mechanical |
+| `degree.centrality` | `stream` | a per-parent movement count — the child seam's scalar arm, which already answers `__.out().count()`. This is also why `scopedMovementCount` is not a kernel (§8): it IS this seam | reuse |
+
+The genuinely new piece is `call()` as a STEP in `lowerToRel` — the source form (`g.call(…)`) and the
+mid-traversal form (`V().call(…)`, which pushes a child scope) — plus making the SPI RelIR-native rather
+than generic. Generic is the wrong answer here precisely because there is no second consumer to be generic
+FOR once legacy's call route is gone; a type parameter would be scaffolding with no end date.
+
+Until it lands the four service rows stay LIVE in `scripts/steps-edges.tsv` — deliberately not exempt, since
+they fail the bar above in exactly the way the bar exists to catch.
 
 ### Phase 1 — writes: three capabilities, then the first cut
 
