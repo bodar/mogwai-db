@@ -28,6 +28,7 @@ import { compile } from '../../src/compiler/compiler.ts';
 import type { Spine } from '../../src/sql/kernel/render.ts';
 import type { Framed } from '../../src/execute.ts';
 import { exec } from '../support/executor.ts';
+import { standardRegistry } from '../../src/services/standard.ts';
 import { isNondeterministic, isWrite, seeded } from '../support/graph.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 
@@ -111,7 +112,21 @@ const FOREIGN_ORIGIN: readonly RegExp[] = [
  */
 function spineOf(query: string): Spine {
   try {
-    const plan = compile(query, {}, { spine: 'rel' });
+    // THE REGISTRY IS NOT OPTIONAL HERE, and omitting it broke this column for every `call()`.
+    // Rule 2 in this module's own header says the census runs through the EXECUTOR precisely
+    // because `compile(q, {})` resolves no registry and turns all twelve `call()` traversals into
+    // false "unknown service" deferrals — and this compile, the one place a bare `compile()`
+    // survived, was doing exactly that. The throw was caught into `legacy`, so every `call()`
+    // traversal reported as uncovered no matter which spine actually answered it.
+    //
+    // It went unnoticed while the answer happened to be right: `call()` WAS legacy-only. Migrating
+    // `--list` to the `rel` arm is what made it observably wrong — the traversal executes on RelIR
+    // (the `status`/`ms` columns, which DO go through the executor, are unchanged and correct)
+    // while this column still said `legacy`. The coverage ratchet was reading a constant.
+    //
+    // `standardRegistry` is what `exec()` binds by default, so the compile now asks the same
+    // question the two execution positions answer.
+    const plan = compile(query, {}, { spine: 'rel', registry: standardRegistry });
     return plan.kind === 'write' ? 'legacy' : plan.spine;
   } catch {
     return 'legacy';
