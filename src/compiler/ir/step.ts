@@ -262,3 +262,48 @@ export type BranchKind = 'union' | 'choose' | 'coalesce' | 'optional';
 export const BRANCH_KINDS: ReadonlySet<string> = new Set<string>(['union', 'choose', 'coalesce', 'optional']);
 export const asBranchKind = (name: string): BranchKind | null =>
   BRANCH_KINDS.has(name) ? name as BranchKind : null;
+
+// ---------- the SHAPE-LOCAL vocabularies: what a step name means over one VALUE ----------
+//
+// The four below arrived here from the legacy emission files that happened to be their first
+// consumer (`tail/coerce.ts`, `tail/list.ts`, `tail/path.ts`). Each is a step-name vocabulary and
+// nothing else — no `Stream`, no `LoweringState`, no SQL — so keeping them beside an emitter did
+// two bad things at once: it pinned every RelIR importer to the whole legacy closure for the sake
+// of a Set of strings (build plan §8's edge inventory), and it hid them from the "derive with a
+// named difference, never merge" rule this module exists to enforce. Read them against the bases
+// above, not against the file each used to live in.
+
+/** The syntax-only scalar transform vocabulary — the step names whose meaning is "reshape this one
+ *  scalar value", emitted by `scalarTx` (`plan/plan.ts`). Membership is decided by SYNTAX alone,
+ *  which is why child-shape classification can consult it without importing an emitter: the
+ *  classifier must run BEFORE the engine it would otherwise pull in. */
+export const SCALAR_TRANSFORMS: ReadonlySet<string> = new Set([
+  'concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace',
+  'trim', 'lTrim', 'rTrim', 'reverse', 'asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff',
+]);
+
+/** The `Scope.local` collection transforms that keep a list a LIST — a per-list reshape, not a
+ *  whole-stream reduction. Spelled as its own base rather than as `SLICE_STEPS + order/dedup/tail`
+ *  because the members coincide today for unrelated reasons: these are the ops with a per-list
+ *  meaning, those are the ops that denote a window. */
+export const LIST_LOCAL_TX: ReadonlySet<string> = new Set(['order', 'dedup', 'limit', 'skip', 'range', 'tail']);
+
+/** The scalar string transforms that, applied to a LIST, apply to each ELEMENT (`Scope.local`).
+ *  A strict subset of `SCALAR_TRANSFORMS`, and the exclusions are the whole content:
+ *  `reverse` reverses element ORDER on a list rather than each string, and `concat` is excluded
+ *  because TinkerPop ships no `ConcatLocalStep` — `ConcatStep.map` rejects a non-String receiver at
+ *  every scope, so `g.inject(["a","b"],"c").concat("d")` must THROW, not answer `['ad','bd','cd']`.
+ *  It did answer that, from a membership list that looked harmlessly complete. */
+export const STRING_LOCAL_TX: ReadonlySet<string> = new Set([
+  'toUpper', 'toLower', 'trim', 'lTrim', 'rTrim', 'asString', 'length', 'substring', 'replace',
+]);
+
+/** The collection ops with an unambiguous meaning over a PATH: the path coerces to its element
+ *  sequence and the op reshapes/filters/explodes that list. `order`/`dedup`/`limit`/`count` are
+ *  deliberately absent — over a path those are WHOLE-STREAM ops, so they overlap
+ *  `LIST_LOCAL_TX` by name while meaning something else entirely. Two vocabularies, not one with
+ *  an exception. */
+export const PATH_LIST_OPS: ReadonlySet<string> = new Set([
+  'combine', 'intersect', 'difference', 'disjunct', 'product', 'merge', 'reverse', 'conjoin',
+  'all', 'any', 'none', 'unfold',
+]);

@@ -7,12 +7,11 @@ import { asOnStream, selectOneFromAlias } from './labelselect.ts';
 import { loweringStateOf, streamPayloadCols, toScalarStream, withRelationAndLayout, PROPERTY_PAYLOAD, type ListStream, type PropertyStream, type ScalarStream, type Stream, type VariantStream, type RelationalStream } from '../context/stream.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { lowerScalarRows } from './scalar.ts';
-import { SCALAR_TRANSFORMS } from './coerce.ts';
 import { lowerReSource } from '../graph-source.ts';
 import { someStepDeep, type IRStep } from '../../ir/strategies.ts';
 import { lowerScopedElementFold, lowerScopedScalarFold, lowerScopedScalarReducer, type ScalarReducer } from './barrier.ts';
 import { predicateSql, elemTable } from '../../plan/plan.ts';
-import { sliceOf } from '../../ir/step.ts';
+import { SCALAR_TRANSFORMS, sliceOf } from '../../ir/step.ts';
 import { elementOrderDrop, elementOrderSql } from './modulation.ts';
 import {
     childCtx, childSteps, classifyCountChild, isOneRowProjection, classifyElementChildRows, classifyScalarChildRows, elementScalarBranchParts, labelSelectOf,

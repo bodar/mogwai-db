@@ -25,8 +25,7 @@ import type { AliasMap, TraverserLayout, ElementStream } from '../context/contex
 import type { PropertyStream, ScalarStream, Stream } from '../context/stream.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
-import { SCALAR_TRANSFORMS } from './coerce.ts';
-import { asBranchKind, isStreamBarrier, REDUCERS, type BranchKind } from '../../ir/step.ts';
+import { asBranchKind, isStreamBarrier, REDUCERS, SCALAR_TRANSFORMS, type BranchKind } from '../../ir/step.ts';
 
 /** Root/child compilation context. A child frame retains the complete parent domain,
  * not merely an ordinal on productive child rows: reducers need that domain to

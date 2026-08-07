@@ -1,7 +1,7 @@
 import { compilerNull, lit, type Expr } from '../../rel/expr.ts';
 import { isNested, argValues } from '../../gremlin/frontend.ts';
 import { JAVA_WHITESPACE } from '../plan/plan.ts';
-import { dtFactor, numericSpec } from '../steps/tail/coerce.ts';
+import { dtFactor, numericSpec } from '../../gremlin/coerce.ts';
 import { STATIC, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 

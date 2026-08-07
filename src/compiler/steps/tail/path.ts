@@ -2,7 +2,7 @@ import { isNested, argValues } from '../../../gremlin/frontend.ts';
 import { empty, list, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { type PathPos } from '../../../sql/kernel/render.ts';
 import { nodes } from '../../../sql/schema.ts';
-import { EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, REDUCERS, VERTEX_MOVES, unionOf } from '../../ir/step.ts';
+import { EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, PATH_LIST_OPS, REDUCERS, VERTEX_MOVES, unionOf } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { aliasCtx, elemCtx, elemTable, elementPayload, predicateSql, scalarProp, type ScalarCtx, tokenExpr } from '../../plan/plan.ts';
 import { dropLayoutAtBarrier, layoutCols, layoutProjection, scopePathCols, withoutPath, type ElementStream, type TraverserLayout } from '../context/context.ts';
@@ -342,13 +342,6 @@ function compilePathArray(st: ElementStream, proj: IRStep, acc: TailAcc): PathSt
   const rel = st.q.cte(node, pathColumns(layout));
   return toPathStream(dropLayoutAtBarrier(loweringStateOf(st)), rel, layout);
 }
-
-/** Collection ops with unambiguous list semantics when applied to a Path: the Path is
- *  coerced to its element sequence (a list) and the op reshapes/filters/explodes it.
- *  order/dedup/limit/count are deliberately NOT here — those are whole-stream path ops
- *  (count() handled below; order/reducer as whole-stream is a separate slice). */
-/** Shared data: both lowering spines read this one Path-to-List operation vocabulary. */
-export const PATH_LIST_OPS = new Set(['combine', 'intersect', 'difference', 'disjunct', 'product', 'merge', 'reverse', 'conjoin', 'all', 'any', 'none', 'unfold']);
 
 /** Coerce a homogeneous scalar linear path (every position a by(key) value) into one
  *  list value per row, so the list-value engine (set-ops / reverse / unfold / reducers)

@@ -1,6 +1,6 @@
-import { q, type Expression } from '../../../sql/kernel/q.ts';
-import { type ValueType } from '../../../sql/kernel/render.ts';
-import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain } from '../../../gremlin/frontend.ts';
+import { q, type Expression } from '../sql/kernel/q.ts';
+import { type ValueType } from '../sql/kernel/render.ts';
+import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain } from './frontend.ts';
 
 // ---------- scalar value coercion (asBool / asNumber / asDate + date arithmetic) ----------
 //
@@ -10,14 +10,6 @@ import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain } from '../../../g
 // const input is an inject() literal); the SQL emitters wrap a runtime scalar in a
 // CAST. Shared by renderProjection (runtime path, projection.ts) and compileInject
 // (const path, inject.ts).
-
-/** The syntax-only scalar transform vocabulary. It lives in this cycle-free leaf
- * because child-shape classification must consult it without importing the scalar
- * emitter (which reaches the engine and therefore the classifier). */
-export const SCALAR_TRANSFORMS = new Set([
-  'concat', 'length', 'toUpper', 'toLower', 'asString', 'substring', 'replace',
-  'trim', 'lTrim', 'rTrim', 'reverse', 'asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff',
-]);
 
 /** asBool() over a compile-time constant — TinkerPop's parse semantics. Its
  *  per-value errors (null / non-bool string / list → "Can't parse …") can't be

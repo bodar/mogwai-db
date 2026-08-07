@@ -15,7 +15,7 @@ import { PER_ROW, STATIC, type Compiled, type ListOf, type ValueType } from '../
 import { engineOf, type Engine } from '../../engine/deps.ts';
 import { firstOf, globalRowOps, lowerGlobalCount, aliasCompareRows } from './barrier.ts';
 import { assertsGType, childSteps, classifyBy, collectionAssert } from './child-shape.ts';
-import { isLocalScope, REDUCERS } from '../../ir/step.ts';
+import { isLocalScope, LIST_LOCAL_TX, REDUCERS, STRING_LOCAL_TX } from '../../ir/step.ts';
 
 /** Does this step carry a Scope.local token (the per-list, not whole-stream, form)? */
 const isLocal = isLocalScope;
@@ -195,23 +195,9 @@ function listNoneFilter(s: ListStream, pred: any): ListStream {
   return listCte(s, c, c.c.list, s.of, q` WHERE NOT EXISTS (SELECT 1 FROM json_each(${c.c.list}) je WHERE ${memberPredicate(s.of, pred)})`);
 }
 
-/** The Scope.local collection transforms that keep a list a list (per-list, not a
- *  whole-stream reduction). Each rebuilds each row's list via a correlated json_each. */
-export const LIST_LOCAL_TX = new Set(['order', 'dedup', 'limit', 'skip', 'range', 'tail']);
-
 /** The shared global row ops keyed by step name, so a LIST_LOCAL_TX name can compose with its
  *  shared twin instead of replacing it. */
 const SHARED_ROW_OPS = new Map(globalRowOps<ListStream>());
-
-/** Scalar string transforms that, on a list, apply to EACH element (Scope.local) —
- *  toUpper(local)/trim(local)/length(local)/… over a folded list. Reuse scalarTx per
- *  element (list.ts is the only per-element caller besides the scalar tail). reverse
- *  is NOT here: on a list it reverses element ORDER (listReverse), not each string. */
-// `concat` is deliberately NOT here: TinkerPop ships no ConcatLocalStep, so `concat()` over a
-// collection is invalid at every scope (`ConcatStep.map` rejects any non-String receiver outright)
-// — it gets its own always-refusing entry below. Having it here made
-// `g.inject(["a","b"],"c").concat("d")` answer ['ad','bd','cd'] where the spec demands a throw.
-export const STRING_LOCAL_TX = new Set(['toUpper', 'toLower', 'trim', 'lTrim', 'rTrim', 'asString', 'length', 'substring', 'replace']);
 
 /** A per-element string transform over a list value (Scope.local): rebuild each row's
  *  list applying scalarTx to every element, preserving position order. Null elements

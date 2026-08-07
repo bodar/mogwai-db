@@ -11,7 +11,7 @@ import { type Compiled, type ValueType } from '../../../sql/kernel/render.ts';
 import {
     numericSpec, asBoolConst, asNumberConst, asNumberBare, asDateConst,
     dtFactor, dateDiffOtherMs, isDateDiffConstant,
-} from '../tail/coerce.ts';
+} from '../../../gremlin/coerce.ts';
 
 const CONST_COERCIONS = new Set(['asBool', 'asNumber', 'asDate', 'dateAdd', 'dateDiff']);
 
