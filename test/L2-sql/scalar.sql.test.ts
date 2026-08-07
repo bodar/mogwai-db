@@ -919,8 +919,13 @@ describe('scalar-parent / projection SQL', () => {
     expect(cyc.sql).toContain('AS e1_vtype');
   });
 
-  test('project() applies by mods to the current traverser under fresh keys', () => {
-    const p = read('g.V().project("n","a").by("name").by("age")');
+  // THE TWO SPINES SPELL A RECORD DIFFERENTLY, and every assertion below says which one it means.
+  // Legacy carries a record as a WIDE relation (one prefixed column-set per field, `Shape{kind:'map',
+  // entries}`); RelIR carries the fields as columns too but collapses them to the one map VALUE the
+  // map vocabulary already frames (`Shape{kind:'mapValue'}`) at the wire. Both are live routes until
+  // Phase 4, so both are pinned rather than one being rewritten into the other.
+  test('project() applies by mods to the current traverser under fresh keys — legacy', () => {
+    const p = read('g.V().project("n","a").by("name").by("age")', { spine: 'legacy' });
     expect(p.shape).toEqual({ kind: 'map', entries: [
       { key: 'n', prefix: 'e0', sub: 'value', type: PER_ROW('e0_vtype') },
       { key: 'a', prefix: 'e1', sub: 'value', type: PER_ROW('e1_vtype') },
@@ -930,8 +935,23 @@ describe('scalar-parent / projection SQL', () => {
     expect(p.sql).toContain('JOIN nodes e1n ON e1n.id=p.id');
   });
 
-  test('project().by(traversal) lowers each field through child scalar streams', () => {
-    const p = read('g.V().project("name","friend").by(__.values("name")).by(__.out().values("name"))');
+  test('project() builds one map value per row from correlated field reads — RelIR', () => {
+    const p = read('g.V().project("n","a").by("name").by("age")', { spine: 'rel' });
+    expect(p.spine).toBe('rel');
+    expect(p.shape).toEqual({ kind: 'mapValue' });
+    // Each field is a correlated read of the CURRENT traverser (`rn.id`), and the pairs array carries
+    // the key beside the value's own `{t,v}` node — the same encoding `group()` emits.
+    expect(p.sql).toContain("json_array('n', json_object('t'");
+    expect(p.sql).toContain("json_array('a', json_object('t'");
+    expect(p.sql).toContain("rp3.key = 'name'");
+    expect(p.sql).toContain("rp17.key = 'age'");
+    // BOTH fields are droppable (a property `by()` can be unproductive), so the array is ACCUMULATED
+    // rather than spelled as one `json_array(pair, pair)` — an absent key is omitted, never null.
+    expect(p.sql).toContain('json_insert');
+  });
+
+  test('project().by(traversal) lowers each field through child scalar streams — legacy', () => {
+    const p = read('g.V().project("name","friend").by(__.values("name")).by(__.out().values("name"))', { spine: 'legacy' });
     expect(p.shape).toEqual({
       kind: 'map',
       entries: [
@@ -943,13 +963,13 @@ describe('scalar-parent / projection SQL', () => {
     expect(p.sql).not.toContain(' AS o1');
     expect(p.sql).toContain('JOIN c');
     expect(p.sql).toContain('ON b1.o0=b0.o0');
-    expect(read('g.V().project("friend").by(__.out().values("name")).select("friend")').shape)
+    expect(read('g.V().project("friend").by(__.out().values("name")).select("friend")', { spine: 'legacy' }).shape)
       .toEqual({ kind: 'value', type: PER_ROW('e0_vtype') });
-    const mixed = read('g.V().project("name","degree").by("name").by(__.out().count())');
+    const mixed = read('g.V().project("name","degree").by("name").by(__.out().count())', { spine: 'legacy' });
     expect(mixed.sql).toContain('SELECT value FROM vertex_properties WHERE node=p0.id AND key=?');
     expect(mixed.sql).toContain('ON b1.o0=b0.o0');
-    expect(read('g.V().project("id","friend").by(T.id).by(__.out().values("name"))').shape.kind).toBe('map');
-    const element = read('g.V(1).project("self","friend").by().by(__.out().values("name"))');
+    expect(read('g.V().project("id","friend").by(T.id).by(__.out().values("name"))', { spine: 'legacy' }).shape.kind).toBe('map');
+    const element = read('g.V(1).project("self","friend").by().by(__.out().values("name"))', { spine: 'legacy' });
     expect(element.shape).toEqual({
       kind: 'map',
       entries: [
@@ -959,8 +979,28 @@ describe('scalar-parent / projection SQL', () => {
     });
     expect(element.sql).toContain('b0.rid AS e0_rid');
     expect(element.sql).toContain('ON b1.o0=b0.o0');
-    expect(read('g.V(1).project("self","friend").by().by(__.out().values("name")).select("self").out().count()').shape)
+    expect(read('g.V(1).project("self","friend").by().by(__.out().values("name")).select("self").out().count()', { spine: 'legacy' }).shape)
       .toEqual({ kind: 'value', type: STATIC('long') });
+  });
+
+  test('a record FIELD re-enters as a stream of its own shape — RelIR', () => {
+    // The whole point of carrying fields as columns: `select(key)` is a RENAME, so whichever tail
+    // loop owns the field's framing takes the rest of the chain and nothing is decoded back out of a
+    // blob. A value field re-roots to a VALUE stream…
+    const degree = read('g.V().project("degree").by(__.out().count()).select("degree")', { spine: 'rel' });
+    expect(degree.spine).toBe('rel');
+    expect(degree.shape).toEqual({ kind: 'value', type: STATIC('long') });
+    // …a PROPERTY field keeps the stored type it was read with…
+    expect(read('g.V().project("n").by("name").select("n")', { spine: 'rel' }).shape)
+      .toEqual({ kind: 'value', type: PER_ROW('vtype') });
+    // …and an ELEMENT field to a vertex stream, which then moves and reduces like any other.
+    expect(read('g.V(1).project("self","degree").by().by(__.out().count()).select("self")', { spine: 'rel' }).shape)
+      .toEqual({ kind: 'vertex' });
+    expect(read('g.V(1).project("self","degree").by().by(__.out().count()).select("self").out().count()', { spine: 'rel' }).shape)
+      .toEqual({ kind: 'value', type: STATIC('long') });
+    // A `count()` field keeps its Gremlin LONG: the child seam reports the reducer's own framing
+    // rather than handing back a bare expression for the wire to guess at (§6·7).
+    expect(read('g.V().project("degree").by(__.out().count())', { spine: 'rel' }).sql).toContain("'t', 'long'");
   });
 
   test('project/select traversal fields carry typed list and element shapes', () => {

@@ -12,7 +12,14 @@ import { compile } from '../../src/compiler/compiler.ts';
 import { run, seededStore } from '../support/harness.ts';
 
 const store = seededStore();
-const vals = (q: string) => (run(store, q) as any[]).map((r) => r.v ?? r.e0_v ?? r.id);
+/** The traverser's value, in whichever spelling the answering spine used. A single-field RECORD is
+ *  legacy's `e0_v` column and RelIR's one-entry `map` blob; both are the same one value, and reading
+ *  only one of them turns a route move into a test failure that says nothing. */
+const vals = (q: string) => (run(store, q) as any[]).map((r) => {
+  if (typeof r.map !== 'string') return r.v ?? r.e0_v ?? r.id;
+  const node = (JSON.parse(r.map) as [string, any][])[0]?.[1];
+  return node && typeof node === 'object' && 't' in node ? node.v : node;
+});
 /** Traversers are a MULTISET. Two spellings of the same question agree row for row only when
  *  something upstream fixes an emission order; where neither does, comparing sorted is the honest
  *  assertion (a stronger one here would be pinning an order SQLite chose — see the perturbation

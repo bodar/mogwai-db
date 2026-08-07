@@ -241,9 +241,16 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     // what this asserts, and it holds on both.
     expect(grouped(run(store, 'g.withStrategies(ProductiveByStrategy).V().groupCount().by("age")'))['null']).toBe(2);
 
-    const projected = run(store, 'g.withStrategies(ProductiveByStrategy).V().project("degree","age").by(__.inE().count()).by("age")');
+    // `project()` is on the RelIR route now, whose record is one map VALUE rather than legacy's
+    // prefixed `e0_v`/`e1_v` columns. The STRATEGY is what this asserts either way: under
+    // `ProductiveByStrategy` the two ageless vertices keep an `age` entry whose value is NULL, where
+    // the default would OMIT the key entirely. Both spines are read in their own spelling.
+    const projected = runWith(store, 'g.withStrategies(ProductiveByStrategy).V().project("degree","age").by(__.inE().count()).by("age")', { spine: 'rel' });
     expect(projected).toHaveLength(6);
-    expect(projected.filter((r) => r.e1_v == null).map((r) => r.e0_v).sort()).toEqual([1, 3]);
+    expect(projected.filter((r: any) => String(r.map).includes('["age",{"t":null,"v":null}]')).length).toBe(2);
+    const projectedLegacy = runWith(store, 'g.withStrategies(ProductiveByStrategy).V().project("degree","age").by(__.inE().count()).by("age")', { spine: 'legacy' });
+    expect(projectedLegacy).toHaveLength(6);
+    expect(projectedLegacy.filter((r: any) => r.e1_v == null).map((r: any) => r.e0_v).sort()).toEqual([1, 3]);
 
     const selected = run(store, 'g.withStrategies(ProductiveByStrategy).V().as("a").select("a").by("age")').map((r) => r.v);
     expect(selected.filter((v) => v == null)).toHaveLength(2);

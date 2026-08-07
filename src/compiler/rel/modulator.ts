@@ -1,8 +1,10 @@
 import { col, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { isNested, isOrderArg, isTokenArg } from '../../gremlin/frontend.ts';
+import { PER_ROW, STATIC, UNKNOWN } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
+import { payloadCols, type RelFraming } from './framing.ts';
 import { and, eq, EDGE_COLS, firstOf, meta, NODE_COLS, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
 import { storedCompareOn } from './predicate.ts';
 
@@ -163,7 +165,9 @@ export function byExpr(
     if (!child) return null;
     // A child projection has no `vtype` column, so an ordering key cannot honestly use the stored-value
     // comparison wrapper. Its expression passes through unchanged and frames by value inference.
-    return child.scalar(key.body, host);
+    // The seam's framing is the FIELD vocabulary's business (`byField`); a bare ordering/grouping key
+    // only ever needed the value.
+    return child.scalar(key.body, host)?.expr ?? null;
   }
 
   if (host.kind === 'scalar') {
@@ -257,11 +261,13 @@ export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, c
 
   if (key.kind === 'child') {
     if (!child) return null;
-    const value = child.scalar(key.body, host);
+    const produced = child.scalar(key.body, host);
+    if (!produced) return null;
+    const value = produced.expr;
     // For `T.id`'s reason, a child has no recorded type: leave it untagged and let the framer infer.
     // Preserve SQL NULL outside the node: it is how the shared productivity filter distinguishes a
     // child that yielded nothing from a value it can collect or group.
-    return value && {
+    return {
       kind: 'case',
       whens: [[{ kind: 'binary', op: 'is', left: value, right: compilerNull() }, compilerNull()]],
       else: typedNode(value, compilerNull('text')),
@@ -296,6 +302,132 @@ export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, c
     pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), compilerText(key.key))),
   });
   return firstOf(mine, typedNode(col(mine.id, 'value'), col(mine.id, 'vtype')), col(mine.id, 'id'), fresh);
+}
+
+/**
+ * A `by()` AS A RECORD FIELD — its payload COLUMNS, what they hold, and whether it can be absent.
+ *
+ * `byExpr`'s and `byNode`'s third sibling, and the one that keeps the SHAPE. The other two collapse a
+ * projection to one thing on purpose — an ordering key wants a comparable value, a map entry wants a
+ * self-describing node — and both therefore lose what the projection IS. A record's field must not:
+ * `project('v','n').by().by('name')` has an ELEMENT in one field and a stored value in the other, and
+ * a following `select('v')` re-roots to a vertex stream, which is only possible while the field is
+ * still a rowid rather than an expanded payload blob.
+ *
+ * So this is not a third spelling of one question — it is the question the other two answer by
+ * discarding. It lives here for `byNode`'s reason: the `by()` vocabulary answering about itself, once,
+ * for every host that grows a record (`project`, multi-label `select`, and `valueMap`'s per-element map
+ * after it).
+ */
+export interface ByField {
+  /** The field's payload, keyed by the CANONICAL column names `payloadCols(framing)` declares — the
+   *  record builder prefixes them, the field re-entry strips the prefix back off. */
+  readonly exprs: readonly (readonly [string, Expr])[];
+  readonly framing: RelFraming;
+  /** May this field be ABSENT from the map on some row (§ `RecordField.optional`)? */
+  readonly optional: boolean;
+}
+
+/**
+ * One `by()` slot as a record field, or `null` to decline.
+ *
+ * `hostFraming`/`hostCol` are what make the IDENTITY arm total over every host at once: a bare `by()`
+ * projects the traverser unchanged, so the field's columns ARE the host relation's payload columns and
+ * its framing IS the host's framing. That is why identity needs no per-host arm and why a host this
+ * module has no `ChildHost` for (a LIST traverser) still gets a working `project('a').by()`.
+ */
+export function byField(
+  step: IRStep, modulation: Modulation, host: ChildHost | null, hostFraming: RelFraming,
+  hostCol: (name: string) => Expr, fresh: Minter, child?: ChildSeam,
+): ByField | null {
+  const { key } = modulation;
+  // A comparator in a record slot is not a form Gremlin has — `project(…).by(Order.desc)` names no
+  // value — so it declines rather than being read as a bare `by()`.
+  if (modulation.order !== undefined) return null;
+  // `optional` is the INTRINSIC question ANDed with the strategy: `ProductiveByStrategy` keeps the
+  // traverser and the key, so nothing is ever absent under it. Asked through the same predicate every
+  // other host asks, so the two cannot drift.
+  const droppable = (): boolean => !isProductiveBy(step);
+
+  if (key.kind === 'identity') {
+    const cols = payloadCols(hostFraming);
+    // A PROPERTY or a DISCARD host has no field-shaped payload (`payloadCols`), so a bare `by()` over
+    // one declines here rather than in the record builder — the by() vocabulary is where "this
+    // projection cannot be a field" belongs.
+    if (!cols) return null;
+    return { exprs: cols.map((column) => [column.name, hostCol(column.name)] as const), framing: hostFraming, optional: false };
+  }
+
+  if (!host) return null;
+
+  if (key.kind === 'child') {
+    if (!child) return null;
+    const produced = child.scalar(key.body, host);
+    if (!produced) return null;
+    // EVERY column the framing declares must have an expression, and only two do. `v` is the child's
+    // value; `vtype` is the second correlated read a stored-value body supplies. A numeric reducer's
+    // `vt` (the aggregate's runtime `typeof`) has neither — recomputing the aggregate a second time is
+    // the duplication a shaped seam exists to avoid — so it DECLINES rather than dropping the type.
+    // `count()` is unaffected: its type is the compile-time `long`.
+    const cols = payloadCols(produced.framing);
+    if (!cols) return null;
+    const exprs: (readonly [string, Expr])[] = [];
+    for (const column of cols) {
+      if (column.name === 'v') exprs.push(['v', produced.expr]);
+      else if (column.name === 'vtype' && produced.vtype) exprs.push(['vtype', produced.vtype]);
+      else return null;
+    }
+    return { exprs, framing: produced.framing, optional: droppable() };
+  }
+
+  if (key.kind === 'token') {
+    const value = byExpr(modulation, host, fresh);
+    if (!value) return null;
+    // A `T` token is ALWAYS present, so a token field is never absent — `orderProductivity` says the
+    // same thing for the same reason. A LABEL is a string; an external id is whatever
+    // `COALESCE(uid, id)` yields, so it stays unknown and the framer infers.
+    return {
+      exprs: [['v', value]],
+      framing: { kind: 'scalar', type: key.token === 'label' ? STATIC('string') : UNKNOWN },
+      optional: false,
+    };
+  }
+
+  if (host.kind === 'scalar') return null;
+
+  // A PROPERTY FIELD keeps its stored type, so it is TWO correlated reads of the same property row —
+  // the value and its `vtype`. They cannot share one subquery (SQL's scalar subquery yields one
+  // column) and they cannot disagree: both take the same `WHERE owner = … AND key = …` and the same
+  // `ORDER BY id LIMIT 1`, which is the insertion-order "first" `PropertyValueStep` means. The cheaper
+  // shape is a LEFT JOIN carrying both columns, and it is a later optimization rather than this
+  // increment's: every other `by()` host already emits the correlated form, so this matches the SQL
+  // the spine already produces instead of introducing a second access path for one caller.
+  const value = byExpr(modulation, host, fresh);
+  const vtype = propertyVtype(key.key, host, fresh);
+  if (!value) return null;
+  return {
+    exprs: [['v', value], ['vtype', vtype]],
+    framing: { kind: 'scalar', type: PER_ROW('vtype') },
+    optional: droppable(),
+  };
+}
+
+/** The stored `vtype` of the FIRST value at `key` — `byExpr`'s property arm with the other column
+ *  projected, sharing its filter and its insertion-order pick so the tag cannot describe a different
+ *  row than the value does. Exported because the child seam needs the identical read for a body that
+ *  LEADS with `values(k)`: the same question, and a second spelling of it is a second chance for the
+ *  tag to describe a row the value did not come from. */
+export function propertyVtype(key: string, host: Extract<ChildHost, { kind: 'element' }>, fresh: Minter): Expr {
+  const { table, owner } = PROPERTIES[host.elem];
+  const scan = make.scan({
+    id: fresh('vp'), table, alias: fresh('rp'), channels: [],
+    type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+  });
+  const mine = make.filter({
+    id: fresh('f'), input: scan, channels: [], type: scan.type,
+    pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), compilerText(key))),
+  });
+  return firstOf(mine, col(mine.id, 'vtype'), col(mine.id, 'id'), fresh);
 }
 
 /** TinkerPop's default `by()` productivity, as a predicate: a traverser whose `by()` yielded nothing

@@ -4,7 +4,7 @@
 import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
-import { bagOf, read, run, seededStore } from '../support/harness.ts';
+import { bagOf, read, run, runWith, seededStore } from '../support/harness.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -64,11 +64,29 @@ test('multi-label select yields the paired elements per traverser', () => {
   expect(bagOf(lists.map((r) => JSON.parse(r.e1_list)))).toEqual(bagOf([[], ['lop', 'ripple']]));
 });
 
+/**
+ * A RECORD ROW as a plain object, from whichever spine produced it.
+ *
+ * The two spellings are a spine fact, not a semantic one: legacy carries a record as prefixed
+ * columns (`e0_v`, `e1_id`, …) and RelIR as the one `map` JSONB column of `[[key, valueNode], …]`
+ * pairs. Reading both here — rather than pinning every assertion to legacy — is what keeps these
+ * VALUE assertions about values, so they survive the route moving under them.
+ */
+const recordRow = (row: any, keys: readonly string[]): Record<string, any> => {
+  if (typeof row.map === 'string') {
+    const node = (v: any): any => (v && typeof v === 'object' && 't' in v ? v.v : v);
+    return Object.fromEntries((JSON.parse(row.map) as [string, any][]).map(([k, v]) => [k, node(v)]));
+  }
+  return Object.fromEntries(keys.map((k, i) => [k, row[`e${i}_v`] ?? row[`e${i}_id`]]).filter(([, v]) => v !== undefined));
+};
+
 test('project builds columns from the current traverser', () => {
   const store = seededStore();
-  const rows = run(store, 'g.V().hasLabel("person").project("name","age").by("name").by("age")');
-  const byName = Object.fromEntries(rows.map((r) => [r.e0_v, r.e1_v]));
-  expect(byName).toEqual({ marko: 29, vadas: 27, josh: 32, peter: 35 });
+  for (const spine of ['rel', 'legacy'] as const) {
+    const rows = runWith(store, 'g.V().hasLabel("person").project("name","age").by("name").by("age")', { spine });
+    const byName = Object.fromEntries(rows.map((r) => Object.values(recordRow(r, ['name', 'age']))));
+    expect(byName, spine).toEqual({ marko: 29, vadas: 27, josh: 32, peter: 35 });
+  }
 });
 
 test('traversal-valued project fields use child productivity and preserve parent multiplicity', () => {
@@ -80,14 +98,20 @@ test('traversal-valued project fields use child productivity and preserve parent
     .map((r) => r.e0_v).sort()).toEqual(['josh', 'marko', 'peter']);
   // A produced NULL is not an unproductive child row.
   expect(run(store, 'g.V(1).project("x").by(__.constant(null))')).toEqual([{ e0_v: null }]);
-  // Equal parents remain separate traversers through the outer by-origin join.
-  expect(run(store, 'g.V(1).union(__.identity(),__.identity()).project("x").by(__.values("name"))'))
+  // Equal parents remain separate traversers through the outer by-origin join. The stored `vtype`
+  // rides with the value on BOTH spines — a child body that leads with `values(k)` reads the tag from
+  // the same property row the value came from, so a uuid does not degrade to a string.
+  expect(runWith(store, 'g.V(1).union(__.identity(),__.identity()).project("x").by(__.values("name"))', { spine: 'legacy' }))
     .toEqual([{ e0_v: 'marko', e0_vtype: 'string' }, { e0_v: 'marko', e0_vtype: 'string' }]);
-  expect(run(store, 'g.V().project("name","degree").by("name").by(__.out().count())')
-    .map((r) => [r.e0_v, r.e1_v]).sort((a, b) => a[0].localeCompare(b[0])))
-    .toEqual([
-      ['josh', 2], ['lop', 0], ['marko', 3], ['peter', 1], ['ripple', 0], ['vadas', 0],
-    ]);
+  expect(runWith(store, 'g.V(1).union(__.identity(),__.identity()).project("x").by(__.values("name"))', { spine: 'rel' }))
+    .toEqual([{ map: '[["x",{"t":"string","v":"marko"}]]' }, { map: '[["x",{"t":"string","v":"marko"}]]' }]);
+  for (const spine of ['rel', 'legacy'] as const)
+    expect(runWith(store, 'g.V().project("name","degree").by("name").by(__.out().count())', { spine })
+      .map((r) => Object.values(recordRow(r, ['name', 'degree'])) as [string, number])
+      .sort((a, b) => a[0].localeCompare(b[0])), spine)
+      .toEqual([
+        ['josh', 2], ['lop', 0], ['marko', 3], ['peter', 1], ['ripple', 0], ['vadas', 0],
+      ]);
   expect(run(store, 'g.V(1).project("id","kind","friend").by(T.id).by(T.label).by(__.out().values("name"))'))
     .toEqual([{ e0_v: 1, e1_v: 'person', e2_v: 'vadas', e2_vtype: 'string' }]);
   expect(run(store, 'g.V(1).project("self","friend").by().by(__.out().values("name"))')[0])

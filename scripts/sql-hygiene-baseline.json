@@ -287,6 +287,12 @@
     "compiler": 37,
     "bound": 0
   },
+  "project": {
+    "binds": 0,
+    "bytes": 1723,
+    "compiler": 22,
+    "bound": 0
+  },
   "properties": {
     "binds": 0,
     "bytes": 286,

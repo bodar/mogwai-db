@@ -99,8 +99,15 @@ describe('movement / edge sources SQL', () => {
       expect(selected.shape).toEqual({ kind: 'edge' });
       expect(selected.sql).toMatch(spine === 'legacy' ? /FROM edges n JOIN/ : /INNER JOIN edges \w+ ON/);
     }
-    expect(read('g.V(1).outE().project("w").by("weight")').shape).toEqual({
+    // A record over an EDGE host, pinned per spine for the same reason: legacy carries the field as a
+    // prefixed column-set, RelIR collapses it to the one map value, and both read the EDGE property
+    // side-table rather than the vertex one — which is the typing this test is actually about.
+    expect(read('g.V(1).outE().project("w").by("weight")', { spine: 'legacy' }).shape).toEqual({
       kind: 'map', entries: [{ key: 'w', prefix: 'e0', sub: 'value', type: PER_ROW('e0_vtype') }],
     });
+    const rel = read('g.V(1).outE().project("w").by("weight")', { spine: 'rel' });
+    expect(rel.spine).toBe('rel');
+    expect(rel.shape).toEqual({ kind: 'mapValue' });
+    expect(rel.sql).toContain('FROM edge_properties');
   });
 });

@@ -68,13 +68,45 @@ export interface ChildSeam {
   readonly params: Record<string, any>;
   readonly sideEffects: Map<string, any>;
   /** A correlated sub-traversal as ONE VALUE over the host traverser, or `null` to decline. */
-  readonly scalar: (body: readonly IRStep[], host: ChildHost) => Expr | null;
+  readonly scalar: (body: readonly IRStep[], host: ChildHost) => ChildValue | null;
   /** A correlated sub-traversal as a BOOLEAN over the subject row, or `null` to decline. */
   readonly predicate: (body: readonly IRStep[], subject: Subject, elem: Elem, negated: boolean) => Expr | null;
   /** A ROOTED chain — one correlated to nothing — lowered as a relation, or `null` to decline. */
   readonly rooted: (steps: readonly IRStep[]) => RootedRead | null;
   /** A nested argument's normalized body, or `null` where normalizing it RAISES. */
   readonly body: (nested: unknown, scope: BodyScope) => readonly IRStep[] | null;
+}
+
+/**
+ * A CHILD BODY'S ONE RESULT for one host traverser — the value, and WHAT IT IS.
+ *
+ * The framing is not decoration, and returning the bare `Expr` was §6·7's discard in miniature: a
+ * child body knows its result's Gremlin type at the point it computes it — `__.out().count()` is a
+ * LONG, `__.values('x').asNumber(GType.BYTE)` a Byte, `__.values('n').asDate()` a Date — and
+ * `transformExpr` already reports it. Dropping it made every child projection frame by JS-value
+ * inference at the wire, which cannot tell a Long from an Int or a Date from a number. Carrying it
+ * costs one field and helps every consumer at once; guessing it back is per-consumer and lossy.
+ *
+ * `framing` is the full `RelFraming` rather than a `ScalarType` because the arm's contract is a
+ * CARDINALITY — one result per host traverser — and not a shape. A body whose one result is an
+ * ELEMENT (`by(__.select('v'))`) is the same correlated read with a rowid in the column, and typing
+ * it narrowly would be the boundary that has to be widened again later. Consumers that can only use
+ * a value narrow it themselves.
+ */
+export interface ChildValue {
+  readonly expr: Expr;
+  readonly framing: RelFraming;
+  /**
+   * The value's PER-ROW type, where the body read one from storage — the second correlated read that
+   * a `perRow` framing names a column for.
+   *
+   * It is a separate field rather than part of `framing` because the two say different things: the
+   * framing says the type rides per row, and this is the expression that produces it. A consumer that
+   * can only project ONE column per correlated read (an ordering key, a map entry's node) ignores it
+   * and reads the framing as untyped; a consumer that projects the field's whole payload (`byField`)
+   * lands it beside the value, which is what stops `by(__.values('uuid'))` framing as a plain string.
+   */
+  readonly vtype?: Expr;
 }
 
 /**

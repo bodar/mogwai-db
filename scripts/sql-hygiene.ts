@@ -41,6 +41,14 @@ const RELIR_AHEAD = new Map([
   ['g.inject(NaN).is(P.neq(NaN))', 'gremlin-test/.../semantics/Comparability.feature InjectXNaNX_neqXNaNX'],
   ['g.inject(null).is(P.neq(1.0d))', 'gremlin-test/.../semantics/Comparability.feature InjectXnullX_neqX1dX'],
   ['g.inject(null).is(P.neq(NaN))', 'gremlin-test/.../semantics/Comparability.feature InjectXnullX_neqXNaNX'],
+  // `project()` OMITS an unproductive key and keeps the traverser; legacy DROPS the traverser, which
+  // is `select()`'s rule applied to the wrong host. The reference expects SIX rows, two of them
+  // `m[{"a":…}]` with no `b` at all (Project.feature:84-90) — so RelIR is right and legacy is not.
+  // Not fixed on legacy: its record framer has no per-field "absent" marker (`MapEntry` carries
+  // `nullable` for an element only), so agreeing would mean growing the framing vocabulary of a route
+  // with an end date. §6·1 — legacy sheds the shape.
+  ['g.V().project("a", "b"). by(__.inE().count()). by("age")',
+    'gremlin-test/.../map/Project.feature g_V_projectXa_bX_byXinE_countX_byXageX'],
 ]);
 
 interface Metric { binds: number; bytes: number; compiler: number; bound: number; }

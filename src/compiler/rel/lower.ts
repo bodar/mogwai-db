@@ -10,9 +10,10 @@ import type { Rel } from '../../rel/rel.ts';
 import { forEachRel } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
-import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type Shape, type ValueType } from '../../sql/kernel/render.ts';
+import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
-import type { RelFraming } from './framing.ts';
+import type { RecordField, RelFraming } from './framing.ts';
+import { fieldNamed, recordField, recordOf, recordPayload } from './record.ts';
 import { propertyElement, propertyKey, propertyPayload, propertyRelation, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
@@ -30,8 +31,8 @@ import {
 } from './build.ts';
 import { bindAliases, selectOne, type AliasRead } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
-import { byExpr, modulations, orderProductivity, productivityFilter, type Modulation } from './modulator.ts';
-import type { ChildHost, ChildSeam, RootedRead, Subject } from './child.ts';
+import { byExpr, modulations, orderProductivity, productivityFilter, propertyVtype, type Modulation } from './modulator.ts';
+import type { ChildHost, ChildSeam, ChildValue, RootedRead, Subject } from './child.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddV, elementDrop, elementMergeE, elementMergeV, elementProperty, propertyWrites, type Effects } from './write.ts';
@@ -1138,7 +1139,7 @@ const CLAUSE_READERS = new Set(['is', 'order']);
  *  inline because the blanket `step.modulators?.length` decline must exempt exactly these — a host
  *  added to the fold without being added here silently loses its modulator, which is the failure mode
  *  the modulator seam exists to end. */
-const BY_READERS = new Set(['order', 'dedup']);
+const BY_READERS = new Set(['order', 'dedup', 'project']);
 
 /**
  * An `order()`'s sort terms over any host, or `null` to decline.
@@ -1284,6 +1285,16 @@ function scalarTail(
       const merged = unionArms(step, rel, out, bulked, ctx, fresh, labels);
       if (!merged) return null;
       return continueAs(merged.rel, merged.framing, steps, at + 1, bulked || ctx.collapse, ctx, fresh, labels);
+    }
+
+    // `project()` over a VALUE traverser — the identical record builder, with the host's own framing as
+    // what a bare `by()` projects. One lowering at both hosts is the point (§6·6's rule one level up: a
+    // shape works wherever it is legal, not wherever a host was taught it), and it is what
+    // `call(…)`'s scalar result then reaches through.
+    if (step.name === 'project') {
+      const record = recordOf(rel, host, out, step, childSeam(ctx, fresh), fresh);
+      if (!record) return null;
+      return continueAs(record.rel, { kind: 'record', fields: record.fields }, steps, at + 1, bulked, ctx, fresh, labels);
     }
 
     if (step.name === 'order') {
@@ -2019,6 +2030,7 @@ const framed = (chain: Tail, collapse: boolean, fresh: Minter): { readonly rel: 
     case 'list': return listPayload(chain.rel, framing.of, !!framing.set, fresh);
     case 'path': return pathPayload(chain.rel, framing.of, fresh);
     case 'map': return mapPayload(chain.rel, framing.keyOf, framing.valOf, fresh);
+    case 'record': return recordPayload(chain.rel, framing.fields, fresh);
     case 'property': return {
       rel: propertyPayload(chain.rel, framing.ownerElem, fresh),
       shape: { kind: 'property' },
@@ -2380,6 +2392,19 @@ function elementTail(
       if (!grouped) return null;
       return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
+    // `project()` — a per-row RECORD, and NOT a barrier: the channels ride through, so the alias map
+    // carries and a following `select(label)` still finds its label. That is the whole difference from
+    // the `group()` arm above, and it is the reference's (`ProjectStep extends ScalarMapStep`, while
+    // `GroupStep extends ReducingBarrierStep`).
+    if (step.name === 'project') {
+      // A carried PATH declines for `terminal()`'s reason: the record is a new traverser object and
+      // nothing here appends it as a path position, so a later `path()` would report a history with a
+      // step missing rather than fail.
+      if (pathCarried(rel)) return null;
+      const record = recordOf(rel, elementHost(rel, elem), { kind: 'elements', elem }, step, childSeam(ctx, fresh), fresh);
+      if (!record) return null;
+      return continueAs(record.rel, { kind: 'record', fields: record.fields }, steps, at + 1, bulked, ctx, fresh, labels);
+    }
     if (step.name === 'mergeV' || step.name === 'mergeE') {
       if (pathCarried(rel)) return null;
       const merged = mergedElements(rel, elem, steps, at, labels, ctx, fresh);
@@ -2473,6 +2498,7 @@ function continueAs(
     // entries, `select(Column.keys/values)`, a local reducer. None of that is lowered yet, so the
     // honest answer is a DECLINE and not a loop that silently drops the map.
     case 'map': return from === steps.length ? { rel, framing, aliases: labels } : null;
+    case 'record': return recordTail(rel, framing.fields, steps, from, bulked, ctx, fresh, labels);
     // A PROPERTY traverser re-enters through `element()`/`key()`/`value()`, and through the ordinary
     // filters and slices before them. None of that is lowered yet, so a step after `properties()`
     // DECLINES — the map arm's reasoning exactly, and for the same reason: a loop that silently
@@ -2514,6 +2540,42 @@ function propertyTail(
           : null;
   if (!retyped) return null;
   return continueAs(retyped.rel, retyped.framing, steps, from + 1, false, ctx, fresh, labels);
+}
+
+/**
+ * THE RECORD LOOP — a record traverser is not terminal either.
+ *
+ * `select(key)` re-enters ONE field as a stream of its own shape and hands it straight back to
+ * `continueAs`, which is `propertyTail`'s structure and for the same reason: a field is a RETYPE, not a
+ * step, so this loop is short by construction rather than by omission.
+ *
+ * **MAP SCOPE BEATS PATH SCOPE, and the fallback is not a convenience.** `Scoping.getScopeValue` tries
+ * the traverser's own Map first, then side-effects, then the path labels
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:117-131`).
+ * So `g.V().as('a').project('a','b')…select('a')` reads the FIELD, and a key that is not a field falls
+ * through to the alias channel the record still carries — which is why the miss routes to `selectOne`
+ * rather than declining.
+ *
+ * Everything else declines. A record is an ordinary per-row traverser, so filters, slices, `order()`
+ * and `math()` over its fields are all expressible and simply not built yet; declining hands them to
+ * the spine that answers rather than dropping the record's fields silently.
+ */
+function recordTail(
+  rel: Rel, fields: readonly RecordField[], steps: readonly IRStep[], from: number,
+  bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | null {
+  if (from === steps.length) return { rel, framing: { kind: 'record', fields }, aliases: labels };
+  const step = steps[from]!;
+  if (step.name !== 'select' || step.modulators?.length || step.optionArms) return null;
+  const args = argValues(step);
+  if (args.length !== 1 || typeof args[0] !== 'string') return null;
+  const field = fieldNamed(fields, args[0]);
+  if (!field) {
+    const selected = selectOne(step, rel, labels, fresh);
+    return selected && continueAs(selected.rel, readFraming(selected.read), steps, from + 1, bulked, ctx, fresh, labels);
+  }
+  const entered = recordField(rel, field, fresh);
+  return entered && continueAs(entered.rel, entered.framing, steps, from + 1, bulked, ctx, fresh, labels);
 }
 
 /** An alias READ, as a framing. The label decides the shape; `continueAs` decides the loop. */
@@ -2675,7 +2737,12 @@ const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
           // between vertex and edge (`vpid`/`meta`), so a blanket equality would union relations of
           // different widths. Nothing builds a property-valued branch yet; decline until one does.
           : left.kind === 'property' ? false
-          : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
+            // Two RECORD arms could merge when their fields agree in key, order AND shape — the same
+            // structural equality the map arm would need, one level down. Nothing builds a
+            // record-valued branch arm yet (`project()` is terminal-or-`select()` today), so declining
+            // is the honest answer rather than an equality no test exercises.
+            : left.kind === 'record' ? false
+              : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
 
 const sameColumns = (left: readonly ColMeta[], right: readonly ColMeta[]): boolean =>
   left.length === right.length && left.every((column, i) => column.name === right[i]!.name);
@@ -2757,9 +2824,16 @@ function rootedSteps(nested: unknown, params: Record<string, any>, sideEffects?:
   try { return normalize(stepChain(nested, params), params, sideEffects).steps as IRStep[]; } catch { return null; }
 }
 
-/** A nested body as a VALUE expression — the seam's correlated-SCALAR answer. Collection, selection
- * and branching still decline for later arms. */
-function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fresh: Minter): Expr | null {
+/**
+ * A nested body as a VALUE expression PLUS what that value is — the seam's correlated-SCALAR answer.
+ * Collection, selection and branching still decline for later arms.
+ *
+ * The FRAMING is tracked alongside the expression rather than derived afterwards, because only here is
+ * it known: `countTail`'s own framing says `long`, `transformExpr` reports the cast subfamily's target
+ * type, and a bare `label()` is a string. Recomputing any of that from the finished `Expr` is
+ * impossible — which is exactly why the value used to reach the wire untagged (§6·7).
+ */
+function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
   if (!body.length) return null;
   if (host.kind !== 'element') return null;
 
@@ -2790,10 +2864,19 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
       id: fresh('bc'), input: tail.rel, channels: [], type: typeOf(meta('v', 'any', true)),
       exprs: [['v', col(tail.rel.id, 'v')]],
     });
-    return { kind: 'scalar', plan: scalar };
+    // The REDUCER'S OWN framing, unchanged — `count()` is a `long` and a numeric reducer reports its
+    // aggregate type. The `result` marker rides with it: a consumer that projects this as a record
+    // field needs the same `vt` column the top-level scalar payload declares for the same value.
+    return { expr: { kind: 'scalar', plan: scalar }, framing: tail.framing };
   }
 
   let value: Expr = host.id;
+  // The value's type as the body computes it, not as the wire guesses it. `UNKNOWN` is the honest seed:
+  // until a step below NAMES the projection, nothing has been read yet.
+  let type: ScalarType = UNKNOWN;
+  // A STORED value's type rides per row, and only a consumer that can project a second column can use
+  // it — so the expression travels beside the value and the framing says which.
+  let vtype: Expr | undefined;
   let at = 0;
   const leading = body[0];
   if (leading?.name === 'values') {
@@ -2802,12 +2885,16 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     const projected = byExpr({ key: { kind: 'property', key: args[0] } }, host, fresh);
     if (!projected) return null;
     value = projected;
+    vtype = propertyVtype(args[0], host, fresh);
     at = 1;
   } else if (leading?.name === 'label' || leading?.name === 'id') {
     if ((leading.args ?? []).length) return null;
     const projected = byExpr({ key: { kind: 'token', token: leading.name } }, host, fresh);
     if (!projected) return null;
     value = projected;
+    // A LABEL is always a string; an external `id` is whatever `COALESCE(uid, id)` yields, so it stays
+    // unknown and the framer infers — the same split `byNode`'s token arm makes.
+    if (leading.name === 'label') type = STATIC('string');
     at = 1;
   } else if (leading?.name === 'constant') {
     const args = argValues(leading);
@@ -2838,8 +2925,18 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     const transformed = transformExpr(step, value, false);
     if (!transformed) return null;
     value = transformed.expr;
+    // A transform that RETYPES says so (`asNumber`/`asDate`/`dateAdd`/`dateDiff`); one that does not
+    // CLEARS the type rather than letting the incoming one ride through. `transformExpr`'s own comment
+    // records why the string family claims nothing — it matches the spine being replaced — and keeping
+    // a stale tag would be worse than claiming none: `asDate().asString()` would frame text as a Date.
+    type = transformed.type ?? UNKNOWN;
+    // The STORED tag describes the value as read; a transform is a new value, so the per-row carrier
+    // stops here whatever the transform claims for itself.
+    vtype = undefined;
   }
-  return value;
+  return vtype
+    ? { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype }
+    : { expr: value, framing: { kind: 'scalar', type } };
 }
 
 function addedVertices(
