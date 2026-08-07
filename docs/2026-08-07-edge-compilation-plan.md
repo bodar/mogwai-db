@@ -112,19 +112,28 @@ The edge holds the plan before anything executes, so it needs no heuristic:
 No flag day, no second correctness surface. The fallback path is the current path, and it stays until
 §7 removes the only reason to take it.
 
-### 4·2 The plan cache is the point
+### 4·2 The statement cache is preserved, and we should not build a second one
 
-Compile is ~4 ms of *fixed* cost per query **shape**. Cached at the edge, one compile serves every
-tenant running that shape — and the agent-memory workload is thousands of graphs running a handful of
-shapes. This is where the parameters-are-the-only-binds rule finally pays the user back: same query
-string, different parameter values, one plan.
+Shipping `{sql, binds}` keeps SQLite's own prepared-statement cache working exactly as it does today:
+same statement text, varying binds, statement reuse in the DO. That is the payoff the
+parameters-are-the-only-binds rule is *for*, and this design costs nothing to keep it.
 
-**One unsolved case.** Parameters normally bind, so a plan is reusable across values — but
-`unrollFixedRepeat` consumes a parameter **structurally**, and that plan is valid only at the value it
-was compiled for. Two ways out: key the cache on `(gremlin, paramTypes)` and mark structurally-
-consuming compiles non-cacheable, or key on the consumed values. The first is better and needs
-`compilePlan` to report which parameters it consumed at compile time — a small honest addition, not a
-tracking system.
+**A plan cache at the edge is a different thing, and it is deliberately not in this plan.** It would
+save ~4 ms of *Worker* CPU per request — the elastic, horizontally-scaled side that §1 exists to move
+work ONTO. Optimizing it is optimizing the resource we just declared abundant. It does not help cold
+start either: a fresh isolate pays §2·4's warm-up before it serves anything, cached or not.
+
+The cost is not the code (an in-isolate LRU keyed on the query text; compile is pure, so there is no
+invalidation problem). The cost is the invariant. `unrollFixedRepeat` consumes a parameter
+**structurally**, so a plan compiled at `times(3)` is invalid at `times(5)` — and reusing it does not
+throw, it returns a confident wrong answer. Doing it safely means `compilePlan` must report which
+parameters it consumed at compile time, which is a new obligation on the compiler's contract and a
+new thing that can drift silently as more steps learn to read parameters early.
+
+A silent-wrong-answer failure mode added to the compiler's public surface, to save milliseconds of
+cheap CPU, against no measurement saying that CPU costs anything. If Worker CPU billing ever measures
+material (§8), the cache is purely additive — it sits above `compilePlan` and is invisible to the
+RPC, the DO and the fallback arm — so nothing here needs to accommodate it in advance.
 
 ### 4·3 Federation: the Worker drives the segment loop
 
@@ -246,10 +255,10 @@ it stops the segment loop's ownership from setting further while `call()` migrat
 buffers. Edge compiles, branches on `plan.kind` (§4·1), falls back otherwise. Measurable end to end
 against the §2·2 numbers.
 
-**Phase 2 — the plan cache.** §4·2, including the `unrollFixedRepeat` reporting it needs.
-
-**Phase 3 — writes and the segment loop.** Gated on §7. `Program` over the same RPC; the Worker
+**Phase 2 — writes and the segment loop.** Gated on §7. `Program` over the same RPC; the Worker
 drives federation (§4·3); the service split gets named (§4·4).
+
+Three phases, and no caching phase — see §4·2 for why that is a decision rather than an omission.
 
 ---
 
@@ -260,8 +269,9 @@ drives federation (§4·3); the service split gets named (§4·4).
 - **Plan payload size** for a large `Program` versus the Gremlin string it replaces. A string is
   tiny; a plan is not. There is presumably a crossover where shipping the query wins, and nobody
   knows where it is.
-- **Cache hit rate** under a realistic multi-tenant shape mix — the entire §4·2 argument rests on it
-  being high, which is plausible for agent memory and unproven for anything else.
+- **Whether Worker CPU time is a cost worth attacking at all.** ~4 ms of compile per request is
+  billable; nobody has looked at what that adds up to. This is the only number that would reopen the
+  plan-cache decision in §4·2, and it should be a bill, not an intuition.
 - **Whether the DO's isolate cold start dominates** the 45 ms in §2·4 rather than ANTLR, which would
   change how much §2·4 is actually worth.
 
