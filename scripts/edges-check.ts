@@ -12,9 +12,16 @@
  * Phase 0 cuts those edges, and this is its countdown.
  *
  * **A RATCHET, not a zero-gate**, unlike `arch`/`lint`/`binds` where zero IS the gate. Zero is the
- * wrong target here: `engine/engine.ts` and `compiler.ts` ARE the legacy routers and keep their
- * edges until Phase 4 deletes them outright. They are declared EXEMPT in the TSV, and **Phase 0 is
- * over when they are the only rows left.**
+ * wrong target here: some of the importers ARE legacy, and they keep their edges until Phase 4
+ * deletes them outright. They are declared EXEMPT in the TSV, and **Phase 0 is over when they are
+ * the only rows left.**
+ *
+ * **THE BAR FOR AN EXEMPTION IS NARROW, and the narrowness is the whole value of the gate.** A file
+ * qualifies only if it is reached ONLY by legacy AND does not exist after Phase 4 — the two legacy
+ * routers (`engine/engine.ts`, `compiler.ts`) and the Engine interface they are typed by
+ * (`engine/deps.ts`). "Legacy still needs it" is NOT the bar; that admits anything. A file that
+ * RelIR or a SERVICE reaches must be severed however awkward, because it OUTLIVES the deletion, and
+ * an exemption there converts a scheduled piece of work into a Phase 4 surprise.
  *
  * **DIRECT edges only, deliberately — not the transitive closure.** The closure is what §8 measures
  * to size the prize, and it is the wrong thing to gate on: it moves when an unrelated file three
@@ -53,7 +60,11 @@ const HEADER = [
   '# The EDGE ratchet — every DIRECT import of src/compiler/steps/ from outside it, and how many',
   '# distinct symbols it still takes. GENERATED FLOOR: re-recorded DOWNWARD by `mise run',
   '# edges-record`. It may never rise, and a NEW importing file is always a failure.',
-  '# `exempt=yes` marks the two legacy ROUTERS, which keep their edges until Phase 4 deletes them.',
+  "# `exempt=yes` marks LEGACY'S OWN FILES, which keep their edges until Phase 4 deletes them.",
+  '# THE BAR FOR AN EXEMPTION, and it is deliberately narrow: the file must be reached ONLY by',
+  '# legacy AND must not exist at all after Phase 4. "Legacy still needs it" is NOT the bar — that',
+  '# would let anything in. A file that RelIR or a SERVICE reaches has to be severed, however',
+  '# awkward, because it outlives the deletion and would otherwise be a Phase 4 surprise.',
   '# Phase 0 (docs/2026-08-01-relir-build-plan.md §10) is OVER when the exempt rows are the only',
   '# rows left. See scripts/edges-check.ts.',
 ].join('\n');
@@ -131,10 +142,10 @@ if (asJson) {
   console.log(JSON.stringify({ src: measured, informational: [...informational].map(([f, s]) => ({ file: f, symbols: [...s] })) }, null, 2));
 } else {
   console.log(`edges: ${measured.length} file(s) in src/ import src/compiler/steps/ directly ` +
-    `(${live.length} to cut, ${measured.length - live.length} exempt router(s))`);
+    `(${live.length} to cut, ${measured.length - live.length} exempt legacy file(s))`);
   for (const { file, now, symbols, entry } of measured) {
     const delta = !entry ? '  NEW — untracked' : now > entry.floor ? `  ROSE from ${entry.floor}` : now < entry.floor ? `  (was ${entry.floor})` : '';
-    console.log(`  ${String(now).padStart(3)}  ${file}${entry?.exempt ? '  [exempt: legacy router]' : ''}${delta}`);
+    console.log(`  ${String(now).padStart(3)}  ${file}${entry?.exempt ? '  [exempt: legacy]' : ''}${delta}`);
     console.log(`       ${symbols.join(', ')}`);
   }
   if (informational.size) {
@@ -165,4 +176,4 @@ if (fallen.length || gone.length) {
   }
 }
 
-if (!live.length) console.log('\nPHASE 0 IS OVER — only the exempt routers reach into src/compiler/steps/.');
+if (!live.length) console.log('\nPHASE 0 IS OVER — only the exempt legacy files reach into src/compiler/steps/.');

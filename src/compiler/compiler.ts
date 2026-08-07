@@ -93,7 +93,10 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   // local and split/merge-on-fork, which are exactly the questions §3.5's obligations checker answers
   // by construction. Deleting this gate is a small change, not a prerequisite-laden one.
   if (resolveSpine(options) === 'rel' && !sackInit) {
-    const viaRel = compileViaRel(engine, steps, request.params, sideEffects);
+    const viaRel = compileViaRel(
+      { collapse: engine.fastPaths.movementCollapse, labelCardinality: engine.labelCardinality },
+      steps, request.params, sideEffects,
+    );
     if (viaRel) return { kind: 'sql', compiled: discard ? applyDiscard(viaRel) : viaRel };
   }
 

@@ -1,12 +1,16 @@
 # The EDGE ratchet — every DIRECT import of src/compiler/steps/ from outside it, and how many
 # distinct symbols it still takes. GENERATED FLOOR: re-recorded DOWNWARD by `mise run
 # edges-record`. It may never rise, and a NEW importing file is always a failure.
-# `exempt=yes` marks the two legacy ROUTERS, which keep their edges until Phase 4 deletes them.
+# `exempt=yes` marks LEGACY'S OWN FILES, which keep their edges until Phase 4 deletes them.
+# THE BAR FOR AN EXEMPTION, and it is deliberately narrow: the file must be reached ONLY by
+# legacy AND must not exist at all after Phase 4. "Legacy still needs it" is NOT the bar — that
+# would let anything in. A file that RelIR or a SERVICE reaches has to be severed, however
+# awkward, because it outlives the deletion and would otherwise be a Phase 4 surprise.
 # Phase 0 (docs/2026-08-01-relir-build-plan.md §10) is OVER when the exempt rows are the only
 # rows left. See scripts/edges-check.ts.
 file	floor	exempt	note
 src/compiler/engine/engine.ts	78	yes	the legacy dispatcher itself — deleted whole in Phase 4
-src/compiler/engine/deps.ts	5	no	the object model — LoweringState/Stream/TraverserLayout
+src/compiler/engine/deps.ts	5	yes	the legacy Engine INTERFACE — legacy's object model typing legacy's own engine; reached only from steps/ + the legacy Query.engine field, and RelIR needs no Engine (see RelRequest, rel/spine.ts). Dies with engine.ts
 src/services/catalog/search.ts	4	no	propertyPayload is a kernel; PropertyStream/TraverserLayout are the object model
 src/services/catalog/directory.ts	3	no	the object model
 src/services/spi/types.ts	3	no	THE UNNAMED PIN — the service SPI typed on legacy Stream/ChildFrameStack

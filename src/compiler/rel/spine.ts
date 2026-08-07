@@ -2,9 +2,31 @@ import { render } from '../../sql/kernel/q.ts';
 import type { Compiled, Program } from '../../sql/kernel/render.ts';
 import { emitProgram } from '../../rel/emit.ts';
 import { cfLimitViolation } from '../../cf-limits.ts';
-import type { Engine } from '../engine/deps.ts';
 import type { IRStep } from '../ir/strategies.ts';
+import type { LabelCardinality } from '../../api.ts';
 import { lowerToRel } from './lower.ts';
+
+/**
+ * What the RelIR route needs from the enclosing REQUEST — and the whole of it.
+ *
+ * This used to be the legacy `Engine` (`engine/deps.ts`), which was never right: `Engine` is the
+ * recursive-lowering surface plus its ambient dependencies, and this route recurses into nothing —
+ * it reads TWO settled values and lowers an algebra. Taking the whole interface made RelIR look
+ * like it depended on legacy's engine, and it made `engine/deps.ts` (which types that interface on
+ * legacy's `Stream`/`LoweringState`/`TraverserLayout`) reachable from a non-legacy caller, so the
+ * import graph could not tell the two spines apart.
+ *
+ * Named for what it is rather than for the scope object it happens to be built from: whatever
+ * survives Phase 4 will supply these two values, and it will not be an `Engine`.
+ */
+export interface RelRequest {
+  /** Whether the bulk `SUM(bulk)` movement collapse is enabled — a lowering STRATEGY the algebra can
+   *  state, which is why it is offered rather than assumed (both positions stay expressible, so the
+   *  differential has two forms to compare). */
+  readonly collapse: boolean;
+  /** This graph's declared VERTEX label cardinality. NOT a strategy switch — see below. */
+  readonly labelCardinality: LabelCardinality;
+}
 
 /**
  * THE ROUTING SEAM — Gremlin in, `Compiled` out, or `null` for "the legacy spine owns this".
@@ -45,7 +67,7 @@ import { lowerToRel } from './lower.ts';
  * and never will be (§10·4: "not as a bridge, not temporarily, not behind a flag").
  */
 export function compileViaRel(
-  engine: Engine, steps: IRStep[], params: Record<string, any>, sideEffects: Map<string, any>,
+  request: RelRequest, steps: IRStep[], params: Record<string, any>, sideEffects: Map<string, any>,
 ): Compiled | Program | null {
   // ONE fast-path switch reaches the lowering. `movementCollapse` picks the grouped `SUM(bulk)`,
   // which is a lowering STRATEGY the algebra can state, so both positions stay expressible and the
@@ -73,13 +95,13 @@ export function compileViaRel(
   // `predicateInlining is equivalent to its generic fallback` case still exercises it.
   const lowered = lowerToRel(steps, {
     params,
-    collapse: engine.fastPaths.movementCollapse,
+    collapse: request.collapse,
     correlatedChildren: true,
     // NOT a strategy switch — the graph's declared label cardinality is a CAPABILITY, and a creation
     // with no label of its own is a compile-time question only because this value is settled before a
     // compile starts (request-scope DI). Coverage is still not a function of configuration: what the
     // cardinality changes is the ANSWER, not whether there is one.
-    labelCardinality: engine.labelCardinality,
+    labelCardinality: request.labelCardinality,
     // NOT a strategy switch either — a `withSideEffect(k, <literal>)` is a compile-time CONSTANT the
     // front-end already extracted, and the write parse has always taken it. What used to happen is
     // that `compiler.ts` refused to OFFER this route at all when one was declared, so the whole
