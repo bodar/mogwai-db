@@ -902,10 +902,20 @@ is real work, but it is not load-bearing for running the suite and must not gate
   wrap literal values"*). So it never reaches the reference's per-traverser path, and folding it is the
   reference's behaviour rather than an approximation of it. ✅ LANDED for LABELS, through one authority
   (`constLabelArg`) because three hosts ask it; `addE(__.constant(l))` is `relirAhead`, since legacy
-  refuses a nested addE label outright where the reference resolves the constant. **The VALUE fold is
-  deliberately NOT in that change** — it touches the typed value channel (§6·7) and owes an answer about
-  which vtype survives the fold, which is exactly the wrong-wire-class defect that channel exists to
-  prevent. What is left below is therefore the genuinely PER-ROW body.
+  refuses a nested addE label outright where the reference resolves the constant.
+  ✅ **And for VALUES**, which took the extra step the labels did not: a label is always a string, while
+  `vtype` names only the OUTER stored shape of a value. **The type was already there and was being thrown
+  away** — `constFromNested` reads the constant's own `Arg`, which holds the full `TypeNode`, and returned
+  the coarse vtype alone, so every caller wanting a typed constant had to re-infer from the JS value.
+  §6·7's discard in miniature, and in the SHARED PARSE rather than in a lowering. Widening the carrier at
+  the source costs one field and helps every type at once; the `withSideEffect` arm returns `null` for it
+  honestly, since that value leaves the registry with no wire arg behind it. Census 864 → 881. The
+  regression test that matters is `datetime`: re-inferring from the JS value yields a Number, a wrong wire
+  CLASS rather than a wrong tag.
+  **What is left is therefore the genuinely PER-ROW body**, and its rules are why it cannot be a
+  correlated scalar: `AddPropertyStep.handleTraversalValue` collects ALL results, so 0 results means NO
+  mutation (never a NULL write, which is what a scalar subquery would produce), >1 under `single` raises,
+  and >1 under `list`/`set` writes each. That wants the HOST-KEYED relation — §6·6's honest fourth answer.
   **The reference is ASYMMETRIC and that decides the shape of the work** — read, not inferred:
   - A nested **KEY** resolves through `Parameters.get(traverser, T.key, …)`, which calls
     `TraversalUtil.apply` and takes `.get(0)`
