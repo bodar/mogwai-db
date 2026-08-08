@@ -906,6 +906,79 @@ describe('the RelIR spine', () => {
         .buffers('g.V().addLabel("x")', {}), spine).toThrow('Label mutation is not supported');
   });
 
+  test('dropLabel/dropLabels are addLabel\'s mirror, and the cardinality FLOOR splits them', () => {
+    // `LabelCardinalityValidator` is where the two steps come apart, and it decides the shape of the
+    // work rather than merely the messages (`structure/util/LabelCardinalityValidator.java`):
+    // `validateDropAll` raises for ANY `min > 0` whatever the element carries — a COMPILE-TIME
+    // question once the cardinality is threaded — while `validateDrop` SIMULATES the removal and
+    // raises only if the survivors fall below `min`, which is arithmetic over the DATA and therefore
+    // a guard binding (§6·5).
+    for (const gremlin of [
+      'g.V().dropLabel("a")', 'g.V().dropLabels()', 'g.V().dropLabel("a","b")',
+      'g.V().dropLabel(constant("a"))', 'g.V().dropLabel(constant(["a","b"]))',
+      'g.V().dropLabel("a").labels().fold()',
+    ]) expect(compile(gremlin, {}, { spine: 'rel', app: createAppScope({ labelCardinality: LabelCardinality.ZERO_OR_MORE }) }).kind, gremlin)
+      .toBe('program');
+
+    // The DIFFERENTIAL over a fresh zero-or-more store, per DropLabel.feature's own fixtures: a named
+    // drop, a name the vertex does NOT carry (a no-op, not an error), and dropping every label.
+    const labelRows = (spine: 'rel' | 'legacy', drop: string) => {
+      const store = new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ZERO_OR_MORE);
+      exec(store, undefined, undefined, spine).buffers('g.addV("a","b","c")', {});
+      exec(store, undefined, undefined, spine).buffers(drop, {});
+      return store.query('SELECT l.name FROM vertex_labels vl JOIN labels l ON l.id = vl.label ORDER BY l.name', [])
+        .map((r: any) => r.name);
+    };
+    for (const [drop, left] of [
+      ['g.V().dropLabel("a")', ['b', 'c']],
+      ['g.V().dropLabel("a","b")', ['c']],
+      ['g.V().dropLabel("xyz")', ['a', 'b', 'c']],   // a name it does not carry is a NO-OP
+      ['g.V().dropLabels()', []],
+      ['g.V().dropLabel(constant(["a","b"]))', ['c']],
+    ] as const) {
+      expect(labelRows('rel', drop), drop).toEqual([...left]);
+      expect(labelRows('legacy', drop), drop).toEqual([...left]);
+    }
+
+    // THE GUARD, which nothing in the corpus can reach: `ONE_OR_MORE` is the only cardinality where a
+    // named drop can fall below the floor, and no conformance graph declares it (@MultiLabel maps to
+    // ZERO_OR_MORE). Dropping ONE of two labels is fine; dropping the only one raises the REFERENCE's
+    // sentence, truncated at its first runtime interpolation.
+    const oneOrMore = () => {
+      const store = new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ONE_OR_MORE);
+      exec(store, undefined, undefined, 'rel').buffers('g.addV("a","b")', {});
+      exec(store, undefined, undefined, 'rel').buffers('g.addV("solo")', {});
+      return store;
+    };
+    const partial = oneOrMore();
+    exec(partial, undefined, undefined, 'rel').buffers('g.V().hasLabel("a").dropLabel("a")', {});
+    expect(partial.query('SELECT l.name FROM vertex_labels vl JOIN labels l ON l.id = vl.label ORDER BY l.name', []))
+      .toEqual([{ name: 'b' }, { name: 'solo' }]);
+
+    const floor = oneOrMore();
+    expect(() => exec(floor, undefined, undefined, 'rel').buffers('g.V().hasLabel("solo").dropLabel("solo")', {}))
+      .toThrow('Cannot drop label(s)');
+    // AND THE GUARD RAN BEFORE THE DELETE — the reference simulates the removal, so a refused drop
+    // must leave the vertex exactly as it was rather than partly stripped.
+    expect(floor.query('SELECT COUNT(*) AS n FROM vertex_labels', [])).toEqual([{ n: 3 }]);
+
+    // `dropLabels()` under `ONE_OR_MORE` can never succeed for any element, so it is decided at
+    // COMPILE time and declines to legacy rather than becoming a guard that always fires.
+    expect(compile('g.V().dropLabels()', {}, {
+      spine: 'rel', app: createAppScope({ labelCardinality: LabelCardinality.ONE_OR_MORE }),
+    })).not.toMatchObject({ spine: 'rel' });
+
+    // An EDGE and an immutable graph refuse identically on both spines — RelIR declines, legacy raises.
+    for (const spine of ['rel', 'legacy'] as const) {
+      const edges = new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ZERO_OR_MORE);
+      exec(edges, undefined, undefined, spine).buffers('g.addV("person").as("a").addV("person").as("b").addE("knows").from("a").to("b")', {});
+      expect(() => exec(edges, undefined, undefined, spine).buffers('g.E().dropLabel("knows").labels().fold()', {}), spine)
+        .toThrow('Label mutation is not supported');
+      expect(() => exec(new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ONE), undefined, undefined, spine)
+        .buffers('g.V().dropLabels()', {}), spine).toThrow('Label mutation is not supported');
+    }
+  });
+
   test('mergeE routes to RelIR for both endpoint kinds, and duplicates get ONE edge', async () => {
     // The corpus cannot see this and neither can L3: every parameterized `mergeE` arrives as a bound
     // Map (`m[{"t[label]":…,"D[OUT]":"M[outV]"}]` on the wire), and those L3 scenarios already PASSED

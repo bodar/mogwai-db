@@ -562,6 +562,41 @@ export function elementProperty(target: Rel, elem: Elem, writes: readonly Proper
 }
 
 /**
+ * A LABEL-MUTATION STEP'S ARGUMENTS → the names it addresses, or `null` for a form this route
+ * declines. ONE authority because `addLabel`, `dropLabel` and `dropLabels` all ask it and the
+ * argument grammar is one grammar — three copies would be three chances to fold a `constant(...)`
+ * differently or to admit a mixed collection at one host and refuse it at another.
+ *
+ * A name is a bare string, a compile-time `constant(...)` (a string or a list), or a collection as
+ * the SOLE argument. Declined: a nested traversal that does not fold to a constant (a per-row label,
+ * which legacy resolves at run time), and a collection MIXED with other arguments — TinkerPop rejects
+ * that outright (`DropLabel.feature` asserts an error "containing text of `Collection`"), so it is an
+ * error legacy raises rather than a write this route may silently reinterpret.
+ *
+ * `dropLabels()` is deliberately NOT a caller: it takes no arguments and means every label, which is
+ * an absent list rather than an empty one.
+ */
+function mutationLabelNames(
+  step: IRStep, sideEffects: Map<string, any> | undefined, params: Record<string, any>,
+): readonly string[] | null {
+  const args = argValues(step);
+  const names: string[] = [];
+  for (const value of args) {
+    let resolved: unknown = value;
+    if (isNested(value)) {
+      const folded = constFromNested(value, sideEffects, params);
+      if (!folded.has) return null;
+      resolved = folded.value;
+    }
+    if (Array.isArray(resolved)) {
+      if (args.length > 1) return null;
+      names.push(...resolved.map(String));
+    } else names.push(String(resolved));
+  }
+  return names;
+}
+
+/**
  * `addLabel(...)` over an EXISTING vertex stream — a sideEffect that ADDS labels idempotently and
  * passes the SAME vertices through. It is `internLabels`' creation pairing applied to rows that
  * already exist rather than freshly-inserted ones, plus `elementProperty`'s snapshot-then-pass-through.
@@ -587,59 +622,183 @@ export function elementAddLabel(
 ): Effects | null {
   if (elem === 'edge' || !cardinality.mutable) return null;
 
-  // The arguments are label NAMES: a bare string, a compile-time `constant(...)` (a string or a list),
-  // or a collection as the SOLE argument. A non-constant nested traversal needs a per-row value and is
-  // legacy's for now; a mixed collection is an error legacy raises.
-  const args = argValues(step);
-  const names: string[] = [];
-  for (const value of args) {
-    let resolved: unknown = value;
-    if (isNested(value)) {
-      const folded = constFromNested(value, sideEffects, params);
-      if (!folded.has) return null;
-      resolved = folded.value;
-    }
-    if (Array.isArray(resolved)) {
-      if (args.length > 1) return null;
-      names.push(...resolved.map(String));
-    } else names.push(String(resolved));
-  }
-  if (!names.length) return null;
+  const names = mutationLabelNames(step, sideEffects, params);
+  if (!names?.length) return null;
+  // `addLabel` VALIDATES and `dropLabel` does not, which is the reference's own asymmetry rather than
+  // an oversight here: a name being added becomes a stored label and goes through `ElementHelper`,
+  // while a name being removed is only ever COMPARED against the ones already stored — an invalid one
+  // simply matches nothing, which is the same no-op `dropLabel("xyz")` already is.
   try { for (const name of names) validateLabel(name); } catch { return null; }
 
-  // A snapshot of the incoming vertices, exactly as `elementProperty` takes it — a role this route
-  // cannot carry through the snapshot is a decline, not a dropped channel.
-  const carried = writeInputChannels(input);
-  if (carried.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
-  const seeded = inputRows(input, writeInputCols(input), fresh);
-  const { bindings, bind } = effectScope(fresh);
-  const owners = bind(seeded.result, true, carried);
+  const scope = labelMutationScope(input, fresh);
+  if (!scope) return null;
 
-  const labelRow = internLabels(names.map(text), bind, fresh)!; // `names` is non-empty, so never the null arm
+  const labelRow = internLabels(names.map(text), scope.bind, fresh)!; // `names` is non-empty, so never the null arm
   const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
   // A CROSS JOIN pairs every incoming vertex with every new label — `addVertex`'s pairing, but the left
   // side is EXISTING ids. Both sides project to a single `id` column so the join's positional output is
   // exactly (node, label).
-  const ownerIds = make.project({ id: fresh('p'), input: owners, channels: [], type: ID_TYPE, exprs: [['id', col(owners.id, 'id')]] });
   const pairs = make.join({
-    id: fresh('j'), left: ownerIds, right: labelRow, join: 'cross', channels: [],
+    id: fresh('j'), left: scope.ownerIds(), right: labelRow, join: 'cross', channels: [],
     type: typeOf(meta('node', 'int'), meta('label', 'int')),
   });
-  bind(insert({
+  scope.bind(insert({
     target: labelTargetRows, cols: ['node', 'label'], source: pairs, channels: [], type: typeOf(), returning: [],
     onConflict: { target: ['node', 'label'], set: [] },
   }));
+  return scope.passThrough();
+}
 
-  // Back to an ELEMENT relation, element-PRESERVING exactly as `elementProperty` is: the snapshot IS
-  // the pass-through, `bulk` re-minted at 1 because the snapshot did not carry it.
-  const channels: Channels = [...carried.filter((channel) => channel.role === 'alias'), BULK_CHANNEL,
-    ...carried.filter((channel) => channel.role === 'encounter')];
-  const cols: readonly ColMeta[] = [meta('id', 'int'), ...carriedCols(channels)];
-  const result = make.project({
-    id: fresh('c'), input: owners, channels, type: typeOf(...cols),
-    exprs: cols.map((column) => [column.name, column.name === 'bulk' ? compilerInt(1) : col(owners.id, column.name)] as const),
+/**
+ * THE SHAPE EVERY LABEL SIDE-EFFECT HAS — snapshot the incoming vertices, run statements against the
+ * snapshot, hand the SAME vertices back.
+ *
+ * Shared by `addLabel` and `dropLabel`/`dropLabels` because it is the whole of what they have in
+ * common and none of what differs: they are `elementProperty`'s snapshot-then-pass-through with a
+ * different statement in the middle. Two copies of it would be two chances to drop a channel on one
+ * host only — and a channel this route cannot put through a snapshot is a DECLINE (`null`), never a
+ * silently dropped one, because a `sack` or a `path` would come back missing and the next reader of
+ * it would answer a different question.
+ *
+ * `passThrough()` reads the binding list at CALL time, so it must be called last — after every
+ * `bind`/`guard` the caller makes.
+ */
+function labelMutationScope(input: Rel, fresh: Minter): {
+  readonly bind: Binder; readonly guard: Guarder;
+  /** The snapshot as a bare `(id)` relation — what a statement addresses its rows by. */
+  readonly ownerIds: () => Rel;
+  readonly passThrough: () => Effects;
+} | null {
+  const carried = writeInputChannels(input);
+  if (carried.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
+  const seeded = inputRows(input, writeInputCols(input), fresh);
+  const { bindings, bind, guard } = effectScope(fresh);
+  const owners = bind(seeded.result, true, carried);
+  return {
+    bind, guard,
+    ownerIds: () => make.project({ id: fresh('p'), input: owners, channels: [], type: ID_TYPE, exprs: [['id', col(owners.id, 'id')]] }),
+    passThrough: () => {
+      // Back to an ELEMENT relation, element-PRESERVING exactly as `elementProperty` is: the snapshot
+      // IS the pass-through, `bulk` re-minted at 1 because the snapshot did not carry it.
+      const channels: Channels = [...carried.filter((channel) => channel.role === 'alias'), BULK_CHANNEL,
+        ...carried.filter((channel) => channel.role === 'encounter')];
+      const cols: readonly ColMeta[] = [meta('id', 'int'), ...carriedCols(channels)];
+      const result = make.project({
+        id: fresh('c'), input: owners, channels, type: typeOf(...cols),
+        exprs: cols.map((column) => [column.name, column.name === 'bulk' ? compilerInt(1) : col(owners.id, column.name)] as const),
+      });
+      return { bindings: [...seeded.bindings, ...bindings], result };
+    },
+  };
+}
+
+/**
+ * `dropLabel(…)` / `dropLabels()` over an EXISTING vertex stream — `addLabel`'s mirror, one DELETE
+ * where that one has an INSERT, and the same snapshot-then-pass-through around it.
+ *
+ * **The two steps differ only in WHICH labels and in WHEN the cardinality floor can be decided, and
+ * that second difference is the whole design** (`structure/util/LabelCardinalityValidator.java`):
+ *
+ * - `dropLabels()` is `validateDropAll`, which raises for ANY `min > 0` *whatever the element
+ *   carries*. That is a COMPILE-TIME question the moment the cardinality is threaded, so it declines
+ *   here rather than becoming a guard — under `ONE_OR_MORE` no vertex can ever survive it.
+ * - `dropLabel(x…)` is `validateDrop`, which SIMULATES the removal and raises only if the survivors
+ *   fall below `min`. That is arithmetic over the DATA, so it is a GUARD BINDING (§6·5) — the general
+ *   lesson the `addE` id collision established, applied to a refusal that is per ROW rather than per
+ *   plan. `addLabel` needed none because every MUTABLE cardinality has `max = Infinity`; this is the
+ *   step at the other end of that sentence.
+ *
+ * The guard runs BEFORE the delete, which is the reference's own order — it simulates the removal
+ * rather than performing and inspecting one — and it is also what keeps the refusal from leaving a
+ * partly-stripped vertex behind.
+ *
+ * Declined for `addLabel`'s reasons and no others: an EDGE (edge label cardinality is fixed at ONE by
+ * spec — `DropLabel.feature` `g_E_dropLabelXknowsX_labels`), an immutable graph, and a collection
+ * argument mixed with others. `dropLabel("xyz")` on a label the vertex does not carry is a NO-OP and
+ * not an error — the DELETE simply matches nothing, which is what the scenario asserts.
+ */
+export function elementDropLabel(
+  input: Rel, elem: Elem, step: IRStep, cardinality: LabelCardinality,
+  sideEffects: Map<string, any> | undefined, params: Record<string, any>, fresh: Minter,
+): Effects | null {
+  if (elem === 'edge' || !cardinality.mutable) return null;
+  const all = step.name === 'dropLabels';
+  if (all && (argValues(step).length || cardinality.min > 0)) return null;
+  // `null` NAMES means EVERY label, and that reading belongs to `dropLabels()` ALONE — the branch is
+  // on the step, never on the resolver's answer. `mutationLabelNames` also returns `null`, and there
+  // it means DECLINE; conflating the two made `dropLabel(constant(["a","b"]), constant("c"))` — a
+  // mixed collection TinkerPop rejects — silently drop every label the vertex had instead of routing
+  // to the spine that raises it.
+  const names = all ? null : mutationLabelNames(step, sideEffects, params);
+  if (!all && !names?.length) return null;
+
+  const scope = labelMutationScope(input, fresh);
+  if (!scope) return null;
+  if (names && cardinality.min > 0) {
+    const short = survivorShortfall(scope.ownerIds(), names, cardinality.min, fresh);
+    scope.guard(short, {
+      // `LabelCardinalityValidator.validateDrop`'s sentence, truncated at its first RUNTIME
+      // interpolation — the surviving count and the cardinality's Java enum name, neither of which
+      // another implementation can reproduce. `ABSENT_LABEL`'s precedent: TinkerPop's own conformance
+      // assertions are `containing text of`, so the stable prefix is the matchable part.
+      message: 'Cannot drop label(s)', raiseWhen: 'rows',
+    });
+  }
+  scope.bind(deleteVertexLabels(scope.ownerIds(), names, fresh));
+  return scope.passThrough();
+}
+
+/** `DELETE FROM vertex_labels WHERE node IN <owners>` — narrowed to the NAMED labels, or every label
+ *  when `names` is null (`dropLabels()`). The name set is bounded by the QUERY TEXT and never by row
+ *  count, so an `InList` inside the `labels` lookup is right here and a JSON bind is not. */
+function deleteVertexLabels(owners: Rel, names: readonly string[] | null, fresh: Minter): Stmt {
+  if (!names) return deleteOwnedBy('vertexLabels', owners, fresh);
+  const { table, owner, cols } = OWNED_BY.vertexLabels;
+  const target = make.scan({ id: fresh('t'), table, alias: fresh('wt'), channels: [], type: typeOf(...cols) });
+  return remove({
+    target, channels: [], type: typeOf(),
+    where: and(
+      { kind: 'in-query', expr: col(target.id, owner), plan: owners, negated: false },
+      { kind: 'in-query', expr: col(target.id, 'label'), plan: namedLabelIds(names, fresh), negated: false },
+    )!,
+    returning: [],
   });
-  return { bindings: [...seeded.bindings, ...bindings], result };
+}
+
+/** The ids of a compile-time set of label NAMES — `labels` is the name→id interning table, and a name
+ *  that was never interned simply contributes no row, which is why `dropLabel("xyz")` is a no-op. */
+function namedLabelIds(names: readonly string[], fresh: Minter): Rel {
+  const scan = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('wt'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
+  const matching = make.filter({
+    id: fresh('f'), input: scan, channels: [], type: scan.type,
+    pred: { kind: 'in-list', expr: col(scan.id, 'name'), values: names.map((name) => text(name)) },
+  });
+  return make.project({ id: fresh('p'), input: matching, channels: [], type: ID_TYPE, exprs: [['id', col(matching.id, 'id')]] });
+}
+
+/** THE OWNERS A DROP WOULD LEAVE BELOW `min` — the relation `validateDrop`'s guard counts, and it is
+ *  non-empty exactly when the reference raises.
+ *
+ *  A CORRELATED COUNT rather than a grouped one, and the difference is a real case: a vertex all of
+ *  whose labels are being dropped produces NO group row at all, so a `GROUP BY … HAVING COUNT(*) < min`
+ *  would miss the very element that fell furthest. Counting per owner from the owner side cannot. */
+function survivorShortfall(owners: Rel, names: readonly string[], min: number, fresh: Minter): Rel {
+  const vl = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...OWNED_BY.vertexLabels.cols) });
+  const surviving = make.filter({
+    id: fresh('f'), input: vl, channels: [], type: vl.type,
+    pred: and(
+      eq(col(vl.id, 'node'), col(owners.id, 'id')),
+      { kind: 'in-query', expr: col(vl.id, 'label'), plan: namedLabelIds(names, fresh), negated: true },
+    )!,
+  });
+  const counted = make.aggregate({
+    id: fresh('ag'), input: surviving, channels: [], type: typeOf(meta('n', 'int')),
+    groupBy: [], aggs: [['n', { kind: 'agg', fn: 'count', args: [] }]],
+  });
+  return make.filter({
+    id: fresh('f'), input: owners, channels: [], type: owners.type,
+    pred: { kind: 'binary', op: '<', left: { kind: 'scalar', plan: counted }, right: compilerInt(min) },
+  });
 }
 
 /**

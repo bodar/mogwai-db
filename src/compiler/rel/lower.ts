@@ -37,7 +37,7 @@ import type { ChildHost, ChildSeam, ChildValue, HostRow, RootedRead, Subject } f
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
-import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
+import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
 import { elementHost, groupBarrier, mapPayload } from './map.ts';
 import { elementPayload } from './element.ts';
@@ -2996,13 +2996,15 @@ function elementTail(
       // after them — one flat list, in the order the fold produced it.
       return { ...tail, effects: [...written.bindings, ...(tail.effects ?? [])] };
     }
-    if (step.name === 'addLabel') {
+    if (step.name === 'addLabel' || step.name === 'dropLabel' || step.name === 'dropLabels') {
       if (pathCarried(rel)) return null;
       if (step.modulators?.length || step.optionArms) return null;
-      // A sideEffect that ADDS labels and passes the SAME vertices through, so the tail is the
-      // ordinary fold after it. `elementAddLabel` declines the refusal cases (edge/immutable/mixed
+      // A sideEffect that mutates labels and passes the SAME vertices through, so the tail is the
+      // ordinary fold after it. Both lowerings decline the refusal cases (edge/immutable/mixed
       // collection) to legacy, which owns the message while its route lives.
-      const mutated = elementAddLabel(rel, elem, step, ctx.labelCardinality, ctx.sideEffects, ctx.params, fresh);
+      const mutated = step.name === 'addLabel'
+        ? elementAddLabel(rel, elem, step, ctx.labelCardinality, ctx.sideEffects, ctx.params, fresh)
+        : elementDropLabel(rel, elem, step, ctx.labelCardinality, ctx.sideEffects, ctx.params, fresh);
       if (!mutated) return null;
       const tail = elementTail(mutated.result, elem, steps, at + 1, bulked, ctx, fresh, labels);
       if (!tail) return null;
