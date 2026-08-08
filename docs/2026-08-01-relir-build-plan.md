@@ -992,6 +992,32 @@ traverser, and its absence is an error (`MergeEdgeStep.resolveVertex`, gremlin-c
 differential could see it. **Where both spines share a reading, the corpus and the differential are BOTH
 blind; only the reference is not.**
 
+**THE GAP TO THE CUT IS MEASURED, NOT ESTIMATED — and the way to measure it is to TURN THE ROUTE OFF.**
+The prose above ranked the residue by reading the code, which is exactly the method §7 warns about: it
+reports what the author remembered, not what the suite needs. Stub `routeWrite` to `null` behind a local
+env switch, run L3, and the answer is a NAME LIST — 78 scenarios (measured 2026-08-08, at L3 1749/2267).
+Run each blocked traversal back through `lowerToRel` prefix by prefix and every one of them names the step
+it stops at. **Do that before touching a lowering, every round: the ranking it produces disagreed with the
+prose in the first entry.**
+
+What it found, in size order, and the first line is the point:
+
+- **`labels()` — a READ — was holding the entire label-write family**, ~20 of the 78. Every
+  `addLabel`/`dropLabel` scenario ends in `.labels()`, so the writes lowered and the tail did not, and no
+  amount of reading the write module could have shown it. ✅ LANDED (`terminal()`, census 937 → 942):
+  `label()`'s FLAT-MAP twin per `LabelsStep`'s own javadoc, the edge arm sharing `label()`'s projection and
+  the vertex arm being `values()`' join with the label side tables. The INNER join is the SPECIFIED answer,
+  not a default — under `ZERO_OR_MORE` a zero-label vertex must contribute no rows.
+- **`mergeV`/`mergeE` positions**, ~28: `g.mergeE(…)` at the SOURCE, `mergeE` mid-chain over a vertex
+  stream, and `mergeV` after a SCALAR stream (`g.inject(0).mergeV([:])`). The map parsing is done; what
+  declines is the POSITION, which is the same "learned at one host" shape §6·6 names.
+- **`dropLabel()`/`dropLabels()`**, ~12 — not lowered at all. `dropLabels()` can fall below `min`, so it is
+  the one that genuinely needs a guard binding; `dropLabel(x)` needs one too under `ONE_OR_MORE`
+  (it is legal only while a label remains), which `addLabel` did not because every MUTABLE cardinality
+  has `max = Infinity`.
+- **`property(k, __.trav)` with a possibly-multi-row VALUE**, ~13 — the HOST-KEYED relation below, and the
+  only item on this list that needs new substrate rather than a new position.
+
 **The cut:** delete the write route, `steps/write/write.ts`, and the write half of the differential.
 
 ### Phase 2 — ✅ sack, then the extracted families
