@@ -6,7 +6,7 @@ import { TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/ke
 import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/step.ts';
 import { argValues } from '../../gremlin/frontend.ts';
-import { and, byEncounter, carriedCols, coalesce, EDGE_COLS, eq, fenced, firstOf, jsonOf, meta, NODE_COLS, PROPERTIES, typeOf, typedNode, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EDGE_COLS, eq, fenced, firstOf, jsonOf, meta, NODE_COLS, PROPERTIES, typeOf, typedNode, withPayload, type Minter } from './build.ts';
 import { inferredVtype, LIST_COL } from './list.ts';
 import { edgeLabel, elementNode, externalId, vertexLabels } from './element.ts';
 import { byExpr, byNode, modulations, productivityFilter, type Modulation } from './modulator.ts';
@@ -77,36 +77,7 @@ function mapOfGroups(grouped: Rel, entry: Entry, order: Expr, fresh: Minter): Re
   return make.aggregate({
     id: fresh('mg'), input: grouped, channels: [], type: typeOf(meta(MAP_COL, 'json')),
     groupBy: [],
-    aggs: [[MAP_COL, {
-      kind: 'call',
-      fn: 'jsonb',
-      args: [{
-        kind: 'call',
-        fn: 'COALESCE',
-        args: [
-          {
-            kind: 'agg',
-            fn: 'json_group_array',
-            // `json()` AROUND EACH SIDE IS LOAD-BEARING, and it is the list module's own warning one
-            // shape over: without it `json_group_array` re-encodes the `{t,v}` envelope as a JSON
-            // STRING, so the framer sees the text `{"t":"int","v":27}` where a tagged 27 belongs. It
-            // shows up as a wire byte diff and nothing else — the entry COUNT and the VALUES are
-            // already right, which is what makes a byte-level differential the only instrument that
-            // sees it.
-            args: [{
-              kind: 'json-array',
-              items: [
-                { kind: 'call', fn: 'json', args: [entry.key] },
-                { kind: 'call', fn: 'json', args: [entry.val] },
-              ],
-              binary: false,
-            }],
-            orderBy: [{ expr: order, dir: 'asc' }],
-          },
-          { kind: 'call', fn: 'json', args: [compilerText('[]')] },
-        ],
-      }],
-    }]],
+    aggs: [[MAP_COL, collectedArray(pairOf(entry.key, entry.val), [{ expr: order, dir: 'asc' }])]],
   });
 }
 
@@ -550,17 +521,21 @@ const elementRow = (rowid: Expr, elem: Elem, fresh: Minter): Rel => {
   return make.filter({ id: fresh('ef'), input: scan, channels: [], type: scan.type, pred: eq(col(scan.id, 'id'), rowid) });
 };
 
-/** Which `T` tokens a `valueMap` includes. `valueMap(true)` and `with(WithOptions.tokens)` are both
- *  ALL of them (`PropertyMapStep.configure` — a boolean selects `WithOptions.all`/`none`), and the
- *  selective subsets pick one; the IR pass that desugars `with()` is what decides which arrives.
- *  `elementMap()` takes no option at all: its tokens are UNCONDITIONAL. */
-export interface MapTokens { readonly ids: boolean; readonly labels: boolean }
-export const NO_TOKENS: MapTokens = { ids: false, labels: false };
+/**
+ * DOES THIS MAP CARRY THE `T` TOKENS — a BOOLEAN, because all-or-nothing is the whole of what can
+ * reach here today.
+ *
+ * `valueMap(true)` and `with(WithOptions.tokens)` are both ALL of them (`PropertyMapStep.configure` —
+ * a boolean argument selects `WithOptions.all`/`none`) and `elementMap()`'s are unconditional. The
+ * SELECTIVE subsets exist in TinkerPop (`with(tokens, ids)`) and `absorbValueMapWith` deliberately
+ * leaves them in place so they fail closed — so NOTHING on this route can construct one, and a
+ * two-field record modelling a subset would be an arm with no producer. It arrives with its pass.
+ */
+export type MapTokens = boolean;
 
 /** No labels in scope — a host built without a row (see `elementHost`). Shared so the two readers
  *  cannot describe "none" differently. */
 const NO_LABELS: AliasMap = new Map();
-export const ALL_TOKENS: MapTokens = { ids: true, labels: true };
 
 /**
  * `valueMap()` and `elementMap()` — an ELEMENT's properties as one map per traverser.
@@ -610,7 +585,7 @@ export function elementValueMap(
   // The collected nodes, in insertion order — the array a `valueMap` list value IS, and the array an
   // `elementMap` takes its LAST element of. ONE aggregate pass either way, which is why the flat form
   // is a `json_extract` over it rather than a second `ORDER BY … LIMIT 1` subquery.
-  const collected: Expr = {
+  const values: Expr = {
     kind: 'agg', fn: 'json_group_array', args: [jsonOf(valued)],
     orderBy: [{ expr: col(mine.id, 'id'), dir: 'asc' }],
   };
@@ -627,8 +602,8 @@ export function elementValueMap(
         // one node; a `valueMap` VERTEX key wraps the whole array as a `{t:'list', …}` node. `$[#-1]`
         // is LAST-wins, which is what `map.put` per property in insertion order means.
         opts.flat || elem === 'edge'
-          ? { kind: 'call', fn: 'json_extract', args: [collected, compilerText('$[#-1]')] }
-          : { kind: 'json-object', entries: [['t', compilerText('list')], ['v', collected]], binary: false },
+          ? { kind: 'call', fn: 'json_extract', args: [values, compilerText('$[#-1]')] }
+          : { kind: 'json-object', entries: [['t', compilerText('list')], ['v', values]], binary: false },
       )],
       [PAIR_ROW.ord, { kind: 'agg', fn: 'min', args: [col(mine.id, 'id')] }],
     ],
@@ -641,8 +616,10 @@ export function elementValueMap(
   const rows: Rel[] = [];
   // A NEGATIVE ordinal puts the tokens ahead of every property, whose ordinals are rowids and therefore
   // positive. Stating it that way rather than sorting a tagged column keeps the whole order in ONE term.
-  if (tokens.ids) rows.push(tokenRow(rowid, elem, 'id', regime, -4, fresh));
-  if (tokens.labels) rows.push(tokenRow(rowid, elem, 'label', regime, -3, fresh));
+  if (tokens) {
+    rows.push(tokenRow(rowid, elem, 'id', regime, -4, fresh));
+    rows.push(tokenRow(rowid, elem, 'label', regime, -3, fresh));
+  }
   if (opts.endpoints && elem === 'edge') {
     rows.push(endpointRow(rowid, 'IN', regime, -2, fresh));
     rows.push(endpointRow(rowid, 'OUT', regime, -1, fresh));
@@ -653,11 +630,7 @@ export function elementValueMap(
   const blob = make.aggregate({
     id: fresh('va'), input: pairs, channels: [], type: typeOf(meta(MAP_COL, 'json')),
     groupBy: [],
-    aggs: [[MAP_COL, { kind: 'call', fn: 'jsonb', args: [coalesce(
-      { kind: 'agg', fn: 'json_group_array', args: [jsonOf(col(pairs.id, PAIR_ROW.pair))],
-        orderBy: [{ expr: col(pairs.id, PAIR_ROW.ord), dir: 'asc' }] },
-      jsonOf(compilerText('[]')),
-    )] }]],
+    aggs: [[MAP_COL, collectedArray(jsonOf(col(pairs.id, PAIR_ROW.pair)), [{ expr: col(pairs.id, PAIR_ROW.ord), dir: 'asc' }])]],
   });
   return {
     // `COALESCE` for `mapOfGroups`' reason one level down: an element with NO properties and no tokens
@@ -790,12 +763,14 @@ const pairSide = (pair: Expr, side: 'keys' | 'values'): Expr =>
  * is a translation rather than a coincidence: both vocabularies describe the same self-describing tree,
  * one from the map's side and one from the list's, so `select(Column.keys)` needs no re-encoding at all.
  *
- * A `scalar` side is a `{t,v}` node, which is precisely what a TYPED list's members are. A `list` side
- * is a naked array, so the collected list is a list OF lists. An `elem` side is a rowid the map module
- * never emits (`mapPayload` declines one), so it declines here too rather than claiming an encoding.
+ * A `scalar` side is a `{t,v}` node, which is precisely what a TYPED list's members are — and it is the
+ * ONLY side any producer here emits, deliberately: every value side is a self-describing node
+ * (`elementValueMap`'s note says why), which is what keeps `valOf` at one arm instead of needing a
+ * "mixed" one. An `elem` side is an expanded element node whose decode into the SCALAR vocabulary
+ * would be lossy, so it declines. `MapOf`'s remaining `list` arm is LEGACY's shape vocabulary and has
+ * no producer on this route; an arm for it here would be one with nothing to reach it.
  */
-const sideList = (of: MapOf): ListOf | null =>
-  of.kind === 'scalar' ? TYPED_MEMBERS : of.kind === 'list' ? { kind: 'list', of: of.of } : null;
+const sideList = (of: MapOf): ListOf | null => (of.kind === 'scalar' ? TYPED_MEMBERS : null);
 
 /**
  * `select(Column.keys)` / `select(Column.values)` — one SIDE of every entry, as a list value.
@@ -816,25 +791,10 @@ export function mapSide(
   if (!items) return null;
   const rel = fenced(input, fresh);
   const pairs = pairsOf(col(rel.id, MAP_COL), fresh);
-  // `json()` around the side is the list module's own warning: without it `json_group_array` re-encodes
-  // the `{t,v}` envelope as a JSON STRING and the framer sees text where a tagged value belongs.
-  const collected: Expr = {
-    kind: 'scalar',
-    plan: make.aggregate({
-      id: fresh('pa'), input: pairs, channels: [], type: typeOf(meta(LIST_COL, 'json')),
-      groupBy: [],
-      aggs: [[LIST_COL, {
-        kind: 'call', fn: 'jsonb',
-        args: [coalesce(
-          { kind: 'agg', fn: 'json_group_array', args: [jsonOf(pairSide(col(pairs.id, PAIR.value), side))],
-            orderBy: [{ expr: col(pairs.id, PAIR.ord), dir: 'asc' }] },
-          jsonOf(compilerText('[]')),
-        )],
-      }]],
-    }),
-  };
+  const sides = collectedOf(pairs, jsonOf(pairSide(col(pairs.id, PAIR.value), side)),
+    [{ expr: col(pairs.id, PAIR.ord), dir: 'asc' }], LIST_COL, fresh);
   return {
-    rel: withPayload(rel, [[LIST_COL, collected]], [meta(LIST_COL, 'json', true)], fresh),
+    rel: withPayload(rel, [[LIST_COL, sides]], [meta(LIST_COL, 'json', true)], fresh),
     of: items,
     set: side === 'keys',
   };
@@ -889,28 +849,23 @@ export function unfoldMap(input: Rel, fresh: Minter): { readonly rel: Rel; reado
  * `$.t`, and the scalar stream then frames PER ROW. A `list` side keeps the list vocabulary instead,
  * and an `elem` side declines for `mapPayload`'s reason.
  */
-export function entrySide(
-  input: Rel, side: 'keys' | 'values', of: MapOf, fresh: Minter,
-): { readonly rel: Rel; readonly of?: ListOf } | null {
+export function entrySide(input: Rel, side: 'keys' | 'values', of: MapOf, fresh: Minter): Rel | null {
   return sideOf(input, col(input.id, side === 'keys' ? ENTRY.key : ENTRY.val), of, fresh);
 }
 
 /**
  * ONE `{t,v}` NODE as the traverser — the retype both an ENTRY side and a `select(<key>)` need.
  *
- * A LIST side stays in the list vocabulary; a scalar side becomes an ordinary per-row-typed value
- * stream, which is the same unwrap the list module's `memberPayload` does one container along (the
- * value out of `$.v`, its tag out of `$.t`). An `elem` side declines for `mapPayload`'s reason: the
- * node frames correctly where it is, and decoding it into the SCALAR vocabulary would be lossy.
+ * A scalar side becomes an ordinary per-row-typed value stream, which is the same unwrap the list
+ * module's `memberPayload` does one container along (the value out of `$.v`, its tag out of `$.t`). An
+ * `elem` side declines for `mapPayload`'s reason: the node frames correctly where it is, and decoding
+ * it into the SCALAR vocabulary would be lossy. There is no third side — see `sideList`.
  */
-function sideOf(input: Rel, node: Expr, of: MapOf, fresh: Minter): { readonly rel: Rel; readonly of?: ListOf } | null {
-  if (of.kind === 'list') return { rel: withPayload(input, [[LIST_COL, { kind: 'call', fn: 'jsonb', args: [node] }]], [meta(LIST_COL, 'json', true)], fresh), of: of.of };
+function sideOf(input: Rel, node: Expr, of: MapOf, fresh: Minter): Rel | null {
   if (of.kind !== 'scalar') return null;
   const field = (name: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [node, compilerText(`$.${name}`)] });
-  return {
-    rel: withPayload(input, [['v', field('v')], ['vtype', field('t')]],
-      [meta('v', 'any', true), meta('vtype', 'text', true)], fresh),
-  };
+  return withPayload(input, [['v', field('v')], ['vtype', field('t')]],
+    [meta('v', 'any', true), meta('vtype', 'text', true)], fresh);
 }
 
 /**
@@ -926,7 +881,7 @@ function sideOf(input: Rel, node: Expr, of: MapOf, fresh: Minter): { readonly re
  * `EXISTS` over the pairs and the value is its own extract, exactly the `present`-beside-the-value
  * split the option-map `choose` needed for `Pick.none` versus `Pick.unproductive`.
  */
-export function mapKey(input: Rel, key: string, valOf: MapOf, fresh: Minter): { readonly rel: Rel; readonly of?: ListOf } | null {
+export function mapKey(input: Rel, key: string, valOf: MapOf, fresh: Minter): Rel | null {
   const rel = fenced(input, fresh);
   // The KEY SIDE is a `{t,v}` node, so the match reads its `v` — a key is a string here (a property
   // name or, under tokens, a `T` whose `v` is the token name, which no `select(<label>)` can name).

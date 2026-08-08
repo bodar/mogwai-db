@@ -8,7 +8,7 @@ import { isNested, isPred, argValues } from '../../gremlin/frontend.ts';
 import { isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
-import { byEncounter, carriedCols, coalesce, EMPTY_ARRAY, fenced, jsonOf, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
+import { byEncounter, carriedCols, coalesce, collectedOf, EMPTY_ARRAY, fenced, jsonOf, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { modulations } from './modulator.ts';
 import { elementObject } from './element.ts';
@@ -182,29 +182,10 @@ const memberCompareKey = (of: ListOf, members: Rel): Expr => {
 const eqText = (subject: Expr, value: string): Expr => ({ kind: 'binary', op: '=', left: subject, right: compilerText(value) });
 const jsonField = (node: Expr, field: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [node, compilerText(`$.${field}`)] });
 
-/**
- * The members BACK to a list value — `jsonb(COALESCE(json_group_array(<member> ORDER BY …), '[]'))`.
- *
- * The `COALESCE` is not defensive: `json_group_array` over ZERO rows is NULL, so an empty list would
- * come back as a null traverser value rather than as an empty list. Legacy spells it the same way.
- */
-const listOfMembers = (members: Rel, member: Expr, order: readonly SortTerm[], fresh: Minter): Expr => ({
-  kind: 'scalar',
-  plan: make.aggregate({
-    id: fresh('ma'), input: members, channels: [], type: typeOf(meta('list', 'json')),
-    groupBy: [],
-    aggs: [['list', {
-      kind: 'call',
-      fn: 'jsonb',
-      args: [{
-        kind: 'call',
-        fn: 'COALESCE',
-        args: [{ kind: 'agg', fn: 'json_group_array', args: [member], orderBy: order },
-          { kind: 'call', fn: 'json', args: [compilerText('[]')] }],
-      }],
-    }]],
-  }),
-});
+/** The members BACK to a list value. `collected` is the shared idiom (`build.ts`) and carries the two
+ *  non-derivable facts; this names the COLUMN a list relation carries them in. */
+const listOfMembers = (members: Rel, member: Expr, order: readonly SortTerm[], fresh: Minter): Expr =>
+  collectedOf(members, member, order, LIST_COL, fresh);
 
 /** The list column every list relation carries. One name, because the framing layer reads it too. */
 export const LIST_COL = 'list';

@@ -85,6 +85,43 @@ export const withPayload = (
  * from a position where legacy answers. The block model already tracks the symmetric fact for windows
  * (`windowed`); this is the same rule one node earlier.
  */
+/**
+ * MEMBERS BACK INTO ONE JSONB ARRAY — `jsonb(COALESCE(json_group_array(<member> ORDER BY …), '[]'))`,
+ * as a correlated scalar subquery.
+ *
+ * The one spelling, because two of its three parts are NON-DERIVABLE FACTS that were being restated at
+ * every site (§12 — a non-derivable fact must not be re-implemented):
+ *
+ * - **`COALESCE` is not defensive.** `json_group_array` over ZERO rows is NULL, so an empty collection
+ *   would come back as a null traverser value rather than as an empty one.
+ * - **`json()` around the MEMBER is load-bearing**, and it is the caller's to apply because only the
+ *   caller knows whether its member is an envelope: without it `json_group_array` re-encodes a `{t,v}`
+ *   object as a JSON STRING, and the framer then sees the text `{"t":"int","v":27}` where a tagged 27
+ *   belongs. It shows up as a wire byte diff and nothing else — the COUNT and the VALUES are already
+ *   right, which is what makes a byte-level differential the only instrument that sees it.
+ *
+ * It had reached FOUR copies (a list's members, a group's entries, a `valueMap`'s pairs, a map side),
+ * each carrying its own transcription of that warning.
+ */
+export const collectedArray = (member: Expr, order: readonly SortTerm[]): Expr => ({
+  kind: 'call', fn: 'jsonb',
+  args: [coalesce({ kind: 'agg', fn: 'json_group_array', args: [member], ...(order.length ? { orderBy: order } : {}) },
+    jsonOf(compilerText('[]')))],
+});
+
+/** The same collection as a CORRELATED SCALAR — the form a caller uses when the members are a
+ *  `json_each` over one traverser's value rather than rows it is already grouping. The EXPRESSION is
+ *  what is shared; whether it lands in an `Aggregate` or inside a subquery is the caller's shape. */
+export const collectedOf = (
+  input: Rel, member: Expr, order: readonly SortTerm[], column: string, fresh: Minter,
+): Expr => ({
+  kind: 'scalar',
+  plan: make.aggregate({
+    id: fresh('ca'), input, channels: [], type: typeOf(meta(column, 'json')),
+    groupBy: [], aggs: [[column, collectedArray(member, order)]],
+  }),
+});
+
 export const fenced = (rel: Rel, fresh: Minter): Rel =>
   (rel.kind === 'materialize' ? rel : make.materialize({ id: fresh('fm'), input: rel, channels: rel.channels, type: rel.type }));
 

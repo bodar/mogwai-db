@@ -30,7 +30,7 @@ import {
   and, byEncounter, carriedCols, EDGE_COLS, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, labelArgsAllStrings,
   labelIds, meta, minter, NODE_COLS, PROPERTIES, renumber, storedValue, typeOf, type Minter,
 } from './build.ts';
-import { bindAliases, liveAliases } from './alias.ts';
+import { bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, propertyExists, propertyVtype, type Modulation } from './modulator.ts';
 import type { ChildHost, ChildRows, ChildSeam, ChildValue, HostRow, RootedRead, Subject } from './child.ts';
@@ -39,7 +39,7 @@ import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
-import { ALL_TOKENS, ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, mapEntryPayload, mapKey, mapPayload, mapSide, mapSize, NO_TOKENS, unfoldMap } from './map.ts';
+import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, mapEntryPayload, mapKey, mapPayload, mapSide, mapSize, unfoldMap } from './map.ts';
 import { elementPayload } from './element.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
 import { type LabelRegime } from '../../api.ts';
@@ -1317,7 +1317,7 @@ function terminal(
     // unconditionally, which is why a `true` argument is not even a form it has.
     if (step.name === 'elementMap' && tokens) return null;
     const mapped = elementValueMap(input, elem, keys.length ? keys : null,
-      step.name === 'elementMap' || tokens ? ALL_TOKENS : NO_TOKENS, ctx.labelRegime, fresh,
+      step.name === 'elementMap' || tokens, ctx.labelRegime, fresh,
       step.name === 'elementMap' ? { flat: true, endpoints: true } : {});
     return { rel: mapped.rel, framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf } };
   }
@@ -2544,9 +2544,7 @@ function mapTail(
       if (key === null || liveAliases(labels, rel).has(key)) return null;
       const keyed = mapKey(rel, key, valOf, fresh);
       if (!keyed) return null;
-      return keyed.of
-        ? listTail(keyed.rel, keyed.of, steps, at + 1, ctx, fresh, labels)
-        : scalarTail(keyed.rel, { kind: 'scalar', type: PER_ROW('vtype') }, steps, at + 1, false, ctx, fresh, labels);
+      return scalarTail(keyed, { kind: 'scalar', type: PER_ROW('vtype') }, steps, at + 1, false, ctx, fresh, labels);
     }
 
     if (step.name === 'unfold') {
@@ -2590,13 +2588,20 @@ const namedElsewhere = (ctx: ChainCtx) => (label: string): boolean =>
  *  the relation's whole declared type and cannot ask the framing for it. */
 const ENTRY_COLS: readonly ColMeta[] = [meta(ENTRY.key, 'json', true), meta(ENTRY.val, 'json', true)];
 
-/** The single STRING a `select()` names, or `null` for any other form (a `Column`, a `Pop`, several
- *  labels, a nested traversal). `selectSpec` is the alias vocabulary's full parse; this is the one
- *  question a MAP host asks, and it asks it of the VALUES for `selectedColumn`'s reason. */
+/**
+ * The single LABEL a `select()` names, or `null` for any other form — the one question a MAP host asks.
+ *
+ * `selectSpec` IS the parse. The alias vocabulary owns which arguments of a `select()` are labels, and
+ * re-deriving it here would be a second recognizer of one grammar — it already rejects a `Column`
+ * token, an option map and any argument that is neither a label nor a `Pop`. A `Pop` is accepted and
+ * IGNORED, which is the reference's own reading: `getScopeValue` consults the traverser's MAP without
+ * it, and only the path-label fallthrough is `pop`-sensitive. A `by()` declines — it projects the
+ * VALUE, which is a different question from reading the scope.
+ */
 function selectedKey(step: IRStep): string | null {
-  if (step.name !== 'select' || step.modulators?.length) return null;
-  const args = argValues(step);
-  return args.length === 1 && typeof args[0] === 'string' ? args[0] : null;
+  if (step.modulators?.length) return null;
+  const spec = selectSpec(step);
+  return spec && spec.labels.length === 1 ? spec.labels[0]! : null;
 }
 
 /** `select(Column.keys)` / `select(Column.values)` — the column an entry-shaped host is asked for, or
@@ -2642,15 +2647,12 @@ function mapEntryTail(
 
     const column = selectedColumn(step);
     if (column) {
-      const of = column === 'keys' ? keyOf : valOf;
-      const side = entrySide(rel, column, of, fresh);
+      // The side becomes an ordinary per-row-typed value stream, which is what makes
+      // `groupCount().unfold().select(Column.values).sum()` the ordinary reducer rather than a
+      // map-shaped special case. There is no other side: see `sideList`.
+      const side = entrySide(rel, column, column === 'keys' ? keyOf : valOf, fresh);
       if (!side) return null;
-      // A LIST side stays in the list vocabulary; a scalar side becomes an ordinary per-row-typed value
-      // stream, which is what makes `groupCount().unfold().select(Column.values).sum()` the ordinary
-      // reducer rather than a map-shaped special case.
-      return side.of
-        ? listTail(side.rel, side.of, steps, at + 1, ctx, fresh, labels)
-        : scalarTail(side.rel, { kind: 'scalar', type: PER_ROW('vtype') }, steps, at + 1, false, ctx, fresh, labels);
+      return scalarTail(side, { kind: 'scalar', type: PER_ROW('vtype') }, steps, at + 1, false, ctx, fresh, labels);
     }
 
     const sliced = sliceOp(step, rel, false, fresh);
