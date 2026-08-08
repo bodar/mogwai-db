@@ -163,17 +163,35 @@ export function groupBarrier(
   // than silently collecting the elements instead — which would be the right arity and the wrong answer,
   // the one thing the decline contract exists to prevent.
   const valueBy = bys[1];
+  /**
+   * `by(__.tail())` — the group's value is the LAST TRAVERSER routed to the key, which is the collecting
+   * arm with one extraction rather than a value projection.
+   *
+   * `Grouping.determineBarrierStep` finds the value traversal's barrier and makes it the group's
+   * reducer, and `TailGlobalStep(1)` keeps the last traverser to arrive — the members' own encounter
+   * order, which is the order the collecting aggregate already states. So this is `member: undefined`
+   * (collect the ELEMENTS) plus the `$[#-1]` the child-assign arm below already spells; nothing about
+   * the pooling, the ordering or the framing is new.
+   *
+   * A `tail(n>1)` keeps n and is therefore a LIST value — a different shape, and one nothing produces
+   * yet, so it declines rather than silently answering the one-member case.
+   */
+  const lastOnly = valueBy?.key.kind === 'child' && valueBy.key.body.length === 1
+    && valueBy.key.body[0]!.name === 'tail'
+    && !argValues(valueBy.key.body[0]!).some((arg) => typeof arg === 'number' && arg !== 1);
   // A REDUCING traversal value is one scalar for the WHOLE GROUP, not one member per incoming
   // traverser — the group's members' child traversers POOL and the barrier reduces the pool once
   // (`Grouping.determineBarrierStep`). So it is its own arm, and the generic per-parent child
   // expression would be a plausible-looking wrong value rather than a decline.
-  if (valueBy?.key.kind === 'child') {
+  if (valueBy?.key.kind === 'child' && !lastOnly) {
     const terminal = valueBy.key.body.at(-1)?.name;
     if (terminal === 'count' || (terminal !== undefined && isReducer(terminal)))
       return groupReduced(input, host, step, bys[0], valueBy.key.body, bulked, child, fresh);
   }
-  const member = valueBy ? byNode(valueBy, host, fresh, child) : undefined;
-  if (valueBy && !member) return null;
+  const member = valueBy && !lastOnly ? byNode(valueBy, host, fresh, child) : undefined;
+  if (valueBy && !lastOnly && !member) return null;
+  // A collecting arm is what `tail()` needs, and only an ELEMENT host has members to collect.
+  if (lastOnly && (!collecting || host.kind !== 'element')) return null;
 
   const bulk = input.channels.find((channel) => channel.role === 'bulk');
   const encounter = collecting ? input.channels.find((channel) => channel.role === 'encounter') : undefined;
@@ -257,7 +275,7 @@ export function groupBarrier(
    * `memberDrop`. Removing it was tried during review, on the (wrong) reasoning that `by('age')` is
    * sugar for `by(__.values('age'))`; the second scenario above is what refutes that.
    */
-  const childValueDrop = member && valueBy?.key.kind === 'child'
+  const childValueDrop = member && !lastOnly && valueBy?.key.kind === 'child'
     ? productivityFilter(step, col(keyed.id, MEMBER_COL))
     : undefined;
   const domainDrop = drop && childValueDrop ? and(drop, childValueDrop) : drop ?? childValueDrop;
@@ -295,13 +313,15 @@ export function groupBarrier(
   // So the drop is the aggregate's own `FILTER (WHERE …)`: the group is still whatever `GROUP BY` decided.
   // `productivityFilter` is asked here for the same reason it is asked for the key — `ProductiveByStrategy`
   // turns both off, and then a genuinely null value IS a member.
+  // A `tail()` value drops nothing: the traverser IS the member, so there is no `by()` that could have
+  // been unproductive — the drop belongs to a PROJECTED value only.
   const memberDrop = member ? productivityFilter(step, col(rows.id, MEMBER_COL)) : undefined;
   const memberAggregate: Expr = {
     kind: 'agg', fn: 'json_group_array', args: [collected],
     orderBy: [{ expr: col(rows.id, ORD_COL), dir: 'asc' }],
     ...(memberDrop ? { filter: memberDrop } : {}),
   };
-  const groupedValue: Expr = valueBy?.key.kind === 'child'
+  const groupedValue: Expr = lastOnly || valueBy?.key.kind === 'child'
     // ONE aggregate pass over the grouped block: order the typed `{t,v}` nodes by encounter, collect
     // them as JSON (so the envelope is embedded rather than stringified), then select the last one.
     // The child expression itself already yields only its first value for one parent traverser.

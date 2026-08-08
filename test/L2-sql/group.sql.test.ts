@@ -11,8 +11,7 @@ import { PER_ROW, SCALAR_MEMBERS, STATIC, TYPED_MEMBERS, UNKNOWN } from '../../s
 import { compile } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decode, decodeAll } from '../support/decode.ts';
-import { bagOf, grouped, read as bare_read, read, relirOff, run, runWith, seededStore } from '../support/harness.ts';
-import type { CompileOptions } from '../../src/compiler/compiler.ts';
+import { bagOf, grouped, read as bare_read, read, relOnly, relirOff, run, runWith, seededStore } from '../support/harness.ts';
 import { t } from '../../src/io.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
@@ -31,21 +30,11 @@ describe('group / properties SQL', () => {
     expect(legacy.sql).toContain('ORDER BY p.encounter');
   });
 
-  // LEGACY'S valueMap SHAPE VOCABULARY, pinned at that spine explicitly.
-  //
-  // It names the KEYS, the token flag and the label regime on the SHAPE and rebuilds the map in the
-  // framer; RelIR builds the map in the ALGEBRA and hands over one `mapValue` blob (§6·3 — a shape is
-  // a value plus a framing arm). Both frame the same bytes, which the RelIR-position test below
-  // asserts against this one's answers. Pinned rather than made conditional because what these lines
-  // are ABOUT is legacy's descriptor, and that claim is the same in either run.
-  test('valueMap variants set shape, reuse the vertex row source', () => {
-    const legacy = (query: string) => read(query, { spine: 'legacy' }).shape;
-    expect(legacy('g.V().valueMap()')).toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: false });
-    expect(legacy('g.V().valueMap(true)')).toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: true });
-    expect(legacy('g.V().valueMap("name","age")')).toEqual({ kind: 'valueMap', labelSet: false, keys: ['name', 'age'], tokens: false });
-    expect(legacy('g.V().elementMap()')).toEqual({ kind: 'elementMap', labelSet: false, keys: null });
-    // RelIR: ONE blob, whatever the variant — the keys and the tokens are spent building it.
-    if (!relirOff) for (const query of ['g.V().valueMap()', 'g.V().valueMap(true)', 'g.V().valueMap("name","age")'])
+  // ONE BLOB, WHATEVER THE VARIANT — the keys and the tokens are spent BUILDING the map, so nothing
+  // about them survives onto the shape. That is §6·3: a shape is a value plus a framing arm, and the
+  // arm here is the one every map value already had.
+  relOnly('valueMap variants all frame as one map VALUE', () => {
+    for (const query of ['g.V().valueMap()', 'g.V().valueMap(true)', 'g.V().valueMap("name","age")', 'g.V().elementMap()'])
       expect(read(query).shape).toEqual({ kind: 'mapValue' });
   });
 
@@ -61,46 +50,15 @@ describe('group / properties SQL', () => {
       .toEqual(read('g.V().valueMap(true,"name","age")').shape);
     // …and it reaches legacy's own token flag, which is what says the Pass ran rather than the shapes
     // merely matching each other.
-    expect(read('g.V().valueMap().with("~tinkerpop.valueMap.tokens", 15)', { spine: 'legacy' }).shape)
-      .toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: true });
-    expect(read('g.V().valueMap().with(WithOptions.tokens)', { spine: 'legacy' }).shape) // enum form (typed at our server)
-      .toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: true });
+    // …and the enum form (typed straight at our server) folds identically to the wire form.
+    expect(read('g.V().valueMap().with(WithOptions.tokens)').shape)
+      .toEqual(read('g.V().valueMap(true)').shape);
     // A SELECTIVE token subset (labels=2) has no valueMap(true) equivalent yet → fail closed,
     // never silently widened to all-tokens.
     expect(() => read('g.V().valueMap("name","age").with("~tinkerpop.valueMap.tokens", 2).by(__.unfold())'))
       .toThrow('with() cannot consume the valueMap result shape');
   });
 
-  // LEGACY'S valueMap RE-ENTRY, pinned at that spine — RelIR's is the map loop's own test below.
-  test('P3 Stage B: valueMap() re-enterable — select(Column), count, is(typeOf(MAP))', () => {
-    const read = (query: string, options?: CompileOptions) => bare_read(query, { ...options, spine: 'legacy' });
-    // valueMap() → a per-element whole-map blob MapStream (one `map` blob per element, folding
-    // {k:[v]} into [[{t,v},valueList],…]); select(Column.keys) aggregates one key-list per map.
-    const keys = read('g.V().valueMap().select(Column.keys)');
-    expect(keys.sql).toContain('json_each');
-    expect(keys.sql).toContain('json_group_array(json_array('); // per-element blob assembly
-    // the keys list holds typed {t,v} string nodes (uniform typed map encoding)
-    expect(keys.shape).toEqual({ kind: 'jsonbList', items: TYPED_MEMBERS });
-    // key subset filters at SQL level (je.key IN (?)); values().unfold() explodes per element
-    const vals = read("g.V().valueMap('location').select(Column.values).unfold()");
-    expect(vals.sql).toContain('je.key IN (?)');
-    // count() over maps = one per element = count of elements; is(typeOf(MAP)) is identity
-    expect(read('g.V().valueMap().count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
-    expect(read('g.V().valueMap().is(typeOf(GType.MAP)).count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
-    // per-element list ops (unfold + set-ops) compose over the derived value list (was a crash)
-    const combined = read("g.V().valueMap('location').select(Column.values).unfold().combine(['seattle'])");
-    expect(combined.sql).toContain('json_each');
-    // select(unbound-label) → empty (TinkerPop); a bound as()-label defers
-    expect(read("g.V().valueMap().select('a')").sql).toContain('WHERE 0');
-    expect(read("g.V().valueMap().select(Pop.first,'a')").sql).toContain('WHERE 0');
-    expect(() => compile("g.V().as('a').valueMap().select('a')", {})).toThrow('select(bound-label) after valueMap() not yet supported');
-    // terminal valueMap unchanged; still-unsupported followers fail closed
-    expect(read('g.V().valueMap()').shape).toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: false });
-    expect(() => compile('g.V().valueMap(true).select(Column.keys)', {}, { spine: 'legacy' })).toThrow('valueMap(true)/token re-entry not yet supported');
-    // RelIR re-enters a TOKEN map like any other: the token entries are ordinary pairs of the same
-    // self-describing tree, so the key side is the `T` node beside the property-name nodes.
-    if (!relirOff) expect(bare_read('g.V().valueMap(true).select(Column.keys)').shape).toEqual({ kind: 'jsonbSet', items: TYPED_MEMBERS });
-  });
 
   test('order(Scope.local).by(Column.keys/values) re-sorts a map blob in place', () => {
     // group().by(k).by(reducer).order(local).by(values): the pairs array is re-sorted by the
@@ -123,23 +81,6 @@ describe('group / properties SQL', () => {
     // shuffle-local and multi-term/by(key) orders are not Column-local orders → defer elsewhere.
   });
 
-  // LEGACY'S Map.Entry stream, pinned at that spine for `P3 Stage B`'s reason.
-  test('Commit A: valueMap().unfold() → per-element Map.Entry stream', () => {
-    const read = (query: string, options?: CompileOptions) => bare_read(query, { ...options, spine: 'legacy' });
-    // valueMap().unfold(): valueMap retypes to a per-element whole-map blob MapStream, unfold()
-    // explodes it to a per-entry MapEntryStream (key = typed {t,v} scalar, value = its list).
-    const t = read('g.V().valueMap().unfold()');
-    expect(t.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'list', of: SCALAR_MEMBERS } });
-    expect(t.sql).toContain('json_each'); // explode the map blob into entry rows
-    // select(keys) per entry → the key, framed by its own stored type (a typed {t,v} node).
-    expect(read('g.V().valueMap().unfold().select(keys)').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
-    // select(values) per entry → the value (a valueMap value is a list) → a list value.
-    expect(read('g.V().valueMap().unfold().select(values)').shape.kind).toBe('jsonbList');
-    // map(__.select(keys)) is the 1-to-1 form — unwrapped to the same per-entry key select
-    expect(read('g.V().valueMap().unfold().map(__.select(keys))').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
-    // elementMap().unfold() fails CLOSED (token entries + single values deferred)
-    expect(() => compile('g.V().elementMap().unfold()', {}, { spine: 'legacy' })).toThrow('elementMap() re-entry not yet supported');
-  });
 
   test('Commit C: is(typeOf(MAP)) over a stored map property → MapStream retype', () => {
     // A stored map property (vtype='map') retypes to a whole-map blob MapStream: the stored
@@ -162,29 +103,6 @@ describe('group / properties SQL', () => {
     expect(read("g.V().values('age').is(typeOf(GType.MAP))").shape.kind).toBe('mapValue');
   });
 
-  // LEGACY'S scalar-host groupCount, pinned at that spine — RelIR's is the same `groupBarrier` the
-  // element host uses and frames one `mapValue` blob; the assertions here are about legacy's `group`
-  // descriptor and its `gkt` sibling column, which is a claim that reads the same in either run.
-  test('P3 Stage C: bare groupCount() over a scalar stream groups by value', () => {
-    const read = (query: string, options?: CompileOptions) => bare_read(query, { ...options, spine: 'legacy' });
-    // V().values('name').groupCount() → GROUP BY the value → Map{value: count}.
-    const g = read("g.V().out('created').values('name').groupCount()");
-    // A stored-property key carries its per-row type in a sibling column (gkt), so a
-    // datetime/uuid key frames exactly instead of collapsing to its storage class.
-    expect(g.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: true, type: PER_ROW('gkt') }, val: { kind: 'count' } });
-    expect(g.sql).toContain('SUM(c.bulk) AS gv');
-    expect(g.sql).toContain('GROUP BY');
-    // a typed scalar (asNumber(X)) carries its tag so the key frames correctly (not inferred)
-    expect(read('g.inject(15).asNumber(GType.BYTE).groupCount()').shape)
-      .toEqual({ kind: 'group', key: { kind: 'scalar', productive: true, type: STATIC('byte') }, val: { kind: 'count' } });
-    // null keys are counted (groupCount is productive)
-    expect(read('g.inject(10,20,null,20).groupCount()').shape)
-      .toEqual({ kind: 'group', key: { kind: 'scalar', productive: true, type: UNKNOWN }, val: { kind: 'count' } });
-    // A NAMED side-effect groupCount('a') over a scalar defers on legacy (it needs side-effect state);
-    // on RelIR the labelled form is the same grouping REGISTERED, so it routes at this host too — one
-    // rule, two hosts.
-    expect(() => compile("g.V().values('name').groupCount('a').cap('a')", {}, { spine: 'legacy' })).toThrow();
-  });
 
   test('count values decode as Number (Int64), including inside a nested groupCount map', async () => {
     // count()/groupCount() are Java Longs → Int64, which the client decodes to a Number (a
@@ -203,7 +121,7 @@ describe('group / properties SQL', () => {
     expect(nested.get('josh')!.get('software')).toBe(2);
   });
 
-  test('P3 Stage C2: count()/is(typeOf(MAP)) re-enter a group value', () => {
+  relOnly('P3 Stage C2: count()/is(typeOf(MAP)) re-enter a group value', () => {
     // A BARRIER EMITS ONE TRAVERSER, so a global `count()` after `group()` is 1 and only
     // `count(Scope.local)` is the map's SIZE (`GroupStep extends ReducingBarrierStep<S, Map<K,V>>`,
     // gremlin-core `step/map/GroupStep.java:51`). Legacy answers the LOCAL reading under the GLOBAL
@@ -213,24 +131,22 @@ describe('group / properties SQL', () => {
     // not because either is unsettled.
     const c = read('g.V().group().by(T.label).count()');
     expect(c.shape).toEqual({ kind: 'value', type: STATIC('long') });
-    expect(c.sql).toContain(relirOff ? 'COUNT(DISTINCT' : 'count(*)');
-    expect(run(seededStore(), 'g.V().group().by(T.label).count()')).toEqual([{ v: relirOff ? 2 : 1 }]);
+    expect(c.sql).toContain('count(*)');
+    expect(run(seededStore(), 'g.V().group().by(T.label).count()')).toEqual([{ v: 1 }]);
     // count(Scope.local) on a Map = its size, same value
     expect(read('g.V().group().by(T.label).count(Scope.local)').shape).toEqual({ kind: 'value', type: STATIC('long') });
     // is(typeOf(MAP)) is IDENTITY — a group IS a Map — and the two spines say so through their own
     // whole-map shape (legacy's `group`, RelIR's `mapValue`), framing the same bytes.
-    expect(read('g.V().groupCount().by(T.label).is(typeOf(GType.MAP))').shape.kind).toBe(relirOff ? 'group' : 'mapValue');
+    expect(read('g.V().groupCount().by(T.label).is(typeOf(GType.MAP))').shape.kind).toBe('mapValue');
     // A NON-MATCHING typeOf is the EMPTY RESULT, not an error: `Set.feature:38-43` pins
     // `g.V().values("age").is(P.typeOf(GType.SET))` as "the result should be empty". Legacy refuses
     // the traversal instead, which is a decline RelIR no longer needs.
-    if (relirOff) expect(() => compile('g.V().groupCount().by(T.label).is(typeOf(GType.LIST))', {})).toThrow('only is(typeOf(GType.MAP))');
-    else expect(run(seededStore(), 'g.V().groupCount().by(T.label).is(typeOf(GType.LIST))')).toEqual([]);
+    expect(run(seededStore(), 'g.V().groupCount().by(T.label).is(typeOf(GType.LIST))')).toEqual([]);
     // A BARE `group()` KEYS BY THE ELEMENT ITSELF, which RelIR now expresses — the key is the ROWID in
     // the `GROUP BY` and `elementNode` builds the entry off it, once per surviving group. Legacy has no
     // element-key group at all and refuses. So `count()` after one is 1 on RelIR (the barrier's single
     // map traverser) and a refusal on legacy.
-    if (relirOff) expect(() => compile('g.V().group().count()', {})).toThrow('non-scalar-key group');
-    else expect(run(seededStore(), 'g.V().group().count()')).toEqual([{ v: 1 }]);
+    expect(run(seededStore(), 'g.V().group().count()')).toEqual([{ v: 1 }]);
   });
 
   test('P3 Stage C3: group().unfold() → per-entry Map.Entry stream', () => {
@@ -247,7 +163,7 @@ describe('group / properties SQL', () => {
     expect(ev.sql).toContain('json_group_array');
   });
 
-  test('Commit B: a bare terminal Map.Entry stream materializes (size-1 MAP per entry)', () => {
+  relOnly('Commit B: a bare terminal Map.Entry stream materializes (size-1 MAP per entry)', () => {
     // group()/groupCount().unfold() with NO following select is a terminal value: the group
     // becomes a whole-map blob (MapStream), unfold() explodes it to a per-entry MapEntryStream,
     // and each entry row frames as a size-1 GraphBinary MAP. Scalar sides are typed {t,v} nodes.
@@ -261,7 +177,7 @@ describe('group / properties SQL', () => {
     // node, so the value side genuinely is one node there. Both frame `{person:[…], software:[…]}`.
     const sl = read("g.V().group().by(T.label).by('name').unfold()");
     expect(sl.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' },
-      valOf: relirOff ? { kind: 'list', of: SCALAR_MEMBERS } : { kind: 'scalar' } });
+      valOf: { kind: 'scalar' } });
     // an ELEMENT-list value: the value column expands its rowids to full element payloads
     // at the root (json_object over nodes), like the list substrate.
     const ev = read("g.V().hasLabel('software').group().by('name').unfold()");
@@ -271,7 +187,7 @@ describe('group / properties SQL', () => {
     expect(read('g.V().groupCount().by(T.label).unfold()').sql).toContain('json_group_array');
   });
 
-  test('valueMap() is a PER-ROW map producer, and the map loop takes its tail', async () => {
+  relOnly('valueMap() is a PER-ROW map producer, and the map loop takes its tail', async () => {
     const store = seededStore();
     const dec = async (q: string) => decodeAll(executeQuery(store, q));
 
@@ -284,9 +200,7 @@ describe('group / properties SQL', () => {
     // `integrated/SubgraphStrategy.feature:713-724` asserts `outE().valueMap().select(Column.values).
     // unfold()` yields `d[5].i`, which it could not if the value side were `[5]`. Legacy wraps it.
     expect(await dec("g.E().hasLabel('knows').valueMap()"))
-      .toEqual(relirOff
-        ? [new Map([['weight', [0.5]]]), new Map([['weight', [1]]])]
-        : [new Map([['weight', 0.5]]), new Map([['weight', 1]])]);
+      .toEqual([new Map([['weight', 0.5]]), new Map([['weight', 1]])]);
     // A key SUBSET filters in SQL, and a key the element does not carry is simply absent — not null.
     expect(await dec("g.V().hasLabel('software').valueMap('name','age')"))
       .toEqual([new Map([['name', ['lop']]]), new Map([['name', ['ripple']]])]);
@@ -305,15 +219,14 @@ describe('group / properties SQL', () => {
     // same shape: the sides, the size and the entries all work over a `valueMap()` unchanged.
     // The map's SIZE. Legacy has no map-local reducer at all ("count(Scope.local) requires a
     // preceding list-producing step"), so this is RelIR ahead rather than a shared claim.
-    if (relirOff) expect(() => executeQuery(store, "g.V().hasLabel('software').valueMap().count(Scope.local)")).toThrow();
-    else expect(await dec("g.V().hasLabel('software').valueMap().count(Scope.local)")).toEqual([2, 2]);
+    expect(await dec("g.V().hasLabel('software').valueMap().count(Scope.local)")).toEqual([2, 2]);
     expect(await dec("g.V().has('name','lop').valueMap().select(Column.values)")).toEqual([[['lop'], ['java']]]);
     expect(await dec("g.V().has('name','lop').valueMap().unfold().select(Column.keys)")).toEqual(['name', 'lang']);
     // An element with NO properties is an EMPTY map and still one traverser.
     expect(await dec("g.V().hasLabel('software').valueMap('nope')")).toEqual([new Map(), new Map()]);
   });
 
-  test('a MAP IS A SCOPE: select(<key>) reads it before the path labels', async () => {
+  relOnly('a MAP IS A SCOPE: select(<key>) reads it before the path labels', async () => {
     const store = seededStore();
     const dec = async (q: string) => decodeAll(executeQuery(store, q));
     // `Scoping.getScopeValue` asks `object instanceof Map && containsKey(key)` FIRST and only then the
@@ -321,32 +234,28 @@ describe('group / properties SQL', () => {
     // `Select.feature:758-769` pins the resolution end to end
     // (`elementMap("name").as("a")…select("a").select("name")` → `marko`). Legacy answers EMPTY for a
     // key that IS in the map, so this is RelIR ahead and the assertion is per-spine.
-    expect(await dec("g.V().has('name','lop').valueMap().select('name')")).toEqual(relirOff ? [] : [['lop']]);
+    expect(await dec("g.V().has('name','lop').valueMap().select('name')")).toEqual([['lop']]);
     // `containsKey`, not "the value is not null": an ABSENT key drops the traverser (`SelectOneStep`'s
     // `ifProductive` emits nothing), so the two software vertices are gone rather than null.
-    expect(await dec("g.V().valueMap().select('age')")).toEqual(relirOff ? [] : [[29], [27], [32], [35]]);
+    expect(await dec("g.V().valueMap().select('age')")).toEqual([[29], [27], [32], [35]]);
     // A key in NEITHER the map nor the labels is the empty result on both spines.
     expect(await dec("g.V().valueMap().select('nope')")).toEqual([]);
     // A groupCount map is a scope too — the key is a grouping VALUE, not a property name. Legacy
     // refuses this one outright rather than answering empty, which is the same gap wearing its other
     // face ("select() on a map value requires Column.keys or Column.values").
-    if (relirOff) expect(() => executeQuery(store, "g.V().groupCount().by('name').select('marko')")).toThrow();
-    else expect(await dec("g.V().groupCount().by('name').select('marko')")).toEqual([1]);
+    expect(await dec("g.V().groupCount().by('name').select('marko')")).toEqual([1]);
   });
 
-  test('the MAP LOOP: a map traverser answers its sides, its size and its entries', async () => {
+  relOnly('the MAP LOOP: a map traverser answers its sides, its size and its entries', async () => {
     const store = seededStore();
     const dec = async (q: string) => decodeAll(executeQuery(store, q));
 
     // `select(Column.keys)` over a MAP is a `LinkedHashSet` and `select(Column.values)` an
     // `ArrayList` (gremlin-core `structure/Column.java:22-47`), so the key side frames as a
     // GraphBinary SET. `Set.feature:47-56` pins that reading — `g.V().valueMap().select(keys)`
-    // yields `s[name,age]`. Legacy frames a LIST for both; RelIR carries the set marker through the
-    // list vocabulary, which is what makes this a per-spine assertion rather than a shared one.
-    const keys = read("g.V().groupCount().by('name').select(Column.keys)");
-    expect(keys.shape).toEqual(relirOff
-      ? { kind: 'jsonbList', items: TYPED_MEMBERS }
-      : { kind: 'jsonbSet', items: TYPED_MEMBERS });
+    // yields `s[name,age]` — and the set marker rides through the list vocabulary to say so.
+    expect(read("g.V().groupCount().by('name').select(Column.keys)").shape)
+      .toEqual({ kind: 'jsonbSet', items: TYPED_MEMBERS });
     expect(read("g.V().groupCount().by('name').select(Column.values)").shape.kind).toBe('jsonbList');
     expect(await dec("g.V().groupCount().by('name').select(Column.values)"))
       .toEqual([[1, 1, 1, 1, 1, 1]]);
@@ -355,7 +264,7 @@ describe('group / properties SQL', () => {
     expect(await dec("g.V().groupCount().by('name').count(Scope.local)")).toEqual([6]);
     // RelIR reads the SIZE off the pairs array; legacy re-counts the grouped rows.
     expect(read("g.V().groupCount().by('name').count(Scope.local)").sql)
-      .toContain(relirOff ? 'COUNT(DISTINCT' : 'json_array_length');
+      .toContain('json_array_length');
 
     // `unfold()` makes each ENTRY a traverser, and a following `select(Column.*)` takes THAT entry's
     // side rather than collecting one — the same `Column`, a different host (`Column.java:26-29`).
@@ -370,8 +279,8 @@ describe('group / properties SQL', () => {
     // A BARRIER emits ONE traverser, so the whole global row vocabulary applies to that one row:
     // `count()` is 1 (legacy answers the LOCAL reading — see the `RELIR_AHEAD` row in `sql-hygiene`),
     // and a slice takes the map or nothing.
-    expect(await dec("g.V().groupCount().by('name').count()")).toEqual([relirOff ? 6 : 1]);
-    if (!relirOff) expect(await dec("g.V().groupCount().by('name').limit(0)")).toEqual([]);
+    expect(await dec("g.V().groupCount().by('name').count()")).toEqual([1]);
+    expect(await dec("g.V().groupCount().by('name').limit(0)")).toEqual([]);
   });
 
   test('a terminal groupCount() is a MAP VALUE on RelIR and a GroupStream on legacy; Column selection derives MapStream', () => {
@@ -400,8 +309,8 @@ describe('group / properties SQL', () => {
     // side reads over an element-keyed map rather than answering them: its blob holds a
     // `{t:'vertex', v:{…}}` node, which frames correctly as a map entry and would decode into the
     // SCALAR vocabulary as a JSON string — a wrong answer where a deferral is available, which is what
-    // the `elem` tag on `MapOf` now prevents. So this stays legacy's, and it is pinned there.
-    expect(bare_read('g.V().groupCount().select(Column.keys).unfold()', { spine: 'legacy' }).shape).toEqual({ kind: 'vertex' });
+    // the `elem` tag on `MapOf` prevents. The DECLINE is the claim, so that is what is asserted.
+    expect(bare_read('g.V().groupCount().select(Column.keys).unfold()', { spine: 'rel' }).spine).toBe('legacy');
     // group().by(k).by(__.count()) → same scalar-valued map path (typed count node → per-row type).
     expect(read('g.V().group().by("name").by(__.count()).select(Column.values).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     const childKey = read('g.V().groupCount().by(__.out().count())', { spine: 'legacy' });
@@ -559,27 +468,8 @@ describe('group / properties SQL', () => {
     expect(read('g.V().group("a").by().by(__.out().label().fold()).cap("a").select(Column.values).unfold()').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
   });
 
-  // LEGACY'S group-scoped reducer, pinned at that spine. RelIR builds the same SHAPE by the same
-  // argument (the child rows pool and the reducer runs once per key) and spells it in its own
-  // vocabulary — the `origin` CHANNEL where legacy carries an `o0` column, and the ordinary fold's
-  // movements where legacy hand-builds the join. The RelIR-position assertions are below.
-  test('group-scoped reducers aggregate generic child rows at the final group boundary', () => {
-    const read = (query: string, options?: CompileOptions) => bare_read(query, { ...options, spine: 'legacy' });
-    const p = read("g.V().hasLabel('software').group().by('name').by(__.bothE().values('weight').mean())");
-    // Movement and values() become ordinary child relations retaining the parent
-    // origin. The reducer runs once over every raw row in the final key (weighted by the
-    // child rows' carried bulk — a bulk-weighted mean), never once per parent with a MAX()
-    // papering over the intermediate result.
-    expect(p.sql).toContain('JOIN c');
-    expect(p.sql).toContain('ON gr.o0=gp.o0');
-    expect(p.sql).toContain('SUM(CASE WHEN typeof(gr.v) in (\'integer\', \'real\') THEN gr.v END * gr.bulk) * 1.0 / SUM(');
-    expect(p.sql).toContain("'real' AS gvt");
-    expect(p.sql).not.toContain('MAX((SELECT AVG(');
-    expect(read("g.V().group().by('name').by(__.bothE().values('weight').sum())").sql)
-      .toContain('SUM(CASE WHEN typeof(gr.v)');
-  });
 
-  test('the GROUP-SCOPED reducer pools the child rows, and the ORIGIN channel is what carries the key', async () => {
+  relOnly('the GROUP-SCOPED reducer pools the child rows, and the ORIGIN channel is what carries the key', async () => {
     const store = seededStore();
     const dec = async (q: string) => decodeAll(executeQuery(store, q));
     // `GroupStep` applies the value traversal's PRE-BARRIER part per traverser and lets the BARRIER
@@ -594,7 +484,6 @@ describe('group / properties SQL', () => {
     // which is `groupCount()`'s value exactly, and it re-enters that arm rather than growing a second
     // spelling of one answer.
     expect(await dec("g.V().has('lang').group().by('lang').by(__.count())")).toEqual([new Map([['java', 2]])]);
-    if (relirOff) return;
     // The ORIGIN CHANNEL is the mechanism, and the SQL says so: the seed names it, the movement's arms
     // carry it, and the KEY is re-read off it rather than carried through the join.
     const sql = bare_read("g.V().group().by('name').by(__.bothE().values('weight').sum())").sql;
@@ -704,12 +593,14 @@ describe('group / properties SQL', () => {
     expect(all.shape).toEqual({ kind: 'jsonbList', items: { kind: 'property', elem: 'edge' } });
   });
 
-  test('group().by(key).by(__.tail()) → element-last, ORDER BY key (assembly path)', () => {
+  // `by(__.tail())` — the group's value is the LAST TRAVERSER routed to the key
+  // (`Grouping.determineBarrierStep` finds the barrier; `TailGlobalStep(1)` keeps the last to arrive,
+  // which is the members' own encounter order). It is the collecting arm plus one `$[#-1]`, which is
+  // why it declares `mapValue` like every other map and needs no shape of its own.
+  relOnly('group().by(key).by(__.tail()) is the LAST member, through the collecting arm', () => {
     const p = read('g.V().group().by("name").by(__.tail())');
-    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: PER_ROW('gkt') }, val: { kind: 'elementLast', elem: 'vertex' } });
-    expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS gk");
-    expect(p.sql).toContain('COALESCE(n.uid, n.id) AS v_id');
-    expect(p.sql).toContain('ORDER BY gk'); // element value → no GROUP BY, ordered for run-folding
+    expect(p.shape).toEqual({ kind: 'mapValue' });
+    expect(p.sql).toContain("'$[#-1]'");
   });
 
   test('group().by(key) default value → element list; group by key reports an index key', () => {

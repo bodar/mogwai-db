@@ -13,7 +13,7 @@
 // test/serializers.test.ts (deserialize a buffer through a serializer) and `read` in
 // test/L3-conformance/glv-compat.ts (a bound `deserializeValue`) are unrelated functions that
 // merely share a name.
-import { expect } from 'bun:test';
+import { expect, test } from 'bun:test';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { ambientSpine } from '../../src/compiler/options/spine.ts';
 import { runProgram } from '../../src/program.ts';
@@ -97,6 +97,30 @@ export const idAlreadyExists = (kind: 'Vertex' | 'Edge', id: string | number): s
  * names a `call()` service refuses for two different reasons without a registry — "unknown service"
  * rather than "legacy does not serve this one" — and a proof of the wrong refusal is not a proof.
  */
+/**
+ * A CLAIM ABOUT THE RELIR SPINE — SKIPPED in the legacy position, never restated there.
+ *
+ * **Legacy is a route with an END DATE (§6·1) and is allowed to DRIFT.** Once RelIR owns a shape,
+ * what that shape's DESCRIPTOR looks like on the other spine is not a fact worth committing: the
+ * assertion and the route are deleted together in Phase 4. Re-stating legacy's answer beside RelIR's
+ * — a `{spine:'legacy'}` pin, a `relirOff ? … : …` branch — is work that must be done once per
+ * increment and thrown away exactly once, and it accumulated to roughly a dozen sites in one session
+ * before anyone named it. So it gets a NAME rather than a convention, because a convention is what
+ * drifted back.
+ *
+ * `test.skip` and not a silent pass: a skipped test is visible in the legacy run's output, so "this
+ * claim is RelIR's" stays readable rather than looking like coverage that is quietly absent.
+ *
+ * TWO things still belong per-spine, and neither is a descriptor:
+ *
+ * - a divergence in the ANSWER where legacy is right and RelIR declines — that is a claim about
+ *   CORRECTNESS, and the decline is what keeps the user's answer right (`relirAhead` is its mirror);
+ * - a property of the PLAN that is legacy's own subject, asserted in a test that says so.
+ */
+export const relOnly = (name: string, body: () => void | Promise<void>): void => {
+  (relirOff ? test.skip : test)(name, body);
+};
+
 export const relirAhead = (gremlin: string, body: () => void | Promise<void>, options?: CompileOptions) =>
   async (): Promise<void> => {
     if (!relirOff) return body();

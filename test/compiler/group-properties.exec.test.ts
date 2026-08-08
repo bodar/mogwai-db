@@ -6,7 +6,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
-import { bagOf, grouped, run, runWith, seededStore } from '../support/harness.ts';
+import { bagOf, grouped, relOnly, run, runWith, seededStore } from '../support/harness.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -101,11 +101,14 @@ test('property aliases support Pop.all and multi-bound Pop.mixed through unfold(
     .toEqual([0.4, 0.4]);
 });
 
-test('group().by(name).by(tail) yields one vertex per name (gate #1 rows)', () => {
+relOnly('group().by(name).by(tail) yields one vertex per name (gate #1 rows)', () => {
   const store = seededStore();
-  const rows = run(store, 'g.V().group().by("name").by(__.tail())');
-  expect(rows.length).toBe(6);
-  const byName = Object.fromEntries(rows.map((r) => [r.gk, r.v_id]));
+  // ONE VERTEX PER NAME is what this test means. Counting ROWS asserted the ROUTE instead — RelIR
+  // emits one `map` blob where legacy emitted one row per key — so it reads the grouping through the
+  // harness and the id out of the element NODE the blob carries.
+  const byName = Object.fromEntries(Object.entries(grouped(run(store, 'g.V().group().by("name").by(__.tail())')))
+    .map(([k, v]) => [k, (v as { id: number }).id]));
+  expect(Object.keys(byName)).toHaveLength(6);
   expect(byName).toEqual({ marko: 1, vadas: 2, lop: 3, josh: 4, ripple: 5, peter: 6 });
 });
 

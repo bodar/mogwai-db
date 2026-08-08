@@ -1444,9 +1444,8 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('aggregation deferred forms throw clearly', () => {
-    // group() is now always a GroupStream. Element-LIST values (by(__.out())/bare) re-enter
-    // via the list-of-rid substrate; a single-element (tail) value entry still defers.
-    expect(() => compile('g.V().group().by("name").by(__.tail()).select(Column.values)', {})).toThrow('single-element (tail) values not yet supported');
+    // A single-element (`tail`) group VALUE is no longer deferred: RelIR carries it as one more member
+    // of the typed tree, so `select(Column.values)` over it is the ordinary side read.
     expect(() => compile('g.V().groupCount().by("name").cap("x")', {})).toThrow('cap() on a group value not yet supported');
     expect(() => compile('g.V().properties().group().by()', {})).toThrow('group().by() on a property element is not yet supported');
     // group() fills a key slot then a value slot; a third by() is invalid Gremlin, refused with
