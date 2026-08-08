@@ -27,6 +27,10 @@ const { Vertex, VertexProperty, Edge, Property } = structure;
 // as T, so they must ride the wire as GraphBinary DataType.T (via EnumSerializer),
 // which anySerializer picks automatically for an EnumValue instance.
 const { t } = gprocess;
+// The Direction enum (in/out/both), on the same footing as `t` and for the same reason: an EDGE's
+// `elementMap()` keys its two endpoint entries by `Direction.IN`/`Direction.OUT`, which the GLV
+// deserializes as Direction and which therefore must ride the wire as `DataType.DIRECTION`.
+const { direction } = gprocess;
 
 // Extend the reused client ioc with the three GraphBinary serializers it leaves as
 // TODOs (BigDecimal/Char/Duration) — locked decision #4 reuse-FIRST allows fixing a
@@ -36,4 +40,4 @@ const { t } = gprocess;
 import { registerExtendedSerializers } from './serializers.ts';
 registerExtendedSerializers(ioc);
 
-export { ioc, StreamReader, Vertex, VertexProperty, Edge, Property, t };
+export { ioc, StreamReader, Vertex, VertexProperty, Edge, Property, t, direction };

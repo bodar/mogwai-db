@@ -138,7 +138,7 @@ describe('group / properties SQL', () => {
     // map(__.select(keys)) is the 1-to-1 form — unwrapped to the same per-entry key select
     expect(read('g.V().valueMap().unfold().map(__.select(keys))').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // elementMap().unfold() fails CLOSED (token entries + single values deferred)
-    expect(() => compile('g.V().elementMap().unfold()', {})).toThrow('elementMap() re-entry not yet supported');
+    expect(() => compile('g.V().elementMap().unfold()', {}, { spine: 'legacy' })).toThrow('elementMap() re-entry not yet supported');
   });
 
   test('Commit C: is(typeOf(MAP)) over a stored map property → MapStream retype', () => {
@@ -270,8 +270,13 @@ describe('group / properties SQL', () => {
     // `map.put(key, value)` otherwise). Same asymmetry the element payload's own bags carry.
     expect(await dec("g.V().hasLabel('software').valueMap()"))
       .toEqual([new Map([['name', ['lop']], ['lang', ['java']]]), new Map([['name', ['ripple']], ['lang', ['java']]])]);
+    // AN EDGE's value is FLAT, and the corpus pins it decisively though indirectly:
+    // `integrated/SubgraphStrategy.feature:713-724` asserts `outE().valueMap().select(Column.values).
+    // unfold()` yields `d[5].i`, which it could not if the value side were `[5]`. Legacy wraps it.
     expect(await dec("g.E().hasLabel('knows').valueMap()"))
-      .toEqual([new Map([['weight', [0.5]]]), new Map([['weight', [1]]])]);
+      .toEqual(relirOff
+        ? [new Map([['weight', [0.5]]]), new Map([['weight', [1]]])]
+        : [new Map([['weight', 0.5]]), new Map([['weight', 1]])]);
     // A key SUBSET filters in SQL, and a key the element does not carry is simply absent — not null.
     expect(await dec("g.V().hasLabel('software').valueMap('name','age')"))
       .toEqual([new Map([['name', ['lop']]]), new Map([['name', ['ripple']]])]);

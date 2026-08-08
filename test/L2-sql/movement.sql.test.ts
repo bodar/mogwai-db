@@ -75,7 +75,9 @@ describe('movement / edge sources SQL', () => {
   test('edge steps reject the wrong element kind', () => {
     expect(() => compile('g.V().outV()', {})).toThrow('outV() expects an edge, not a vertex');
     expect(() => compile('g.E().out()', {})).toThrow('out() expects a vertex, not an edge');
-    expect(() => compile('g.E().elementMap()', {})).toThrow('elementMap() on edges not yet supported');
+    // LEGACY refuses an edge `elementMap()`; RelIR answers it, endpoint entries and all
+    // (`ElementMapStep.getVertexStructure`), so the refusal is pinned at the spine that makes it.
+    expect(() => compile('g.E().elementMap()', {}, { spine: 'legacy' })).toThrow('elementMap() on edges not yet supported');
   });
 
   test('has()/values() on edges filter/project the edges table', () => {

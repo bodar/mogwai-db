@@ -424,11 +424,17 @@ export type FrameNode =
   | { t: 'map'; v: [FrameNode, FrameNode][] }
   | { t: 'vertex' | 'edge'; v: Record<string, any> }
   | { t: 'T'; v: TokenName }
+  | { t: 'D'; v: DirectionName }
   | null | string | number | boolean | FrameNode[];
 
 /** The `T` tokens a map key can be. TinkerPop's enum, minus nothing — `id`/`label` come from an
  *  element and `key`/`value` from a VertexProperty (`PropertyMapStep.addIncludedOptions`). */
 export type TokenName = 'id' | 'label' | 'key' | 'value';
+
+/** The `Direction` tokens a map key can be — an EDGE's `elementMap()` keys its two endpoint maps by
+ *  them (`ElementMapStep.map`). `BOTH` is not among them: an edge has one head and one tail, and no
+ *  producer keys an entry by the undirected token. */
+export type DirectionName = 'IN' | 'OUT';
 
 /** A collection leaf's JSON-safe canonical storage form, keyed on its canonical type.
  *  Reuses storedScalar for the exact tail (long/bigint>2^53, bigdecimal, duration →

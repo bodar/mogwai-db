@@ -5,6 +5,7 @@ import { executeQuery } from './support/executor.ts';
 import { ioc, StreamReader } from '../src/io.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { decode, decodeAll } from './support/decode.ts';
+import { relirOff } from './support/harness.ts';
 
 // End-to-end fidelity: write a typed collection property, read it back over GraphBinary,
 // and assert every element/key survived write→storage→read→frame. Two lenses:
@@ -219,8 +220,15 @@ describe('#5 whole-element framing carries scalar property types', () => {
     executeQuery(s, "g.addV('p').as('a').addV('p').as('b').addE('knows').from('a').to('b').property('since',datetime('2024-01-02T03:04:05Z'))", {});
     const e = await dec(rawList(s, 'g.E()')) as any;
     expect(e.properties[0].value instanceof Date).toBe(true);
-    const m = await dec(rawList(s, "g.E().valueMap()")) as Map<string, any[]>;
-    expect(m.get('since')![0] instanceof Date).toBe(true);
+    // AN EDGE `valueMap()` VALUE IS THE VALUE ITSELF, NOT A LIST, and the reference is unambiguous:
+    // `PropertyMapStep.addElementProperties` collects into a list only `if (isVertex)` and otherwise
+    // does `map.put(key, value)`. The corpus pins it too, indirectly but decisively —
+    // `integrated/SubgraphStrategy.feature:713-724` asserts `outE().valueMap().select(Column.values).
+    // unfold()` yields `d[5].i`, which it could not if the value side were `[5]`. Legacy wraps it, so
+    // this is per-spine: what the test is about either way is that the DATE survives typed.
+    const m = await dec(rawList(s, "g.E().valueMap()")) as Map<string, any>;
+    const since = m.get('since');
+    expect((relirOff ? since[0] : since) instanceof Date).toBe(true);
   });
 });
 

@@ -8,7 +8,7 @@ import type { IRStep } from '../ir/step.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import { and, byEncounter, carriedCols, coalesce, EDGE_COLS, eq, fenced, jsonOf, meta, NODE_COLS, PROPERTIES, typeOf, typedNode, withPayload, type Minter } from './build.ts';
 import { inferredVtype, LIST_COL } from './list.ts';
-import { edgeLabel, elementNode, vertexLabels } from './element.ts';
+import { edgeLabel, elementNode, externalId, vertexLabels } from './element.ts';
 import { byExpr, byNode, modulations, productivityFilter } from './modulator.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { AliasMap } from '../plan/alias.ts';
@@ -416,28 +416,39 @@ const elementRow = (rowid: Expr, elem: Elem, fresh: Minter): Rel => {
 
 /** Which `T` tokens a `valueMap` includes. `valueMap(true)` and `with(WithOptions.tokens)` are both
  *  ALL of them (`PropertyMapStep.configure` — a boolean selects `WithOptions.all`/`none`), and the
- *  selective subsets pick one; the IR pass that desugars `with()` is what decides which arrives. */
+ *  selective subsets pick one; the IR pass that desugars `with()` is what decides which arrives.
+ *  `elementMap()` takes no option at all: its tokens are UNCONDITIONAL. */
 export interface MapTokens { readonly ids: boolean; readonly labels: boolean }
 export const NO_TOKENS: MapTokens = { ids: false, labels: false };
+export const ALL_TOKENS: MapTokens = { ids: true, labels: true };
 
 /**
- * `valueMap()` — an ELEMENT's properties as one map per traverser, or `null` to decline.
+ * `valueMap()` and `elementMap()` — an ELEMENT's properties as one map per traverser.
  *
- * A VERTEX key is MULTI-VALUED, so its value is a LIST and an EDGE key's is the value itself
- * (`PropertyMapStep.addElementProperties` — `map.compute(key, …values.add(value))` for a Vertex,
- * `map.put(key, value)` otherwise). That is the same asymmetry `vertexProps`/`edgeProps` already carry
- * for the element payload and it is read off the same tables, one aggregate level apart.
+ * ONE function for both, because the two differ in three FACTS and not in how the map is built —
+ * exactly the relationship `group()`/`groupCount()` have inside `groupBarrier`, and the reason that
+ * one takes a step rather than a pair of booleans:
+ *
+ * - **the tokens.** `valueMap`'s are optional (`valueMap(true)`, `with(WithOptions.tokens)`);
+ *   `elementMap`'s are unconditional (`ElementMapStep.map` puts `T.id` and `T.label` outright).
+ * - **the value arity.** A `valueMap` VERTEX key is MULTI-VALUED so its value is a LIST, and an EDGE
+ *   key's is the value itself (`PropertyMapStep.addElementProperties` — `map.compute(key,
+ *   …values.add(value))` for a Vertex, `map.put(key, value)` otherwise). An `elementMap` is FLAT
+ *   whatever the host, and `map.put` overwrites, so a multi-valued key keeps its LAST value.
+ * - **the ENDPOINTS.** An edge `elementMap()` adds `Direction.IN`/`Direction.OUT`, each a nested map
+ *   of that vertex's own `T.id`/`T.label` (`ElementMapStep.getVertexStructure`).
  *
  * **The KEY ORDER is ours to state, and it is the insertion order** — each key at its earliest
  * property rowid, which is what the element payload's own bag does. TinkerPop hands back a
  * `LinkedHashMap` in `element.properties()` iteration order, which is a provider's business rather
  * than the spec's; stating it is what stops the two spines differing by whatever SQLite scanned.
  *
- * The token entries lead, `T.id` before `T.label`, which is the order `addIncludedOptions` puts them
- * in before any property is added.
+ * The token entries LEAD, in the order the reference puts them: `T.id`, `T.label`, then an edge's
+ * `Direction.IN` and `Direction.OUT`, then the properties.
  */
 export function elementValueMap(
   input: Rel, elem: Elem, keys: readonly string[] | null, tokens: MapTokens, regime: LabelRegime, fresh: Minter,
+  opts: { readonly flat?: boolean; readonly endpoints?: boolean } = {},
 ): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } {
   const rowid = col(input.id, 'id');
   const table = elem === 'edge' ? PROPERTIES.edge : PROPERTIES.vertex;
@@ -456,6 +467,13 @@ export function elementValueMap(
   // schema (`UNIQUE(edge, key)`, which is TinkerPop's `Property` being single by spec), so the group is
   // still needed to carry the order column but the value is the one node.
   const valued = typedNode(col(mine.id, 'value'), col(mine.id, 'vtype'));
+  // The collected nodes, in insertion order — the array a `valueMap` list value IS, and the array an
+  // `elementMap` takes its LAST element of. ONE aggregate pass either way, which is why the flat form
+  // is a `json_extract` over it rather than a second `ORDER BY … LIMIT 1` subquery.
+  const collected: Expr = {
+    kind: 'agg', fn: 'json_group_array', args: [jsonOf(valued)],
+    orderBy: [{ expr: col(mine.id, 'id'), dir: 'asc' }],
+  };
   const grouped = make.aggregate({
     id: fresh('vk'), input: mine, channels: [],
     // The GROUP KEY is a declared column — the emitter names `groupBy` exprs before the aggregates —
@@ -465,16 +483,12 @@ export function elementValueMap(
     aggs: [
       [PAIR_ROW.pair, pairOf(
         typedNode(col(mine.id, 'key'), compilerText('string')),
-        elem === 'edge'
-          ? { kind: 'agg', fn: 'json_group_array', args: [jsonOf(valued)], orderBy: [{ expr: col(mine.id, 'id'), dir: 'asc' }] }
-          : {
-            kind: 'json-object',
-            entries: [['t', compilerText('list')], ['v', {
-              kind: 'agg', fn: 'json_group_array', args: [jsonOf(valued)],
-              orderBy: [{ expr: col(mine.id, 'id'), dir: 'asc' }],
-            }]],
-            binary: false,
-          },
+        // FLAT (`elementMap`, and a `valueMap` over an EDGE, whose key is single by schema) takes the
+        // one node; a `valueMap` VERTEX key wraps the whole array as a `{t:'list', …}` node. `$[#-1]`
+        // is LAST-wins, which is what `map.put` per property in insertion order means.
+        opts.flat || elem === 'edge'
+          ? { kind: 'call', fn: 'json_extract', args: [collected, compilerText('$[#-1]')] }
+          : { kind: 'json-object', entries: [['t', compilerText('list')], ['v', collected]], binary: false },
       )],
       [PAIR_ROW.ord, { kind: 'agg', fn: 'min', args: [col(mine.id, 'id')] }],
     ],
@@ -487,8 +501,12 @@ export function elementValueMap(
   const rows: Rel[] = [];
   // A NEGATIVE ordinal puts the tokens ahead of every property, whose ordinals are rowids and therefore
   // positive. Stating it that way rather than sorting a tagged column keeps the whole order in ONE term.
-  if (tokens.ids) rows.push(tokenRow(rowid, elem, 'id', regime, -2, fresh));
-  if (tokens.labels) rows.push(tokenRow(rowid, elem, 'label', regime, -1, fresh));
+  if (tokens.ids) rows.push(tokenRow(rowid, elem, 'id', regime, -4, fresh));
+  if (tokens.labels) rows.push(tokenRow(rowid, elem, 'label', regime, -3, fresh));
+  if (opts.endpoints && elem === 'edge') {
+    rows.push(endpointRow(rowid, 'IN', regime, -2, fresh));
+    rows.push(endpointRow(rowid, 'OUT', regime, -1, fresh));
+  }
   const pairs = rows.length ? make.union({
     id: fresh('vu'), inputs: [...rows, perKey], all: true, channels: [], type: perKey.type,
   }) : perKey;
@@ -515,7 +533,7 @@ export function elementValueMap(
  *  `LabelRegime`: a set of names where a vertex genuinely holds a set, the one first-interned name
  *  otherwise, and an EDGE's label is always the single name TinkerPop fixes its cardinality at. */
 function tokenRow(rowid: Expr, elem: Elem, token: 'id' | 'label', regime: LabelRegime, ord: number, fresh: Minter): Rel {
-  const row = elementRow(rowid, elem, fresh);
+  const row = labelled(elementRow(rowid, elem, fresh), token === 'label' && elem !== 'edge' && regime === 'single', fresh);
   const external = coalesce(col(row.id, 'uid'), col(row.id, 'id'));
   const value = token === 'id'
     // NOT `typedNode`, and the difference is plan size rather than taste: that helper re-tests the tag
@@ -523,12 +541,68 @@ function tokenRow(rowid: Expr, elem: Elem, token: 'id' | 'label', regime: LabelR
     // external id is a rowid or a uid — never a collection — so the node is built directly.
     ? { kind: 'json-object' as const, binary: false, entries: [['t', inferredVtype(external)] as const, ['v', external] as const] }
     : elem === 'edge'
+      // An edge label is ALWAYS the one name: TinkerPop fixes edge label cardinality at exactly one,
+      // so no regime applies to it (`addIncludedOptions` reads `element.labels()` for a Vertex only).
       ? typedNode(edgeLabel(col(row.id, 'label'), fresh), compilerText('string'))
-      : regime === 'set'
-        ? { kind: 'json-object' as const, entries: [['t', compilerText('set')] as const, ['v', vertexLabels(col(row.id, 'id'), fresh)] as const], binary: false }
-        : typedNode(vertexLabelName(col(row.id, 'id'), fresh), compilerText('string'));
+      : labelNode(col(row.id, 'id'), regime, fresh);
   return pairRow(row, pairOf(tokenKey(token), value), compilerInt(ord), fresh);
 }
+
+/**
+ * A ZERO-LABEL VERTEX HAS NO `T.label` ENTRY AT ALL in the single regime, which is a filter on the
+ * token ROW rather than a null value in it: `addIncludedOptions` puts the label only
+ * `if (!label.isEmpty())`, and `ElementMap.feature`'s `g_withXsinglelabelX_V_elementMap_zero_label_vertex`
+ * pins the omission (`m[{"t[id]": …, "name": "nobody"}]`, no label key). Under MULTILABEL the entry is
+ * always present and may be the empty set (`…_zero_label_vertex` under `with("multilabel")` →
+ * `"t[label]": "s[]"`), so the filter is regime-specific and not a general defence. Our `label()`
+ * reports `DEFAULT_VERTEX_LABEL` for such a vertex, which is right for the scalar step and would be a
+ * WRONG entry here — the same value answering two different questions.
+ */
+const labelled = (row: Rel, gate: boolean, fresh: Minter): Rel => {
+  if (!gate) return row;
+  const vl = make.scan({ id: fresh('lx'), table: 'vertex_labels', alias: fresh('rlx'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
+  const mine = make.filter({ id: fresh('lf'), input: vl, channels: [], type: vl.type, pred: eq(col(vl.id, 'node'), col(row.id, 'id')) });
+  const probe = make.project({ id: fresh('lp'), input: mine, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+  return make.filter({ id: fresh('lg'), input: row, channels: [], type: row.type, pred: { kind: 'exists', plan: probe, negated: false } });
+};
+
+/** An EDGE ENDPOINT as an `elementMap` entry — `Direction.IN`/`Direction.OUT` keyed at a nested map of
+ *  that vertex's own `T.id`/`T.label` and nothing else (`ElementMapStep.getVertexStructure`). `IN` is
+ *  the edge's TARGET and `OUT` its source, which is TinkerPop's direction convention and our column
+ *  naming's (`tgt`/`src`) meeting point. */
+function endpointRow(rowid: Expr, side: 'IN' | 'OUT', regime: LabelRegime, ord: number, fresh: Minter): Rel {
+  const row = elementRow(rowid, 'edge', fresh);
+  const endpoint = col(row.id, side === 'IN' ? 'tgt' : 'src');
+  const nested: Expr = {
+    kind: 'json-object', binary: false,
+    entries: [['t', compilerText('map')], ['v', {
+      kind: 'json-array', binary: false,
+      items: [
+        { kind: 'json-array', binary: false, items: [jsonOf(tokenKey('id')), jsonOf(externalIdNode(endpoint, fresh))] },
+        { kind: 'json-array', binary: false, items: [jsonOf(tokenKey('label')), jsonOf(labelNode(endpoint, regime, fresh))] },
+      ],
+    }]],
+  };
+  return pairRow(row, pairOf(directionKey(side), nested), compilerInt(ord), fresh);
+}
+
+/** A `Direction` token as a map KEY — `T`'s standing one enum along (`FrameNode`'s `D` arm). */
+const directionKey = (side: 'IN' | 'OUT'): Expr =>
+  ({ kind: 'json-object', entries: [['t', compilerText('D')], ['v', compilerText(side)]], binary: false });
+
+/** A vertex rowid's PUBLIC id as a typed node — the endpoint entries' `T.id` value. Correlated,
+ *  because an endpoint arrives as a rowid COLUMN and not as a relation to join against. */
+const externalIdNode = (rowid: Expr, fresh: Minter): Expr => {
+  const external = externalId(rowid, 'vertex', fresh);
+  return { kind: 'json-object', binary: false, entries: [['t', inferredVtype(external)], ['v', external]] };
+};
+
+/** A vertex rowid's LABEL as a typed node, by regime — the endpoint entries' `T.label` value. A zero-label
+ *  endpoint keeps the entry (a nested endpoint map is built unconditionally by `getVertexStructure`, which
+ *  applies the same `isEmpty()` test only to the NAME); the value is then a null tag the framer infers. */
+const labelNode = (rowid: Expr, regime: LabelRegime, fresh: Minter): Expr => regime === 'set'
+  ? { kind: 'json-object', binary: false, entries: [['t', compilerText('set')], ['v', vertexLabels(rowid, fresh)]] }
+  : typedNode(vertexLabelName(rowid, fresh), compilerText('string'));
 
 /** A vertex's SINGLE label — the side table's first-interned name, which is the same deterministic pick
  *  `label()` and `by(T.label)` make. Spelled through `byExpr`'s token arm so a third pick cannot exist. */

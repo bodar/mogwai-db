@@ -3,7 +3,7 @@ import { DEFAULT_VERTEX_LABEL } from './api.ts';
 import { compilePlan, hasTypedMembers, perRowColumn, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type Executable, type FastPathConfig, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type ValueType } from './compiler/compiler.ts';
 import type { FederationSource, Plan } from './compiler/segment.ts';
 import { hasSerializer, isCollectionType, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
-import { ioc, Property, t, VertexProperty } from './io.ts';
+import { direction, ioc, Property, t, VertexProperty } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
 import { runProgram } from './program.ts';
@@ -290,6 +290,9 @@ function frameTypedNode(node: FrameNode): Buffer {
   // reaches (a map key today; a list member or a nested map's key the day one produces it) exactly
   // as the element arm above does.
   if (node.t === 'T') return ioc.anySerializer.serialize(t[node.v]);
+  // A `Direction` token, the same standing as `T` one enum along — an edge `elementMap()`'s two
+  // endpoint entries are keyed by it, and it is a GraphBinary type of its own (`DataType.DIRECTION`).
+  if (node.t === 'D') return ioc.anySerializer.serialize(direction[node.v === 'IN' ? 'in' : 'out']);
   return frameValue(node.v, vtypeToValueType(node.t));
 }
 

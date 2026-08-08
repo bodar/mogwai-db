@@ -39,7 +39,7 @@ import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
-import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, mapEntryPayload, mapPayload, mapSide, mapSize, NO_TOKENS, unfoldMap } from './map.ts';
+import { ALL_TOKENS, ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, mapEntryPayload, mapPayload, mapSide, mapSize, NO_TOKENS, unfoldMap } from './map.ts';
 import { elementPayload } from './element.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
 import { LabelCardinality, type LabelRegime } from '../../api.ts';
@@ -1285,15 +1285,22 @@ function terminal(
   // A `by()` modulator on a `valueMap()` projects each VALUE (`applyTraversalRingToMap` computes over
   // the map's values and REMOVES the key when the projection is unproductive), which is a different
   // question from every other `by()` here — so the guard at the top of this function declines it.
-  if (step.name === 'valueMap') {
+  if (step.name === 'valueMap' || step.name === 'elementMap') {
     const tokens = args.includes(true);
     const keys = args.filter((a) => typeof a === 'string') as string[];
-    // Any argument that is neither a key nor the token flag — a `null` key, a nested traversal —
-    // is a form this does not serve, and answering the same map for it would answer a different
-    // question rather than declining.
-    if (args.length !== keys.length + (tokens ? 1 : 0)) return null;
+    // A `null` KEY IS IGNORED rather than declined, and the reference pins it rather than us inferring
+    // it: `element.properties(keys)` filters by key membership, so a null never matches, and
+    // `ElementMap.feature`'s `g_V_elementMapXname_age_nullX` answers exactly `elementMap("name","age")`.
+    // Any OTHER argument — a nested traversal, a token this fold does not know — is a form this does
+    // not serve, and answering the same map for it would answer a different question.
+    const nulls = args.filter((a) => a === null).length;
+    if (args.length !== keys.length + nulls + (tokens ? 1 : 0)) return null;
+    // `elementMap()` takes no token OPTION: `ElementMapStep.map` puts `T.id` and `T.label`
+    // unconditionally, which is why a `true` argument is not even a form it has.
+    if (step.name === 'elementMap' && tokens) return null;
     const mapped = elementValueMap(input, elem, keys.length ? keys : null,
-      tokens ? { ids: true, labels: true } : NO_TOKENS, ctx.labelRegime, fresh);
+      step.name === 'elementMap' || tokens ? ALL_TOKENS : NO_TOKENS, ctx.labelRegime, fresh,
+      step.name === 'elementMap' ? { flat: true, endpoints: true } : {});
     return { rel: mapped.rel, framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf } };
   }
 
