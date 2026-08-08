@@ -589,9 +589,10 @@ at all three hosts** · **the GROUP-SCOPED REDUCER (and the `origin` channel)** 
 - 🔴 **THE MEMBER TYPE CHANNEL — §6·7 one layer down, and it had grown a SECOND VOCABULARY unnoticed.**
   `ListOf`'s scalar arm was `as?: ValueType` + `typed?: boolean` plus an implicit third case: exactly the
   two-optionals-plus-implicit-third trap `ScalarType` exists to end, spelled differently enough that nobody
-  recognized it. It is now `{ type: ScalarType; productiveNull? }` — the same union, cases and accessors a
-  ROW's type uses — which is step 3 of the build order recorded in
-  `docs/archive/2026-07-25-type-channel-unification.md`. **The carrier is now NAMED too**
+  recognized it. It is now `{ type: ScalarType; productiveNull: boolean }` — the same union, cases and
+  accessors a ROW's type uses, and both fields REQUIRED. That closes step 3 of the build order in
+  `docs/archive/2026-07-25-type-channel-unification.md` outright: `GroupKey` and `Shape{kind:'value'}`
+  carry the same union too, so no descriptor describes a scalar type in its own words any more. **The carrier is now NAMED too**
   (`TypeCarrier = column | envelope`): both are the same compile-time fact and only the READ differs, and
   leaving the encoding to prose is precisely what let the second vocabulary grow for it.
 - 🔴 **What the second vocabulary cost, measured — three wrong answers and a decline, all one shape.**
