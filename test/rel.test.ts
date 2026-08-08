@@ -9,6 +9,7 @@ import { fuse } from '../src/rel/passes/fuse.ts';
 import { name } from '../src/rel/passes/name.ts';
 import { prune } from '../src/rel/passes/prune.ts';
 import type { Channels } from '../src/channels.ts';
+import type { Rel } from '../src/rel/rel.ts';
 import { relId } from '../src/rel/types.ts';
 
 const channels: Channels = [];
@@ -156,6 +157,47 @@ describe('RelIR', () => {
       step: (self) => materialize({ id: relId('fence'), name: 'fence', input: self, channels, type: { cols: oneCol } }),
     });
     expect(() => check(fenced)).toThrow("must reference 'fencedWalk' at the top level of FROM");
+  });
+
+  // P3 — SQLite ACCEPTS all three and none of them means what an author writing it means. Measured
+  // on bun:sqlite 3.53.0 against a 6-edge cyclic graph: DISTINCT leaves the duplicates in place
+  // (byte-identical result to the same walk without it), and LIMIT 2 returns 2 rows for the WHOLE
+  // walk rather than 2 per iteration. An accepted wrong answer is the one outcome no instrument in
+  // this repo can see, so the checker is the only place it can be caught.
+  test('refuses a per-iteration barrier inside a recursive term (P3) — SQLite accepts each one silently', () => {
+    const oneCol = [{ name: 'id', type: 'int', nullable: false }] as const;
+    const seed = valuesRel({ id: relId('seed'), rows: [[lit(1, 'int')]], channels, type: { cols: oneCol } });
+    const walkWith = (id: string, step: (self: Rel) => Rel) =>
+      recursiveRel({ id: relId(id), name: id, cols: ['id'], seed, channels, type: { cols: oneCol }, step });
+
+    const deduped = walkWith('dedupWalk', (self) => distinctRel({ id: relId('d'), input: self, channels, type: { cols: oneCol } }));
+    expect(() => check(deduped)).toThrow('silently ignores it — no per-iteration dedup exists');
+
+    const capped = walkWith('limitWalk', (self) => limitRel({ id: relId('l'), input: self, channels, type: { cols: oneCol }, count: lit(2, 'int') }));
+    expect(() => check(capped)).toThrow('applies it to the WHOLE walk, not per iteration');
+
+    const ordered = walkWith('sortWalk', (self) => sortRel({ id: relId('s'), input: self, channels, type: { cols: oneCol }, terms: [{ expr: col(self.id, 'id'), dir: 'asc' }] }));
+    expect(() => check(ordered)).toThrow('applies it to the WHOLE walk, not per iteration');
+  });
+
+  // The OTHER direction, and it is the one that would have blocked Phase 3: the barrier laws are
+  // laws of the recursive SELECT, not of every SELECT beneath it. Measured legal on bun:sqlite —
+  // a correlated scalar carrying COUNT(*) inside a recursive term runs and returns the right
+  // per-row value. `flatten` (§4.2) decorrelates into exactly this shape, per P2, so a law that
+  // fired inside a subquery would refuse the shapes Phase 3 exists to produce.
+  test('admits an aggregate inside a CORRELATED SUBQUERY in a recursive term (P2)', () => {
+    const oneCol = [{ name: 'id', type: 'int', nullable: false }] as const;
+    const seed = valuesRel({ id: relId('seed'), rows: [[lit(1, 'int')]], channels, type: { cols: oneCol } });
+    const recursive = recursiveRel({ id: relId('aggSubWalk'), name: 'aggSubWalk', cols: ['id'], seed, channels, type: { cols: oneCol },
+      step: (self) => {
+        const inner = scanRel({ id: relId('n'), table: 'nodes', alias: 'n', channels, type: { cols: [{ name: 'id', type: 'int', nullable: false }] } });
+        const counted = aggregateRel({ id: relId('c'), input: inner, channels, type: { cols: [{ name: 'n', type: 'int', nullable: false }] },
+          groupBy: [], aggs: [['n', { kind: 'agg', fn: 'count', args: [] }]] });
+        return projectRel({ id: relId('p'), input: self, channels, type: { cols: oneCol },
+          exprs: [['id', { kind: 'scalar', plan: counted }]] });
+      },
+    });
+    expect(() => check(recursive)).not.toThrow();
   });
 
   test('places named dependencies beside a recursive CTE', () => {

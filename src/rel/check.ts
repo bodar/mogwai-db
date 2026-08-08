@@ -97,26 +97,68 @@ export function bindCount(plan: Rel | Stmt): number {
 }
 
 export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt> = new Map()): void {
-  /** SQLite's recursive-term law is positional, not merely a reference count. */
-  const recursiveTerm = (term: Rel, name: string): { selfRefs: number; aggregate: boolean; window: boolean } => {
+  /**
+   * SQLite's recursive-term laws, and they have TWO different scopes — conflating them was a real
+   * defect in both directions. Each row below is measured on bun:sqlite 3.53.0, not reasoned from
+   * the docs (whose "must not appear anywhere else" is stricter than the engine, per P2).
+   *
+   * **The BARRIER laws apply to the recursive SELECT ITSELF and stop at a subquery boundary.** A
+   * nested SELECT is a different SELECT and the engine treats it as one:
+   *
+   * | in the recursive term proper | in a correlated subquery inside it |
+   * |---|---|
+   * | aggregate → `recursive aggregate queries not supported` | aggregate → **legal** |
+   * | window → refused | window → **legal** |
+   * | `DISTINCT` → accepted and **INERT** (duplicates survive) | its own SELECT's, honoured |
+   * | `LIMIT` → accepted as a **WHOLE-CTE cap** | its own SELECT's, honoured |
+   * | `ORDER BY` → accepted, whole-CTE | its own SELECT's, honoured |
+   *
+   * ⚠️ **The right column is why this walk must NOT descend.** `flatten` (§4.2) decorrelates into
+   * exactly these correlated scalars — P2 lists them as legal-but-refused-today — so a law that
+   * fires inside one would refuse the shapes Phase 3 is built to produce. Refusing a legal input to
+   * keep a check simple is the failure mode the root CLAUDE.md names by hand.
+   *
+   * ⚠️ **`Distinct`/`Limit`/`Sort` are refused here even though SQLite ACCEPTS them, and that is the
+   * point** (P3). They are silently not what an author writing them means: a `repeat(…dedup())` body
+   * reads as a per-iteration barrier and compiles to an inert keyword, and a `LIMIT` inside a body
+   * caps the WHOLE walk rather than each step. No per-iteration barrier is expressible in a
+   * recursive term in ANY lowering, so the only correct answer is a clear refusal — an accepted
+   * wrong answer is the one outcome no instrument in this repo can see.
+   *
+   * The SELF-REFERENCE count keeps the descending walk, because P2 measured that a correlated scalar
+   * subquery MAY reference the walk's alias — so a reference inside one is a real reference and must
+   * count toward "exactly once".
+   */
+  const BARRIER_IN_TERM: Partial<Record<RelKind, string>> = {
+    aggregate: 'SQLite forbids aggregate queries in a recursive term',
+    window: 'SQLite forbids window functions in a recursive term',
+    distinct: 'SQLite ACCEPTS DISTINCT in a recursive term and silently ignores it — no per-iteration dedup exists (P3); dedup outside the walk',
+    limit: 'SQLite ACCEPTS LIMIT in a recursive term and applies it to the WHOLE walk, not per iteration (P3); cap outside the walk',
+    sort: 'SQLite ACCEPTS ORDER BY in a recursive term and applies it to the WHOLE walk, not per iteration (P3); order outside the walk',
+  };
+  const recursiveTerm = (term: Rel, name: string): { selfRefs: number; barrier?: string } => {
     let selfRefs = 0;
-    let aggregate = false;
-    let window = false;
-    const expression = (e: Expr): void => {
-      if (e.kind === 'agg') aggregate = true;
-      if (e.kind === 'window-expr') window = true;
-      exprRels(e).forEach(relation);
-      exprChildren(e).forEach(expression);
+    let barrier: string | undefined;
+    const refuse = (kind: RelKind): void => { barrier ??= BARRIER_IN_TERM[kind]; };
+    /** The term's OWN relational spine — through relational children only, never into a subplan. */
+    // Node kinds only: an `Agg` is legal nowhere but `Aggregate.aggs` and a `WindowExpr` nowhere but
+    // `Window.specs` (checked in `checkExpr`), so the two node kinds ARE the two expression forms and
+    // scanning expressions here would be the same law spelled twice.
+    const spine = (r: Rel): void => {
+      if (r.kind === 'self-ref') return;
+      refuse(r.kind);
+      relChildren(r).forEach(spine);
     };
-    const relation = (r: Rel): void => {
+    /** Self-references, wherever they are — including inside a correlated subplan (P2). */
+    const expression = (e: Expr): void => { exprRels(e).forEach(references); exprChildren(e).forEach(expression); };
+    const references = (r: Rel): void => {
       if (r.kind === 'self-ref') { if (r.name === name) selfRefs++; return; }
-      if (r.kind === 'aggregate') aggregate = true;
-      if (r.kind === 'window') window = true;
       relExprs(r).forEach(expression);
-      relChildren(r).forEach(relation);
+      relChildren(r).forEach(references);
     };
-    relation(term);
-    return { selfRefs, aggregate, window };
+    spine(term);
+    references(term);
+    return { selfRefs, barrier };
   };
   const topLevelSelf = (term: Rel, name: string): boolean => {
     if (term.kind === 'self-ref') return term.name === name;
@@ -246,8 +288,7 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
       const step = recursiveStep(node);
       const term = recursiveTerm(step, node.name);
       if (term.selfRefs !== 1) throw new Error(`RelIR: Recursive step must reference '${node.name}' exactly once (found ${term.selfRefs})`);
-      if (term.aggregate) throw new Error('RelIR: SQLite forbids aggregate queries in a recursive term');
-      if (term.window) throw new Error('RelIR: SQLite forbids window functions in a recursive term');
+      if (term.barrier) throw new Error(`RelIR: ${term.barrier}`);
       if (!topLevelSelf(step, node.name)) throw new Error(`RelIR: Recursive step must reference '${node.name}' at the top level of FROM; run flatten first`);
       if (!sameColumns(node.seed.type.cols, step.type.cols)) throw new Error('RelIR: Recursive seed and step types must be identical');
     },
