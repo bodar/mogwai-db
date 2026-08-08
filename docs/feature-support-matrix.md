@@ -3,7 +3,7 @@
 What you can rely on. Each step gets one mark based on how much of it works and how
 freely it composes — a ✅ step works **anywhere in a traversal**, however deeply nested,
 not just at the top. Notes call out **only the cases that don't work yet**; if a row has
-no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,763<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
+no note, the whole step works. **L3 conformance: <!-- L3:passing -->1,756<!-- /L3:passing --> · corpus parse+chain: 2298/2298.**
 
 | Mark | Meaning |
 |---|---|
@@ -85,7 +85,7 @@ back to a (correct, unindexed) `LIKE` scan — never fail-closed. `regex` is a p
 | Step | | Notes |
 |---|:--:|---|
 | `values(k…)`, `id()`, `label()`, `count()` | ✅ | ids frame as `COALESCE(uid,id)` |
-| `labels()` | ✅ | `label()`'s FLAT-MAP twin (`LabelsStep`): one traverser per label for a vertex, ordered by label id so its first entry is `label()`'s pick; for an EDGE the single label, since edge label cardinality is fixed at one. A vertex carrying NO labels (`LabelCardinality.ZERO_OR_MORE`) contributes no rows |
+| `labels()` | ✅ | `label()`'s FLAT-MAP twin (`LabelsStep`): one traverser per label for a vertex, ordered by label id so its first entry is `label()`'s pick; for an EDGE the single label, since edge label cardinality is fixed at one. A vertex carrying NO labels — which a bare `g.addV()` produces — contributes no rows |
 | `valueMap`, `elementMap` | ✅ | each value framed by its stored type; re-enterable as a per-element map (`select(Column.keys/values)`, `count()`, `is(typeOf(MAP))`, and `valueMap().unfold()` → a per-entry Map.Entry stream, incl. `map(__.select(keys/values))`, compose). ❌ `elementMap().unfold()` re-entry; heterogeneous element-value maps |
 | `properties(k…)` [`.key`/`.value`/`.element`/`.id`/`.label`/`.count`] | ✅ | full property stream with owner/key/value/meta, all re-enterable; `dedup()` keeps VertexProperty identity (`vpid`) and edge key/value identity; `dedup().by(value)` deduplicates property values; `order()` supports natural order, `by(T.key)`, `by(T.value)`, direction-only `by(asc/desc)`, and one scalar traversal `by(__.value())`/`by(__.element().values(k))`, with typed value sorting and stable property identity ties. ❌ nested property order after `as()`/path tracking; multi-term/traversal-valued `by()` modulators; fan-out traversal ordering beyond first emitted value |
 | `select('a')`, multi-`select`, `project(…)` | ✅ | single-label select → scalar/element/property/typed-list; a single-label select also composes INSIDE a child body at any depth (`map`/`local`/`flatMap`, `where`/`and`/`or`, every `by()` host, branch arms) — the label may be bound anywhere up the chain or earlier in the same body, and an unbound one drops the traverser rather than erroring, exactly as at root; property aliases re-enter through `select().value()`/`key()`/`element()` and project `T.id`/`T.key`/`T.value`; property aliases support `Pop.all` and statically multi-bound `Pop.mixed` as re-enterable property lists; multi-`select`/`project` → per-traverser record whose fields each re-enter; `limit`/`range`/`skip`/`tail` with `Scope.local` slice fields; `project(…)` over a scalar parent. ❌ dynamic mixed-shape/mixed-depth histories, property aliases in path tracking, and property aliases with arbitrary `by()` traversals |
@@ -262,3 +262,4 @@ each staying one SQL statement.
 | OLAP / GraphComputer | OLTP-only (small per-tenant graphs) |
 | Multi-request `g.tx()` | needs DO session state (P5 stretch) |
 | TextP regex | platform wall — no SQLite `regexp()` UDF, DO blocks extensions |
+| **Single-label graphs** | **A vertex carries a SET of labels, always.** That is the property graph everyone else means (a Neo4j node holds a set; a relationship holds exactly one type, which is why an EDGE label stays singular here too), and exactly-one-vertex-label is the TinkerPop 3 constraint v4's `LabelCardinality` exists to LIFT. So `addLabel`/`dropLabel`/`dropLabels` are always legal on a vertex, a bare `g.addV()` carries NO label (`Labels.feature` `g_addV_labels`), and the seven `*_single_label_graph` conformance scenarios assert a refusal we do not have — excluded by name in `test/L3-conformance/tags.ts`. **Rendering is separate**: `elementMap()`/`valueMap(true)` still show ONE label unless a traversal asks with `g.with("multilabel")`, which is the reference's own default |

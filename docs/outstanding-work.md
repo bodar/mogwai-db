@@ -505,17 +505,19 @@ of gravity is ceiling, not correctness.
     needing the IN/OUT direction tokens).
     → [multi-label-elements](./archive/2026-07-30-multi-label-elements-plan.md)
 
-19b. **No provider can declare a multi-label DEFAULT, so `@MultiLabelDefault` is untestable for
-    everyone — an upstream gap and a good fork contribution.** All three GLVs skip its 10 scenarios.
-    Verified in `gremlin-core`: `TraversalHelper.isMultilabelEnabled` reads the source-level `with()`
-    option and nothing else (`.orElse(false)`), so the reference default is ALWAYS single-label whatever
-    a graph's `LabelCardinality` says, and no knob exists. **We are apparently that provider** — our
-    `labelRegime` falls back to the declared cardinality, a deliberate divergence recorded at
-    `src/api.ts`. A second symptom makes the declaration *unsatisfiable*: three untagged scenarios
-    assert a BARE string `T.label`, so a blanket multi-label default forfeits them by construction —
-    which is why we derive the regime from the graph instead. Raise as an ISSUE (a `gremlin-core` API
-    addition, not a patch); precedent `apache/tinkerpop#3511` came from here and merged.
-    → `patches/upstream/tinkerpop-03-multilabel-default-untestable.md`. *Medium — 10 scenarios for everyone.*
+19b. ~~**No provider can declare a multi-label DEFAULT**~~ — **CLOSED, and by withdrawing the claim
+    rather than by landing it.** The premise was that we ARE the provider `@MultiLabelDefault`
+    describes, because `labelRegime` fell back to the graph's declared cardinality. Making mogwai-db
+    multi-label ONLY removed the thing it fell back to: every vertex now holds a label set, so
+    "the cardinality decides" would render `s[…]` for everyone — a wire-shape change for every
+    `elementMap()` user, to express a PRESENTATION choice. Storage and rendering are split instead,
+    and `labelRegime` defaults to `single`, which is the REFERENCE's own answer
+    (`TraversalHelper.isMultilabelEnabled` reads the `with()` option and nothing else,
+    `.orElse(false)`). **We now AGREE with upstream where we used to diverge**, so there is no gap
+    to raise: the 10 scenarios remain untestable for everyone, and that is upstream's to change.
+    `test/L4-addendum/multilabel-default.feature` keeps every assertion, asked for explicitly with
+    `g.with("multilabel")`. `patches/upstream/tinkerpop-03-multilabel-default-untestable.md` is
+    superseded.
 
 24. **`tree()` — 14 scenarios, the largest unimplemented-step bucket.** The won't-do premise (the JS GLV
     stubs `DataType.TREE`) is refuted and the matrix now says so: the client at the pinned gitlink ships
