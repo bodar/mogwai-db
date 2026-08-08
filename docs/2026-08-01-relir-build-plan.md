@@ -1206,8 +1206,21 @@ more capable, because collapsing would discard an arm's `datetime` because its S
 That discard is precisely what §6·7 exists to end, so reproducing it at the merge would have been the
 same bug one layer along. The remaining two sites (the inject source, the reducer) are unchanged.
 
+**✅ `union()` in SOURCE position** landed beside it, and it is a source ARM rather than a widening of
+`unionArms`: that one lowers each body against the CURRENT traverser, and a source union has none —
+each arm is a whole traversal re-entering `lowerChain` through the seam's rooted answer. Everything
+after the arms exist is shared, and `mergeArms` taking a `Channels` rather than an input RELATION is
+what makes it parent-agnostic in the types as well as the comment (it only ever wanted the channels).
+
+**A SILENT NARROWING fell out of it, and it is §6·6 at a second seam.** `rootedRead` re-entered
+`lowerChain` with five settled values and dropped three — `services`, `sack` and
+`sideEffectReducers` — so a rooted arm naming a service was handed LESS than the chain around it and
+declined for want of a fact the compile already held. Same class as `servicesNamedBy` scanning only
+the top-level chain and as `rel-blockers` not passing the sack seed: **whenever a seam re-enters the
+fold, check what it HANDS OVER before concluding what the algebra cannot express.**
+
 What still declines is an arm disagreeing on SHAPE — the VARIANT merge, which is the rest of the
-branch family (63, now the top of the board) and its own substrate.
+branch family (55) and its own substrate.
 
 Then the families whose kernels Phase 0 extracted and whose only remaining legacy content is emission —
 `math`/`format` were the proof case (§6·4) — then the scalar-transform tail, the property shape
