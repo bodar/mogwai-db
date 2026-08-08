@@ -80,6 +80,19 @@ export interface Binding {
 export interface Guard {
   readonly message: string;
   readonly raiseWhen: 'rows' | 'empty';
+  /**
+   * A column of the guard's own relation whose FIRST row is appended to `message`.
+   *
+   * It exists because some of the reference's sentences NAME THE OFFENDING VALUE — *"Label can not be
+   * a hidden key: ~x"* — and a value that only exists at run time cannot be interpolated when the
+   * message is written. Where the value IS a compile-time constant the message still carries it
+   * outright (`elementIdGuard` spells `id already exists: 7` directly), so this is for the runtime
+   * case alone and stays absent everywhere else.
+   *
+   * `'rows'` guards only: an `'empty'` guard has no row to read the value from, which is why this is
+   * a column name rather than an expression.
+   */
+  readonly valueColumn?: string;
 }
 export interface Plan { readonly bindings: readonly Binding[]; readonly result: Rel; }
 

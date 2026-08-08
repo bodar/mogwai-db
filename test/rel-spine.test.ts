@@ -690,6 +690,49 @@ describe('the RelIR spine', () => {
       .toThrow('step not implemented after properties(): drop()');
   });
 
+  test('a RUNTIME label resolves through the seam, and its validity is a GUARD not a decline', () => {
+    // `ElementHelper.validateLabel` is three PURE PREDICATES over the value — null, empty, hidden — so
+    // a label nobody sees until execution is still checkable, in ONE statement over the whole set,
+    // before anything is written. That is better than evaluating the body per row and validating the
+    // first bad one reached, which is why this is a guard rather than "we cannot know, so decline".
+    for (const gremlin of [
+      'g.addV(__.V().has("name","marko").values("name"))',
+      'g.addV(__.V().has("name","marko").properties("name").key())',
+    ]) expect(compile(gremlin, {}, { spine: 'rel' }).kind, gremlin).toBe('program');
+
+    const store = () => {
+      const s = new GraphStore(new BunSqlite(':memory:'));
+      for (const seed of MODERN_SEED) exec(s, undefined, undefined, 'rel').buffers(seed, {});
+      return s;
+    };
+    const write = (s: GraphStore, gremlin: string) => exec(s, undefined, undefined, 'rel').buffers(gremlin, {});
+
+    const created = store();
+    write(created, 'g.addV(__.V().has("name","marko").values("name"))');
+    expect(created.query(
+      'SELECT l.name FROM nodes n JOIN vertex_labels vl ON vl.node = n.id JOIN labels l ON l.id = vl.label WHERE n.id > 6', []))
+      .toEqual([{ name: 'marko' }]);
+
+    // EVERY MESSAGE IS THE REFERENCE'S — never the other spine's, which is a route with an end date:
+    // a borrowed string dies with the file it was borrowed from. `Element.java:212-222` owns the three
+    // `Label can not be …`; `TraversalUtil.java:41-53` owns the absent one (stable prefix, since its
+    // tail interpolates Java object descriptions nothing else can reproduce).
+    //
+    // **AN ABSENT BODY AND A NULL VALUE ARE DIFFERENT ERRORS AND ARE DISTINGUISHED.** A scalar subquery
+    // collapses them to one NULL; `EXISTS` over the same relation does not. Getting this wrong would be
+    // invisible — one plausible message, always — since no corpus scenario asserts either string.
+    for (const [gremlin, message] of [
+      ['g.addV(__.V().has("name","zzz").values("name"))', 'The provided traverser does not map to a value'],
+      ['g.addV(__.V().has("name","marko").values("nokey").fold().unfold())', 'The provided traverser does not map to a value'],
+      ['g.addV(__.inject(null))', 'Label can not be null'],
+      ['g.addV(__.inject(""))', 'Label can not be empty'],
+      ['g.addV(__.inject("~h"))', 'Label can not be a hidden key: ~h'],
+    ] as const) {
+      expect(compile(gremlin, {}, { spine: 'rel' }).kind, gremlin).toBe('program');
+      expect(() => write(store(), gremlin), gremlin).toThrow(message);
+    }
+  });
+
   test('the hand-authored modern seed compiles WHOLE on RelIR, byte-identical to legacy', () => {
     // The plan named these seeds as the last thing pinning legacy writes for corpus LOADING (§ Phase 1):
     // the reference graphs are GraphSON-bulk-loaded, so `MODERN_SEED` and its crew sibling are the two

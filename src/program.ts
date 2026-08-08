@@ -48,7 +48,12 @@ export function runProgram(store: RowSource, program: Plan, tail?: Emitted): rea
       // that cannot. The rows are already in hand; the test is their count.
       const guard = declared.get(step.binding)?.guard;
       if (guard && (guard.raiseWhen === 'rows' ? rows.length > 0 : rows.length === 0))
-        throw new Error(guard.message);
+        // `valueColumn` appends the OFFENDING VALUE, for the reference sentences that name it. Only a
+        // `'rows'` guard can have one — an `'empty'` guard has no row to read it from — and the append
+        // is the first row's, which is the row the message is about.
+        throw new Error(guard.valueColumn !== undefined && rows.length
+          ? `${guard.message}${(rows[0] as Record<string, unknown>)[guard.valueColumn]}`
+          : guard.message);
     }
     if (step.result) result = rows;
   }
