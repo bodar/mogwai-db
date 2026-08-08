@@ -670,35 +670,34 @@ builds `typedNode(storedValue(…), vtype)` and `typedNode` applies `storedValue
 property-keyed group emits the collection CASE nested inside itself. `json(json(x))` is idempotent, so it
 is bytes and not an answer — but it is bytes in the hottest key expression there is.
 
-🚧 **THE NEXT INCREMENT IN THIS FAMILY IS THE GROUP-SCOPED REDUCER, and it is the biggest single thing
-left on the board** (~25 of the 30 remaining `group*` blockers): `group().by(k).by(__.bothE().values('weight')
-.sum())`, `by(__.count())`, `by(__.out().fold())`, `by(__.values('name').order().fold())`. `groupBarrier`
-declines it in one place and states the reason — the generic child expression reduces PER PARENT, which
-composes with neither the framing (it would produce `[n]`) nor every reducer (`mean` needs the complete
-child-row domain, not an average of per-parent means). The design, worked out but NOT built:
-
-- **It needs a FOURTH child-seam answer** (§6·6 has three — correlated scalar, correlated predicate, rooted
-  relation): the body's ROWS over the host STREAM, so the value side is a JOIN the grouping aggregates over
-  rather than a scalar subquery per row. A CORRELATED relation cannot serve — SQLite has no `LATERAL`, so
-  the correlation has to become a join `ON`, which is exactly what the ordinary fold's movements already
-  build from an input relation.
-- **THE GROUP KEY SURVIVES THE JOIN AS THE `origin` CHANNEL, and that role is already modelled and unbuilt**
-  — `src/channels.ts` gives it a merge policy (`identical`), a barrier policy (`empty`) and a `ROLE_ORDER`
-  slot, and nothing in `src/compiler/rel/` mints one. This is `sack`'s situation exactly one increment
-  earlier: the channel exists, the plumbing does not. Mint it as the PARENT ROWID on the group's input, lower
-  the pre-barrier body through the ordinary fold (movements carry channels by contract, §3.5, so no
-  per-movement change), then re-project the key per origin in the outer aggregate.
-- 🔴 **THE EMPTY POOL IS PER-REDUCER, and it decides INNER versus LEFT join.** A parent whose body produced
-  no rows vanishes from an inner join and takes its key with it — right for `sum()` (`SumGlobalStep` leaves
-  `NON_EMITTING_SEED` in place and `ReducingBarrierStep` emits nothing) and WRONG for `count()`
-  (`CountGlobalStep` seeds 0, so the key survives with 0). `scalarChild` already documents that exact
-  distinction for the per-parent case; the group-scoped arm has to honour it at the JOIN.
-- A SCALAR host is out of reach at first: `origin` is typed `int`, and a value stream has no rowid to name
-  the parent by.
-
-The same fourth answer is what an `order().by(<reducer>)`, a collection's value reducer and the per-origin
-reducer after a branch (an L3 deferral bucket in its own right) all want, which is why it is substrate rather
-than a group feature.
+- ⚠️ **THE GROUP-SCOPED REDUCER IS A POOL, AND IT MAY NOT BE A DECOMPOSITION TABLE.** `GroupStep` applies
+  the value traversal's PRE-BARRIER part per traverser and lets the BARRIER reduce what EVERY member of a
+  key contributed (`Grouping.determineBarrierStep`). `sum`/`min`/`max` happen to agree with
+  per-parent-then-outer-reduce and `mean` does not, and a rule right for three reducers and wrong for the
+  fourth is the defect class the decline contract exists to prevent.
+- ⚠️ **THE `origin` CHANNEL IS MINTED, and it is the mechanism** — `src/channels.ts` had modelled the role
+  since the channel core landed and nothing built it (`sack`'s position one increment earlier). A JOIN keeps
+  CHANNELS and drops payload (§3.5), so one `int` naming the parent rides through every hop with NO
+  per-step change and the key is re-read off it. A correlated relation could not serve: SQLite has no
+  `LATERAL`, so the correlation becomes the join's `ON` — which the ordinary fold's movements already build.
+  `ChildSeam`'s FOURTH answer (`rows`) is what an `order().by(<reducer>)`, a collection's value reducer and
+  the per-origin reducer after a branch all want too.
+- 🔴 **TWO CORRECT RULES MADE A WRONG ANSWER, and only the byte differential saw it.** The sub-fold was
+  handed `NO_ALIASES`, so a body reading a label found none — and since an unresolvable `select()` had just
+  become the EMPTY RESULT, it pooled ZERO rows and answered an empty map instead of declining. §6·6's "check
+  what a seam HANDS OVER" at its sharpest: neither rule was wrong, and their composition was.
+- 🔴 **SQLite WRITES A REAL INTO JSON WITH 15 SIGNIFICANT DIGITS**, so every JSONB-carried collection loses
+  an inexact double — `Mean.feature:70` wants `d[0.3333333333333333].d` and a blob carries
+  `0.333333333333333`. **BOTH SPINES ALREADY HAVE THIS** (`g.inject(1).math("1/3").fold()` is lossy on
+  each), which is why it went unseen; it becomes a DIVERGENCE only where one spine computes in a ROW and the
+  other into the blob, which is why the group-scoped `mean` declines. The fix is to carry an inexact real as
+  decimal TEXT under its tag — the carriage the exact tail already has for a big long — and it is worth
+  doing for its own sake, not for the group.
+- 🚧 **The empty pool is PER-REDUCER and decides INNER versus LEFT join**, which is why `count()` with a
+  non-empty body still declines: `CountGlobalStep` seeds 0 so a member whose body produced nothing must
+  still count 0 and keep its key, where `SumGlobalStep` leaves `NON_EMITTING_SEED` and the key goes with the
+  traverser. A SCALAR host also stays out of reach — `origin` is typed `int` and a value stream has no rowid
+  to name its parent by, which is a channels-core change.
 
 🚧 **What else the MAP family owes:** the SELECTIVE token subsets (`with(tokens, ids)`, which
 `absorbValueMapWith` deliberately leaves in place to fail closed) and the `by(__.unfold())` that pairs with
