@@ -377,7 +377,7 @@ describe('repeat / path SQL', () => {
     // whole path drops (TinkerPop default, no ProductiveByStrategy).
     expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=x0n.id AND key=? ORDER BY id LIMIT 1) is not null AND");
     expect(p.shape).toEqual({ kind: 'path', positions: [
-      { render: 'value', prefix: 'x0' }, { render: 'value', prefix: 'x1' }, { render: 'value', prefix: 'x2' },
+      { render: 'value', prefix: 'x0', optional: false }, { render: 'value', prefix: 'x1', optional: false }, { render: 'value', prefix: 'x2', optional: false },
     ] });
     if (!relirOff) {
       const rel = read('g.V(1).out().out().path().by("name").by("age")', { spine: 'rel' });
@@ -443,8 +443,8 @@ describe('repeat / path SQL', () => {
     // path keeps only those two positions, framed by(name).
     const ft = read('g.V().as("a").out().as("b").out().as("c").path().from("b").to("c").by("name")');
     expect(ft.shape).toEqual({ kind: 'path', positions: [
-      { render: 'value', prefix: 'x0' },
-      { render: 'value', prefix: 'x1' },
+      { render: 'value', prefix: 'x0', optional: false },
+      { render: 'value', prefix: 'x1', optional: false },
     ] });
     // from() only → [1..end]; to() only → [0..that label].
     expect((read('g.V().as("a").out().as("b").out().as("c").path().from("b")').shape as any).positions).toHaveLength(2);
@@ -461,7 +461,7 @@ describe('repeat / path SQL', () => {
   test('path().by(T.token) and path().by(__.traversal): per-position scalar', () => {
     // by(T.label)/by(T.id) project the token inline; both are value positions.
     const lbl = read('g.V().out().path().by(T.label)', { spine: 'legacy' });
-    expect(lbl.shape).toEqual({ kind: 'path', positions: [{ render: 'value', prefix: 'x0' }, { render: 'value', prefix: 'x1' }] });
+    expect(lbl.shape).toEqual({ kind: 'path', positions: [{ render: 'value', prefix: 'x0', optional: false }, { render: 'value', prefix: 'x1', optional: false }] });
     expect(read('g.V(1).out().path().by(T.id)', { spine: 'legacy' }).sql).toContain('COALESCE');
     if (!relirOff)
       expect(read('g.V().out().path().by(T.label)', { spine: 'rel' }).shape)
@@ -472,14 +472,14 @@ describe('repeat / path SQL', () => {
     expect(read('g.V().out().out().path().by(__.values("name").toUpper())').sql.toLowerCase()).toContain('upper(');
     // by(__.<movement>.count()): a per-position scalar child → one value column per position.
     const cnt = read('g.V().out().path().by(__.out().count())');
-    expect(cnt.shape).toEqual({ kind: 'path', positions: [{ render: 'value', prefix: 'x0' }, { render: 'value', prefix: 'x1' }] });
+    expect(cnt.shape).toEqual({ kind: 'path', positions: [{ render: 'value', prefix: 'x0', optional: false }, { render: 'value', prefix: 'x1', optional: false }] });
     // by(__.choose(...))/by(__.coalesce(...)): a bare 1-to-1 branch at the position lowers
     // through the element-parent scalar-branch compilers (one value per position, no first-
     // collapse needed). Both stay value positions.
     expect(read('g.V().out().path().by(__.choose(__.hasLabel("person"), __.constant("P"), __.constant("S")))').shape)
-      .toEqual({ kind: 'path', positions: [{ render: 'value', prefix: 'x0' }, { render: 'value', prefix: 'x1' }] });
+      .toEqual({ kind: 'path', positions: [{ render: 'value', prefix: 'x0', optional: false }, { render: 'value', prefix: 'x1', optional: false }] });
     expect(read('g.V().out().path().by(__.coalesce(__.values("lang"), __.constant("none")))').shape)
-      .toEqual({ kind: 'path', positions: [{ render: 'value', prefix: 'x0' }, { render: 'value', prefix: 'x1' }] });
+      .toEqual({ kind: 'path', positions: [{ render: 'value', prefix: 'x0', optional: false }, { render: 'value', prefix: 'x1', optional: false }] });
     // a by(traversal) shape the scalar child seam can't classify (a bare group barrier) fails closed.
     expect(() => compile('g.V().out().path().by(__.groupCount())', {})).toThrow('path().by(traversal)');
     // union() at a position FANS OUT (N values); a position holds one → fail closed (take-first
@@ -527,7 +527,7 @@ describe('repeat / path SQL', () => {
     expect(b.sql).toContain('AS x2_at');
     expect(b.sql).toContain('p.p2 IS NULL OR');
     expect((b.shape as any).positions[2]).toEqual({ render: 'value', prefix: 'x2', optional: true });
-    expect((b.shape as any).positions[0]).toEqual({ render: 'value', prefix: 'x0' }); // p0 is never padded
+    expect((b.shape as any).positions[0]).toEqual({ render: 'value', prefix: 'x0', optional: false }); // p0 is never padded
     // ---- still fail-closed ----
     // conflicting element kinds at one position (edge vs vertex) → deferred (needs tagged array).
     expect(() => compile('g.V(1).union(__.outE().inV(), __.out()).path()', {}, { spine: 'legacy' })).toThrow('conflicting element kinds');
@@ -546,7 +546,7 @@ describe('repeat / path SQL', () => {
     expect(p.sql).toContain('jsonb_array(id) AS path');                  // seed
     expect(p.sql).toContain("jsonb_insert(c1.path, '$[#]', e.tgt) AS path"); // append per hop
     expect(p.sql).toContain('json_each(pp.path) je JOIN nodes n ON n.id=je.value'); // explode + materialize
-    expect(p.shape).toEqual({ kind: 'pathGrouped', elem: 'vertex' });
+    expect(p.shape).toEqual({ kind: 'pathGrouped', elem: 'vertex', byKey: false });
   });
 
   test('recursive path().by(key) projects each position to a scalar (not the whole element)', () => {
@@ -630,7 +630,7 @@ describe('repeat / path SQL', () => {
     const p = read('g.V(1).repeat(__.out()).until(__.has("name","ripple")).path()');
     expect(p.sql).toContain('jsonb_insert');
     expect(p.sql).toContain('AS done');
-    expect(p.shape).toEqual({ kind: 'pathGrouped', elem: 'vertex' });
+    expect(p.shape).toEqual({ kind: 'pathGrouped', elem: 'vertex', byKey: false });
   });
 
   test('until(__.out()) correlates the EXISTS on the walk row via the FROM boundary', () => {

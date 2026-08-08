@@ -28,7 +28,7 @@ export type ListOf =
   // `productiveNull` is orthogonal to the type and stays its own field: it says whether a NULL
   // reduction over these members is a REAL result (`ProductiveByStrategy`) or the framer's signal
   // to emit nothing. Use `withMemberType` to change one without dropping the other.
-  | { kind: 'scalar'; type: ScalarType; productiveNull?: boolean }
+  | { kind: 'scalar'; type: ScalarType; productiveNull: boolean }
   | { kind: 'list'; of: ListOf };
 
 // How a map stream's key/value column is shaped — kept at the render boundary (like
@@ -47,7 +47,7 @@ export type MapOf =
 // select(labels…)/project(keys…): a Map per row. Each entry names its result
 // key plus the SQL column prefix carrying its typed payload.
 export type MapEntry =
-  | { key: string; prefix: string; sub: 'vertex' | 'edge'; nullable?: boolean }
+  | { key: string; prefix: string; sub: 'vertex' | 'edge'; nullable: boolean }
   // A record/map scalar has the same total type channel as ScalarStream. Its per-row
   // member names the prefixed sibling column in the wide record relation.
   | { key: string; prefix: string; sub: 'value'; type: ScalarType }
@@ -69,7 +69,7 @@ export type GroupKey =
   // A perRow type names a SIBLING column (gkt) rather than a {t,v} envelope: the key is a
   // GROUP BY term (an envelope would group by JSON text), and a bare groupCount() never
   // becomes a MapStream, so there is no blob for it to ride inside.
-  | { kind: 'scalar'; productive?: boolean; type?: ScalarType }
+  | { kind: 'scalar'; productive: boolean; type: ScalarType }
   | { kind: 'element'; elem: ElemShape }                 // bare by() → the element itself, columns k_*
   | { kind: 'map'; parts: { key: string }[] };           // by(__.project(...)) → columns k0_,k1_,…
 export type GroupVal =
@@ -92,7 +92,7 @@ export type PathPos =
   // optional position carries a sibling `<prefix>_at` presence column (the raw position id) and
   // the handler omits the position when it is NULL. An element position needs no such column —
   // its own `_id` already answers it.
-  | { render: 'value'; prefix: string; optional?: true };
+  | { render: 'value'; prefix: string; optional: boolean };
 
 // A compile-time type tag on a scalar value stream — the value's GraphBinary type
 // is known from the producing step (a typed literal, or an as*() cast's target), NOT
@@ -142,7 +142,7 @@ export type ScalarType =
   // (`inject(9.99m)`, a bound big long/Duration) rather than a native REAL/INT (`count()`,
   // `asNumber(BIGDECIMAL)`). The two share a tag (`bigdecimal`/`long`) but not a storage class, so an
   // ordering comparison must cast a `text` subject to its numeric class and leave a native one alone.
-  | { kind: 'static'; type: ValueType; text?: boolean }   // a cast, a typed literal, count()→long
+  | { kind: 'static'; type: ValueType; text: boolean }   // a cast, a typed literal, count()→long
   | { kind: 'perRow'; carrier: TypeCarrier } // per-value types — the only heterogeneous-safe case
   | { kind: 'unknown' };                  // the JS-client seam; infer from the JS value at framing
 
@@ -165,8 +165,7 @@ export type TypeCarrier =
   | { kind: 'column'; name: string }      // a sibling column of the relation (the stored `vtype`)
   | { kind: 'envelope' };                 // a `{t,v}` node inside a JSON blob (a typed list member)
 
-export const STATIC = (type: ValueType, text = false): ScalarType =>
-  text ? { kind: 'static', type, text: true } : { kind: 'static', type };
+export const STATIC = (type: ValueType, text = false): ScalarType => ({ kind: 'static', type, text });
 
 /** Whether a static scalar is stored as decimal TEXT (an exact tail), so an ordering compare must cast it. */
 export const staticIsText = (t: ScalarType | undefined): boolean => t?.kind === 'static' && t.text === true;
@@ -237,12 +236,12 @@ export const perRowCols = (t: ScalarType | undefined): string[] => {
 
 /** A scalar-membered list whose members carry no tag — the type is whatever the storage class
  *  says at the wire. The old `{ kind: 'scalar' }` with every optional absent. */
-export const SCALAR_MEMBERS: ListOf = { kind: 'scalar', type: UNKNOWN };
+export const SCALAR_MEMBERS: ListOf = { kind: 'scalar', type: UNKNOWN, productiveNull: false };
 
 /** A scalar-membered list whose members are self-describing `{t,v}` nodes. The old `TYPED_LIST`
  *  constant — but reached through `withMemberType` wherever an existing list is being re-tagged,
  *  because assigning the constant is exactly how `productiveNull` used to be lost. */
-export const TYPED_MEMBERS: ListOf = { kind: 'scalar', type: PER_ROW_ENVELOPE };
+export const TYPED_MEMBERS: ListOf = { kind: 'scalar', type: PER_ROW_ENVELOPE, productiveNull: false };
 
 /** Re-tag a list's members, PRESERVING everything the tag is not — the named preserving rebuild
  *  that makes "assign a constant `ListOf` and silently drop its other fields" unexpressible. A
@@ -284,8 +283,8 @@ export type Shape =
   | { kind: 'value'; type: ScalarType }
   // A per-row tag: null/scalar/vertex/edge/list. `arms` is the complete declared
   // framing vocabulary; `wholeResult` makes cap() wrap all framed rows in one List.
-  | { kind: 'variant'; arms: readonly VariantShapeArm[]; wholeResult?: true }
-  | { kind: 'scalar'; productiveNull?: boolean } // numeric reducer; productive NULL may be a real result
+  | { kind: 'variant'; arms: readonly VariantShapeArm[]; wholeResult: boolean }
+  | { kind: 'scalar'; productiveNull: boolean } // numeric reducer; productive NULL may be a real result
   | { kind: 'list'; elem: ElemShape | 'scalar'; as?: ValueType } // legacy row-fold; scalar items may carry a uniform type
   // One JSON list value per row. `items` is total: the former `as`/`typed`/`of`
   // flag bag made four encodings look like optional metadata and forced the framer
@@ -301,14 +300,14 @@ export type Shape =
   // `labelSet` says the `label` column holds a JSON ARRAY of names (the multi-label regime)
   // rather than one name. Carried on the shape because the SQL and the framer must agree, and the
   // regime is a per-traversal decision the framer cannot re-derive.
-  | { kind: 'valueMap'; keys: string[] | null; tokens: boolean; labelSet?: boolean }
-  | { kind: 'elementMap'; keys: string[] | null; labelSet?: boolean }
+  | { kind: 'valueMap'; keys: string[] | null; tokens: boolean; labelSet: boolean }
+  | { kind: 'elementMap'; keys: string[] | null; labelSet: boolean }
   | { kind: 'map'; entries: MapEntry[] }
   | { kind: 'mapValue' } // one whole map VALUE per row: a `map` JSONB column [[keyNode,valNode],…] with self-describing {t,v} scalar sides → one GraphBinary MAP (frameTypedNode)
   | { kind: 'mapEntry'; keyOf: MapOf; valOf: MapOf } // one Map.Entry per row (a MapStream unfold) → each frames as a size-1 GraphBinary MAP
   | { kind: 'group'; key: GroupKey; val: GroupVal }
   | { kind: 'path'; positions: PathPos[] }                 // linear: one row per path, per-position columns
-  | { kind: 'pathGrouped'; elem: ElemShape; byKey?: boolean } // recursive: N rows per path (pk, ord, element|value), grouped
+  | { kind: 'pathGrouped'; elem: ElemShape; byKey: boolean } // recursive: N rows per path (pk, ord, element|value), grouped
   | { kind: 'discard' };
 
 /** Which lowering produced a compile. There are two only while the RelIR migration runs, and

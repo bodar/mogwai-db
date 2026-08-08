@@ -162,9 +162,9 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // the rows. Legacy states `wholeResult` explicitly as undefined; RelIR omits the key, and the
     // framer reads `shape.wholeResult` either way.
     expect(read('g.V().union(__.values("name"), __.out())', { spine: 'legacy' }).shape)
-      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
+      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'vertex' }], wholeResult: false });
     const mixedU = read('g.V().union(__.values("name"), __.out())', { spine: 'rel' });
-    expect(mixedU.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }] });
+    expect(mixedU.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'vertex' }], wholeResult: false });
     expect(mixedU.sql).toContain('1 AS vk'); // scalar arm
     expect(mixedU.sql).toContain('2 AS vk'); // node arm
     // MIXED ELEMENT KINDS stay legacy's defer and are RelIR's ordinary variant: `vk` distinguishes a
@@ -173,7 +173,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // wire vocabulary can express, which is a route with an end date shedding one (§6·1).
     expect(() => compile('g.V().union(__.out(), __.outE())', {}, { spine: 'legacy' })).toThrow('different element kinds');
     expect(read('g.V().union(__.out(), __.outE())', { spine: 'rel' }).shape)
-      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }, { kind: 'edge' }] });
+      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'vertex' }, { kind: 'edge' }], wholeResult: false });
   });
 
   test('optional() → single-hop LEFT JOIN fast path; multi-hop via ordinal', () => {
@@ -206,7 +206,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
   test('optional non-total scalar child lowers to a scalar-or-element VariantStream', () => {
     const store = seededStore();
     const plan = read('g.V().optional(__.values("age"))');
-    expect(plan.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
+    expect(plan.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'vertex' }], wholeResult: false });
     const rows = run(store, 'g.V().optional(__.values("age"))');
     expect(rows.filter((r) => r.vk === 1).map((r) => r.v).sort((a, b) => a - b)).toEqual([27, 29, 32, 35]);
     // The variant's vertex arm carries the payload label form (a JSON array); the edge arm, whose
@@ -284,7 +284,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // limit/skip/range re-project the variant relation, slicing rows without touching
     // the per-row tag — the whole union (all arms) rides through the LIMIT/OFFSET.
     const lim = read(`${base}.limit(2)`);
-    expect(lim.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
+    expect(lim.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'vertex' }], wholeResult: false });
     expect(lim.sql).toContain('SELECT p.vk, p.v, p.rid, p.bulk, p.encounter FROM'); // full column re-projection (encounter seeded: union fan-out + limit)
     expect(lim.sql).toContain('LIMIT 2');
     expect(run(store, `${base}.limit(2)`).length).toBe(2);
@@ -320,7 +320,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // mixed element+scalar arms now merge as a dynamic-tag VariantStream (P4), gated
     // per input ordinal like the homogeneous coalesce.
     const mixedC = read('g.V().coalesce(__.out(), __.values("name"))');
-    expect(mixedC.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
+    expect(mixedC.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'vertex' }], wholeResult: false });
     expect(mixedC.sql).toContain('o0 NOT IN (SELECT o0 FROM'); // second arm gated
     expect(() => compile('g.V().coalesce(__.out(), __.outE())', {})).toThrow('different element kinds');
     // dedup now preserves both the branch ordinal and its inner child ordinal.
@@ -450,14 +450,14 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
       .toThrow('predicate form');
     // mixed element+scalar then/else now merge as a dynamic-tag VariantStream (P4)
     expect(read('g.V().choose(__.has("x"), __.out(), __.values("name"))', { spine: 'legacy' }).shape)
-      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
+      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'vertex' }], wholeResult: false });
     const mixedCh = read('g.V().choose(__.has("x"), __.out(), __.values("name"))', { spine: 'rel' });
-    expect(mixedCh.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }] });
+    expect(mixedCh.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'vertex' }], wholeResult: false });
     // mixed element kinds: legacy's defer, RelIR's ordinary variant (see the union test above)
     expect(() => compile('g.V().choose(__.has("x"), __.out(), __.outE())', {}, { spine: 'legacy' }))
       .toThrow('different element kinds');
     expect(read('g.V().choose(__.has("x"), __.out(), __.outE())', { spine: 'rel' }).shape)
-      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }, { kind: 'edge' }] });
+      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'vertex' }, { kind: 'edge' }], wholeResult: false });
     // as() before choose now threads the alias column through the gated arms + merge (Move B)
     const ca = read('g.V().as("a").choose(__.has("x"), __.out(), __.in()).select("a")', { spine: 'legacy' });
     expect(ca.sql).toContain('UNION ALL');

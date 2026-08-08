@@ -162,7 +162,7 @@ export function variantPayload(
       id: fresh('vw'), input: ordered, channels: [], type: typeOf(...payload.map(([column]) => column)),
       exprs: payload.map(([column, expr]) => [column.name, expr] as const),
     }),
-    shape: { kind: 'variant', arms: declaredArms },
+    shape: { kind: 'variant', arms: declaredArms, wholeResult: false },
   };
 }
 

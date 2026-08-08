@@ -53,7 +53,7 @@ export function materializeScalarRoot(stream: ScalarStream): Compiled {
   // frameValue(v,'long') were the same expression). Retiring the redundant `result` value itself
   // is a separate change: it still distinguishes a count from a 'number' reducer for column sets.
   const shape: Shape = stream.result === 'number'
-    ? { kind: 'scalar', productiveNull: stream.productiveNull }
+    ? { kind: 'scalar', productiveNull: !!stream.productiveNull }
     : { kind: 'value', type: stream.type };
   // A per-row stored vtype column (values() of a typed prop) rides alongside v so the
   // handler frames each row by its own type, not one compile-time tag.
@@ -75,7 +75,7 @@ export function materializeVariantRoot(stream: VariantStream): Compiled {
   if (stream.node) arms.push({ kind: 'vertex' });
   if (stream.edge) arms.push({ kind: 'edge' });
   if (stream.listOf) arms.push({ kind: 'list', of: stream.listOf });
-  const shape: Shape = { kind: 'variant', arms, wholeResult: stream.result === 'list' || undefined };
+  const shape: Shape = { kind: 'variant', arms, wholeResult: stream.result === 'list' };
   const cols: Expression[] = [v.c.vk, v.c.v];
   const joins: Expression[] = [];
   if (stream.node || stream.edge) {
@@ -241,7 +241,7 @@ export function materializePathRoot(stream: PathStream): Compiled {
   const order = rootOrder(stream, p);
   const shape: Shape = stream.layout.kind === 'linear'
     ? { kind: 'path', positions: [...stream.layout.positions] }
-    : { kind: 'pathGrouped', elem: stream.layout.elem, ...(stream.layout.byKey ? { byKey: true } : {}) };
+    : { kind: 'pathGrouped', elem: stream.layout.elem, byKey: !!stream.layout.byKey };
   return materializeRoot(stream.q, q`SELECT ${list(cols, ', ')} FROM ${p}${order}`, shape);
 }
 

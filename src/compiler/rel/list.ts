@@ -714,7 +714,7 @@ export function foldScalars(
         }],
       }]],
     }),
-    of: { kind: 'scalar', type: memberType, ...(opts.productiveNull ? { productiveNull: true } : {}) },
+    of: { kind: 'scalar', type: memberType, productiveNull: !!opts.productiveNull },
   };
 }
 

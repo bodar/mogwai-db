@@ -36,7 +36,7 @@ export const unifyLists = (arms: readonly ListStream[]): ListStream['of'] => {
     // on `long`-as-decimal-TEXT keep the flag that says so instead of both being flattened to a tag.
     const types = ofs.map((of) => memberTypeOf(of) ?? UNKNOWN);
     const agreed = types.every((t) => sameScalarType(t, types[0]!));
-    return { kind: 'scalar', type: agreed ? types[0]! : UNKNOWN };
+    return { kind: 'scalar', type: agreed ? types[0]! : UNKNOWN, productiveNull: false };
   }
   if (ofs.every((of) => of.kind === 'elem')) {
     const elems = ofs.map((of) => of.kind === 'elem' ? of.elem : undefined);

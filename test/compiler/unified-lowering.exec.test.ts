@@ -444,7 +444,7 @@ describe('unified lowering characterization', () => {
     // columns, RelIR as the one map VALUE its map vocabulary already frames.
     const mixed = read('g.V(1).as("a").values("name").as("b").select("a","b")', { spine: 'legacy' });
     expect(mixed.shape).toEqual({ kind: 'map', entries: [
-      { key: 'a', prefix: 'e0', sub: 'vertex' },
+      { key: 'a', prefix: 'e0', sub: 'vertex', nullable: false },
       { key: 'b', prefix: 'e1', sub: 'value', type: PER_ROW('e1_vtype') },
     ] });
     const viaRel = read('g.V(1).as("a").values("name").as("b").select("a","b")', { spine: 'rel' });

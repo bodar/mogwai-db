@@ -351,7 +351,7 @@ export function foldMember(type: ScalarType, src: Relation): { member: Expressio
   // and NOT a re-derivation through `ValueType` (which drops the `text` flag that says a big long
   // rides as decimal TEXT, the fact a local reducer needs to compare numerically rather than
   // lexicographically).
-  if (!perRow) return { member: src.c.v, of: { kind: 'scalar', type } };
+  if (!perRow) return { member: src.c.v, of: { kind: 'scalar', type, productiveNull: false } };
   // The types are per-ROW, so "is an envelope needed?" is a RUNTIME question about the whole
   // list — exactly the decision the reverted barrier-local fix could not make. Wrap iff SOME
   // member's type is lossy under its storage class, asked ONCE for the whole relation: that

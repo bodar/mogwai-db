@@ -190,7 +190,7 @@ export function lowerPath(st: ElementStream, proj: IRStep, acc: TailAcc): PathSt
       cols.push(q`${b.c.v} AS ${`${prefix}_v`}`);
       if (pos.nullable) cols.push(q`${p.c[pos.col]} AS ${`${prefix}_at`}`);
       if (!productive) whereParts.push(dropIfMissing(pos, b.c.v));
-      return pos.nullable ? { render: 'value', prefix, optional: true } : { render: 'value', prefix };
+      return { render: 'value', prefix, optional: !!pos.nullable };
     }
     const tbl = elemTable(pos.elem).as(`${prefix}n`);
     const jn = pos.nullable ? 'LEFT JOIN' : 'JOIN';
@@ -205,7 +205,7 @@ export function lowerPath(st: ElementStream, proj: IRStep, acc: TailAcc): PathSt
     cols.push(q`${pe} AS ${`${prefix}_v`}`);
     if (pos.nullable) cols.push(q`${p.c[pos.col]} AS ${`${prefix}_at`}`);
     if (!productive) whereParts.push(dropIfMissing(pos, pe));
-    return pos.nullable ? { render: 'value', prefix, optional: true } : { render: 'value', prefix };
+    return { render: 'value', prefix, optional: !!pos.nullable };
   });
 
   const dist = acc.distinct ? 'DISTINCT ' : '';

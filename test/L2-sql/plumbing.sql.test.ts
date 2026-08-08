@@ -8,7 +8,7 @@
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
-import { PER_ROW, STATIC } from '../../src/sql/kernel/render.ts';
+import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
@@ -39,7 +39,7 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     expect(() => toPropertyStream(state, q.cte({} as any, propertyCols.slice(1)), 'vertex')).toThrow(
       'property stream column mismatch',
     );
-    const fields = [{ key: 'x', prefix: 'e0', sub: 'vertex' as const }];
+    const fields = [{ key: 'x', prefix: 'e0', sub: 'vertex' as const, nullable: false }];
     const recordCols = ['e0_rid', 'e0_id', 'e0_label', 'e0_props'];
     expect(toRecordStream(state, q.cte({} as any, recordCols), fields).kind).toBe('record');
     expect(() => toRecordStream(state, q.cte({} as any, recordCols.slice(1)), fields)).toThrow(
@@ -50,13 +50,13 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     expect(() => toRecordStream(state, q.cte({} as any, ['e0_v']), typedField)).toThrow(
       'record stream column mismatch: expected [e0_v, e0_vtype], got [e0_v]',
     );
-    const groupKey = { kind: 'scalar' as const };
+    const groupKey = { kind: 'scalar' as const, productive: false, type: UNKNOWN };
     const groupVal = { kind: 'count' as const };
     expect(toGroupStream(state, q.cte({} as any, ['gk', 'gv']), groupKey, groupVal).kind).toBe('group');
     expect(() => toGroupStream(state, q.cte({} as any, ['mk', 'mv']), groupKey, groupVal)).toThrow(
       'group stream column mismatch',
     );
-    const pathLayout = { kind: 'linear' as const, positions: [{ render: 'value' as const, prefix: 'x0' }] };
+    const pathLayout = { kind: 'linear' as const, positions: [{ render: 'value' as const, prefix: 'x0', optional: false }] };
     expect(toPathStream(state, q.cte({} as any, ['x0_v']), pathLayout).kind).toBe('path');
     expect(() => toPathStream(state, q.cte({} as any, ['v']), pathLayout)).toThrow(
       'path stream column mismatch',
@@ -235,7 +235,7 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     const legacyRows = runWith(store, 'g.withStrategies(ProductiveByStrategy).V().group().by("age").by("name")', { spine: 'legacy' });
     expect(legacyRows.find((r: any) => r.gk == null)).toMatchObject({ gv: '["lop","ripple"]' });
     expect(read('g.withoutStrategies(ProductiveByStrategy).V().group().by("age").by("name")', { spine: 'legacy' }).shape)
-      .toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'scalarList' } });
+      .toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: UNKNOWN }, val: { kind: 'scalarList' } });
     // Route-agnostic: the null key survives the strategy whichever spine grouped. `groupCount()` is on
     // the RelIR route now, whose result is one map value rather than `(gk, gv)` rows — the STRATEGY is
     // what this asserts, and it holds on both.
@@ -282,7 +282,7 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     expect(nullableRecord.filter((r) => r.e0_id == null)).toHaveLength(3);
     expect(executeQuery(store, 'g.withStrategies(ProductiveByStrategy).V().project("x").by(__.out().order().by("name"))', {})).toHaveLength(6);
     expect(read('g.withStrategies(ProductiveByStrategy).V().project("x").by(__.out().order().by("name")).select("x")').shape)
-      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
+      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'vertex' }], wholeResult: false });
     expect(() => compile('g.withStrategies(ProductiveByStrategy).V().order().by("age")', {})).not.toThrow();
     expect(read('g.withStrategies(ProductiveByStrategy).V().as("a").out().as("b").where("a",eq("b")).by("age")').sql)
       .toContain(' IS ');

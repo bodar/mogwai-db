@@ -468,7 +468,7 @@ export function lowerScalarSplit(s: ScalarStream, step: IRStep): ListStream {
     q`SELECT ${g.c.list} AS list${layoutProjection(s.traverserLayout, sa)} FROM ${sa} LEFT JOIN ${g} ON ${g.c[rk]}=${sa.c[rk]}`,
     ['list', ...cols],
   );
-  return toListStream(loweringStateOf(s), rel, { kind: 'scalar', type: STATIC('string') });
+  return toListStream(loweringStateOf(s), rel, { kind: 'scalar', type: STATIC('string'), productiveNull: false });
 }
 
 // ---------- scalar-parent branch primitives (gate + union) ----------

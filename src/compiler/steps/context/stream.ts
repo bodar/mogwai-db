@@ -16,7 +16,7 @@
 import { type Expression, type Query, type Relation } from '../../../sql/kernel/q.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { PROPERTY_PAYLOAD, type Elem } from '../../plan/plan.ts';
-import { perRowCols, TYPED_MEMBERS, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from '../../../sql/kernel/render.ts';
+import { perRowCols, STATIC, TYPED_MEMBERS, UNKNOWN, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from '../../../sql/kernel/render.ts';
 import { layoutCols, type LoweringState, type ElementStream } from './context.ts';
 
 /** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare
@@ -51,7 +51,7 @@ export interface ScalarStream extends LoweringState {
   readonly result?: 'value' | 'count' | 'number';
   /** A NULL row is a real traverser rather than an empty numeric reduction. Set by
    * ProductiveBy-backed list streams and preserved through their reducers. */
-  readonly productiveNull?: boolean;
+  readonly productiveNull: boolean;
   /** The stream's sole traverser is a compile-time literal null (a bare `inject(null)`), as
    * opposed to a runtime scalar of unknown value. Lets a collection step (intersect/merge/…)
    * distinguish TinkerPop's "Incoming traverser … can't be null" from its "encountered a
@@ -434,10 +434,10 @@ export interface ScalarOpts {
  *  (`toScalarStream(c, rel, 'long')`); it folds into the same union, so the two can never
  *  disagree — there is no second field to forget. */
 export const toScalarStream = (c: LoweringState, rel: Relation, as?: ValueType, opts: ScalarOpts = {}): ScalarStream => {
-  const type = opts.type ?? (as ? { kind: 'static', type: as } : { kind: 'unknown' });
+  const type = opts.type ?? (as ? STATIC(as) : UNKNOWN);
   return assertStreamColumns({
     ...c, kind: 'scalar', rel, type,
-    result: opts.result ?? 'value', productiveNull: opts.productiveNull, literalNull: opts.literalNull,
+    result: opts.result ?? 'value', productiveNull: !!opts.productiveNull, literalNull: opts.literalNull,
   });
 };
 /** A ROW-PRESERVING rebuild of a scalar stream: same traversers, same types, new relation

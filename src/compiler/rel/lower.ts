@@ -2868,7 +2868,7 @@ const scalarPayload = (
       exprs: cols.map((column) => [column.name, col(ordered.id, column.name)] as const),
     }),
     shape: framing.result === 'number'
-      ? { kind: 'scalar', ...(framing.productiveNull ? { productiveNull: true } : {}) }
+      ? { kind: 'scalar', productiveNull: !!framing.productiveNull }
       : { kind: 'value', type: framing.type },
   };
 };

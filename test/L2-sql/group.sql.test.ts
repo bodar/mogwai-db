@@ -386,7 +386,7 @@ describe('group / properties SQL', () => {
     // Legacy's own lowering stays pinned — it still answers everything RelIR declines, and it must keep
     // working until §8 deletes it.
     expect(read('g.V().groupCount().by("name")', { spine: 'legacy' }).shape)
-      .toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
+      .toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: UNKNOWN }, val: { kind: 'count' } });
     // A Column consumer derives MapStream; select(Column.values) aggregates the
     // value column into a list value (one row), unfold() explodes it. Count → Long tag.
     const gv = read('g.V().groupCount().by("name").select(Column.values)');
@@ -405,7 +405,7 @@ describe('group / properties SQL', () => {
     // group().by(k).by(__.count()) → same scalar-valued map path (typed count node → per-row type).
     expect(read('g.V().group().by("name").by(__.count()).select(Column.values).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     const childKey = read('g.V().groupCount().by(__.out().count())', { spine: 'legacy' });
-    expect(childKey.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
+    expect(childKey.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: UNKNOWN }, val: { kind: 'count' } });
     expect(childKey.sql).toContain('ROW_NUMBER() OVER () AS o0');
     expect(childKey.sql).toContain('JOIN c');
     expect(childKey.sql).toContain('ON gk.o0=gp.o0');
@@ -472,7 +472,7 @@ describe('group / properties SQL', () => {
     const eq = (a: string, b: string) =>
       JSON.stringify(executeQuery(store, a, {}).map((x) => [...x])) === JSON.stringify(executeQuery(store, b, {}).map((x) => [...x]));
     // by(__.out()) ≡ by(__.out().fold()) — TinkerPop collects an unreduced group value.
-    expect(read('g.V().group().by(T.label).by(__.out())').shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementList', elem: 'vertex' } });
+    expect(read('g.V().group().by(T.label).by(__.out())').shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: UNKNOWN }, val: { kind: 'elementList', elem: 'vertex' } });
     expect(eq('g.V().group().by(T.label).by(__.out())', 'g.V().group().by(T.label).by(__.out().fold())')).toBe(true);
     // a trailing bare order() is the fold's natural id order (no-op), incl. before fold()
     expect(eq('g.V().group().by(T.label).by(__.out().order())', 'g.V().group().by(T.label).by(__.out().fold())')).toBe(true);
@@ -490,7 +490,7 @@ describe('group / properties SQL', () => {
     // properties().groupCount().by(T.label): a Map<name, Map<propKey, count>> per person.
     // marko has name,age (single) → {name:1, age:1}. One outer Map, framed once.
     const c = read("g.V().hasLabel('person').group().by('name').by(__.properties().groupCount().by(T.label))");
-    expect(c.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'nestedMap', innerVal: 'count' } });
+    expect(c.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: UNKNOWN }, val: { kind: 'nestedMap', innerVal: 'count' } });
     // two-level: json_group_object over a lvl1 GROUP BY (outer key, inner key); the inner
     // key is now sourced generically from the properties() child (any alias), not hand-rolled.
     expect(c.sql).toContain('json_group_object');
@@ -503,7 +503,7 @@ describe('group / properties SQL', () => {
     expect(JSON.parse(marko.gv)).toEqual({ name: 1, age: 1 });
     // edge movement + inner reducer: Map<label, Map<edgeLabel, sum(weight)>>
     const s = read("g.V().group().by(T.label).by(__.bothE().group().by(T.label).by(__.values('weight').sum()))");
-    expect(s.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'nestedMap', innerVal: 'number' } });
+    expect(s.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: UNKNOWN }, val: { kind: 'nestedMap', innerVal: 'number' } });
     // the INNER reducer weights by the outer traverser's bulk carried through the child scope
     // (same substrate all the way down — ≡ unweighted while bulk is 1, so results are unchanged).
     expect(s.sql).toContain('* gng.bulk');
@@ -513,7 +513,7 @@ describe('group / properties SQL', () => {
     // The generic child engine composes ANY movement/filter chain in the nested value.
     // (a) filtered movement: out().hasLabel('software').groupCount().by('name')
     const nuA = read("g.V().group().by(T.label).by(__.out().hasLabel('software').groupCount().by('name'))");
-    expect(nuA.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'nestedMap', innerVal: 'count' } });
+    expect(nuA.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: UNKNOWN }, val: { kind: 'nestedMap', innerVal: 'count' } });
     const personA = run(store, "g.V().group().by(T.label).by(__.out().hasLabel('software').groupCount().by('name'))")
       .find((r: any) => r.gk === 'person');
     expect(JSON.parse(personA.gv)).toEqual({ lop: 3, ripple: 1 }); // marko/josh/peter→lop, josh→ripple
@@ -695,7 +695,7 @@ describe('group / properties SQL', () => {
 
   test('group().by(key).by(__.tail()) → element-last, ORDER BY key (assembly path)', () => {
     const p = read('g.V().group().by("name").by(__.tail())');
-    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementLast', elem: 'vertex' } });
+    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: UNKNOWN }, val: { kind: 'elementLast', elem: 'vertex' } });
     expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS gk");
     expect(p.sql).toContain('COALESCE(n.uid, n.id) AS v_id');
     expect(p.sql).toContain('ORDER BY gk'); // element value → no GROUP BY, ordered for run-folding
@@ -708,7 +708,7 @@ describe('group / properties SQL', () => {
     // members are `{t:'vertex', v:{…}}` nodes the framer walks by the rule it already has for a typed
     // list — so `mapValue` is the whole contract and there is nothing per-position to describe.
     expect(read('g.V().group().by("name")', { spine: 'legacy' }).shape)
-      .toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementList', elem: 'vertex' } });
+      .toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: UNKNOWN }, val: { kind: 'elementList', elem: 'vertex' } });
     expect(read('g.V().group().by("name")', { spine: 'rel' }).shape).toEqual({ kind: 'mapValue' });
     // That the two AGREE on the answer is the census's and L3's job, not this file's — an L2 assertion
     // over SQL text cannot see it.
@@ -716,7 +716,7 @@ describe('group / properties SQL', () => {
 
   test('group().by(key).by(prop) → scalar-list via json_group_array + GROUP BY', () => {
     const p = read('g.V().group().by("name").by("age")', { spine: 'legacy' });
-    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'scalarList' } });
+    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: UNKNOWN }, val: { kind: 'scalarList' } });
     expect(p.sql).toContain("json_group_array((SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1)) AS gv");
     expect(p.sql).toContain('GROUP BY gk');
     // The RelIR route reaches the SAME answer with the null drop stated where it belongs: the member is
@@ -741,7 +741,7 @@ describe('group / properties SQL', () => {
     // aggregate is authoritative — the wire layer no longer strips nulls in JS (which could
     // not tell an unproductive child from a productive NULL member). `scalarList` remains the
     // DIRECT by(key) projection, which has no child rows and does emit SQL NULLs.
-    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'list' } });
+    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: UNKNOWN }, val: { kind: 'list' } });
     expect(p.sql).toContain('ROW_NUMBER() OVER (ORDER BY p.encounter) AS o0');
     expect(p.sql).toContain('ON gv.o0=gp.o0');
     // The member list is EMISSION-ORDERED (per-origin encounter), not incidentally ordered by
@@ -829,10 +829,10 @@ describe('group / properties SQL', () => {
     // point: a labelled grouping differs from an unlabelled one in what happens to the RESULT, not in
     // how the map is computed, so it needed no second builder.
     const g = read('g.V().group("a").by("name").cap("a")', { spine: 'legacy' });
-    expect(g.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementList', elem: 'vertex' } });
+    expect(g.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: UNKNOWN }, val: { kind: 'elementList', elem: 'vertex' } });
     // groupCount('a') passes traversers through: out() runs between it and cap('a').
     const gc = read('g.V().groupCount("a").by("name").out().cap("a")', { spine: 'legacy' });
-    expect(gc.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
+    expect(gc.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: UNKNOWN }, val: { kind: 'count' } });
 
     for (const gremlin of ['g.V().group("a").by("name").cap("a")',
       'g.V().groupCount("a").by("name").out().cap("a")']) {
@@ -859,7 +859,7 @@ describe('group / properties SQL', () => {
     // the same traversal with a map value instead. The equivalent RelIR assertions are in the
     // terminal-groupCount test above (shape) and the map-shape L4 feature (answer).
     const p = read('g.V().groupCount().by("name")', { spine: 'legacy' });
-    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
+    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: UNKNOWN }, val: { kind: 'count' } });
     // count is the traverser total per key — SUM(bulk) (≡ COUNT while bulk is 1, correct after a fan-out)
     expect(p.sql).toContain('SUM(p.bulk) AS gv');
     expect(p.sql).toContain('GROUP BY gk');

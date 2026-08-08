@@ -198,7 +198,7 @@ describe('scalar-parent / projection SQL', () => {
     // TinkerPop 4 Strings are Comparable, so min/max include text (numbers order first).
     expect(mn.sql).toContain("typeof(s.v) in ('integer', 'real', 'text')");
     expect(mn.sql).toContain(`MIN(${eligible('s.v', true)})`);
-    expect(mn.shape).toEqual({ kind: 'scalar' });
+    expect(mn.shape).toEqual({ kind: 'scalar', productiveNull: false });
     expect(read('g.V().values("age").max()', { spine: 'legacy' }).sql).toContain(`MAX(${eligible('s.v', true)})`);
     // mean stays numeric-only (never text).
     expect(read('g.V().values("age").mean()', { spine: 'legacy' }).sql).toContain("typeof(s.v) in ('integer', 'real')");
@@ -223,13 +223,13 @@ describe('scalar-parent / projection SQL', () => {
       const p = read(gremlin, { spine: 'rel' });
       for (const cls of classes) expect(p.sql).toContain(`'${cls}'`);
       for (const cls of classes) expect(p.binds).not.toContain(cls);
-      expect(p.shape).toEqual({ kind: 'scalar' });
+      expect(p.shape).toEqual({ kind: 'scalar', productiveNull: false });
     }
     // …and the mean is forced REAL by a CAST rather than legacy's `* 1.0`, which declares the storage
     // class directly (measured: the reference mean came back 30 instead of 30.75 without it).
     expect(read('g.V().values("age").mean()', { spine: 'rel' }).sql).toMatch(/CAST\(sum\([^]*AS REAL\) \//);
     // min(Scope.local) after fold() reduces the folded list per-list (list phase).
-    expect(read('g.V().values("age").fold().min(Scope.local)').shape).toEqual({ kind: 'scalar' });
+    expect(read('g.V().values("age").fold().min(Scope.local)').shape).toEqual({ kind: 'scalar', productiveNull: false });
 
     // "numeric only" is a RESULT claim, not just an SQL one, and it was false for sum() alone:
     // the global arm carried no eligibility guard, so SQLite coerced each text value to 0 and
@@ -293,10 +293,10 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().hasLabel("person").fold().unfold().values("name")').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // Scope.local reducers reduce EACH folded list to one scalar (per-list, not global).
     expect(read('g.V().fold().count(Scope.local)').shape).toEqual({ kind: 'value', type: STATIC('long') });
-    expect(read('g.V().values("age").fold().sum(Scope.local)').shape).toEqual({ kind: 'scalar' });
+    expect(read('g.V().values("age").fold().sum(Scope.local)').shape).toEqual({ kind: 'scalar', productiveNull: false });
     expect(read('g.V().values("age").fold().sum(Scope.local)').sql).toContain('json_each');
     // Local reducers are ScalarStream transitions, so a later predicate composes.
-    expect(read('g.V().values("age").fold().sum(Scope.local).is(P.gt(1))').shape).toEqual({ kind: 'scalar' });
+    expect(read('g.V().values("age").fold().sum(Scope.local).is(P.gt(1))').shape).toEqual({ kind: 'scalar', productiveNull: false });
     // A retype boundary consumes the already-accumulated dedup before materialising the
     // list; it cannot defer that set semantics to terminal framing.
     expect(run(seededStore(), 'g.V().out().dedup().fold().unfold().values("name")').map((r: any) => r.v).sort())
@@ -305,7 +305,7 @@ describe('scalar-parent / projection SQL', () => {
 
   test('fold preserves uniform scalar item types through ListStream materialization', async () => {
     const typed = read('g.V().values("age").asNumber(GType.DOUBLE).fold()');
-    expect(typed.shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', type: STATIC('double') } });
+    expect(typed.shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', type: STATIC('double'), productiveNull: false } });
 
     const { ioc } = await import('../../src/io.ts');
     const doubles = executeQuery(seededStore(), 'g.V().values("age").asNumber(GType.DOUBLE).fold()', {})[0];
@@ -325,7 +325,7 @@ describe('scalar-parent / projection SQL', () => {
     // unfold() explodes the list back to a scalar stream.
     expect(read('g.inject([1,2,3]).unfold()').shape).toEqual({ kind: 'value', type: UNKNOWN });
     // Scope.local reducers act per-list (mean over the numeric elements → Double).
-    expect(read('g.inject([null,10,20,null]).mean(Scope.local)').shape).toEqual({ kind: 'scalar' });
+    expect(read('g.inject([null,10,20,null]).mean(Scope.local)').shape).toEqual({ kind: 'scalar', productiveNull: false });
     // none(P) on a LIST keeps the list iff no element matches (collection filter).
     expect(read('g.inject([5,8,10],[10,7]).none(P.lt(7))').sql).toContain('NOT EXISTS');
     // none(pred) is NOT the iterate discard-marker (only a bare none() is stripped).
@@ -439,7 +439,7 @@ describe('scalar-parent / projection SQL', () => {
     // dedup/order/reducer see the whole stream) — a chained inject().inject() routes legacy (binds).
     expect(read('g.inject(1,3).inject(100,300)').binds).toEqual([1, 3, 100, 300]);
     // reducers reuse the shared wrapper
-    expect(read('g.inject(1,2,3).sum()').shape).toEqual({ kind: 'scalar' });
+    expect(read('g.inject(1,2,3).sum()').shape).toEqual({ kind: 'scalar', productiveNull: false });
     // An injected row carries NO multiplicity by construction, so the reducer takes the UNWEIGHTED form
     // — the same distinction `count()` draws between `COUNT(*)` and `SUM(bulk)`, read off the channel.
     expect(read('g.inject(1,2,3).sum()', { spine: 'legacy' }).sql).toContain(`SUM(${eligible('s.v')})`);
@@ -575,7 +575,7 @@ describe('scalar-parent / projection SQL', () => {
     // on a runtime (V-rooted) stream asBool defers — needs local()/sack()
     expect(() => compile('g.V().values("name").asBool()', {})).toThrow('scalar transform asBool() not supported');
     // fold preserves the uniform item tag; a heterogeneous trailing inject still defers.
-    expect(read('g.inject(1,0).asBool().fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', type: STATIC('boolean') } });
+    expect(read('g.inject(1,0).asBool().fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', type: STATIC('boolean'), productiveNull: false } });
     expect(() => compile('g.inject(1).asBool().inject(5)', {})).toThrow('after typed/reduced/carried scalar state');
   });
 
@@ -607,7 +607,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(() => compile('g.inject(5).asNumber(GType.VERTEX)', {})).toThrow('asNumber() requires a numeric type token, got VERTEX');
     // a reducer is now a later ScalarStream transition; its runtime result type is
     // carried by vt rather than reconstructed from the cast's source position.
-    expect(read('g.inject(2.0).asNumber(GType.FLOAT).sum()').shape).toEqual({ kind: 'scalar' });
+    expect(read('g.inject(2.0).asNumber(GType.FLOAT).sum()').shape).toEqual({ kind: 'scalar', productiveNull: false });
     // overflow message uses the boxed Java type name (Integer, not Int)
     expect(() => compile('g.inject(3000000000).asNumber(GType.INT)', {})).toThrow('to Integer due to overflow.');
     // blank string is a parse error, not a silent 0
@@ -988,8 +988,8 @@ describe('scalar-parent / projection SQL', () => {
   test('multi-label select → map shape with per-entry prefixed columns — legacy', () => {
     const p = read('g.V().as("a").out().as("b").select("a","b")', { spine: 'legacy' });
     expect(p.shape).toEqual({ kind: 'map', entries: [
-      { key: 'a', prefix: 'e0', sub: 'vertex' },
-      { key: 'b', prefix: 'e1', sub: 'vertex' },
+      { key: 'a', prefix: 'e0', sub: 'vertex', nullable: false },
+      { key: 'b', prefix: 'e1', sub: 'vertex', nullable: false },
     ] });
     expect(p.sql).toContain('COALESCE(e0n.uid, e0n.id) AS e0_id'); // element reports uid ?? rowid
     expect(p.sql).toContain('COALESCE(e1n.uid, e1n.id) AS e1_id');
@@ -1063,7 +1063,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(element.shape).toEqual({
       kind: 'map',
       entries: [
-        { key: 'self', prefix: 'e0', sub: 'vertex' },
+        { key: 'self', prefix: 'e0', sub: 'vertex', nullable: false },
         { key: 'friend', prefix: 'e1', sub: 'value', type: PER_ROW('e1_vtype') },
       ],
     });
@@ -1152,7 +1152,7 @@ describe('scalar-parent / projection SQL', () => {
       kind: 'map',
       entries: [
         { key: 'friends', prefix: 'e0', sub: 'list', of: TYPED_MEMBERS },
-        { key: 'first', prefix: 'e1', sub: 'vertex' },
+        { key: 'first', prefix: 'e1', sub: 'vertex', nullable: false },
       ],
     });
     expect(shaped.sql).toContain('b0.list AS e0_list');
@@ -1184,7 +1184,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(element.shape).toEqual({
       kind: 'map',
       entries: [
-        { key: 'a', prefix: 'e0', sub: 'vertex' },
+        { key: 'a', prefix: 'e0', sub: 'vertex', nullable: false },
         { key: 'b', prefix: 'e1', sub: 'value', type: STATIC('long') },
       ],
     });
@@ -1346,26 +1346,26 @@ describe('scalar-parent / projection SQL', () => {
 
   test('sum() wraps a value stream in SQL SUM → scalar shape', () => {
     const p = read('g.V().values("age").sum()', { spine: 'legacy' });
-    expect(p.shape).toEqual({ kind: 'scalar' });
+    expect(p.shape).toEqual({ kind: 'scalar', productiveNull: false });
     expect(p.sql).toContain(`SELECT SUM(${eligible('s.v')} * s.bulk) AS v, typeof(SUM(${eligible('s.v')} * s.bulk)) AS vt FROM`);
     // RelIR states the same three facts — the aggregate, the BULK weighting, and the dynamic `vt`
     // column reading the result's own storage class — with the value inlined rather than aliased.
     const rel = read('g.V().values("age").sum()', { spine: 'rel' });
-    expect(rel.shape).toEqual({ kind: 'scalar' });
+    expect(rel.shape).toEqual({ kind: 'scalar', productiveNull: false });
     expect(rel.sql).toMatch(/sum\([^]*\* 1\)\) AS v/);
     expect(rel.sql).toMatch(/typeof\(sum\([^]*\)\) AS vt/);
   });
 
   test('numeric reducers are scalar streams and preserve dynamic type past filters', () => {
     const summed = read('g.V().values("age").sum().is(P.gt(100))', { spine: 'legacy' });
-    expect(summed.shape).toEqual({ kind: 'scalar' });
+    expect(summed.shape).toEqual({ kind: 'scalar', productiveNull: false });
     expect(summed.sql).toContain(`SUM(${eligible('s.v')} * s.bulk) AS v`);
     expect(summed.sql).toContain('p.vt AS vt');
     expect(summed.sql).toContain('WHERE p.v > ?');
     // A filter over a REDUCED value is a `HAVING` on the RelIR side — one of §3's declared collapses,
     // and the same question legacy asks with a CTE plus a WHERE. Both keep the dynamic `vt` column.
     const summedRel = read('g.V().values("age").sum().is(P.gt(100))', { spine: 'rel' });
-    expect(summedRel.shape).toEqual({ kind: 'scalar' });
+    expect(summedRel.shape).toEqual({ kind: 'scalar', productiveNull: false });
     // The HAVING now carries the comparability guard (§13a): a numeric bound compares only where the
     // aggregate's own storage class is numeric, else FALSE. So what is pinned is that the filter became a
     // HAVING over the aggregate — not the shape of the comparison inside it.
@@ -1430,7 +1430,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(relSlice.sql).toMatch(/ORDER BY \w+\.encounter ASC LIMIT 2 OFFSET 1/);
 
     const typedSum = read('g.V().values("age").asNumber(GType.DOUBLE).sum().is(P.gt(100))');
-    expect(typedSum.shape).toEqual({ kind: 'scalar' });
+    expect(typedSum.shape).toEqual({ kind: 'scalar', productiveNull: false });
     // The cast is inside the reducer's eligibility guard on the RelIR side (the transform is fused into
     // the aggregate's argument), so what both spines must say is that the value was cast to REAL before
     // being summed — not where the cast sits in the select list.
@@ -1452,7 +1452,7 @@ describe('scalar-parent / projection SQL', () => {
     // group() fills a key slot then a value slot; a third by() is invalid Gremlin, refused with
     // GroupStep's own wording by the byModulatorArity verify Pass (test/compiler/by-modulator-arity).
     expect(() => compile('g.V().group().by("name").by("age").by("x")', {})).toThrow('already been set');
-    expect(read('g.V().count().fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', type: STATIC('long') } });
+    expect(read('g.V().count().fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', type: STATIC('long'), productiveNull: false } });
     expect(() => compile('g.V().sum()', {})).toThrow('sum() of vertex not yet supported');
   });
 });

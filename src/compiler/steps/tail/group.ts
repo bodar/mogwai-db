@@ -1,6 +1,6 @@
 import { isNested, isTokenArg, stepChain, argValues } from '../../../gremlin/frontend.ts';
 import { empty, list, q, raw, value, values, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { PER_ROW, perRowColumnOf, SCALAR_MEMBERS, staticTypeOf, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
+import { PER_ROW, perRowColumnOf, SCALAR_MEMBERS, staticTypeOf, UNKNOWN, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { NUMERIC_REDUCERS, REDUCERS } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import {
@@ -121,9 +121,11 @@ const elementSelect = (elem: ElemShape, prefix: string, ctx: ScalarCtx): Express
 const elementIdExpr = (elem: ElemShape, ctx: ScalarCtx): Expression => elem === 'property' ? ctx.pkExpr! : ctx.idExpr;
 
 interface GroupKeyBuild { desc: GroupKey; cols: Expression; group: string | Expression }
-const scalarGroupKey = (productive?: boolean): GroupKey => productive
-  ? { kind: 'scalar', productive: true }
-  : { kind: 'scalar' };
+// The key's TYPE is stated even where it is unknown — `GroupKey` is total, so a producer that has no
+// tag says `UNKNOWN` rather than omitting the field and letting the framer guess what the omission
+// meant. Legacy has no per-key vtype column to offer here; RelIR's group barrier does and sets one.
+const scalarGroupKey = (productive?: boolean): GroupKey =>
+  ({ kind: 'scalar', productive: !!productive, type: UNKNOWN });
 
 /** Build the key columns for group(). */
 function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Record<string, any>): GroupKeyBuild {

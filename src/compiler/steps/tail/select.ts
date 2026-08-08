@@ -150,7 +150,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: IRStep, keys: string[]
         q`SELECT ${payload}${layoutProjection(child.stream.traverserLayout, cp)} FROM ${cp} JOIN ${n} ON ${n.c.id}=${cp.c.id}`,
         [...payloadCols, ...layoutCols(child.stream.traverserLayout)],
       ).as(`b${i}`);
-      const field: RecordField = { key: keys[i], prefix, sub: child.stream.elem, nullable: productive || undefined };
+      const field: RecordField = { key: keys[i], prefix, sub: child.stream.elem, nullable: !!productive };
       return {
         rel,
         field,
@@ -168,7 +168,7 @@ function tryLowerTraversalRecord(st: ElementStream, proj: IRStep, keys: string[]
         q`SELECT ${payload}${layoutProjection(outer.seed.traverserLayout, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${source.id}`,
         [...payloadCols, ...layoutCols(outer.seed.traverserLayout)],
       ).as(`b${i}`);
-      const field: RecordField = { key: keys[i], prefix, sub: source.elem };
+      const field: RecordField = { key: keys[i], prefix, sub: source.elem, nullable: false };
       return {
         rel,
         field,
@@ -342,7 +342,7 @@ export function lowerScalarProject(s: ScalarStream, proj: IRStep): RecordStream 
       const n = elemTable(elem).as(`n${i}`);
       const idExpr = aliasId(p.c[aliasField.entry.col], 'last');
       const payload = elementPayload(elemCtx(n, elem), elem, `e${i}`, true);
-      const field: RecordField = { key, prefix: `e${i}`, sub: elem };
+      const field: RecordField = { key, prefix: `e${i}`, sub: elem, nullable: false };
       const rel = s.q.cte(
         q`SELECT ${p.c[ord]} AS ${ord}, ${payload}${layoutProjection(s.traverserLayout, p)} FROM ${p} JOIN ${n} ON ${n.c.id}=${idExpr}`,
         [ord, ...recordFieldColumns(field), ...layoutCols(s.traverserLayout)],
@@ -424,7 +424,7 @@ export function lowerRecordSelectProject(st: ElementStream, proj: IRStep): Strea
       const { vtype, stored } = storedPropFor(en.c.id, src.elem, e.key!);
       cols.push(q`${stored} AS ${`${prefix}_v`}, ${vtype} AS ${`${prefix}_vtype`}`);
     }
-    return e.sub === 'value' ? storedPropertyRecordField(k, prefix) : { key: k, prefix, sub: src.elem };
+    return e.sub === 'value' ? storedPropertyRecordField(k, prefix) : { key: k, prefix, sub: src.elem, nullable: false };
   });
 
   const relCols = [...fields.flatMap(recordFieldColumns), ...layoutCols(st.traverserLayout)];
@@ -501,7 +501,7 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
         return storedPropertyRecordField(k, prefix);
       }
       cols.push(elementPayload(elemCtx(en, elem), elem, prefix, true));
-      return { key: k, prefix, sub: elem };
+      return { key: k, prefix, sub: elem, nullable: false };
     }
     // A scalar value label (by() does not apply to a non-element value).
     const type = scalarTypeFromAlias(entry.scalarType, `${prefix}_vtype`);

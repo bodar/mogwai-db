@@ -4,7 +4,7 @@ import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../r
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
-import { PER_ROW, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
+import { PER_ROW, STATIC, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { Elem } from '../plan/plan.ts';
 import { aliasScalarTypeOf, withShape, type AliasEntry, type AliasMap } from '../plan/alias.ts';
@@ -190,7 +190,7 @@ const readOf = (entry: AliasEntry, vtype: string): AliasRead | null => {
  *  the NEW column (the entry's `t` field lands there), never the source relation's vanished one —
  *  legacy's `scalarTypeFromAlias` says the same thing and this is the algebra's spelling of it. */
 const scalarTypeOfAlias = (entry: AliasEntry, vtype: string): ScalarType =>
-  entry.scalarType?.kind === 'static' ? { kind: 'static', type: entry.scalarType.type }
+  entry.scalarType?.kind === 'static' ? STATIC(entry.scalarType.type)
     : entry.scalarType?.kind === 'perRow' ? PER_ROW(vtype)
       : { kind: 'unknown' };
 

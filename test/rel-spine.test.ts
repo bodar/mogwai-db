@@ -8,7 +8,7 @@ import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { createAppScope } from '../src/scopes.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
-import { PER_ROW } from '../src/sql/kernel/render.ts';
+import { PER_ROW, STATIC } from '../src/sql/kernel/render.ts';
 
 /**
  * THE RelIR SPINE — routing, coverage and the per-traversal differential (§10·4).
@@ -1761,7 +1761,7 @@ describe('the RelIR spine', () => {
     for (const gremlin of ['g.V().count()', "g.V().values('name')", "g.E().values('weight')"]) {
       expect(read(gremlin, { spine: 'rel' }).shape).toEqual(read(gremlin, { spine: 'legacy' }).shape);
     }
-    expect(read('g.V().count()', { spine: 'rel' }).shape).toEqual({ kind: 'value', type: { kind: 'static', type: 'long' } });
+    expect(read('g.V().count()', { spine: 'rel' }).shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(read("g.V().values('name')", { spine: 'rel' }).shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
   });
 
