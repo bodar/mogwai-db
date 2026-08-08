@@ -602,6 +602,15 @@ mostly literal-typed casts and error-raising forms rather than one lowering), br
 aliases (32 — `select` 27, dominated by `Pop.all`/`Pop.mixed` history reads), the rest of the map shape
 (24), side effects (21), then `local`, `match`, `where`, the `path` tails.
 
+⚠️ **THAT RANKING HAS ONE OVERRIDE, AND IT IS NOT A COVERAGE ARGUMENT.** Gap 4's **element-keyed side
+reads** are what upstream's own graph-snapshot reads use — `getVertices`/`getEdges`/
+`getVertexProperties` in `vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/world.js:147-180`,
+i.e. `group().by(__.project(…)).by(__.tail())` over `E`, `V` and `V().properties()`. They route to
+legacy, so they RAISE under the `rel-only` position and cucumber dies in `BeforeAll` before a scenario
+runs: **the cut measurement cannot report at all until they lower.** A gap that blocks an INSTRUMENT
+outranks one that costs scenarios, because until it lands every other ranking is being read off the
+proxy. Take gap 4 first.
+
 Named gaps inside those, each with its blocker stated so it is not re-derived:
 
 | | Gap | Blocked on |
@@ -609,7 +618,7 @@ Named gaps inside those, each with its blocker stated so it is not re-derived:
 | 1 | **Group VALUE forms** — `group().by(k).by(__.out().count())`, `by(__.tail())` | Nothing. Legacy-only today, and they are what stops legacy shedding its group KEY (34 tests, an L3 scenario, a conformance gate) |
 | 2 | **Set-op keeps its members' types** — `values('when').fold().merge(…)` returns raw millis | The lossy test must span BOTH sides; `withLossyFlag` asks it of one relation. ⚠️ Gating on the compile-time `typed` flag is NOT the same question and was measured wrong (6 differentials) |
 | 3 | **`memberTypeTag` returns a NULL tag unresolved** for a wrapped member whose `t` is null (what `path().by(<transform>)` writes), where a null tag means "infer from the value" everywhere else | Nothing — inert until tags join a comparison, which is how it was found |
-| 4 | **Map family residue** — selective token subsets (`with(tokens, ids)`), the `by(__.unfold())` that pairs with them, `order(Scope.local)` over map entries, element-keyed side reads | The last needs a list whose members may be ELEMENTS (`MapOf`'s `elem` tag declines today) |
+| 4 | 🔴 **Map family residue — TAKE THIS FIRST, on a reason that is not its coverage.** Selective token subsets (`with(tokens, ids)`), the `by(__.unfold())` that pairs with them, `order(Scope.local)` over map entries, **element-keyed side reads** | The last needs a list whose members may be ELEMENTS (`MapOf`'s `elem` tag declines today). ⚠️ **It also gates the CUT MEASUREMENT** — see below |
 | 5 | **Group-scoped reducer: `count()` with a non-empty body, and a SCALAR host** | The empty pool is PER-REDUCER and decides INNER vs LEFT join (`CountGlobalStep` seeds 0 and keeps its key; `SumGlobalStep` does not). A scalar host needs `origin` to name a parent without a rowid — channels-core |
 | 6 | **Two `sack` declines** — `withSack(seed, Operator.x)` (a MERGE policy for the role, channels-core) and `barrier(Barrier.normSack)` (its own step) | Both honest |
 | 7 | **L4 sweep** — two committed expectations encoded legacy's bug. An addendum written against one implementation records that implementation, not the reference | Nobody has swept the rest |
@@ -723,6 +732,18 @@ ROUTE OFF, NEVER BY READING THE CODE"** — whose first run refuted the prose it
 was holding the entire label-write family). Without it, "what is left before we can delete" is an opinion.
 ⚠️ Read its output through §6·6: it measures the ROUTE, so a shape the algebra EXPRESSES but no route hands it
 reads identically to a missing lowering.
+
+✅ **Built** — `MOGWAI_RELIR=only`, `mise run L3:rel-only`, `src/compiler/options/spine.ts`. `SpinePosition` is a
+THIRD value beside `Spine` rather than a widening of it: `Spine` names which lowering PRODUCED a compile, and a
+plan is never produced "by rel-only" — it is produced by RelIR or the compile raised. Not in `ci`; L3 under this
+position reports and neither gates nor records (gating pins a number meant to fall to zero; recording would
+overwrite the routed floor with the un-fallen-back one and silently lower the ratchet).
+
+🚧 **It cannot REPORT yet, and the reason is Phase 2 gap 4.** Upstream's graph-snapshot reads (`world.js:147-180`,
+cited above) take the legacy route, so this position raises inside `BeforeAll` and cucumber runs zero scenarios.
+⚠️ **The instrument's first run READ THAT AS "deleting legacy costs 0 scenarios"** — the worst answer a
+measurement can give, indistinguishable from success and pointing the wrong way. A zero-scenario run is now a
+hard failure naming the cause. Whatever else is true of gap 4, this is why it goes first.
 
 Phase 4's read-side work rides along where it is a prerequisite: the block assembler replaces `TailAcc`,
 `ELEMENT_DISPATCH` joins the shared substrate, aggregate/count handlers become one `Aggregate`, and
