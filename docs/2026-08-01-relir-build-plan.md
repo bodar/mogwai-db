@@ -862,11 +862,17 @@ it.
   child value) and `by(__.tail())`. Measured by trying to shed the legacy group KEY: declining costs 34
   tests, an L3 scenario and a conformance-host gate, all of them these two shapes. Until they land,
   every `group()` chain that uses them is legacy-only.
-- **A set-op over TWO self-describing sides loses the member types.** Both sides are normalized to
-  payloads (that is what puts them in one vocabulary), so the result is honestly `unknown`. Recovering
-  the tags means normalizing both sides to the TYPED encoding instead — wrapping a bare member with its
-  INFERRED tag, which is information-preserving because that tag is what the wire would infer anyway.
-  A different design from the one in place, not a gap in it.
+- **A set-op over TWO self-describing sides loses the member types**, so `values('when').fold().merge(…)`
+  comes back a list of raw millis. Normalizing both sides to the TYPED encoding is the fix and is
+  information-preserving (a bare member's tag is what `inferredVtype` reads off its storage class —
+  what the wire would infer anyway). ⚠️ **It must be gated on the RUNTIME lossy test, not the
+  compile-time `typed` flag** — measured: `values('name').fold()` is `typed` while every member is bare
+  at run time, so a compile-time gate wrapped members needing no envelope, changed the common case's
+  bytes and broke uniform-only-when-needed (6 differentials). The missing piece is that the test must
+  span BOTH sides; `withLossyFlag` asks it of one relation. A latent defect in `memberTypeTag` fell out
+  of the attempt and is recorded at the site: a wrapped member whose `t` is NULL (what
+  `path().by(<transform>)` writes) has its tag returned unresolved, where a null tag means "infer from
+  the value" everywhere else in the channel.
 - **The `set` framing marker** survives `range(local)`/`all`/`any`/`none` and is dropped only by
   `order(local)`/`unfold()` — a state-threading change through the list tail's follower loop, which is
   duplicated (`rel/list.ts`'s `ListOf.set` vs legacy's `ListStream.set`). Land it in RelIR and let legacy shed.

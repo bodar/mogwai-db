@@ -984,9 +984,23 @@ export function listSetOp(
   // THE RESULT'S MEMBER TYPE IS THE TWO SIDES' MEET. Both sides were normalized to payloads above, so
   // the members no longer state their own types — but where BOTH were bare and AGREED on a static
   // tag, that tag still describes every member of the result and dropping it framed a set of longs
-  // by JS inference. An ENVELOPE side is honestly `unknown` here: flattening it to payloads is what
-  // put the two sides in one vocabulary, and recovering the tags needs both sides normalized to the
-  // TYPED encoding instead — a different design, noted rather than half-done.
+  // by JS inference.
+  //
+  // 🔴 AN ENVELOPE SIDE IS STILL FLATTENED, so a set-op over stored `datetime`s/`uuid`s loses their
+  // types. Normalizing both sides to the TYPED encoding instead is the fix and it is
+  // information-preserving (a bare member's tag is what `inferredVtype` reads off its storage class,
+  // which is what the wire would infer anyway) — but it MUST be gated on the same RUNTIME lossy test
+  // `foldScalars` spends, not on the compile-time `typed` flag. Measured by trying the compile-time
+  // gate: `values('name').fold()` is `typed` while every member is bare at run time, so it wrapped
+  // members that needed no envelope, changed the bytes of the common case and broke the
+  // uniform-only-when-needed rule (6 differentials). The runtime test has to span BOTH sides, which
+  // is the part that does not exist yet: `withLossyFlag` asks it of one relation.
+  //
+  // One piece of it IS worth keeping and is not here: `memberTypeTag` returns a NULL tag unresolved
+  // for a wrapped member whose `t` is null (`path().by(<a transform>)` writes exactly that), where a
+  // null tag means "infer from the value" everywhere else in this channel. That is a latent defect in
+  // the tag reader regardless of the set-op, and it surfaced as three conformance scenarios the
+  // moment the tag joined a comparison.
   const merged = isTypedList(of) || isTypedList(resolved.of) ? UNKNOWN
     : sameScalarType(memberTypeOf(of) ?? UNKNOWN, memberTypeOf(resolved.of) ?? UNKNOWN)
       ? memberTypeOf(of) ?? UNKNOWN : UNKNOWN;
