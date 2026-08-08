@@ -916,6 +916,36 @@ is real work, but it is not load-bearing for running the suite and must not gate
   correlated scalar: `AddPropertyStep.handleTraversalValue` collects ALL results, so 0 results means NO
   mutation (never a NULL write, which is what a scalar subquery would produce), >1 under `single` raises,
   and >1 under `list`/`set` writes each. That wants the HOST-KEYED relation — §6·6's honest fourth answer.
+
+  **A RUNTIME LABEL IS WHERE RelIR CAN BEAT LEGACY OUTRIGHT, and the reference is what says so.**
+  The question "can we validate a label we will not see until execution" looked like grounds to decline;
+  it is not. `ElementHelper.validateLabel` is three PURE PREDICATES over the value — null, empty, hidden
+  (`Graph.Hidden.HIDDEN_PREFIX` is `~`) — with no graph access and no traverser state, so all three are
+  expressible in SQL and belong in a GUARD BINDING (§6·5) rather than in a decline. That is better than
+  legacy on three axes at once and worse on none: one statement instead of O(rows) round-trips, the whole
+  set checked before anything is written instead of the first bad row reached, and the reference's message
+  verbatim either way. The atomicity difference is not new — every RelIR write is already one set-based
+  statement, so "create some, then throw" is not expressible on this spine however the check is spelled.
+
+  Three facts to build it against, none of them guessable:
+  - **The message set depends on ARITY.** `addV(single)` is not a `Collection`, so the resolved value goes
+    into `graph.addVertex(keyValues)` → `ElementHelper.getLabelValue` → `validateLabel`, giving the three
+    `Label can not be …` messages (and a `ClassCastException` on a non-String).
+    `addV(a, b)` IS a Collection, so it takes `AddVertexStep.resolveLabelCollection`
+    (`.../step/map/AddVertexStep.java:165-182`), which raises FOUR distinct messages of its own BEFORE
+    `validateLabel` runs: *"Label traversal must not produce null"*, *"…must produce a scalar String when
+    multiple traversals are provided, but got a Collection"*, *"…must produce a String, but got %s"*.
+  - **`TraversalUtil.apply` is `.next()`** — the FIRST result — so a rooted single-row label is the child
+    seam's existing arm plus a `Limit 1`, exactly as `endpointOf`'s `read` arm already spells it for
+    `to(__.V(2))`.
+  - **Our shared `validateLabel` COERCES where the reference raises** (`String(label)`, `gremlin/validate.ts`),
+    so a runtime label of `5` becomes `"5"` on BOTH spines today. A pre-existing divergence in shared code,
+    invisible to the corpus (no scenario asserts any of these messages) and therefore exactly the class
+    §12 says goes to the vendored source rather than to the corpus.
+
+  So the build is: `internLabels` generalized from a compile-time `string[]` to EXPRESSIONS; a rooted
+  single-row label through the seam's existing arm; an ALIAS-read label (`addV(__.select('a').label())`),
+  which is a column already on the row rather than a subquery; and the validity guards, chosen by arity.
   **The reference is ASYMMETRIC and that decides the shape of the work** — read, not inferred:
   - A nested **KEY** resolves through `Parameters.get(traverser, T.key, …)`, which calls
     `TraversalUtil.apply` and takes `.get(0)`
