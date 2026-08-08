@@ -38,7 +38,10 @@ export const isReducer = (name: string): name is Reducer => REL_REDUCERS.has(nam
 const agg = (fn: AggFn, arg: Expr): Expr => ({ kind: 'agg', fn, args: [arg] });
 const call = (fn: string, arg: Expr): Expr => ({ kind: 'call', fn, args: [arg] });
 
-const SAFE_INT = 9007199254740991; // 2^53 - 1: the widest a JS number (thus a plain SQLite read) holds exactly.
+/** 2^53 - 1: the widest a JS number (thus a plain SQLite read) holds exactly. EXPORTED because the
+ *  legacy spine's list reducer needs the same boundary and a second copy of the constant is a second
+ *  chance for the two to disagree about where the exact tail begins. */
+export const SAFE_INT = 9007199254740991;
 const LONG_SUM_CLASSES: ReadonlySet<string> = new Set(['long', 'bigint']);
 export const isLongSumClass = (vt: string): vt is 'long' | 'bigint' => LONG_SUM_CLASSES.has(vt);
 

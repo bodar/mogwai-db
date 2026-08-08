@@ -3,16 +3,16 @@ import { sliceBound } from './const.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
-import { hasTypedMembers, perRowColumnOf, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, TYPED_MEMBERS, UNKNOWN, type ListOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
+import { hasTypedMembers, memberTypeOf, perRowColumnOf, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, TYPED_MEMBERS, UNKNOWN, type ListOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import { isNested, isPred, argValues } from '../../gremlin/frontend.ts';
 import { isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import { byEncounter, carriedCols, coalesce, EMPTY_ARRAY, fenced, jsonOf, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
-import { predicateExpr, SUBJECT_UNKNOWN } from './predicate.ts';
+import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
 import { elementObject } from './element.ts';
 import type { Elem } from '../plan/plan.ts';
-import { isReducer, reducerAggregate } from './reducer.ts';
+import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { transformExpr } from './transform.ts';
 
 /**
@@ -129,6 +129,52 @@ const memberVtype = (of: ListOf, members: Rel): Expr | undefined => {
     kind: 'case',
     whens: [[eqText(col(members.id, MEMBER.type), 'object'), jsonField(col(members.id, MEMBER.value), 't')]],
     else: inferredVtype(col(members.id, MEMBER.value)),
+  };
+};
+
+/**
+ * A MEMBER'S GREMLIN TYPE, from whichever carrier the list uses — the third member read, and the one
+ * whose absence made every list op compare by SQLite storage class.
+ *
+ * `memberVtype` above answers only for a self-describing list, because that is all `unfold()` needs.
+ * Everything that COMPARES needs an answer for all three: a `static` list states its tag at compile
+ * time (a literal, which `storedCompareOn` then constant-folds away), an envelope list states it per
+ * member, and an untagged one infers it from the storage class — which is exactly what the wire
+ * would do, so it is not a second policy.
+ */
+const memberTypeTag = (of: ListOf, members: Rel): Expr => {
+  const type = memberTypeOf(of);
+  if (type?.kind === 'static') return compilerText(type.type);
+  return memberVtype(of, members) ?? inferredVtype(col(members.id, MEMBER.value));
+};
+
+/**
+ * THE MEMBER'S ORDERING KEY — `storedCompareOn` over the member's own type, which is the SAME cast
+ * authority `order().by()`, the row-level `min`/`max` and every range predicate use.
+ *
+ * Without it a member compares by SQLite STORAGE CLASS, and a value carried as decimal TEXT because
+ * it does not fit one (a long past 2^53, a bigint, a bigdecimal, a duration) compares
+ * LEXICOGRAPHICALLY. Measured before this existed, on BOTH spines:
+ * `inject(9007199254740993L, 10007199254740993L).fold().max(Scope.local)` answered the SMALLER value
+ * and `min(Scope.local)` the larger, while the global `max()` — which already had this authority —
+ * answered correctly. One step name, two engines, and only one of them had been fixed.
+ */
+const memberCompareKey = (of: ListOf, members: Rel): Expr => {
+  const value = col(members.id, MEMBER.value);
+  const type = memberTypeOf(of);
+  if (type?.kind === 'static') return storedCompareOn(compilerText(type.type))(value);
+  // AN UNTAGGED MEMBER IS ITS OWN KEY, and that is provable rather than a shortcut: its type is
+  // INFERRED from its storage class, and that inference can never disagree with the storage order —
+  // TEXT infers `string` (no cast at all), INTEGER infers `int`/`long` (a CAST to INTEGER is the
+  // identity) and REAL infers `double` (likewise). So the cast folds away, and emitting it would be
+  // pure statement text. The same argument retires `inferredVtype` from the ORDERING key of a
+  // self-describing list: only the WRAPPED members can carry a type their storage class does not.
+  if (!isTypedList(of)) return value;
+  return {
+    kind: 'case',
+    whens: [[eqText(col(members.id, MEMBER.type), 'object'),
+      storedCompareOn(jsonField(value, 't'))(jsonField(value, 'v'))]],
+    else: value,
   };
 };
 
@@ -374,7 +420,9 @@ export function listRetype(
   if (isReducer(step.name) && isLocalScope(step)) {
     if (args.some((arg) => typeof arg === 'number')) return null;
     const members = membersOf(list, fresh);
-    const reduced = reducerAggregate(memberPayload(of, members), step.name);
+    const payload = memberPayload(of, members);
+    const memberType = memberTypeOf(of);
+    /** One correlated subquery over the members, projecting one named column. */
     const scalar = (value: Expr, name: string, type: 'any' | 'text'): readonly [string, Expr] => [name, {
       kind: 'scalar',
       plan: make.aggregate({
@@ -382,13 +430,84 @@ export function listRetype(
         groupBy: [], aggs: [[name, value]],
       }),
     }];
-    // TWO correlated subqueries over the same members, which is what legacy emits too: the result's
-    // storage class is `typeof(<the aggregate>)`, and SQL has nowhere to name the aggregate once.
-    return {
-      rel: withPayload(rel, [scalar(reduced.value, 'v', 'any'), scalar(reduced.type, 'vt', 'text')],
-        [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
-      type: UNKNOWN, result: 'number',
-    };
+    const asNumber = (value: readonly [string, Expr], vt: readonly [string, Expr]) => ({
+      rel: withPayload(rel, [value, vt], [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
+      type: UNKNOWN, result: 'number' as const,
+    });
+
+    // **`min`/`max` ORDER, so they take the ARGMIN/ARGMAX — the winning MEMBER, projected whole —
+    // exactly as the row-level pair does.** Two things follow that a `MIN()`/`MAX()` over a cast key
+    // cannot give: the winner is chosen by `memberCompareKey` (so a decimal-TEXT long orders
+    // numerically instead of lexicographically), and the value returned is the RAW member, so a
+    // >2^53 long is not rounded through the cast on its way out. The `vt` is that member's own
+    // GREMLIN vtype rather than SQLite's `typeof`, which is what lets the `result:'number'` framer
+    // send it back as a `long` through `vtypeToValueType` — before this it came back the string
+    // `"9007199254740993"`.
+    if (step.name === 'min' || step.name === 'max') {
+      const dir: 'asc' | 'desc' = step.name === 'min' ? 'asc' : 'desc';
+      // NULL is SKIPPED by min/max (`NumberHelper` returns the non-null side), so it never wins —
+      // the row-level pair filters identically.
+      const present = make.filter({
+        id: fresh('mf'), input: members, channels: [], type: members.type,
+        pred: { kind: 'binary', op: 'is not', left: payload, right: compilerNull() },
+      });
+      const key = memberCompareKey(of, present);
+      const winner = make.limit({
+        id: fresh('mw'),
+        input: make.sort({
+          id: fresh('mo'), input: present, channels: [], type: present.type,
+          // A total tie-break on the raw payload keeps the survivor deterministic, as it does at row level.
+          terms: [{ expr: key, dir }, { expr: memberPayload(of, present), dir }],
+        }),
+        channels: [], type: present.type, count: compilerInt(1),
+      });
+      // THE WINNER IS PICKED ONCE. `v` and `vt` are two columns of one row, and giving each its own
+      // correlated subquery would emit the whole sort twice — measured, that alone took the `max`
+      // family's statement from 1,250 bytes to 4,108, against a platform that caps a statement at
+      // 100 KB. So the pick projects a `{v,t}` pair as ONE value and the payload columns read its
+      // two fields, which is the same trick the member ENVELOPE already is.
+      const picked: Expr = {
+        kind: 'scalar',
+        plan: make.project({
+          id: fresh('mp'), input: winner, channels: [], type: typeOf(meta('w', 'json')),
+          exprs: [['w', {
+            kind: 'json-object',
+            entries: [['v', memberPayload(of, winner)], ['t', memberTypeTag(of, winner)]],
+            binary: false,
+          }]],
+        }),
+      };
+      // FENCED, and that is the whole point of naming it: without a materialization boundary the
+      // block assembler fuses the two projections into one SELECT and re-inlines `w` at both reads,
+      // which is the duplication this shape exists to avoid (measured: 3,024 bytes fused, 1,747
+      // fenced, for the same plan). Legacy reaches the same place with a `derived` subquery.
+      const held = fenced(withPayload(rel, [['w', picked]], [meta('w', 'any', true)], fresh), fresh);
+      return {
+        rel: withPayload(held,
+          [['v', jsonField(col(held.id, 'w'), 'v')], ['vt', jsonField(col(held.id, 'w'), 't')]],
+          [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
+        type: UNKNOWN, result: 'number' as const,
+      };
+    }
+
+    // **`sum` over a KNOWN exact-tail class must admit its decimal-TEXT members.** The eligibility
+    // guard is a storage-class test, so a `long`/`bigint` past 2^53 has `typeof = 'text'` ∉ arithmetic
+    // and was silently EXCLUDED — the row-level defect §13g·5 records, reachable here through exactly
+    // the same shape (`inject(9007199254740993L, 1L).fold().sum(Scope.local)` answered 1). Casting
+    // through `storedCompareOn` for the known class admits it exactly, and `sumTower` keeps the class
+    // and rides a >2^53 result as exact TEXT so the int64 survives the JS-number read.
+    if (step.name === 'sum' && memberType?.kind === 'static' && isLongSumClass(memberType.type)) {
+      const casted = storedCompareOn(compilerText(memberType.type))(payload);
+      const tower = sumTower({ kind: 'agg', fn: 'sum', args: [casted] }, memberType.type);
+      return asNumber(scalar(tower.value, 'v', 'any'), scalar(tower.type, 'vt', 'text'));
+    }
+
+    // `sum`/`mean` REDUCE rather than order, so the result is a fresh value whose storage class the
+    // aggregate itself reports — `typeof(<the aggregate>)`, the row-level rule unchanged. TWO
+    // correlated subqueries over the same members, which is what legacy emits too: SQL has nowhere to
+    // name the aggregate once.
+    const reduced = reducerAggregate(payload, step.name);
+    return asNumber(scalar(reduced.value, 'v', 'any'), scalar(reduced.type, 'vt', 'text'));
   }
 
   return null;

@@ -5,7 +5,7 @@
 // re-enterable tail (compileFromList). The producers live in projection.ts (compileFold)
 // and, later, inject-of-a-list / select(Column.values).
 
-import { q, value, raw, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
+import { q, value, raw, list, empty, derived, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { predicateSql, scalarTx, compareKey, inferVtypeSql } from '../../plan/plan.ts';
 import { argValues, isColumnArg, isNested, isPred, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
@@ -13,6 +13,7 @@ import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toM
 import { layoutProjection, layoutCols, type ElementStream } from '../context/context.ts';
 import { hasTypedMembers, memberTypeOf, PER_ROW, SCALAR_MEMBERS, STATIC, UNKNOWN, withMemberType, type Compiled, type ListOf, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf, type Engine } from '../../engine/deps.ts';
+import { isLongSumClass, SAFE_INT } from '../../rel/reducer.ts';
 import { firstOf, globalRowOps, lowerGlobalCount, aliasCompareRows } from './barrier.ts';
 import { assertsGType, childSteps, classifyBy, collectionAssert } from './child-shape.ts';
 import { isLocalScope, LIST_LOCAL_TX, REDUCERS, STRING_LOCAL_TX } from '../../ir/step.ts';
@@ -73,6 +74,45 @@ const memberNode = (of: ListOf, member: Expression = q`je.value`, type: Expressi
 const retypedList = (of: ListOf, as?: ValueType): ListOf =>
   withMemberType(of, as ? STATIC(as) : UNKNOWN);
 
+/**
+ * A MEMBER'S GREMLIN TYPE, from whichever carrier the list uses — the third member read, beside
+ * `memberValue` and `memberNode`, and the one whose absence made every list op compare by SQLite
+ * STORAGE CLASS. RelIR's `memberTypeTag` (`rel/list.ts`) is the same rule in the other vocabulary.
+ *
+ * A `static` list states its tag at compile time; a self-describing one states it per member (with
+ * `inferVtypeSql` for the members the producer left bare, since the encoding is uniform-per-list and
+ * not per-member); an untagged one infers it from the storage class, which is what the wire would do.
+ */
+const memberVtypeSql = (of: ListOf, member: Expression = q`je.value`, type: Expression = q`je.type`): Expression => {
+  const t = of.kind === 'scalar' ? of.type : undefined;
+  if (t?.kind === 'static') return value(t.type);
+  return isTyped(of)
+    ? q`CASE WHEN ${type}='object' THEN ${member} ->> '$.t' ELSE ${inferVtypeSql(member)} END`
+    : inferVtypeSql(member);
+};
+
+/**
+ * THE MEMBER'S ORDERING KEY — `compareKey` over the member's own type, which is the SAME cast
+ * authority `order().by()` and every range predicate use on this spine.
+ *
+ * Without it a member compares by storage class, so a value carried as decimal TEXT because it does
+ * not fit one (a long past 2^53, a bigint, a bigdecimal, a duration) compares LEXICOGRAPHICALLY.
+ * Measured before this existed, on BOTH spines:
+ * `inject(9007199254740993L, 10007199254740993L).fold().max(Scope.local)` answered the SMALLER value.
+ */
+const memberCompareKey = (of: ListOf, member: Expression = q`je.value`, type: Expression = q`je.type`): Expression => {
+  const t = of.kind === 'scalar' ? of.type : undefined;
+  if (t?.kind === 'static') return compareKey(member, value(t.type));
+  // AN UNTAGGED MEMBER IS ITS OWN KEY, and that is provable rather than a shortcut: its type is
+  // INFERRED from its storage class, and that inference can never disagree with the storage order —
+  // TEXT infers `string` (no cast), INTEGER infers `int`/`long` (a CAST to INTEGER is the identity)
+  // and REAL infers `double` (likewise). So the cast folds away and emitting it would be pure
+  // statement text. The same argument keeps `inferVtypeSql` out of a self-describing list's ORDERING
+  // key: only the WRAPPED members can carry a type their storage class does not determine.
+  if (!isTyped(of)) return member;
+  return q`CASE WHEN ${type}='object' THEN ${compareKey(q`${member} ->> '$.v'`, q`${member} ->> '$.t'`)} ELSE ${member} END`;
+};
+
 /** A Scope.local reducer over a list value: reduce EACH list (row) to one scalar via a
  *  correlated json_each aggregate. count() counts elements (any list); sum/min/max/mean
  *  reduce the numeric elements (non-numeric filtered out, matching the global reducers).
@@ -92,17 +132,51 @@ function lowerListReducer(s: ListStream, name: string): ScalarStream {
   // so the numeric typeof guard sees the underlying value (an INTEGER/REAL/TEXT), not the
   // JSON object. A computed (untyped) list holds bare scalars — read je.value directly.
   const elem = memberValue(s.of);
-  // Numeric aggregate over the list's numeric elements (typeof guard mirrors wrapReducer);
-  // min/max also range over text (TinkerPop 4 Strings are Comparable), sum/mean stay numeric.
-  const types = (name === 'min' || name === 'max') ? "('integer', 'real', 'text')" : "('integer', 'real')";
-  const agg = (fn: string): Expression => q`(SELECT ${fn}(${elem}) FROM json_each(${c.c.list}) je WHERE typeof(${elem}) in ${types})`;
-  if (name === 'mean') {
-    const rel = s.q.cte(q`SELECT ${agg('AVG')} AS v, 'real' AS vt${carry} FROM ${c}`, ['v', 'vt', ...cols]);
-    return toScalarStream(loweringStateOf(s), rel, undefined, { result: 'number', productiveNull: s.of.kind === 'scalar' && s.of.productiveNull });
+  const memberType = s.of.kind === 'scalar' ? s.of.type : undefined;
+  const productiveNull = s.of.kind === 'scalar' && s.of.productiveNull;
+  const reduced = (body: Expression) =>
+    toScalarStream(loweringStateOf(s), s.q.cte(q`SELECT ${body}${carry} FROM ${c}`, ['v', 'vt', ...cols]),
+      undefined, { result: 'number', productiveNull });
+
+  // **`min`/`max` ORDER, so they take the ARGMIN/ARGMAX — the winning MEMBER, projected whole.**
+  // A `MIN()`/`MAX()` over the raw payload picks by SQLite's storage-class order, which answers the
+  // WRONG member for anything carried as decimal TEXT and hands it back framed as text; ordering by
+  // `memberCompareKey` and taking the first row fixes both at once, and the `vt` becomes that
+  // member's own GREMLIN vtype so `vtypeToValueType` reframes a text-carried long as a `long`.
+  // The same argmin/argmax the ROW-level pair uses (`rel/lower.ts`), one scope down.
+  if (name === 'min' || name === 'max') {
+    const dir = name === 'min' ? raw('ASC') : raw('DESC');
+    // NULL is SKIPPED by min/max (`NumberHelper` returns the non-null side), so it never wins. A
+    // total tie-break on the raw payload keeps the survivor deterministic under a reversed scan.
+    //
+    // THE WINNER IS PICKED ONCE: `v` and `vt` are two fields of one member, and giving each its own
+    // correlated subquery emits the whole sort twice — measured on the RelIR twin, that alone took
+    // the `max` family's statement from 1,250 to 4,108 bytes against a 100 KB platform cap. So the
+    // pick projects a `{v,t}` pair as one JSON value and the two columns read its fields.
+    const pick = q`(SELECT json_object('v', ${elem}, 't', ${memberVtypeSql(s.of)}) FROM json_each(${c.c.list}) je WHERE ${elem} IS NOT NULL ORDER BY ${memberCompareKey(s.of)} ${dir}, ${elem} ${dir} LIMIT 1)`;
+    const held = derived(q`SELECT ${pick} AS w${carry} FROM ${c}`, ['w', ...cols], 'w');
+    return toScalarStream(loweringStateOf(s),
+      s.q.cte(q`SELECT ${held.c.w} ->> '$.v' AS v, ${held.c.w} ->> '$.t' AS vt${layoutProjection(s.traverserLayout, held)} FROM ${held}`, ['v', 'vt', ...cols]),
+      undefined, { result: 'number', productiveNull });
   }
-  const fn = name === 'sum' ? 'SUM' : name === 'min' ? 'MIN' : 'MAX';
-  const rel = s.q.cte(q`SELECT ${agg(fn)} AS v, typeof(${agg(fn)}) AS vt${carry} FROM ${c}`, ['v', 'vt', ...cols]);
-  return toScalarStream(loweringStateOf(s), rel, undefined, { result: 'number', productiveNull: s.of.kind === 'scalar' && s.of.productiveNull });
+
+  // Numeric aggregate over the list's numeric elements (typeof guard mirrors wrapReducer);
+  // sum/mean stay numeric.
+  const agg = (fn: string, subject: Expression = elem): Expression =>
+    q`(SELECT ${fn}(${subject}) FROM json_each(${c.c.list}) je WHERE typeof(${elem}) in ('integer', 'real'))`;
+  if (name === 'mean') return reduced(q`${agg('AVG')} AS v, 'real' AS vt`);
+
+  // **`sum` over a KNOWN exact-tail class must admit its decimal-TEXT members.** The eligibility
+  // guard is a storage-class test, so a `long`/`bigint` past 2^53 has `typeof = 'text'` ∉ arithmetic
+  // and is silently EXCLUDED — `inject(9007199254740993L, 1L).fold().sum(Scope.local)` answered 1.
+  // Casting through `compareKey` for the known class admits it exactly, and the result rides as
+  // exact TEXT past 2^53 so the int64 survives the JS-number read (`frameValue`'s long arm takes
+  // either form). `SAFE_INT` comes from the reducer authority rather than a second copy of 2^53-1.
+  if (name === 'sum' && memberType?.kind === 'static' && isLongSumClass(memberType.type)) {
+    const exact = q`(SELECT SUM(${compareKey(elem, value(memberType.type))}) FROM json_each(${c.c.list}) je WHERE ${elem} IS NOT NULL)`;
+    return reduced(q`CASE WHEN abs(${exact}) > ${value(SAFE_INT)} THEN CAST(${exact} AS TEXT) ELSE ${exact} END AS v, ${value(memberType.type)} AS vt`);
+  }
+  return reduced(q`${agg('SUM')} AS v, typeof(${agg('SUM')}) AS vt`);
 }
 
 /**
@@ -246,9 +320,8 @@ function listLocalTransform(s: ListStream, step: IRStep): ListStream {
   const name = step.name;
   const nums = argValues(step).filter((a: any) => typeof a === 'number') as number[];
   const je = q`json_each(${c.c.list})`;
-  // Compare on the payload, carry the whole member. For a bare list these are the same
-  // expression, so the untyped SQL is unchanged.
-  const xVal = memberValue(s.of, q`x.value`, q`x.type`);
+  // Carry the whole member. For a bare list this is `x.value` itself, so the untyped SQL is
+  // unchanged; ordering reads `memberCompareKey` instead (see the `order` branch).
   const xNode = memberNode(s.of, q`x.value`, q`x.type`);
   // Every branch re-aggregates with `json_group_array(value ORDER BY ord)` so the final
   // list order is explicit (never relying on subquery-order-into-aggregate). COALESCE to
@@ -273,9 +346,11 @@ function listLocalTransform(s: ListStream, step: IRStep): ListStream {
       if (by.dir === 'shuffle') throw new Error('order(Scope.local) shuffle not yet supported');
       desc = by.dir === 'desc';
     }
-    // Order by the PAYLOAD (ordering raw {t,v} JSON text would sort by the type name),
-    // but emit the whole member so the element keeps its type.
-    sub = q`(SELECT jsonb(COALESCE(json_group_array(${xNode} ORDER BY ${xVal} ${desc ? 'DESC' : 'ASC'}), json('[]'))) FROM ${je} x)`;
+    // Order by the member's COMPARE KEY — the payload cast into its own numeric class (ordering the
+    // raw {t,v} JSON text would sort by the type name; ordering the raw PAYLOAD sorts a decimal-TEXT
+    // long lexicographically) — but emit the whole member so the element keeps its type.
+    const key = memberCompareKey(s.of, q`x.value`, q`x.type`);
+    sub = q`(SELECT jsonb(COALESCE(json_group_array(${xNode} ORDER BY ${key} ${desc ? 'DESC' : 'ASC'}), json('[]'))) FROM ${je} x)`;
   } else if (name === 'dedup') {
     // First-occurrence order: group by the member, order by earliest position. Grouping on
     // the WHOLE member (payload + type for a typed list) is the same rule root dedup() uses

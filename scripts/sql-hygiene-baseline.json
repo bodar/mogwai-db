@@ -253,8 +253,8 @@
   },
   "max": {
     "binds": 0,
-    "bytes": 1250,
-    "compiler": 29,
+    "bytes": 1915,
+    "compiler": 55,
     "bound": 0
   },
   "mean": {
@@ -283,8 +283,8 @@
   },
   "min": {
     "binds": 0,
-    "bytes": 1250,
-    "compiler": 29,
+    "bytes": 1913,
+    "compiler": 55,
     "bound": 0
   },
   "none": {
