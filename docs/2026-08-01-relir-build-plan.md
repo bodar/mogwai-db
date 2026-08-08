@@ -346,6 +346,14 @@ assertion that omits a field stops witnessing it. Two silent gaps fell out immed
 - 🚧 the **variant payload** has no `vtype` column, so a variant arm declares a STATIC tag or `UNKNOWN`.
   Carrying `perRow` there needs the framer to read it, i.e. a wire change.
 
+✅ **The first defect totality surfaced was legacy's GROUP KEY**, and it is the argument in one case.
+`groupCount().by('when')` keyed on raw MILLIS and `by('uuid')` on a String — the arm emitted `gk`
+alone, so the property's stored `vtype` had nowhere to ride and the key framed by JS inference, with
+the VALUES and the entry COUNT both right. `GroupKey.scalar.type` had been OPTIONAL and the producer
+simply omitted it; an omission reads as "no opinion" rather than "framed wrong", so nothing could
+tell them apart. §6·1 would say SHED, and that is not available here (see the group-value gap below),
+so the tag is carried — `gkt`, the column RelIR's own barrier already picks.
+
 **PASS-THROUGH is exact; ARITHMETIC is SQLite's** — the narrowest tag in the Number family that holds the
 result **without narrowing**. ⚠️ Two hard edges: **never narrow** (`frameValue`'s `case 'byte'` calls a strict
 serializer; tagging 128 a Byte is a crash), and **never leave the Number family gratuitously**
@@ -850,12 +858,10 @@ Most of `docs/` was written against a two-spine world and will be lying by here.
 Each cited, corpus-mostly-invisible, none a one-liner. Rank them against phase work, do not queue them behind
 it.
 
-- **Legacy's GROUP KEY frames a stored property by JS inference** — `groupCount().by('when')` keys on
-  raw MILLIS, `by('uuid')` on a String, because the arm emits `gk` alone and the property's `vtype` has
-  nowhere to ride. RelIR answers all of these correctly, so §6·1 says SHED — and it cannot yet:
-  declining takes out 34 tests, an L3 scenario and a conformance-host gate, because **RelIR does not
-  hold the group VALUE forms that reach this key** (`by(__.out().count())`, `by(__.tail())`). The
-  blocker is the group-value family, not the key. Recorded at the site with the measurement.
+- **RelIR does not hold the group VALUE forms** — `group().by(k).by(__.out().count())` (a reducing
+  child value) and `by(__.tail())`. Measured by trying to shed the legacy group KEY: declining costs 34
+  tests, an L3 scenario and a conformance-host gate, all of them these two shapes. Until they land,
+  every `group()` chain that uses them is legacy-only.
 - **A set-op over TWO self-describing sides loses the member types.** Both sides are normalized to
   payloads (that is what puts them in one vocabulary), so the result is honestly `unknown`. Recovering
   the tags means normalizing both sides to the TYPED encoding instead — wrapping a bare member with its
