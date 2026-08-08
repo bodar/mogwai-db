@@ -552,7 +552,10 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       // reached the caller as SQLite's own constraint error instead of the reference's message.
       if (isStmt(binding.node)) { retain(statement(binding.node)); continue; }
       if (retained(binding)) { retain(renderRel(binding.node, EMPTY_SCOPE)); continue; }
-      ctes.push(q`${ident(binding.name)} AS (${renderBuilt(build(binding.node, EMPTY_SCOPE))})`);
+      // A `fenced` Materialize renders `AS MATERIALIZED` — a barrier SQLite may not flatten. Only the
+      // fenced ones ask for it; every other CTE stays the flatten-freely default (see `Rel.materialize`).
+      const materialized = binding.node.kind === 'materialize' && binding.node.fenced ? raw('MATERIALIZED ') : empty;
+      ctes.push(q`${ident(binding.name)} AS ${materialized}(${renderBuilt(build(binding.node, EMPTY_SCOPE))})`);
     }
     if (lastRetained) return { effects };
     // A recursive root must share ONE `WITH RECURSIVE` list with the bindings beside it.

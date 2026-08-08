@@ -112,7 +112,7 @@ export function mapRelChildren(r: Rel, f: (child: Rel) => Rel): Rel {
     case 'distinct': return make.distinct({ id, channels, type, input: f(r.input) });
     case 'window': return make.window({ id, channels, type, input: f(r.input), specs: r.specs });
     case 'explode': return make.explode({ id, channels, type, ...(r.input ? { input: f(r.input) } : {}), expr: r.expr, as: r.as });
-    case 'materialize': return make.materialize({ id, channels, type, input: f(r.input), name: r.name });
+    case 'materialize': return make.materialize({ id, channels, type, input: f(r.input), name: r.name, fenced: r.fenced });
     case 'join': return make.join({ id, channels, type, left: f(r.left), right: f(r.right), join: r.join, on: r.on, ordered: r.ordered });
     case 'union': return make.union({ id, channels, type, inputs: r.inputs.map(f), all: r.all });
     case 'recursive': return make.recursive({ id, channels, type, name: r.name, cols: r.cols, seed: f(r.seed), step: (self) => f(r.step(self)) });

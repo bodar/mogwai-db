@@ -558,7 +558,12 @@ Each fails closed. Do only when a concrete scenario demands it.
 - **Foldable-sack residuals** — fan-out `by(__.trav)` in a repeat sack body, mutate `sack(op)` in a branch
   arm, `withSack()` at a `union()` source, mixed sack+element `until`/`emit`, `sack(BiFunction)`. *Low.*
   → [foldable-carried-column](./2026-07-24-foldable-carried-column-plan.md)
-- **`repeat`/`match` emission order** — a recursive CTE can't window across iterations. *Low.*
+- **`repeat`/`match` emission order** — a recursive CTE can't window across iterations. *Low, and NOT a
+  correctness debt.* TinkerPop itself leaves this order unspecified: the reference scenario for the L5
+  witness (`g.V().repeat(__.both()).times(3).range(5,11)`) asserts `the result should be OF` the six
+  vertices — each result need only be a valid vertex, not a fixed window (`vendor/tinkerpop/gremlin-test/
+  .../filter/Range.feature`, at the pin). So this primitive would make the output DETERMINATE, not
+  correct — a nicety for the perturbation instrument, not a conformance gap. Detail: `test/L5-properties/known.ts`.
 - **L3 ratchet hygiene.** `tags.ts` names which of three exclusion KINDS each tag is, and
   `runner-skips.test.ts` gates the kind that depends on someone else's code. **Do not descope
   GraphComputer**: 4 of its 6 scenarios are the OLAP names item 8 will serve, so that exclusion should

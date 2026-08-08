@@ -11,13 +11,31 @@
 // semantic authority, so a difference is always a defect in the optimized lowering (or in a layer
 // beneath both).
 //
+// The ONE principled exception, and it is the ORACLE's blind spot rather than a licence: where
+// TinkerPop itself leaves an emission ORDER unspecified (a `the result should be OF` scenario), the
+// two routes may legitimately pick different valid windows — and a POSITIONAL consumer turns that
+// within-spec order difference into a `multiset` difference this oracle cannot tell from a wrong
+// answer. Such an entry is kept because this is the only channel that can suppress it, and it must
+// PROVE within-spec by citing the reference scenario — never assert it. `repeatBodyExpansion` is the
+// only one, and the day the oracle can read a traversal's reference assertion it moves out of here.
+//
 // ****  EMPTY IS THE INTENDED STATE. THE LIST IS NOT EMPTY — see the entries below.  ****
 //
 // (This line claimed emptiness while an entry already sat below it; a header that describes a state
-// the file has left is worse than no header, because it is read as a summary. Two entries today:
-// `repeatBodyExpansion`, an under-determined emission ORDER neither route owns, and `propertySeek`,
-// a slice dropped by the generic fallback — the second is a real defect awaiting a fix, not a
-// tolerated difference.)
+// the file has left is worse than no header, because it is read as a summary. TWO entries today:
+// `repeatBodyExpansion`, an under-determined emission ORDER neither route owns (the within-spec
+// exception above); and `predicateInlining`, a genuine contract defect — the generic path THROWS on a
+// child body the fast path answers (a slice-then-values existence test the legacy child lowering
+// cannot express).
+//
+// The `propertySeek` entry that sat here was NOT a fast-path defect at all — it was a wrong ANSWER
+// present in BOTH spine positions (this oracle's own blind spot), which `propertySeek` merely masked
+// by lifting a `has()`'s `EXISTS` into a join. Root cause: SQLite silently drops an `OFFSET` when the
+// offset's block has a single-table `FROM` and a positive correlated `EXISTS` in its `WHERE`, so the
+// whole `where(…)`/`has(…)`-then-`skip`/`range` family answered wrong under the DEFAULT config. Fixed
+// generically by a `MATERIALIZED`-CTE fence between the filter and the offset — `slice` /
+// `offsetDropsOverExists` in `src/compiler/rel/lower.ts` — and pinned in
+// `test/L4-addendum/offset-over-correlated-exists.feature`.)
 //
 // L5's first sweep produced 22 divergent traversals in 17 step-signature groups. They reduced to
 // FOUR root causes, all now fixed (L3 1475 → 1490, +15/−0, each pinned in an L4 `.feature`):
@@ -79,46 +97,24 @@ export const KNOWN: readonly KnownDivergence[] = [
       + 'has no reason to visit the two in the same order. Neither is wrong ON ITS OWN — the walk has '
       + 'no emission order to be faithful to, because a recursive CTE cannot window across iterations '
       + '(the encounter demand pass returns false at repeat()/match() for exactly this reason, '
-      + 'ir/analyze.ts). So the defect is the UNDER-DETERMINATION, not either route, and it is already '
-      + 'filed as such: docs/outstanding-work.md item 20 names this traversal as EXPECTED under the '
-      + 'perturbation instrument, and item 4 owns the missing primitive. '
+      + 'ir/analyze.ts). '
+      + 'AND TINKERPOP AGREES THE ORDER IS UNSPECIFIED — THIS IS NOT A LOWERING DEFECT: the reference '
+      + 'scenario for this EXACT traversal, g_V_repeatXbothX_timesX3X_rangeX5_11X, asserts `the result '
+      + 'should be OF` v[marko]/v[josh]/v[peter]/v[lop]/v[vadas]/v[ripple] — i.e. each of the six '
+      + 'results need only be ONE OF the six vertices, not a fixed window (vendor/tinkerpop/gremlin-'
+      + 'test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/filter/Range.feature, at '
+      + 'the pin). Both routes return six valid vertices, so both PASS conformance; they simply pick '
+      + "different valid windows. This is the `order`-telemetry class that a slice amplified into a "
+      + 'multiset difference the oracle cannot recognise as within-spec — the limitation is the '
+      + "ORACLE's (it compares specific multisets), not the lowering's. It is kept here because that "
+      + 'is the only channel to suppress it; docs/outstanding-work.md item 20 names this traversal as '
+      + 'EXPECTED under the perturbation instrument (an exemption, not a fix), and item 4 owns the '
+      + 'OPTIONAL primitive that would make repeat()-then-slice determinate — a nicety the reference '
+      + 'does not require, NOT a correctness debt. '
       + 'THIS ENTRY IS WHY THE FLAG WAS ADDED: the flat expansion always won where it recognised a '
       + 'body, so nothing could compare the two routes at all. The first sweep with the switch found '
       + 'exactly one disagreement across the corpus, which is the useful result either way.',
     family: { query: /^g\.V\(\)\.repeat\(__\.both\(\)\)\.times\(3\)\.range\(/ },
-  },
-  {
-    query: "g.V().has('age', P.gt(0)).where(__.outE()).skip(1)",
-    fastPath: 'propertySeek',
-    diagnosis:
-      'A NEWLY-REACHED DEFECT, not a regression: the generic fallback DROPS A FOLLOWING SLICE when a '
-      + 'property `has()` is followed by a `where()`/`filter()` child body. Measured on the modern '
-      + "graph, `g.V().has('age',P.gt(0)).where(__.outE()).skip(1)` is [4,6] — age>0 gives "
-      + '{marko,vadas,josh,peter}, the child keeps those with out-edges {1,4,6}, skip(1) drops the '
-      + 'first — and that is what the DEFAULT config answers on both spines. With propertySeek alone '
-      + 'disabled it answers [1,4,6]: the skip is gone, not merely reordered. '
-      + 'ATTRIBUTION IS EXACT, not inferred — every one of the other seven switches was toggled off '
-      + 'individually against the same traversal and all seven still answer [4,6]. '
-      + '`g.V().has(...).filter(__.outE("created")).skip(2)` is the same cause with a different arity '
-      + '([6] correct, [4,6] with the switch off), which is why this is ONE entry and not two. '
-      + 'SEVERITY: production is CORRECT, because the switch defaults on — this is the disable path, '
-      + 'exactly the class this oracle exists for (the header above records four switches that '
-      + 'shipped before L5 and whose generic path had never been executed). It is still a defect in '
-      + "the optimized lowering's contract, since `FastPathConfig` promises the generic path is "
-      + 'result-equivalent AND the semantic authority; here the accelerated path is the correct one, '
-      + 'which inverts that and means the authority cannot be trusted to arbitrate. '
-      + 'NOT YET DIAGNOSED TO A LINE: what remains is why the non-seek `has` lowering loses a '
-      + 'following slice. Recorded rather than fixed because the fix is an unrelated read-path '
-      + 'investigation and the finding surfaced mid-way through Phase 1 write work; the L5 seed is '
-      + 'HEAD-derived, so this WILL resurface, and the point of the entry is that it resurfaces named. '
-      + 'TO REPRODUCE, without waiting for a seed to land on it again: run the traversal directly '
-      + 'against the modern graph with `DEFAULT_FAST_PATHS` and then with `{...DEFAULT_FAST_PATHS, '
-      + 'propertySeek: false}` — the answers are [4,6] and [1,4,6]. Toggle the switches ONE AT A TIME '
-      + 'rather than passing a partial config: a partial object silently disables every key it omits, '
-      + 'which is how this was first mis-attributed to the generic path in general. The seed that '
-      + 'surfaced it was `L5_SEED=4264137` (`bun test test/L5-properties/differential.test.ts`), kept '
-      + 'because a seed that is known to hit a defect is worth more than one that merely might.',
-    family: { query: /^g\.V\(\)\.has\('age', ?P\.(gt|gte)\(\d+\)\)\.(where|filter)\(__\.outE\(.*\)\)\.skip\(/ },
   },
   {
     query: "g.V(1).outE().outV().has('name', TextP.containing('a')).where(__.out().range(0, 2).values('name'))",

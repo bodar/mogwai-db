@@ -8,7 +8,7 @@ import { seek } from '../../rel/passes/seek.ts';
 import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { forEachRel } from '../../rel/walk.ts';
+import { exprChildren, forEachRel } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
 import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
@@ -859,12 +859,19 @@ function slice(
   window: { readonly offset: number; readonly limit: number | null; readonly offsetParam?: string | null; readonly limitParam?: string | null },
   encounter: Channel | undefined, dir: 'asc' | 'desc', fresh: Minter,
 ): Rel {
+  // FENCE THE FILTER FROM THE OFFSET WHEN SQLITE WOULD DROP IT. `offsetDropsOverExists` decides; when
+  // it holds, a `MATERIALIZED` CTE between the correlated `EXISTS` and the `OFFSET` is the fence, and it
+  // goes UNDER the `order()` sort so the emission order is re-established over the materialized rows.
+  const hasOffset = window.offset > 0 || window.offsetParam != null;
+  const base = hasOffset && offsetDropsOverExists(input)
+    ? make.materialize({ id: fresh('om'), input, channels: input.channels, type: input.type, fenced: true })
+    : input;
   const source = encounter
     ? make.sort({
-      id: fresh('so'), input, channels: input.channels, type: input.type,
-      terms: [{ expr: col(input.id, encounter.col), dir }],
+      id: fresh('so'), input: base, channels: base.channels, type: base.type,
+      terms: [{ expr: col(base.id, encounter.col), dir }],
     })
-    : input;
+    : base;
   // A `limit($x)`/`skip($x)` count is a user PARAMETER and binds untouched; a parsed literal inlines
   // (`sliceBound`). The offset is emitted for a nonzero literal OR any parameter (a `skip($x)` where
   // `$x` happens to resolve to 0 still binds, so the plan is one cached statement over every offset).
@@ -873,6 +880,55 @@ function slice(
     ...(window.limit === null ? {} : { count: sliceBound(window.limit, window.limitParam ?? null) }),
     ...(window.offset || window.offsetParam != null ? { offset: sliceBound(window.offset, window.offsetParam ?? null) } : {}),
   });
+}
+
+/**
+ * SQLite (measured on bun:sqlite 3.51.x AND the DO runtime) SILENTLY DROPS an `OFFSET` when the
+ * offset's own `SELECT` block has a SINGLE-TABLE `FROM` and a POSITIVE correlated `EXISTS` in its
+ * `WHERE`:
+ * ```
+ * SELECT id FROM nodes n WHERE EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id) LIMIT -1 OFFSET 1
+ * ```
+ * returns EVERY surviving row — a wrong ANSWER, not a reorder. A `JOIN` in the `FROM` (any movement)
+ * dodges it; `NOT EXISTS`, an uncorrelated `IN (SELECT …)` and a scalar `(SELECT …) > 0` do not
+ * trigger it. That is why `propertySeek` — which lifts a `has()`'s `EXISTS` into a join — masked the
+ * defect on the ONE traversal `known.ts` recorded, while the whole `where(…)`/`has(…)`-then-`skip`
+ * family answered wrong in production under the DEFAULT config. The differential could not see it: the
+ * bug is present in BOTH spine positions of those traversals, which is the blind spot L5's own header
+ * names. The fence is a `MATERIALIZED` CTE between the filter and the offset (`slice`).
+ *
+ * This decides when the fence is needed: does the offset's block FUSE a positive correlated `EXISTS`
+ * onto a bare scan? It walks the block-fusing spine — `project`/`filter`/`sort`/`materialize` all fold
+ * into one `SELECT`, and `sliceOf`'s own `order()` sort sits on top — down to the `FROM`-defining node.
+ * A `scan` there IS the single-table `FROM` the bug needs; any block-closing node (`join`/`union`/
+ * `distinct`/`aggregate`/`window`/…) means the offset does not sit over a bare scan, so it cannot bite.
+ * A plain `materialize` is transparent here: an ordinary CTE is flattened, so an `EXISTS` beneath one
+ * still fuses upward — the fence wraps the whole input, which the `MATERIALIZED` barrier then pins.
+ */
+function offsetDropsOverExists(input: Rel): boolean {
+  let sawExists = false;
+  for (let node: Rel = input; ; ) {
+    switch (node.kind) {
+      case 'scan': return sawExists;
+      case 'filter': sawExists ||= hasPositiveExists(node.pred); node = node.input; break;
+      case 'project': case 'sort': case 'materialize': node = node.input; break;
+      default: return false;
+    }
+  }
+}
+
+/** Does this predicate place a POSITIVE `EXISTS` in the emitted `WHERE`? Parity-tracked, because a
+ *  `hasNot(k)` (`NOT (EXISTS …)`) and a `not(__.out())` (a `negated` exists) both render as `NOT
+ *  EXISTS`, which does not trigger the bug — so an exists under an ODD number of negations is not one
+ *  the fence must cover. (A positive exists buried in `NOT (a AND …)` reads as negated and is left
+ *  unfenced; that composition does not arise from ordinary Gremlin and a spurious fence would only cost
+ *  a redundant barrier, never correctness.) */
+function hasPositiveExists(pred: Expr): boolean {
+  const walk = (e: Expr, negated: boolean): boolean =>
+    e.kind === 'exists' ? e.negated === negated
+    : e.kind === 'unary' && e.op === 'not' ? walk(e.arg, !negated)
+    : exprChildren(e).some((child) => walk(child, negated));
+  return walk(pred, false);
 }
 
 /**

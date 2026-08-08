@@ -25,7 +25,14 @@ type RawRel =
    *  than a join. Every list member op is that shape — a transform, a predicate, a local reducer or a
    *  local slice over one traverser's members, not over the stream's rows. */
   | (RelBase & { readonly kind: 'explode'; readonly id: RelId; readonly input?: Rel; readonly expr: Expr; readonly as: { readonly key?: string; readonly value: string; readonly ord?: string; readonly type?: string } })
-  | (RelBase & { readonly kind: 'materialize'; readonly id: RelId; readonly input: Rel; readonly name?: string })
+  /** `fenced` forces the CTE to render `AS MATERIALIZED` — a real optimization BARRIER SQLite may not
+   *  flatten, as opposed to the ordinary CTE it inlines freely. It is a PHYSICAL fact like `join.ordered`
+   *  (the algebra means the same either way), and it exists for one reason: a positive correlated `EXISTS`
+   *  in a `WHERE` that fuses onto a bare scan makes SQLite silently drop a following `OFFSET` (measured on
+   *  bun:sqlite 3.51.x and the DO runtime). The fence between that filter and the offset is the one thing
+   *  that reliably defeats it — a plain CTE is flattened and re-exposes the bug. See `slice` in
+   *  `src/compiler/rel/lower.ts`. */
+  | (RelBase & { readonly kind: 'materialize'; readonly id: RelId; readonly input: Rel; readonly name?: string; readonly fenced?: boolean })
   /** `ordered` pins the LEFT side as the outer loop. It is not an algebraic property — the join
    *  means the same thing either way — but a PHYSICAL one, and the only place the algebra states a
    *  fact about execution rather than about rows. It exists because a traversal already fixes the
