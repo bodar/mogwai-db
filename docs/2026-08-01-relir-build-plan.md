@@ -1219,8 +1219,40 @@ declined for want of a fact the compile already held. Same class as `servicesNam
 the top-level chain and as `rel-blockers` not passing the sack seed: **whenever a seam re-enters the
 fold, check what it HANDS OVER before concluding what the algebra cannot express.**
 
-What still declines is an arm disagreeing on SHAPE — the VARIANT merge, which is the rest of the
-branch family (55) and its own substrate.
+#### ✅ the VARIANT — and it added NO wire concept
+
+Arms of different SHAPES now merge as a per-row tagged union, and almost all of the family was one
+syntactic shape: a two-argument `choose` has an IMPLICIT identity else arm (`ChooseStep`'s private
+constructor installs one), so the moment its `then` retypes the branch is mixed.
+
+**`Shape{kind:'variant'}` and the `vk` discriminant were already legacy's and `execute.ts` has always
+framed them** (0 null, 1 scalar, 2 vertex, 3 edge, 4 list). So this taught the ALGEBRA to produce rows
+the framer could already read — §6·3 exactly — and the proof is that both spines now DECLARE the same
+arm list for a shape they both answer, not merely the same rows. **Structurally it is the scalar meet
+one level up**: a tag disagreement widens the schema by ONE column, a shape disagreement by THREE, and
+both then hand the arms to the same `Union`. §7's bar is "show the seam cannot EXPRESS the shape" — it
+could; it had not been taught to.
+
+Rowids until the root, as the element list does: an element arm carries only `rid` and
+`correlatedElementColumns` expands it once, a THIRD caller of the same id/label/props expressions
+rather than a third spelling of the tuple. The scalar arm declares a STATIC tag or `UNKNOWN` and never
+the `perRow` an arm may arrive with — the payload has no `vtype` column, so `perRow` would describe a
+row shape the algebra did not build. Carrying it is §6·7's extension point and needs the framer to
+read it, i.e. a wire change.
+
+RelIR ahead in two ways, both pinned by decoded CLASS rather than by rows (a vertex framed through
+`rowEdge` is a wrong GraphBinary type, not a wrong value): the retyping two-arg `choose`, which legacy
+refuses outright; and MIXED ELEMENT KINDS, a shape legacy's own wire vocabulary can express (`vk` 2 vs
+3) and its lowering declines.
+
+**The family barely moved (55 → 54), and that is the finding.** What is left of `choose` is almost
+entirely the OPTION-MAP form (`choose(key).option(k, body)…`), which every branch host still declines
+on `step.optionArms`. It is the family's next arm, and the piece it needs is a PRESENCE signal from
+the child seam: `Pick.none` (a productive choice matching no key) and `Pick.unproductive` (a choice
+that produced nothing) are distinguishable only if the seam reports productivity beside the value —
+legacy computes exactly that as its modulation `present` column. `ChildValue.present` is the shape,
+and it is §6·7's rule again: carry the fact, do not guess it back from a NULL, because a productive
+NULL and an unproductive read are not the same traverser.
 
 Then the families whose kernels Phase 0 extracted and whose only remaining legacy content is emission —
 `math`/`format` were the proof case (§6·4) — then the scalar-transform tail, the property shape
