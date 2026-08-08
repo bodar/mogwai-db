@@ -330,8 +330,19 @@ layer along).
   arm the plan did not have a slot for, and its absence is why a member's type was spelled in a second,
   lossier vocabulary for as long as it was — see "THE MEMBER TYPE CHANNEL" under Phase 2. The reducer
   site landed with it (a local `min`/`max` is the argmin/argmax, reading the winner's own tag).
-- 🚧 `AliasScalarType`/`aliasScalarTypeOf` (`steps/context/context.ts`) — a lossy coarsening invented for
-  the same missing carrier, and now the LAST one. Same treatment: one total union, coarse views derived.
+- ✅ the **ALIAS channel** — `AliasScalarType` is gone. It was the last place a scalar type was
+  described in its own words, invented because a history entry has no relation COLUMN to name; the
+  `envelope` carrier is what that actually is, so the union absorbed it. **§6·7's site list is now
+  empty.**
+
+**THE OPTIONALS THEMSELVES WERE THE DEFECT GENERATOR, and the fix is totality rather than a fifth
+guard.** Three times a descriptor lost a field on a re-shape and three times the answer was a new
+bespoke preserving rebuild (`rebuildScalar`, then `withMemberType`, then `typeCarriedBy` + a local
+`numeric`). A CONVENTION cannot be the protection when the failure mode is forgetting. Every
+descriptor field is now REQUIRED — `ListOf`/`RelFraming`/`GroupKey`/`MapEntry`/`PathPos`/`Shape`, and
+`ScalarType.static.text` — so omitting one is a type error rather than a code review. 89 sites had to
+state what they had been leaving unsaid, and the test assertions are the half worth having: a shape
+assertion that omits a field stops witnessing it. Two silent gaps fell out immediately (below).
 - 🚧 the **variant payload** has no `vtype` column, so a variant arm declares a STATIC tag or `UNKNOWN`.
   Carrying `perRow` there needs the framer to read it, i.e. a wire change.
 
@@ -587,13 +598,16 @@ at all three hosts** · **the GROUP-SCOPED REDUCER (and the `origin` channel)** 
   `MaxGlobalStep` emits ONE null traverser (`MaxLocalStep.processNextStart` splits on the same null and
   skips only an EMPTY collection). Filtering answered EMPTY for exactly that case. Both spines now sort
   nulls LAST — with an explicit `IS NULL` term, because SQLite orders NULLs first ascending.
-- 🔴 **FOUR SITES DROPPED A FIELD ON A RE-SHAPE, and they are one defect shape.** A collection projection
-  declared `v` alone (ask `framingCols` what the framing OWES); `aggregate().by(traversal)`'s per-input
-  window narrowed to `(v, ordinal, rn)`; `unfold()` of a typed list rebuilt the scalar stream without
-  `productiveNull` and with `UNKNOWN` instead of the member's own static type; the three global-reducer arms
-  each rebuilt the framing without `productiveNull`. **The countermeasure is a named preserving rebuild**
-  (`withMemberType`, `typeCarriedBy`, one `numeric` above all three reducer arms) — the same answer
-  `rebuildScalar` already is for the row channel.
+- ✅ **FOUR SITES DROPPED A FIELD ON A RE-SHAPE — and the FIX IS TOTALITY, not a fifth guard.** A
+  collection projection declared `v` alone; `aggregate().by(traversal)`'s window narrowed to
+  `(v, ordinal, rn)`; `unfold()` rebuilt the scalar stream without `productiveNull` and with `UNKNOWN`
+  instead of the member's static type; the three global-reducer arms each rebuilt the framing without
+  `productiveNull`. Each was answered with a NAMED preserving rebuild — and that was the third time
+  this class appeared and the third bespoke guard (`rebuildScalar`, `withMemberType`, `typeCarriedBy`).
+  **A convention cannot be the protection when the failure mode is forgetting**, so every descriptor
+  field is now REQUIRED and the omission is a type error. The first defect totality surfaced was
+  legacy's group key, which had simply left `GroupKey.type` unset — an omission reads as "no opinion"
+  rather than "framed wrong".
 - ⚠️ **A COMPUTE-ONCE RULE the statement budget makes non-negotiable.** `v` and `vt` are two fields of one
   winning member, and a correlated subquery each emits the whole sort twice: 1,250 → 4,108 bytes for the
   `max` family against a 100 KB cap. Both spines project a `{v,t}` pair as ONE value and read its fields —
@@ -836,10 +850,17 @@ Most of `docs/` was written against a two-spine world and will be lying by here.
 Each cited, corpus-mostly-invisible, none a one-liner. Rank them against phase work, do not queue them behind
 it.
 
-- **The per-row scalar type channel's LAST site (§6·7)** — `AliasScalarType`/`aliasScalarTypeOf`. The
-  reducer and the list MEMBER both landed; this is the only coarsening left, and the `ListOf` cutover is
-  the worked example to copy (one total union, coarse views derived, a NAMED preserving rebuild so a
-  re-tag cannot drop the fields the tag is not).
+- **Legacy's GROUP KEY frames a stored property by JS inference** — `groupCount().by('when')` keys on
+  raw MILLIS, `by('uuid')` on a String, because the arm emits `gk` alone and the property's `vtype` has
+  nowhere to ride. RelIR answers all of these correctly, so §6·1 says SHED — and it cannot yet:
+  declining takes out 34 tests, an L3 scenario and a conformance-host gate, because **RelIR does not
+  hold the group VALUE forms that reach this key** (`by(__.out().count())`, `by(__.tail())`). The
+  blocker is the group-value family, not the key. Recorded at the site with the measurement.
+- **A set-op over TWO self-describing sides loses the member types.** Both sides are normalized to
+  payloads (that is what puts them in one vocabulary), so the result is honestly `unknown`. Recovering
+  the tags means normalizing both sides to the TYPED encoding instead — wrapping a bare member with its
+  INFERRED tag, which is information-preserving because that tag is what the wire would infer anyway.
+  A different design from the one in place, not a gap in it.
 - **The `set` framing marker** survives `range(local)`/`all`/`any`/`none` and is dropped only by
   `order(local)`/`unfold()` — a state-threading change through the list tail's follower loop, which is
   duplicated (`rel/list.ts`'s `ListOf.set` vs legacy's `ListStream.set`). Land it in RelIR and let legacy shed.
