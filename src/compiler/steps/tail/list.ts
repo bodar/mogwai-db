@@ -153,7 +153,10 @@ function lowerListReducer(s: ListStream, name: string): ScalarStream {
     // correlated subquery emits the whole sort twice — measured on the RelIR twin, that alone took
     // the `max` family's statement from 1,250 to 4,108 bytes against a 100 KB platform cap. So the
     // pick projects a `{v,t}` pair as one JSON value and the two columns read its fields.
-    const pick = q`(SELECT json_object('v', ${elem}, 't', ${memberVtypeSql(s.of)}) FROM json_each(${c.c.list}) je WHERE ${elem} IS NOT NULL ORDER BY ${memberCompareKey(s.of)} ${dir}, ${elem} ${dir} LIMIT 1)`;
+    // A NULL never WINS but is never FILTERED either: a non-empty all-null list reduces to null and
+    // `MaxLocalStep` splits on it. Nulls sort LAST in both directions, which needs the explicit
+    // `IS NULL` term — SQLite orders NULLs first ascending.
+    const pick = q`(SELECT json_object('v', ${elem}, 't', ${memberVtypeSql(s.of)}) FROM json_each(${c.c.list}) je ORDER BY (${elem} IS NULL) ASC, ${memberCompareKey(s.of)} ${dir}, ${elem} ${dir} LIMIT 1)`;
     const held = derived(q`SELECT ${pick} AS w${carry} FROM ${c}`, ['w', ...cols], 'w');
     return toScalarStream(loweringStateOf(s),
       s.q.cte(q`SELECT ${held.c.w} ->> '$.v' AS v, ${held.c.w} ->> '$.t' AS vt${layoutProjection(s.traverserLayout, held)} FROM ${held}`, ['v', 'vt', ...cols]),
@@ -161,9 +164,11 @@ function lowerListReducer(s: ListStream, name: string): ScalarStream {
   }
 
   // Numeric aggregate over the list's numeric elements (typeof guard mirrors wrapReducer);
-  // sum/mean stay numeric.
-  const agg = (fn: string, subject: Expression = elem): Expression =>
-    q`(SELECT ${fn}(${subject}) FROM json_each(${c.c.list}) je WHERE typeof(${elem}) in ('integer', 'real'))`;
+  // sum/mean stay numeric. THE MEMBER IS DECODED ONCE: the payload expression is a CASE for a
+  // self-describing list, and splicing it into the aggregate AND its eligibility guard wrote it
+  // twice — naming it in a subselect first is the same trick the member envelope itself is.
+  const decoded = q`(SELECT ${elem} AS v FROM json_each(${c.c.list}) je) m`;
+  const agg = (fn: string): Expression => q`(SELECT ${fn}(m.v) FROM ${decoded} WHERE typeof(m.v) in ('integer', 'real'))`;
   if (name === 'mean') return reduced(q`${agg('AVG')} AS v, 'real' AS vt`);
 
   // **`sum` over a KNOWN exact-tail class must admit its decimal-TEXT members.** The eligibility
@@ -173,10 +178,19 @@ function lowerListReducer(s: ListStream, name: string): ScalarStream {
   // exact TEXT past 2^53 so the int64 survives the JS-number read (`frameValue`'s long arm takes
   // either form). `SAFE_INT` comes from the reducer authority rather than a second copy of 2^53-1.
   if (name === 'sum' && memberType?.kind === 'static' && isLongSumClass(memberType.type)) {
-    const exact = q`(SELECT SUM(${compareKey(elem, value(memberType.type))}) FROM json_each(${c.c.list}) je WHERE ${elem} IS NOT NULL)`;
-    return reduced(q`CASE WHEN abs(${exact}) > ${value(SAFE_INT)} THEN CAST(${exact} AS TEXT) ELSE ${exact} END AS v, ${value(memberType.type)} AS vt`);
+    const exact = q`(SELECT SUM(${compareKey(q`m.v`, value(memberType.type))}) FROM ${decoded} WHERE m.v IS NOT NULL)`;
+    const held = derived(q`SELECT ${exact} AS t${carry} FROM ${c}`, ['t', ...cols], 'sx');
+    return toScalarStream(loweringStateOf(s),
+      s.q.cte(q`SELECT CASE WHEN abs(${held.c.t}) > ${value(SAFE_INT)} THEN CAST(${held.c.t} AS TEXT) ELSE ${held.c.t} END AS v, ${value(memberType.type)} AS vt${layoutProjection(s.traverserLayout, held)} FROM ${held}`, ['v', 'vt', ...cols]),
+      undefined, { result: 'number', productiveNull });
   }
-  return reduced(q`${agg('SUM')} AS v, typeof(${agg('SUM')}) AS vt`);
+  // The aggregate is COMPUTED ONCE and its storage class read off the column, not a second copy of
+  // the whole subquery — the same rule the argmax above obeys, and the reason the family's statement
+  // did not grow when the members became self-describing.
+  const held = derived(q`SELECT ${agg('SUM')} AS v${carry} FROM ${c}`, ['v', ...cols], 'sm');
+  return toScalarStream(loweringStateOf(s),
+    s.q.cte(q`SELECT ${held.c.v} AS v, typeof(${held.c.v}) AS vt${layoutProjection(s.traverserLayout, held)} FROM ${held}`, ['v', 'vt', ...cols]),
+    undefined, { result: 'number', productiveNull });
 }
 
 /**
@@ -226,7 +240,14 @@ export function compileUnfold(s: ListStream): ElementStream | PropertyStream | S
       q`SELECT ${val} AS v, ${vt} AS vtype${layoutProjection(s.traverserLayout, p)} FROM ${p}, json_each(${p.c.list}) je ORDER BY je.key`,
       ['v', 'vtype', ...layoutCols(s.traverserLayout)],
     );
-    return toScalarStream(c, rel, undefined, { type: PER_ROW('vtype'), result: 'value' });
+    // `productiveNull` rides through the retype exactly as it does on the bare arm below. It used to
+    // be dropped HERE and only here, which is a one-line gap with a four-scenario blast radius: the
+    // moment a projected collection started carrying its type, an all-null `ProductiveByStrategy`
+    // collection took this branch instead of the bare one and its explicit nulls stopped framing.
+    return toScalarStream(c, rel, undefined, {
+      type: PER_ROW('vtype'), result: 'value',
+      productiveNull: s.of.kind === 'scalar' && s.of.productiveNull,
+    });
   }
   const rel = explode('v');
   // The member type crosses back onto the ROW channel whole — the carrier question does not even

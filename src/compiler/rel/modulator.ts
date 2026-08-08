@@ -173,7 +173,7 @@ function aliasKey(body: readonly IRStep[]): Extract<ByKey, { kind: 'alias' }> | 
 /** Does this host keep a traverser its `by()` yields nothing for? `ProductiveByStrategy` says yes;
  *  TinkerPop's default says no. NOT exported: a host asks `productivityFilter` for the predicate, so
  *  there is nowhere a caller needs the boolean without also needing what to do about it. */
-const isProductiveBy = (step: IRStep): boolean => step.productiveBy === true;
+export const isProductiveBy = (step: IRStep): boolean => step.productiveBy === true;
 
 /**
  * A `by()`'s projection as an expression over the host traverser, or `null` to decline.

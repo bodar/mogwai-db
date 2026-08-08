@@ -1,15 +1,15 @@
-import { col } from '../../rel/expr.ts';
+import { col, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { perRowColumnOf, UNKNOWN, type ListOf } from '../../sql/kernel/render.ts';
+import { typeCarriedBy, type ListOf } from '../../sql/kernel/render.ts';
 import { isLocalScope } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
-import { byField, modulations, productivityFilter } from './modulator.ts';
+import { byField, isProductiveBy, modulations, productivityFilter } from './modulator.ts';
 import { foldElements, foldScalars } from './list.ts';
-import { carriedCols, meta, typeOf, type Minter } from './build.ts';
-import type { RelFraming } from './framing.ts';
+import { carriedCols, typeOf, type Minter } from './build.ts';
+import { framingCols, type RelFraming } from './framing.ts';
 import type { Channel } from '../../channels.ts';
 
 /**
@@ -105,13 +105,6 @@ export function registerCollection(
   if (reducers.has(label)) return false;
   const bys = modulations(step, 1, child);
   if (!bys) return false;
-  // A PROJECTED collection under `ProductiveByStrategy` keeps a NULL member for every traverser the
-  // projection yielded nothing for, and an all-null list is where the two spines stop agreeing: a
-  // local reducer over one emits NOTHING here and NULL on legacy. That difference is the list tail's,
-  // not this module's — it is reachable the moment a `cap()` routes — and which answer the reference
-  // wants is a question about `MaxLocalStep` rather than about collections. So this DECLINES rather
-  // than diverging on purpose (§12), and the reducer question is its own increment on both spines.
-  if (bys[0] && step.productiveBy === true) return false;
   const encounter = input.channels.find((channel) => channel.role === 'encounter');
   const collected = bys[0]
     ? foldProjection(step, input, host, framing, bys[0], encounter, child, fresh)
@@ -169,13 +162,27 @@ function foldProjection(
 ): Collection | null {
   const field = byField(step, modulation, host, framing, (name) => col(input.id, name), fresh, child);
   if (!field || field.framing.kind !== 'scalar') return null;
-  const value = field.exprs.find(([name]) => name === 'v')?.[1];
-  if (!value) return null;
+  // A numeric reducer's type is the aggregate's runtime `typeof` in `vt`, which `byField` already
+  // declines to supply rather than recomputing the aggregate; every other scalar `by()` declares `v`
+  // and, where its type rides in a column, that column too.
+  const cols = framingCols(field.framing);
+  if (!cols || !field.exprs.some(([name]) => name === 'v')) return null;
+  const projections = cols.map((column) => {
+    const expr = field.exprs.find(([name]) => name === column.name)?.[1];
+    return expr ? ([column.name, expr] as const) : null;
+  });
+  if (projections.some((projection) => projection === null)) return null;
   const carried = encounter ? [encounter] : [];
+  // THE TYPE COLUMN IS PROJECTED WITH THE VALUE, which is the whole of what used to be missing. This
+  // projection declared `v` alone, so a `by('age')`'s per-row type had nowhere to ride and degraded
+  // to `unknown` — every projected collection folded BARE, and a `by('uuid')` collection framed its
+  // members as Strings. `framingCols` is the authority on which columns a framing owes, so asking it
+  // rather than naming `v` is also what makes the child-body and property arms carry their tags for
+  // free.
   const projected = make.project({
     id: fresh('ag'), input, channels: carried,
-    type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
-    exprs: [['v', value],
+    type: typeOf(...cols, ...carriedCols(carried)),
+    exprs: [...projections as readonly (readonly [string, Expr])[],
       ...carried.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
   });
   // An unproductive projection contributes no member — the same rule every other by() host spends,
@@ -184,23 +191,16 @@ function foldProjection(
   const rows = drop
     ? make.filter({ id: fresh('af'), input: projected, channels: carried, type: projected.type, pred: drop })
     : projected;
-  // THE PER-ROW TYPE IS DELIBERATELY NOT CLAIMED HERE, and it is worth saying why rather than leaving
-  // the omission to read as an oversight. §6·7 says carry the type, and a TYPED list is what a
-  // `by('uuid')` collection would need to frame its members as UUIDs rather than as strings — so the
-  // improvement is real and it is NOT this increment's. Measured: claiming it changes the answer for
-  // an ALL-NULL collection (`withStrategies(ProductiveByStrategy)…aggregate('a').by('foo')`, where
-  // every member is null because nothing is dropped), because a local reducer over a TYPED list of
-  // nulls emits nothing while over a BARE one it emits null — and which of those the reference wants
-  // is a question about `MaxLocalStep`, not about collections. `transform.ts`'s rule applies: match
-  // the spine being replaced, and make a semantic improvement to the tag a separate change on BOTH
-  // sides. Claiming it unilaterally would be RelIR answering a different question from legacy on
-  // purpose, which §12 forbids outright.
-  // A COLUMN-carried per-row type cannot cross here yet — the projection above declares `v` and the
-  // carried channels only, so naming a `vtype` column the relation does not have would fail the
-  // algebra's own column check. A `static` type crosses whole (`text` flag included).
-  const memberType = perRowColumnOf(field.framing.type) ? UNKNOWN : field.framing.type;
+  // **`productiveNull` rides with the type.** Under `ProductiveByStrategy` nothing is dropped, so an
+  // unproductive projection leaves an explicit NULL member — and a local reducer over an all-null
+  // collection must then emit that NULL as a REAL result rather than being read as "no result".
+  // These two travelling together is exactly what the old vocabulary could not express: `typed` was a
+  // CONSTANT `ListOf`, so claiming the type DROPPED this flag, and the resulting "a typed list of
+  // nulls emits nothing where a bare one emits null" got recorded as an open question about
+  // `MaxLocalStep`. It was never that; it was one field falling out of a constant.
   return listed(foldScalars(rows, {
-    type: memberType,
+    type: typeCarriedBy(field.framing.type, (column) => cols.some((declared) => declared.name === column)),
+    ...(isProductiveBy(step) ? { productiveNull: true } : {}),
     ...(encounter ? { encounter: encounter.col } : {}),
   }, fresh));
 }

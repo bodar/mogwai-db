@@ -1,6 +1,6 @@
 import { derived, empty, list, q, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { argValues } from '../../../gremlin/frontend.ts';
-import { perRowColumnOf, staticTypeOf, TYPED_MEMBERS, type ListOf } from '../../../sql/kernel/render.ts';
+import { perRowColumnOf, staticTypeOf, TYPED_MEMBERS, type ListOf, type ScalarType } from '../../../sql/kernel/render.ts';
 import { sliceSuffix, typedScalarNode } from '../../plan/plan.ts';
 import { armBatches, isLocalScope, BATCHING_BRANCHES, type BranchKind, type IRStep, type NumericReducer, type ScalarReducer } from '../../ir/step.ts';
 
@@ -345,13 +345,13 @@ const LOSSLESS_VTYPES = raw(`('string', 'double', 'int')`);
  * Uniform per list is the invariant: mixing encodings within one list is what broke the
  * reverted attempt (docs/archive/2026-07-25-type-channel-unification.md).
  */
-export function foldMember(input: ScalarStream, src: Relation): { member: Expression; of: ListOf } {
-  const perRow = perRowColumnOf(input.type);
+export function foldMember(type: ScalarType, src: Relation): { member: Expression; of: ListOf } {
+  const perRow = perRowColumnOf(type);
   // A static or unknown type crosses onto the members verbatim — same union, new carrier question,
   // and NOT a re-derivation through `ValueType` (which drops the `text` flag that says a big long
   // rides as decimal TEXT, the fact a local reducer needs to compare numerically rather than
   // lexicographically).
-  if (!perRow) return { member: src.c.v, of: { kind: 'scalar', type: input.type } };
+  if (!perRow) return { member: src.c.v, of: { kind: 'scalar', type } };
   // The types are per-ROW, so "is an envelope needed?" is a RUNTIME question about the whole
   // list — exactly the decision the reverted barrier-local fix could not make. Wrap iff SOME
   // member's type is lossy under its storage class, asked ONCE for the whole relation: that
@@ -378,7 +378,7 @@ export function lowerGlobalFold(input: ScalarStream): ListStream {
   // Order the folded list by the carried emission encounter when the chain tracks one
   // (canonical emission order, Stage B); otherwise the list keeps incidental row order.
   const order = input.traverserLayout.encounter ? q` ORDER BY ${src.c[input.traverserLayout.encounter]}` : empty;
-  const { member, of } = foldMember(input, src);
+  const { member, of } = foldMember(input.type, src);
   const rel = input.q.cte(
     q`SELECT jsonb(COALESCE(json_group_array(${member}${order}), json('[]'))) AS list FROM ${src}`,
     ['list'],
@@ -398,7 +398,7 @@ export function lowerScopedScalarFold(
   const enc = input.traverserLayout.encounter;
   const d = domain.as('d');
   const s = input.rel.as('s');
-  const { member, of } = foldMember(input, s);
+  const { member, of } = foldMember(input.type, s);
   const rel = input.q.cte(
     q`SELECT jsonb(COALESCE(json_group_array(${member} ORDER BY ${s.c[enc]}) FILTER (WHERE ${s.c[enc]} IS NOT NULL), json('[]'))) AS list${layoutProjection(layout, d)} FROM ${d} LEFT JOIN ${s} ON ${s.c[ordinal]}=${d.c[ordinal]} GROUP BY ${d.c[ordinal]}`,
     ['list', ...layoutCols(layout)],

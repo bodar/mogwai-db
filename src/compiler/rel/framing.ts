@@ -35,7 +35,13 @@ import type { VariantArm } from './variant.ts';
  */
 export type RelFraming =
   | { readonly kind: 'elements'; readonly elem: Elem }
-  | { readonly kind: 'scalar'; readonly type: ScalarType; readonly result?: 'value' | 'count' | 'number' }
+  /** `productiveNull` says a NULL result is a REAL value rather than the framer's signal to emit
+   *  nothing. It is the `ProductiveByStrategy` fact, and it reaches here from the LIST whose members
+   *  a local reducer collapsed: nothing was dropped, so an all-null collection reduces to a null
+   *  that `MaxLocalStep` genuinely emits (`NumberHelper.max(null,null)` returns null and the step
+   *  splits on it — `gremlin-core/.../util/NumberHelper.java`, `.../step/map/MaxLocalStep.java:45`).
+   *  Without it the framer's "a null scalar is no result" rule silently eats a correct answer. */
+  | { readonly kind: 'scalar'; readonly type: ScalarType; readonly result?: 'value' | 'count' | 'number'; readonly productiveNull?: boolean }
   /** A traverser whose VALUE is a collection — one JSONB `list` column per row (§ the list
    *  vocabulary, `list.ts`). `of` describes the MEMBER encoding, which is what the framing layer
    *  needs to know how to expand each one; `set` is a framing marker only (a SET frames differently,

@@ -11,7 +11,7 @@ import type { Rel } from '../../rel/rel.ts';
 import { exprChildren, forEachRel } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
-import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
+import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { fieldNamed, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordOf, recordPayload, selectKeys } from './record.ts';
@@ -1917,6 +1917,15 @@ function scalarTail(
     // (§3.5's `barrierChannels`), which is why the channels list is empty rather than trimmed by hand.
     if (isReducer(step.name)) {
       if (args.length || isLocalScope(step)) return null;
+      // A reducer REPLACES the framing, so every field the new one does not recompute has to be
+      // carried explicitly — and `productiveNull` is the only one. It says a NULL result is a real
+      // value (`ProductiveByStrategy` put explicit nulls in this stream), so dropping it here turns
+      // the reference's one null traverser into an empty result. Written once, above all three arms,
+      // because writing it three times is how two of them would come to disagree.
+      const numeric = {
+        kind: 'scalar', type: UNKNOWN, result: 'number',
+        ...(out.kind === 'scalar' && out.productiveNull ? { productiveNull: true } : {}),
+      } as const satisfies RelFraming;
       if (step.name === 'min' || step.name === 'max') {
         // min/max ORDER rather than reduce, and Gremlin orders within a single TYPE SPACE — not by
         // SQLite storage class. A `long` carried as decimal TEXT (a value past 2^53) has
@@ -1942,18 +1951,24 @@ function scalarTail(
         const key = vtypeExpr ? storedCompareOn(vtypeExpr)(col(rel.id, 'v')) : col(rel.id, 'v');
         const dir: 'asc' | 'desc' = step.name === 'min' ? 'asc' : 'desc';
         const rank = 'red_rank';
-        // NULL is SKIPPED by min/max (`NumberHelper` returns the non-null side), so it never wins.
-        const present = make.filter({
-          id: fresh('rf'), input: rel, channels: rel.channels, type: rel.type,
-          pred: { kind: 'binary', op: 'is not', left: col(rel.id, 'v'), right: compilerNull() },
-        });
+        // NULL is SKIPPED by min/max — `NumberHelper.max/min` return the non-null side — so it never
+        // WINS. It must not be FILTERED, though, and that distinction cost four conformance
+        // scenarios: `Operator.max` over an all-null input reduces to null, and
+        // `ReducingBarrierStep` has seen starts, so the reference emits ONE null traverser
+        // (`gremlin-core/.../step/map/MaxGlobalStep.java:43-46` + `.../util/NumberHelper.java`'s
+        // `max`). Filtering answered EMPTY for exactly that case — reachable the moment a
+        // `ProductiveByStrategy` collection put nulls in a stream. So nulls sort LAST instead, in
+        // both directions: SQLite orders NULLs first ascending and last descending, which is why the
+        // `IS NULL` term is explicit rather than left to the direction.
+        const present = rel;
+        const nullsLast: Expr = { kind: 'binary', op: 'is', left: col(rel.id, 'v'), right: compilerNull() };
         const ranked = make.window({
           id: fresh('rw'), input: present, channels: present.channels,
           type: typeOf(...present.type.cols, meta(rank, 'int')),
           specs: [[rank, {
             kind: 'window-expr', fn: 'row_number', args: [],
             // A total tie-break on the raw value keeps the survivor deterministic under a reversed scan.
-            spec: { partitionBy: [], orderBy: [{ expr: key, dir }, { expr: col(present.id, 'v'), dir }] },
+            spec: { partitionBy: [], orderBy: [{ expr: nullsLast, dir: 'asc' }, { expr: key, dir }, { expr: col(present.id, 'v'), dir }] },
           }]],
         });
         // The rank filter reads a windowed column, so fence it (a window may not sit inside another
@@ -1970,7 +1985,7 @@ function scalarTail(
           id: fresh('red'), input: winner, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
           exprs: [['v', col(winner.id, 'v')], ['vt', vt]],
         });
-        out = { kind: 'scalar', type: UNKNOWN, result: 'number' };
+        out = numeric;
         continue;
       }
       const bulk = rel.channels.find((channel) => channel.role === 'bulk');
@@ -1991,7 +2006,7 @@ function scalarTail(
           id: fresh('red'), input: rel, channels: [], type: typeOf(meta('v', 'any', true), meta('vt', 'text', true)),
           groupBy: [], aggs: [['v', tower.value], ['vt', tower.type]],
         });
-        out = { kind: 'scalar', type: UNKNOWN, result: 'number' };
+        out = numeric;
         continue;
       }
       const reduced = reducerAggregate(col(rel.id, 'v'), step.name, bulk && col(rel.id, bulk.col));
@@ -2002,7 +2017,7 @@ function scalarTail(
       // `result: 'number'` is the framing arm that reads the `vt` column — the result's storage class is
       // DYNAMIC (a sum of integers is an integer, of reals a real), so there is no compile-time tag to
       // give and `UNKNOWN` would throw the second column away.
-      out = { kind: 'scalar', type: UNKNOWN, result: 'number' };
+      out = numeric;
       continue;
     }
 
@@ -2323,11 +2338,18 @@ function listTail(
       // the multiplicity when it collapsed the stream to one traverser, and each member now stands for
       // exactly one.
       if (unfolded.elem) return elementTail(positioned, unfolded.elem, steps, at + 1, false, ctx, fresh, labels);
-      // A TYPED list's members frame by their OWN type, exactly as `values()` over a stored property
-      // does — `PER_ROW('vtype')`, the same channel and the same column name, so the scalar tail's
-      // `carries('vtype')` picks it up and an `is(P.gt(…))` after it gets the vtype-aware compare key
-      // for free. A bare list's members are honestly `UNKNOWN` (inferred per value at the wire).
-      return scalarTail(positioned, { kind: 'scalar', type: unfolded.typed ? PER_ROW('vtype') : UNKNOWN }, steps, at + 1, false, ctx, fresh, labels);
+      // THE MEMBER TYPE CROSSES BACK ONTO THE ROW CHANNEL, carrier and all: an envelope becomes the
+      // `PER_ROW('vtype')` column the explode just projected — the same channel and column name
+      // `values()` uses, so the scalar tail's `carries('vtype')` picks it up and an `is(P.gt(…))`
+      // after it gets the vtype-aware compare key for free — while a `static` member type crosses
+      // unchanged rather than being flattened to `UNKNOWN`, which is what used to happen and cost a
+      // `fold().unfold()` its tag. `productiveNull` rides along for the same reason it rides through
+      // every other retype: it says a NULL is a real value, and losing it means losing the value.
+      return scalarTail(positioned, {
+        kind: 'scalar',
+        type: unfolded.typed ? PER_ROW('vtype') : memberTypeOf(items) ?? UNKNOWN,
+        ...(items.kind === 'scalar' && items.productiveNull ? { productiveNull: true } : {}),
+      }, steps, at + 1, false, ctx, fresh, labels);
     }
 
     // A GLOBAL row op slices the stream's rows, not one traverser's members.
@@ -2352,7 +2374,11 @@ function listTail(
     if (!retyped) return null;
     return scalarTail(
       retyped.rel,
-      { kind: 'scalar', type: retyped.type, ...(retyped.result ? { result: retyped.result } : {}) },
+      {
+        kind: 'scalar', type: retyped.type,
+        ...(retyped.result ? { result: retyped.result } : {}),
+        ...(retyped.productiveNull ? { productiveNull: true } : {}),
+      },
       steps, at + 1, false, ctx, fresh, labels,
     );
   }
@@ -2797,9 +2823,12 @@ const framed = (chain: Tail, collapse: boolean, fresh: Minter): { readonly rel: 
  *   than by one tag for the whole result. `perRowColumnOf` is the authority, shared with legacy.
  * - anything else is one value and one static-or-unknown tag, so `v` alone.
  *
- * `productiveNull` is deliberately absent, exactly as it was when this arm went through legacy: it is
- * `ScalarStream` state the RelIR route never set, so claiming it here would be inventing a channel rather
- * than carrying one. A productive NULL result is its own increment.
+ * `productiveNull` is CARRIED, and where it comes from is the point: it is the `ProductiveByStrategy`
+ * fact recorded on the LIST whose members a local reducer collapsed. It used to be absent here because
+ * the RelIR route never set it — and it could not, because a list's `productiveNull` lived on a
+ * descriptor that any re-tagging replaced wholesale. With the member type channel unified it simply
+ * travels, which is what turns "a typed list of nulls emits nothing" from an open question into a
+ * dropped field.
  */
 const scalarPayload = (
   rel: Rel, framing: Extract<RelFraming, { readonly kind: 'scalar' }>, fresh: Minter,
@@ -2812,7 +2841,9 @@ const scalarPayload = (
       id: fresh('vw'), input: ordered, channels: [], type: typeOf(...cols),
       exprs: cols.map((column) => [column.name, col(ordered.id, column.name)] as const),
     }),
-    shape: framing.result === 'number' ? { kind: 'scalar' } : { kind: 'value', type: framing.type },
+    shape: framing.result === 'number'
+      ? { kind: 'scalar', ...(framing.productiveNull ? { productiveNull: true } : {}) }
+      : { kind: 'value', type: framing.type },
   };
 };
 

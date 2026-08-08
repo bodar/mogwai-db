@@ -367,7 +367,10 @@ export function listMemberOp(
  */
 export function listRetype(
   step: IRStep, input: Rel, of: ListOf, fresh: Minter,
-): { readonly rel: Rel; readonly type: import('../../sql/kernel/render.ts').ScalarType; readonly result?: 'number' | 'count' } | null {
+): {
+  readonly rel: Rel; readonly type: import('../../sql/kernel/render.ts').ScalarType;
+  readonly result?: 'number' | 'count'; readonly productiveNull?: boolean;
+} | null {
   if (step.modulators?.length || step.optionArms || !isBareList(of)) return null;
   const args = argValues(step);
   const rel = fenced(input, fresh);
@@ -430,9 +433,13 @@ export function listRetype(
         groupBy: [], aggs: [[name, value]],
       }),
     }];
+    // A NULL reduction is a REAL result exactly when the LIST says nothing was dropped on the way in
+    // (`ProductiveByStrategy`), which is the fact `foldScalars` recorded beside the member type. It
+    // rides out with every reducer arm below, so no shape can be built that forgets it.
+    const productive = of.kind === 'scalar' && of.productiveNull ? { productiveNull: true } : {};
     const asNumber = (value: readonly [string, Expr], vt: readonly [string, Expr]) => ({
       rel: withPayload(rel, [value, vt], [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
-      type: UNKNOWN, result: 'number' as const,
+      type: UNKNOWN, result: 'number' as const, ...productive,
     });
 
     // **`min`/`max` ORDER, so they take the ARGMIN/ARGMAX — the winning MEMBER, projected whole —
@@ -445,19 +452,22 @@ export function listRetype(
     // `"9007199254740993"`.
     if (step.name === 'min' || step.name === 'max') {
       const dir: 'asc' | 'desc' = step.name === 'min' ? 'asc' : 'desc';
-      // NULL is SKIPPED by min/max (`NumberHelper` returns the non-null side), so it never wins —
-      // the row-level pair filters identically.
-      const present = make.filter({
-        id: fresh('mf'), input: members, channels: [], type: members.type,
-        pred: { kind: 'binary', op: 'is not', left: payload, right: compilerNull() },
-      });
+      // NULL is SKIPPED by min/max (`NumberHelper` returns the non-null side), so it never WINS —
+      // but it is not FILTERED, because a NON-EMPTY all-null list reduces to null and
+      // `MaxLocalStep` splits on that null rather than skipping the traverser
+      // (`gremlin-core/.../step/map/MaxLocalStep.java:45-56`). Nulls therefore sort LAST in both
+      // directions, which needs an explicit `IS NULL` term: SQLite puts NULLs first ascending.
+      const present = members;
       const key = memberCompareKey(of, present);
       const winner = make.limit({
         id: fresh('mw'),
         input: make.sort({
           id: fresh('mo'), input: present, channels: [], type: present.type,
           // A total tie-break on the raw payload keeps the survivor deterministic, as it does at row level.
-          terms: [{ expr: key, dir }, { expr: memberPayload(of, present), dir }],
+          terms: [
+            { expr: { kind: 'binary', op: 'is', left: memberPayload(of, present), right: compilerNull() }, dir: 'asc' },
+            { expr: key, dir }, { expr: memberPayload(of, present), dir },
+          ],
         }),
         channels: [], type: present.type, count: compilerInt(1),
       });
@@ -486,7 +496,7 @@ export function listRetype(
         rel: withPayload(held,
           [['v', jsonField(col(held.id, 'w'), 'v')], ['vt', jsonField(col(held.id, 'w'), 't')]],
           [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
-        type: UNKNOWN, result: 'number' as const,
+        type: UNKNOWN, result: 'number' as const, ...productive,
       };
     }
 
@@ -503,11 +513,19 @@ export function listRetype(
     }
 
     // `sum`/`mean` REDUCE rather than order, so the result is a fresh value whose storage class the
-    // aggregate itself reports — `typeof(<the aggregate>)`, the row-level rule unchanged. TWO
-    // correlated subqueries over the same members, which is what legacy emits too: SQL has nowhere to
-    // name the aggregate once.
+    // aggregate itself reports — `typeof(<the aggregate>)`, the row-level rule unchanged. The
+    // aggregate is COMPUTED ONCE and its class read off the column: `reducerAggregate` splices its
+    // subject into the eligibility guard as well as the aggregate, and for a self-describing list
+    // that subject is a decode CASE, so writing the whole thing twice is what made this family's
+    // statement grow when projected collections became typed. Same rule as the argmax above.
     const reduced = reducerAggregate(payload, step.name);
-    return asNumber(scalar(reduced.value, 'v', 'any'), scalar(reduced.type, 'vt', 'text'));
+    const held = fenced(withPayload(rel, [['v', scalar(reduced.value, 'v', 'any')[1]]], [meta('v', 'any', true)], fresh), fresh);
+    return {
+      rel: withPayload(held,
+        [['v', col(held.id, 'v')], ['vt', step.name === 'mean' ? compilerText('real') : { kind: 'call', fn: 'typeof', args: [col(held.id, 'v')] }]],
+        [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
+      type: UNKNOWN, result: 'number' as const, ...productive,
+    };
   }
 
   return null;

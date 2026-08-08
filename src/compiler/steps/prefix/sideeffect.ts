@@ -1,11 +1,11 @@
-import { derived, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { scalarProp, predicateSql, jsonbGroupArray, elemCtx } from '../../plan/plan.ts';
+import { derived, empty, q, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
+import { scalarProp, predicateSql, jsonbGroupArray, elemCtx, propTypeFor } from '../../plan/plan.ts';
 import { argValues, stepChain } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { elemRel, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type ScalarStream } from '../context/stream.ts';
-import { typeCarriedBy, UNKNOWN } from '../../../sql/kernel/render.ts';
+import { PER_ROW, perRowColumnOf, typeCarriedBy, UNKNOWN } from '../../../sql/kernel/render.ts';
 import { foldMember } from '../tail/barrier.ts';
 import { tryCompileFirstElementValueRows, tryCompileScalarValueRows } from '../tail/child.ts';
 import { classifyBy } from '../tail/child-shape.ts';
@@ -56,15 +56,33 @@ export const aggregate: StepFn = (s, st) => {
     if (by.kind === 'key') {
       const n = elemRel(st);
       const p = st.rel.as('p');
-      const pe = scalarProp(elemCtx(n, st.elem), by.key); // first-under-multi for a node
+      const ctx = elemCtx(n, st.elem);
+      const pe = scalarProp(ctx, by.key); // first-under-multi for a node
+      // **THE PROPERTY'S STORED TYPE IS COLLECTED WITH ITS VALUE.** A projected collection used to
+      // fold BARE, so `aggregate('a').by('when').cap('a')` came back as raw millis and `by('big')` as
+      // a String — the storage class is all the wire had left to infer from. `propTypeFor` is the
+      // sibling read `order().by(key)` already uses, and routing the fold through the SHARED
+      // `foldMember` is what decides the envelope: one uniform-per-list verdict, stated once, rather
+      // than a second copy of the lossy rule here. A META-property (`ctx.elem === 'property'`) has no
+      // vtype column at all, so it stays honestly untagged.
+      const pt = ctx.elem === 'property' ? undefined : propTypeFor(ctx.idExpr, ctx.elem, by.key);
       // ProductiveBy makes a missing modulation one explicit NULL member. Ordinary
       // aggregate keeps values()-style productivity and drops that parent.
       const where = productive ? q`` : q` WHERE ${predicateSql(pe, undefined)}`;
+      const enc = memberOrder(st, p);
+      const encCol = st.traverserLayout.encounter;
+      const rows = derived(
+        q`SELECT ${pe} AS v${pt ? q`, ${pt} AS vtype` : empty}${enc && encCol ? q`, ${enc} AS ${raw(encCol)}` : empty} FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${where}`,
+        ['v', ...(pt ? ['vtype'] : []), ...(enc && encCol ? [encCol] : [])],
+        'ag',
+      );
+      const src = rows.as('agm');
+      const { member, of: memberOf } = foldMember(pt ? PER_ROW('vtype') : UNKNOWN, src);
       const rel = st.q.cte(
-        q`SELECT ${jsonbGroupArray(pe, memberOrder(st, p))} AS list FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${where}`,
+        q`SELECT jsonb(COALESCE(json_group_array(${member}${enc && encCol ? q` ORDER BY ${src.c[encCol]}` : empty}), json('[]'))) AS list FROM ${src}`,
         ['list'],
       );
-      def = { kind: 'list', rel, of: { kind: 'scalar', type: UNKNOWN, productiveNull: productive } };
+      def = { kind: 'list', rel, of: productive ? { ...memberOf, productiveNull: true } as typeof memberOf : memberOf };
     } else if (by.kind === 'nested') {
       const rows = tryCompileScalarValueRows(st, by.nested);
       if (rows) {
@@ -73,9 +91,14 @@ export const aggregate: StepFn = (s, st) => {
         if (!encounter) throw new Error('aggregate().by(traversal) requires child encounter order');
         // by(traversal) is a map-style modulator: retain its FIRST productive result
         // per input. ProductiveBy then LEFT-restores parents whose child had no row.
+        // THE CHILD'S TYPE COLUMN IS CARRIED THROUGH THE WINDOW. It used to narrow to
+        // (v, ordinal, rn), so a column-carried type had nowhere to ride and degraded to `unknown` —
+        // `aggregate('a').by(__.values('when'))` came back as raw millis. Widening the projection by
+        // one column is the whole fix, and it is the same fix the property arm above needed.
+        const childVtype = perRowColumnOf(rows.stream.type);
         const first = derived(
-          q`SELECT ${r.c.v} AS v, ${r.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${r.c[rows.frame.ordinal]} ORDER BY ${r.c[encounter]}) AS rn FROM ${r}`,
-          ['v', rows.frame.ordinal, 'rn'],
+          q`SELECT ${r.c.v} AS v${childVtype ? q`, ${r.c[childVtype]} AS vtype` : empty}, ${r.c[rows.frame.ordinal]} AS ${rows.frame.ordinal}, ROW_NUMBER() OVER (PARTITION BY ${r.c[rows.frame.ordinal]} ORDER BY ${r.c[encounter]}) AS rn FROM ${r}`,
+          ['v', ...(childVtype ? ['vtype'] : []), rows.frame.ordinal, 'rn'],
           'f',
         );
         // BOTH arms read from the parent DOMAIN, differing only in the join: productive LEFT-joins
@@ -87,11 +110,19 @@ export const aggregate: StepFn = (s, st) => {
         const d = rows.frame.domain.as('d');
         const on = q`${first.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]} AND ${first.c.rn}=1`;
         const source = productive ? q`${d} LEFT JOIN ${first} ON ${on}` : q`${d} JOIN ${first} ON ${on}`;
-        // NB the `first` projection above narrows to (v, ordinal, rn) — it does not carry a
-        // per-row vtype column, so a column-carried type DEGRADES rather than being claimed;
-        // `typeCarriedBy` is that rule, shared with the two other narrowing folds.
-        const rel = st.q.cte(q`SELECT ${jsonbGroupArray(first.c.v, memberOrder(st, d))} AS list FROM ${source}`, ['list']);
-        def = { kind: 'list', rel, of: { kind: 'scalar', type: typeCarriedBy(rows.stream.type, () => false), productiveNull: productive } };
+        // The member and the envelope verdict come from the SHARED `foldMember` — the same one the
+        // global fold and the property arm use — so all three ask the uniform-per-list lossy question
+        // exactly once and in one place. `typeCarriedBy` still states the degrade rule for the case
+        // the window genuinely cannot carry (a child whose type is a numeric reducer's runtime `vt`,
+        // which `tryCompileScalarValueRows` does not project).
+        const memberType = typeCarriedBy(rows.stream.type, () => childVtype !== undefined);
+        const { member, of: memberOf } = foldMember(childVtype ? PER_ROW('vtype') : memberType, first);
+        const order = memberOrder(st, d);
+        const rel = st.q.cte(
+          q`SELECT jsonb(COALESCE(json_group_array(${member}${order ? q` ORDER BY ${order}` : empty}), json('[]'))) AS list FROM ${source}`,
+          ['list'],
+        );
+        def = { kind: 'list', rel, of: { ...memberOf, productiveNull: productive } as typeof memberOf };
       } else {
         const elements = tryCompileFirstElementValueRows(st, by.nested);
         if (!elements)
@@ -145,7 +176,7 @@ export function lowerScalarAggregate(s: ScalarStream, step: IRStep): ScalarStrea
   const p = s.rel.as('p');
   // Same encoding decision as fold() — a per-row type channel becomes self-describing
   // members, so cap() frames each one by its own stored type.
-  const { member, of } = foldMember(s, p);
+  const { member, of } = foldMember(s.type, p);
   const rel = s.q.cte(q`SELECT ${jsonbGroupArray(member, memberOrder(s, p))} AS list FROM ${p}`, ['list']);
   const def: SideEffectDef = { kind: 'list', rel, of };
   return { ...s, sideEffects: new Map([...(s.sideEffects ?? []), [name, def]]) };
