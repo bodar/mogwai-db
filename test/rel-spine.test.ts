@@ -350,7 +350,11 @@ const DECLINED = [
   "g.V().order().by('name').union(__.out(), __.in())",  // a live emission order: the merge key needs the origin
   'g.inject()',                       // the EMPTY relation, which `Values` refuses to express (§3.3)
   "g.inject([1,2],3)",                // MIXED list/scalar args: the VARIANT shape, not either of them
-  "g.inject(['a','b']).order(Scope.local)",   // a member SORT needs the vtype-aware compare key
+  // `g.inject(['a','b']).order(Scope.local)` LEFT this list: the member sort landed, and it takes the
+  // vtype-aware compare key from `byExpr` rather than a second policy. The guard that REPLACES it is
+  // the one that still holds — an ELEMENT list's members are ROWIDS, so every member op declines
+  // (`isBareList`): a question about the element is the child seam's, not the list module's.
+  'g.V().fold().order(Scope.local)',
   "g.inject(['a','a']).dedup(Scope.local)",   // a member dedup keeps the FIRST occurrence per value
   "g.inject(['a','b']).reverse()",    // on a list `reverse` reverses ORDER, not each member
   "g.V().values('age').is(P.typeOf(GType.MAP))", // a MAP retype needs the map shape, not a decode

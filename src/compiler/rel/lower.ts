@@ -2374,8 +2374,16 @@ function listTail(
     const sliced = sliceOp(step, rel, false, fresh);
     if (sliced) { rel = sliced; continue; }
 
-    const member = listMemberOp(step, rel, items, fresh);
-    if (member) { rel = member.rel; items = member.of; if (member.rewrites) set = false; continue; }
+    const member = listMemberOp(step, rel, items, fresh, seam);
+    if (member) {
+      rel = member.rel;
+      items = member.of;
+      if (member.rewrites) set = false;
+      // `dedup(Scope.local)` MAKES a set where the input was a list — `DedupLocalStep` yields a
+      // `LinkedHashSet` — so the marker is raised here as well as dropped by a rewrite.
+      if (member.set) set = true;
+      continue;
+    }
 
     // The SET-OP family, which needs to know whether it is TERMINAL: the four deduping ops frame as a
     // GraphBinary SET only at the end of a chain — with a follower TinkerPop treats the deduped

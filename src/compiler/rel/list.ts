@@ -10,6 +10,7 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import { byEncounter, carriedCols, coalesce, EMPTY_ARRAY, fenced, jsonOf, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
+import { modulations } from './modulator.ts';
 import { elementObject } from './element.ts';
 import type { Elem } from '../plan/plan.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
@@ -276,8 +277,8 @@ const memberPredicate = (member: Expr, pred: unknown): Expr | null => {
  * predicate and pass the list through untouched.
  */
 export function listMemberOp(
-  step: IRStep, input: Rel, of: ListOf, fresh: Minter,
-): { readonly rel: Rel; readonly of: ListOf; readonly rewrites?: boolean } | null {
+  step: IRStep, input: Rel, of: ListOf, fresh: Minter, child?: ChildSeam,
+): { readonly rel: Rel; readonly of: ListOf; readonly rewrites?: boolean; readonly set?: boolean } | null {
   if (step.modulators?.length || step.optionArms || !isBareList(of)) return null;
   const rel = fenced(input, fresh);
   const list = col(rel.id, LIST_COL);
@@ -305,8 +306,64 @@ export function listMemberOp(
   // A LOCAL slice takes a window of the MEMBERS, in position order — and `tail(Scope.local, n)` takes
   // it from the far end, which is the same direction flag the row slice uses. The members keep their
   // original positions (the re-aggregate orders by `mo`), so a slice of a slice composes.
+  // `order(Scope.local)` SORTS THE MEMBERS IN PLACE, and `dedup(Scope.local)` collapses them —
+  // both re-aggregate the same list through the same frame, so they sit together.
+  if ((step.name === 'order' || step.name === 'dedup') && isLocalScope(step)) {
+    const members = membersOf(list, fresh);
+    // THE COMPARE KEY IS `byExpr`'S, not a second policy. A member is a value with a type, which is
+    // exactly a SCALAR host — so the vtype-aware cast the row-level `order()` spends comes for free,
+    // and the two cannot drift on whether `'10'` sorts before `'9'`. A BARE member has no recorded
+    // type, so it infers one from its storage class — the same answer the wire would reach.
+    const payload = memberPayload(of, members);
+    if (step.name === 'dedup') {
+      // FIRST OCCURRENCE WINS and the surviving order is the original one — `DedupLocalStep` builds a
+      // `LinkedHashSet`, so it is insertion order over distinct values. `min(mo)` per distinct payload
+      // is that, in one aggregate: the earliest position each value appeared at.
+      if (step.modulators?.length || argValues(step).length) return null;
+      const distinct = make.aggregate({
+        id: fresh('md'), input: members, channels: [],
+        type: typeOf(meta(MEMBER.value, 'any', true), meta(MEMBER.ord, 'int')),
+        groupBy: [payload],
+        aggs: [[MEMBER.value, { kind: 'agg', fn: 'min', args: [col(members.id, MEMBER.value)] }],
+          [MEMBER.ord, { kind: 'agg', fn: 'min', args: [col(members.id, MEMBER.ord)] }]],
+      });
+      // A DEDUPED list is a SET on the wire (`DedupLocalStep` yields a `LinkedHashSet`), which is the
+      // same marker `listSetOp`'s four deduping ops carry — and `listTail` now threads it.
+      return {
+        rel: withList(rel, listOfMembers(distinct, memberNode(of, distinct), [{ expr: col(distinct.id, MEMBER.ord), dir: 'asc' }], fresh), fresh),
+        of, set: true,
+      };
+    }
+    // A `by()` needs the seam to normalize a nested body; a caller with none may still order by the
+    // bare member, which is the only form this arm serves anyway.
+    if (!child && step.modulators?.length) return null;
+    const bys = child ? modulations(step, (step.modulators ?? []).length, child) : [];
+    if (!bys) return null;
+    const parsed = bys.length ? bys : [{ key: { kind: 'identity' } as const }];
+    // ONE key, and it must be the MEMBER ITSELF. A member has exactly one value, so a second `by()`
+    // would have nothing to name; a PROJECTION off it (`by('age')`, a nested body) is a question about
+    // an element, which is the child seam's rather than this module's — `isBareList` has already
+    // gated the only list that could answer it. `shuffle` is `RANDOM()` per row, its own answer.
+    if (parsed.length !== 1 || parsed[0]!.key.kind !== 'identity' || parsed[0]!.order === 'shuffle') return null;
+    const only = parsed[0]!;
+    // `memberCompareKey`, NOT a second policy: it is the same `storedCompareOn` authority the
+    // row-level `order().by()` and the local reducers spend, so a value carried as decimal TEXT
+    // (a long past 2^53, a bigint, a bigdecimal, a duration) sorts NUMERICALLY rather than
+    // lexicographically. Getting that wrong is the defect the local reducers already had.
+    const key = memberCompareKey(of, members);
+    return {
+      rel: withList(rel, listOfMembers(members, memberNode(of, members), [
+        { expr: key, dir: only.order === 'desc' ? 'desc' : 'asc' },
+        // THE ORIGINAL POSITION BREAKS TIES, and it is not tidiness: `json_group_array` takes rows in
+        // whatever order SQLite produced, so equal keys would land in an arbitrary one — the defect
+        // `mise run test:perturbed` exists to find and that no assertion in the ladder can see.
+        memberOrder(members),
+      ], fresh), fresh),
+      of,
+    };
+  }
+
   if (LIST_LOCAL_TX.has(step.name) && isLocalScope(step)) {
-    if (step.name === 'order' || step.name === 'dedup') return null;
     const window = step.name === 'tail'
       ? { offset: 0, limit: Number(argValues(step).find((arg) => typeof arg === 'number') ?? 1) }
       : (() => { try { return sliceOf(step); } catch { return null; } })();
