@@ -16,6 +16,7 @@ import {
     propRel,
     scalarProp,
     typedScalarNode,
+    propTypeFor,
     vertexLabelIn,
     vertexLabelsJson,
     type Elem,
@@ -144,22 +145,29 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
     return { desc: { kind: 'element', elem: src.elem }, cols: elementSelect(src.elem, 'k', src.ctx), group: elementIdExpr(src.elem, src.ctx) };
   }
   if (by.kind === 'key') { // by('name') — first-under-multi for a node
-    // 🔴 A PROPERTY KEY CARRIES A STORED TYPE THIS ROUTE CANNOT PROJECT, and the answer is WRONG rather
-    // than coarse: `groupCount().by('when')` comes back keyed on raw MILLIS and `by('uuid')` keyed on a
-    // String, because this arm emits `gk` alone and there is nowhere for the property's `vtype` to
-    // ride. RelIR keys off a real per-key tag and answers all of these correctly.
+    // THE PROPERTY'S STORED TYPE RIDES BESIDE THE KEY, as a `gkt` sibling column. Without it this arm
+    // emitted `gk` alone and the key framed by JS inference: `groupCount().by('when')` came back keyed
+    // on raw MILLIS and `by('uuid')` keyed on a String.
     //
-    // §6·1 says SHED — and it cannot yet. Measured: declining here takes out 34 tests, an L3 scenario
-    // and a conformance-host gate, because RelIR does not hold the group VALUE forms that reach this
-    // key — `group().by(k).by(__.out().count())` (a reducing child value) and `by(__.tail())`. The
-    // census agrees the 19 traversals it CAN see are held; the ladder shows the rest are not. So the
-    // blocker is RelIR coverage of the group-value family, not this line.
+    // §6·1 would normally say SHED rather than fix a route with an end date — and here it cannot.
+    // Measured: declining takes out 34 tests, an L3 scenario and a conformance-host gate, because
+    // RelIR does not hold the group VALUE forms that reach this key (`by(__.out().count())`,
+    // `by(__.tail())`). Shedding is not available and leaving a wrong wire class is worse than five
+    // lines on a doomed route, so the tag is carried.
     //
-    // Until then `scalarGroupKey` states `type: UNKNOWN` — which is the point of making `GroupKey`
-    // total. The field used to be OMITTED, so a wrong wire class was indistinguishable from "no
-    // opinion"; it is now written down, and this is the first defect that totality surfaced.
+    // `propTypeFor` is the sibling read `order().by(key)` and `aggregate().by(key)` already use, and
+    // `gkt` is the column name RelIR's own barrier picks (`lowerScalarGroupCount`) — same channel,
+    // same spelling, so the two spines cannot describe one key differently. GROUPING SPANS
+    // (value, type) for the reason `dedup()` does: equal values of different stored types are
+    // distinct Gremlin keys. A meta-property has no vtype column, so it stays honestly untagged.
     const pe = scalarProp(src.ctx, by.key);
-    return { desc: scalarGroupKey(src.productiveBy), cols: q`${pe} AS gk`, group: 'gk' };
+    const pt = src.ctx.elem === 'property' ? undefined : propTypeFor(src.ctx.idExpr, src.ctx.elem, by.key);
+    if (!pt) return { desc: scalarGroupKey(src.productiveBy), cols: q`${pe} AS gk`, group: 'gk' };
+    return {
+      desc: { kind: 'scalar', productive: !!src.productiveBy, type: PER_ROW('gkt') },
+      cols: q`${pe} AS gk, ${pt} AS gkt`,
+      group: q`gk, gkt`,
+    };
   }
   if (by.kind === 'token') { // by(T.label)/by(T.id)/by(T.key)/by(T.value)
     const expr = tokenExpr(src.ctx, by.token);
@@ -552,12 +560,15 @@ export function lowerGroup(st: LoweringState, isCount: boolean, bys: any[][], sr
     const { innerKey, innerVal, innerKind } = src.valNestedMap;
     const lvl1 = st.q.cte(
       q`SELECT ${key.cols}, ${innerKey} AS ik, ${innerVal} AS iv FROM ${src.from} GROUP BY ${key.group}, ik`,
-      ['gk', 'ik', 'iv'],
+      // The key's own columns come from `groupColumns`, not a literal ['gk'] — an outer key whose type
+      // rides in a sibling `gkt` declares BOTH, and a hand-written list is how the two came apart.
+      [...groupColumns({ key: key.desc, val: { kind: 'count' } }).filter((c) => c !== 'gv'), 'ik', 'iv'],
     );
     const l = lvl1.as('l');
+    const keyTag = perRowColumnOf(key.desc.kind === 'scalar' ? key.desc.type : undefined);
     const rel = st.q.cte(
-      q`SELECT ${l.c.gk} AS gk, json_group_object(${l.c.ik}, ${l.c.iv}) AS gv FROM ${l} WHERE ${l.c.ik} IS NOT NULL GROUP BY ${l.c.gk}`,
-      ['gk', 'gv'],
+      q`SELECT ${l.c.gk} AS gk${keyTag ? q`, ${l.c[keyTag]} AS ${raw(keyTag)}` : empty}, json_group_object(${l.c.ik}, ${l.c.iv}) AS gv FROM ${l} WHERE ${l.c.ik} IS NOT NULL GROUP BY ${l.c.gk}${keyTag ? q`, ${l.c[keyTag]}` : empty}`,
+      [...groupColumns({ key: key.desc, val: { kind: 'count' } }).filter((c) => c !== 'gv'), 'gv'],
     );
     return toGroupStream(dropLayoutAtBarrier(st), rel, key.desc, { kind: 'nestedMap', innerVal: innerKind });
   }

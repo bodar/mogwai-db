@@ -235,7 +235,7 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     const legacyRows = runWith(store, 'g.withStrategies(ProductiveByStrategy).V().group().by("age").by("name")', { spine: 'legacy' });
     expect(legacyRows.find((r: any) => r.gk == null)).toMatchObject({ gv: '["lop","ripple"]' });
     expect(read('g.withoutStrategies(ProductiveByStrategy).V().group().by("age").by("name")', { spine: 'legacy' }).shape)
-      .toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: UNKNOWN }, val: { kind: 'scalarList' } });
+      .toEqual({ kind: 'group', key: { kind: 'scalar', productive: false, type: PER_ROW('gkt') }, val: { kind: 'scalarList' } });
     // Route-agnostic: the null key survives the strategy whichever spine grouped. `groupCount()` is on
     // the RelIR route now, whose result is one map value rather than `(gk, gv)` rows — the STRATEGY is
     // what this asserts, and it holds on both.
