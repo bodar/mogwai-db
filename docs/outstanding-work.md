@@ -46,14 +46,23 @@ computes a mean in a ROW and the other into a blob (the group-scoped reducer, wh
 for exactly this).
 
 The fix is the carriage the exact tail already has for a big long: an inexact real rides as decimal
-TEXT under its tag. Two things make it more than a one-liner and are why it is written down rather
-than done in passing:
+TEXT under its tag — and **the framer already accepts that form**, which is the fact that decides the
+cost: `frameValue`'s `double`/`float` arms do `Number(v)`, so `{t:'double', v:'0.33333333333333331'}`
+frames EXACTLY with no wire change at all (`src/execute.ts:426-438`). What is left is where the TEXT
+gets produced. Two things make it more than a one-liner and are why it is written down rather than
+done in passing:
 
 - it must land on BOTH spines together (`typedNode` in `src/compiler/rel/build.ts`, `typedScalarNode`
   in `src/compiler/plan/plan.ts`), or the two diverge on every real in every collection;
 - a BARE list member has no envelope to carry a tag, so either the member gets one (the list becomes
   typed whenever a real is inexact — the `withLossyFlag` window already asks a question of that exact
-  shape) or `foldMember`'s bare arm stops being reachable for reals.
+  shape, and `LOSSLESS_VTYPES` currently names `double` as lossless, which is the line that is wrong)
+  or `foldMember`'s bare arm stops being reachable for reals;
+- `typedNode` feeds every typed tree, INCLUDING an element's props bag — so a stored double property
+  would start travelling as a JSON string. Every reader of that bag has to be checked, not only the
+  GraphBinary framer: the GraphSON adapters in `src/formats/`, the write-response echo, and the tests'
+  own `bare()`. That sweep is the actual work, and it is why this wants its own differential rather
+  than a corner of another change.
 
 **Ranked entry point.** Numbers are IDs, not an order.
 **[write-path](./2026-08-01-write-path-plan.md) §2** (silent wrong answers) → **2** → **17**'s
