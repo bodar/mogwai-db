@@ -654,17 +654,38 @@ trusted. Nobody has swept the rest.
 policy answer for the role — a channels-core change, not a step lowering), and `barrier(Barrier.normSack)` is
 its own step.
 
+- ⚠️ **A MAP IS A SCOPE, consulted BEFORE the path labels** (`gremlin-core/.../step/Scoping.java:119-135`
+  — `object instanceof Map && containsKey(key)` is the FIRST test, then side effects, then labels). So
+  `select(<key>)` is the map loop's answer, and `containsKey` is not "the value is not null": presence
+  is an `EXISTS` and the value its own extract, which is the `present`-beside-the-value split the
+  option-map `choose` needed, at a third seam.
+- ⚠️ **AN UNRESOLVABLE `select()` KEY IS THE EMPTY RESULT, NOT A DECLINE** (`Select.feature:578-596`),
+  and the guard is where being empty would be WRONG: `getScopeValue` tries the traverser's SIDE EFFECTS
+  before the labels, so a `withSideEffect` constant or a named collection resolves with no `as()`
+  behind it. The chain context answers that, because the record builder holds the alias map and nothing
+  else.
+
 🚧 **A PLAN-SIZE WART worth one commit, spotted while reading the emitted SQL:** `byNode`'s property arm
 builds `typedNode(storedValue(…), vtype)` and `typedNode` applies `storedValueOn` AGAIN, so every
 property-keyed group emits the collection CASE nested inside itself. `json(json(x))` is idempotent, so it
 is bytes and not an answer — but it is bytes in the hottest key expression there is.
 
-🚧 **What the MAP family still owes, in the order it is worth doing:** the SELECTIVE token subsets
-(`with(tokens, ids)`, which `absorbValueMapWith` deliberately leaves in place to fail closed) and the
-`by(__.unfold())` that pairs with them (a `by()` on a `valueMap` projects each map VALUE and removes an
-unproductive key — `applyTraversalRingToMap`); `select(<key>)` over a map (`Scoping.getScopeValue` tries the
-traverser's own map BEFORE the path labels); a bare `groupCount()` over a SCALAR stream, which `groupBarrier`
-already documents as an arm waiting for its caller; and `order(Scope.local)` over a map's entries.
+🚧 **THE NEXT INCREMENT IN THIS FAMILY IS THE GROUP-SCOPED REDUCER, and it is the biggest single thing
+left on the board** (~25 of the 30 remaining `group*` blockers): `group().by(k).by(__.bothE().values('weight')
+.sum())`, `by(__.count())`, `by(__.out().fold())`, `by(__.values('name').order().fold())`. `groupBarrier`
+declines it in one place and states the reason — the generic child expression reduces PER PARENT, which
+composes with neither the framing (it would produce `[n]`) nor every reducer (`mean` needs the complete
+child-row domain, not an average of per-parent means). **It needs a FOURTH child-seam answer: the body's ROWS
+correlated to the host** (§6·6 has three — correlated scalar, correlated predicate, rooted relation), so the
+value side becomes a JOIN the grouping aggregates over rather than a scalar subquery per row. That same
+answer is what an `order().by(<reducer>)` and a collection's value reducer will want, which is why it is
+substrate rather than a group feature.
+
+🚧 **What else the MAP family owes:** the SELECTIVE token subsets (`with(tokens, ids)`, which
+`absorbValueMapWith` deliberately leaves in place to fail closed) and the `by(__.unfold())` that pairs with
+them (a `by()` on a `valueMap` projects each map VALUE and removes an unproductive key —
+`applyTraversalRingToMap`); `order(Scope.local)` over a map's entries; and the element-keyed side reads,
+which need a list whose members may be ELEMENTS (today `MapOf`'s `elem` tag makes them decline).
 
 🚧 **Then the rest of Phase 2:** the scalar-transform tail (49, but heterogeneous — mostly literal-typed
 casts and error-raising forms rather than one lowering), the rest of the property shape (`properties()`
