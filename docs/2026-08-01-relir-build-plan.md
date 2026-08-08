@@ -492,7 +492,19 @@ every one names the step it stops at. Do this every round — the ranking it pro
 in the first entry (**`labels()`, a READ, was holding the entire label-write family**: every
 `addLabel`/`dropLabel` scenario ends in `.labels()`, and no amount of reading the write module could show it).
 
-🚧 **What is left:**
+✅ **Landed since that measurement, and the count it moved:** `labels()` (the read that was holding the
+label-write family) · `dropLabel`/`dropLabels` · **writes over a SCALAR stream** · the `mergeE` search reading
+the MERGE map alone (a wrong ANSWER, not a gap) · a `T.label` on `mergeV`'s `onMatch` arm · the merge-map key
+rule moved into the verify Pass. **78 blocked scenarios → 47**, L3 1748 → 1755, census 937 → 950.
+
+⚠️ **TWO OF THOSE WERE WRONG ANSWERS RATHER THAN GAPS, and both were found by reading the reference while
+building something else.** A `mergeE` search was narrowed by `option(onCreate)`'s endpoints, where
+`searchEdges` is handed the MATCH map alone — so a `knows` edge existing anywhere made the traversal create a
+duplicate. And `null` from the label-name resolver ("decline") was read as `null` names ("every label"), so a
+mixed-collection `dropLabel` dropped everything. **Both spines agreed about the first, so neither the corpus
+nor the differential could see it** — §12's rule, twice in one phase.
+
+🚧 **What is left, measured 2026-08-08 with the route off:**
 
 - **`property(k, __.trav)` with a possibly-multi-row VALUE** (~13 scenarios) — the only item needing new
   substrate. Rules read off `AddPropertyStep` (`.../step/sideEffect/AddPropertyStep.java:105-199`), none
@@ -514,10 +526,21 @@ in the first entry (**`labels()`, a READ, was holding the entire label-write fam
   (`.../map/AddVertexStep.java:165-182`), which raises FOUR distinct messages BEFORE `validateLabel` runs.
   Build: `internLabels` generalized from `string[]` to EXPRESSIONS, a rooted single-row label through the
   seam, an ALIAS-read label (a column already on the row), and the arity-chosen guards.
-- **Endpoint-less `mergeE`** (`g.mergeE([:])`): no `Direction` key → the search is `g.E()` [+label] [+props]
-  and `resolveVertices` resolves nothing, so a MATCH is answerable and a CREATE is impossible. The reference
-  raises *"Out Vertex not specified in onCreate - edge cannot be created"* exactly when the search came back
-  empty — a GUARD BINDING with `raiseWhen: 'empty'`, not a decline.
+- ✅ **Endpoint-less `mergeE`** (`g.mergeE([:])`) — LANDED, and the guard is `raiseWhen: 'rows'` over the
+  UNMATCHED rows rather than `'empty'` over the matched ones, which is the sharper statement of the same
+  rule: the reference's check runs per traverser, so "some row found nothing" is the condition and "the whole
+  search was empty" is only its one-row case.
+- 🚧 **THE REFUSALS LEGACY STILL OWNS — ~16 scenarios, and they are ONE piece of work.** An immutable graph
+  (`addLabel`/`dropLabel`/`dropLabels`/`mergeV` on `single_label_graph`), a label mutation on an EDGE, a
+  mixed `Collection` argument, `addV(constant(["a","b"]), constant("c"))`. Every one is an ERROR whichever
+  spine runs it, so every one belongs in a `verify` Pass (§6·5) — and the reason none of them is there yet is
+  a real gap in the Pass tier rather than an oversight: **a Pass cannot see the graph's
+  `LabelCardinality`**. `runPasses` takes `(steps, strategies, params, sideEffects)`, and the cardinality is
+  request-scope DI. Threading it is the increment; the merge-map KEY rule just landed the same way and needed
+  no new input, which is why it went first.
+- **`mergeV`/`mergeE` with a `T.id`** (~5) — the onCreate-inheritance scenarios and
+  `mergeE_with_eid_specified_and_inheritance`. The guard mechanism exists (`elementIdGuard`); the `Insert`
+  column plumbing does not.
 - **A meta-property under an UNDECLARED cardinality** (the `set` arm PATCHES rather than inserts — an `UPDATE`
   this route does not emit yet); **`PartitionStrategy` on a merge**; **`addE` after `addV` in one chain**.
 
@@ -525,9 +548,10 @@ in the first entry (**`labels()`, a READ, was holding the entire label-write fam
 runtime label of `5` becomes `"5"` on BOTH spines today. A pre-existing divergence in shared code, invisible
 to the corpus (no scenario asserts these messages) — needs a call on whether to fix it into conformance.
 
-⚠️ **`inject()` is not a write and must move with this phase.** `routeWrite` owns it as a SOURCE, and measured
-over the suite it is the dispatcher's largest tenant: of 944 distinct traversals the legacy dispatcher
-answers, 591 (63%) contain no mutating step at all, 543 of them `g.inject(…)` reads.
+✅ **`inject()` LEFT the write dispatcher** — it is not a write and never was, and it was the dispatcher's
+largest tenant by a wide margin: of 944 distinct traversals `routeWrite` answered, 591 (63%) contain no
+mutating step at all, 543 of them `g.inject(…)` reads. Kept because the SIZE of that is the reason a route's
+tenancy is not evidence of what it is for.
 
 ⚠️ **Where a refusal is arithmetic over the INPUT's row count, a host that cannot count statically needs a
 GUARD, not a decline.** `addV` proves single-row at COMPILE time (its one-row case is a literal `Values`); an
