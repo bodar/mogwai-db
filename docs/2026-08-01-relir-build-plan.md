@@ -1011,10 +1011,19 @@ What it found, in size order, and the first line is the point:
 - **`mergeV`/`mergeE` positions**, ~28: `g.mergeE(…)` at the SOURCE, `mergeE` mid-chain over a vertex
   stream, and `mergeV` after a SCALAR stream (`g.inject(0).mergeV([:])`). The map parsing is done; what
   declines is the POSITION, which is the same "learned at one host" shape §6·6 names.
-- **`dropLabel()`/`dropLabels()`**, ~12 — not lowered at all. `dropLabels()` can fall below `min`, so it is
-  the one that genuinely needs a guard binding; `dropLabel(x)` needs one too under `ONE_OR_MORE`
-  (it is legal only while a label remains), which `addLabel` did not because every MUTABLE cardinality
-  has `max = Infinity`.
+- **`dropLabel()`/`dropLabels()`**, ~12 — ✅ LANDED, and this plan had the guard on the WRONG STEP.
+  `LabelCardinalityValidator` splits them and the split decides the shape of the work:
+  `validateDropAll` raises for ANY `min > 0` *whatever the element carries*, so `dropLabels()` is a
+  COMPILE-TIME decline (a guard there would always fire); `validateDrop` SIMULATES the removal and
+  raises only if the survivors fall below `min`, so `dropLabel(x…)` is the one that earns the guard
+  binding. It runs BEFORE the delete — the reference's own order, and what keeps a refused drop from
+  leaving a partly stripped vertex — and it counts CORRELATED per owner rather than grouped, because a
+  vertex losing all its labels produces no group row and `HAVING COUNT(*) < min` would miss exactly
+  the element that fell furthest. The snapshot-then-pass-through and the argument grammar are now
+  SHARED with `addLabel` (`labelMutationScope`, `mutationLabelNames`) rather than copied.
+  **Nothing in the corpus reaches that guard** — `ONE_OR_MORE` is the only cardinality where a named
+  drop can fall below the floor and no conformance graph declares one (`@MultiLabel` maps to
+  `ZERO_OR_MORE`) — so `test/rel-spine.test.ts` is the record, exactly as `mergeE` needed.
 - **`property(k, __.trav)` with a possibly-multi-row VALUE**, ~13 — the HOST-KEYED relation below, and the
   only item on this list that needs new substrate rather than a new position.
 
