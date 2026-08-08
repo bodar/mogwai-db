@@ -18,6 +18,7 @@ import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
 import { and, carriedCols, eq, meta, renumber, typeOf, type Minter } from './build.ts';
 import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
+import { propertyRowId } from './property.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import { DEFAULT_VERTEX_CARDINALITY, DEFAULT_VERTEX_LABEL, type LabelCardinality, type VertexCardinality } from '../../api.ts';
 
@@ -66,6 +67,11 @@ const OWNED_BY = {
   vertexCardinality: { table: 'vertex_property_cardinality', owner: 'node', cols: [meta('node', 'int'), meta('key', 'text')] },
   vertexLabels: { table: 'vertex_labels', owner: 'node', cols: [meta('node', 'int'), meta('label', 'int')] },
   edgeProps: { table: 'edge_properties', owner: 'edge', cols: [meta('id', 'int'), meta('edge', 'int')] },
+  // The same two tables addressed by the property row's OWN id rather than by its owner — what
+  // `drop()` over a PROPERTY stream deletes. Separate entries and not a parameter, because the KEY is
+  // the whole difference between "this element's properties" and "these properties".
+  vertexPropRows: { table: 'vertex_properties', owner: 'id', cols: [meta('id', 'int')] },
+  edgePropRows: { table: 'edge_properties', owner: 'id', cols: [meta('id', 'int')] },
   nodes: { table: 'nodes', owner: 'id', cols: [meta('id', 'int')] },
   edges: { table: 'edges', owner: 'id', cols: [meta('id', 'int')] },
 } as const satisfies Readonly<Record<string, { readonly table: Table; readonly owner: string; readonly cols: readonly ColMeta[] }>>;
@@ -170,6 +176,44 @@ export function elementDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
   const last = statements[statements.length - 1]!;
   const names = statements.map(() => fresh('d'));
   statements.forEach((node, i) => bindings.push({ name: names[i]!, node }));
+  return { bindings, result: make.ref({ id: fresh('r'), name: names[names.length - 1]!, channels: [], type: last.type }) };
+}
+
+/**
+ * `drop()` over a PROPERTY stream — `g.V().properties().drop()` removes the properties and leaves
+ * every element standing. There is no cascade: a property owns nothing but its index text.
+ *
+ * **Both element kinds delete BY THE PROPERTY ROW'S OWN id**, and that is the one place this differs
+ * from legacy rather than re-expressing it. Legacy's property stream nulls `vpid` on an edge — correct
+ * for the WIRE, since a Gremlin edge `Property` has no identity — and its delete then addresses edge
+ * properties by the `(edge, key)` PAIR, through a `VALUES` list chunked by row count. That is a bind
+ * list sized by DATA, which is exactly the shape `mise run binds` exists to keep out and which a
+ * compiled plan cannot chunk at all (§6·2). The physical row has an id either way, so addressing it is
+ * both simpler and O(plan size): one statement, one `InQuery` against the retained rows.
+ *
+ * The FTS sweep is `dropStaleIndex` unchanged — it already deletes by `pid`, which is that same row id.
+ */
+export function propertyDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
+  // Snapshot first, for `elementDrop`'s reason: the rows to delete must be decided before the first
+  // statement changes what a later one would select.
+  const targetPlan = nameBindings(make.project({
+    id: fresh('w'), input: target, channels: [], type: ID_TYPE, exprs: [['id', propertyRowId(target)]],
+  }));
+  const ids = fresh('pdrop');
+  const rows = make.ref({ id: fresh('r'), name: ids, channels: [], type: ID_TYPE });
+  const bindings: Binding[] = [...targetPlan.bindings, { name: ids, node: targetPlan.result, snapshot: true }];
+
+  // The index text before the row it describes — the referencing direction `elementDrop` states once.
+  const statements: Stmt[] = [
+    dropStaleIndex(elem, rows, fresh),
+    deleteOwnedBy(elem === 'edge' ? 'edgePropRows' : 'vertexPropRows', rows, fresh),
+  ];
+  // A per-element cardinality DECLARATION is deliberately untouched: it is scoped to (node, key) and
+  // describes the KEY's schema, not the value that happened to be stored under it. Dropping the last
+  // value of a `list` key does not make the key `single`.
+  const names = statements.map(() => fresh('d'));
+  statements.forEach((node, i) => bindings.push({ name: names[i]!, node }));
+  const last = statements[statements.length - 1]!;
   return { bindings, result: make.ref({ id: fresh('r'), name: names[names.length - 1]!, channels: [], type: last.type }) };
 }
 
@@ -311,7 +355,11 @@ function indexWritten(written: Rel, elem: Elem, write: PropertySet, fresh: Minte
   const row = make.project({
     id: fresh('p'), input: paired, channels: [], type: typeOf(...FTS_ROW_COLS),
     exprs: [
-      ['owner_elem', text(elem === 'edge' ? 'edge' : 'node')],
+      // `compilerText`, not `text`: the OWNER KIND is a compile-time fact off `elem` and can never be
+      // user data, so binding it spent one of the 100 on a constant the compiler already holds. Its
+      // twin in `deleteFts` always inlined; these two did not, and the sql-hygiene `bound` ratchet is
+      // what surfaced the disagreement (the drop family reached this path for the first time).
+      ['owner_elem', compilerText(elem === 'edge' ? 'edge' : 'node')],
       ['pid', col(paired.id, 'id')], ['owner', col(paired.id, 'owner')], ['pk', text(write.key)],
       ['kind', col(paired.id, 'kind')], ['text', col(paired.id, 'text')],
     ],
@@ -331,7 +379,7 @@ function dropStaleIndex(elem: Elem, rows: Rel, fresh: Minter): Stmt {
   return remove({
     target, channels: [], type: typeOf(),
     where: and(
-      eq(col(target.id, 'owner_elem'), text(elem === 'edge' ? 'edge' : 'node')),
+      eq(col(target.id, 'owner_elem'), compilerText(elem === 'edge' ? 'edge' : 'node')),
       { kind: 'in-query', expr: col(target.id, 'pid'), plan: rows, negated: false },
     ),
     returning: [],

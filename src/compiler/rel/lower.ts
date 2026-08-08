@@ -37,7 +37,7 @@ import type { ChildHost, ChildSeam, ChildValue, HostRow, RootedRead, Subject } f
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
-import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementMergeE, elementMergeV, elementProperty, propertyWrites, type Effects } from './write.ts';
+import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
 import { elementHost, groupBarrier, mapPayload } from './map.ts';
 import { elementPayload } from './element.ts';
@@ -2874,6 +2874,14 @@ function propertyTail(
   if (from === steps.length) return { rel, framing: { kind: 'property', ownerElem: elem }, aliases: labels };
   const step = steps[from]!;
   if (step.modulators?.length || step.optionArms || (step.args ?? []).length) return null;
+  // `drop()` over a property stream removes the property ROWS and leaves the elements standing.
+  // TERMINAL by the grammar, asserted for `elementDrop`'s reason: a step after it would read a stream
+  // that no longer exists, and declining is the honest answer to a chain the passes should have refused.
+  if (step.name === 'drop') {
+    if (from !== steps.length - 1) return null;
+    const dropped = propertyDrop(rel, elem, fresh);
+    return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: dropped.bindings };
+  }
   const retyped = step.name === 'key' ? propertyKey(rel, fresh)
     : step.name === 'value' ? propertyValue(rel, fresh)
       : step.name === 'element' ? propertyElement(rel, elem, fresh)

@@ -2,8 +2,8 @@
   "addE": {
     "binds": 12,
     "bytes": 790,
-    "compiler": 7,
-    "bound": 34
+    "compiler": 11,
+    "bound": 30
   },
   "addV": {
     "binds": 4,
@@ -26,8 +26,8 @@
   "as": {
     "binds": 12,
     "bytes": 1012,
-    "compiler": 10,
-    "bound": 34
+    "compiler": 14,
+    "bound": 30
   },
   "asBool": {
     "binds": 0,
@@ -278,8 +278,8 @@
   "option": {
     "binds": 15,
     "bytes": 1312,
-    "compiler": 14,
-    "bound": 41
+    "compiler": 19,
+    "bound": 36
   },
   "order": {
     "binds": 0,
@@ -324,10 +324,10 @@
     "bound": 0
   },
   "property": {
-    "binds": 19,
+    "binds": 18,
     "bytes": 1017,
-    "compiler": 40,
-    "bound": 252
+    "compiler": 76,
+    "bound": 216
   },
   "range": {
     "binds": 0,
@@ -392,8 +392,8 @@
   "to": {
     "binds": 13,
     "bytes": 949,
-    "compiler": 43,
-    "bound": 204
+    "compiler": 67,
+    "bound": 180
   },
   "toLower": {
     "binds": 0,
@@ -435,7 +435,7 @@
     "binds": 12,
     "bytes": 2632,
     "compiler": 95,
-    "bound": 33
+    "bound": 29
   },
   "where": {
     "binds": 0,

@@ -649,6 +649,44 @@ describe('the RelIR spine', () => {
     },
   ));
 
+  test('drop() over a PROPERTY stream removes the properties and leaves the elements', () => {
+    // No cascade — a property owns nothing but its index text. Both element kinds delete by the
+    // property row's OWN id, which is where this does not merely re-express legacy: legacy addresses
+    // edge properties by the `(edge, key)` PAIR through a `VALUES` list chunked by ROW COUNT, a
+    // data-sized bind list a compiled plan cannot chunk at all (§6·2).
+    for (const gremlin of [
+      'g.V().properties().drop()',
+      'g.E().properties("weight").drop()',
+      'g.V().properties("name").drop()',
+    ]) {
+      expect(compile(gremlin, {}, { spine: 'rel' }).kind, gremlin).toBe('program');
+
+      const after = (spine: 'rel' | 'legacy') => {
+        const store = new GraphStore(new BunSqlite(':memory:'));
+        for (const seed of MODERN_SEED) exec(store, undefined, undefined, spine).buffers(seed, {});
+        exec(store, undefined, undefined, spine).buffers(gremlin, {});
+        return JSON.stringify({
+          vp: store.query('SELECT node, key FROM vertex_properties ORDER BY node, key', []),
+          ep: store.query('SELECT edge, key FROM edge_properties ORDER BY edge, key', []),
+          nodes: store.query('SELECT count(*) AS c FROM nodes', []),
+          edges: store.query('SELECT count(*) AS c FROM edges', []),
+          fts: store.query('SELECT count(*) AS c FROM property_fts', []),
+        });
+      };
+      expect(after('rel'), gremlin).toEqual(after('legacy'));
+      // The elements themselves are untouched whichever properties went.
+      expect(JSON.parse(after('rel')).nodes).toEqual([{ c: 6 }]);
+      expect(JSON.parse(after('rel')).edges).toEqual([{ c: 6 }]);
+    }
+
+    // `drop()` is terminal over a property stream too. A step after it would read a stream that no
+    // longer exists, so RelIR declines rather than lowering the prefix and forgetting the rest — and
+    // legacy, which has no property-tail `drop()` at all, then raises. Fail-closed on both spines,
+    // which is the contract; asserting a plan KIND here would have been asserting the route.
+    expect(() => compile('g.V().properties().drop().count()', {}, { spine: 'rel' }))
+      .toThrow('step not implemented after properties(): drop()');
+  });
+
   test('the hand-authored modern seed compiles WHOLE on RelIR, byte-identical to legacy', () => {
     // The plan named these seeds as the last thing pinning legacy writes for corpus LOADING (§ Phase 1):
     // the reference graphs are GraphSON-bulk-loaded, so `MODERN_SEED` and its crew sibling are the two

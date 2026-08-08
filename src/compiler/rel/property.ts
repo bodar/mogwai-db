@@ -131,6 +131,19 @@ export function propertyPayload(input: Rel, elem: Elem, fresh: Minter): Rel {
 const carryThrough = (input: Rel) =>
   input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const);
 
+/**
+ * THE PROPERTY ROW'S OWN rowid, for a consumer that has to address the STORED row rather than frame it.
+ *
+ * Exported as an accessor rather than by exporting `PROP`, so the prefixed-column contract stays in
+ * this file — the reason the prefix exists at all is that a join carrying both an element `id` and a
+ * property `id` would declare the name twice.
+ *
+ * **It is present for BOTH element kinds**, which is worth stating because the PAYLOAD deliberately
+ * nulls it on an edge: a Gremlin edge `Property` has no identity to give the wire. Physically the row
+ * has one either way (`edge_properties.id`), and a delete addresses the row, not the Property.
+ */
+export const propertyRowId = (props: Rel): Expr => col(props.id, PROP('id'));
+
 /** `key()` — the property's KEY as a string scalar. Always a string, so a STATIC tag is honest here
  *  where the VALUE's is not. */
 export function propertyKey(input: Rel, fresh: Minter): { rel: Rel; framing: RelFraming } {
