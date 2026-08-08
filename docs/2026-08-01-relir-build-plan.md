@@ -1245,14 +1245,43 @@ RelIR ahead in two ways, both pinned by decoded CLASS rather than by rows (a ver
 refuses outright; and MIXED ELEMENT KINDS, a shape legacy's own wire vocabulary can express (`vk` 2 vs
 3) and its lowering declines.
 
-**The family barely moved (55 → 54), and that is the finding.** What is left of `choose` is almost
-entirely the OPTION-MAP form (`choose(key).option(k, body)…`), which every branch host still declines
-on `step.optionArms`. It is the family's next arm, and the piece it needs is a PRESENCE signal from
-the child seam: `Pick.none` (a productive choice matching no key) and `Pick.unproductive` (a choice
-that produced nothing) are distinguishable only if the seam reports productivity beside the value —
-legacy computes exactly that as its modulation `present` column. `ChildValue.present` is the shape,
-and it is §6·7's rule again: carry the fact, do not guess it back from a NULL, because a productive
-NULL and an unproductive read are not the same traverser.
+**The family barely moved (55 → 54), and that was the finding**: what was left of `choose` was almost
+entirely the OPTION-MAP form.
+
+#### ✅ the OPTION-MAP `choose` — and three things it taught
+
+**It needed a FACT, not a gate.** `ChildValue.present` carries productivity beside the value, because
+`Pick.none` (a productive choice matching no key) and `Pick.unproductive` (a choice that produced
+nothing) are distinguishable no other way — `TraversalProduct` calls a productive null a value, so
+`choice IS NULL` answers a different question. A body that cannot report it DECLINES. §6·7's rule at a
+third seam, and legacy computes the identical signal as its modulation `present` column.
+
+**WHICH ARM A ROW TAKES IS ONE COLUMN, and the measurement is the argument.** The naive gating is
+O(n²) in the EXPENSIVE term — arm k tests its key, negates every earlier one, the pass-through negates
+them all, and a key test is the vtype-aware ordering compare `is(P.between(…))` spends. A three-option
+map: **18.7 KB** of statement text with the choice inlined, **7.5 KB** with the choice projected to a
+column, **1.9 KB** with the tests projected into one ordinal `CASE`. The group key's rule one level up.
+The ordinal also gives FIRST-MATCH-WINS free, because a `CASE` takes its first true `WHEN` — and that
+rule cost a wrong answer first: `BranchStep.pickBranches` collects EVERY match, and `ChooseStep`
+OVERRIDES it with `branches.subList(0, 1)` (`.../ChooseStep.java:139-142`). Reading the super-method
+alone emitted six rows where `Choose.feature:244-256` pins four.
+
+**TWO COMMITTED L4 EXPECTATIONS ENCODED LEGACY'S BUG**, which is the part worth generalizing. Our own
+addendum asserted that an UNPRODUCTIVE choice takes the `Pick.none` body; it takes the unwritten
+`Pick.unproductive` identity, i.e. the traverser itself, and the OFFICIAL corpus pins that exact
+pattern elsewhere (`Choose.feature:371-387`). The scenarios were written when legacy was the only
+spine. **An addendum written against one implementation records that implementation, not the
+reference** — so an L4 scenario in a family the migration is about is worth re-deriving from
+`gremlin-test`/`gremlin-core` rather than trusted.
+
+Closing the gap in LEGACY was tried and REVERTED, and the rule that decided it is worth stating:
+declining its CASE projector does make legacy correct there — its own comment predicted as much — but
+it hands the shape to a `map()`-child position NEITHER spine lowers, so a second L4 scenario stopped
+being answered at all. **§6·1 lets legacy SHED a capability RelIR holds; it does not let the union
+lose a shape.** Legacy keeps its documented gap; the scenario is tagged `@SpineRel`, because the two
+spines ANSWER differently here rather than one refusing (which is what `@RelIR` declares).
+
+Measured: census 929 → 937 (40.8%), L3 1747 → 1748, branch 54 → 46.
 
 Then the families whose kernels Phase 0 extracted and whose only remaining legacy content is emission —
 `math`/`format` were the proof case (§6·4) — then the scalar-transform tail, the property shape
