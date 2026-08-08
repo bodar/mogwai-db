@@ -362,7 +362,12 @@ const DECLINED = [
   'g.V().has(T.label,null)',          // a null label VALUE: legacy owns what that means
   "g.inject('a').inject('b')",        // a second inject is a UNION with the first, not a source
   'g.inject(1,2).order(Scope.local)', // LOCAL scope: a per-traverser sort of a LIST, a different arm
-  'g.V().group().by("name").by(__.out().count())', // a reducing child VALUE reduces over the GROUP, not per traverser
+  // A reducing child VALUE reduces over the GROUP rather than per traverser, and RelIR now expresses
+  // that (the `origin` channel pools the members' child rows). What still declines is `mean`, and its
+  // reason is the BLOB rather than the reducer: SQLite writes a REAL into JSON with 15 significant
+  // digits, so a group-scoped mean would lose a digit where legacy — which computes it in a ROW —
+  // does not (`outstanding-work.md` P1 carries the project-wide defect).
+  'g.V().hasLabel("software").group().by("name").by(__.bothE().values("weight").mean())',
   'g.V().order().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
   'g.V().dedup().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
   // The REDUCER form of withSideEffect (`(k, seed, BiFunction)`) is left UNREGISTERED by the

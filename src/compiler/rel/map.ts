@@ -392,8 +392,7 @@ function groupReduced(
     if (reducer !== 'count') return null;
     return groupBarrier(input, host, { ...step, name: 'groupCount', modulators: step.modulators?.slice(0, 1) }, bulked, child, fresh);
   }
-  if (reducer === 'count') return null;
-  if (!isReducer(reducer)) return null;
+  if (reducer !== 'count' && !isReducer(reducer)) return null;
   // `mean` DECLINES, and the reason is the BLOB rather than the reducer: SQLite writes a REAL into JSON
   // with 15 significant digits (`%!.15g`), so a map value that needs 17 comes back a digit short —
   // `map/Mean.feature:70` wants `d[0.3333333333333333].d` and the blob carries `0.333333333333333`.
@@ -404,29 +403,66 @@ function groupReduced(
   // blob. Declining hands it to the spine that answers exactly; the fix is to carry an inexact real as
   // decimal TEXT under its tag, which is the carriage the exact tail already has for a big long.
   if (reducer === 'mean') return null;
+  const counting = reducer === 'count';
   const rows = child.rows(pre, input, host.elem, host.row?.aliases ?? NO_LABELS);
-  if (!rows || rows.framing.kind !== 'scalar') return null;
+  // A COUNT counts TRAVERSERS, so it needs no value at all and admits any body shape; every other
+  // reducer reads one, so a body that does not end in a per-row value has nothing to reduce.
+  if (!rows || (!counting && rows.framing.kind !== 'scalar')) return null;
 
-  const origin = col(rows.rel.id, rows.origin);
   const elementKey = !keyBy;
-  const key = elementKey ? origin : byNode(keyBy!, { kind: 'element', id: origin, elem: host.elem }, fresh, child);
+  /** The key, from whichever ROWID names the parent — the child rows' `origin`, or the parent's own
+   *  `id` in the seed arm below. One function, because the two arms must group by the same thing. */
+  const keyOf = (rowid: Expr): Expr | null =>
+    (elementKey ? rowid : byNode(keyBy!, { kind: 'element', id: rowid, elem: host.elem }, fresh, child));
+  const key = keyOf(col(rows.rel.id, rows.origin));
   if (!key) return null;
+  const keyCols = typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true));
   // THE KEY IS A COLUMN FIRST, for the reason the barrier's own key is: a `by()` key is a correlated
   // subquery and SQL needs it in the SELECT list AND the GROUP BY, so naming it once is what stops the
   // whole subquery being inlined at every position it appears.
+  //
+  // A COUNT's value column is the traverser WEIGHT rather than a value — `SUM(bulk)` where the stream
+  // carries a multiplicity, which is `countExpr`'s rule, and the seed arm below contributes 0.
+  const bulk = rows.rel.channels.find((channel) => channel.role === 'bulk');
   const projected = make.project({
-    id: fresh('rk'), input: rows.rel, channels: [],
-    type: typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true)),
-    exprs: [[KEY_COL, key], [VAL_COL, col(rows.rel.id, 'v')]],
+    id: fresh('rk'), input: rows.rel, channels: [], type: keyCols,
+    exprs: [[KEY_COL, key], [VAL_COL, counting ? (bulk ? col(rows.rel.id, bulk.col) : compilerInt(1)) : col(rows.rel.id, 'v')]],
   });
-  const keyed = make.materialize({ id: fresh('rm'), input: projected, channels: [], type: projected.type });
+  /**
+   * A COUNT KEEPS ITS KEY WHERE EVERY OTHER REDUCER LOSES IT, and that is a SEED ROW rather than an
+   * outer join.
+   *
+   * `CountGlobalStep` seeds 0 and `ReducingBarrierStep` therefore emits for an empty pool, so a group
+   * member whose body produced NOTHING must still contribute a 0 and keep its key; `SumGlobalStep`
+   * leaves `NON_EMITTING_SEED` in place and emits nothing, so there the key goes with the traverser.
+   * An inner join gives the second, which is why only this arm needs the other.
+   *
+   * A LEFT JOIN is not available — the child rows are built by the ordinary fold, whose movements are
+   * inner joins by construction — but it is also not needed: one row per PARENT contributing WEIGHT
+   * ZERO is the same answer, because a parent with children then sums their weights and a parent with
+   * none sums its single zero. The union stays inside the same `GROUP BY`, so nothing downstream has
+   * to know which arm a row came from.
+   */
+  const seedKey = counting ? keyOf(col(input.id, 'id')) : null;
+  if (counting && !seedKey) return null;
+  const arms = counting
+    ? make.union({
+      id: fresh('ru'), all: true, channels: [], type: keyCols,
+      inputs: [make.project({ id: fresh('rz'), input, channels: [], type: keyCols, exprs: [[KEY_COL, seedKey!], [VAL_COL, compilerInt(0)]] }), projected],
+    })
+    : projected;
+  const keyed = make.materialize({ id: fresh('rm'), input: arms, channels: [], type: arms.type });
   const drop = productivityFilter(step, col(keyed.id, KEY_COL));
   const rowsIn = drop
     ? make.filter({ id: fresh('rf'), input: keyed, channels: [], type: keyed.type, pred: drop })
     : keyed;
-  // NO BULK WEIGHTING: the child rows are the pool, one traverser each. A collapsed parent's
-  // multiplicity was spent producing them, and re-applying it here would count every walk twice.
-  const reduced = reducerAggregate(col(rowsIn.id, VAL_COL), reducer);
+  // A REDUCER reads the pooled VALUES with no bulk weighting — the child rows are the pool, one
+  // traverser each, and re-applying a collapsed parent's multiplicity would count every walk twice. A
+  // COUNT sums the weight column the projection above built, `COALESCE`d for the reason `countExpr`
+  // carries one: a group whose every row is a zero seed must answer 0, not NULL.
+  const reduced = counting
+    ? { value: coalesce({ kind: 'agg' as const, fn: 'sum' as const, args: [col(rowsIn.id, VAL_COL)] }, compilerInt(0)), type: compilerText('long') }
+    : reducerAggregate(col(rowsIn.id, VAL_COL), reducer);
   const productive = make.aggregate({
     id: fresh('rb'), input: rowsIn, channels: [],
     type: typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true)),
@@ -441,7 +477,10 @@ function groupReduced(
     // class made a mean frame as an unmapped tag and come back a digit short; `inferredVtype` is the
     // shared translation, and using it here is the same answer the framer would reach for an untagged
     // value with the big-long case still covered.
-    val: typedNode(col(productive.id, VAL_COL), inferredVtype(col(productive.id, VAL_COL))),
+    // A COUNT is a Gremlin `long` by declaration, which is what makes the wire agree with legacy's
+    // `countBuffer` rather than letting magnitude inference pick Int for a small count. Every other
+    // reducer's result class is DYNAMIC, so its tag is inferred from the value's storage class.
+    val: typedNode(col(productive.id, VAL_COL), counting ? compilerText('long') : inferredVtype(col(productive.id, VAL_COL))),
     keyOf: elementKey ? { kind: 'elem', elem: host.elem } : { kind: 'scalar' },
     valOf: { kind: 'scalar' },
   };

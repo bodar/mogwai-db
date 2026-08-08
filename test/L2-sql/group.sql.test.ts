@@ -11,7 +11,7 @@ import { PER_ROW, SCALAR_MEMBERS, STATIC, TYPED_MEMBERS, UNKNOWN } from '../../s
 import { compile } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decode, decodeAll } from '../support/decode.ts';
-import { bagOf, read as bare_read, read, relirOff, run, runWith, seededStore } from '../support/harness.ts';
+import { bagOf, grouped, read as bare_read, read, relirOff, run, runWith, seededStore } from '../support/harness.ts';
 import type { CompileOptions } from '../../src/compiler/compiler.ts';
 import { t } from '../../src/io.ts';
 
@@ -409,15 +409,26 @@ describe('group / properties SQL', () => {
     expect(childKey.sql).toContain('ROW_NUMBER() OVER () AS o0');
     expect(childKey.sql).toContain('JOIN c');
     expect(childKey.sql).toContain('ON gk.o0=gp.o0');
-    // The RelIR route answers a reducing child KEY now — per traverser, which is what a key by() IS.
-    // (A reducing child VALUE still declines: it reduces over the whole GROUP, so the per-parent
-    // expression would be a plausible wrong value — see `groupBarrier`.) The child is a correlated
-    // scalar subquery there rather than a joined child relation, so there are no `o0` ordinals at all.
+    // The RelIR route answers a reducing child KEY per traverser, which is what a key `by()` IS — a
+    // correlated scalar subquery, so there are no `o0` ordinals at all. A reducing child VALUE is the
+    // OTHER question (it reduces over the whole GROUP) and now routes too, through the `origin`
+    // channel rather than through this key path — which is why the two are asserted together: the
+    // difference between them is the whole point.
     if (!relirOff) {
       const rel = read('g.V().groupCount().by(__.out().count())', { spine: 'rel' });
       expect(rel.shape).toEqual({ kind: 'mapValue' });
       expect(rel.sql).not.toContain('o0');
-      expect(read('g.V().group().by("name").by(__.out().count())', { spine: 'rel' }).spine).toBe('legacy');
+      const value = read('g.V().group().by("name").by(__.out().count())', { spine: 'rel' });
+      expect(value.spine).toBe('rel');
+      // The SEED ARM is the mechanism and the SQL shows it: one zero-weight row per PARENT unioned
+      // under the same `GROUP BY`, which is what makes a member whose body produced nothing still
+      // count 0 and KEEP its key (`CountGlobalStep` seeds 0 where `SumGlobalStep` emits nothing).
+      // The `origin` channel itself is not in the text — with a single hop the emitter inlines it back
+      // to the parent's `id`, which is the channel core working, not the mechanism missing.
+      expect(value.sql).toContain('UNION ALL');
+      expect(value.sql).toContain('0 AS gv');
+      expect(grouped(run(seededStore(), 'g.V().group().by("name").by(__.out().count())')))
+        .toEqual({ josh: 2, lop: 0, marko: 3, peter: 1, ripple: 0, vadas: 0 });
     }
   });
 
