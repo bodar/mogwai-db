@@ -1949,7 +1949,7 @@ export function elementMergeV(
  *   `writeOf` is the one place that says so.
  */
 export function elementMergeE(
-  input: Rel, elem: Elem | null, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
+  input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
   aliases: AliasMap, ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
@@ -1968,11 +1968,31 @@ export function elementMergeE(
   // mutation this route may make — it is one the reference refuses outright.
   if (onMatch?.label) return null;
 
-  const out = mergeEndpoint(match.outV, onCreate?.outV, maps.outV, child, fresh);
-  const to = mergeEndpoint(match.inV, onCreate?.inV, maps.inV, child, fresh);
-  if (!out || !to) return null;
+  // **THE SEARCH READS THE MERGE MAP AND ONLY THE MERGE MAP.** `searchEdges` is handed the resolved
+  // MATCH map alone, and `onCreateMap` is built afterwards and only once the search came back empty
+  // (`MergeEdgeStep.flatMap`, gremlin-core `.../step/map/MergeEdgeStep.java:258-311`). So an endpoint
+  // or a label that exists ONLY on `option(onCreate, …)` narrows NOTHING — reading the union here made
+  // `mergeE([(T.label):'knows']).option(onCreate, [(OUT):1,(IN):2])` search for a 1→2 edge where the
+  // reference searches every `knows` edge, and then CREATE a duplicate whenever one existed elsewhere.
+  // A wrong answer, and one no scenario named: both spines agreed, so only the reference could see it.
+  const matchOut = endpointSlot(match.outV, maps.outV, child, fresh);
+  const matchIn = endpointSlot(match.inV, maps.inV, child, fresh);
+  if (matchOut === null || matchIn === null) return null;
+  const createOut = matchOut ?? endpointSlot(onCreate?.outV, maps.outV, child, fresh);
+  const createIn = matchIn ?? endpointSlot(onCreate?.inV, maps.inV, child, fresh);
+  if (createOut === null || createIn === null) return null;
+
+  // A CREATE NEEDS BOTH ENDS, and a map that supplies neither is NOT a refusal to compile: the search
+  // still runs (`g.E()` narrowed by whatever the map did give), and the reference raises only where it
+  // came back empty (`:312-316`). That is a GUARD BINDING, so `g.mergeE([:])` answers the edge it finds
+  // and raises the reference's sentence exactly when there is none.
+  const creating = createOut !== undefined && createIn !== undefined;
+  // The SEARCH's label is the match map's; the CREATE's may come from `onCreate`. One name for both is
+  // the same conflation as the endpoints, one field over.
+  const searchLabels = (match.label as string[] | null) ?? [];
   const labels = ((onCreate?.label ?? match.label) as string[] | null) ?? [];
-  if (labels.length !== 1) return null;
+  if (searchLabels.length > 1) return null;
+  if (creating && labels.length !== 1) return null;
 
   const matchWrites = mergeWrites(onMatch, 'edge', child);
   // `onCreate` WINS per key, and `validateNoOverrides` has already proved the two cannot contradict.
@@ -1985,12 +2005,14 @@ export function elementMergeE(
   const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'edge', child) : [];
   if (!matchWrites || !createWrites || !tailWrites) return null;
 
-  // AN INCOMING ENDPOINT NEEDS AN INCOMING VERTEX. At the source the one-row seed carries no `id`,
-  // and an edge stream is not a vertex — either way there is nothing to be an endpoint, which is the
-  // refusal `MergeEdgeStep` words as "Out Vertex not specified in onCreate".
-  if ((out.kind === 'traverser' || to.kind === 'traverser')
-    && (elem !== 'vertex' || !input.type.cols.some((column) => column.name === 'id'))) return null;
-
+  // **THERE IS NO `traverser` ENDPOINT ON THIS STEP, and that is `MergeEdgeStep`'s rule rather than a
+  // limitation of ours.** `resolveVertex` returns immediately when the map has no `Direction` key
+  // ("no Direction specified in the map, nothing to resolve", `:232-234`), so an omitted endpoint is
+  // NOT the incoming traverser the way `addE`'s is — it simply drops out of the search. `endpointOf`
+  // accordingly never yields `{kind:'traverser'}` here, which is why this step takes NO element kind:
+  // the incoming stream's KIND cannot change its answer, and a scalar one is as legal as a vertex one.
+  // The parameter it used to take guarded a case that could not arise, and the guard's presence read
+  // as evidence that it could.
   const carried = writeInputChannels(input);
   if (carried.length !== input.channels.filter((channel) => channel.role !== 'bulk').length) return null;
   const seeded = input.kind === 'values' ? null : inputRows(input, writeInputCols(input), fresh);
@@ -2000,25 +2022,30 @@ export function elementMergeE(
   // THE ENDPOINTS FIRST, so a missing vertex refuses before anything is written. The vocabulary is
   // `addE`'s `Endpoint` — an alias, a rooted read, the incoming traverser, a public id — because a
   // merge's endpoints and a creation's ARE the same four things under different spellings.
-  const src = endpointExpr(out, incoming, aliases, fresh, guard);
-  const tgt = endpointExpr(to, incoming, aliases, fresh, guard);
-  if (!src || !tgt) return null;
+  const src = createOut === undefined ? undefined : endpointExpr(createOut, incoming, aliases, fresh, guard);
+  const tgt = createIn === undefined ? undefined : endpointExpr(createIn, incoming, aliases, fresh, guard);
+  if ((createOut !== undefined && !src) || (createIn !== undefined && !tgt)) return null;
   // EVERY ROW CARRIES ITS OWN PAIR, whether or not the pair varies — which is what lets the constant
   // and incoming cases be one lowering rather than two. `ord` names the row that asked; a source seed
   // has no position of its own and is one row, so a literal is the honest answer for it.
+  //
+  // A SIDE THE MAP NEVER MENTIONED HAS NO COLUMN AT ALL, rather than a nullable one: whether it is
+  // there is a COMPILE-TIME fact, so a NULL would only be a value the join and the insert both have
+  // to remember not to trust.
   const position: Expr = incoming.type.cols.some((column) => column.name === ORD) ? col(incoming.id, ORD) : compilerInt(1);
+  const pairCols: readonly ColMeta[] = [meta(ORD, 'int'),
+    ...(src ? [meta('src', 'int')] : []), ...(tgt ? [meta('tgt', 'int')] : [])];
   const pairs = bind(make.project({
-    id: fresh('p'), input: incoming, channels: [],
-    type: typeOf(meta(ORD, 'int'), meta('src', 'int'), meta('tgt', 'int')),
-    exprs: [[ORD, position], ['src', src], ['tgt', tgt]],
+    id: fresh('p'), input: incoming, channels: [], type: typeOf(...pairCols),
+    exprs: [[ORD, position], ...(src ? [['src', src] as const] : []), ...(tgt ? [['tgt', tgt] as const] : [])],
   }), true);
 
-  const criteria = edgeCriteria(labels[0]!, Object.entries(match.props), child, fresh);
+  const criteria = edgeCriteria(searchLabels[0] ?? null, Object.entries(match.props), child, fresh);
   if (!criteria) return null;
   // SNAPSHOTTED for `mergeV`'s two reasons at once: the create is guarded by this relation's
   // emptiness and would otherwise read the very table its own statement inserts into, and an
   // `onMatch` write can change a property the search asked about.
-  const matched = bind(pairedWith(pairs, criteria, fresh), true);
+  const matched = bind(pairedWith(pairs, criteria, { bySrc: matchOut !== undefined, byTgt: matchIn !== undefined }, fresh), true);
   for (const write of matchWrites) propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh);
 
   // ONE EDGE PER DISTINCT PAIR THAT FOUND NOTHING. `Distinct` is the whole duplicate rule: two
@@ -2030,6 +2057,31 @@ export function elementMergeE(
       pred: eq(col(matched.id, ORD), col(pairs.id, ORD)),
     }) },
   });
+
+  // **A CREATE THE MAP CANNOT DESCRIBE IS A GUARD, NOT A DECLINE** (§6·5). `MergeEdgeStep` reaches its
+  // endpoint check only after the search came back empty, so the refusal is per ROW and arithmetic over
+  // the data: `unmatched` is exactly the rows that found nothing, so `raiseWhen: 'rows'` fires precisely
+  // where the reference's loop would. `g.mergeE([:])` therefore ANSWERS the edge it finds and raises
+  // only when there is none, which is the pair of scenarios `MergeEdge.feature` states side by side
+  // (`g_mergeEXemptyX_exists` counts 1; `g_mergeEXemptyX` raises).
+  //
+  // OUT is tested before IN because the reference tests it first (`:312-315`) and the two sentences
+  // differ; a map missing both must say the same thing upstream says.
+  if (!creating) {
+    guard(make.limit({
+      id: fresh('li'), channels: [], type: typeOf(meta(ORD, 'int')), count: compilerInt(1),
+      input: make.project({
+        id: fresh('p'), input: unmatched, channels: [], type: typeOf(meta(ORD, 'int')),
+        exprs: [[ORD, col(unmatched.id, ORD)]],
+      }),
+    }), {
+      message: `${createOut === undefined ? 'Out' : 'In'} Vertex not specified in onCreate - edge cannot be created`,
+      raiseWhen: 'rows',
+    });
+    const found = tailWrites.length ? bind(matched, true) : matched;
+    for (const write of tailWrites) propertyStatements('edge', idsOf(found, fresh), write, bind, fresh);
+    return { bindings: [...(seeded?.bindings ?? []), ...bindings], result: crossed(incoming, found, carried, ordered, fresh, true) };
+  }
   const wanted = make.distinct({
     id: fresh('d'), channels: [], type: typeOf(meta('src', 'int'), meta('tgt', 'int')),
     input: make.project({
@@ -2097,10 +2149,13 @@ export function elementMergeE(
  * The option's own value goes through `endpointOf`, so an alias, a rooted read and a public id all
  * arrive already spelled the way `endpointExpr` reads them.
  */
-function mergeEndpoint(
-  fromMatch: unknown, fromCreate: unknown, option: unknown, child: ChildSeam, fresh: Minter,
-): Endpoint | null {
-  const named = fromMatch === undefined ? fromCreate : fromMatch;
+function endpointSlot(
+  named: unknown, option: unknown, child: ChildSeam, fresh: Minter,
+): Endpoint | undefined | null {
+  // THREE ANSWERS, and collapsing the first two is what tied the search to the create: `undefined` is
+  // "this map never mentioned the side", which the reference reads as "do not narrow by it"; `null` is
+  // "mentioned, and this route cannot express it", which is a decline.
+  if (named === undefined) return undefined;
   if (named !== null && typeof named === 'object' && (named as { incoming?: unknown }).incoming !== undefined)
     return option === undefined ? null : endpointOf(option, child, fresh, true);
   return typeof named === 'string' || typeof named === 'number' ? { kind: 'vertex', uid: named } : null;
@@ -2139,30 +2194,45 @@ function endpointRowid(uid: string | number, guard: Guarder, fresh: Minter): Exp
  * expressible.
  */
 function edgeCriteria(
-  label: string, props: readonly (readonly [string, unknown])[], child: ChildSeam, fresh: Minter,
+  label: string | null, props: readonly (readonly [string, unknown])[], child: ChildSeam, fresh: Minter,
 ): Rel | null {
   const read = child.rooted([
     { name: 'E', args: [] },
-    { name: 'hasLabel', args: [arg(label)] },
+    // A map with no `T.label` searches EVERY edge — `searchEdges` adds `hasLabel` only when the label
+    // is non-null, so an absent one is one fewer step rather than a different chain.
+    ...(label === null ? [] : [{ name: 'hasLabel', args: [arg(label)] }]),
     ...props.map(([key, value]) => ({ name: 'has', args: [arg(key), arg(value)] })),
   ] as IRStep[]);
   if (!read || read.effects?.length || read.framing.kind !== 'elements' || read.framing.elem !== 'edge') return null;
   return make.project({ id: fresh('p'), input: read.rel, channels: [], type: ID_TYPE, exprs: [['id', col(read.rel.id, 'id')]] });
 }
 
-/** Each incoming row's endpoint pair joined to the edges that satisfy BOTH halves of the search —
- *  `(ord, id)`, i.e. which row asked and what it found. */
-function pairedWith(pairs: Rel, criteria: Rel, fresh: Minter): Rel {
+/**
+ * Each incoming row joined to the edges that satisfy the search — `(ord, id)`, i.e. which row asked
+ * and what it found.
+ *
+ * **WHICH ENDPOINTS NARROW IS A COMPILE-TIME FACT AND IS PASSED IN, never read off `pairs`.** A row may
+ * carry a `src` because the CREATE needs one while the MERGE map never mentioned it, and joining on
+ * that column would be searching by a constraint the reference does not have. With neither side
+ * narrowing, every incoming row is paired with every admitted edge — a CROSS join, which is
+ * `searchEdges`' bare `g.E()` arm spelled in the algebra.
+ */
+function pairedWith(pairs: Rel, criteria: Rel, by: { readonly bySrc: boolean; readonly byTgt: boolean }, fresh: Minter): Rel {
   const scan = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('wt'), channels: [], type: typeOf(...EDGE_ROW_COLS) });
   const admitted = make.filter({
     id: fresh('f'), input: scan, channels: [], type: scan.type,
     pred: { kind: 'in-query', expr: col(scan.id, 'id'), plan: criteria, negated: false },
   });
+  const bySrc = by.bySrc ? eq(col(pairs.id, 'src'), col(admitted.id, 'src')) : undefined;
+  const byTgt = by.byTgt ? eq(col(pairs.id, 'tgt'), col(admitted.id, 'tgt')) : undefined;
+  // `and` REFUSES a conjunction of nothing, deliberately, so the "narrow by neither" case is spelled
+  // here as an absent ON rather than smuggled through it as a `TRUE`.
+  const on = bySrc && byTgt ? and(bySrc, byTgt) : bySrc ?? byTgt;
   const joined = make.join({
-    id: fresh('j'), left: pairs, right: admitted, join: 'inner', channels: [],
-    type: typeOf(meta(ORD, 'int'), meta('src', 'int'), meta('tgt', 'int'),
+    id: fresh('j'), left: pairs, right: admitted, ...(on ? { join: 'inner' as const, on } : { join: 'cross' as const }),
+    channels: [],
+    type: typeOf(...pairs.type.cols,
       ...EDGE_ROW_COLS.map((column) => meta(`e_${column.name}`, column.type, column.nullable))),
-    on: and(eq(col(pairs.id, 'src'), col(admitted.id, 'src')), eq(col(pairs.id, 'tgt'), col(admitted.id, 'tgt'))),
   });
   return make.project({
     id: fresh('p'), input: joined, channels: [], type: typeOf(meta(ORD, 'int'), meta('id', 'int')),

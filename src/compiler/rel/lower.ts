@@ -1999,7 +1999,7 @@ function scalarTail(
       if (pathCarried(rel)) return null;
       const written = step.name === 'addV' ? addedVertices(rel, steps, at, ctx, fresh)
         : step.name === 'addE' ? addedEdges(rel, null, steps, at, labels, ctx, fresh)
-          : mergedElements(rel, null, steps, at, labels, ctx, fresh);
+          : mergedElements(rel, steps, at, labels, ctx, fresh);
       if (!written) return null;
       const tail = elementTail(
         written.effects.result, step.name === 'addE' || step.name === 'mergeE' ? 'edge' : 'vertex',
@@ -2906,7 +2906,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   // the input is a MULTIPLIER, so one row means the search's answer is emitted once.
   if (first.name === 'mergeV' || first.name === 'mergeE') {
     const one = make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
-    const merged = mergedElements(one, 'vertex', steps, 0, NO_ALIASES, ctx, fresh);
+    const merged = mergedElements(one, steps, 0, NO_ALIASES, ctx, fresh);
     if (!merged) return null;
     const tail = elementTail(merged.effects.result, first.name === 'mergeE' ? 'edge' : 'vertex', steps, merged.at, false, ctx, fresh, NO_ALIASES);
     return tail && { ...tail, effects: [...merged.effects.bindings, ...(tail.effects ?? [])] };
@@ -3141,7 +3141,7 @@ function elementTail(
     }
     if (step.name === 'mergeV' || step.name === 'mergeE') {
       if (pathCarried(rel)) return null;
-      const merged = mergedElements(rel, elem, steps, at, labels, ctx, fresh);
+      const merged = mergedElements(rel, steps, at, labels, ctx, fresh);
       if (!merged) return null;
       // The LABELS carry for `addV`'s reason and by `addV`'s mechanism, but the correlation is a cross
       // join rather than a positional one: a merge emits the elements its SEARCH found, and no incoming
@@ -4205,7 +4205,7 @@ function addedVertices(
  *  its endpoints: `option(Merge.outV, __.select("x"))` is an alias read, and an omitted endpoint is
  *  the incoming traverser, which a non-vertex stream cannot supply. */
 function mergedElements(
-  input: Rel, elem: Elem | null, steps: readonly IRStep[], at: number, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
+  input: Rel, steps: readonly IRStep[], at: number, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
 ): { readonly effects: Effects; readonly at: number } | null {
   let options = at + 1;
   while (options < steps.length && steps[options]!.name === 'option') options++;
@@ -4215,7 +4215,7 @@ function mergedElements(
   const tail = steps.slice(options, end);
   const child = childSeam(ctx, fresh);
   const effects = steps[at]!.name === 'mergeE'
-    ? elementMergeE(input, elem, steps[at]!, arms, tail, aliases, ctx.ordered, child, fresh)
+    ? elementMergeE(input, steps[at]!, arms, tail, aliases, ctx.ordered, child, fresh)
     : elementMergeV(input, steps[at]!, arms, tail, ctx.ordered, ctx.labelCardinality, child, fresh);
   return effects && { effects, at: end };
 }

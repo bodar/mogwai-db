@@ -263,6 +263,12 @@
     "compiler": 37,
     "bound": 1
   },
+  "mergeE": {
+    "binds": 7,
+    "bytes": 992,
+    "compiler": 8,
+    "bound": 0
+  },
   "mergeV": {
     "binds": 6,
     "bytes": 1083,

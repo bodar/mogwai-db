@@ -1041,6 +1041,65 @@ describe('the RelIR spine', () => {
     expect(many.query('SELECT COUNT(*) AS n FROM vertex_properties', [])).toEqual([{ n: 3 }]);
   });
 
+  test('a mergeE search reads the MERGE map and only the merge map', () => {
+    // `searchEdges` is handed the resolved MATCH map alone, and `onCreateMap` is built afterwards and
+    // only once the search came back empty (`MergeEdgeStep.flatMap`,
+    // `vendor/tinkerpop/gremlin-core/.../step/map/MergeEdgeStep.java:258-311`). Reading the UNION of
+    // the two — which is what the endpoint resolution used to do — narrows the search by a constraint
+    // the reference does not have, and then creates a duplicate whenever a matching edge existed
+    // somewhere else. A wrong ANSWER that no scenario named, because both spines agreed about it.
+    const seeded = () => {
+      const store = new GraphStore(new BunSqlite(':memory:'));
+      for (const gremlin of [
+        'g.addV("person").property("name","marko")',
+        'g.addV("person").property("name","josh")',
+        'g.addV("person").property("name","vadas")',
+        'g.V().has("name","marko").addE("knows").to(__.V().has("name","josh"))',
+      ]) exec(store, undefined, undefined, 'rel').buffers(gremlin, {});
+      return store;
+    };
+    // A `knows` edge already exists (1→2). The merge map names only the LABEL, so the search finds it
+    // and NOTHING is created — even though `onCreate` describes a different pair entirely.
+    const store = seeded();
+    exec(store, undefined, undefined, 'rel')
+      .buffers('g.mergeE([(T.label):"knows"]).option(Merge.onCreate,[(Direction.OUT):1,(Direction.IN):3])', {});
+    expect(store.query('SELECT src, tgt FROM edges', [])).toEqual([{ src: 1, tgt: 2 }]);
+
+    // And with the search narrowed by an endpoint the map DOES name, the same traversal creates.
+    const narrowed = seeded();
+    exec(narrowed, undefined, undefined, 'rel')
+      .buffers('g.mergeE([(T.label):"knows",(Direction.OUT):1,(Direction.IN):3])', {});
+    expect(narrowed.query('SELECT src, tgt FROM edges ORDER BY id', [])).toEqual([{ src: 1, tgt: 2 }, { src: 1, tgt: 3 }]);
+  });
+
+  test('a mergeE that cannot CREATE searches anyway, and raises only where it found nothing', () => {
+    // `MergeEdge.feature` states the pair side by side and they are the whole design: `g.mergeE([:])`
+    // COUNTS 1 against a graph holding a self-edge (`g_mergeEXemptyX_exists`) and RAISES against one
+    // that holds none (`g_mergeEXemptyX`). So a map with no `Direction` key is not a refusal to
+    // compile — the search still runs, and the reference reaches its endpoint check only after the
+    // search came back empty (`:312-316`). That makes it a GUARD BINDING, and `unmatched` is exactly
+    // the rows that found nothing, so `raiseWhen: 'rows'` fires precisely where upstream's loop would.
+    const withEdge = new GraphStore(new BunSqlite(':memory:'));
+    exec(withEdge, undefined, undefined, 'rel').buffers('g.addV("person").property("name","marko").addE("self")', {});
+    expect(compile('g.mergeE([:])', {}, { spine: 'rel' }).kind).toBe('program');
+    expect(exec(withEdge, undefined, undefined, 'rel').buffers('g.mergeE([:])', {})).toHaveLength(1);
+
+    const noEdge = new GraphStore(new BunSqlite(':memory:'));
+    exec(noEdge, undefined, undefined, 'rel').buffers('g.addV("person").property("name","marko")', {});
+    expect(() => exec(noEdge, undefined, undefined, 'rel').buffers('g.mergeE([:])', {}))
+      .toThrow('Out Vertex not specified in onCreate - edge cannot be created');
+    // OUT is tested before IN, as the reference does, and the two sentences differ — so a map that
+    // names only OUT must report the OTHER one.
+    expect(() => exec(noEdge, undefined, undefined, 'rel').buffers('g.mergeE([(Direction.OUT):1])', {}))
+      .toThrow('In Vertex not specified in onCreate - edge cannot be created');
+    // Nothing was written on either refusal: the guard runs before the create, as every guard does.
+    expect(noEdge.query('SELECT COUNT(*) AS n FROM edges', [])).toEqual([{ n: 0 }]);
+
+    // LEGACY IS WRONG ON THE FIRST OF THESE — it raises even when the search succeeds, which is why
+    // `g_mergeEXemptyX_exists` was failing on both spines and is one of the three this change gained.
+    expect(() => exec(seededStore(), undefined, undefined, 'legacy').buffers('g.mergeE([:])', {})).toThrow();
+  });
+
   test('mergeE routes to RelIR for both endpoint kinds, and duplicates get ONE edge', async () => {
     // The corpus cannot see this and neither can L3: every parameterized `mergeE` arrives as a bound
     // Map (`m[{"t[label]":…,"D[OUT]":"M[outV]"}]` on the wire), and those L3 scenarios already PASSED
