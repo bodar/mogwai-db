@@ -1107,6 +1107,26 @@ interface CreationLabels {
 }
 
 /**
+ * ONE label argument → its expression, plus the guards it owes — the single-label form of
+ * `creationLabels`, for the host that takes exactly one.
+ *
+ * `addE` is that host: an edge label is singular by spec, so it has no `Collection` arm and none of
+ * `resolveLabelCollection`'s four messages apply to it. Sharing this with `addV` rather than letting
+ * the edge host grow its own resolution is the point — a second copy is a second chance to fold a
+ * constant differently, or to forget a guard.
+ */
+function labelSource(value: unknown, child: ChildSeam, fresh: Minter): CreationLabels | null {
+  const folded = constLabelArg(value, child) ?? value;
+  if (isNested(folded)) {
+    const resolved = runtimeLabel(folded, child, fresh);
+    return resolved && { names: [resolved.expr], runtime: [resolved] };
+  }
+  if (typeof folded !== 'string') return null;
+  try { validateLabel(folded); } catch { return null; }
+  return { names: [text(folded)], runtime: [] };
+}
+
+/**
  * A nested label body → the ONE value it produces, as an expression.
  *
  * `TraversalUtil.apply` is `traversal.next()` — the FIRST result — so this is the child seam's rooted
@@ -1292,12 +1312,10 @@ export function elementAddE(
   ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
-  // FOLDED, so `addE(__.constant("knows"))` is the edge label it names — `AddEdgeStep.java:180-181`
-  // unwraps a `ConstantTraversal` before anything else looks at it. Legacy THROWS for this shape
-  // ("nested-traversal label not supported"), so RelIR is ahead here rather than at parity, which
-  // §6·1 makes a first-class state.
-  const stepLabel = constLabelArg((step.args ?? [])[0]?.value, child);
-  if (typeof stepLabel !== 'string') return null;
+  // The label is resolved by `labelSource` BELOW, once `property(T.label, …)` has had its say — a
+  // `typeof !== 'string'` gate here would reject a nested body before the resolution that handles it
+  // ever ran, which is exactly what it did. It stays raw until then.
+  const stepLabel = (step.args ?? [])[0]?.value;
 
   let from: Endpoint = { kind: 'traverser' };
   let to: Endpoint = { kind: 'traverser' };
@@ -1334,8 +1352,13 @@ export function elementAddE(
   // `addV`. Validating the WINNER rather than the step's argument is what makes that true.
   const tokens = creationTokens(propertySteps, child);
   if (!tokens) return null;
-  const label = tokens.label ?? stepLabel;
-  try { validateLabel(label); } catch { return null; }
+  // A RUNTIME label works here for the same reason it works on `addV`, and by the same two pieces:
+  // the seam's rooted arm resolves the body's FIRST value (`TraversalUtil.apply` is `next()`), and the
+  // reference's three validity rules are pure predicates over that value, so they ride as guards. The
+  // only host-specific part is which label WINS — `property(T.label, …)` replaces the step's argument,
+  // and whichever won is the one validated.
+  const label = labelSource(tokens.label ?? stepLabel, child, fresh);
+  if (!label) return null;
   const writes = tokens.rest.length ? propertyWrites(tokens.rest, 'edge', child) : [];
   if (!writes) return null;
 
@@ -1377,7 +1400,9 @@ export function elementAddE(
     guard(make.project({ id: fresh('p'), input: second, channels: [], type: ID_TYPE, exprs: [['id', compilerInt(1)]] }), taken.guard);
   }
 
-  const labelRow = internLabels([text(label)], bind, fresh)!;
+  // A RUNTIME label's validity, before the insert — a check after it has nothing left to refuse.
+  for (const runtime of label.runtime) labelGuards(runtime, guard, fresh);
+  const labelRow = internLabels(label.names, bind, fresh)!;
 
   // ORDERED BY THE INPUT'S OWN POSITION, for `addVertex`'s reason: rowids are assigned in the source's
   // output order, so this is what makes the k-th created edge the k-th input row — which is what the

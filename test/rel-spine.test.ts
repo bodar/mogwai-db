@@ -751,6 +751,35 @@ describe('the RelIR spine', () => {
     }
   });
 
+  test('addE takes a RUNTIME label through the same seam and the same guards', () => {
+    // The edge host reuses `addV`'s resolution rather than growing its own — a second copy is a second
+    // chance to fold a constant differently or to forget a guard. An edge label is singular by spec, so
+    // there is no `Collection` arm here and none of `resolveLabelCollection`'s messages apply.
+    for (const gremlin of [
+      'g.V(1).addE(__.constant("knows")).to(__.V(2))',
+      'g.V(1).addE(__.V().has("name","marko").values("name")).to(__.V(2))',
+    ]) expect(compile(gremlin, {}, { spine: 'rel' }).kind, gremlin).toBe('program');
+
+    const seeded = () => {
+      const s = new GraphStore(new BunSqlite(':memory:'));
+      for (const seed of MODERN_SEED) exec(s, undefined, undefined, 'rel').buffers(seed, {});
+      return s;
+    };
+    const store = seeded();
+    exec(store, undefined, undefined, 'rel')
+      .buffers('g.V(1).addE(__.V().has("name","marko").values("name")).to(__.V(2))', {});
+    expect(store.query('SELECT l.name, e.src, e.tgt FROM edges e JOIN labels l ON l.id = e.label WHERE e.id > 12', []))
+      .toEqual([{ name: 'marko', src: 1, tgt: 2 }]);
+
+    // The SAME three guards, on the edge host — the validity rules belong to the value, not to the host.
+    for (const [gremlin, message] of [
+      ['g.V(1).addE(__.V().has("name","zzz").values("name")).to(__.V(2))', 'The provided traverser does not map to a value'],
+      ['g.V(1).addE(__.inject("")).to(__.V(2))', 'Label can not be empty'],
+      ['g.V(1).addE(__.inject("~h")).to(__.V(2))', 'Label can not be a hidden key: ~h'],
+    ] as const)
+      expect(() => exec(seeded(), undefined, undefined, 'rel').buffers(gremlin, {}), gremlin).toThrow(message);
+  });
+
   test('the hand-authored modern seed compiles WHOLE on RelIR, byte-identical to legacy', () => {
     // The plan named these seeds as the last thing pinning legacy writes for corpus LOADING (§ Phase 1):
     // the reference graphs are GraphSON-bulk-loaded, so `MODERN_SEED` and its crew sibling are the two
