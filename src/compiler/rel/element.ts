@@ -199,6 +199,34 @@ function edgeProps(edge: Expr, fresh: Minter): Expr {
  * survive a subquery boundary. Legacy's `elementPayloadObject` carries the identical wrappers.
  */
 export function elementNode(rowid: Expr, elem: Elem, fresh: Minter): Expr {
+  return correlatedElement(rowid, elem, fresh,
+    (payload) => ({ kind: 'json-object', entries: [['t', compilerText(elem)], ['v', payload]], binary: false }));
+}
+
+/**
+ * AN ELEMENT AS A BARE PAYLOAD OBJECT — `{id, label, props[, src, tgt]}`, correlated on a rowid, with
+ * NO `{t,v}` envelope around it.
+ *
+ * `elementNode`'s twin, and the pair is deliberate rather than a duplication: the two encodings serve
+ * two different framers and the framer decides which. A member of a TYPED tree (a map side, a
+ * `TYPED_LIST` member) is read by `frameTypedNode`, which needs the tag; an ELEMENT-membered list is
+ * read by `listItemBuffers`' `of.kind === 'elem'` arm (`execute.ts`), which maps `rowVertex`/`rowEdge`
+ * straight over the items and whose own comment states the contract — *"element items arrive as
+ * `{id,label,props[,src,tgt]}` objects (rowids already expanded to public payloads in SQL)"*. A tag
+ * there would be an extra level the framer does not unwrap, and the wrapper's absence is not a
+ * simplification: `of` already says every member is an element, so a per-member tag would be the same
+ * fact spelled twice.
+ *
+ * They share `correlatedElement` so the PAYLOAD itself has one authority — the id/label/props tuple and
+ * its `json()` subtype wrappers are what a second copy would get subtly wrong.
+ */
+export function elementObject(rowid: Expr, elem: Elem, fresh: Minter): Expr {
+  return correlatedElement(rowid, elem, fresh, (payload) => payload);
+}
+
+/** The correlated element row, projected through `wrap`. Both public forms differ only in that
+ *  function, which is why the scan/filter/payload triple is stated once. */
+function correlatedElement(rowid: Expr, elem: Elem, fresh: Minter, wrap: (payload: Expr) => Expr): Expr {
   const rowCols = elem === 'edge' ? EDGE_COLS : NODE_COLS;
   const row = make.scan({
     id: fresh('wen'), table: elem === 'edge' ? 'edges' : 'nodes', alias: fresh('rwm'), channels: [],
@@ -222,7 +250,7 @@ export function elementNode(rowid: Expr, elem: Elem, fresh: Minter): Expr {
   };
   const only = make.project({
     id: fresh('wnp'), input: mine, channels: [], type: typeOf(meta('n', 'json', true)),
-    exprs: [['n', { kind: 'json-object', entries: [['t', compilerText(elem)], ['v', payload]], binary: false }]],
+    exprs: [['n', wrap(payload)]],
   });
   return { kind: 'scalar', plan: only };
 }

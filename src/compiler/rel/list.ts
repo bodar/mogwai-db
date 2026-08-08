@@ -10,6 +10,8 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import { byEncounter, carriedCols, coalesce, EMPTY_ARRAY, jsonOf, meta, typedNode, typeOf, type Minter } from './build.ts';
 import { predicateExpr, SUBJECT_UNKNOWN } from './predicate.ts';
+import { elementObject } from './element.ts';
+import type { Elem } from '../plan/plan.ts';
 import { isReducer, reducerAggregate } from './reducer.ts';
 import { transformExpr } from './transform.ts';
 
@@ -47,8 +49,17 @@ import { transformExpr } from './transform.ts';
  * BOTH scalar member encodings are served: a BARE list, and a SELF-DESCRIBING one whose members may
  * be `{t,v}` nodes (what `fold()` over a per-row-typed stream produces). `memberPayload`/`memberNode`
  * are the two reads and every op goes through one of them, which is what lets a typed list flow
- * through the same code as an untyped one instead of failing closed. An ELEMENT list (rowids) and a
- * NESTED list are not served — each needs its own expansion, not a decode.
+ * through the same code as an untyped one instead of failing closed.
+ *
+ * An ELEMENT list and a NESTED list are the two that need an EXPANSION rather than a decode, and both
+ * now have one at the ROOT only (`listPayloadExpr`). An element list's members stay ROWIDS for the
+ * whole of their life inside the algebra — `foldElements` collects them, `unfoldList` hands them back
+ * as an ordinary element relation, and only `listPayload` expands them into public payload objects.
+ * That is what makes the round trip lossless (a payload object has no rowid to move from) and what
+ * keeps a discarded member free: `fold().range(local,0,2)` computes two property bags, not six. The
+ * MEMBER OPS still decline an element list — `isBareList` gates every one of them — because a member
+ * TRANSFORM or a member PREDICATE over a rowid is a question about the element, not about the value,
+ * and that is the child seam's question rather than this module's.
  */
 
 /** The member relation's columns: the value, its position in the list (`json_each.key`, which for a
@@ -419,10 +430,37 @@ const scalarOf = (
  */
 export function unfoldList(
   rel: Rel, of: ListOf, fresh: Minter,
-): { readonly rel: Rel; readonly ord: string; readonly typed: boolean; readonly member?: ListOf } | null {
+): { readonly rel: Rel; readonly ord: string; readonly typed: boolean; readonly member?: ListOf; readonly elem?: Elem } | null {
   // A NESTED list unfolds into one LIST traverser per member (a `product()`'s pair-lists), which is
   // the same explode with a different payload column — so it is one arm rather than a second function.
   if (of.kind === 'list') return unfoldNested(rel, of, fresh);
+  // AN ELEMENT list unfolds back into the ELEMENT vocabulary, and that round trip is the whole reason
+  // the members stay rowids: `fold()` collected ids, so `unfold()` hands back a relation whose payload
+  // is an `id` — an ordinary element relation, indistinguishable from the one the fold consumed, so
+  // `out()`/`has()`/`values()` after it are the ordinary element loop with nothing to know about lists.
+  // Had the fold expanded its members to payload objects, this direction would have to parse them back
+  // out of JSON and would have LOST the rowid the graph is keyed by.
+  if (of.kind === 'elem') {
+    const exploded = make.explode({
+      id: fresh('ux'), input: rel, expr: col(rel.id, LIST_COL), channels: rel.channels, as: MEMBER,
+      type: typeOf(...rel.type.cols, meta(MEMBER.value, 'any', true), meta(MEMBER.ord, 'int'), meta(MEMBER.type, 'text', true)),
+    });
+    return {
+      rel: make.project({
+        id: fresh('ue'), input: exploded, channels: rel.channels,
+        type: typeOf(meta('id', 'int'), ...carriedCols(rel.channels), meta(MEMBER.ord, 'int')),
+        // `json_each` hands a member back with the storage class the JSON held; the CAST states the
+        // rowid contract rather than trusting that, which is the same thing the alias channel's own
+        // rowid read does.
+        exprs: [['id', { kind: 'cast', arg: col(exploded.id, MEMBER.value), to: 'int' }],
+          ...rel.channels.map((channel) => [channel.col, col(exploded.id, channel.col)] as const),
+          [MEMBER.ord, col(exploded.id, MEMBER.ord)]],
+      }),
+      ord: MEMBER.ord,
+      typed: false,
+      elem: of.elem,
+    };
+  }
   if (!isBareList(of)) return null;
   const exploded = make.explode({
     id: fresh('uf'), input: rel, expr: col(rel.id, LIST_COL), channels: rel.channels, as: MEMBER,
@@ -511,6 +549,44 @@ export function foldScalars(
       }]],
     }),
     of: vtype ? TYPED_LIST : { kind: 'scalar', ...(staticTag ? { as: staticTag } : {}) },
+  };
+}
+
+/**
+ * `fold()` OVER AN ELEMENT STREAM — the same barrier, collecting ROWIDS.
+ *
+ * `foldScalars`' twin, and the difference is one expression: a scalar list collects the VALUE, an
+ * element list collects the traverser's rowid and leaves the expansion to the payload arm below. That
+ * split is what makes the encoding cheap — a fold's job is the barrier, and expanding six vertices
+ * into their property bags inside the aggregate would compute a payload for every member of every
+ * intermediate list, including the ones a following `range(local)` or `unfold().limit(1)` throws away.
+ *
+ * It is also why there is no type question here and a long one in `foldScalars`: every member of an
+ * element list IS an element, so `of` says it once and no member needs a tag. `{kind:'elem'}` was
+ * already the `ListOf` arm legacy produced and the framer already read (`listItemBuffers`,
+ * `execute.ts`); this is the increment that first PRODUCES one on this spine, which is exactly what
+ * `listPayloadExpr`'s decline comment said it was waiting for.
+ *
+ * The member ORDER is the emission order where one is carried, which for a `fold()` is always:
+ * `analyzeChain` makes `fold` a COLLECTING consumer, so a chain reaching one demands an encounter.
+ * `COALESCE(…, '[]')` because a fold over ZERO traversers emits `[]` rather than nothing —
+ * `FoldStep` supplies a seed, which is the per-step rule §12 cites `gremlin-core` for.
+ */
+export function foldElements(
+  input: Rel, elem: Elem, opts: { readonly encounter?: string }, fresh: Minter,
+): { readonly rel: Rel; readonly of: ListOf } {
+  const order: readonly SortTerm[] = opts.encounter ? [{ expr: col(input.id, opts.encounter), dir: 'asc' }] : [];
+  return {
+    rel: make.aggregate({
+      id: fresh('fe'), input, channels: [], type: typeOf(meta(LIST_COL, 'json')),
+      groupBy: [],
+      aggs: [[LIST_COL, {
+        kind: 'call',
+        fn: 'jsonb',
+        args: [coalesce({ kind: 'agg', fn: 'json_group_array', args: [col(input.id, 'id')], orderBy: order }, EMPTY_ARRAY)],
+      }]],
+    }),
+    of: { kind: 'elem', elem },
   };
 }
 
@@ -808,13 +884,31 @@ export function collectionRetype(rel: Rel, vtype: string, kind: 'list' | 'set', 
  *   correlated `FROM json_each(…)`, which is what makes a per-member computation a scalar subquery rather
  *   than a row multiplication.
  *
- * An ELEMENT-membered list declines. Not a wall: the expansion is `element.ts`'s payload as a member
- * (legacy's `elementListResult`), and it becomes reachable the moment `fold()` over elements lands — which
- * is the increment that would first PRODUCE one. Declining until then is the decline contract, not a gap:
- * legacy answers it today.
+ * An ELEMENT-membered list is REBUILT the same way a nested one is, and for the same reason: the members
+ * are ROWIDS (what `foldElements` collected) and the wire wants public payload objects, so each one is
+ * expanded here — at the ROOT, once per surviving member — rather than inside the barrier that made the
+ * list. Legacy's `elementListResult`, and the framer contract is `listItemBuffers`' own comment: element
+ * items arrive as `{id,label,props[,src,tgt]}` objects, rowids already expanded in SQL. That is
+ * `elementObject` and NOT `elementNode` — a `{t,v}` envelope here would be a level the `of.kind === 'elem'`
+ * framer does not unwrap, and `of` has already said every member is an element.
  */
 function listPayloadExpr(list: Expr, of: ListOf, fresh: Minter): Expr | null {
   if (of.kind === 'scalar') return jsonOf(list);
+  if (of.kind === 'elem') {
+    const rowids = membersOf(jsonOf(list), fresh);
+    const expanded = make.aggregate({
+      id: fresh('le'), input: rowids, channels: [], type: typeOf(meta('members', 'json', true)),
+      groupBy: [],
+      aggs: [['members', {
+        kind: 'agg', fn: 'json_group_array',
+        // `json()` for `jsonOf`'s standing reason: without it the expanded object is re-encoded as a
+        // JSON STRING inside the enclosing array.
+        args: [jsonOf(elementObject(col(rowids.id, MEMBER.value), of.elem, fresh))],
+        orderBy: [memberOrder(rowids)],
+      }]],
+    });
+    return jsonOf(coalesce({ kind: 'scalar', plan: expanded }, EMPTY_ARRAY));
+  }
   if (of.kind !== 'list') return null;
   const members = membersOf(jsonOf(list), fresh);
   const inner = listPayloadExpr(col(members.id, MEMBER.value), of.of, fresh);

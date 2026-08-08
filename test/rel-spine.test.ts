@@ -1405,4 +1405,55 @@ describe('the RelIR spine', () => {
     read('g.E()', { spine: 'rel' });
     expect(read('g.V(1)', { spine: 'rel' }).sql).toBe(first.sql);
   });
+
+  test('an ELEMENT fold frames the same BYTES on both spines, through two Shape descriptors', () => {
+    // The claim the L2 shape assertions make in prose, gated here in bytes. Legacy folds element ROWS
+    // and frames its `list` Shape as `listBuffer(rows.map(rowVertex))`; RelIR folds ROWIDS, expands
+    // them to public payload objects at the ROOT (so a `range(local)` or `unfold().limit(1)` discards
+    // members before anything computes a property bag), and frames through `jsonbList`'s
+    // `of.kind === 'elem'` arm — `listBuffer(items.map(rowVertex))`, the SAME encoder. Two
+    // descriptors, one encoder, identical GraphBinary; a divergence here would be the wrong-answer-
+    // with-right-arity class no coverage number can see.
+    //
+    // The EMPTY fold is in the list on purpose: `FoldStep` supplies a seed (§12), so zero traversers
+    // must frame as one EMPTY LIST and not as no traverser at all.
+    return (async () => {
+      for (const gremlin of [
+        'g.V().fold()',
+        'g.V().hasLabel("person").fold()',
+        'g.V(1).outE().fold()',
+        'g.V().out("created").fold()',
+        'g.V().hasLabel("person").order().by("name").fold()',
+        'g.V().hasLabel("nope").fold()',
+        'g.V().hasLabel("person").fold().count(Scope.local)',
+        'g.V().hasLabel("person").fold().unfold()',
+        'g.V().out("created").fold().unfold().dedup().values("name")',
+      ]) {
+        expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('rel');
+        const via = (spine: 'rel' | 'legacy') =>
+          decodeAll(exec(seededStore(), undefined, undefined, spine).buffers(gremlin, {}, {}));
+        expect(await via('rel'), gremlin).toEqual(await via('legacy'));
+      }
+    })();
+  });
+
+  test('fold().unfold() PRESERVES the traverser order, and legacy loses it once a value follows', () => {
+    // RelIR is AHEAD here, and it is worth pinning because it is the direction the differential cannot
+    // forgive if it ever reverses. `fold()` and `unfold()` are both order-preserving upstream, so
+    // `hasLabel('person')` over the modern graph is marko, vadas, josh, peter at every point in the
+    // round trip. RelIR carries that through: the fold's `Agg.orderBy` is the emission order, and the
+    // unfold re-mints the position from `json_each`'s index, so a following `values()` is the ordinary
+    // element loop over an ordered relation.
+    //
+    // Legacy agrees while the round trip ENDS at the elements (asserted in the byte test above) and
+    // loses it the moment a value follows — `["josh","marko","peter","vadas"]`, which is neither the
+    // traverser order nor anything the query asked for; it is the property table's scan order showing
+    // through. A pre-existing defect on a route with an end date, so it is RECORDED rather than fixed
+    // (§6·1), and not asserted as agreement — the two spines answer this one differently ON PURPOSE.
+    const names = (spine: 'rel' | 'legacy') =>
+      (runWith(seededStore(), 'g.V().hasLabel("person").fold().unfold().values("name")', { spine }) as any[])
+        .map((row) => row.v);
+    expect(names('rel')).toEqual(['marko', 'vadas', 'josh', 'peter']);
+    expect(names('legacy')).not.toEqual(names('rel'));
+  });
 });

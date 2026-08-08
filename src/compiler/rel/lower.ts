@@ -38,7 +38,7 @@ import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementMergeE, elementMergeV, elementProperty, propertyWrites, type Effects } from './write.ts';
-import { BARE_LIST, collectionRetype, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
+import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
 import { elementHost, groupBarrier, mapPayload } from './map.ts';
 import { elementPayload } from './element.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
@@ -917,10 +917,29 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, ctx: Chain
     });
     return make.distinct({ id: fresh('d'), input: projected, channels: BULK, type: projected.type });
   }
+  // THE AGGREGATES ARE DERIVED FROM THE CHANNELS THE INPUT ACTUALLY CARRIES, never named — §12's rule,
+  // and this line broke it. The pair `['bulk', 'encounter']` was hardcoded while every ordered element
+  // relation carried both, and the first one that did not was a `fold().unfold()`: a fold collapses the
+  // stream to ONE traverser, so the list relation has no multiplicity to carry and the unfolded members
+  // arrive with an emission order and no `bulk`. The declared type then said two columns while the node
+  // emitted three, which the factory catches — a THROW out of a lowering whose contract is `null`, i.e.
+  // RelIR failing where legacy answers, which is the one failure the routing switch cannot absorb.
+  //
+  // `groupableChannels` above has already refused every role without a defined N→1 answer, so the two
+  // arms below are total over what can reach here; anything else declines rather than being averaged
+  // into a plausible value. `bulk` is the constant 1 because a dedup survivor stands for ITSELF
+  // (`DedupGlobalStep.filter`'s unconditional `setBulk(1L)`), and `encounter` is the FIRST occurrence's
+  // position, which is what makes the survivor the one TinkerPop keeps.
+  const reductions: (readonly [string, Expr])[] = [];
+  for (const channel of input.channels) {
+    if (channel.role === 'bulk') reductions.push([channel.col, compilerInt(1)]);
+    else if (channel.role === 'encounter') reductions.push([channel.col, { kind: 'agg', fn: 'min', args: [col(input.id, channel.col)] }]);
+    else return null;
+  }
   return make.aggregate({
     id: fresh('dd'), input, channels: input.channels, type: typeOf(...elementCols(input.channels)),
     groupBy: [col(input.id, 'id')],
-    aggs: [['bulk', compilerInt(1)], ['encounter', { kind: 'agg', fn: 'min', args: [col(input.id, 'encounter')] }]],
+    aggs: reductions,
   });
 }
 
@@ -1962,15 +1981,18 @@ function listTail(
         ...(carried ? [{ expr: col(unfolded.rel.id, carried.col), dir: 'asc' as const }] : []),
         { expr: col(unfolded.rel.id, unfolded.ord), dir: 'asc' as const },
       ];
-      const positioned = renumber(
-        unfolded.rel, terms,
-        [...(unfolded.member ? [meta(LIST_COL, 'json')] : [meta('v', 'any', true), ...(unfolded.typed ? [meta('vtype', 'text', true)] : [])]),
-          ...carriedCols(channels)],
-        channels, fresh,
-      );
+      const payloadCols: readonly ColMeta[] = unfolded.member ? [meta(LIST_COL, 'json')]
+        : unfolded.elem ? [meta('id', 'int')]
+          : [meta('v', 'any', true), ...(unfolded.typed ? [meta('vtype', 'text', true)] : [])];
+      const positioned = renumber(unfolded.rel, terms, [...payloadCols, ...carriedCols(channels)], channels, fresh);
       // A NESTED list's members are LISTS, so the unfolded stream stays in the list vocabulary rather
       // than entering the scalar one — the same explode, a different payload.
       if (unfolded.member) return listTail(positioned, unfolded.member, steps, at + 1, ctx, fresh, labels);
+      // AN ELEMENT list's members are ELEMENTS, so the round trip closes: the relation carries an `id`
+      // again and the rest of the chain is the ordinary element loop. `bulked` is false — a fold reset
+      // the multiplicity when it collapsed the stream to one traverser, and each member now stands for
+      // exactly one.
+      if (unfolded.elem) return elementTail(positioned, unfolded.elem, steps, at + 1, false, ctx, fresh, labels);
       // A TYPED list's members frame by their OWN type, exactly as `values()` over a stored property
       // does — `PER_ROW('vtype')`, the same channel and the same column name, so the scalar tail's
       // `carries('vtype')` picks it up and an `is(P.gt(…))` after it gets the vtype-aware compare key
@@ -2614,6 +2636,16 @@ function elementTail(
       const projected = projectorTail(rel, step, elementHost(rel, elem, labels), childSeam(ctx, fresh), fresh);
       if (!projected) return null;
       return continueAs(projected.rel, projected.framing, steps, at + 1, bulked, ctx, fresh, labels);
+    }
+    // `fold()` — the SHAPE BOUNDARY out of the element loop, the twin of the scalar tail's own. Every
+    // traverser becomes one MEMBER of one list traverser, and for elements the member is the rowid:
+    // `listPayload` expands it at the root, so a following `range(local)`/`unfold().limit(1)` throws
+    // rows away before anything computes a property bag for them.
+    if (step.name === 'fold') {
+      if (argValues(step).length || isLocalScope(step) || step.modulators?.length || pathCarried(rel)) return null;
+      const encounter = encounterOf(rel.channels);
+      const folded = foldElements(rel, elem, encounter ? { encounter: encounter.col } : {}, fresh);
+      return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
     }
     if (step.name === 'project') {
       // A carried PATH declines for `terminal()`'s reason: the record is a new traverser object and

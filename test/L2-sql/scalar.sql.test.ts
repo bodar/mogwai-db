@@ -269,9 +269,14 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('fold() as a value + unfold() re-enters the tail', () => {
-    // Element folds retain the row-framing path; scalar folds become a genuine
-    // ListStream even when terminal, so item metadata can survive the barrier.
-    expect(read('g.V().fold()').shape).toEqual({ kind: 'list', elem: 'vertex' });
+    // AN ELEMENT FOLD IS ONE SHAPE ON EACH SPINE AND THE SAME BYTES, which is why both are pinned
+    // rather than one being "the" answer. Legacy's `list` arm frames element ROWS (`listBuffer(rows
+    // .map(rowVertex))`); RelIR folds ROWIDS and expands them to payload objects at the root, so it
+    // frames through `jsonbList`'s `of.kind === 'elem'` arm — `listBuffer(items.map(rowVertex))`, the
+    // same encoder legacy's own `jsonbElementList` uses. Different descriptor, identical GraphBinary.
+    expect(read('g.V().fold()', { spine: 'legacy' }).shape).toEqual({ kind: 'list', elem: 'vertex' });
+    expect(read('g.V().fold()', { spine: 'rel' }).shape)
+      .toEqual({ kind: 'jsonbList', items: { kind: 'elem', elem: 'vertex' } });
     expect(read('g.V().values("name").fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });
     // A NON-terminal fold() retypes to a JSONB list value (jsonb(json_group_array)),
     // and unfold() explodes it (json_each) — the stream continues. fold().unfold() is
@@ -1323,9 +1328,15 @@ describe('scalar-parent / projection SQL', () => {
   });
 
   test('fold() wraps the projection in a list shape (element or scalar)', () => {
-    expect(read('g.V().fold()').shape).toEqual({ kind: 'list', elem: 'vertex' });
+    // The element arm is per-spine for the reason above — same bytes, two descriptors — and the
+    // scalar arm is not, because both spines already produce `jsonbList` for it.
+    expect(read('g.V().fold()', { spine: 'legacy' }).shape).toEqual({ kind: 'list', elem: 'vertex' });
+    expect(read('g.V(1).outE().fold()', { spine: 'legacy' }).shape).toEqual({ kind: 'list', elem: 'edge' });
+    expect(read('g.V().fold()', { spine: 'rel' }).shape)
+      .toEqual({ kind: 'jsonbList', items: { kind: 'elem', elem: 'vertex' } });
+    expect(read('g.V(1).outE().fold()', { spine: 'rel' }).shape)
+      .toEqual({ kind: 'jsonbList', items: { kind: 'elem', elem: 'edge' } });
     expect(read('g.V().values("name").fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });
-    expect(read('g.V(1).outE().fold()').shape).toEqual({ kind: 'list', elem: 'edge' });
   });
 
   test('sum() wraps a value stream in SQL SUM → scalar shape', () => {
