@@ -799,6 +799,37 @@ describe('the RelIR spine', () => {
     expect(compile('g.V().id()', {}, { spine: 'rel' })).not.toMatchObject({ spine: 'rel' });
   });
 
+  test('labels() is label()\'s FLAT-MAP twin, and a zero-label vertex contributes no rows', async () => {
+    // `LabelsStep` is a `FlatMapStep` over `element.labels()` and its javadoc states BOTH arms —
+    // *"For vertices with multiple labels, each label is emitted individually. For edges, the single
+    // label is emitted"* (`vendor/tinkerpop/gremlin-core/.../step/map/LabelsStep.java`). The edge arm
+    // is therefore `label()` exactly and shares its projection; the vertex arm is `values()`' join with
+    // the label side tables in place of the property one.
+    //
+    // This is the read step every `addLabel`/`dropLabel` scenario ENDS in, so it was the shape holding
+    // that whole write family on the legacy route while the writes themselves already lowered.
+    for (const gremlin of [
+      'g.V().labels()', 'g.E().labels()', 'g.V().labels().fold()', 'g.V().labels().count()',
+      'g.V().labels().dedup()', 'g.V().has("name","marko").labels()', 'g.V().labels().order()',
+    ]) {
+      expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('rel');
+      const via = (spine: 'rel' | 'legacy') =>
+        decodeAll(exec(seededStore(), undefined, undefined, spine).buffers(gremlin, {}, {}));
+      expect(await via('rel'), gremlin).toEqual(await via('legacy'));
+    }
+
+    // THE INNER JOIN IS THE SPECIFIED ANSWER, not a default: under `ZERO_OR_MORE` a vertex may carry
+    // no labels at all, and `labels()` must then emit NOTHING for it — an outer join would emit one
+    // NULL row and `count()` would answer 1 where the reference answers 0. Only a zero-label graph can
+    // state that, so it needs its own store.
+    const none = new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ZERO_OR_MORE);
+    exec(none, undefined, undefined, 'rel').buffers('g.addV()', {});
+    for (const spine of ['rel', 'legacy'] as const) {
+      expect(await decodeAll(exec(none, undefined, undefined, spine).buffers('g.V().labels()', {}, {})), spine).toEqual([]);
+      expect(await decodeAll(exec(none, undefined, undefined, spine).buffers('g.V().labels().count()', {}, {})), spine).toEqual([0]);
+    }
+  });
+
   // RelIR is AHEAD: legacy refuses a nested `addE` label outright ("nested-traversal label not
   // supported") where the reference resolves the body's first value. `addV` has no such gap, so only
   // the edge host needs this form of assertion.

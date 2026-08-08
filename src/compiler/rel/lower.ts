@@ -1336,6 +1336,67 @@ function terminal(
     };
   }
 
+  // `labels()` — `label()`'s FLAT-MAP twin, and the only reader that may join `vertex_labels`.
+  //
+  // `LabelsStep` is a `FlatMapStep` over `element.labels()` and its javadoc states both arms:
+  // *"For vertices with multiple labels, each label is emitted individually. For edges, the single
+  // label is emitted"* (`vendor/tinkerpop/gremlin-core/.../step/map/LabelsStep.java`). So the EDGE
+  // arm is `label()` exactly — one row, the same token projection — and sharing it is the point: an
+  // edge's label cardinality is fixed at one by spec, so a second spelling here could only disagree.
+  //
+  // The VERTEX arm is `values()`' shape with the label side tables in place of the property one: one
+  // traverser per label, the channels riding through, `ordered` so the stream drives and
+  // `vertex_labels(node, label)` is probed rather than scanned. The join is INNER, and that is the
+  // SPECIFIED answer rather than a default — under `LabelCardinality.ZERO_OR_MORE` a vertex may carry
+  // no labels at all, and `g.addV().labels().count()` is then 0, which an outer join would answer 1.
+  //
+  // Emission order within one vertex is label ID, which is the same deterministic pick `label()`
+  // makes for its scalar, so the first entry of `labels()` and `label()` name the same label.
+  if (step.name === 'labels') {
+    if (args.length) return null;
+    if (elem === 'edge') {
+      const projected = byExpr({ key: { kind: 'token', token: 'label' } }, elementHost(input, elem, aliases), fresh);
+      if (!projected) return null;
+      return {
+        rel: make.project({
+          id: fresh('tok'), input, channels: input.channels,
+          type: typeOf(meta('v', 'text'), ...carriedCols(input.channels)),
+          exprs: [['v', projected], ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
+        }),
+        framing: { kind: 'scalar', type: STATIC('string') },
+      };
+    }
+    const vl = make.scan({
+      id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [],
+      type: typeOf(meta('node', 'int'), meta('label', 'int')),
+    });
+    const owned = make.join({
+      id: fresh('j'), left: input, right: vl, join: 'inner', ordered: true, channels: input.channels,
+      type: typeOf(...elementCols(input.channels), meta('node', 'int'), meta('label', 'int')),
+      on: eq(col(vl.id, 'node'), col(input.id, 'id')),
+    });
+    const names = make.scan({
+      id: fresh('lb'), table: 'labels', alias: fresh('rl'), channels: [],
+      type: typeOf(meta('id', 'int'), meta('name', 'text')),
+    });
+    const named = make.join({
+      id: fresh('j'), left: owned, right: names, join: 'inner', ordered: true, channels: owned.channels,
+      // `lid` and not a second `id`: a Join's declared names are POSITIONAL and must be unique, and
+      // the element's own `id` is already the first of them.
+      type: typeOf(...elementCols(owned.channels), meta('node', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
+      on: eq(col(names.id, 'id'), col(owned.id, 'label')),
+    });
+    return {
+      rel: make.project({
+        id: fresh('lv'), input: named, channels: named.channels,
+        type: typeOf(meta('v', 'text'), ...carriedCols(named.channels)),
+        exprs: [['v', col(named.id, 'name')],
+          ...named.channels.map((channel) => [channel.col, col(named.id, channel.col)] as const)],
+      }),
+      framing: { kind: 'scalar', type: STATIC('string') },
+    };
+  }
+
   if (step.name === 'values') {
     // TinkerPop's `PropertiesStep` is `element.properties(keys)`: no keys means EVERY key, several
     // mean membership in the set. A non-string key is a decline rather than a guess — answering
