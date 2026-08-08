@@ -16,28 +16,60 @@ import { read, run, seededStore } from '../support/harness.ts';
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
 
 describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () => {
-  test('union() as a source lowers each ROOTED branch and routes it to the shared merges', () => {
-    const p = read("g.union(__.V(2),__.V(4)).values('name')");
+  // PINNED TO LEGACY, because it describes that route's source union in full — including the
+  // capabilities RelIR has not reached (a VARIANT merge, the empty `union()`, an `as()` bound inside
+  // an arm, the arm-merge encounter). RelIR's own source union is the test below; the two are
+  // separate rather than merged because §6·1's floor is the UNION of the spines, and a single
+  // ambient-spine assertion would silently become a claim about whichever route happened to answer.
+  test('union() as a source lowers each ROOTED branch and routes it to the shared merges — legacy', () => {
+    const p = read("g.union(__.V(2),__.V(4)).values('name')", { spine: 'legacy' });
     expect(p.sql).toContain('UNION ALL');
     expect(p.sql).toContain('vp.value END AS v');
     // branches sharing the one WITH clause
-    expect(read("g.union(__.V().hasLabel('software'),__.V().hasLabel('person')).count()").shape).toEqual({ kind: 'value', type: STATIC('long') });
+    expect(read("g.union(__.V().hasLabel('software'),__.V().hasLabel('person')).count()", { spine: 'legacy' }).shape).toEqual({ kind: 'value', type: STATIC('long') });
     // mid-chain union() still works (the element StepFn — same merge, a parent to fork from)
-    expect(read("g.V().union(__.out(),__.in()).values('name')").sql).toContain('UNION ALL');
+    expect(read("g.V().union(__.out(),__.in()).values('name')", { spine: 'legacy' }).sql).toContain('UNION ALL');
     // Each branch is a fully ROOTED traversal lowered to its natural shape, so the merge is
     // picked from the arms' KINDS — every shape the mid-traversal union reaches, a source
     // union now reaches too.
-    expect(read("g.union(__.V().values('name'))").shape.kind).toBe('value');              // scalar merge
-    expect(read('g.union(__.inject(1),__.inject(2))').shape.kind).toBe('value');          // non-V/E-rooted arms
-    expect(read("g.union(__.V().values('name').fold(),__.V().values('age').fold())").shape.kind).toBe('jsonbList');
-    expect(read("g.union(__.V().values('name'),__.V().hasLabel('person'))").shape.kind).toBe('variant'); // mixed
-    expect(read('g.union()').shape.kind).toBe('vertex');                                  // no branches → empty
+    expect(read("g.union(__.V().values('name'))", { spine: 'legacy' }).shape.kind).toBe('value');              // scalar merge
+    expect(read('g.union(__.inject(1),__.inject(2))', { spine: 'legacy' }).shape.kind).toBe('value');          // non-V/E-rooted arms
+    expect(read("g.union(__.V().values('name').fold(),__.V().values('age').fold())", { spine: 'legacy' }).shape.kind).toBe('jsonbList');
+    expect(read("g.union(__.V().values('name'),__.V().hasLabel('person'))", { spine: 'legacy' }).shape.kind).toBe('variant'); // mixed
+    expect(read('g.union()', { spine: 'legacy' }).shape.kind).toBe('vertex');                                  // no branches → empty
     // as() inside a branch resolves through the merge's alias union; a positional consumer
     // downstream of the fan-out mints the arm-merge encounter (arm 0 fully before arm 1).
-    expect(read("g.union(__.V().as('a').out(),__.V()).select('a').values('name')").shape.kind).toBe('value');
-    expect(read('g.union(__.V(),__.V()).limit(3)').sql).toContain('ROW_NUMBER() OVER (ORDER BY m.arm_idx, m.arm_ordinal, m.encounter)');
+    expect(read("g.union(__.V().as('a').out(),__.V()).select('a').values('name')", { spine: 'legacy' }).shape.kind).toBe('value');
+    expect(read('g.union(__.V(),__.V()).limit(3)', { spine: 'legacy' }).sql).toContain('ROW_NUMBER() OVER (ORDER BY m.arm_idx, m.arm_ordinal, m.encounter)');
     // An arm whose shape no merge in the family covers fails closed, naming that shape.
-    expect(() => compile("g.union(__.V().group().by('name'),__.V())", {})).toThrow('union() source branch producing a group value');
+    expect(() => compile("g.union(__.V().group().by('name'),__.V())", {}, { spine: 'legacy' })).toThrow('union() source branch producing a group value');
+  });
+
+  test('union() as a source on RelIR — each arm is a ROOTED chain, then the SHARED merge', () => {
+    // NOT the chain-position `union()` with a different input, and the distinction is the whole
+    // reason this is its own source arm: `unionArms` lowers each body against the CURRENT traverser,
+    // and here there is none — each arm re-enters `lowerChain` whole through the seam's rooted
+    // answer. Legacy draws the same line (its `sourceUnion` deliberately does not use the child-body
+    // arm triage).
+    //
+    // Everything AFTER the arms exist is shared, and making `mergeArms` take a `Channels` rather
+    // than an input relation is what says so in the types: a source union has no input to take them
+    // from, so the first arm's are the base every arm must agree with.
+    for (const gremlin of [
+      "g.union(__.V().hasLabel('software'), __.V().hasLabel('person')).values('name')",
+      'g.union(__.inject(1), __.inject(2))',
+      "g.union(__.V().hasLabel('person'), __.V().hasLabel('software')).count()",
+      'g.union(__.V(), __.V()).hasLabel("person").count()',
+    ]) expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('rel');
+
+    // The declines, each its own reason rather than a blanket. A single arm is not a merge at all
+    // and the empty one is the empty relation `Values` refuses (§3.3); an arm with EFFECTS is plan
+    // composition whose statements would need hoisting to bindings first; and a shape disagreement
+    // is the VARIANT merge, which is the rest of the branch family.
+    for (const gremlin of [
+      "g.union(__.V().values('name'))",
+      "g.union(__.V().values('name'), __.V().hasLabel('person'))",
+    ]) expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('legacy');
   });
 
   test('and()/or() combine branch predicates; nested where(__.and)', () => {

@@ -2435,6 +2435,21 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
    *  with no accumulator in it. */
   const sacked = (rel: Rel): Rel | null => (ctx.sack ? seedSack(rel, ctx.sack, fresh) : rel);
 
+  // `g.union(a, b, …)` in SOURCE position — every arm is a ROOTED chain of its own, correlated to
+  // nothing, so this is NOT the chain-position `union()` with a different input. `unionArms` lowers
+  // each body against the CURRENT traverser; here there is none, and each arm re-enters `lowerChain`
+  // whole. That is the same distinction legacy draws (its `sourceUnion` deliberately does not use the
+  // child-body arm triage), and it is why this is a source arm rather than a widening of that one.
+  //
+  // What is SHARED is everything after the arms exist: `mergeArms` is parent-agnostic, which is what
+  // taking a `Channels` rather than an input relation now makes explicit — a source union has no
+  // input to take them from, so the first arm's are the base every arm must agree with.
+  if (first.name === 'union') {
+    const merged = sourceUnion(first, ctx, fresh);
+    if (!merged) return null;
+    return continueAs(merged.rel, merged.framing, steps, 1, false, ctx, fresh, NO_ALIASES);
+  }
+
   if (first.name === 'inject') {
     // A COLLECTION literal seeds a LIST traverser, an ordinary value a SCALAR one — two shapes, and
     // the argument decides which, so the list arm is asked first and declines a scalar inject.
@@ -3060,7 +3075,7 @@ function unionArms(
     if (!arm) return null;
     arms.push(arm);
   }
-  return mergeArms(arms, input, labels, fresh);
+  return mergeArms(arms, input.channels, labels, fresh);
 }
 
 /**
@@ -3122,7 +3137,40 @@ function withMergedVtype(arm: Tail, fresh: Minter): Rel {
   });
 }
 
-function mergeArms(arms: readonly Tail[], input: Rel, labels: AliasMap, fresh: Minter): { readonly rel: Rel; readonly framing: RelFraming } | null {
+/**
+ * `g.union(a, b, …)` — a SOURCE union, or `null` to decline.
+ *
+ * Each argument is a whole traversal, so each one re-enters `lowerChain` through the seam's rooted
+ * answer and the merge is the ordinary one. Three declines, each its own reason:
+ *
+ * - **fewer than two arms.** `union(t)` IS `t` — not a merge at all — and `union()` is the empty
+ *   relation, which `Values` cannot express (§3.3). Both are legacy's today.
+ * - **an arm with EFFECTS.** `union(__.addV(…), __.addV(…))` is plan composition (§3.0) and the
+ *   arms' statements would have to be hoisted to bindings and ordered before the read that merges
+ *   them. Expressible, unbuilt, and a write question rather than a branch one.
+ * - anything `mergeArms` refuses — a shape disagreement, a label bound in one arm, an arm-local
+ *   `order()` minting a second emission order.
+ */
+function sourceUnion(
+  step: IRStep, ctx: ChainCtx, fresh: Minter,
+): { readonly rel: Rel; readonly framing: RelFraming } | null {
+  if (step.modulators?.length || step.optionArms) return null;
+  const args = argValues(step);
+  if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
+  const arms: Tail[] = [];
+  for (const arg of args) {
+    const body = rootedSteps((arg as { readonly nested: unknown }).nested, ctx.params, ctx.sideEffects);
+    if (!body?.length) return null;
+    const read = rootedRead(body, ctx, fresh);
+    if (!read || read.effects?.length) return null;
+    arms.push({ rel: read.rel, framing: read.framing, aliases: NO_ALIASES });
+  }
+  return mergeArms(arms, arms[0]!.rel.channels, NO_ALIASES, fresh);
+}
+
+function mergeArms(
+  arms: readonly Tail[], base: Channels, labels: AliasMap, fresh: Minter,
+): { readonly rel: Rel; readonly framing: RelFraming } | null {
   let [first, ...rest] = arms as [Tail, ...Tail[]];
   // SCALAR ARMS MEET BEFORE THEY ARE COMPARED, because a tag disagreement is not a shape
   // disagreement — see `meetScalarArms`. The re-projection is what makes the arms comparable at all,
@@ -3150,13 +3198,13 @@ function mergeArms(arms: readonly Tail[], input: Rel, labels: AliasMap, fresh: M
   // one. `rigidChannels` is why the peer merge refuses it rather than picking a winner, and asking
   // here is what turns that refusal into a deferral (found by `rel-sweep` on
   // `union(out(…).order().by(k).limit(2), …)`).
-  if (arms.some((arm) => !sameChannels(input.channels, arm.rel.channels))) return null;
+  if (arms.some((arm) => !sameChannels(base, arm.rel.channels))) return null;
 
   // The merged list, from the core rather than assembled here. Today the arms are required to agree,
   // so the peer merge has nothing to reconcile and this is a derivation rather than a reconciliation
   // — it earns its keep when the alias half lands, since an alias is the one FORKABLE role and a
   // label bound in one arm is exactly what `union` merge policy exists for.
-  const channels = mergeChannels(input.channels, arms.map((arm) => arm.rel.channels), { rigid: 'peer' });
+  const channels = mergeChannels(base, arms.map((arm) => arm.rel.channels), { rigid: 'peer' });
   return {
     rel: make.union({
       id: fresh('un'), inputs: arms.map((arm) => arm.rel), all: true,
@@ -3205,7 +3253,7 @@ function chooseArms(
   // The else arm over ZERO steps is `identity` on the complement — see above.
   const armElse = continueAs(guarded(true), framing, otherwise ?? [], 0, bulked, ctx, fresh, labels);
   if (!armThen || !armElse) return null;
-  return mergeArms([armThen, armElse], input, labels, fresh);
+  return mergeArms([armThen, armElse], input.channels, labels, fresh);
 }
 
 /** Do two framings describe the same stream? A shape mismatch between arms is a variant stream, which
@@ -3301,6 +3349,12 @@ function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter): Roo
   const chain = lowerChain(steps, {
     params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren,
     labelCardinality: ctx.labelCardinality, sideEffects: ctx.sideEffects,
+    // The SETTLED values ride into a rooted chain too, and their absence was a silent narrowing: a
+    // rooted arm naming a service, a sack or a reducer-form side effect was being handed LESS than
+    // the chain around it, so it declined for want of a fact the compile already held. §6·6's
+    // lesson at a second seam — coverage must measure what the algebra can express, never what the
+    // caller remembered to pass.
+    services: ctx.services, sack: ctx.sack, sideEffectReducers: ctx.sideEffectReducers,
   }, fresh);
   if (!chain) return null;
   return chain.effects ? { rel: chain.rel, framing: chain.framing, effects: chain.effects } : { rel: chain.rel, framing: chain.framing };
