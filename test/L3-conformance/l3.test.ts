@@ -224,15 +224,26 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
     } else {
       writeState(STATE, rows, spine);
       const bump = passing !== prev.passing ? `${prev.passing} → ${passing}` : `+${d.gained.length}/-${d.regressed.length}`;
-      // The prose count is THE default configuration's conformance number. A legacy run records
-      // only legacySpine and must never make README or the feature-support matrix quote its floor.
-      if (spine === 'rel') {
-        const synced = passing !== prev.passing ? syncCountFiles(passing) : [];
-        const also = synced.length ? ` + ${synced.join(' + ')}` : '';
-        console.log(`L3 state [${spineLabel}] recorded (${bump}). Commit test/L3-conformance/l3-state.json${also}.`);
-      } else {
-        console.log(`L3 state [${spineLabel}] recorded (${bump}). Commit test/L3-conformance/l3-state.json.`);
-      }
+      console.log(`L3 state [${spineLabel}] recorded (${bump}). Commit test/L3-conformance/l3-state.json.`);
     }
+  }
+  // THE PROSE SYNC IS UNCONDITIONAL on a clean local RelIR run, and that is the fix for a merge
+  // hazard rather than belt-and-braces. It used to fire only when the recorded count MOVED, which is
+  // precisely the case a rebase erases: git merges two agents' `passed` insertions cleanly, so the
+  // floor grows while nothing in this run "changed" relative to the merged file — and README kept
+  // quoting the pre-merge number with every gate green. `syncCountFiles` writes only when the file
+  // disagrees, so asking every run costs a read and cannot loop. A LEGACY run must never touch the
+  // prose: it records its own floor, and the number these files quote is the default configuration's.
+  if (spine === 'rel' && !process.env.CI) {
+    // …and the STORED count self-heals for the same reason. Nothing computes with it (`readState`
+    // derives the floor from `passed`), but it is what a human reads out of the file, and a merge can
+    // leave it one behind. Re-recording the run is the repair, and it is the run's own rows either way.
+    const stored = (JSON.parse(readFileSync(STATE, 'utf8')) as { passing?: number }).passing;
+    if (stored !== passing) {
+      writeState(STATE, rows, spine);
+      console.log(`L3 stored count repaired ${stored} → ${passing} (a merge had left it behind).`);
+    }
+    const synced = syncCountFiles(passing);
+    if (synced.length) console.log(`L3 prose count synced to ${passing} — commit ${synced.join(' + ')}.`);
   }
 }, LONG);

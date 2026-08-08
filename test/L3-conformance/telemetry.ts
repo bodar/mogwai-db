@@ -337,11 +337,28 @@ function parseStateFile(file: string): L3StateFile {
   return JSON.parse(readFileSync(file, 'utf8')) as L3StateFile;
 }
 
+/**
+ * A recorded floor, with `passing` DERIVED from `passed` rather than read.
+ *
+ * The stored number is redundant with the list, and a redundant number in a committed JSON file is a
+ * number that can be MERGED WRONG — which is not hypothetical here. Two agents rebasing onto one trunk
+ * produce exactly this: both sides sort `passed`, so git merges the two insertions cleanly, while
+ * `passing` is one line that was IDENTICAL on both sides and therefore silently keeps the pre-merge
+ * value. Measured on trunk twice in one morning (`passing: 1750` beside 1,751 names, then `1753`
+ * beside 1,754), each time leaving README and the support matrix quoting a count one behind the floor
+ * they are supposed to report, with every gate still green because the gate compares against the same
+ * stale number.
+ *
+ * Deriving it kills the class rather than the instance: `stateOf` already defines `passing` as
+ * `passed.length`, so reading it any other way was two authorities on one fact. The field stays in the
+ * file — it is what a human reads — but nothing computes with it.
+ */
 export function readState(file: string, spine: Spine): L3State {
   const state = parseStateFile(file);
   const s = spine === 'rel' ? state : state.legacySpine;
   if (!s) return EMPTY_STATE();
-  return { passing: s.passing ?? 0, total: s.total ?? 0, passed: s.passed ?? [], failed: s.failed ?? [] };
+  const passed = s.passed ?? [];
+  return { passing: passed.length, total: s.total ?? 0, passed, failed: s.failed ?? [] };
 }
 
 /** A run's scenario rows AS a floor. One function because the recorded floor and the live side of the
