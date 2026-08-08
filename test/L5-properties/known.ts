@@ -110,7 +110,14 @@ export const KNOWN: readonly KnownDivergence[] = [
       + 'NOT YET DIAGNOSED TO A LINE: what remains is why the non-seek `has` lowering loses a '
       + 'following slice. Recorded rather than fixed because the fix is an unrelated read-path '
       + 'investigation and the finding surfaced mid-way through Phase 1 write work; the L5 seed is '
-      + 'HEAD-derived, so this WILL resurface, and the point of the entry is that it resurfaces named.',
+      + 'HEAD-derived, so this WILL resurface, and the point of the entry is that it resurfaces named. '
+      + 'TO REPRODUCE, without waiting for a seed to land on it again: run the traversal directly '
+      + 'against the modern graph with `DEFAULT_FAST_PATHS` and then with `{...DEFAULT_FAST_PATHS, '
+      + 'propertySeek: false}` — the answers are [4,6] and [1,4,6]. Toggle the switches ONE AT A TIME '
+      + 'rather than passing a partial config: a partial object silently disables every key it omits, '
+      + 'which is how this was first mis-attributed to the generic path in general. The seed that '
+      + 'surfaced it was `L5_SEED=4264137` (`bun test test/L5-properties/differential.test.ts`), kept '
+      + 'because a seed that is known to hit a defect is worth more than one that merely might.',
     family: { query: /^g\.V\(\)\.has\('age', ?P\.(gt|gte)\(\d+\)\)\.(where|filter)\(__\.outE\(.*\)\)\.skip\(/ },
   },
 ];
