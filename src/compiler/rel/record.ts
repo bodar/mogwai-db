@@ -1,15 +1,15 @@
-import { col, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { perRowColumn, type Shape } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
-import { and, carriedCols, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
+import { and, carriedCols, eq, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { elementNode } from './element.ts';
 import { fieldCol, framingCols, type RecordField, type RelFraming } from './framing.ts';
 import { MAP_COL, mapPayload } from './map.ts';
 import { byField, modulations } from './modulator.ts';
-import { aliasGuard, aliasPresent, aliasProjection, readFraming, readProjection, selectSpec, type AliasRead } from './alias.ts';
+import { aliasGuard, aliasPresent, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 
@@ -298,11 +298,35 @@ export function recordField(
  */
 export function selectKeys(
   step: IRStep, rel: Rel, aliases: AliasMap, child: ChildSeam, fresh: Minter,
+  host?: { readonly framing: RelFraming; readonly named: (label: string) => boolean },
 ): { readonly rel: Rel; readonly framing: RelFraming } | null {
   const spec = selectSpec(step);
   if (!spec) return null;
   const bys = modulations(step, spec.labels.length, child);
   if (!bys) return null;
+
+  /**
+   * AN UNRESOLVABLE KEY IS THE EMPTY RESULT, NOT A DECLINE — `Select.feature:578-596` pins
+   * `g.V().select("a")` as empty and its `count()` as `0`. It follows from the same rule the header
+   * states: `getScopeValue` throws `KeyNotFoundException` for a key that is in no scope, `SelectStep`
+   * catches it to `EmptyTraverser`, and a drop applied to EVERY key is a conjunction over the input —
+   * so ONE unresolvable key empties the stream whatever the others do.
+   *
+   * `named` is the caller's answer for the scopes this record builder cannot see: `getScopeValue` tries
+   * the traverser's SIDE EFFECTS before the path labels, so a `withSideEffect` constant or a named
+   * collection resolves where no `as()` bound anything, and treating those as empty would be a wrong
+   * answer rather than a conservative one. A caller that does not pass a host keeps the old DECLINE,
+   * which is why this is optional rather than a behaviour change at four call sites at once.
+   */
+  if (host && spec.labels.some((label) => !liveAliases(aliases, rel).has(label) && !host.named(label)))
+    return {
+      // §3.3's spelling of the empty relation: `Values` refuses to express one, so it is a false
+      // `Filter` — and the framing is the HOST's, because a stream with no rows has no shape of its
+      // own and inventing one would be a claim no row can support. `pathTail`'s non-matching `typeOf`
+      // says the same thing the same way.
+      rel: make.filter({ id: fresh('se'), input: rel, channels: rel.channels, type: rel.type, pred: eq(compilerInt(0), compilerInt(1)) }),
+      framing: host.framing,
+    };
 
   const fields: RecordField[] = [];
   const exprs = new Map<string, Expr>();

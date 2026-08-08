@@ -1693,7 +1693,7 @@ function scalarTail(
     // function: the shape boundary runs both ways and `selectTail` is the one place that decides which
     // loop the label's shape belongs to.
     if (step.name === 'select') {
-      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh);
+      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh, { framing: out, named: namedElsewhere(ctx) });
       if (!selected) return null;
       return continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
@@ -2290,7 +2290,8 @@ function listTail(
     // shape and `selectTail` decides the loop, so a label holding an element re-enters `elementTail`
     // from here exactly as it does from the scalar tail.
     if (step.name === 'select') {
-      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh);
+      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh,
+        { framing: { kind: 'list', of: items, ...(set ? { set } : {}) }, named: namedElsewhere(ctx) });
       if (!selected) return null;
       return continueAs(selected.rel, selected.framing, steps, at + 1, false, ctx, fresh, labels);
     }
@@ -2518,6 +2519,19 @@ function mapTail(
   }
   return { rel, framing: { kind: 'map', keyOf, valOf }, aliases: labels };
 }
+
+/**
+ * DOES THIS NAME RESOLVE IN A SCOPE `selectKeys` CANNOT SEE — a `withSideEffect` constant or a named
+ * collection this chain has filled?
+ *
+ * `getScopeValue` tries the traverser's SIDE EFFECTS before the path labels
+ * (`gremlin-core/.../step/Scoping.java:126-127`), so a name with no `as()` behind it may still be
+ * perfectly resolvable — and treating it as EMPTY would be a wrong answer rather than a conservative
+ * one. The record builder sees the alias map and nothing else, so the chain context answers this and
+ * the two facts stay where they are owned.
+ */
+const namedElsewhere = (ctx: ChainCtx) => (label: string): boolean =>
+  ctx.sideEffects.has(label) || ctx.sideEffectReducers.has(label) || ctx.collections.has(label);
 
 /** The two payload columns a Map.Entry relation carries — `framingCols` names the same pair, and
  *  `map.ts`'s `ENTRY` names them for the framer. Stated here as `ColMeta` because `renumber` rebuilds
@@ -3122,7 +3136,8 @@ function elementTail(
     }
     if (step.name === 'select') {
       if (pathCarried(rel)) return null;
-      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh);
+      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh,
+        { framing: { kind: 'elements', elem }, named: namedElsewhere(ctx) });
       if (!selected) return null;
       return continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
@@ -3448,7 +3463,8 @@ function recordTail(
         const entered = recordField(rel, field, fresh);
         return entered && continueAs(entered.rel, entered.framing, steps, at + 1, bulked, ctx, fresh, labels);
       }
-      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh);
+      const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh,
+        { framing: { kind: 'record', fields }, named: namedElsewhere(ctx) });
       return selected && continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
 

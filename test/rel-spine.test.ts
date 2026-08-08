@@ -328,7 +328,11 @@ const COVERED = [
 const DECLINED = [
   "g.V().bothE().otherV()",           // otherV reads the entering vertex — carried state not modelled
   "g.V().as('a').out().as('a').select(Pop.all,'a')", // Pop.all is the history as a LIST value
-  "g.V().out().select('a')",           // a label bound NOWHERE drops every traverser — the empty relation
+  // `g.V().out().select('a')` LEFT this list: a label bound nowhere is the EMPTY RESULT rather than a
+  // decline (`Select.feature:578-596` pins `g.V().select("a")` as empty and its `count()` as `0`), and
+  // RelIR now expresses that as the `Filter(false)` §3.3 names. The remaining guard is the one where
+  // being empty would be WRONG: a name that resolves in a scope this record builder cannot see.
+  "g.V().groupCount('a').select('a')", // a NAMED COLLECTION resolves as a side effect, not as a label
   "g.V().union(__.out())",             // a SINGLE arm: `union(t) === t`, not a merge at all
   "g.V().union(__.as('b').out(), __.in())",  // an arm that BINDS a label owes each arm a remap + NULL pad
   // NOTE: `union(__.values('name'), __.constant('x'))` used to sit here — two scalar arms that
