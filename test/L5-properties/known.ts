@@ -120,6 +120,40 @@ export const KNOWN: readonly KnownDivergence[] = [
       + 'because a seed that is known to hit a defect is worth more than one that merely might.',
     family: { query: /^g\.V\(\)\.has\('age', ?P\.(gt|gte)\(\d+\)\)\.(where|filter)\(__\.outE\(.*\)\)\.skip\(/ },
   },
+  {
+    query: "g.V(1).outE().outV().has('name', TextP.containing('a')).where(__.out().range(0, 2).values('name'))",
+    fastPath: 'predicateInlining',
+    diagnosis:
+      'THE GENERIC PATH REFUSES WHAT THE FAST PATH ANSWERS, which inverts the `FastPathConfig` '
+      + 'contract rather than merely disagreeing with it. With every switch on, this yields marko at '
+      + 'bulk 3; with `predicateInlining` alone disabled it THROWS `where() traversal not supported by '
+      + 'inline predicate or generic child existence lowering`. `src/compiler/CLAUDE.md` states the '
+      + 'bar a specialized lowering has to clear — "disabling it compiles the same traversal '
+      + 'generically" — and this body does not clear it. '
+      + 'ATTRIBUTION IS EXACT: all eight switches were toggled off individually against this '
+      + 'traversal and only `predicateInlining` changes the outcome. `movementCollapse` off returns '
+      + 'THREE separate rows where on returns one row at bulk 3, which is the documented RLE encoding '
+      + 'and the same multiset, not a divergence. '
+      + 'WHAT THE BODY NEEDS is a child EXISTENCE lowering that admits a slice followed by a value '
+      + 'projection (`__.out().range(0, 2).values(k)`): the generic path handles a bare movement body '
+      + 'and gives up once the body slices. The shrunk witnesses are the same shape under `not()` and '
+      + '`filter()` as well as `where()`, and with `both()`/`otherV()`/`endingWith` substituted, which '
+      + 'is why this is ONE entry and one family regex rather than a dozen. '
+      + 'SEVERITY: production is CORRECT — the switch defaults on, so this is the disable path, the '
+      + 'class the header above records four switches for. It is still a contract defect, because a '
+      + 'generic path that cannot express the shape cannot be the semantic authority that arbitrates it. '
+      + 'RECORDED RATHER THAN FIXED because the fix is in the LEGACY generic child-existence lowering, '
+      + 'a route with an end date, and RelIR reaches the same shape through `correlatedExists` / '
+      + '`valuePredicate` instead. It is recorded rather than left to resurface anonymously because the '
+      + 'L5 seed is HEAD-derived: this failed CI at `c62b99d` and passed at the very next commit, which '
+      + 'changed no code at all. A finding that only appears at some seeds is exactly what this ratchet '
+      + 'is for. TO REPRODUCE without waiting for a seed: run the query with `DEFAULT_FAST_PATHS` and '
+      + 'then with `{...DEFAULT_FAST_PATHS, predicateInlining: false}` — one row, then a throw. Toggle '
+      + 'ONE AT A TIME; a partial config silently disables every key it omits.',
+    family: {
+      query: /^g\.V\(\d*\)\.outE\(.*\)\.(outV|inV|otherV)\(\)\.has\('name', ?TextP\.\w+\('[^']*'\)\)\.(where|filter|not)\(__\.(out|in|both)\(.*\)\.range\(/,
+    },
+  },
 ];
 
 /** Normalise the quote style / whitespace the corpus and the generator differ on. */
