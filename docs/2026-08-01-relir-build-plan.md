@@ -208,6 +208,11 @@ A traversal whose every step is covered routes RelIR end-to-end; anything else r
 mixed inside one traversal**, so no opaque node ever exists and RelIR stays a real algebra. `RelIR on`/`off`
 is a **differential switch** (`mise run test:legacy-spine`), making the whole corpus + L5 the oracle.
 
+⚠️ **Those two positions measure the DIFFERENTIAL, never the CUT, and the distinction has no proxy.** Both
+runs may fall back to legacy, so the `legacySpine` floor proves only *routed ≥ all-legacy* — it cannot say what
+deleting legacy costs. The third position (a RelIR decline FAILS rather than falls back) is the one that can,
+and it is Phase 3's leading item for that reason.
+
 **THE FLOOR IS THE UNION OF THE TWO SPINES, NEVER EITHER ONE — legacy may lose what RelIR holds.** Gaining
 five and losing five is progress; "legacy would have to support it too" is not a cost of a RelIR increment.
 Three gates say so mechanically: the L3 floors gate ASYMMETRICALLY (the `legacySpine` floor may only shed
@@ -384,6 +389,7 @@ Most are inside `ci`. The per-increment loop: `ci` → `test:legacy-spine` (ever
 | L3 conformance | anything the corpus doesn't exercise — but the ONLY thing that sees a required error message |
 | `rel-sweep` | correctness — it asserts the lowering doesn't THROW and renders within the cap; a decline at `spine.ts` is invisible to it |
 | `test:perturbed` | values — the only thing that sees an order right only by SQLite's scan luck |
+| legacy-OFF L3 + census (Phase 3) | the same corpus blindness as L3 — and it measures the ROUTE, so a shape the algebra EXPRESSES but nothing HANDS it (§6·6) reads exactly like a missing lowering |
 
 ⚠️ **A FIXTURE-CORRUPTING bug HANGS instead of failing, and no instrument above reports it.** The census
 shares ONE store across every non-write traversal, so a write MISCLASSIFIED as a read mutates the fixture.
@@ -677,12 +683,46 @@ divergence stays visible; what is gone is the obligation to make legacy agree.
 ### 🔴 Phase 3 — `repeat()` — THE GATE
 
 The one family whose absence disqualifies the server, so deletion waits on it and on nothing else.
-`flatten` (P1 legality in `check`; a body that cannot be made legal throws a clear deferral) → route
-`repeat()`'s body through ordinary lowering → `unroll` for `times(n)` (take `dedup` first, one barrier per
-commit with an L4 pin; `prune`'s remainder — pruning below Join/Union/Aggregate — is a precondition).
 
-🔴 Per P4 that covers the 48 `times(n)`-bounded majority; **the 5 `until()`/`emit()` barrier bodies hit the P3
-wall and are not expressible in any lowering.** That deviation needs accepting, not engineering.
+**0. Checker hardening — PREREQS, not follow-ups.** Refuse `Distinct`/`Limit`/`Sort` inside a recursive term
+(P3); a whole-row `Distinct` may not carry a per-row-unique channel; an `aggs` entry may not reference an input
+column outside an `Agg`; `name` must walk expression subplans (a shared node in a `Scalar`/`Exists` body is
+inlined twice). ⚠️ These sat in §10·6 under "orthogonal to the phases" *while being labelled Phase 3 prereqs* —
+a prereq of the gate is not orthogonal to the gate, and filing it as one is how it gets ranked against the work
+it blocks.
+
+**1. `prune`'s remainder** — pruning below `Join`/`Union`/`Aggregate`/**`Recursive`**, under all four of which
+every declared column is required today; `src/rel/passes/prune.ts` states the remainder at the code, which is
+the authority. It is what makes `unroll`'s n replicas affordable, and **`Recursive` is the node this phase
+introduces**, so it is the one that must not be missing from the list.
+
+**2. `flatten`** — join flattening / decorrelation into the P1 envelope, P1 legality enforced in `check`, a body
+that cannot be made legal throwing a clear deferral. Deletes `expandRepeatBody`, and `REPEAT_BODY_OK`'s
+row-local vocabulary gate dissolves with it.
+
+**3. Route `repeat()`'s body through ordinary lowering** — the step ITSELF, and the majority route. Per P4, 72
+of the 125 corpus `repeat()`s have a NON-barrier body and need nothing beyond `Recursive`, already in the closed
+node set (`Recursive.step` is a function; seed/step channels identical, §3.3).
+
+**4. `unroll` for `times(n)`** — take `dedup` first, one barrier per commit with an L4 pin. Covers the 48
+`times(n)`-bounded of P4's 53 barrier bodies. §3.6's statement-text budget is its other exit: `unroll` declines
+above a rendered-size ceiling and falls back to `Recursive`.
+
+🔴 **The 5 `until()`/`emit()` barrier bodies hit the P3 wall and are not expressible in ANY lowering.** That
+deviation needs accepting, not engineering. The three routes partition the family: **125 = 72 `Recursive` + 48
+`unroll` + 5 wall.**
+
+**THE MEASUREMENT — a THIRD switch position. It gates the CUT, not this phase, so build it FIRST.**
+`MOGWAI_RELIR` has two positions (`src/compiler/options/spine.ts`) and NEITHER answers *what does deleting
+legacy cost*: the default run's L3 `passed` set contains legacy-ROUTED traversals, so the `legacySpine` floor
+only proves routed ≥ all-legacy, and the census `spine` column — the closest thing available — is a corpus
+count, not a conformance one. Add the position where **a RelIR decline is a FAILURE rather than a fallback**,
+and run L3 + the census against it every round; that, not this document, is the countdown to Phase 4.
+⚠️ It is Phase 1's rule generalized from `routeWrite` to the whole legacy route — **"MEASURE BY TURNING THE
+ROUTE OFF, NEVER BY READING THE CODE"** — whose first run refuted the prose it replaced (`labels()`, a READ,
+was holding the entire label-write family). Without it, "what is left before we can delete" is an opinion.
+⚠️ Read its output through §6·6: it measures the ROUTE, so a shape the algebra EXPRESSES but no route hands it
+reads identically to a missing lowering.
 
 Phase 4's read-side work rides along where it is a prerequisite: the block assembler replaces `TailAcc`,
 `ELEMENT_DISPATCH` joins the shared substrate, aggregate/count handlers become one `Aggregate`, and
@@ -735,10 +775,8 @@ it.
   duplicated (`rel/list.ts`'s `ListOf.set` vs legacy's `ListStream.set`). Land it in RelIR and let legacy shed.
 - **`AliasEntry.binds`** must not increment on a rebind at the SAME path position (a wrong `Pop.mixed` wire
   type today) — needs head-position tracking on the RelIR `AliasEntry`.
-- **Checker hardening (Phase 3 prereqs):** refuse `Distinct`/`Limit`/`Sort` inside a recursive term (P3); a
-  whole-row `Distinct` may not carry a per-row-unique channel; an `aggs` entry may not reference an input
-  column outside an `Agg`; `name` should walk expression subplans (a shared node in a `Scalar`/`Exists` body
-  is inlined twice).
+- *(The checker hardening that used to sit here has moved to **Phase 3 step 0**, where it belongs: it was
+  labelled a Phase 3 prereq inside a section headed "orthogonal to the phases".)*
 
 ---
 
