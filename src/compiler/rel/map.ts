@@ -1,14 +1,15 @@
 import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
+import type { LabelRegime } from '../../api.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ListOf, MapOf, Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/step.ts';
 import { argValues } from '../../gremlin/frontend.ts';
-import { and, byEncounter, carriedCols, coalesce, fenced, jsonOf, meta, typeOf, typedNode, withPayload, type Minter } from './build.ts';
-import { LIST_COL, TYPED_LIST } from './list.ts';
-import { elementNode } from './element.ts';
-import { byNode, modulations, productivityFilter } from './modulator.ts';
+import { and, byEncounter, carriedCols, coalesce, EDGE_COLS, eq, fenced, jsonOf, meta, NODE_COLS, PROPERTIES, typeOf, typedNode, withPayload, type Minter } from './build.ts';
+import { inferredVtype, LIST_COL, TYPED_LIST } from './list.ts';
+import { edgeLabel, elementNode, vertexLabels } from './element.ts';
+import { byExpr, byNode, modulations, productivityFilter } from './modulator.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import { isReducer } from './reducer.ts';
@@ -364,6 +365,179 @@ export function groupBarrier(
  *  still gets a host; the alias arm then declines instead of guessing. */
 export const elementHost = (rel: Rel, elem: Elem, aliases?: AliasMap): ChildHost =>
   ({ kind: 'element', id: col(rel.id, 'id'), elem, ...(aliases ? { row: { rel, aliases } } : {}) });
+
+// ---------- the PER-ROW producer: `valueMap()`, an element's properties AS a map ----------
+//
+// `GroupStep extends ReducingBarrierStep<S, Map<K,V>>` and `PropertyMapStep extends
+// ScalarMapStep<Element, Map<K,E>>` — TinkerPop separates the two producers by SUPERCLASS while both
+// carry the same `Map<K,V>`. So the barrier-versus-per-row difference belongs to the PRODUCER and the
+// SHAPE is genuinely one shape, which is why this is a second caller of the pairs encoding above and
+// not a second map vocabulary. The module note at the top predicted exactly that; this is it arriving.
+//
+// **EVERY VALUE SIDE IS A SELF-DESCRIBING `{t,v}` NODE, including the token entries**, and that is what
+// keeps `valOf` honest at ONE `MapOf` arm rather than needing a "mixed" one. A vertex key's values are
+// a `{t:'list', v:[…]}` node, an edge key's is the stored value's own node, `T.id`'s is the external id
+// under its INFERRED tag and `T.label`'s is a string or a set depending on the regime. The framer reads
+// all of them by the one rule it already has, and `select(Column.values)` after a `valueMap()` then
+// describes what is actually there.
+
+/** One PAIR ROW on its way into the map — the `[keyNode, valNode]` array and the position that orders
+ *  it. A relation rather than an expression because the TOKENS and the PROPERTIES are different
+ *  relations that meet in one `Union`: SQLite cannot concatenate two JSON arrays, and re-exploding one
+ *  to append the other would throw away the order this column exists to state. */
+const PAIR_ROW = { pair: 'mp', ord: 'mo' } as const;
+
+const pairRow = (input: Rel, pair: Expr, ord: Expr, fresh: Minter): Rel => make.project({
+  id: fresh('pr'), input, channels: [],
+  type: typeOf(meta(PAIR_ROW.pair, 'json'), meta(PAIR_ROW.ord, 'int')),
+  exprs: [[PAIR_ROW.pair, pair], [PAIR_ROW.ord, ord]],
+});
+
+/** A `[keyNode, valNode]` pair, with `json()` around each side for the reason every producer here
+ *  carries it: `json_group_array` re-encodes an unwrapped envelope as a JSON STRING. */
+const pairOf = (key: Expr, val: Expr): Expr =>
+  ({ kind: 'json-array', items: [jsonOf(key), jsonOf(val)], binary: false });
+
+/** A `T` token as a map KEY. Its own node type on the wire (`FrameNode`'s `T` arm) rather than the
+ *  string it prints as — `valueMap(true)` keys by `T.id`, not by `"id"`. */
+const tokenKey = (name: 'id' | 'label'): Expr =>
+  ({ kind: 'json-object', entries: [['t', compilerText('T')], ['v', compilerText(name)]], binary: false });
+
+/** The one ROW an element rowid names, as a relation — the correlated scan every token pair projects
+ *  off. `elementRow`'s columns are the physical ones, so `uid`/`id` and an edge's `label` FK are all in
+ *  reach without a second subquery each. */
+const elementRow = (rowid: Expr, elem: Elem, fresh: Minter): Rel => {
+  const scan = make.scan({
+    id: fresh('er'), table: elem === 'edge' ? 'edges' : 'nodes', alias: fresh('rer'), channels: [],
+    type: typeOf(...(elem === 'edge' ? EDGE_COLS : NODE_COLS)),
+  });
+  return make.filter({ id: fresh('ef'), input: scan, channels: [], type: scan.type, pred: eq(col(scan.id, 'id'), rowid) });
+};
+
+/** Which `T` tokens a `valueMap` includes. `valueMap(true)` and `with(WithOptions.tokens)` are both
+ *  ALL of them (`PropertyMapStep.configure` — a boolean selects `WithOptions.all`/`none`), and the
+ *  selective subsets pick one; the IR pass that desugars `with()` is what decides which arrives. */
+export interface MapTokens { readonly ids: boolean; readonly labels: boolean }
+export const NO_TOKENS: MapTokens = { ids: false, labels: false };
+
+/**
+ * `valueMap()` — an ELEMENT's properties as one map per traverser, or `null` to decline.
+ *
+ * A VERTEX key is MULTI-VALUED, so its value is a LIST and an EDGE key's is the value itself
+ * (`PropertyMapStep.addElementProperties` — `map.compute(key, …values.add(value))` for a Vertex,
+ * `map.put(key, value)` otherwise). That is the same asymmetry `vertexProps`/`edgeProps` already carry
+ * for the element payload and it is read off the same tables, one aggregate level apart.
+ *
+ * **The KEY ORDER is ours to state, and it is the insertion order** — each key at its earliest
+ * property rowid, which is what the element payload's own bag does. TinkerPop hands back a
+ * `LinkedHashMap` in `element.properties()` iteration order, which is a provider's business rather
+ * than the spec's; stating it is what stops the two spines differing by whatever SQLite scanned.
+ *
+ * The token entries lead, `T.id` before `T.label`, which is the order `addIncludedOptions` puts them
+ * in before any property is added.
+ */
+export function elementValueMap(
+  input: Rel, elem: Elem, keys: readonly string[] | null, tokens: MapTokens, regime: LabelRegime, fresh: Minter,
+): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } {
+  const rowid = col(input.id, 'id');
+  const table = elem === 'edge' ? PROPERTIES.edge : PROPERTIES.vertex;
+  const props = make.scan({
+    id: fresh('vm'), table: table.table, alias: fresh('rvm'), channels: [],
+    type: typeOf(meta('id', 'int'), meta(table.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+  });
+  // `keys` is bounded by the QUERY TEXT and never by row count, so an `InList` is right here and the
+  // single-JSON-bind rule does not apply (that rule is about DATA-sized sets).
+  const mine = make.filter({
+    id: fresh('vf'), input: props, channels: [], type: props.type,
+    pred: and(eq(col(props.id, table.owner), rowid),
+      keys && keys.length ? { kind: 'in-list', expr: col(props.id, 'key'), values: keys.map(compilerText) } : undefined),
+  });
+  // A VERTEX collects each key's values into one `{t:'list', v:[…]}` node; an EDGE's key is single by
+  // schema (`UNIQUE(edge, key)`, which is TinkerPop's `Property` being single by spec), so the group is
+  // still needed to carry the order column but the value is the one node.
+  const valued = typedNode(col(mine.id, 'value'), col(mine.id, 'vtype'));
+  const grouped = make.aggregate({
+    id: fresh('vk'), input: mine, channels: [],
+    // The GROUP KEY is a declared column — the emitter names `groupBy` exprs before the aggregates —
+    // and the projection below drops it, because what the union and the blob want is the PAIR.
+    type: typeOf(meta('key', 'text'), meta(PAIR_ROW.pair, 'json'), meta(PAIR_ROW.ord, 'int')),
+    groupBy: [col(mine.id, 'key')],
+    aggs: [
+      [PAIR_ROW.pair, pairOf(
+        typedNode(col(mine.id, 'key'), compilerText('string')),
+        elem === 'edge'
+          ? { kind: 'agg', fn: 'json_group_array', args: [jsonOf(valued)], orderBy: [{ expr: col(mine.id, 'id'), dir: 'asc' }] }
+          : {
+            kind: 'json-object',
+            entries: [['t', compilerText('list')], ['v', {
+              kind: 'agg', fn: 'json_group_array', args: [jsonOf(valued)],
+              orderBy: [{ expr: col(mine.id, 'id'), dir: 'asc' }],
+            }]],
+            binary: false,
+          },
+      )],
+      [PAIR_ROW.ord, { kind: 'agg', fn: 'min', args: [col(mine.id, 'id')] }],
+    ],
+  });
+  const perKey = make.project({
+    id: fresh('vp'), input: grouped, channels: [],
+    type: typeOf(meta(PAIR_ROW.pair, 'json'), meta(PAIR_ROW.ord, 'int')),
+    exprs: [[PAIR_ROW.pair, col(grouped.id, PAIR_ROW.pair)], [PAIR_ROW.ord, col(grouped.id, PAIR_ROW.ord)]],
+  });
+  const rows: Rel[] = [];
+  // A NEGATIVE ordinal puts the tokens ahead of every property, whose ordinals are rowids and therefore
+  // positive. Stating it that way rather than sorting a tagged column keeps the whole order in ONE term.
+  if (tokens.ids) rows.push(tokenRow(rowid, elem, 'id', regime, -2, fresh));
+  if (tokens.labels) rows.push(tokenRow(rowid, elem, 'label', regime, -1, fresh));
+  const pairs = rows.length ? make.union({
+    id: fresh('vu'), inputs: [...rows, perKey], all: true, channels: [], type: perKey.type,
+  }) : perKey;
+  const blob = make.aggregate({
+    id: fresh('va'), input: pairs, channels: [], type: typeOf(meta(MAP_COL, 'json')),
+    groupBy: [],
+    aggs: [[MAP_COL, { kind: 'call', fn: 'jsonb', args: [coalesce(
+      { kind: 'agg', fn: 'json_group_array', args: [jsonOf(col(pairs.id, PAIR_ROW.pair))],
+        orderBy: [{ expr: col(pairs.id, PAIR_ROW.ord), dir: 'asc' }] },
+      jsonOf(compilerText('[]')),
+    )] }]],
+  });
+  return {
+    // `COALESCE` for `mapOfGroups`' reason one level down: an element with NO properties and no tokens
+    // is an EMPTY MAP and still one traverser, not a null value.
+    rel: withPayload(input, [[MAP_COL, coalesce({ kind: 'scalar', plan: blob }, { kind: 'call', fn: 'jsonb', args: [jsonOf(compilerText('[]'))] })]],
+      [meta(MAP_COL, 'json', true)], fresh),
+    keyOf: { kind: 'scalar' },
+    valOf: { kind: 'scalar' },
+  };
+}
+
+/** One `T.id`/`T.label` entry, as a pair row correlated to the element. The LABEL follows the
+ *  `LabelRegime`: a set of names where a vertex genuinely holds a set, the one first-interned name
+ *  otherwise, and an EDGE's label is always the single name TinkerPop fixes its cardinality at. */
+function tokenRow(rowid: Expr, elem: Elem, token: 'id' | 'label', regime: LabelRegime, ord: number, fresh: Minter): Rel {
+  const row = elementRow(rowid, elem, fresh);
+  const external = coalesce(col(row.id, 'uid'), col(row.id, 'id'));
+  const value = token === 'id'
+    // NOT `typedNode`, and the difference is plan size rather than taste: that helper re-tests the tag
+    // for collection-ness (`storedValueOn`), which would spell this whole inference CASE twice. An
+    // external id is a rowid or a uid — never a collection — so the node is built directly.
+    ? { kind: 'json-object' as const, binary: false, entries: [['t', inferredVtype(external)] as const, ['v', external] as const] }
+    : elem === 'edge'
+      ? typedNode(edgeLabel(col(row.id, 'label'), fresh), compilerText('string'))
+      : regime === 'set'
+        ? { kind: 'json-object' as const, entries: [['t', compilerText('set')] as const, ['v', vertexLabels(col(row.id, 'id'), fresh)] as const], binary: false }
+        : typedNode(vertexLabelName(col(row.id, 'id'), fresh), compilerText('string'));
+  return pairRow(row, pairOf(tokenKey(token), value), compilerInt(ord), fresh);
+}
+
+/** A vertex's SINGLE label — the side table's first-interned name, which is the same deterministic pick
+ *  `label()` and `by(T.label)` make. Spelled through `byExpr`'s token arm so a third pick cannot exist. */
+const vertexLabelName = (rowid: Expr, fresh: Minter): Expr => {
+  const projected = byExpr({ key: { kind: 'token', token: 'label' } }, { kind: 'element', id: rowid, elem: 'vertex' }, fresh);
+  // `byExpr`'s token arm is total for `T.label`; a null here would be a lowering bug, not a deferral.
+  if (!projected) throw new Error('RelIR lowering: the T.label projection declined for a vertex');
+  return projected;
+};
 
 // ---------- the map as a RE-ENTERABLE traverser: its entries, its sides, its size ----------
 //

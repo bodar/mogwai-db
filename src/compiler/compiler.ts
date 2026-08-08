@@ -101,6 +101,7 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
         collapse: engine.fastPaths.movementCollapse,
         propertySeek: engine.fastPaths.propertySeek,
         labelCardinality: engine.labelCardinality,
+        labelRegime: engine.labelRegime,
         // The registry is an app-scope DEPENDENCY and stops here: this is the boundary that holds
         // it, so it resolves the names and hands the lowering the settled services.
         services: servicesNamedBy(steps, request.params, engine.registry),

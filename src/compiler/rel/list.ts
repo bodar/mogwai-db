@@ -192,7 +192,7 @@ export const isBareList = (of: ListOf): boolean => of.kind === 'scalar';
  * so naming it here is not a second policy: it is what lets a MIXED list (some members wrapped, some
  * bare, which is exactly what `typed` means) hand every member a type without a second channel.
  */
-const inferredVtype = (value: Expr): Expr => ({
+export const inferredVtype = (value: Expr): Expr => ({
   kind: 'case',
   whens: [
     [eqText({ kind: 'call', fn: 'typeof', args: [value] }, 'text'), compilerText('string')],

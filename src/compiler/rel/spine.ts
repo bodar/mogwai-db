@@ -3,7 +3,7 @@ import type { Compiled, Program } from '../../sql/kernel/render.ts';
 import { emitProgram } from '../../rel/emit.ts';
 import { cfLimitViolation } from '../../cf-limits.ts';
 import type { IRStep } from '../ir/strategies.ts';
-import type { LabelCardinality } from '../../api.ts';
+import type { LabelCardinality, LabelRegime } from '../../api.ts';
 import type { Service } from '../../services/spi/types.ts';
 import type { SackSpec } from '../../gremlin/frontend.ts';
 import { lowerToRel } from './lower.ts';
@@ -37,6 +37,11 @@ export interface RelRequest {
   readonly propertySeek: boolean;
   /** This graph's declared VERTEX label cardinality. NOT a strategy switch — see below. */
   readonly labelCardinality: LabelCardinality;
+  /** How a `T.label` ENTRY renders (`valueMap(true)`, `elementMap()`). A SEPARATE fact from the
+   *  cardinality and not derivable from it here — an explicit `with("multilabel")`/`with("singlelabel")`
+   *  overrides the graph's default — so it crosses as its own settled value rather than being
+   *  re-derived inside the lowering from a source-options map the algebra has no business reading. */
+  readonly labelRegime: LabelRegime;
   /** `withSack(seed)`'s seed, as the front end extracted it, or `null`. A SOURCE-level declaration
    *  settled before a compile starts, so it crosses as a value exactly as `labelCardinality` does —
    *  and it is here rather than being a route GATE because a gate reads identically to a missing
@@ -124,6 +129,7 @@ export function compileViaRel(
     // compile starts (request-scope DI). Coverage is still not a function of configuration: what the
     // cardinality changes is the ANSWER, not whether there is one.
     labelCardinality: request.labelCardinality,
+    labelRegime: request.labelRegime,
     propertySeek: request.propertySeek,
     services: request.services,
     sack: request.sack,

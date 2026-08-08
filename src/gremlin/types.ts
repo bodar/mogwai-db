@@ -404,20 +404,31 @@ export type ValueNode =
  * closed over exactly what a property value can hold. Widening `ValueNode` instead would hand those
  * walkers arms they can never receive and could not encode.
  *
- * Two things a read adds. A relational producer may OMIT an envelope where SQLite/JSON already supplies
- * the structural type (a bare value, a bare array) — explicit here rather than an undocumented hole. And
- * an ELEMENT may be a MEMBER, `v` being its public payload (`{id, label, props[, src, tgt]}`) as the SQL
+ * Three things a read adds. A relational producer may OMIT an envelope where SQLite/JSON already supplies
+ * the structural type (a bare value, a bare array) — explicit here rather than an undocumented hole. An
+ * ELEMENT may be a MEMBER, `v` being its public payload (`{id, label, props[, src, tgt]}`) as the SQL
  * side already expanded it. That arm is named ONCE, at the tree, rather than as a descriptor at each
  * container — which is what makes the containers compose: a list of elements, a map whose value is a
  * list of elements, and a map whose KEY is an element are the same rule applied at a different depth,
  * and no consumer needs a per-position `elem` tag threaded to it.
+ *
+ * And a `T` TOKEN may be a map KEY — `valueMap(true)`/`elementMap()` key their id and label entries by
+ * `T.id`/`T.label`, which is a GraphBinary type of its own and not a string. It is deliberately absent
+ * from `CanonicalType` (`WIRE_TYPE_TO_NAME`'s note says why: a token is never a stored property VALUE),
+ * and being an arm HERE rather than there is exactly that distinction — a read can frame one, a write
+ * can never store one.
  */
 export type FrameNode =
   | ValueNode
   | { t: 'list' | 'set'; v: FrameNode[] }
   | { t: 'map'; v: [FrameNode, FrameNode][] }
   | { t: 'vertex' | 'edge'; v: Record<string, any> }
+  | { t: 'T'; v: TokenName }
   | null | string | number | boolean | FrameNode[];
+
+/** The `T` tokens a map key can be. TinkerPop's enum, minus nothing — `id`/`label` come from an
+ *  element and `key`/`value` from a VertexProperty (`PropertyMapStep.addIncludedOptions`). */
+export type TokenName = 'id' | 'label' | 'key' | 'value';
 
 /** A collection leaf's JSON-safe canonical storage form, keyed on its canonical type.
  *  Reuses storedScalar for the exact tail (long/bigint>2^53, bigdecimal, duration →

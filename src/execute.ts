@@ -285,6 +285,11 @@ function frameTypedNode(node: FrameNode): Buffer {
   // position, which is how a payload tuple ends up spelled at fourteen sites.
   if (node.t === 'vertex') return rowVertex(node.v);
   if (node.t === 'edge') return rowEdge(node.v);
+  // A `T` TOKEN, which is a GraphBinary type of its own rather than the string it prints as — a
+  // `valueMap(true)`/`elementMap()` key. One arm here, so a token composes at every depth the tree
+  // reaches (a map key today; a list member or a nested map's key the day one produces it) exactly
+  // as the element arm above does.
+  if (node.t === 'T') return ioc.anySerializer.serialize(t[node.v]);
   return frameValue(node.v, vtypeToValueType(node.t));
 }
 

@@ -39,10 +39,10 @@ import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
-import { ENTRY, elementHost, entrySide, groupBarrier, mapEntryPayload, mapPayload, mapSide, mapSize, unfoldMap } from './map.ts';
+import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, mapEntryPayload, mapPayload, mapSide, mapSize, NO_TOKENS, unfoldMap } from './map.ts';
 import { elementPayload } from './element.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
-import { LabelCardinality } from '../../api.ts';
+import { LabelCardinality, type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantArm, variantArmOf, variantHasList, variantPayload, type VariantArm } from './variant.ts';
 import { readCollection, registerCollection, registerMap, type Collections } from './collection.ts';
@@ -196,6 +196,11 @@ interface ChainCtx extends FilterCtx {
    *  its own gets. Threaded for the reason `ordered` is: it is settled before a step is lowered, so a
    *  step that asked the store instead would be asking at the wrong time. */
   readonly labelCardinality: LabelCardinality;
+  /** How a `T.label` ENTRY renders — a set of names where a vertex genuinely holds a set, one name
+   *  otherwise. Settled before a compile starts (an explicit `with("multilabel")` wins, else the
+   *  graph's cardinality decides), so it travels as a value for `labelCardinality`'s reason. It is a
+   *  SEPARATE fact from the cardinality and not derivable from it here: the source option overrides. */
+  readonly labelRegime: LabelRegime;
   /** The `withSideEffect(name, constant)` registry the FRONT END extracted. See `Lowering`. */
   readonly sideEffects: Map<string, any>;
   /** The labels declared with the REDUCER form of `withSideEffect`. See `Lowering`. */
@@ -1266,6 +1271,30 @@ function terminal(
   if (step.name === 'count') {
     if (args.length) return null;
     return countTail(input, fresh);
+  }
+
+  // `valueMap()` — the element's PROPERTIES as one map per traverser, which is a shape boundary of
+  // exactly this function's kind: the element is gone and a map value stands where it was.
+  //
+  // The TOKEN forms arrive as a `true` argument, because `absorbValueMapWith` (a Pass) has already
+  // desugared `with(WithOptions.tokens)` and `with(tokens, all)` onto the step — one recognizer for
+  // both spellings, above both spines. A SELECTIVE subset (`with(tokens, ids)`) is deliberately left
+  // in place by that pass and therefore reaches this fold as a `with` step nothing lowers, so it
+  // declines rather than being silently widened to all-tokens.
+  //
+  // A `by()` modulator on a `valueMap()` projects each VALUE (`applyTraversalRingToMap` computes over
+  // the map's values and REMOVES the key when the projection is unproductive), which is a different
+  // question from every other `by()` here — so the guard at the top of this function declines it.
+  if (step.name === 'valueMap') {
+    const tokens = args.includes(true);
+    const keys = args.filter((a) => typeof a === 'string') as string[];
+    // Any argument that is neither a key nor the token flag — a `null` key, a nested traversal —
+    // is a form this does not serve, and answering the same map for it would answer a different
+    // question rather than declining.
+    if (args.length !== keys.length + (tokens ? 1 : 0)) return null;
+    const mapped = elementValueMap(input, elem, keys.length ? keys : null,
+      tokens ? { ids: true, labels: true } : NO_TOKENS, ctx.labelRegime, fresh);
+    return { rel: mapped.rel, framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf } };
   }
 
   // `constant(c)` REPLACES the traverser's value with a literal, which over an element stream is a
@@ -2537,6 +2566,9 @@ export interface Lowering {
    * lowers without an engine measures the default graph rather than a regime nothing runs.
    */
   readonly labelCardinality?: LabelCardinality;
+  /** How a `T.label` entry renders (`valueMap(true)`, `elementMap()`) — see `ChainCtx.labelRegime`.
+   *  Defaults to `single`, which is `labelRegime`'s own answer for the default graph. */
+  readonly labelRegime?: LabelRegime;
   /**
    * The services this chain's `call()` steps name, RESOLVED — a settled environment, not the
    * registry. `servicesNamedBy` (`services/params/call-params.ts`) does the lookup at the DI
@@ -2590,6 +2622,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   correlatedChildren: opts.correlatedChildren ?? true,
   propertySeek: opts.propertySeek ?? true,
   labelCardinality: opts.labelCardinality ?? LabelCardinality.ONE,
+  labelRegime: opts.labelRegime ?? 'single',
   sideEffects: opts.sideEffects ?? NO_SIDE_EFFECTS,
   sideEffectReducers: opts.sideEffectReducers ?? NO_SIDE_EFFECT_REDUCERS,
   services: opts.services ?? NO_SERVICES,
@@ -2785,7 +2818,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  *   pass walk them is the general fix if a case ever needs it.)
  */
 function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Tail | null {
-  const { params, collapse, correlatedChildren, labelCardinality, sideEffects, sideEffectReducers, services, sack } = settle(opts);
+  const { params, collapse, correlatedChildren, labelCardinality, labelRegime, sideEffects, sideEffectReducers, services, sack } = settle(opts);
   // EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step.
   // `analyzeChain` is the same authority the legacy source seeds from, so the two cannot disagree
   // about which chains have an order to take a window from. A chain that demands one and reaches a
@@ -2796,7 +2829,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   const ordered = facts.demandsEncounter;
   const tracksPath = facts.tracksPath;
   const ctx: ChainCtx = {
-    params, correlatedChildren, collapse, ordered, tracksPath, labelCardinality, sideEffects, sideEffectReducers, services, sack,
+    params, correlatedChildren, collapse, ordered, tracksPath, labelCardinality, labelRegime, sideEffects, sideEffectReducers, services, sack,
     collections: new Map(),
     mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),
   };
@@ -3947,7 +3980,7 @@ function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter): Roo
   if (!steps.length) return null;
   const chain = lowerChain(steps, {
     params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren,
-    labelCardinality: ctx.labelCardinality, sideEffects: ctx.sideEffects,
+    labelCardinality: ctx.labelCardinality, labelRegime: ctx.labelRegime, sideEffects: ctx.sideEffects,
     // The SETTLED values ride into a rooted chain too, and their absence was a silent narrowing: a
     // rooted arm naming a service, a sack or a reducer-form side effect was being handed LESS than
     // the chain around it, so it declined for want of a fact the compile already held. §6·6's

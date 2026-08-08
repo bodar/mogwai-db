@@ -449,6 +449,12 @@
     "compiler": 8,
     "bound": 0
   },
+  "valueMap": {
+    "binds": 0,
+    "bytes": 2326,
+    "compiler": 46,
+    "bound": 0
+  },
   "values": {
     "binds": 12,
     "bytes": 2632,

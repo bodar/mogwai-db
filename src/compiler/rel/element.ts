@@ -69,7 +69,7 @@ const labelTable = (fresh: Minter): Rel =>
  * `label()` and the payload's first entry name the same label. `json_group_array` over no rows is NULL —
  * a vertex may carry zero labels under `ZERO_OR_MORE` — so the `COALESCE` is the totality, not a defence.
  */
-function vertexLabels(node: Expr, fresh: Minter): Expr {
+export function vertexLabels(node: Expr, fresh: Minter): Expr {
   const vl = make.scan({ id: fresh('wvl'), table: 'vertex_labels', alias: fresh('rwv'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
   const names = labelTable(fresh);
   const joined = make.join({
@@ -90,7 +90,7 @@ function vertexLabels(node: Expr, fresh: Minter): Expr {
 
 /** An EDGE's label — the bare name, because TinkerPop fixes edge label cardinality at exactly one and the
  *  id is inline on `edges` rather than in a side table. `labelNameSub`'s twin. */
-function edgeLabel(labelId: Expr, fresh: Minter): Expr {
+export function edgeLabel(labelId: Expr, fresh: Minter): Expr {
   const names = labelTable(fresh);
   const matching = make.filter({ id: fresh('wlf'), input: names, channels: [], type: names.type, pred: eq(col(names.id, 'id'), labelId) });
   const only = make.project({
@@ -361,7 +361,7 @@ function edgeColumn(rowid: Expr, name: string, fresh: Minter): Expr {
 
 /** The PUBLIC id of either element kind — `nodeExternalId`'s generalization, so the variant tuple does
  *  not need a second copy for edges. */
-function externalId(rowid: Expr, elem: Elem, fresh: Minter): Expr {
+export function externalId(rowid: Expr, elem: Elem, fresh: Minter): Expr {
   if (elem === 'vertex') return nodeExternalId(rowid, fresh);
   const edges = make.scan({ id: fresh('wed'), table: 'edges', alias: fresh('rwd'), channels: [], type: typeOf(...EDGE_COLS) });
   const matching = make.filter({ id: fresh('wef'), input: edges, channels: [], type: edges.type, pred: eq(col(edges.id, 'id'), rowid) });

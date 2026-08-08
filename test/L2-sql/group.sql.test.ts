@@ -11,7 +11,9 @@ import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decode, decodeAll } from '../support/decode.ts';
-import { bagOf, read, relirOff, run, runWith, seededStore } from '../support/harness.ts';
+import { bagOf, read as bare_read, read, relirOff, run, runWith, seededStore } from '../support/harness.ts';
+import type { CompileOptions } from '../../src/compiler/compiler.ts';
+import { t } from '../../src/io.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -29,11 +31,22 @@ describe('group / properties SQL', () => {
     expect(legacy.sql).toContain('ORDER BY p.encounter');
   });
 
+  // LEGACY'S valueMap SHAPE VOCABULARY, pinned at that spine explicitly.
+  //
+  // It names the KEYS, the token flag and the label regime on the SHAPE and rebuilds the map in the
+  // framer; RelIR builds the map in the ALGEBRA and hands over one `mapValue` blob (§6·3 — a shape is
+  // a value plus a framing arm). Both frame the same bytes, which the RelIR-position test below
+  // asserts against this one's answers. Pinned rather than made conditional because what these lines
+  // are ABOUT is legacy's descriptor, and that claim is the same in either run.
   test('valueMap variants set shape, reuse the vertex row source', () => {
-    expect(read('g.V().valueMap()').shape).toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: false });
-    expect(read('g.V().valueMap(true)').shape).toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: true });
-    expect(read('g.V().valueMap("name","age")').shape).toEqual({ kind: 'valueMap', labelSet: false, keys: ['name', 'age'], tokens: false });
-    expect(read('g.V().elementMap()').shape).toEqual({ kind: 'elementMap', labelSet: false, keys: null });
+    const legacy = (query: string) => read(query, { spine: 'legacy' }).shape;
+    expect(legacy('g.V().valueMap()')).toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: false });
+    expect(legacy('g.V().valueMap(true)')).toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: true });
+    expect(legacy('g.V().valueMap("name","age")')).toEqual({ kind: 'valueMap', labelSet: false, keys: ['name', 'age'], tokens: false });
+    expect(legacy('g.V().elementMap()')).toEqual({ kind: 'elementMap', labelSet: false, keys: null });
+    // RelIR: ONE blob, whatever the variant — the keys and the tokens are spent building it.
+    if (!relirOff) for (const query of ['g.V().valueMap()', 'g.V().valueMap(true)', 'g.V().valueMap("name","age")'])
+      expect(read(query).shape).toEqual({ kind: 'mapValue' });
   });
 
   test('valueMap().with(WithOptions.tokens) desugars to valueMap(true) (item 13)', () => {
@@ -41,13 +54,16 @@ describe('group / properties SQL', () => {
     // tokens'/15 before sending, so the real conformance query is with('~…tokens'). The tokens
     // option with no selector (or + all) IS valueMap(true): the fold Pass sets the tokens flag,
     // so the shape matches its valueMap(true) equivalent exactly. Both wire and enum forms fold.
+    // The DESUGARING is a Pass, so it is true above both spines and asserted on the ambient one.
     expect(read('g.V().valueMap().with("~tinkerpop.valueMap.tokens")').shape)
       .toEqual(read('g.V().valueMap(true)').shape);
     expect(read('g.V().valueMap("name","age").with("~tinkerpop.valueMap.tokens")').shape)
       .toEqual(read('g.V().valueMap(true,"name","age")').shape);
-    expect(read('g.V().valueMap().with("~tinkerpop.valueMap.tokens", 15)').shape)
+    // …and it reaches legacy's own token flag, which is what says the Pass ran rather than the shapes
+    // merely matching each other.
+    expect(read('g.V().valueMap().with("~tinkerpop.valueMap.tokens", 15)', { spine: 'legacy' }).shape)
       .toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: true });
-    expect(read('g.V().valueMap().with(WithOptions.tokens)').shape) // enum form (typed at our server)
+    expect(read('g.V().valueMap().with(WithOptions.tokens)', { spine: 'legacy' }).shape) // enum form (typed at our server)
       .toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: true });
     // A SELECTIVE token subset (labels=2) has no valueMap(true) equivalent yet → fail closed,
     // never silently widened to all-tokens.
@@ -55,7 +71,9 @@ describe('group / properties SQL', () => {
       .toThrow('with() cannot consume the valueMap result shape');
   });
 
+  // LEGACY'S valueMap RE-ENTRY, pinned at that spine — RelIR's is the map loop's own test below.
   test('P3 Stage B: valueMap() re-enterable — select(Column), count, is(typeOf(MAP))', () => {
+    const read = (query: string, options?: CompileOptions) => bare_read(query, { ...options, spine: 'legacy' });
     // valueMap() → a per-element whole-map blob MapStream (one `map` blob per element, folding
     // {k:[v]} into [[{t,v},valueList],…]); select(Column.keys) aggregates one key-list per map.
     const keys = read('g.V().valueMap().select(Column.keys)');
@@ -78,7 +96,10 @@ describe('group / properties SQL', () => {
     expect(() => compile("g.V().as('a').valueMap().select('a')", {})).toThrow('select(bound-label) after valueMap() not yet supported');
     // terminal valueMap unchanged; still-unsupported followers fail closed
     expect(read('g.V().valueMap()').shape).toEqual({ kind: 'valueMap', labelSet: false, keys: null, tokens: false });
-    expect(() => compile('g.V().valueMap(true).select(Column.keys)', {})).toThrow('valueMap(true)/token re-entry not yet supported');
+    expect(() => compile('g.V().valueMap(true).select(Column.keys)', {}, { spine: 'legacy' })).toThrow('valueMap(true)/token re-entry not yet supported');
+    // RelIR re-enters a TOKEN map like any other: the token entries are ordinary pairs of the same
+    // self-describing tree, so the key side is the `T` node beside the property-name nodes.
+    if (!relirOff) expect(bare_read('g.V().valueMap(true).select(Column.keys)').shape).toEqual({ kind: 'jsonbSet', typed: true });
   });
 
   test('order(Scope.local).by(Column.keys/values) re-sorts a map blob in place', () => {
@@ -102,7 +123,9 @@ describe('group / properties SQL', () => {
     // shuffle-local and multi-term/by(key) orders are not Column-local orders → defer elsewhere.
   });
 
+  // LEGACY'S Map.Entry stream, pinned at that spine for `P3 Stage B`'s reason.
   test('Commit A: valueMap().unfold() → per-element Map.Entry stream', () => {
+    const read = (query: string, options?: CompileOptions) => bare_read(query, { ...options, spine: 'legacy' });
     // valueMap().unfold(): valueMap retypes to a per-element whole-map blob MapStream, unfold()
     // explodes it to a per-entry MapEntryStream (key = typed {t,v} scalar, value = its list).
     const t = read('g.V().valueMap().unfold()');
@@ -236,6 +259,43 @@ describe('group / properties SQL', () => {
     expect(ev.sql).toContain('json_object');
     // the group is assembled as ONE whole-map blob before unfold explodes it
     expect(read('g.V().groupCount().by(T.label).unfold()').sql).toContain('json_group_array');
+  });
+
+  test('valueMap() is a PER-ROW map producer, and the map loop takes its tail', async () => {
+    const store = seededStore();
+    const dec = async (q: string) => decodeAll(executeQuery(store, q));
+
+    // A VERTEX key is MULTI-VALUED so its value is a LIST; an EDGE key's is the value itself
+    // (`PropertyMapStep.addElementProperties` — `map.compute(key, …values.add(value))` for a Vertex,
+    // `map.put(key, value)` otherwise). Same asymmetry the element payload's own bags carry.
+    expect(await dec("g.V().hasLabel('software').valueMap()"))
+      .toEqual([new Map([['name', ['lop']], ['lang', ['java']]]), new Map([['name', ['ripple']], ['lang', ['java']]])]);
+    expect(await dec("g.E().hasLabel('knows').valueMap()"))
+      .toEqual([new Map([['weight', [0.5]]]), new Map([['weight', [1]]])]);
+    // A key SUBSET filters in SQL, and a key the element does not carry is simply absent — not null.
+    expect(await dec("g.V().hasLabel('software').valueMap('name','age')"))
+      .toEqual([new Map([['name', ['lop']]]), new Map([['name', ['ripple']]])]);
+
+    // `valueMap(true)` (and `with(WithOptions.tokens)`, which a Pass desugars to it) adds the id and
+    // label entries keyed by `T.id`/`T.label` — a GraphBinary type of its own, which is the `T` arm
+    // `FrameNode` grew for it. The tokens LEAD, which is `addIncludedOptions` running before the
+    // properties are added.
+    const withTokens = (await dec("g.V().hasLabel('software').has('name','lop').valueMap(true)"))[0] as Map<unknown, unknown>;
+    expect([...withTokens.keys()].map(String)).toEqual(['T.id', 'T.label', 'name', 'lang']);
+    expect(withTokens.get(t.label)).toBe('software');
+    expect(await dec("g.V().has('name','lop').valueMap().with('~tinkerpop.valueMap.tokens')"))
+      .toEqual(await dec("g.V().has('name','lop').valueMap(true)"));
+
+    // AND IT COMPOSES WITH THE MAP LOOP, which is the whole point of building the producer onto the
+    // same shape: the sides, the size and the entries all work over a `valueMap()` unchanged.
+    // The map's SIZE. Legacy has no map-local reducer at all ("count(Scope.local) requires a
+    // preceding list-producing step"), so this is RelIR ahead rather than a shared claim.
+    if (relirOff) expect(() => executeQuery(store, "g.V().hasLabel('software').valueMap().count(Scope.local)")).toThrow();
+    else expect(await dec("g.V().hasLabel('software').valueMap().count(Scope.local)")).toEqual([2, 2]);
+    expect(await dec("g.V().has('name','lop').valueMap().select(Column.values)")).toEqual([[['lop'], ['java']]]);
+    expect(await dec("g.V().has('name','lop').valueMap().unfold().select(Column.keys)")).toEqual(['name', 'lang']);
+    // An element with NO properties is an EMPTY map and still one traverser.
+    expect(await dec("g.V().hasLabel('software').valueMap('nope')")).toEqual([new Map(), new Map()]);
   });
 
   test('the MAP LOOP: a map traverser answers its sides, its size and its entries', async () => {
