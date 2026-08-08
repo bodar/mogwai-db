@@ -3,7 +3,7 @@ import { sliceBound } from './const.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
-import { STATIC, UNKNOWN, type ListOf, type Shape, type ValueType } from '../../sql/kernel/render.ts';
+import { hasTypedMembers, perRowColumnOf, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, TYPED_MEMBERS, UNKNOWN, type ListOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import { isNested, isPred, argValues } from '../../gremlin/frontend.ts';
 import { isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
@@ -170,20 +170,17 @@ const withList = (rel: Rel, list: Expr, fresh: Minter): Rel => make.project({
     [column.name, column.name === LIST_COL ? list : col(rel.id, column.name)] as const),
 });
 
-/** A bare list of scalars — the one member encoding this module serves, and what a member REWRITE
- *  always produces: a transformed member is a native value the stored type no longer describes, so
- *  the output list is untagged and framed by per-value inference (legacy's `retypedList`). */
-export const BARE_LIST: ListOf = { kind: 'scalar' };
+/** An UNTAGGED list of scalars — what a member REWRITE always produces, since a transformed member
+ *  is a native value the stored type no longer describes, so the output is framed by per-value
+ *  inference (legacy's `retypedList`). Note this is the `unknown` member type and NOT "no type":
+ *  a rewrite that KNOWS the result class says so with `withMemberType(of, STATIC(…))`. */
+export const BARE_LIST: ListOf = SCALAR_MEMBERS;
 
-/** A SELF-DESCRIBING list — members MAY be `{t,v}` nodes, and the readers detect the envelope per
- *  member (`memberPayload`). This is what a `fold()` over a per-row-typed stream produces. */
-export const TYPED_LIST: ListOf = { kind: 'scalar', typed: true };
+const isTypedList = hasTypedMembers;
 
-const isTypedList = (of: ListOf): boolean => of.kind === 'scalar' && !!of.typed;
-
-/** Is this list's member encoding one this module can read? Both scalar encodings now — a bare list
- *  and a self-describing one — but not an ELEMENT or a nested list, whose members are rowids and
- *  sub-lists respectively and need their own expansion. */
+/** Is this list's member encoding one this module can read? Every scalar member type — untagged,
+ *  statically tagged and self-describing — but not an ELEMENT or a nested list, whose members are
+ *  rowids and sub-lists respectively and need their own expansion. */
 export const isBareList = (of: ListOf): boolean => of.kind === 'scalar';
 
 /**
@@ -480,6 +477,14 @@ export function unfoldList(
  *   member's type is lossy under its storage class. Asked once, so the encoding stays uniform per
  *   list — mixing encodings inside one list is the corruption this shape exists to avoid.
  *
+ * **THE STREAM'S `ScalarType` IS THE INPUT, not a `vtype?`/`staticTag?` pair.** The fold is the one
+ * place a scalar ROW's type channel becomes a LIST MEMBER's, and both ends now spell it the same
+ * way, so the conversion is a CARRIER change (column → envelope) rather than a re-derivation: the
+ * caller hands over what it holds and this function decides the encoding. Splitting it into two
+ * optionals at the call site is what let a `static`'s `text` flag — the fact that a big long rides
+ * as decimal TEXT — fall out of every fold, which is why a `max(Scope.local)` over such a list
+ * compared lexicographically and answered the smaller value.
+ *
  * "About the whole list" is a WINDOW here, not legacy's second alias over the same relation:
  * `MAX(<is this row lossy>) OVER ()` is 1 iff any row is. Legacy notes that a window "cannot nest
  * inside the json_group_array aggregate" and reaches for `EXISTS` over a second alias instead — true
@@ -496,23 +501,29 @@ export function unfoldList(
  * so a chain that reaches one always demands an encounter).
  */
 export function foldScalars(
-  input: Rel, opts: { readonly vtype?: string; readonly staticTag?: ValueType; readonly encounter?: string }, fresh: Minter,
+  input: Rel,
+  opts: { readonly type: ScalarType; readonly productiveNull?: boolean; readonly encounter?: string },
+  fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf } {
-  const { staticTag } = opts;
   // The type column and the position are named rather than passed as EXPRESSIONS, because the relation
   // an expression must address is the window's output and not the caller's input: every node here
   // addresses its own INPUT, and the lossy flag inserts one.
-  const vtype = opts.vtype ? col(input.id, opts.vtype) : undefined;
+  const vtypeCol = perRowColumnOf(opts.type);
+  const vtype = vtypeCol ? col(input.id, vtypeCol) : undefined;
   const flagged = vtype ? withLossyFlag(input, vtype, fresh) : input;
   const order: readonly SortTerm[] = opts.encounter ? [{ expr: col(flagged.id, opts.encounter), dir: 'asc' }] : [];
   const value = col(flagged.id, 'v');
   const member = vtype
     ? {
       kind: 'case',
-      whens: [[col(flagged.id, LOSSY_COL), typedNode(value, col(flagged.id, opts.vtype!))]],
+      whens: [[col(flagged.id, LOSSY_COL), typedNode(value, col(flagged.id, vtypeCol!))]],
       else: value,
     } as Expr
     : value;
+  // The CARRIER moves; the type does not. A column-carried per-row type becomes envelope-carried
+  // because a member has no column of its own; `static`/`unknown` cross unchanged, `text` flag and
+  // all — which is exactly the fact the old `staticTag: ValueType` pair could not carry.
+  const memberType: ScalarType = vtype ? PER_ROW_ENVELOPE : opts.type;
   return {
     rel: make.aggregate({
       id: fresh('fd'), input: flagged, channels: [], type: typeOf(meta(LIST_COL, 'json')),
@@ -528,7 +539,7 @@ export function foldScalars(
         }],
       }]],
     }),
-    of: vtype ? TYPED_LIST : { kind: 'scalar', ...(staticTag ? { as: staticTag } : {}) },
+    of: { kind: 'scalar', type: memberType, ...(opts.productiveNull ? { productiveNull: true } : {}) },
   };
 }
 
@@ -845,7 +856,7 @@ export function collectionRetype(rel: Rel, vtype: string, kind: 'list' | 'set', 
       exprs: [[LIST_COL, { kind: 'call', fn: 'json', args: [col(matching.id, 'v')] }],
         ...rel.channels.map((channel) => [channel.col, col(matching.id, channel.col)] as const)],
     }),
-    of: TYPED_LIST,
+    of: TYPED_MEMBERS,
     set: kind === 'set',
   };
 }

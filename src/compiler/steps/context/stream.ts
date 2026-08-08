@@ -16,7 +16,7 @@
 import { type Expression, type Query, type Relation } from '../../../sql/kernel/q.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { PROPERTY_PAYLOAD, type Elem } from '../../plan/plan.ts';
-import { perRowCols, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from '../../../sql/kernel/render.ts';
+import { perRowCols, TYPED_MEMBERS, type ElemShape, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type Shape, type ValueType } from '../../../sql/kernel/render.ts';
 import { layoutCols, type LoweringState, type ElementStream } from './context.ts';
 
 /** What a list stream holds — i.e. the shape `unfold` produces from it. `elem` → bare
@@ -474,4 +474,4 @@ export const toPathStream = (c: LoweringState, rel: Relation, layout: PathLayout
  *  aggregates it: a scalar carries its type tag, an element rejoins on unfold, a
  *  list-valued column becomes a list-of-lists (one nesting level deeper). */
 export const mapOfToListOf = (m: MapOf): ListOf =>
-  m.kind === 'elem' ? { kind: 'elem', elem: m.elem } : m.kind === 'list' ? { kind: 'list', of: m.of } : { kind: 'scalar', typed: true };
+  m.kind === 'elem' ? { kind: 'elem', elem: m.elem } : m.kind === 'list' ? { kind: 'list', of: m.of } : TYPED_MEMBERS;

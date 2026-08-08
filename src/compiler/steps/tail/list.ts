@@ -11,7 +11,7 @@ import { argValues, isColumnArg, isNested, isPred, stepChain } from '../../../gr
 import { type IRStep } from '../../ir/strategies.ts';
 import { loweringStateOf, continueLowering, dispatchShapeTail, toListStream, toMapEntryStream, toMapStream, toPropertyStream, toResultStream, toScalarStream, mapOfToListOf, PROPERTY_PAYLOAD, type ListStream, type LoweringResult, type MapEntryStream, type MapOf, type PropertyStream, type ScalarStream, type MapStream, type ShapeTailFn } from '../context/stream.ts';
 import { layoutProjection, layoutCols, type ElementStream } from '../context/context.ts';
-import { PER_ROW, STATIC, type Compiled, type ListOf, type ValueType } from '../../../sql/kernel/render.ts';
+import { hasTypedMembers, memberTypeOf, PER_ROW, SCALAR_MEMBERS, STATIC, UNKNOWN, withMemberType, type Compiled, type ListOf, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf, type Engine } from '../../engine/deps.ts';
 import { firstOf, globalRowOps, lowerGlobalCount, aliasCompareRows } from './barrier.ts';
 import { assertsGType, childSteps, classifyBy, collectionAssert } from './child-shape.ts';
@@ -40,7 +40,7 @@ const isLocal = isLocalScope;
 // Every op below goes through these, which is what lets a typed list flow through the
 // same code as an untyped one instead of failing closed.
 
-const isTyped = (of: ListOf): boolean => of.kind === 'scalar' && !!of.typed;
+const isTyped = hasTypedMembers;
 
 /** The comparable/filterable PAYLOAD of a member — the underlying SQL value in both
  *  encodings. Use for ORDER BY, predicates, DISTINCT, numeric aggregates.
@@ -67,10 +67,11 @@ const memberNode = (of: ListOf, member: Expression = q`je.value`, type: Expressi
     : member;
 
 /** Retype a list whose members a transform has REWRITTEN (a per-element string transform):
- *  the stored types no longer describe the new values, so the result is a bare list tagged
- *  by whatever the transform statically produces. Mirrors the scalar tail's retype rule. */
+ *  the stored types no longer describe the new values, so the result carries whatever the
+ *  transform statically produces. Mirrors the scalar tail's retype rule — and goes through
+ *  `withMemberType`, which is what keeps `productiveNull` from riding out with the old tag. */
 const retypedList = (of: ListOf, as?: ValueType): ListOf =>
-  of.kind === 'scalar' ? { kind: 'scalar', as, productiveNull: of.productiveNull } : of;
+  withMemberType(of, as ? STATIC(as) : UNKNOWN);
 
 /** A Scope.local reducer over a list value: reduce EACH list (row) to one scalar via a
  *  correlated json_each aggregate. count() counts elements (any list); sum/min/max/mean
@@ -142,7 +143,7 @@ export function compileUnfold(s: ListStream): ElementStream | PropertyStream | S
   // extracting the payload (`->> '$.v'`) AND the per-element type (`->> '$.t'`) into a
   // vtype-carrying ScalarStream — reusing the P1–P3 typed-scalar spine, so each element
   // frames by its own type (a nested list/map element frames whole via frameStoredValue).
-  if (s.of.kind === 'scalar' && s.of.typed) {
+  if (hasTypedMembers(s.of)) {
     // A bare member (a fold the producer left unwrapped because storage class suffices)
     // recovers its type the same way the write channel would have recorded it.
     const val = memberValue(s.of);
@@ -154,7 +155,12 @@ export function compileUnfold(s: ListStream): ElementStream | PropertyStream | S
     return toScalarStream(c, rel, undefined, { type: PER_ROW('vtype'), result: 'value' });
   }
   const rel = explode('v');
-  return toScalarStream(c, rel, s.of.as, { result: 'value', productiveNull: s.of.productiveNull });
+  // The member type crosses back onto the ROW channel whole — the carrier question does not even
+  // arise for a bare member list, and a `static` keeps its `text` flag rather than being re-derived
+  // through a `ValueType` that cannot say a big long rides as decimal TEXT.
+  return toScalarStream(c, rel, undefined, {
+    type: memberTypeOf(s.of) ?? UNKNOWN, result: 'value', productiveNull: s.of.productiveNull,
+  });
 }
 
 /** Build a per-row list CTE that PRESERVES the carried schema (origin/aliases). A
@@ -520,7 +526,7 @@ const listSetOp: ShapeTailFn<ListStream> = (s, step, steps, at) => {
     return continueLowering(toResultStream(s.q, q`SELECT json(${listExpr}) AS list FROM ${c}`, { kind: 'jsonbSet' }), at + 1);
   // product yields a list of pair-lists; the others keep the element shape — but a typed
   // list that met a bare operand has been flattened to payloads, so it is bare now.
-  const of = step.name === 'product' ? { kind: 'list' as const, of: { kind: 'scalar' as const } }
+  const of = step.name === 'product' ? { kind: 'list' as const, of: SCALAR_MEMBERS }
     : isTyped(s.of) ? retypedList(s.of) : s.of;
   return continueLowering(listCte(s, c, listExpr, of), at + 1);
 };

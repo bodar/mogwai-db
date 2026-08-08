@@ -7,7 +7,7 @@
 // result shape. The execution-semantics half of the old compiler.test.ts lives at
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
-import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
+import { PER_ROW, SCALAR_MEMBERS, STATIC, TYPED_MEMBERS, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decode, decodeAll } from '../support/decode.ts';
@@ -80,7 +80,7 @@ describe('group / properties SQL', () => {
     expect(keys.sql).toContain('json_each');
     expect(keys.sql).toContain('json_group_array(json_array('); // per-element blob assembly
     // the keys list holds typed {t,v} string nodes (uniform typed map encoding)
-    expect(keys.shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });
+    expect(keys.shape).toEqual({ kind: 'jsonbList', items: TYPED_MEMBERS });
     // key subset filters at SQL level (je.key IN (?)); values().unfold() explodes per element
     const vals = read("g.V().valueMap('location').select(Column.values).unfold()");
     expect(vals.sql).toContain('je.key IN (?)');
@@ -114,7 +114,7 @@ describe('group / properties SQL', () => {
     // by(Column.keys) sorts the key side; desc flips direction; both re-enter through unfold().
     const keysUnfold = read('g.V().valueMap().order(Scope.local).by(Column.keys).unfold()');
     expect(keysUnfold.sql).toContain('ORDER BY');
-    expect(keysUnfold.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'list', of: { kind: 'scalar' } } });
+    expect(keysUnfold.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'list', of: SCALAR_MEMBERS } });
     const desc = read('g.V().values("age").groupCount().order(Scope.local).by(Column.values, Order.desc)');
     expect(desc.sql).toContain('DESC');
     // Fail closed: an element/list-valued map side has no total order → clear deferral.
@@ -129,7 +129,7 @@ describe('group / properties SQL', () => {
     // valueMap().unfold(): valueMap retypes to a per-element whole-map blob MapStream, unfold()
     // explodes it to a per-entry MapEntryStream (key = typed {t,v} scalar, value = its list).
     const t = read('g.V().valueMap().unfold()');
-    expect(t.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'list', of: { kind: 'scalar' } } });
+    expect(t.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'list', of: SCALAR_MEMBERS } });
     expect(t.sql).toContain('json_each'); // explode the map blob into entry rows
     // select(keys) per entry → the key, framed by its own stored type (a typed {t,v} node).
     expect(read('g.V().valueMap().unfold().select(keys)').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
@@ -152,7 +152,7 @@ describe('group / properties SQL', () => {
     expect(cnt.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(cnt.sql).toContain('json_array_length');
     // select(values)/select(keys) → one list value (typed items); unfold() → per-entry MapEntryStream
-    expect(read("g.V().values('m').is(typeOf(GType.MAP)).select(values)").shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });
+    expect(read("g.V().values('m').is(typeOf(GType.MAP)).select(values)").shape).toEqual({ kind: 'jsonbList', items: TYPED_MEMBERS });
     expect(read("g.V().values('m').is(typeOf(GType.MAP)).unfold()").shape.kind).toBe('mapEntry');
     // richer followers fail CLOSED (correct-by-design deferral, not mis-execution)
     expect(() => compile("g.V().values('m').is(typeOf(GType.MAP)).where(count(Scope.local).is(P.gt(1)))", {})).toThrow('where() on a map value not yet supported');
@@ -251,7 +251,7 @@ describe('group / properties SQL', () => {
     // node, so the value side genuinely is one node there. Both frame `{person:[…], software:[…]}`.
     const sl = read("g.V().group().by(T.label).by('name').unfold()");
     expect(sl.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' },
-      valOf: relirOff ? { kind: 'list', of: { kind: 'scalar' } } : { kind: 'scalar' } });
+      valOf: relirOff ? { kind: 'list', of: SCALAR_MEMBERS } : { kind: 'scalar' } });
     // an ELEMENT-list value: the value column expands its rowids to full element payloads
     // at the root (json_object over nodes), like the list substrate.
     const ev = read("g.V().hasLabel('software').group().by('name').unfold()");
@@ -309,7 +309,7 @@ describe('group / properties SQL', () => {
     // list vocabulary, which is what makes this a per-spine assertion rather than a shared one.
     const keys = read("g.V().groupCount().by('name').select(Column.keys)");
     expect(keys.shape).toEqual(relirOff
-      ? { kind: 'jsonbList', items: { kind: 'scalar', typed: true } }
+      ? { kind: 'jsonbList', items: TYPED_MEMBERS }
       : { kind: 'jsonbSet', typed: true });
     expect(read("g.V().groupCount().by('name').select(Column.values)").shape.kind).toBe('jsonbList');
     expect(await dec("g.V().groupCount().by('name').select(Column.values)"))
@@ -355,7 +355,7 @@ describe('group / properties SQL', () => {
     // value column into a list value (one row), unfold() explodes it. Count → Long tag.
     const gv = read('g.V().groupCount().by("name").select(Column.values)');
     // the value list holds self-describing {t,v} nodes (each count typed), so it frames typed.
-    expect(gv.shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });
+    expect(gv.shape).toEqual({ kind: 'jsonbList', items: TYPED_MEMBERS });
     expect(gv.sql).toContain('json_group_array');
     expect(read('g.V().groupCount().by("name").select(Column.values).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // select(Column.keys) over a scalar key → a typed scalar stream on unfold.
@@ -385,20 +385,20 @@ describe('group / properties SQL', () => {
     // A neighbour-list value → a list-valued map; select(Column.values) yields a
     // list-of-lists, unfold() explodes to per-list rows, order(Scope.local) sorts each.
     const g = read('g.V().group().by().by(__.out().label().fold()).select(Column.values).unfold().order(Scope.local)');
-    expect(g.shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
+    expect(g.shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
     // The neighbour-list is folded from generic child rows at the group boundary.
     expect(g.sql).toContain('json_group_array');
     expect(g.sql).toContain('ON gf.o0=gp.o0');
     expect(g.sql).not.toContain('MAX((SELECT jsonb(COALESCE(json_group_array');
     // A pre-fold op folds into the correlated subquery (dedup/limit/tail).
-    expect(read('g.V().group().by().by(__.out().label().dedup().fold()).select(Column.values).unfold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
+    expect(read('g.V().group().by().by(__.out().label().dedup().fold()).select(Column.values).unfold()').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
     // A scalar key now works too: the fold owns the complete final key domain, so
     // there is no per-parent list for MAX() to pick arbitrarily.
     // Terminal select(Column.values) is a list-of-lists; the shape carries its nested
     // `of` so each inner list frames by its own descriptor (here scalar; an element leaf
     // expands its rowids — see materialize.nestedListResult).
     const scalarKey = read('g.V().group().by("name").by(__.out().label().fold()).select(Column.values)');
-    expect(scalarKey.shape).toEqual({ kind: 'jsonbList', items: { kind: 'list', of: { kind: 'scalar' } } });
+    expect(scalarKey.shape).toEqual({ kind: 'jsonbList', items: { kind: 'list', of: SCALAR_MEMBERS } });
     expect(scalarKey.sql).toContain('GROUP BY gk');
   });
 
@@ -505,7 +505,7 @@ describe('group / properties SQL', () => {
     // A group('a')/groupCount('a') side-effect, re-emitted by cap('a'), is re-enterable
     // too: select(Column.values)/unfold compose exactly like an inline group().
     expect(read('g.V().groupCount("a").by("name").cap("a").select(Column.values).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
-    expect(read('g.V().group("a").by().by(__.out().label().fold()).cap("a").select(Column.values).unfold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
+    expect(read('g.V().group("a").by().by(__.out().label().fold()).cap("a").select(Column.values).unfold()').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
   });
 
   test('group-scoped reducers aggregate generic child rows at the final group boundary', () => {
@@ -705,7 +705,7 @@ describe('group / properties SQL', () => {
     expect(p.shape).toEqual({ kind: 'value', type: UNKNOWN });
     expect(p.sql).toContain("(SELECT value FROM vertex_properties WHERE node=n.id AND key=? ORDER BY id LIMIT 1) AS sk");
     expect(p.sql).toContain('SELECT p.sk AS v, p.sk, p.bulk FROM'); // scalar CTE reads + carries the sack
-    expect(read('g.withSack(1).V().sack().fold()', legacy).shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
+    expect(read('g.withSack(1).V().sack().fold()', legacy).shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
     // sum accumulator references the prior sk; div forces REAL division.
     expect(read('g.withSack(0.0d).V().sack(sum).by("age").sack()', legacy).sql).toContain('(p.sk + (SELECT value FROM vertex_properties WHERE node=n.id AND key=?');
     expect(read('g.withSack(2).V().sack(div).by(__.constant(4.0d)).sack()', legacy).sql).toContain('(CAST(d.sk AS REAL) / f.v)');

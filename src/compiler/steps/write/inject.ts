@@ -5,6 +5,7 @@ import { type IRStep } from '../../ir/strategies.ts';
 import { patchLayout, type LoweringState } from '../context/context.ts';
 import { toListStream, toScalarStream, type Stream } from '../context/stream.ts';
 import { foldConstantCoercions, uniformInjectType } from '../../../gremlin/coerce.ts';
+import { SCALAR_MEMBERS } from '../../../sql/kernel/render.ts';
 
 /** Seed `inject(v1, v2, …)` as a shaped SOURCE on `carry`'s Query → the initial Stream plus the
  * index of the first step the generic lowering loop takes over at (a leading constant-coercion
@@ -28,7 +29,7 @@ export function seedInject(carry: LoweringState, steps: IRStep[], sackInit?: Sac
     if (sackInit) throw new Error('withSack() with a list-valued inject() not yet supported');
     const rows = steps[0].args.map((a) => q`(${jsonbArrayOf(a.value)})`);
     const rel = Q.cte(q`VALUES ${list(rows, ', ')}`, ['list']);
-    return { stream: toListStream(carry, rel, { kind: 'scalar' }), at: 1 };
+    return { stream: toListStream(carry, rel, SCALAR_MEMBERS), at: 1 };
   }
 
   // Mixed list/scalar inject remains the historical flattened representation until

@@ -9,6 +9,7 @@ import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { LabelCardinality } from '../src/api.ts';
 import { createAppScope } from '../src/scopes.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
+import { PER_ROW } from '../src/sql/kernel/render.ts';
 
 /**
  * THE RelIR SPINE — routing, coverage and the per-traversal differential (§10·4).
@@ -1757,7 +1758,7 @@ describe('the RelIR spine', () => {
       expect(read(gremlin, { spine: 'rel' }).shape).toEqual(read(gremlin, { spine: 'legacy' }).shape);
     }
     expect(read('g.V().count()', { spine: 'rel' }).shape).toEqual({ kind: 'value', type: { kind: 'static', type: 'long' } });
-    expect(read("g.V().values('name')", { spine: 'rel' }).shape).toEqual({ kind: 'value', type: { kind: 'perRow', column: 'vtype' } });
+    expect(read("g.V().values('name')", { spine: 'rel' }).shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
   });
 
   test('values(k…) is the KEY SET, on both spines', () => {

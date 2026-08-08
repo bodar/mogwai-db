@@ -1,7 +1,7 @@
 import { col, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { Shape } from '../../sql/kernel/render.ts';
+import { perRowColumn, type Shape } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 import { and, carriedCols, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
@@ -165,7 +165,7 @@ function fieldNode(rel: Rel, field: RecordField, at: string, fresh: Minter): Exp
       // `vt`, a stored value's is its `vtype` column, a cast's is one compile-time token, and an
       // unknown type is a NULL tag the framer reads as "infer from the value".
       const tag = framing.result === 'number' ? own('vt')
-        : framing.type.kind === 'perRow' ? own(framing.type.column)
+        : framing.type.kind === 'perRow' ? own(perRowColumn(framing.type, 'recordValue'))
           : framing.type.kind === 'static' ? compilerText(framing.type.type)
             : compilerNull('text');
       return typedNode(own('v'), tag);

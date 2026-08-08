@@ -7,7 +7,7 @@
 // result shape. The execution-semantics half of the old compiler.test.ts lives at
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
-import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
+import { PER_ROW, SCALAR_MEMBERS, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
 import { read, run, seededStore } from '../support/harness.ts';
@@ -491,7 +491,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(read('g.V().choose(__.out().count()).option(1, __.values("name")).option(Pick.none, __.values("age"))', { spine: 'legacy' }).sql)
       .toContain('COUNT(c.id) AS v');
     expect(read('g.V().choose(T.label).option("person", __.constant("p")).option(Pick.none, __.constant("o")).fold()', { spine: 'legacy' }).shape)
-      .toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
+      .toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
 
     const nested = read('g.V().map(__.choose(__.values("age")).option(P.between(26,30), __.values("name")).option(Pick.none, __.constant("unknown")))', { spine: 'legacy' });
     expect(nested.sql).toContain('CASE WHEN');

@@ -7,7 +7,7 @@
 // readCompiled islands while those leaves are converted to Stream -> Stream lowerers.
 
 import { empty, list, q, raw, type Expression, type Query, type Relation } from '../../../sql/kernel/q.ts';
-import { perRowColumnOf, readCompiled, STATIC, UNKNOWN, type Compiled, type ListOf, type Shape, type VariantShapeArm } from '../../../sql/kernel/render.ts';
+import { hasTypedMembers, perRowColumnOf, readCompiled, STATIC, UNKNOWN, type Compiled, type ListOf, type Shape, type VariantShapeArm } from '../../../sql/kernel/render.ts';
 import { edges, nodes } from '../../../sql/schema.ts';
 import { elemCtx, elementPayloadObject, elemTable, extIdOf, framedProps, labelNameSub, vertexLabelsJson } from '../../plan/plan.ts';
 import type { ElementStream } from '../context/context.ts';
@@ -146,7 +146,7 @@ export function materializeListRoot(stream: ListStream): Compiled {
   // on the jsonbList shape so frameListOf recurses the same nesting on the framing side.
   if (stream.of.kind === 'list')
     return materializeRoot(stream.q, q`SELECT ${listResult(c.c.list, stream.of)} AS list FROM ${c}${rootOrder(stream, c)}`, { kind: 'jsonbList', items: stream.of });
-  const typed = stream.of.kind === 'scalar' && stream.of.typed ? true : undefined;
+  const typed = hasTypedMembers(stream.of) ? true : undefined;
   const shape: Shape = stream.set
     ? { kind: 'jsonbSet', typed }
     : { kind: 'jsonbList', items: stream.of };

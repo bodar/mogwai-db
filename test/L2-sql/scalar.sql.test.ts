@@ -7,7 +7,7 @@
 // result shape. The execution-semantics half of the old compiler.test.ts lives at
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
-import { PER_ROW, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
+import { PER_ROW, SCALAR_MEMBERS, STATIC, TYPED_MEMBERS, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
@@ -145,12 +145,12 @@ describe('scalar-parent / projection SQL', () => {
     // `vtype = 'list'` filter, which is the retype rather than a predicate.
     const listed = read('g.V().values("list").is(typeOf(GType.LIST))', { spine: 'legacy' });
     // typed: items are self-describing {t,v} nodes → framed via frameTypedNode (full-fidelity).
-    expect(listed.shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });
+    expect(listed.shape).toEqual({ kind: 'jsonbList', items: TYPED_MEMBERS });
     expect(listed.sql).toContain("json(p.v) AS list");
     expect(listed.sql).toContain("p.vtype = ?");
     expect(listed.binds).toContain('list');
     const relListed = read('g.V().values("list").is(typeOf(GType.LIST))', { spine: 'rel' });
-    expect(relListed.shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });
+    expect(relListed.shape).toEqual({ kind: 'jsonbList', items: TYPED_MEMBERS });
     // The RelIR route composes the retype's `json(v)` (relation level) with the payload projection's own
     // `json(list)` (§10·10) — a no-op nesting, since `json()` of valid JSON text is that text. The
     // assertion is about WHICH column becomes the list, not how many times the conversion is spelled;
@@ -277,7 +277,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().fold()', { spine: 'legacy' }).shape).toEqual({ kind: 'list', elem: 'vertex' });
     expect(read('g.V().fold()', { spine: 'rel' }).shape)
       .toEqual({ kind: 'jsonbList', items: { kind: 'elem', elem: 'vertex' } });
-    expect(read('g.V().values("name").fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });
+    expect(read('g.V().values("name").fold()').shape).toEqual({ kind: 'jsonbList', items: TYPED_MEMBERS });
     // A NON-terminal fold() retypes to a JSONB list value (jsonb(json_group_array)),
     // and unfold() explodes it (json_each) — the stream continues. fold().unfold() is
     // an identity roundtrip (deliberately not peepholed).
@@ -305,7 +305,7 @@ describe('scalar-parent / projection SQL', () => {
 
   test('fold preserves uniform scalar item types through ListStream materialization', async () => {
     const typed = read('g.V().values("age").asNumber(GType.DOUBLE).fold()');
-    expect(typed.shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', as: 'double' } });
+    expect(typed.shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', type: STATIC('double') } });
 
     const { ioc } = await import('../../src/io.ts');
     const doubles = executeQuery(seededStore(), 'g.V().values("age").asNumber(GType.DOUBLE).fold()', {})[0];
@@ -320,8 +320,8 @@ describe('scalar-parent / projection SQL', () => {
 
   test('inject([...]) is a real list value (not flattened)', () => {
     // Each bracket arg is ONE list traverser → a JSONB list-value stream.
-    expect(read('g.inject([1,3,100,300])').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
-    expect(read('g.inject([1,2],[3,4])').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
+    expect(read('g.inject([1,3,100,300])').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
+    expect(read('g.inject([1,2],[3,4])').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
     // unfold() explodes the list back to a scalar stream.
     expect(read('g.inject([1,2,3]).unfold()').shape).toEqual({ kind: 'value', type: UNKNOWN });
     // Scope.local reducers act per-list (mean over the numeric elements → Double).
@@ -329,12 +329,12 @@ describe('scalar-parent / projection SQL', () => {
     // none(P) on a LIST keeps the list iff no element matches (collection filter).
     expect(read('g.inject([5,8,10],[10,7]).none(P.lt(7))').sql).toContain('NOT EXISTS');
     // none(pred) is NOT the iterate discard-marker (only a bare none() is stripped).
-    expect(read('g.inject([5,8,10],[10,7]).none(P.lt(7))').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
+    expect(read('g.inject([5,8,10],[10,7]).none(P.lt(7))').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
   });
 
   test('set-op / list-algebra family (combine/intersect/difference/disjunct/product/conjoin/all/any)', () => {
     // combine = concat → a List; intersect/difference/disjunct → a Set (jsonbSet) when terminal.
-    expect(read('g.V().values("age").fold().combine([1,2])').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
+    expect(read('g.V().values("age").fold().combine([1,2])').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
     expect(read('g.V().values("age").fold().intersect([27,29])').shape).toEqual({ kind: 'jsonbSet' });
     expect(read('g.V().values("age").fold().difference([27])').shape).toEqual({ kind: 'jsonbSet' });
     expect(read('g.V().values("age").fold().disjunct([27])').shape).toEqual({ kind: 'jsonbSet' });
@@ -351,7 +351,7 @@ describe('scalar-parent / projection SQL', () => {
     for (const spine of ['legacy', 'rel'] as const)
       expect(read('g.inject(["a",null,"b"]).merge(["a","c"])', { spine }).sql).toMatch(/ORDER BY \w*\.?\bmv? ?ASC|ORDER BY value/);
     // a Set followed by a list op (order(Scope.local)) degrades to a List (not a Set).
-    expect(read('g.V().values("age").fold().intersect([27]).order(Scope.local)').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
+    expect(read('g.V().values("age").fold().intersect([27]).order(Scope.local)').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
     // constant(c).fold() and a standalone scalar-list traversal are valid operands.
     expect(read('g.V().values("age").fold().intersect(__.constant(27).fold())').shape).toEqual({ kind: 'jsonbSet' });
     expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())').shape).toEqual({ kind: 'jsonbSet' });
@@ -370,7 +370,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(() => compile('g.V().fold().combine(2)', {})).toThrow('can only take an array or an Iterable as an argument');
     expect(() => compile('g.V().fold().combine(null)', {})).toThrow("can't be null");
     // product → a list of pair-lists; conjoin → a scalar string.
-    expect(read('g.V().values("age").fold().product([1]).unfold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
+    expect(read('g.V().values("age").fold().product([1]).unfold()').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
     // conjoin joins the members into ONE string, whatever they were — a static 'string'
     // type, not per-value inference at the wire.
     expect(read('g.V().values("name").order().fold().conjoin("_")').shape).toEqual({ kind: 'value', type: STATIC('string') });
@@ -394,7 +394,7 @@ describe('scalar-parent / projection SQL', () => {
     // A non-terminal fold() → ListStream; a Scope.local transform rebuilds each list
     // (correlated json_each) and stays a list, so unfold() re-enters afterwards.
     const o = read('g.V().values("age").fold().order(Scope.local)');
-    expect(o.shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });
+    expect(o.shape).toEqual({ kind: 'jsonbList', items: TYPED_MEMBERS });
     expect(o.sql).toContain('json_group_array');
     // order().by(Order.desc) — direction-only by() flips the sort.
     expect(read('g.V().values("age").fold().order(Scope.local).by(Order.desc).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
@@ -445,7 +445,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.inject(1,2,3).mean()', { spine: 'legacy' }).sql).toContain(`AVG(${eligible('s.v')})`);
     expect(read('g.inject(1,2,3).mean()', { spine: 'rel' }).sql).toMatch(/avg\(CASE WHEN typeof\(/);
     expect(read('g.inject(1,2,3).count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
-    expect(read('g.inject(1,2,3).fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
+    expect(read('g.inject(1,2,3).fold()').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
     // is() BEFORE count() filters the pre-count stream (WHERE inside the counted set)
     expect(read('g.inject(1,2,3).is(P.gt(1)).count()', { spine: 'legacy' }).sql).toContain('WHERE p.v > ?');
     // count is a relational boundary, so later scalar filters compose in position.
@@ -570,7 +570,7 @@ describe('scalar-parent / projection SQL', () => {
     // on a runtime (V-rooted) stream asBool defers — needs local()/sack()
     expect(() => compile('g.V().values("name").asBool()', {})).toThrow('scalar transform asBool() not supported');
     // fold preserves the uniform item tag; a heterogeneous trailing inject still defers.
-    expect(read('g.inject(1,0).asBool().fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', as: 'boolean' } });
+    expect(read('g.inject(1,0).asBool().fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', type: STATIC('boolean') } });
     expect(() => compile('g.inject(1).asBool().inject(5)', {})).toThrow('after typed/reduced/carried scalar state');
   });
 
@@ -1146,7 +1146,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(shaped.shape).toEqual({
       kind: 'map',
       entries: [
-        { key: 'friends', prefix: 'e0', sub: 'list', of: { kind: 'scalar', typed: true } },
+        { key: 'friends', prefix: 'e0', sub: 'list', of: TYPED_MEMBERS },
         { key: 'first', prefix: 'e1', sub: 'vertex' },
       ],
     });
@@ -1156,7 +1156,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V(1).project("friends").by(__.out().values("name").fold()).select("friends").unfold().count()').shape)
       .toEqual({ kind: 'value', type: STATIC('long') });
     expect(read('g.V(1).project("friends","created").by(__.out().values("name").fold()).by(__.out("created").values("name").fold()).select(Column.values).unfold()').shape)
-      .toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });
+      .toEqual({ kind: 'jsonbList', items: TYPED_MEMBERS });
     expect(read('g.V(1).as("a").out().select("a").by(__.out()).values("name")').shape)
       .toEqual({ kind: 'value', type: PER_ROW('vtype') });
   });
@@ -1336,7 +1336,7 @@ describe('scalar-parent / projection SQL', () => {
       .toEqual({ kind: 'jsonbList', items: { kind: 'elem', elem: 'vertex' } });
     expect(read('g.V(1).outE().fold()', { spine: 'rel' }).shape)
       .toEqual({ kind: 'jsonbList', items: { kind: 'elem', elem: 'edge' } });
-    expect(read('g.V().values("name").fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', typed: true } });
+    expect(read('g.V().values("name").fold()').shape).toEqual({ kind: 'jsonbList', items: TYPED_MEMBERS });
   });
 
   test('sum() wraps a value stream in SQL SUM → scalar shape', () => {
@@ -1447,7 +1447,7 @@ describe('scalar-parent / projection SQL', () => {
     // group() fills a key slot then a value slot; a third by() is invalid Gremlin, refused with
     // GroupStep's own wording by the byModulatorArity verify Pass (test/compiler/by-modulator-arity).
     expect(() => compile('g.V().group().by("name").by("age").by("x")', {})).toThrow('already been set');
-    expect(read('g.V().count().fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', as: 'long' } });
+    expect(read('g.V().count().fold()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar', type: STATIC('long') } });
     expect(() => compile('g.V().sum()', {})).toThrow('sum() of vertex not yet supported');
   });
 });

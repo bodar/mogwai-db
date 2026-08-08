@@ -10,7 +10,7 @@
 // arm rides through unchanged.
 
 import { q, list, empty, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { type ValueType } from '../../../sql/kernel/render.ts';
+import { memberTypeOf, sameScalarType, UNKNOWN, type ValueType } from '../../../sql/kernel/render.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { continueLowering, variantPayloadCols, dispatchShapeTail, toListStream, toVariantStream, type ListStream, type LoweringResult, type ShapeTailFn, type VariantArms, type VariantStream } from '../context/stream.ts';
 import { armOrderKey, branchFork, layoutProjection, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, type LoweringState, type TraverserLayout } from '../context/context.ts';
@@ -31,8 +31,12 @@ const stateWithLayout = (base: LoweringState, layout: LoweringState['traverserLa
 export const unifyLists = (arms: readonly ListStream[]): ListStream['of'] => {
   const ofs = arms.map((arm) => arm.of);
   if (ofs.every((of) => of.kind === 'scalar')) {
-    const tags = ofs.map((of) => of.kind === 'scalar' ? of.as : undefined);
-    return { kind: 'scalar', as: tags.every((tag) => tag === tags[0]) ? tags[0] : undefined };
+    // The arms' member types MEET: agreement survives, disagreement degrades to `unknown`. Spelled
+    // over the whole `ScalarType` rather than over a coarsened `ValueType`, so two arms that agree
+    // on `long`-as-decimal-TEXT keep the flag that says so instead of both being flattened to a tag.
+    const types = ofs.map((of) => memberTypeOf(of) ?? UNKNOWN);
+    const agreed = types.every((t) => sameScalarType(t, types[0]!));
+    return { kind: 'scalar', type: agreed ? types[0]! : UNKNOWN };
   }
   if (ofs.every((of) => of.kind === 'elem')) {
     const elems = ofs.map((of) => of.kind === 'elem' ? of.elem : undefined);

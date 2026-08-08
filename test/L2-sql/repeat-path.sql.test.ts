@@ -7,7 +7,7 @@
 // result shape. The execution-semantics half of the old compiler.test.ts lives at
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
-import { STATIC } from '../../src/sql/kernel/render.ts';
+import { SCALAR_MEMBERS, STATIC, TYPED_MEMBERS } from '../../src/sql/kernel/render.ts';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
@@ -359,7 +359,7 @@ describe('repeat / path SQL', () => {
   test('path() on the RelIR spine: one JSONB array channel, positions rebuilt as a typed tree', () => {
     if (!relirOff) {
       const p = read('g.V(1).out().out().path()');
-      expect(p.shape).toEqual({ kind: 'jsonbPath', items: { kind: 'scalar', typed: true } });
+      expect(p.shape).toEqual({ kind: 'jsonbPath', items: TYPED_MEMBERS });
       expect(p.sql).toContain('jsonb_insert(');
       expect(p.sql).toContain('json_each(');
       expect(p.sql).toContain('json_group_array(');
@@ -381,7 +381,7 @@ describe('repeat / path SQL', () => {
     ] });
     if (!relirOff) {
       const rel = read('g.V(1).out().out().path().by("name").by("age")', { spine: 'rel' });
-      expect(rel.shape).toEqual({ kind: 'jsonbPath', items: { kind: 'scalar', typed: true } });
+      expect(rel.shape).toEqual({ kind: 'jsonbPath', items: TYPED_MEMBERS });
       expect(rel.sql).toContain(' % ');
       expect(rel.sql).toContain('NOT EXISTS');
     }
@@ -422,8 +422,8 @@ describe('repeat / path SQL', () => {
     // A homogeneous scalar path coerces to one list value per row, so the whole list-value
     // engine composes: combine/reverse → List, merge/difference/intersect/disjunct → Set,
     // conjoin → String, unfold → the exploded scalars.
-    expect(read('g.V().out().out().path().by("name").reverse()').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
-    expect(read('g.V().out().out().path().by("name").combine(["x"])').shape).toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
+    expect(read('g.V().out().out().path().by("name").reverse()').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
+    expect(read('g.V().out().out().path().by("name").combine(["x"])').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
     expect(read('g.V().out().out().path().by("name").merge(["x"])').shape).toEqual({ kind: 'jsonbSet' });
     expect(read('g.V().out().out().path().by("name").difference(["x"])').shape).toEqual({ kind: 'jsonbSet' });
     expect(read('g.V().out().out().path().by("name").conjoin("-")').shape).toEqual({ kind: 'value', type: STATIC('string') });
@@ -465,7 +465,7 @@ describe('repeat / path SQL', () => {
     expect(read('g.V(1).out().path().by(T.id)', { spine: 'legacy' }).sql).toContain('COALESCE');
     if (!relirOff)
       expect(read('g.V().out().path().by(T.label)', { spine: 'rel' }).shape)
-        .toEqual({ kind: 'jsonbPath', items: { kind: 'scalar', typed: true } });
+        .toEqual({ kind: 'jsonbPath', items: TYPED_MEMBERS });
     // by(__.trav) positions lower through the generic scalar child seam (pushChildScope +
     // tryCompileScalarValueChild), re-rooted per position — the same seam select/dedup/order use.
     // by(__.values(k).transform): a value+transform chain.

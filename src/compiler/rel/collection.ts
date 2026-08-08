@@ -2,7 +2,7 @@ import { col } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { perRowColumnOf, staticTypeOf, type ListOf } from '../../sql/kernel/render.ts';
+import { perRowColumnOf, UNKNOWN, type ListOf } from '../../sql/kernel/render.ts';
 import { isLocalScope } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
@@ -147,13 +147,7 @@ function foldTraversers(
   const at = encounter ? { encounter: encounter.col } : {};
   if (framing.kind === 'elements') return listed(foldElements(input, framing.elem, at, fresh));
   if (framing.kind !== 'scalar') return null;
-  const perRow = perRowColumnOf(framing.type);
-  const staticTag = staticTypeOf(framing.type);
-  return listed(foldScalars(input, {
-    ...(perRow ? { vtype: perRow } : {}),
-    ...(staticTag ? { staticTag } : {}),
-    ...at,
-  }, fresh));
+  return listed(foldScalars(input, { type: framing.type, ...at }, fresh));
 }
 
 /** A fold's `{rel, of}` as a `Collection`. One place, so the two folds cannot describe themselves
@@ -190,7 +184,6 @@ function foldProjection(
   const rows = drop
     ? make.filter({ id: fresh('af'), input: projected, channels: carried, type: projected.type, pred: drop })
     : projected;
-  const staticTag = staticTypeOf(field.framing.type);
   // THE PER-ROW TYPE IS DELIBERATELY NOT CLAIMED HERE, and it is worth saying why rather than leaving
   // the omission to read as an oversight. §6·7 says carry the type, and a TYPED list is what a
   // `by('uuid')` collection would need to frame its members as UUIDs rather than as strings — so the
@@ -202,8 +195,12 @@ function foldProjection(
   // the spine being replaced, and make a semantic improvement to the tag a separate change on BOTH
   // sides. Claiming it unilaterally would be RelIR answering a different question from legacy on
   // purpose, which §12 forbids outright.
+  // A COLUMN-carried per-row type cannot cross here yet — the projection above declares `v` and the
+  // carried channels only, so naming a `vtype` column the relation does not have would fail the
+  // algebra's own column check. A `static` type crosses whole (`text` flag included).
+  const memberType = perRowColumnOf(field.framing.type) ? UNKNOWN : field.framing.type;
   return listed(foldScalars(rows, {
-    ...(staticTag ? { staticTag } : {}),
+    type: memberType,
     ...(encounter ? { encounter: encounter.col } : {}),
   }, fresh));
 }

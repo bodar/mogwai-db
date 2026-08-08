@@ -1,6 +1,6 @@
 import { argValues, isColumnArg, isNested, isPopArg, isTokenArg, stepChain } from '../../../gremlin/frontend.ts';
 import { empty, list, q, value, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { PER_ROW, perRowColumnOf, STATIC, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
+import { PER_ROW, perRowColumnOf, SCALAR_MEMBERS, STATIC, TYPED_MEMBERS, UNKNOWN, type ScalarType } from '../../../sql/kernel/render.ts';
 import { isLocalScope, SLICE_STEPS, sliceOf, type Slice } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { elemCtx, elementPayload, elemTable, labelNameFor, limitOffset, propScalarFor, predicateSql, propExtract, storedPropFor } from '../../plan/plan.ts';
@@ -480,7 +480,7 @@ export function selectRecordFromAlias(s: Exclude<Stream, { kind: 'result' }>, st
     if (popIsListResult(entry, pop)) {
       if (entry.shapes.size !== 1) throw new Error('select(Pop.all/mixed) over a mixed-shape label history not yet supported');
       const shape = [...entry.shapes][0];
-      const of: ListOf = shape === 'value' ? { kind: 'scalar', typed: true }
+      const of: ListOf = shape === 'value' ? TYPED_MEMBERS
         : (shape === 'vertex' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
         : shape === 'property' ? { kind: 'property', elem: entry.propertyElem! }
         : (() => { throw new Error(`select(Pop.all) over a ${shape} label not yet supported`); })();
@@ -666,7 +666,7 @@ const recordSelect: ShapeTailFn<RecordStream> = (s, step, _steps, at) => {
   if (column) {
     if (step.modulators?.length) throw new Error('by() after select(Column) on a record not yet supported');
     let expr: Expression;
-    let of: ListOf = { kind: 'scalar' };
+    let of: ListOf = SCALAR_MEMBERS;
     if (column === 'keys') expr = q`jsonb(${value(JSON.stringify(s.fields.map((f) => f.key)))})`;
     else {
       if (s.fields.every((f) => f.sub === 'value'))

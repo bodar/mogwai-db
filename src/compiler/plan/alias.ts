@@ -1,6 +1,6 @@
 import { q, value, empty, type Expression } from '../../sql/kernel/q.ts';
 import { type Elem } from './plan.ts';
-import type { ListOf, ScalarType, ValueType } from '../../sql/kernel/render.ts';
+import { PER_ROW, type ListOf, type ScalarType, type ValueType } from '../../sql/kernel/render.ts';
 
 // ---------- as() label encoding: per-traverser path history ----------
 //
@@ -162,7 +162,7 @@ export const aliasScalarTypeOf = (type: ScalarType): AliasScalarType =>
  * names the NEW projection column, not the source relation's vanished column. */
 export const scalarTypeFromAlias = (type: AliasScalarType | undefined, vtype = 'vtype'): ScalarType =>
   type?.kind === 'static' ? { kind: 'static', type: type.type }
-    : type?.kind === 'perRow' ? { kind: 'perRow', column: vtype }
+    : type?.kind === 'perRow' ? PER_ROW(vtype)
       : { kind: 'unknown' };
 
 /** Merge the scalar types of several bindings of one label — the alias channel's own join, used

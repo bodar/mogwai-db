@@ -7,7 +7,7 @@ import { isLocalScope, REDUCERS, SACK_OPS, SCALAR_TRANSFORMS, sliceOf } from '..
 import { armOrderKey, branchFork, layoutProjection, layoutProjectionMinting, layoutCols, layoutArmProjection, layoutGrewAliases, mergeArmRelation, patchLayout, mergeLayouts, dropLayoutAtBarrier, type LoweringState } from '../context/context.ts';
 import { loweringStateOf, rebuildScalar, toListStream, toMapStream, toScalarStream, type ListStream, type MapStream, type ScalarStream } from '../context/stream.ts';
 import { asDateSql, asNumberSql, dateDiffOtherMs, dtFactor, isDateDiffConstant, numericSpec } from '../../../gremlin/coerce.ts';
-import { PER_ROW, perRowColumnOf, perRowCols, STATIC, staticTypeOf, UNKNOWN, type ScalarType, type ValueType } from '../../../sql/kernel/render.ts';
+import { PER_ROW, perRowColumnOf, perRowCols, STATIC, TYPED_MEMBERS, staticTypeOf, UNKNOWN, type ScalarType, type ValueType } from '../../../sql/kernel/render.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { reprojectRows, rankedRows } from './barrier.ts';
 import { collectionAssert } from './child-shape.ts';
@@ -32,7 +32,7 @@ export function scalarCollectionRetype(s: ScalarStream, kind: 'list' | 'set'): L
     q`SELECT json(${p.c.v}) AS list${layoutProjection(s.traverserLayout, p)} FROM ${p} WHERE ${p.c[vtype]} = ${value(kind)}`,
     ['list', ...layoutCols(s.traverserLayout)],
   );
-  return toListStream(loweringStateOf(s), rel, { kind: 'scalar', typed: true }, kind === 'set');
+  return toListStream(loweringStateOf(s), rel, TYPED_MEMBERS, kind === 'set');
 }
 
 /** Retype a scalar value stream at is(typeOf(MAP)): keep only rows whose stored vtype is 'map'
@@ -468,7 +468,7 @@ export function lowerScalarSplit(s: ScalarStream, step: IRStep): ListStream {
     q`SELECT ${g.c.list} AS list${layoutProjection(s.traverserLayout, sa)} FROM ${sa} LEFT JOIN ${g} ON ${g.c[rk]}=${sa.c[rk]}`,
     ['list', ...cols],
   );
-  return toListStream(loweringStateOf(s), rel, { kind: 'scalar', as: 'string' });
+  return toListStream(loweringStateOf(s), rel, { kind: 'scalar', type: STATIC('string') });
 }
 
 // ---------- scalar-parent branch primitives (gate + union) ----------

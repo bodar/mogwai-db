@@ -2,13 +2,13 @@ import type { Channel } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { ListOf, Shape } from '../../sql/kernel/render.ts';
+import { TYPED_MEMBERS, type ListOf, type Shape } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 import { SHAPE_K } from '../plan/alias.ts';
 import { byEncounter, carriedCols, jsonOf, meta, typeOf, type Minter } from './build.ts';
 import { elementNode } from './element.ts';
 import { historyAppend, historySeed, objectEntry, type TraverserObject } from './history.ts';
-import { LIST_COL, TYPED_LIST } from './list.ts';
+import { LIST_COL } from './list.ts';
 import { byNode, modulations, type Modulation } from './modulator.ts';
 import type { ChildSeam } from './child.ts';
 
@@ -112,7 +112,7 @@ export function extendPath(rel: Rel, object: TraverserObject, fresh: Minter): Re
  * public element (`elementNode`, shared with the element payload and with a list's element members, so a
  * path position and a folded element frame identically by construction).
  *
- * `TYPED_LIST` is the honest member encoding: the positions are self-describing `{t,v}` nodes, and since an
+ * `TYPED_MEMBERS` is the honest member encoding: the positions are self-describing `{t,v}` nodes, and since an
  * element is a MEMBER of that tree a path holding a vertex, an edge and a value at once needs no descriptor
  * per position — the framer reads each member's own tag.
  *
@@ -219,7 +219,7 @@ export function pathPositions(
    * IS EVERY POSITION A PROJECTED SCALAR? — the one thing a consumer of this path needs that the member
    * encoding cannot tell it, and the reason it is reported rather than re-derived.
    *
-   * `TYPED_LIST` is the honest encoding for both an element position and a `by()`-projected one (both are
+   * `TYPED_MEMBERS` is the honest encoding for both an element position and a `by()`-projected one (both are
    * members of the self-describing tree, and `frameTypedNode` reads each member's own tag), so the framing
    * arm cannot distinguish them — which is exactly right for FRAMING a Path and exactly wrong for RE-ENTERING
    * one as a list. The list vocabulary's member ops decode a member's `$.v` into a SCALAR stream, and the
@@ -233,7 +233,7 @@ export function pathPositions(
    * an ELEMENT member (§10·10's remaining list arm), not before.
    */
   const scalars = parsed.length > 0 && !parsed.some((modulation) => modulation.key.kind === 'identity');
-  if (!hasNonIdentity || step.productiveBy === true) return { rel: projection, of: TYPED_LIST, scalars };
+  if (!hasNonIdentity || step.productiveBy === true) return { rel: projection, of: TYPED_MEMBERS, scalars };
 
   // Productivity reads the rebuilt list, so fence the projection before the correlated clause reader.
   const projectedPath = make.materialize({
@@ -257,7 +257,7 @@ export function pathPositions(
       id: fresh('f'), input: projectedPath, channels: projectedPath.channels, type: projectedPath.type,
       pred: { kind: 'exists', negated: true, plan: probe },
     }),
-    of: TYPED_LIST,
+    of: TYPED_MEMBERS,
     scalars,
   };
 }

@@ -2,12 +2,12 @@ import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import type { LabelRegime } from '../../api.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { ListOf, MapOf, Shape } from '../../sql/kernel/render.ts';
+import { TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/step.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import { and, byEncounter, carriedCols, coalesce, EDGE_COLS, eq, fenced, jsonOf, meta, NODE_COLS, PROPERTIES, typeOf, typedNode, withPayload, type Minter } from './build.ts';
-import { inferredVtype, LIST_COL, TYPED_LIST } from './list.ts';
+import { inferredVtype, LIST_COL } from './list.ts';
 import { edgeLabel, elementNode, vertexLabels } from './element.ts';
 import { byExpr, byNode, modulations, productivityFilter } from './modulator.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
@@ -581,7 +581,7 @@ const pairSide = (pair: Expr, side: 'keys' | 'values'): Expr =>
  * never emits (`mapPayload` declines one), so it declines here too rather than claiming an encoding.
  */
 const sideList = (of: MapOf): ListOf | null =>
-  of.kind === 'scalar' ? TYPED_LIST : of.kind === 'list' ? { kind: 'list', of: of.of } : null;
+  of.kind === 'scalar' ? TYPED_MEMBERS : of.kind === 'list' ? { kind: 'list', of: of.of } : null;
 
 /**
  * `select(Column.keys)` / `select(Column.values)` — one SIDE of every entry, as a list value.

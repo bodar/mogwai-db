@@ -2001,9 +2001,13 @@ function scalarTail(
     if (step.name === 'fold') {
       if (args.length || isLocalScope(step)) return null;
       const encounter = encounterOf(rel.channels);
+      // The stream's OWN type channel crosses into the member channel; a `perRow` type whose column
+      // the relation does not actually carry degrades to `unknown` rather than claiming a column that
+      // is not there (`assertStreamColumns`' rule, stated at the one seam that can violate it).
+      const streamType = out.kind === 'scalar' && !(perRowColumnOf(out.type) && !carries(perRowColumnOf(out.type)!))
+        ? out.type : UNKNOWN;
       const folded = foldScalars(rel, {
-        ...(carries('vtype') ? { vtype: 'vtype' } : {}),
-        ...(out.kind === 'scalar' && staticTypeOf(out.type) ? { staticTag: staticTypeOf(out.type)! } : {}),
+        type: streamType,
         ...(encounter ? { encounter: encounter.col } : {}),
       }, fresh);
       return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);

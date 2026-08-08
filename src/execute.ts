@@ -1,6 +1,6 @@
 import type { Executor as ExecutorApi, ForeignRow } from './api.ts';
 import { DEFAULT_VERTEX_LABEL } from './api.ts';
-import { compilePlan, staticTypeOf, type Compiled, type ElemShape, type Executable, type FastPathConfig, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type ValueType } from './compiler/compiler.ts';
+import { compilePlan, hasTypedMembers, perRowColumn, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type Executable, type FastPathConfig, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type ValueType } from './compiler/compiler.ts';
 import type { FederationSource, Plan } from './compiler/segment.ts';
 import { hasSerializer, isCollectionType, valueNodeFromStored, type FrameNode, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import { ioc, Property, t, VertexProperty } from './io.ts';
@@ -200,7 +200,7 @@ function mapBuffer(row: any, entries: MapEntry[]): Buffer {
 function recordValueBuffer(row: any, prefix: string, type: ScalarType): Buffer {
   const v = row[`${prefix}_v`];
   if (type.kind !== 'perRow') return frameValue(v, staticTypeOf(type));
-  const vtype = row[type.column];
+  const vtype = row[perRowColumn(type, 'recordValueBuffer')];
   return isCollectionType(vtype) ? frameStoredValue(v, vtype) : frameValue(v, vtypeToValueType(vtype));
 }
 
@@ -456,10 +456,15 @@ function listItemBuffers(json: string, of: ListOf): Buffer[] {
   const items = JSON.parse(json);
   if (of.kind === 'elem') return items.map(of.elem === 'edge' ? rowEdge : rowVertex);
   if (of.kind === 'property') return items.map(framePropertyRow);
-  if (of.kind === 'scalar')
-    return of.typed ? items.map(frameTypedNode)
-      : of.as ? items.map((x: any) => frameValue(x, of.as))
+  if (of.kind === 'scalar') {
+    // The member type channel, read exactly as a scalar ROW's is: an envelope-carried per-row type
+    // means each member is a self-describing {t,v} node, a static tag applies to every member, and
+    // an unknown type infers from the JS value (correct for the storage-class-determined three).
+    const as = staticTypeOf(of.type);
+    return hasTypedMembers(of) ? items.map(frameTypedNode)
+      : as ? items.map((x: any) => frameValue(x, as))
         : items.map((x: any) => ioc.anySerializer.serialize(x));
+  }
   // A list-of-lists: frame each inner member by its own descriptor so an element leaf
   // (e.g. terminal select(Column.values) over an element-list-valued group) frames its
   // members as Vertex/Edge, not the client's JS-inferred maps. SQL already expanded the
@@ -487,7 +492,7 @@ function groupKey(r: any, key: GroupKey): { buf: Buffer; canon: string } {
   // truth channel — a datetime/uuid key keeps its exact type) beats the compile-time tag
   // (asNumber(BYTE).groupCount()), and an untagged key infers from the JS value (correct
   // for string/int/double, where the storage class already determines the type).
-  const keyCol = key.type?.kind === 'perRow' ? key.type.column : undefined;
+  const keyCol = perRowColumnOf(key.type);
   const perRow = keyCol ? r[keyCol] as string | null : null;
   if (perRow) {
     // Distinct stored types are distinct keys, so the type joins the canonical dedup key.
@@ -619,7 +624,7 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
       const t = shape.type;
       for (const r of rows) {
         if (t.kind !== 'perRow') { yield frameValue(r.v, staticTypeOf(t)); continue; }
-        const vtype = r[t.column];
+        const vtype = r[perRowColumn(t, "Shape 'value'")];
         // A collection vtype names the OUTER shape, so frame the stored {t,v} tree.
         yield isCollectionType(vtype) ? frameStoredValue(r.v, vtype) : frameValue(r.v, vtypeToValueType(vtype));
       }

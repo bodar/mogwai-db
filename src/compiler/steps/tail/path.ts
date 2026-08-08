@@ -1,6 +1,6 @@
 import { isNested, argValues } from '../../../gremlin/frontend.ts';
 import { empty, list, q, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { type PathPos } from '../../../sql/kernel/render.ts';
+import { SCALAR_MEMBERS, type PathPos } from '../../../sql/kernel/render.ts';
 import { nodes } from '../../../sql/schema.ts';
 import { EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, PATH_LIST_OPS, REDUCERS, VERTEX_MOVES, unionOf } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
@@ -366,7 +366,7 @@ function linearScalarList(s: PathStream): ListStream | null {
     q`SELECT jsonb(json_array(${list(vals, ', ')})) AS list${layoutProjection(s.traverserLayout, p)} FROM ${p}`,
     ['list', ...layoutCols(s.traverserLayout)],
   );
-  return toListStream(loweringStateOf(s), rel, { kind: 'scalar' });
+  return toListStream(loweringStateOf(s), rel, SCALAR_MEMBERS);
 }
 
 /** The path arm of lowerSteps — steps AFTER path() over a PathStream (P3 Stage A).

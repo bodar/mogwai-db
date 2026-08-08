@@ -2,7 +2,7 @@
 // Runs compiled SQL against a seeded in-memory store, asserting RESULTS. Pure cut-
 // and-paste relocation; the SQL-string snapshots live at test/L2-sql/*.sql.test.ts.
 import { test, expect, describe } from 'bun:test';
-import { STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
+import { STATIC, TYPED_MEMBERS, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
@@ -139,9 +139,12 @@ describe('scalar-parent branch/map (Stage 1)', () => {
     // scalar 'x' + element re-source (all 6 vertices) → 7 tagged rows.
     expect(read("g.V(1).values('age').union(__.constant('x'),__.V())").shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'vertex' }], wholeResult: undefined });
     expect(executeQuery(store, "g.V(1).values('age').union(__.constant('x'),__.V())", {})).toHaveLength(7);
-    // scalar + list arm (fold of re-sourced names).
+    // scalar + list arm (fold of re-sourced names). The list arm keeps its MEMBER TYPE across the
+    // unification: `values('name').fold()` is self-describing, and `unifyLists` used to compare only
+    // the members' static tags — so a lone typed arm unified to an UNTAGGED list and every member
+    // framed by storage-class inference (a uuid or datetime member came back a String).
     expect(read("g.V(1).values('age').union(__.constant('x'),__.V().values('name').fold())").shape)
-      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'list', of: { kind: 'scalar' } }], wholeResult: undefined });
+      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: UNKNOWN }, { kind: 'list', of: TYPED_MEMBERS }], wholeResult: undefined });
     expect(executeQuery(store, "g.V(1).values('age').union(__.constant('x'),__.V().values('name').fold())", {})).toHaveLength(2);
     // shape-agnostic count() composes over the variant (variant.ts VARIANT_TAIL).
     expect(await vals("g.V(1).values('age').union(__.constant('x'),__.V()).count()")).toEqual(['7']);

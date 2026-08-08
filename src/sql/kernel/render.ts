@@ -16,10 +16,19 @@ import type { Plan as RelPlan } from '../../rel/plan.ts';
 export type ListOf =
   | { kind: 'elem'; elem: Elem }
   | { kind: 'property'; elem: Elem }
-  // `typed`: items are self-describing {t,v} ValueNodes (a stored typed collection),
-  // so unfold carries each element's own vtype and framing routes through frameTypedNode
-  // (not the single `as` tag). A computed scalar list (fold of scalars) stays untyped.
-  | { kind: 'scalar'; as?: ValueType; productiveNull?: boolean; typed?: boolean }
+  // A scalar member has THE SAME total type channel a scalar row has — `static` is one uniform
+  // compile-time tag for every member, `perRow` (carrier `envelope`) means the members are
+  // self-describing `{t,v}` ValueNodes so each states its own type, `unknown` means infer from the
+  // storage class at the wire. It used to be `as?` + `typed?` + an implicit third case: the exact
+  // two-optionals-plus-implicit-third trap `ScalarType` was built to end, one layer down, and it
+  // cost real answers — `typed` was a CONSTANT `ListOf`, so tagging a list DROPPED `as` and
+  // `productiveNull` rather than widening them, and every member op read the raw value because the
+  // tag it needed was in a vocabulary it did not share with the row-level one.
+  //
+  // `productiveNull` is orthogonal to the type and stays its own field: it says whether a NULL
+  // reduction over these members is a REAL result (`ProductiveByStrategy`) or the framer's signal
+  // to emit nothing. Use `withMemberType` to change one without dropping the other.
+  | { kind: 'scalar'; type: ScalarType; productiveNull?: boolean }
   | { kind: 'list'; of: ListOf };
 
 // How a map stream's key/value column is shaped — kept at the render boundary (like
@@ -122,25 +131,48 @@ export type { ValueType };
 // ABSENT one — naming it keeps the model total. If the client is ever fixed, the variant
 // becomes unreachable and deletable.
 //
-// This is a COMPILE-TIME property; the physical encoding stays a per-site choice (bare when
-// the SQLite storage class already determines it, a sibling column for row-preserving ops,
-// a {t,v} envelope only inside a JSON blob). Conflating the two is what caused the dead end
-// recorded in docs/archive/2026-07-25-type-channel-unification.md.
+// This is a COMPILE-TIME property; the physical encoding stays a per-site choice, and the
+// CARRIER union below is that choice made TOTAL rather than left to prose. Conflating the type
+// with its encoding is what caused the dead end recorded in
+// docs/archive/2026-07-25-type-channel-unification.md; leaving the encoding UNNAMED is what let a
+// list's member type be spelled as a second, lossier vocabulary (`ListOf`'s former `as?`+`typed?`)
+// for as long as it was.
 export type ScalarType =
   // `text`: this static scalar is stored as decimal TEXT — an inlined or bound EXACT TAIL
   // (`inject(9.99m)`, a bound big long/Duration) rather than a native REAL/INT (`count()`,
   // `asNumber(BIGDECIMAL)`). The two share a tag (`bigdecimal`/`long`) but not a storage class, so an
   // ordering comparison must cast a `text` subject to its numeric class and leave a native one alone.
   | { kind: 'static'; type: ValueType; text?: boolean }   // a cast, a typed literal, count()→long
-  | { kind: 'perRow'; column: string }    // a stored-vtype column — the only heterogeneous-safe case
+  | { kind: 'perRow'; carrier: TypeCarrier } // per-value types — the only heterogeneous-safe case
   | { kind: 'unknown' };                  // the JS-client seam; infer from the JS value at framing
+
+/**
+ * WHERE a per-row type is physically written down — the encoding, named.
+ *
+ * A row-preserving relation can put the type in a SIBLING COLUMN, because a relation has columns.
+ * A value living inside a JSON blob cannot: a list member has no column of its own, so its type
+ * rides in the member itself as a `{t,v}` ENVELOPE, discriminated at read time by `json_each`'s own
+ * `type` column. Both are the same COMPILE-TIME fact ("this value states its own type"); only the
+ * read differs, so the two must be one `ScalarType` case with two carriers rather than two type
+ * vocabularies — the second vocabulary is what silently dropped `productiveNull` and the static tag
+ * whenever a list was retyped.
+ *
+ * The envelope is deliberately UNIFORM PER LIST (`barrier.ts foldMember` / `list.ts withLossyFlag`
+ * ask once per relation whether ANY member is lossy under its storage class), because mixing the
+ * two encodings inside one list is the corruption that dead end hit.
+ */
+export type TypeCarrier =
+  | { kind: 'column'; name: string }      // a sibling column of the relation (the stored `vtype`)
+  | { kind: 'envelope' };                 // a `{t,v}` node inside a JSON blob (a typed list member)
 
 export const STATIC = (type: ValueType, text = false): ScalarType =>
   text ? { kind: 'static', type, text: true } : { kind: 'static', type };
 
 /** Whether a static scalar is stored as decimal TEXT (an exact tail), so an ordering compare must cast it. */
 export const staticIsText = (t: ScalarType | undefined): boolean => t?.kind === 'static' && t.text === true;
-export const PER_ROW = (column: string): ScalarType => ({ kind: 'perRow', column });
+export const PER_ROW = (column: string): ScalarType => ({ kind: 'perRow', carrier: { kind: 'column', name: column } });
+/** A per-value type carried by the value itself — the encoding a typed list's members use. */
+export const PER_ROW_ENVELOPE: ScalarType = { kind: 'perRow', carrier: { kind: 'envelope' } };
 export const UNKNOWN: ScalarType = { kind: 'unknown' };
 
 /** The static tag, when there is one — for the consumers that can only act on a
@@ -149,14 +181,84 @@ export const UNKNOWN: ScalarType = { kind: 'unknown' };
 export const staticTypeOf = (t: ScalarType | undefined): ValueType | undefined =>
   t?.kind === 'static' ? t.type : undefined;
 
-/** The per-row column name, when the type rides in one. */
+/** The per-row column name, when the type rides in one. An ENVELOPE-carried per-row type has no
+ *  column by construction, so it answers `undefined` exactly as `static`/`unknown` do — a caller
+ *  that can only read a column is asking "is there a column", not "is the type per-row". */
 export const perRowColumnOf = (t: ScalarType | undefined): string | undefined =>
-  t?.kind === 'perRow' ? t.column : undefined;
+  t?.kind === 'perRow' && t.carrier.kind === 'column' ? t.carrier.name : undefined;
 
-/** The physical columns a type channel adds to a relation: a per-row type needs its column
- *  declared in the stream's projection; static/unknown need none. */
-export const perRowCols = (t: ScalarType | undefined): string[] =>
-  t?.kind === 'perRow' ? [t.column] : [];
+/** Whether the value states its OWN type (either carrier) — the question a reader that can decode
+ *  both asks, and the one `perRowColumnOf` deliberately cannot answer. */
+export const isPerRow = (t: ScalarType | undefined): boolean => t?.kind === 'perRow';
+
+/** The column a per-row type rides in AT A RELATION BOUNDARY, where an envelope cannot reach: a
+ *  relation row has columns, so a scalar row's type is always column-carried, and the envelope
+ *  carrier belongs to a value inside a JSON blob. Raising here names the seam rather than reading
+ *  `row[undefined]` and framing every value as untyped — a fail-closed invariant, not a decline. */
+/** Structural equality over the type channel — the question "do these two streams/members agree?",
+ *  asked by every arm merge and every list unification. One authority, because a hand-rolled
+ *  comparison that forgets `text` (or a carrier) reports agreement where there is none. */
+export const sameScalarType = (a: ScalarType, b: ScalarType): boolean =>
+  a.kind !== b.kind ? false
+    : a.kind === 'static' ? a.type === (b as typeof a).type && !!a.text === !!(b as typeof a).text
+      : a.kind === 'perRow' ? a.carrier.kind === (b as typeof a).carrier.kind
+        && perRowColumnOf(a) === perRowColumnOf(b)
+        : true;
+
+/**
+ * The strongest type a relation can HONOUR — a column-carried per-row type whose column the
+ * relation does not declare degrades to `unknown` rather than claiming a column that is not there.
+ *
+ * The rule `assertStreamColumns` caught during the original unification ("a merge that cannot carry
+ * a per-row type must degrade EXPLICITLY"), stated once instead of re-spelled at each narrowing
+ * projection. Three sites narrow this way — the global `fold`, a projected collection, and
+ * `aggregate().by(traversal)`'s `first` window — and each had its own inline ternary, which is how
+ * the `static` case's `text` flag came to be dropped at two of them.
+ */
+export const typeCarriedBy = (t: ScalarType, carries: (column: string) => boolean): ScalarType => {
+  const column = perRowColumnOf(t);
+  return column === undefined || carries(column) ? t : UNKNOWN;
+};
+
+export const perRowColumn = (t: ScalarType, at: string): string => {
+  const column = perRowColumnOf(t);
+  if (column === undefined) throw new Error(`${at}: a per-row type carried by an envelope has no relation column`);
+  return column;
+};
+
+/** The physical columns a type channel adds to a relation: a column-carried per-row type needs its
+ *  column declared in the stream's projection; an envelope, static and unknown need none. */
+export const perRowCols = (t: ScalarType | undefined): string[] => {
+  const column = perRowColumnOf(t);
+  return column === undefined ? [] : [column];
+};
+
+// ---------- the same channel, one layer down: a LIST's members ----------
+
+/** A scalar-membered list whose members carry no tag — the type is whatever the storage class
+ *  says at the wire. The old `{ kind: 'scalar' }` with every optional absent. */
+export const SCALAR_MEMBERS: ListOf = { kind: 'scalar', type: UNKNOWN };
+
+/** A scalar-membered list whose members are self-describing `{t,v}` nodes. The old `TYPED_LIST`
+ *  constant — but reached through `withMemberType` wherever an existing list is being re-tagged,
+ *  because assigning the constant is exactly how `productiveNull` used to be lost. */
+export const TYPED_MEMBERS: ListOf = { kind: 'scalar', type: PER_ROW_ENVELOPE };
+
+/** Re-tag a list's members, PRESERVING everything the tag is not — the named preserving rebuild
+ *  that makes "assign a constant `ListOf` and silently drop its other fields" unexpressible. A
+ *  non-scalar list has no member tag to change and passes through. */
+export const withMemberType = (of: ListOf, type: ScalarType): ListOf =>
+  of.kind === 'scalar' ? { ...of, type } : of;
+
+/** The member type of a scalar-membered list; `undefined` for element/property/nested lists, whose
+ *  members are not scalars at all. */
+export const memberTypeOf = (of: ListOf): ScalarType | undefined =>
+  of.kind === 'scalar' ? of.type : undefined;
+
+/** Are this list's members self-describing `{t,v}` envelopes? The one question every member READ
+ *  asks, so it is stated once rather than re-derived from the carrier at each site. */
+export const hasTypedMembers = (of: ListOf): boolean =>
+  of.kind === 'scalar' && of.type.kind === 'perRow' && of.type.carrier.kind === 'envelope';
 
 /** One concrete arm in the wire representation of a VariantStream. A variant is
  * a per-row tagged union, so its framing contract records the arms directly rather

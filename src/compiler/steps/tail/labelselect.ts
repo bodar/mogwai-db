@@ -10,7 +10,7 @@ import {
     loweringStateOf, withRelationAndLayout, pathColumns, streamColumns, toElementStream, toListStream, toPropertyStream, toScalarStream, PROPERTY_PAYLOAD,
     type ListOf, type PropertyStream, type Stream,
 } from '../context/stream.ts';
-import { PER_ROW, perRowColumnOf, staticTypeOf } from '../../../sql/kernel/render.ts';
+import { PER_ROW, perRowColumnOf, SCALAR_MEMBERS, staticTypeOf, TYPED_MEMBERS } from '../../../sql/kernel/render.ts';
 import { elemTable, propScalarFor, predicateSql } from '../../plan/plan.ts';
 
 // ---------- as()/select() over path-history labels, any stream shape ----------
@@ -269,7 +269,7 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
     // is fully handled by the property block above, so this path never sees 'property'.
     if (entry.shapes.size !== 1) throw new Error('select(Pop.all/mixed) over a mixed-shape label history not yet supported');
     const shape = [...entry.shapes][0] as AliasShape;
-    const of: ListOf = shape === 'value' ? { kind: 'scalar', typed: true }
+    const of: ListOf = shape === 'value' ? TYPED_MEMBERS
       : (shape === 'vertex' || shape === 'edge') ? { kind: 'elem', elem: shapeElem(shape) }
       : (() => { throw new Error(`select(Pop.all) over a ${shape} label not yet supported`); })();
     const rel = s.q.cte(
@@ -323,7 +323,7 @@ export function selectOneFromAlias(s: Exclude<Stream, { kind: 'result' }>, step:
     // Path aliases predate member metadata and can be heterogeneous under by(); retain
     // their existing conservative scalar fallback. Ordinary ListStream aliases always
     // have `listOf`, so a new list route cannot silently discard it.
-    return toListStream(carry, rel, entry.listOf ?? { kind: 'scalar', as: undefined });
+    return toListStream(carry, rel, entry.listOf ?? SCALAR_MEMBERS);
   }
   // A single scalar value.
   const type = scalarTypeFromAlias(entry.scalarType);

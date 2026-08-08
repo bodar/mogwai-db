@@ -6,7 +6,7 @@ import { nodes, edges, labels, vertexLabels, vertexProperties, edgeProperties } 
 import type { LabelRegime } from '../../api.ts';
 import { CF_MAX_BINDS } from '../../cf-limits.ts';
 import { sliceOf, type IRStep, type Slice } from '../ir/step.ts';
-import { type ElemShape, type ScalarType, type ValueType } from '../../sql/kernel/render.ts';
+import { perRowColumn, type ElemShape, type ScalarType, type ValueType } from '../../sql/kernel/render.ts';
 
 // ---------- SQL node builders ----------
 //
@@ -333,7 +333,7 @@ export const TYPE_UNKNOWN: TypeCtx = { kind: 'unknown' };
  * predicate consumer from reimplementing the boundary. */
 export const typeCtxOf = (type: ScalarType, column: (name: string) => Expression): TypeCtx =>
   type.kind === 'static' ? TYPE_STATIC(type.type)
-    : type.kind === 'perRow' ? TYPE_PER_ROW(column(type.column))
+    : type.kind === 'perRow' ? TYPE_PER_ROW(column(perRowColumn(type, 'typeCtxOf')))
       : TYPE_UNKNOWN;
 
 /** P.typeOf(GType|"ClassName") → a SQL type test over `expr`, resolved by `ctx` (see

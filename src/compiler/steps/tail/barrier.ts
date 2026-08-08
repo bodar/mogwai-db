@@ -1,6 +1,6 @@
 import { derived, empty, list, q, raw, type Expression, type Relation } from '../../../sql/kernel/q.ts';
 import { argValues } from '../../../gremlin/frontend.ts';
-import { perRowColumnOf, staticTypeOf, type ListOf } from '../../../sql/kernel/render.ts';
+import { perRowColumnOf, staticTypeOf, TYPED_MEMBERS, type ListOf } from '../../../sql/kernel/render.ts';
 import { sliceSuffix, typedScalarNode } from '../../plan/plan.ts';
 import { armBatches, isLocalScope, BATCHING_BRANCHES, type BranchKind, type IRStep, type NumericReducer, type ScalarReducer } from '../../ir/step.ts';
 
@@ -338,8 +338,8 @@ const LOSSLESS_VTYPES = raw(`('string', 'double', 'int')`);
  *             unknown at compile time. Only a self-describing {t,v} node per member can
  *             express that, so the whole list is typed. This is the runtime-derived,
  *             uniform-per-list decision the barrier-local fix could not make.
- *   static  — one compile-time type for every member; it rides on ListOf.as (one tag for
- *             the list) and the members stay bare. No per-member envelope needed.
+ *   static  — one compile-time type for every member; it crosses UNCHANGED onto the list's own
+ *             member type (`text` flag included) and the members stay bare. No envelope needed.
  *   unknown — nothing to carry; bare members, inferred per value at the wire.
  *
  * Uniform per list is the invariant: mixing encodings within one list is what broke the
@@ -347,7 +347,11 @@ const LOSSLESS_VTYPES = raw(`('string', 'double', 'int')`);
  */
 export function foldMember(input: ScalarStream, src: Relation): { member: Expression; of: ListOf } {
   const perRow = perRowColumnOf(input.type);
-  if (!perRow) return { member: src.c.v, of: { kind: 'scalar', as: staticTypeOf(input.type) } };
+  // A static or unknown type crosses onto the members verbatim — same union, new carrier question,
+  // and NOT a re-derivation through `ValueType` (which drops the `text` flag that says a big long
+  // rides as decimal TEXT, the fact a local reducer needs to compare numerically rather than
+  // lexicographically).
+  if (!perRow) return { member: src.c.v, of: { kind: 'scalar', type: input.type } };
   // The types are per-ROW, so "is an envelope needed?" is a RUNTIME question about the whole
   // list — exactly the decision the reverted barrier-local fix could not make. Wrap iff SOME
   // member's type is lossy under its storage class, asked ONCE for the whole relation: that
@@ -362,7 +366,7 @@ export function foldMember(input: ScalarStream, src: Relation): { member: Expres
   const anyLossy = q`EXISTS (SELECT 1 FROM ${probe} WHERE ${probe.c[perRow]} IS NOT NULL AND ${probe.c[perRow]} NOT IN ${LOSSLESS_VTYPES})`;
   return {
     member: q`CASE WHEN ${anyLossy} THEN ${typedScalarNode(src.c.v, { vtypeExpr: src.c[perRow] })} ELSE ${src.c.v} END`,
-    of: { kind: 'scalar', typed: true },
+    of: TYPED_MEMBERS,
   };
 }
 

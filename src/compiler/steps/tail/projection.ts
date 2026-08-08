@@ -1,6 +1,6 @@
 import { argValues, isColumnArg, isNested, isOrderArg, isTokenArg } from '../../../gremlin/frontend.ts';
 import { empty, list, q, raw, Relation, value, type Expression } from '../../../sql/kernel/q.ts';
-import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type Shape } from '../../../sql/kernel/render.ts';
+import { PER_ROW, SCALAR_MEMBERS, STATIC, staticTypeOf, UNKNOWN, type Shape } from '../../../sql/kernel/render.ts';
 import { edgeProperties, labels, vertexLabels, vertexProperties } from '../../../sql/schema.ts';
 import { engineOf } from '../../engine/deps.ts';
 import { type IRStep } from '../../ir/strategies.ts';
@@ -824,7 +824,7 @@ function compileFold(st: ElementStream, acc: TailAcc): ListStream {
       ? q`jsonb(json_group_array(f.v ORDER BY f.v ${orderDir === 'desc' ? 'DESC' : 'ASC'}))`
       : jsonbGroupArray(q`f.v`);
     const rel = st.q.cte(q`SELECT ${arr} AS list FROM ${source} AS f`, ['list']);
-    return toListStream(carry, rel, { kind: 'scalar' });
+    return toListStream(carry, rel, SCALAR_MEMBERS);
   }
   throw new Error(`fold() of a ${projName}() projection not yet supported`);
 }

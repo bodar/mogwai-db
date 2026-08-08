@@ -5,7 +5,7 @@ import { type IRStep } from '../../ir/strategies.ts';
 import { normalize } from '../../ir/passes.ts';
 import { elemRel, type ElementStream, type StepFn, type SideEffectDef } from '../context/context.ts';
 import { type ScalarStream } from '../context/stream.ts';
-import { staticTypeOf } from '../../../sql/kernel/render.ts';
+import { typeCarriedBy, UNKNOWN } from '../../../sql/kernel/render.ts';
 import { foldMember } from '../tail/barrier.ts';
 import { tryCompileFirstElementValueRows, tryCompileScalarValueRows } from '../tail/child.ts';
 import { classifyBy } from '../tail/child-shape.ts';
@@ -64,7 +64,7 @@ export const aggregate: StepFn = (s, st) => {
         q`SELECT ${jsonbGroupArray(pe, memberOrder(st, p))} AS list FROM ${n} JOIN ${p} ON ${n.c.id}=${p.c.id}${where}`,
         ['list'],
       );
-      def = { kind: 'list', rel, of: { kind: 'scalar', productiveNull: productive } };
+      def = { kind: 'list', rel, of: { kind: 'scalar', type: UNKNOWN, productiveNull: productive } };
     } else if (by.kind === 'nested') {
       const rows = tryCompileScalarValueRows(st, by.nested);
       if (rows) {
@@ -88,10 +88,10 @@ export const aggregate: StepFn = (s, st) => {
         const on = q`${first.c[rows.frame.ordinal]}=${d.c[rows.frame.ordinal]} AND ${first.c.rn}=1`;
         const source = productive ? q`${d} LEFT JOIN ${first} ON ${on}` : q`${d} JOIN ${first} ON ${on}`;
         // NB the `first` projection above narrows to (v, ordinal, rn) — it does not carry a
-        // per-row vtype column, so this by()-modulated path can only offer the static tag.
-        // Widening it to preserve the type channel is follow-on work, not a silent drop.
+        // per-row vtype column, so a column-carried type DEGRADES rather than being claimed;
+        // `typeCarriedBy` is that rule, shared with the two other narrowing folds.
         const rel = st.q.cte(q`SELECT ${jsonbGroupArray(first.c.v, memberOrder(st, d))} AS list FROM ${source}`, ['list']);
-        def = { kind: 'list', rel, of: { kind: 'scalar', as: staticTypeOf(rows.stream.type), productiveNull: productive } };
+        def = { kind: 'list', rel, of: { kind: 'scalar', type: typeCarriedBy(rows.stream.type, () => false), productiveNull: productive } };
       } else {
         const elements = tryCompileFirstElementValueRows(st, by.nested);
         if (!elements)

@@ -1,6 +1,6 @@
 import { isNested, isTokenArg, stepChain, argValues } from '../../../gremlin/frontend.ts';
 import { empty, list, q, raw, value, values, type Expression, type Relation } from '../../../sql/kernel/q.ts';
-import { PER_ROW, perRowColumnOf, staticTypeOf, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
+import { PER_ROW, perRowColumnOf, SCALAR_MEMBERS, staticTypeOf, type ElemShape, type GroupKey, type GroupVal } from '../../../sql/kernel/render.ts';
 import { NUMERIC_REDUCERS, REDUCERS } from '../../ir/step.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import {
@@ -674,7 +674,7 @@ export function lowerValueMap(st: ElementStream, proj: IRStep): MapStream {
   );
   // One blob row per element, carrying whatever the element carried (bar bulk, consumed here).
   const carry: LoweringState = loweringStateOf(st, outCarried);
-  return toMapStream(carry, rel, { kind: 'scalar' }, { kind: 'list', of: { kind: 'scalar' } });
+  return toMapStream(carry, rel, { kind: 'scalar' }, { kind: 'list', of: SCALAR_MEMBERS });
 }
 
 // ---------- a MAP-shaped child body ----------
@@ -824,7 +824,7 @@ function deriveGroupMap(s: GroupStream): { rel: Relation; keyOf: MapOf; valOf: M
     throw new Error('select(Column)/unfold() over a group of single-element (tail) values not yet supported');
   } else if (s.val.kind === 'count') { valNode = typedScalarNode(g.c.gv, { staticType: 'long' }); valOf = { kind: 'scalar' }; }
   else if (s.val.kind === 'sum') { valNode = typedScalarNode(g.c.gv); valOf = { kind: 'scalar' }; }
-  else if (s.val.kind === 'list' || s.val.kind === 'scalarList') { valNode = q`json(${g.c.gv})`; valOf = { kind: 'list', of: { kind: 'scalar' } }; }
+  else if (s.val.kind === 'list' || s.val.kind === 'scalarList') { valNode = q`json(${g.c.gv})`; valOf = { kind: 'list', of: SCALAR_MEMBERS }; }
   else throw new Error('select(Column)/unfold() over this rich group value layout not yet supported');
 
   // One pair per group key. An element-list value already aggregates member rows (GROUP BY key);
