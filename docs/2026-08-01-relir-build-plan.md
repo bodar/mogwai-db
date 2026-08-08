@@ -583,6 +583,23 @@ GUARD, not a decline.** `addV` proves single-row at COMPILE time (its one-row ca
   `valueMap()` describe what is actually there. `T` is a WIRE TYPE, not a string: `FrameNode` grew a `T` arm
   (one line in `frameTypedNode`, the same shape as its `vertex`/`edge` arms), deliberately NOT a
   `CanonicalType` — a token is never a stored property VALUE, so it belongs to the READ vocabulary only.
+- ⚠️ **THE GROUP BARRIER HAS THREE HOSTS AND ONE LOWERING.** A scalar stream needed only a CALLER
+  (`byNode`'s scalar arm already tagged the value); a bare `group()`/`groupCount()` keys by the ELEMENT
+  with the ROWID as the `GROUP BY` and `elementNode` building the entry off it — once per SURVIVING
+  group, so SQLite hashes an integer rather than a JSON document per row. Both declines had stopped
+  being true before they were removed: one said the caller did not exist, the other was written before
+  an element could be a MEMBER of the typed tree. **Read a decline's REASON, not its date.**
+- 🔴 **A STATIC TYPE MUST RIDE ON THE SCALAR HOST — leaving it off was a wrong ANSWER.** A static tag
+  is a per-row `vtype` constant-folded, so an untagged group key made
+  `inject(777).asNumber(GType.BIGINT).groupCount()` frame an Int: untagged means "infer from the JS
+  value", which cannot tell a BigInt from an Int, a BigDecimal from an Int or a datetime from a long.
+  Three corpus traversals framed the wrong TYPE with the right value, and only `sql-hygiene`'s
+  byte-level comparison saw it. §6·7 at one more carrier.
+- ⚠️ **A SHAPE THAT FRAMES CORRECTLY AT THE WIRE CAN STILL BE WRONG TO RE-ENTER**, and that is now
+  twice in this family. An element-keyed map's blob holds `{t:'vertex', v:{…}}`, which the typed framer
+  walks at any depth — but `select(Column.keys).unfold()` decodes it into the SCALAR vocabulary, whose
+  framer emitted the payload as a JSON STRING. `MapOf`'s `elem` arm on the key is what turns that into
+  a DECLINE; the wire still sees `scalar`, because the two vocabularies answer two questions.
 - ⚠️ **`valueMap` and `elementMap` are ONE producer with THREE facts different**, which is the
   `group()`/`groupCount()` relationship again: the tokens (optional against unconditional), the value
   arity (a LIST per vertex key against FLAT, and `map.put` overwriting means the flat form keeps the
@@ -636,6 +653,11 @@ trusted. Nobody has swept the rest.
 🚧 Two `sack` declines remain, both honest: `withSack(seed, Operator.x)` names a MERGE operator (a third
 policy answer for the role — a channels-core change, not a step lowering), and `barrier(Barrier.normSack)` is
 its own step.
+
+🚧 **A PLAN-SIZE WART worth one commit, spotted while reading the emitted SQL:** `byNode`'s property arm
+builds `typedNode(storedValue(…), vtype)` and `typedNode` applies `storedValueOn` AGAIN, so every
+property-keyed group emits the collection CASE nested inside itself. `json(json(x))` is idempotent, so it
+is bytes and not an answer — but it is bytes in the hottest key expression there is.
 
 🚧 **What the MAP family still owes, in the order it is worth doing:** the SELECTIVE token subsets
 (`with(tokens, ids)`, which `absorbValueMapWith` deliberately leaves in place to fail closed) and the
