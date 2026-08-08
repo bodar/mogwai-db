@@ -189,7 +189,6 @@ deferred	legacy	group() on a list value not yet supported	g.V().hasLabel("person
 deferred	legacy	map() child not supported by generic scalar lowering	g.V().hasLabel("person"). map(__.choose(__.values("age")). option(P.between(26, 30), __.values("name").fold()). option(Pick.none, __.values("name").fold()))
 deferred	legacy	map() child not supported by generic scalar lowering	g.V().hasLabel("person").as("p"). map(__.bothE().label().groupCount()).as("r"). select("p", "r")
 unbound	legacy	Unbound parameter 'xx1'	g.V().hasLabel("person").as("p").V(xx1).addE("uses").from("p")
-deferred	legacy	group('a') after as()/path() not yet supported	g.V().hasLabel("person").as("p").out("created").group("a").by("name").by(__.select("p").values("age").sum()).cap("a")
 unbound	legacy	Unbound parameter 'xx1'	g.V().hasLabel("person").choose(__.values("age")). option(xx1, __.constant("young")). option(Pick.none, __.constant("old")). groupCount()
 deferred	legacy	choose().option() not yet supported by generic lowering (an option body outside the element/scalar/list arm shapes, or a choice the correlated seam cannot compile)	g.V().hasLabel("person").choose(values("name")). option(is("marko"), values("age")). option(Pick.none, values("name"))
 deferred	legacy	step not implemented: connectedComponent()	g.V().hasLabel("person").connectedComponent().with("~tinkerpop.connectedComponent.edges", __.bothE("knows")).with("~tinkerpop.connectedComponent.propertyName", "cluster").project("name","cluster").by("name").by("cluster")

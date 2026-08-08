@@ -9,10 +9,10 @@ import { argValues } from '../../gremlin/frontend.ts';
 import { and, byEncounter, carriedCols, coalesce, EDGE_COLS, eq, fenced, firstOf, jsonOf, meta, NODE_COLS, PROPERTIES, typeOf, typedNode, withPayload, type Minter } from './build.ts';
 import { inferredVtype, LIST_COL } from './list.ts';
 import { edgeLabel, elementNode, externalId, vertexLabels } from './element.ts';
-import { byExpr, byNode, modulations, productivityFilter } from './modulator.ts';
+import { byExpr, byNode, modulations, productivityFilter, type Modulation } from './modulator.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { AliasMap } from '../plan/alias.ts';
-import { isReducer } from './reducer.ts';
+import { isReducer, reducerAggregate } from './reducer.ts';
 
 /**
  * THE MAP SHAPE — a barrier whose result is ONE map, as a value in the algebra.
@@ -192,14 +192,14 @@ export function groupBarrier(
   // than silently collecting the elements instead — which would be the right arity and the wrong answer,
   // the one thing the decline contract exists to prevent.
   const valueBy = bys[1];
-  // A REDUCING traversal value is one scalar for the WHOLE group, not one member per incoming
-  // traverser. The generic child expression reduces per parent, which is composable for neither the
-  // framing (it would produce `[n]`) nor every reducer (`mean` needs the complete child-row domain,
-  // not an average of per-parent means). That group-scoped reducer is a separate arm; decline until
-  // it lands rather than collecting a plausible-looking wrong value.
+  // A REDUCING traversal value is one scalar for the WHOLE GROUP, not one member per incoming
+  // traverser — the group's members' child traversers POOL and the barrier reduces the pool once
+  // (`Grouping.determineBarrierStep`). So it is its own arm, and the generic per-parent child
+  // expression would be a plausible-looking wrong value rather than a decline.
   if (valueBy?.key.kind === 'child') {
     const terminal = valueBy.key.body.at(-1)?.name;
-    if (terminal === 'count' || (terminal !== undefined && isReducer(terminal))) return null;
+    if (terminal === 'count' || (terminal !== undefined && isReducer(terminal)))
+      return groupReduced(input, host, step, bys[0], valueBy.key.body, bulked, child, fresh);
   }
   const member = valueBy ? byNode(valueBy, host, fresh, child) : undefined;
   if (valueBy && !member) return null;
@@ -381,6 +381,106 @@ export function groupBarrier(
   };
 }
 
+/**
+ * A GROUP whose VALUE is a REDUCER over the group's pooled child traversers, or `null` to decline.
+ *
+ * **The pool is the whole point.** `GroupStep` applies the value traversal's PRE-BARRIER part per
+ * traverser and lets the BARRIER reduce what every member of a key contributed
+ * (`Grouping.determineBarrierStep`) — so `group().by(T.label).by(__.bothE().values('weight').sum())` is
+ * one sum per LABEL, not the sum of per-vertex sums re-summed. The two agree for `sum` and disagree for
+ * `mean`, which is precisely why this may not be a decomposition table: `mean` needs the complete
+ * child-row domain, and a rule that is right for three reducers and wrong for the fourth is the shape
+ * of defect the decline contract exists to prevent.
+ *
+ * So the value side is a JOIN and the grouping aggregates over it — the seam's `rows` answer (§6·6's
+ * fourth), with the `origin` channel naming each child row's host. The KEY is re-projected FROM THE
+ * ORIGIN rather than carried, because a join keeps channels and drops payload: one `int` names the
+ * parent, and the same `by()` that would have read the parent reads it again off that rowid.
+ *
+ * THREE DECLINES, each for its own reason and none of them taste:
+ *
+ * - a SCALAR host — `origin` is a rowid and a value stream has none (a channels-core change);
+ * - `count()` with a NON-EMPTY body — `CountGlobalStep` seeds 0, so a member whose body produced
+ *   nothing must still count 0 and keep its key, which needs an OUTER join where every other reducer
+ *   wants an inner one (`SumGlobalStep` leaves `NON_EMITTING_SEED` and the key goes with the traverser);
+ * - a body that does not reduce to a per-row VALUE — there is nothing for an aggregate to read.
+ *
+ * `count()` with an EMPTY body is not the same question and is answered here: `by(__.count())` counts
+ * the group's own traversers, which is `groupCount`'s value exactly, with no join and no pool.
+ */
+function groupReduced(
+  input: Rel, host: ChildHost, step: IRStep, keyBy: Modulation | undefined, body: readonly IRStep[],
+  bulked: boolean, child: ChildSeam, fresh: Minter,
+): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } | null {
+  if (host.kind !== 'element') return null;
+  const reducer = body.at(-1)!.name;
+  const pre = body.slice(0, -1);
+  if (!pre.length) {
+    // `by(__.count())` — the group's own traverser count. `groupBarrier` already builds exactly that
+    // for `groupCount()`, so this re-enters it rather than growing a second spelling of one answer.
+    if (reducer !== 'count') return null;
+    return groupBarrier(input, host, { ...step, name: 'groupCount', modulators: step.modulators?.slice(0, 1) }, bulked, child, fresh);
+  }
+  if (reducer === 'count') return null;
+  if (!isReducer(reducer)) return null;
+  // `mean` DECLINES, and the reason is the BLOB rather than the reducer: SQLite writes a REAL into JSON
+  // with 15 significant digits (`%!.15g`), so a map value that needs 17 comes back a digit short —
+  // `map/Mean.feature:70` wants `d[0.3333333333333333].d` and the blob carries `0.333333333333333`.
+  // The defect is PROJECT-WIDE and BOTH SPINES ALREADY HAVE IT (`g.inject(1).math("1/3").fold()` is
+  // lossy on each), which is §12's rule again — their agreement is a shared cause, not correctness. It
+  // is invisible for every other reducer here because `sum`/`min`/`max` of exact inputs stay exact, and
+  // it becomes a DIVERGENCE only for a mean, where legacy computes in a ROW and this computes into the
+  // blob. Declining hands it to the spine that answers exactly; the fix is to carry an inexact real as
+  // decimal TEXT under its tag, which is the carriage the exact tail already has for a big long.
+  if (reducer === 'mean') return null;
+  const rows = child.rows(pre, input, host.elem, host.row?.aliases ?? NO_LABELS);
+  if (!rows || rows.framing.kind !== 'scalar') return null;
+
+  const origin = col(rows.rel.id, rows.origin);
+  const elementKey = !keyBy;
+  const key = elementKey ? origin : byNode(keyBy!, { kind: 'element', id: origin, elem: host.elem }, fresh, child);
+  if (!key) return null;
+  // THE KEY IS A COLUMN FIRST, for the reason the barrier's own key is: a `by()` key is a correlated
+  // subquery and SQL needs it in the SELECT list AND the GROUP BY, so naming it once is what stops the
+  // whole subquery being inlined at every position it appears.
+  const projected = make.project({
+    id: fresh('rk'), input: rows.rel, channels: [],
+    type: typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true)),
+    exprs: [[KEY_COL, key], [VAL_COL, col(rows.rel.id, 'v')]],
+  });
+  const keyed = make.materialize({ id: fresh('rm'), input: projected, channels: [], type: projected.type });
+  const drop = productivityFilter(step, col(keyed.id, KEY_COL));
+  const rowsIn = drop
+    ? make.filter({ id: fresh('rf'), input: keyed, channels: [], type: keyed.type, pred: drop })
+    : keyed;
+  // NO BULK WEIGHTING: the child rows are the pool, one traverser each. A collapsed parent's
+  // multiplicity was spent producing them, and re-applying it here would count every walk twice.
+  const reduced = reducerAggregate(col(rowsIn.id, VAL_COL), reducer);
+  const productive = make.aggregate({
+    id: fresh('rb'), input: rowsIn, channels: [],
+    type: typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), meta(VAL_COL, 'any', true)),
+    groupBy: [col(rowsIn.id, KEY_COL)],
+    aggs: [[VAL_COL, reduced.value]],
+  });
+  const entry: Entry = {
+    key: elementKey ? elementNode(col(productive.id, KEY_COL), host.elem, fresh) : col(productive.id, KEY_COL),
+    // THE TAG IS A CANONICAL TYPE, NOT A STORAGE CLASS. `reducerAggregate` reports `typeof(<the
+    // aggregate>)` — `'integer'`/`'real'` — which is what `scalarPayload`'s `result: 'number'` arm
+    // reads, and the typed tree speaks the OTHER vocabulary (`'long'`/`'double'`). Handing it a storage
+    // class made a mean frame as an unmapped tag and come back a digit short; `inferredVtype` is the
+    // shared translation, and using it here is the same answer the framer would reach for an untagged
+    // value with the big-long case still covered.
+    val: typedNode(col(productive.id, VAL_COL), inferredVtype(col(productive.id, VAL_COL))),
+    keyOf: elementKey ? { kind: 'elem', elem: host.elem } : { kind: 'scalar' },
+    valOf: { kind: 'scalar' },
+  };
+  return {
+    rel: mapOfGroups(productive, entry, col(productive.id, KEY_COL), fresh),
+    keyOf: entry.keyOf,
+    valOf: entry.valOf,
+  };
+}
+
 /** THE TRAVERSER ITSELF as a collected member — a rowid for an element (expanded once per surviving
  *  member at the aggregate) and the self-describing value node for a scalar, which is `byNode`'s own
  *  identity answer over that host. One function so the two hosts cannot describe "the traverser" two
@@ -456,6 +556,10 @@ const elementRow = (rowid: Expr, elem: Elem, fresh: Minter): Rel => {
  *  `elementMap()` takes no option at all: its tokens are UNCONDITIONAL. */
 export interface MapTokens { readonly ids: boolean; readonly labels: boolean }
 export const NO_TOKENS: MapTokens = { ids: false, labels: false };
+
+/** No labels in scope — a host built without a row (see `elementHost`). Shared so the two readers
+ *  cannot describe "none" differently. */
+const NO_LABELS: AliasMap = new Map();
 export const ALL_TOKENS: MapTokens = { ids: true, labels: true };
 
 /**

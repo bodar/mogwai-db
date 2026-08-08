@@ -11,7 +11,7 @@
 // `insertEdgeProperty` for every property key) rather than each write step, which is the point of
 // having a waist — a new write step inherits the rule instead of having to remember it.
 import { describe, expect, test } from 'bun:test';
-import { runWith } from '../support/harness.ts';
+import { grouped, runWith } from '../support/harness.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { validateLabel, validatePropertyKey } from '../../src/gremlin/validate.ts';
@@ -101,7 +101,9 @@ describe('T.id is the outward-facing id at every by() position', () => {
   const vals = (s: GraphStore, q: string) => (runWith(s, q) as any[]).map((r) => r.v ?? r.id);
   /** A group() plan's rows are the raw key/value pair columns — read them as the pairs they are
    *  rather than through the wire framer, which is a different subject from the KEY resolution. */
-  const pairs = (s: GraphStore, q: string) => (runWith(s, q) as any[]).map((r) => [r.gk, r.gv]);
+  // Through the harness's `grouped`, not off `gk`/`gv`: the two spines spell a group row differently
+  // by design, so reading the columns would assert the ROUTE rather than the keying this test is about.
+  const pairs = (s: GraphStore, q: string) => Object.entries(grouped(runWith(s, q))).map(([k, v]) => [k, Number(v)]);
 
   test('group().by(T.id) keys on the user id, not the rowid', () => {
     const s = withIds();

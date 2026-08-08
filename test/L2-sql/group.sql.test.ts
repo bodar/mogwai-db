@@ -548,7 +548,12 @@ describe('group / properties SQL', () => {
     expect(read('g.V().group("a").by().by(__.out().label().fold()).cap("a").select(Column.values).unfold()').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
   });
 
+  // LEGACY'S group-scoped reducer, pinned at that spine. RelIR builds the same SHAPE by the same
+  // argument (the child rows pool and the reducer runs once per key) and spells it in its own
+  // vocabulary — the `origin` CHANNEL where legacy carries an `o0` column, and the ordinary fold's
+  // movements where legacy hand-builds the join. The RelIR-position assertions are below.
   test('group-scoped reducers aggregate generic child rows at the final group boundary', () => {
+    const read = (query: string, options?: CompileOptions) => bare_read(query, { ...options, spine: 'legacy' });
     const p = read("g.V().hasLabel('software').group().by('name').by(__.bothE().values('weight').mean())");
     // Movement and values() become ordinary child relations retaining the parent
     // origin. The reducer runs once over every raw row in the final key (weighted by the
@@ -561,6 +566,33 @@ describe('group / properties SQL', () => {
     expect(p.sql).not.toContain('MAX((SELECT AVG(');
     expect(read("g.V().group().by('name').by(__.bothE().values('weight').sum())").sql)
       .toContain('SUM(CASE WHEN typeof(gr.v)');
+  });
+
+  test('the GROUP-SCOPED reducer pools the child rows, and the ORIGIN channel is what carries the key', async () => {
+    const store = seededStore();
+    const dec = async (q: string) => decodeAll(executeQuery(store, q));
+    // `GroupStep` applies the value traversal's PRE-BARRIER part per traverser and lets the BARRIER
+    // reduce what every member of a key contributed (`Grouping.determineBarrierStep`), so this is one
+    // sum per LABEL and not the sum of per-vertex sums re-summed. The two agree for `sum` and disagree
+    // for `mean`, which is why it may not be a decomposition table.
+    expect(await dec("g.V().hasLabel('software').group().by('name').by(__.bothE().values('weight').sum())"))
+      .toEqual([new Map([['lop', 1], ['ripple', 1]])]);
+    expect(await dec("g.V().hasLabel('software').group().by('name').by(__.bothE().values('weight').max())"))
+      .toEqual([new Map([['lop', 0.4], ['ripple', 1]])]);
+    // `by(__.count())` with an EMPTY body is not that question: it counts the group's own traversers,
+    // which is `groupCount()`'s value exactly, and it re-enters that arm rather than growing a second
+    // spelling of one answer.
+    expect(await dec("g.V().has('lang').group().by('lang').by(__.count())")).toEqual([new Map([['java', 2]])]);
+    if (relirOff) return;
+    // The ORIGIN CHANNEL is the mechanism, and the SQL says so: the seed names it, the movement's arms
+    // carry it, and the KEY is re-read off it rather than carried through the join.
+    const sql = bare_read("g.V().group().by('name').by(__.bothE().values('weight').sum())").sql;
+    expect(sql).toContain('AS origin');
+    expect(sql).toMatch(/rp\d+\.node = \w+\.origin/);
+    // A body reading a LABEL resolves, because the host's labels ride into the sub-fold — handing over
+    // an empty map would have made an unresolvable `select()` (now the EMPTY RESULT) pool zero rows.
+    expect(await dec("g.V().hasLabel('person').as('p').out('created').group().by('name').by(__.select('p').values('age').sum())"))
+      .toEqual([new Map([['lop', 96], ['ripple', 32]])]);
   });
 
   test('properties() joins the property table into a property shape', () => {

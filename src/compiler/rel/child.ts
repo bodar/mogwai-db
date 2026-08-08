@@ -74,8 +74,36 @@ export interface ChildSeam {
   readonly predicate: (body: readonly IRStep[], subject: Subject, elem: Elem, negated: boolean) => Expr | null;
   /** A ROOTED chain — one correlated to nothing — lowered as a relation, or `null` to decline. */
   readonly rooted: (steps: readonly IRStep[]) => RootedRead | null;
+  /**
+   * A child body lowered over the host STREAM — one row per child TRAVERSER, carrying an `origin`
+   * channel that names the host row it descends from. `null` declines.
+   *
+   * THE FOURTH ANSWER, and it is the one a GROUP-SCOPED reduction needs: `scalar` collapses the body to
+   * one value PER HOST ROW, which is the wrong shape when the reducer must see every group member's
+   * child traversers pooled. So this hands back the rows themselves and lets the CONSUMER decide the
+   * grouping — the same division `rooted` makes, one correlation along.
+   *
+   * It is a JOIN and not a correlated subquery because SQLite has no `LATERAL`: the correlation becomes
+   * the join's `ON`, which is what the ordinary fold's movements already build from an input relation.
+   * That is also why the origin has to be a CHANNEL — a join keeps its input's channels and drops its
+   * payload (§3.5), so a plain column naming the parent would not survive the first hop.
+   */
+  readonly rows: (body: readonly IRStep[], input: Rel, elem: Elem, aliases: AliasMap) => ChildRows | null;
   /** A nested argument's normalized body, or `null` where normalizing it RAISES. */
   readonly body: (nested: unknown, scope: BodyScope) => readonly IRStep[] | null;
+}
+
+/**
+ * A CHILD BODY'S ROWS over a host STREAM — the relation, what its traversers ARE, and the column that
+ * names each one's host row.
+ *
+ * `origin` is a COLUMN NAME rather than an expression because the consumer both GROUPS by it and
+ * re-projects the host's own key from it, and two spellings of one column is how those two uses drift.
+ */
+export interface ChildRows {
+  readonly rel: Rel;
+  readonly framing: RelFraming;
+  readonly origin: string;
 }
 
 /**

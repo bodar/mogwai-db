@@ -219,24 +219,27 @@ test('group scalar-list drops members missing the property (json_group_array + n
 
 test('group reducers operate over the complete child row domain for each key', () => {
   const store = seededStore();
-  const grouped = (query: string) => Object.fromEntries(run(store, query).map((r) => [r.gk, r.gv]));
+  // Through the HARNESS, because the two spines spell a group row differently by design — legacy
+  // emits `(gk, gv)` ROWS and RelIR one `map` blob — and reading `gk`/`gv` here would be asserting the
+  // ROUTE rather than the grouping. Same move the five other gk/gv readers already made.
+  const groupedRows = (query: string) => grouped(run(store, query));
 
   // count is total: parents with no productive child rows retain their key as zero.
-  expect(grouped('g.V().group().by(T.label).by(__.count())'))
+  expect(groupedRows('g.V().group().by(T.label).by(__.count())'))
     .toEqual({ person: 4, software: 2 });
-  expect(grouped('g.V().group().by(T.label).by(__.out().count())'))
+  expect(groupedRows('g.V().group().by(T.label).by(__.out().count())'))
     .toEqual({ person: 6, software: 0 });
 
   // Numeric reducers are productive-only. They combine all child rows sharing the
   // final key; an empty software domain contributes no map entry.
-  expect(grouped('g.V().group().by(T.label).by(__.values("age").sum())'))
+  expect(groupedRows('g.V().group().by(T.label).by(__.values("age").sum())'))
     .toEqual({ person: 123 });
-  expect(grouped('g.V().group().by(T.label).by(__.outE().values("weight").sum())'))
+  expect(groupedRows('g.V().group().by(T.label).by(__.outE().values("weight").sum())'))
     .toEqual({ person: 3.5 });
 
   // Equal element ids are still distinct traversers. Both marko parents contribute
   // their full outgoing-weight domain (1.9 each) to the shared person reduction.
-  expect(grouped('g.V(1).union(__.identity(),__.identity()).group().by(T.label).by(__.outE().values("weight").sum())'))
+  expect(groupedRows('g.V(1).union(__.identity(),__.identity()).group().by(T.label).by(__.outE().values("weight").sum())'))
     .toEqual({ person: 3.8 });
 });
 
@@ -440,8 +443,10 @@ describe('a project()/select() child body', () => {
 // and `count` was special for no semantic reason. Now both are tried. This test asserts the
 // UNIFORMITY, not the two scenarios that happened to expose it.
 describe('group().by(<value traversal>) — reducer/projection uniformity', () => {
-  const grouped = (store: GraphStore, g: string) =>
-    (run(store, g) as any[]).map((r) => [r.gk, Number(r.gv)])
+  // Via the harness for the reason above: what this asserts is the GROUPING, not which spine spelled
+  // the row.
+  const groupedPairs = (store: GraphStore, g: string) =>
+    Object.entries(grouped(run(store, g))).map(([k, v]) => [k, Number(v)])
       .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
 
   test('a projection composes with count exactly as it does with the other reducers', () => {
@@ -457,16 +462,16 @@ describe('group().by(<value traversal>) — reducer/projection uniformity', () =
     const store = seededStore();
     // modern: 4 person + 2 software. `label` and `name` exist on EVERY vertex, so counting either
     // per group is the member count — it must equal the bare count() form exactly.
-    const members = grouped(store, 'g.V().group().by(__.label()).by(__.count())');
+    const members = groupedPairs(store, 'g.V().group().by(__.label()).by(__.count())');
     expect(members).toEqual([['person', 4], ['software', 2]]);
     for (const body of ['__.label().count()', '__.values("name").count()'])
-      expect(grouped(store, `g.V().group().by(__.label()).by(${body})`)).toEqual(members);
+      expect(groupedPairs(store, `g.V().group().by(__.label()).by(${body})`)).toEqual(members);
     // A property only SOME members carry must differ — proving it counts values, not members.
-    expect(grouped(store, 'g.V().group().by(__.label()).by(__.values("age").count())'))
+    expect(groupedPairs(store, 'g.V().group().by(__.label()).by(__.values("age").count())'))
       .toEqual([['person', 4], ['software', 0]]);
     // A movement projection counts reached values, and agrees with the movement-only form.
-    expect(grouped(store, 'g.V().group().by(__.label()).by(__.out().values("name").count())'))
-      .toEqual(grouped(store, 'g.V().group().by(__.label()).by(__.out().count())'));
+    expect(groupedPairs(store, 'g.V().group().by(__.label()).by(__.out().values("name").count())'))
+      .toEqual(groupedPairs(store, 'g.V().group().by(__.label()).by(__.out().count())'));
   });
 
   test('a reducer that is nonsense over elements still fails closed', () => {

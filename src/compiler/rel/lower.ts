@@ -33,7 +33,7 @@ import {
 import { bindAliases, liveAliases } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, propertyExists, propertyVtype, type Modulation } from './modulator.ts';
-import type { ChildHost, ChildSeam, ChildValue, HostRow, RootedRead, Subject } from './child.ts';
+import type { ChildHost, ChildRows, ChildSeam, ChildValue, HostRow, RootedRead, Subject } from './child.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
@@ -149,6 +149,25 @@ const BULK: Channels = [{ col: 'bulk', role: 'bulk' }];
  * schema from the physical one.
  */
 const ENCOUNTER: Channel = { col: 'encounter', role: 'encounter' };
+
+/**
+ * THE ORIGIN CHANNEL — which HOST ROW a traverser descends from, carried through the ordinary fold.
+ *
+ * `src/channels.ts` has modelled the role since the channel core landed (merge `identical`, barrier
+ * `empty`, a `ROLE_ORDER` slot) and nothing minted one, which is exactly where `sack` was one increment
+ * earlier: the channel existed, the plumbing did not. It costs no per-step work to carry — a movement
+ * preserves its input's channels by contract (§3.5) — so minting it on a relation and lowering a body
+ * from there is the whole mechanism.
+ *
+ * It is what makes a GROUP-SCOPED reduction expressible: the child rows of every group member have to
+ * pool before the reducer runs, so the value side is a JOIN the grouping aggregates over rather than a
+ * scalar subquery per row — and a JOIN drops the parent's payload while keeping its channels. A
+ * CORRELATED relation could not serve, because SQLite has no `LATERAL` and the correlation has to
+ * become a join `ON`.
+ */
+const ORIGIN: Channel = { col: 'origin', role: 'origin' };
+const originOf = (channels: Channels): Channel | undefined =>
+  channels.find((channel) => channel.role === 'origin');
 const encounterOf = (channels: Channels): Channel | undefined =>
   channels.find((channel) => channel.role === 'encounter');
 
@@ -4069,10 +4088,50 @@ const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
     ? correlatedExists(body, subject, elem, fresh, ctx, true) ?? valuePredicate(body, subject, elem, fresh, ctx, true)
     : bodyPredicate(body, subject, elem, fresh, ctx)),
   rooted: (steps) => rootedRead(steps, ctx, fresh),
+  rows: (body, input, elem, aliases) => childRows(body, input, elem, aliases, ctx, fresh),
   body: (nested, scope) => (scope === 'child'
     ? bodyOf(nested, ctx.params, ctx.sideEffects)
     : rootedSteps(nested, ctx.params, ctx.sideEffects)),
 });
+
+/**
+ * A CHILD BODY'S ROWS over a host STREAM — the seam's FOURTH answer (`child.ts` states why).
+ *
+ * The whole mechanism is two lines, and that is the point: MINT the origin channel on the input, then
+ * hand the relation to the ordinary fold. A movement carries its input's channels by contract (§3.5),
+ * so the origin rides through every hop with no per-step change — which is what the channel core was
+ * built for and what makes this a caller rather than a second fold.
+ *
+ * The origin is the host's ROWID, so an ELEMENT host is the only one served: a value stream has no
+ * rowid to name its parent by, and `origin` is typed `int`. That is a real limit rather than a
+ * deferral of taste — a scalar-hosted group-scoped reducer needs the role to carry a VALUE, which is a
+ * channels-core change.
+ */
+function childRows(
+  body: readonly IRStep[], input: Rel, elem: Elem, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
+): ChildRows | null {
+  if (!body.length || originOf(input.channels)) return null;
+  const channels = withChannel(input.channels, ORIGIN);
+  const seeded = make.project({
+    id: fresh('og'), input, channels, type: typeOf(...elementCols(channels)),
+    // Driven off the MINTED channel list, not the input's plus one: `withChannel` inserts in
+    // `ROLE_ORDER` (origin sits before encounter), and an appended expression would declare the columns
+    // in a different order from `elementCols` — which the factory catches, and which would otherwise be
+    // a schema desync no test names.
+    exprs: [['id', col(input.id, 'id')],
+      ...channels.map((channel) => [channel.col, channel.role === 'origin' ? col(input.id, 'id') : col(input.id, channel.col)] as const)],
+  });
+  // THE HOST'S LABELS RIDE IN, and handing over `NO_ALIASES` was a WRONG ANSWER rather than a
+  // narrowing: a body reading one (`by(__.select('p').values('age').sum())`) would find no live label,
+  // and since an unresolvable `select()` is now the EMPTY RESULT it would pool ZERO rows and answer an
+  // empty map. §6·6's rule with the sharpest witness yet — check what a seam HANDS OVER, because the
+  // combination of two correct rules made one of them silently produce the other's answer.
+  const tail = continueAs(seeded, { kind: 'elements', elem }, body, 0, false, ctx, fresh, aliases);
+  // A body with EFFECTS is not a read, and one that lost the origin (a barrier inside it) has nothing
+  // to group by — both are declines rather than answers that would silently pool the wrong rows.
+  if (!tail || tail.effects?.length || !originOf(tail.rel.channels)) return null;
+  return { rel: tail.rel, framing: tail.framing, origin: ORIGIN.col };
+}
 
 /**
  * A ROOTED chain, lowered — the seam's third answer, POLICY-FREE.
