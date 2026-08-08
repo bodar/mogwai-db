@@ -330,7 +330,10 @@ const DECLINED = [
   "g.V().out().select('a')",           // a label bound NOWHERE drops every traverser — the empty relation
   "g.V().union(__.out())",             // a SINGLE arm: `union(t) === t`, not a merge at all
   "g.V().union(__.as('b').out(), __.in())",  // an arm that BINDS a label owes each arm a remap + NULL pad
-  "g.V(1).union(__.values('name'), __.constant('x'))",  // arms disagreeing on payload: a Union is positional
+  // NOTE: `union(__.values('name'), __.constant('x'))` used to sit here — two scalar arms that
+  // disagree only on their TYPE TAG. That is no longer a decline: §6·7's lattice meets them at a
+  // per-row `vtype` column (`meetScalarArms`), so the payload agrees and the Union is positional
+  // again. What still declines is an arm disagreeing on SHAPE, which is the variant merge.
   "g.V().union(__.out(), __.count())", // element arm + scalar arm: the VARIANT shape, not either of them
   "g.V().where(__.out().values('age').sum())",  // a NUMERIC reducer over an EMPTY child: SQL yields one
   // NULL row where Gremlin yields NO traverser, so a bare EXISTS would answer true where the
@@ -1546,5 +1549,35 @@ describe('the RelIR spine', () => {
     }
     // The CONSTANT form is unaffected and still registers — the two facts are separate on purpose.
     expect(read('g.withSideEffect("a", 1).V().aggregate("b").by("age").cap("b")', { spine: 'rel' }).spine).toBe('rel');
+  });
+
+  test('two scalar arms that disagree only on their TYPE TAG meet at a per-row column', () => {
+    // §6·7 at the arm merge. `sameFraming` compared the whole `ScalarType`, so a branch whose arms
+    // were both one-value-per-row DECLINED for no reason but a tag disagreement — the relation merges
+    // perfectly, and all that was missing is somewhere to record that the halves are typed
+    // differently. That somewhere is the `vtype` column a stored-property read already carries, and
+    // the cost is one projection per arm.
+    //
+    // The UNKNOWN arm is the interesting row. The plan's lattice said `unknown ∧ x → unknown`; here it
+    // contributes a NULL tag instead, which is not a different answer (a null `vtype` IS "infer this
+    // member from its value") and is strictly more capable — collapsing to `unknown` would discard the
+    // sibling's tag because ITS sibling could not say, which is the discard §6·7 exists to end.
+    return (async () => {
+      for (const gremlin of [
+        'g.V().hasLabel("person").union(__.values("name"), __.values("age"))',
+        'g.V().hasLabel("person").union(__.values("name"), __.constant(1))',
+        'g.V(1).union(__.values("name"), __.constant("x"))',
+        'g.inject("a").union(__.identity(), __.constant(1))',
+        'g.V().hasLabel("person").choose(__.values("age").is(P.gt(30)), __.values("name"), __.constant("young"))',
+        // AGREEING arms stay exactly as they were — agreement costs no column, which is the first
+        // line of the lattice and the reason this is a widening rather than a re-encoding.
+        'g.V().hasLabel("person").union(__.values("name"), __.values("name"))',
+      ]) {
+        expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('rel');
+        const via = (spine: 'rel' | 'legacy') =>
+          decodeAll(exec(seededStore(), undefined, undefined, spine).buffers(gremlin, {}, {}));
+        expect(await via('rel'), gremlin).toEqual(await via('legacy'));
+      }
+    })();
   });
 });

@@ -3070,8 +3070,72 @@ function unionArms(
  * condition or its negation) and merges them identically. The arm-shape rules are the merge's, not
  * `union`'s, so there is one place they are stated.
  */
+/**
+ * TWO SCALAR ARMS WHOSE TYPES DIFFER MEET AT A PER-ROW ONE — §6·7's lattice, at the arm merge.
+ *
+ * `sameFraming` compares the whole `ScalarType`, so `union(__.values('name'), __.constant(1))` used
+ * to DECLINE for no reason but a tag disagreement: both arms are one value per row, the relation
+ * merges perfectly, and the only thing missing was somewhere to record that the two halves are
+ * typed differently. That somewhere is a COLUMN — the same `vtype` a stored-property read already
+ * carries — and the whole cost is one projection per arm.
+ *
+ * The lattice, and one deliberate refinement of the plan's version. `static ∧ static(same)` stays
+ * static, because agreement costs no column. `static ∧ static(differ)` goes per-row, each side
+ * projecting its tag as a literal. `perRow ∧ anything` goes per-row. The plan says
+ * `unknown ∧ x → unknown`; here an UNKNOWN arm instead contributes a NULL tag to the per-row column,
+ * which is not a different answer — a null `vtype` IS "infer this member from its value", which is
+ * exactly what `unknown` means — and it is strictly more capable, because it lets an arm that CAN
+ * say keep its tag instead of the whole merge losing it to the one that cannot. Collapsing to
+ * `unknown` would discard a `datetime` because its sibling was untagged, which is the discard §6·7
+ * exists to end.
+ *
+ * `null` where the meet is not this module's to take: an arm carrying a `result` marker
+ * (`count`/`number`) reads its type off a `vt` column the reducer computed, so padding it with a
+ * second type column would leave two disagreeing authorities on one row.
+ */
+function meetScalarArms(arms: readonly Tail[]): ScalarType | null {
+  const types: ScalarType[] = [];
+  for (const arm of arms) {
+    if (arm.framing.kind !== 'scalar' || arm.framing.result !== undefined) return null;
+    types.push(arm.framing.type);
+  }
+  const [head] = types as [ScalarType, ...ScalarType[]];
+  // Identical throughout — including all-unknown — costs no column and stays as it is.
+  if (types.every((type) => JSON.stringify(type) === JSON.stringify(head))) return head;
+  return PER_ROW('vtype');
+}
+
+/** An arm re-projected to carry the merged `vtype` column: its own per-row tag where it has one, its
+ *  static tag as a literal where it has one, and SQL NULL where it genuinely cannot say. */
+function withMergedVtype(arm: Tail, fresh: Minter): Rel {
+  const rel = arm.rel;
+  const carried = rel.channels;
+  const type = arm.framing.kind === 'scalar' ? arm.framing.type : UNKNOWN;
+  const existing = perRowColumnOf(type);
+  const tag = staticTypeOf(type);
+  const vtype: Expr = existing ? col(rel.id, existing) : tag ? compilerText(tag) : compilerNull('text');
+  return make.project({
+    id: fresh('mv'), input: rel, channels: carried,
+    type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...carriedCols(carried)),
+    exprs: [['v', col(rel.id, 'v')], ['vtype', vtype],
+      ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+  });
+}
+
 function mergeArms(arms: readonly Tail[], input: Rel, labels: AliasMap, fresh: Minter): { readonly rel: Rel; readonly framing: RelFraming } | null {
-  const [first, ...rest] = arms as [Tail, ...Tail[]];
+  let [first, ...rest] = arms as [Tail, ...Tail[]];
+  // SCALAR ARMS MEET BEFORE THEY ARE COMPARED, because a tag disagreement is not a shape
+  // disagreement — see `meetScalarArms`. The re-projection is what makes the arms comparable at all,
+  // so it has to happen before both the framing and the column tests below.
+  if (first.framing.kind === 'scalar') {
+    const met = meetScalarArms(arms);
+    if (met && met.kind === 'perRow') {
+      const framing = { kind: 'scalar', type: met } as const;
+      const retyped = arms.map((arm) => ({ ...arm, rel: withMergedVtype(arm, fresh), framing }));
+      [first, ...rest] = retyped as [Tail, ...Tail[]];
+      arms = retyped;
+    }
+  }
   // The arms must agree on SHAPE, and `sameFraming` is the whole test: an element arm and a scalar
   // arm merge to legacy's VARIANT stream, which is a shape this route does not produce.
   if (rest.some((arm) => !sameFraming(first.framing, arm.framing))) return null;
