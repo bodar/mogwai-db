@@ -21,9 +21,15 @@ import { decode } from '../support/decode.ts';
 const store = seededStore();
 const onRel = (g: string, p: Record<string, any> = {}) => { const c = compile(g, p, { spine: 'rel' }); return c.kind === 'read' ? c.spine : c.kind; };
 const plan = (g: string, p: Record<string, any> = {}) => compile(g, p, { spine: 'rel' }) as any;
+// PINNED TO RelIR, as `plan` above already is. This file's subject is the RelIR bind discipline —
+// "a bind serves a user PARAMETER, nothing else earns one" — so an ambient answer helper was asserting
+// that claim against whichever spine happened to be selected. In the differential's OFF position that
+// meant running legacy, which has its own defect on a collection parameter in `hasLabel` (a bind
+// mismatch, `SQLite query expected 1 values, received 2`) and made this file red for a reason it never
+// claimed anything about. The plan half and the answer half now name the same spine.
 const valsIn = async (s: ReturnType<typeof seededStore>, g: string, p: Record<string, any> = {}) => {
   const out: string[] = [];
-  for (const b of exec(s).buffers(g, p, {})) out.push(String(await decode(b)));
+  for (const b of exec(s, undefined, undefined, 'rel').buffers(g, p, {})) out.push(String(await decode(b)));
   return out.sort();
 };
 const vals = (g: string, p: Record<string, any> = {}) => valsIn(store, g, p);
