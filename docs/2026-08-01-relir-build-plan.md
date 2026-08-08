@@ -1109,6 +1109,43 @@ is the claim that actually needed a gate.
 
 Measured: the list-shape family 31 → 10.
 
+#### ✅ the NAMED-COLLECTION substrate — `aggregate()`/`cap()`, and a fact the front end was dropping
+
+**The largest family on the board (95) needed no new node kind, no `Binding` and no executor
+change**, which is what §3.0 had already predicted: *a named CTE and a prior result are the same
+concept*. A collection IS the relation the traversal held at that point, and a node referenced from
+two places in the DAG is what the `name` pass already turns into a CTE. `aggregate` records the node,
+`cap` reads it, the sharing is the mechanism. It rides directly on the element-membered list above —
+a bare `aggregate` over vertices is `foldElements`, a projected one is `foldScalars`, `cap` is
+`listTail` — which is what "land the whole FAMILY" buys and a per-step increment would not have.
+
+**The fold happens AT the aggregate, not at the cap**, because that is what "the value at this point"
+means: `AggregateGlobalStep` is a barrier, so the collection is complete and a `cap` anywhere
+downstream reads the whole of it. Deferring it would mean re-deriving which relation was current N
+steps earlier — the "the query never exists as data" problem the migration exists to end.
+
+**THE LOAD-BEARING HALF IS A FACT THE FRONT END WAS DROPPING.**
+`withSideEffect("a", 1, Operator.max)` supplies an initial value AND a merge policy, neither of which
+this substrate expresses — and the decline was IMPOSSIBLE TO WRITE. `extractSideEffects` skips the
+reducer form (correctly: there is no constant to substitute) and recorded nothing, so the label read
+as FRESH and the collection registered with the seed and the operator silently dropped.
+**`compiler.ts` had already written down that this decline belonged "inside the lowering"; what was
+missing is that a lowering cannot decline on a fact it cannot SEE.** `sideEffectReducers(tree)` is
+that fact — a SET, separate from the constant registry because the two hold different kinds of thing
+(a value to substitute versus a policy), travelling as a settled value exactly as `withSack`'s seed
+does rather than as a route-level gate. **Generalize it: §6·6's rule has a mirror. A gate at the
+router reads identically to a missing lowering; so does a fact the FRONT END drops, and the second is
+harder to see because nothing in the compiler is even asking.**
+
+One deliberate non-claim, recorded so it does not read as an oversight: a projected collection folds
+BARE rather than typed. §6·7 wants the per-row type and `by('uuid')` will need it — but claiming it
+changes the answer for an ALL-NULL collection (`ProductiveByStrategy` keeps a null member per
+unproductive traverser), because a local reducer over a TYPED list of nulls emits nothing where over
+a BARE one it emits null. That is a question about `MaxLocalStep`, not about collections, so it
+matches the spine being replaced and the tag is its own change on both sides.
+
+Measured: census 890 → 916, 0 changed answers.
+
 Then the families whose kernels Phase 0 extracted and whose only remaining legacy content is emission —
 `math`/`format` were the proof case (§6·4) — then the scalar-transform tail, the property shape
 (`properties`/`valueMap`), the map shape's mid-chain consumers, branch, aliases, `local`, `match`, `where`,
