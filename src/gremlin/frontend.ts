@@ -386,11 +386,14 @@ export function extractSourceOptions(tree: any, params: Record<string, any>): Ma
 /** Pull withSideEffect(key, constValue) declarations into a name→constant registry.
  *  withSideEffect values are compile-time constants (a map/list/scalar literal or a bound
  *  param), so a later select(key) resolves to the constant directly. The reducer form
- *  withSideEffect(key, seed, BiFunction) is deferred (left unregistered → select throws). */
+ *  withSideEffect(key, seed, BiFunction) is NOT a constant and stays out of this map —
+ *  `sideEffectReducers` below is the companion fact, and it is a SEPARATE map rather than a
+ *  sentinel in this one precisely because a consumer of this registry wants a value it can
+ *  substitute, and there is none. */
 export function extractSideEffects(tree: any, params: Record<string, any>): Map<string, any> {
   const out = new Map<string, any>();
   for (const w of descendants(tree, 'TraversalSourceSelfMethod_withSideEffectContext')) {
-    if (descendants(w, 'TraversalBiFunctionContext').length) continue; // reducer form → defer
+    if (descendants(w, 'TraversalBiFunctionContext').length) continue; // reducer form → sideEffectReducers
     const keyNode = descendants(w, 'StringLiteralContext')[0];
     const valNode = descendants(w, 'GenericLiteralContext')[0];
     if (!keyNode || !valNode) continue;
@@ -398,6 +401,37 @@ export function extractSideEffects(tree: any, params: Record<string, any>): Map<
     walkArgs(keyNode, ks, params);
     walkArgs(valNode, vs, params);
     if (typeof ks[0]?.value === 'string') out.set(ks[0].value, vs[0].value);
+  }
+  return out;
+}
+
+/**
+ * The LABELS declared with the reducer form `withSideEffect(key, seed, Operator.x)`.
+ *
+ * A FACT THE FRONT END WAS DROPPING, and the drop was silent. `extractSideEffects` skips this form
+ * because its value is not a constant to substitute — correct — but skipping it left the compiler
+ * unable to tell a seeded, operator-merged collection from a fresh one, and a lowering that cannot
+ * SEE a fact cannot decline on it. `compiler.ts` already says where that decline belongs ("the
+ * reducer form of `withSideEffect`, which the front-end leaves unregistered, declines inside the
+ * lowering like any other unlearned step"); this is what makes that possible, and it is the same
+ * move `withSack`'s seed made — the fact travels as a settled value rather than as a route-level gate.
+ *
+ * A SET rather than a map of seeds: nothing can USE the seed until the operator merge is expressible,
+ * and handing over a value no consumer may act on invites exactly the silent half-support this
+ * function exists to end. When a merge policy lands, this widens to carry both — one place.
+ *
+ * The front-end stays a thin translator either way: this reports what the traversal DECLARED, and
+ * what to do about it is entirely the compiler's.
+ */
+export function sideEffectReducers(tree: any, params: Record<string, any>): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const w of descendants(tree, 'TraversalSourceSelfMethod_withSideEffectContext')) {
+    if (!descendants(w, 'TraversalBiFunctionContext').length) continue;
+    const keyNode = descendants(w, 'StringLiteralContext')[0];
+    if (!keyNode) continue;
+    const ks: Arg[] = [];
+    walkArgs(keyNode, ks, params);
+    if (typeof ks[0]?.value === 'string') out.add(ks[0].value);
   }
   return out;
 }

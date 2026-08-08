@@ -217,7 +217,7 @@ const EDGE_TRAVERSAL_STEPS = new Set(['out', 'in', 'both', 'outE', 'inE', 'bothE
 /** The mutating-step vocabulary — the one source of truth for "this traversal writes":
  *  ReadOnlyStrategy rejects any of these, and SubgraphStrategy defers over them (a write's
  *  endpoints aren't a post-hoc read filter). Add a new write step here, not in two places. */
-const MUTATING_STEPS = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop', 'addLabel', 'dropLabel', 'dropLabels']);
+export const MUTATING_STEPS: ReadonlySet<string> = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', 'drop', 'addLabel', 'dropLabel', 'dropLabels']);
 
 export const rejectMsg = (name: string) =>
   `withStrategies(...) is not supported: '${name}' is a semantic or unknown strategy that would change results if ignored ` +

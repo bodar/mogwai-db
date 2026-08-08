@@ -42,6 +42,12 @@ export interface RelRequest {
    *  and it is here rather than being a route GATE because a gate reads identically to a missing
    *  lowering in every counter the migration owns (§6·6). */
   readonly sack: SackSpec | null;
+  /** The labels declared with the REDUCER form `withSideEffect(name, seed, Operator.x)`. It crosses
+   *  for `sack`'s reason and is a SEPARATE fact from the constant registry: the front end skips the
+   *  reducer form when building that map (there is no constant to substitute), so without this the
+   *  lowering cannot tell a seeded, operator-merged collection from a fresh one — and a fact a
+   *  lowering cannot SEE is one it cannot decline on. */
+  readonly sideEffectReducers: ReadonlySet<string>;
 }
 
 /**
@@ -121,6 +127,7 @@ export function compileViaRel(
     propertySeek: request.propertySeek,
     services: request.services,
     sack: request.sack,
+    sideEffectReducers: request.sideEffectReducers,
     // NOT a strategy switch either — a `withSideEffect(k, <literal>)` is a compile-time CONSTANT the
     // front-end already extracted, and the write parse has always taken it. What used to happen is
     // that `compiler.ts` refused to OFFER this route at all when one was declared, so the whole

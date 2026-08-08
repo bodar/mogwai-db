@@ -1456,4 +1456,57 @@ describe('the RelIR spine', () => {
     expect(names('rel')).toEqual(['marko', 'vadas', 'josh', 'peter']);
     expect(names('legacy')).not.toEqual(names('rel'));
   });
+
+  test('a NAMED COLLECTION is a shared node — aggregate() fills it, cap() reads it back', () => {
+    // The substrate needs no new node kind, no `Binding` and no executor change, which is the whole
+    // point: §3.0 already says a named CTE and a prior result are one concept, so a collection is
+    // simply the relation the traversal HELD at that point, and a node referenced twice is what the
+    // `name` pass turns into a CTE. The FOLD happens at the aggregate rather than at the cap because
+    // that is what "the value at this point" means — `AggregateGlobalStep` is a barrier, so the
+    // collection is complete wherever the cap sits.
+    //
+    // A LOCAL member op over an ELEMENT collection (`cap("a").count(Scope.local)`) still declines,
+    // and that is `list.ts`'s boundary rather than this one's: every member op gates on `isBareList`,
+    // because a transform or a predicate over a ROWID is a question about the element and belongs to
+    // the child seam. A PROJECTED collection is scalar-membered and takes them all, which is why the
+    // `by("age").max(Scope.local)` case above is in this list and its bare twin is not.
+    return (async () => {
+      for (const gremlin of [
+        'g.V().aggregate("x").cap("x")',
+        'g.V().aggregate("x").by("age").cap("x")',
+        'g.V().aggregate("x").by("name").cap("x")',
+        'g.V().aggregate("a").by("age").cap("a").unfold().sum()',
+        'g.V().aggregate("a").by("age").cap("a").max(Scope.local)',
+        // a projection NOTHING has: the members are dropped, so the collection is EMPTY rather than
+        // full of nulls, and `cap()` over it is `[]` (the reference's `BulkSet` seed).
+        'g.V().aggregate("a").by("foo").cap("a")',
+        // the collection is the relation AT THE AGGREGATE, so a filter AFTER it changes the stream
+        // and not the collection — all six vertices, not the two that survive the `has()`
+        'g.V().aggregate("a").has("person","age", P.gte(30)).cap("a")',
+        // a SCALAR host — the members are the values
+        'g.V().values("name").aggregate("x").cap("x")',
+      ]) {
+        expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('rel');
+        const via = (spine: 'rel' | 'legacy') =>
+          decodeAll(exec(seededStore(), undefined, undefined, spine).buffers(gremlin, {}, {}));
+        expect(await via('rel'), gremlin).toEqual(await via('legacy'));
+      }
+    })();
+  });
+
+  test('a SEEDED, operator-merged collection declines — the fact now reaches the lowering', () => {
+    // `withSideEffect("a", 1, Operator.max)` supplies an initial value AND a merge policy, neither of
+    // which this substrate expresses; registering the label anyway would answer a plausible list with
+    // both silently dropped. The decline was IMPOSSIBLE TO WRITE until the front end reported the
+    // form: `extractSideEffects` skips it (correctly — there is no constant to substitute) and
+    // recorded nothing, so the label read as fresh. `sideEffectReducers` is that missing fact, and it
+    // travels as a settled value exactly as `withSack`'s seed does rather than as a route-level gate
+    // (§6·6: a gate reads identically to a missing lowering in every counter the migration owns).
+    for (const operator of ['max', 'min', 'sum', 'mult', 'assign']) {
+      const gremlin = `g.withSideEffect("a", 1, Operator.${operator}).V().aggregate("a").by("age").cap("a")`;
+      expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('legacy');
+    }
+    // The CONSTANT form is unaffected and still registers — the two facts are separate on purpose.
+    expect(read('g.withSideEffect("a", 1).V().aggregate("b").by("age").cap("b")', { spine: 'rel' }).spine).toBe('rel');
+  });
 });

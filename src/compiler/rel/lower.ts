@@ -44,6 +44,8 @@ import { elementPayload } from './element.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
 import { LabelCardinality } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
+import { readCollection, registerCollection, type Collections } from './collection.ts';
+import { MUTATING_STEPS } from '../ir/strategies.ts';
 
 /**
  * THE SECOND LOWERING — `Step[] -> RelIR` (§10·4 of `docs/2026-08-01-relir-build-plan.md`).
@@ -189,10 +191,30 @@ interface ChainCtx extends FilterCtx {
   readonly labelCardinality: LabelCardinality;
   /** The `withSideEffect(name, constant)` registry the FRONT END extracted. See `Lowering`. */
   readonly sideEffects: Map<string, any>;
+  /** The labels declared with the REDUCER form of `withSideEffect`. See `Lowering`. */
+  readonly sideEffectReducers: ReadonlySet<string>;
   /** The services this chain names, resolved at the DI boundary. See `Lowering.services`. */
   readonly services: ReadonlyMap<string, Service>;
   /** `withSack(seed)`'s seed, or `null`. See `Lowering.sack`. */
   readonly sack: SackSpec | null;
+  /**
+   * THE NAMED COLLECTIONS this chain has filled so far — `aggregate("a")` writes one, `cap("a")`
+   * reads it back.
+   *
+   * The one MUTABLE field here, and deliberately so: a side effect is chain-global state written at
+   * one step and read at a LATER one, which is the single thing a fold's return value cannot carry.
+   * `Tail` travels backwards out of the recursion; `cap` needs to see forwards from where
+   * `aggregate` stood. Everything else on this interface is settled before the chain starts.
+   */
+  readonly collections: Collections;
+  /**
+   * Does this chain MUTATE the graph? Read once from the step list rather than discovered as the
+   * fold proceeds, because the question it answers is about the WHOLE chain: a shared read node is
+   * re-evaluated by every statement that names it, so a named collection in a program with effects
+   * would see the graph AFTER the write. §3.0's answer to that is a `snapshot` binding, which is the
+   * increment this one is a prerequisite for rather than a shortcut it may take.
+   */
+  readonly mutating: boolean;
 }
 
 /** A nested body, normalized — or `null` where normalizing it RAISES. See the call site for why a
@@ -1738,6 +1760,20 @@ function scalarTail(
       continue;
     }
 
+    // `aggregate("a")`/`cap("a")` over a VALUE traverser — the identical pair, for `project()`'s
+    // reason: a shape works wherever it is legal, not wherever a host was taught it. The members of a
+    // scalar collection are the VALUES, keeping their per-row type.
+    if (step.name === 'aggregate') {
+      if (ctx.mutating) return null;
+      if (!registerCollection(step, rel, host, out, ctx.collections, ctx.sideEffectReducers, childSeam(ctx, fresh), fresh)) return null;
+      continue;
+    }
+    if (step.name === 'cap') {
+      const collected = readCollection(step, ctx.collections);
+      if (!collected) return null;
+      return listTail(collected.rel, collected.of, steps, at + 1, ctx, fresh, NO_ALIASES);
+    }
+
     // `fold()` — the SHAPE BOUNDARY out of the scalar tail and into the list vocabulary: every
     // traverser becomes one member of ONE list traverser. The member encoding is `list.ts`'s (it is
     // the decision every later member read depends on); what this side owns is the two facts it needs
@@ -2153,6 +2189,19 @@ export interface Lowering {
    * Defaults to EMPTY, which is what a lowering with no source options has.
    */
   readonly sideEffects?: Map<string, any>;
+  /**
+   * The labels declared with the REDUCER form `withSideEffect(name, seed, Operator.x)` — a seeded,
+   * operator-merged collection.
+   *
+   * Separate from `sideEffects` because it is a different KIND of fact: that map holds constants a
+   * `select(name)` substitutes, and a reducer-form declaration has no constant to give. What it has
+   * is a policy, and until a merge policy is expressible the only honest thing to do with the name is
+   * DECLINE it — which is impossible unless the lowering can see it, and it could not: the front end
+   * skipped the form and recorded nothing, so a `aggregate(name)` registered as though the label were
+   * fresh and silently dropped both the seed and the operator. `withSack`'s seed travels the same way
+   * and for the same reason.
+   */
+  readonly sideEffectReducers?: ReadonlySet<string>;
 }
 
 /**
@@ -2168,12 +2217,16 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   propertySeek: opts.propertySeek ?? true,
   labelCardinality: opts.labelCardinality ?? LabelCardinality.ONE,
   sideEffects: opts.sideEffects ?? NO_SIDE_EFFECTS,
+  sideEffectReducers: opts.sideEffectReducers ?? NO_SIDE_EFFECT_REDUCERS,
   services: opts.services ?? NO_SERVICES,
   sack: opts.sack ?? null,
 });
 
 /** No `withSideEffect` declared. One shared value, for `NO_ALIASES`' reason. */
 const NO_SIDE_EFFECTS: Map<string, any> = new Map();
+
+/** No reducer-form `withSideEffect` declared. */
+const NO_SIDE_EFFECT_REDUCERS: ReadonlySet<string> = new Set();
 
 /** No services resolved — an instrument or a test lowering without a registry. Every `call()` then
  *  declines, which is the same answer an unregistered name gets. */
@@ -2356,7 +2409,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  *   pass walk them is the general fix if a case ever needs it.)
  */
 function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Tail | null {
-  const { params, collapse, correlatedChildren, labelCardinality, sideEffects, services, sack } = settle(opts);
+  const { params, collapse, correlatedChildren, labelCardinality, sideEffects, sideEffectReducers, services, sack } = settle(opts);
   // EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step.
   // `analyzeChain` is the same authority the legacy source seeds from, so the two cannot disagree
   // about which chains have an order to take a window from. A chain that demands one and reaches a
@@ -2366,7 +2419,11 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   const facts = analyzeChain(steps as IRStep[]);
   const ordered = facts.demandsEncounter;
   const tracksPath = facts.tracksPath;
-  const ctx: ChainCtx = { params, correlatedChildren, collapse, ordered, tracksPath, labelCardinality, sideEffects, services, sack };
+  const ctx: ChainCtx = {
+    params, correlatedChildren, collapse, ordered, tracksPath, labelCardinality, sideEffects, sideEffectReducers, services, sack,
+    collections: new Map(),
+    mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),
+  };
   const orderedChannels = ordered ? withChannel(BULK, ENCOUNTER) : BULK;
   const seedChannels = tracksPath ? withChannel(orderedChannels, PATH_CHANNEL) : orderedChannels;
   const first = steps[0];
@@ -2636,6 +2693,22 @@ function elementTail(
       const projected = projectorTail(rel, step, elementHost(rel, elem, labels), childSeam(ctx, fresh), fresh);
       if (!projected) return null;
       return continueAs(projected.rel, projected.framing, steps, at + 1, bulked, ctx, fresh, labels);
+    }
+    // `aggregate("a")` — fill a NAMED COLLECTION and pass the traversers through. Shape-preserving,
+    // so it sits in the ordinary loop beside `as()`; what it changes is chain state, not the relation.
+    if (step.name === 'aggregate') {
+      if (ctx.mutating || pathCarried(rel)) return null;
+      if (!registerCollection(step, rel, elementHost(rel, elem, labels), { kind: 'elements', elem },
+        ctx.collections, ctx.sideEffectReducers, childSeam(ctx, fresh), fresh)) return null;
+      continue;
+    }
+    // `cap("a")` — the collection as ONE list traverser. A SHAPE BOUNDARY, and a total re-root: the
+    // incoming stream is discarded (a cap emits one fresh traverser), so the alias channel goes with
+    // it and the list tail takes the rest of the chain.
+    if (step.name === 'cap') {
+      const collected = readCollection(step, ctx.collections);
+      if (!collected) return null;
+      return listTail(collected.rel, collected.of, steps, at + 1, ctx, fresh, NO_ALIASES);
     }
     // `fold()` — the SHAPE BOUNDARY out of the element loop, the twin of the scalar tail's own. Every
     // traverser becomes one MEMBER of one list traverser, and for elements the member is the rowid:
