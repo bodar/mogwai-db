@@ -533,8 +533,8 @@ GUARD, not a decline.** `addV` proves single-row at COMPILE time (its one-row ca
 ### Phase 2 — ✅ sack, ✅ the extracted families, then the rest
 
 ✅ Landed: `sack` · `math` · `format` · the ELEMENT-membered list · the NAMED-COLLECTION substrate ·
-§6·7's lattice at the arm merge · `union()` in SOURCE position · the VARIANT · the OPTION-MAP `choose`.
-The durable findings from them:
+§6·7's lattice at the arm merge · `union()` in SOURCE position · the VARIANT · the OPTION-MAP `choose` ·
+**the MAP LOOP** · **`valueMap()`**. The durable findings from them:
 
 - ⚠️ **THE MEMBERS STAY ROWIDS FOR THE WHOLE OF THEIR LIFE INSIDE THE ALGEBRA.** `foldElements` collects ids,
   `unfoldList` hands them back as an element relation, and only `listPayload` expands them — at the ROOT, once
@@ -562,6 +562,30 @@ The durable findings from them:
   non-derivable SQL facts, §6·4); and "a non-reducing value traversal collects" — `Grouping.convertValueTraversal`
   appends `fold()` for a `ValueTraversal`/`TokenTraversal`/`IdentityTraversal`/`ColumnTraversal` ONLY
   (`.../step/Grouping.java:92-101`), so `group().by(k).by(__.constant(1))` is `{j:1}`.
+- ⚠️ **A map is a VALUE, so re-entering one is `json_each` and nothing more exotic.** The pairs array
+  `[[keyNode, valNode], …]` was chosen so a key could be non-string and the entry order could be OURS to
+  state; it paid a second dividend when the tail landed, because both sides are addressable BY POSITION.
+  One wall wearing four names fell at once — `select(Column.keys|values)`, `unfold()`, `count(Scope.local)`
+  and every global row op.
+- ⚠️ **`Column` is ONE token with TWO hosts, which is why there are two loops.** Over a Map, `Column.keys`
+  is a `LinkedHashSet` and `Column.values` an `ArrayList` (`gremlin-core/.../structure/Column.java:22-47`),
+  so the KEY side frames as a SET (`data/Set.feature:47-56` pins `s[name,age]`); over a `Map.Entry` the same
+  token is the SIDE ITSELF (`Column.java:26-29`). A `mapEntry` framing arm is its own arm because there the
+  two sides are their own COLUMNS — which is the WIRE's own distinction too (`MapEntrySerializer`,
+  TINKERPOP-3104), so this taught the algebra to produce rows the framer already read (§6·3).
+- ⚠️ **The two map PRODUCERS differ by superclass, never by shape.** `GroupStep extends
+  ReducingBarrierStep<S, Map<K,V>>` against `PropertyMapStep extends ScalarMapStep<Element, Map<K,E>>`, both
+  carrying `Map<K,V>` — so `valueMap()` needed no new shape and no new framing arm, only a second caller of
+  the pairs encoding. A VERTEX key is MULTI-VALUED (its value is a LIST) and an EDGE key's is the value
+  itself (`PropertyMapStep.addElementProperties`), the asymmetry `vertexProps`/`edgeProps` already carry.
+- ⚠️ **EVERY value side is a self-describing `{t,v}` node, TOKENS INCLUDED** — that is what keeps `valOf` at
+  ONE `MapOf` arm instead of needing a "mixed" one, and therefore what makes `select(Column.values)` after a
+  `valueMap()` describe what is actually there. `T` is a WIRE TYPE, not a string: `FrameNode` grew a `T` arm
+  (one line in `frameTypedNode`, the same shape as its `vertex`/`edge` arms), deliberately NOT a
+  `CanonicalType` — a token is never a stored property VALUE, so it belongs to the READ vocabulary only.
+- ⚠️ **The LABEL REGIME is a settled value the lowering must be HANDED (§6·6 again).** It is not derivable
+  from `labelCardinality` inside the algebra — `with("multilabel")`/`with("singlelabel")` overrides the graph
+  default — so a lowering that re-derived it would render one name where a vertex holds a set.
 - ⚠️ **A shared `format` bug both spines agreed on.** The reference's pattern is `(?<!%)%\{(.*?)\}` and **the
   lookbehind is an ESCAPE**; each spine carried `%\{([^}]*)\}` and read `%%{name}` as a reference — a wrong
   answer with the right arity that neither the differential nor the census could see. Only the reference is
@@ -574,6 +598,18 @@ alphabetically; the retyping two-arg `choose` and MIXED ELEMENT KINDS in a varia
 folds BARE rather than typed (a TYPED list of nulls emits nothing where a BARE one emits null — a question
 about `MaxLocalStep`, not about collections).
 
+🔴 **A BARRIER EMITS ONE TRAVERSER, and legacy contradicts ITSELF one shape over.** A global `count()`
+after `group()` is 1; only `count(Scope.local)` is the map's SIZE (`GroupStep extends
+ReducingBarrierStep`, `gremlin-core/.../step/map/GroupStep.java:51`). Legacy answers the LOCAL reading
+under the GLOBAL name — making the two spellings indistinguishable — while both spines already answer 1 for
+`fold().count()`. Recorded as `RELIR_AHEAD`. Two more of the same class, both now pinned per-spine: a
+non-matching `is(typeOf(…))` over a map is the EMPTY RESULT rather than a refusal
+(`data/Set.feature:38-43`), and slicing ONE traverser yields it (`group().by(k).limit(2)`).
+
+🔴 **THREE MORE COMMITTED ASSERTIONS HAD ROTTED IN THE LEGACY POSITION**, found by the map loop routing —
+the same class the option-map increment named. When a family starts routing, every assertion about it was
+written while ONE spine owned it: pin the claim AT the spine it is about, or re-derive it.
+
 🔴 **TWO COMMITTED L4 EXPECTATIONS ENCODED LEGACY'S BUG** (an unproductive choice takes `Pick.unproductive`,
 the traverser itself — not `Pick.none`; the official corpus pins the pattern at `Choose.feature:371-387`).
 **An addendum written against one implementation records that implementation, not the reference** — every L4
@@ -584,9 +620,19 @@ trusted. Nobody has swept the rest.
 policy answer for the role — a channels-core change, not a step lowering), and `barrier(Barrier.normSack)` is
 its own step.
 
-🚧 **Then the rest of Phase 2:** the scalar-transform tail, the property shape (`properties`/`valueMap`), the
-map shape's mid-chain consumers, branch, aliases, `local`, `match`, `where`, `path` tails, and the by()-child
-matrix (`group`←reducer, `select` multi-label — `byField()`'s next callers).
+🚧 **What the MAP family still owes, in the order it is worth doing:** `elementMap()` (7 blockers, and an
+edge's `Direction.IN`/`OUT` entries want the same token treatment one enum along, plus a LAST-WINS rule for a
+multi-valued key — `map.put` overwrites where `valueMap` collects); the SELECTIVE token subsets
+(`with(tokens, ids)`, which `absorbValueMapWith` deliberately leaves in place to fail closed) and the
+`by(__.unfold())` that pairs with them (a `by()` on a `valueMap` projects each map VALUE and removes an
+unproductive key — `applyTraversalRingToMap`); `select(<key>)` over a map (`Scoping.getScopeValue` tries the
+traverser's own map BEFORE the path labels); a bare `groupCount()` over a SCALAR stream, which `groupBarrier`
+already documents as an arm waiting for its caller; and `order(Scope.local)` over a map's entries.
+
+🚧 **Then the rest of Phase 2:** the scalar-transform tail (49, but heterogeneous — mostly literal-typed
+casts and error-raising forms rather than one lowering), the rest of the property shape (`properties()`
+re-entry), branch, aliases, `local`, `match`, `where`, `path` tails, and the by()-child matrix
+(`group`←reducer, `select` multi-label — `byField()`'s next callers).
 
 ### 🔴 Phase 3 — `repeat()` — THE GATE
 
