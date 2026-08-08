@@ -546,11 +546,24 @@ needs a GUARD, not a decline.** `addV` proves single-row at COMPILE time (its on
 `Values`); an `addE` mid-chain input is a traverser relation and nothing static separates `g.V(1)`
 from `g.V()`.
 
-🔴 **HUMAN DECISION — the only one open here.** `gremlin/validate.ts`'s `validateLabel` COERCES where
-the reference RAISES (`String(label)`), so a runtime label of `5` becomes `"5"` on BOTH spines today.
-Pre-existing, in SHARED code, and invisible to the corpus (no scenario asserts these messages). Fixing
-it into conformance is a behaviour change to a shared path that no test demands — it needs a call
-before the computed-label item above is built on top of it.
+🚧 **The label TYPE refusal — inside the computed-label row above, never before or after it.**
+`validateLabel` takes `unknown` and coerces (`String(label)`), so a label of `5` is written `"5"`.
+⚠️ **The reference does not raise there either** — `validateLabel(final String label)`
+(`gremlin-core/.../structure/util/ElementHelper.java:64-71`) is TYPED and its three checks are
+exactly ours, so the gap is a missing guard at the CALL SITES and the raise is per-site — NINE
+messages (`MergeElementStep.java:259-305`, `AddVertexStep.java:165-182`, `ElementHelper.java:258-283`).
+Strictness therefore leaves the `labelNames` waist for the sites, which already carry `step`/`sole`.
+⚠️ One question has THREE answers today: `mergeV([(T.label): x])` coerces on BOTH spines,
+`g.addV(x)` declines on RelIR (`rel/write.ts:1229`) and coerces on legacy, `addLabel(x)` coerces
+(`:631`). All reachable — `stringArgument : stringLiteral | variable`, so a PARAMETER bound to a
+non-string is grammatical. That decline is §6·5's conflation, and guards beside a surviving coercion
+would answer one question two ways depending on whether the value was static.
+
+✅ **DECIDED — the `- found: %s` tail names a GREMLIN type (`CanonicalType`), not a Java class**, and
+the tail ONLY (the prefix is fixed prose; the tail is the one place upstream reflects a live Java
+object). Measured: the corpus asserts on none of these messages, so nothing is paid for it. The guard
+arm settles the vocabulary — it can name the offending value only by its per-row `vtype`, which IS
+`CanonicalType` (§6·7), so one name serves both arms.
 
 
 ### Phase 2 — ✅ the extracted families; what is LEFT
