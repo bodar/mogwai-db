@@ -1010,23 +1010,6 @@ function creationTokens(
 }
 
 /**
- * THE LABELS A CREATION GIVES ITS NEW VERTEX — `addV`'s arguments and a merge map's `T.label` reduced
- * to the same list, or `null` for a form this route declines.
- *
- * **A creation with NO label of its own is answerable, and it needed only the graph's declared
- * cardinality.** `insertVertex` spells the same rule: an unstated list takes the graph default where
- * the cardinality demands at least one label, and stays empty where it permits zero. That is a
- * compile-time question the moment the cardinality is threaded (see `Lowering.labelCardinality`) —
- * what made it look like a runtime one was that this seam had not been handed the value.
- *
- * The COUNT rule is the other half, and it is a DECLINE rather than a throw: `assertLabelCount` raises
- * a message the conformance suite matches on, and that refusal is the reference's own answer, so the
- * spine that owns the message must be the one to raise it (write-path trap 3).
- *
- * Deduped as a SET before counting, exactly as `insertVertex` does — `addV('a','a')` is one label, so
- * it must not fail a `max: 1` graph.
- */
-/**
  * A LABEL argument that is really a LITERAL, unwrapped — or `undefined` for a nested body this route
  * cannot fold.
  *
@@ -1053,6 +1036,23 @@ function constLabelArg(value: unknown, child: ChildSeam): unknown {
   return folded.has ? folded.value : undefined;
 }
 
+/**
+ * THE LABELS A CREATION GIVES ITS NEW VERTEX — `addV`'s arguments and a merge map's `T.label` reduced
+ * to the same list, or `null` for a form this route declines.
+ *
+ * **A creation with NO label of its own is answerable, and it needed only the graph's declared
+ * cardinality.** `insertVertex` spells the same rule: an unstated list takes the graph default where
+ * the cardinality demands at least one label, and stays empty where it permits zero. That is a
+ * compile-time question the moment the cardinality is threaded (see `Lowering.labelCardinality`) —
+ * what made it look like a runtime one was that this seam had not been handed the value.
+ *
+ * The COUNT rule is the other half, and it is a DECLINE rather than a throw: `assertLabelCount` raises
+ * a message the conformance suite matches on, and that refusal is the reference's own answer, so the
+ * spine that owns the message must be the one to raise it (write-path trap 3).
+ *
+ * Deduped as a SET before counting, exactly as `insertVertex` does — `addV('a','a')` is one label, so
+ * it must not fail a `max: 1` graph.
+ */
 function creationLabels(args: readonly unknown[], cardinality: LabelCardinality, child: ChildSeam): readonly string[] | null {
   const folded = args.map((arg) => constLabelArg(arg, child));
   if (folded.some((arg) => arg === undefined)) return null;
