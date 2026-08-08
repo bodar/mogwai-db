@@ -295,7 +295,14 @@ function resolveMergeArg(raw: any, sideEffects: Map<string, any> | undefined, pa
  * check would see a traversal, not `~id`.
  */
 function validateMergeKey(role: MergeRole, k: any, v: any, kind: ReturnType<typeof classifyMergeKey>['kind']): void {
-  if (kind === 'prop') return; // a String key; validate.ts checks it once resolved
+  // A STATIC string key is decidable from the TEXT, so `MergeElementStep.validate`'s
+  // `ElementHelper.validateProperty` call (gremlin-core
+  // `.../step/map/MergeElementStep.java:278,314-316`) belongs HERE — in the shared parse, which the
+  // `writeArguments` verify Pass runs above both spines (§6·5). It used to live only in legacy's
+  // route (`validateResolvedMergeSpec`), so `g.mergeV([:]).option(onCreate, ['~label':'vertex'])`
+  // was a REFUSAL one spine owned, and RelIR had to decline the whole traversal to reach it.
+  // A NESTED key is not decidable here and stays legacy's per-driver check.
+  if (kind === 'prop') { if (typeof k === 'string') validatePropertyKey(k); return; }
   const token = kind === 'label' ? 'T.label' : kind === 'id' ? 'T.id' : kind === 'outV' ? 'Direction.OUT' : 'Direction.IN';
   if (role.kind === 'onMatch') {
     // T.label survives: onMatch replaces/extends an element's labels where the graph allows it.

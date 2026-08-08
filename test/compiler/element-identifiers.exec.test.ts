@@ -57,6 +57,24 @@ describe('every write reaches them through a waist', () => {
     expect(() => runWith(s, "g.mergeV(['~id':1])")).toThrow('Property key can not be a hidden key: ~id');
   });
 
+  test('the merge-map key rule fires from the verify PASS, so both spines raise it', () => {
+    // `MergeElementStep.validate` calls `ElementHelper.validateProperty` on every String key of every
+    // arm (gremlin-core `.../step/map/MergeElementStep.java:278,314-316`), and a STATIC key is
+    // decidable from the TEXT. So it belongs in the shared parse, which the `writeArguments` verify
+    // Pass runs ABOVE the routing switch (§6·5) — not in a route.
+    //
+    // It used to live only in legacy's `validateResolvedMergeSpec`, which made the refusal a spine's
+    // property: RelIR had to DECLINE the whole traversal to reach the message, and the census then
+    // counted a traversal TinkerPop itself rejects as an uncovered gap.
+    for (const spine of ['rel', 'legacy'] as const)
+      for (const [gremlin, message] of [
+        ["g.mergeV([:]).option(Merge.onCreate,['~label':'vertex'])", 'Property key can not be a hidden key: ~label'],
+        ["g.mergeV([:]).option(Merge.onMatch,['~id':1])", 'Property key can not be a hidden key: ~id'],
+        ["g.mergeV(['':1])", 'Property key can not be the empty string'],
+      ] as const)
+        expect(() => runWith(store(), gremlin, { spine }), `${spine} ${gremlin}`).toThrow(message);
+  });
+
   test('legal identifiers are untouched', () => {
     const s = store();
     expect(runWith(s, "g.addV('person').property('name','marko')")).toHaveLength(1);
