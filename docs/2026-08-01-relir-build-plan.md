@@ -1066,6 +1066,49 @@ key directly rather than declining as legacy does); and the filter is
 
 Measured: census 881 → 888, 0 changed answers, L3 1744 → 1745.
 
+#### ✅ the ELEMENT-membered list — and the ranking instrument that was hiding the real top family
+
+**Read the instrument as code that can rot.** `rel-blockers`' `blame()` told a NAMED collection
+(`group("a")…cap("a")`, a side-effect substrate) from an unkeyed barrier (`group()`, the map shape) by
+`typeof step.args[0] === 'string'`. An `Arg` has been `{value, type, name}` since a user PARAMETER
+became a first-class IR fact, so that test had been permanently false and every labelled
+`group`/`groupCount`/`aggregate`/`store` was filed under the unkeyed bucket. The board said *78 the
+map shape · 0 side effects*; it actually reads **95 side effects · 48 the map shape**. The largest
+family was reported as absent and the third as the first. Nothing in the compiler changed — this is
+the ranking every increment is chosen by, and it was ranking by a wrapper.
+
+**Then the element-membered list, which is ONE substrate wearing four names.** `fold()` over an
+element stream, `cap()` over a named collection, `group().by().by(__.out().fold())` and `aggregate`'s
+default member were all blocked on the same missing thing, and `listPayloadExpr`'s own decline comment
+had already named the trigger — *"it becomes reachable the moment `fold()` over elements lands."*
+
+**THE MEMBERS STAY ROWIDS FOR THE WHOLE OF THEIR LIFE INSIDE THE ALGEBRA.** `foldElements` collects
+ids, `unfoldList` hands them back as an ordinary element relation, and only `listPayload` expands them
+— at the ROOT, once per SURVIVING member. Two things follow that would not from expanding inside the
+barrier: the round trip is LOSSLESS (a payload object has no rowid to move from, so `unfold().out()`
+would have to parse one back out of JSON), and a discarded member is free
+(`fold().range(local,0,2)` computes two property bags, not six). `elementNode`/`elementObject` are now
+a pair over one `correlatedElement`, because the two encodings serve two framers and the FRAMER
+decides which: a typed tree's member needs the `{t,v}` tag, an `of.kind === 'elem'` list must not have
+one.
+
+**A fail-closed VIOLATION fell out of it, and it is §12's channel rule with a new witness.** The
+ordered `dedup()` hardcoded `aggs: [['bulk', …], ['encounter', …]]` while deriving its declared TYPE
+from the input's channels. Every ordered element relation carried both until a `fold().unfold()`,
+which is the first that does not — a fold collapses the stream to one traverser, so the members come
+back with a position and no multiplicity. The factory caught the mismatch as a THROW out of a lowering
+whose contract is `null`: RelIR failing where legacy answers, the one failure the routing switch
+cannot absorb. **Never name a channel list** — the aggregates are derived from the channels the input
+carries, and a role with no defined N→1 answer declines.
+
+Two places RelIR is AHEAD, pinned rather than reconciled: an EMPTY fold frames as one empty list
+(`FoldStep` supplies a seed), and `fold().unfold().values("name")` keeps the traverser order where
+legacy answers alphabetically — the property table's scan order showing through. Both spines are
+asserted to frame an element fold to the SAME BYTES through two different `Shape` descriptors, which
+is the claim that actually needed a gate.
+
+Measured: the list-shape family 31 → 10.
+
 Then the families whose kernels Phase 0 extracted and whose only remaining legacy content is emission —
 `math`/`format` were the proof case (§6·4) — then the scalar-transform tail, the property shape
 (`properties`/`valueMap`), the map shape's mid-chain consumers, branch, aliases, `local`, `match`, `where`,
