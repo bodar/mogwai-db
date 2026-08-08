@@ -583,6 +583,28 @@ export function propertyVtype(key: string, host: Extract<ChildHost, { kind: 'ele
   return firstOf(mine, col(mine.id, 'vtype'), col(mine.id, 'id'), fresh);
 }
 
+/**
+ * DOES A PROPERTY ROW EXIST at `key` for this host — the productivity of a property read, as a
+ * predicate.
+ *
+ * `propertyVtype`'s sibling and `byExpr`'s third read of the same rows, and it exists because a
+ * property's PRESENCE is not the same question as its value's nullness: `TraversalProduct` calls a
+ * productive null a value, so a consumer that tested `value IS NULL` would answer "unproductive" for
+ * a property that is genuinely there. An `Exists` says exactly what is being asked.
+ */
+export function propertyExists(key: string, host: Extract<ChildHost, { kind: 'element' }>, fresh: Minter): Expr {
+  const { table, owner } = PROPERTIES[host.elem];
+  const scan = make.scan({
+    id: fresh('vp'), table, alias: fresh('rp'), channels: [],
+    type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+  });
+  const mine = make.filter({
+    id: fresh('f'), input: scan, channels: [], type: scan.type,
+    pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), compilerText(key))),
+  });
+  return { kind: 'exists', plan: mine, negated: false };
+}
+
 /** TinkerPop's default `by()` productivity, as a predicate: a traverser whose `by()` yielded nothing
  *  is dropped. `undefined` where no filter is owed — the host was handed no projection, or
  *  `ProductiveByStrategy` asked for the null-keeping behaviour. */

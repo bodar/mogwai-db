@@ -32,7 +32,7 @@ import {
 } from './build.ts';
 import { bindAliases } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
-import { byExpr, modulations, orderProductivity, productivityFilter, propertyVtype, type Modulation } from './modulator.ts';
+import { byExpr, modulations, orderProductivity, productivityFilter, propertyExists, propertyVtype, type Modulation } from './modulator.ts';
 import type { ChildHost, ChildSeam, ChildValue, HostRow, RootedRead, Subject } from './child.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
@@ -46,6 +46,7 @@ import { LabelCardinality } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantArm, variantArmOf, variantHasList, variantPayload, type VariantArm } from './variant.ts';
 import { readCollection, registerCollection, registerMap, type Collections } from './collection.ts';
+import { optionArms, type OptionArm } from '../ir/option-map.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
 
 /**
@@ -121,6 +122,11 @@ type Tail = {
    */
   readonly effects?: readonly Binding[];
 };
+
+/** A body that CANNOT be unproductive, as an expression — the claim `ChildValue.present` wants where
+ *  the answer is "always", since its absence means "cannot say" and the two must stay distinguishable.
+ *  A constant true; SQLite folds it and the emitter never sees a branch on it. */
+const ALWAYS_PRODUCTIVE: Expr = { kind: 'binary', op: '=', left: compilerInt(1), right: compilerInt(1) };
 
 /** No label bound yet. One shared value, because an empty Map is the seed at every entry point. */
 const NO_ALIASES: AliasMap = new Map();
@@ -3323,11 +3329,163 @@ function mergeArms(
  * The OPTION form (`choose(<key>).option(v, arm)…`) is a different question — a CASE over a projected
  * key rather than a boolean — and declines here; it is the family's next arm.
  */
+/**
+ * `choose(<key>).option(k, body)…` — the OPTION-MAP form, or `null` to decline.
+ *
+ * A different question from the boolean `choose`: an N-way lookup on a projected CHOICE rather than a
+ * predicate, so the arms are gated by a comparison against each key rather than by a condition and its
+ * negation. Everything after the gating is shared — each arm is the ordinary fold over its gated
+ * input, and `mergeArms` merges them, including as a VARIANT where their shapes differ, which is what
+ * makes the common `option(Pick.none, __.identity())` shape expressible at all.
+ *
+ * TWO ARMS ARE IMPLICIT and neither is written down (`optionArms`' note): a map with no `Pick.none`
+ * emits the TRAVERSER for an unmatched input, and a `__.discard()` body contributes no arm at all.
+ * The pass-through is `ChooseStep`'s own default — its private constructor installs identity
+ * traversals for both `Pick` tokens — so it is the reference's rule rather than an inference.
+ *
+ * PRODUCTIVITY IS CARRIED, NOT GUESSED, and this is the piece the form was waiting on. `Pick.none`
+ * claims a productive choice that matched no key and `Pick.unproductive` claims one that produced
+ * nothing; `TraversalProduct` calls a productive null a value, so `choice IS NULL` answers a different
+ * question. `ChildValue.present` is the signal, and a choice whose body cannot report it DECLINES
+ * rather than conflating the two — which is why this reads `present` and never tests the value.
+ */
+function chooseOptions(
+  step: IRStep, input: Rel, elem: Elem, framing: RelFraming, bulked: boolean,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): { readonly rel: Rel; readonly framing: RelFraming } | null {
+  if (step.modulators?.length) return null;
+  const seam = childSeam(ctx, fresh);
+  const arms = optionArms(step, (nested) => seam.body(nested, 'child'));
+  if (!arms) return null;
+  const choiceArg = step.args?.[0]?.value;
+  if (!isNested(choiceArg)) return null; // a `T` token choice is the next form, not this one
+  const choiceBody = seam.body(choiceArg.nested, 'child');
+  if (!choiceBody?.length) return null;
+  const host = elementHost(input, elem, labels);
+  const produced = seam.scalar(choiceBody, host);
+  // A choice that cannot report its own productivity cannot serve the two `Pick` arms, and cannot be
+  // told apart from a productive NULL — decline rather than answer one of them for the other.
+  if (!produced || !produced.present) return null;
+
+  // THE CHOICE IS PROJECTED TO COLUMNS FIRST, and this is a plan-quality requirement rather than a
+  // tidiness one — `groupBarrier` records the same rule for the same reason. The choice is a
+  // CORRELATED SUBQUERY and every arm's gate mentions it: arm k tests its own key, negates every
+  // earlier one, and the implicit pass-through negates them all. Inlined, that is O(n²) copies of the
+  // subquery — measured at 1.5 KB of statement text before this projection and 18.7 KB after the
+  // gating landed, for a three-option map. Naming it once makes every later reference a COLUMN.
+  //
+  // FENCED for the same reason the group key is: the emitter merges a plain `Project` back into the
+  // block that reads it, so the naming would buy nothing without the boundary.
+  const ARM = 'oarm';
+  const CHOICE = 'ochoice';
+  const PRESENT = 'opresent';
+  const vtypeCol = produced.vtype ? [meta('ovtype', 'text', true)] : [];
+  const projected = make.project({
+    id: fresh('oc'), input, channels: input.channels,
+    type: typeOf(...input.type.cols, meta(CHOICE, 'any', true), meta(PRESENT, 'int', true), ...vtypeCol),
+    exprs: [
+      ...input.type.cols.map((column) => [column.name, col(input.id, column.name)] as const),
+      [CHOICE, produced.expr], [PRESENT, produced.present],
+      ...(produced.vtype ? [['ovtype', produced.vtype] as const] : []),
+    ],
+  });
+  const scoped = make.materialize({ id: fresh('om'), input: projected, channels: projected.channels, type: projected.type });
+  const choice = { expr: col(scoped.id, CHOICE), present: col(scoped.id, PRESENT), vtype: produced.vtype && col(scoped.id, 'ovtype') };
+  const subject: SubjectType = choice.vtype ? { kind: 'perRow', vtype: choice.vtype }
+    : produced.framing.kind === 'scalar' && produced.framing.type.kind === 'static'
+      ? { kind: 'static', type: produced.framing.type.type, text: produced.framing.type.text }
+      : SUBJECT_UNKNOWN;
+
+  // WHICH ARM A ROW TAKES IS ONE COLUMN, computed once — not a predicate per arm.
+  //
+  // The naive gating is O(n²) in the EXPENSIVE term: arm k tests its own key, negates every earlier
+  // key, and the implicit pass-through negates them all — and a key test is a vtype-aware ordering
+  // compare, which is the big expression in the plan (`predicateExpr`, the same one `is(P.gt(…))`
+  // spends). Measured on a three-option map: 18.7 KB of statement text with the choice inlined, 7.5 KB
+  // with the choice projected but the tests still repeated, 1.9 KB with the tests projected too. Same
+  // rule as the group key, one level up — name the expensive thing once and let every later reference
+  // be a column.
+  //
+  // The ordinal also carries FIRST-MATCH-WINS for free, because a `CASE` takes its first true `WHEN`:
+  // `BranchStep.pickBranches` collects every matching option and `ChooseStep` overrides it with
+  // `branches.subList(0, 1)` (`gremlin-core/.../branch/ChooseStep.java:139-142`), which is exactly a
+  // `CASE`'s own rule. Reading only the super-method makes overlapping keys look like a fan-out, and
+  // this emitted six rows where `Choose.feature:244-256` pins four until the override was read.
+  const NONE = -1;
+  const UNPRODUCTIVE = -2;
+  const keyed = arms.filter((arm) => arm.pick === 'key');
+  const whens: (readonly [Expr, Expr])[] = [
+    [{ kind: 'unary', op: 'not', arg: choice.present }, compilerInt(UNPRODUCTIVE)],
+  ];
+  for (const [at, arm] of keyed.entries()) {
+    const pred = predicateExpr(choice.expr, arm.key, subject, null, null, fresh);
+    if (!pred) return null;
+    whens.push([pred, compilerInt(at)]);
+  }
+  const armOf = make.project({
+    id: fresh('oa'), input: scoped, channels: scoped.channels,
+    type: typeOf(...scoped.type.cols, meta(ARM, 'int')),
+    exprs: [...scoped.type.cols.map((column) => [column.name, col(scoped.id, column.name)] as const),
+      [ARM, { kind: 'case', whens, else: compilerInt(NONE) }]],
+  });
+  const takes = (ordinal: number): Expr => eq(col(armOf.id, ARM), compilerInt(ordinal));
+
+  // The ordinal each written arm claims. A `Pick` arm claims its sentinel; a keyed arm claims its
+  // position, which is the order `whens` above assigned.
+  const claimed: number[] = [];
+  const gated: { readonly arm: OptionArm; readonly ordinal: number }[] = [];
+  let next = 0;
+  for (const arm of arms) {
+    const ordinal = arm.pick === 'unproductive' ? UNPRODUCTIVE : arm.pick === 'none' ? NONE : next++;
+    claimed.push(ordinal);
+    if (!arm.discard) gated.push({ arm, ordinal });
+  }
+  // AN ARM RUNS OVER THE INPUT'S OWN COLUMNS, not the widened ones. The choice columns exist to be
+  // TESTED and nothing downstream may see them: an arm body is the ordinary fold, and a `values()`
+  // after one joins the property table against a relation whose declared width it computes from the
+  // CHANNELS. Leaving the extra payload columns on it made that join declare six and emit nine — a
+  // factory throw, i.e. RelIR failing where legacy answers. So the gate filters on the wide relation
+  // and projects straight back to the narrow one, and the widening never escapes this step.
+  const gate = (pred: Expr): Rel => {
+    const kept = make.filter({ id: fresh('og'), input: armOf, channels: armOf.channels, type: armOf.type, pred });
+    // Addressed through `kept`, not `armOf`: a node addresses its own INPUT, and `armOf` is the
+    // GRANDchild here. Naming it is the "no relation in scope" the checker catches — and it caught it.
+    return make.project({
+      id: fresh('on'), input: kept, channels: input.channels, type: input.type,
+      exprs: input.type.cols.map((column) => [column.name, col(kept.id, column.name)] as const),
+    });
+  };
+
+  const built: Tail[] = [];
+  for (const { arm, ordinal } of gated) {
+    const body = seam.body(arm.nested, 'child');
+    if (!body?.length) return null;
+    const lowered = continueAs(gate(takes(ordinal)), framing, body, 0, bulked, ctx, fresh, labels);
+    if (!lowered) return null;
+    built.push(lowered);
+  }
+  // THE IMPLICIT PASS-THROUGH is every ordinal no written arm claimed — which is at most the two
+  // sentinels, since every keyed ordinal is claimed by construction. Deriving it from the claims
+  // rather than from which tokens were written is what keeps it right when both are, and what makes a
+  // `discard` arm's rows disappear rather than fall through: its ordinal IS claimed.
+  const unclaimed = [NONE, UNPRODUCTIVE].filter((ordinal) => !claimed.includes(ordinal));
+  if (unclaimed.length) {
+    built.push({
+      rel: gate(unclaimed.map(takes).reduce((left, right) => ({ kind: 'binary', op: 'or', left, right }))),
+      framing,
+      aliases: labels,
+    });
+  }
+  if (built.length < 2) return null;
+  return mergeArms(built, input.channels, labels, fresh);
+}
+
 function chooseArms(
   step: IRStep, input: Rel, elem: Elem, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): { readonly rel: Rel; readonly framing: RelFraming } | null {
-  if (step.modulators?.length || step.optionArms) return null;
+  if (step.modulators?.length) return null;
+  if (step.optionArms) return chooseOptions(step, input, elem, framing, bulked, ctx, fresh, labels);
   if (encounterOf(input.channels)) return null;
   const args = argValues(step);
   if (args.length < 2 || args.length > 3 || args.some((arg) => !isNested(arg))) return null;
@@ -3519,6 +3677,9 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   }
 
   let value: Expr = host.id;
+  // WHETHER THIS BODY PRODUCES anything for the host row, where the leading step can say precisely.
+  // `undefined` is "cannot say", which is not the same as "always" — see `ChildValue.present`.
+  let present: Expr | undefined;
   // The value's type as the body computes it, not as the wire guesses it. `UNKNOWN` is the honest seed:
   // until a step below NAMES the projection, nothing has been read yet.
   let type: ScalarType = UNKNOWN;
@@ -3534,6 +3695,9 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     if (!projected) return null;
     value = projected;
     vtype = propertyVtype(args[0], host, fresh);
+    // A property read is the one leading step whose productivity is EXACTLY decidable and not the
+    // same question as its value's nullness: the property row either exists or it does not.
+    present = propertyExists(args[0], host, fresh);
     at = 1;
   } else if (leading?.name === 'call') {
     // A `streaming` SERVICE is a value projection like any other, so it leads a body exactly as
@@ -3547,6 +3711,9 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     at = 1;
   } else if (leading?.name === 'label' || leading?.name === 'id') {
     if ((leading.args ?? []).length) return null;
+    // A `T` token is ALWAYS present — every element has a label and an id — and saying so is a CLAIM
+    // rather than the silence `undefined` means.
+    present = ALWAYS_PRODUCTIVE;
     const projected = byExpr({ key: { kind: 'token', token: leading.name } }, host, fresh);
     if (!projected) return null;
     value = projected;
@@ -3576,6 +3743,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     const projected = constLit(leading.args[0]);
     if (!projected) return null;
     value = projected;
+    present = ALWAYS_PRODUCTIVE;
     at = 1;
   }
 
@@ -3587,7 +3755,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   // it; an element is not one. Measured on this very increment, so it is a guard with a witness.
   if (at === 0) return null;
 
-  return valueRun(body, at, { value, type, vtype }, host.row, childSeam(ctx, fresh), fresh);
+  return valueRun(body, at, { value, type, vtype, present }, host.row, childSeam(ctx, fresh), fresh);
 }
 
 /**
@@ -3608,12 +3776,15 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
  */
 function valueRun(
   body: readonly IRStep[], from: number,
-  seed: { readonly value: Expr; readonly type: ScalarType; readonly vtype: Expr | undefined },
+  seed: { readonly value: Expr; readonly type: ScalarType; readonly vtype: Expr | undefined; readonly present?: Expr },
   row: HostRow | undefined, child: ChildSeam, fresh: Minter,
 ): ChildValue | null {
   let value = seed.value;
   let type = seed.type;
   let vtype = seed.vtype;
+  // A value TRANSFORM does not change WHETHER the body produced — `toUpper()` of nothing is still
+  // nothing — so the leading step's answer rides through the whole run unchanged.
+  const present = seed.present;
   for (let at = from; at < body.length; at++) {
     const step = body[at]!;
     if (REL_PROJECTORS.has(step.name)) {
@@ -3632,9 +3803,10 @@ function valueRun(
     type = transformed.type ?? UNKNOWN;
     vtype = undefined;
   }
+  const produced = present ? { present } : {};
   return vtype
-    ? { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype }
-    : { expr: value, framing: { kind: 'scalar', type } };
+    ? { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, ...produced }
+    : { expr: value, framing: { kind: 'scalar', type }, ...produced };
 }
 
 /**

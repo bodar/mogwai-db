@@ -35,6 +35,15 @@ const expected = JSON.parse(await Bun.file(new URL('./sql-hygiene-baseline.json'
  */
 const RELIR_AHEAD = new Map([
   ['g.V().group().by(__.values("name").substring(0,1)).by(__.constant(1))', 'gremlin-test/.../sideEffect/Group.feature g_V_group_byXvaluesXnameX_substringX1XX_byXconstantX1XX'],
+  // The IMPLICIT PASS-THROUGH of an option-map `choose`. Only `Pick.none` is written and the choice
+  // (`values("age")`) can be UNPRODUCTIVE, so the age-less vertices are claimed by neither written arm
+  // and TinkerPop emits them WHOLE — the reference installs identity traversals for both `Pick` tokens
+  // (`gremlin-core/.../branch/ChooseStep.java:65-81`). `Choose.feature:371-387` pins
+  // `marko, vadas, v[lop], josh, v[ripple], peter`: RelIR answers exactly that, legacy answers
+  // `lop`/`ripple` as STRINGS because its scalar CASE projector has one fallthrough and routes the
+  // unproductive inputs into it. Legacy's own `lowerChooseOptions` documents the gap in place.
+  ['g.V().choose(__.values("age")). option(P.between(26, 30), __.values("name")). option(Pick.none, __.values("name"))',
+    'gremlin-test/.../branch/Choose.feature g_V_chooseXageX_optionXbetweenX26_30X_nameX_optionXnone_nameX'],
   // THE KEYED TWIN of the row above, and it needs no second argument — the same grouping, read back
   // through `cap()` instead of becoming the traverser. It arrived here the day the named-collection
   // substrate made `group("a")` route, which is worth noting: a shed capability does not become a new

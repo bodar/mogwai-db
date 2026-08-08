@@ -468,10 +468,13 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(divC.sql).toContain('SELECT id, NULL AS a0, bulk FROM');
   });
 
-  test('option-map choose → CASE over the choice scalar (value shape)', () => {
+  // PINNED TO LEGACY: this describes that spine's scalar CASE projector, and the "known gap" its own
+  // comment names is a WRONG ANSWER that RelIR no longer has — the unproductive inputs pass through as
+  // ELEMENTS there (`Choose.feature:371-387`), which is a variant and not a value shape at all.
+  test('option-map choose → CASE over the choice scalar (value shape) — legacy', () => {
     // The CASE serves an option map with exactly ONE fallthrough: a Pick.none and no
     // Pick.unproductive. (See lowerChooseOptions for the known gap this leaves.)
-    const c = read('g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z"))');
+    const c = read('g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z"))', { spine: 'legacy' });
     expect(c.shape).toEqual({ kind: 'value', type: UNKNOWN });
     expect(c.sql).toContain('LEFT JOIN');
     expect(c.sql).toContain('m0_present');
@@ -479,18 +482,18 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(c.binds).toEqual(['age', 'x', 'z', 26, 30, 26, 30]);
     // A written Pick.unproductive is a SECOND fallthrough — keyed off the choice's PRESENCE, not
     // its value — so it needs the merge's per-arm gating rather than an ELSE.
-    expect(read('g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z")).option(Pick.unproductive, __.constant("u"))').sql)
+    expect(read('g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z")).option(Pick.unproductive, __.constant("u"))', { spine: 'legacy' }).sql)
       .toContain('ch_at');
     // T.label choice, literal-equality keys
-    expect(read('g.V().choose(T.label).option("person", __.constant("p")).option(Pick.none, __.constant("o"))').sql)
+    expect(read('g.V().choose(T.label).option("person", __.constant("p")).option(Pick.none, __.constant("o"))', { spine: 'legacy' }).sql)
       .toContain('CASE WHEN (SELECT labels.name FROM vertex_labels JOIN labels ON labels.id=vertex_labels.label WHERE vertex_labels.node=n.id ORDER BY vertex_labels.label LIMIT 1) = ? THEN p.m0 ELSE p.m1 END');
     // count() choice is a total generic child barrier
-    expect(read('g.V().choose(__.out().count()).option(1, __.values("name")).option(Pick.none, __.values("age"))').sql)
+    expect(read('g.V().choose(__.out().count()).option(1, __.values("name")).option(Pick.none, __.values("age"))', { spine: 'legacy' }).sql)
       .toContain('COUNT(c.id) AS v');
-    expect(read('g.V().choose(T.label).option("person", __.constant("p")).option(Pick.none, __.constant("o")).fold()').shape)
+    expect(read('g.V().choose(T.label).option("person", __.constant("p")).option(Pick.none, __.constant("o")).fold()', { spine: 'legacy' }).shape)
       .toEqual({ kind: 'jsonbList', items: { kind: 'scalar' } });
 
-    const nested = read('g.V().map(__.choose(__.values("age")).option(P.between(26,30), __.values("name")).option(Pick.none, __.constant("unknown")))');
+    const nested = read('g.V().map(__.choose(__.values("age")).option(P.between(26,30), __.values("name")).option(Pick.none, __.constant("unknown")))', { spine: 'legacy' });
     expect(nested.sql).toContain('CASE WHEN');
     expect(nested.sql).toContain('PARTITION BY');
     expect(nested.sql).toContain('m0_present');

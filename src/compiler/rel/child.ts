@@ -108,6 +108,23 @@ export interface ChildValue {
    * lands it beside the value, which is what stops `by(__.values('uuid'))` framing as a plain string.
    */
   readonly vtype?: Expr;
+  /**
+   * DID THIS BODY PRODUCE ANYTHING for this host row — the productivity signal, carried rather than
+   * guessed back from the value.
+   *
+   * `TraversalProduct` is explicit that a productive NULL is a value (`util/TraversalProduct.java`),
+   * so `expr IS NULL` answers a DIFFERENT question from "the body was unproductive" and a consumer
+   * that conflates them is wrong in exactly the case it was reaching for. The option-map `choose` is
+   * that consumer: `Pick.none` claims a productive choice that matched no key and `Pick.unproductive`
+   * claims a choice that produced nothing, and TinkerPop routes them to different arms. Legacy
+   * computes the identical signal as its modulation `present` column, so this is carriage rather than
+   * semantics — §6·7's rule at a third seam.
+   *
+   * ABSENT means the arm CANNOT SAY, and a consumer that needs it must then decline: an unknown
+   * productivity is not "always productive". A body that is always productive says so with a true
+   * literal, which is a claim rather than a silence.
+   */
+  readonly present?: Expr;
 }
 
 /**

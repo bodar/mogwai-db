@@ -338,8 +338,11 @@ const DECLINED = [
   "g.V().where(__.out().values('age').sum())",  // a NUMERIC reducer over an EMPTY child: SQL yields one
   // NULL row where Gremlin yields NO traverser, so a bare EXISTS would answer true where the
   // reference rejects. count()/fold() are not this — both emit a traverser for an empty child.
-  "g.V().choose(__.label()).option('person', __.out()).option(Pick.none, __.identity())",  // the OPTION
-  // form is a CASE over a projected KEY rather than a boolean — a different question, next arm.
+  // NOTE: the OPTION-MAP form used to sit here and is covered now — see the option-map test below.
+  // What it needed was not a new gate but a PRESENCE signal, because `Pick.none` and
+  // `Pick.unproductive` are distinguishable only where the choice reports productivity BESIDE its
+  // value. What still declines is a choice whose body cannot report one, and a `T`-TOKEN choice
+  // (`choose(T.label)`, no nested body at all), which is a different projection.
   "g.V().order().by('name').union(__.out(), __.in())",  // a live emission order: the merge key needs the origin
   'g.inject()',                       // the EMPTY relation, which `Values` refuses to express (§3.3)
   "g.inject([1,2],3)",                // MIXED list/scalar args: the VARIANT shape, not either of them
@@ -1722,6 +1725,48 @@ describe('the RelIR spine', () => {
         .toEqual(['Vertex', 'Vertex', 'Vertex', 'Edge', 'Edge', 'Edge']);
       expect(await framed('g.V().hasLabel("person").choose(__.values("age").is(P.gt(30)), __.values("name"))'))
         .toEqual(['String', 'String', 'Vertex', 'Vertex']);
+    })();
+  });
+
+  test('the OPTION-MAP choose — an N-way lookup, gated by a CARRIED productivity signal', () => {
+    // The form every branch host declined on `step.optionArms`, and what unblocked it was not a gate
+    // but a fact: `Pick.none` claims a productive choice that matched no key and `Pick.unproductive`
+    // claims one that produced NOTHING, and `TraversalProduct` calls a productive null a value — so
+    // `choice IS NULL` answers a different question. `ChildValue.present` carries the signal (legacy
+    // computes the identical thing as its modulation `present` column), and a choice whose body
+    // cannot report it DECLINES rather than conflating the two. §6·7's rule at a third seam.
+    return (async () => {
+      for (const gremlin of [
+        "g.V().choose(__.label()).option('person', __.out()).option(Pick.none, __.identity())",
+        'g.V().choose(__.values("age")).option(P.between(26, 30), __.values("name")).option(Pick.none, __.discard())',
+        'g.V().choose(__.values("name")).option(P.neq("y"), __.values("age")).option(Pick.none, __.constant("x"))',
+        // OVERLAPPING KEYS: the FIRST match wins. `BranchStep.pickBranches` collects every matching
+        // option and `ChooseStep` overrides it with `branches.subList(0, 1)` — reading only the
+        // super-method makes overlapping keys look like a fan-out, and this emitted six rows where
+        // `Choose.feature:244-256` pins four until the override was read.
+        'g.V().hasLabel("person").choose(__.values("age")).option(P.between(26, 30), __.constant("x")).option(P.between(20, 30), __.constant("y")).option(Pick.none, __.constant("z"))',
+      ]) {
+        expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('rel');
+        // AS A MULTISET, because neither spine pins the ARM order here: no `encounter` is live (both
+        // decline a branch under one), so the merge is a bare `UNION ALL` and which arm's rows land
+        // first is SQLite's. The corpus agrees — every option-map scenario is `unordered`. What is
+        // being compared is which traversers survive and how each frames, which is the claim.
+        const via = async (spine: 'rel' | 'legacy') =>
+          (await decodeAll(exec(seededStore(), undefined, undefined, spine).buffers(gremlin, {}, {})))
+            .map((v: any) => JSON.stringify(v)).sort();
+        expect(await via('rel'), gremlin).toEqual(await via('legacy'));
+      }
+
+      // THE IMPLICIT PASS-THROUGH, where RelIR is ahead and the corpus says so. Only `Pick.none` is
+      // written and `values("age")` can be unproductive, so the age-less vertices are claimed by
+      // neither written arm and TinkerPop emits them WHOLE (`ChooseStep`'s constructor installs
+      // identity traversals for both `Pick` tokens). `Choose.feature:371-387` pins `v[lop]`/`v[ripple]`
+      // as ELEMENTS; legacy's scalar CASE projector has one fallthrough and answers them as strings,
+      // a gap its own `lowerChooseOptions` documents in place.
+      const framed = (await decodeAll(exec(seededStore(), undefined, undefined, 'rel').buffers(
+        'g.V().choose(__.values("age")).option(P.between(26, 30), __.values("name")).option(Pick.none, __.values("name"))', {}, {})))
+        .map((v: any) => (typeof v === 'string' ? v : `v[${v.properties.find((p: any) => p.key === 'name').value}]`));
+      expect(framed.sort()).toEqual(['josh', 'marko', 'peter', 'v[lop]', 'v[ripple]', 'vadas']);
     })();
   });
 });

@@ -144,9 +144,11 @@ test('branch fork/merge of DIVERGENT arm labels executes (union/coalesce/choose)
 
 test('option-map choose executes: choice scalar → matched option body', () => {
   const store = seededStore();
-  // age in [26,30) → "x" (marko 29, vadas 27), else "z". NB the age-less lop/ripple also land in
-  // the ELSE here; TinkerPop would emit the ELEMENT for them (see lowerChooseOptions' KNOWN GAP).
-  expect(run(store, 'g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z"))').map((r) => r.v).sort())
+  // age in [26,30) → "x" (marko 29, vadas 27), else "z". THE AGE-LESS lop/ripple land in the ELSE on
+  // LEGACY and that is its KNOWN GAP, so this row is pinned there: TinkerPop emits the ELEMENT for
+  // them (`Choose.feature:371-387`), which RelIR now does — the corrected answer is asserted in
+  // `test/rel-spine.test.ts`, and it is not a value shape at all but a variant.
+  expect(runWith(store, 'g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z"))', { spine: 'legacy' }).map((r: any) => r.v).sort())
     .toEqual(['x', 'x', 'z', 'z', 'z', 'z']);
   // Write Pick.unproductive and the distinction is honoured: the two age-less vertices take it.
   expect(run(store, 'g.V().choose(__.values("age")).option(P.between(26,30), __.constant("x")).option(Pick.none, __.constant("z")).option(Pick.unproductive, __.constant("u"))').map((r) => r.v).sort())
