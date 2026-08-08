@@ -578,245 +578,84 @@ GUARD, not a decline.** `addV` proves single-row at COMPILE time (its one-row ca
 
 **The cut:** delete the write route, `steps/write/write.ts`, and the write half of the differential.
 
-### Phase 2 — ✅ sack, ✅ the extracted families, then the rest
+### Phase 2 — ✅ the extracted families; what is LEFT
 
 ✅ Landed: `sack` · `math` · `format` · the ELEMENT-membered list · the NAMED-COLLECTION substrate ·
-§6·7's lattice at the arm merge · `union()` in SOURCE position · the VARIANT · the OPTION-MAP `choose` ·
-**the MAP LOOP** · **`valueMap()`/`elementMap()`** · **the MEMBER TYPE CHANNEL** · **the group barrier
-at all three hosts** · **the GROUP-SCOPED REDUCER (and the `origin` channel)** ·
-**`order`/`dedup(Scope.local)`**. The durable findings from them:
+`union()` in SOURCE position · the VARIANT · the OPTION-MAP `choose` · the MAP LOOP ·
+`valueMap()`/`elementMap()` · the group barrier at all three hosts · the GROUP-SCOPED REDUCER (and the
+`origin` channel) · `order`/`dedup(Scope.local)` · **the MEMBER TYPE CHANNEL** (§6·7's list arm, and
+with it the total descriptors below).
 
-- 🔴 **THE MEMBER TYPE CHANNEL — §6·7 one layer down, and it had grown a SECOND VOCABULARY unnoticed.**
-  `ListOf`'s scalar arm was `as?: ValueType` + `typed?: boolean` plus an implicit third case: exactly the
-  two-optionals-plus-implicit-third trap `ScalarType` exists to end, spelled differently enough that nobody
-  recognized it. It is now `{ type: ScalarType; productiveNull: boolean }` — the same union, cases and
-  accessors a ROW's type uses, and both fields REQUIRED. That closes step 3 of the build order in
-  `docs/archive/2026-07-25-type-channel-unification.md` outright: `GroupKey` and `Shape{kind:'value'}`
-  carry the same union too, so no descriptor describes a scalar type in its own words any more. **The carrier is now NAMED too**
-  (`TypeCarrier = column | envelope`): both are the same compile-time fact and only the READ differs, and
-  leaving the encoding to prose is precisely what let the second vocabulary grow for it.
-- 🔴 **What the second vocabulary cost, measured — three wrong answers and a decline, all one shape.**
-  `TYPED_LIST` was a CONSTANT, so re-tagging a list REPLACED it and dropped `as` and `productiveNull`;
-  `unifyLists` compared only the arms' static tags, so a lone self-describing arm unified to an UNTAGGED
-  list and a uuid member framed as a String; `foldScalars`/`foldMember` took a `vtype?`/`staticTag?` PAIR
-  and so could not carry `static`'s `text` flag — the fact that a big long rides as decimal TEXT — which is
-  why `max(Scope.local)` compared lexicographically and answered the SMALLER value on BOTH spines while the
-  GLOBAL `max()` was already right. **One step name, two engines, only one of them ever fixed.**
-- 🔴 **A NULL never WINS a min/max, but it must not be FILTERED.** `NumberHelper.max/min` return the
-  non-null side; over an all-null input they reduce to null, and `ReducingBarrierStep` has seen starts, so
-  `MaxGlobalStep` emits ONE null traverser (`MaxLocalStep.processNextStart` splits on the same null and
-  skips only an EMPTY collection). Filtering answered EMPTY for exactly that case. Both spines now sort
-  nulls LAST — with an explicit `IS NULL` term, because SQLite orders NULLs first ascending.
-- ✅ **FOUR SITES DROPPED A FIELD ON A RE-SHAPE — and the FIX IS TOTALITY, not a fifth guard.** A
-  collection projection declared `v` alone; `aggregate().by(traversal)`'s window narrowed to
-  `(v, ordinal, rn)`; `unfold()` rebuilt the scalar stream without `productiveNull` and with `UNKNOWN`
-  instead of the member's static type; the three global-reducer arms each rebuilt the framing without
-  `productiveNull`. Each was answered with a NAMED preserving rebuild — and that was the third time
-  this class appeared and the third bespoke guard (`rebuildScalar`, `withMemberType`, `typeCarriedBy`).
-  **A convention cannot be the protection when the failure mode is forgetting**, so every descriptor
-  field is now REQUIRED and the omission is a type error. The first defect totality surfaced was
-  legacy's group key, which had simply left `GroupKey.type` unset — an omission reads as "no opinion"
-  rather than "framed wrong".
-- ⚠️ **A COMPUTE-ONCE RULE the statement budget makes non-negotiable.** `v` and `vt` are two fields of one
-  winning member, and a correlated subquery each emits the whole sort twice: 1,250 → 4,108 bytes for the
-  `max` family against a 100 KB cap. Both spines project a `{v,t}` pair as ONE value and read its fields —
-  and on RelIR that needs a FENCE, because the block assembler otherwise fuses the two projections and
-  re-inlines the pick at both reads (3,024 fused, 1,915 fenced). The same rule retired `sum`'s
-  double-aggregate and the member decode spliced into its own eligibility guard.
-- ⚠️ **An UNTAGGED member is its own compare key, and that is PROVED rather than assumed** — its type is
-  inferred from its storage class, and that inference cannot disagree with the storage order (TEXT infers
-  `string`, no cast; INTEGER infers int/long, a CAST to INTEGER is the identity; REAL infers double). So the
-  cast folds away for a bare list, and `inferVtypeSql` stays out of a self-describing list's ORDERING key
-  entirely: only the WRAPPED members can carry a type their storage class does not determine.
+#### 🚧 What is left, ranked
 
-- ⚠️ **THE MEMBERS STAY ROWIDS FOR THE WHOLE OF THEIR LIFE INSIDE THE ALGEBRA.** `foldElements` collects ids,
-  `unfoldList` hands them back as an element relation, and only `listPayload` expands them — at the ROOT, once
-  per SURVIVING member. The round trip is LOSSLESS and a discarded member is free
-  (`fold().range(local,0,2)` computes two property bags, not six).
-- ⚠️ **The fold happens AT the `aggregate`, not at the `cap`** — that is what "the value at this point" means;
-  deferring it re-derives which relation was current N steps earlier, the problem the migration exists to end.
-- ⚠️ **WHICH ARM A ROW TAKES IS ONE COLUMN.** Naive option-map gating is O(n²) in the EXPENSIVE term:
-  measured 18.7 KB of statement text with the choice inlined, 7.5 KB projected to a column, **1.9 KB** with
-  the tests projected into one ordinal `CASE`. The ordinal gives FIRST-MATCH-WINS free — and that rule cost a
-  wrong answer first: `BranchStep.pickBranches` collects EVERY match and `ChooseStep` OVERRIDES it with
-  `branches.subList(0, 1)` (`.../ChooseStep.java:139-142`).
-- ⚠️ **`ChildValue.present` carries productivity beside the value** — `Pick.none` (a productive choice
-  matching no key) and `Pick.unproductive` are distinguishable no other way, since `TraversalProduct` calls a
-  productive null a value. A body that cannot report it DECLINES.
-- ⚠️ **The ranking instrument can rot.** `rel-blockers`' `blame()` told a named collection from an unkeyed
-  barrier by `typeof step.args[0] === 'string'`; an `Arg` has been `{value, type, name}` since a parameter
-  became a first-class IR fact, so the test had been permanently false and the LARGEST family (95 side
-  effects) was reported as absent while the third was reported as first.
-- ⚠️ **A fail-closed VIOLATION: never name a channel list.** The ordered `dedup()` hardcoded
-  `aggs: [['bulk',…],['encounter',…]]` while deriving its declared TYPE from the input's channels — fine until
-  `fold().unfold()`, the first relation carrying a position and no multiplicity. The factory caught it as a
-  THROW out of a lowering whose contract is `null`.
-- ⚠️ **Refuted, twice, by one grep each:** an AST split of `math` (three of twenty FN entries are
-  non-derivable SQL facts, §6·4); and "a non-reducing value traversal collects" — `Grouping.convertValueTraversal`
-  appends `fold()` for a `ValueTraversal`/`TokenTraversal`/`IdentityTraversal`/`ColumnTraversal` ONLY
-  (`.../step/Grouping.java:92-101`), so `group().by(k).by(__.constant(1))` is `{j:1}`.
-- ⚠️ **A map is a VALUE, so re-entering one is `json_each` and nothing more exotic.** The pairs array
-  `[[keyNode, valNode], …]` was chosen so a key could be non-string and the entry order could be OURS to
-  state; it paid a second dividend when the tail landed, because both sides are addressable BY POSITION.
-  One wall wearing four names fell at once — `select(Column.keys|values)`, `unfold()`, `count(Scope.local)`
-  and every global row op.
-- ⚠️ **`Column` is ONE token with TWO hosts, which is why there are two loops.** Over a Map, `Column.keys`
-  is a `LinkedHashSet` and `Column.values` an `ArrayList` (`gremlin-core/.../structure/Column.java:22-47`),
-  so the KEY side frames as a SET (`data/Set.feature:47-56` pins `s[name,age]`); over a `Map.Entry` the same
-  token is the SIDE ITSELF (`Column.java:26-29`). A `mapEntry` framing arm is its own arm because there the
-  two sides are their own COLUMNS — which is the WIRE's own distinction too (`MapEntrySerializer`,
-  TINKERPOP-3104), so this taught the algebra to produce rows the framer already read (§6·3).
-- ⚠️ **The two map PRODUCERS differ by superclass, never by shape.** `GroupStep extends
-  ReducingBarrierStep<S, Map<K,V>>` against `PropertyMapStep extends ScalarMapStep<Element, Map<K,E>>`, both
-  carrying `Map<K,V>` — so `valueMap()` needed no new shape and no new framing arm, only a second caller of
-  the pairs encoding. A VERTEX key is MULTI-VALUED (its value is a LIST) and an EDGE key's is the value
-  itself (`PropertyMapStep.addElementProperties`), the asymmetry `vertexProps`/`edgeProps` already carry.
-- ⚠️ **EVERY value side is a self-describing `{t,v}` node, TOKENS INCLUDED** — that is what keeps `valOf` at
-  ONE `MapOf` arm instead of needing a "mixed" one, and therefore what makes `select(Column.values)` after a
-  `valueMap()` describe what is actually there. `T` is a WIRE TYPE, not a string: `FrameNode` grew a `T` arm
-  (one line in `frameTypedNode`, the same shape as its `vertex`/`edge` arms), deliberately NOT a
-  `CanonicalType` — a token is never a stored property VALUE, so it belongs to the READ vocabulary only.
-- ⚠️ **THE GROUP BARRIER HAS THREE HOSTS AND ONE LOWERING.** A scalar stream needed only a CALLER
-  (`byNode`'s scalar arm already tagged the value); a bare `group()`/`groupCount()` keys by the ELEMENT
-  with the ROWID as the `GROUP BY` and `elementNode` building the entry off it — once per SURVIVING
-  group, so SQLite hashes an integer rather than a JSON document per row. Both declines had stopped
-  being true before they were removed: one said the caller did not exist, the other was written before
-  an element could be a MEMBER of the typed tree. **Read a decline's REASON, not its date.**
-- 🔴 **A STATIC TYPE MUST RIDE ON THE SCALAR HOST — leaving it off was a wrong ANSWER.** A static tag
-  is a per-row `vtype` constant-folded, so an untagged group key made
-  `inject(777).asNumber(GType.BIGINT).groupCount()` frame an Int: untagged means "infer from the JS
-  value", which cannot tell a BigInt from an Int, a BigDecimal from an Int or a datetime from a long.
-  Three corpus traversals framed the wrong TYPE with the right value, and only `sql-hygiene`'s
-  byte-level comparison saw it. §6·7 at one more carrier.
-- ⚠️ **A SHAPE THAT FRAMES CORRECTLY AT THE WIRE CAN STILL BE WRONG TO RE-ENTER**, and that is now
-  twice in this family. An element-keyed map's blob holds `{t:'vertex', v:{…}}`, which the typed framer
-  walks at any depth — but `select(Column.keys).unfold()` decodes it into the SCALAR vocabulary, whose
-  framer emitted the payload as a JSON STRING. `MapOf`'s `elem` arm on the key is what turns that into
-  a DECLINE; the wire still sees `scalar`, because the two vocabularies answer two questions.
-- ⚠️ **`valueMap` and `elementMap` are ONE producer with THREE facts different**, which is the
-  `group()`/`groupCount()` relationship again: the tokens (optional against unconditional), the value
-  arity (a LIST per vertex key against FLAT, and `map.put` overwriting means the flat form keeps the
-  key's LAST value), and an edge `elementMap`'s `Direction.IN`/`OUT` endpoint maps
-  (`ElementMapStep.getVertexStructure`). `Direction` joined `T` as a `FrameNode` arm; the nested
-  endpoint map needed nothing new, because the tree is self-describing at every depth.
-- 🔴 **AN EDGE `valueMap()` VALUE IS THE VALUE, NOT A LIST — and both spines had it wrong.**
-  `PropertyMapStep.addElementProperties` collects into a list only `if (isVertex)`. The corpus pins it
-  decisively though indirectly: `integrated/SubgraphStrategy.feature:713-724` asserts
-  `outE().valueMap().select(Column.values).unfold()` yields `d[5].i`, which it could not if the value
-  side were `[5]`. §12's rule with a sharpened witness — one of the two agreeing implementations was
-  a RelIR expectation written two hours earlier in the same session, which made it no better evidence.
-- ⚠️ **A ZERO-LABEL VERTEX HAS NO `T.label` ENTRY under the single regime**, which is a filter on the
-  token ROW rather than a null inside it (`addIncludedOptions` puts the label only
-  `if (!label.isEmpty())`; the multilabel twin pins `s[]`, present and empty). Our `label()` answers
-  `DEFAULT_VERTEX_LABEL` there, which is right for the scalar step and the wrong ENTRY here — one
-  value answering two questions.
-- ⚠️ **The LABEL REGIME is a settled value the lowering must be HANDED (§6·6 again).** It is not derivable
-  from `labelCardinality` inside the algebra — `with("multilabel")`/`with("singlelabel")` overrides the graph
-  default — so a lowering that re-derived it would render one name where a vertex holds a set.
-- ⚠️ **A shared `format` bug both spines agreed on.** The reference's pattern is `(?<!%)%\{(.*?)\}` and **the
-  lookbehind is an ESCAPE**; each spine carried `%\{([^}]*)\}` and read `%%{name}` as a reference — a wrong
-  answer with the right arity that neither the differential nor the census could see. Only the reference is
-  not blind.
+`mise run rel-blockers` once the map family closed — the scalar-transform tail (53, heterogeneous:
+mostly literal-typed casts and error-raising forms rather than one lowering), branch (41 — `choose` 20,
+`union` 14), row ops (41 — `order` 20, `dedup` 12, now the ELEMENT-list and `Column`-keyed forms),
+aliases (32 — `select` 27, dominated by `Pop.all`/`Pop.mixed` history reads), the rest of the map shape
+(24), side effects (21), then `local`, `match`, `where`, the `path` tails.
 
-🔴 **Divergences left standing deliberately** (recorded, not reconciled — each is a human call if it ever
-matters): a `by()`-less `math("a + b")` over labelled values ANSWERS on RelIR where legacy throws; an EMPTY
-`fold()` frames as one empty list; `fold().unfold().values("name")` keeps traverser order where legacy answers
-alphabetically; the retyping two-arg `choose` and MIXED ELEMENT KINDS in a variant.
+Named gaps inside those, each with its blocker stated so it is not re-derived:
 
-✅ **One of those "divergences" was a DROPPED FIELD, and the way it read as a semantics question is the
-lesson.** It stood here as *a projected collection folds BARE rather than typed — a TYPED list of nulls
-emits nothing where a BARE one emits null, a question about `MaxLocalStep`, not about collections.* Both
-halves were wrong. `typed` was a CONSTANT `ListOf`, so claiming the type REPLACED the descriptor and took
-`productiveNull` with it — the flag saying a NULL member is a real value; the observed behaviour change was
-that field falling out, and nothing about `MaxLocalStep`. And the reference answers the question outright:
-`Operator.max` over an all-null input reduces to null (`NumberHelper.max` returns the non-null side, null
-when both are null) and `ReducingBarrierStep` has seen starts, so `MaxGlobalStep` emits ONE null traverser;
-`MaxLocalStep.processNextStart` splits on the same null and skips only an EMPTY collection. **A recorded
-divergence whose justification is a question we did not ask the reference is not a divergence — it is an
-unread citation** (§12's rule, with the twist that the blind spot was a vocabulary rather than an argument:
-a list member's type was spelled in a second, lossier channel than a row's, so nobody thought to ask). The
-whole family landed once `ListOf` took the same `ScalarType` a row carries: see "the MEMBER TYPE CHANNEL"
-below.
+| | Gap | Blocked on |
+|---|---|---|
+| 1 | **Group VALUE forms** — `group().by(k).by(__.out().count())`, `by(__.tail())` | Nothing. Legacy-only today, and they are what stops legacy shedding its group KEY (34 tests, an L3 scenario, a conformance gate) |
+| 2 | **Set-op keeps its members' types** — `values('when').fold().merge(…)` returns raw millis | The lossy test must span BOTH sides; `withLossyFlag` asks it of one relation. ⚠️ Gating on the compile-time `typed` flag is NOT the same question and was measured wrong (6 differentials) |
+| 3 | **`memberTypeTag` returns a NULL tag unresolved** for a wrapped member whose `t` is null (what `path().by(<transform>)` writes), where a null tag means "infer from the value" everywhere else | Nothing — inert until tags join a comparison, which is how it was found |
+| 4 | **Map family residue** — selective token subsets (`with(tokens, ids)`), the `by(__.unfold())` that pairs with them, `order(Scope.local)` over map entries, element-keyed side reads | The last needs a list whose members may be ELEMENTS (`MapOf`'s `elem` tag declines today) |
+| 5 | **Group-scoped reducer: `count()` with a non-empty body, and a SCALAR host** | The empty pool is PER-REDUCER and decides INNER vs LEFT join (`CountGlobalStep` seeds 0 and keeps its key; `SumGlobalStep` does not). A scalar host needs `origin` to name a parent without a rowid — channels-core |
+| 6 | **Two `sack` declines** — `withSack(seed, Operator.x)` (a MERGE policy for the role, channels-core) and `barrier(Barrier.normSack)` (its own step) | Both honest |
+| 7 | **L4 sweep** — two committed expectations encoded legacy's bug. An addendum written against one implementation records that implementation, not the reference | Nobody has swept the rest |
+| 8 | **Plan-size wart** — `byNode`'s property arm nests the collection CASE inside itself (`typedNode` re-applies `storedValueOn`). Bytes, not an answer, but in the hottest key expression there is | Nothing; one commit |
 
-🔴 **A BARRIER EMITS ONE TRAVERSER, and legacy contradicts ITSELF one shape over.** A global `count()`
-after `group()` is 1; only `count(Scope.local)` is the map's SIZE (`GroupStep extends
-ReducingBarrierStep`, `gremlin-core/.../step/map/GroupStep.java:51`). Legacy answers the LOCAL reading
-under the GLOBAL name — making the two spellings indistinguishable — while both spines already answer 1 for
-`fold().count()`. Recorded as `RELIR_AHEAD`. Two more of the same class, both now pinned per-spine: a
-non-matching `is(typeOf(…))` over a map is the EMPTY RESULT rather than a refusal
-(`data/Set.feature:38-43`), and slicing ONE traverser yields it (`group().by(k).limit(2)`).
+#### 🔴 Human decisions
 
-🔴 **THREE MORE COMMITTED ASSERTIONS HAD ROTTED IN THE LEGACY POSITION**, found by the map loop routing —
-the same class the option-map increment named. When a family starts routing, every assertion about it was
-written while ONE spine owned it: pin the claim AT the spine it is about, or re-derive it.
+- **The REAL precision loss, and it is BOTH spines.** SQLite writes a REAL into JSON with 15
+  significant digits, so every JSONB-carried collection loses an inexact double — `Mean.feature:70`
+  wants `d[0.3333333333333333].d` and a blob carries `0.333333333333333`. It is a DIVERGENCE only
+  where one spine computes in a ROW and the other into the blob, which is why the group-scoped `mean`
+  declines. Fix = carry an inexact real as decimal TEXT under its tag, the carriage the exact tail
+  already has for a big long. **Wire-visible on both spines — worth doing for its own sake, not for
+  the group, and that is the call.**
+- **Divergences left standing** (recorded, not reconciled): a `by()`-less `math("a + b")` over labelled
+  values ANSWERS on RelIR where legacy throws; an EMPTY `fold()` frames as one empty list;
+  `fold().unfold().values("name")` keeps traverser order where legacy answers alphabetically; the
+  retyping two-arg `choose`; MIXED ELEMENT KINDS in a variant.
+- **Three `RELIR_AHEAD` where legacy contradicts the reference**: a global `count()` after `group()` is
+  1 and only `count(Scope.local)` is the map's SIZE (`GroupStep extends ReducingBarrierStep`); a
+  non-matching `is(typeOf(…))` over a map is the EMPTY RESULT rather than a refusal
+  (`data/Set.feature:38-43`); slicing ONE traverser yields it (`group().by(k).limit(2)`).
 
-🔴 **TWO COMMITTED L4 EXPECTATIONS ENCODED LEGACY'S BUG** (an unproductive choice takes `Pick.unproductive`,
-the traverser itself — not `Pick.none`; the official corpus pins the pattern at `Choose.feature:371-387`).
-**An addendum written against one implementation records that implementation, not the reference** — every L4
-scenario in a family the migration touches is worth re-deriving from `gremlin-test`/`gremlin-core` rather than
-trusted. Nobody has swept the rest.
+#### ⚠️ Invariants earned here — re-breaking these costs a wrong answer
 
-🚧 Two `sack` declines remain, both honest: `withSack(seed, Operator.x)` names a MERGE operator (a third
-policy answer for the role — a channels-core change, not a step lowering), and `barrier(Barrier.normSack)` is
-its own step.
-
-- ⚠️ **A MAP IS A SCOPE, consulted BEFORE the path labels** (`gremlin-core/.../step/Scoping.java:119-135`
-  — `object instanceof Map && containsKey(key)` is the FIRST test, then side effects, then labels). So
-  `select(<key>)` is the map loop's answer, and `containsKey` is not "the value is not null": presence
-  is an `EXISTS` and the value its own extract, which is the `present`-beside-the-value split the
-  option-map `choose` needed, at a third seam.
-- ⚠️ **AN UNRESOLVABLE `select()` KEY IS THE EMPTY RESULT, NOT A DECLINE** (`Select.feature:578-596`),
-  and the guard is where being empty would be WRONG: `getScopeValue` tries the traverser's SIDE EFFECTS
-  before the labels, so a `withSideEffect` constant or a named collection resolves with no `as()`
-  behind it. The chain context answers that, because the record builder holds the alias map and nothing
-  else.
-
-🚧 **A PLAN-SIZE WART worth one commit, spotted while reading the emitted SQL:** `byNode`'s property arm
-builds `typedNode(storedValue(…), vtype)` and `typedNode` applies `storedValueOn` AGAIN, so every
-property-keyed group emits the collection CASE nested inside itself. `json(json(x))` is idempotent, so it
-is bytes and not an answer — but it is bytes in the hottest key expression there is.
-
-- ⚠️ **THE GROUP-SCOPED REDUCER IS A POOL, AND IT MAY NOT BE A DECOMPOSITION TABLE.** `GroupStep` applies
-  the value traversal's PRE-BARRIER part per traverser and lets the BARRIER reduce what EVERY member of a
-  key contributed (`Grouping.determineBarrierStep`). `sum`/`min`/`max` happen to agree with
-  per-parent-then-outer-reduce and `mean` does not, and a rule right for three reducers and wrong for the
-  fourth is the defect class the decline contract exists to prevent.
-- ⚠️ **THE `origin` CHANNEL IS MINTED, and it is the mechanism** — `src/channels.ts` had modelled the role
-  since the channel core landed and nothing built it (`sack`'s position one increment earlier). A JOIN keeps
-  CHANNELS and drops payload (§3.5), so one `int` naming the parent rides through every hop with NO
-  per-step change and the key is re-read off it. A correlated relation could not serve: SQLite has no
-  `LATERAL`, so the correlation becomes the join's `ON` — which the ordinary fold's movements already build.
-  `ChildSeam`'s FOURTH answer (`rows`) is what an `order().by(<reducer>)`, a collection's value reducer and
-  the per-origin reducer after a branch all want too.
-- 🔴 **TWO CORRECT RULES MADE A WRONG ANSWER, and only the byte differential saw it.** The sub-fold was
-  handed `NO_ALIASES`, so a body reading a label found none — and since an unresolvable `select()` had just
-  become the EMPTY RESULT, it pooled ZERO rows and answered an empty map instead of declining. §6·6's "check
-  what a seam HANDS OVER" at its sharpest: neither rule was wrong, and their composition was.
-- 🔴 **SQLite WRITES A REAL INTO JSON WITH 15 SIGNIFICANT DIGITS**, so every JSONB-carried collection loses
-  an inexact double — `Mean.feature:70` wants `d[0.3333333333333333].d` and a blob carries
-  `0.333333333333333`. **BOTH SPINES ALREADY HAVE THIS** (`g.inject(1).math("1/3").fold()` is lossy on
-  each), which is why it went unseen; it becomes a DIVERGENCE only where one spine computes in a ROW and the
-  other into the blob, which is why the group-scoped `mean` declines. The fix is to carry an inexact real as
-  decimal TEXT under its tag — the carriage the exact tail already has for a big long — and it is worth
-  doing for its own sake, not for the group.
-- 🚧 **The empty pool is PER-REDUCER and decides INNER versus LEFT join**, which is why `count()` with a
-  non-empty body still declines: `CountGlobalStep` seeds 0 so a member whose body produced nothing must
-  still count 0 and keep its key, where `SumGlobalStep` leaves `NON_EMITTING_SEED` and the key goes with the
-  traverser. A SCALAR host also stays out of reach — `origin` is typed `int` and a value stream has no rowid
-  to name its parent by, which is a channels-core change.
-
-🚧 **What else the MAP family owes:** the SELECTIVE token subsets (`with(tokens, ids)`, which
-`absorbValueMapWith` deliberately leaves in place to fail closed) and the `by(__.unfold())` that pairs with
-them (a `by()` on a `valueMap` projects each map VALUE and removes an unproductive key —
-`applyTraversalRingToMap`); `order(Scope.local)` over a map's entries; and the element-keyed side reads,
-which need a list whose members may be ELEMENTS (today `MapOf`'s `elem` tag makes them decline).
-
-🚧 **Then the rest of Phase 2**, ranked as `mise run rel-blockers` had it once the map family closed:
-the scalar-transform tail (53, but heterogeneous — mostly literal-typed casts and error-raising forms
-rather than one lowering), branch (41 — `choose` 20, `union` 14), the row ops (41 — `order` 20 and
-`dedup` 12, now the ELEMENT-list and `Column`-keyed forms), aliases (32 — `select` 27, dominated by
-`Pop.all`/`Pop.mixed` history reads), the rest of the map shape (24), the side effects (21), `local`,
-`match`, `where` and the `path` tails.
+- **Every shape DESCRIPTOR is total.** Three times a field was dropped on a re-shape and three times
+  the answer was another bespoke preserving rebuild; a convention cannot be the protection when the
+  failure mode is forgetting. Omitting a field is now a type error. The first defect it surfaced was
+  legacy's group key, which had left `GroupKey.type` unset — an omission reads as "no opinion" rather
+  than "framed wrong".
+- **A NULL never WINS a min/max and must never be FILTERED.** `NumberHelper.max/min` return the
+  non-null side; over an all-null input they reduce to null and the barrier has seen starts, so ONE
+  null traverser is emitted. Nulls sort LAST, with an explicit `IS NULL` term (SQLite orders NULLs
+  first ascending).
+- **An UNTAGGED member is its own compare key** — proved, not assumed: its inferred type cannot
+  disagree with its storage order, so the cast folds away.
+- **COMPUTE ONCE.** `v` and `vt` are two fields of one winning member; a correlated subquery each
+  emits the whole sort twice (1,250 → 4,108 bytes for `max`). On RelIR that needs a FENCE, or the
+  assembler re-inlines the pick at both reads.
+- **Members stay ROWIDS for their whole life inside the algebra** — only `listPayload` expands them, at
+  the ROOT, once per SURVIVING member.
+- **The fold happens AT the `aggregate`, not at the `cap`.**
+- **Never name a channel list** — derive the aggregates from the channels the input carries.
+- **A map is a SCOPE, consulted BEFORE the path labels** (`Scoping.java:119-135`), and `containsKey` is
+  presence (an `EXISTS`), not "the value is not null". An unresolvable `select()` key is the EMPTY
+  RESULT, not a decline (`Select.feature:578-596`).
+- **`ChildValue.present` carries productivity beside the value** — `Pick.none` and `Pick.unproductive`
+  are distinguishable no other way. A body that cannot report it DECLINES.
+- **Which arm a row takes is ONE COLUMN** — the option-map ordinal `CASE` (18.7 KB inlined → 1.9 KB),
+  and it gives FIRST-MATCH-WINS free (`ChooseStep` overrides `pickBranches` with `subList(0, 1)`).
+- **The ranking instrument can rot** — `rel-blockers`' `blame()` read a wrapper and reported the
+  LARGEST family as absent. Re-derive a ranking before trusting it.
+- **Read a decline's REASON, not its date** — two group-barrier declines had stopped being true before
+  anyone removed them.
 
 ### 🔴 Phase 3 — `repeat()` — THE GATE
 
@@ -886,10 +725,14 @@ it.
 
 ---
 
-## §11. Open design decisions — NONE OPEN
+## §11. Open design decisions
 
-Decided and recorded as laws; the section stays so the §-numbering (code comments cite §12) does not move.
-Re-open one only with evidence, not with a preference.
+**The live ones are listed per PHASE, beside the work they gate** — Phase 2's are under "🔴 Human
+decisions" there, and Phase 3's is the `until()`/`emit()` barrier wall. Keeping a decision next to the
+increment it blocks is what stops it being read as general policy.
+
+What follows is CLOSED, recorded as law; the section stays so the §-numbering (code comments cite §12)
+does not move. Re-open one only with evidence, not with a preference.
 
 1. ~~Exact-type literal framing~~ → **§6·7**. The tag table was the wrong lever; the missing per-row carrier
    was the defect.
