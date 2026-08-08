@@ -1407,10 +1407,29 @@ function orderedInput(input: Rel, fresh: Minter): { readonly bindings: readonly 
  * relation it hands back simply does not declare the channel, so a later reader of it fails closed.
  */
 function writeInputCols(input: Rel): readonly ColMeta[] {
-  return [meta('id', 'int'), ...input.channels
+  return [traverserCol(input), ...input.channels
     .filter((channel) => channel.role === 'encounter' || channel.role === 'alias')
     .map((channel) => meta(channel.col, channel.role === 'alias' ? 'json' : 'int', channel.role === 'alias'))];
 }
+
+/**
+ * THE COLUMN AN INPUT RELATION CARRIES ITS TRAVERSER IN — `id` for an ELEMENT relation, `v` for a
+ * SCALAR one.
+ *
+ * A write asks this question for two different reasons and only one of them cares about the answer.
+ * Where the traverser IS the subject — a property's owner, an implicit `addE` endpoint, an
+ * `addLabel` target — the write reads `id` and a scalar stream is refused ANYWAY, by the same
+ * `elem !== 'vertex'` tests that already guard those. Where the input is only a MULTIPLIER — a
+ * creation, a merge, whose row count is all they take from it — nothing reads the column at all and
+ * the snapshot merely has to carry SOMETHING, because a projection with no columns is not a SELECT.
+ *
+ * So this is not a widening of what a write may do to a traverser; it is the snapshot ceasing to
+ * assume the traverser is an element. `g.inject(0).mergeV([:])` is `g.V().mergeV([:])` with a
+ * different multiplier, and the reason it declined was that `inputRows` projected a column its input
+ * does not have.
+ */
+const traverserCol = (input: Rel): ColMeta =>
+  (input.type.cols.some((column) => column.name === 'id') ? meta('id', 'int') : meta('v', 'any', true));
 
 // ---------- addE() ----------
 
@@ -1467,7 +1486,7 @@ function endpointExpr(end: Endpoint, over: Rel, aliases: AliasMap, fresh: Minter
  * `addV`s and then six `addE`s reading the labels they bound).
  */
 export function elementAddE(
-  input: Rel, elem: Elem, step: IRStep, cluster: readonly IRStep[], aliases: AliasMap,
+  input: Rel, elem: Elem | null, step: IRStep, cluster: readonly IRStep[], aliases: AliasMap,
   ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
@@ -1930,7 +1949,7 @@ export function elementMergeV(
  *   `writeOf` is the one place that says so.
  */
 export function elementMergeE(
-  input: Rel, elem: Elem, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
+  input: Rel, elem: Elem | null, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
   aliases: AliasMap, ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;

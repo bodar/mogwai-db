@@ -979,6 +979,68 @@ describe('the RelIR spine', () => {
     }
   });
 
+  test('a creation or a merge over a SCALAR stream is the same write with a different multiplier', () => {
+    // §6·6's rule at the WRITE seam. What `addV`/`addE`/`mergeV`/`mergeE` take from their input is its
+    // ROW COUNT, and a scalar relation has one exactly as an element relation does — the reference
+    // draws no distinction at all, since `MergeVertexStep` never looks at the traverser except to
+    // materialize a map from it. What declined was the SNAPSHOT, which projected an `id` column a
+    // scalar relation does not have; `traverserCol` is the fix, and it is one line in `write.ts`
+    // rather than a scalar-specific write path.
+    for (const gremlin of [
+      'g.inject(0).mergeV([:])',
+      'g.inject(0).mergeV([(T.label):"person"])',
+      'g.inject(0).as("a").mergeV([(T.label):"person"])',
+      'g.inject(1).addV("person")',
+      'g.inject(1).addV("person").property("name","x")',
+      'g.V().values("name").addV("person")',
+      'g.inject(0).addE("knows").from(__.V(1)).to(__.V(2))',
+      'g.inject(0).mergeE([(T.label):"knows",(Direction.OUT):1,(Direction.IN):2])',
+    ]) expect(compile(gremlin, {}, { spine: 'rel' }).kind, gremlin).toBe('program');
+
+    // AND THE FORMS THAT READ THE TRAVERSER AS AN ELEMENT STILL REFUSE, which is the whole of the
+    // safety: an implicit `addE` endpoint IS the incoming traverser, and a scalar is not a vertex.
+    // `AddEdgeStartStep` defaults both ends to `null` and raises, so this is the reference's own rule
+    // and not a conservatism — the `elem !== 'vertex'` tests that already guarded it now see `null`.
+    // It DECLINES, so legacy answers — and legacy's answer is a throw, which is why the assertion is
+    // on the compile and not on the routing: an implicit endpoint over a scalar is an error on every
+    // spine, and the only question this route settles is that it does not silently invent one.
+    expect(() => compile('g.inject(0).addE("knows")', {}, { spine: 'rel' })).toThrow();
+
+    // THE DIFFERENTIAL, for the half legacy can also answer — a MERGE over a scalar source is what
+    // `routeWrite` already handled, so the two spines must build the same graph.
+    const merged = (spine: 'rel' | 'legacy') => {
+      const store = new GraphStore(new BunSqlite(':memory:'));
+      for (const gremlin of [
+        'g.addV("person").property("name","alice")',
+        'g.inject(0).mergeV([(T.label):"person","name":"alice"])',   // MATCHES the vertex above
+        'g.inject(0).mergeV([(T.label):"person","name":"bob"])',     // CREATES a second
+        'g.inject(0).mergeE([(T.label):"knows",(Direction.OUT):1,(Direction.IN):2])',
+      ]) exec(store, undefined, undefined, spine).buffers(gremlin, {});
+      return JSON.stringify({
+        nodes: store.query('SELECT id FROM nodes ORDER BY id', []),
+        edges: store.query('SELECT src, tgt FROM edges ORDER BY id', []),
+        vprops: store.query('SELECT node, key, value FROM vertex_properties ORDER BY node, key', []),
+      });
+    };
+    const rel = merged('rel');
+    expect(rel).toEqual(merged('legacy'));
+    // Two vertices and one edge — the second `mergeV` MATCHED rather than creating a third, which is
+    // the whole point of routing a merge here rather than a creation.
+    expect(JSON.parse(rel).nodes).toEqual([{ id: 1 }, { id: 2 }]);
+    expect(JSON.parse(rel).edges).toEqual([{ src: 1, tgt: 2 }]);
+
+    // RelIR is AHEAD for the CREATIONS, and that is a finding rather than a gap in the test: legacy's
+    // `routeWrite` builds an ELEMENT prefix and throws outright on a scalar source, so there is no
+    // second answer to compare against and what the test asserts instead is the graph itself.
+    expect(() => compile('g.inject(1).addV("person")', {}, { spine: 'legacy' })).toThrow('not an element prefix');
+    // A MULTI-ROW scalar source is a real multiplier, not a formality: three injected values create
+    // three vertices, exactly as three traversers would.
+    const many = new GraphStore(new BunSqlite(':memory:'));
+    exec(many, undefined, undefined, 'rel').buffers('g.inject(1,2,3).addV("person").property("k","v")', {});
+    expect(many.query('SELECT COUNT(*) AS n FROM nodes', [])).toEqual([{ n: 3 }]);
+    expect(many.query('SELECT COUNT(*) AS n FROM vertex_properties', [])).toEqual([{ n: 3 }]);
+  });
+
   test('mergeE routes to RelIR for both endpoint kinds, and duplicates get ONE edge', async () => {
     // The corpus cannot see this and neither can L3: every parameterized `mergeE` arrives as a bound
     // Map (`m[{"t[label]":…,"D[OUT]":"M[outV]"}]` on the wire), and those L3 scenarios already PASSED

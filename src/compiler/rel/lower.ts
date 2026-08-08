@@ -1980,6 +1980,34 @@ function scalarTail(
       return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
     }
 
+    // THE CREATION AND MERGE VOCABULARY OVER A SCALAR STREAM — §6·6's rule at the WRITE seam: a step
+    // works wherever it is LEGAL, not wherever a tail was taught it.
+    //
+    // **What these four take from their input is its ROW COUNT**, and a scalar relation has one just
+    // as an element relation does. `g.inject(0).mergeV([:])` is `g.V().mergeV([:])` with a different
+    // multiplier; the reference draws no distinction at all, because `MergeVertexStep` never looks at
+    // the traverser except to materialize a map from it. What actually declined was the snapshot,
+    // which projected an `id` column a scalar relation does not have — `traverserCol` is the fix, and
+    // it is one line in `write.ts` rather than a scalar-specific write path.
+    //
+    // **`elem` is `null` here and that is the whole of the safety**, not an omission: the two steps
+    // that can read the incoming traverser as an ELEMENT — `addE` with an implicit endpoint, `mergeE`
+    // with an omitted `Direction` — already test `elem !== 'vertex'` and refuse. A scalar stream
+    // therefore reaches exactly the forms whose endpoints are named outright, which is the reference's
+    // own rule (`AddEdgeStartStep` defaults both ends to `null` and raises).
+    if (step.name === 'addV' || step.name === 'addE' || step.name === 'mergeV' || step.name === 'mergeE') {
+      if (pathCarried(rel)) return null;
+      const written = step.name === 'addV' ? addedVertices(rel, steps, at, ctx, fresh)
+        : step.name === 'addE' ? addedEdges(rel, null, steps, at, labels, ctx, fresh)
+          : mergedElements(rel, null, steps, at, labels, ctx, fresh);
+      if (!written) return null;
+      const tail = elementTail(
+        written.effects.result, step.name === 'addE' || step.name === 'mergeE' ? 'edge' : 'vertex',
+        steps, written.at, false, ctx, fresh, labels,
+      );
+      return tail && { ...tail, effects: [...written.effects.bindings, ...(tail.effects ?? [])] };
+    }
+
     return null;
   }
   return { rel, framing: out, aliases: labels };
@@ -3706,7 +3734,7 @@ const sameColumns = (left: readonly ColMeta[], right: readonly ColMeta[]): boole
 /** `addE(…)` plus the `from`/`to`/`property` cluster that belongs to it — legacy's `parseEdgeCluster`
  *  scans the same run, and the members may come in any order. */
 function addedEdges(
-  input: Rel, elem: Elem, steps: readonly IRStep[], at: number, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
+  input: Rel, elem: Elem | null, steps: readonly IRStep[], at: number, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
 ): { readonly effects: Effects; readonly at: number } | null {
   const CLUSTER = new Set(['from', 'to', 'property']);
   let end = at + 1;
@@ -4013,7 +4041,7 @@ function addedVertices(
  *  its endpoints: `option(Merge.outV, __.select("x"))` is an alias read, and an omitted endpoint is
  *  the incoming traverser, which a non-vertex stream cannot supply. */
 function mergedElements(
-  input: Rel, elem: Elem, steps: readonly IRStep[], at: number, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
+  input: Rel, elem: Elem | null, steps: readonly IRStep[], at: number, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
 ): { readonly effects: Effects; readonly at: number } | null {
   let options = at + 1;
   while (options < steps.length && steps[options]!.name === 'option') options++;
