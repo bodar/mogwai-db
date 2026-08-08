@@ -73,7 +73,6 @@ deferred	legacy	step not implemented: shortestPath()	g.V().both().dedup().shorte
 deferred	legacy	Dedup step can only have one by modulator	g.V().both().has(T.label, "software").dedup().by("lang").by("name").values("name")
 deferred	legacy	local() child shape not yet supported by generic child lowering	g.V().both().local(groupCount("a")).out().cap("a").select(Column.keys).unfold().both().local(groupCount("a")).cap("a")
 deferred	legacy	step not implemented after properties().properties(): dedup()	g.V().both().properties().properties().dedup().count()
-deferred	legacy	choose() branch __.values() not yet supported (scalar/projection body)	g.V().choose(__.has("name", "vadas"), __.values("name"))
 deferred	legacy	choose().option() not yet supported by generic lowering (an option body outside the element/scalar/list arm shapes, or a choice the correlated seam cannot compile)	g.V().choose(__.label()). option("person", __.choose(__.values("age")). option(P.lt(30), __.constant("young")). option(P.gte(30), __.constant("old"))). option("software", __.constant("program")). option(Pick.none, __.constant("unknown"))
 unbound	legacy	Unbound parameter 'xx1'	g.V().choose(__.out().count()). option(xx1, __.values("name")). option(xx2, __.values("age"))
 unbound	legacy	Unbound parameter 'xx1'	g.V().choose(__.out().count()). option(xx1, __.values("name")). option(xx2, __.values("age")). option(Pick.none, __.discard())

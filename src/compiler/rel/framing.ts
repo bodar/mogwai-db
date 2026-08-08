@@ -1,6 +1,7 @@
 import { perRowColumnOf, type ListOf, type MapOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import type { Elem } from '../plan/plan.ts';
+import type { VariantArm } from './variant.ts';
 
 // ---------- what the framing layer must build over a result relation ----------
 //
@@ -76,6 +77,12 @@ export type RelFraming =
    *  has no columns and there is no shape to interpret. It is an arm of this union rather than an
    *  absent framing because `spine.ts` switches TOTALLY: "there is nothing here" has to be something
    *  the lowering can SAY. */
+  /** A branch whose arms have DIFFERENT SHAPES — a per-row tagged union (`compiler/rel/variant.ts`).
+   *  `arms` is the complete declared vocabulary, which is what the wire's `vk` dispatch needs: a row
+   *  whose tag names an arm the shape did not declare is a throw at the framer, not an inference. It
+   *  is a framing rather than a node-set question for §6·3's reason — the algebra builds the VALUE
+   *  (one `Union` over re-projected arms) and `execute.ts` frames it. */
+  | { readonly kind: 'variant'; readonly arms: readonly VariantArm[] }
   | { readonly kind: 'discard' };
 
 /**
@@ -153,6 +160,9 @@ export function framingCols(framing: RelFraming): readonly ColMeta[] | null {
       }
       return nested;
     }
-    case 'property': case 'discard': return null;
+    // A VARIANT has no fixed payload — its columns depend on which arms it declares, and a record
+    // field needs a shape it can name in advance. Declining keeps `project().by(<mixed branch>)` an
+    // honest gap rather than a field whose width varies by row.
+    case 'variant': case 'property': case 'discard': return null;
   }
 }

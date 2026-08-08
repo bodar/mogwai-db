@@ -68,8 +68,10 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // is the VARIANT merge, which is the rest of the branch family.
     for (const gremlin of [
       "g.union(__.V().values('name'))",
-      "g.union(__.V().values('name'), __.V().hasLabel('person'))",
     ]) expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('legacy');
+    // A SHAPE disagreement is no longer one of them: mixed arms merge as a per-row tagged union, and
+    // a source union reaches it through the same `mergeArms` a mid-chain one does.
+    expect(read("g.union(__.V().values('name'), __.V().hasLabel('person'))", { spine: 'rel' }).spine).toBe('rel');
   });
 
   test('and()/or() combine branch predicates; nested where(__.and)', () => {
@@ -155,12 +157,23 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(sackU.sql).toContain('sk'); // the sack column survives the branch merge
     expect(sackU.sql).toContain('UNION ALL');
     // mixed scalar+element arms now merge as a dynamic-tag VariantStream (P4)
-    const mixedU = read('g.V().union(__.values("name"), __.out())');
-    expect(mixedU.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
+    // BOTH SPINES declare the same variant now, which is the claim worth making: RelIR reuses the
+    // `vk` vocabulary rather than inventing one, so the two agree on the arm list and not merely on
+    // the rows. Legacy states `wholeResult` explicitly as undefined; RelIR omits the key, and the
+    // framer reads `shape.wholeResult` either way.
+    expect(read('g.V().union(__.values("name"), __.out())', { spine: 'legacy' }).shape)
+      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
+    const mixedU = read('g.V().union(__.values("name"), __.out())', { spine: 'rel' });
+    expect(mixedU.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }] });
     expect(mixedU.sql).toContain('1 AS vk'); // scalar arm
     expect(mixedU.sql).toContain('2 AS vk'); // node arm
-    // mixed element kinds across branches (both element-class) stays the legacy defer
-    expect(() => compile('g.V().union(__.out(), __.outE())', {})).toThrow('different element kinds');
+    // MIXED ELEMENT KINDS stay legacy's defer and are RelIR's ordinary variant: `vk` distinguishes a
+    // vertex (2) from an edge (3), so a branch producing both is the same tagged union a scalar/element
+    // mix is, and the framer's `rowVertex`/`rowEdge` split reads it. Legacy declines the shape its own
+    // wire vocabulary can express, which is a route with an end date shedding one (§6·1).
+    expect(() => compile('g.V().union(__.out(), __.outE())', {}, { spine: 'legacy' })).toThrow('different element kinds');
+    expect(read('g.V().union(__.out(), __.outE())', { spine: 'rel' }).shape)
+      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }, { kind: 'edge' }] });
   });
 
   test('optional() → single-hop LEFT JOIN fast path; multi-hop via ordinal', () => {
@@ -436,11 +449,15 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(() => compile('g.V().choose(__.out())', {}))
       .toThrow('predicate form');
     // mixed element+scalar then/else now merge as a dynamic-tag VariantStream (P4)
-    const mixedCh = read('g.V().choose(__.has("x"), __.out(), __.values("name"))');
-    expect(mixedCh.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
-    // mixed element kinds across arms (both element-class) stays the legacy defer
-    expect(() => compile('g.V().choose(__.has("x"), __.out(), __.outE())', {}))
+    expect(read('g.V().choose(__.has("x"), __.out(), __.values("name"))', { spine: 'legacy' }).shape)
+      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }], wholeResult: undefined });
+    const mixedCh = read('g.V().choose(__.has("x"), __.out(), __.values("name"))', { spine: 'rel' });
+    expect(mixedCh.shape).toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }] });
+    // mixed element kinds: legacy's defer, RelIR's ordinary variant (see the union test above)
+    expect(() => compile('g.V().choose(__.has("x"), __.out(), __.outE())', {}, { spine: 'legacy' }))
       .toThrow('different element kinds');
+    expect(read('g.V().choose(__.has("x"), __.out(), __.outE())', { spine: 'rel' }).shape)
+      .toEqual({ kind: 'variant', arms: [{ kind: 'scalar', type: { kind: 'unknown' } }, { kind: 'vertex' }, { kind: 'edge' }] });
     // as() before choose now threads the alias column through the gated arms + merge (Move B)
     const ca = read('g.V().as("a").choose(__.has("x"), __.out(), __.in()).select("a")', { spine: 'legacy' });
     expect(ca.sql).toContain('UNION ALL');

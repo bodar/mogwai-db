@@ -1623,4 +1623,58 @@ describe('the RelIR spine', () => {
       }
     })();
   });
+
+  test('arms of DIFFERENT SHAPES merge as a per-row tagged union — the variant', () => {
+    // The dominant remaining branch blocker, and almost all of it is one syntactic shape: a
+    // two-argument `choose` has an IMPLICIT identity else arm (`ChooseStep`'s private constructor
+    // installs one), so the moment the `then` arm changes shape the branch is mixed. Nothing about
+    // it is exotic — the two arms just needed somewhere to say which of them a row came from.
+    //
+    // NO WIRE CONCEPT WAS ADDED. `Shape{kind:'variant'}` and the `vk` discriminant are legacy's and
+    // `execute.ts` has always framed them; this teaches the ALGEBRA to produce rows the framer could
+    // already read, which is §6·3's "a shape is a VALUE plus a framing arm" exactly. The proof is
+    // that both spines now DECLARE the same arm list for a shape they both answer, not merely the
+    // same rows.
+    return (async () => {
+      for (const gremlin of [
+        'g.V().union(__.values("name"), __.identity())',
+        'g.V().union(__.values("name"), __.out())',
+      ]) {
+        expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('rel');
+        // Legacy states `wholeResult` explicitly as undefined and RelIR omits the key; the framer
+        // reads `shape.wholeResult` either way, so the arm LIST is the claim and this normalizes the
+        // spelling rather than pinning it.
+        const declared = (spine: 'rel' | 'legacy') => JSON.parse(JSON.stringify(read(gremlin, { spine }).shape));
+        expect(declared('rel'), gremlin).toEqual(declared('legacy'));
+        const via = (spine: 'rel' | 'legacy') =>
+          decodeAll(exec(seededStore(), undefined, undefined, spine).buffers(gremlin, {}, {}));
+        expect(await via('rel'), gremlin).toEqual(await via('legacy'));
+      }
+      // NOT a variant, and the contrast is the point: `choose(pred, values(k), constant(c))` has two
+      // SCALAR arms, so the scalar meet above settles it at a per-row `vtype` column and no tag is
+      // needed at all. A variant is what two arms reach only when their SHAPES differ — RelIR keeps
+      // the per-row type here where legacy claims `unknown`, which is the lattice, not this merge.
+      {
+        const gremlin = 'g.V().choose(__.hasLabel("person"), __.values("name"), __.constant("inhuman"))';
+        expect(read(gremlin, { spine: 'rel' }).shape.kind).toBe('value');
+        const via = (spine: 'rel' | 'legacy') =>
+          decodeAll(exec(seededStore(), undefined, undefined, spine).buffers(gremlin, {}, {}));
+        expect(await via('rel')).toEqual(await via('legacy'));
+      }
+
+      // RELIR AHEAD, and each for its own reason. The two-argument `choose` whose `then` retypes is
+      // the shape legacy refuses outright ("choose() branch __.values() not yet supported"); mixed
+      // ELEMENT KINDS are a shape legacy's own wire vocabulary can express (`vk` 2 vs 3) and its
+      // lowering declines. Asserted by CLASS rather than by rows, because the class is what a wrong
+      // `vk` would corrupt: a vertex framed through `rowEdge` is not a wrong value, it is a wrong
+      // GraphBinary type.
+      const framed = async (gremlin: string) =>
+        (await decodeAll(exec(seededStore(), undefined, undefined, 'rel').buffers(gremlin, {}, {})))
+          .map((v: any) => v?.constructor?.name);
+      expect(await framed('g.V(1).union(__.out(), __.outE())'))
+        .toEqual(['Vertex', 'Vertex', 'Vertex', 'Edge', 'Edge', 'Edge']);
+      expect(await framed('g.V().hasLabel("person").choose(__.values("age").is(P.gt(30)), __.values("name"))'))
+        .toEqual(['String', 'String', 'Vertex', 'Vertex']);
+    })();
+  });
 });

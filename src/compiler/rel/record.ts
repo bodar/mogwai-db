@@ -154,6 +154,11 @@ function fieldNode(rel: Rel, field: RecordField, at: string, fresh: Minter): Exp
   const own = (name: string): Expr => col(rel.id, qualify(at, fieldCol(field.prefix, name)));
   const framing = field.framing;
   switch (framing.kind) {
+    // A VARIANT field would be a mixed branch inside a `project()` slot. `byField` cannot produce one
+    // (its arms are element/value only) and `framingCols` declines a variant outright, so this is
+    // unreachable rather than a gap — stated so the switch stays TOTAL, which is what makes the next
+    // framing arm a compile error here instead of a silent fallthrough.
+    case 'variant': return null;
     case 'elements': return elementNode(own('id'), framing.elem, fresh);
     case 'scalar': {
       // The tag rides where the type does: a numeric reducer's is the aggregate's runtime `typeof` in

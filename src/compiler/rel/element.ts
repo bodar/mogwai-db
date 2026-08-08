@@ -311,3 +311,63 @@ export function elementPayload(input: Rel, elem: Elem, opts: { readonly bulk: bo
     exprs: payload.map(([column, expression]) => [column.name, expression] as const),
   });
 }
+
+/**
+ * AN ELEMENT'S WIRE TUPLE, correlated on a ROWID rather than read off a joined row.
+ *
+ * `elementPayload`'s twin for a caller that holds an id and no relation to join against — the VARIANT
+ * merge, whose rows are a tagged union and whose element rows carry only `rid`. Legacy expands that
+ * with two `LEFT JOIN`s gated on the tag (`materializeVariantRoot`); correlated reads say the same
+ * thing without the gating, because a subquery that matches nothing is NULL and a `vk` the framer
+ * does not read never asks.
+ *
+ * It is a third caller of the SAME expressions rather than a third spelling of the tuple: the id is
+ * `COALESCE(uid, id)`, a vertex label is the labels array and an edge label is the one name, the
+ * endpoints are EXTERNAL ids. Those are the facts a hand-rolled payload got wrong before the tuple had
+ * one authority, and the module note above says why they may not be re-derived.
+ */
+export function correlatedElementColumns(
+  rowid: Expr, elem: Elem, fresh: Minter,
+): readonly (readonly [ColMeta, Expr])[] {
+  if (elem === 'edge') {
+    const row = (name: string): Expr => edgeColumn(rowid, name, fresh);
+    return [
+      [meta('id', 'any', true), externalId(rowid, 'edge', fresh)],
+      [meta('label', 'text', true), edgeLabel(row('label'), fresh)],
+      [meta('src', 'any', true), nodeExternalId(row('src'), fresh)],
+      [meta('tgt', 'any', true), nodeExternalId(row('tgt'), fresh)],
+      [meta('props', 'json', true), edgeProps(rowid, fresh)],
+    ];
+  }
+  return [
+    [meta('id', 'any', true), externalId(rowid, 'vertex', fresh)],
+    [meta('label', 'json', true), vertexLabels(rowid, fresh)],
+    [meta('props', 'json', true), vertexProps(rowid, fresh)],
+  ];
+}
+
+/** One raw column of the `edges` row a rowid names — the FK label and the two endpoint rowids, which
+ *  the tuple above then resolves. A vertex needs no equivalent: every vertex fact above already takes
+ *  the rowid directly. */
+function edgeColumn(rowid: Expr, name: string, fresh: Minter): Expr {
+  const edges = make.scan({ id: fresh('wec'), table: 'edges', alias: fresh('rwc'), channels: [], type: typeOf(...EDGE_COLS) });
+  const matching = make.filter({ id: fresh('wcf'), input: edges, channels: [], type: edges.type, pred: eq(col(edges.id, 'id'), rowid) });
+  const only = make.project({
+    id: fresh('wcx'), input: matching, channels: [], type: typeOf(meta('v', 'any', true)),
+    exprs: [['v', col(matching.id, name)]],
+  });
+  return { kind: 'scalar', plan: only };
+}
+
+/** The PUBLIC id of either element kind — `nodeExternalId`'s generalization, so the variant tuple does
+ *  not need a second copy for edges. */
+function externalId(rowid: Expr, elem: Elem, fresh: Minter): Expr {
+  if (elem === 'vertex') return nodeExternalId(rowid, fresh);
+  const edges = make.scan({ id: fresh('wed'), table: 'edges', alias: fresh('rwd'), channels: [], type: typeOf(...EDGE_COLS) });
+  const matching = make.filter({ id: fresh('wef'), input: edges, channels: [], type: edges.type, pred: eq(col(edges.id, 'id'), rowid) });
+  const only = make.project({
+    id: fresh('wex'), input: matching, channels: [], type: typeOf(meta('v', 'any', true)),
+    exprs: [['v', coalesce(col(matching.id, 'uid'), col(matching.id, 'id'))]],
+  });
+  return { kind: 'scalar', plan: only };
+}

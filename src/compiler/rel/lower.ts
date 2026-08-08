@@ -44,6 +44,7 @@ import { elementPayload } from './element.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
 import { LabelCardinality } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
+import { variantArm, variantArmOf, variantHasList, variantPayload, type VariantArm } from './variant.ts';
 import { readCollection, registerCollection, registerMap, type Collections } from './collection.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
 
@@ -2328,6 +2329,7 @@ const framed = (chain: Tail, collapse: boolean, fresh: Minter): { readonly rel: 
     // A DISCARD has nothing to project: the result relation is a statement with an empty `RETURNING`, so it
     // has no columns and `discard` is already the whole contract. The algebra owes the framing layer nothing
     // further, which is exactly what every other arm here now also means.
+    case 'variant': return variantPayload(chain.rel, framing.arms, fresh);
     case 'discard': return { rel: chain.rel, shape: { kind: 'discard' } };
   }
 };
@@ -2912,6 +2914,10 @@ function continueAs(
     // Nothing survives a discard, so nothing can follow one. `drop()` is a terminal step in the
     // grammar and the passes reject a chain that continues past it, so this is unreachable rather
     // than a decline — and saying so keeps the switch total.
+    // A VARIANT is TERMINAL here. Legacy answers a handful of steps over one (a `count`, a slice, an
+    // alias compare); each is expressible and none is written, so a step after a variant DECLINES
+    // rather than being silently dropped — the map arm's reasoning exactly.
+    case 'variant': return from === steps.length ? { rel, framing, aliases: labels } : null;
     case 'discard': return null;
   }
 }
@@ -3203,6 +3209,56 @@ function sourceUnion(
   return mergeArms(arms, arms[0]!.rel.channels, NO_ALIASES, fresh);
 }
 
+/**
+ * ARMS OF DIFFERENT SHAPES, merged as a per-row tagged union — or `null` to decline.
+ *
+ * `mergeArms`' fallback, and structurally its twin: the scalar meet widens the schema by one column
+ * so two tag-disagreeing arms become comparable, and this widens it by three so two SHAPE-disagreeing
+ * arms do. Both then hand the arms to the same `Union`. Neither invents a node, and that is the test
+ * §7 sets — the seam could already EXPRESS this; it had not been taught to.
+ *
+ * The declines are the arms' own: a shape with no `vk` (a map, a record, a path, a property, a
+ * discard), a reducer-marked scalar (its type rides on a `vt` column the payload has no slot for),
+ * and a SET, whose wire form differs from a list's while sharing its member substrate.
+ *
+ * The channel and label tests are NOT repeated here — the caller runs them for both routes, because
+ * an arm that binds a label or mints its own order is refused for reasons that have nothing to do
+ * with shape.
+ */
+function variantMerge(
+  arms: readonly Tail[], base: Channels, labels: AliasMap, fresh: Minter,
+): { readonly rel: Rel; readonly framing: RelFraming } | null {
+  const shapes: VariantArm[] = [];
+  for (const arm of arms) {
+    const shape = variantArmOf(arm.framing);
+    if (!shape) return null;
+    shapes.push(shape);
+  }
+  if (arms.some((arm) => arm.aliases.size !== labels.size)) return null;
+  if (arms.some((arm) => !sameChannels(base, arm.rel.channels))) return null;
+  const hasList = variantHasList(shapes);
+  const tagged = arms.map((arm, at) => variantArm(arm.rel, shapes[at]!, hasList, fresh));
+  const channels = mergeChannels(base, tagged.map((rel) => rel.channels), { rigid: 'peer' });
+  return {
+    rel: make.union({ id: fresh('vu'), inputs: tagged, all: true, channels, type: tagged[0]!.type }),
+    // The DECLARED vocabulary is de-duplicated by shape, never by position: two arms of the same
+    // shape share one tag, so the framer's arm list stays a description of what a row can BE.
+    framing: { kind: 'variant', arms: dedupeArms(shapes) },
+  };
+}
+
+/** The declared arms, one per distinct SHAPE. Two `{kind:'scalar'}` arms whose types differ collapse
+ *  to one here and the payload then frames `UNKNOWN` — the wire carries a single static tag per
+ *  variant, which is the one place its vocabulary is short of the algebra's (§6·7's extension point). */
+const dedupeArms = (arms: readonly VariantArm[]): readonly VariantArm[] => {
+  const seen = new Map<string, VariantArm>();
+  for (const arm of arms) {
+    const key = arm.kind === 'elements' ? `e:${arm.elem}` : arm.kind;
+    if (!seen.has(key)) seen.set(key, arm);
+  }
+  return [...seen.values()];
+};
+
 function mergeArms(
   arms: readonly Tail[], base: Channels, labels: AliasMap, fresh: Minter,
 ): { readonly rel: Rel; readonly framing: RelFraming } | null {
@@ -3219,9 +3275,11 @@ function mergeArms(
       arms = retyped;
     }
   }
-  // The arms must agree on SHAPE, and `sameFraming` is the whole test: an element arm and a scalar
-  // arm merge to legacy's VARIANT stream, which is a shape this route does not produce.
-  if (rest.some((arm) => !sameFraming(first.framing, arm.framing))) return null;
+  // ARMS THAT DISAGREE ON SHAPE MERGE TO A VARIANT — a per-row tagged union, and the same move the
+  // scalar meet above makes one level down: re-project the arms onto a shared payload, then let the
+  // ordinary `Union` merge them. It is tried only AFTER the meet, so two scalar arms never reach it.
+  if (rest.some((arm) => !sameFraming(first.framing, arm.framing)))
+    return variantMerge(arms, base, labels, fresh);
   // …and on their declared COLUMNS, name for name, because a Union is positional.
   if (rest.some((arm) => !sameColumns(first.rel.type.cols, arm.rel.type.cols))) return null;
   // An arm that bound a label would have to be remapped onto a canonical column (see above).
@@ -3316,7 +3374,12 @@ const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
             // record-valued branch arm yet (`project()` is terminal-or-`select()` today), so declining
             // is the honest answer rather than an equality no test exercises.
             : left.kind === 'record' ? false
-              : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
+              // A VARIANT arm would be a branch nested inside a branch whose inner merge already went
+              // mixed. `variantMerge` flattens no nesting today — an arm's tagged rows would have to
+              // be re-tagged onto the outer payload, which is expressible and unbuilt — so declining
+              // hands it to the spine that answers rather than double-tagging the rows.
+              : left.kind === 'variant' ? false
+                : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
 
 const sameColumns = (left: readonly ColMeta[], right: readonly ColMeta[]): boolean =>
   left.length === right.length && left.every((column, i) => column.name === right[i]!.name);
