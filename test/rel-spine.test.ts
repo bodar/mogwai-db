@@ -1041,6 +1041,45 @@ describe('the RelIR spine', () => {
     expect(many.query('SELECT COUNT(*) AS n FROM vertex_properties', [])).toEqual([{ n: 3 }]);
   });
 
+  test('a T.label on mergeV\'s onMatch arm is APPEND-ONLY addLabel', () => {
+    // The reference handles it apart from every other entry and says so in a comment:
+    // *"Handle T.label separately: append-only addLabel semantics for multi-label support"*
+    // (`MergeVertexStep.java:106-113` → `ElementHelper.applyLabelsToVertex`,
+    // `.../structure/util/ElementHelper.java:293-305`). So it is `addLabel`'s statement over the
+    // MATCHED vertices — which is why `bindLabels` is now shared rather than a second insert — and an
+    // EMPTY collection is a NO-OP rather than a clear (`applyLabelsToVertex` returns without touching
+    // the vertex at `:298`).
+    //
+    // NEITHER COUNTER MOVES FOR THIS, which is the plan's "parameterized family needs a test" case one
+    // more time: the scenarios pass on LEGACY today, so the L3 total is unchanged and only the spine
+    // gap is, and the corpus cannot spell a bound merge map. This test IS the record.
+    const labels = (spine: 'rel' | 'legacy', arm: string) => {
+      const store = new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ZERO_OR_MORE);
+      exec(store, undefined, undefined, spine).buffers('g.addV("person").addLabel("employee").property("name","marko")', {});
+      exec(store, undefined, undefined, spine).buffers(`g.mergeV([(T.label):"person","name":"marko"]).option(Merge.onMatch,${arm})`, {});
+      return store.query('SELECT l.name FROM vertex_labels vl JOIN labels l ON l.id = vl.label ORDER BY l.name', [])
+        .map((r: any) => r.name);
+    };
+    for (const [arm, expected] of [
+      ['[(T.label):"manager"]', ['employee', 'manager', 'person']],   // APPENDED, nothing replaced
+      ['[(T.label):"person"]', ['employee', 'person']],               // already carried — idempotent
+      ['[(T.label):[]]', ['employee', 'person']],                     // an EMPTY collection is a no-op
+      ['[(T.label):["manager","director"]]', ['director', 'employee', 'manager', 'person']],
+    ] as const) {
+      expect(labels('rel', arm), arm).toEqual([...expected]);
+      expect(labels('legacy', arm), arm).toEqual([...expected]);
+    }
+
+    // An IMMUTABLE graph declines to legacy, which raises the refusal — `addLabel`'s rule, asked at
+    // this host too rather than discovered when the insert fails. An empty arm still routes, because
+    // it mutates nothing at all.
+    const immutable = createAppScope({ labelCardinality: LabelCardinality.ONE });
+    expect(compile('g.mergeV([(T.label):"person","name":"marko"]).option(Merge.onMatch,[(T.label):"manager"])',
+      {}, { spine: 'rel', app: immutable })).not.toMatchObject({ spine: 'rel' });
+    expect(compile('g.mergeV([(T.label):"person","name":"marko"]).option(Merge.onMatch,[(T.label):[]])',
+      {}, { spine: 'rel', app: immutable }).kind).toBe('program');
+  });
+
   test('a mergeE search reads the MERGE map and only the merge map', () => {
     // `searchEdges` is handed the resolved MATCH map alone, and `onCreateMap` is built afterwards and
     // only once the search came back empty (`MergeEdgeStep.flatMap`,

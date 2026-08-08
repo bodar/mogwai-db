@@ -633,20 +633,30 @@ export function elementAddLabel(
   const scope = labelMutationScope(input, fresh);
   if (!scope) return null;
 
-  const labelRow = internLabels(names.map(text), scope.bind, fresh)!; // `names` is non-empty, so never the null arm
-  const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
-  // A CROSS JOIN pairs every incoming vertex with every new label — `addVertex`'s pairing, but the left
-  // side is EXISTING ids. Both sides project to a single `id` column so the join's positional output is
-  // exactly (node, label).
+  bindLabels(scope.ownerIds(), names, scope.bind, fresh);
+  return scope.passThrough();
+}
+
+/**
+ * BIND A SET OF LABELS TO A SET OF VERTICES, idempotently — the statement `addLabel` IS, factored out
+ * because a merge's `onMatch` arm needs exactly it and nothing else of that step.
+ *
+ * A CROSS JOIN pairs every owner with every label — `addVertex`'s pairing, but the left side is
+ * EXISTING ids. Both sides project to a single `id` column so the join's positional output is exactly
+ * `(node, label)`. `vertex_labels` is `PRIMARY KEY (node, label)`, so a label already carried is a
+ * no-op through `ON CONFLICT DO NOTHING` rather than through a check this had to write.
+ */
+function bindLabels(ownerIds: Rel, names: readonly string[], bind: Binder, fresh: Minter): void {
+  const labelRow = internLabels(names.map(text), bind, fresh)!; // `names` is non-empty, so never the null arm
+  const target = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
   const pairs = make.join({
-    id: fresh('j'), left: scope.ownerIds(), right: labelRow, join: 'cross', channels: [],
+    id: fresh('j'), left: ownerIds, right: labelRow, join: 'cross', channels: [],
     type: typeOf(meta('node', 'int'), meta('label', 'int')),
   });
-  scope.bind(insert({
-    target: labelTargetRows, cols: ['node', 'label'], source: pairs, channels: [], type: typeOf(), returning: [],
+  bind(insert({
+    target, cols: ['node', 'label'], source: pairs, channels: [], type: typeOf(), returning: [],
     onConflict: { target: ['node', 'label'], set: [] },
   }));
-  return scope.passThrough();
 }
 
 /**
@@ -1828,9 +1838,23 @@ export function elementMergeV(
     if (spec.id != null || isNested(spec.label)) return null;
     if (Object.values(spec.props).some(isNested) || Object.values(spec.propKeys).some(isNested)) return null;
   }
-  // A label on the MATCH arm is a search criterion; a label on `onMatch` is a mutation of an element
-  // that already exists, which is a different statement and a different refusal.
-  if (onMatch?.label) return null;
+  // **A LABEL ON `onMatch` IS APPEND-ONLY `addLabel`, not a replacement** — the reference handles it
+  // apart from every other entry and says so:
+  // *"Handle T.label separately: append-only addLabel semantics for multi-label support"*
+  // (`MergeVertexStep.java:106-113` → `ElementHelper.applyLabelsToVertex`, `.../util/ElementHelper.java:293-305`).
+  // So it is `addLabel`'s statement over the MATCHED vertices, and an EMPTY collection is a no-op
+  // rather than a clear — `applyLabelsToVertex` returns without touching the vertex (`:298`), which is
+  // what `g_mergeVXlabel_person_name_markoX_optionXonMatch_label_emptyX` asserts.
+  //
+  // The refusals are `addLabel`'s and are asked HERE, before anything is built: a nested label declines
+  // above, an immutable graph declines (legacy raises `Label mutation is not supported`), and an
+  // invalid name is an ERROR rather than a write to skip. No count guard is owed — every MUTABLE
+  // cardinality has `max = Infinity`, so appending can never overstep it.
+  const appended = [...new Set(((onMatch?.label as string[] | null) ?? []))];
+  if (appended.length) {
+    if (!cardinality.mutable) return null;
+    try { for (const name of appended) validateLabel(name); } catch { return null; }
+  }
 
   const matchWrites = mergeWrites(onMatch, 'vertex', child);
   // `onCreate` WINS per key, and `validateNoOverrides` has already proved the two cannot contradict —
@@ -1860,6 +1884,9 @@ export function elementMergeV(
   // inserts into (the `addV` trap, one level up); and every `onMatch` statement after the first has
   // already changed a property the search asked about.
   const matched = bind(idsOf(searched, fresh), true);
+  // The reference applies the labels before the property entries and so does this; they are different
+  // tables, so the order is the reference's rather than a constraint.
+  if (appended.length) bindLabels(matched, appended, bind, fresh);
   for (const write of matchWrites) propertyStatements('vertex', matched, write, bind, fresh);
 
   // ONE row off the input, because a create happens once however many traversers asked for it. The
