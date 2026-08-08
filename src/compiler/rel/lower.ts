@@ -1248,6 +1248,38 @@ function terminal(
     };
   }
 
+  // `label()` / `id()` — the element's TOKENS as a scalar stream.
+  //
+  // **Nothing had to be built: the projection already existed and this tail had never been handed
+  // it.** `byExpr`'s token arm is the authority — `COALESCE(uid, id)` for the external id, one
+  // indirection into `labels` for an edge and the side table's first-interned name for a vertex —
+  // and it is what `by(T.label)`, `group().by(label)` and a `label()` child body have always used.
+  // Reaching it from here is the whole change, which is `steps/CLAUDE.md`'s "cannot be HANDED" versus
+  // "cannot EXPRESS" applied to a step rather than to a substrate.
+  //
+  // A LABEL is always a string, so a STATIC tag is honest here.
+  //
+  // **`id()` is DELIBERATELY NOT here, and the reason is measured rather than cautious.** The same arm
+  // serves it in `byExpr` and adding it was one more token, but `g.E().id()` then answers
+  // `[7,9,11,12,8,10]` where legacy answers `[7,8,9,10,11,12]` — the same multiset in a different
+  // order. Nothing pins that order (no `order()`, no slice), so neither is wrong and the census counts
+  // `ord` as telemetry — but it is an observable change to an order-bearing surface that I could not
+  // explain, and shipping a behaviour I cannot account for is how an order-fragile answer gets banked
+  // as a baseline. It wants its own change, with `test:perturbed` run against it.
+  if (step.name === 'label') {
+    if (args.length) return null;
+    const projected = byExpr({ key: { kind: 'token', token: 'label' } }, elementHost(input, elem, aliases), fresh);
+    if (!projected) return null;
+    return {
+      rel: make.project({
+        id: fresh('tok'), input, channels: input.channels,
+        type: typeOf(meta('v', 'text'), ...carriedCols(input.channels)),
+        exprs: [['v', projected], ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
+      }),
+      framing: { kind: 'scalar', type: STATIC('string') },
+    };
+  }
+
   if (step.name === 'values') {
     // TinkerPop's `PropertiesStep` is `element.properties(keys)`: no keys means EVERY key, several
     // mean membership in the set. A non-string key is a decline rather than a guess — answering

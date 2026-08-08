@@ -608,9 +608,12 @@ describe('the RelIR spine', () => {
       ['g.addV(__.constant("a"), __.constant("b"))', multi],
     ] as const) expect(compile(gremlin, {}, { spine: 'rel', app }).kind, gremlin).toBe('program');
 
-    // A genuinely NESTED label still declines — the fold is for a literal in traversal clothing, and
-    // widening it to a per-row body would be a different feature wearing the same spelling.
-    expect(compile('g.addV(__.V().has("name","marko").label())', {}, { spine: 'rel' }).kind).not.toBe('program');
+    // THIS BOUNDARY HAS MOVED, and the assertion moved with it rather than being deleted. It used to
+    // say a genuinely nested label declines, which was true while the constant fold was all there was;
+    // a nested body is now RESOLVED at run time through the seam's rooted arm. What still declines is a
+    // body with EFFECTS — resolving a label must not also mutate the graph, and the rooted arm is
+    // deliberately policy-free about that (§6·6), so the admission rule belongs to this consumer.
+    expect(compile('g.addV(__.addV("x").label())', {}, { spine: 'rel' }).kind).not.toBe('program');
 
     const store = new GraphStore(new BunSqlite(':memory:'));
     const write = (gremlin: string) => exec(store, undefined, undefined, 'rel').buffers(gremlin, {});
@@ -782,6 +785,47 @@ describe('the RelIR spine', () => {
     ] as const)
       expect(() => exec(seeded(), undefined, undefined, 'rel').buffers(gremlin, {}), gremlin).toThrow(message);
   });
+
+  test('label() is a scalar retype off an element relation', async () => {
+    // NOTHING WAS BUILT FOR THIS: `byExpr`'s token arm already projected the label — one indirection
+    // into `labels` for an edge, the side table's first-interned name for a vertex — which is why
+    // `by(T.label)` and a `label()` CHILD body have always worked. The element tail had simply never
+    // been handed that expression, which is `steps/CLAUDE.md`'s "cannot be HANDED" vs "cannot EXPRESS"
+    // applied to a step. It was the last thing blocking a nested label on BOTH write hosts.
+    for (const gremlin of [
+      'g.V().label()', 'g.E().label()', 'g.V().label().dedup()',
+      'g.V().has("name","marko").label()', 'g.V().label().count()',
+      'g.V().hasLabel("person").label().dedup()', 'g.V().label().order()',
+    ]) {
+      expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('rel');
+      const via = (spine: 'rel' | 'legacy') =>
+        decodeAll(exec(seededStore(), undefined, undefined, spine).buffers(gremlin, {}, {}));
+      expect(await via('rel'), gremlin).toEqual(await via('legacy'));
+    }
+
+    // The WRITE host is the payoff and is a program, not a read — this is the shape that was blocked
+    // on the read gap above, on both `addV` and `addE`.
+    expect(compile('g.addV(__.V().has("name","marko").label())', {}, { spine: 'rel' }).kind).toBe('program');
+
+    // `id()` is DELIBERATELY still declined — the same `byExpr` arm serves it, but adding it made
+    // `g.E().id()` answer the same multiset in a different order, and shipping an unexplained change
+    // to an order-bearing surface is how an order-fragile answer gets banked as a baseline.
+    expect(compile('g.V().id()', {}, { spine: 'rel' })).not.toMatchObject({ spine: 'rel' });
+  });
+
+  // RelIR is AHEAD: legacy refuses a nested `addE` label outright ("nested-traversal label not
+  // supported") where the reference resolves the body's first value. `addV` has no such gap, so only
+  // the edge host needs this form of assertion.
+  test('addE resolves a nested label() body where legacy refuses', relirAhead(
+    'g.V(1).addE(__.V().has("name","marko").label()).to(__.V(2))',
+    () => {
+      const store = new GraphStore(new BunSqlite(':memory:'));
+      for (const seed of MODERN_SEED) exec(store, undefined, undefined, 'rel').buffers(seed, {});
+      exec(store, undefined, undefined, 'rel').buffers('g.V(1).addE(__.V().has("name","marko").label()).to(__.V(2))', {});
+      expect(store.query('SELECT l.name, e.src, e.tgt FROM edges e JOIN labels l ON l.id = e.label WHERE e.id > 12', []))
+        .toEqual([{ name: 'person', src: 1, tgt: 2 }]);
+    },
+  ));
 
   test('the hand-authored modern seed compiles WHOLE on RelIR, byte-identical to legacy', () => {
     // The plan named these seeds as the last thing pinning legacy writes for corpus LOADING (§ Phase 1):
