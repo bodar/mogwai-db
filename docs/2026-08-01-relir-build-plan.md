@@ -1008,9 +1008,24 @@ What it found, in size order, and the first line is the point:
   `label()`'s FLAT-MAP twin per `LabelsStep`'s own javadoc, the edge arm sharing `label()`'s projection and
   the vertex arm being `values()`' join with the label side tables. The INNER join is the SPECIFIED answer,
   not a default — under `ZERO_OR_MORE` a zero-label vertex must contribute no rows.
-- **`mergeV`/`mergeE` positions**, ~28: `g.mergeE(…)` at the SOURCE, `mergeE` mid-chain over a vertex
-  stream, and `mergeV` after a SCALAR stream (`g.inject(0).mergeV([:])`). The map parsing is done; what
-  declines is the POSITION, which is the same "learned at one host" shape §6·6 names.
+- **`mergeV`/`mergeE` positions**, ~28. ✅ **The SCALAR-STREAM half landed and it was one line of
+  substrate.** What `addV`/`addE`/`mergeV`/`mergeE` take from their input is its ROW COUNT, and a
+  scalar relation has one exactly as an element relation does — the reference draws no distinction,
+  since `MergeVertexStep` never looks at the traverser except to materialize a map from it. What
+  declined was the SNAPSHOT, which projected an `id` column a scalar relation does not have, so the
+  fix is `traverserCol` (`id` for an element relation, `v` for a scalar one) plus routing, and NOT a
+  scalar-specific write path. `elem` widens to `Elem | null`, which is the whole of the safety: the
+  two steps that read the traverser as an ELEMENT — `addE` with an implicit endpoint, `mergeE` with an
+  omitted `Direction` — already test `elem !== 'vertex'` and refuse. **RelIR is now AHEAD on the
+  CREATIONS**: `routeWrite` builds an ELEMENT prefix and throws on a scalar source, so
+  `g.inject(1).addV("person")` had no answer at all before. L3 1748 → 1750, census 942 → 944 — and the
+  second census gain is a PartitionStrategy write over an `inject` source, a COMBINATION neither half
+  was reachable in before, which is the compounding §7 predicts and a per-step counter cannot show.
+  What is LEFT is the ENDPOINT-LESS `mergeE` (`g.mergeE([:])`, `g.mergeE([(T.label):'self'])`): with no
+  `Direction` key the search is `g.E()` [+ label] [+ props] and `resolveVertices` resolves nothing, so
+  a MATCH is answerable and a CREATE is impossible — the reference raises *"Out Vertex not specified in
+  onCreate - edge cannot be created"* exactly when the search came back empty. That is a GUARD BINDING
+  with `raiseWhen: 'empty'`, not a decline.
 - **`dropLabel()`/`dropLabels()`**, ~12 — ✅ LANDED, and this plan had the guard on the WRONG STEP.
   `LabelCardinalityValidator` splits them and the split decides the shape of the work:
   `validateDropAll` raises for ANY `min > 0` *whatever the element carries*, so `dropLabels()` is a
