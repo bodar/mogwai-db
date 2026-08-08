@@ -285,10 +285,10 @@ test('addE sets its own uid via property(T.id)', () => {
 
 test('custom vertex and edge ids fail at the shared identity boundary', () => {
   const store = seededStore();
-  expect(() => run(store, 'g.addV().property(T.id, 1)')).toThrow('vertex id already exists: 1');
+  expect(() => run(store, 'g.addV().property(T.id, 1)')).toThrow('Vertex with id already exists: 1');
   run(store, 'g.addV().property(T.id, "marko")');
-  expect(() => run(store, 'g.addV().property(T.id, "marko")')).toThrow('vertex id already exists: marko');
-  expect(() => run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property(T.id, 7)')).toThrow('edge id already exists: 7');
+  expect(() => run(store, 'g.addV().property(T.id, "marko")')).toThrow('Vertex with id already exists: marko');
+  expect(() => run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property(T.id, 7)')).toThrow('Edge with id already exists: 7');
 });
 
 test('addE write-chain graph initializer (addV.as.addV.as.addE.from.to)', () => {

@@ -11,7 +11,13 @@
 // semantic authority, so a difference is always a defect in the optimized lowering (or in a layer
 // beneath both).
 //
-// ****  THE LIST IS CURRENTLY EMPTY, AND THAT IS THE INTENDED STATE.  ****
+// ****  EMPTY IS THE INTENDED STATE. THE LIST IS NOT EMPTY — see the entries below.  ****
+//
+// (This line claimed emptiness while an entry already sat below it; a header that describes a state
+// the file has left is worse than no header, because it is read as a summary. Two entries today:
+// `repeatBodyExpansion`, an under-determined emission ORDER neither route owns, and `propertySeek`,
+// a slice dropped by the generic fallback — the second is a real defect awaiting a fix, not a
+// tolerated difference.)
 //
 // L5's first sweep produced 22 divergent traversals in 17 step-signature groups. They reduced to
 // FOUR root causes, all now fixed (L3 1475 → 1490, +15/−0, each pinned in an L4 `.feature`):
@@ -80,6 +86,32 @@ export const KNOWN: readonly KnownDivergence[] = [
       + 'body, so nothing could compare the two routes at all. The first sweep with the switch found '
       + 'exactly one disagreement across the corpus, which is the useful result either way.',
     family: { query: /^g\.V\(\)\.repeat\(__\.both\(\)\)\.times\(3\)\.range\(/ },
+  },
+  {
+    query: "g.V().has('age', P.gt(0)).where(__.outE()).skip(1)",
+    fastPath: 'propertySeek',
+    diagnosis:
+      'A NEWLY-REACHED DEFECT, not a regression: the generic fallback DROPS A FOLLOWING SLICE when a '
+      + 'property `has()` is followed by a `where()`/`filter()` child body. Measured on the modern '
+      + "graph, `g.V().has('age',P.gt(0)).where(__.outE()).skip(1)` is [4,6] — age>0 gives "
+      + '{marko,vadas,josh,peter}, the child keeps those with out-edges {1,4,6}, skip(1) drops the '
+      + 'first — and that is what the DEFAULT config answers on both spines. With propertySeek alone '
+      + 'disabled it answers [1,4,6]: the skip is gone, not merely reordered. '
+      + 'ATTRIBUTION IS EXACT, not inferred — every one of the other seven switches was toggled off '
+      + 'individually against the same traversal and all seven still answer [4,6]. '
+      + '`g.V().has(...).filter(__.outE("created")).skip(2)` is the same cause with a different arity '
+      + '([6] correct, [4,6] with the switch off), which is why this is ONE entry and not two. '
+      + 'SEVERITY: production is CORRECT, because the switch defaults on — this is the disable path, '
+      + 'exactly the class this oracle exists for (the header above records four switches that '
+      + 'shipped before L5 and whose generic path had never been executed). It is still a defect in '
+      + "the optimized lowering's contract, since `FastPathConfig` promises the generic path is "
+      + 'result-equivalent AND the semantic authority; here the accelerated path is the correct one, '
+      + 'which inverts that and means the authority cannot be trusted to arbitrate. '
+      + 'NOT YET DIAGNOSED TO A LINE: what remains is why the non-seek `has` lowering loses a '
+      + 'following slice. Recorded rather than fixed because the fix is an unrelated read-path '
+      + 'investigation and the finding surfaced mid-way through Phase 1 write work; the L5 seed is '
+      + 'HEAD-derived, so this WILL resurface, and the point of the entry is that it resurfaces named.',
+    family: { query: /^g\.V\(\)\.has\('age', ?P\.(gt|gte)\(\d+\)\)\.(where|filter)\(__\.outE\(.*\)\)\.skip\(/ },
   },
 ];
 

@@ -591,7 +591,7 @@ unbound	legacy	Unbound parameter 'xx1'	g.addE(xx1).property("weight", null).from
 deferred	legacy	unsupported source step: addV	g.addV().as("first").repeat(__.addE("next").to(__.addV()).inV()).times(5).addE("next").to(__.select("first"))
 deferred	legacy	step not implemented: with()	g.addV().property("name", "marko").with("key", "value").values("name", "key")
 deferred	legacy	step not implemented: with()	g.addV().property("name", "marko", "since", 2010).with("key", "value").properties("name").values("since", "key")
-deferred	rel	vertex id already exists: 1	g.addV().property(T.id, 1)
+deferred	rel	Vertex with id already exists: 1	g.addV().property(T.id, 1)
 unbound	legacy	Unbound parameter 'xx1'	g.addV().property(T.id, xx1)
 unbound	legacy	Unbound parameter 'xx1'	g.addV().property(T.label, xx1)
 unbound	legacy	Unbound parameter 'vid1'	g.addV(constant("prefix_").concat(__.V(vid1).label())).label()

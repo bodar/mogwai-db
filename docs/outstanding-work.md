@@ -10,7 +10,13 @@ should make this file SHORTER.
 
 **Refreshed** 2026-08-01 · **L3 1686 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
 collision is expected, see won't-do) · census **0 `crashed`, 4 `nondet`**, perturbed census **4** ·
-`known.ts` **1 entry** (repeat's two body routes disagree on a positional window) ·
+`known.ts` **2 entries** — repeat's two body routes disagree on a positional window, and
+**`propertySeek`'s generic fallback DROPS A FOLLOWING SLICE** after a `has()` + `where()`/`filter()`
+child (`g.V().has('age',P.gt(0)).where(__.outE()).skip(1)` is [4,6] by default and [1,4,6] with that
+one switch off; the other seven were each toggled individually and are innocent). Production is
+correct — the switch defaults on — but the ACCELERATED path is the right one here, which inverts
+`FastPathConfig`'s promise that the generic path is both result-equivalent and the semantic
+authority, so the arbiter cannot be trusted until it is fixed. Not diagnosed to a line ·
 `capability-baseline.ts` **1 entry** · L5 `L5-random` plus fixed seeds 5/11/27/91/143 at
 `L5_RUNS=3000`: **36 pass / 0 fail on every run** (35).
 

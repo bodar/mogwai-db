@@ -908,9 +908,18 @@ export function effectScope(fresh: Minter): { readonly bindings: Binding[]; read
  * IS THIS PUBLIC ELEMENT ID STILL FREE — the relation a guard binding counts.
  *
  * `assertAvailableElementId` asks the same question with the same two columns: a NUMERIC id is the
- * rowid, a STRING id is the `uid`. The message is legacy's verbatim, because a decline hands the
- * traversal to a spine that raises exactly this — what the guard buys is the string without the
- * decline, and a reworded one would be a different answer to the conformance suite.
+ * rowid, a STRING id is the `uid`.
+ *
+ * **The message is the REFERENCE's, and this comment used to say it was LEGACY's — which was both the
+ * wrong authority and, as it turned out, the wrong string.** `Graph.java:1364,1368` says
+ * *"Vertex with id already exists: %s"*; both spines said *"vertex id already exists: 7"*. A spine may
+ * never take its wording from the other one: legacy is a route with an end date, so a borrowed string
+ * dies with the file, and correctness here must not be contingent on a route being deleted. Legacy
+ * still spells its own version (`steps/write/write.ts`) and keeps it until it goes — where the two
+ * disagree it is legacy that is wrong, which §6·1 makes a legal and recorded state.
+ *
+ * It survived because the comment ASSERTED the provenance confidently enough to be quoted instead of
+ * checked. A comment claiming "the reference's, verbatim" is not evidence; the vendored file is.
  *
  * `Limit 1` because the count is only ever compared against zero, and the projection is one column
  * because nothing reads it.
@@ -928,7 +937,10 @@ function elementIdGuard(uid: string | number, elem: Elem, fresh: Minter): { read
   const one = make.project({ id: fresh('p'), input: taken, channels: [], type: ID_TYPE, exprs: [['id', col(taken.id, 'id')]] });
   return {
     node: make.limit({ id: fresh('li'), input: one, channels: [], type: ID_TYPE, count: compilerInt(1) }),
-    guard: { message: `${elem === 'edge' ? 'edge' : 'vertex'} id already exists: ${uid}`, raiseWhen: 'rows' },
+    // `Graph.Exceptions.vertexWithIdAlreadyExists` / `edgeWithIdAlreadyExists`
+    // (`structure/Graph.java:1364,1368`), verbatim. The id IS a compile-time constant here — a
+    // supplied `T.id` — so the sentence carries it outright and needs no `valueColumn`.
+    guard: { message: `${elem === 'edge' ? 'Edge' : 'Vertex'} with id already exists: ${uid}`, raiseWhen: 'rows' },
   };
 }
 
