@@ -144,6 +144,20 @@ function buildGroupKey(keyArgs: any[] | undefined, src: GroupSource, params: Rec
     return { desc: { kind: 'element', elem: src.elem }, cols: elementSelect(src.elem, 'k', src.ctx), group: elementIdExpr(src.elem, src.ctx) };
   }
   if (by.kind === 'key') { // by('name') — first-under-multi for a node
+    // 🔴 A PROPERTY KEY CARRIES A STORED TYPE THIS ROUTE CANNOT PROJECT, and the answer is WRONG rather
+    // than coarse: `groupCount().by('when')` comes back keyed on raw MILLIS and `by('uuid')` keyed on a
+    // String, because this arm emits `gk` alone and there is nowhere for the property's `vtype` to
+    // ride. RelIR keys off a real per-key tag and answers all of these correctly.
+    //
+    // §6·1 says SHED — and it cannot yet. Measured: declining here takes out 34 tests, an L3 scenario
+    // and a conformance-host gate, because RelIR does not hold the group VALUE forms that reach this
+    // key — `group().by(k).by(__.out().count())` (a reducing child value) and `by(__.tail())`. The
+    // census agrees the 19 traversals it CAN see are held; the ladder shows the rest are not. So the
+    // blocker is RelIR coverage of the group-value family, not this line.
+    //
+    // Until then `scalarGroupKey` states `type: UNKNOWN` — which is the point of making `GroupKey`
+    // total. The field used to be OMITTED, so a wrong wire class was indistinguishable from "no
+    // opinion"; it is now written down, and this is the first defect that totality surfaced.
     const pe = scalarProp(src.ctx, by.key);
     return { desc: scalarGroupKey(src.productiveBy), cols: q`${pe} AS gk`, group: 'gk' };
   }

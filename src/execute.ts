@@ -680,15 +680,13 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
     case 'metaMap': for (const r of rows) yield ioc.anySerializer.serialize(new Map(Object.entries(r.meta ? JSON.parse(r.meta) : {}))); return;
     // Barriers: the whole stream collapses to ONE value (Map / List).
     case 'group': yield groupBuffer(rows, shape.key, shape.val); return;
-    case 'list': {
+    case 'list':
       // fold() reuses the plain vertex/edge projection (unprefixed id/label/…),
-      // unlike group's v_-prefixed element columns.
-      if (shape.elem === 'scalar') yield shape.as
-        ? listBuffer(rows.map((r) => frameValue(r.v, shape.as)))
-        : ioc.listSerializer.serialize(rows.map((r) => r.v));
-      else yield listBuffer(rows.map(shape.elem === 'edge' ? rowEdge : rowVertex));
+      // unlike group's v_-prefixed element columns. ELEMENTS ONLY — the scalar item branch this used
+      // to carry was unreachable (its producer throws for a non-element projection), and an
+      // unreachable branch in a framer is a claim nothing tests.
+      yield listBuffer(rows.map(shape.elem === 'edge' ? rowEdge : rowVertex));
       return;
-    }
     // A list-VALUE stream: one framed List per row (the `list` column arrives as JSON
     // text via json(), so it JSON.parses; scalar elements frame via listSerializer).
     // A list-VALUE stream: frame each row's list by its item descriptor (shared with the

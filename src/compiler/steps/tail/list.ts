@@ -456,8 +456,10 @@ function operandList(engine: Engine, arg: any, op: string, params: Record<string
 export function foldedListSubquery(engine: Engine, inner: IRStep[], params: Record<string, any>): Expression | null {
   const sub = engine.compileReadCompiled(inner, params);
   if (sub.shape.kind === 'jsonbList') return q`(SELECT jsonb(list) FROM (${embedSql(sub)}))`;
-  if (sub.shape.kind !== 'list' || sub.shape.elem !== 'scalar') return null;
-  return q`(SELECT jsonb(COALESCE(json_group_array(v), json('[]'))) FROM (${embedSql(sub)}))`;
+  // `Shape{kind:'list'}` is the legacy ROW-fold and is ELEMENTS ONLY — its `'scalar'` item arm was
+  // unreachable and is gone, so the row-fold-of-scalars branch that used to live here was dead with
+  // it. An element row-fold is not a scalar list operand, which is what this function must decline.
+  return null;
 }
 
 /** Embed a fully-rendered Compiled (its own `with … select …`) as an Expression, so it

@@ -285,7 +285,12 @@ export type Shape =
   // framing vocabulary; `wholeResult` makes cap() wrap all framed rows in one List.
   | { kind: 'variant'; arms: readonly VariantShapeArm[]; wholeResult: boolean }
   | { kind: 'scalar'; productiveNull: boolean } // numeric reducer; productive NULL may be a real result
-  | { kind: 'list'; elem: ElemShape | 'scalar'; as?: ValueType } // legacy row-fold; scalar items may carry a uniform type
+  // The legacy ROW-fold: one List per result, built from the RESULT ROWS rather than from a JSON
+  // column (that is `jsonbList`). Elements only — its single producer (`projection.ts` `compileFold`)
+  // throws for every other projection shape, so the `'scalar'` item arm and the `as?` tag it carried
+  // were UNREACHABLE, and with them a whole framer branch. A fifth encoding that looked like optional
+  // metadata, which is exactly what `ListOf` was made total to stop.
+  | { kind: 'list'; elem: Exclude<ElemShape, 'property'> }
   // One JSON list value per row. `items` is total: the former `as`/`typed`/`of`
   // flag bag made four encodings look like optional metadata and forced the framer
   // to reconstruct a fifth. `ListOf` already owns the item question.
