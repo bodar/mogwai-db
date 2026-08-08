@@ -1659,9 +1659,17 @@ function scalarTail(
     // distinction `compare()` above draws and the reason `ChildHost` carries it as an optional.
     // The ROW rides with the host so a `by(__.select(label))` can read the alias channel — which is
     // carried state on this relation, not a question a correlated subquery over the value could answer.
+    // A STATIC type is the SAME FACT as a per-row `vtype` column, constant-folded — so it rides on the
+    // host too, and saying so is what makes a `groupCount()` key over
+    // `inject(777).asNumber(GType.BIGINT)` a BigInt on the wire instead of an inferred Int. Leaving it
+    // off was not neutral: `byNode` tags an untagged value NULL, and NULL means "infer from the JS
+    // value", which cannot tell a BigInt from an Int, a BigDecimal from an Int, or a datetime from a
+    // long. §6·7's rule at one more carrier — what is KNOWN is carried, never re-guessed downstream.
+    const staticTag = out.kind === 'scalar' && out.type.kind === 'static' ? out.type.type : undefined;
     const host: ChildHost = {
       kind: 'scalar', value: col(rel.id, 'v'), row: { rel, aliases: labels },
-      ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}),
+      ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') }
+        : staticTag ? { vtype: compilerText(staticTag) } : {}),
     };
 
     if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
@@ -1694,6 +1702,27 @@ function scalarTail(
       const merged = unionArms(step, rel, out, bulked, ctx, fresh, labels);
       if (!merged) return null;
       return continueAs(merged.rel, merged.framing, steps, at + 1, bulked || ctx.collapse, ctx, fresh, labels);
+    }
+
+    // `group()`/`groupCount()` over a VALUE stream — the barrier at its second host, and it is the SAME
+    // `groupBarrier` rather than a scalar-shaped copy. `groupBarrier`'s own comment had predicted this
+    // ("over a SCALAR stream the traverser IS a value, so `by()`-less is exactly the identity
+    // projection… it arrives with the scalar-host caller that does not exist yet"), and the caller is
+    // all that was missing: `byNode`'s scalar arm already tags the value with its own `vtype`.
+    if (step.name === 'group' || step.name === 'groupCount') {
+      const grouped = groupBarrier(rel, host, step, bulked, childSeam(ctx, fresh), fresh);
+      if (!grouped) return null;
+      const framing = { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf } as const;
+      // A LABELLED form is a SIDE EFFECT: it fills the named map and passes its traversers on, exactly
+      // as it does over an element stream — so the loop CONTINUES and only the unkeyed form becomes the
+      // traverser. One rule, two hosts (§6·6's "a child body works wherever it is LEGAL" applied to a
+      // barrier rather than to a body).
+      if (argValues(step).length) {
+        if (ctx.mutating) return null;
+        if (!registerMap(step, { rel: grouped.rel, framing }, ctx.collections, ctx.sideEffectReducers)) return null;
+        continue;
+      }
+      return continueAs(grouped.rel, framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
 
     // `project()` over a VALUE traverser — the identical record builder, with the host's own framing as
@@ -2702,7 +2731,7 @@ const framed = (chain: Tail, collapse: boolean, fresh: Minter): { readonly rel: 
     case 'scalar': return scalarPayload(chain.rel, framing, fresh);
     case 'list': return listPayload(chain.rel, framing.of, !!framing.set, fresh);
     case 'path': return pathPayload(chain.rel, framing.of, fresh);
-    case 'map': return mapPayload(chain.rel, framing.keyOf, framing.valOf, fresh);
+    case 'map': return mapPayload(chain.rel, fresh);
     case 'mapEntry': return mapEntryPayload(chain.rel, framing.keyOf, framing.valOf, fresh);
     case 'record': return recordPayload(chain.rel, framing.fields, fresh);
     case 'property': return {

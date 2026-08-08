@@ -235,7 +235,7 @@ export function recordPayload(
   rel: Rel, fields: readonly RecordField[], fresh: Minter,
 ): { readonly rel: Rel; readonly shape: Shape } | null {
   const mapped = recordToMap(rel, fields, fresh);
-  return mapped && mapPayload(mapped, { kind: 'scalar' }, { kind: 'scalar' }, fresh);
+  return mapped && mapPayload(mapped, fresh);
 }
 
 /**

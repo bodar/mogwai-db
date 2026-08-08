@@ -165,20 +165,27 @@ export function groupBarrier(
   // else in the argument position is a form this does not serve.
   const args = argValues(step);
   if (args.length > 1 || (args.length === 1 && typeof args[0] !== 'string')) return null;
-  // A group's members are the ELEMENTS, so a scalar host has no element to collect. It is a real arm —
-  // the members are the values, tagged by their own `vtype` — and it arrives with the scalar-host caller
-  // that does not exist yet, rather than being guessed at here.
-  if (step.name === 'group' && host.kind !== 'element') return null;
-
   // TWO SLOTS for `group()`, one for `groupCount()`, and that is the whole of the arity difference:
   // `GroupStep` takes a key `by()` and a value `by()`, `GroupCountStep` only a key.
   const collecting = step.name === 'group';
   const bys = modulations(step, collecting ? 2 : 1, child);
-  // A bare `groupCount()` groups by the TRAVERSER, so an element stream would need an element key —
-  // which the materializer expands per pair rather than tagging. Over a SCALAR stream the traverser IS
-  // a value, so `by()`-less is exactly the identity projection and works.
   if (!bys) return null;
-  const key = byNode(bys[0] ?? { key: { kind: 'identity' } }, host, fresh, child);
+
+  /**
+   * A `by()`-LESS KEY GROUPS BY THE TRAVERSER ITSELF, and over an ELEMENT that is the ROWID with the
+   * node built at the entry — not the node in the `GROUP BY`.
+   *
+   * The distinction is the one the MEMBER column already draws and for the same two reasons: an element
+   * node carries the whole property bag, so grouping by it would make SQLite hash a JSON document per
+   * row where an integer settles it, and the node would then be expanded once per ROW instead of once
+   * per surviving GROUP. It is also why this is not `byNode`'s business — that function answers "the
+   * traverser as a self-describing member", which is exactly right at the entry and wrong in a key
+   * position, so the identity arm over an element stays declined there.
+   */
+  const elementKey = !bys[0] && host.kind === 'element';
+  const key = elementKey
+    ? (host as Extract<ChildHost, { kind: 'element' }>).id
+    : byNode(bys[0] ?? { key: { kind: 'identity' } }, host, fresh, child);
   if (!key) return null;
 
   // THE VALUE `by()`, where there is one. A slot `byNode` cannot project declines the whole step rather
@@ -199,6 +206,10 @@ export function groupBarrier(
 
   const bulk = input.channels.find((channel) => channel.role === 'bulk');
   const encounter = collecting ? input.channels.find((channel) => channel.role === 'encounter') : undefined;
+  // A COLLECTING group states its member order, and over a SCALAR host the rowid fallback below does not
+  // exist — there is no `id` column on a value relation. `analyzeChain` demands an encounter for every
+  // `group()`, so this declines only if that contract is violated rather than in any reachable chain.
+  if (collecting && !encounter && host.kind !== 'element') return null;
   const extra = [
     ...(collecting ? [meta(MEMBER_COL, 'any', true), meta(ORD_COL, 'int')] : []),
     ...(bulk ? [meta(bulk.col, 'int')] : []),
@@ -215,7 +226,9 @@ export function groupBarrier(
   // ordinary payload column, because at a barrier it is data being collected rather than per-row state.
   const projected = make.project({
     id: fresh('gk'), input, channels: [...(bulk ? [bulk] : []), ...(encounter ? [encounter] : [])],
-    type: typeOf(meta(KEY_COL, 'json', true), ...extra),
+    // An element-identity key is a ROWID, not a node — the declared type says so, because the factory
+    // checks widths and the emitter's own type view is this list.
+    type: typeOf(meta(KEY_COL, elementKey ? 'int' : 'json', true), ...extra),
     exprs: [
       [KEY_COL, key],
       // The MEMBER is the projected value where a value `by()` names one, and the traverser's rowid
@@ -223,7 +236,7 @@ export function groupBarrier(
       // not an order: two traversers can share one, and the members would then collect in scan order.
       // analyzeChain demands an encounter for every group(), so the id fallback is unreachable for this
       // collecting arm; it remains only as a defensive fallback if that analysis contract is violated.
-      ...(collecting ? [[MEMBER_COL, member ?? col(input.id, 'id')] as const, [ORD_COL, col(input.id, encounter ? encounter.col : 'id')] as const] : []),
+      ...(collecting ? [[MEMBER_COL, member ?? traverserMember(host, fresh)] as const, [ORD_COL, col(input.id, encounter ? encounter.col : 'id')] as const] : []),
       ...(bulk ? [[bulk.col, col(input.id, bulk.col)] as const] : []),
       ...(encounter ? [[encounter.col, col(input.id, encounter.col)] as const] : []),
     ],
@@ -293,10 +306,11 @@ export function groupBarrier(
   // inside one collected traverser's buffer, so their order is fully observable, and `json_group_array`
   // takes rows in whatever order SQLite scanned. The emission order where the chain carries one, the
   // rowid otherwise — a total order either way, which is what `mise run test:perturbed` exists to check.
-  const collected = member
+  const collected = member || host.kind === 'scalar'
     // A projected VALUE is already a self-describing `{t,v}` node (`byNode` builds it from the row the
-    // value came from), so it is written back as it is. `json()` around it for the list module's own
-    // reason: without it `json_group_array` re-encodes the envelope as a JSON STRING.
+    // value came from), so it is written back as it is — and so is a SCALAR host's own traverser, whose
+    // `by()`-less member is that same node. `json()` around it for the list module's own reason: without
+    // it `json_group_array` re-encodes the envelope as a JSON STRING.
     ? jsonOf(col(rows.id, MEMBER_COL))
     : jsonOf(elementNode(col(rows.id, MEMBER_COL), (host as Extract<ChildHost, { kind: 'element' }>).elem, fresh));
   // THE VALUE'S PRODUCTIVITY DROPS THE MEMBER, NOT THE TRAVERSER AND NOT THE GROUP — and getting that
@@ -342,9 +356,19 @@ export function groupBarrier(
   // group needs no envelope added: a collecting value is already a typed list node, while the child
   // assignment arm extracts the child's typed scalar node unchanged.
   const entry: Entry = {
-    key: col(productive.id, KEY_COL),
+    // The KEY NODE is built HERE for an element-identity key — once per surviving group, off the rowid
+    // the grouping actually used. That is the same rowids-until-the-root rule the element-membered list
+    // follows, one container along.
+    key: elementKey
+      ? elementNode(col(productive.id, KEY_COL), (host as Extract<ChildHost, { kind: 'element' }>).elem, fresh)
+      : col(productive.id, KEY_COL),
     val: step.name === 'group' ? col(productive.id, VAL_COL) : typedNode(col(productive.id, VAL_COL), compilerText('long')),
-    keyOf: { kind: 'scalar' },
+    // AN ELEMENT KEY SAYS SO, and that is what keeps the SIDE READS honest. The blob holds a
+    // `{t:'vertex', v:{…}}` node, which the typed framer walks correctly at any depth — but a
+    // `select(Column.keys).unfold()` would decode it into the SCALAR vocabulary, whose framer cannot
+    // frame an element and emitted the payload as a JSON STRING. `sideList`/`entrySide` decline an
+    // `elem` side, so declaring it is the difference between a wrong answer and a deferral.
+    keyOf: elementKey ? { kind: 'elem', elem: (host as Extract<ChildHost, { kind: 'element' }>).elem } : { kind: 'scalar' },
     valOf: { kind: 'scalar' },
   };
   return {
@@ -355,6 +379,18 @@ export function groupBarrier(
     keyOf: entry.keyOf,
     valOf: entry.valOf,
   };
+}
+
+/** THE TRAVERSER ITSELF as a collected member — a rowid for an element (expanded once per surviving
+ *  member at the aggregate) and the self-describing value node for a scalar, which is `byNode`'s own
+ *  identity answer over that host. One function so the two hosts cannot describe "the traverser" two
+ *  ways, and a THROW rather than a decline for a host that has neither: `groupBarrier` reaches this only
+ *  after admitting the host, so a third kind here is a lowering bug and not a deferral. */
+function traverserMember(host: ChildHost, fresh: Minter): Expr {
+  if (host.kind === 'element') return host.id;
+  const node = byNode({ key: { kind: 'identity' } }, host, fresh);
+  if (!node) throw new Error(`RelIR lowering: a ${host.kind} host cannot project its own traverser as a group member`);
+  return node;
 }
 
 /** The host a `by()` projects from, for an ELEMENT relation — the shape `groupBarrier` needs handed to
@@ -773,13 +809,19 @@ export function entrySide(
  * naked array, and the typed framer treats a bare array as a list of bare members exactly as it treats a
  * bare scalar as an inferred value. ONE blob encoding, not two with a rebuild between them.
  *
- * An ELEMENT side declines. This is the `materialize.ts:191` throw that §10·10 names as the thing blocking
- * `group()`, and it now sits on the correct side of the boundary: a decline routes to the spine that
- * answers, and building it is `element.ts`'s payload reached per pair — the same expansion the element-list
- * arm wants. `groupBarrier` above emits scalar sides only, so nothing reachable today declines here.
+ * AN ELEMENT SIDE NEEDS NOTHING SPECIAL HERE, and it used to decline. What changed is not this function
+ * but what a producer puts in the blob: `elementNode` makes an element a MEMBER of the self-describing
+ * tree, so `{t:'vertex', v:{…}}` is walked by the one rule `frameTypedNode` already has, at whatever
+ * depth it appears. The `elem` tag on the side is therefore an ALGEBRA fact — it tells the side READS
+ * (`sideList`, `entrySide`) that decoding into the scalar vocabulary would be lossy — and not a wire
+ * one, which is why the `Shape` below says `scalar` for it (`mapSideBuffer`'s own `elem` arm expects a
+ * BARE payload object, and this blob carries the envelope).
+ *
+ * It therefore takes NO side descriptors and cannot decline: `mapValue` is one blob whatever the sides
+ * hold. Keeping the parameters "for symmetry" with `mapEntryPayload` would be keeping the two arguments
+ * whose only job was the decline that is now wrong.
  */
-export function mapPayload(rel: Rel, keyOf: MapOf, valOf: MapOf, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null {
-  if (keyOf.kind === 'elem' || valOf.kind === 'elem') return null;
+export function mapPayload(rel: Rel, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } {
   const ordered = byEncounter(rel, fresh);
   return {
     rel: make.project({
@@ -801,7 +843,6 @@ export function mapPayload(rel: Rel, keyOf: MapOf, valOf: MapOf, fresh: Minter):
 export function mapEntryPayload(
   rel: Rel, keyOf: MapOf, valOf: MapOf, fresh: Minter,
 ): { readonly rel: Rel; readonly shape: Shape } | null {
-  if (keyOf.kind === 'elem' || valOf.kind === 'elem') return null;
   const ordered = byEncounter(rel, fresh);
   return {
     rel: make.project({
@@ -809,6 +850,12 @@ export function mapEntryPayload(
       type: typeOf(meta(ENTRY.key, 'json', true), meta(ENTRY.val, 'json', true)),
       exprs: [[ENTRY.key, jsonOf(col(ordered.id, ENTRY.key))], [ENTRY.val, jsonOf(col(ordered.id, ENTRY.val))]],
     }),
-    shape: { kind: 'mapEntry', keyOf, valOf },
+    // An `elem` side crosses as `scalar`: the column holds a `{t,v}` node, which is what
+    // `mapSideBuffer`'s scalar arm frames, while its own `elem` arm expects a bare payload object. The
+    // two vocabularies answer two questions (`framing.ts`'s note), and this is that split paying off.
+    shape: { kind: 'mapEntry', keyOf: framed(keyOf), valOf: framed(valOf) },
   };
 }
+
+/** A side AS THE WIRE sees it — an `elem` side is a typed node here, so it frames like any other. */
+const framed = (of: MapOf): MapOf => (of.kind === 'elem' ? { kind: 'scalar' } : of);

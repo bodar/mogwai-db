@@ -162,7 +162,11 @@ describe('group / properties SQL', () => {
     expect(read("g.V().values('age').is(typeOf(GType.MAP))").shape.kind).toBe('mapValue');
   });
 
+  // LEGACY'S scalar-host groupCount, pinned at that spine — RelIR's is the same `groupBarrier` the
+  // element host uses and frames one `mapValue` blob; the assertions here are about legacy's `group`
+  // descriptor and its `gkt` sibling column, which is a claim that reads the same in either run.
   test('P3 Stage C: bare groupCount() over a scalar stream groups by value', () => {
+    const read = (query: string, options?: CompileOptions) => bare_read(query, { ...options, spine: 'legacy' });
     // V().values('name').groupCount() → GROUP BY the value → Map{value: count}.
     const g = read("g.V().out('created').values('name').groupCount()");
     // A stored-property key carries its per-row type in a sibling column (gkt), so a
@@ -176,8 +180,10 @@ describe('group / properties SQL', () => {
     // null keys are counted (groupCount is productive)
     expect(read('g.inject(10,20,null,20).groupCount()').shape)
       .toEqual({ kind: 'group', key: { kind: 'scalar', productive: true, type: UNKNOWN }, val: { kind: 'count' } });
-    // named side-effect groupCount('a') over a scalar defers (needs side-effect state)
-    expect(() => compile("g.V().values('name').groupCount('a').cap('a')", {})).toThrow();
+    // A NAMED side-effect groupCount('a') over a scalar defers on legacy (it needs side-effect state);
+    // on RelIR the labelled form is the same grouping REGISTERED, so it routes at this host too — one
+    // rule, two hosts.
+    expect(() => compile("g.V().values('name').groupCount('a').cap('a')", {}, { spine: 'legacy' })).toThrow();
   });
 
   test('count values decode as Number (Int64), including inside a nested groupCount map', async () => {
@@ -219,8 +225,12 @@ describe('group / properties SQL', () => {
     // the traversal instead, which is a decline RelIR no longer needs.
     if (relirOff) expect(() => compile('g.V().groupCount().by(T.label).is(typeOf(GType.LIST))', {})).toThrow('only is(typeOf(GType.MAP))');
     else expect(run(seededStore(), 'g.V().groupCount().by(T.label).is(typeOf(GType.LIST))')).toEqual([]);
-    // A non-scalar group key still fails closed on both spines.
-    expect(() => compile('g.V().group().count()', {})).toThrow('non-scalar-key group');
+    // A BARE `group()` KEYS BY THE ELEMENT ITSELF, which RelIR now expresses — the key is the ROWID in
+    // the `GROUP BY` and `elementNode` builds the entry off it, once per surviving group. Legacy has no
+    // element-key group at all and refuses. So `count()` after one is 1 on RelIR (the barrier's single
+    // map traverser) and a refusal on legacy.
+    if (relirOff) expect(() => compile('g.V().group().count()', {})).toThrow('non-scalar-key group');
+    else expect(run(seededStore(), 'g.V().group().count()')).toEqual([{ v: 1 }]);
   });
 
   test('P3 Stage C3: group().unfold() → per-entry Map.Entry stream', () => {
@@ -365,8 +375,12 @@ describe('group / properties SQL', () => {
     expect(read('g.V().groupCount().by("name").select(Column.values).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     // select(Column.keys) over a scalar key → a typed scalar stream on unfold.
     expect(read('g.V().groupCount().by("name").select(Column.keys).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
-    // Element keys (bare groupCount()) carry their rowid → unfold rejoins vertices.
-    expect(read('g.V().groupCount().select(Column.keys).unfold()').shape).toEqual({ kind: 'vertex' });
+    // Element keys (bare groupCount()) carry their rowid → unfold rejoins vertices. RelIR DECLINES the
+    // side reads over an element-keyed map rather than answering them: its blob holds a
+    // `{t:'vertex', v:{…}}` node, which frames correctly as a map entry and would decode into the
+    // SCALAR vocabulary as a JSON string — a wrong answer where a deferral is available, which is what
+    // the `elem` tag on `MapOf` now prevents. So this stays legacy's, and it is pinned there.
+    expect(bare_read('g.V().groupCount().select(Column.keys).unfold()', { spine: 'legacy' }).shape).toEqual({ kind: 'vertex' });
     // group().by(k).by(__.count()) → same scalar-valued map path (typed count node → per-row type).
     expect(read('g.V().group().by("name").by(__.count()).select(Column.values).unfold()').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     const childKey = read('g.V().groupCount().by(__.out().count())', { spine: 'legacy' });

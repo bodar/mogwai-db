@@ -121,8 +121,8 @@
   },
   "dedup": {
     "binds": 0,
-    "bytes": 1800,
-    "compiler": 22,
+    "bytes": 1864,
+    "compiler": 27,
     "bound": 0
   },
   "difference": {
@@ -181,8 +181,8 @@
   },
   "groupCount": {
     "binds": 0,
-    "bytes": 902,
-    "compiler": 11,
+    "bytes": 2052,
+    "compiler": 20,
     "bound": 0
   },
   "has": {
@@ -397,8 +397,8 @@
   },
   "sum": {
     "binds": 0,
-    "bytes": 1233,
-    "compiler": 27,
+    "bytes": 2803,
+    "compiler": 33,
     "bound": 0
   },
   "tail": {
