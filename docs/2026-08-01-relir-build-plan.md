@@ -675,11 +675,30 @@ left on the board** (~25 of the 30 remaining `group*` blockers): `group().by(k).
 .sum())`, `by(__.count())`, `by(__.out().fold())`, `by(__.values('name').order().fold())`. `groupBarrier`
 declines it in one place and states the reason — the generic child expression reduces PER PARENT, which
 composes with neither the framing (it would produce `[n]`) nor every reducer (`mean` needs the complete
-child-row domain, not an average of per-parent means). **It needs a FOURTH child-seam answer: the body's ROWS
-correlated to the host** (§6·6 has three — correlated scalar, correlated predicate, rooted relation), so the
-value side becomes a JOIN the grouping aggregates over rather than a scalar subquery per row. That same
-answer is what an `order().by(<reducer>)` and a collection's value reducer will want, which is why it is
-substrate rather than a group feature.
+child-row domain, not an average of per-parent means). The design, worked out but NOT built:
+
+- **It needs a FOURTH child-seam answer** (§6·6 has three — correlated scalar, correlated predicate, rooted
+  relation): the body's ROWS over the host STREAM, so the value side is a JOIN the grouping aggregates over
+  rather than a scalar subquery per row. A CORRELATED relation cannot serve — SQLite has no `LATERAL`, so
+  the correlation has to become a join `ON`, which is exactly what the ordinary fold's movements already
+  build from an input relation.
+- **THE GROUP KEY SURVIVES THE JOIN AS THE `origin` CHANNEL, and that role is already modelled and unbuilt**
+  — `src/channels.ts` gives it a merge policy (`identical`), a barrier policy (`empty`) and a `ROLE_ORDER`
+  slot, and nothing in `src/compiler/rel/` mints one. This is `sack`'s situation exactly one increment
+  earlier: the channel exists, the plumbing does not. Mint it as the PARENT ROWID on the group's input, lower
+  the pre-barrier body through the ordinary fold (movements carry channels by contract, §3.5, so no
+  per-movement change), then re-project the key per origin in the outer aggregate.
+- 🔴 **THE EMPTY POOL IS PER-REDUCER, and it decides INNER versus LEFT join.** A parent whose body produced
+  no rows vanishes from an inner join and takes its key with it — right for `sum()` (`SumGlobalStep` leaves
+  `NON_EMITTING_SEED` in place and `ReducingBarrierStep` emits nothing) and WRONG for `count()`
+  (`CountGlobalStep` seeds 0, so the key survives with 0). `scalarChild` already documents that exact
+  distinction for the per-parent case; the group-scoped arm has to honour it at the JOIN.
+- A SCALAR host is out of reach at first: `origin` is typed `int`, and a value stream has no rowid to name
+  the parent by.
+
+The same fourth answer is what an `order().by(<reducer>)`, a collection's value reducer and the per-origin
+reducer after a branch (an L3 deferral bucket in its own right) all want, which is why it is substrate rather
+than a group feature.
 
 🚧 **What else the MAP family owes:** the SELECTIVE token subsets (`with(tokens, ids)`, which
 `absorbValueMapWith` deliberately leaves in place to fail closed) and the `by(__.unfold())` that pairs with
