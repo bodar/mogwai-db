@@ -32,6 +32,20 @@ interface Scope {
   readonly cols: ReadonlyMap<string, Rel>;
   readonly inAggregate: boolean;
   readonly inWindow: boolean;
+  /**
+   * The BARE-COLUMN rule inside an `Aggregate` — which relation is being grouped, which of its
+   * columns the `GROUP BY` fixed, and whether we are currently inside an `Agg`'s own arguments.
+   *
+   * ⚠️ **SQLite ACCEPTS `SELECT k, x FROM t GROUP BY k` and returns `x` from an ARBITRARY row of each
+   * group.** Every other engine rejects it; SQLite documents it as a feature. So a lowering that
+   * reads an ungrouped column in `aggs` gets a plausible value from whichever row the scan reached
+   * first — right arity, right shape, wrong value, and non-deterministic between runs and between
+   * runtimes. `test:perturbed` is the only instrument that could see it and only by luck.
+   *
+   * Present only while checking `aggs`/`having`; a `groupBy` key is not inside the aggregate and is
+   * what makes a column legal in the first place.
+   */
+  readonly grouped?: { readonly rel: string; readonly keys: ReadonlySet<string>; readonly insideAgg: boolean };
   readonly recursive?: { readonly name: string; readonly self: string; readonly allowed: boolean };
   readonly bindings: ReadonlyMap<string, Rel | Stmt>;
 }
@@ -181,6 +195,9 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
       const bound = scope.cols.get(e.rel);
       if (!bound) throw new Error(`RelIR: no relation '${e.rel}' is in scope for column '${e.name}'`);
       if (!bound.type.cols.some((column) => column.name === e.name)) throw new Error(`RelIR: relation ${e.rel} has no declared column '${e.name}'`);
+      const { grouped } = scope;
+      if (grouped && !grouped.insideAgg && grouped.rel === e.rel && !grouped.keys.has(e.name))
+        throw new Error(`RelIR: '${e.name}' is neither a group key nor inside an Agg — SQLite would return it from an ARBITRARY row of each group rather than rejecting the query`);
       return;
     }
     if (e.kind === 'agg' && !scope.inAggregate) throw new Error('RelIR: Agg is legal only in Aggregate.aggs');
@@ -191,7 +208,14 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
       // arguments, and they were not being walked — so a `Col` naming a relation out of scope inside
       // either one reached the emitter unchecked. `exprChildren` (walk.ts) has always included the order
       // terms; this arm is what makes the CHECK agree with the walk.
-      case 'agg': e.args.forEach(child); (e.orderBy ?? []).forEach((term) => child(term.expr)); if (e.filter) child(e.filter); break;
+      // Inside an `Agg` every input column is legal again — that is what an aggregate IS — so the
+      // bare-column rule lifts for its arguments, its ORDER BY terms and its FILTER alike.
+      case 'agg': {
+        const inside = scope.grouped ? { ...scope, grouped: { ...scope.grouped, insideAgg: true } } : scope;
+        const arg = (x: Expr) => checkExpr(x, inside);
+        e.args.forEach(arg); (e.orderBy ?? []).forEach((term) => arg(term.expr)); if (e.filter) arg(e.filter);
+        break;
+      }
       case 'window-expr': e.args.forEach(child); break; case 'json-object': e.entries.forEach(([,x]) => child(x)); break; case 'json-array': e.items.forEach(child); break; case 'scalar': case 'exists': checkRel(e.plan, scope); break; case 'in-list': child(e.expr); e.values.forEach(child); break; case 'in-query': child(e.expr); checkRel(e.plan, scope); break; default: break; }
   };
   /** Where each of a node's expressions is EVALUATED. A kind that forgets one is caught by the
@@ -208,12 +232,23 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
     materialize: () => [],
     explode: (node, inner) => [[node.expr, inner]],
     join: (node, inner) => (node.on ? [[node.on, inner]] : []),
-    // An Agg is legal only here, and a groupBy key is NOT inside the aggregate.
-    aggregate: (node, inner) => [
-      ...node.groupBy.map((e) => [e, inner] as const),
-      ...node.aggs.map(([, e]) => [e, { ...inner, inAggregate: true }] as const),
-      ...(node.having ? [[node.having, { ...inner, inAggregate: true }] as const] : []),
-    ],
+    // An Agg is legal only here, and a groupBy key is NOT inside the aggregate — it is checked in the
+    // plain scope, and it is also what FIXES a column so a later bare reference to it is legal.
+    // Only a groupBy term that IS a bare column of the input fixes a name: a keyed expression fixes
+    // that expression, and a bare `Col` is not the same expression as `lower(col)`.
+    aggregate: (node, inner) => {
+      const grouped = {
+        rel: node.input.id,
+        keys: new Set(node.groupBy.flatMap((e) => (e.kind === 'col' && e.rel === node.input.id ? [e.name] : []))),
+        insideAgg: false,
+      };
+      const aggregating = { ...inner, inAggregate: true, grouped };
+      return [
+        ...node.groupBy.map((e) => [e, inner] as const),
+        ...node.aggs.map(([, e]) => [e, aggregating] as const),
+        ...(node.having ? [[node.having, aggregating] as const] : []),
+      ];
+    },
     window: (node, inner) => node.specs.map(([, e]) => [e, { ...inner, inWindow: true }] as const),
   };
 

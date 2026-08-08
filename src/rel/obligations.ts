@@ -1,4 +1,4 @@
-import { barrierChannels, CHANNEL_GROUP_POLICY, channelCols, groupableChannels, mergeChannels, rigidChannels, sameChannels, type Channels } from '../channels.ts';
+import { barrierChannels, CHANNEL_GROUP_POLICY, channelCols, groupableChannels, mergeChannels, rigidChannels, rowUniqueChannels, sameChannels, type Channels } from '../channels.ts';
 import type { Rel, RelKind } from './rel.ts';
 import { recursiveStep } from './walk.ts';
 
@@ -66,7 +66,25 @@ export const CHANNEL_OBLIGATION: { readonly [K in RelKind]: ChannelObligation<K>
   filter: preserving,
   sort: preserving,
   limit: preserving,
-  distinct: preserving,
+  /**
+   * Preserving, PLUS the one thing a whole-row `DISTINCT` cannot survive: a row-unique channel.
+   *
+   * Carrying one makes the operator inert — every row differs in that column, so nothing collapses
+   * — and inert is the failure no instrument sees: same arity, same plan shape, no throw, more rows
+   * than the step means. It is P3's `DISTINCT`-in-a-recursive-term defect one layer up, reachable by
+   * a lowering instead of by the engine, which is why it is a checked law and not a comment.
+   *
+   * The ORDERED `dedup()` is the shape that proves the rule is the right one: it must keep the first
+   * occurrence's position, so it is not a `Distinct` at all but a grouping by traverser identity
+   * taking `MIN(encounter)` — the per-traverser reduction `CHANNEL_GROUP_POLICY` permits. A lowering
+   * that reached for `Distinct` there would now fail closed instead of quietly emitting every row.
+   */
+  distinct: (node) => {
+    preserving(node);
+    const unique = rowUniqueChannels(node.channels);
+    if (unique.length)
+      throw new Error(`RelIR: a whole-row Distinct cannot carry the row-unique channel(s) ${unique.map((c) => `'${c.role}'`).join(', ')} — every row differs there, so the Distinct collapses nothing; group by traverser identity instead`);
+  },
   materialize: preserving,
   window: (node) => extending(node, node.specs.map(([name]) => name)),
   // With an input it EXTENDS (input columns then the member's); source-less it emits exactly the

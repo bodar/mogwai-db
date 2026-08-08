@@ -185,6 +185,42 @@ describe('RelIR', () => {
   // a correlated scalar carrying COUNT(*) inside a recursive term runs and returns the right
   // per-row value. `flatten` (§4.2) decorrelates into exactly this shape, per P2, so a law that
   // fired inside a subquery would refuse the shapes Phase 3 exists to produce.
+  // The same defect one layer up from P3's, and reachable by a LOWERING rather than by the engine:
+  // every row differs in a row-unique column, so the operator collapses nothing. Same arity, same
+  // plan shape, no throw — just more rows than the step means.
+  test('refuses a whole-row Distinct carrying a row-unique channel', () => {
+    const carried: Channels = [{ col: 'enc', role: 'encounter' }];
+    const withEnc = [...cols, { name: 'enc', type: 'int', nullable: false }] as const;
+    const source = projectRel({ id: relId('src'), input: scan, channels: carried, type: { cols: withEnc },
+      exprs: [['id', col(scan.id, 'id')], ['name', col(scan.id, 'name')], ['enc', lit(1, 'int')]] });
+    const deduped = distinctRel({ id: relId('dd'), input: source, channels: carried, type: { cols: withEnc } });
+    expect(() => check(deduped)).toThrow("cannot carry the row-unique channel(s) 'encounter'");
+
+    // `bulk` is NOT row-unique, and this is the shape that proves the rule had to be per-role: the
+    // landed unordered `dedup()` projects `bulk = 1` and dedups over `(id, 1)`, which is a dedup on
+    // `id`. A blanket "a Distinct may carry no channels" would refuse correct, shipped code.
+    const bulk: Channels = [{ col: 'bulk', role: 'bulk' }];
+    const withBulk = [...cols, { name: 'bulk', type: 'int', nullable: false }] as const;
+    const counted = projectRel({ id: relId('bsrc'), input: scan, channels: bulk, type: { cols: withBulk },
+      exprs: [['id', col(scan.id, 'id')], ['name', col(scan.id, 'name')], ['bulk', lit(1, 'int')]] });
+    expect(() => check(distinctRel({ id: relId('bdd'), input: counted, channels: bulk, type: { cols: withBulk } }))).not.toThrow();
+  });
+
+  // ⚠️ SQLite ACCEPTS `SELECT k, x FROM t GROUP BY k` and returns `x` from an arbitrary row of each
+  // group; every other engine rejects it. So this is a wrong VALUE with the right shape, and it is
+  // non-deterministic between runs — the class no ladder level sees.
+  test('refuses a bare input column in Aggregate.aggs, and admits the two legal forms', () => {
+    const outCols = [{ name: 'id', type: 'int', nullable: false }, { name: 'v', type: 'text', nullable: false }] as const;
+    const grouped = (value: Parameters<typeof aggregateRel>[0]['aggs'][number][1]) =>
+      aggregateRel({ id: relId('g'), input: scan, channels, type: { cols: outCols }, groupBy: [col(scan.id, 'id')], aggs: [['v', value]] });
+
+    expect(() => check(grouped(col(scan.id, 'name')))).toThrow('neither a group key nor inside an Agg');
+    // Inside an Agg the same column is exactly what an aggregate is for.
+    expect(() => check(grouped({ kind: 'agg', fn: 'max', args: [col(scan.id, 'name')] }))).not.toThrow();
+    // …and a column the GROUP BY fixed is legal bare, because the group has only one value for it.
+    expect(() => check(grouped(col(scan.id, 'id')))).not.toThrow();
+  });
+
   test('admits an aggregate inside a CORRELATED SUBQUERY in a recursive term (P2)', () => {
     const oneCol = [{ name: 'id', type: 'int', nullable: false }] as const;
     const seed = valuesRel({ id: relId('seed'), rows: [[lit(1, 'int')]], channels, type: { cols: oneCol } });

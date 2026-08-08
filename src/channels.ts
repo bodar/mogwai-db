@@ -162,6 +162,43 @@ export const CHANNEL_GROUP_POLICY: Readonly<Record<ChannelRole, 'combine' | 'und
 export const groupableChannels = (channels: Channels): boolean =>
   channels.every((channel) => CHANNEL_GROUP_POLICY[channel.role] === 'combine');
 
+/**
+ * The FOURTH total table: is this role's value distinct on every row BY CONSTRUCTION?
+ *
+ * It answers one question and it is a question about rows, not about Gremlin: **a whole-row
+ * `DISTINCT` over a relation carrying a row-unique column collapses NOTHING.** Every row differs in
+ * that column, so the operator is inert — and inert is the dangerous outcome, because it is not a
+ * throw, not a crash and not a plan-shape change. It is the same failure as SQLite's own `DISTINCT`
+ * inside a recursive term (P3), one layer up and reachable by a lowering rather than by the engine.
+ *
+ * `encounter` is the only role that qualifies today and it qualifies absolutely: it is a minted
+ * emission position whose whole purpose is a TOTAL order, which is why it carries a tie-break
+ * (`ROW_NUMBER() OVER (ORDER BY encounter, id)` — §12). A total order is a unique value per row.
+ *
+ * ⚠️ **`bulk` is deliberately NOT row-unique, and the distinction is load-bearing rather than
+ * pedantic.** `src/compiler/rel/lower.ts`'s unordered `dedup()` projects `bulk = 1` — a LITERAL —
+ * and then does exactly this whole-row `Distinct`; over `(id, 1)` that is a dedup on `id` and it is
+ * correct. A blanket "a Distinct may carry no channels" would refuse a landed, correct lowering,
+ * and a rule that has to be relaxed the first time it meets real code was never the rule.
+ *
+ * Total for the reason the other three are: a role added tomorrow must say whether it is row-unique
+ * before anything can dedup over it, rather than inheriting silence.
+ */
+export const CHANNEL_ROW_UNIQUE: Readonly<Record<ChannelRole, boolean>> = {
+  encounter: true,
+  alias: false,
+  path: false,
+  origin: false,
+  branchOrder: false,
+  sack: false,
+  fromV: false,
+  bulk: false,
+};
+
+/** The channels that make a whole-row `DISTINCT` inert — empty is the only legal answer for one. */
+export const rowUniqueChannels = (channels: Channels): Channels =>
+  channels.filter((channel) => CHANNEL_ROW_UNIQUE[channel.role]);
+
 /** A LIST EQUALITY, which is the whole tell that this decomposition is the right one: the layout
  * comparison it replaces was a `JSON.stringify` of a struct whose alias shapes it had no reason to
  * touch beyond their being in the same object. */
