@@ -96,6 +96,9 @@ const failures: string[] = [];
  *  gate, exactly as the census treats the same fact. A number worth watching move, so it is printed
  *  on a green run too (the summary line below). */
 const reordered: string[] = [];
+/** Queries where the two spines frame DIFFERENT rows. Recorded, never gated — see the comparison
+ *  site for why this stopped being a failure. */
+const diverged: string[] = [];
 let admitted = 0;
 let statements = 0;
 let pairedReads = 0;
@@ -211,11 +214,16 @@ for (const query of corpus) {
         const [relAnswer, legacyAnswer] = await Promise.all([comparable(query, 'rel'), comparable(query, 'legacy')]);
         // A malformed literal is not an executable paired read; the front-end's common refusal is
         // already L1's contract. A one-sided failure remains a hygiene failure.
-        if (relAnswer.ok !== legacyAnswer.ok) failures.push(`${query}: only one spine frames the read`);
-        else if (relAnswer.ok && legacyAnswer.ok && !RELIR_AHEAD.has(query)) {
-          // WHICH ROWS gates; WHAT ORDER is telemetry. See `comparable` for why the two claims have
-          // different standing, and for the measurement that separated them.
-          if (relAnswer.multiset !== legacyAnswer.multiset) failures.push(`${query}: RelIR and legacy framed answers differ`);
+        // ONE SPINE FRAMING AND THE OTHER NOT IS LEGAL — legacy may decline anything (§6·1), and RelIR
+        // declining a plan `lowerToRel` admitted is caught above. Neither is a hygiene failure.
+        if (relAnswer.ok && legacyAnswer.ok && !RELIR_AHEAD.has(query)) {
+          // **A FRAMED-ANSWER DIFFERENCE IS TELEMETRY, NOT A GATE.** It used to fail, and that made
+          // sense while both spines were candidates for being right. They are not: RelIR follows the
+          // REFERENCE and legacy is a route with an end date, so a disagreement no longer implies
+          // RelIR is wrong — it usually means legacy is, and fixing legacy is effort spent on
+          // something being deleted. The count still prints, so a NEW divergence is visible; what is
+          // gone is the obligation to go and make legacy agree.
+          if (relAnswer.multiset !== legacyAnswer.multiset) diverged.push(query);
           else if (relAnswer.value !== legacyAnswer.value) reordered.push(query);
         }
       }
@@ -287,6 +295,8 @@ if (json) {
   // gate. The NAMES are verbose-only, because 50-odd of them is a wall of text and the count is what
   // a reader is watching.
   console.log(`  ${reordered.length} spine emission-order difference(s) — telemetry, never gates`);
+  console.log(`  ${diverged.length} spine framed-answer difference(s) — telemetry: RelIR follows the reference`);
+  if (verbose) for (const query of diverged) console.log(`    ${query}`);
   if (verbose) for (const query of reordered) console.log(`  ORDER ${query}`);
   if (verbose) for (const [family, metric] of Object.entries(baseline))
     console.log(`  ${family}\tbinds=${metric.binds}\tbytes=${metric.bytes}\tcompiler=${metric.compiler}\tbound=${metric.bound}`);

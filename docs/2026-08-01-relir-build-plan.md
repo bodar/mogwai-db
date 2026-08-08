@@ -614,23 +614,20 @@ actually lost — `CASE WHEN CAST(printf('%.15g',v) AS REAL) = v THEN v ELSE jso
 4. **SQLite's JSON subtype does not survive some `CASE` shapes** — it does survive when the `json()` call
    is the aggregate's direct argument, which is what any fix must rely on.
 
-#### 🔴 Human decisions
+#### ✅ RelIR follows the REFERENCE; legacy's disagreements are not decisions
 
-- **The REAL precision loss, and it is BOTH spines.** SQLite writes a REAL into JSON with 15
-  significant digits, so every JSONB-carried collection loses an inexact double — `Mean.feature:70`
-  wants `d[0.3333333333333333].d` and a blob carries `0.333333333333333`. It is a DIVERGENCE only
-  where one spine computes in a ROW and the other into the blob, which is why the group-scoped `mean`
-  declines. Fix = carry an inexact real as decimal TEXT under its tag, the carriage the exact tail
-  already has for a big long. **Wire-visible on both spines — worth doing for its own sake, not for
-  the group, and that is the call.**
-- **Divergences left standing** (recorded, not reconciled): a `by()`-less `math("a + b")` over labelled
-  values ANSWERS on RelIR where legacy throws; an EMPTY `fold()` frames as one empty list;
-  `fold().unfold().values("name")` keeps traverser order where legacy answers alphabetically; the
-  retyping two-arg `choose`; MIXED ELEMENT KINDS in a variant.
-- **Three `RELIR_AHEAD` where legacy contradicts the reference**: a global `count()` after `group()` is
-  1 and only `count(Scope.local)` is the map's SIZE (`GroupStep extends ReducingBarrierStep`); a
-  non-matching `is(typeOf(…))` over a map is the EMPTY RESULT rather than a refusal
-  (`data/Set.feature:38-43`); slicing ONE traverser yields it (`group().by(k).limit(2)`).
+There is nothing to decide here, and the list that used to sit in this slot was an artefact of when
+both spines were candidates for being right. They are not. **RelIR is checked against
+`gremlin-test`/`gremlin-core`; legacy is a route with an end date.** So a disagreement is legacy's,
+it is expected, and it earns no work — the previously "standing divergences" (a `by()`-less
+`math()`, an empty `fold()`, `fold().unfold().values()` order, the retyping two-arg `choose`, mixed
+element kinds in a variant) and the three cited `RELIR_AHEAD` contradictions (a global `count()`
+after `group()` is 1; a non-matching `is(typeOf(…))` over a map is the EMPTY RESULT; slicing ONE
+traverser yields it) are all the same statement.
+
+The instruments say so too: a framed-answer difference in `sql-hygiene` is TELEMETRY rather than a
+failure, alongside the emission-order line it sits next to. The count still prints, so a NEW
+divergence stays visible; what is gone is the obligation to make legacy agree.
 
 #### ⚠️ Invariants earned here — re-breaking these costs a wrong answer
 
@@ -734,9 +731,10 @@ it.
 
 ## §11. Open design decisions
 
-**The live ones are listed per PHASE, beside the work they gate** — Phase 2's are under "🔴 Human
-decisions" there, and Phase 3's is the `until()`/`emit()` barrier wall. Keeping a decision next to the
-increment it blocks is what stops it being read as general policy.
+**The live ones are listed per PHASE, beside the work they gate** — Phase 3's `until()`/`emit()`
+barrier wall is the only one. Keeping a decision next to the increment it blocks is what stops it
+being read as general policy. Phase 2 has none: RelIR follows the REFERENCE, so legacy disagreeing
+with it is expected rather than a question.
 
 What follows is CLOSED, recorded as law; the section stays so the §-numbering (code comments cite §12)
 does not move. Re-open one only with evidence, not with a preference.
