@@ -10,13 +10,9 @@ should make this file SHORTER.
 
 **Refreshed** 2026-08-01 · **L3 1686 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
 collision is expected, see won't-do) · census **0 `crashed`, 4 `nondet`**, perturbed census **4** ·
-`known.ts` **2 entries** — repeat's two body routes disagree on a positional window, and
-**`propertySeek`'s generic fallback DROPS A FOLLOWING SLICE** after a `has()` + `where()`/`filter()`
-child (`g.V().has('age',P.gt(0)).where(__.outE()).skip(1)` is [4,6] by default and [1,4,6] with that
-one switch off; the other seven were each toggled individually and are innocent). Production is
-correct — the switch defaults on — but the ACCELERATED path is the right one here, which inverts
-`FastPathConfig`'s promise that the generic path is both result-equivalent and the semantic
-authority, so the arbiter cannot be trusted until it is fixed. Not diagnosed to a line ·
+`known.ts` **2 entries** — repeat's two body routes disagree on a positional window (within-spec, the
+oracle's blind spot), and `predicateInlining`, where the generic path THROWS on a child body the fast
+path answers ·
 `capability-baseline.ts` **1 entry** · L5 `L5-random` plus fixed seeds 5/11/27/91/143 at
 `L5_RUNS=3000`: **36 pass / 0 fail on every run** (35).
 
@@ -594,6 +590,26 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
 **There is no TODO/FIXME/XXX/HACK in `src/compiler/`, `src/sql/` or `src/execute.ts`.** Debt here is
 typed `throw` deferrals and prose, so a marker grep finds nothing and proves nothing — read the
 deferral clusters in 5c instead.
+
+- **`staleEntries` (`test/L5-properties/known.ts`) has NO SPINE AWARENESS, and the gap is currently
+  LATENT rather than fixed.** A fast path belonging to one lowering cannot diverge in the other's
+  position, so a RelIR-only entry is reported STALE under `mise run test:legacy-spine` — "unreachable
+  here" read as "fixed, delete it", i.e. the check tells you to delete a valid entry. It bit once (a
+  `propertySeek` entry, since removed because the underlying bug was fixed), and no current entry is
+  spine-specific, so nothing reproduces it today. A `KnownDivergence.spine?` field was written and then
+  deliberately NOT kept — machinery with no consumer — so what remains is this note. If you add a
+  spine-specific entry, add the field with it. The whole problem disappears with legacy.
+
+- **A FAST PATH THAT IS *MORE CORRECT* THAN ITS GENERIC FALLBACK IS NEVER A FAST-PATH DEFECT** — it is
+  a generic-path defect the fast path is HIDING, and its blast radius is the DEFAULT config, not the
+  ratchet. Recorded because getting this backwards cost real time: the `propertySeek` entry was filed
+  as a disable-path curiosity with "production is correct" written next to it, when the truth was a
+  wrong answer in BOTH spine positions under the default config (SQLite drops an `OFFSET` when the
+  block has a single-table `FROM` and a positive correlated `EXISTS` in its `WHERE`; `propertySeek`
+  masked it by lifting the `EXISTS` into a join). The evidence was already in hand — the accelerated
+  path answering correctly *inverts* `FastPathConfig`'s promise that the generic path is the semantic
+  authority — and was noted as a curiosity instead of read as the finding. It is also precisely the
+  case `known.ts`'s own header says the differential CANNOT see: a defect present in both.
 
 - **A `Scope.local` slice over a SCALAR or ELEMENT-tail value still declines rather than answering.**
   The argument decode is one function (`sliceOf`/`isLocalScope`, `ir/step.ts`) and the rendering one
