@@ -44,7 +44,7 @@ import { elementPayload } from './element.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
 import { LabelCardinality } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
-import { readCollection, registerCollection, type Collections } from './collection.ts';
+import { readCollection, registerCollection, registerMap, type Collections } from './collection.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
 
 /**
@@ -1771,7 +1771,7 @@ function scalarTail(
     if (step.name === 'cap') {
       const collected = readCollection(step, ctx.collections);
       if (!collected) return null;
-      return listTail(collected.rel, collected.of, steps, at + 1, ctx, fresh, NO_ALIASES);
+      return continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
 
     // `fold()` — the SHAPE BOUNDARY out of the scalar tail and into the list vocabulary: every
@@ -2677,7 +2677,17 @@ function elementTail(
       if (pathCarried(rel)) return null;
       const grouped = groupBarrier(rel, elementHost(rel, elem, labels), step, bulked, childSeam(ctx, fresh), fresh);
       if (!grouped) return null;
-      return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, at + 1, false, ctx, fresh, NO_ALIASES);
+      const framing = { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf } as const;
+      // A LABELLED `group("a")`/`groupCount("a")` is a SIDE EFFECT, not a barrier result:
+      // `GroupSideEffectStep` fills the named map and passes its incoming traversers ON, which is
+      // `aggregate`'s contract exactly. So the map is registered and the loop CONTINUES from the
+      // unchanged relation; only the unkeyed form becomes the traverser.
+      if (argValues(step).length) {
+        if (ctx.mutating) return null;
+        if (!registerMap(step, { rel: grouped.rel, framing }, ctx.collections, ctx.sideEffectReducers)) return null;
+        continue;
+      }
+      return continueAs(grouped.rel, framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
     // `project()` — a per-row RECORD, and NOT a barrier: the channels ride through, so the alias map
     // carries and a following `select(label)` still finds its label. That is the whole difference from
@@ -2708,7 +2718,7 @@ function elementTail(
     if (step.name === 'cap') {
       const collected = readCollection(step, ctx.collections);
       if (!collected) return null;
-      return listTail(collected.rel, collected.of, steps, at + 1, ctx, fresh, NO_ALIASES);
+      return continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
     // `fold()` — the SHAPE BOUNDARY out of the element loop, the twin of the scalar tail's own. Every
     // traverser becomes one MEMBER of one list traverser, and for elements the member is the rowid:

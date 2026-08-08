@@ -35,6 +35,16 @@ const expected = JSON.parse(await Bun.file(new URL('./sql-hygiene-baseline.json'
  */
 const RELIR_AHEAD = new Map([
   ['g.V().group().by(__.values("name").substring(0,1)).by(__.constant(1))', 'gremlin-test/.../sideEffect/Group.feature g_V_group_byXvaluesXnameX_substringX1XX_byXconstantX1XX'],
+  // THE KEYED TWIN of the row above, and it needs no second argument — the same grouping, read back
+  // through `cap()` instead of becoming the traverser. It arrived here the day the named-collection
+  // substrate made `group("a")` route, which is worth noting: a shed capability does not become a new
+  // divergence when a NEIGHBOURING family lands, it simply becomes VISIBLE. `Grouping.convertValueTraversal`
+  // (gremlin-core, `step/Grouping.java:92-101`) appends `fold()` for a `ValueTraversal`/`TokenTraversal`/
+  // `IdentityTraversal`/`ColumnTraversal` only; an anonymous CHILD is returned unchanged, so its
+  // barrier is null and the bi-operator is `Operator.assign` — ONE value per key, not a list. RelIR
+  // says `{j: 1}`, legacy says `{j: [1]}`, and the reference is with RelIR.
+  ['g.V().group("a").by(__.values("name").substring(0,1)).by(__.constant(1)).cap("a")',
+    'gremlin-test/.../sideEffect/Group.feature — the keyed twin; Grouping.java:92-101 appends fold() only for the four simple traversals'],
   ['g.inject("foo").is(P.gt(1.0d))', 'gremlin-test/.../semantics/Comparability.feature InjectXfooX_gtX1dX'],
   ['g.inject("foo").is(P.gte(1.0d))', 'gremlin-test/.../semantics/Comparability.feature InjectXfooX_gteX1dX'],
   ['g.inject(1.0d).is(P.lt("foo"))', 'gremlin-test/.../semantics/Comparability.feature mixed numeric/string ordering'],

@@ -4,6 +4,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { MapOf, Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/step.ts';
+import { argValues } from '../../gremlin/frontend.ts';
 import { and, byEncounter, jsonOf, meta, typeOf, typedNode, type Minter } from './build.ts';
 import { elementNode } from './element.ts';
 import { byNode, modulations, productivityFilter } from './modulator.ts';
@@ -153,8 +154,15 @@ const ORD_COL = 'go';
 export function groupBarrier(
   input: Rel, host: ChildHost, step: IRStep, bulked: boolean, child: ChildSeam, fresh: Minter,
 ): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } | null {
-  if (step.optionArms || (step.args ?? []).length > 0) return null;
+  if (step.optionArms) return null;
   if (step.name !== 'groupCount' && step.name !== 'group') return null;
+  // A single STRING argument is a side-effect LABEL, and the grouping it names is built exactly the
+  // same way — `GroupSideEffectStep` and `GroupStep` differ in what happens to the result, not in how
+  // the map is computed. So this builds either, and the CALLER decides: the barrier form returns the
+  // map as the traverser, the keyed form registers it and passes the traversers through. Anything
+  // else in the argument position is a form this does not serve.
+  const args = argValues(step);
+  if (args.length > 1 || (args.length === 1 && typeof args[0] !== 'string')) return null;
   // A group's members are the ELEMENTS, so a scalar host has no element to collect. It is a real arm —
   // the members are the values, tagged by their own `vtype` — and it arrives with the scalar-host caller
   // that does not exist yet, rather than being guessed at here.

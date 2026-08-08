@@ -45,10 +45,18 @@ import type { Channel } from '../../channels.ts';
  * - **a multi-label `cap("a","b")`**, which yields a MAP of collections rather than one list.
  */
 
-/** A registered collection: the list relation, and what its members are. */
+/**
+ * A registered collection: the relation, and WHAT IT HOLDS.
+ *
+ * `RelFraming` rather than a `ListOf`, because a named collection is not always a list. A
+ * `group("a")` fills a MAP and `cap("a")` reads that map back, so the shape is whatever the step
+ * that filled it produced — and carrying the framing is what makes `cap` shape-polymorphic for free:
+ * it hands the pair to `continueAs`, the one dispatcher, and whichever tail owns that shape takes the
+ * rest of the chain. Narrowing this to a list would have bought a second `cap` arm per shape.
+ */
 export interface Collection {
   readonly rel: Rel;
-  readonly of: ListOf;
+  readonly framing: RelFraming;
 }
 
 /** The registry a chain carries — MUTABLE, because a side effect is chain-global state written at one
@@ -113,21 +121,45 @@ export function registerCollection(
   return true;
 }
 
+/**
+ * `group("a")`/`groupCount("a")` — register the MAP a grouping barrier built, or `false` to decline.
+ *
+ * The keyed form of these two is a SIDE EFFECT and not a barrier result: `GroupSideEffectStep` fills
+ * the named map and passes its incoming traversers on, which is `aggregate`'s contract exactly. So
+ * the only thing that differs from `registerCollection` is WHO built the relation — the caller has
+ * already run `groupBarrier`, because deciding a grouping is the map shape's job and not this
+ * module's. What is shared is the registry discipline: the same label rules, the same refusals.
+ */
+export function registerMap(
+  step: IRStep, built: { readonly rel: Rel; readonly framing: RelFraming }, collections: Collections,
+  reducers: ReadonlySet<string>,
+): boolean {
+  const label = labelOf(step);
+  if (label === null || collections.has(label) || reducers.has(label)) return false;
+  collections.set(label, built);
+  return true;
+}
+
 /** The BARE `aggregate("a")` — the traversers themselves, folded by whichever fold their shape has. */
 function foldTraversers(
   input: Rel, framing: RelFraming, encounter: Channel | undefined, fresh: Minter,
 ): Collection | null {
   const at = encounter ? { encounter: encounter.col } : {};
-  if (framing.kind === 'elements') return foldElements(input, framing.elem, at, fresh);
+  if (framing.kind === 'elements') return listed(foldElements(input, framing.elem, at, fresh));
   if (framing.kind !== 'scalar') return null;
   const perRow = perRowColumnOf(framing.type);
   const staticTag = staticTypeOf(framing.type);
-  return foldScalars(input, {
+  return listed(foldScalars(input, {
     ...(perRow ? { vtype: perRow } : {}),
     ...(staticTag ? { staticTag } : {}),
     ...at,
-  }, fresh);
+  }, fresh));
 }
+
+/** A fold's `{rel, of}` as a `Collection`. One place, so the two folds cannot describe themselves
+ *  differently. */
+const listed = (folded: { readonly rel: Rel; readonly of: ListOf }): Collection =>
+  ({ rel: folded.rel, framing: { kind: 'list', of: folded.of } });
 
 /**
  * `aggregate("a").by(<projection>)` — the projection's value per traverser, folded.
@@ -170,10 +202,10 @@ function foldProjection(
   // the spine being replaced, and make a semantic improvement to the tag a separate change on BOTH
   // sides. Claiming it unilaterally would be RelIR answering a different question from legacy on
   // purpose, which §12 forbids outright.
-  return foldScalars(rows, {
+  return listed(foldScalars(rows, {
     ...(staticTag ? { staticTag } : {}),
     ...(encounter ? { encounter: encounter.col } : {}),
-  }, fresh);
+  }, fresh));
 }
 
 /**

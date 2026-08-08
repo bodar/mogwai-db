@@ -634,12 +634,24 @@ describe('group / properties SQL', () => {
   });
 
   test('side-effecting group(a)/groupCount(a) → registered spec re-emitted by cap(a)', () => {
-    // group('a').by(key).cap('a') → one Map (lowerGroup over the stashed source).
-    const g = read('g.V().group("a").by("name").cap("a")');
+    // ONE MAP EITHER WAY, through two Shape descriptors. Legacy re-runs its stashed grouping SPEC at
+    // the `cap()` and frames the resulting ROWS as a `group` (a key column plus per-side descriptors);
+    // RelIR registers the grouping's own relation as a named collection and frames the finished JSON
+    // tree as a `mapValue` — the same encoding an UNKEYED `group()` already produced, which is the
+    // point: a labelled grouping differs from an unlabelled one in what happens to the RESULT, not in
+    // how the map is computed, so it needed no second builder.
+    const g = read('g.V().group("a").by("name").cap("a")', { spine: 'legacy' });
     expect(g.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'elementList', elem: 'vertex' } });
     // groupCount('a') passes traversers through: out() runs between it and cap('a').
-    const gc = read('g.V().groupCount("a").by("name").out().cap("a")');
+    const gc = read('g.V().groupCount("a").by("name").out().cap("a")', { spine: 'legacy' });
     expect(gc.shape).toEqual({ kind: 'group', key: { kind: 'scalar' }, val: { kind: 'count' } });
+
+    for (const gremlin of ['g.V().group("a").by("name").cap("a")',
+      'g.V().groupCount("a").by("name").out().cap("a")']) {
+      const rel = read(gremlin, { spine: 'rel' });
+      expect(rel.spine, gremlin).toBe('rel');
+      expect(rel.shape, gremlin).toEqual({ kind: 'mapValue' });
+    }
   });
 
   test('terminal group(a) with no cap passes the traversers through (side-effect discarded)', () => {
