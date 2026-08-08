@@ -54,6 +54,15 @@ const RELIR_AHEAD = new Map([
   // says `{j: 1}`, legacy says `{j: [1]}`, and the reference is with RelIR.
   ['g.V().group("a").by(__.values("name").substring(0,1)).by(__.constant(1)).cap("a")',
     'gremlin-test/.../sideEffect/Group.feature — the keyed twin; Grouping.java:92-101 appends fold() only for the four simple traversals'],
+  // A BARRIER EMITS ONE TRAVERSER, so a global `count()` after `group()` is 1 and only
+  // `count(Scope.local)` is the map's SIZE. `GroupStep extends ReducingBarrierStep<S, Map<K,V>>`
+  // (gremlin-core, `step/map/GroupStep.java:51`) and `Count.feature:54` pins the local reading
+  // (`g.V().fold().count(Scope.local)` → 6) as the one that counts CONTENTS. Legacy answers 2 for
+  // BOTH spellings, which makes them indistinguishable — and it contradicts itself one shape over:
+  // both spines already answer 1 for `g.V().fold().count()`, the same barrier with a list result.
+  // It became visible the day the map stopped being terminal; before that RelIR declined the tail.
+  ['g.V().group().by(label).count()',
+    'gremlin-core/.../step/map/GroupStep.java:51 (a ReducingBarrierStep emits ONE traverser) + gremlin-test/.../map/Count.feature:54'],
   ['g.inject("foo").is(P.gt(1.0d))', 'gremlin-test/.../semantics/Comparability.feature InjectXfooX_gtX1dX'],
   ['g.inject("foo").is(P.gte(1.0d))', 'gremlin-test/.../semantics/Comparability.feature InjectXfooX_gteX1dX'],
   ['g.inject(1.0d).is(P.lt("foo"))', 'gremlin-test/.../semantics/Comparability.feature mixed numeric/string ordering'],

@@ -58,6 +58,36 @@ export const carriedCols = (channels: Channels): readonly ColMeta[] =>
 export const payloadCols = (rel: Rel): readonly ColMeta[] =>
   rel.type.cols.filter((column) => !rel.channels.some((channel) => channel.col === column.name));
 
+/**
+ * Replace a relation's PAYLOAD columns, keeping every carried channel exactly as it was — the shape
+ * every retype into another traverser vocabulary ends with (a list's `count(local)`, a map's size, a
+ * map side becoming a list).
+ *
+ * Here rather than beside any one vocabulary because the halves are this module's own invariant: the
+ * payload columns are the caller's to name and the channel columns are never the caller's business,
+ * and a projection that spelled the second half itself is one that can forget a channel.
+ */
+export const withPayload = (
+  rel: Rel, exprs: readonly (readonly [string, Expr])[], cols: readonly ColMeta[], fresh: Minter,
+): Rel => make.project({
+  id: fresh('pl'), input: rel, channels: rel.channels,
+  type: typeOf(...cols, ...carriedCols(rel.channels)),
+  exprs: [...exprs, ...rel.channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+});
+
+/**
+ * A FENCE in front of a `json_each` reader, and it is a legality wall rather than a bind-budget hint.
+ *
+ * `json_each(<collection>)` is a FROM-clause reader, and SQL has no way to name a select alias there —
+ * so fused into the block that COMPUTES the collection it re-inlines the whole expression. Where that
+ * expression is an aggregate (a `fold()`, a `group()`'s pairs array) SQLite refuses it inside a
+ * table-valued function argument outright (`misuse of aggregate function json_group_array()`): a THROW,
+ * from a position where legacy answers. The block model already tracks the symmetric fact for windows
+ * (`windowed`); this is the same rule one node earlier.
+ */
+export const fenced = (rel: Rel, fresh: Minter): Rel =>
+  (rel.kind === 'materialize' ? rel : make.materialize({ id: fresh('fm'), input: rel, channels: rel.channels, type: rel.type }));
+
 /** Physical columns of the two element tables, as `Scan` must declare them. `Scan` is the one node
  *  that names the physical schema (§3.3), so this list IS the algebra's view of storage. */
 export const NODE_COLS = [meta('id', 'int'), meta('uid', 'text', true)];

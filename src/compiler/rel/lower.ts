@@ -11,14 +11,14 @@ import type { Rel } from '../../rel/rel.ts';
 import { exprChildren, forEachRel } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
-import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
+import { PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { fieldNamed, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordOf, recordPayload, selectKeys } from './record.ts';
 import { propertyElement, propertyKey, propertyPayload, propertyRelation, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
-import { isNested, isTokenArg, stepChain, argValues, arg, type Arg, type SackSpec } from '../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isTokenArg, stepChain, argValues, arg, type Arg, type SackSpec } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
 import type { IRStep } from '../ir/strategies.ts';
@@ -39,7 +39,7 @@ import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
-import { elementHost, groupBarrier, mapPayload } from './map.ts';
+import { ENTRY, elementHost, entrySide, groupBarrier, mapEntryPayload, mapPayload, mapSide, mapSize, unfoldMap } from './map.ts';
 import { elementPayload } from './element.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
 import { LabelCardinality } from '../../api.ts';
@@ -2187,11 +2187,16 @@ function injectList(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFramin
  */
 function listTail(
   seed: Rel, of: ListOf, steps: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
-  aliases: AliasMap = NO_ALIASES,
+  aliases: AliasMap = NO_ALIASES, isSet = false,
 ): Tail | null {
   let rel = seed;
   let items = of;
   let labels = aliases;
+  // A SET marker rides THROUGH the loop rather than being decided at its end, because the answer is a
+  // fact about the value's history: `select(Column.keys)` produced a set, a slice or a member filter
+  // leaves it one, and a member REWRITE does not (§10·6). It was previously only ever set by the last
+  // step of a chain (`listSetOp`'s four deduping ops), so the state had nowhere to live.
+  let set = isSet;
   // The sub-read lowerer is INJECTED rather than imported, which is what keeps the module DAG a DAG
   // (`build ◂ {predicate, modulator, transform, reducer, list} ◂ lower ◂ spine`): a list op that needs
   // a nested chain lowered would otherwise import the fold that imports it.
@@ -2260,7 +2265,7 @@ function listTail(
     if (sliced) { rel = sliced; continue; }
 
     const member = listMemberOp(step, rel, items, fresh);
-    if (member) { rel = member.rel; items = member.of; continue; }
+    if (member) { rel = member.rel; items = member.of; if (member.rewrites) set = false; continue; }
 
     // The SET-OP family, which needs to know whether it is TERMINAL: the four deduping ops frame as a
     // GraphBinary SET only at the end of a chain — with a follower TinkerPop treats the deduped
@@ -2281,7 +2286,7 @@ function listTail(
       steps, at + 1, false, ctx, fresh, labels,
     );
   }
-  return { rel, framing: { kind: 'list', of: items }, aliases: labels };
+  return { rel, framing: { kind: 'list', of: items, ...(set ? { set } : {}) }, aliases: labels };
 }
 
 /**
@@ -2345,6 +2350,156 @@ function pathTail(
     return null;
   }
   return { rel, framing: { kind: 'path', of, scalars }, aliases: labels };
+}
+
+/**
+ * THE MAP LOOP — a map traverser is not terminal either.
+ *
+ * `group()`/`groupCount()`/`cap()` and (next) `valueMap()` all produce ONE map per traverser, and until
+ * this existed every one of them was the end of the chain. The list tail's twin, and deliberately as
+ * small: what belongs here is only what a Map answers ITSELF, and each of those answers is a retype
+ * that hands the relation to whichever loop owns the shape it produced.
+ *
+ * - **`is(typeOf(GType.MAP))` is IDENTITY** — a map IS a Map. Any other `GType` matches nothing, which
+ *   is the empty relation (§3.3's `Filter(false)`); a real predicate declines and legacy owns the message.
+ * - **`count()` counts MAPS and `count(Scope.local)` counts ENTRIES** — the same global/local split the
+ *   list vocabulary makes, sharing `countTail` so the two cannot disagree about `SUM(bulk)`.
+ * - **`select(Column.keys | Column.values)`** collects one side into a list — a SET for the keys, per
+ *   the reference's own two container types (see `mapSide`).
+ * - **`unfold()`** makes each ENTRY a traverser.
+ *
+ * A global slice reads the emission order the map carried through, exactly as anywhere else. Anything
+ * else DECLINES rather than being silently dropped — the standing contract at every tail here.
+ */
+function mapTail(
+  seed: Rel, keyOf: MapOf, valOf: MapOf, steps: readonly IRStep[], from: number,
+  ctx: ChainCtx, fresh: Minter, aliases: AliasMap,
+): Tail | null {
+  let rel = seed;
+  const labels = aliases;
+  for (let at = from; at < steps.length; at++) {
+    const step = steps[at];
+    const args = argValues(step);
+    if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
+    if (step.modulators?.length || step.optionArms) return null;
+
+    if (step.name === 'is') {
+      if (assertsGType(step, 'MAP')) continue;
+      if (typeOfAssert(step).kind !== 'gtype') return null;
+      rel = make.filter({
+        id: fresh('f'), input: rel, channels: rel.channels, type: rel.type,
+        pred: eq(compilerInt(0), compilerInt(1)),
+      });
+      continue;
+    }
+
+    if (step.name === 'count') {
+      // `count(Scope.local)` is the map's SIZE — one number per traverser, so the stream keeps its rows
+      // and only the payload changes. The GLOBAL `count()` is the barrier that counts the maps.
+      if (isLocalScope(step)) {
+        if (args.some((arg) => typeof arg === 'number')) return null;
+        return scalarTail(mapSize(rel, fresh), { kind: 'scalar', type: STATIC('long'), result: 'count' },
+          steps, at + 1, false, ctx, fresh, labels);
+      }
+      if (args.length) return null;
+      const counted = countTail(rel, fresh);
+      return scalarTail(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, labels);
+    }
+
+    const column = selectedColumn(step);
+    if (column) {
+      const side = mapSide(rel, column, column === 'keys' ? keyOf : valOf, fresh);
+      if (!side) return null;
+      return listTail(side.rel, side.of, steps, at + 1, ctx, fresh, labels, side.set);
+    }
+
+    if (step.name === 'unfold') {
+      if (args.length) return null;
+      const unfolded = unfoldMap(rel, fresh);
+      // The ENTRY's position becomes the emission order, re-minted for `unfoldList`'s reason:
+      // `json_each.key` indexes within ONE map, so a later slice taking its window from a per-row index
+      // would return the right multiset from the wrong place. A carried position leads the sort, so
+      // every entry of an earlier map precedes every entry of a later one.
+      const carried = encounterOf(rel.channels);
+      const channels = carried ? rel.channels : withChannel(rel.channels, ENCOUNTER);
+      const positioned = renumber(unfolded.rel, [
+        ...(carried ? [{ expr: col(unfolded.rel.id, carried.col), dir: 'asc' as const }] : []),
+        { expr: col(unfolded.rel.id, unfolded.ord), dir: 'asc' as const },
+      ], [...ENTRY_COLS, ...carriedCols(channels)], channels, fresh);
+      return mapEntryTail(positioned, keyOf, valOf, steps, at + 1, ctx, fresh, labels);
+    }
+
+    const sliced = sliceOp(step, rel, false, fresh);
+    if (!sliced) return null;
+    rel = sliced;
+  }
+  return { rel, framing: { kind: 'map', keyOf, valOf }, aliases: labels };
+}
+
+/** The two payload columns a Map.Entry relation carries — `framingCols` names the same pair, and
+ *  `map.ts`'s `ENTRY` names them for the framer. Stated here as `ColMeta` because `renumber` rebuilds
+ *  the relation's whole declared type and cannot ask the framing for it. */
+const ENTRY_COLS: readonly ColMeta[] = [meta(ENTRY.key, 'json', true), meta(ENTRY.val, 'json', true)];
+
+/** `select(Column.keys)` / `select(Column.values)` — the column an entry-shaped host is asked for, or
+ *  `null` for any other `select()`. ONE recognizer, because the map loop and the entry loop must agree
+ *  about which argument forms are a column read and which are a label read. */
+function selectedColumn(step: IRStep): 'keys' | 'values' | null {
+  if (step.name !== 'select') return null;
+  // `argValues`, NOT `step.args` — an `Arg` is `{value, type, name}` since a user PARAMETER became a
+  // first-class IR fact, so a test against the wrapper is permanently false. That exact reading rot is
+  // what made `rel-blockers` file every labelled `group("a")` under the unkeyed bucket.
+  const args = argValues(step);
+  if (args.length !== 1) return null;
+  const arg = args[0];
+  if (!isColumnArg(arg)) return null;
+  return arg.column === 'keys' || arg.column === 'values' ? arg.column : null;
+}
+
+/**
+ * THE MAP.ENTRY LOOP — what a single entry answers, which is almost entirely its two sides.
+ *
+ * `Column.keys` over a `Map.Entry` is the KEY ITSELF rather than a collection
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Column.java:26-29`),
+ * so the same step name means "collect a side" over a map and "take the side" over an entry — one
+ * `Column`, two hosts, which is exactly why the two loops are separate rather than one widened one.
+ */
+function mapEntryTail(
+  seed: Rel, keyOf: MapOf, valOf: MapOf, steps: readonly IRStep[], from: number,
+  ctx: ChainCtx, fresh: Minter, aliases: AliasMap,
+): Tail | null {
+  let rel = seed;
+  const labels = aliases;
+  for (let at = from; at < steps.length; at++) {
+    const step = steps[at];
+    const args = argValues(step);
+    if (step.name === 'identity' || step.name === 'barrier') { if (args.length) return null; continue; }
+    if (step.modulators?.length || step.optionArms) return null;
+
+    if (step.name === 'count' && !isLocalScope(step)) {
+      if (args.length) return null;
+      const counted = countTail(rel, fresh);
+      return scalarTail(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, labels);
+    }
+
+    const column = selectedColumn(step);
+    if (column) {
+      const of = column === 'keys' ? keyOf : valOf;
+      const side = entrySide(rel, column, of, fresh);
+      if (!side) return null;
+      // A LIST side stays in the list vocabulary; a scalar side becomes an ordinary per-row-typed value
+      // stream, which is what makes `groupCount().unfold().select(Column.values).sum()` the ordinary
+      // reducer rather than a map-shaped special case.
+      return side.of
+        ? listTail(side.rel, side.of, steps, at + 1, ctx, fresh, labels)
+        : scalarTail(side.rel, { kind: 'scalar', type: PER_ROW('vtype') }, steps, at + 1, false, ctx, fresh, labels);
+    }
+
+    const sliced = sliceOp(step, rel, false, fresh);
+    if (!sliced) return null;
+    rel = sliced;
+  }
+  return { rel, framing: { kind: 'mapEntry', keyOf, valOf }, aliases: labels };
 }
 
 
@@ -2504,6 +2659,7 @@ const framed = (chain: Tail, collapse: boolean, fresh: Minter): { readonly rel: 
     case 'list': return listPayload(chain.rel, framing.of, !!framing.set, fresh);
     case 'path': return pathPayload(chain.rel, framing.of, fresh);
     case 'map': return mapPayload(chain.rel, framing.keyOf, framing.valOf, fresh);
+    case 'mapEntry': return mapEntryPayload(chain.rel, framing.keyOf, framing.valOf, fresh);
     case 'record': return recordPayload(chain.rel, framing.fields, fresh);
     case 'property': return {
       rel: propertyPayload(chain.rel, framing.ownerElem, fresh),
@@ -3086,10 +3242,8 @@ function continueAs(
     case 'path': return pathTail(rel, framing.of, framing.scalars, steps, from, ctx, fresh, labels);
     // A value's multiplicity is the traverser's, so `bulked` carries.
     case 'scalar': return scalarTail(rel, framing, steps, from, bulked, ctx, fresh, labels);
-    // A MAP is a barrier's RESULT, so a step after one re-enters a map traverser — `unfold()` to
-    // entries, `select(Column.keys/values)`, a local reducer. None of that is lowered yet, so the
-    // honest answer is a DECLINE and not a loop that silently drops the map.
-    case 'map': return from === steps.length ? { rel, framing, aliases: labels } : null;
+    case 'map': return mapTail(rel, framing.keyOf, framing.valOf, steps, from, ctx, fresh, labels);
+    case 'mapEntry': return mapEntryTail(rel, framing.keyOf, framing.valOf, steps, from, ctx, fresh, labels);
     case 'record': return recordTail(rel, framing.fields, steps, from, bulked, ctx, fresh, labels);
     // A PROPERTY traverser re-enters through `element()`/`key()`/`value()`, and through the ordinary
     // filters and slices before them. None of that is lowered yet, so a step after `properties()`
@@ -3699,9 +3853,19 @@ const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
       // A DISCARD is not a stream, so no arm can be one: `drop()` is terminal, and an arm body ending
       // in it would be a branch whose arms disagree about whether a traverser exists at all.
       : left.kind === 'discard' ? false
-        // A MAP arm would be a branch whose arms each produce a whole map — expressible in principle,
-        // and nothing builds one yet, so an equality that guessed would be untested code.
-        : left.kind === 'map' ? false
+        // TWO MAP ARMS MERGE when the two SIDES agree, which is the list arm's rule with two member
+        // encodings instead of one: each arm carries a single `map` column, so the union is positional
+        // and needs nothing re-projected. It became reachable the moment a map stopped being terminal —
+        // `choose(p, __.valueMap('name'), __.valueMap('age'))` is the shape, and an arm-local BARRIER
+        // inside one (`__.groupCount()`) is the branch child's own scope exactly as a `fold()` arm is.
+        : left.kind === 'map'
+          ? right.kind === 'map' && JSON.stringify(left.keyOf) === JSON.stringify(right.keyOf)
+            && JSON.stringify(left.valOf) === JSON.stringify(right.valOf)
+        // A MAP.ENTRY arm is the same equality over the same two sides — two columns rather than one,
+        // and the column test below is what checks that.
+        : left.kind === 'mapEntry'
+          ? right.kind === 'mapEntry' && JSON.stringify(left.keyOf) === JSON.stringify(right.keyOf)
+            && JSON.stringify(left.valOf) === JSON.stringify(right.valOf)
           // Two PROPERTY arms could merge when they agree on the owner kind, but the columns differ
           // between vertex and edge (`vpid`/`meta`), so a blanket equality would union relations of
           // different widths. Nothing builds a property-valued branch yet; decline until one does.

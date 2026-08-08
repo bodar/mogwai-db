@@ -175,17 +175,29 @@ describe('group / properties SQL', () => {
   });
 
   test('P3 Stage C2: count()/is(typeOf(MAP)) re-enter a group value', () => {
-    // count() over a group = number of entries (distinct keys) → COUNT(DISTINCT gk)
+    // A BARRIER EMITS ONE TRAVERSER, so a global `count()` after `group()` is 1 and only
+    // `count(Scope.local)` is the map's SIZE (`GroupStep extends ReducingBarrierStep<S, Map<K,V>>`,
+    // gremlin-core `step/map/GroupStep.java:51`). Legacy answers the LOCAL reading under the GLOBAL
+    // name — `COUNT(DISTINCT gk)` — which makes the two spellings indistinguishable and contradicts
+    // its own `fold().count()`; RelIR counts the map traversers. `sql-hygiene`'s `RELIR_AHEAD` row
+    // carries the witness. The assertion is per-spine because the two answers are both PINNED here,
+    // not because either is unsettled.
     const c = read('g.V().group().by(T.label).count()');
     expect(c.shape).toEqual({ kind: 'value', type: STATIC('long') });
-    expect(c.sql).toContain('COUNT(DISTINCT');
+    expect(c.sql).toContain(relirOff ? 'COUNT(DISTINCT' : 'count(*)');
+    expect(run(seededStore(), 'g.V().group().by(T.label).count()')).toEqual([{ v: relirOff ? 2 : 1 }]);
     // count(Scope.local) on a Map = its size, same value
     expect(read('g.V().group().by(T.label).count(Scope.local)').shape).toEqual({ kind: 'value', type: STATIC('long') });
-    // is(typeOf(MAP)) is identity — a group IS a Map
-    expect(read('g.V().groupCount().by(T.label).is(typeOf(GType.MAP))').shape.kind).toBe('group');
-    // non-scalar-key count + non-MAP typeOf fail closed
+    // is(typeOf(MAP)) is IDENTITY — a group IS a Map — and the two spines say so through their own
+    // whole-map shape (legacy's `group`, RelIR's `mapValue`), framing the same bytes.
+    expect(read('g.V().groupCount().by(T.label).is(typeOf(GType.MAP))').shape.kind).toBe(relirOff ? 'group' : 'mapValue');
+    // A NON-MATCHING typeOf is the EMPTY RESULT, not an error: `Set.feature:38-43` pins
+    // `g.V().values("age").is(P.typeOf(GType.SET))` as "the result should be empty". Legacy refuses
+    // the traversal instead, which is a decline RelIR no longer needs.
+    if (relirOff) expect(() => compile('g.V().groupCount().by(T.label).is(typeOf(GType.LIST))', {})).toThrow('only is(typeOf(GType.MAP))');
+    else expect(run(seededStore(), 'g.V().groupCount().by(T.label).is(typeOf(GType.LIST))')).toEqual([]);
+    // A non-scalar group key still fails closed on both spines.
     expect(() => compile('g.V().group().count()', {})).toThrow('non-scalar-key group');
-    expect(() => compile('g.V().groupCount().by(T.label).is(typeOf(GType.LIST))', {})).toThrow('only is(typeOf(GType.MAP))');
   });
 
   test('P3 Stage C3: group().unfold() → per-entry Map.Entry stream', () => {
@@ -210,9 +222,13 @@ describe('group / properties SQL', () => {
       .toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } });
     // scalar key + scalar-reducer value
     expect(read('g.V().group().by(T.label).by(__.count()).unfold()').shape.kind).toBe('mapEntry');
-    // scalar key + scalar-LIST value (by('name') → the value side is a list)
+    // scalar key + a COLLECTED value, and the two spines DECLARE it differently while framing the
+    // same bytes: legacy names the value side a list of scalars, RelIR names it one self-describing
+    // scalar node — a wrapped property `by()` collects `{t,v}` nodes into a single `{t:'list',v:[…]}`
+    // node, so the value side genuinely is one node there. Both frame `{person:[…], software:[…]}`.
     const sl = read("g.V().group().by(T.label).by('name').unfold()");
-    expect(sl.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'list', of: { kind: 'scalar' } } });
+    expect(sl.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' },
+      valOf: relirOff ? { kind: 'list', of: { kind: 'scalar' } } : { kind: 'scalar' } });
     // an ELEMENT-list value: the value column expands its rowids to full element payloads
     // at the root (json_object over nodes), like the list substrate.
     const ev = read("g.V().hasLabel('software').group().by('name').unfold()");
@@ -220,6 +236,46 @@ describe('group / properties SQL', () => {
     expect(ev.sql).toContain('json_object');
     // the group is assembled as ONE whole-map blob before unfold explodes it
     expect(read('g.V().groupCount().by(T.label).unfold()').sql).toContain('json_group_array');
+  });
+
+  test('the MAP LOOP: a map traverser answers its sides, its size and its entries', async () => {
+    const store = seededStore();
+    const dec = async (q: string) => decodeAll(executeQuery(store, q));
+
+    // `select(Column.keys)` over a MAP is a `LinkedHashSet` and `select(Column.values)` an
+    // `ArrayList` (gremlin-core `structure/Column.java:22-47`), so the key side frames as a
+    // GraphBinary SET. `Set.feature:47-56` pins that reading — `g.V().valueMap().select(keys)`
+    // yields `s[name,age]`. Legacy frames a LIST for both; RelIR carries the set marker through the
+    // list vocabulary, which is what makes this a per-spine assertion rather than a shared one.
+    const keys = read("g.V().groupCount().by('name').select(Column.keys)");
+    expect(keys.shape).toEqual(relirOff
+      ? { kind: 'jsonbList', items: { kind: 'scalar', typed: true } }
+      : { kind: 'jsonbSet', typed: true });
+    expect(read("g.V().groupCount().by('name').select(Column.values)").shape.kind).toBe('jsonbList');
+    expect(await dec("g.V().groupCount().by('name').select(Column.values)"))
+      .toEqual([[1, 1, 1, 1, 1, 1]]);
+
+    // `count(Scope.local)` is the map's SIZE — `json_array_length` over the pairs array, no explode.
+    expect(await dec("g.V().groupCount().by('name').count(Scope.local)")).toEqual([6]);
+    // RelIR reads the SIZE off the pairs array; legacy re-counts the grouped rows.
+    expect(read("g.V().groupCount().by('name').count(Scope.local)").sql)
+      .toContain(relirOff ? 'COUNT(DISTINCT' : 'json_array_length');
+
+    // `unfold()` makes each ENTRY a traverser, and a following `select(Column.*)` takes THAT entry's
+    // side rather than collecting one — the same `Column`, a different host (`Column.java:26-29`).
+    expect(await dec("g.V().groupCount().by('name').unfold()"))
+      .toEqual([new Map([['josh', 1]]), new Map([['lop', 1]]), new Map([['marko', 1]]),
+        new Map([['peter', 1]]), new Map([['ripple', 1]]), new Map([['vadas', 1]])]);
+    expect(await dec("g.V().groupCount().by('name').unfold().select(Column.keys)"))
+      .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+    expect(await dec("g.V().groupCount().by('name').unfold().select(Column.values)"))
+      .toEqual([1, 1, 1, 1, 1, 1]);
+
+    // A BARRIER emits ONE traverser, so the whole global row vocabulary applies to that one row:
+    // `count()` is 1 (legacy answers the LOCAL reading — see the `RELIR_AHEAD` row in `sql-hygiene`),
+    // and a slice takes the map or nothing.
+    expect(await dec("g.V().groupCount().by('name').count()")).toEqual([relirOff ? 6 : 1]);
+    if (!relirOff) expect(await dec("g.V().groupCount().by('name').limit(0)")).toEqual([]);
   });
 
   test('a terminal groupCount() is a MAP VALUE on RelIR and a GroupStream on legacy; Column selection derives MapStream', () => {

@@ -54,6 +54,12 @@ export type RelFraming =
    *  the framing layer exactly as `of` does for a list, and a pairs ARRAY rather than a JSON object is
    *  what keeps the entry order ours to state and lets a key be something other than a string. */
   | { readonly kind: 'map'; readonly keyOf: MapOf; readonly valOf: MapOf }
+  /** ONE ENTRY of a map, as the traverser — what `unfold()` over a map produces. A separate arm from
+   *  `map` and not a one-entry map value, because the two sides are their own COLUMNS here: that is
+   *  what makes `select(Column.keys)` after it a column read rather than a second JSON walk, and it is
+   *  also the wire's own distinction (a Map.Entry frames as a size-1 GraphBinary MAP — TinkerPop's
+   *  `MapEntrySerializer`, TINKERPOP-3104 — while a map value frames as the whole map). */
+  | { readonly kind: 'mapEntry'; readonly keyOf: MapOf; readonly valOf: MapOf }
   /** THE RECORD — a map whose KEYS ARE KNOWN AT COMPILE TIME, so its fields are still addressable
    *  columns rather than an opaque blob. `project('a','b')` and `select('a','b')` produce it.
    *
@@ -151,6 +157,7 @@ export function framingCols(framing: RelFraming): readonly ColMeta[] | null {
     }
     case 'list': case 'path': return [{ name: 'list', type: 'json', nullable: true }];
     case 'map': return [{ name: 'map', type: 'json', nullable: true }];
+    case 'mapEntry': return [{ name: 'mk', type: 'json', nullable: true }, { name: 'mv', type: 'json', nullable: true }];
     case 'record': {
       const nested: ColMeta[] = [];
       for (const field of framing.fields) {

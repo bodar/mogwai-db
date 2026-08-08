@@ -8,7 +8,7 @@ import { isNested, isPred, argValues } from '../../gremlin/frontend.ts';
 import { isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
-import { byEncounter, carriedCols, coalesce, EMPTY_ARRAY, jsonOf, meta, typedNode, typeOf, type Minter } from './build.ts';
+import { byEncounter, carriedCols, coalesce, EMPTY_ARRAY, fenced, jsonOf, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { predicateExpr, SUBJECT_UNKNOWN } from './predicate.ts';
 import { elementObject } from './element.ts';
 import type { Elem } from '../plan/plan.ts';
@@ -162,21 +162,6 @@ const listOfMembers = (members: Rel, member: Expr, order: readonly SortTerm[], f
 /** The list column every list relation carries. One name, because the framing layer reads it too. */
 export const LIST_COL = 'list';
 
-/**
- * A FENCE in front of a member op, and it is a legality wall rather than a bind-budget hint (§11).
- *
- * A member op's `json_each(<list>)` is a FROM-clause reader, and SQL has no way to name a select alias
- * there — so fused into the block that COMPUTES the list it re-inlines the whole expression. Where the
- * list came from a `fold()` that expression is `json_group_array(…)`, and SQLite refuses an aggregate
- * inside a table-valued function argument outright (`misuse of aggregate function
- * json_group_array()`): a THROW, from the position where legacy answers. The block model already
- * tracks the symmetric fact for windows (`windowed` — "nothing may reference it from WHERE, GROUP BY
- * or a table-valued function argument"); this is the same rule one node earlier, and fencing here
- * lands legacy's own CTE-per-list-op shape.
- */
-const fenced = (rel: Rel, fresh: Minter): Rel =>
-  (rel.kind === 'materialize' ? rel : make.materialize({ id: fresh('lm'), input: rel, channels: rel.channels, type: rel.type }));
-
 /** Replace a relation's list value, keeping every other column (and channel) exactly as it was — the
  *  shape every member op that STAYS a list produces. */
 const withList = (rel: Rel, list: Expr, fresh: Minter): Rel => make.project({
@@ -247,7 +232,9 @@ const memberPredicate = (member: Expr, pred: unknown): Expr | null => {
  * of the members in position order; `all`/`any`/`none` filter the whole traverser on a member
  * predicate and pass the list through untouched.
  */
-export function listMemberOp(step: IRStep, input: Rel, of: ListOf, fresh: Minter): { readonly rel: Rel; readonly of: ListOf } | null {
+export function listMemberOp(
+  step: IRStep, input: Rel, of: ListOf, fresh: Minter,
+): { readonly rel: Rel; readonly of: ListOf; readonly rewrites?: boolean } | null {
   if (step.modulators?.length || step.optionArms || !isBareList(of)) return null;
   const rel = fenced(input, fresh);
   const list = col(rel.id, LIST_COL);
@@ -266,7 +253,10 @@ export function listMemberOp(step: IRStep, input: Rel, of: ListOf, fresh: Minter
     // A REWRITE reads the payload and writes a BARE member: the recorded type no longer describes the
     // new value (`length()` makes it an integer outright), so re-tagging it would frame the RESULT as
     // the INPUT's type. Legacy's `retypedList` says the same.
-    return { rel: withList(rel, listOfMembers(members, tx.expr, [memberOrder(members)], fresh), fresh), of: BARE_LIST };
+    // `rewrites` is what a SET marker cannot survive: the members are new values, so "these are the
+    // distinct results of a set operation" has stopped being true of them. A slice and a whole-traverser
+    // filter both leave the members alone and keep it.
+    return { rel: withList(rel, listOfMembers(members, tx.expr, [memberOrder(members)], fresh), fresh), of: BARE_LIST, rewrites: true };
   }
 
   // A LOCAL slice takes a window of the MEMBERS, in position order — and `tail(Scope.local, n)` takes
@@ -363,7 +353,7 @@ export function listRetype(
         }]],
       }),
     };
-    return { rel: scalarOf(rel, [['v', joined]], [meta('v', 'text', true)], fresh), type: STATIC('string') };
+    return { rel: withPayload(rel, [['v', joined]], [meta('v', 'text', true)], fresh), type: STATIC('string') };
   }
 
   // `count(Scope.local)` counts the MEMBERS — a long, and the one local reduction that needs no
@@ -378,7 +368,7 @@ export function listRetype(
         groupBy: [], aggs: [['v', { kind: 'agg', fn: 'count', args: [] }]],
       }),
     };
-    return { rel: scalarOf(rel, [['v', total]], [meta('v', 'int')], fresh), type: STATIC('long'), result: 'count' };
+    return { rel: withPayload(rel, [['v', total]], [meta('v', 'int')], fresh), type: STATIC('long'), result: 'count' };
   }
 
   // The REDUCER family over the members — the same `reducer.ts` authority the row-level reducers use,
@@ -398,7 +388,7 @@ export function listRetype(
     // TWO correlated subqueries over the same members, which is what legacy emits too: the result's
     // storage class is `typeof(<the aggregate>)`, and SQL has nowhere to name the aggregate once.
     return {
-      rel: scalarOf(rel, [scalar(reduced.value, 'v', 'any'), scalar(reduced.type, 'vt', 'text')],
+      rel: withPayload(rel, [scalar(reduced.value, 'v', 'any'), scalar(reduced.type, 'vt', 'text')],
         [meta('v', 'any', true), meta('vt', 'text', true)], fresh),
       type: UNKNOWN, result: 'number',
     };
@@ -406,16 +396,6 @@ export function listRetype(
 
   return null;
 }
-
-/** Replace a list relation's payload with scalar columns, keeping the carried channels — the
- *  projection every retype above ends with. */
-const scalarOf = (
-  rel: Rel, exprs: readonly (readonly [string, Expr])[], cols: readonly import('../../rel/types.ts').ColMeta[], fresh: Minter,
-): Rel => make.project({
-  id: fresh('ls'), input: rel, channels: rel.channels,
-  type: typeOf(...cols, ...carriedCols(rel.channels)),
-  exprs: [...exprs, ...rel.channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
-});
 
 /**
  * `unfold()` — the list boundary in the other direction: one traverser per MEMBER.

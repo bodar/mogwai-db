@@ -8,7 +8,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery } from '../support/executor.ts';
 import { rawVertex } from '../support/graph.ts';
-import { bagOf, bare, read, run, runWith, seededStore } from '../support/harness.ts';
+import { bagOf, bare, read, relirOff, run, runWith, seededStore } from '../support/harness.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -779,8 +779,12 @@ test('the shared row ops slice every shape whose rows are its traversers', () =>
 
 test('a shared row op fails closed rather than answering a different question', () => {
   const store = seededStore();
-  // wholeResult: a group() barrier is ONE map traverser, so slicing its ROWS is not the ask.
-  expect(() => run(store, "g.V().group().by('name').limit(2)")).toThrow('on a group value not yet supported');
+  // A group() barrier is ONE map traverser, and that settles `limit(2)` rather than blocking it:
+  // `RangeGlobalStep` slices the TRAVERSER stream, so taking two of one map yields the map. Legacy
+  // refuses ("limit() on a group value not yet supported"); RelIR answers, and the answer is the
+  // whole map. Asserted per-spine because both positions are pinned, not because either is unsettled.
+  if (relirOff) expect(() => run(store, "g.V().group().by('name').limit(2)")).toThrow('on a group value not yet supported');
+  else expect(run(store, "g.V().group().by('name').limit(2)")).toHaveLength(1);
   // Carried label state makes a bare DISTINCT over the row the wrong collapse key.
   expect(() => run(store, "g.V().as('x').local(__.out().fold()).dedup()"))
     .toThrow('carried path/label state');

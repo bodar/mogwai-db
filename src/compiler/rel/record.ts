@@ -174,7 +174,7 @@ function fieldNode(rel: Rel, field: RecordField, at: string, fresh: Minter): Exp
       const nested = recordValue(rel, framing.fields, qualify(at, field.prefix), fresh);
       return nested && { kind: 'json-object', entries: [['t', compilerText('map')], ['v', nested]], binary: false };
     }
-    case 'list': case 'path': case 'map': case 'property': case 'discard': return null;
+    case 'list': case 'path': case 'map': case 'mapEntry': case 'property': case 'discard': return null;
   }
 }
 

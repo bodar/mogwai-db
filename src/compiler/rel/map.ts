@@ -1,11 +1,12 @@
 import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
-import type { MapOf, Shape } from '../../sql/kernel/render.ts';
+import type { ListOf, MapOf, Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/step.ts';
 import { argValues } from '../../gremlin/frontend.ts';
-import { and, byEncounter, jsonOf, meta, typeOf, typedNode, type Minter } from './build.ts';
+import { and, byEncounter, carriedCols, coalesce, fenced, jsonOf, meta, typeOf, typedNode, withPayload, type Minter } from './build.ts';
+import { LIST_COL, TYPED_LIST } from './list.ts';
 import { elementNode } from './element.ts';
 import { byNode, modulations, productivityFilter } from './modulator.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
@@ -364,6 +365,155 @@ export function groupBarrier(
 export const elementHost = (rel: Rel, elem: Elem, aliases?: AliasMap): ChildHost =>
   ({ kind: 'element', id: col(rel.id, 'id'), elem, ...(aliases ? { row: { rel, aliases } } : {}) });
 
+// ---------- the map as a RE-ENTERABLE traverser: its entries, its sides, its size ----------
+//
+// A map was TERMINAL here until this section existed, and the decline was honest but expensive: every
+// `cap('a').select(Column.values)`, every `groupCount().unfold()` and the whole of `valueMap()`'s tail
+// stopped at the same wall. The list module's twin one more time — a map is one JSONB value per row, so
+// re-entering it is `json_each` over the pairs array and nothing more exotic than that.
+//
+// **The pairs array is what makes each of these one expression.** `[[keyNode, valNode], …]` explodes
+// into one row per ENTRY with both sides addressable by position, where a JSON OBJECT would have made
+// the key a string and lost the order — the two reasons the encoding is a pairs array in the first
+// place, now paying for themselves a second time.
+
+/** The two columns a MAP.ENTRY relation carries. The names are `execute.ts`'s (`mapEntryBuffer` reads
+ *  `mk`/`mv`), declared once here for `LIST_COL`/`MAP_COL`'s reason: the framing layer reads them too. */
+export const ENTRY = { key: 'mk', val: 'mv' } as const;
+
+/** One PAIR as `json_each` hands it back: the two-element `[keyNode, valNode]` array, and its position
+ *  in the map (`json_each.key`, which for a JSON array IS the index). */
+const PAIR = { value: 'ev', ord: 'eo' } as const;
+
+/** The map's pairs as a relation — `FROM json_each(<map>)`. No `input`, which is what makes it a
+ *  correlated subquery over ONE traverser's map (`rel.ts`); the row-multiplying form is `unfoldMap`. */
+const pairsOf = (map: Expr, fresh: Minter): Rel => make.explode({
+  id: fresh('px'), expr: map, channels: [], as: PAIR,
+  type: typeOf(meta(PAIR.value, 'any', true), meta(PAIR.ord, 'int')),
+});
+
+/** One SIDE of a pair — `json_extract(<pair>, '$[0]')` for the key, `'$[1]'` for the value. A `{t,v}`
+ *  envelope comes back as JSON TEXT, which is exactly what `mapSideBuffer` and `frameTypedNode` read. */
+const pairSide = (pair: Expr, side: 'keys' | 'values'): Expr =>
+  ({ kind: 'call', fn: 'json_extract', args: [pair, compilerText(side === 'keys' ? '$[0]' : '$[1]')] });
+
+/**
+ * WHAT A MAP SIDE BECOMES WHEN IT IS COLLECTED INTO A LIST — the `MapOf`→`ListOf` translation, and it
+ * is a translation rather than a coincidence: both vocabularies describe the same self-describing tree,
+ * one from the map's side and one from the list's, so `select(Column.keys)` needs no re-encoding at all.
+ *
+ * A `scalar` side is a `{t,v}` node, which is precisely what a TYPED list's members are. A `list` side
+ * is a naked array, so the collected list is a list OF lists. An `elem` side is a rowid the map module
+ * never emits (`mapPayload` declines one), so it declines here too rather than claiming an encoding.
+ */
+const sideList = (of: MapOf): ListOf | null =>
+  of.kind === 'scalar' ? TYPED_LIST : of.kind === 'list' ? { kind: 'list', of: of.of } : null;
+
+/**
+ * `select(Column.keys)` / `select(Column.values)` — one SIDE of every entry, as a list value.
+ *
+ * `Column.keys` over a Map is a `LinkedHashSet` and `Column.values` an `ArrayList`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Column.java:22-47`),
+ * so the KEY side frames as a GraphBinary SET and the value side as a LIST — one framing marker on an
+ * otherwise identical relation, which is the `set` flag the list vocabulary already carries.
+ *
+ * The entry ORDER carries into the list: the pairs array is ordered (the map's own entry order, stated
+ * by whichever producer built it), so `ORDER BY` the pair position is what keeps a key list and a value
+ * list aligned. Reading them back in scan order would let the two disagree.
+ */
+export function mapSide(
+  input: Rel, side: 'keys' | 'values', of: MapOf, fresh: Minter,
+): { readonly rel: Rel; readonly of: ListOf; readonly set: boolean } | null {
+  const items = sideList(of);
+  if (!items) return null;
+  const rel = fenced(input, fresh);
+  const pairs = pairsOf(col(rel.id, MAP_COL), fresh);
+  // `json()` around the side is the list module's own warning: without it `json_group_array` re-encodes
+  // the `{t,v}` envelope as a JSON STRING and the framer sees text where a tagged value belongs.
+  const collected: Expr = {
+    kind: 'scalar',
+    plan: make.aggregate({
+      id: fresh('pa'), input: pairs, channels: [], type: typeOf(meta(LIST_COL, 'json')),
+      groupBy: [],
+      aggs: [[LIST_COL, {
+        kind: 'call', fn: 'jsonb',
+        args: [coalesce(
+          { kind: 'agg', fn: 'json_group_array', args: [jsonOf(pairSide(col(pairs.id, PAIR.value), side))],
+            orderBy: [{ expr: col(pairs.id, PAIR.ord), dir: 'asc' }] },
+          jsonOf(compilerText('[]')),
+        )],
+      }]],
+    }),
+  };
+  return {
+    rel: withPayload(rel, [[LIST_COL, collected]], [meta(LIST_COL, 'json', true)], fresh),
+    of: items,
+    set: side === 'keys',
+  };
+}
+
+/**
+ * `count(Scope.local)` over a map — its ENTRY COUNT, which is `json_array_length` over the pairs array
+ * and needs no explode at all. The list vocabulary counts its members by aggregating `json_each`
+ * because a member may have been filtered; a map's entries never have been, so the length IS the size.
+ */
+export const mapSize = (input: Rel, fresh: Minter): Rel =>
+  withPayload(input, [['v', { kind: 'call', fn: 'json_array_length', args: [jsonOf(col(input.id, MAP_COL))] }]],
+    [meta('v', 'int')], fresh);
+
+/**
+ * `unfold()` — one traverser per ENTRY, which is the relation-level explode the side reads are not.
+ *
+ * A Map.Entry is its own traverser kind on the wire (a size-1 GraphBinary MAP — TinkerPop's
+ * `MapEntrySerializer`, TINKERPOP-3104), so the two sides land in their own columns rather than being
+ * rebuilt into a one-entry map value. That is what lets `select(Column.keys)` after it be a COLUMN READ
+ * rather than a second JSON walk.
+ *
+ * The entry's POSITION becomes the emission order, re-minted by the caller for `unfoldList`'s reason:
+ * `json_each.key` indexes within ONE map, so it is a total order only where the relation has one row.
+ */
+export function unfoldMap(input: Rel, fresh: Minter): { readonly rel: Rel; readonly ord: string } {
+  const rel = fenced(input, fresh);
+  const exploded = make.explode({
+    id: fresh('ux'), input: rel, expr: col(rel.id, MAP_COL), channels: rel.channels, as: PAIR,
+    type: typeOf(...rel.type.cols, meta(PAIR.value, 'any', true), meta(PAIR.ord, 'int')),
+  });
+  const pair = col(exploded.id, PAIR.value);
+  return {
+    rel: make.project({
+      id: fresh('ue'), input: exploded, channels: rel.channels,
+      type: typeOf(meta(ENTRY.key, 'json', true), meta(ENTRY.val, 'json', true),
+        ...carriedCols(rel.channels), meta(PAIR.ord, 'int')),
+      exprs: [[ENTRY.key, pairSide(pair, 'keys')], [ENTRY.val, pairSide(pair, 'values')],
+        ...rel.channels.map((channel) => [channel.col, col(exploded.id, channel.col)] as const),
+        [PAIR.ord, col(exploded.id, PAIR.ord)]],
+    }),
+    ord: PAIR.ord,
+  };
+}
+
+/**
+ * ONE SIDE of a Map.Entry, as the traverser — `select(Column.keys)` over an entry yields the KEY
+ * itself, not a collection (`Column.java:26-29`, the `Map.Entry` arm).
+ *
+ * The side is a `{t,v}` node in a column, so the retype into the scalar vocabulary is the same unwrap
+ * the list module's `memberPayload` does one container along: the value out of `$.v`, its tag out of
+ * `$.t`, and the scalar stream then frames PER ROW. A `list` side keeps the list vocabulary instead,
+ * and an `elem` side declines for `mapPayload`'s reason.
+ */
+export function entrySide(
+  input: Rel, side: 'keys' | 'values', of: MapOf, fresh: Minter,
+): { readonly rel: Rel; readonly of?: ListOf } | null {
+  const column = col(input.id, side === 'keys' ? ENTRY.key : ENTRY.val);
+  if (of.kind === 'list') return { rel: withPayload(input, [[LIST_COL, { kind: 'call', fn: 'jsonb', args: [column] }]], [meta(LIST_COL, 'json', true)], fresh), of: of.of };
+  if (of.kind !== 'scalar') return null;
+  const field = (name: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [column, compilerText(`$.${name}`)] });
+  return {
+    rel: withPayload(input, [['v', field('v')], ['vtype', field('t')]],
+      [meta('v', 'any', true), meta('vtype', 'text', true)], fresh),
+  };
+}
+
 /**
  * THE MAP PAYLOAD — one row's `map` column as the JSON the framing layer reads (§10·10), or `null` to
  * decline.
@@ -389,5 +539,28 @@ export function mapPayload(rel: Rel, keyOf: MapOf, valOf: MapOf, fresh: Minter):
       exprs: [[MAP_COL, jsonOf(col(ordered.id, MAP_COL))]],
     }),
     shape: { kind: 'mapValue' },
+  };
+}
+
+/**
+ * THE MAP.ENTRY PAYLOAD — the two side columns, as the JSON `mapEntryBuffer` frames.
+ *
+ * `json()` per side rather than over a whole blob, and that is the only difference from `mapPayload`:
+ * a side is already the exact subtree the framer wants, so the projection's whole job is to make
+ * SQLite's JSON subtype survive the value boundary (an ELEMENT side declines here for the same reason
+ * it does there — the rowid would have to be expanded and nothing produces one yet).
+ */
+export function mapEntryPayload(
+  rel: Rel, keyOf: MapOf, valOf: MapOf, fresh: Minter,
+): { readonly rel: Rel; readonly shape: Shape } | null {
+  if (keyOf.kind === 'elem' || valOf.kind === 'elem') return null;
+  const ordered = byEncounter(rel, fresh);
+  return {
+    rel: make.project({
+      id: fresh('ew'), input: ordered, channels: [],
+      type: typeOf(meta(ENTRY.key, 'json', true), meta(ENTRY.val, 'json', true)),
+      exprs: [[ENTRY.key, jsonOf(col(ordered.id, ENTRY.key))], [ENTRY.val, jsonOf(col(ordered.id, ENTRY.val))]],
+    }),
+    shape: { kind: 'mapEntry', keyOf, valOf },
   };
 }
