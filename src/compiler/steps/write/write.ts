@@ -9,7 +9,6 @@ import { normalize } from '../../ir/passes.ts';
 import { staticTypeOf, renderFrom, type Compiled, type WritePlan, type WriteResult, type Shape } from '../../../sql/kernel/render.ts';
 import type { Engine } from '../../engine/deps.ts';
 import type { ElementReadDriver } from '../../engine/deps.ts';
-import { compileInject } from './inject.ts';
 import { indexProperty, deleteFtsFor, deleteFtsForOwners } from '../../../services/fts-index.ts';
 import { bindChunks, deleteWhereIn, placeholders } from '../../../rowbatch.ts';
 import { layoutCols, type ElementStream, type TraverserLayout } from '../context/context.ts';
@@ -1289,10 +1288,13 @@ const WRITE_RULES: WriteRule[] = [
   { match: (s) => s.some((x) => LABEL_MUTATIONS.has(x.name)), compile: (e, s, p, _sk, se) => compileLabelMutation(e, s, p, se) },
   { match: (s) => s.some((x) => x.name === 'mergeV'), compile: (e, s, p, _sk, se) => compileMergeV(e, s, p, se) },
   { match: (s) => s.some((x) => x.name === 'mergeE'), compile: (e, s, p, _sk, se) => compileMergeE(e, s, p, se) },
-  // inject is a scalar-stream READ, not a write — it lives here only because it's a
-  // source constructor. It threads withSack() so a sack-carrying value stream
-  // (withSack(x).inject(v).sack(...)) seeds its `sk` column like the V()/E() path.
-  { match: (s) => s[0].name === 'inject', compile: (e, s, _p, sackInit) => compileInject(e, s, sackInit) },
+  // inject() IS NOT HERE. It is a scalar-stream READ and never was a write; it sat in this list only
+  // because it is a source constructor, and `Engine.seedRooted` already recognizes it (`seedInject`,
+  // with `sackInit` threaded exactly as the `V()`/`E()` path threads it). Routing it through the write
+  // dispatcher made `inject` the dispatcher's LARGEST tenant — 543 of the 944 traversals it answered
+  // contain no mutating step at all — so deleting the write route without moving it first would have
+  // deleted a third of what it does (plan §Phase 1).
+
   { match: (s) => s[s.length - 1].name === 'drop', compile: (e, s, p) => compileDrop(e, s, p) },
   { match: (s) => s.some((x) => x.name === 'property'), compile: (e, s, p, _sk, se) => compileSetProperty(e, s, p, se) },
 ];

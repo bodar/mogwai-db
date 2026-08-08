@@ -2,11 +2,8 @@ import { q, value, list } from '../../../sql/kernel/q.ts';
 import { jsonbArrayOf } from '../../plan/plan.ts';
 import { flattenListArgs, argValues, type SackSpec } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { patchLayout, rootLayout, type LoweringState } from '../context/context.ts';
+import { patchLayout, type LoweringState } from '../context/context.ts';
 import { toListStream, toScalarStream, type Stream } from '../context/stream.ts';
-import type { Engine } from '../../engine/deps.ts';
-import { materializeRootStream } from '../tail/materialize.ts';
-import { type Compiled } from '../../../sql/kernel/render.ts';
 import { foldConstantCoercions, uniformInjectType } from '../../../gremlin/coerce.ts';
 
 /** Seed `inject(v1, v2, …)` as a shaped SOURCE on `carry`'s Query → the initial Stream plus the
@@ -15,9 +12,14 @@ import { foldConstantCoercions, uniformInjectType } from '../../../gremlin/coerc
  * ordinary values seed ScalarStream rows.
  *
  * Takes a bare `LoweringState` rather than an Engine so the seed lands on whichever Query the caller is
- * building: its own fresh one at the top of a traversal (compileInject, below), or the SHARED one
+ * building: the traversal's own at the top of a rooted chain (`Engine.seedRooted`), or the SHARED one
  * when inject() heads a `union()` SOURCE branch (`g.union(__.inject(1), __.inject(2))`) — where
- * the arm's relation has to sit in the same WITH as its siblings'. */
+ * the arm's relation has to sit in the same WITH as its siblings'.
+ *
+ * There is no `compileInject` any more, and its absence is the point: `inject()` is a READ, so it is
+ * seeded by the ordinary rooted-source path like `V()`/`E()`/`union()` and lowered by the ordinary
+ * loop. It used to have a whole-traversal entry point of its own purely because the WRITE dispatcher
+ * routed it (plan §Phase 1). */
 export function seedInject(carry: LoweringState, steps: IRStep[], sackInit?: SackSpec): { stream: Stream; at: number } {
   const Q = carry.q;
 
@@ -60,14 +62,3 @@ export function seedInject(carry: LoweringState, steps: IRStep[], sackInit?: Sac
   return { stream: toScalarStream(sackCarry, rel, as, { literalNull }), at: folded.at };
 }
 
-/** g.inject(v1, v2, …) as a whole traversal: seed the source, then lower every following step
- * through lowerSteps — the same lowering engine used after values()/unfold(). */
-export function compileInject(engine: Engine, steps: IRStep[], sackInit?: SackSpec): Compiled {
-  // A fresh child engine (fresh Query, same app scope): inject() is a SOURCE constructor, so it
-  // seeds its own relation on this Query and lowers the chain through the same engine — which the
-  // seed stream reaches via `q.engine`.
-  const eng = engine.subEngine({});
-  const carry: LoweringState = { q: eng.q, params: {}, traverserLayout: rootLayout() };
-  const { stream, at } = seedInject(carry, steps, sackInit);
-  return materializeRootStream(eng.lowerStepsStrict(stream, steps, at));
-}
