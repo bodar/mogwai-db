@@ -523,8 +523,17 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
       .toBe('variant');
     // Pick.unproductive is the choice producing NOTHING, distinct from Pick.none (a value that
     // matched no key) — the modulation seam's `present` column is what separates them.
+    //
+    // **The column is `opresent`, RelIR's, and this used to read `ch_at`, which is LEGACY's**
+    // (`steps/prefix/branch.ts`). Not a rewrite of what the assertion means: the traversal DECLINED on
+    // RelIR when this was written, because its `Pick.unproductive` arm is `__.label()` and the element
+    // tail had no `label()` — so it fell to legacy and the test pinned legacy's spelling without
+    // anyone choosing that. Teaching `label()` moved the route and the assertion followed it. The
+    // PROPERTY is unchanged and is the one the commit that added this was about: the productivity
+    // signal is CARRIED on the row, not guessed from a NULL. Both spines answer identically here
+    // (`["marko","vadas","josh","peter","software","software"]`), so the move cost no correctness.
     expect(read('g.V().choose(__.values("age")).option(P.between(26,30), __.values("name")).option(Pick.none, __.values("name")).option(Pick.unproductive, __.label())').sql)
-      .toContain('ch_at');
+      .toContain('opresent');
     // ---- still fail-closed ----
     // Pick.any (only reachable via branch(), which is unimplemented) and a choice the correlated
     // modulation seam cannot compile: both routes decline, so the dispatch throws.

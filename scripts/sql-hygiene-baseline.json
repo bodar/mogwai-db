@@ -73,8 +73,8 @@
   },
   "choose": {
     "binds": 0,
-    "bytes": 7500,
-    "compiler": 244,
+    "bytes": 3190,
+    "compiler": 72,
     "bound": 0
   },
   "combine": {
@@ -163,8 +163,8 @@
   },
   "format": {
     "binds": 0,
-    "bytes": 1479,
-    "compiler": 17,
+    "bytes": 1787,
+    "compiler": 20,
     "bound": 0
   },
   "group": {
@@ -214,6 +214,12 @@
     "bytes": 2488,
     "compiler": 25,
     "bound": 2
+  },
+  "label": {
+    "binds": 4,
+    "bytes": 872,
+    "compiler": 17,
+    "bound": 0
   },
   "length": {
     "binds": 0,
