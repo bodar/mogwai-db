@@ -1176,6 +1176,39 @@ matches the spine being replaced and the tag is its own change on both sides.
 
 Measured: census 890 → 916, 0 changed answers.
 
+**✅ the labelled forms too.** `group("a")`/`groupCount("a")` differ from their unkeyed twins in what
+happens to the RESULT, not in how the map is computed, so `groupBarrier` builds either and the CALLER
+decides. `Collection` carries a `RelFraming` rather than a `ListOf`, which is what made that small:
+`cap()` hands the pair to `continueAs` and whichever tail owns that shape takes the rest of the chain.
+**A divergence arrived without being new** — the keyed twin of an already-declared `RELIR_AHEAD` row
+became visible the moment this family routed, which is worth naming as a class: a shed capability does
+not become a fresh divergence when a NEIGHBOURING family lands, it stops being hidden behind a
+fallback. It also nearly cost a wrong "fix": `group().by(k).by(__.constant(1))` is `{j:1}` on RelIR and
+`{j:[1]}` on legacy, and the plausible reading (a non-reducing value traversal collects) is refuted by
+`Grouping.convertValueTraversal` — it appends `fold()` for a `ValueTraversal`/`TokenTraversal`/
+`IdentityTraversal`/`ColumnTraversal` ONLY (`gremlin-core/.../step/Grouping.java:92-101`) and returns
+an anonymous CHILD unchanged, so the operator is `Operator.assign` and one value per key is right.
+§12's trap, avoided by one grep.
+
+#### ✅ §6·7's lattice at the ARM MERGE — the first of its three sites
+
+`sameFraming` compared the whole `ScalarType`, so `union(__.values('name'), __.constant(1))` declined
+for no reason but a tag disagreement: both arms are one value per row, the relation merges perfectly,
+and all that was missing was somewhere to record that the halves are typed differently. That somewhere
+is the `vtype` column a stored read already carries; the cost is one projection per arm, and the meet
+runs BEFORE the framing and column tests because re-projecting is what makes the arms comparable.
+
+**One refinement of the plan's lattice, recorded as a deviation.** `static ∧ static(same)` stays
+static (agreement costs no column — this is a widening, not a re-encoding); `static ∧ static(differ)`
+and `perRow ∧ x` go per-row. The plan said `unknown ∧ x → unknown`; an UNKNOWN arm now contributes a
+NULL tag instead. Not a different answer — a null `vtype` IS "infer from the value" — and strictly
+more capable, because collapsing would discard an arm's `datetime` because its SIBLING could not say.
+That discard is precisely what §6·7 exists to end, so reproducing it at the merge would have been the
+same bug one layer along. The remaining two sites (the inject source, the reducer) are unchanged.
+
+What still declines is an arm disagreeing on SHAPE — the VARIANT merge, which is the rest of the
+branch family (63, now the top of the board) and its own substrate.
+
 Then the families whose kernels Phase 0 extracted and whose only remaining legacy content is emission —
 `math`/`format` were the proof case (§6·4) — then the scalar-transform tail, the property shape
 (`properties`/`valueMap`), the map shape's mid-chain consumers, branch, aliases, `local`, `match`, `where`,
