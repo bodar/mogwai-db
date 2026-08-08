@@ -1,6 +1,5 @@
 import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
-import * as make from '../../rel/factory.ts';
-import { meta, typeOf, type Minter } from './build.ts';
+import { jsonEachSet, type Minter } from './build.ts';
 import { CF_MAX_BINDS } from '../../cf-limits.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
 import { gtypeName, arg, collectionMembers, type Arg } from '../../gremlin/frontend.ts';
@@ -323,16 +322,12 @@ const KNOWN_NON_VALUE = new Set(['vertex', 'edge', 'vertexproperty', 'vproperty'
  * The caller supplies it because the caller is the only one that knows where the `vtype` column lives
  * — the same reason `Col` names a relation.
  */
-/** A collection PARAMETER as an IN-set: `subject IN (SELECT wv FROM json_each(jsonb(?)))`. The whole
+/** A collection PARAMETER as an IN-set: `subject IN (SELECT sv FROM json_each(jsonb(?)))`. The whole
  *  array crosses as ONE `jsonb(?)` bind exploded by `json_each` (root `CLAUDE.md`'s data-sized-set rule),
  *  so the parameter stays a bind of any size and the statement text never becomes a function of its data.
  *  The bind is a PARAMETER (`param`, named), so it reuses the repeated-parameter dedup like any other. */
 const jsonEachInSet = (subject: Expr, value: readonly unknown[], name: string, fresh: Minter, negated: boolean): Expr => ({
-  kind: 'in-query', negated, expr: subject,
-  plan: make.explode({
-    id: fresh('wset'), channels: [], expr: { kind: 'call', fn: 'jsonb', args: [param(JSON.stringify(value), name)] },
-    as: { value: 'wv' }, type: typeOf(meta('wv', 'any', true)),
-  }),
+  kind: 'in-query', negated, expr: subject, plan: jsonEachSet(name, value, fresh),
 });
 
 export function predicateExpr(

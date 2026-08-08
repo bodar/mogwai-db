@@ -18,7 +18,7 @@ import { recordField, recordOf, recordPayload, selectKeys } from './record.ts';
 import { propertyElement, propertyKey, propertyPayload, propertyRelation, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
-import { flattenListArgs, isNested, isTokenArg, stepChain, argValues, arg, type Arg, type SackSpec } from '../../gremlin/frontend.ts';
+import { isNested, isTokenArg, stepChain, argValues, arg, type Arg, type SackSpec } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
 import type { IRStep } from '../ir/strategies.ts';
@@ -27,8 +27,8 @@ import { childSteps, normalize } from '../ir/passes.ts';
 import { containsTextSearch, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
-  and, byEncounter, carriedCols, EDGE_COLS, eq, labelIds, meta, minter, NODE_COLS, PROPERTIES, renumber, storedValue,
-  typeOf, type Minter,
+  and, byEncounter, carriedCols, EDGE_COLS, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, labelArgsAllStrings,
+  labelIds, meta, minter, NODE_COLS, PROPERTIES, renumber, storedValue, typeOf, type Minter,
 } from './build.ts';
 import { bindAliases } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
@@ -352,9 +352,9 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
   const args = argValues(step);
 
   if (step.name === 'hasLabel') {
-    const names = flattenListArgs(args);
-    if (!names.length || names.some((n) => typeof n !== 'string')) return null;
-    return hasLabelClause(names as string[], subject, elem, fresh);
+    // `hasLabelClause` validates and lowers each label `Arg` — an inline name inlines, a `$label`
+    // scalar / `$labels` collection binds — so a wire parameter's data never enters the statement text.
+    return hasLabelClause(step.args, subject, elem, fresh);
   }
 
   // `where`/`filter`/`not` over a TRAVERSAL body: a correlated existence test, which is the same
@@ -402,8 +402,10 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
     // id or label rather than about a property row. Each was a separate decline; each is a
     // composition of clauses this module already builds, which is why they arrive together (§10·8).
     if (args.length === 3) {
-      if (typeof args[0] !== 'string' || typeof args[1] !== 'string') return null;
-      const labelled = hasLabelClause([args[0]], subject, elem, fresh);
+      // The KEY must be a parsed string; the LABEL may be a string parameter (`hasLabelClause` binds
+      // it), so only the key is guarded here.
+      if (typeof args[1] !== 'string') return null;
+      const labelled = hasLabelClause([step.args[0]!], subject, elem, fresh);
       const valued = hasPropertyClause(args[1], args[2], subject, elem, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null);
       return labelled && valued ? and(labelled, valued) : null;
     }
@@ -426,8 +428,11 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
  * An EDGE carries its label inline; a VERTEX may hold several, in a side table. Two different
  * physical questions, which is exactly why `Scan` is the only node that names a table.
  */
-function hasLabelClause(names: readonly string[], subject: Subject, elem: Elem, fresh: Minter): Expr {
-  const ids = labelIds(names, fresh);
+function hasLabelClause(labelArgs: readonly Arg[], subject: Subject, elem: Elem, fresh: Minter): Expr | null {
+  // A non-string label (or a bound one resolving to a non-string) is a decline the caller routes; an
+  // inline label inlines, a `$label` / `$labels` binds — all inside `labelIds`.
+  if (!labelArgs.length || !labelArgsAllStrings(labelArgs)) return null;
+  const ids = labelIds(labelArgs, fresh);
   if (elem === 'edge') {
     // Direct where the column is physically present (the source scan), and a membership test on
     // the edge id where it is not (after a movement, the relation is `id` + channels). Same
@@ -555,19 +560,47 @@ function elementScan(step: IRStep, fresh: Minter): { scan: Rel; pred?: Expr; ele
     type: typeOf(...(elem === 'edge' ? EDGE_COLS : NODE_COLS)),
   });
 
-  const ids = flattenListArgs(argValues(step));
-  const nums = ids.filter((a): a is number => typeof a === 'number');
-  const strs = ids.filter((a): a is string => typeof a === 'string');
-  // An id argument that is neither is a hard error in the legacy spine too, but this route must
-  // not THROW on a shape it merely has not learned — declining routes it to the spine that owns
-  // the message.
-  if (ids.length !== nums.length + strs.length) return null;
+  // Ids span two provenances and two columns. PROVENANCE decides bind-vs-inline: a parsed LITERAL id
+  // is a constant bounded by the QUERY TEXT and INLINES (a rowid `int`, a uid `text`); a wire
+  // PARAMETER (`V($x)`) BINDS, so its value never enters the statement text — a scalar as one `?`, a
+  // bound collection (`V($ids)`) as ONE `jsonb(?)` exploded by `json_each`, exactly the rule the
+  // `within($list)` set already keeps. COLUMN follows the value's type: a number matches the rowid
+  // `id`, a string the `uid` — for a literal decided here, for a bound member decided per row by
+  // json_each's own type (so a heterogeneous bound id list is faithful without our reading its data).
+  const idCol = col(scan.id, 'id');
+  const uidCol = col(scan.id, 'uid');
+  const inlineNums: number[] = [];
+  const inlineStrs: string[] = [];
+  const paramClauses: Expr[] = [];
+  const inlineOne = (v: unknown): boolean => {
+    if (typeof v === 'number') { inlineNums.push(v); return true; }
+    if (typeof v === 'string') { inlineStrs.push(v); return true; }
+    return false; // an id that is neither declines — a hard error the legacy spine owns the message for
+  };
+  for (const a of step.args) {
+    if (a.name == null) {
+      // A CONSTANT — a bare scalar id or a bracketed list literal (`V(1, [2,3])` ≡ `V(1,2,3)`); the
+      // grammar forbids a param member, so every member is itself a literal that inlines.
+      const members = a.members ? a.members.map((m) => m.value) : Array.isArray(a.value) ? a.value : [a.value];
+      for (const v of members) if (!inlineOne(v)) return null;
+    } else if (Array.isArray(a.value)) {
+      // A bound COLLECTION of ids → ONE `jsonb(?)` bind, exploded and routed per member by its json
+      // type. The two clauses share the parameter NAME, so the render dedups them to a single bind.
+      paramClauses.push({ kind: 'in-query', expr: idCol, plan: jsonEachSet(a.name, a.value, fresh, JSON_NUMERIC_TYPES), negated: false });
+      paramClauses.push({ kind: 'in-query', expr: uidCol, plan: jsonEachSet(a.name, a.value, fresh, JSON_TEXT_TYPES), negated: false });
+    } else if (typeof a.value === 'number') {
+      paramClauses.push(eq(idCol, param(a.value, a.name)));
+    } else if (typeof a.value === 'string') {
+      paramClauses.push(eq(uidCol, param(a.value, a.name, 'text')));
+    } else return null; // a bound id of another shape declines, as its inline sibling does
+  }
 
+  // Inline lists first so a param-free `V(...)` renders byte-for-byte as before; `constLit` never
+  // declines a number/string, so its assertion cannot fire.
   const clauses: Expr[] = [];
-  // Ids are parsed integer/string literals bounded by the QUERY TEXT — inline them (a rowid `int`, a
-  // uid `text`); `constLit` never declines a number/string, so the assertion cannot fire.
-  if (nums.length) clauses.push({ kind: 'in-list', expr: col(scan.id, 'id'), values: nums.map((n) => constLit(arg(n, 'long'))!) });
-  if (strs.length) clauses.push({ kind: 'in-list', expr: col(scan.id, 'uid'), values: strs.map((s) => compilerText(s)) });
+  if (inlineNums.length) clauses.push({ kind: 'in-list', expr: idCol, values: inlineNums.map((n) => constLit(arg(n, 'long'))!) });
+  if (inlineStrs.length) clauses.push({ kind: 'in-list', expr: uidCol, values: inlineStrs.map((s) => compilerText(s)) });
+  clauses.push(...paramClauses);
   const pred = clauses.reduce<Expr | undefined>((left, right) =>
     left ? { kind: 'binary', op: 'or', left, right } : right, undefined);
   return { scan, pred, elem };
@@ -622,11 +655,13 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
   if (!hops || step.modulators?.length || step.optionArms) return null;
   if (FROM_EDGE.has(step.name) !== (elem === 'edge')) return null;
 
-  const labels = flattenListArgs(argValues(step));
-  if (labels.some((l) => typeof l !== 'string')) return null;
+  // A movement's arguments are edge LABELS. An inline label inlines; a `$label` / `$labels` parameter
+  // binds through `labelIds`, so its data never enters the statement text. A non-string label declines.
+  const labelArgs = step.args;
+  if (labelArgs.length && !labelArgsAllStrings(labelArgs)) return null;
   // A label restriction is meaningless on an endpoint read — the edge is already chosen — and
   // TinkerPop's inV()/outV() take no arguments at all.
-  if (labels.length && FROM_EDGE.has(step.name)) return null;
+  if (labelArgs.length && FROM_EDGE.has(step.name)) return null;
 
   const input = frontierRel(from);
   // WHAT THE HOP CARRIES is its input's channels, read off the frontier rather than off a
@@ -641,9 +676,9 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
       type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
     });
     const incoming = input ? col(input.id, 'id') : (from as { readonly correlated: Expr }).correlated;
-    const on = labels.length
+    const on = labelArgs.length
       ? and(eq(col(e.id, hop.from), incoming),
-        { kind: 'in-query', expr: col(e.id, 'label'), plan: labelIds(labels as string[], fresh), negated: false })
+        { kind: 'in-query', expr: col(e.id, 'label'), plan: labelIds(labelArgs, fresh), negated: false })
       : eq(col(e.id, hop.from), incoming);
     // A correlated hop FILTERS the edge table against the outer id; a rooted one JOINS the incoming
     // frontier. The projection is identical either way, which is what keeps the second hop from

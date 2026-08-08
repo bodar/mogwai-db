@@ -1,8 +1,9 @@
 import type { ChannelRole, Channels } from '../../channels.ts';
-import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerText, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { relId, type ColMeta, type RelId, type RelType, type SortTerm, type SqlType } from '../../rel/types.ts';
+import type { Arg } from '../../gremlin/frontend.ts';
 
 /**
  * THE CONSTRUCTION LEAF every RelIR lowering module sits on — the physical schema as the algebra sees
@@ -129,12 +130,70 @@ export const eq = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '=',
 
 /** `SELECT id FROM labels WHERE name IN (…)` — the name→id indirection every label-aware step
  *  reaches through, and the reason `labels` is a `Scan` table rather than a string in an emitter. */
-export function labelIds(names: readonly string[], fresh: Minter): Rel {
-  const scan = make.scan({ id: fresh('lbl'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
-  const matching = make.filter({
-    id: fresh('f'), input: scan, channels: [], type: scan.type,
-    pred: { kind: 'in-list', expr: col(scan.id, 'name'), values: names.map(compilerText) },
+/**
+ * A collection PARAMETER exploded to a one-column relation of its members (`sv`) — the whole array
+ * crosses as ONE `jsonb(?)` bind (named, so repeated uses dedup at render) and `json_each` explodes it
+ * IN-QUERY, so its data never enters the statement text (root `CLAUDE.md`'s data-sized-set rule). This
+ * is the shared kernel behind every "a bound collection is a set membership" site — a `within($list)`
+ * predicate (`predicate.ts`), a `V($ids)` id list and a `hasLabel($labels)` name list here.
+ *
+ * `jsonTypes`, when given, keeps only the members whose json_each `type` is in the set — the seam a
+ * `V()`/`E()` id list needs to route a JSON number to the rowid column and a JSON string to `uid`,
+ * decided PER MEMBER by json_each's own type rather than at compile time (so a heterogeneous bound id
+ * list is faithful without our reading its data).
+ */
+export function jsonEachSet(name: string, value: readonly unknown[], fresh: Minter, jsonTypes?: readonly string[]): Rel {
+  const source: Expr = { kind: 'call', fn: 'jsonb', args: [param(JSON.stringify(value), name)] };
+  const exploded = make.explode(jsonTypes
+    ? { id: fresh('jes'), channels: [], expr: source, as: { value: 'sv', type: 'st' }, type: typeOf(meta('sv', 'any', true), meta('st', 'text', true)) }
+    : { id: fresh('jes'), channels: [], expr: source, as: { value: 'sv' }, type: typeOf(meta('sv', 'any', true)) });
+  if (!jsonTypes) return exploded;
+  const kept = make.filter({
+    id: fresh('jesf'), input: exploded, channels: [], type: exploded.type,
+    pred: { kind: 'in-list', expr: col(exploded.id, 'st'), values: jsonTypes.map(compilerText) },
   });
+  return make.project({ id: fresh('jesp'), input: kept, channels: [], type: typeOf(meta('sv', 'any', true)), exprs: [['sv', col(kept.id, 'sv')]] });
+}
+
+/** The json_each `type` names for a JSON number and a JSON string — a `V()`/`E()` id list routes the
+ *  first to the rowid column and the second to `uid`, exactly the asymmetry the inline id path draws. */
+export const JSON_NUMERIC_TYPES = ['integer', 'real'] as const;
+export const JSON_TEXT_TYPES = ['text'] as const;
+
+/** Is every `Arg` a LABEL — an inline string, a literal list of strings, a string parameter, or a bound
+ *  list of strings? Callers validate before building `labelIds`, which then trusts the values are text
+ *  (labels are strings by spec; a non-string label is a decline the caller owns). */
+export const labelArgsAllStrings = (args: readonly Arg[]): boolean =>
+  args.every((a) => (a.name == null
+    ? (a.members ? a.members.map((m) => m.value) : Array.isArray(a.value) ? a.value : [a.value]).every((v) => typeof v === 'string')
+    : Array.isArray(a.value) ? a.value.every((v) => typeof v === 'string') : typeof a.value === 'string'));
+
+/**
+ * The `labels` rowids matching a set of label ARGUMENTS — the name filter over the `labels` table each
+ * label-restricting step (`hasLabel`, `out('knows')`, `has(label, k, v)`) joins against. An inline
+ * label (a parsed literal `'knows'`) INLINES as a `compilerText` name — zero binds; a label PARAMETER
+ * BINDS — a scalar `$l` as one `?` on the name, a bound list `$ls` as ONE `jsonb(?)` exploded by
+ * `json_each` — so a parameter's data never enters the statement text, the same rule the id and
+ * `within` set paths keep. Callers pre-validate with `labelArgsAllStrings`, so every value here is text.
+ */
+export function labelIds(args: readonly Arg[], fresh: Minter): Rel {
+  const scan = make.scan({ id: fresh('lbl'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
+  const nameCol = col(scan.id, 'name');
+  const inline: string[] = [];
+  const clauses: Expr[] = [];
+  for (const a of args) {
+    if (a.name == null) {
+      const members = a.members ? a.members.map((m) => m.value) : Array.isArray(a.value) ? a.value : [a.value];
+      for (const v of members) inline.push(v as string);
+    } else if (Array.isArray(a.value)) {
+      clauses.push({ kind: 'in-query', expr: nameCol, plan: jsonEachSet(a.name, a.value, fresh), negated: false });
+    } else {
+      clauses.push({ kind: 'binary', op: '=', left: nameCol, right: param(a.value, a.name, 'text') });
+    }
+  }
+  if (inline.length) clauses.unshift({ kind: 'in-list', expr: nameCol, values: inline.map(compilerText) });
+  const pred = clauses.reduce<Expr | undefined>((left, right) => (left ? { kind: 'binary', op: 'or', left, right } : right), undefined);
+  const matching = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: pred! });
   return make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
 }
 
