@@ -32,6 +32,29 @@ unblocks a *family*; one-off step impls are matrix-fill, lower.
 
 ## P1 — ceiling-raising generic-substrate lifts
 
+### 🔴 A REAL LOSES A DIGIT CROSSING INTO JSON — both spines, everywhere a collection carries one
+
+SQLite writes a REAL into JSON with 15 significant digits, so any double needing 17 comes back short:
+`g.inject(1).math("1/3").fold()` frames `0.333333333333333` on BOTH spines where the value is
+`0.3333333333333333`, and `map/Mean.feature:70` pins the exact digits. Measured 2026-08-08:
+`json_object('v', 1.0/3)` → `{"v":0.333333333333333}` (a JSON round-trip is NOT exact), while
+`printf('%!.17g', 1.0/3)` → `0.33333333333333331`, which `Number()` restores EXACTLY.
+
+**Their agreement is a shared cause, not correctness** (§12) — both encoders put a bare real into a
+JSON document, so neither the differential nor the census can see it. It surfaced only where one spine
+computes a mean in a ROW and the other into a blob (the group-scoped reducer, which declines `mean`
+for exactly this).
+
+The fix is the carriage the exact tail already has for a big long: an inexact real rides as decimal
+TEXT under its tag. Two things make it more than a one-liner and are why it is written down rather
+than done in passing:
+
+- it must land on BOTH spines together (`typedNode` in `src/compiler/rel/build.ts`, `typedScalarNode`
+  in `src/compiler/plan/plan.ts`), or the two diverge on every real in every collection;
+- a BARE list member has no envelope to carry a tag, so either the member gets one (the list becomes
+  typed whenever a real is inexact — the `withLossyFlag` window already asks a question of that exact
+  shape) or `foldMember`'s bare arm stops being reachable for reals.
+
 **Ranked entry point.** Numbers are IDs, not an order.
 **[write-path](./2026-08-01-write-path-plan.md) §2** (silent wrong answers) → **2** → **17**'s
 partitioned row-ops seam → **29** → **3b**'s `times(n)` unroll, one barrier at a time.
