@@ -563,8 +563,9 @@ GUARD, not a decline.** `addV` proves single-row at COMPILE time (its one-row ca
 
 ✅ Landed: `sack` · `math` · `format` · the ELEMENT-membered list · the NAMED-COLLECTION substrate ·
 §6·7's lattice at the arm merge · `union()` in SOURCE position · the VARIANT · the OPTION-MAP `choose` ·
-**the MAP LOOP** · **`valueMap()`/`elementMap()`** · **the MEMBER TYPE CHANNEL**. The durable findings
-from them:
+**the MAP LOOP** · **`valueMap()`/`elementMap()`** · **the MEMBER TYPE CHANNEL** · **the group barrier
+at all three hosts** · **the GROUP-SCOPED REDUCER (and the `origin` channel)** ·
+**`order`/`dedup(Scope.local)`**. The durable findings from them:
 
 - 🔴 **THE MEMBER TYPE CHANNEL — §6·7 one layer down, and it had grown a SECOND VOCABULARY unnoticed.**
   `ListOf`'s scalar arm was `as?: ValueType` + `typed?: boolean` plus an implicit third case: exactly the
@@ -787,10 +788,12 @@ them (a `by()` on a `valueMap` projects each map VALUE and removes an unproducti
 `applyTraversalRingToMap`); `order(Scope.local)` over a map's entries; and the element-keyed side reads,
 which need a list whose members may be ELEMENTS (today `MapOf`'s `elem` tag makes them decline).
 
-🚧 **Then the rest of Phase 2:** the scalar-transform tail (49, but heterogeneous — mostly literal-typed
-casts and error-raising forms rather than one lowering), the rest of the property shape (`properties()`
-re-entry), branch, aliases, `local`, `match`, `where`, `path` tails, and the by()-child matrix
-(`group`←reducer, `select` multi-label — `byField()`'s next callers).
+🚧 **Then the rest of Phase 2**, ranked as `mise run rel-blockers` had it once the map family closed:
+the scalar-transform tail (53, but heterogeneous — mostly literal-typed casts and error-raising forms
+rather than one lowering), branch (41 — `choose` 20, `union` 14), the row ops (41 — `order` 20 and
+`dedup` 12, now the ELEMENT-list and `Column`-keyed forms), aliases (32 — `select` 27, dominated by
+`Pop.all`/`Pop.mixed` history reads), the rest of the map shape (24), the side effects (21), `local`,
+`match`, `where` and the `path` tails.
 
 ### 🔴 Phase 3 — `repeat()` — THE GATE
 
