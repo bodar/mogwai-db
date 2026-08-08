@@ -619,7 +619,25 @@ Named gaps inside those, each with its blocker stated so it is not re-derived:
 | 5 | **Group-scoped reducer: `count()` with a non-empty body, and a SCALAR host** | The empty pool is PER-REDUCER and decides INNER vs LEFT join (`CountGlobalStep` seeds 0 and keeps its key; `SumGlobalStep` does not). A scalar host needs `origin` to name a parent without a rowid — channels-core |
 | 6 | **Two `sack` declines** — `withSack(seed, Operator.x)` (a MERGE policy for the role, channels-core) and `barrier(Barrier.normSack)` (its own step) | Both honest |
 | 7 | **L4 sweep** — two committed expectations encoded legacy's bug. An addendum written against one implementation records that implementation, not the reference | Nobody has swept the rest |
-| 8 | **Plan-size wart** — `byNode`'s property arm nests the collection CASE inside itself (`typedNode` re-applies `storedValueOn`). Bytes, not an answer, but in the hottest key expression there is | Nothing; one commit |
+| 8 | **Carry an inexact REAL into JSON exactly** — SQLite's JSON *writer* uses 15 significant digits and cannot round-trip a binary64 (`1/3` returns a different double); the *parser* is exact, so `json(printf(…))` at the JSON entry points is the whole fix | Nothing, but see below |
+| 9 | **Plan-size wart** — `byNode`'s property arm nests the collection CASE inside itself (`typedNode` re-applies `storedValueOn`). Bytes, not an answer, but in the hottest key expression there is | Nothing; one commit |
+
+#### ⚠️ The exact-REAL fix — attempted, reverted, four traps found
+
+Worth doing, and each of these cost a cycle. The shape that works: apply ONLY where precision is
+actually lost — `CASE WHEN CAST(printf('%.15g',v) AS REAL) = v THEN v ELSE json(printf('%!.17g',v)) END`
+— so every value that already round-trips keeps its exact current text and only the lossy ones change.
+
+1. **It is a JSON-ENTRY rule, not a stored-value rule.** Putting it in `storedValueOn` corrupts the ROW
+   path: `values('weight')` becomes JSON text and a later `fold()` quotes it (`["0.5", 1, …]`). It
+   belongs in `typedNode`/`collectedArray` and nowhere else.
+2. **Gate on the VTYPE, not on `typeof(value)`.** The value can be a whole correlated subquery and the
+   guard splices it three times — measured, 69 statement families moved.
+3. **`%.17g` drops real-ness**: `1.0` prints `1`, so `1f` came back an `int`. `%!.17g` keeps the decimal
+   point but always writes 17 digits, so `0.2` becomes `0.20000000000000001` — same double, different
+   text, and every existing REAL's bytes change. Hence the lossy-only guard above.
+4. **SQLite's JSON subtype does not survive some `CASE` shapes** — it does survive when the `json()` call
+   is the aggregate's direct argument, which is what any fix must rely on.
 
 #### 🔴 Human decisions
 
