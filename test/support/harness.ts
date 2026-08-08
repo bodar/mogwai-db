@@ -63,6 +63,20 @@ export const run = (store: GraphStore, q: string) => runWith(store, q, undefined
 export const relirOff = ambientSpine() === 'legacy';
 
 /**
+ * THE "id is taken" REFUSAL — `Graph.Exceptions.vertexWithIdAlreadyExists` /
+ * `edgeWithIdAlreadyExists` (`structure/Graph.java:1364,1368`), verbatim, and the SAME on both spines.
+ *
+ * It is a function only so the two hosts share one spelling. It deliberately takes no `spine`: the
+ * spines disagreed for a while (legacy invented a lowercased, `with`-less version and RelIR's guard
+ * copied it), and the first fix here was a spine-AWARE helper that returned whichever string the
+ * ambient route happened to raise. That was backwards — legacy is being deleted, so a helper teaching
+ * every test to expect its wrong message is the version that OUTLIVES the route. Legacy was corrected
+ * instead, at one line, and the asymmetry disappeared rather than being encoded.
+ */
+export const idAlreadyExists = (kind: 'Vertex' | 'Edge', id: string | number): string =>
+  `${kind} with id already exists: ${id}`;
+
+/**
  * A TRAVERSAL RELIR ANSWERS AND THE LEGACY SPINE REFUSES — declared, and PROVEN in both positions.
  *
  * The RelIR route is allowed to be ahead: `mise run ci` does not include the differential, and the

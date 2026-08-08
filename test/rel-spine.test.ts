@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { compile } from '../src/compiler/compiler.ts';
-import { read, relirAhead, runWith, seededStore } from './support/harness.ts';
+import { idAlreadyExists, read, relirAhead, runWith, seededStore } from './support/harness.ts';
 import { CF_MAX_BINDS as DO_BIND_CAP, cfLimitViolation } from '../src/cf-limits.ts';
 import { exec, executeQuery } from './support/executor.ts';
 import { decodeAll } from './support/decode.ts';
@@ -369,20 +369,6 @@ const DECLINED = [
   "g.V().where(__.has('name','marko'))", // a filter-only body is a predicate on the SAME traverser
 ];
 
-/**
- * THE "id is taken" REFUSAL, per spine — and the two genuinely differ.
- *
- * RelIR raises TinkerPop's own sentence (`Graph.Exceptions.vertexWithIdAlreadyExists` /
- * `edgeWithIdAlreadyExists`, `structure/Graph.java:1364,1368`). Legacy raises a lowercased,
- * `with`-less version it invented, and keeps it until the route is deleted.
- *
- * Spelled as a function rather than as one shared string because the shared string was the defect: a
- * spine may never take its wording from the other, so a helper that hands both the SAME message would
- * be re-creating the coupling this exists to record.
- */
-const idTaken = (spine: 'rel' | 'legacy', kind: 'Vertex' | 'Edge', id: string): string =>
-  spine === 'rel' ? `${kind} with id already exists: ${id}` : `${kind.toLowerCase()} id already exists: ${id}`;
-
 describe('the RelIR spine', () => {
   for (const gremlin of COVERED) {
     test(`${gremlin} routes to RelIR and agrees with legacy`, () => {
@@ -486,7 +472,7 @@ describe('the RelIR spine', () => {
     // recorded state, not a regression.
     for (const spine of ['rel', 'legacy'] as const)
       expect(() => exec(seededStore(), undefined, undefined, spine).buffers(taken, {}, {}), spine)
-        .toThrow(idTaken(spine, 'Vertex', '1'));
+        .toThrow(idAlreadyExists('Vertex', '1'));
 
     // …and it must not fire when the id IS free, nor cost the creation its answer.
     for (const gremlin of [
@@ -583,15 +569,15 @@ describe('the RelIR spine', () => {
       const taken = twoPeople(store(), spine);
       write(taken, "g.V(1).addE('knows').to(__.V(2)).property(T.id,7)", spine);
       expect(() => write(taken, "g.V(1).addE('knows').to(__.V(2)).property(T.id,7)", spine), spine)
-        .toThrow(idTaken(spine, 'Edge', '7'));
+        .toThrow(idAlreadyExists('Edge', '7'));
       // …and from the SOURCE form too, whose guard runs over a seed relation rather than a traverser one.
       expect(() => write(taken, "g.addE('knows').from(__.V(1)).to(__.V(2)).property(T.id,7)", spine), spine)
-        .toThrow(idTaken(spine, 'Edge', '7'));
+        .toThrow(idAlreadyExists('Edge', '7'));
 
       const many = store();
       for (const i of [1, 2, 3]) write(many, `g.addV('person').property(T.id,${i})`, spine);
       expect(() => write(many, "g.V().addE('knows').to(__.V(2)).property(T.id,9)", spine), spine)
-        .toThrow(idTaken(spine, 'Edge', '9'));
+        .toThrow(idAlreadyExists('Edge', '9'));
     }
   });
 

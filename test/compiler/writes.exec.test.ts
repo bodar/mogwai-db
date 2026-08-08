@@ -6,7 +6,7 @@ import { UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { read, relirAhead, relirOff, run, seededStore, written } from '../support/harness.ts';
+import { idAlreadyExists, read, relirAhead, relirOff, run, seededStore, written } from '../support/harness.ts';
 import { emit } from '../../src/rel/emit.ts';
 import { executeQuery } from '../support/executor.ts';
 import { CF_MAX_BINDS } from '../../src/cf-limits.ts';
@@ -285,10 +285,13 @@ test('addE sets its own uid via property(T.id)', () => {
 
 test('custom vertex and edge ids fail at the shared identity boundary', () => {
   const store = seededStore();
-  expect(() => run(store, 'g.addV().property(T.id, 1)')).toThrow('Vertex with id already exists: 1');
+  // `idAlreadyExists` and not a literal: `run()` takes the AMBIENT spine, and the two spines word this
+  // refusal differently on purpose (RelIR raises the reference's sentence, legacy its own until it is
+  // deleted). A hardcoded message here passes `mise run ci` and fails `mise run test:legacy-spine`.
+  expect(() => run(store, 'g.addV().property(T.id, 1)')).toThrow(idAlreadyExists('Vertex', 1));
   run(store, 'g.addV().property(T.id, "marko")');
-  expect(() => run(store, 'g.addV().property(T.id, "marko")')).toThrow('Vertex with id already exists: marko');
-  expect(() => run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property(T.id, 7)')).toThrow('Edge with id already exists: 7');
+  expect(() => run(store, 'g.addV().property(T.id, "marko")')).toThrow(idAlreadyExists('Vertex', 'marko'));
+  expect(() => run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property(T.id, 7)')).toThrow(idAlreadyExists('Edge', 7));
 });
 
 test('addE write-chain graph initializer (addV.as.addV.as.addE.from.to)', () => {

@@ -408,7 +408,14 @@ function assertAvailableElementId(store: GraphStore, table: ElementTable, uid: s
   if (uid == null) return;
   const col = typeof uid === 'number' ? 'id' : 'uid';
   if (store.query<{ found: number }>(`SELECT 1 AS found FROM ${table} WHERE ${col}=? LIMIT 1`, [uid]).length)
-    throw new Error(`${table === 'nodes' ? 'vertex' : 'edge'} id already exists: ${uid}`);
+    // `Graph.Exceptions.vertexWithIdAlreadyExists` / `edgeWithIdAlreadyExists`
+    // (`structure/Graph.java:1364,1368`), verbatim. This used to be a lowercased, `with`-less version
+    // of its own, and RelIR's guard had COPIED it — which is how a string nothing owned came to be
+    // asserted as the reference's. Fixed on this route too, cheaply, rather than teaching the tests
+    // which spine is answering: legacy is being deleted, so the choice is between it being right until
+    // then and it being wrong until then, and encoding the wrong version into shared test helpers so
+    // it survives the deletion is the one outcome worth avoiding.
+    throw new Error(`${table === 'nodes' ? 'Vertex' : 'Edge'} with id already exists: ${uid}`);
 }
 
 function insertRow(store: GraphStore, table: ElementTable, baseCols: string[], baseVals: any[], uid: string | number | null, jsonbCol?: string): { id: number; extId: string | number } {
