@@ -583,8 +583,22 @@ GUARD, not a decline.** `addV` proves single-row at COMPILE time (its one-row ca
 ✅ Landed: `sack` · `math` · `format` · the ELEMENT-membered list · the NAMED-COLLECTION substrate ·
 `union()` in SOURCE position · the VARIANT · the OPTION-MAP `choose` · the MAP LOOP ·
 `valueMap()`/`elementMap()` · the group barrier at all three hosts · the GROUP-SCOPED REDUCER (and the
-`origin` channel) · `order`/`dedup(Scope.local)` · **the MEMBER TYPE CHANNEL** (§6·7's list arm, and
-with it the total descriptors below).
+`origin` channel) · `order`/`dedup(Scope.local)` · **both GROUP-VALUE shapes** (a group-scoped
+`count()`, `by(__.tail())`) · **the MEMBER TYPE CHANNEL** (§6·7's list arm, and with it the total
+descriptors below).
+
+⚠️ **RELIR HOLDS BOTH GROUP-VALUE SHAPES NOW** — the two the type-channel work measured as pinning
+legacy's group key (34 tests, an L3 scenario, a conformance-host gate), so that key is shed-able on
+the evidence that made it un-sheddable. A group-scoped `count()` KEEPS its key where every other
+reducer loses it (`CountGlobalStep` seeds 0 while `SumGlobalStep` leaves `NON_EMITTING_SEED`), and a
+LEFT join is neither available — the fold's movements are inner joins by construction — nor needed:
+one SEED ROW per parent at weight ZERO is the same answer under the same `GROUP BY`. `by(__.tail())`
+is the collecting arm plus one `$[#-1]`, because `TailGlobalStep(1)` keeps the last traverser to
+arrive and the members' encounter order is what that aggregate already states.
+🔴 **`by(__.tail())`'s lowering landed inside `a5bc7f3`, whose message reads as tests-only.** Its
+measurements are accurate (tail is exercised by our own tests and the conformance-host gate, not by
+the corpus or L3, so neither number moved) but the feature is not named there. Recorded here rather
+than rewritten, because trunk is shared.
 
 #### 🚧 What is left, ranked
 
