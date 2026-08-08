@@ -313,6 +313,27 @@ describe('group / properties SQL', () => {
     expect(await dec("g.V().hasLabel('software').valueMap('nope')")).toEqual([new Map(), new Map()]);
   });
 
+  test('a MAP IS A SCOPE: select(<key>) reads it before the path labels', async () => {
+    const store = seededStore();
+    const dec = async (q: string) => decodeAll(executeQuery(store, q));
+    // `Scoping.getScopeValue` asks `object instanceof Map && containsKey(key)` FIRST and only then the
+    // side effects and the path labels (gremlin-core `step/Scoping.java:119-135`), and
+    // `Select.feature:758-769` pins the resolution end to end
+    // (`elementMap("name").as("a")…select("a").select("name")` → `marko`). Legacy answers EMPTY for a
+    // key that IS in the map, so this is RelIR ahead and the assertion is per-spine.
+    expect(await dec("g.V().has('name','lop').valueMap().select('name')")).toEqual(relirOff ? [] : [['lop']]);
+    // `containsKey`, not "the value is not null": an ABSENT key drops the traverser (`SelectOneStep`'s
+    // `ifProductive` emits nothing), so the two software vertices are gone rather than null.
+    expect(await dec("g.V().valueMap().select('age')")).toEqual(relirOff ? [] : [[29], [27], [32], [35]]);
+    // A key in NEITHER the map nor the labels is the empty result on both spines.
+    expect(await dec("g.V().valueMap().select('nope')")).toEqual([]);
+    // A groupCount map is a scope too — the key is a grouping VALUE, not a property name. Legacy
+    // refuses this one outright rather than answering empty, which is the same gap wearing its other
+    // face ("select() on a map value requires Column.keys or Column.values").
+    if (relirOff) expect(() => executeQuery(store, "g.V().groupCount().by('name').select('marko')")).toThrow();
+    else expect(await dec("g.V().groupCount().by('name').select('marko')")).toEqual([1]);
+  });
+
   test('the MAP LOOP: a map traverser answers its sides, its size and its entries', async () => {
     const store = seededStore();
     const dec = async (q: string) => decodeAll(executeQuery(store, q));

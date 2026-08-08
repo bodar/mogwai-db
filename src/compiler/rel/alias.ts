@@ -65,7 +65,7 @@ import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject 
 /** MODULE-PRIVATE again since §10·10: its one external reader was `lowerToRel`, pruning the map before
  *  handing it to `spine.ts`'s `TraverserLayout` bridge. With the payload projection inside the algebra
  *  there is no bridge and no map to hand over, so the two readers left are both here. */
-const liveAliases = (aliases: AliasMap, rel: Rel): AliasMap =>
+export const liveAliases = (aliases: AliasMap, rel: Rel): AliasMap =>
   new Map([...aliases].filter(([, entry]) => rel.channels.some((channel) => channel.col === entry.col)));
 
 /** Keep a traverser only where the label is actually bound on its path. An unbound label DROPS the

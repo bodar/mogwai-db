@@ -30,7 +30,7 @@ import {
   and, byEncounter, carriedCols, EDGE_COLS, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, labelArgsAllStrings,
   labelIds, meta, minter, NODE_COLS, PROPERTIES, renumber, storedValue, typeOf, type Minter,
 } from './build.ts';
-import { bindAliases } from './alias.ts';
+import { bindAliases, liveAliases } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, propertyExists, propertyVtype, type Modulation } from './modulator.ts';
 import type { ChildHost, ChildSeam, ChildValue, HostRow, RootedRead, Subject } from './child.ts';
@@ -39,7 +39,7 @@ import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
-import { ALL_TOKENS, ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, mapEntryPayload, mapPayload, mapSide, mapSize, NO_TOKENS, unfoldMap } from './map.ts';
+import { ALL_TOKENS, ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, mapEntryPayload, mapKey, mapPayload, mapSide, mapSize, NO_TOKENS, unfoldMap } from './map.ts';
 import { elementPayload } from './element.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
 import { LabelCardinality, type LabelRegime } from '../../api.ts';
@@ -2482,6 +2482,20 @@ function mapTail(
       return listTail(side.rel, side.of, steps, at + 1, ctx, fresh, labels, side.set);
     }
 
+    // `select(<key>)` reads the MAP first — see `mapKey`. A key that also names a LIVE alias declines:
+    // the reference's fallthrough (map, then labels) is one COALESCE of two sources whose "absent"
+    // tests differ, and answering only the map's half would be a wrong answer where the label is the
+    // one that resolves. An alias the relation no longer carries is not live and does not block.
+    if (step.name === 'select') {
+      const key = selectedKey(step);
+      if (key === null || liveAliases(labels, rel).has(key)) return null;
+      const keyed = mapKey(rel, key, valOf, fresh);
+      if (!keyed) return null;
+      return keyed.of
+        ? listTail(keyed.rel, keyed.of, steps, at + 1, ctx, fresh, labels)
+        : scalarTail(keyed.rel, { kind: 'scalar', type: PER_ROW('vtype') }, steps, at + 1, false, ctx, fresh, labels);
+    }
+
     if (step.name === 'unfold') {
       if (args.length) return null;
       const unfolded = unfoldMap(rel, fresh);
@@ -2509,6 +2523,15 @@ function mapTail(
  *  `map.ts`'s `ENTRY` names them for the framer. Stated here as `ColMeta` because `renumber` rebuilds
  *  the relation's whole declared type and cannot ask the framing for it. */
 const ENTRY_COLS: readonly ColMeta[] = [meta(ENTRY.key, 'json', true), meta(ENTRY.val, 'json', true)];
+
+/** The single STRING a `select()` names, or `null` for any other form (a `Column`, a `Pop`, several
+ *  labels, a nested traversal). `selectSpec` is the alias vocabulary's full parse; this is the one
+ *  question a MAP host asks, and it asks it of the VALUES for `selectedColumn`'s reason. */
+function selectedKey(step: IRStep): string | null {
+  if (step.name !== 'select' || step.modulators?.length) return null;
+  const args = argValues(step);
+  return args.length === 1 && typeof args[0] === 'string' ? args[0] : null;
+}
 
 /** `select(Column.keys)` / `select(Column.values)` — the column an entry-shaped host is asked for, or
  *  `null` for any other `select()`. ONE recognizer, because the map loop and the entry loop must agree

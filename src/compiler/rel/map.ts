@@ -6,7 +6,7 @@ import { TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/ke
 import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/step.ts';
 import { argValues } from '../../gremlin/frontend.ts';
-import { and, byEncounter, carriedCols, coalesce, EDGE_COLS, eq, fenced, jsonOf, meta, NODE_COLS, PROPERTIES, typeOf, typedNode, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, carriedCols, coalesce, EDGE_COLS, eq, fenced, firstOf, jsonOf, meta, NODE_COLS, PROPERTIES, typeOf, typedNode, withPayload, type Minter } from './build.ts';
 import { inferredVtype, LIST_COL } from './list.ts';
 import { edgeLabel, elementNode, externalId, vertexLabels } from './element.ts';
 import { byExpr, byNode, modulations, productivityFilter } from './modulator.ts';
@@ -788,14 +788,64 @@ export function unfoldMap(input: Rel, fresh: Minter): { readonly rel: Rel; reado
 export function entrySide(
   input: Rel, side: 'keys' | 'values', of: MapOf, fresh: Minter,
 ): { readonly rel: Rel; readonly of?: ListOf } | null {
-  const column = col(input.id, side === 'keys' ? ENTRY.key : ENTRY.val);
-  if (of.kind === 'list') return { rel: withPayload(input, [[LIST_COL, { kind: 'call', fn: 'jsonb', args: [column] }]], [meta(LIST_COL, 'json', true)], fresh), of: of.of };
+  return sideOf(input, col(input.id, side === 'keys' ? ENTRY.key : ENTRY.val), of, fresh);
+}
+
+/**
+ * ONE `{t,v}` NODE as the traverser — the retype both an ENTRY side and a `select(<key>)` need.
+ *
+ * A LIST side stays in the list vocabulary; a scalar side becomes an ordinary per-row-typed value
+ * stream, which is the same unwrap the list module's `memberPayload` does one container along (the
+ * value out of `$.v`, its tag out of `$.t`). An `elem` side declines for `mapPayload`'s reason: the
+ * node frames correctly where it is, and decoding it into the SCALAR vocabulary would be lossy.
+ */
+function sideOf(input: Rel, node: Expr, of: MapOf, fresh: Minter): { readonly rel: Rel; readonly of?: ListOf } | null {
+  if (of.kind === 'list') return { rel: withPayload(input, [[LIST_COL, { kind: 'call', fn: 'jsonb', args: [node] }]], [meta(LIST_COL, 'json', true)], fresh), of: of.of };
   if (of.kind !== 'scalar') return null;
-  const field = (name: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [column, compilerText(`$.${name}`)] });
+  const field = (name: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [node, compilerText(`$.${name}`)] });
   return {
     rel: withPayload(input, [['v', field('v')], ['vtype', field('t')]],
       [meta('v', 'any', true), meta('vtype', 'text', true)], fresh),
   };
+}
+
+/**
+ * `select(<key>)` over a MAP traverser — the map's own value at that key, or `null` to decline.
+ *
+ * **A MAP IS A SCOPE, and it is consulted BEFORE the path labels** — `Scoping.getScopeValue` asks the
+ * traverser's own `Map` first and only then the labels
+ * (`gremlin-core/.../step/util/Scoping.java`), which is why this is the map loop's answer to `select`
+ * and not the alias vocabulary's.
+ *
+ * **An ABSENT key DROPS the traverser, and that is a different test from a NULL value.** `select` is
+ * `SelectOneStep`, whose `ifProductive` emits nothing for an unproductive read — so presence is an
+ * `EXISTS` over the pairs and the value is its own extract, exactly the `present`-beside-the-value
+ * split the option-map `choose` needed for `Pick.none` versus `Pick.unproductive`.
+ */
+export function mapKey(input: Rel, key: string, valOf: MapOf, fresh: Minter): { readonly rel: Rel; readonly of?: ListOf } | null {
+  const rel = fenced(input, fresh);
+  // The KEY SIDE is a `{t,v}` node, so the match reads its `v` — a key is a string here (a property
+  // name or, under tokens, a `T` whose `v` is the token name, which no `select(<label>)` can name).
+  const matching = (pairs: Rel): Expr =>
+    eq({ kind: 'call', fn: 'json_extract', args: [col(pairs.id, PAIR.value), compilerText('$[0].v')] }, compilerText(key));
+  const probePairs = pairsOf(col(rel.id, MAP_COL), fresh);
+  // THE PRESENCE FILTER COMES FIRST, and the order is forced rather than chosen: the projection below
+  // spends the `map` column, so a filter after it would reference a column that no longer exists.
+  const kept = make.filter({
+    id: fresh('kg'), input: rel, channels: rel.channels, type: rel.type,
+    pred: {
+      kind: 'exists', negated: false,
+      plan: make.project({
+        id: fresh('kp'), channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]],
+        input: make.filter({ id: fresh('kf'), input: probePairs, channels: [], type: probePairs.type, pred: matching(probePairs) }),
+      }),
+    },
+  });
+  const valuePairs = pairsOf(col(kept.id, MAP_COL), fresh);
+  // The value and the order are written in the inner FILTER's scope, not the explode's — every node
+  // addresses its own INPUT, and the filter is a relation between them (`firstOf`'s own contract).
+  const matched = make.filter({ id: fresh('kv'), input: valuePairs, channels: [], type: valuePairs.type, pred: matching(valuePairs) });
+  return sideOf(kept, firstOf(matched, pairSide(col(matched.id, PAIR.value), 'values'), col(matched.id, PAIR.ord), fresh), valOf, fresh);
 }
 
 /**
