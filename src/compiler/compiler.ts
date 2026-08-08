@@ -7,7 +7,7 @@ import { routeWrite } from './steps/write/write.ts';
 import { type Executable } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
 import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './options/fast-paths.ts';
-import { resolveSpine } from './options/spine.ts';
+import { LegacyRouteRequired, legacyReachable, resolveSpine } from './options/spine.ts';
 import { compileViaRel } from './rel/spine.ts';
 import { createAppScope, createRequestScope } from '../scopes.ts';
 import { servicesNamedBy } from '../services/params/call-params.ts';
@@ -95,7 +95,13 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   // modelled, and a seed or a merge operator that route cannot express declines INSIDE the lowering
   // like any other unlearned step. That is the whole content of §6·6's lesson at the routing switch:
   // a gate here reads identically to a missing lowering in every counter the migration owns.
-  if (resolveSpine(options) === 'rel') {
+  //
+  // **THE THIRD POSITION MEASURES THE CUT.** `rel-only` tries RelIR exactly as `rel` does and then
+  // RAISES instead of falling through, so an L3 run against it counts what deleting the legacy route
+  // would cost. `rel` and `legacy` cannot answer that — both may fall back, so the `legacySpine` floor
+  // proves only *routed ≥ all-legacy*. See options/spine.ts and plan §Phase 3.
+  const position = resolveSpine(options);
+  if (position !== 'legacy') {
     const viaRel = compileViaRel(
       {
         collapse: engine.fastPaths.movementCollapse,
@@ -111,6 +117,7 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
     );
     if (viaRel) return { kind: 'sql', compiled: discard ? applyDiscard(viaRel) : viaRel };
   }
+  if (!legacyReachable(position)) throw new LegacyRouteRequired();
 
   const write = routeWrite(engine, steps, params, sackInit ?? undefined, sideEffects);
   if (write) return { kind: 'sql', compiled: discard ? applyDiscard(write) : write };

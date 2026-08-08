@@ -33,7 +33,7 @@ import { buildConformanceApp } from './conformance-server.ts';
 import { installInMemoryTransport, type InMemoryTransport } from '../support/in-memory-transport.ts';
 import { runFeatures, GLV } from '../support/cucumber.ts';
 import { L3_TAGS, isExcludedScenario } from './tags.ts';
-import { ambientSpine } from '../../src/compiler/options/spine.ts';
+import { ambientPosition, ambientSpine } from '../../src/compiler/options/spine.ts';
 import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readState, writeState, stateOf, delta, formatDelta, formatSpineGap, partitionLegacyRegressions, unionPassing, expectedErrorSubstrings } from './telemetry.ts';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
@@ -101,6 +101,14 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
   // Read the process position ONCE and carry it through every state operation: crossing sections is
   // the failure mode, because one configuration must never gate on or rewrite the other's floor.
   const spine = ambientSpine();
+  // ⚠️ THE THIRD POSITION IS A MEASUREMENT, NOT A RATCHET (plan §Phase 3, options/spine.ts).
+  // `rel-only` runs the RelIR route with the legacy fallback FORBIDDEN, so this run's failures are
+  // exactly the scenarios legacy is still carrying — the cost of deleting the route. It compares
+  // against the `rel` floor because that floor IS the routed configuration, which makes `regressed`
+  // the answer we came for. It must not gate and must not record: gating would pin a number that is
+  // meant to fall to zero, and recording would overwrite the routed floor with the un-fallen-back
+  // one, silently lowering the ratchet the migration is held to.
+  const measuringTheCut = ambientPosition() === 'rel-only';
   const report = join(tmpdir(), `mogwai-l3-${process.pid}.json`);
   // The `json` formatter is cucumber's OWN output and stays the measurement: `collectScenarios`
   // reads its shape, and the committed floor was recorded from it. Only how cucumber is DRIVEN
@@ -151,7 +159,7 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
   const recordedRel = readState(STATE, 'rel');
   const recordedLegacy = readState(STATE, 'legacy');
   const prev = spine === 'rel' ? recordedRel : recordedLegacy;
-  const spineLabel = spine === 'rel' ? 'RelIR spine' : 'legacy spine';
+  const spineLabel = measuringTheCut ? 'RelIR ONLY — measuring the cut' : spine === 'rel' ? 'RelIR spine' : 'legacy spine';
   console.log(`L3 conformance [${spineLabel}]: ${passing}/${total} scenarios pass (last recorded ${prev.passing})`);
 
   // Per-scenario delta vs the committed last-known run. The passing SET in l3-state.json
@@ -168,12 +176,37 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
   // `writeState` would record, through the same function, so the printed gap cannot drift from the
   // floor that gets committed.
   const current = stateOf(rows);
-  const gapText = formatSpineGap(
+  // The two-floor gap is a statement about the DIFFERENTIAL and says nothing under `rel-only`,
+  // whose comparison is this run against the routed floor — printed by `formatDelta` above.
+  const gapText = measuringTheCut ? '' : formatSpineGap(
     spine === 'rel' ? current : recordedRel,
     spine === 'legacy' ? current : recordedLegacy,
     spine,
   );
   if (gapText) console.log(gapText);
+
+  if (measuringTheCut) {
+    // ⚠️ FAIL CLOSED ON AN EMPTY RUN, and this is the defect the instrument's FIRST run had.
+    // Upstream's own graph-snapshot reads (`getVertices`/`getEdges`/`getVertexProperties`,
+    // `vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/world.js:147-180`) are HARNESS,
+    // not measurement — and they route to legacy, so `rel-only` raises inside them and cucumber dies
+    // before a single scenario runs. The instrument then read "0 scenarios lost", which is the worst
+    // answer a measurement can give: indistinguishable from success and pointing the wrong way.
+    // A zero-scenario run is a BROKEN run, never a clean one.
+    if (total === 0) {
+      throw new Error('L3 [rel-only] ran ZERO scenarios — the cut is UNMEASURED, not zero. cucumber aborted, '
+        + 'almost certainly inside world.js\'s graph-snapshot reads, which take the legacy route and therefore '
+        + 'raise under this position. Land those shapes on RelIR (plan §Phase 2 gap 4 — element-keyed side '
+        + `reads) and this instrument starts reporting.\n--- cucumber stdout ---\n${out.slice(-2000)}`);
+    }
+    console.log(`\nL3 THE CUT: deleting the legacy route today costs ${d.regressed.length} scenario(s) — `
+      + `${passing}/${total} on RelIR alone vs ${prev.passing} routed.`);
+    console.log(d.regressed.length
+      ? `Each is a traversal RelIR declines and legacy answers:\n${d.regressed.map((r) => `  - ${r.name}`).join('\n')}`
+      : 'Nothing. On L3, the legacy route is already carrying zero scenarios.');
+    console.log('Rank by FAMILY with `mise run rel-blockers`; ⚠️ read every name through §6·6 first — '
+      + 'a shape the algebra expresses but nothing HANDS it reads identically to a missing lowering.');
+  }
 
   // The systematic-gap view (deferral buckets + failing-step frequency), joined from the
   // server NDJSON captured this run. Always on. The NDJSON + summary are gitignored
@@ -199,11 +232,16 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
   // regression. So the legacy side gates on the UNION: legacy may shed anything the RelIR floor
   // holds, and may not lose a name no spine holds. Two assertions that fail differently on purpose
   // (the second also catches a name that left SCOPE, which `delta` cannot see).
+  //
+  // …and `rel-only` gates on NOTHING. Its regressions are the measurement itself, so asserting on
+  // them would make the instrument fail by definition until Phase 4 — the one shape of test that
+  // teaches everyone to ignore it.
   const shed = spine === 'legacy' ? partitionLegacyRegressions(d.regressed, recordedRel) : undefined;
   if (shed?.shed.length) {
     console.log(`L3 [legacy spine] shed ${shed.shed.length} scenario(s) the RelIR floor holds — ` +
       `legal (§6·1), lowers the legacy floor:\n${shed.shed.map((r) => `  - ${r.name}`).join('\n')}`);
   }
+  if (measuringTheCut) return;
   expect(shed ? shed.uncompensated : d.regressed).toHaveLength(0);
   if (spine === 'rel') {
     expect(passing).toBeGreaterThanOrEqual(prev.passing);

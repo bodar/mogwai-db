@@ -245,6 +245,19 @@ depends = ["install", "check", "submodule"]
 env = { MOGWAI_RELIR = "0" }
 run = "bun test"
 
+# THE CUT, not the differential — the one number `test:legacy-spine` structurally cannot produce.
+# Both of the other positions may fall back to legacy, so the `legacySpine` floor proves only
+# `routed >= all-legacy`; this position forbids the fallback, so its FAILURES are exactly the
+# scenarios legacy is still carrying. Not in `ci` and not a gate: it is a measurement whose number is
+# meant to fall to zero by Phase 4, and it prints the per-scenario list plus a pointer at
+# `rel-blockers` for the family ranking. Scoped to L3 deliberately — the corpus-wide view is already
+# `rel-blockers`, and the census would simply crash on every legacy-carried traversal.
+[tasks."L3:rel-only"]
+description = "Instrument: what deleting the legacy route costs today, in L3 scenarios (no gate, no ratchet)"
+depends = ["install", "check", "submodule"]
+env = { MOGWAI_RELIR = "only" }
+run = "bun test test/L3-conformance/l3.test.ts"
+
 [tasks."test:cf-limits"]
 description = "Instrument: the full suite with every statement asserted Cloudflare-legal (≤100 binds)"
 depends = ["install", "check", "submodule"]
