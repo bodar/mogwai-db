@@ -424,8 +424,8 @@ describe('repeat / path SQL', () => {
     // conjoin → String, unfold → the exploded scalars.
     expect(read('g.V().out().out().path().by("name").reverse()').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
     expect(read('g.V().out().out().path().by("name").combine(["x"])').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
-    expect(read('g.V().out().out().path().by("name").merge(["x"])').shape).toEqual({ kind: 'jsonbSet' });
-    expect(read('g.V().out().out().path().by("name").difference(["x"])').shape).toEqual({ kind: 'jsonbSet' });
+    expect(read('g.V().out().out().path().by("name").merge(["x"])').shape).toEqual({ kind: 'jsonbSet', items: SCALAR_MEMBERS });
+    expect(read('g.V().out().out().path().by("name").difference(["x"])').shape).toEqual({ kind: 'jsonbSet', items: SCALAR_MEMBERS });
     expect(read('g.V().out().out().path().by("name").conjoin("-")').shape).toEqual({ kind: 'value', type: STATIC('string') });
     // the retype builds one JSON array per path row from the position value columns.
     expect(read('g.V().out().out().path().by("name").reverse()').sql).toContain('json_array');

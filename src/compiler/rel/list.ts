@@ -3,7 +3,7 @@ import { sliceBound } from './const.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
-import { hasTypedMembers, memberTypeOf, perRowColumnOf, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, TYPED_MEMBERS, UNKNOWN, type ListOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
+import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import { isNested, isPred, argValues } from '../../gremlin/frontend.ts';
 import { isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
@@ -943,7 +943,18 @@ export function listSetOp(
   })();
   if (!result) return null;
 
-  const resultOf: ListOf = step.name === 'product' ? { kind: 'list', of: BARE_LIST } : BARE_LIST;
+  // THE RESULT'S MEMBER TYPE IS THE TWO SIDES' MEET. Both sides were normalized to payloads above, so
+  // the members no longer state their own types — but where BOTH were bare and AGREED on a static
+  // tag, that tag still describes every member of the result and dropping it framed a set of longs
+  // by JS inference. An ENVELOPE side is honestly `unknown` here: flattening it to payloads is what
+  // put the two sides in one vocabulary, and recovering the tags needs both sides normalized to the
+  // TYPED encoding instead — a different design, noted rather than half-done.
+  const merged = isTypedList(of) || isTypedList(resolved.of) ? UNKNOWN
+    : sameScalarType(memberTypeOf(of) ?? UNKNOWN, memberTypeOf(resolved.of) ?? UNKNOWN)
+      ? memberTypeOf(of) ?? UNKNOWN : UNKNOWN;
+  const resultOf: ListOf = step.name === 'product'
+    ? { kind: 'list', of: withMemberType(BARE_LIST, merged) }
+    : withMemberType(BARE_LIST, merged);
   return { rel: result, of: resultOf, ...(SET_RESULT.has(step.name) && terminal ? { set: true } : {}) };
 }
 
@@ -1058,7 +1069,7 @@ export function listPayload(rel: Rel, of: ListOf, set: boolean, fresh: Minter): 
   const payload = listPayloadExpr(col(ordered.id, LIST_COL), of, fresh);
   if (!payload) return null;
   const shape: Shape = of.kind === 'list' ? { kind: 'jsonbList', items: of }
-    : set ? { kind: 'jsonbSet', ...(isTypedList(of) ? { typed: true } : {}) }
+    : set ? { kind: 'jsonbSet', items: of }
       : { kind: 'jsonbList', items: of };
   return {
     rel: make.project({

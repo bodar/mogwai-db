@@ -335,11 +335,11 @@ describe('scalar-parent / projection SQL', () => {
   test('set-op / list-algebra family (combine/intersect/difference/disjunct/product/conjoin/all/any)', () => {
     // combine = concat → a List; intersect/difference/disjunct → a Set (jsonbSet) when terminal.
     expect(read('g.V().values("age").fold().combine([1,2])').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
-    expect(read('g.V().values("age").fold().intersect([27,29])').shape).toEqual({ kind: 'jsonbSet' });
-    expect(read('g.V().values("age").fold().difference([27])').shape).toEqual({ kind: 'jsonbSet' });
-    expect(read('g.V().values("age").fold().disjunct([27])').shape).toEqual({ kind: 'jsonbSet' });
+    expect(read('g.V().values("age").fold().intersect([27,29])').shape).toEqual({ kind: 'jsonbSet', items: SCALAR_MEMBERS });
+    expect(read('g.V().values("age").fold().difference([27])').shape).toEqual({ kind: 'jsonbSet', items: SCALAR_MEMBERS });
+    expect(read('g.V().values("age").fold().disjunct([27])').shape).toEqual({ kind: 'jsonbSet', items: SCALAR_MEMBERS });
     // merge = set union of both operands → a Set (jsonbSet) when terminal.
-    expect(read('g.V().values("age").fold().merge([1,2])').shape).toEqual({ kind: 'jsonbSet' });
+    expect(read('g.V().values("age").fold().merge([1,2])').shape).toEqual({ kind: 'jsonbSet', items: SCALAR_MEMBERS });
     expect(read('g.inject(["a",null,"b"]).merge(["a","c"])', { spine: 'legacy' }).sql).toContain('UNION');
     // null-safe set membership (IS, not =) so null intersects/differs correctly — both spines, each in
     // its own aliases, because getting this wrong is a wrong ANSWER (a null member never matching).
@@ -353,8 +353,8 @@ describe('scalar-parent / projection SQL', () => {
     // a Set followed by a list op (order(Scope.local)) degrades to a List (not a Set).
     expect(read('g.V().values("age").fold().intersect([27]).order(Scope.local)').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
     // constant(c).fold() and a standalone scalar-list traversal are valid operands.
-    expect(read('g.V().values("age").fold().intersect(__.constant(27).fold())').shape).toEqual({ kind: 'jsonbSet' });
-    expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())').shape).toEqual({ kind: 'jsonbSet' });
+    expect(read('g.V().values("age").fold().intersect(__.constant(27).fold())').shape).toEqual({ kind: 'jsonbSet', items: SCALAR_MEMBERS });
+    expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())').shape).toEqual({ kind: 'jsonbSet', items: SCALAR_MEMBERS });
     // the standalone operand embeds as a scalar subquery (its own WITH + json_group_array).
     // A SUB-READ operand — the members are only known at run time, so the operand is a relation. Legacy
     // compiles it separately and embeds the rendered SQL; RelIR lowers it with the SAME fold into the

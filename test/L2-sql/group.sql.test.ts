@@ -99,7 +99,7 @@ describe('group / properties SQL', () => {
     expect(() => compile('g.V().valueMap(true).select(Column.keys)', {}, { spine: 'legacy' })).toThrow('valueMap(true)/token re-entry not yet supported');
     // RelIR re-enters a TOKEN map like any other: the token entries are ordinary pairs of the same
     // self-describing tree, so the key side is the `T` node beside the property-name nodes.
-    if (!relirOff) expect(bare_read('g.V().valueMap(true).select(Column.keys)').shape).toEqual({ kind: 'jsonbSet', typed: true });
+    if (!relirOff) expect(bare_read('g.V().valueMap(true).select(Column.keys)').shape).toEqual({ kind: 'jsonbSet', items: TYPED_MEMBERS });
   });
 
   test('order(Scope.local).by(Column.keys/values) re-sorts a map blob in place', () => {
@@ -346,7 +346,7 @@ describe('group / properties SQL', () => {
     const keys = read("g.V().groupCount().by('name').select(Column.keys)");
     expect(keys.shape).toEqual(relirOff
       ? { kind: 'jsonbList', items: TYPED_MEMBERS }
-      : { kind: 'jsonbSet', typed: true });
+      : { kind: 'jsonbSet', items: TYPED_MEMBERS });
     expect(read("g.V().groupCount().by('name').select(Column.values)").shape.kind).toBe('jsonbList');
     expect(await dec("g.V().groupCount().by('name').select(Column.values)"))
       .toEqual([[1, 1, 1, 1, 1, 1]]);

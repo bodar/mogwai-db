@@ -407,9 +407,11 @@ const jsGtype = (v: any): string => (typeof v === 'number' ? (Number.isInteger(v
 /** Resolve a set-op operand argument to a JSONB list expression, raising TinkerPop's
  *  exact argument errors. Literal array / constant(c).fold() only; a standalone
  *  traversal operand defers. */
-function operandList(engine: Engine, arg: any, op: string, params: Record<string, any>): Expression {
+function operandList(engine: Engine, arg: any, op: string, params: Record<string, any>): { expr: Expression; typed: boolean } {
   if (arg === null || arg === undefined) throw new Error(`Argument provided for ${op} step can't be null`);
-  if (Array.isArray(arg)) return q`jsonb(${value(JSON.stringify(arg))})`;
+  // A literal array and `constant(c).fold()` are COMPILE-TIME lists, so their members are bare by
+  // construction; only a rooted SUB-READ can hand back self-describing ones.
+  if (Array.isArray(arg)) return { expr: q`jsonb(${value(JSON.stringify(arg))})`, typed: false };
   if (isNested(arg)) {
     // `childSteps`, not a bare `stepChain`: the operand is a nested BODY and must go through the same
     // normalization every other body does, which is what ABSORBS a modulator onto its host. Without it
@@ -429,11 +431,11 @@ function operandList(engine: Engine, arg: any, op: string, params: Record<string
     const pre = inner.slice(0, -1);
     if (pre.length === 1 && pre[0].name === 'constant') {
       const c = pre[0].args[0].value;
-      return q`jsonb(${value(JSON.stringify([c ?? null]))})`;
+      return { expr: q`jsonb(${value(JSON.stringify([c ?? null]))})`, typed: false };
     }
     const folded = foldedListSubquery(engine, inner, params);
     if (!folded) throw new Error(`${op}() operand traversal must fold a scalar list (values/id/label)`);
-    return folded;
+    return { expr: folded, typed: true };
   }
   // A MAP argument gets `MergeStep`'s own wording (gremlin-core .../step/map/MergeStep.java:95):
   // over a LIST receiver the argument must be Iterable, and a Map is the one non-Iterable the
@@ -609,17 +611,26 @@ const listConjoin: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
 const listSetOp: ShapeTailFn<ListStream> = (s, step, steps, at) => {
   const c = s.rel.as('c');
   const op = operandList(engineOf(s), step.args[0]?.value, step.name, s.params);
+  // ⚠️ A SELF-DESCRIBING OPERAND IS A WRONG ANSWER ON THIS ROUTE, and the shed is BLOCKED on RelIR
+  // coverage rather than on the fix. Only the SELF side is flattened to payloads below, and a
+  // `{"t":"datetime","v":…}` envelope never equals a bare payload — so a typed operand matches
+  // NOTHING and `values("when").fold().intersect(__.V().values("when").fold())` answers `[]`, a
+  // list's intersection with ITSELF. RelIR flattens both sides and answers it, so §6·1 says this
+  // route should DECLINE rather than grow a second copy of the fix. It cannot yet: `order(Scope.local)`
+  // and `dedup(Scope.local)` after a set-op are legacy-only, so declining here sheds shapes the RelIR
+  // floor does not hold — which the census gate refuses, correctly. Land those two on RelIR first.
+  // Measured when the decline was tried: L3 -1, 7 COVERED differentials, 2 census gates.
   // A typed incoming list meets a BARE operand (a literal array / constant().fold()), so the
   // two sides' encodings differ. Comparing and emitting on the payload puts both sides in
   // one vocabulary; the result is therefore a bare list, uniformly (mixing a typed member
   // with a bare operand member inside one list is precisely the corruption to avoid).
-  const listExpr = setOpExpr(step.name, c.c.list, op, isTyped(s.of));
+  const listExpr = setOpExpr(step.name, c.c.list, op.expr, isTyped(s.of));
   const terminal = at + 1 >= steps.length;
   // intersect/difference/disjunct return a Set: frame as a Set only when terminal. With a
   // follower (order(Scope.local)/unfold) the deduped content is treated as a plain list
   // (TinkerPop's order(local) on a set yields a List), matching the suite.
   if (SET_RESULT.has(step.name) && terminal)
-    return continueLowering(toResultStream(s.q, q`SELECT json(${listExpr}) AS list FROM ${c}`, { kind: 'jsonbSet' }), at + 1);
+    return continueLowering(toResultStream(s.q, q`SELECT json(${listExpr}) AS list FROM ${c}`, { kind: 'jsonbSet', items: SCALAR_MEMBERS }), at + 1);
   // product yields a list of pair-lists; the others keep the element shape — but a typed
   // list that met a bare operand has been flattened to payloads, so it is bare now.
   const of = step.name === 'product' ? { kind: 'list' as const, of: SCALAR_MEMBERS }

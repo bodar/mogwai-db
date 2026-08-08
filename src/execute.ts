@@ -705,9 +705,10 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
     // A set-VALUE stream (intersect/difference/disjunct, or a stored typed set): frame each
     // list column as a Set — typed items via frameTypedNode (exact element types), else the
     // client's element-inferring SetSerializer over the computed scalars.
-    case 'jsonbSet': for (const r of rows)
-      yield shape.typed ? setBuffer((JSON.parse(r.list) as ValueNode[]).map(frameTypedNode))
-        : ioc.setSerializer.serialize(new Set(JSON.parse(r.list))); return;
+    // A SET frames exactly as a list does, member for member — only the outer buffer differs. It used
+    // to have its own two-branch reader keyed on a `typed` boolean, which meant a set of `long`s or
+    // `datetime`s carrying ONE static tag had no way to say so and framed by JS inference.
+    case 'jsonbSet': for (const r of rows) yield setBuffer(listItemBuffers(r.list, shape.items)); return;
     case 'discard': return;
   }
 }

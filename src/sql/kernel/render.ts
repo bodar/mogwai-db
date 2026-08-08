@@ -293,7 +293,11 @@ export type Shape =
   | { kind: 'jsonbList'; items: ListOf }
   | { kind: 'jsonbPath'; items: ListOf } // one JSONB array of positions per row → one GraphBinary Path
   | { kind: 'jsonbElementList'; elem: Exclude<ElemShape, 'property'> } // one JSON object-array per relational element list
-  | { kind: 'jsonbSet'; typed?: boolean }    // a set-VALUE stream (intersect/difference/disjunct OR a stored typed set): one Set per row, from a JSONB `list` column
+  // A set-VALUE stream (intersect/difference/disjunct OR a stored typed set): one Set per row, from
+  // a JSONB `list` column. `items` is the SAME total member descriptor `jsonbList` carries — it was a
+  // `typed?: boolean`, which is the last of the four flag-bag spellings and the only one that could
+  // not say a set's members share one STATIC type.
+  | { kind: 'jsonbSet'; items: ListOf }
   // `labelSet` says the `label` column holds a JSON ARRAY of names (the multi-label regime)
   // rather than one name. Carried on the shape because the SQL and the framer must agree, and the
   // regime is a per-traversal decision the framer cannot re-derive.
