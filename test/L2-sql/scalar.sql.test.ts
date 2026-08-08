@@ -354,14 +354,19 @@ describe('scalar-parent / projection SQL', () => {
     expect(read('g.V().values("age").fold().intersect([27]).order(Scope.local)').shape).toEqual({ kind: 'jsonbList', items: SCALAR_MEMBERS });
     // constant(c).fold() and a standalone scalar-list traversal are valid operands.
     expect(read('g.V().values("age").fold().intersect(__.constant(27).fold())').shape).toEqual({ kind: 'jsonbSet', items: SCALAR_MEMBERS });
-    expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())').shape).toEqual({ kind: 'jsonbSet', items: SCALAR_MEMBERS });
+    // A SUB-READ operand is self-describing, which is the shape legacy now sheds — so this asserts the
+    // shape only where RelIR is the ambient route. The shed itself is asserted below, in both.
+    if (!relirOff) expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())').shape).toEqual({ kind: 'jsonbSet', items: SCALAR_MEMBERS });
     // the standalone operand embeds as a scalar subquery (its own WITH + json_group_array).
-    // A SUB-READ operand — the members are only known at run time, so the operand is a relation. Legacy
-    // compiles it separately and embeds the rendered SQL; RelIR lowers it with the SAME fold into the
-    // same algebra and reads it through a `Scalar` expression (no escape node), so each spine is pinned
-    // in its own spelling and the row-for-row differential ties the answers.
-    expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())', { spine: 'legacy' }).sql)
-      .toContain('SELECT jsonb(list)');
+    // A SUB-READ operand — the members are only known at run time, so the operand is a relation. RelIR
+    // lowers it with the SAME fold into the same algebra and reads it through a `Scalar` expression
+    // (no escape node).
+    //
+    // LEGACY SHEDS THIS SHAPE (§6·1). Its set-op flattens only the SELF side, so a self-describing
+    // operand — which every `values(k).fold()` sub-read is — matched NOTHING and a list's difference
+    // from ITSELF answered the whole list. It now fails closed instead, and RelIR is the route.
+    expect(() => read('g.V().values("name").fold().difference(__.V().values("name").fold())', { spine: 'legacy' }))
+      .toThrow('self-describing operand');
     expect(read('g.V().values("name").fold().difference(__.V().values("name").fold())', { spine: 'rel' }).sql)
       .toMatch(/json_each\(\(SELECT jsonb\(COALESCE\(json_group_array/);
     // an element-fold operand (a vertex list) isn't a scalar list → defers.

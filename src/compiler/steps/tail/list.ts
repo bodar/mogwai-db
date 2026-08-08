@@ -611,15 +611,18 @@ const listConjoin: ShapeTailFn<ListStream> = (s, step, _steps, at) => {
 const listSetOp: ShapeTailFn<ListStream> = (s, step, steps, at) => {
   const c = s.rel.as('c');
   const op = operandList(engineOf(s), step.args[0]?.value, step.name, s.params);
-  // ⚠️ A SELF-DESCRIBING OPERAND IS A WRONG ANSWER ON THIS ROUTE, and the shed is BLOCKED on RelIR
-  // coverage rather than on the fix. Only the SELF side is flattened to payloads below, and a
-  // `{"t":"datetime","v":…}` envelope never equals a bare payload — so a typed operand matches
-  // NOTHING and `values("when").fold().intersect(__.V().values("when").fold())` answers `[]`, a
-  // list's intersection with ITSELF. RelIR flattens both sides and answers it, so §6·1 says this
-  // route should DECLINE rather than grow a second copy of the fix. It cannot yet: `order(Scope.local)`
-  // and `dedup(Scope.local)` after a set-op are legacy-only, so declining here sheds shapes the RelIR
-  // floor does not hold — which the census gate refuses, correctly. Land those two on RelIR first.
-  // Measured when the decline was tried: L3 -1, 7 COVERED differentials, 2 census gates.
+  // A SELF-DESCRIBING OPERAND FAILS CLOSED, because answering it here is a WRONG ANSWER rather than
+  // a coarse one. Only the SELF side is flattened to payloads below, and a `{"t":"datetime","v":…}`
+  // envelope never equals a bare payload — so a typed operand matches NOTHING and
+  // `values("when").fold().intersect(__.V().values("when").fold())` answers `[]`, a list's
+  // intersection with ITSELF. It passed for a literal-array operand and for the reference graph's
+  // storage-class-determined properties, which is exactly the shape the corpus cannot see.
+  //
+  // RelIR flattens BOTH sides and answers it, so §6·1 says this route SHEDS rather than growing a
+  // second copy of the fix on a spine with an end date. The shed was blocked until `order(Scope.local)`
+  // and `dedup(Scope.local)` landed on RelIR — declining here also sheds those, and the census
+  // refuses shedding a shape the RelIR floor does not hold. It holds them now.
+  if (op.typed) throw new Error(`${step.name}() with a self-describing operand collection not supported`);
   // A typed incoming list meets a BARE operand (a literal array / constant().fold()), so the
   // two sides' encodings differ. Comparing and emitting on the payload puts both sides in
   // one vocabulary; the result is therefore a bare list, uniformly (mixing a typed member
