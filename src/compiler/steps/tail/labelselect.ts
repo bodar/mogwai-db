@@ -1,7 +1,7 @@
 import { q, list, raw, empty, value, type Expression } from '../../../sql/kernel/q.ts';
 import { argValues, isTokenArg } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import { aliasElem, aliasIsElement, aliasScalarTypeOf, layoutCols, patchLayout, layoutProjection, scalarTypeFromAlias, withShape, type AliasEntry, type AliasScalarType, type TraverserLayout, type LoweringState, type ElementStream } from '../context/context.ts';
+import { aliasElem, aliasIsElement, aliasScalarTypeOf, layoutCols, patchLayout, layoutProjection, scalarTypeFromAlias, withShape, type AliasEntry, type TraverserLayout, type LoweringState, type ElementStream } from '../context/context.ts';
 import {
     aliasAppend, aliasEntry, aliasId, aliasPop, aliasPresent, aliasScalar, aliasSeed, elemEntry, entryTypeTag, shapeElem,
     type AliasShape,
@@ -10,7 +10,7 @@ import {
     loweringStateOf, withRelationAndLayout, pathColumns, streamColumns, toElementStream, toListStream, toPropertyStream, toScalarStream, PROPERTY_PAYLOAD,
     type ListOf, type PropertyStream, type Stream,
 } from '../context/stream.ts';
-import { PER_ROW, perRowColumnOf, SCALAR_MEMBERS, staticTypeOf, TYPED_MEMBERS } from '../../../sql/kernel/render.ts';
+import { PER_ROW, PER_ROW_ENVELOPE, perRowColumnOf, sameScalarType, SCALAR_MEMBERS, staticTypeOf, TYPED_MEMBERS, type ScalarType } from '../../../sql/kernel/render.ts';
 import { elemTable, propScalarFor, predicateSql } from '../../plan/plan.ts';
 
 // ---------- as()/select() over path-history labels, any stream shape ----------
@@ -28,7 +28,7 @@ const payloadOf = (s: Exclude<Stream, { kind: 'result' }>): string[] => {
 
 /** The tagged current-object entry for a non-element stream, its shape, and (for a
  *  value) its compile-time type tag. */
-function currentEntry(s: Exclude<Stream, { kind: 'result' }>, p: any): { entry: Expression; shape: AliasShape; scalarType?: AliasScalarType; listOf?: ListOf } {
+function currentEntry(s: Exclude<Stream, { kind: 'result' }>, p: any): { entry: Expression; shape: AliasShape; scalarType?: ScalarType; listOf?: ListOf } {
   switch (s.kind) {
     case 'scalar': {
       const scalarType = aliasScalarTypeOf(s.type);
@@ -91,9 +91,12 @@ export function asOnStream(s: Exclude<Stream, { kind: 'result' | 'elements' }>, 
     aliases.set(lbl, {
       col,
       shapes: withShape(existing?.shapes, shape),
+      // A REBIND MERGES the label's type, and it is the same join `mergeAliasScalarTypes` performs for
+      // a branch — `sameScalarType` decides agreement, so two `long`s that disagree about `text` no
+      // longer read as agreeing and collapse to the entry's own `t`.
       scalarType: shape === 'value'
-        ? (!existing ? scalarType : existing.scalarType?.kind === 'static' && scalarType?.kind === 'static' && existing.scalarType.type === scalarType.type
-          ? scalarType : { kind: 'perRow' })
+        ? (!existing || !existing.scalarType || !scalarType ? scalarType
+          : sameScalarType(existing.scalarType, scalarType) ? scalarType : PER_ROW_ENVELOPE)
         : existing?.scalarType,
       listOf: shape === 'list' ? listOf : existing?.listOf,
       binds: (existing?.binds ?? 0) + 1,

@@ -1,6 +1,6 @@
 import { q, value, empty, type Expression } from '../../sql/kernel/q.ts';
 import { type Elem } from './plan.ts';
-import { PER_ROW, STATIC, type ListOf, type ScalarType, type ValueType } from '../../sql/kernel/render.ts';
+import { PER_ROW, PER_ROW_ENVELOPE, sameScalarType, UNKNOWN, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
 
 // ---------- as() label encoding: per-traverser path history ----------
 //
@@ -129,7 +129,7 @@ export type AliasEntry = {
   /** The scalar type channel after it has crossed into JSON history. A per-row
    * stream no longer has its original relation column, so it is represented by
    * the entry's own `t` field and restored into a fresh `vtype` column on select. */
-  scalarType?: AliasScalarType;
+  scalarType?: ScalarType;
   /** Member descriptor for a list value held in history. This is deliberately
    * alias-local: it says how to re-enter THIS JSON list, not what a Stream is. */
   listOf?: ListOf;
@@ -148,33 +148,40 @@ export type AliasEntry = {
 };
 export type AliasMap = ReadonlyMap<string, AliasEntry>;
 
-export type AliasScalarType =
-  | { readonly kind: 'static'; readonly type: ValueType }
-  | { readonly kind: 'perRow' }
-  | { readonly kind: 'unknown' };
+/**
+ * A LABEL'S SCALAR TYPE IS AN ORDINARY `ScalarType` — §6·7's LAST coarsening, retired.
+ *
+ * It used to be its own three-arm union (`static` without `text`, a column-less `perRow`, `unknown`),
+ * invented because a history entry has no relation COLUMN to name: the type rides in the entry's own
+ * `t` field. That reason was real and the separate vocabulary was not the answer to it — a value that
+ * states its own type inside a JSON document is exactly `PER_ROW_ENVELOPE`, which is what the carrier
+ * union now spells. So the alias channel joins the one vocabulary and stops being the last place a
+ * scalar type is described in its own words.
+ *
+ * What the coarsening COST, and it is the same loss the list members had: `static` dropped `text`, so
+ * a big long carried as decimal TEXT went through `as('a')`/`select('a')` and came back a plain
+ * static `long` — the flag that says "cast this before comparing it" gone, which is the defect the
+ * local reducers had from the other direction.
+ */
+export const aliasScalarTypeOf = (type: ScalarType): ScalarType =>
+  type.kind === 'perRow' ? PER_ROW_ENVELOPE : type;
 
-export const aliasScalarTypeOf = (type: ScalarType): AliasScalarType =>
-  type.kind === 'static' ? { kind: 'static', type: type.type }
-    : type.kind === 'perRow' ? { kind: 'perRow' }
-      : { kind: 'unknown' };
-
-/** Restore an alias history type to a scalar relation. `perRow` deliberately
- * names the NEW projection column, not the source relation's vanished column. */
-export const scalarTypeFromAlias = (type: AliasScalarType | undefined, vtype = 'vtype'): ScalarType =>
-  type?.kind === 'static' ? STATIC(type.type)
-    : type?.kind === 'perRow' ? PER_ROW(vtype)
-      : { kind: 'unknown' };
+/** Restore an alias history type onto a scalar relation. The carrier MOVES: inside the history the
+ *  type rides in the entry's `t`, and on the way out it becomes a column of the NEW projection (never
+ *  the source relation's vanished one). `static`/`unknown` cross unchanged, `text` flag included. */
+export const scalarTypeFromAlias = (type: ScalarType | undefined, vtype = 'vtype'): ScalarType =>
+  type === undefined ? UNKNOWN : type.kind === 'perRow' ? PER_ROW(vtype) : type;
 
 /** Merge the scalar types of several bindings of one label — the alias channel's own join, used
- *  when a branch merge unions arms that bound the same label differently. */
-export const mergeAliasScalarTypes = (types: readonly (AliasScalarType | undefined)[]): AliasScalarType | undefined => {
-  const present = types.filter((type): type is AliasScalarType => type !== undefined);
+ *  when a branch merge unions arms that bound the same label differently. `sameScalarType` is the
+ *  authority, so two `long`s that disagree about `text` no longer read as agreeing. */
+export const mergeAliasScalarTypes = (types: readonly (ScalarType | undefined)[]): ScalarType | undefined => {
+  const present = types.filter((type): type is ScalarType => type !== undefined);
   if (!present.length) return undefined;
-  if (present.every((type) => type.kind === 'static' && type.type === (present[0] as any).type)) return present[0];
-  if (present.every((type) => type.kind === 'unknown')) return { kind: 'unknown' };
-  // Different static tags and branch-local types are all faithfully represented by
-  // the JSON entry's `t`; a selected relation must expose that per-row channel.
-  return { kind: 'perRow' };
+  if (present.every((type) => sameScalarType(type, present[0]!))) return present[0];
+  // Differing tags are all faithfully represented by the JSON entry's own `t`, so the merged label is
+  // self-describing rather than untyped — a selected relation exposes that per-row channel.
+  return PER_ROW_ENVELOPE;
 };
 
 /** The element kind of a homogeneously-element label (node/edge). Throws if the

@@ -3,7 +3,7 @@ import { aliasCtx, type Elem, type ScalarCtx, elemTable, P_OPS, propScalarFor } 
 import {
   aliasElem, aliasId, aliasIsElement, aliasPresent, aliasScalar, aliasScalarTypeOf, mergeAliasScalarTypes,
   scalarTypeFromAlias, withShape,
-  type AliasEntry, type AliasMap, type AliasScalarType, type AliasShape,
+  type AliasEntry, type AliasMap, type AliasShape,
 } from '../../plan/alias.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import type { ValueType, ListOf } from '../../../sql/kernel/render.ts';
@@ -24,7 +24,7 @@ import { CHANNEL_BARRIER_POLICY, CHANNEL_MERGE_POLICY, type BarrierPolicy, type 
  *  and both read them back, which is why one home rather than a copy per spine. */
 export {
   aliasElem, aliasIsElement, aliasScalarTypeOf, scalarTypeFromAlias, withShape,
-  type AliasEntry, type AliasMap, type AliasScalarType,
+  type AliasEntry, type AliasMap,
 };
 
 /** Path tracking. Two regimes (see docs/2026-07-12-path-tracking-prior-art.md):
