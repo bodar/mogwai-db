@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { CfLimitedSql } from '../src/cf-limits.ts';
-import { LabelCardinality } from '../src/api.ts';
 import { loadGraphson, graphsonValue, writeGraphson } from '../src/formats/graphson.ts';
 import { executeQuery } from './support/executor.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
@@ -28,7 +27,7 @@ import { BigDecimal, Duration } from '../src/gremlin/types.ts';
 const GRAPHSON = 'vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/structure/io/graphson';
 const fixture = (name: string) => readFileSync(new URL(`../${GRAPHSON}/${name}`, import.meta.url).pathname, 'utf8');
 
-const fresh = (cardinality?: LabelCardinality) => new GraphStore(new CfLimitedSql(new BunSqlite(':memory:')), cardinality);
+const fresh = () => new GraphStore(new CfLimitedSql(new BunSqlite(':memory:')));
 const seededByTraversals = (seed: readonly string[]) => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   for (const q of seed) executeQuery(store, q, {});
@@ -173,7 +172,7 @@ describe('v3 and v4 differ in exactly one field, and the other artefacts fail cl
   ].join('\n');
 
   test('a v4 label ARRAY lands as the label set, including multi-label and none', () => {
-    const store = fresh(LabelCardinality.ZERO_OR_MORE);
+    const store = fresh();
     loadGraphson(store, v4);
     expect(store.query<{ id: number; labels: string | null }>(
       `SELECT n.id AS id, group_concat(l.name, ',') AS labels FROM nodes n
@@ -240,9 +239,9 @@ const canonical = (store: GraphStore) =>
     Object.fromEntries(Object.entries(r).map(([k, v]) => [k, v instanceof Uint8Array ? `blob:${Buffer.from(v).toString('hex')}` : v])))]));
 
 /** Write `store` out and read it back into a fresh one — the round trip both gates assert on. */
-function roundTrip(store: GraphStore, cardinality?: LabelCardinality): { document: string; reloaded: GraphStore } {
+function roundTrip(store: GraphStore): { document: string; reloaded: GraphStore } {
   const document = writeGraphson(store);
-  const reloaded = fresh(cardinality);
+  const reloaded = fresh();
   loadGraphson(reloaded, document);
   return { document, reloaded };
 }
@@ -287,9 +286,9 @@ describe('the round trip preserves what the type channel carries', () => {
     // gzoo is the multi-label showcase (ten of its thirteen vertices carry several labels). v3's
     // `label` is ONE bare string, so a v3 writer is lossy for exactly the graph that exercises the
     // feature we declare (§4c); v4's label array is what makes this test possible.
-    const store = new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ZERO_OR_MORE);
+    const store = new GraphStore(new BunSqlite(':memory:'));
     for (const q of ZOO_SEED) executeQuery(store, q, {});
-    const { document, reloaded } = roundTrip(store, LabelCardinality.ZERO_OR_MORE);
+    const { document, reloaded } = roundTrip(store);
     expect(canonical(reloaded)).toEqual(canonical(store));
     // Not vacuous: the graph really does carry multi-label vertices, and one deliberately single one.
     const labelCounts = JSON.parse(document.split('\n')[0]).label;

@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { CfLimitedSql } from '../src/cf-limits.ts';
-import { LabelCardinality } from '../src/api.ts';
 import { loadGraphson } from '../src/formats/graphson.ts';
 import { csvLine, csvPaths, csvRecords, loadCsv, writeCsv } from '../src/formats/csv.ts';
 import { executeQuery } from './support/executor.ts';
@@ -28,9 +27,9 @@ const GRAPHSON = 'vendor/tinkerpop/gremlin-test/src/main/resources/org/apache/ti
 const fixture = (name: string) => readFileSync(new URL(`../${GRAPHSON}/${name}`, import.meta.url).pathname, 'utf8');
 
 /** Every store here is CF-parity checked, so a bind list that scales with row count fails on Bun. */
-const fresh = (cardinality?: LabelCardinality) => new GraphStore(new CfLimitedSql(new BunSqlite(':memory:')), cardinality);
-const seeded = (seed: readonly string[], cardinality?: LabelCardinality) => {
-  const store = fresh(cardinality);
+const fresh = () => new GraphStore(new CfLimitedSql(new BunSqlite(':memory:')));
+const seeded = (seed: readonly string[]) => {
+  const store = fresh();
   for (const q of seed) executeQuery(store, q, {});
   return store;
 };
@@ -66,9 +65,9 @@ const canonical = (store: GraphStore) =>
 /** Write `store` out as the two documents and read them back into a fresh graph. The vertex file
  *  first: the edge file's endpoints then resolve against vertices already in the graph, which is what
  *  a two-file format requires of any loader (and is why an edge file needs no shared state). */
-function roundTrip(store: GraphStore, cardinality?: LabelCardinality) {
+function roundTrip(store: GraphStore) {
   const dump = writeCsv(store);
-  const reloaded = fresh(cardinality);
+  const reloaded = fresh();
   loadCsv(reloaded, dump.vertices);
   loadCsv(reloaded, dump.edges);
   return { dump, reloaded };
@@ -220,8 +219,8 @@ describe('the round trip is exact for the types CSV has a column for', () => {
   });
 
   test('multi-label vertices survive: ~label is a ;-separated set in both dialects', () => {
-    const store = seeded(ZOO_SEED, LabelCardinality.ZERO_OR_MORE);
-    const { dump, reloaded } = roundTrip(store, LabelCardinality.ZERO_OR_MORE);
+    const store = seeded(ZOO_SEED);
+    const { dump, reloaded } = roundTrip(store);
     expect(dump.vertices.split('\n')[1]).toContain('animal;bird;aquatic;endangered');
     expect(canonical(reloaded)).toEqual(canonical(store));
     expect(executeQuery(reloaded, "g.V().hasLabel('endangered').count()", {}))

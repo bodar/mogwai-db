@@ -20,7 +20,7 @@ import { rewriteExpr } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { propertyRowId } from './property.ts';
 import type { AliasMap } from '../plan/alias.ts';
-import { DEFAULT_VERTEX_CARDINALITY, DEFAULT_VERTEX_LABEL, type LabelCardinality, type VertexCardinality } from '../../api.ts';
+import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts';
 
 /**
  * THE WRITE VOCABULARY — an effect is a `Stmt` binding over a read plan, never a row-at-a-time loop.
@@ -617,10 +617,10 @@ function mutationLabelNames(
  * a repeated `addLabel(x)` a no-op via `ON CONFLICT DO NOTHING`.
  */
 export function elementAddLabel(
-  input: Rel, elem: Elem, step: IRStep, cardinality: LabelCardinality,
+  input: Rel, elem: Elem, step: IRStep,
   sideEffects: Map<string, any> | undefined, params: Record<string, any>, fresh: Minter,
 ): Effects | null {
-  if (elem === 'edge' || !cardinality.mutable) return null;
+  if (elem === 'edge') return null;
 
   const names = mutationLabelNames(step, sideEffects, params);
   if (!names?.length) return null;
@@ -728,12 +728,12 @@ function labelMutationScope(input: Rel, fresh: Minter): {
  * not an error — the DELETE simply matches nothing, which is what the scenario asserts.
  */
 export function elementDropLabel(
-  input: Rel, elem: Elem, step: IRStep, cardinality: LabelCardinality,
+  input: Rel, elem: Elem, step: IRStep,
   sideEffects: Map<string, any> | undefined, params: Record<string, any>, fresh: Minter,
 ): Effects | null {
-  if (elem === 'edge' || !cardinality.mutable) return null;
+  if (elem === 'edge') return null;
   const all = step.name === 'dropLabels';
-  if (all && (argValues(step).length || cardinality.min > 0)) return null;
+  if (all && argValues(step).length) return null;
   // `null` NAMES means EVERY label, and that reading belongs to `dropLabels()` ALONE — the branch is
   // on the step, never on the resolver's answer. `mutationLabelNames` also returns `null`, and there
   // it means DECLINE; conflating the two made `dropLabel(constant(["a","b"]), constant("c"))` — a
@@ -744,16 +744,6 @@ export function elementDropLabel(
 
   const scope = labelMutationScope(input, fresh);
   if (!scope) return null;
-  if (names && cardinality.min > 0) {
-    const short = survivorShortfall(scope.ownerIds(), names, cardinality.min, fresh);
-    scope.guard(short, {
-      // `LabelCardinalityValidator.validateDrop`'s sentence, truncated at its first RUNTIME
-      // interpolation — the surviving count and the cardinality's Java enum name, neither of which
-      // another implementation can reproduce. `ABSENT_LABEL`'s precedent: TinkerPop's own conformance
-      // assertions are `containing text of`, so the stable prefix is the matchable part.
-      message: 'Cannot drop label(s)', raiseWhen: 'rows',
-    });
-  }
   scope.bind(deleteVertexLabels(scope.ownerIds(), names, fresh));
   return scope.passThrough();
 }
@@ -786,30 +776,6 @@ function namedLabelIds(names: readonly string[], fresh: Minter): Rel {
   return make.project({ id: fresh('p'), input: matching, channels: [], type: ID_TYPE, exprs: [['id', col(matching.id, 'id')]] });
 }
 
-/** THE OWNERS A DROP WOULD LEAVE BELOW `min` — the relation `validateDrop`'s guard counts, and it is
- *  non-empty exactly when the reference raises.
- *
- *  A CORRELATED COUNT rather than a grouped one, and the difference is a real case: a vertex all of
- *  whose labels are being dropped produces NO group row at all, so a `GROUP BY … HAVING COUNT(*) < min`
- *  would miss the very element that fell furthest. Counting per owner from the owner side cannot. */
-function survivorShortfall(owners: Rel, names: readonly string[], min: number, fresh: Minter): Rel {
-  const vl = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...OWNED_BY.vertexLabels.cols) });
-  const surviving = make.filter({
-    id: fresh('f'), input: vl, channels: [], type: vl.type,
-    pred: and(
-      eq(col(vl.id, 'node'), col(owners.id, 'id')),
-      { kind: 'in-query', expr: col(vl.id, 'label'), plan: namedLabelIds(names, fresh), negated: true },
-    )!,
-  });
-  const counted = make.aggregate({
-    id: fresh('ag'), input: surviving, channels: [], type: typeOf(meta('n', 'int')),
-    groupBy: [], aggs: [['n', { kind: 'agg', fn: 'count', args: [] }]],
-  });
-  return make.filter({
-    id: fresh('f'), input: owners, channels: [], type: owners.type,
-    pred: { kind: 'binary', op: '<', left: { kind: 'scalar', plan: counted }, right: compilerInt(min) },
-  });
-}
 
 /**
  * A run of `property()` STEPS → what this route can write, or `null` for "legacy owns it".
@@ -1126,14 +1092,14 @@ const writeInputChannels = (input: Rel): Channels =>
  *  per vertex). A label that is a nested traversal or an invalid one declines — the label validator is
  *  the shared waist, and a name it refuses is an ERROR legacy raises, not a write this route may
  *  silently skip. */
-export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IRStep[], ordered: boolean, cardinality: LabelCardinality, child: ChildSeam, fresh: Minter): Effects | null {
+export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IRStep[], ordered: boolean, child: ChildSeam, fresh: Minter): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
   const tokens = creationTokens(propertySteps, child);
   if (!tokens) return null;
   // `property(T.label, …)` REPLACES the step's own labels rather than adding to them — `insertVertex`
   // reads the same way, and it is not an addition: `addV('a').property(T.label,'b')` is a vertex
   // labelled `b`. The count rule then applies to whichever list won.
-  const labels = creationLabels(tokens.label === null ? argValues(step) : [tokens.label], cardinality, child, fresh);
+  const labels = creationLabels(tokens.label === null ? argValues(step) : [tokens.label], child, fresh);
   if (!labels) return null;
   const writes = tokens.rest.length ? propertyWrites(tokens.rest, 'vertex', child) : [];
   if (!writes) return null;
@@ -1241,7 +1207,7 @@ function constLabelArg(value: unknown, child: ChildSeam): unknown {
  * it must not fail a `max: 1` graph.
  */
 function creationLabels(
-  args: readonly unknown[], cardinality: LabelCardinality, child: ChildSeam, fresh: Minter,
+  args: readonly unknown[], child: ChildSeam, fresh: Minter,
 ): CreationLabels | null {
   // A nested arg that does NOT fold keeps its original `{nested}` value rather than becoming a miss:
   // the fold is an optimization for a literal in traversal clothing, and what it leaves behind is a
@@ -1256,16 +1222,16 @@ function creationLabels(
   // error vocabulary is a different four messages (`resolveLabelCollection`), so answering it with this
   // one's would be the wrong answer rather than a missing one.
   if (named.length === 1 && isNested(named[0])) {
-    if (cardinality.max < 1 || cardinality.min > 1) return null;
     const resolved = runtimeLabel(named[0], child, fresh);
     return resolved && { names: [resolved.expr], runtime: [resolved] };
   }
   if (named.some((arg) => typeof arg !== 'string')) return null;
   const labels = [...new Set(named as string[])];
   try { for (const label of labels) validateLabel(label); } catch { return null; }
-  const resolved = labels.length || cardinality.min === 0 ? labels : [DEFAULT_VERTEX_LABEL];
-  if (resolved.length > cardinality.max || resolved.length < cardinality.min) return null;
-  return { names: resolved.map(text), runtime: [] };
+  // NO DEFAULT LABEL IS SUPPLIED. A bare `g.addV()` stores nothing, which `Labels.feature`
+  // `g_addV_labels` asserts outright (`count of 0`); `DEFAULT_VERTEX_LABEL` is only what a
+  // label-less vertex REPORTS for `label()`.
+  return { names: labels.map(text), runtime: [] };
 }
 
 /** A creation's labels as EXPRESSIONS, plus the subset whose value only exists at run time and
@@ -1824,7 +1790,7 @@ function positioned(created: Rel, fresh: Minter): Rel {
  */
 export function elementMergeV(
   input: Rel, step: IRStep, options: readonly IRStep[], propertySteps: readonly IRStep[],
-  ordered: boolean, cardinality: LabelCardinality, child: ChildSeam, fresh: Minter,
+  ordered: boolean, child: ChildSeam, fresh: Minter,
 ): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
   let maps: MergeMaps;
@@ -1851,10 +1817,7 @@ export function elementMergeV(
   // invalid name is an ERROR rather than a write to skip. No count guard is owed — every MUTABLE
   // cardinality has `max = Infinity`, so appending can never overstep it.
   const appended = [...new Set(((onMatch?.label as string[] | null) ?? []))];
-  if (appended.length) {
-    if (!cardinality.mutable) return null;
-    try { for (const name of appended) validateLabel(name); } catch { return null; }
-  }
+  try { for (const name of appended) validateLabel(name); } catch { return null; }
 
   const matchWrites = mergeWrites(onMatch, 'vertex', child);
   // `onCreate` WINS per key, and `validateNoOverrides` has already proved the two cannot contradict —
@@ -1867,7 +1830,7 @@ export function elementMergeV(
   } : match, 'vertex', child);
   const tailWrites = propertySteps.length ? propertyWrites(propertySteps, 'vertex', child) : [];
   if (!matchWrites || !createWrites || !tailWrites) return null;
-  const createLabels = creationLabels(((onCreate?.label ?? match.label) as string[] | null) ?? [], cardinality, child, fresh);
+  const createLabels = creationLabels(((onCreate?.label ?? match.label) as string[] | null) ?? [], child, fresh);
   if (!createLabels) return null;
 
   const searched = matching((match.label as string[] | null) ?? [], Object.entries(match.props), child, fresh);

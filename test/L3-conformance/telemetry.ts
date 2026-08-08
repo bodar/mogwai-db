@@ -30,6 +30,7 @@ import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import type { GraphManager, GraphInfo } from '../../src/manager.ts';
 import type { RemoteExecutor } from '../../src/api.ts';
 import type { Spine } from '../../src/sql/kernel/render.ts';
+import { isExcludedScenario } from './tags.ts';
 
 export interface QueryRecord {
   g: string;
@@ -277,6 +278,9 @@ export function collectScenarios(cucumberJson: any[]): ScenarioRow[] {
   const rows: ScenarioRow[] = [];
   for (const feat of cucumberJson) for (const el of feat.elements ?? []) {
     if (el.type && el.type !== 'scenario') continue;
+    // A DECLARED WALL leaves the report entirely — numerator and denominator both — so it can neither
+    // read as a regression in the delta nor sit in the floor as a permanent failure (tags.ts).
+    if (isExcludedScenario(el.name)) continue;
     const steps = el.steps ?? [];
     const passed = steps.length > 0 && steps.every((s: any) => s.result?.status === 'passed');
     if (passed) { rows.push({ name: el.name, passed: true }); continue; }
@@ -357,8 +361,17 @@ export function readState(file: string, spine: Spine): L3State {
   const state = parseStateFile(file);
   const s = spine === 'rel' ? state : state.legacySpine;
   if (!s) return EMPTY_STATE();
-  const passed = s.passed ?? [];
-  return { passing: passed.length, total: s.total ?? 0, passed, failed: s.failed ?? [] };
+  // **A NAME THAT IS NO LONGER MEASURED CANNOT BE A REGRESSION.** When a scenario joins
+  // `EXCLUDED_SCENARIOS` — a capability we have DECLARED we do not have — it leaves the live report's
+  // numerator and denominator both, so a floor still naming it would read as "was passing, now gone"
+  // forever and no clean run could ever rewrite it (the ratchet fails, so the state is never
+  // rewritten, so the ratchet fails). Filtering on READ makes the floor self-healing and keeps the
+  // decision in ONE place — the exclusion list — rather than requiring a hand-edit of the artifact.
+  const live = (names: readonly string[]) => names.filter((n) => !isExcludedScenario(n));
+  const passed = live(s.passed ?? []);
+  const failed = live(s.failed ?? []);
+  const dropped = ((s.passed?.length ?? 0) - passed.length) + ((s.failed?.length ?? 0) - failed.length);
+  return { passing: passed.length, total: (s.total ?? 0) - dropped, passed, failed };
 }
 
 /** A run's scenario rows AS a floor. One function because the recorded floor and the live side of the

@@ -29,7 +29,6 @@ import { EMPTY_REGISTRY } from './services/spi/registry.ts';
 import type { FederationSource } from './compiler/segment.ts';
 import { NO_IO_STORE, type IoStore } from './iostore.ts';
 import type { GraphStore } from './storage.ts';
-import { LabelCardinality } from './api.ts';
 
 /** How the app scope OBTAINS its registry. A registry is not a value the entry point can build
  *  in isolation: a service takes its own dependencies at CONSTRUCTION (federate needs `source`,
@@ -50,7 +49,6 @@ export type AppScope =
   // A GRAPH capability, and app scope is per-graph (one Executor, one store, one scope), so this
   // is its lifecycle. Only the VERTEX cardinality is a provider choice — edges are fixed at ONE
   // by spec, so there is nothing to declare for them.
-  & Dependency<'labelCardinality', LabelCardinality>
   /** Where io() reads and writes whole-graph documents (iostore.ts). Per-graph, like the store.
    *  Never undefined: an unbound one fails closed naming the missing binding. */
   & Dependency<'io', IoStore>
@@ -84,14 +82,12 @@ export function createAppScope(deps?: Partial<{
   registry: RegistryProvider;
   fastPaths: FastPathConfig;
   source: FederationSource | undefined;
-  labelCardinality: LabelCardinality;
   io: IoStore;
   store: GraphStore | undefined;
 }>): AppScope {
   const app: AppScope = LazyMap.create()
     .set('fastPaths', instance(deps?.fastPaths ?? DEFAULT_FAST_PATHS))
     .set('source', instance(deps?.source))
-    .set('labelCardinality', instance(deps?.labelCardinality ?? LabelCardinality.ONE))
     .set('io', instance(deps?.io ?? NO_IO_STORE))
     .set('store', instance(deps?.store))
     .set('registry', () => (deps?.registry ?? (() => EMPTY_REGISTRY))(app));

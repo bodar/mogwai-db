@@ -30,7 +30,7 @@ import type { SegmentPlan } from '../segment.ts';
 import type { LoweringState, ElementStream, TraverserLayout } from '../steps/context/context.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { Stream, LoweringSuspension } from '../steps/context/stream.ts';
-import type { LabelCardinality, LabelRegime } from '../../api.ts';
+import type { LabelRegime } from '../../api.ts';
 
 /** A materialized element traverser re-entering the read compiler from a write.
  * The driver preserves every carried column (especially alias histories), so a
@@ -50,8 +50,6 @@ export interface Engine {
   // ---- ambient dependencies (were LoweringState fields; now held by the object) ----
   readonly fastPaths: FastPathConfig;
   readonly registry: ServiceRegistry;
-  /** This graph's declared VERTEX label cardinality — what addLabel/dropLabel validate against. */
-  readonly labelCardinality: LabelCardinality;
   /** How elementMap()/valueMap(true) render T.label for THIS traversal — the graph's declared
    *  default unless `g.with("multilabel"|"singlelabel")` overrode it. Resolved once. */
   readonly labelRegime: LabelRegime;

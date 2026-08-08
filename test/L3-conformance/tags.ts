@@ -61,3 +61,35 @@ export const OUR_EXCLUSIONS = [
 ] as const;
 
 export const L3_TAGS = [...OUR_EXCLUSIONS, ...RUNNER_SKIPPED].map((t) => `not ${t}`).join(' and ');
+
+/**
+ * SCENARIOS EXCLUDED BY NAME, because they assert a capability this graph DECLARES IT DOES NOT HAVE.
+ *
+ * **mogwai-db is multi-label only** (`src/api.ts`): a vertex carries a SET of labels, always. That is
+ * the property graph everyone else means — a Neo4j node holds a set — and exactly-one-vertex-label is
+ * the TinkerPop 3 constraint that v4's `LabelCardinality` exists to lift. We declare `ZERO_OR_MORE`
+ * and carry no other regime.
+ *
+ * Every scenario below provisions a single-label graph and asserts the refusal that follows from it.
+ * They cannot pass, and that is a DECLARED WALL rather than a regression — the same standing as the
+ * 128-bit arithmetic and 32-bit float walls. Counting them as gaps in our engine would be a lie in
+ * the same way `@MultiLabelDefault` would be.
+ *
+ * BY NAME rather than by tag because upstream does not tag them: the regime is expressed in the
+ * scenario NAME (`*_single_label_graph`) and in which graph the step routes to. A cucumber tag
+ * expression cannot say that, so the filter lives where the report is read — it removes them from
+ * the DENOMINATOR as well, exactly as a tag exclusion does, rather than parking them as permanent
+ * failures.
+ */
+export const EXCLUDED_SCENARIOS: ReadonlySet<string> = new Set([
+  'g_V_addLabelXa_bX_single_label_graph',
+  'g_V_addLabelXemployeeX_single_label_graph',
+  'g_V_dropLabelXpersonX_single_label_graph',
+  'g_V_dropLabels_single_label_graph',
+  'g_mergeVXlabel_ab_name_markoX_single_label_graph',
+  'g_mergeVXlabel_person_name_markoX_optionXonCreate_label_abX_single_label_graph',
+  'g_mergeVXlabel_person_name_markoX_optionXonMatch_label_managerX_single_label_graph',
+]);
+
+/** Whether the report should ignore this scenario entirely — see `EXCLUDED_SCENARIOS`. */
+export const isExcludedScenario = (name: string): boolean => EXCLUDED_SCENARIOS.has(name);

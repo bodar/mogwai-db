@@ -32,7 +32,7 @@ import '../support/undici-shim.ts'; // client teardown calls Agent.close() — s
 import { buildConformanceApp } from './conformance-server.ts';
 import { installInMemoryTransport, type InMemoryTransport } from '../support/in-memory-transport.ts';
 import { runFeatures, GLV } from '../support/cucumber.ts';
-import { L3_TAGS } from './tags.ts';
+import { L3_TAGS, isExcludedScenario } from './tags.ts';
 import { ambientSpine } from '../../src/compiler/options/spine.ts';
 import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readState, writeState, stateOf, delta, formatDelta, formatSpineGap, partitionLegacyRegressions, unionPassing, expectedErrorSubstrings } from './telemetry.ts';
 
@@ -132,6 +132,9 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
   let passing = 0, total = 0;
   for (const feat of json) for (const el of feat.elements ?? []) {
     if (el.type && el.type !== 'scenario') continue;
+    // A DECLARED WALL is not part of the denominator — see `EXCLUDED_SCENARIOS` in tags.ts. It never
+    // reaches `passing` either (it fails), so cucumber's own summary cross-check below still holds.
+    if (isExcludedScenario(el.name)) continue;
     total++;
     const steps = el.steps ?? [];
     if (steps.length && steps.every((s: any) => s.result?.status === 'passed')) passing++;

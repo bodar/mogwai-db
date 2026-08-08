@@ -32,41 +32,53 @@ export interface Sql {
 // ---- graph capabilities ----
 
 /**
- * How many labels an element may carry, and whether they can be mutated — TinkerPop 4's
- * `LabelCardinality`, which a provider declares through `Graph.Features` and which
- * `addLabel()`/`dropLabel()`/`dropLabels()` validate against.
+ * **VERTICES CARRY A SET OF LABELS — ALWAYS. Single-label is a declared WALL, not a setting.**
  *
- * Modelled as the min/max/mutable triple upstream uses rather than as a set of booleans,
- * because the three values disagree in ways a boolean pair cannot express: `ONE_OR_MORE`
- * permits `dropLabel(x)` while `dropLabels()` always throws under it, and only
- * `ZERO_OR_MORE` allows an element to end up with no labels at all.
+ * TinkerPop 4 added `LabelCardinality` so a provider could declare `ONE` / `ONE_OR_MORE` /
+ * `ZERO_OR_MORE`; mogwai-db declares the third and does not carry the others. That is the property
+ * graph everyone else already means — a Neo4j node holds a SET of labels (a relationship holds
+ * exactly one type, which is why `EdgeFeatures.getLabelCardinality()` is "always ONE" and why our
+ * edge label stays a column). Exactly-one-vertex-label is the TinkerPop 3 constraint that v4 exists
+ * to lift; carrying it as a runtime knob would make every write path branch on a regime nobody asks
+ * for, and make a user's first surprise a refusal.
+ *
+ * **What it costs, stated rather than discovered:** the seven `*_single_label_graph` conformance
+ * scenarios assert that refusal and therefore cannot pass. They are excluded BY NAME
+ * (`test/L3-conformance/tags.ts`), on the same footing as any other declared wall — a scenario that
+ * tests a capability we do not claim is out of scope, not a regression.
+ *
+ * The consequences that follow, none of them optional:
+ * - a bare `g.addV()` creates a vertex with NO labels (`Labels.feature` `g_addV_labels` asserts
+ *   exactly this: `count of 0`), so `DEFAULT_VERTEX_LABEL` is what a LABEL-LESS vertex REPORTS, never
+ *   what a creation silently supplies;
+ * - `addLabel`/`dropLabel`/`dropLabels` are always legal on a vertex and never need a cardinality
+ *   guard — there is no floor to fall below and no ceiling to overstep;
+ * - an EDGE still refuses them, and that is the spec rather than this decision.
  */
-export const LabelCardinality = {
-  /** Exactly one label, immutable. TinkerGraph's default and 3.x-compatible; all mutation throws. */
-  ONE: { min: 1, max: 1, mutable: false },
-  /** One or more. `dropLabels()` always throws; `dropLabel(x)` only while one label remains. */
-  ONE_OR_MORE: { min: 1, max: Infinity, mutable: true },
-  /** Zero or more — no constraints, an element may carry no labels. */
-  ZERO_OR_MORE: { min: 0, max: Infinity, mutable: true },
-} as const;
-
-export type LabelCardinality = (typeof LabelCardinality)[keyof typeof LabelCardinality];
 
 /**
  * How `elementMap()` / `valueMap(true)` render an element's `T.label`.
  *
  * `set` emits every label (`s[animal,bird,aquatic,endangered]`); `single` emits one. A traversal
- * selects it explicitly with `g.with("multilabel")` / `g.with("singlelabel")`; with neither, the
- * GRAPH's declared default applies — which is what upstream's mutually exclusive
- * `@MultiLabelDefault` / `@SingleLabelDefault` scenario tags describe. mogwai-db declares
- * MULTI-LABEL default: a vertex genuinely holds a set, so rendering one of them by default would
- * be the lossy answer.
+ * selects it explicitly with `g.with("multilabel")` / `g.with("singlelabel")`.
+ *
+ * **RENDERING IS A SEPARATE CONCERN FROM STORAGE, and keeping the two apart is what makes the
+ * multi-label decision cheap.** How many labels a vertex may HOLD is a storage capability and is now
+ * settled (it holds a set); how many `elementMap()` SHOWS is a presentation choice the traversal
+ * makes. This used to fall back to the graph's declared cardinality, which coupled them — so
+ * declaring multi-label storage would have silently changed every user's `elementMap()` label from
+ * `person` to `s[person]`.
+ *
+ * The default is `single`, which is also the REFERENCE's: `TraversalHelper.isMultilabelEnabled`
+ * reads the `with()` option and nothing else (`.orElse(false)`). The old fallback was documented
+ * here as a deliberate divergence; removing it makes us agree with upstream rather than diverge, and
+ * `@MultiLabelDefault` — which all three GLVs skip — describes a provider we no longer claim to be.
  */
 export type LabelRegime = 'set' | 'single';
 export const MULTILABEL_OPTION = 'multilabel';
 export const SINGLELABEL_OPTION = 'singlelabel';
 
-/** The regime for a compile: an explicit `with()` wins, else the graph's cardinality decides.
+/** The regime for a compile: an explicit `with()` wins, else `single` — the reference's own default.
  *
  *  The two options are MUTUALLY EXCLUSIVE — `WithOptions.MULTILABEL_KEY`'s javadoc says
  *  "configuring both on the same traversal source is rejected during traversal strategy
@@ -78,20 +90,22 @@ export const SINGLELABEL_OPTION = 'singlelabel';
  *  always single-label whatever a graph's cardinality is, and there is no knob to change it. That
  *  is precisely why every GLV skips `@MultiLabelDefault`: those scenarios describe a provider the
  *  reference cannot configure into existence. We are that provider. See item 19b. */
-export function labelRegime(sourceOptions: ReadonlyMap<string, any>, cardinality: LabelCardinality): LabelRegime {
+export function labelRegime(sourceOptions: ReadonlyMap<string, any>): LabelRegime {
   const multi = sourceOptions.has(MULTILABEL_OPTION), single = sourceOptions.has(SINGLELABEL_OPTION);
   if (multi && single)
     throw new Error(`with("${MULTILABEL_OPTION}") and with("${SINGLELABEL_OPTION}") are mutually exclusive`);
   if (multi) return 'set';
   if (single) return 'single';
-  return cardinality.max > 1 ? 'set' : 'single';
+  return 'single';
 }
 
 /** The message TinkerPop's conformance suite matches on when a graph refuses label mutation. */
 export const LABEL_MUTATION_UNSUPPORTED = 'Label mutation is not supported';
 
-/** The label a vertex takes when none is supplied and the cardinality demands at least one —
- *  TinkerPop's `Vertex.DEFAULT_LABEL`. Also the name a zero-label vertex reports for `label()`. */
+/** TinkerPop's `Vertex.DEFAULT_LABEL` — and here it is ONLY what a LABEL-LESS vertex REPORTS for
+ *  `label()`, never a label a creation supplies. A bare `g.addV()` stores no label at all
+ *  (`Labels.feature` `g_addV_labels`: `count of 0`), so writing this into `vertex_labels` would make
+ *  that scenario answer 1. */
 export const DEFAULT_VERTEX_LABEL = 'vertex';
 
 /** How many values one vertex-property KEY may hold. An edge property has no cardinality at all
@@ -109,7 +123,7 @@ export type VertexCardinality = 'single' | 'list' | 'set';
  *
  * It is a constant rather than a per-key function because we have no per-key schema to consult;
  * TinkerPop's signature takes the key so a provider CAN vary it, and that is the hook, not a
- * requirement. It is a graph capability like `LabelCardinality` and lives beside it for the same
+ * requirement. It is a graph capability and lives here for the same
  * reason: only the storage waist may apply it, since only there is "the step declared none"
  * (`null`) still distinguishable from an explicit `Cardinality.single`.
  */

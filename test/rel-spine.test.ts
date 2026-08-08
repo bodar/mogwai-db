@@ -6,7 +6,6 @@ import { exec, executeQuery } from './support/executor.ts';
 import { decodeAll } from './support/decode.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { LabelCardinality } from '../src/api.ts';
 import { createAppScope } from '../src/scopes.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { PER_ROW } from '../src/sql/kernel/render.ts';
@@ -591,7 +590,7 @@ describe('the RelIR spine', () => {
     // before anything else looks at it — `AddVertexStep.java:253-259`, `AddEdgeStep.java:180-181`,
     // and `AddPropertyStep.java:106-110`, whose comment states the rule outright. So a folded constant
     // is the reference's own behaviour, not an approximation, and it never reaches the per-traverser path.
-    const multi = createAppScope({ labelCardinality: LabelCardinality.ONE_OR_MORE });
+    const multi = createAppScope({ });
     for (const [gremlin, app] of [
       ['g.addV(__.constant("person"))', undefined],
       ['g.V(1).addE(__.constant("knows")).to(__.V(2))', undefined],
@@ -827,7 +826,7 @@ describe('the RelIR spine', () => {
     // no labels at all, and `labels()` must then emit NOTHING for it — an outer join would emit one
     // NULL row and `count()` would answer 1 where the reference answers 0. Only a zero-label graph can
     // state that, so it needs its own store.
-    const none = new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ZERO_OR_MORE);
+    const none = new GraphStore(new BunSqlite(':memory:'));
     exec(none, undefined, undefined, 'rel').buffers('g.addV()', {});
     for (const spine of ['rel', 'legacy'] as const) {
       expect(await decodeAll(exec(none, undefined, undefined, spine).buffers('g.V().labels()', {}, {})), spine).toEqual([]);
@@ -873,7 +872,7 @@ describe('the RelIR spine', () => {
   test('addLabel adds labels idempotently over a vertex stream (multi-label graph)', () => {
     // A MULTI-LABEL graph (mutable cardinality) is what makes `addLabel` legal; an immutable graph or
     // an edge refuses, and that refusal is legacy's while its route lives (RelIR declines to it).
-    const multi = createAppScope({ labelCardinality: LabelCardinality.ONE_OR_MORE });
+    const multi = createAppScope({ });
     for (const gremlin of [
       'g.addV("person").addLabel("employee").property("name","marko")',
       'g.V().addLabel("employee")',
@@ -885,7 +884,7 @@ describe('the RelIR spine', () => {
     // The DIFFERENTIAL over a fresh multi-label store: RelIR and legacy leave the same label set,
     // and a repeated label is a no-op (PRIMARY KEY(node,label) + ON CONFLICT DO NOTHING).
     const labelRows = (spine: 'rel' | 'legacy') => {
-      const store = new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ONE_OR_MORE);
+      const store = new GraphStore(new BunSqlite(':memory:'));
       for (const write of [
         'g.addV("person").property("name","marko")',
         'g.addV("person").property("name","josh")',
@@ -904,11 +903,18 @@ describe('the RelIR spine', () => {
       { node: 2, name: 'employee' }, { node: 2, name: 'person' },
     ]);
 
-    // An immutable graph refuses with the reference's message, identically on both spines — RelIR
-    // declines and legacy raises it (the census counts this as vocabulary, never a gap).
-    for (const spine of ['rel', 'legacy'] as const)
-      expect(() => exec(new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ONE), undefined, undefined, spine)
-        .buffers('g.V().addLabel("x")', {}), spine).toThrow('Label mutation is not supported');
+    // THERE IS NO IMMUTABLE GRAPH TO REFUSE ANY MORE. Every mogwai-db vertex carries a label set
+    // (`src/api.ts`), so `addLabel` is always legal on one — the assertion that used to live here
+    // pinned `LabelCardinality.ONE`, which is a declared wall rather than a configuration.
+    //
+    // An EDGE still refuses, and that is the SPEC rather than this decision: edge label cardinality
+    // is fixed at ONE by TinkerPop itself, so it is the one refusal that survives.
+    for (const spine of ['rel', 'legacy'] as const) {
+      const store = new GraphStore(new BunSqlite(':memory:'));
+      exec(store, undefined, undefined, spine).buffers('g.addV("a").as("x").addV("b").as("y").addE("knows").from("x").to("y")', {});
+      expect(() => exec(store, undefined, undefined, spine).buffers('g.E().addLabel("x")', {}), spine)
+        .toThrow('Label mutation is not supported');
+    }
   });
 
   test('dropLabel/dropLabels are addLabel\'s mirror, and the cardinality FLOOR splits them', () => {
@@ -922,13 +928,13 @@ describe('the RelIR spine', () => {
       'g.V().dropLabel("a")', 'g.V().dropLabels()', 'g.V().dropLabel("a","b")',
       'g.V().dropLabel(constant("a"))', 'g.V().dropLabel(constant(["a","b"]))',
       'g.V().dropLabel("a").labels().fold()',
-    ]) expect(compile(gremlin, {}, { spine: 'rel', app: createAppScope({ labelCardinality: LabelCardinality.ZERO_OR_MORE }) }).kind, gremlin)
+    ]) expect(compile(gremlin, {}, { spine: 'rel', app: createAppScope({ }) }).kind, gremlin)
       .toBe('program');
 
     // The DIFFERENTIAL over a fresh zero-or-more store, per DropLabel.feature's own fixtures: a named
     // drop, a name the vertex does NOT carry (a no-op, not an error), and dropping every label.
     const labelRows = (spine: 'rel' | 'legacy', drop: string) => {
-      const store = new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ZERO_OR_MORE);
+      const store = new GraphStore(new BunSqlite(':memory:'));
       exec(store, undefined, undefined, spine).buffers('g.addV("a","b","c")', {});
       exec(store, undefined, undefined, spine).buffers(drop, {});
       return store.query('SELECT l.name FROM vertex_labels vl JOIN labels l ON l.id = vl.label ORDER BY l.name', [])
@@ -945,42 +951,24 @@ describe('the RelIR spine', () => {
       expect(labelRows('legacy', drop), drop).toEqual([...left]);
     }
 
-    // THE GUARD, which nothing in the corpus can reach: `ONE_OR_MORE` is the only cardinality where a
-    // named drop can fall below the floor, and no conformance graph declares it (@MultiLabel maps to
-    // ZERO_OR_MORE). Dropping ONE of two labels is fine; dropping the only one raises the REFERENCE's
-    // sentence, truncated at its first runtime interpolation.
-    const oneOrMore = () => {
-      const store = new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ONE_OR_MORE);
-      exec(store, undefined, undefined, 'rel').buffers('g.addV("a","b")', {});
-      exec(store, undefined, undefined, 'rel').buffers('g.addV("solo")', {});
-      return store;
-    };
-    const partial = oneOrMore();
-    exec(partial, undefined, undefined, 'rel').buffers('g.V().hasLabel("a").dropLabel("a")', {});
-    expect(partial.query('SELECT l.name FROM vertex_labels vl JOIN labels l ON l.id = vl.label ORDER BY l.name', []))
-      .toEqual([{ name: 'b' }, { name: 'solo' }]);
+    // THE GUARD IS GONE WITH THE FLOOR. `validateDrop` raises only where the survivors fall below
+    // `min`, and `min` is 0 for every mogwai-db graph — so a named drop can never fall below it and
+    // `dropLabels()` can never be refused. Both were real refusals under `ONE_OR_MORE`; that regime
+    // is a declared wall now, so what replaces the assertion is that neither raises.
+    const stripped = new GraphStore(new BunSqlite(':memory:'));
+    exec(stripped, undefined, undefined, 'rel').buffers('g.addV("solo")', {});
+    exec(stripped, undefined, undefined, 'rel').buffers('g.V().dropLabel("solo")', {});
+    expect(stripped.query('SELECT COUNT(*) AS n FROM vertex_labels', [])).toEqual([{ n: 0 }]);
+    // And `dropLabels()` compiles rather than declining — the arm that used to be a compile-time
+    // refusal for any `min > 0`.
+    expect(compile('g.V().dropLabels()', {}, { spine: 'rel' }).kind).toBe('program');
 
-    const floor = oneOrMore();
-    expect(() => exec(floor, undefined, undefined, 'rel').buffers('g.V().hasLabel("solo").dropLabel("solo")', {}))
-      .toThrow('Cannot drop label(s)');
-    // AND THE GUARD RAN BEFORE THE DELETE — the reference simulates the removal, so a refused drop
-    // must leave the vertex exactly as it was rather than partly stripped.
-    expect(floor.query('SELECT COUNT(*) AS n FROM vertex_labels', [])).toEqual([{ n: 3 }]);
-
-    // `dropLabels()` under `ONE_OR_MORE` can never succeed for any element, so it is decided at
-    // COMPILE time and declines to legacy rather than becoming a guard that always fires.
-    expect(compile('g.V().dropLabels()', {}, {
-      spine: 'rel', app: createAppScope({ labelCardinality: LabelCardinality.ONE_OR_MORE }),
-    })).not.toMatchObject({ spine: 'rel' });
-
-    // An EDGE and an immutable graph refuse identically on both spines — RelIR declines, legacy raises.
+    // An EDGE still refuses on both spines — the spec's rule, not a cardinality we chose.
     for (const spine of ['rel', 'legacy'] as const) {
-      const edges = new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ZERO_OR_MORE);
+      const edges = new GraphStore(new BunSqlite(':memory:'));
       exec(edges, undefined, undefined, spine).buffers('g.addV("person").as("a").addV("person").as("b").addE("knows").from("a").to("b")', {});
       expect(() => exec(edges, undefined, undefined, spine).buffers('g.E().dropLabel("knows").labels().fold()', {}), spine)
         .toThrow('Label mutation is not supported');
-      expect(() => exec(new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ONE), undefined, undefined, spine)
-        .buffers('g.V().dropLabels()', {}), spine).toThrow('Label mutation is not supported');
     }
   });
 
@@ -1059,7 +1047,7 @@ describe('the RelIR spine', () => {
     // more time: the scenarios pass on LEGACY today, so the L3 total is unchanged and only the spine
     // gap is, and the corpus cannot spell a bound merge map. This test IS the record.
     const labels = (spine: 'rel' | 'legacy', arm: string) => {
-      const store = new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ZERO_OR_MORE);
+      const store = new GraphStore(new BunSqlite(':memory:'));
       exec(store, undefined, undefined, spine).buffers('g.addV("person").addLabel("employee").property("name","marko")', {});
       exec(store, undefined, undefined, spine).buffers(`g.mergeV([(T.label):"person","name":"marko"]).option(Merge.onMatch,${arm})`, {});
       return store.query('SELECT l.name FROM vertex_labels vl JOIN labels l ON l.id = vl.label ORDER BY l.name', [])
@@ -1075,14 +1063,12 @@ describe('the RelIR spine', () => {
       expect(labels('legacy', arm), arm).toEqual([...expected]);
     }
 
-    // An IMMUTABLE graph declines to legacy, which raises the refusal — `addLabel`'s rule, asked at
-    // this host too rather than discovered when the insert fails. An empty arm still routes, because
-    // it mutates nothing at all.
-    const immutable = createAppScope({ labelCardinality: LabelCardinality.ONE });
-    expect(compile('g.mergeV([(T.label):"person","name":"marko"]).option(Merge.onMatch,[(T.label):"manager"])',
-      {}, { spine: 'rel', app: immutable })).not.toMatchObject({ spine: 'rel' });
-    expect(compile('g.mergeV([(T.label):"person","name":"marko"]).option(Merge.onMatch,[(T.label):[]])',
-      {}, { spine: 'rel', app: immutable }).kind).toBe('program');
+    // An INVALID name is still an ERROR rather than a write to skip — and it RAISES rather than
+    // declining, because the merge parse validates a `T.label` value and that parse runs in the
+    // `writeArguments` verify Pass, above both spines (§6·5). No graph can refuse label mutation
+    // outright any more, so this is the only refusal this host contributes.
+    expect(() => compile('g.mergeV([(T.label):"person","name":"marko"]).option(Merge.onMatch,[(T.label):"~hidden"])',
+      {}, { spine: 'rel' })).toThrow('Label can not be a hidden key: ~hidden');
   });
 
   test('a mergeE search reads the MERGE map and only the merge map', () => {

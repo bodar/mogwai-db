@@ -56,11 +56,13 @@ Feature: mogwai addendum — a merge emits its INPUT crossed with what it merged
       | marko |
       | vadas |
 
-  # A merge that CREATES gives its new vertex the same labels a creation with no label of its own
-  # gets — the graph's, not the step's. `g_mergeVXemptyX_no_existing` pins that one vertex appears and
-  # says nothing about what it is called, which under LabelCardinality.ONE is `vertex`.
+  # A merge that CREATES gives its new vertex exactly the labels the map named — and an empty map
+  # names none, so the vertex carries NONE. Same rule as a bare `addV()`, and for the same reason:
+  # `Vertex.DEFAULT_LABEL` is what a label-less vertex REPORTS, never what a creation supplies.
+  # `g_mergeVXemptyX_no_existing` pins that one vertex appears and says nothing about what it is
+  # called; this pins what it is called.
   @gap:merge-input-cross
-  Scenario: g_mergeVXemptyX_creates_with_the_graph_default_label
+  Scenario: g_mergeVXemptyX_creates_a_label_less_vertex
     Given the empty graph
     And the traversal of
       """
@@ -68,7 +70,8 @@ Feature: mogwai addendum — a merge emits its INPUT crossed with what it merged
       """
     When iterated to list
     Then the result should have a count of 1
-    And the graph should return 1 for count of "g.V().hasLabel(\"vertex\")"
+    And the graph should return 0 for count of "g.V().hasLabel(\"vertex\")"
+    And the graph should return 1 for count of "g.V()"
 
   # And the read tail folds over whatever the merge emitted, matched or created — the property the
   # legacy route cannot express at all, and the reason the merge's result is an ordinary element

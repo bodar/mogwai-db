@@ -758,7 +758,7 @@ export class Executor implements ExecutorApi {
      *  chain, because coverage is a property of the chain, not of the request. */
     private readonly spine?: Spine,
   ) {
-    this.app = createAppScope({ registry, source, fastPaths, io, store, labelCardinality: store.labelCardinality });
+    this.app = createAppScope({ registry, source, fastPaths, io, store });
   }
 
   /** SYNC GraphBinary buffers with per-value bulk (concern C appends it as a Long). A

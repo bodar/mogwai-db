@@ -619,7 +619,7 @@ function insertVertex(
   // A SET, so duplicates collapse before the count is checked — addV('a','a') is one label.
   // An UNSPECIFIED label list (bare addV()) takes the graph's default: 'vertex' when the
   // cardinality requires at least one label, nothing at all when it permits zero.
-  const labels = resolved.length || engine.labelCardinality.min === 0
+  const labels = resolved.length || LABEL_CARDINALITY.min === 0
     ? [...new Set(resolved)]
     : [DEFAULT_VERTEX_LABEL];
   assertLabelCount(engine, labels.length, 'addV');
@@ -1074,7 +1074,7 @@ function compileMergeV(engine: Engine, steps: IRStep[], params: Record<string, a
             // `manager`. Under an immutable cardinality that is a refusal, same as addLabel().
             const omLabels = Array.isArray(om?.label) ? om.label : null;
             if (omLabels?.length) {
-              if (!engine.labelCardinality.mutable)
+              if (!LABEL_CARDINALITY.mutable)
                 throw new Error(`${LABEL_MUTATION_UNSUPPORTED}: mergeV(onMatch) with a label`);
               store.addVertexLabels(m.id, omLabels);
               assertLabelCount(engine, store.vertexLabels(m.id).length, 'mergeV');
@@ -1221,11 +1221,18 @@ const MUTATING_TAIL = new Set(['addV', 'addE', 'mergeV', 'mergeE', 'property', '
  *  LabelCardinalityValidator.java:96) — the same refusal for the same reason, so it says so in the
  *  same words. The step prefix is ours and is kept: the reference's message cannot say WHICH
  *  operation overstepped, and that is the first thing you want to know. */
-function assertLabelCount(engine: Engine, n: number, step: string): void {
-  const c = engine.labelCardinality;
-  if (n > c.max) throw new Error(`${step}(): Element creation allows at most ${c.max} label(s), got ${n}`);
-  if (n < c.min) throw new Error(`${step}(): Element creation requires at least ${c.min} label(s), got ${n}`);
+function assertLabelCount(_engine: Engine, n: number, step: string): void {
+  if (n > LABEL_CARDINALITY.max) throw new Error(`${step}(): Element creation allows at most ${LABEL_CARDINALITY.max} label(s), got ${n}`);
+  if (n < LABEL_CARDINALITY.min) throw new Error(`${step}(): Element creation requires at least ${LABEL_CARDINALITY.min} label(s), got ${n}`);
 }
+
+/** **THE ONE PLACE THIS ROUTE STILL SPELLS A LABEL CARDINALITY, and it is deliberately a LOCAL
+ *  constant rather than a shared one.** Vertices carry a label SET unconditionally now (`src/api.ts`),
+ *  so the concept left the shared surface entirely — but this file reads it in four places and is
+ *  deleted whole in Phase 4, so threading a value it will never vary is worse than one copy with an
+ *  end date. Every branch it feeds is now unreachable; they are kept only so this route keeps
+ *  compiling until it goes. */
+const LABEL_CARDINALITY = { min: 0, max: Infinity, mutable: true } as const;
 
 /** addLabel/dropLabel/dropLabels over the elements a read prefix selects.
  *
@@ -1240,7 +1247,7 @@ function compileLabelMutation(engine: Engine, steps: IRStep[], params: Record<st
   // labels must say so whatever the tail is. `g.E().addLabel("friend").labels().fold()` asserts
   // exactly that, and checking the tail first answered "step not implemented after addLabel()".
   if (st.elem === 'edge') throw new Error(`${LABEL_MUTATION_UNSUPPORTED}: ${step.name}() on an edge`);
-  if (!engine.labelCardinality.mutable) throw new Error(`${LABEL_MUTATION_UNSUPPORTED}: ${step.name}()`);
+  if (!LABEL_CARDINALITY.mutable) throw new Error(`${LABEL_MUTATION_UNSUPPORTED}: ${step.name}()`);
 
   // These are SIDE-EFFECT steps: they mutate and pass the SAME traverser on, so a read tail is
   // the norm rather than the exception (`addLabel("employee").labels().fold()`). The element is

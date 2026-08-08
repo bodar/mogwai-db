@@ -30,7 +30,7 @@ function ioDir(): string {
   return dir;
 }
 
-const managerOn = (dir: string) => new BunGraphManager(undefined, standardRegistry, undefined, new FileIoStore(dir));
+const managerOn = (dir: string) => new BunGraphManager(undefined, standardRegistry, new FileIoStore(dir));
 
 const steps = (gremlin: string) =>
   runPasses(stepChain(parseGremlin(gremlin), {}), { with: [], without: [] } as any, {}).steps;

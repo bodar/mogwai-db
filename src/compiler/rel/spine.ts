@@ -3,7 +3,7 @@ import type { Compiled, Program } from '../../sql/kernel/render.ts';
 import { emitProgram } from '../../rel/emit.ts';
 import { cfLimitViolation } from '../../cf-limits.ts';
 import type { IRStep } from '../ir/strategies.ts';
-import type { LabelCardinality, LabelRegime } from '../../api.ts';
+import type { LabelRegime } from '../../api.ts';
 import type { Service } from '../../services/spi/types.ts';
 import type { SackSpec } from '../../gremlin/frontend.ts';
 import { lowerToRel } from './lower.ts';
@@ -35,15 +35,13 @@ export interface RelRequest {
    *  `EXISTS` in front of the scan it filters. A physical rewrite over the finished algebra rather
    *  than a lowering choice, which is why it arrives here as a flag and is applied by a pass. */
   readonly propertySeek: boolean;
-  /** This graph's declared VERTEX label cardinality. NOT a strategy switch — see below. */
-  readonly labelCardinality: LabelCardinality;
-  /** How a `T.label` ENTRY renders (`valueMap(true)`, `elementMap()`). A SEPARATE fact from the
-   *  cardinality and not derivable from it here — an explicit `with("multilabel")`/`with("singlelabel")`
-   *  overrides the graph's default — so it crosses as its own settled value rather than being
-   *  re-derived inside the lowering from a source-options map the algebra has no business reading. */
+  /** How a `T.label` ENTRY renders (`valueMap(true)`, `elementMap()`) — decided ONLY by an explicit
+   *  `with("multilabel")`/`with("singlelabel")`, since storage no longer has a regime to inherit
+   *  from (§api.ts). It crosses as its own settled value rather than being re-derived inside the
+   *  lowering from a source-options map the algebra has no business reading. */
   readonly labelRegime: LabelRegime;
   /** `withSack(seed)`'s seed, as the front end extracted it, or `null`. A SOURCE-level declaration
-   *  settled before a compile starts, so it crosses as a value exactly as `labelCardinality` does —
+   *  settled before a compile starts, so it crosses as a settled VALUE rather than a step argument —
    *  and it is here rather than being a route GATE because a gate reads identically to a missing
    *  lowering in every counter the migration owns (§6·6). */
   readonly sack: SackSpec | null;
@@ -128,7 +126,6 @@ export function compileViaRel(
     // with no label of its own is a compile-time question only because this value is settled before a
     // compile starts (request-scope DI). Coverage is still not a function of configuration: what the
     // cardinality changes is the ANSWER, not whether there is one.
-    labelCardinality: request.labelCardinality,
     labelRegime: request.labelRegime,
     propertySeek: request.propertySeek,
     services: request.services,

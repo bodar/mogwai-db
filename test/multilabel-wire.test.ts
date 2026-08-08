@@ -17,14 +17,13 @@
 import { test, expect, describe } from 'bun:test';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
-import { LabelCardinality } from '../src/api.ts';
 import { exec } from './support/executor.ts';
 import { streamBuffers } from '../src/http.ts';
 import { ioc } from '../src/io.ts';
 import { ZOO_SEED } from './fixtures/seed-zoo.ts';
 
 const zoo = () => {
-  const store = new GraphStore(new BunSqlite(':memory:'), LabelCardinality.ZERO_OR_MORE);
+  const store = new GraphStore(new BunSqlite(':memory:'));
   for (const w of ZOO_SEED) exec(store).buffers(w, {});
   return store;
 };

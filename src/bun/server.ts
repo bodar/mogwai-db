@@ -20,7 +20,7 @@ export function startServer(
 ) {
   // Production injects the EXTENDED registry (federation on). The single place the registry
   // choice is made; the conformance host injects standardRegistry at its own construction.
-  const manager = new BunGraphManager(dir, extendedRegistry, undefined, ioDir ? new FileIoStore(ioDir) : undefined);
+  const manager = new BunGraphManager(dir, extendedRegistry, ioDir ? new FileIoStore(ioDir) : undefined);
   // Silent by default (router.ts `silentLogger` — a failure reaches the client on the wire, which
   // is its channel). `$MOGWAI_LOG=1` turns the one-line-per-query access log back on.
   const app = application({ manager, pathPrefix, log: process.env.MOGWAI_LOG ? verboseLogger : undefined });

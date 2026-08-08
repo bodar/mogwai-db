@@ -42,7 +42,7 @@ import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, listM
 import { ALL_TOKENS, ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, mapEntryPayload, mapKey, mapPayload, mapSide, mapSize, NO_TOKENS, unfoldMap } from './map.ts';
 import { elementPayload } from './element.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
-import { LabelCardinality, type LabelRegime } from '../../api.ts';
+import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantArm, variantArmOf, variantHasList, variantPayload, type VariantArm } from './variant.ts';
 import { readCollection, registerCollection, registerMap, type Collections } from './collection.ts';
@@ -214,11 +214,10 @@ interface ChainCtx extends FilterCtx {
   /** The GRAPH's declared vertex-label cardinality, which decides what a creation with no label of
    *  its own gets. Threaded for the reason `ordered` is: it is settled before a step is lowered, so a
    *  step that asked the store instead would be asking at the wrong time. */
-  readonly labelCardinality: LabelCardinality;
-  /** How a `T.label` ENTRY renders — a set of names where a vertex genuinely holds a set, one name
-   *  otherwise. Settled before a compile starts (an explicit `with("multilabel")` wins, else the
-   *  graph's cardinality decides), so it travels as a value for `labelCardinality`'s reason. It is a
-   *  SEPARATE fact from the cardinality and not derivable from it here: the source option overrides. */
+  /** How a `T.label` ENTRY renders — a set of names or one name. Decided ONLY by an explicit
+   *  `with("multilabel")`/`with("singlelabel")`, since storage no longer carries a regime to inherit
+   *  from (every vertex holds a set — `src/api.ts`). Settled before a compile starts, so it travels
+   *  as a value rather than being re-derived from a source-options map inside the lowering. */
   readonly labelRegime: LabelRegime;
   /** The `withSideEffect(name, constant)` registry the FRONT END extracted. See `Lowering`. */
   readonly sideEffects: Map<string, any>;
@@ -2687,9 +2686,8 @@ export interface Lowering {
    * Defaults to `ONE`, which is `createAppScope`'s own default, so an instrument or a test that
    * lowers without an engine measures the default graph rather than a regime nothing runs.
    */
-  readonly labelCardinality?: LabelCardinality;
   /** How a `T.label` entry renders (`valueMap(true)`, `elementMap()`) — see `ChainCtx.labelRegime`.
-   *  Defaults to `single`, which is `labelRegime`'s own answer for the default graph. */
+   *  Defaults to `single`, which is `labelRegime`'s own answer when no `with()` asks otherwise. */
   readonly labelRegime?: LabelRegime;
   /**
    * The services this chain's `call()` steps name, RESOLVED — a settled environment, not the
@@ -2743,7 +2741,6 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   collapse: opts.collapse ?? true,
   correlatedChildren: opts.correlatedChildren ?? true,
   propertySeek: opts.propertySeek ?? true,
-  labelCardinality: opts.labelCardinality ?? LabelCardinality.ONE,
   labelRegime: opts.labelRegime ?? 'single',
   sideEffects: opts.sideEffects ?? NO_SIDE_EFFECTS,
   sideEffectReducers: opts.sideEffectReducers ?? NO_SIDE_EFFECT_REDUCERS,
@@ -2945,7 +2942,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  *   pass walk them is the general fix if a case ever needs it.)
  */
 function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Tail | null {
-  const { params, collapse, correlatedChildren, labelCardinality, labelRegime, sideEffects, sideEffectReducers, services, sack } = settle(opts);
+  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectReducers, services, sack } = settle(opts);
   // EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step.
   // `analyzeChain` is the same authority the legacy source seeds from, so the two cannot disagree
   // about which chains have an order to take a window from. A chain that demands one and reaches a
@@ -2956,7 +2953,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   const ordered = facts.demandsEncounter;
   const tracksPath = facts.tracksPath;
   const ctx: ChainCtx = {
-    params, correlatedChildren, collapse, ordered, tracksPath, labelCardinality, labelRegime, sideEffects, sideEffectReducers, services, sack,
+    params, correlatedChildren, collapse, ordered, tracksPath, labelRegime, sideEffects, sideEffectReducers, services, sack,
     collections: new Map(),
     mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),
   };
@@ -3348,8 +3345,8 @@ function elementTail(
       // ordinary fold after it. Both lowerings decline the refusal cases (edge/immutable/mixed
       // collection) to legacy, which owns the message while its route lives.
       const mutated = step.name === 'addLabel'
-        ? elementAddLabel(rel, elem, step, ctx.labelCardinality, ctx.sideEffects, ctx.params, fresh)
-        : elementDropLabel(rel, elem, step, ctx.labelCardinality, ctx.sideEffects, ctx.params, fresh);
+        ? elementAddLabel(rel, elem, step, ctx.sideEffects, ctx.params, fresh)
+        : elementDropLabel(rel, elem, step, ctx.sideEffects, ctx.params, fresh);
       if (!mutated) return null;
       const tail = elementTail(mutated.result, elem, steps, at + 1, bulked, ctx, fresh, labels);
       if (!tail) return null;
@@ -4149,7 +4146,7 @@ function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter): Roo
   if (!steps.length) return null;
   const chain = lowerChain(steps, {
     params: ctx.params, collapse: ctx.collapse, correlatedChildren: ctx.correlatedChildren,
-    labelCardinality: ctx.labelCardinality, labelRegime: ctx.labelRegime, sideEffects: ctx.sideEffects,
+    labelRegime: ctx.labelRegime, sideEffects: ctx.sideEffects,
     // The SETTLED values ride into a rooted chain too, and their absence was a silent narrowing: a
     // rooted arm naming a service, a sack or a reducer-form side effect was being handed LESS than
     // the chain around it, so it declined for want of a fact the compile already held. §6·6's
@@ -4392,7 +4389,7 @@ function addedVertices(
 ): { readonly effects: Effects; readonly at: number } | null {
   let end = at + 1;
   while (end < steps.length && steps[end]!.name === 'property') end++;
-  const effects = elementAddV(input, steps[at]!, steps.slice(at + 1, end), ctx.ordered, ctx.labelCardinality, childSeam(ctx, fresh), fresh);
+  const effects = elementAddV(input, steps[at]!, steps.slice(at + 1, end), ctx.ordered, childSeam(ctx, fresh), fresh);
   return effects && { effects, at: end };
 }
 
@@ -4418,6 +4415,6 @@ function mergedElements(
   const child = childSeam(ctx, fresh);
   const effects = steps[at]!.name === 'mergeE'
     ? elementMergeE(input, steps[at]!, arms, tail, aliases, ctx.ordered, child, fresh)
-    : elementMergeV(input, steps[at]!, arms, tail, ctx.ordered, ctx.labelCardinality, child, fresh);
+    : elementMergeV(input, steps[at]!, arms, tail, ctx.ordered, child, fresh);
   return effects && { effects, at: end };
 }

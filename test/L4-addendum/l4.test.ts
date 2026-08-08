@@ -31,7 +31,6 @@ import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { exec, executeQuery } from '../support/executor.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { ZOO_SEED } from '../fixtures/seed-zoo.ts';
-import { LabelCardinality } from '../../src/api.ts';
 import { CREW_SEED } from '../fixtures/seed-crew.ts';
 import { BigDecimal, Duration } from '../../src/gremlin/types.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
@@ -202,12 +201,12 @@ function elementId(v: unknown): unknown {
 
 /** A fixture is a seed AND the capability the graph declares — `multilabel`/`zoo` need
  *  ZERO_OR_MORE, everything else keeps TinkerGraph's ONE default. */
-interface Fixture { seed: readonly string[]; labelCardinality?: LabelCardinality; }
+interface Fixture { seed: readonly string[]; }
 const GRAPHS: Record<string, Fixture> = {
   modern: { seed: MODERN_SEED }, crew: { seed: CREW_SEED }, typed: { seed: TYPED_SEED },
   mapdata: { seed: MAPDATA_SEED }, search: { seed: SEARCH_SEED }, empty: { seed: [] },
-  multilabel: { seed: [], labelCardinality: LabelCardinality.ZERO_OR_MORE },
-  zoo: { seed: ZOO_SEED, labelCardinality: LabelCardinality.ZERO_OR_MORE },
+  multilabel: { seed: [] },
+  zoo: { seed: ZOO_SEED },
 };
 
 /** Resolve upstream's element REFERENCES — `v[marko].id` is "the id of the vertex named marko".
@@ -249,7 +248,7 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
     test(`[${s.graph}] ${s.name}`, async () => {
       if (!(s.graph in GRAPHS)) throw new Error(`unknown graph '${s.graph}' (add its fixture to GRAPHS)`);
       const fixture = GRAPHS[s.graph];
-      const store = new GraphStore(new BunSqlite(':memory:'), fixture.labelCardinality);
+      const store = new GraphStore(new BunSqlite(':memory:'));
       for (const w of fixture.seed) executeQuery(store, w, {});
       // A scenario's own `graph initializer` runs after the fixture seed and before its traversal,
       // exactly as upstream orders them.

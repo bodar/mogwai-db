@@ -34,7 +34,7 @@ import type { SegmentPlan } from '../segment.ts';
 import type { ForeignRow } from '../../services/spi/types.ts';
 import type { RequestScope } from '../../scopes.ts';
 import type { ElementReadDriver, Engine } from './deps.ts';
-import { labelRegime, type LabelCardinality, type LabelRegime } from '../../api.ts';
+import { labelRegime, type LabelRegime } from '../../api.ts';
 
 export { compileTail };
 
@@ -123,7 +123,6 @@ export class LoweringEngine implements Engine {
   readonly params: Record<string, any>;
   readonly fastPaths: FastPathConfig;
   readonly registry: ServiceRegistry;
-  readonly labelCardinality: LabelCardinality;
   readonly labelRegime: LabelRegime;
   readonly federationDepth: number;
   private readonly PREFIX: Map<string, StepFn>;
@@ -146,8 +145,7 @@ export class LoweringEngine implements Engine {
     this.params = own.params ?? request.params;
     this.fastPaths = own.fastPaths ?? request.fastPaths;
     this.registry = request.registry;
-    this.labelCardinality = request.labelCardinality;
-    this.labelRegime = labelRegime(request.sourceOptions, request.labelCardinality);
+    this.labelRegime = labelRegime(request.sourceOptions);
     this.federationDepth = request.federationDepth;
     this.q.engine = this; // ride the Query so families reach us via stream.q.engine
     // The movement/filter/branch/passthrough compilers, keyed by step name. A step absent from

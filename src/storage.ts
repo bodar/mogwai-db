@@ -5,7 +5,7 @@
 // above it (schema, label interning, the whole compiler) is runtime-agnostic.
 // (Deliberately synchronous, unlike an async D1-style adapter: DO SQL is sync.)
 import { coerceBindValue } from './gremlin/types.ts';
-import { LabelCardinality, type Sql } from './api.ts';
+import { type Sql } from './api.ts';
 // The `Sql` seam now lives in the API surface (src/api.ts). Re-exported here so the many
 // existing `import { Sql } from './storage.ts'` sites keep working.
 export type { Sql } from './api.ts';
@@ -27,7 +27,7 @@ const SCHEMA = [
   // fixes edge label cardinality at ONE by spec). Two things fall out of the schema rather
   // than out of step logic: PRIMARY KEY(node,label) makes it a set, so re-adding a label a
   // vertex already carries is an INSERT OR IGNORE no-op; and a ZERO-label vertex is simply
-  // zero rows, which a NOT NULL column could not represent and LabelCardinality.ZERO_OR_MORE
+  // zero rows, which a NOT NULL column could not represent and a label SET
   // requires. The declared capability is still ONE — see labelCardinality in api.ts — so
   // today every vertex has exactly one row here.
   `CREATE TABLE IF NOT EXISTS vertex_labels(
@@ -112,12 +112,7 @@ const SCHEMA = [
 ];
 
 export class GraphStore {
-  /** This graph's declared VERTEX label cardinality (TinkerPop's `Graph.Features`). The storage
-   *  is multi-label-capable regardless; this is what the label-mutation steps validate against
-   *  and what `addV` may write more than one row for. Edge cardinality is fixed at ONE by spec. */
-  readonly labelCardinality: LabelCardinality;
-  constructor(private sql: Sql, labelCardinality: LabelCardinality = LabelCardinality.ONE) {
-    this.labelCardinality = labelCardinality;
+  constructor(private sql: Sql) {
     this.initSchema();
   }
 
