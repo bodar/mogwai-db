@@ -325,8 +325,13 @@ layer along).
 - ✅ the **inject source** (`injectValueTypes`, `gremlin/coerce.ts`; `bareInjectTag` deleted).
 - ✅ the **arm merge** (`sameFraming` no longer declines on a tag disagreement).
 - ✅ the **child seam's `scalar` arm** returns `{expr, framing, vtype?}`.
-- 🚧 the **reducer** site, and `AliasScalarType`/`aliasScalarTypeOf` (`steps/context/context.ts`) — a lossy
-  coarsening invented for the same missing carrier.
+- ✅ the **LIST MEMBER** — `ListOf` carries the same `ScalarType`, and the `perRow` case grew a total
+  `TypeCarrier` (`column` | `envelope`) so the encoding is a NAMED choice rather than prose. This is the
+  arm the plan did not have a slot for, and its absence is why a member's type was spelled in a second,
+  lossier vocabulary for as long as it was — see "THE MEMBER TYPE CHANNEL" under Phase 2. The reducer
+  site landed with it (a local `min`/`max` is the argmin/argmax, reading the winner's own tag).
+- 🚧 `AliasScalarType`/`aliasScalarTypeOf` (`steps/context/context.ts`) — a lossy coarsening invented for
+  the same missing carrier, and now the LAST one. Same treatment: one total union, coarse views derived.
 - 🚧 the **variant payload** has no `vtype` column, so a variant arm declares a STATIC tag or `UNKNOWN`.
   Carrying `perRow` there needs the framer to read it, i.e. a wire change.
 
@@ -534,7 +539,47 @@ GUARD, not a decline.** `addV` proves single-row at COMPILE time (its one-row ca
 
 ✅ Landed: `sack` · `math` · `format` · the ELEMENT-membered list · the NAMED-COLLECTION substrate ·
 §6·7's lattice at the arm merge · `union()` in SOURCE position · the VARIANT · the OPTION-MAP `choose` ·
-**the MAP LOOP** · **`valueMap()`/`elementMap()`**. The durable findings from them:
+**the MAP LOOP** · **`valueMap()`/`elementMap()`** · **the MEMBER TYPE CHANNEL**. The durable findings
+from them:
+
+- 🔴 **THE MEMBER TYPE CHANNEL — §6·7 one layer down, and it had grown a SECOND VOCABULARY unnoticed.**
+  `ListOf`'s scalar arm was `as?: ValueType` + `typed?: boolean` plus an implicit third case: exactly the
+  two-optionals-plus-implicit-third trap `ScalarType` exists to end, spelled differently enough that nobody
+  recognized it. It is now `{ type: ScalarType; productiveNull? }` — the same union, cases and accessors a
+  ROW's type uses — which is step 3 of the build order recorded in
+  `docs/archive/2026-07-25-type-channel-unification.md`. **The carrier is now NAMED too**
+  (`TypeCarrier = column | envelope`): both are the same compile-time fact and only the READ differs, and
+  leaving the encoding to prose is precisely what let the second vocabulary grow for it.
+- 🔴 **What the second vocabulary cost, measured — three wrong answers and a decline, all one shape.**
+  `TYPED_LIST` was a CONSTANT, so re-tagging a list REPLACED it and dropped `as` and `productiveNull`;
+  `unifyLists` compared only the arms' static tags, so a lone self-describing arm unified to an UNTAGGED
+  list and a uuid member framed as a String; `foldScalars`/`foldMember` took a `vtype?`/`staticTag?` PAIR
+  and so could not carry `static`'s `text` flag — the fact that a big long rides as decimal TEXT — which is
+  why `max(Scope.local)` compared lexicographically and answered the SMALLER value on BOTH spines while the
+  GLOBAL `max()` was already right. **One step name, two engines, only one of them ever fixed.**
+- 🔴 **A NULL never WINS a min/max, but it must not be FILTERED.** `NumberHelper.max/min` return the
+  non-null side; over an all-null input they reduce to null, and `ReducingBarrierStep` has seen starts, so
+  `MaxGlobalStep` emits ONE null traverser (`MaxLocalStep.processNextStart` splits on the same null and
+  skips only an EMPTY collection). Filtering answered EMPTY for exactly that case. Both spines now sort
+  nulls LAST — with an explicit `IS NULL` term, because SQLite orders NULLs first ascending.
+- 🔴 **FOUR SITES DROPPED A FIELD ON A RE-SHAPE, and they are one defect shape.** A collection projection
+  declared `v` alone (ask `framingCols` what the framing OWES); `aggregate().by(traversal)`'s per-input
+  window narrowed to `(v, ordinal, rn)`; `unfold()` of a typed list rebuilt the scalar stream without
+  `productiveNull` and with `UNKNOWN` instead of the member's own static type; the three global-reducer arms
+  each rebuilt the framing without `productiveNull`. **The countermeasure is a named preserving rebuild**
+  (`withMemberType`, `typeCarriedBy`, one `numeric` above all three reducer arms) — the same answer
+  `rebuildScalar` already is for the row channel.
+- ⚠️ **A COMPUTE-ONCE RULE the statement budget makes non-negotiable.** `v` and `vt` are two fields of one
+  winning member, and a correlated subquery each emits the whole sort twice: 1,250 → 4,108 bytes for the
+  `max` family against a 100 KB cap. Both spines project a `{v,t}` pair as ONE value and read its fields —
+  and on RelIR that needs a FENCE, because the block assembler otherwise fuses the two projections and
+  re-inlines the pick at both reads (3,024 fused, 1,915 fenced). The same rule retired `sum`'s
+  double-aggregate and the member decode spliced into its own eligibility guard.
+- ⚠️ **An UNTAGGED member is its own compare key, and that is PROVED rather than assumed** — its type is
+  inferred from its storage class, and that inference cannot disagree with the storage order (TEXT infers
+  `string`, no cast; INTEGER infers int/long, a CAST to INTEGER is the identity; REAL infers double). So the
+  cast folds away for a bare list, and `inferVtypeSql` stays out of a self-describing list's ORDERING key
+  entirely: only the WRAPPED members can carry a type their storage class does not determine.
 
 - ⚠️ **THE MEMBERS STAY ROWIDS FOR THE WHOLE OF THEIR LIFE INSIDE THE ALGEBRA.** `foldElements` collects ids,
   `unfoldList` hands them back as an element relation, and only `listPayload` expands them — at the ROOT, once
@@ -628,9 +673,22 @@ GUARD, not a decline.** `addV` proves single-row at COMPILE time (its one-row ca
 🔴 **Divergences left standing deliberately** (recorded, not reconciled — each is a human call if it ever
 matters): a `by()`-less `math("a + b")` over labelled values ANSWERS on RelIR where legacy throws; an EMPTY
 `fold()` frames as one empty list; `fold().unfold().values("name")` keeps traverser order where legacy answers
-alphabetically; the retyping two-arg `choose` and MIXED ELEMENT KINDS in a variant; a projected collection
-folds BARE rather than typed (a TYPED list of nulls emits nothing where a BARE one emits null — a question
-about `MaxLocalStep`, not about collections).
+alphabetically; the retyping two-arg `choose` and MIXED ELEMENT KINDS in a variant.
+
+✅ **One of those "divergences" was a DROPPED FIELD, and the way it read as a semantics question is the
+lesson.** It stood here as *a projected collection folds BARE rather than typed — a TYPED list of nulls
+emits nothing where a BARE one emits null, a question about `MaxLocalStep`, not about collections.* Both
+halves were wrong. `typed` was a CONSTANT `ListOf`, so claiming the type REPLACED the descriptor and took
+`productiveNull` with it — the flag saying a NULL member is a real value; the observed behaviour change was
+that field falling out, and nothing about `MaxLocalStep`. And the reference answers the question outright:
+`Operator.max` over an all-null input reduces to null (`NumberHelper.max` returns the non-null side, null
+when both are null) and `ReducingBarrierStep` has seen starts, so `MaxGlobalStep` emits ONE null traverser;
+`MaxLocalStep.processNextStart` splits on the same null and skips only an EMPTY collection. **A recorded
+divergence whose justification is a question we did not ask the reference is not a divergence — it is an
+unread citation** (§12's rule, with the twist that the blind spot was a vocabulary rather than an argument:
+a list member's type was spelled in a second, lossier channel than a row's, so nobody thought to ask). The
+whole family landed once `ListOf` took the same `ScalarType` a row carries: see "the MEMBER TYPE CHANNEL"
+below.
 
 🔴 **A BARRIER EMITS ONE TRAVERSER, and legacy contradicts ITSELF one shape over.** A global `count()`
 after `group()` is 1; only `count(Scope.local)` is the map's SIZE (`GroupStep extends
@@ -751,8 +809,10 @@ Most of `docs/` was written against a two-spine world and will be lying by here.
 Each cited, corpus-mostly-invisible, none a one-liner. Rank them against phase work, do not queue them behind
 it.
 
-- **The per-row scalar type channel's remaining sites (§6·7)** — the reducer, and `AliasScalarType`/
-  `aliasScalarTypeOf`.
+- **The per-row scalar type channel's LAST site (§6·7)** — `AliasScalarType`/`aliasScalarTypeOf`. The
+  reducer and the list MEMBER both landed; this is the only coarsening left, and the `ListOf` cutover is
+  the worked example to copy (one total union, coarse views derived, a NAMED preserving rebuild so a
+  re-tag cannot drop the fields the tag is not).
 - **The `set` framing marker** survives `range(local)`/`all`/`any`/`none` and is dropped only by
   `order(local)`/`unfold()` — a state-threading change through the list tail's follower loop, which is
   duplicated (`rel/list.ts`'s `ListOf.set` vs legacy's `ListStream.set`). Land it in RelIR and let legacy shed.

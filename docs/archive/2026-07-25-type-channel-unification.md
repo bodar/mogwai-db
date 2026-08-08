@@ -126,6 +126,17 @@ stopped rather than pushed through.
    then names every site that must decide.
 3. Give `ListOf`/`GroupKey`/`Shape{kind:'value'}` the same union (this absorbs the `as?` xor
    `perRowType?` debt item and `GroupKey.vtypeCol`).
+   **DONE 2026-08-08 for `ListOf` and `Shape{kind:'value'}`; `GroupKey` carries a `ScalarType?` and
+   only its optionality is left.** Two things this step turned out to need that the list above does
+   not say. First, `ScalarType.perRow` had to grow a total `TypeCarrier` — `column` for a relation's
+   sibling column, `envelope` for a `{t,v}` node inside a JSON blob. They are the same compile-time
+   fact and differ only in the READ, so one case with two carriers is right where two type
+   vocabularies were what actually happened: the doc's own "the physical encoding stays a per-site
+   choice" was left as PROSE, and prose does not stop a second vocabulary growing. Second, a
+   re-tagging must be a named PRESERVING rebuild (`withMemberType`) — `TYPED_LIST` was a constant, so
+   claiming the type replaced the descriptor and silently dropped `as` and `productiveNull`, which
+   cost a wrong wire class for every projected collection and read for weeks as an open semantics
+   question about `MaxLocalStep`. Same lesson as `rebuildScalar` in step 2, one layer down.
 4. Make the container encoding a runtime per-list decision derived from the type; the typed
    readers handle one uniform encoding per list.
 5. Retire `assertUntypedList` — it exists only to guard the two-encoding split — which lands
