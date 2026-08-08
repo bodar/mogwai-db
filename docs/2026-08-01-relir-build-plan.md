@@ -534,7 +534,7 @@ GUARD, not a decline.** `addV` proves single-row at COMPILE time (its one-row ca
 
 ✅ Landed: `sack` · `math` · `format` · the ELEMENT-membered list · the NAMED-COLLECTION substrate ·
 §6·7's lattice at the arm merge · `union()` in SOURCE position · the VARIANT · the OPTION-MAP `choose` ·
-**the MAP LOOP** · **`valueMap()`**. The durable findings from them:
+**the MAP LOOP** · **`valueMap()`/`elementMap()`**. The durable findings from them:
 
 - ⚠️ **THE MEMBERS STAY ROWIDS FOR THE WHOLE OF THEIR LIFE INSIDE THE ALGEBRA.** `foldElements` collects ids,
   `unfoldList` hands them back as an element relation, and only `listPayload` expands them — at the ROOT, once
@@ -583,6 +583,23 @@ GUARD, not a decline.** `addV` proves single-row at COMPILE time (its one-row ca
   `valueMap()` describe what is actually there. `T` is a WIRE TYPE, not a string: `FrameNode` grew a `T` arm
   (one line in `frameTypedNode`, the same shape as its `vertex`/`edge` arms), deliberately NOT a
   `CanonicalType` — a token is never a stored property VALUE, so it belongs to the READ vocabulary only.
+- ⚠️ **`valueMap` and `elementMap` are ONE producer with THREE facts different**, which is the
+  `group()`/`groupCount()` relationship again: the tokens (optional against unconditional), the value
+  arity (a LIST per vertex key against FLAT, and `map.put` overwriting means the flat form keeps the
+  key's LAST value), and an edge `elementMap`'s `Direction.IN`/`OUT` endpoint maps
+  (`ElementMapStep.getVertexStructure`). `Direction` joined `T` as a `FrameNode` arm; the nested
+  endpoint map needed nothing new, because the tree is self-describing at every depth.
+- 🔴 **AN EDGE `valueMap()` VALUE IS THE VALUE, NOT A LIST — and both spines had it wrong.**
+  `PropertyMapStep.addElementProperties` collects into a list only `if (isVertex)`. The corpus pins it
+  decisively though indirectly: `integrated/SubgraphStrategy.feature:713-724` asserts
+  `outE().valueMap().select(Column.values).unfold()` yields `d[5].i`, which it could not if the value
+  side were `[5]`. §12's rule with a sharpened witness — one of the two agreeing implementations was
+  a RelIR expectation written two hours earlier in the same session, which made it no better evidence.
+- ⚠️ **A ZERO-LABEL VERTEX HAS NO `T.label` ENTRY under the single regime**, which is a filter on the
+  token ROW rather than a null inside it (`addIncludedOptions` puts the label only
+  `if (!label.isEmpty())`; the multilabel twin pins `s[]`, present and empty). Our `label()` answers
+  `DEFAULT_VERTEX_LABEL` there, which is right for the scalar step and the wrong ENTRY here — one
+  value answering two questions.
 - ⚠️ **The LABEL REGIME is a settled value the lowering must be HANDED (§6·6 again).** It is not derivable
   from `labelCardinality` inside the algebra — `with("multilabel")`/`with("singlelabel")` overrides the graph
   default — so a lowering that re-derived it would render one name where a vertex holds a set.
@@ -620,9 +637,7 @@ trusted. Nobody has swept the rest.
 policy answer for the role — a channels-core change, not a step lowering), and `barrier(Barrier.normSack)` is
 its own step.
 
-🚧 **What the MAP family still owes, in the order it is worth doing:** `elementMap()` (7 blockers, and an
-edge's `Direction.IN`/`OUT` entries want the same token treatment one enum along, plus a LAST-WINS rule for a
-multi-valued key — `map.put` overwrites where `valueMap` collects); the SELECTIVE token subsets
+🚧 **What the MAP family still owes, in the order it is worth doing:** the SELECTIVE token subsets
 (`with(tokens, ids)`, which `absorbValueMapWith` deliberately leaves in place to fail closed) and the
 `by(__.unfold())` that pairs with them (a `by()` on a `valueMap` projects each map VALUE and removes an
 unproductive key — `applyTraversalRingToMap`); `select(<key>)` over a map (`Scoping.getScopeValue` tries the
