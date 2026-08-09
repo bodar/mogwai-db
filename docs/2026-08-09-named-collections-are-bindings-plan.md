@@ -1,8 +1,10 @@
 # A NAMED COLLECTION IS A BOUND RELATION, REDUCED AT THE READ
 
-_Status: **APPROVED, not started.** Written 2026-08-09 against trunk `87105cc`. Supersedes the
-"registered twice → decline" rule in `src/compiler/rel/collection.ts` and the `ctx.mutating` decline
-beside it. Read this before touching `collection.ts`._
+_Status: **Phases 1, 2, 3a, 5 and 6 LANDED** (2026-08-09). L3 1775 → 1782. Phases 4, 7, 3b and 2b are
+open, and **7 is the largest L3 item left at ~24 scenarios** — its design is worked out below, at the
+pin. Written against trunk `87105cc`; it superseded the "registered twice → decline" rule in
+`src/compiler/rel/collection.ts` and two of the four `ctx.mutating` declines beside it. Read this
+before touching `collection.ts`._
 
 ## The one-sentence thesis
 
@@ -395,12 +397,46 @@ is Phase 4, not a second snapshot: once the keyed forms hold `(key, value-contri
 and run `groupBarrier` at the `cap`, they take the aggregate sites' binding unchanged. `ChainCtx.mutating`
 therefore survives, with two readers instead of four.
 
-### Phase 7 — the merge POLICY: seed + `Operator`.
+### Phase 7 — the merge POLICY: seed + `Operator`. NOT STARTED — **the largest L3 item left, ~24.**
 
 Delete the `reducers.has(label)` decline. A seed with `addAll` is an extra member row; a `Set` seed
 makes the reduction DEDUP; every other operator reduces member-by-member over the seed
-(`AggregateStep.java:124-153`). The same policy object then serves `withSack(seed, Operator.x)` —
-land both, or land the collection half and leave a named seam the sack lowering can call.
+(`AggregateStep.java:124-153`). The same policy object then serves `withSack(seed, Operator.x)`.
+
+**Verified at the pin, so the design below is not guesswork.** `sideEffect/Aggregate.feature:279-563`
+over `gmodern`'s ages (29, 27, 32, 35):
+
+| declaration | expected | so the reduction is |
+|---|---|---|
+| `("a", 1, Operator.sum)` | `124` | `1+29+27+32+35` |
+| `("a", 123, Operator.minus)` | `0` | `123-29-27-32-35` |
+| `("a", 2, Operator.mult)` | `1753920` | `2*29*27*32*35` |
+| `("a", 876960, Operator.div)` | `1` | `876960/29/27/32/35` |
+| `("a", 1, Operator.min)` / `("a", 100, Operator.min)` | `1` / `27` | extremum including the seed |
+| `("a", …, Operator.addAll)` / a `Set` seed | a list / a deduped list | the list fold, seed first |
+
+**It is ONE mechanism, and picking nine would be the mistake.** `DefaultTraversalSideEffects.add` is
+`set(k, getReducer(k).apply(get(k), v))` (`.../util/DefaultTraversalSideEffects.java:88-91`) — a LEFT
+FOLD over the members in order, seeded. So the lowering is a `Recursive` walk over the ordered member
+relation with one operator-dependent expression, which is `make.recursive` and nothing new. Two
+things make that the right shape rather than a per-operator aggregate:
+
+- **`SUM`/`MIN`/`MAX` would cover four operators and silently mis-answer two.** `mult` and `div` have
+  no SQL aggregate, and rewriting `div` as `seed / PRODUCT(members)` is NOT equivalent under INTEGER
+  division — it happens to agree on this fixture and would not in general. A left fold is exact by
+  construction, which is the difference between a right answer and a lucky one.
+- The member ORDER the fold needs is the one Phase 2 already pinned (site ordinal, then that site's
+  encounter), so nothing new decides it.
+
+The result of a non-`addAll` operator is a SCALAR, not a list, so `reduce()` gains a second framing
+answer — which is exactly what `Members` + `MergePolicy` being separate fields is for, and where
+`merge` finally earns the place Phase 1 declined to give it.
+
+Work, in order: widen `sideEffectReducers` from `ReadonlySet<string>` to a map of `{seed, operator}`
+(the front end already finds the form and throws the payload away — its own comment says it widens
+"when a merge policy lands, one place"); thread it as `ChainCtx` already threads the set; add
+`MergePolicy` to `Collection`; make `reduce()` dispatch list-fold vs recursive-fold. Then `withSack`'s
+identical decline takes the same object.
 
 ---
 
