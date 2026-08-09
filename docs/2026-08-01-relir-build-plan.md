@@ -735,10 +735,25 @@ caught, and why each refusal's MESSAGE says what SQLite actually does rather tha
   two rewrites separate is load-bearing — `prune`'s analysis is keyed on the relational SPINE, so a `rewrite`
   that descended into subplans would prune every projection inside a correlated subquery down to its channels.
 
-**1. `prune`'s remainder** — pruning below `Join`/`Union`/`Aggregate`/**`Recursive`**, under all four of which
-every declared column is required today; `src/rel/passes/prune.ts` states the remainder at the code, which is
-the authority. It is what makes `unroll`'s n replicas affordable, and **`Recursive` is the node this phase
-introduces**, so it is the one that must not be missing from the list.
+**1. `prune`'s remainder** — what makes `unroll`'s n replicas affordable. ✅ `Join`/`Union`/`Aggregate` landed;
+🚧 `Recursive` is next, and **it is the node this phase introduces**, so it is the one that must not be missing.
+
+⚠️ **It was never "add three cases", and the reason generalizes.** A `Project` is the only node that removes a
+column at SOURCE; every other kind's output is a function of its input's. So pruning below a `Join` does not
+prune the join — it **RETYPES** it, and every node between there and the root with it, because `check` requires
+the unary chain to declare exactly its input's columns. That also refuted the obvious implementation: pass 2
+**cannot be a `rewrite` callback**, since a factory validates its declared type against the children it was
+given, so the join throws INSIDE the rebuild and the callback that would have retyped it never runs.
+`mapRelChildren` grew a `retype` override so the node is constructed with its new type in one step.
+
+Three laws the per-kind rules keep, each a wrong ANSWER rather than an error if broken: a **`groupBy` key is
+never dropped** (removing one makes the grouping COARSER); an **`Aggregate` keeps at least one output** (§12 —
+a `Project` reading none of a whole-relation aggregate's outputs ERASES it, one row becomes N); a **channel is
+never pruned**. The safety property is a test: pruning nothing changes the SQL not at all.
+
+`Recursive` requires every declared column *for a stated reason*, not because the walk stopped there: its
+`step` is a FUNCTION of `self`, so what the body reads from the walk is only knowable by instantiating it, and
+the header, seed and step types must move together.
 
 **2. `flatten`** — join flattening / decorrelation into the P1 envelope, P1 legality enforced in `check`, a body
 that cannot be made legal throwing a clear deferral. Deletes `expandRepeatBody`, and `REPEAT_BODY_OK`'s
