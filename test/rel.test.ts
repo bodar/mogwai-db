@@ -370,6 +370,47 @@ describe('RelIR', () => {
     if (pruned.kind === 'union') for (const input of pruned.inputs) expect(input.type.cols.map((c) => c.name)).toEqual(['id']);
   });
 
+  // The header, the seed and the step are ONE decision — and the body has to be re-expressed against
+  // a SelfRef of the narrower type, or it goes on declaring columns the CTE no longer has. `depth` is
+  // unobserved by the consumer and unread by the body, so it goes; `id` is read by both and stays.
+  test('prunes a Recursive header, moving its seed, step and SelfRef together', () => {
+    // A terminating body, and it has to be ONE unary node over the SelfRef: P1 puts the walk at the
+    // top level of the recursive term's FROM, and P3 now refuses the Limit that would otherwise be
+    // the lazy way to stop. So the filter both bounds the walk and is what reads `id` off it.
+    const walkCols = [{ name: 'id', type: 'int', nullable: false }, { name: 'depth', type: 'int', nullable: false }] as const;
+    const seed = valuesRel({ id: relId('ws'), rows: [[lit(1, 'int'), lit(0, 'int')]], channels, type: { cols: walkCols } });
+    const walk = recursiveRel({ id: relId('walk'), name: 'walk', cols: ['id', 'depth'], seed, channels, type: { cols: walkCols },
+      step: (self) => filter({ id: relId('wstep'), input: self, channels, type: { cols: walkCols },
+        pred: { kind: 'binary', op: '<', left: col(self.id, 'id'), right: lit(0, 'int') } }) });
+
+    const pruned = prune(walk, ['id']);
+    expect(() => check(pruned)).not.toThrow();
+    expect(pruned.type.cols.map((c) => c.name)).toEqual(['id']);
+    if (pruned.kind === 'recursive') {
+      expect(pruned.cols).toEqual(['id']);
+      expect(pruned.seed.type.cols.map((c) => c.name)).toEqual(['id']);
+    }
+    // …and it still runs: a narrower CTE header is only correct if the emitted SQL agrees with it.
+    const emitted = emitQuery(planOf(pruned));
+    const db = new Database(':memory:');
+    expect(db.query(emitted.sql).all(...emitted.binds)).toEqual([{ id: 1 }]);
+    db.close();
+  });
+
+  // A column the BODY reads off the walk is not unobserved, however little the consumer wants it.
+  test('keeps a Recursive column the body itself reads back off the walk', () => {
+    const walkCols = [{ name: 'id', type: 'int', nullable: false }, { name: 'depth', type: 'int', nullable: false }] as const;
+    const seed = valuesRel({ id: relId('ws2'), rows: [[lit(1, 'int'), lit(0, 'int')]], channels, type: { cols: walkCols } });
+    const walk = recursiveRel({ id: relId('walk2'), name: 'walk2', cols: ['id', 'depth'], seed, channels, type: { cols: walkCols },
+      step: (self) => filter({ id: relId('wstep2'), input: self, channels, type: { cols: walkCols },
+        pred: { kind: 'binary', op: '<', left: col(self.id, 'depth'), right: lit(0, 'int') } }) });
+
+    // The consumer asks only for `id`; `depth` survives because the WALK reads it.
+    const pruned = prune(walk, ['id']);
+    expect(pruned.type.cols.map((c) => c.name)).toEqual(['id', 'depth']);
+    expect(() => check(pruned)).not.toThrow();
+  });
+
   // The safety property that lets this pass sit in front of an emitter whose SQL is snapshot-tested.
   // Node IDENTITY is not it — `rewrite` rebuilds every node through its factory either way — so the
   // claim is about the emitted statement.

@@ -1,10 +1,10 @@
 import { channelCols } from '../../channels.ts';
 import type { Expr } from '../expr.ts';
-import { aggregate, project } from '../factory.ts';
+import { aggregate, project, recursive, values } from '../factory.ts';
 import { explodeColumns } from '../obligations.ts';
 import type { Rel } from '../rel.ts';
 import type { ColMeta, RelId } from '../types.ts';
-import { forEachExpr, mapRelChildren, relChildren, relExprs } from '../walk.ts';
+import { exprRels, forEachExpr, mapRelChildren, recursiveStep, relChildren, relExprs } from '../walk.ts';
 
 const refs = (expression: Expr, relation: RelId, out: Set<string>): void =>
   forEachExpr(expression, (e) => { if (e.kind === 'col' && e.rel === relation) out.add(e.name); });
@@ -20,6 +20,43 @@ const added = (r: Rel): readonly string[] =>
   r.kind === 'window' ? r.specs.map(([name]) => name)
     : r.kind === 'explode' ? explodeColumns(r.as)
       : [];
+
+/**
+ * The columns a `Recursive` must keep: what its consumer reads, PLUS what its own body reads back
+ * off the walk, plus its channels — in declared order, because the header is positional.
+ *
+ * A `SelfRef` carries the recursive's own `id`, so a body's reference to the walk is an ordinary
+ * `Col` against that id and this is just a scan for them.
+ */
+const keepOfRecursive = (r: Extract<Rel, { readonly kind: 'recursive' }>, need: ReadonlySet<string>): readonly string[] => {
+  const fromSelf = new Set<string>();
+  const body = recursiveStep(r);
+  const scan = (node: Rel): void => {
+    relExprs(node).forEach((e) => {
+      refs(e, r.id, fromSelf);
+      forEachExpr(e, (sub) => exprRels(sub).forEach(scan));
+    });
+    relChildren(node).forEach(scan);
+  };
+  scan(body);
+  const keep = new Set([...need, ...fromSelf, ...channelCols(r.channels)]);
+  return names(r.type.cols).filter((name) => keep.has(name));
+};
+
+/**
+ * Re-express a walk body against a `SelfRef` of the PRUNED type.
+ *
+ * ⚠️ **The substitution must happen INSIDE pass 2, not before it**, and getting that backwards cost
+ * a real cycle. Substituting first produces a body whose nodes declare their old widths over a
+ * narrower child, and pass 2 then sees nothing to do — its retypes fire on a child having SHRUNK,
+ * and within the pre-substituted tree nothing did. Done here, the self-ref shrinks like any other
+ * child, so every retype downstream works unchanged: the unary chain follows it, and a `Join`'s
+ * positional mapping still has the ORIGINAL side widths to map against.
+ *
+ * It exists at all because `recursive`'s factory memoises `step` — the body it built the first time
+ * is the only body there is, so the original closure cannot simply be re-run against a new `self`.
+ */
+interface SelfSubstitution { readonly name: string; readonly self: Rel }
 
 /**
  * Remove unobserved columns, everywhere the plan's own laws leave a defined answer.
@@ -49,11 +86,16 @@ const added = (r: Rel): readonly string[] =>
  * - **A channel is never pruned.** It is carried state, not an observed output, and dropping one is
  *   the largest defect category in this repo's history (§3.5).
  *
- * `Recursive` still requires every declared column: its `step` is a FUNCTION of `self`, so what the
- * body reads from the walk is only knowable by instantiating it, and the seed/step/header types must
- * move together. That fixpoint is its own increment.
+ * `Recursive` is the one whose header, seed and step are ONE decision: what the body reads back off
+ * the walk joins the consumer's need before anything is decided, and the body is then re-expressed
+ * against a `SelfRef` of the narrower type. See the arm in pass 2 for why that cannot reuse the
+ * original `step` closure.
  */
-export function prune(plan: Rel, required: readonly string[] = plan.type.cols.map((col) => col.name)): Rel {
+export function prune(
+  plan: Rel,
+  required: readonly string[] = plan.type.cols.map((col) => col.name),
+  substitute?: SelfSubstitution,
+): Rel {
   const needs = new Map<Rel, Set<string>>();
   const queue: Rel[] = [];
   const require = (r: Rel, cols: Iterable<string>): void => {
@@ -121,6 +163,22 @@ export function prune(plan: Rel, required: readonly string[] = plan.type.cols.ma
       continue;
     }
 
+    if (r.kind === 'recursive') {
+      // The header, the seed and the step move together, and what the BODY reads from the walk is
+      // only knowable by instantiating it — so the walk's own reads join the parent's need before
+      // anything is decided. `recursiveStep` is memoised by the factory, so this is the same body
+      // object pass 2 walks.
+      //
+      // ⚠️ BOTH sides must be required, not just the seed. `check` holds the seed and the step to
+      // IDENTICAL types, so a body left with no recorded need prunes to its channels alone and the
+      // two stop agreeing — which is what happens on the path where the header does not shrink at
+      // all, i.e. the case that looked like it needed no work.
+      const keep = keepOfRecursive(r, need);
+      require(r.seed, keep);
+      require(recursiveStep(r), keep);
+      continue;
+    }
+
     for (const child of relChildren(r)) {
       const mine = new Set(added(r));
       const childNeed = new Set(preserves(r)
@@ -184,6 +242,28 @@ export function prune(plan: Rel, required: readonly string[] = plan.type.cols.ma
   };
 
   function build(r: Rel): Rel {
+    // The walk reference, narrowed — see `SelfSubstitution`. It shrinks like any other child, which
+    // is what makes every retype below fire without a special case.
+    if (substitute && r.kind === 'self-ref' && r.name === substitute.name) return substitute.self;
+    /**
+     * `Values` is the OTHER node that removes a column at source, and forgetting it is not cosmetic:
+     * a walk's SEED is typically a `Values`, so a `Recursive` whose header pruned would leave the
+     * seed wider than the step and `check` holds those two to identical types. It is the first thing
+     * `unroll` would have hit.
+     *
+     * ⚠️ It may not prune to zero — an empty relation is a `Filter(false)`, never an empty `VALUES`
+     * (§3.3), and the factory says so.
+     */
+    if (r.kind === 'values') {
+      const keep = new Set([...(needs.get(r) ?? names(r.type.cols)), ...channelCols(r.channels)]);
+      const alive = r.type.cols.map((col, i) => [col, i] as const).filter(([col]) => keep.has(col.name));
+      const kept = alive.length ? alive : [[r.type.cols[0]!, 0] as const];
+      if (kept.length === r.type.cols.length) return r;
+      return values({
+        id: r.id, channels: r.channels, type: { cols: kept.map(([col]) => col) },
+        rows: r.rows.map((row) => kept.map(([, i]) => row[i]!)),
+      });
+    }
     // A Project removes a column at SOURCE, so its expressions change too and the factory has to see
     // both at once.
     if (r.kind === 'project') {
@@ -210,6 +290,27 @@ export function prune(plan: Rel, required: readonly string[] = plan.type.cols.ma
         id: r.id, input: go(r.input), channels: r.channels, having: r.having,
         groupBy: r.groupBy, aggs: r.aggs.filter(([name]) => kept.has(name)),
         type: { cols: [...keyCols, ...keptCols] },
+      });
+    }
+    /**
+     * The walk. Its header, seed and step are ONE decision, and the body has to be re-expressed
+     * against a `SelfRef` of the narrower type or it goes on declaring columns the CTE no longer
+     * has. The factory memoises `step`, so the original closure cannot be re-run against a new
+     * `self` — the body it built the first time is the only body there is. So: substitute the walk
+     * reference, then prune the substituted body to the same header. Re-entering `prune` rather than
+     * threading this pass's memo through is deliberate — the body is now a DIFFERENT tree, and a memo
+     * keyed on the old nodes would miss every one of them while looking like it had hit.
+     */
+    if (r.kind === 'recursive') {
+      const keep = keepOfRecursive(r, needs.get(r) ?? new Set(names(r.type.cols)));
+      if (keep.length === r.type.cols.length) return mapRelChildren(r, go);
+      const kept = new Set(keep);
+      const body = recursiveStep(r);
+      return recursive({
+        id: r.id, name: r.name, cols: keep, channels: r.channels,
+        type: { cols: r.type.cols.filter((col) => kept.has(col.name)) },
+        seed: go(r.seed),
+        step: (self) => prune(body, keep, { name: r.name, self }),
       });
     }
     return mapRelChildren(r, go, retypeOf(r, relChildren(r).map(go)));
