@@ -2961,6 +2961,18 @@ export interface Lowering {
    * and for the same reason.
    */
   readonly sideEffectReducers?: ReadonlySet<string>;
+  /**
+   * THE NAMED-COLLECTION REGISTRY a rooted sub-chain SHARES with the chain around it — see
+   * `ChainCtx.collections`, which this becomes.
+   *
+   * The one option here that is not a settled constant, and it is a `Lowering` field for exactly one
+   * caller: `rootedRead` re-enters `lowerChain` for a nested ROOTED traversal, and a side effect
+   * lives on the ROOT traversal (`AggregateStep.java:57` resolves through
+   * `this.getTraversal().getSideEffects()`), so `within(__.cap("a").unfold())` must see the outer
+   * `aggregate("a")`. Absent, a fresh map — which is the right answer for an actual top-level compile
+   * and the WRONG one for a sub-chain, which is what it silently was.
+   */
+  readonly collections?: Collections;
 }
 
 /**
@@ -2979,6 +2991,11 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   sideEffectReducers: opts.sideEffectReducers ?? NO_SIDE_EFFECT_REDUCERS,
   services: opts.services ?? NO_SERVICES,
   sack: opts.sack ?? null,
+  // A FRESH registry unless a caller hands one down. `rootedRead` is the caller that does, and it
+  // must: side effects live on the ROOT traversal (`AggregateStep.java:57`), so a rooted sub-chain
+  // shares the outer chain's collections rather than getting an empty map — the isolation that was
+  // here before was not a scoping decision, it was wrong against the reference.
+  collections: opts.collections ?? new Map(),
 });
 
 /** No `withSideEffect` declared. One shared value, for `NO_ALIASES`' reason. */
@@ -3175,7 +3192,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  *   pass walk them is the general fix if a case ever needs it.)
  */
 function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Tail | null {
-  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectReducers, services, sack } = settle(opts);
+  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectReducers, services, sack, collections } = settle(opts);
   // EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step.
   // `analyzeChain` is the same authority the legacy source seeds from, so the two cannot disagree
   // about which chains have an order to take a window from. A chain that demands one and reaches a
@@ -3187,7 +3204,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   const tracksPath = facts.tracksPath;
   const ctx: ChainCtx = {
     params, correlatedChildren, collapse, ordered, tracksPath, labelRegime, sideEffects, sideEffectReducers, services, sack,
-    collections: new Map(),
+    collections,
     mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),
   };
   const orderedChannels = ordered ? withChannel(BULK, ENCOUNTER) : BULK;
@@ -4536,7 +4553,7 @@ function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter): Roo
     // the chain around it, so it declined for want of a fact the compile already held. §6·6's
     // lesson at a second seam — coverage must measure what the algebra can express, never what the
     // caller remembered to pass.
-    services: ctx.services, sack: ctx.sack, sideEffectReducers: ctx.sideEffectReducers,
+    services: ctx.services, sack: ctx.sack, sideEffectReducers: ctx.sideEffectReducers, collections: ctx.collections,
   }, fresh);
   if (!chain) return null;
   return chain.effects ? { rel: chain.rel, framing: chain.framing, effects: chain.effects } : { rel: chain.rel, framing: chain.framing };

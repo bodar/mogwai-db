@@ -76,6 +76,23 @@ Feature: mogwai addendum — a label filled at several chain positions holds eve
 
   @SpineRel
   @gap:aggregate-multi-site
+  Scenario: g_unionXV_aggregateXxX__V_hasLabelXsoftwareX_aggregateXxXX_capXxX_unfold_dedup_countXlocalX
+    Given the modern graph
+    And the traversal of
+      """
+      g.union(__.V().hasLabel("person").aggregate("x"), __.V().hasLabel("software").aggregate("x")).cap("x").unfold().count()
+      """
+    # A SOURCE-position union: each arm is a whole ROOTED traversal re-entering the fold, and both
+    # fill the same label. They must see one registry, because a side effect lives on the root
+    # traversal — a rooted sub-chain given a fresh map cannot be read back at all, which is what
+    # `cap("x")` declining used to prove. Four persons plus two software.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[6].l |
+
+  @SpineRel
+  @gap:aggregate-multi-site
   Scenario: g_V_hasLabelXpersonX_aggregateXaX_byXnameX_aggregateXaX_byXageX_capXaX_unfold
     Given the modern graph
     And the traversal of

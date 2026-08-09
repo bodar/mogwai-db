@@ -344,11 +344,20 @@ Store keyed member rows + the reducer; run `groupBarrier` at `cap`. `registerMap
 **Trap:** a group's VALUE reducer is not the collection's merge operator. Keep them apart — the
 member is `(key, value-contribution)` and the group reduction runs over the union.
 
-### Phase 5 — rooted sub-chains inherit `collections`.
+### Phase 5 — ✅ LANDED. Rooted sub-chains inherit `collections`.
 
-Forward `collections` in `rootedRead`'s settle-list (`lower.ts:4543-4557`). Unblocks
-`within(__.cap('a').unfold())`, `g.union(__.aggregate('x'), __.aggregate('x'))`, and every set-op
-operand naming a collection.
+`collections` is a `Lowering` option, forwarded in `rootedRead`'s settle-list. The fresh-map
+isolation was not a scoping decision — it was wrong against the reference, where a side effect lives
+on the ROOT traversal (`AggregateStep.java:57`).
+
+**Checkpoint — measured:** L3 unchanged at 1782, census unchanged at 1208, legacy floor unchanged.
+The corpus does not exercise it, so the evidence is an A/B on one traversal and an L4 scenario:
+`g.union(__.V().hasLabel("person").aggregate("x"), __.V().hasLabel("software").aggregate("x")).cap("x")`
+lowers 1/2 → 2/2 steps with the forward and without it.
+
+⚠️ **`within(__.cap('a').unfold())` is still blocked, and NOT here.** `where(P.within("a"))` declines
+at the `where`, before any rooted body is reached — the predicate operand's label resolution is its
+own gap. Phase 5 was a precondition for it, not the whole of it.
 
 **Trap:** a rooted body is correlated to NOTHING. A collection registered inside one and read outside
 it is fine (side effects are root-global); a collection registered OUTSIDE and read inside is fine
