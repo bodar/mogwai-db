@@ -8,7 +8,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { SqlType } from '../../rel/types.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
-import type { RelFraming } from './framing.ts';
+import type { FramedRel, RelFraming } from './framing.ts';
 import { byExpr, modulations, scopedHost, type Modulation } from './modulator.ts';
 import { carriedCols, meta, typeOf, type Minter } from './build.ts';
 
@@ -229,7 +229,7 @@ export function projectorValue(
  */
 export function projectorTail(
   input: Rel, step: IRStep, host: ChildHost, child: ChildSeam, fresh: Minter,
-): { readonly rel: Rel; readonly framing: RelFraming } | null {
+): FramedRel | null {
   const produced = projectorValue(step, host, child, fresh);
   if (!produced) return null;
   const { value, drop, sqlType, framing } = produced;

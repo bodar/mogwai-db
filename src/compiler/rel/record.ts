@@ -6,7 +6,7 @@ import type { IRStep } from '../ir/step.ts';
 import { and, carriedCols, eq, mapNode, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { elementNode } from './element.ts';
-import { fieldCol, framingCols, type RecordField, type RelFraming } from './framing.ts';
+import { fieldCol, framingCols, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { MAP_COL, mapPayload } from './map.ts';
 import { byField, modulations } from './modulator.ts';
 import { aliasGuard, aliasPresent, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead } from './alias.ts';
@@ -342,7 +342,7 @@ export function recordPayload(
  */
 export function recordField(
   rel: Rel, field: RecordField, fresh: Minter,
-): { readonly rel: Rel; readonly framing: RelFraming } | null {
+): FramedRel | null {
   const cols = framingCols(field.framing);
   if (!cols) return null;
   const present = field.optional ? presence(readingRel(rel, ''), field) : null;
@@ -388,7 +388,7 @@ export function recordField(
 export function selectKeys(
   step: IRStep, rel: Rel, aliases: AliasMap, child: ChildSeam, fresh: Minter,
   host?: { readonly framing: RelFraming; readonly named: (label: string) => boolean },
-): { readonly rel: Rel; readonly framing: RelFraming } | null {
+): FramedRel | null {
   const spec = selectSpec(step);
   if (!spec) return null;
   const bys = modulations(step, spec.labels.length, child);

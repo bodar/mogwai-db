@@ -9,7 +9,7 @@ import type { ChildHost, ChildSeam } from './child.ts';
 import { byField, isProductiveBy, modulations, productivityFilter } from './modulator.ts';
 import { foldElements, foldScalars } from './list.ts';
 import { carriedCols, typeOf, type Minter } from './build.ts';
-import { framingCols, type RelFraming } from './framing.ts';
+import { framingCols, type FramedRel, type RelFraming } from './framing.ts';
 import type { Channel } from '../../channels.ts';
 
 /**
@@ -124,7 +124,7 @@ export function registerCollection(
  * module's. What is shared is the registry discipline: the same label rules, the same refusals.
  */
 export function registerMap(
-  step: IRStep, built: { readonly rel: Rel; readonly framing: RelFraming }, collections: Collections,
+  step: IRStep, built: FramedRel, collections: Collections,
   reducers: ReadonlySet<string>,
 ): boolean {
   const label = labelOf(step);

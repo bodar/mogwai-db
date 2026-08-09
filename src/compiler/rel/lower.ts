@@ -13,7 +13,7 @@ import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
-import { fieldNamed, type RecordField, type RelFraming } from './framing.ts';
+import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordNode, recordOf, recordPayload, selectKeys } from './record.ts';
 import { propertyElement, propertyKey, propertyPayload, propertyReadOf, propertyRelation, propertyRowId, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
@@ -109,8 +109,8 @@ export interface RelLowering {
 
 /** A lowered chain BEFORE naming and the budget — the relation, plus the two facts about it that are
  *  not properties of the relation itself. Every tail function returns this shape. */
-type Tail = {
-  readonly rel: Rel; readonly framing: RelFraming; readonly aliases: AliasMap;
+type Tail = FramedRel & {
+  readonly aliases: AliasMap;
   /**
    * THE STATEMENTS THIS CHAIN RUNS BEFORE ITS RESULT IS READ — a write's effects, in execution order
    * (§3.0: effects are legal only at a `Plan` binding).
@@ -1422,7 +1422,7 @@ const countTail = (input: Rel, fresh: Minter): { rel: Rel; framing: RelFraming }
  */
 function terminal(
   step: IRStep, input: Rel, elem: Elem, fresh: Minter, ctx: ChainCtx, aliases: AliasMap,
-): { readonly rel: Rel; readonly framing: RelFraming } | null {
+): FramedRel | null {
   if (step.modulators?.length || step.optionArms) return null;
   const args = argValues(step);
 
@@ -1666,7 +1666,7 @@ function terminal(
  */
 function midCall(
   step: IRStep, input: Rel, elem: Elem, fresh: Minter, ctx: ChainCtx, aliases: AliasMap,
-): { readonly rel: Rel; readonly framing: RelFraming } | null {
+): FramedRel | null {
   const produced = serviceValue(step, elementHost(input, elem, aliases), ctx, fresh);
   if (!produced) return null;
   const { expr, framing, vtype } = produced;
@@ -3847,7 +3847,7 @@ function recordTail(
 function unionArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-): { readonly rel: Rel; readonly framing: RelFraming } | null {
+): FramedRel | null {
   if (step.modulators?.length || step.optionArms) return null;
   // Read off the RELATION, not off `demandsEncounter`: what matters is whether a position is
   // physically carried here, which an `order()` upstream can make true where the chain-global flag
@@ -3943,7 +3943,7 @@ function withMergedVtype(arm: Tail, fresh: Minter): Rel {
  */
 function sourceUnion(
   step: IRStep, ctx: ChainCtx, fresh: Minter,
-): { readonly rel: Rel; readonly framing: RelFraming } | null {
+): FramedRel | null {
   if (step.modulators?.length || step.optionArms) return null;
   const args = argValues(step);
   if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
@@ -3976,7 +3976,7 @@ function sourceUnion(
  */
 function variantMerge(
   arms: readonly Tail[], base: Channels, labels: AliasMap, fresh: Minter,
-): { readonly rel: Rel; readonly framing: RelFraming } | null {
+): FramedRel | null {
   const shapes: VariantArm[] = [];
   for (const arm of arms) {
     const shape = variantArmOf(arm.framing);
@@ -4010,7 +4010,7 @@ const dedupeArms = (arms: readonly VariantArm[]): readonly VariantArm[] => {
 
 function mergeArms(
   arms: readonly Tail[], base: Channels, labels: AliasMap, fresh: Minter,
-): { readonly rel: Rel; readonly framing: RelFraming } | null {
+): FramedRel | null {
   let [first, ...rest] = arms as [Tail, ...Tail[]];
   // SCALAR ARMS MEET BEFORE THEY ARE COMPARED, because a tag disagreement is not a shape
   // disagreement — see `meetScalarArms`. The re-projection is what makes the arms comparable at all,
@@ -4095,7 +4095,7 @@ function mergeArms(
 function chooseOptions(
   step: IRStep, input: Rel, elem: Elem, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-): { readonly rel: Rel; readonly framing: RelFraming } | null {
+): FramedRel | null {
   if (step.modulators?.length) return null;
   const seam = childSeam(ctx, fresh);
   const arms = optionArms(step, (nested) => seam.body(nested, 'child'));
@@ -4239,7 +4239,7 @@ function chooseOptions(
 function chooseArms(
   step: IRStep, input: Rel, elem: Elem, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
-): { readonly rel: Rel; readonly framing: RelFraming } | null {
+): FramedRel | null {
   if (step.modulators?.length) return null;
   if (step.optionArms) return chooseOptions(step, input, elem, framing, bulked, ctx, fresh, labels);
   if (encounterOf(input.channels)) return null;

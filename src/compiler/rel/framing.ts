@@ -1,4 +1,5 @@
 import { perRowColumnOf, type ListOf, type MapOf, type ScalarType } from '../../sql/kernel/render.ts';
+import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import type { Elem } from '../plan/plan.ts';
 import type { VariantArm } from './variant.ts';
@@ -96,6 +97,21 @@ export type RelFraming =
    *  (one `Union` over re-projected arms) and `execute.ts` frames it. */
   | { readonly kind: 'variant'; readonly arms: readonly VariantArm[] }
   | { readonly kind: 'discard' };
+
+/**
+ * A RELATION AND WHAT IT HOLDS — the pair every producer in the fold hands back, and the smallest
+ * complete answer to "I lowered this; what is it?".
+ *
+ * Named because it was spelled inline fourteen times, and an anonymous shape repeated that often is a
+ * concept the code has not admitted to having: a tail function, a record/projector/sack read, a
+ * service's `relation` contribution and a `cap()` all return exactly this and mean exactly the same
+ * thing by it. `Tail` is this plus the facts that are NOT about the relation (its aliases, its
+ * pending statements), which is why it extends this rather than restating it.
+ */
+export interface FramedRel {
+  readonly rel: Rel;
+  readonly framing: RelFraming;
+}
 
 /**
  * ONE FIELD of a record — its Gremlin key, the COLUMN PREFIX its payload rides under, and what that

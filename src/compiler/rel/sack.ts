@@ -10,7 +10,7 @@ import type { IRStep } from '../ir/step.ts';
 import { carriedCols, meta, payloadCols, typeOf, type Minter } from './build.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { constLit } from './const.ts';
-import type { RelFraming } from './framing.ts';
+import type { FramedRel } from './framing.ts';
 import { byExpr, modulations, productivityFilter } from './modulator.ts';
 
 /**
@@ -159,7 +159,7 @@ export function sackMutate(
  * claim the fold cannot support past the first mutation. Carrying it properly is the §6·7 shape and
  * a separate increment; claiming it now would be the guess that section exists to end.
  */
-export function sackRead(rel: Rel, fresh: Minter): { readonly rel: Rel; readonly framing: RelFraming } | null {
+export function sackRead(rel: Rel, fresh: Minter): FramedRel | null {
   if (!sackCarried(rel)) return null;
   return {
     rel: make.project({

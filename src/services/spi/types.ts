@@ -1,7 +1,6 @@
 import type { ForeignRow } from '../../api.ts';
-import type { Rel } from '../../rel/rel.ts';
 import type { Minter } from '../../compiler/rel/build.ts';
-import type { RelFraming } from '../../compiler/rel/framing.ts';
+import type { FramedRel } from '../../compiler/rel/framing.ts';
 import type { ChildHost, ChildSeam, ChildValue } from '../../compiler/rel/child.ts';
 
 // ---------- the call() service seam ----------
@@ -135,7 +134,7 @@ export type Contribution =
  * expression, its framing and its per-row type are the same three facts the seam already carries.
  */
 export type RelContribution =
-  | { readonly kind: 'relation'; readonly rel: Rel; readonly framing: RelFraming }
+  | ({ readonly kind: 'relation' } & FramedRel)
   | { readonly kind: 'value'; readonly value: ChildValue };
 
 /** What a `rel` contribution is handed. The `CallSite` fields that survive are the ones that are
