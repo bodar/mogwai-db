@@ -767,9 +767,41 @@ from both sides** — P1 puts the walk at the top level of the term's `FROM` so 
 step 0's P3 refusal removes `Limit` as the lazy way to stop. An unbounded body hangs the suite, which is
 `repeat()` behaving exactly as specified.
 
-**2. `flatten`** — join flattening / decorrelation into the P1 envelope, P1 legality enforced in `check`, a body
-that cannot be made legal throwing a clear deferral. Deletes `expandRepeatBody`, and `REPEAT_BODY_OK`'s
+**2. 🚧 `flatten`** — join flattening / decorrelation into the P1 envelope, P1 legality enforced in `check`, a
+body that cannot be made legal throwing a clear deferral. Deletes `expandRepeatBody`, and `REPEAT_BODY_OK`'s
 row-local vocabulary gate dissolves with it.
+
+⚠️ **MEASURED BEFORE DESIGNING, and it moves most of the weight out of the rewrite: `check`'s `topLevelSelf`
+is a ONE-LEVEL shape match, and what it refuses includes the most common `repeat()` body there is.** It admits
+a unary node whose `input` IS the self-reference, or a `Join` with the self-reference as a DIRECT side — and
+nothing deeper. So a one-hop movement, `project(join(self, edges))`, is refused:
+
+```
+RelIR: Recursive step must reference 'w' at the top level of FROM; run flatten first
+```
+
+…while the SQL that shape denotes is not merely legal but the canonical recursive walk (measured, bun:sqlite
+3.53.0, returns `1,2,3,4` over a 3-edge chain):
+
+```sql
+WITH RECURSIVE w(id) AS (SELECT 1 UNION ALL SELECT e.dst FROM w INNER JOIN edges e ON w.id = e.src)
+SELECT * FROM w
+```
+
+**SQL's `FROM` is a join TREE and everything in it is top-level**; P1's law is that the reference is not
+wrapped in a DERIVED TABLE, which is a different question from how many nodes sit above it. So the first
+piece of step 2 is to replace the shape match with a **structural legality analysis** — does the self-reference
+land in the term's `FROM` join-tree, unwrapped — co-designed with §5's `needNewSubQuery` rules, since the
+emitter is what decides when a nested SELECT opens. Only the bodies that genuinely cannot land there need the
+REWRITE, and those are what `flatten` proper is for. This is the plan's own wording ("P1 legality enforced in
+`check`") taken seriously rather than a change of direction.
+
+⚠️ Two facts already banked that step 2 depends on, both from step 0: the barrier laws now stop at a subquery
+boundary, so the correlated scalars `flatten` produces are admitted rather than refused; and `freeRelIds`
+(`walk.ts`) already answers "is this subtree self-contained", which is the same fact decorrelation needs.
+⚠️ And the fallback is NOT nothing: `src/compiler/steps/tail/keyed.ts`'s keyed child relation exists precisely
+because SQLite has no `LATERAL`, so a fan-out body inside a recursive term cannot be correlated at all. Read
+its header before concluding a body is inexpressible.
 
 **3. Route `repeat()`'s body through ordinary lowering** — the step ITSELF, and the majority route. Per P4, 72
 of the 125 corpus `repeat()`s have a NON-barrier body and need nothing beyond `Recursive`, already in the closed
