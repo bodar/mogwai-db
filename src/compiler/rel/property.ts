@@ -192,3 +192,77 @@ export function propertyElement(input: Rel, elem: Elem, fresh: Minter): { rel: R
     framing: { kind: 'elements', elem },
   };
 }
+
+// ---------- a property addressed by its ROWID: the correlated reads a child body needs ----------
+//
+// The retypes above project COLUMNS off the property join, which is what a chain-position `key()` /
+// `value()` / `element()` gets. A property reached as a `by()` HOST has only its rowid — the same
+// standing an element `ChildHost` has — so the same three questions become correlated reads of the
+// stored row. They are here rather than in `modulator.ts` for `propertyRelation`'s reason: what a
+// property ROW is has one authority, and a second spelling of the `vertex_properties` / `edge_properties`
+// column contract is what would let a value and its `vtype` describe two different rows.
+
+/** The property row, filtered to ONE rowid — the correlated reads below all start here, so the column
+ *  contract is stated once. */
+function propertyRow(rowid: Expr, ownerElem: Elem, fresh: Minter): { readonly rel: Rel; readonly owner: string } {
+  const { table, owner } = PROPERTIES[ownerElem];
+  const cols = propCols(owner, ownerElem === 'vertex');
+  const scan = make.scan({ id: fresh('pn'), table, alias: fresh('rpn'), channels: [], type: typeOf(...cols) });
+  return { rel: make.filter({ id: fresh('pnf'), input: scan, channels: [], type: scan.type, pred: eq(col(scan.id, 'id'), rowid) }), owner };
+}
+
+/**
+ * A PROPERTY AS A SELF-DESCRIBING `{t,v}` NODE — `elementNode`'s third kind (`element.ts`).
+ *
+ * `v` is exactly the tuple `framePropertyRow` (`execute.ts`) already reads for a top-level property
+ * stream and for a property-membered list, so the wire needed one arm in `frameTypedNode` and no new
+ * payload vocabulary: the typed tree is SELF-DESCRIBING, so a property as a group key, a group member
+ * or a record field all frame by that one rule at whatever depth they appear.
+ *
+ * `vpid` is NULL on an edge exactly as `propertyPayload` nulls it — a Gremlin edge `Property` has no
+ * identity of its own to give, and the framer synthesises `owner:pk` for it.
+ */
+export function propertyNode(rowid: Expr, ownerElem: Elem, fresh: Minter): Expr {
+  const { rel, owner } = propertyRow(rowid, ownerElem, fresh);
+  const isVertex = ownerElem === 'vertex';
+  const own = (name: string): Expr => col(rel.id, name);
+  const payload: Expr = {
+    kind: 'json-object',
+    entries: [
+      ['vpid', isVertex ? own('id') : compilerNull()],
+      ['owner', own(owner)],
+      ['pk', own('key')],
+      ['pv', storedValueOn(own('value'), own('vtype'))],
+      ['pvtype', own('vtype')],
+      ['pmeta', isVertex ? jsonOf(own('meta')) : compilerNull()],
+    ],
+    binary: false,
+  };
+  const only = make.project({
+    id: fresh('pnp'), input: rel, channels: [], type: typeOf(meta('n', 'json', true)),
+    exprs: [['n', { kind: 'json-object', entries: [['t', compilerText('property')], ['v', payload]], binary: false }]],
+  });
+  return { kind: 'scalar', plan: only };
+}
+
+/** WHICH single column of the stored property row a child body asks for. Named rather than passed as a
+ *  raw string so a caller cannot spell a column this module does not carry. */
+export type PropertyRead = 'key' | 'value' | 'vtype' | 'owner';
+
+/**
+ * ONE stored column of the property at `rowid`, as a correlated expression.
+ *
+ * `value` arrives through `storedValueOn` — the same decode `propertyValue` applies to the join — so a
+ * property read from a rowid and one read from the join cannot disagree about a text-carried long.
+ */
+export function propertyReadOf(rowid: Expr, ownerElem: Elem, read: PropertyRead, fresh: Minter): Expr {
+  const { rel, owner } = propertyRow(rowid, ownerElem, fresh);
+  const value = read === 'owner' ? col(rel.id, owner)
+    : read === 'value' ? storedValueOn(col(rel.id, 'value'), col(rel.id, 'vtype'))
+      : col(rel.id, read);
+  const only = make.project({
+    id: fresh('prp'), input: rel, channels: [], type: typeOf(meta('v', 'any', true)),
+    exprs: [['v', value]],
+  });
+  return { kind: 'scalar', plan: only };
+}

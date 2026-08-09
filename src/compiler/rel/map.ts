@@ -9,6 +9,7 @@ import { argValues } from '../../gremlin/frontend.ts';
 import { and, byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EDGE_COLS, eq, fenced, firstOf, jsonOf, meta, NODE_COLS, PROPERTIES, typeOf, typedNode, withPayload, type Minter } from './build.ts';
 import { inferredVtype, LIST_COL } from './list.ts';
 import { edgeLabel, elementNode, externalId, vertexLabels } from './element.ts';
+import { propertyNode } from './property.ts';
 import { byExpr, byNode, modulations, productivityFilter, type Modulation } from './modulator.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import type { AliasMap } from '../plan/alias.ts';
@@ -152,11 +153,14 @@ export function groupBarrier(
    * per surviving GROUP. It is also why this is not `byNode`'s business — that function answers "the
    * traverser as a self-describing member", which is exactly right at the entry and wrong in a key
    * position, so the identity arm over an element stays declined there.
+   *
+   * A PROPERTY host has no such cheaper spelling — nothing in the `MapOf` vocabulary names a property
+   * SIDE, so its `by()`-less key is the property NODE (`byNode`'s own property arm says the same
+   * thing from the other side). That is a plan cost and not a wrong answer, and it is the honest
+   * trade while the rowid spelling would need a framing arm nothing else wants yet.
    */
-  const elementKey = !bys[0] && host.kind === 'element';
-  const key = elementKey
-    ? (host as Extract<ChildHost, { kind: 'element' }>).id
-    : byNode(bys[0] ?? { key: { kind: 'identity' } }, host, fresh, child);
+  const elementKey = !bys[0] && host.kind === 'element' ? host : undefined;
+  const key = elementKey ? elementKey.id : byNode(bys[0] ?? { key: { kind: 'identity' } }, host, fresh, child);
   if (!key) return null;
 
   // THE VALUE `by()`, where there is one. A slot `byNode` cannot project declines the whole step rather
@@ -190,14 +194,17 @@ export function groupBarrier(
   }
   const member = valueBy && !lastOnly ? byNode(valueBy, host, fresh, child) : undefined;
   if (valueBy && !lastOnly && !member) return null;
-  // A collecting arm is what `tail()` needs, and only an ELEMENT host has members to collect.
-  if (lastOnly && (!collecting || host.kind !== 'element')) return null;
+  // A collecting arm is what `tail()` needs, and it is the hosts whose traverser is a ROWID that have
+  // members to collect: an element and a property. A scalar host's members are its own value nodes,
+  // which `member` already covers, and a record's are not addressable at all.
+  if (lastOnly && (!collecting || !ROWID_HOSTS.has(host.kind))) return null;
 
   const bulk = input.channels.find((channel) => channel.role === 'bulk');
   const encounter = collecting ? input.channels.find((channel) => channel.role === 'encounter') : undefined;
-  // A COLLECTING group states its member order, and over a SCALAR host the rowid fallback below does not
-  // exist — there is no `id` column on a value relation. `analyzeChain` demands an encounter for every
-  // `group()`, so this declines only if that contract is violated rather than in any reachable chain.
+  // A COLLECTING group states its member order, and only an ELEMENT relation has the `id` column the
+  // rowid fallback below reads — a value relation has none, and a PROPERTY relation's `id` is the
+  // OWNER's rather than the property's. `analyzeChain` demands an encounter for every `group()`, so
+  // this declines only if that contract is violated rather than in any reachable chain.
   if (collecting && !encounter && host.kind !== 'element') return null;
   const extra = [
     ...(collecting ? [meta(MEMBER_COL, 'any', true), meta(ORD_COL, 'int')] : []),
@@ -301,7 +308,7 @@ export function groupBarrier(
     // `by()`-less member is that same node. `json()` around it for the list module's own reason: without
     // it `json_group_array` re-encodes the envelope as a JSON STRING.
     ? jsonOf(col(rows.id, MEMBER_COL))
-    : jsonOf(elementNode(col(rows.id, MEMBER_COL), (host as Extract<ChildHost, { kind: 'element' }>).elem, fresh));
+    : jsonOf(rowidMember(host, col(rows.id, MEMBER_COL), fresh));
   // THE VALUE'S PRODUCTIVITY DROPS THE MEMBER, NOT THE TRAVERSER AND NOT THE GROUP — and getting that
   // wrong has three distinguishable answers, which is why the reference is quoted rather than reasoned
   // from. `g.V().group().by("name").by("age")` over the modern graph: `ripple` and `lop` have no `age`,
@@ -351,7 +358,7 @@ export function groupBarrier(
     // the grouping actually used. That is the same rowids-until-the-root rule the element-membered list
     // follows, one container along.
     key: elementKey
-      ? elementNode(col(productive.id, KEY_COL), (host as Extract<ChildHost, { kind: 'element' }>).elem, fresh)
+      ? elementNode(col(productive.id, KEY_COL), elementKey.elem, fresh)
       : col(productive.id, KEY_COL),
     val: step.name === 'group' ? col(productive.id, VAL_COL) : typedNode(col(productive.id, VAL_COL), compilerText('long')),
     // AN ELEMENT KEY SAYS SO, and that is what keeps the SIDE READS honest. The blob holds a
@@ -359,7 +366,7 @@ export function groupBarrier(
     // `select(Column.keys).unfold()` would decode it into the SCALAR vocabulary, whose framer cannot
     // frame an element and emitted the payload as a JSON STRING. `sideList`/`entrySide` decline an
     // `elem` side, so declaring it is the difference between a wrong answer and a deferral.
-    keyOf: elementKey ? { kind: 'elem', elem: (host as Extract<ChildHost, { kind: 'element' }>).elem } : { kind: 'scalar' },
+    keyOf: elementKey ? { kind: 'elem', elem: elementKey.elem } : { kind: 'scalar' },
     valOf: { kind: 'scalar' },
   };
   return {
@@ -390,7 +397,9 @@ export function groupBarrier(
  *
  * THREE DECLINES, each for its own reason and none of them taste:
  *
- * - a SCALAR host — `origin` is a rowid and a value stream has none (a channels-core change);
+ * - a host with no ROWID (a scalar, a record) — `origin` is a rowid and a value stream has none (a
+ *   channels-core change). It bites only the POOLING arm: the empty-body `count()` below pools
+ *   nothing, so it is answered for every host `groupBarrier` itself admits;
  * - `count()` with a NON-EMPTY body — `CountGlobalStep` seeds 0, so a member whose body produced
  *   nothing must still count 0 and keep its key, which needs an OUTER join where every other reducer
  *   wants an inner one (`SumGlobalStep` leaves `NON_EMITTING_SEED` and the key goes with the traverser);
@@ -403,15 +412,23 @@ function groupReduced(
   input: Rel, host: ChildHost, step: IRStep, keyBy: Modulation | undefined, body: readonly IRStep[],
   bulked: boolean, child: ChildSeam, fresh: Minter,
 ): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } | null {
-  if (host.kind !== 'element') return null;
   const reducer = body.at(-1)!.name;
   const pre = body.slice(0, -1);
   if (!pre.length) {
     // `by(__.count())` — the group's own traverser count. `groupBarrier` already builds exactly that
     // for `groupCount()`, so this re-enters it rather than growing a second spelling of one answer.
+    //
+    // BEFORE the host test below, and that ordering is the §6·6 rule rather than a tidy-up: this arm
+    // pools nothing, so it needs no `origin` and no rowid, and testing the host first declined every
+    // host the POOLING arm cannot serve for a question that never reaches it. Measured on
+    // `g.V().properties().group().by(__.element()).by(__.count())`, which the algebra could express
+    // the whole time.
     if (reducer !== 'count') return null;
     return groupBarrier(input, host, { ...step, name: 'groupCount', modulators: step.modulators?.slice(0, 1) }, bulked, child, fresh);
   }
+  // THE POOLING ARM needs a rowid to name each child row's parent by, so only an ELEMENT host reaches
+  // it — `origin` is typed `int` and a value stream has none (a channels-core change).
+  if (host.kind !== 'element') return null;
   if (reducer !== 'count' && !isReducer(reducer)) return null;
   // `mean` DECLINES, and the reason is the BLOB rather than the reducer: SQLite writes a REAL into JSON
   // with 15 significant digits (`%!.15g`), so a map value that needs 17 comes back a digit short —
@@ -511,16 +528,33 @@ function groupReduced(
   };
 }
 
-/** THE TRAVERSER ITSELF as a collected member — a rowid for an element (expanded once per surviving
- *  member at the aggregate) and the self-describing value node for a scalar, which is `byNode`'s own
- *  identity answer over that host. One function so the two hosts cannot describe "the traverser" two
- *  ways, and a THROW rather than a decline for a host that has neither: `groupBarrier` reaches this only
- *  after admitting the host, so a third kind here is a lowering bug and not a deferral. */
+/** The hosts whose traverser is addressed by a ROWID, so a collecting group can carry it as an integer
+ *  and expand it once per SURVIVING member rather than once per row. Named because three sites read it
+ *  (the `tail()` admission, the member projection, the member expansion) and a fourth spelling of the
+ *  same set is how they would drift apart. */
+const ROWID_HOSTS: ReadonlySet<ChildHost['kind']> = new Set(['element', 'property']);
+
+/** THE TRAVERSER ITSELF as a collected member — a rowid where the host has one (expanded once per
+ *  surviving member at the aggregate) and the self-describing value node for a scalar, which is
+ *  `byNode`'s own identity answer over that host. One function so the hosts cannot describe "the
+ *  traverser" two ways, and a THROW rather than a decline for a host that has neither: `groupBarrier`
+ *  reaches this only after admitting the host, so another kind here is a lowering bug and not a
+ *  deferral. */
 function traverserMember(host: ChildHost, fresh: Minter): Expr {
-  if (host.kind === 'element') return host.id;
+  if (host.kind === 'element' || host.kind === 'property') return host.id;
   const node = byNode({ key: { kind: 'identity' } }, host, fresh);
   if (!node) throw new Error(`RelIR lowering: a ${host.kind} host cannot project its own traverser as a group member`);
   return node;
+}
+
+/** A collected ROWID expanded back into its self-describing member node, at the AGGREGATE — the other
+ *  half of `traverserMember`, and the reason the two are stated together: what goes into `gt` and what
+ *  comes back out of it must be the same traverser. A host with no rowid never reaches here (its member
+ *  is already a node), so this throws rather than declining, exactly as its twin does. */
+function rowidMember(host: ChildHost, rowid: Expr, fresh: Minter): Expr {
+  if (host.kind === 'element') return elementNode(rowid, host.elem, fresh);
+  if (host.kind === 'property') return propertyNode(rowid, host.ownerElem, fresh);
+  throw new Error(`RelIR lowering: a ${host.kind} host has no rowid member to expand`);
 }
 
 /** The host a `by()` projects from, for an ELEMENT relation — the shape `groupBarrier` needs handed to

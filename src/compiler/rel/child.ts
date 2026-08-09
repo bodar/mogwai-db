@@ -174,6 +174,15 @@ export type BodyScope = 'child' | 'rooted';
 export type ChildHost =
   | { readonly kind: 'element'; readonly id: Expr; readonly elem: Elem; readonly row?: HostRow }
   | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly row?: HostRow }
+  /** A PROPERTY traverser — `properties()`, addressed by the stored row's own rowid exactly as an
+   *  element host is addressed by its element rowid. Its three projections (`key()`, `value()`,
+   *  `element()`) are correlated reads of that row (`propertyReadOf`, `property.ts`), which is what
+   *  lets `group().by(__.project(…).by(__.element().values('name')).by(__.key()).by(__.value()))`
+   *  compose out of the SAME by()/child vocabulary every other host uses.
+   *
+   *  `ownerElem` is required because the two owners differ in the row's COLUMNS and not merely in
+   *  their values: an edge `Property` has no meta-properties and no identity of its own. */
+  | { readonly kind: 'property'; readonly id: Expr; readonly ownerElem: Elem; readonly row?: HostRow }
   /** A RECORD traverser — its own MAP SCOPE. `Scoping.getScopeValue` tries the traverser's Map before
    *  the side effects and the path labels, so `by(__.select('b'))` over a `project('a','b')` names the
    *  FIELD and not a same-named `as()` label. The fields ride on the host rather than on `HostRow`

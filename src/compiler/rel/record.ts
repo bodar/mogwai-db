@@ -3,7 +3,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { perRowColumn, type Shape } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
-import { and, carriedCols, eq, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
+import { and, carriedCols, eq, mapNode, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { elementNode } from './element.ts';
 import { fieldCol, framingCols, type RecordField, type RelFraming } from './framing.ts';
@@ -68,6 +68,93 @@ const prefixAt = (index: number): string => `f${index}`;
 const qualify = (at: string, name: string): string => (at ? fieldCol(at, name) : name);
 
 /**
+ * `project(keys…)`'s FIELDS — each slot's payload expressions, keyed by the field's prefixed column
+ * name, plus what each field IS. `null` declines.
+ *
+ * The half `recordOf` and `recordNode` share, and the split is the record's two physical forms: this
+ * answers what the fields ARE, and the caller decides whether they become COLUMNS of a relation (a
+ * `project()` in the chain, whose fields stay addressable) or a MAP NODE assembled on the spot (a
+ * `project()` inside a `by()`, which has no row to name). Spelling the `by()` ring, the key checks and
+ * the field loop twice is how the two forms would start disagreeing about which key is omitted when.
+ *
+ * The `by()` RING CYCLES, which is upstream's and not a convenience: `TraversalRing.next()` is
+ * `(current + 1) % size` and an EMPTY ring yields `null`, which `TraversalUtil.produce` reads as the
+ * traverser itself (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/TraversalRing.java:41-48`).
+ * So `project('a','b','c').by('name')` gives all three fields the same `by('name')`, and a bare
+ * `project('a','b')` gives both the traverser.
+ */
+function recordFields(
+  step: IRStep, host: ChildHost | null, hostFraming: RelFraming, hostCol: (name: string) => Expr,
+  child: ChildSeam, fresh: Minter,
+): { readonly fields: readonly RecordField[]; readonly exprs: ReadonlyMap<string, Expr> } | null {
+  if (step.optionArms) return null;
+  const keys = (step.args ?? []).map((a) => a.value);
+  if (!keys.length || keys.some((key) => typeof key !== 'string')) return null;
+  // `ProjectStep`'s own constructor raises `keys must be unique in ProjectStep`. That is a refusal on
+  // the traversal's TEXT and belongs to the Pass tier (§6·5); until it lives there, declining hands the
+  // traversal to the spine that raises today rather than answering a map with a key written twice.
+  if (new Set(keys as string[]).size !== keys.length) return null;
+
+  const bys = modulations(step, keys.length, child);
+  if (!bys) return null;
+
+  const fields: RecordField[] = [];
+  const exprs = new Map<string, Expr>();
+  for (const [index, key] of (keys as readonly string[]).entries()) {
+    const by = bys.length ? bys[index % bys.length]! : { key: { kind: 'identity' } as const };
+    const built = byField(step, by, host, hostFraming, hostCol, fresh, child);
+    if (!built) return null;
+    const prefix = prefixAt(index);
+    for (const [name, expr] of built.exprs) exprs.set(fieldCol(prefix, name), expr);
+    fields.push({ key, prefix, framing: built.framing, optional: built.optional });
+  }
+  return { fields, exprs };
+}
+
+/**
+ * A `project()` INSIDE A `by()` — the record's PAIRS ARRAY over the HOST traverser, or `null` to
+ * decline.
+ *
+ * The pairs array and not the `{t:'map', v:…}` node around it, deliberately: that is exactly what a
+ * map-framed RELATION carries in its `map` column (`recordToMap`, `mapOfGroups`), so `RelFraming`'s
+ * `map` arm means ONE thing whether the value came from a column or from a correlated read, and the
+ * envelope is added by whichever consumer needs a member (`byNode`, `fieldNode`).
+ *
+ * This is the §6·6 answer to "the algebra cannot express a record-keyed group". It can, and always
+ * could: a record BECOMES a map at the one boundary that needs a value, and a group KEY is exactly
+ * such a boundary (this module's own header named it). What was missing was not a node kind but a
+ * route — `child.scalar` was never handed a `project()` body, so `MapOf`'s `elem` tag looked like the
+ * blocker when the blocker was that nothing asked.
+ *
+ * So `g.E().group().by(__.project('o','l','i').by(__.outV().values('name')).by(__.label()).by(__.inV().values('name')))`
+ * groups by that map, and the fields keep their own encodings: an element field is a
+ * `{t:'vertex', v:{…}}` member, a stored value keeps its `vtype`, an unproductive slot omits its key.
+ *
+ * ## The GROUP BY term is the map's JSON text, and that is `Map.equals` exactly
+ *
+ * `GroupStep` keys a `HashMap` on the produced Map, so two traversers group together iff their maps
+ * have the same keys bound to equal values. The pairs array is built in `project()`'s own key order
+ * with each value under its own encoding, so equal maps produce identical text and unequal ones do
+ * not — an omitted key shortens the array, which is the different key SET it is. A JSON key is not a
+ * cheap grouping term, and there is no cheaper one available: unlike an element key there is no rowid
+ * that stands for the whole value.
+ */
+export function recordNode(
+  step: IRStep, host: ChildHost, hostFraming: RelFraming, hostCol: (name: string) => Expr,
+  child: ChildSeam, fresh: Minter,
+): Expr | null {
+  const built = recordFields(step, host, hostFraming, hostCol, child, fresh);
+  if (!built) return null;
+  return recordPairs((column) => {
+    const expr = built.exprs.get(column);
+    // A field column with no expression is a `framingCols`/`byField` disagreement inside this module,
+    // not a traversal this route cannot express — the same invariant `recordOf` throws on.
+    if (!expr) throw new Error(`RelIR lowering: record field column ${column} has no expression`);
+    return expr;
+  }, built.fields, fresh);
+}
+
+/**
  * `project(keys…)` — the record, built. `null` declines.
  *
  * The `by()` RING CYCLES, which is upstream's and not a convenience: `TraversalRing.next()` is
@@ -84,27 +171,9 @@ export function recordOf(
   input: Rel, host: ChildHost | null, hostFraming: RelFraming, step: IRStep,
   child: ChildSeam, fresh: Minter,
 ): { readonly rel: Rel; readonly fields: readonly RecordField[] } | null {
-  if (step.optionArms) return null;
-  const keys = (step.args ?? []).map((a) => a.value);
-  if (!keys.length || keys.some((key) => typeof key !== 'string')) return null;
-  // `ProjectStep`'s own constructor raises `keys must be unique in ProjectStep`. That is a refusal on
-  // the traversal's TEXT and belongs to the Pass tier (§6·5); until it lives there, declining hands the
-  // traversal to the spine that raises today rather than answering a map with a key written twice.
-  if (new Set(keys as string[]).size !== keys.length) return null;
-
-  const bys = modulations(step, keys.length, child);
-  if (!bys) return null;
-
-  const fields: RecordField[] = [];
-  const exprs = new Map<string, Expr>();
-  for (const [index, key] of (keys as readonly string[]).entries()) {
-    const by = bys.length ? bys[index % bys.length]! : { key: { kind: 'identity' } as const };
-    const built = byField(step, by, host, hostFraming, (name) => col(input.id, name), fresh, child);
-    if (!built) return null;
-    const prefix = prefixAt(index);
-    for (const [name, expr] of built.exprs) exprs.set(fieldCol(prefix, name), expr);
-    fields.push({ key, prefix, framing: built.framing, optional: built.optional });
-  }
+  const built = recordFields(step, host, hostFraming, (name) => col(input.id, name), child, fresh);
+  if (!built) return null;
+  const { fields, exprs } = built;
 
   // The declared type comes from `framingCols` and the expressions are looked UP by it, rather than
   // both being built in parallel from the same loop. The two must agree in ORDER as well as in name,
@@ -128,17 +197,30 @@ export function recordOf(
   };
 }
 
+/**
+ * HOW A RECORD'S PAYLOAD IS READ, by the canonical column name `framingCols` declares.
+ *
+ * The map assembly below is written against this and not against a `Rel`, because the record has two
+ * physical forms and only one meaning. A record RELATION holds its payload in prefixed columns, so the
+ * read is `col(rel, …)`. A record built inside a `by()` — `group().by(__.project('o','l','i'))` — never
+ * becomes a relation at all: each field is a correlated EXPRESSION over the host traverser, and there
+ * is no row to name. Spelling the assembly twice would be two chances to disagree about the one thing
+ * a record's map form must get right (which key is omitted when, and in what order), so it is spelled
+ * once over the accessor and each caller supplies its own reader.
+ */
+type FieldRead = (column: string) => Expr;
+
+/** A record RELATION's reader — the prefixed columns, at whatever nesting depth `at` names. */
+const readingRel = (rel: Rel, at: string): FieldRead => (column) => col(rel.id, qualify(at, column));
+
 /** Is this field PRESENT on this row? The first payload column answers it for every shape — a rowid
  *  for an element, `v` for a value, `list`/`map` for a collection — which is the same convention
  *  `aliasPresent` reads and the reason a field's columns are declared nullable. */
-function presence(rel: Rel, field: RecordField, at: string): Expr | null {
+function presence(read: FieldRead, field: RecordField): Expr | null {
   const cols = framingCols(field.framing);
   const first = cols?.[0];
   if (!first) return null;
-  return {
-    kind: 'binary', op: 'is not',
-    left: col(rel.id, qualify(at, fieldCol(field.prefix, first.name))), right: compilerNull(),
-  };
+  return { kind: 'binary', op: 'is not', left: read(fieldCol(field.prefix, first.name)), right: compilerNull() };
 }
 
 /**
@@ -150,8 +232,8 @@ function presence(rel: Rel, field: RecordField, at: string): Expr | null {
  * (`byField`'s arms are element/value only), so the arm arrives with its producer rather than being
  * guessed at now.
  */
-function fieldNode(rel: Rel, field: RecordField, at: string, fresh: Minter): Expr | null {
-  const own = (name: string): Expr => col(rel.id, qualify(at, fieldCol(field.prefix, name)));
+function fieldNode(read: FieldRead, field: RecordField, fresh: Minter): Expr | null {
+  const own = (name: string): Expr => read(fieldCol(field.prefix, name));
   const framing = field.framing;
   switch (framing.kind) {
     // A VARIANT field would be a mixed branch inside a `project()` slot. `byField` cannot produce one
@@ -171,10 +253,17 @@ function fieldNode(rel: Rel, field: RecordField, at: string, fresh: Minter): Exp
       return typedNode(own('v'), tag);
     }
     case 'record': {
-      const nested = recordValue(rel, framing.fields, qualify(at, field.prefix), fresh);
-      return nested && { kind: 'json-object', entries: [['t', compilerText('map')], ['v', nested]], binary: false };
+      // A NESTED record composes the accessor rather than a prefix string: its own fields' columns sit
+      // under `<this field's prefix>_<inner prefix>_<name>`, which is exactly `framingCols`' recursive
+      // arm, so composing the read is the same rule read from the other end.
+      const nested = recordPairs((column) => own(column), framing.fields, fresh);
+      return nested && mapNode(nested);
     }
-    case 'list': case 'path': case 'map': case 'mapEntry': case 'property': case 'discard': return null;
+    // A MAP field is a record that has ALREADY spent its fields — `by(__.project(…))` inside a
+    // `project()` slot, or a map-valued child. Its column holds the pairs array, so the member is that
+    // array under the same envelope the record arm above adds. One encoding, two producers.
+    case 'map': return mapNode(own('map'));
+    case 'list': case 'path': case 'mapEntry': case 'property': case 'discard': return null;
   }
 }
 
@@ -191,12 +280,12 @@ function fieldNode(rel: Rel, field: RecordField, at: string, fresh: Minter): Exp
  * `ProductiveByStrategy` — the accumulator collapses to a single `json_array(…)` and the `CASE` chain
  * costs nothing.
  */
-function recordValue(rel: Rel, fields: readonly RecordField[], at: string, fresh: Minter): Expr | null {
+function recordPairs(read: FieldRead, fields: readonly RecordField[], fresh: Minter): Expr | null {
   const pairs: { readonly pair: Expr; readonly present: Expr | null }[] = [];
   for (const field of fields) {
-    const node = fieldNode(rel, field, at, fresh);
+    const node = fieldNode(read, field, fresh);
     if (!node) return null;
-    const present = field.optional ? presence(rel, field, at) : null;
+    const present = field.optional ? presence(read, field) : null;
     if (field.optional && !present) return null;
     // The KEY is a bare string, not a `{t,v}` node: `frameTypedNode` reads a non-object member as an
     // inferred value, which for a project key is exactly the String it must be. Tagging it would be a
@@ -216,7 +305,7 @@ function recordValue(rel: Rel, fields: readonly RecordField[], at: string, fresh
 /** The record relation with its fields COLLAPSED into the one `map` column the map vocabulary reads —
  *  channels intact, because the caller still has to sort by the emission order. */
 export function recordToMap(rel: Rel, fields: readonly RecordField[], fresh: Minter): Rel | null {
-  const value = recordValue(rel, fields, '', fresh);
+  const value = recordPairs(readingRel(rel, ''), fields, fresh);
   return value && make.project({
     id: fresh('rm'), input: rel, channels: rel.channels,
     type: typeOf(meta(MAP_COL, 'json', true), ...carriedCols(rel.channels)),
@@ -256,7 +345,7 @@ export function recordField(
 ): { readonly rel: Rel; readonly framing: RelFraming } | null {
   const cols = framingCols(field.framing);
   if (!cols) return null;
-  const present = field.optional ? presence(rel, field, '') : null;
+  const present = field.optional ? presence(readingRel(rel, ''), field) : null;
   if (field.optional && !present) return null;
   const source = present
     ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: present })

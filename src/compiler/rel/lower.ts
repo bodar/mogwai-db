@@ -14,8 +14,8 @@ import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, s
 import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { fieldNamed, type RecordField, type RelFraming } from './framing.ts';
-import { recordField, recordOf, recordPayload, selectKeys } from './record.ts';
-import { propertyElement, propertyKey, propertyPayload, propertyRelation, propertyValue } from './property.ts';
+import { recordField, recordNode, recordOf, recordPayload, selectKeys } from './record.ts';
+import { propertyElement, propertyKey, propertyPayload, propertyReadOf, propertyRelation, propertyRowId, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
 import { isColumnArg, isNested, isTokenArg, stepChain, argValues, arg, type Arg, type SackSpec } from '../../gremlin/frontend.ts';
@@ -40,7 +40,7 @@ import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, mapEntryPayload, mapKey, mapPayload, mapSide, mapSize, unfoldMap } from './map.ts';
-import { elementPayload } from './element.ts';
+import { edgeEndpoint, elementPayload } from './element.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
 import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
@@ -3414,10 +3414,12 @@ function continueAs(
     case 'mapEntry': return mapEntryTail(rel, framing.keyOf, framing.valOf, steps, from, ctx, fresh, labels);
     case 'record': return recordTail(rel, framing.fields, steps, from, bulked, ctx, fresh, labels);
     // A PROPERTY traverser re-enters through `element()`/`key()`/`value()`, and through the ordinary
-    // filters and slices before them. None of that is lowered yet, so a step after `properties()`
+    // filters and slices before them. Most of that is not lowered yet, so a step after `properties()`
     // DECLINES — the map arm's reasoning exactly, and for the same reason: a loop that silently
-    // dropped the property would answer a different question rather than defer.
-    case 'property': return propertyTail(rel, framing.ownerElem, steps, from, ctx, fresh, labels);
+    // dropped the property would answer a different question rather than defer. `bulked` carries for
+    // the reason a value's does: `properties()` joins through its parent's channels, so a collapsed
+    // parent's properties stand for the parent's multiplicity.
+    case 'property': return propertyTail(rel, framing.ownerElem, steps, from, bulked, ctx, fresh, labels);
     // Nothing survives a discard, so nothing can follow one. `drop()` is a terminal step in the
     // grammar and the passes reject a chain that continues past it, so this is unreachable rather
     // than a decline — and saying so keeps the switch total.
@@ -3442,10 +3444,23 @@ function continueAs(
  */
 function propertyTail(
   rel: Rel, elem: Elem, steps: readonly IRStep[], from: number,
-  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+  bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | null {
   if (from === steps.length) return { rel, framing: { kind: 'property', ownerElem: elem }, aliases: labels };
   const step = steps[from]!;
+
+  // THE GROUP BARRIER, over a property stream. It needs nothing property-specific: `groupBarrier` asks
+  // its host for a key and a member, and a property host answers both — the three projections a `by()`
+  // body can name (`key()`, `value()`, `element()`) are the child seam's, and the traverser itself is
+  // `propertyNode`. This is upstream's own graph-snapshot read
+  // (`vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/world.js:176-190`), which is why it
+  // is here before the retypes below rather than after the modulator guard they share.
+  if (step.name === 'group' || step.name === 'groupCount') {
+    const host: ChildHost = { kind: 'property', id: propertyRowId(rel), ownerElem: elem, row: { rel, aliases: labels } };
+    const grouped = groupBarrier(rel, host, step, bulked, childSeam(ctx, fresh), fresh);
+    return grouped && continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, from + 1, false, ctx, fresh, NO_ALIASES);
+  }
+
   if (step.modulators?.length || step.optionArms || (step.args ?? []).length) return null;
   // `drop()` over a property stream removes the property ROWS and leaves the elements standing.
   // TERMINAL by the grammar, asserted for `elementDrop`'s reason: a step after it would read a stream
@@ -4178,6 +4193,66 @@ function rootedSteps(nested: unknown, params: Record<string, any>, sideEffects?:
 }
 
 /**
+ * A HOST DESCRIBED AS ITS OWN TRAVERSER — the framing it would have as a relation, and where each of
+ * that framing's payload columns lives on it. `null` for a host whose payload is not this convention.
+ *
+ * It is what a bare `by()` inside a correlated `project()` needs: `byField`'s identity arm answers
+ * "the traverser unchanged" by reading the host framing's own columns, which is exactly why that arm
+ * is total over every host at once. In a relation those columns are `col(rel, name)`; here the host
+ * IS the columns, so this is the same lookup with the relation removed.
+ *
+ * A PROPERTY answers with its own framing and no readable columns, which is the honest pair: it HAS a
+ * framing, and `framingCols` declines a property outright — the payload is a six-column tuple rather
+ * than the one-or-two-column convention — so `byField`'s identity arm declines exactly there while
+ * every other slot of the same `project()` still works. Only a RECORD with no row declines outright,
+ * because its columns live on a row it does not have.
+ */
+function hostSelf(host: ChildHost): { readonly framing: RelFraming; readonly col: (name: string) => Expr } | null {
+  if (host.kind === 'element')
+    return { framing: { kind: 'elements', elem: host.elem }, col: (name) => (name === 'id' ? host.id : compilerNull()) };
+  if (host.kind === 'scalar') {
+    const vtype = host.vtype;
+    return {
+      framing: { kind: 'scalar', type: vtype ? PER_ROW('vtype') : UNKNOWN },
+      col: (name) => (name === 'v' ? host.value : name === 'vtype' && vtype ? vtype : compilerNull()),
+    };
+  }
+  // A RECORD host's own columns live on the row it rides, which is the one place a nested record's
+  // prefixed payload can be read from. Without a row there is nothing to read and the identity arm
+  // declines rather than projecting nulls.
+  if (host.kind === 'record') {
+    const row = host.row;
+    return row ? { framing: { kind: 'record', fields: host.fields }, col: (name) => col(row.rel.id, name) } : null;
+  }
+  return { framing: { kind: 'property', ownerElem: host.ownerElem }, col: () => compilerNull() };
+}
+
+/**
+ * A step that turns the host traverser into EXACTLY ONE other traverser, as the new host — or `null`
+ * where the step is not one of those.
+ *
+ * The membership rule is CARDINALITY and it is the schema's, not a taste: `edges.src`/`edges.tgt` are
+ * non-null columns, so an edge has exactly one head and one tail; a property row's owner column is
+ * non-null, so a property belongs to exactly one element. `bothV()` is deliberately absent — it yields
+ * TWO traversers, which is a movement and belongs to the fan-out arm that reduces.
+ *
+ * The ROW rides through unchanged: re-rooting changes what the traverser IS, never which row of the
+ * outer relation the body is correlated to, so a label bound on that row stays readable (`Scoping`
+ * puts the path labels in the same slot either way).
+ */
+function rerootedHost(step: IRStep, host: ChildHost, fresh: Minter): Extract<ChildHost, { kind: 'element' }> | null {
+  if (step.modulators?.length || step.optionArms || argValues(step).length) return null;
+  const row = host.row ? { row: host.row } : {};
+  if (host.kind === 'element' && host.elem === 'edge') {
+    const end = step.name === 'outV' ? 'src' : step.name === 'inV' ? 'tgt' : null;
+    return end && { kind: 'element', id: edgeEndpoint(host.id, end, fresh), elem: 'vertex', ...row };
+  }
+  if (host.kind === 'property' && step.name === 'element')
+    return { kind: 'element', id: propertyReadOf(host.id, host.ownerElem, 'owner', fresh), elem: host.ownerElem, ...row };
+  return null;
+}
+
+/**
  * A nested body as a VALUE expression PLUS what that value is — the seam's correlated-SCALAR answer.
  * Collection, selection and branching still decline for later arms.
  *
@@ -4188,6 +4263,52 @@ function rootedSteps(nested: unknown, params: Record<string, any>, sideEffects?:
  */
 function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
   if (!body.length) return null;
+  const first = body[0]!;
+
+  // THE RECORD ARM — `by(__.project('a','b')…)`, one traverser in and one MAP out.
+  //
+  // `project()` is a `ScalarMapStep`, so it is a correlated single value exactly as `values(k)` is; the
+  // only difference is that the value is a map rather than a scalar, which the framing SAYS. It is the
+  // whole body or nothing: a chain past it (`__.project('a').select('a')`) re-roots to a field's own
+  // stream, which is the RECORD relation's business and not a correlated read's.
+  if (first.name === 'project' && body.length === 1) {
+    const self = hostSelf(host);
+    const node = self && recordNode(first, host, self.framing, self.col, childSeam(ctx, fresh), fresh);
+    return node && { expr: node, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } } };
+  }
+
+  // THE RE-ROOTING ARM — a step that turns this traverser into exactly ONE other traverser, so the
+  // body CONTINUES against a different host rather than producing a relation.
+  //
+  // It is what makes `by(__.outV().values('name'))` and `by(__.element().values('name'))` correlated
+  // values at all: the generic movement arm below must refuse a non-reducing tail, because a hop that
+  // can fan out would leave SQLite silently taking a row. An endpoint read and a property's owner
+  // cannot fan out — the schema says so — so they are not movements to be admitted more loosely, they
+  // are a change of subject.
+  const rerooted = rerootedHost(first, host, fresh);
+  if (rerooted) {
+    // The body ENDS at the re-rooting (`by(__.outV())`) — the value is the new traverser itself, which
+    // is an ELEMENT and a shape `ChildValue` already carries. A `by()` consumer that can only use a
+    // scalar narrows it; one that can frame a member (`byNode`) makes it an element node.
+    if (body.length === 1) return { expr: rerooted.id, framing: { kind: 'elements', elem: rerooted.elem }, present: ALWAYS_PRODUCTIVE };
+    return scalarChild(body.slice(1), rerooted, ctx, fresh);
+  }
+
+  // A PROPERTY host's three projections are STEPS, and two of them read the stored row. `element()` is
+  // the third and re-roots above, which is why it is not here.
+  if (host.kind === 'property') {
+    // A property's KEY is always present and always a string; its VALUE carries the stored `vtype` per
+    // row, which is `propertyValue`'s channel read through a rowid instead of through the join.
+    if (first.name === 'key' && !argValues(first).length)
+      return valueRun(body, 1, { value: propertyReadOf(host.id, host.ownerElem, 'key', fresh), type: STATIC('string'), vtype: undefined, present: ALWAYS_PRODUCTIVE }, host.row, childSeam(ctx, fresh), fresh);
+    if (first.name === 'value' && !argValues(first).length)
+      return valueRun(body, 1, {
+        value: propertyReadOf(host.id, host.ownerElem, 'value', fresh), type: UNKNOWN,
+        vtype: propertyReadOf(host.id, host.ownerElem, 'vtype', fresh), present: ALWAYS_PRODUCTIVE,
+      }, host.row, childSeam(ctx, fresh), fresh);
+    return null;
+  }
+
   // A SCALAR host names its own subject: the traverser IS the value, so a transform-only body
   // (`by(__.math('_ * 10'))`, `by(dateAdd(DT.day, 1))`) is well-formed rather than the nonsense it
   // would be over an element. That is the "A BODY MUST NAME ITS SUBJECT" guard below read the other

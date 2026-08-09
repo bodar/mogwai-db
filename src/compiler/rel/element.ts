@@ -101,6 +101,29 @@ export function edgeLabel(labelId: Expr, fresh: Minter): Expr {
 }
 
 /**
+ * AN EDGE'S ENDPOINT, as the vertex ROWID — `outV()`/`inV()` reached from a correlated edge id rather
+ * than from an edge relation.
+ *
+ * Deliberately NOT `movement()`: an endpoint read is exactly-one-per-traverser by the schema
+ * (`edges.src`/`edges.tgt` are non-null columns), so it re-roots a `ChildHost` instead of producing a
+ * relation of traversers. That distinction is what lets `by(__.outV().values('name'))` be a correlated
+ * value at all — the generic movement arm has to refuse a non-reducing tail, because a hop that CAN
+ * fan out would otherwise let SQLite silently pick a row.
+ *
+ * The rowid and not the external id: a `ChildHost` addresses an element by its rowid everywhere, and
+ * `COALESCE(uid, id)` is what the PAYLOAD projections apply on the way out.
+ */
+export function edgeEndpoint(edgeRowid: Expr, end: 'src' | 'tgt', fresh: Minter): Expr {
+  const edges = make.scan({ id: fresh('ee'), table: 'edges', alias: fresh('ree'), channels: [], type: typeOf(...EDGE_COLS) });
+  const matching = make.filter({ id: fresh('eef'), input: edges, channels: [], type: edges.type, pred: eq(col(edges.id, 'id'), edgeRowid) });
+  const only = make.project({
+    id: fresh('eep'), input: matching, channels: [], type: typeOf(meta('v', 'int', true)),
+    exprs: [['v', col(matching.id, end)]],
+  });
+  return { kind: 'scalar', plan: only };
+}
+
+/**
  * An edge endpoint's OUTWARD-FACING id — `extIdOf`'s twin, and the field two of legacy's fourteen
  * hand-rolled payloads got wrong before the tuple had one authority. An endpoint column holds a rowid;
  * what a client sees is `COALESCE(uid, id)`, which is also what the write path returns for the same edge,

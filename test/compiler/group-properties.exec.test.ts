@@ -288,13 +288,42 @@ test('group element fold emits child elements at the final key boundary', () => 
   expect(executeQuery(store, 'g.V().group().by(T.label).by(__.out().fold())', {})).toHaveLength(1);
 });
 
-test('edge-gate composite key rows carry o/l/i + the edge (gate #2)', () => {
+test('a RECORD-keyed group frames as the Map of Maps upstream reads (gate #2)', async () => {
+  // Upstream's own `getEdges` graph snapshot
+  // (`vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/world.js:157-174`), asserted THROUGH
+  // THE WIRE rather than over columns — a `project()` key is a Map on both spines and each spells its
+  // rows differently, so the columns were asserting the ROUTE while the wire asserts the answer.
   const store = seededStore();
-  const rows = run(store, 'g.E().group().by(__.project("o","l","i").by(__.outV().values("name")).by(__.label()).by(__.inV().values("name"))).by(__.tail())');
-  // 6 distinct edges → 6 groups; verify marko-created->lop maps to edge 9
-  const hit = rows.find((r) => r.k0_v === 'marko' && r.k1_v === 'created' && r.k2_v === 'lop');
-  expect(hit.v_id).toBe(9);
-  expect(hit.v_src).toBe(1); expect(hit.v_tgt).toBe(3);
+  const [framed] = await decodeAll(executeQuery(store,
+    'g.E().group().by(__.project("o","l","i").by(__.outV().values("name")).by(__.label()).by(__.inV().values("name"))).by(__.tail())', {}));
+  expect(framed).toBeInstanceOf(Map);
+  // 6 distinct (out-name, label, in-name) triples in the modern graph, each keyed by a Map — which is
+  // what `getEdgeKey` stringifies as `o-l->i`.
+  expect(framed.size).toBe(6);
+  const keyed = new Map([...framed].map(([k, v]) => [`${k.get('o')}-${k.get('l')}->${k.get('i')}`, v]));
+  expect([...keyed.keys()].sort()).toEqual([
+    'josh-created->lop', 'josh-created->ripple', 'marko-created->lop',
+    'marko-knows->josh', 'marko-knows->vadas', 'peter-created->lop',
+  ]);
+  // The value is the LAST edge routed to that key — one Edge element, not a list of them.
+  expect(keyed.get('marko-created->lop').id).toBe(9);
+});
+
+relOnly('a RECORD-keyed group over a PROPERTY stream frames VertexProperties (upstream getVertexProperties)', async () => {
+  // The third snapshot read (`world.js:176-190`). Its VALUE is the property traverser itself, which is
+  // the typed tree's third element kind — so `frameTypedNode` walks it at map depth by the one rule it
+  // already had for a vertex and an edge.
+  const store = seededStore();
+  const [framed] = await decodeAll(executeQuery(store,
+    'g.V().properties().group().by(__.project("n","k","v").by(__.element().values("name")).by(__.key()).by(__.value())).by(__.tail())', {}));
+  expect(framed).toBeInstanceOf(Map);
+  expect(framed.size).toBe(12); // 12 vertex properties in the modern graph
+  const keyed = new Map([...framed].map(([k, v]) => [`${k.get('n')}-${k.get('k')}->${k.get('v')}`, v]));
+  expect(keyed.get('marko-name->marko').key).toBe('name');
+  expect(keyed.get('marko-name->marko').value).toBe('marko');
+  // The `age` key kept its stored INT type through the record field — `getVertexPropertyKey` renders
+  // it `d[29].i`, which it can only do because the value did not become a string on the way out.
+  expect(keyed.get('marko-age->29').value).toBe(29);
 });
 });
 

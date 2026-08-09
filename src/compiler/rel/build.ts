@@ -323,6 +323,18 @@ export const typedNode = (value: Expr, vtype: Expr): Expr => ({
 });
 
 /**
+ * A PAIRS ARRAY under the typed tree's MAP envelope — `typedNode`'s twin for a value that is a map.
+ *
+ * It is here rather than in `record.ts` because BOTH sides of the `record ◂ modulator` DAG edge add
+ * it: `fieldNode` wraps a nested record's pairs, and `byNode` wraps a map-framed child body's. One
+ * spelling is what keeps a map member the same shape wherever it was produced — the framer walks
+ * `{t:'map', v:[[k,v],…]}` at any depth by a single rule, and a second envelope (or a missing one)
+ * frames the map as an untyped value instead.
+ */
+export const mapNode = (pairs: Expr): Expr =>
+  ({ kind: 'json-object', entries: [['t', compilerText('map')], ['v', pairs]], binary: false });
+
+/**
  * The FIRST row of a one-column relation, as an expression — SQL's scalar subquery.
  *
  * Every `by()` projection that reads storage is one of these, and the `ORDER BY … LIMIT 1` is not

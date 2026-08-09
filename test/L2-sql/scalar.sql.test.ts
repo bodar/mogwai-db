@@ -1447,7 +1447,10 @@ describe('scalar-parent / projection SQL', () => {
     // A single-element (`tail`) group VALUE is no longer deferred: RelIR carries it as one more member
     // of the typed tree, so `select(Column.values)` over it is the ordinary side read.
     expect(() => compile('g.V().groupCount().by("name").cap("x")', {})).toThrow('cap() on a group value not yet supported');
-    expect(() => compile('g.V().properties().group().by()', {})).toThrow('group().by() on a property element is not yet supported');
+    // `group().by()` over a PROPERTY element is no longer deferred either: a property is a `ChildHost`
+    // of its own, so the bare key is the property NODE and the members are the properties themselves.
+    // The legacy route still refuses it, which is the route's business and not a fact worth restating.
+    if (!relirOff) expect(read('g.V().properties().group().by()').shape).toEqual({ kind: 'mapValue' });
     // group() fills a key slot then a value slot; a third by() is invalid Gremlin, refused with
     // GroupStep's own wording by the byModulatorArity verify Pass (test/compiler/by-modulator-arity).
     expect(() => compile('g.V().group().by("name").by("age").by("x")', {})).toThrow('already been set');

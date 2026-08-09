@@ -5,11 +5,12 @@ import { PER_ROW, STATIC, UNKNOWN } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
-import { and, eq, EDGE_COLS, firstOf, meta, NODE_COLS, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
+import { and, eq, EDGE_COLS, firstOf, mapNode, meta, NODE_COLS, PROPERTIES, typedNode, typeOf, type Minter } from './build.ts';
 import { storedCompareOn } from './predicate.ts';
 import { aliasProjection, readFraming, type Pop } from './alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import { elementNode } from './element.ts';
+import { propertyNode } from './property.ts';
 
 /**
  * `by()` AS ONE VOCABULARY — the modulator seam.
@@ -195,7 +196,14 @@ export function byExpr(
     // comparison wrapper. Its expression passes through unchanged and frames by value inference.
     // The seam's framing is the FIELD vocabulary's business (`byField`); a bare ordering/grouping key
     // only ever needed the value.
-    return child.scalar(key.body, host)?.expr ?? null;
+    //
+    // ONLY A SCALAR RESULT, and the guard is the seam's contract read honestly: `ChildValue.framing` is
+    // the full `RelFraming` and a consumer that can only use a VALUE narrows it itself. A body whose one
+    // result is an ELEMENT hands back a rowid and one that is a RECORD hands back a map node — neither
+    // is a comparable value, and ordering by either would be a plausible-looking answer to a traversal
+    // TinkerPop rejects.
+    const produced = child.scalar(key.body, host);
+    return produced && produced.framing.kind === 'scalar' ? produced.expr : null;
   }
 
   if (key.kind === 'alias') {
@@ -221,6 +229,14 @@ export function byExpr(
   // one is the whole map — not a comparable value and not a property source — so everything left here
   // declines rather than picking a field.
   if (host.kind === 'record') return null;
+
+  // A PROPERTY's three projections are `key()`, `value()` and `element()`, which are STEPS and therefore
+  // reached through the child arm above. What is left here is the vocabulary an ELEMENT has and a
+  // property does not: a bare `by()` over one is the VertexProperty itself (not a comparable value),
+  // `by('x')` would be a meta-property read, and `T.key`/`T.value` are deliberately absent from `TOKENS`
+  // because they are a property's tokens and not an element's. All three decline rather than being
+  // answered off the wrong row.
+  if (host.kind === 'property') return null;
 
   if (key.kind === 'identity') return host.id;
 
@@ -378,13 +394,31 @@ export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, c
     const produced = child.scalar(key.body, host);
     if (!produced) return null;
     const value = produced.expr;
-    // For `T.id`'s reason, a child has no recorded type: leave it untagged and let the framer infer.
+    // WHAT THE BODY PRODUCED decides the member encoding, and the three answers are the same three the
+    // ALIAS arm below gives — a child body and a labelled read are the same question about a different
+    // scope, so they must not encode their results two ways.
+    //
+    // An ELEMENT body (`by(__.outV())`) hands back a rowid, which becomes the `{t:'vertex', v:{…}}`
+    // member the typed tree frames at any depth. A MAP body (`by(__.project('a','b'))`) hands back the
+    // pairs array a map column carries, so it takes the same envelope `fieldNode` adds to a nested
+    // record. Both preserve SQL NULL outside the node for the reason the scalar arm does.
+    const member = produced.framing.kind === 'elements' ? elementNode(value, produced.framing.elem, fresh)
+      : produced.framing.kind === 'map' ? mapNode(value)
+        // For `T.id`'s reason, a plain child value stays UNTAGGED here and the framer infers from it.
+        // The seam does carry a stored `vtype` (`ChildValue.vtype`) and a consumer that can project a
+        // second COLUMN uses it (`byField`), but a map side is one expression: splicing the tag in
+        // would emit its correlated read twice — once as `t` and once inside `storedValueOn`'s CASE —
+        // which is the COMPUTE-ONCE invariant a map key expression is measured against. So the tag
+        // rides where there is room for it and is dropped where there is not.
+        : produced.framing.kind === 'scalar' ? typedNode(value, compilerNull('text'))
+          : null;
+    if (!member) return null;
     // Preserve SQL NULL outside the node: it is how the shared productivity filter distinguishes a
     // child that yielded nothing from a value it can collect or group.
     return {
       kind: 'case',
       whens: [[{ kind: 'binary', op: 'is', left: value, right: compilerNull() }, compilerNull()]],
-      else: typedNode(value, compilerNull('text')),
+      else: member,
     };
   }
 
@@ -414,6 +448,18 @@ export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, c
   // the FIELD vocabulary, which is on the other side of this module's DAG edge. A non-field projection
   // over one declines here.
   if (host.kind === 'record') return null;
+
+  if (host.kind === 'property') {
+    // A bare `by()` over a PROPERTY projects the VertexProperty itself, and unlike the element case
+    // below it is answered rather than declined: the element arm declines because `groupBarrier` has a
+    // cheaper spelling for that key (the ROWID, expanded once per surviving group), and a property key
+    // has no such spelling in this route yet. So the node IS the answer here, and a bare
+    // `g.V().properties().group()` groups by the property's own JSON rather than by an integer — a
+    // correct answer at a plan cost, which is the honest trade while the rowid spelling needs a
+    // `MapOf` that can name a property side.
+    if (key.kind !== 'identity') return null;
+    return propertyNode(host.id, host.ownerElem, fresh);
+  }
 
   // A bare `by()` over an element projects the ELEMENT — not a value with a tag.
   if (key.kind === 'identity') return null;
@@ -515,17 +561,23 @@ export function byField(
     if (!child) return null;
     const produced = child.scalar(key.body, host);
     if (!produced) return null;
-    // EVERY column the framing declares must have an expression, and only two do. `v` is the child's
-    // value; `vtype` is the second correlated read a stored-value body supplies. A numeric reducer's
-    // `vt` (the aggregate's runtime `typeof`) has neither — recomputing the aggregate a second time is
-    // the duplication a shaped seam exists to avoid — so it DECLINES rather than dropping the type.
+    // THE SEAM'S ONE EXPRESSION IS THE FRAMING'S FIRST PAYLOAD COLUMN, whatever the framing is — a
+    // rowid for an element, `v` for a value, `map` for a collapsed record. That is the same convention
+    // `presence` reads to ask whether a field is there, so stating it here is reading one rule rather
+    // than adding an arm per shape, and it is what makes `project('v').by(__.outV())` re-enter as a
+    // VERTEX stream instead of declining.
+    //
+    // EVERY OTHER column the framing declares must also have an expression, and only `vtype` does —
+    // the second correlated read a stored-value body supplies. A numeric reducer's `vt` (the
+    // aggregate's runtime `typeof`) has none, and recomputing the aggregate a second time is the
+    // duplication a shaped seam exists to avoid, so it DECLINES rather than dropping the type.
     // `count()` is unaffected: its type is the compile-time `long`.
     const cols = framingCols(produced.framing);
-    if (!cols) return null;
-    const exprs: (readonly [string, Expr])[] = [];
-    for (const column of cols) {
-      if (column.name === 'v') exprs.push(['v', produced.expr]);
-      else if (column.name === 'vtype' && produced.vtype) exprs.push(['vtype', produced.vtype]);
+    const [payload, ...rest] = cols ?? [];
+    if (!payload) return null;
+    const exprs: (readonly [string, Expr])[] = [[payload.name, produced.expr]];
+    for (const column of rest) {
+      if (column.name === 'vtype' && produced.vtype) exprs.push(['vtype', produced.vtype]);
       else return null;
     }
     return { exprs, framing: produced.framing, optional: droppable() };
@@ -546,7 +598,10 @@ export function byField(
     };
   }
 
-  if (host.kind === 'scalar') return null;
+  // A SCALAR and a PROPERTY host both stop here for the same reason: what is left below is the ELEMENT
+  // vocabulary (a stored property of the traverser), and neither traverser has one. A property's own
+  // three projections are STEPS and reached through the child arm above.
+  if (host.kind === 'scalar' || host.kind === 'property') return null;
 
   // A PROPERTY FIELD keeps its stored type, so it is TWO correlated reads of the same property row —
   // the value and its `vtype`. They cannot share one subquery (SQL's scalar subquery yields one

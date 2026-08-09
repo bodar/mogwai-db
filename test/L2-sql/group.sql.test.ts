@@ -767,29 +767,110 @@ describe('group / properties SQL', () => {
     expect(p.sql).toContain('GROUP BY gk');
   });
 
-  test('group().by(__.project) composite key with nested scalar by()s (edge gate)', () => {
-    const p = read('g.E().group().by(__.project("o","l","i").by(__.outV().values("name")).by(__.label()).by(__.inV().values("name"))).by(__.tail())');
-    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'map', parts: [{ key: 'o' }, { key: 'l' }, { key: 'i' }] }, val: { kind: 'elementLast', elem: 'edge' } });
-    // Every project field is an independent generic child joined on one outer edge
-    // ordinal; no composite-key field uses a correlated scalar mini-compiler.
-    expect(p.sql).toContain('ROW_NUMBER() OVER (ORDER BY p.encounter) AS o0');
-    expect(p.sql).toContain('gkp0.v AS k0_v, gkp1.v AS k1_v, gkp2.v AS k2_v');
-    expect(p.sql).toContain('JOIN vertex_properties vp ON vp.node=n.id');
-    expect(p.sql).toContain('(SELECT COALESCE(uid, id) FROM nodes WHERE id=gn.src) AS v_src'); // edge value framing → external endpoint id
+  // ---------- upstream's own GRAPH-SNAPSHOT reads: an ELEMENT-KEYED / RECORD-KEYED side read ----------
+  //
+  // These two are `getEdges`/`getVertexProperties` from the cucumber harness's `BeforeAll`
+  // (`vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/world.js:157-190`), verbatim. They are
+  // the reason `mise run L3:rel-only` could not report at all: they took the legacy route, so under the
+  // `rel-only` position the harness died before a scenario ran.
+  //
+  // On RelIR a `project()` key is the RECORD shape collapsed to a map VALUE — the boundary `record.ts`
+  // always named — so the group key is one `{t:'map', v:[[k,node],…]}` column and the shape is the
+  // ordinary `mapValue`. The claims below are RelIR's; legacy's composite-key columns (`k0_v`…) are a
+  // descriptor of a route with an end date and are deliberately not restated (see `relOnly`).
+  relOnly('group().by(__.project) — a RECORD-keyed group over an edge stream (upstream getEdges)', () => {
+    const gremlin = 'g.E().group().by(__.project("o","l","i").by(__.outV().values("name")).by(__.label()).by(__.inV().values("name"))).by(__.tail())';
+    const p = read(gremlin);
+    expect(p.spine).toBe('rel');
+    expect(p.shape).toEqual({ kind: 'mapValue' });
+    // The key IS the record's map node, named once as a column and grouped by that column — the
+    // plan-quality rule every by() key here follows (a correlated subquery inlined at each position
+    // is what naming it prevents).
+    expect(p.sql).toContain("json_object('t', 'map', 'v'");
+    expect(p.sql).toContain('GROUP BY');
+    // Each field lowers through the ORDINARY child seam: `outV()`/`inV()` re-root the host to the
+    // endpoint (exactly one by the schema), `label()` is the token projection every by() shares.
+    expect(p.sql).toContain('SELECT ree');   // the endpoint re-root reads the edge row
+    expect(p.sql).toContain('FROM labels');  // label() → the labels dictionary, not a second spelling
+
+    // THE ANSWER — what the harness actually consumes: a Map keyed by a Map. The key rides as the
+    // typed pairs array, each field under its OWN type, which is what lets a record key round-trip.
+    const store = seededStore();
+    const pairs = JSON.parse(run(store, gremlin)[0]!.map) as [any, any][];
+    expect(pairs).toHaveLength(6); // 6 distinct (out-name, label, in-name) triples in the modern graph
+    const marko = pairs.find(([k]) => k.v[0][1].v === 'marko' && k.v[2][1].v === 'lop');
+    expect(marko![0]).toEqual({ t: 'map', v: [
+      ['o', { t: 'string', v: 'marko' }], ['l', { t: 'string', v: 'created' }], ['i', { t: 'string', v: 'lop' }],
+    ] });
+    // The VALUE is the last edge routed to that key — one edge, framed as a typed element member.
+    expect(marko![1].t).toBe('edge');
+    expect(marko![1].v.id).toBe(9);
   });
 
-  test('properties().group() lowers by() modulators through the generic child seam', () => {
-    // D3: the property group is a live parent stream (pushChildScope over the property
-    // payload), so its composite-key parts lower as ordinary scalar children — element()
-    // .values() and key()/value() — NOT a hand-rolled inline reader.
-    const p = read('g.V().properties().group().by(__.project("n","k","v").by(__.element().values("name")).by(__.key()).by(__.value())).by(__.tail())');
-    expect(p.shape).toEqual({ kind: 'group', key: { kind: 'map', parts: [{ key: 'n' }, { key: 'k' }, { key: 'v' }] }, val: { kind: 'elementLast', elem: 'property' } });
-    // The property parent's multiset-safe domain carries the full property payload.
-    expect(p.sql).toContain('p.pk AS pk, p.pv AS pv, p.pvtype AS pvtype, p.pmeta AS pmeta, p.bulk, ROW_NUMBER() OVER (ORDER BY p.encounter) AS o0');
-    // element().values("name") → owner re-root + values, joined back as a composite key part.
-    expect(p.sql).toContain('gkp0.v AS k0_v, gkp1.v AS k1_v, gkp2.v AS k2_v');
-    expect(p.sql).toContain('SELECT p.pk AS v, p.bulk, p.o0, ROW_NUMBER() OVER (PARTITION BY p.o0'); // key() child, per-origin encounter (carried slot)
-    expect(p.sql).toContain('gp.owner AS v_owner'); // the tail() value frames the property element from the domain
+  relOnly('properties().group() — a RECORD key over a PROPERTY stream (upstream getVertexProperties)', () => {
+    const gremlin = 'g.V().properties().group().by(__.project("n","k","v").by(__.element().values("name")).by(__.key()).by(__.value())).by(__.tail())';
+    const p = read(gremlin);
+    expect(p.spine).toBe('rel');
+    expect(p.shape).toEqual({ kind: 'mapValue' });
+    // Every key part is the ORDINARY child seam over a PROPERTY host — `element()` re-roots to the
+    // owner (exactly one by the schema) and `key()`/`value()` are correlated reads of the stored row.
+    // There is no property-specific reader, which is what makes the same `project()` work here and
+    // over the edge stream above.
+    expect(p.sql).toContain("json_object('t', 'map', 'v'");
+    expect(p.sql).toContain('FROM vertex_properties');
+    // The group's members are the PROPERTIES themselves — the typed tree's third element kind.
+    expect(p.sql).toContain("'t', 'property'");
+
+    const store = seededStore();
+    const pairs = JSON.parse(run(store, gremlin)[0]!.map) as [any, any][];
+    // 12 vertex properties in the modern graph, each its own (owner-name, key, value) triple.
+    expect(pairs).toHaveLength(12);
+    // An `age` key keeps its stored INT type where the owner's name is a string — the per-row type
+    // channel (§6·7) surviving into a record field and out again, which is the whole reason the
+    // harness can stringify these keys and get upstream's own `n-k->v` back.
+    const markoAge = pairs.find(([k]) => k.v[0][1].v === 'marko' && k.v[1][1].v === 'age');
+    expect(markoAge![0]).toEqual({ t: 'map', v: [
+      ['n', { t: 'string', v: 'marko' }], ['k', { t: 'string', v: 'age' }], ['v', { t: 'int', v: 29 }],
+    ] });
+    // The VALUE is the VertexProperty itself — the typed tree's third element kind.
+    expect(markoAge![1]).toEqual({ t: 'property', v: { vpid: 2, owner: 1, pk: 'age', pv: 29, pvtype: 'int', pmeta: null } });
+  });
+
+  // The NEIGHBOURING combinations of the two shapes above. Neither is in the corpus and both are
+  // legal Gremlin: a record key and a re-rooted host compose wherever a `by()` body is legal, so the
+  // question "does this work HERE?" must not have a per-position answer.
+  relOnly('a RECORD key and a RE-ROOTED host compose at every by() position they are legal in', () => {
+    const store = seededStore();
+    // A record key over the simplest host — a vertex stream, no re-rooting involved.
+    const byNameLang = JSON.parse(run(store, 'g.V().group().by(__.project("n","l").by("name").by(T.label)).by(__.count())')[0]!.map) as [any, any][];
+    expect(byNameLang).toHaveLength(6);
+    expect(byNameLang.every(([k]) => k.t === 'map' && k.v.length === 2)).toBeTrue();
+
+    // A re-rooted host as the WHOLE body — the value is the endpoint ELEMENT, so the key is a vertex
+    // member rather than a scalar. `byNode`'s element arm and the seam's element framing, meeting.
+    const byOutV = JSON.parse(run(store, 'g.E().group().by(__.outV()).by(__.count())')[0]!.map) as [any, any][];
+    expect(byOutV).toHaveLength(3); // marko, josh, peter are the only out-vertices
+    expect(byOutV.every(([k]) => k.t === 'vertex')).toBeTrue();
+
+    // The same re-rooting one host along: `element()` over a PROPERTY stream, as a group key.
+    const byOwner = JSON.parse(run(store, 'g.V().properties().group().by(__.element()).by(__.count())')[0]!.map) as [any, any][];
+    expect(byOwner).toHaveLength(6);
+    expect(byOwner.every(([k]) => k.t === 'vertex')).toBeTrue();
+
+    // A record key NESTED in a record key — the assembly is recursive, so depth changes nothing.
+    const nested = JSON.parse(run(store, 'g.E().group().by(__.project("l","e").by(__.label()).by(__.project("o").by(__.outV().values("name")))).by(__.count())')[0]!.map) as [any, any][];
+    expect(nested.every(([k]) => k.t === 'map' && k.v[1][1].t === 'map')).toBeTrue();
+  });
+
+  relOnly('a RECORD value is not a comparable one — an ordering by() over a project() DECLINES', () => {
+    // `byExpr` narrows the seam's framing to a scalar, so a `project()` body reaches an ordering key
+    // as a decline rather than as a JSON blob SQLite would happily sort. Fail closed: legacy raises
+    // the message it owns instead of this route inventing an order over a Map.
+    expect(() => read('g.V().order().by(__.project("a").by("name"))'))
+      .toThrow('order().by(traversal) child shape not yet supported by generic child lowering');
+  });
+
+  test('properties().group() member order and grouping over the legacy route', () => {
     // Result: each vertex property grouped by {owner name, key, value}, value = the property.
     const store = seededStore();
     // The GROUPING is what this pins. The member order inside each group follows the emission

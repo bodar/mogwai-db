@@ -422,7 +422,11 @@ export type FrameNode =
   | ValueNode
   | { t: 'list' | 'set'; v: FrameNode[] }
   | { t: 'map'; v: [FrameNode, FrameNode][] }
-  | { t: 'vertex' | 'edge'; v: Record<string, any> }
+  // A PROPERTY is the element arm's third kind and rides the same way — `v` is the
+  // `{vpid, owner, pk, pv, pvtype, pmeta}` tuple `framePropertyRow` reads, already expanded by SQL. A
+  // VertexProperty IS an Element and an edge `Property` is not, but they frame identically here (the
+  // synthetic `owner:pk` id is the framer's, not the tree's), so one arm serves both.
+  | { t: 'vertex' | 'edge' | 'property'; v: Record<string, any> }
   | { t: 'T'; v: TokenName }
   | { t: 'D'; v: DirectionName }
   | null | string | number | boolean | FrameNode[];
@@ -451,11 +455,20 @@ function leafStore(val: any, t: CanonicalType | null): any {
  *  recurses per element; a map recurses per key AND value (ordered pairs preserve typed,
  *  non-string keys). The write path stores JSON.stringify(valueNodeOf(val, tn).v). */
 /** The inverse of the on-disk convention: reconstruct a ValueNode from a stored (value,
- *  vtype) pair — a collection's `value` is the bare top-node `v` as JSON text (→ its {t,v}
- *  item tree), a scalar rides raw. The one place this rule lives; both the read framer
- *  (execute.ts frameStoredValue) and the write-response echo (write.ts) consume it. */
+ *  vtype) pair — a collection's `value` is the bare top-node `v` (→ its {t,v} item tree),
+ *  a scalar rides raw. The one place this rule lives; both the read framer
+ *  (execute.ts frameStoredValue) and the write-response echo (write.ts) consume it.
+ *
+ *  A COLLECTION ARRIVES IN TWO FORMS, exactly as an element's label and property payloads do
+ *  (execute.ts labelsOf/propsOf): as JSON TEXT when it is a relation COLUMN, because SQLite's
+ *  json subtype does not survive the value boundary, and ALREADY PARSED when it rode inside a
+ *  json_object payload, where the subtype makes it nest instead. Both are deterministic per
+ *  producer and neither is a guess — a parsed collection top node is always an ARRAY (a map's
+ *  `v` is its ordered pairs), so a string is unambiguously the text form. Accepting only the
+ *  text form is what made a property node inside a map value throw `JSON.parse('[object
+ *  Object]')` for a map-valued property. */
 export const valueNodeFromStored = (value: any, vtype: string | null): ValueNode =>
-  ({ t: (vtype ?? null) as ValueNode['t'], v: isCollectionType(vtype) ? JSON.parse(value) : value });
+  ({ t: (vtype ?? null) as ValueNode['t'], v: isCollectionType(vtype) && typeof value === 'string' ? JSON.parse(value) : value });
 
 export function valueNodeOf(val: any, tn: TypeNode | null): ValueNode {
   if (Array.isArray(val) || val instanceof Set) {
