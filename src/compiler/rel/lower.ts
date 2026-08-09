@@ -2281,7 +2281,7 @@ function scalarTail(
       continue;
     }
     if (step.name === 'cap') {
-      const collected = readCollection(step, ctx.collections);
+      const collected = readCollection(step, ctx.collections, fresh);
       if (!collected) return null;
       return continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
@@ -3501,7 +3501,7 @@ function elementTail(
     // incoming stream is discarded (a cap emits one fresh traverser), so the alias channel goes with
     // it and the list tail takes the rest of the chain.
     if (step.name === 'cap') {
-      const collected = readCollection(step, ctx.collections);
+      const collected = readCollection(step, ctx.collections, fresh);
       if (!collected) return null;
       return continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }

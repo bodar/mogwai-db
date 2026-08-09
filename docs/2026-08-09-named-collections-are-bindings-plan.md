@@ -201,21 +201,35 @@ Each phase is independently green, independently committable, and states its own
 `mise run ci` → `mise run test:legacy-spine` → commit → rebase → push → watch CI at every one
 (`docs/2026-08-01-relir-build-plan.md` §The instruments).
 
-### Phase 1 — `Collection` holds members; the reduction moves to `cap`. NO coverage change.
+### Phase 1 — ✅ LANDED. `Collection` holds members; the reduction moves to `cap`. NO coverage change.
 
 Pure refactor. Single-site only; the `collections.has(label)` decline STAYS.
 
-- `Collection` becomes `{members, of, merge}` with `merge` hardcoded to the `addAll` default.
-- `registerCollection` stops calling `foldTraversers`/`foldProjection`. The `by()` PROJECTION still
-  happens at the write site — it must, because `by(__.outE("created").count())` is correlated to the
-  traverser that is there NOW — but the FOLD does not. Keep `foldProjection`'s projection half,
-  delete its fold half.
-- `readCollection` gains `reduce()`, which calls the fold the framing names.
-- `registerMap` keeps storing the built map for now (Phase 4 moves it).
+- `Collection` became `{members, of}` — `of` is the TOTAL `Members` union (`elements` / `scalars` /
+  the transitional `reduced`), each arm carrying exactly the fold parameters its reduction asks for.
+  ⚠️ **`merge` is NOT in it yet, deliberately.** With the `reducers.has(label)` decline still standing
+  (Phase 7 is what lifts it) the policy has exactly one possible value, and a single-valued field
+  claims a capability the decline right beside it refuses. It lands in Phase 7 where it can hold more
+  than one answer.
+- `registerCollection` stops folding. The `by()` PROJECTION still happens at the write site — it must,
+  because `by(__.outE("created").count())` is correlated to the traverser that is there NOW — so
+  `foldProjection` became `projectedMembers`, which is its projection half returning member rows.
+- `readCollection` is now `collections.get` + `reduce()`, and `reduce()` is the ONE place a named
+  collection's fold is chosen.
+- `registerMap` still stores the built map, under the `reduced` arm (Phase 4 moves it).
 
-**Checkpoint:** L3, census `spine` column, `rel-only` and the legacy floor ALL unchanged. `sql-hygiene`
-will move — `cap("a").unfold()` should get materially shorter (a fold immediately exploded is now
-neither), and that is the phase's evidence. Re-record with the reason.
+Landed alongside, because the pair `{rel, framing}` was spelled inline FOURTEEN times and `reduce()`
+would have been the fifteenth: `FramedRel` in `framing.ts`, with `Tail` extending it.
+
+**Checkpoint — measured:** `mise run ci` green; L3, census `spine` (1202), `rel-only` and the legacy
+floor (1692, 83 RelIR-only / 0 legacy-only) ALL unchanged, which is what a pure refactor owes.
+
+⚠️ **`sql-hygiene` did NOT move, and the prediction that it would was wrong.** Phase 1 moves WHERE the
+fold node is built, not WHETHER one is built: `cap("a").unfold()` still folds and then explodes. The
+cancellation §6·7 describes — a `cap()` whose reduction is immediately unfolded IS the member rows —
+is a real increment that this phase makes expressible for the first time, but it is its own change
+with its own question (the members' row order versus the list's `Agg.orderBy`), not a side effect of
+this one. Tracked as Phase 2b below rather than left as a trap.
 
 **Trap:** the scalar fold is where `withLossyFlag` decides the member encoding (`list.ts:769-789`).
 It is a whole-relation `MAX(...) OVER ()`, so it must run over the UNION of all sites' members, not
@@ -236,6 +250,19 @@ column up.
 orders are not comparable. Order is not pinned (§1), so the union may drop the channel — but it must
 drop it DELIBERATELY and the reduction must then fold unordered, not fold by a channel that means
 different things per arm.
+
+### Phase 2b — the reduction a `cap().unfold()` never needed.
+
+`cap("a").unfold()` folds every member into one JSONB array and immediately explodes it again. With
+members held pre-fold, the answer is the member relation itself — the element arm without the
+round-trip through JSON that §6·7 names. This is the movement `sql-hygiene` was predicted to show in
+Phase 1 and did not.
+
+**The question it must answer, and it is not rhetorical:** the fold pins member order with
+`Agg.orderBy` on the encounter channel; the member relation carries that channel but no ORDER BY. So
+the cancellation is only sound where the consumer does not depend on the list's order, and
+`mise run test:perturbed` — not the corpus — is what decides whether a given consumer does.
+Cancelling into an ordered movement is the conservative form and is probably what this should be.
 
 ### Phase 3 — mixed member shapes through the variant.
 
