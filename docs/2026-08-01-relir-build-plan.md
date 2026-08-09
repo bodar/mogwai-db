@@ -162,7 +162,9 @@ new kind a compile error. Rewriting is memoised, so the DAG stays a DAG.
 would be a throw out of a lowering whose contract is `null`, and legacy would never see the traversal.
 
 - **`check`** — the fail-closed verifier (column resolution, `Agg`/`WindowExpr` placement, §3.5 obligations,
-  both §3.6 budgets). Always on in dev/tests.
+  both §3.6 budgets). Always on in dev/tests. Its SQLite laws about "this SELECT" are answered by the shared
+  block analysis (`src/rel/block.ts`), which is also the emitter's own fusion rule table — one definition, so
+  the checker cannot admit a plan the emitter then wraps.
 - **`name` (§4.6)** — named CTE vs inlined derived table for every shared node, honouring `Materialize`. The
   ONLY pass with a production caller (`lower.ts`).
 - **`prune` (§4.5)** — column pruning; makes `unroll`'s replicas affordable. Phase 3 prerequisite.
@@ -170,8 +172,9 @@ would be a throw out of a lowering whose contract is `null`, and legacy would ne
 - **`fuse` (§4.4)** — small semantic rewrites. Ask which still buys anything the assembler doesn't before
   wiring it.
 - 🚧 **`flatten` (§4.2)** *(Phase 3)* — join flattening / decorrelation into the P1 envelope. Deletes
-  `expandRepeatBody`.
-- 🚧 **`unroll` (§4.3)** *(Phase 3)* — replicate a subplan n times for `times(n)`.
+  `expandRepeatBody`. Most of it dissolved into the legality ANALYSIS (Phase 3 step 2a).
+- ✅ **`unroll` (§4.3)** *(Phase 3)* — a bounded walk as its LEVELS, over `refresh`/`minter`
+  (`src/rel/mint.ts`), which is also where §12's "a replica carries its own ids" now lives.
 - 🚧 **`recognize` (§4.7)** *(Phase 4)* — the fast paths as plan rewrites, so a fast-path decline can be lifted.
 
 **Declared is not wired.** Only `name` has a production caller today; the rest are built-and-tested (or
@@ -830,9 +833,27 @@ its header before concluding a body is inexpressible.
 of the 125 corpus `repeat()`s have a NON-barrier body and need nothing beyond `Recursive`, already in the closed
 node set (`Recursive.step` is a function; seed/step channels identical, §3.3).
 
-**4. `unroll` for `times(n)`** — take `dedup` first, one barrier per commit with an L4 pin. Covers the 48
-`times(n)`-bounded of P4's 53 barrier bodies. §3.6's statement-text budget is its other exit: `unroll` declines
-above a rendered-size ceiling and falls back to `Recursive`.
+**4. ✅ `unroll` for `times(n)` — BUILT** (`src/rel/passes/unroll.ts`), covering the 48 `times(n)`-bounded of
+P4's 53 barrier bodies. Wiring is step 3's, which is what it waits on.
+
+⚠️ **It returns the LEVELS, not a result, and that is §2's boundary.** Which levels a traversal emits is a
+GREMLIN question — `times(n)` alone yields the last, `emit()` adds the ones it selects, `until()` chooses per
+row — so answering it inside a `Rel → Rel` pass would put Gremlin's vocabulary below the line. Level 0 is the
+seed; level i is the step applied to level i-1. A caller takes the last, or unions a set of them, and says so
+in its own words. §3.6's statement-text budget is not decided there either: n replicas are n times the SQL,
+and what a Durable Object refuses is measured on the rendered statement by `cfLimitViolation`, which
+`spine.ts` already asks. A caller that cannot afford the copies keeps the `Recursive` — which then refuses a
+barrier body per P3 rather than answering it wrongly.
+
+⚠️ **§12's replica trap is answered ONCE, in `src/rel/mint.ts`.** Two relations sharing a `RelId` in one scope
+make every `Col` against it ambiguous (the last binding silently wins) and two FROM items sharing a SQL alias
+are `ambiguous column name` — and a chain of levels puts every replica in ONE scope, where only the join case
+has a checker rule. `minter` moved there out of `seek` (one rule, one implementation); `refresh` copies a
+subplan under fresh names, PRESERVING SHARING — copying per occurrence turns the DAG into a tree, which is
+what `name`'s occurrence analysis reads. Its `substitute` map is how the self-reference becomes the previous
+level: `recursive` MEMOISES `step`, so it cannot be re-run against a new input and the substitution has to
+happen on the instantiated body. `mapRelChildren`'s `retype` generalized to a `RelOverride` — what a rebuild
+may change about the node ITSELF: type, id, alias.
 
 🔴 **The 5 `until()`/`emit()` barrier bodies hit the P3 wall and are not expressible in ANY lowering.** That
 deviation needs accepting, not engineering. The three routes partition the family: **125 = 72 `Recursive` + 48
