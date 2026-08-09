@@ -18,10 +18,10 @@
     "bound": 0
   },
   "and": {
-    "binds": 0,
+    "binds": 2,
     "bytes": 1532,
     "compiler": 15,
-    "bound": 0
+    "bound": 2
   },
   "any": {
     "binds": 0,
@@ -168,10 +168,10 @@
     "bound": 0
   },
   "filter": {
-    "binds": 0,
+    "binds": 4,
     "bytes": 1043,
-    "compiler": 9,
-    "bound": 0
+    "compiler": 15,
+    "bound": 4
   },
   "fold": {
     "binds": 0,
@@ -311,6 +311,12 @@
     "compiler": 33,
     "bound": 0
   },
+  "not": {
+    "binds": 1,
+    "bytes": 186,
+    "compiler": 5,
+    "bound": 1
+  },
   "option": {
     "binds": 15,
     "bytes": 1312,
@@ -318,10 +324,10 @@
     "bound": 35
   },
   "or": {
-    "binds": 0,
+    "binds": 2,
     "bytes": 1202,
     "compiler": 12,
-    "bound": 0
+    "bound": 2
   },
   "order": {
     "binds": 0,

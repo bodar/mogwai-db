@@ -265,8 +265,13 @@ const bodyOf = (nested: unknown, params: Record<string, any>, sideEffects?: Map<
  * to get the child's own filter recursion wrong.
  */
 function correlatedExists(
-  body: readonly IRStep[], subject: Subject, elem: Elem, fresh: Minter, ctx: ChainCtx, negated: boolean,
+  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negated: boolean,
 ): Expr | null {
+  // A MOVEMENT NEEDS AN ELEMENT TO MOVE FROM. A scalar traverser has no adjacency, so this arm is not
+  // "not yet taught" for one — it is the arm that does not apply, and `bodyPredicate` falls through to
+  // the two that do.
+  if (subject.kind !== 'element') return null;
+  const elem = subject.elem;
   const child = movement(body[0]!, { correlated: subject.id }, elem, fresh);
   if (!child) return null;
   // THE REST OF THE BODY IS THE ORDINARY FOLD, started at the correlated child — the same insight the
@@ -325,12 +330,12 @@ function correlatedExists(
  * value comparison over a correlated sub-read, which is a further arm rather than this one.
  */
 function bodyPredicate(
-  body: readonly IRStep[], subject: Subject, elem: Elem, fresh: Minter, ctx: ChainCtx,
+  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx,
 ): Expr | null {
   let clause: Expr | undefined;
   for (const step of body) {
-    const filter = sourceFilter(step, subject, elem, fresh, ctx);
-    if (!filter) return correlatedExists(body, subject, elem, fresh, ctx, false) ?? valuePredicate(body, subject, elem, fresh, ctx, false);
+    const filter = sourceFilter(step, subject, fresh, ctx);
+    if (!filter) return correlatedExists(body, subject, fresh, ctx, false) ?? valuePredicate(body, subject, fresh, ctx, false);
     clause = and(clause, filter);
   }
   return clause ?? null;
@@ -354,15 +359,15 @@ function bodyPredicate(
  * where the two-valued-versus-three-valued difference is stated once.
  */
 function childPredicate(
-  body: readonly IRStep[], subject: Subject, elem: Elem, fresh: Minter, ctx: ChainCtx, negated: boolean,
+  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negated: boolean,
 ): Expr | null {
-  if (!negated) return bodyPredicate(body, subject, elem, fresh, ctx);
+  if (!negated) return bodyPredicate(body, subject, fresh, ctx);
   // The two self-negating shapes FIRST, so every body they already answered keeps the SQL it has and
   // this is new coverage rather than a re-spelling — `valuePredicate`'s own ordering rule, one level up.
-  const exact = correlatedExists(body, subject, elem, fresh, ctx, true)
-    ?? valuePredicate(body, subject, elem, fresh, ctx, true);
+  const exact = correlatedExists(body, subject, fresh, ctx, true)
+    ?? valuePredicate(body, subject, fresh, ctx, true);
   if (exact) return exact;
-  const positive = bodyPredicate(body, subject, elem, fresh, ctx);
+  const positive = bodyPredicate(body, subject, fresh, ctx);
   return positive && notProduced(positive);
 }
 
@@ -384,11 +389,11 @@ function childPredicate(
  * answers keeps the lowering it has, so this is new coverage and not a re-spelling of existing SQL.
  */
 function valuePredicate(
-  body: readonly IRStep[], subject: Subject, elem: Elem, fresh: Minter, ctx: ChainCtx, negate: boolean,
+  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx, negate: boolean,
 ): Expr | null {
   const last = body.at(-1);
   if (body.length < 2 || last?.name !== 'is' || last.modulators?.length || last.optionArms) return null;
-  const produced = scalarChild(body.slice(0, -1), { kind: 'element', id: subject.id, elem }, ctx, fresh);
+  const produced = scalarChild(body.slice(0, -1), childHostOf(subject), ctx, fresh);
   if (!produced) return null;
   const args = argValues(last);
   if (args.length !== 1) return null;
@@ -431,7 +436,22 @@ function valuePredicate(
   return negate ? notProduced(tested) : tested;
 }
 
-function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter, ctx: ChainCtx): Expr | null {
+/** The traverser a child body is rooted at, as the CHILD SEAM's host — one derivation, so the
+ *  predicate arm and the projection arm cannot disagree about what the subject IS. */
+const childHostOf = (subject: Subject): ChildHost => subject.kind === 'element'
+  ? { kind: 'element', id: subject.id, elem: subject.elem }
+  : { kind: 'scalar', value: subject.value, ...(subject.vtype ? { vtype: subject.vtype } : {}) };
+
+/** The subject of a clause that reads an ELEMENT — a property row, a label row, an id. Named because
+ *  three clause builders take it and each would otherwise re-state the narrowing in its signature. */
+type ElementSubject = Extract<Subject, { kind: 'element' }>;
+
+/** The ELEMENT subject, or `null` — the narrowing every element-only clause opens with, spelled once
+ *  so an arm states "this question is about an element" rather than repeating a `kind` test. */
+const elementSubject = (subject: Subject): ElementSubject | null =>
+  subject.kind === 'element' ? subject : null;
+
+function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainCtx): Expr | null {
   // One filter form HOSTS a `by()` — the alias-compare `where('a', P.eq('b')).by('key')`, which
   // `isAliasCompareWhere` detects structurally rather than by name — and it is not covered at all
   // (it needs the alias channel). So this stays a blanket decline, and `modulator.ts` is what it will
@@ -444,7 +464,26 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
   if (step.name === 'hasLabel') {
     // `hasLabelClause` validates and lowers each label `Arg` — an inline name inlines, a `$label`
     // scalar / `$labels` collection binds — so a wire parameter's data never enters the statement text.
-    return hasLabelClause(step.args, subject, elem, fresh);
+    const element = elementSubject(subject);
+    return element && hasLabelClause(step.args, element, fresh);
+  }
+
+  /**
+   * `is(P.x(v))` — the traverser's own VALUE compared, and the clause that makes the connectives
+   * usable over a scalar stream at all.
+   *
+   * It sits here, beside `and`/`or`/`not`, rather than only in the scalar tail, because `and(is(…),
+   * is(…))` loops THIS builder over each arm's body: a step the loop cannot build a clause for
+   * declines the whole connective, so an `is` that existed only as a tail arm made every scalar
+   * connective decline on a body every part of which the algebra already expressed (§6·6 again).
+   *
+   * The RETYPING form (`is(typeOf(GType.LIST))`) is deliberately NOT here: it re-frames the stream to
+   * a collection rather than filtering it, so it is the scalar tail's business and a filter position
+   * must decline it rather than answer the rows-right/shape-wrong question.
+   */
+  if (step.name === 'is') {
+    if (subject.kind !== 'scalar' || args.length !== 1 || collectionAssert(step)) return null;
+    return predicateExpr(subject.value, args[0], subject.type, step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh);
   }
 
   // `where`/`filter`/`not` over a TRAVERSAL body: a correlated existence test, which is the same
@@ -474,7 +513,7 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
     // body that MOVES is a correlated `EXISTS`, and a body that PROJECTS a value is that value
     // compared. This used to offer only the last two, so `where(__.has('age', P.gt(27)))` declined —
     // a body every clause of which this very function builds.
-    return childPredicate(body, subject, elem, fresh, ctx, step.name === 'not');
+    return childPredicate(body, subject, fresh, ctx, step.name === 'not');
   }
 
   /**
@@ -509,7 +548,7 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
       if (!isNested(arm)) return null;
       const body = bodyOf(arm.nested, ctx.params);
       if (!body?.length) return null;
-      const pred = childPredicate(body, subject, elem, fresh, ctx, false);
+      const pred = childPredicate(body, subject, fresh, ctx, false);
       // ONE ARM THIS ROUTE CANNOT ANSWER DECLINES THE WHOLE STEP. A connective is not decomposable
       // into the arms it happens to understand: dropping an arm of an `and` widens the result and
       // dropping one of an `or` narrows it, and either is a plausible answer to a different question.
@@ -522,10 +561,17 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
   // `hasNot(key)` is a bare `has(key)` NEGATED, and it reuses that clause rather than spelling a second
   // absence test — the two must agree about what "carries a property" means, and one builder is how.
   if (step.name === 'hasNot') {
-    if (args.length !== 1 || typeof args[0] !== 'string') return null;
-    const present = hasPropertyClause(args[0], undefined, subject, elem, fresh);
+    const element = elementSubject(subject);
+    if (!element || args.length !== 1 || typeof args[0] !== 'string') return null;
+    const present = hasPropertyClause(args[0], undefined, element, fresh);
     return present && { kind: 'unary', op: 'not', arg: present };
   }
+
+  // EVERY REMAINING CLAUSE READS AN ELEMENT — a property row, a label row, an id. A scalar traverser
+  // has none of them, so the narrowing is the honest answer rather than a guard: `values('age').has(…)`
+  // is not a filter this route declined to learn, it is a question about something that is not there.
+  const element = elementSubject(subject);
+  if (!element) return null;
 
   if (step.name === 'has') {
     // THE THREE ARGUMENT SHAPES, all of one step: `has(key[, value-or-predicate])`,
@@ -537,17 +583,17 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
       // The KEY must be a parsed string; the LABEL may be a string parameter (`hasLabelClause` binds
       // it), so only the key is guarded here.
       if (typeof args[1] !== 'string') return null;
-      const labelled = hasLabelClause([step.args[0]!], subject, elem, fresh);
-      const valued = hasPropertyClause(args[1], args[2], subject, elem, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null);
+      const labelled = hasLabelClause([step.args[0]!], element, fresh);
+      const valued = hasPropertyClause(args[1], args[2], element, fresh, step.args[2]?.type ?? null, step.args[2]?.name ?? null);
       return labelled && valued ? and(labelled, valued) : null;
     }
     const [key, val, extra] = args;
     if (extra !== undefined) return null;
     const valType = step.args[1]?.type ?? null;
     const valParam = step.args[1]?.name ?? null;
-    if (isTokenArg(key)) return hasTokenClause(key.token, val, subject, elem, fresh, valType, valParam);
+    if (isTokenArg(key)) return hasTokenClause(key.token, val, element, fresh, valType, valParam);
     if (typeof key !== 'string') return null;
-    return hasPropertyClause(key, val, subject, elem, fresh, valType, valParam);
+    return hasPropertyClause(key, val, element, fresh, valType, valParam);
   }
 
   return null;
@@ -560,7 +606,8 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
  * An EDGE carries its label inline; a VERTEX may hold several, in a side table. Two different
  * physical questions, which is exactly why `Scan` is the only node that names a table.
  */
-function hasLabelClause(labelArgs: readonly Arg[], subject: Subject, elem: Elem, fresh: Minter): Expr | null {
+function hasLabelClause(labelArgs: readonly Arg[], subject: ElementSubject, fresh: Minter): Expr | null {
+  const elem = subject.elem;
   // A non-string label (or a bound one resolving to a non-string) is a decline the caller routes; an
   // inline label inlines, a `$label` / `$labels` binds — all inside `labelIds`.
   if (!labelArgs.length || !labelArgsAllStrings(labelArgs)) return null;
@@ -591,7 +638,8 @@ function hasLabelClause(labelArgs: readonly Arg[], subject: Subject, elem: Elem,
  * CHECKED but never DRIVEN FROM, so on a bare source the pass lifts it in front of the scan as an
  * index seek. Nothing here needs to change for that, which is the point of putting it in a pass.
  */
-function hasPropertyClause(key: string, val: unknown, subject: Subject, elem: Elem, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null): Expr | null {
+function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null): Expr | null {
+  const elem = subject.elem;
   // A substring `TextP` over a STORED property is `ftsSubstringPredicate`'s, and taking it here
   // would swap a trigram-index seek for a base-table LIKE scan — a regression the census cannot
   // see, reported by the coverage number as progress. §4.7 lifts this.
@@ -632,7 +680,8 @@ function hasPropertyClause(key: string, val: unknown, subject: Subject, elem: El
  * correlated scan so the clause is the same in the source position and after a movement (where the
  * relation carries the rowid alone).
  */
-function hasTokenClause(token: string, val: unknown, subject: Subject, elem: Elem, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null): Expr | null {
+function hasTokenClause(token: string, val: unknown, subject: ElementSubject, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null): Expr | null {
+  const elem = subject.elem;
   const name = token.toLowerCase();
   if (name !== 'label' && name !== 'id') return null;
   if (val === undefined || containsTextSearch(val)) return null;
@@ -1660,9 +1709,22 @@ function serviceValue(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: Minte
   return contributed && contributed.kind === 'value' ? contributed.value : null;
 }
 
+/**
+ * The filter steps a VALUE stream hosts — the ones whose question is about the traverser rather than
+ * about an element it is not.
+ *
+ * `where` is here in its BODY form only (`where(__.…)`); the predicate form (`where(P.eq(__.const(29)))`)
+ * needs a correlated operand `predicateExpr` has no arm for, and declines inside `sourceFilter` like
+ * any other unlearned shape. `has`/`hasLabel`/`hasId` are deliberately absent: they read a property or
+ * label row, which a scalar traverser does not have.
+ */
+const SCALAR_FILTER_HOSTS = new Set(['and', 'or', 'not', 'filter', 'where']);
+
 /** The tail steps that read the traverser's value from a clause SQL cannot alias into — a `WHERE`
- *  or an `ORDER BY`. What they have in common is the bind wall, and the remedy, both in `scalarTail`. */
-const CLAUSE_READERS = new Set(['is', 'order']);
+ *  or an `ORDER BY`. What they have in common is the bind wall, and the remedy, both in `scalarTail`.
+ *  The connectives are here for the same reason `is` is, and more so: each ARM re-inlines the value
+ *  expression, so an unfenced `and(is(…), is(…))` pays the projection twice over. */
+const CLAUSE_READERS = new Set(['is', 'order', ...SCALAR_FILTER_HOSTS]);
 
 /** The tail steps that HOST a `by()` (`BY_HOSTS` ∩ this fold's vocabulary). Named rather than checked
  *  inline because the blanket `step.modulators?.length` decline must exempt exactly these — a host
@@ -1754,6 +1816,13 @@ function scalarTail(
     carries('vtype') ? { kind: 'perRow', vtype: col(rel.id, 'vtype') }
       : out.kind === 'scalar' && out.type.kind === 'static' ? { kind: 'static', type: out.type.type, text: out.type.text }
         : SUBJECT_UNKNOWN;
+  /** This stream's traverser as a filter SUBJECT — the value, the type column where there is one, and
+   *  the row the clause is correlated to. Read off `rel` at the moment it is asked for, like every
+   *  other fact here, so a step that reshaped the relation cannot leave it stale. */
+  const scalarSubject = (): Subject => ({
+    kind: 'scalar', value: col(rel.id, 'v'), rel, type: subjectType(),
+    ...(carries('vtype') ? { vtype: col(rel.id, 'vtype') } : {}),
+  });
 
   // A BOUNDARY before a CLAUSE-POSITION READER, and it is not cosmetic. Fusing a `Filter` or a
   // `Sort` into its input's block means the input's outputs are spelled as the EXPRESSIONS that
@@ -2002,6 +2071,24 @@ function scalarTail(
       const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), step.args[0]?.type ?? null, step.args[0]?.name ?? null, fresh);
       if (!pred) return null;
       rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
+      continue;
+    }
+
+    /**
+     * THE FILTER FAMILY over a VALUE stream — `and`/`or`/`not`/`filter`/`where(<body>)`, built by the
+     * SAME `sourceFilter` the element loop calls, with a scalar `Subject`.
+     *
+     * There is nothing scalar-specific to lower here, and that is the point: a connective is the
+     * connective applied to its arms' answers whatever the traverser IS, so the whole family arrives
+     * at once (and composes to any depth — `filter(or(and(is(…), not(is(…))), …))` recurses through
+     * `childPredicate` exactly as it does over elements). What used to make it element-only was a
+     * SIGNATURE — an `Elem` beside the subject — rather than anything in the algebra, which is why
+     * `Subject` is now a union over the traverser shape (`child.ts`).
+     */
+    if (SCALAR_FILTER_HOSTS.has(step.name)) {
+      const clause = sourceFilter(step, scalarSubject(), fresh, ctx);
+      if (!clause) return null;
+      rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
       continue;
     }
 
@@ -3201,7 +3288,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   let at = 1;
   let elem = seeded.elem;
   for (; at < steps.length; at++) {
-    const clause = sourceFilter(steps[at], { id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan }, elem, fresh, ctx);
+    const clause = sourceFilter(steps[at], { kind: 'element', id: col(seeded.scan.id, 'id'), label: elem === 'edge' ? col(seeded.scan.id, 'label') : undefined, rel: seeded.scan, elem }, fresh, ctx);
     if (!clause) break;
     pred = and(pred, clause);
   }
@@ -3280,7 +3367,7 @@ function elementTail(
       elem = moved.elem;
       continue;
     }
-    const clause = sourceFilter(step, { id: col(rel.id, 'id'), rel }, elem, fresh, ctx);
+    const clause = sourceFilter(step, { kind: 'element', id: col(rel.id, 'id'), rel, elem }, fresh, ctx);
     // `rel.channels`, NOT `BULK`: a `Filter` is channel-preserving by contract (§3.5), so naming a
     // list rather than passing the input's through is a chance to name a SHORTER one — and under
     // `demandsEncounter` the relation carries `bulk` AND `encounter`, so the hardcoded `BULK` dropped
@@ -4133,7 +4220,7 @@ function chooseArms(
   const [condition, then, otherwise] = bodies;
   if (!condition?.length || !then?.length) return null;
 
-  const pred = bodyPredicate(condition, { id: col(input.id, 'id'), rel: input }, elem, fresh, ctx);
+  const pred = bodyPredicate(condition, { kind: 'element', id: col(input.id, 'id'), rel: input, elem }, fresh, ctx);
   if (!pred) return null;
   const guarded = (negated: boolean): Rel => make.filter({
     id: fresh('cg'), input, channels: input.channels, type: input.type,
@@ -4229,9 +4316,9 @@ const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   params: ctx.params,
   sideEffects: ctx.sideEffects,
   scalar: (body, host) => scalarChild(body, host, ctx, fresh),
-  predicate: (body, subject, elem, negated) => (negated
-    ? correlatedExists(body, subject, elem, fresh, ctx, true) ?? valuePredicate(body, subject, elem, fresh, ctx, true)
-    : bodyPredicate(body, subject, elem, fresh, ctx)),
+  predicate: (body, subject, negated) => (negated
+    ? correlatedExists(body, subject, fresh, ctx, true) ?? valuePredicate(body, subject, fresh, ctx, true)
+    : bodyPredicate(body, subject, fresh, ctx)),
   rooted: (steps) => rootedRead(steps, ctx, fresh),
   rows: (body, input, elem, aliases) => childRows(body, input, elem, aliases, ctx, fresh),
   body: (nested, scope) => (scope === 'child'

@@ -5,6 +5,7 @@ import type { AliasMap } from '../plan/alias.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { Binding } from '../../rel/plan.ts';
 import type { RecordField, RelFraming } from './framing.ts';
+import type { SubjectType } from './predicate.ts';
 
 /**
  * THE CHILD SEAM — ONE interface, THREE total answers to "lower an inner body" (§6·6).
@@ -71,7 +72,7 @@ export interface ChildSeam {
   /** A correlated sub-traversal as ONE VALUE over the host traverser, or `null` to decline. */
   readonly scalar: (body: readonly IRStep[], host: ChildHost) => ChildValue | null;
   /** A correlated sub-traversal as a BOOLEAN over the subject row, or `null` to decline. */
-  readonly predicate: (body: readonly IRStep[], subject: Subject, elem: Elem, negated: boolean) => Expr | null;
+  readonly predicate: (body: readonly IRStep[], subject: Subject, negated: boolean) => Expr | null;
   /** A ROOTED chain — one correlated to nothing — lowered as a relation, or `null` to decline. */
   readonly rooted: (steps: readonly IRStep[]) => RootedRead | null;
   /**
@@ -222,12 +223,30 @@ export type ChildHost =
 export interface HostRow { readonly rel: Rel; readonly aliases: AliasMap; }
 
 /**
- * What a correlated PREDICATE may read about the row it is filtering. `label` is present only where
- * the relation physically carries it — an edge SCAN does, a moved id-relation does not — so the edge
- * label test can take the direct column read at the source and the membership form elsewhere, without
- * either position having to know which it is in.
+ * WHAT A CORRELATED PREDICATE IS FILTERING — a total union over the traverser SHAPE, exactly as
+ * `ChildHost` is, and for the identical reason.
+ *
+ * The filter vocabulary is not element-only and never was: `and`/`or`/`not`/`filter`/`where`/`is` are
+ * questions about a TRAVERSER, and a Gremlin traverser is an element in some positions and a value in
+ * others. Carrying `Elem` as a second parameter beside an element-shaped `Subject` made that
+ * assumption structural — every arm took an `elem` it could not have been given for
+ * `g.V().values('age').and(is(P.gt(30)), is(P.lt(40)))`, so the whole connective family declined over
+ * a scalar stream while working over an element one. That is a composition the language admits and
+ * the algebra can express, so it was a missing feature rather than a boundary.
+ *
+ * Folding `elem` INTO the union is what makes the shape decidable at each arm rather than assumed by
+ * the signature: an element-only clause (`hasLabel`, `has`, `hasId`) reads `subject.elem` after
+ * narrowing and declines on the scalar arm, while a shape-independent one never looks.
+ *
+ * On the element arm, `label` is present only where the relation physically carries it — an edge SCAN
+ * does, a moved id-relation does not — so the edge label test can take the direct column read at the
+ * source and the membership form elsewhere, without either position having to know which it is in.
+ * On the scalar arm, `type` is what the stream knows about its own values (the same fact
+ * `predicateExpr` takes) and `vtype` the column carrying it per row, where there is one.
  */
-export interface Subject { readonly id: Expr; readonly label?: Expr; readonly rel: Rel; }
+export type Subject =
+  | { readonly kind: 'element'; readonly id: Expr; readonly label?: Expr; readonly rel: Rel; readonly elem: Elem }
+  | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly rel: Rel; readonly type: SubjectType };
 
 /**
  * A ROOTED chain, lowered — the relation plus what it holds and what it ran first.

@@ -3,7 +3,7 @@ import { jsonEachSet, type Minter } from './build.ts';
 import { CF_MAX_BINDS } from '../../cf-limits.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
 import { gtypeName, arg, collectionMembers, type Arg } from '../../gremlin/frontend.ts';
-import { BigDecimal, Duration, normalizeTypeName, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
+import { BigDecimal, Duration, flatType, normalizeTypeName, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
 import { constLit } from './const.ts';
 
 /**
@@ -149,8 +149,23 @@ export const SUBJECT_UNKNOWN: SubjectType = { kind: 'unknown' };
  * exact numeric value may deliberately be stored as decimal TEXT. */
 const ordered = (
   op: Extract<Expr, { kind: 'binary' }>['op'], subject: Expr, bound: Expr, value: unknown, type: SubjectType,
+  boundType: TypeNode | null = null,
 ): Expr | null => {
   const numericBound = typeof value === 'number' || isExactTail(value);
+  // WHICH STORED `vtype`s THIS BOUND IS COMPARABLE WITH — the OPERAND's own Gremlin type decides, and
+  // reading it is what keeps three different type spaces apart once all of them ride as a number.
+  // A `datetime` bound is epoch millis and a `duration` bound total nanos, so both are numeric to
+  // SQLite and NEITHER is comparable with an `int` property — while both ARE comparable with a stored
+  // value of their own tag. Dropping the operand's type (this took only its VALUE) made every temporal
+  // bound fall to the `else` and answer FALSE for a comparison the reference performs:
+  // `values('datetime').is(P.gt(datetime(…)))` was empty where it should hold. Numbers keep the whole
+  // numeric vocabulary, which is `Compare`'s own "one number space" rule.
+  const temporal = ((): 'datetime' | 'duration' | null => {
+    const canonical = flatType(boundType);
+    return canonical === 'datetime' || canonical === 'duration' ? canonical : null;
+  })();
+  const intVtypes = temporal ? [temporal] : NUMERIC_CAST_TO_INT;
+  const realVtypes = temporal ? [] : CAST_TO_REAL;
   // The exact tail rides as decimal TEXT, so its ORDERING bound is cast to the column's numeric class
   // (`compareBound`) — otherwise `CAST(col AS REAL) > '9.99'` would compare a REAL against unconverted
   // TEXT. A plain number needs no cast (it already binds/inlines numeric).
@@ -173,7 +188,9 @@ const ordered = (
     // wrong answer) rather than fold to a wrong `CONSTANT.false`. A native-numeric static subject
     // (`count()`'s `long`, an `asNumber(BIGDECIMAL)` REAL) is unaffected and still folds/compares here.
     if (numericBound && canonical !== null && STATIC_ORDERING_DECLINE.has(canonical)) return null;
-    const agrees = numericBound ? canonical !== null && NUMERIC_VTYPES.includes(canonical) : canonical === 'string';
+    const agrees = numericBound
+      ? canonical !== null && (temporal ? canonical === temporal : NUMERIC_VTYPES.includes(canonical))
+      : canonical === 'string';
     return agrees ? binary(op, subject, castBound) : CONSTANT.false;
   }
   const compilerFalse = binary('!=',
@@ -182,8 +199,10 @@ const ordered = (
   if (type.kind === 'perRow') {
     return numericBound
       ? { kind: 'case', whens: [
-        [{ kind: 'in-list', expr: type.vtype, values: NUMERIC_CAST_TO_INT.map(compilerText) }, binary(op, { kind: 'cast', arg: subject, to: 'int' }, castBound)],
-        [{ kind: 'in-list', expr: type.vtype, values: CAST_TO_REAL.map(compilerText) }, binary(op, { kind: 'cast', arg: subject, to: 'real' }, castBound)],
+        [{ kind: 'in-list', expr: type.vtype, values: intVtypes.map(compilerText) }, binary(op, { kind: 'cast', arg: subject, to: 'int' }, castBound)],
+        ...(realVtypes.length
+          ? [[{ kind: 'in-list', expr: type.vtype, values: realVtypes.map(compilerText) }, binary(op, { kind: 'cast', arg: subject, to: 'real' }, castBound)] as const]
+          : []),
       ], else: compilerFalse }
       : { kind: 'case', whens: [[binary('=', type.vtype, compilerText('string')), binary(op, subject, bound)]], else: compilerFalse };
   }
@@ -368,7 +387,7 @@ export function predicateExpr(
     if (!bound) return null;
     // Equality stays a RAW compare: canonical text is exact, and it keeps the value index usable
     // for the common case. Only ORDERING needs the cast, and only it pays for one.
-    if (ORDERING.has(op)) return ordered(comparison, subject, bound, operands[0].value, type);
+    if (ORDERING.has(op)) return ordered(comparison, subject, bound, operands[0].value, type, operands[0].type);
     const inner = binary(comparison, subject, bound);
     return op === 'neq' ? negated(binary('=', subject, bound)) : inner;
   }
@@ -403,8 +422,8 @@ export function predicateExpr(
     const [low, high] = [operand(bounds[0].value, bounds[0].type, bounds[0].name), operand(bounds[1].value, bounds[1].type, bounds[1].name)];
     if (!low || !high) return null;
     const [loCmp, hiCmp] = [
-      ordered(op === 'inside' ? '>' : '>=', subject, low, bounds[0].value, type),
-      ordered('<', subject, high, bounds[1].value, type),
+      ordered(op === 'inside' ? '>' : '>=', subject, low, bounds[0].value, type, bounds[0].type),
+      ordered('<', subject, high, bounds[1].value, type, bounds[1].type),
     ];
     return loCmp && hiCmp ? binary('and', loCmp, hiCmp) : null;
   }
