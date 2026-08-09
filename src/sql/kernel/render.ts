@@ -204,6 +204,31 @@ export const sameScalarType = (a: ScalarType, b: ScalarType): boolean =>
         && perRowColumnOf(a) === perRowColumnOf(b)
         : true;
 
+/** The column a MEET writes its per-row tag into. One name, because every producer of a met type
+ *  re-projects onto it and every consumer reads it off the type rather than off this constant. */
+export const MERGED_VTYPE = 'vtype';
+
+/**
+ * THE MEET over the type channel — the ONE type a set of streams or members can all be read as.
+ *
+ * Identical throughout (including all-`unknown`) costs no column and stays as it is; anything else
+ * becomes a per-row tag in `MERGED_VTYPE`, which each contributor fills with its own static tag, its
+ * own existing per-row column, or SQL NULL where it genuinely cannot say.
+ *
+ * ⚠️ **A NULL tag is not the same as collapsing to `unknown`, and the difference is a discarded
+ * type.** The obvious lattice reads `unknown ∧ x → unknown`; here an untagged contributor instead
+ * writes a NULL into the column, which means exactly what `unknown` means ("infer this one from its
+ * value") while letting the contributor that CAN say keep its tag. Collapsing would throw away a
+ * `datetime` because its sibling was untagged.
+ *
+ * Asked by branch arms (`union`/`choose`) and by the sites of one named collection — two questions
+ * that were the same question, and the second is why this moved out of `lower.ts`.
+ */
+export const meetScalarTypes = (types: readonly ScalarType[]): ScalarType => {
+  const [head, ...rest] = types as [ScalarType, ...ScalarType[]];
+  return rest.every((type) => sameScalarType(head, type)) ? head : PER_ROW(MERGED_VTYPE);
+};
+
 /**
  * The strongest type a relation can HONOUR — a column-carried per-row type whose column the
  * relation does not declare degrades to `unknown` rather than claiming a column that is not there.

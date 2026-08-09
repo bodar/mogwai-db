@@ -276,11 +276,65 @@ the cancellation is only sound where the consumer does not depend on the list's 
 `mise run test:perturbed` — not the corpus — is what decides whether a given consumer does.
 Cancelling into an ordered movement is the conservative form and is probably what this should be.
 
-### Phase 3 — mixed member shapes through the variant.
+### Phase 3a — ✅ LANDED. Member TYPES meet; a tag disagreement is not a shape disagreement.
 
-Two sites contributing different element kinds, or an element and a value. Reuse `mergeArms`/the
-dynamic-tag variant rather than declining. Not corpus-driven — this is combinatorial completeness,
-and the substrate exists.
+Two sites whose members are a String and an Integer do not disagree about what a member IS. They
+meet at a per-value type, which is the answer two BRANCH ARMS already gave — so the pair that gave
+it moved out of `lower.ts` and both callers now share it: `meetScalarTypes` (`render.ts`, beside
+`sameScalarType`, which it now uses instead of a `JSON.stringify` comparison) and `withMergedVtype`
+(`build.ts`). What stayed in `lower.ts` is the framing-level decline above the meet, which is about
+`Tail`s and not about types.
+
+**Checkpoint — measured:** L3 unchanged at 1782 and census unchanged at 1208, because the ONE corpus
+scenario in this family is blocked by something else (below). The evidence is four new L4 scenarios
+in `aggregate-multi-site.feature`, which fail without it.
+
+⚠️ **The L3 scenario this was expected to close is blocked by a DIFFERENT gap.**
+`aggregate("a").by(__.inE("created").values("weight").sum())` declines at the SINGLE site — a `by()`
+whose body is a numeric reducer has its type in a `vt` column that `byField` declines to supply
+(`collection.ts`'s `projectedMembers`, and gap 5 of the build plan's Phase 2 table). `by(count())`
+lowers; `by(sum())` does not. So the multi-site half of that scenario was never what stopped it.
+
+### Phase 3b — mixed member SHAPES through the variant. NOT STARTED.
+
+Two sites contributing different element KINDS (edge members beside vertex members), or an element
+and a value. `ListOf` has no mixed arm — a list's members are all elements, all scalars, or all
+lists — so this is not `mergeArms` reused: it is a member-level tagged union, one level below the
+stream-level variant, and the wire framer has to read it. Not corpus-driven beyond one scenario
+(`g_V_hasXname_joshX_outE_localXaggregateXaXX_inV_…`); it is combinatorial completeness.
+
+### Two NEIGHBOURING gaps this phase measured, neither a collection gap
+
+Both were found writing the L4 scenarios, and both are why those scenarios are spelled the way they
+are. Recorded here because they are what a reader will hit next in this space.
+
+1. **`union()` declines when the stream carries an encounter channel** (`unionArms`, the
+   `encounterOf(input.channels)` guard). Any chain ending in a collecting consumer demands an
+   encounter, so `g.V().union(__.aggregate("a"), …).cap("a")` declines at the UNION — not at the
+   collection, which handles branch-arm sites fine. This is why the union-arm scenario is absent
+   from the L4 feature.
+2. **`count(Scope.local)` over an ELEMENT-membered list declines**; over a scalar-membered one it
+   lowers. So the multiset SIZE of an element collection cannot be asserted directly, and the L4
+   scenarios use `cap("a").unfold()` instead.
+
+### §8 IS NOT UNBLOCKED — measured, and it needs four other gaps first
+
+The plan said to make legacy's silent overwrite a refusal once Phase 2 landed. **Tried, and reverted:
+it costs three L3 scenarios and a census row that NO spine then holds**, which is exactly the
+condition §8 itself names as the reason to wait. The four shapes are luck-passes whose collection
+loss is invisible AND which RelIR declines for unrelated reasons:
+
+| Scenario shape | Why RelIR declines it |
+|---|---|
+| `…local(aggregate("a")).outE().inV().simplePath().local(aggregate("a"))…` | `simplePath()` |
+| `…local(aggregate("a")).bothE().sample(1).otherV()…` | `sample()` |
+| `…local(aggregate("a")).union(__.out(), __.in()).local(aggregate("a"))…` | gap 1 above (union + encounter) |
+| `…by(__.outE("created").count())…by(__.inE("created").values("weight").sum())…` | the `by(<reducer>)` type gap |
+
+So §8's precondition is "RelIR holds every shape legacy currently luck-passes", and that is four
+independent features away. Until then the L4 scenarios pin their spine with `@SpineRel` rather than
+declaring `@RelIR` — `@RelIR` asserts that legacy REFUSES, and legacy does not refuse, it answers
+wrongly. Making that tag honest is the same work as §8.
 
 ### Phase 4 — `group("a")`/`groupCount("a")` join the mechanism.
 

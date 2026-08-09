@@ -2,14 +2,14 @@ import { col, compilerInt, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { perRowCols, sameScalarType, typeCarriedBy, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
+import { meetScalarTypes, perRowCols, sameScalarType, typeCarriedBy, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { isLocalScope } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { byField, isProductiveBy, modulations, productivityFilter } from './modulator.ts';
 import { foldElements, foldScalars } from './list.ts';
-import { carriedCols, meta, typeOf, type Minter } from './build.ts';
+import { carriedCols, meta, typeOf, withMergedVtype, type Minter } from './build.ts';
 import { framingCols, type FramedRel, type RelFraming } from './framing.ts';
 import type { Channel } from '../../channels.ts';
 
@@ -171,29 +171,44 @@ export function registerCollection(
   if (!retained) return false;
   const held = collections.get(label);
   if (!held) { collections.set(label, retained); return true; }
-  // A SECOND SITE ACCUMULATES — side effects live on the ROOT traversal
-  // (`AggregateStep.java:57` reads `this.getTraversal().getSideEffects()`), so a label filled at two
-  // chain positions holds both sites' members. Only the shapes have to agree; disagreeing ones are a
-  // variant merge and decline here rather than being widened by this module (Phase 3).
-  if (!sameMembers(held.of, retained.of)) return false;
-  collections.set(label, { sites: [...held.sites, ...retained.sites], of: held.of });
+  const accumulated = accumulate(held, retained, fresh);
+  if (!accumulated) return false;
+  collections.set(label, accumulated);
   return true;
 }
 
-/** Do two sites hold the SAME KIND of member? The reduction is one fold over the union, so it has one
- *  answer to give — a union of shapes is the dynamic-tag variant's question, not this module's. */
-function sameMembers(a: Members, b: Members): boolean {
-  if (a.kind !== b.kind) return false;
-  if (a.kind === 'elements') return a.elem === (b as typeof a).elem;
-  if (a.kind === 'scalars') {
-    const other = b as typeof a;
-    return a.productiveNull === other.productiveNull && sameScalarType(a.type, other.type);
-  }
-  // A `reduced` collection is a map a grouping barrier already built, so there is nothing to
-  // accumulate into: two `group("a")` sites are Phase 4's, and merging their maps is a group
-  // reduction rather than a concatenation.
-  return false;
+/**
+ * A SECOND SITE ACCUMULATES — side effects live on the ROOT traversal (`AggregateStep.java:57`
+ * resolves through `this.getTraversal().getSideEffects()`), so a label filled at two chain positions
+ * holds both sites' members.
+ *
+ * What the sites must AGREE on is what a member IS, because the reduction is one fold and has one
+ * answer to give. Two SCALAR sites whose types differ do not disagree about that — a tag
+ * disagreement is not a shape disagreement — so they MEET, exactly as two branch arms do and through
+ * the same pair (`meetScalarTypes` + `withMergedVtype`). Anything else declines; a union of member
+ * SHAPES is the dynamic-tag variant's question, one level down at the member encoding, and is not
+ * this module's to invent.
+ */
+function accumulate(held: Collection, added: Collection, fresh: Minter): Collection | null {
+  const sites = [...held.sites, ...added.sites];
+  if (held.of.kind === 'elements' && added.of.kind === 'elements')
+    return held.of.elem === added.of.elem ? { sites, of: held.of } : null;
+  if (held.of.kind !== 'scalars' || added.of.kind !== 'scalars') return null;
+  // `productiveNull` is orthogonal to the type and says whether a NULL member is a REAL value or the
+  // framer's signal to emit nothing. Two sites that answer it differently are two different member
+  // encodings, and picking either would silently change one site's answer.
+  if (held.of.productiveNull !== added.of.productiveNull) return null;
+  const type = meetScalarTypes([held.of.type, added.of.type]);
+  return {
+    sites: [...honouring(held.sites, held.of.type, type, fresh), ...honouring(added.sites, added.of.type, type, fresh)],
+    of: { kind: 'scalars', type, productiveNull: held.of.productiveNull },
+  };
 }
+
+/** Sites re-projected so they can be read as the MET type — a no-op where `from` already IS the meet,
+ *  which is the common case and the one that must cost no node. */
+const honouring = (sites: readonly Site[], from: ScalarType, to: ScalarType, fresh: Minter): readonly Site[] =>
+  sameScalarType(from, to) ? sites : sites.map((site) => ({ ...site, rel: withMergedVtype(site.rel, from, fresh) }));
 
 /**
  * `group("a")`/`groupCount("a")` — register the MAP a grouping barrier built, or `false` to decline.

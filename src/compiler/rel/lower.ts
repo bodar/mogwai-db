@@ -11,7 +11,7 @@ import type { Rel } from '../../rel/rel.ts';
 import { exprChildren, forEachRel } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
-import { memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
+import { meetScalarTypes, memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordNode, recordOf, recordPayload, selectKeys } from './record.ts';
@@ -28,7 +28,7 @@ import { containsTextSearch, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, ty
 import { foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
   and, byEncounter, carriedCols, EDGE_COLS, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, labelArgsAllStrings,
-  labelIds, meta, minter, NODE_COLS, notProduced, or, PROPERTIES, renumber, storedValue, typeOf, type Minter,
+  labelIds, meta, minter, NODE_COLS, notProduced, or, PROPERTIES, renumber, storedValue, typeOf, withMergedVtype, type Minter,
 } from './build.ts';
 import { bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
@@ -3904,27 +3904,9 @@ function meetScalarArms(arms: readonly Tail[]): ScalarType | null {
     if (arm.framing.kind !== 'scalar' || arm.framing.result !== undefined) return null;
     types.push(arm.framing.type);
   }
-  const [head] = types as [ScalarType, ...ScalarType[]];
-  // Identical throughout — including all-unknown — costs no column and stays as it is.
-  if (types.every((type) => JSON.stringify(type) === JSON.stringify(head))) return head;
-  return PER_ROW('vtype');
-}
-
-/** An arm re-projected to carry the merged `vtype` column: its own per-row tag where it has one, its
- *  static tag as a literal where it has one, and SQL NULL where it genuinely cannot say. */
-function withMergedVtype(arm: Tail, fresh: Minter): Rel {
-  const rel = arm.rel;
-  const carried = rel.channels;
-  const type = arm.framing.kind === 'scalar' ? arm.framing.type : UNKNOWN;
-  const existing = perRowColumnOf(type);
-  const tag = staticTypeOf(type);
-  const vtype: Expr = existing ? col(rel.id, existing) : tag ? compilerText(tag) : compilerNull('text');
-  return make.project({
-    id: fresh('mv'), input: rel, channels: carried,
-    type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...carriedCols(carried)),
-    exprs: [['v', col(rel.id, 'v')], ['vtype', vtype],
-      ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
-  });
+  // The MEET itself is `render.ts`'s — the same question a named collection asks of its sites. What
+  // stays here is the framing-level decline above it, which is about `Tail`s and not about types.
+  return meetScalarTypes(types);
 }
 
 /**
@@ -4019,7 +4001,11 @@ function mergeArms(
     const met = meetScalarArms(arms);
     if (met && met.kind === 'perRow') {
       const framing = { kind: 'scalar', type: met } as const;
-      const retyped = arms.map((arm) => ({ ...arm, rel: withMergedVtype(arm, fresh), framing }));
+      // `meetScalarArms` returned non-null, so EVERY arm is a scalar without a `result` marker.
+      const retyped = arms.map((arm) => ({
+        ...arm, framing,
+        rel: withMergedVtype(arm.rel, arm.framing.kind === 'scalar' ? arm.framing.type : UNKNOWN, fresh),
+      }));
       [first, ...rest] = retyped as [Tail, ...Tail[]];
       arms = retyped;
     }

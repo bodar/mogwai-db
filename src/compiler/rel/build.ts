@@ -1,5 +1,6 @@
 import type { ChannelRole, Channels } from '../../channels.ts';
-import { col, compilerInt, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { MERGED_VTYPE, perRowColumnOf, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { relId, type ColMeta, type RelId, type RelType, type SortTerm, type SqlType } from '../../rel/types.ts';
@@ -350,6 +351,28 @@ export const typedNode = (value: Expr, vtype: Expr): Expr => ({
   entries: [['t', vtype], ['v', storedValueOn(value, vtype)]],
   binary: false,
 });
+
+/**
+ * A SCALAR RELATION RE-PROJECTED ONTO THE MET TYPE's per-row column — its own per-row tag where it
+ * has one, its static tag as a literal where it has one, and SQL NULL where it genuinely cannot say.
+ *
+ * The build half of `meetScalarTypes`, and the two are always used together: the meet says what the
+ * shared type IS, this makes one contributor able to honour it. Both of its callers — the branch arm
+ * merge and a named collection whose sites disagree on their member type — are the same question
+ * asked of different things, which is why neither owns it.
+ */
+export const withMergedVtype = (rel: Rel, type: ScalarType, fresh: Minter): Rel => {
+  const carried = rel.channels;
+  const existing = perRowColumnOf(type);
+  const tag = staticTypeOf(type);
+  const vtype: Expr = existing ? col(rel.id, existing) : tag ? compilerText(tag) : compilerNull('text');
+  return make.project({
+    id: fresh('mv'), input: rel, channels: carried,
+    type: typeOf(meta('v', 'any', true), meta(MERGED_VTYPE, 'text', true), ...carriedCols(carried)),
+    exprs: [['v', col(rel.id, 'v')], [MERGED_VTYPE, vtype],
+      ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
+  });
+};
 
 /**
  * A PAIRS ARRAY under the typed tree's MAP envelope — `typedNode`'s twin for a value that is a map.
