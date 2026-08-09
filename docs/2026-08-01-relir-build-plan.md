@@ -771,30 +771,42 @@ step 0's P3 refusal removes `Limit` as the lazy way to stop. An unbounded body h
 body that cannot be made legal throwing a clear deferral. Deletes `expandRepeatBody`, and `REPEAT_BODY_OK`'s
 row-local vocabulary gate dissolves with it.
 
-⚠️ **MEASURED BEFORE DESIGNING, and it moves most of the weight out of the rewrite: `check`'s `topLevelSelf`
-is a ONE-LEVEL shape match, and what it refuses includes the most common `repeat()` body there is.** It admits
-a unary node whose `input` IS the self-reference, or a `Join` with the self-reference as a DIRECT side — and
-nothing deeper. So a one-hop movement, `project(join(self, edges))`, is refused:
-
-```
-RelIR: Recursive step must reference 'w' at the top level of FROM; run flatten first
-```
-
-…while the SQL that shape denotes is not merely legal but the canonical recursive walk (measured, bun:sqlite
-3.53.0, returns `1,2,3,4` over a 3-edge chain):
-
-```sql
-WITH RECURSIVE w(id) AS (SELECT 1 UNION ALL SELECT e.dst FROM w INNER JOIN edges e ON w.id = e.src)
-SELECT * FROM w
-```
+**2a. ✅ The structural legality analysis — DONE** (`src/rel/block.ts`). ⚠️ **MEASURED BEFORE DESIGNING, and
+it moved most of the weight out of the rewrite: `check`'s `topLevelSelf` was a ONE-LEVEL shape match, and what
+it refused included the most common `repeat()` body there is.** It admitted a unary node whose `input` IS the
+self-reference, or a `Join` with the self-reference as a DIRECT side — and nothing deeper. So a one-hop
+movement, `project(join(self, edges))`, was refused with `run flatten first` for a shape needing no rewrite at
+all.
 
 **SQL's `FROM` is a join TREE and everything in it is top-level**; P1's law is that the reference is not
-wrapped in a DERIVED TABLE, which is a different question from how many nodes sit above it. So the first
-piece of step 2 is to replace the shape match with a **structural legality analysis** — does the self-reference
-land in the term's `FROM` join-tree, unwrapped — co-designed with §5's `needNewSubQuery` rules, since the
-emitter is what decides when a nested SELECT opens. Only the bodies that genuinely cannot land there need the
-REWRITE, and those are what `flatten` proper is for. This is the plan's own wording ("P1 legality enforced in
-`check`") taken seriously rather than a change of direction.
+wrapped in a DERIVED TABLE, which is a different question from how many nodes sit above it. Measured,
+bun:sqlite 3.53.0, 3-edge chain, every one returning `1,2,3,4`: `FROM w INNER JOIN edges e`, the same with the
+sides swapped, EITHER side of a `LEFT JOIN`, a cross join, nested joins, and a `w`-correlated `EXISTS`. Both
+refusals are `circular reference: w` — the walk behind a derived table, and the walk referenced ONLY from a
+correlated scalar. So the legality question is exactly *is the reference a FROM item of the term's outermost
+block*, and **what decides that is the EMITTER's fusion rules**, not a second guess at them.
+
+⚠️ **So the rules moved rather than being copied.** `block.ts` holds them once, over STRUCTURE alone —
+`Slots` (which of a block's slots are filled), `NEEDS_SUBQUERY` (§5's `needNewSubQuery`, TOTAL over `RelKind`
+so a new kind must declare its rule), `spliceable`, and `shapeOf`/`fromTree`: the assembler's own walk minus
+every rendered expression. `emit.ts`'s `Block` IS a `Slots` and its arms read the shared table. A
+checker-local copy would drift into admitting a plan the emitter then wraps — `circular reference`, or wrong
+rows where SQLite accepts it, which is the class step 0 exists to keep dead.
+
+Two defects fell out of stating it properly, each a wrong ANSWER rather than an error:
+
+- A **`Materialize` over the walk's reference** is refused BY NAME now. It is the one unary node the fusion
+  analysis cannot answer for, because its boundary is a CTE the `Name` pass makes rather than a derived table
+  the emitter opens.
+- ⚠️ **`name` was free to hoist a subtree holding a self-reference, and `freeRelIds` does not forbid it** — a
+  `SelfRef` names its walk POSITIONALLY rather than by a `Col`, so such a subtree is free-reference-clean and
+  looked bindable. `check` refuses the `Materialize` route outright; the new arm in `binds` is what keeps the
+  other route — a node the recursive term shares with itself — correct, and `unroll`'s replicas are exactly
+  the shape that would have hit it.
+
+Only the bodies that genuinely cannot land in that FROM need the REWRITE, and those are what `flatten` proper
+is for. This is the plan's own wording ("P1 legality enforced in `check`") taken seriously rather than a
+change of direction.
 
 ⚠️ Two facts already banked that step 2 depends on, both from step 0: the barrier laws now stop at a subquery
 boundary, so the correlated scalars `flatten` produces are admitted rather than refused; and `freeRelIds`
