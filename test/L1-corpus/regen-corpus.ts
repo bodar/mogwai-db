@@ -21,6 +21,12 @@ const SUBMODULE = join(ROOT, 'vendor/tinkerpop');
 const FEATURES_PATH = 'gremlin-test/src/main/resources/org/apache/tinkerpop/gremlin/test/features';
 const REF = 'origin/master';
 const OUT = new URL('./corpus.txt', import.meta.url).pathname;
+// The SECOND artifact: which SCENARIO each traversal came from. corpus.txt is deduped and sorted, so
+// it cannot answer "does any route ANSWER this one" — that question is settled by `l3-state.json`,
+// which is keyed on the scenario NAME. Emitting the join here rather than re-deriving it keeps every
+// consumer submodule-free (corpus.txt's own reason for being committed) and keeps the two artifacts
+// from drifting: they come out of one extraction pass over one ref.
+const OUT_SCENARIOS = new URL('./scenarios.tsv', import.meta.url).pathname;
 
 // The submodule's origin/master ref is only fetched at clone time and never
 // refreshed by `git submodule update` (which fetches the pinned SHA), so refresh
@@ -44,17 +50,32 @@ function* featureFiles(dir: string): Generator<string> {
 }
 
 const traversals = new Set<string>();
+// `scenario<TAB>traversal`, one line per PAIR — the relation is many-to-many in both directions and
+// flattening either way would lose a real edge. One scenario can carry several docstrings, and one
+// traversal is routinely shared by scenarios over different graph fixtures.
+const pairs = new Set<string>();
 for (const file of featureFiles(join(work, FEATURES_PATH))) {
   const lines = readFileSync(file, 'utf8').split('\n');
+  // The nearest preceding `Scenario:`/`Scenario Outline:` OWNS the docstring — Gherkin has no other
+  // way to attach one, and the extraction is a line scan rather than a parse for the same reason the
+  // traversal half is (see the header: this file must run against a bare `git archive` of the ref).
+  let scenario = '';
   for (let i = 0; i < lines.length; i++) {
+    const heading = /^Scenario(?: Outline)?:\s*(.+)$/.exec(lines[i].trim());
+    if (heading) { scenario = heading[1].trim(); continue; }
     if (!lines[i].trim().startsWith('"""')) continue;
     const body: string[] = [];
     for (i++; i < lines.length && !lines[i].trim().startsWith('"""'); i++) body.push(lines[i].trim());
     const q = body.join(' ').trim();
-    if (q.startsWith('g.')) traversals.add(q);
+    if (!q.startsWith('g.')) continue;
+    traversals.add(q);
+    if (scenario) pairs.add(`${scenario}\t${q}`);
   }
 }
 
 const sorted = [...traversals].sort();
 writeFileSync(OUT, sorted.join('\n') + '\n');
+const sortedPairs = [...pairs].sort();
+writeFileSync(OUT_SCENARIOS, sortedPairs.join('\n') + '\n');
 console.log(`corpus.txt: ${sorted.length} unique traversals extracted from tinkerpop ${REF}`);
+console.log(`scenarios.tsv: ${sortedPairs.length} scenario→traversal pairs`);
