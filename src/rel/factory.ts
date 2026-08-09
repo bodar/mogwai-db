@@ -103,13 +103,8 @@ export const recursive = (init: WithId<'recursive'>): Node<'recursive'> => {
   return node('recursive', { ...init, step: (self) => built ??= init.step(self) });
 };
 
-/** The walk's own reference inside its `Recursive` step. It is constructible on its own because a
- *  rebuild has to reconstruct one — a replicated subplan carries fresh ids, and the self-reference
- *  is a node like any other — but `check` still admits it only inside its own step. */
-export const selfRef = (init: WithId<'self-ref'>): Node<'self-ref'> => node('self-ref', init);
-
 /** Internal-only recursive callback argument. */
 export const recursiveSelf = (recursive: Node<'recursive'>): Node<'self-ref'> =>
-  selfRef({ id: recursive.id, name: recursive.name, channels: recursive.channels, type: recursive.type });
+  brandRel({ kind: 'self-ref', id: recursive.id, name: recursive.name, channels: recursive.channels, type: recursive.type });
 
 export type { Table };

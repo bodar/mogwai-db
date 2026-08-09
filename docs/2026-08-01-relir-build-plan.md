@@ -39,7 +39,7 @@ Measured against SQLite 3.51.2, re-confirmed on DO SQLite (workerd) via `test/cf
   `LIMIT`/`ORDER BY` are whole-CTE caps, `UNION` dedups the whole walk (violating the multiset rule). Do not
   re-propose re-lowering.
 - **P4 — corpus ratio.** Of 125 `repeat()`s, 53 have a barrier body: **48 `times(n)`-bounded (max n=10), 5
-  `until()`/`emit()`**. → `unroll` is the majority route; the wall is 5.
+  `until()`/`emit()`**. → the IR-level `times(n)` unroll is the majority route; the wall is 5.
 - **P5 — the write envelope.** Legal: CTE→`INSERT … SELECT … RETURNING`; multi-row `INSERT … RETURNING`;
   `INSERT … ON CONFLICT DO UPDATE … RETURNING`; `UPDATE … FROM (subquery)`; `DELETE … WHERE … IN (SELECT)`.
   Illegal: the Postgres-style data-modifying CTE. → a write chain is a SEQUENCE of statements, O(write steps)
@@ -147,8 +147,9 @@ answer (`bulk` adds, `encounter` earliest; alias/path/origin/sack belong to one 
 - **Binds.** A user PARAMETER earns a `?`; a compiler-held constant is a typed literal. A plan carries
   `bindCount()` and **fails closed above the DO cap of 100**, checked against the RENDERED bind list (a fused
   block can spell one value twice). An over-budget row set lands as ONE JSON bind.
-- **Statement text.** DO caps at 100 KB. `unroll` consults rendered size and declines above a ceiling,
-  falling back to `Recursive` (which then refuses a barrier body per P3).
+- **Statement text.** DO caps at 100 KB, enforced by `cfLimitViolation` at the end of the RelIR spine. The
+  producer that can exceed it is the `times(n)` UNROLL, which now happens above the IR (Phase 3 step 4), so
+  the ceiling belongs to that pass rather than to a Rel one.
 
 ---
 
@@ -167,14 +168,16 @@ would be a throw out of a lowering whose contract is `null`, and legacy would ne
   the checker cannot admit a plan the emitter then wraps.
 - **`name` (§4.6)** — named CTE vs inlined derived table for every shared node, honouring `Materialize`. The
   ONLY pass with a production caller (`lower.ts`).
-- **`prune` (§4.5)** — column pruning; makes `unroll`'s replicas affordable. Phase 3 prerequisite.
+- **`prune` (§4.5)** — column pruning. Phase 3 prerequisite: a walk carries only what its body and its
+  consumer read.
 - **`land` (§4.5b)** — the bind-budget lowering (an over-budget `Values` → one JSON bind).
 - **`fuse` (§4.4)** — small semantic rewrites. Ask which still buys anything the assembler doesn't before
   wiring it.
 - 🚧 **`flatten` (§4.2)** *(Phase 3)* — join flattening / decorrelation into the P1 envelope. Deletes
   `expandRepeatBody`. Most of it dissolved into the legality ANALYSIS (Phase 3 step 2a).
-- ✅ **`unroll` (§4.3)** *(Phase 3)* — a bounded walk as its LEVELS, over `refresh`/`minter`
-  (`src/rel/mint.ts`), which is also where §12's "a replica carries its own ids" now lives.
+- ⛔ **`unroll` (§4.3)** — **WITHDRAWN.** `unrollFixedRepeat` (`ir/strategies.ts`) already unrolls
+  `repeat().times(n)` one layer up, into the FLAT chain; a Rel-level copy would be a second replicator.
+  See Phase 3 step 4. `src/rel/mint.ts` keeps `minter` alone, for `seek`.
 - 🚧 **`recognize` (§4.7)** *(Phase 4)* — the fast paths as plan rewrites, so a fast-path decline can be lifted.
 
 **Declared is not wired.** Only `name` has a production caller today; the rest are built-and-tested (or
@@ -738,8 +741,8 @@ caught, and why each refusal's MESSAGE says what SQLite actually does rather tha
   two rewrites separate is load-bearing — `prune`'s analysis is keyed on the relational SPINE, so a `rewrite`
   that descended into subplans would prune every projection inside a correlated subquery down to its channels.
 
-**1. ✅ `prune`'s remainder — DONE** (`Join`/`Union`/`Aggregate`/`Recursive`/`Values`). What makes `unroll`'s n
-replicas affordable.
+**1. ✅ `prune`'s remainder — DONE** (`Join`/`Union`/`Aggregate`/`Recursive`/`Values`). What keeps a walk's
+header down to what its body and its consumer actually read.
 
 ⚠️ **It was never "add three cases", and the reason generalizes.** A `Project` is the only node that removes a
 column at SOURCE; every other kind's output is a function of its input's. So pruning below a `Join` does not
@@ -756,7 +759,7 @@ never pruned**. The safety property is a test: pruning nothing changes the SQL n
 
 ⚠️ **`Values` is the OTHER node that removes a column at SOURCE, and only `Project` was doing so.** A walk's
 seed is typically a `Values`, so a `Recursive` whose header pruned left the seed wider than the step. It would
-have been the first thing `unroll` hit.
+have been the first thing a walk over a pruned header hit.
 
 ⚠️ **A `Recursive`'s header, seed and step are ONE decision**, and its keep set is consumer-need + what the
 BODY reads back off the walk + channels — the second term knowable only by instantiating the step. **The
@@ -804,8 +807,7 @@ Two defects fell out of stating it properly, each a wrong ANSWER rather than an 
 - ⚠️ **`name` was free to hoist a subtree holding a self-reference, and `freeRelIds` does not forbid it** — a
   `SelfRef` names its walk POSITIONALLY rather than by a `Col`, so such a subtree is free-reference-clean and
   looked bindable. `check` refuses the `Materialize` route outright; the new arm in `binds` is what keeps the
-  other route — a node the recursive term shares with itself — correct, and `unroll`'s replicas are exactly
-  the shape that would have hit it.
+  other route — a node the recursive term shares with itself — correct.
 
 **2b. ✅ The barrier laws follow the SELECT, not the node children — DONE.** ⚠️ **Step 0 relaxed the boundary
 from "any subplan" to "a subquery"; it is really A NESTED SELECT, and a joined DERIVED TABLE is one.** The
@@ -833,31 +835,43 @@ its header before concluding a body is inexpressible.
 of the 125 corpus `repeat()`s have a NON-barrier body and need nothing beyond `Recursive`, already in the closed
 node set (`Recursive.step` is a function; seed/step channels identical, §3.3).
 
-**4. ✅ `unroll` for `times(n)` — BUILT** (`src/rel/passes/unroll.ts`), covering the 48 `times(n)`-bounded of
-P4's 53 barrier bodies. Wiring is step 3's, which is what it waits on.
+**4. 🚧 `times(n)` unrolls AT THE IR LEVEL, not in RelIR — the plan's own §4.3 is WITHDRAWN.**
 
-⚠️ **It returns the LEVELS, not a result, and that is §2's boundary.** Which levels a traversal emits is a
-GREMLIN question — `times(n)` alone yields the last, `emit()` adds the ones it selects, `until()` chooses per
-row — so answering it inside a `Rel → Rel` pass would put Gremlin's vocabulary below the line. Level 0 is the
-seed; level i is the step applied to level i-1. A caller takes the last, or unions a set of them, and says so
-in its own words. §3.6's statement-text budget is not decided there either: n replicas are n times the SQL,
-and what a Durable Object refuses is measured on the rendered statement by `cfLimitViolation`, which
-`spine.ts` already asks. A caller that cannot afford the copies keeps the `Recursive` — which then refuses a
-barrier body per P3 rather than answering it wrongly.
+⚠️ **`unrollFixedRepeat` (`src/compiler/ir/strategies.ts`) already does this one layer up**, and it is
+TinkerPop's own `RepeatUnrollStrategy` widened by one name. It rewrites `repeat(body).times(n)` into n
+copies of the body IN THE FLAT STEP CHAIN, before `formRepeatRegions`, so every later pass and the whole
+lowering see ordinary chain steps. A Rel-level `unroll` would be a SECOND place that knows how to replicate
+a body, and the flat splice is strictly better for combinatorial completeness: the replicated steps compose
+with everything by construction, rather than through whatever the replicating pass reproduces.
 
-⚠️ **§12's replica trap is answered ONCE, in `src/rel/mint.ts`.** Two relations sharing a `RelId` in one scope
-make every `Col` against it ambiguous (the last binding silently wins) and two FROM items sharing a SQL alias
-are `ambiguous column name` — and a chain of levels puts every replica in ONE scope, where only the join case
-has a checker rule. `minter` moved there out of `seek` (one rule, one implementation); `refresh` copies a
-subplan under fresh names, PRESERVING SHARING — copying per occurrence turns the DAG into a tree, which is
-what `name`'s occurrence analysis reads. Its `substitute` map is how the self-reference becomes the previous
-level: `recursive` MEMOISES `step`, so it cannot be re-run against a new input and the substitution has to
-happen on the instantiated body. `mapRelChildren`'s `retype` generalized to a `RelOverride` — what a rebuild
-may change about the node ITSELF: type, id, alias.
+Its narrowness is **pass ORDER, not a law** — it runs BEFORE `absorbModulators`, so a body containing a
+modulator host (`order().by(k)`, `group().by(…)`, `dedup().by(…)`) arrives with its `by()` still a loose
+step and is refused; and `UNROLLABLE_BARRIERS` is the single name `dedup`. So step 4 is: **run it after
+`absorbModulators` and widen the admitted body set**, one barrier per commit with an L4 pin.
+
+A Rel-level `unroll` (levels of a bounded walk) plus `refresh` (copy a subplan under fresh ids) WAS built
+and is reverted; the restore point is `9e0e307`. `minter` stays in `src/rel/mint.ts` — `seek` uses it, and
+"a fresh name cannot collide" is the algebra's rule rather than that pass's.
+
+⚠️ **Four costs the IR level carries, none of them fatal and all of them to be handled in step 4:**
+
+- **Statement text is multiplied before anything can see it.** n copies of the body, and n×m for a nested
+  repeat, decided by a pass with no view of the rendered size. Today the only backstop is
+  `cfLimitViolation` at the very end of the RelIR spine (a decline), and legacy has none. Widening the
+  admitted set widens what can reach that wall, so step 4 owns a ceiling on `n × body length`.
+- **`times($x)` must be reduced to a value at pass time.** This is the ONE early-reduction exception the
+  root `CLAUDE.md` names (`docs/archive/2026-08-05-parameters-are-the-only-binds.md`), and widening the pass
+  widens its blast radius: more traversals lose the statement-cache benefit of a parameterised `times`.
+- **The unrolled chain is no longer RECOGNISABLE as a repeat.** `loops()`, a named `repeat('a', …)` and
+  `emit()`'s intermediate frontiers have nothing to attach to, which is exactly why the pass declines all
+  three today — and any widening must keep declining them rather than approximating them.
+- **It changes LEGACY's answers too**, since the pass runs above the routing switch. Every increment
+  therefore needs the census plus `test:legacy-spine`, not just `ci` (`docs/outstanding-work.md`'s rule that
+  `ci` does not contain the differential).
 
 🔴 **The 5 `until()`/`emit()` barrier bodies hit the P3 wall and are not expressible in ANY lowering.** That
 deviation needs accepting, not engineering. The three routes partition the family: **125 = 72 `Recursive` + 48
-`unroll` + 5 wall.**
+IR-level unroll + 5 wall.**
 
 **THE MEASUREMENT — a THIRD switch position. It gates the CUT, not this phase, so build it FIRST.**
 `MOGWAI_RELIR` has two positions (`src/compiler/options/spine.ts`) and NEITHER answers *what does deleting
@@ -1003,7 +1017,7 @@ reader (`WHERE`/`ORDER BY`) that reads a select alias needs a `Materialize` fenc
 window may not read a windowed column — the ASSEMBLER closes the block. A bind-budget overrun is a DECLINE at
 the routing seam, not a throw — and the gate must RENDER (IR occurrence counts differ from the rendered bind
 list up to 2×). Relation ids are minted PER LOWERING (a module-global counter makes two compiles emit
-different SQL); a replicated subplan (`unroll`) must carry FRESH ids, and WITHIN one compile the minter is
+different SQL); a replicated subplan must carry FRESH ids, and WITHIN one compile the minter is
 shared/injected. A `Project` over a whole-relation `Aggregate` (empty `groupBy`) that reads none of its
 outputs ERASES the aggregation — the emitter blocks it (Calcite's `fieldsUsed.isEmpty()`).
 

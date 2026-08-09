@@ -313,7 +313,7 @@ export function prune(
         step: (self) => prune(body, keep, { name: r.name, self }),
       });
     }
-    return mapRelChildren(r, go, { type: retypeOf(r, relChildren(r).map(go)) });
+    return mapRelChildren(r, go, retypeOf(r, relChildren(r).map(go)));
   }
 
   return go(plan);
