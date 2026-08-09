@@ -43,6 +43,29 @@ describe('the filter family over a scalar stream', () => {
     expect(await vals("g.V().values('age').where(__.is(P.gt(33)))")).toEqual(['35']);
   });
 
+  test('where(P) / filter(P) with NO body is is(P) — the traverser tested against itself', async () => {
+    // `WherePredicateStep` with no start key tests the traverser; `filter(P)` asks the same thing.
+    expect(await vals("g.V().values('age').where(P.gt(33))")).toEqual(['35']);
+    expect(await vals("g.V().values('age').filter(P.lt(28))")).toEqual(['27']);
+    // A `__.constant(v)` operand is constant-folded by the Pass tier long before this, so the value
+    // form and the folded form must land on the same clause.
+    expect(await vals("g.V().values('name').where(P.neq(__.constant('marko')))"))
+      .toEqual(['josh', 'lop', 'peter', 'ripple', 'vadas']);
+  });
+
+  test('where(P) over a LIVE LABEL is the alias compare and DECLINES — it is not a value test', () => {
+    // `where(P.neq('a'))` reads the PATH, not the traverser, so answering it as a string comparison
+    // would be a wrong answer rather than a decline. The live alias map is what tells the two apart.
+    // (Legacy answers it as a plain value compare, which is its own defect; what is under test here
+    // is that RelIR DECLINES rather than joining it.)
+    // The position is PINNED rather than read off the ambient switch: which spine answered is the
+    // whole claim, so `mise run test:legacy-spine` must ask the same question this run does.
+    const rel = { spine: 'rel' } as const;
+    expect(read("g.V().values('name').as('a').where(P.neq('a'))", rel).spine).toBe('legacy');
+    // …and the same shape with a string that is NOT a bound label is an ordinary value test.
+    expect(read("g.V().values('name').where(P.neq('a'))", rel).spine).toBe('rel');
+  });
+
   test('the connectives NEST to any depth over a value stream', async () => {
     expect(await vals("g.V().values('age').and(__.or(__.is(P.eq(27)),__.is(P.eq(35))),__.not(__.is(P.eq(35))))"))
       .toEqual(['27']);

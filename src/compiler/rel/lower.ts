@@ -18,7 +18,7 @@ import { recordField, recordNode, recordOf, recordPayload, selectKeys } from './
 import { propertyElement, propertyKey, propertyPayload, propertyReadOf, propertyRelation, propertyRowId, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
-import { isColumnArg, isNested, isTokenArg, stepChain, argValues, arg, type Arg, type SackSpec } from '../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isPred, isTokenArg, stepChain, argValues, arg, type Arg, type SackSpec } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
 import type { IRStep } from '../ir/strategies.ts';
@@ -1720,6 +1720,14 @@ function serviceValue(step: IRStep, host: ChildHost, ctx: ChainCtx, fresh: Minte
  */
 const SCALAR_FILTER_HOSTS = new Set(['and', 'or', 'not', 'filter', 'where']);
 
+/** Does any operand of this predicate (at any nesting depth — `P.not(P.eq('a'))`) name a LABEL that
+ *  is live on this relation? That is what separates `where(P.neq('a'))`, TinkerPop's alias compare,
+ *  from `where(P.neq('marko'))`, a value comparison — and the two must not be confused, because one
+ *  reads the path and the other reads the traverser. Fails CLOSED: any live-label hit declines. */
+const namesALiveLabel = (pred: unknown, labels: AliasMap): boolean =>
+  isPred(pred) && pred.operands.some((operand) =>
+    (typeof operand.value === 'string' && labels.has(operand.value)) || namesALiveLabel(operand.value, labels));
+
 /** The tail steps that read the traverser's value from a clause SQL cannot alias into — a `WHERE`
  *  or an `ORDER BY`. What they have in common is the bind wall, and the remedy, both in `scalarTail`.
  *  The connectives are here for the same reason `is` is, and more so: each ARM re-inlines the value
@@ -2085,6 +2093,27 @@ function scalarTail(
      * SIGNATURE — an `Elem` beside the subject — rather than anything in the algebra, which is why
      * `Subject` is now a union over the traverser shape (`child.ts`).
      */
+    /**
+     * `where(P)` / `filter(P)` WITH NO BODY — a predicate on the traverser's own value, which is
+     * `is(P)` under another name: `WherePredicateStep` with no start key tests the traverser itself
+     * (`gremlin-core/.../step/filter/WherePredicateStep.java`), and `FilterStep` over a bare `P` is
+     * the same question.
+     *
+     * ⚠️ IT IS NOT `is(P)` WHEN AN OPERAND NAMES A LIVE LABEL. `where(P.neq('a'))` is TinkerPop's
+     * ALIAS COMPARE — the string is a `selectKey` into the path, not a value — and answering it as a
+     * string comparison would be a wrong answer rather than a decline. The alias map is the only
+     * thing that can tell the two apart (`where(P.neq(__.constant('marko')))` constant-folds to the
+     * same shape with a string that is NOT a label), which is why this arm lives HERE, where the
+     * live labels are in scope, rather than in `sourceFilter`.
+     */
+    if ((step.name === 'where' || step.name === 'filter') && args.length === 1 && isPred(args[0])) {
+      if (namesALiveLabel(args[0], labels)) return null;
+      const pred = predicateExpr(col(rel.id, 'v'), args[0], subjectType(), null, null, fresh);
+      if (!pred) return null;
+      rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred });
+      continue;
+    }
+
     if (SCALAR_FILTER_HOSTS.has(step.name)) {
       const clause = sourceFilter(step, scalarSubject(), fresh, ctx);
       if (!clause) return null;
