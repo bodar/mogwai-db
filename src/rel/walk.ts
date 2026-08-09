@@ -190,6 +190,55 @@ export function rewrite(plan: Rel, f: (mapped: Rel, original: Rel) => Rel): Rel 
   return go(plan);
 }
 
+/**
+ * `rewrite`'s counterpart for `forEachRel`'s coverage: rewrite every relation in the DAG, INCLUDING
+ * the ones correlated from an expression, preserving sharing across both.
+ *
+ * It is a separate entry point rather than a widening of `rewrite`, and the asymmetry is deliberate
+ * and load-bearing. `prune`'s analysis is keyed on the relational SPINE — a subplan node has no
+ * entry in its `needs` map, so a `rewrite` that descended into subplans would prune every projection
+ * inside a correlated subquery down to its channels. The two coverages are different questions and a
+ * pass must say which one it is asking.
+ */
+export function rewriteRels(plan: Rel, f: (mapped: Rel, original: Rel) => Rel): Rel {
+  const memo = new Map<Rel, Rel>();
+  const go = (r: Rel): Rel => {
+    const seen = memo.get(r);
+    if (seen) return seen;
+    const out = f(mapRelExprs(mapRelChildren(r, go), (e) => rewriteExpr(e, (node) => node, go)), r);
+    memo.set(r, out);
+    return out;
+  };
+  return go(plan);
+}
+
+/**
+ * The relation ids an expression inside this subtree references but the subtree does not DEFINE —
+ * i.e. what it is correlated against.
+ *
+ * A subtree with a free reference is not a self-contained relation: hoisting it to a named CTE moves
+ * it out of the scope its `Col`s resolve in, and the reference silently becomes either an error or,
+ * worse, a same-named relation elsewhere in the statement. `name` uses it to decide what may be
+ * bound; `flatten` (§4.2) needs the same fact to decide what it must decorrelate, which is why it is
+ * here rather than private to a pass.
+ *
+ * A `SelfRef` defines nothing and names its walk positionally, so it is not a free reference.
+ */
+export function freeRelIds(plan: Rel): ReadonlySet<string> {
+  const defined = new Set<string>();
+  const referenced = new Set<string>();
+  const go = (r: Rel): void => {
+    defined.add(r.id);
+    relExprs(r).forEach((e) => forEachExpr(e, (node) => {
+      if (node.kind === 'col') referenced.add(node.rel);
+      exprRels(node).forEach(go);
+    }));
+    relChildren(r).forEach(go);
+  };
+  go(plan);
+  return new Set([...referenced].filter((id) => !defined.has(id)));
+}
+
 /** Visit every relation in the DAG once, plus every relation correlated from an expression. */
 export function forEachRel(plan: Rel, visit: (r: Rel) => void): void {
   const seen = new Set<Rel>();

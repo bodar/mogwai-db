@@ -1,7 +1,7 @@
 import { ref } from '../factory.ts';
 import { plan, type Binding, type Plan } from '../plan.ts';
 import type { Rel } from '../rel.ts';
-import { relChildren, rewrite } from '../walk.ts';
+import { exprRels, forEachExpr, freeRelIds, relChildren, relExprs, rewriteRels } from '../walk.ts';
 
 /**
  * Decide which DAG vertices deserve a named boundary, and REWRITE them into `Plan` bindings.
@@ -21,6 +21,13 @@ export function name(root: Rel): Plan {
     const seen = (counts.get(rel) ?? 0) + 1;
     counts.set(rel, seen);
     if (seen > 1) return;
+    // ⚠️ THE COUNT MUST INCLUDE CORRELATED SUBPLANS, or a node shared between the spine and a
+    // `Scalar`/`Exists` body counts once and is INLINED at both — the emitter spells the whole
+    // subtree twice, and it is spelled again for every further occurrence. Nothing is wrong with the
+    // answer, which is why this survived: it is bytes, and §3.6's statement-text budget is measured
+    // in bytes. `COMPUTE ONCE` (§Phase 2's invariants) measured the same shape at 1,250 → 4,108 for
+    // a single `max`.
+    relExprs(rel).forEach((e) => forEachExpr(e, (node) => exprRels(node).forEach(visit)));
     relChildren(rel).forEach(visit);
   };
   visit(root);
@@ -34,12 +41,24 @@ export function name(root: Rel): Plan {
     taken.add(candidate);
     return candidate;
   };
-  const binds = (rel: Rel): boolean => rel !== root && ((counts.get(rel) ?? 0) > 1 || rel.kind === 'materialize');
+  /**
+   * ⚠️ **A CORRELATED subtree may not be bound, and this is the whole risk of reaching into
+   * subplans.** A binding is a CTE beside the statement; a subtree whose `Col`s resolve against a
+   * relation OUTSIDE it stops resolving the moment it moves there — and it does not necessarily
+   * fail, because a same-named relation elsewhere in the statement would silently capture it. So the
+   * admission rule is the free-reference test, not the occurrence count.
+   *
+   * That is also why the test lives in `walk.ts`: `flatten` (§4.2) decides what it must DECORRELATE
+   * with exactly this fact, and two implementations of "is this subtree self-contained" is two
+   * chances to get it wrong.
+   */
+  const binds = (rel: Rel): boolean =>
+    rel !== root && ((counts.get(rel) ?? 0) > 1 || rel.kind === 'materialize') && freeRelIds(rel).size === 0;
 
   const bindings: Binding[] = [];
   // Bottom-up and memoised, so a binding is pushed after every binding it depends on, and the
   // second occurrence of a shared node gets the SAME `Ref` — the ordering `checkPlan` then proves.
-  const result = rewrite(root, (mapped, original) => {
+  const result = rewriteRels(root, (mapped, original) => {
     if (!binds(original)) return mapped;
     const bound = original.kind === 'materialize' && original.name ? original.name : generate();
     bindings.push({ name: bound, node: mapped });

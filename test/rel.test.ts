@@ -9,8 +9,9 @@ import { fuse } from '../src/rel/passes/fuse.ts';
 import { name } from '../src/rel/passes/name.ts';
 import { prune } from '../src/rel/passes/prune.ts';
 import type { Channels } from '../src/channels.ts';
-import type { Rel } from '../src/rel/rel.ts';
+import { isRel, type Rel } from '../src/rel/rel.ts';
 import { relId } from '../src/rel/types.ts';
+import { freeRelIds } from '../src/rel/walk.ts';
 
 const channels: Channels = [];
 const cols = [{ name: 'id', type: 'int', nullable: false }, { name: 'name', type: 'text', nullable: false }] as const;
@@ -188,6 +189,45 @@ describe('RelIR', () => {
   // The same defect one layer up from P3's, and reachable by a LOWERING rather than by the engine:
   // every row differs in a row-unique column, so the operator collapses nothing. Same arity, same
   // plan shape, no throw — just more rows than the step means.
+  // `name` counted occurrences down the relational SPINE only, so a node shared between the spine
+  // and a `Scalar`/`Exists` body counted once and was INLINED at both — spelled again in full for
+  // every occurrence. Nothing is wrong with the answer, which is why it survived; it is bytes, and
+  // bytes are §3.6's other budget.
+  test('binds a node shared between the spine and a correlated subplan', () => {
+    const shared = projectRel({ id: relId('shared'), input: scan, channels, type: { cols },
+      exprs: [['id', col(scan.id, 'id')], ['name', col(scan.id, 'name')]] });
+    const counted = aggregateRel({ id: relId('cnt'), input: shared, channels, type: { cols: [{ name: 'n', type: 'int', nullable: false }] },
+      groupBy: [], aggs: [['n', { kind: 'agg', fn: 'count', args: [] }]] });
+    const root = projectRel({ id: relId('root'), input: shared, channels,
+      type: { cols: [{ name: 'id', type: 'int', nullable: false }, { name: 'n', type: 'int', nullable: false }] },
+      exprs: [['id', col(shared.id, 'id')], ['n', { kind: 'scalar', plan: counted }]] });
+
+    const named = name(root);
+    expect(named.bindings.map((b) => b.node)).toContainEqual(expect.objectContaining({ id: 'shared' }));
+    const sql = emitQuery(named).sql;
+    // Spelled ONCE as a CTE body, referenced from the spine and from inside the subquery.
+    expect(sql.match(/FROM nodes n/g)).toHaveLength(1);
+  });
+
+  // The risk that comes with reaching into subplans, and why the admission rule is the free-reference
+  // test rather than the occurrence count: a binding is a CTE beside the statement, so a subtree
+  // whose Cols resolve against a relation OUTSIDE it stops resolving the moment it moves there.
+  test('never binds a CORRELATED subtree, however often it is shared', () => {
+    const outer = projectRel({ id: relId('outer'), input: scan, channels, type: { cols },
+      exprs: [['id', col(scan.id, 'id')], ['name', col(scan.id, 'name')]] });
+    const other = scanRel({ id: relId('m'), table: 'nodes', alias: 'm', channels, type: { cols } });
+    const correlated = filter({ id: relId('corr'), input: other, channels, type: { cols },
+      pred: { kind: 'binary', op: '=', left: col(other.id, 'id'), right: col(outer.id, 'id') } });
+    expect([...freeRelIds(correlated)]).toEqual(['outer']);
+
+    const root = projectRel({ id: relId('croot'), input: outer, channels,
+      type: { cols: [{ name: 'a', type: 'int', nullable: false }, { name: 'b', type: 'int', nullable: false }] },
+      exprs: [['a', { kind: 'scalar', plan: correlated }], ['b', { kind: 'scalar', plan: correlated }]] });
+
+    const named = name(root);
+    expect(named.bindings.flatMap((b) => (isRel(b.node) ? [b.node.id] : []))).not.toContain('corr');
+  });
+
   test('refuses a whole-row Distinct carrying a row-unique channel', () => {
     const carried: Channels = [{ col: 'enc', role: 'encounter' }];
     const withEnc = [...cols, { name: 'enc', type: 'int', nullable: false }] as const;
