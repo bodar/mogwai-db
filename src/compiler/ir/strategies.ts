@@ -957,15 +957,58 @@ export function canonicalizeConnectives(steps: Step[], params: Record<string, an
  *  "unintentional traversal semantics changes in the past when allowing a large variety of steps
  *  (especially barriers)". We go further than it deliberately, one name at a time.
  *  Boundary pinned in `test/compiler/repeat-unroll-boundary.exec.test.ts`. */
-const UNROLLABLE_BARRIERS = new Set(['dedup']);
+const UNROLLABLE_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = {
+  // A BARE `dedup()` — stateless in the set it is handed. `dedup('a','b')` dedups by LABELS bound
+  // earlier in the traversal, which is a different question and not this one's argument.
+  dedup: (s) => !(s.args ?? []).length,
+  // THE SLICE FAMILY, and one argument covers all of it: phase k's relation IS the frontier at
+  // iteration k, so taking its first `k` rows takes exactly the traversers the interpreter's
+  // per-iteration slice takes. Nothing is carried between invocations, which is the same property
+  // that makes `dedup` airtight. Where no order is pinned the slice is arbitrary — but that is the
+  // TRAVERSAL's nondeterminism (TinkerPop's too) and it is identical in both spellings, which is why
+  // the pins below assert an IDENTITY against the hand-written phases rather than a value.
+  limit: () => true,
+  range: () => true,
+  // A REORDERING of the frontier at that iteration, stateless in the set it is handed for the same
+  // reason. Its `by()` rides as an absorbed modulator (see `tryUnroll` — the body is normalized
+  // before it is spliced), so `order().by(k)` arrives as ONE step rather than two loose ones. The
+  // unrolled chain's final emission order is the LAST phase's, which is the interpreter's answer:
+  // `repeat()` is outside the emission-order substrate, so the rolled form has no order to disagree
+  // with.
+  order: () => true,
+};
 
-/** A body step an unrolled phase may contain: a bare `dedup()`, or a row-local movement/filter the
- *  main chain already lowers. A modulator host is excluded because this pass runs BEFORE
- *  `absorbModulators` — a spliced `order().by(k)` would arrive with its `by()` still a loose step. */
+/** A body step an unrolled phase may contain: one of the barriers above, or a row-local
+ *  movement/filter the main chain already lowers. */
 const unrollableBodyStep = (s: Step): boolean =>
-  (UNROLLABLE_BARRIERS.has(s.name) && (s.args ?? []).length === 0)
+  UNROLLABLE_BARRIERS[s.name]?.(s)
   || VERTEX_MOVES.has(s.name) || EDGE_MOVES.has(s.name) || ENDPOINT_MOVES.has(s.name)
   || s.name === 'has' || s.name === 'hasLabel' || s.name === 'hasId' || s.name === 'identity';
+
+/**
+ * THE STATEMENT-TEXT CEILING, and it belongs to this pass because this pass is what multiplies.
+ *
+ * n copies of a body is n times the SQL, and n×m for a nested `repeat`. A Durable Object caps a
+ * statement at 100 KB (`src/cf-limits.ts`); the only thing that measures it today is
+ * `cfLimitViolation` at the END of the RelIR spine — a decline — and legacy checks nothing at all.
+ * So the pass refuses rather than handing downstream a chain that cannot ship.
+ *
+ * MEASURED, not chosen, and the first number measured was the WRONG ONE. Compile time looked
+ * superlinear — `times(24)` took 50 s — which would have made the ceiling ~32 steps. That was not
+ * this pass's cost at all: it was an un-memoised DAG walk in `freeRelIds` (`src/rel/walk.ts`), and
+ * with the visited-guard in place `times(48)` compiles in 18 ms. With time linear, the real
+ * constraint is the text, and the worst per-step cost measured is an `order().by(k)` body at ~1 KB
+ * of SQL per spliced step (a movement or `dedup` body is ~300 bytes). 100 KB at 1 KB per step is
+ * 100 steps, which is where this sits — every realistic `times(n)` is far below it (the corpus's
+ * largest is `times(10)` over a two-step body) while the multiplication is bounded BY CONSTRUCTION
+ * rather than by what the corpus happens to contain.
+ */
+const MAX_UNROLLED_STEPS = 100;
+
+/** `childSteps` (`ir/passes.ts`), injected. It runs the WHOLE pass pipeline over the nested body, and
+ *  that pipeline is what this file's passes are folded into — so taking it as an argument is what
+ *  keeps the dependency one-way instead of importing the module that imports this one. */
+type ChildBody = (nested: any, params: Record<string, any>) => IRStep[];
 
 /**
  * `repeat(body).times(n)` → the body spliced n times, when every step in the body is one an
@@ -987,7 +1030,7 @@ const unrollableBodyStep = (s: Step): boolean =>
  * `until()` is a predicate rather than a count, and a named `repeat("a", …)` carries a loop counter
  * the phases would have to reproduce.
  */
-export function unrollFixedRepeat(steps: Step[], params: Record<string, any>): Step[] {
+export function unrollFixedRepeat(steps: Step[], params: Record<string, any>, body: ChildBody): Step[] {
   const out: Step[] = [];
   for (let i = 0; i < steps.length; i++) {
     if (!REPEAT_CLUSTER.has(steps[i].name)) { out.push(steps[i]); continue; }
@@ -997,7 +1040,7 @@ export function unrollFixedRepeat(steps: Step[], params: Record<string, any>): S
     while (j < steps.length && REPEAT_CLUSTER.has(steps[j].name) && !seen.has(steps[j].name)) {
       seen.add(steps[j].name); region.push(steps[j]); j++;
     }
-    const unrolled = tryUnroll(region, params);
+    const unrolled = tryUnroll(region, params, body);
     out.push(...(unrolled ?? region));
     i = j - 1;
   }
@@ -1005,7 +1048,7 @@ export function unrollFixedRepeat(steps: Step[], params: Record<string, any>): S
 }
 
 /** One repeat run → its unrolled steps, or null to leave the run alone. */
-function tryUnroll(region: Step[], params: Record<string, any>): Step[] | null {
+function tryUnroll(region: Step[], params: Record<string, any>, childBody: ChildBody): Step[] | null {
   if (region.length !== 2) return null;
   const rep = region.find((s) => s.name === 'repeat');
   const times = region.find((s) => s.name === 'times');
@@ -1016,11 +1059,19 @@ function tryUnroll(region: Step[], params: Record<string, any>): Step[] | null {
   // is a plain n applications.
   const args = rep.args ?? [];
   if (args.length !== 1 || !isNested(args[0].value)) return null;
-  const body = stepChain(args[0].value.nested, params);
+  // NORMALIZED, not raw. The body crosses the same seam every other child body does (`childSteps`),
+  // so `order().by(k)` arrives as ONE step with its modulator absorbed, a nested `repeat().times(m)`
+  // is already unrolled, and the infix connectives are already canonical. Splicing raw steps was what
+  // forced this pass to run before `absorbModulators` and what excluded every modulator host from the
+  // admitted set — the body's canonicalization is now stated here rather than inherited from where in
+  // the pipeline this pass happens to sit.
+  const body = childBody(args[0].value.nested, params);
   if (!body.length || !body.every(unrollableBodyStep)) return null;
   // Nothing to gain unless a barrier is what was blocking it: a barrier-free body already lowers
   // through the flat expansion, and unrolling it would change the SQL for no capability.
-  if (!body.some((s) => UNROLLABLE_BARRIERS.has(s.name))) return null;
+  if (!body.some((s) => s.name in UNROLLABLE_BARRIERS)) return null;
+  // §3.6's statement-text budget, owned where the multiplication happens (see MAX_UNROLLED_STEPS).
+  if (n * body.length > MAX_UNROLLED_STEPS) return null;
   const phases: Step[] = [];
   for (let k = 0; k < n; k++) phases.push(...body.map((s) => ({ ...s })));
   return phases;

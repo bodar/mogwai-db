@@ -62,8 +62,30 @@ describe('the repeat() unroll boundary', () => {
       ['g.V().repeat(__.both().dedup()).times(2).count()', 'g.V().both().dedup().both().dedup().count()'],
       ['g.V().repeat(__.dedup().both()).times(3).count()', 'g.V().dedup().both().dedup().both().dedup().both().count()'],
       ["g.V().repeat(__.both().dedup()).times(1).values('name')", "g.V().both().dedup().values('name')"],
+      // THE SLICE FAMILY. Asserted as an identity precisely because an unpinned slice is arbitrary:
+      // both spellings must take the same arbitrary rows, which is what "phase k's relation IS the
+      // frontier at iteration k" claims and what a value-expectation could not distinguish.
+      ['g.V().repeat(__.out().limit(2)).times(2).count()', 'g.V().out().limit(2).out().limit(2).count()'],
+      ["g.V(5).repeat(__.limit(1).in()).times(2).values('name')", "g.V(5).limit(1).in().limit(1).in().values('name')"],
+      ['g.V().repeat(__.out().range(0,2)).times(2).count()', 'g.V().out().range(0,2).out().range(0,2).count()'],
+      ['g.V().repeat(__.both().limit(3)).times(3).count()', 'g.V().both().limit(3).both().limit(3).both().limit(3).count()'],
+      // ORDER, including the modulator host the pass could not admit until the body was normalized
+      // before splicing — `order().by(k)` arrives as ONE step now, not two loose ones.
+      ['g.V().repeat(__.order()).times(2).count()', 'g.V().order().order().count()'],
+      ["g.V().repeat(__.out().order().by('name')).times(2).count()", "g.V().out().order().by('name').out().order().by('name').count()"],
+      ["g.V().repeat(__.out().order().by('name').limit(1)).times(2).values('name')",
+        "g.V().out().order().by('name').limit(1).out().order().by('name').limit(1).values('name')"],
     ];
     for (const [rolled, written] of pairs) expect(vals(rolled)).toEqual(vals(written));
+  });
+
+  /** §3.6's statement-text budget, which this pass is what multiplies: n copies of a body is n times
+   *  the SQL and n×m for a nested repeat. Above the ceiling the pass declines and today's deferral
+   *  stands, rather than handing downstream a chain that cannot ship to a Durable Object. */
+  test('declines above the unrolled-size ceiling instead of multiplying without bound', () => {
+    expect(() => compile('g.V().repeat(__.both().dedup()).times(49).count()', {})).not.toThrow();
+    expect(() => compile('g.V().repeat(__.both().dedup()).times(51).count()', {}))
+      .toThrow('per-iteration GLOBAL barrier over the whole frontier');
   });
 
   test('the run must be exactly repeat + times — emit, until and a named loop all decline', () => {
@@ -99,8 +121,10 @@ describe('the repeat() unroll boundary', () => {
     // generic StepFns cannot be handed the body (they would lower it per-ORIGIN, answering a
     // different question). Every barrier still on the far side of the line has to earn this sentence
     // before it moves — `dedup` earned it and is gone from this list.
+    // `order()` has since crossed the line (see UNROLLABLE_BARRIERS) and is gone from this list, as
+    // `dedup` was before it. What is left is what still has no argument: a reducer that changes the
+    // stream's shape mid-body, and a sampler with no stable position at all.
     for (const q of [
-      'g.V().repeat(__.order()).times(2).count()',
       'g.V().repeat(__.groupCount().out()).times(2).count()',
       'g.V().repeat(__.both().sample(1)).times(2)',
     ]) {

@@ -477,15 +477,18 @@ describe('repeat() body: the generic body relation', () => {
     // StepFns would happily lower it (bare dedup emits SELECT DISTINCT id, <carried>, and with an
     // origin column in the tuple that silently becomes PER-ORIGIN), so the gate is the row-local
     // vocabulary, not "whatever lowerElementSteps accepts". This test is that guard.
-    // `dedup` has since MOVED off this list — a fixed times(n) unrolls it into n ordinary phases,
-    // where a phase-local collapse is exactly the per-iteration one (unrollFixedRepeat,
-    // ir/strategies.ts; the equivalence is pinned as an identity in repeat-unroll-boundary). The wall
-    // stands for every barrier whose phase-local reading is NOT the per-iteration one.
+    // `dedup`, and now the SLICE family and `order`, have MOVED off this list — a fixed times(n)
+    // unrolls them into n ordinary phases, where a phase-local reading is exactly the per-iteration
+    // one (unrollFixedRepeat, ir/strategies.ts; each equivalence pinned as an identity in
+    // repeat-unroll-boundary). The wall stands for every barrier whose phase-local reading is NOT
+    // the per-iteration one, and for every one of these bodies WITHOUT a fixed times(n) — an
+    // unbounded walk has no phases to unroll into, which is the two-regime split.
     const store = seededStore();
     for (const [g, step] of [
-      ['g.V(1).repeat(__.out().limit(1)).times(2).count()', 'limit'],
-      ['g.V(1).repeat(__.out().order().by("name")).times(2).count()', 'order'],
+      ['g.V(1).repeat(__.out().limit(1)).until(__.has("name","x")).count()', 'limit'],
+      ['g.V(1).repeat(__.out().order().by("name")).until(__.has("name","x")).count()', 'order'],
       ['g.V(1).repeat(__.out().aggregate("x").out()).times(2).count()', 'aggregate'],
+      ['g.V(1).repeat(__.out().groupCount()).times(2).count()', 'groupCount'],
     ] as [string, string][]) {
       expect(() => run(store, g)).toThrow(new RegExp(`${step}\\(\\) is a per-iteration GLOBAL barrier`));
     }

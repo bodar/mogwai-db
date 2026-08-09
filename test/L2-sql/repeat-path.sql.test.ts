@@ -304,7 +304,7 @@ describe('repeat / path SQL', () => {
     expect(em.sql).not.toContain('depth <');       // no depth cap in the recursion
     expect(em.sql).toContain('WHERE depth >= 1');   // emit-after band
     // a barrier body step (order/dedup/limit/…) can't live in a recursive term → defers.
-    expect(() => compile('g.V().repeat(__.out().order()).times(2)', {})).toThrow('not yet supported');
+    expect(() => compile('g.V().repeat(__.out().groupCount()).times(2)', {})).toThrow('not yet supported');
     // The named overload is normalized to the same body channel before lowering;
     // its counter namespace is deferred explicitly until named loops are modeled.
     expect(() => compile('g.V().repeat("a", __.out()).times(2)', {}))
@@ -329,10 +329,11 @@ describe('repeat / path SQL', () => {
     // both() + has() → cartesian over both directions = 2 recursive SELECTs.
     const b = read('g.V().repeat(__.both().has("age",P.lt(30))).times(2)');
     expect((b.sql.match(/EXISTS\(SELECT 1 FROM vertex_properties/g) || []).length).toBe(2);
-    // Barrier/collection body steps still defer — they cannot live in a recursive term. `dedup` is no
-    // longer one of them: a fixed times(n) UNROLLS it into n ordinary phases (unrollFixedRepeat,
-    // ir/strategies.ts), so the example here is a barrier that stays on the far side of that line.
-    expect(() => compile('g.V().repeat(__.out().order()).times(2)', {})).toThrow('not yet supported');
+    // Barrier/collection body steps still defer — they cannot live in a recursive term. `dedup`, the
+    // slice family and `order` are no longer among them: a fixed times(n) UNROLLS each into n
+    // ordinary phases (unrollFixedRepeat, ir/strategies.ts), so the example here is a barrier that
+    // stays on the far side of that line.
+    expect(() => compile('g.V().repeat(__.out().groupCount()).times(2)', {})).toThrow('not yet supported');
     // …and the dedup body reaches SQL now, with no recursive term at all — n spliced phases.
     expect(read('g.V().repeat(__.out().dedup()).times(2)').sql).not.toContain('RECURSIVE');
     expect(() => compile('g.V().repeat(__.local(__.out())).times(2)', {})).toThrow('not yet supported');
