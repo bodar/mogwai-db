@@ -1,15 +1,15 @@
-import { col, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import type { Rel } from '../../rel/rel.ts';
-import { typeCarriedBy, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
+import { perRowCols, sameScalarType, typeCarriedBy, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { isLocalScope } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { byField, isProductiveBy, modulations, productivityFilter } from './modulator.ts';
 import { foldElements, foldScalars } from './list.ts';
-import { carriedCols, typeOf, type Minter } from './build.ts';
+import { carriedCols, meta, typeOf, type Minter } from './build.ts';
 import { framingCols, type FramedRel, type RelFraming } from './framing.ts';
 import type { Channel } from '../../channels.ts';
 
@@ -58,12 +58,35 @@ import type { Channel } from '../../channels.ts';
 /**
  * A NAMED COLLECTION — the rows the traversal RETAINED under a name, and what one of them IS.
  *
- * Not a value: `members` is one row per contributed traverser, unfolded, and the reduction is
- * `reduce()`'s at the read. That split is what lets N registration sites be a union of N relations.
+ * Not a value: a site's `rel` is one row per contributed traverser, unfolded, and the reduction is
+ * `reduce()`'s at the read. That split is what lets N registration SITES be a list here and a
+ * `UNION ALL` at the read, instead of N-1 list concatenations each re-exploding JSON.
+ *
+ * **`sites` is a LIST, in chain order, and that order is load-bearing.** The reference drains one
+ * site's traversers into a `BulkSet` in encounter order and then `addAll`s that whole set into the
+ * collection (`AggregateStep.java:124-153`, `Operator.java:178-196`), so the members of site 1
+ * precede the members of site 2. Keeping the sites apart until the read is what makes that
+ * expressible — a single pre-merged relation has already lost which rows came from where.
  */
 export interface Collection {
-  readonly members: Rel;
+  readonly sites: readonly Site[];
   readonly of: Members;
+}
+
+/**
+ * ONE REGISTRATION SITE's contribution — its member rows and the columns that order them.
+ *
+ * The order is a property of the SITE and not of what a member is: two sites are two positions in the
+ * chain, each with its own emission order, and those orders are not comparable. Hoisting it onto
+ * `Members` would have made it look like one fact when it is N.
+ *
+ * `order` is a COLUMN LIST rather than one encounter channel because the accumulation of N sites is
+ * itself a site, and its order is two columns (the site ordinal, then that site's encounter). Same
+ * list the folds take.
+ */
+export interface Site {
+  readonly rel: Rel;
+  readonly order: readonly string[];
 }
 
 /**
@@ -77,12 +100,9 @@ export interface Collection {
  */
 export type Members =
   /** An ELEMENT stream's traversers; the member is the rowid and `unfoldList` casts it back. */
-  | { readonly kind: 'elements'; readonly elem: Elem; readonly encounter: string | undefined }
+  | { readonly kind: 'elements'; readonly elem: Elem }
   /** A VALUE stream's traversers, or a `by()` projection's values; the member is the row's `v`. */
-  | {
-    readonly kind: 'scalars'; readonly type: ScalarType;
-    readonly productiveNull: boolean; readonly encounter: string | undefined;
-  }
+  | { readonly kind: 'scalars'; readonly type: ScalarType; readonly productiveNull: boolean }
   /**
    * ALREADY REDUCED by whoever registered it — `group("a")`/`groupCount("a")`, whose map a grouping
    * barrier built before this module ever saw it. The arm is a transitional one: Phase 4 gives the
@@ -130,7 +150,7 @@ export function registerCollection(
   reducers: ReadonlySet<string>, child: ChildSeam, fresh: Minter,
 ): boolean {
   const label = labelOf(step);
-  if (label === null || collections.has(label)) return false;
+  if (label === null) return false;
   // A `withSideEffect(name, seed, Operator.x)` collection is NOT empty when the traversal starts and
   // is not merged by concatenation either: the declaration supplies an initial value and the operator
   // says how each contribution combines with it. Registering here would silently drop both and answer
@@ -149,8 +169,30 @@ export function registerCollection(
     ? projectedMembers(step, input, host, framing, bys[0], encounter, child, fresh)
     : traverserMembers(input, framing, encounter);
   if (!retained) return false;
-  collections.set(label, retained);
+  const held = collections.get(label);
+  if (!held) { collections.set(label, retained); return true; }
+  // A SECOND SITE ACCUMULATES — side effects live on the ROOT traversal
+  // (`AggregateStep.java:57` reads `this.getTraversal().getSideEffects()`), so a label filled at two
+  // chain positions holds both sites' members. Only the shapes have to agree; disagreeing ones are a
+  // variant merge and decline here rather than being widened by this module (Phase 3).
+  if (!sameMembers(held.of, retained.of)) return false;
+  collections.set(label, { sites: [...held.sites, ...retained.sites], of: held.of });
   return true;
+}
+
+/** Do two sites hold the SAME KIND of member? The reduction is one fold over the union, so it has one
+ *  answer to give — a union of shapes is the dynamic-tag variant's question, not this module's. */
+function sameMembers(a: Members, b: Members): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'elements') return a.elem === (b as typeof a).elem;
+  if (a.kind === 'scalars') {
+    const other = b as typeof a;
+    return a.productiveNull === other.productiveNull && sameScalarType(a.type, other.type);
+  }
+  // A `reduced` collection is a map a grouping barrier already built, so there is nothing to
+  // accumulate into: two `group("a")` sites are Phase 4's, and merging their maps is a group
+  // reduction rather than a concatenation.
+  return false;
 }
 
 /**
@@ -168,21 +210,26 @@ export function registerMap(
 ): boolean {
   const label = labelOf(step);
   if (label === null || collections.has(label) || reducers.has(label)) return false;
-  collections.set(label, { members: built.rel, of: { kind: 'reduced', framing: built.framing } });
+  collections.set(label, {
+    sites: [{ rel: built.rel, order: [] }],
+    of: { kind: 'reduced', framing: built.framing },
+  });
   return true;
 }
+
+/** A site's member order: the encounter channel where the stream carries one, and nothing where it
+ *  does not — the same "incidental row order" a `fold()` accepts on the same terms. */
+const orderOf = (encounter: Channel | undefined): readonly string[] => encounter ? [encounter.col] : [];
 
 /** The BARE `aggregate("a")` — the traversers themselves are the members, in whichever shape the
  *  stream already had. */
 function traverserMembers(
   input: Rel, framing: RelFraming, encounter: Channel | undefined,
 ): Collection | null {
-  const at = encounter?.col;
-  if (framing.kind === 'elements') {
-    return { members: input, of: { kind: 'elements', elem: framing.elem, encounter: at } };
-  }
+  const sites = [{ rel: input, order: orderOf(encounter) }];
+  if (framing.kind === 'elements') return { sites, of: { kind: 'elements', elem: framing.elem } };
   if (framing.kind !== 'scalar') return null;
-  return { members: input, of: { kind: 'scalars', type: framing.type, productiveNull: false, encounter: at } };
+  return { sites, of: { kind: 'scalars', type: framing.type, productiveNull: false } };
 }
 
 /**
@@ -236,12 +283,11 @@ function projectedMembers(
   // nulls emits nothing where a bare one emits null" got recorded as an open question about
   // `MaxLocalStep`. It was never that; it was one field falling out of a constant.
   return {
-    members: rows,
+    sites: [{ rel: rows, order: orderOf(encounter) }],
     of: {
       kind: 'scalars',
       type: typeCarriedBy(field.framing.type, (column) => cols.some((declared) => declared.name === column)),
       productiveNull: isProductiveBy(step),
-      encounter: encounter?.col,
     },
   };
 }
@@ -261,11 +307,60 @@ function projectedMembers(
  * A collection NOTHING reached needs no arm: both folds `COALESCE` an empty aggregate to `[]`, so
  * `cap()` over it is an EMPTY list — which is what the reference's `BulkSet` seed supplies.
  */
-export function reduce({ members, of }: Collection, fresh: Minter): FramedRel {
-  if (of.kind === 'reduced') return { rel: members, framing: of.framing };
-  const at = of.encounter === undefined ? {} : { encounter: of.encounter };
-  if (of.kind === 'elements') return listed(foldElements(members, of.elem, at, fresh));
-  return listed(foldScalars(members, { type: of.type, productiveNull: of.productiveNull, ...at }, fresh));
+export function reduce({ sites, of }: Collection, fresh: Minter): FramedRel {
+  if (of.kind === 'reduced') return { rel: sites[0]!.rel, framing: of.framing };
+  const { rel, order } = sites.length === 1 ? sites[0]! : accumulated(sites, memberCols(of), fresh);
+  if (of.kind === 'elements') return listed(foldElements(rel, of.elem, { order }, fresh));
+  return listed(foldScalars(rel, { type: of.type, productiveNull: of.productiveNull, order }, fresh));
+}
+
+/** The column a member ITSELF occupies, plus the one its type rides in when it has one. What a site
+ *  must project down to before it can be unioned with another — everything else it carries (its
+ *  aliases, its path, its own encounter) is about the chain position, not about the member. */
+const memberCols = (of: Members): readonly string[] =>
+  of.kind === 'elements' ? ['id'] : of.kind === 'scalars' ? ['v', ...perRowCols(of.type)] : [];
+
+/** The ORDINAL of the site a member came from, and that site's own emission position — see
+ *  `Collection.sites`. Ordering by the pair is what reproduces `Operator.addAll` appending one whole
+ *  site's `BulkSet` after the previous one's, rather than interleaving two incomparable orders. */
+const SITE_COL = 'site';
+const SITE_ENCOUNTER_COL = 'siteenc';
+
+/**
+ * N SITES AS ONE MEMBER RELATION — `UNION ALL` over each site narrowed to the member columns, with
+ * the site ordinal and that site's own encounter projected as ONE comparable order.
+ *
+ * ALL, never distinct: a collection is a multiset (`BulkSet` bumps a repeat member's count rather
+ * than dropping it, `BulkSet.java:131`), so a vertex reached twice contributes twice.
+ *
+ * The narrowing is not tidiness — it is what makes the union WELL-TYPED. Two sites sit at different
+ * chain positions, so they carry different channels and different declared types, and a `UNION ALL`
+ * over their raw relations is not expressible. Narrowing states the same thing semantically: past
+ * this point the rows are members, and a member has no aliases and no path.
+ *
+ * A site with NO encounter channel contributes 0, which orders its members among themselves
+ * incidentally — the same answer that site alone would have given, rather than a claim the plan
+ * cannot support.
+ */
+function accumulated(sites: readonly Site[], cols: readonly string[], fresh: Minter): Site {
+  // The member columns keep the DECLARED metadata of the first site rather than a fabricated one:
+  // the sites agree on `Members`, so they agree on what `v`/`id` holds, and inventing a storage class
+  // here would be a second authority on a fact the relation already states.
+  const first = sites[0]!.rel.type.cols;
+  const type = typeOf(...cols.map((name) => first.find((column) => column.name === name) ?? meta(name, 'any')),
+    meta(SITE_COL, 'int'), meta(SITE_ENCOUNTER_COL, 'int'));
+  const arms = sites.map((site, ordinal) => make.project({
+    id: fresh('cm'), input: site.rel, channels: [], type,
+    exprs: [...cols.map((name) => [name, col(site.rel.id, name)] as const),
+      [SITE_COL, compilerInt(ordinal)],
+      // A site with NO order of its own contributes a constant, which orders its members among
+      // themselves incidentally — the same answer that site alone would have given.
+      [SITE_ENCOUNTER_COL, site.order[0] === undefined ? compilerInt(0) : col(site.rel.id, site.order[0])]],
+  }));
+  return {
+    rel: make.union({ id: fresh('cu'), inputs: arms, all: true, channels: [], type }),
+    order: [SITE_COL, SITE_ENCOUNTER_COL],
+  };
 }
 
 /** A fold's `{rel, of}` as the framed relation `cap()` hands to `continueAs`. One place, so the two

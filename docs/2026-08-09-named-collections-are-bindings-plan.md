@@ -236,20 +236,32 @@ It is a whole-relation `MAX(...) OVER ()`, so it must run over the UNION of all 
 per site — which is exactly why it belongs at the read. Getting this wrong gives a list whose members
 are inconsistently enveloped.
 
-### Phase 2 — multi-site accumulation. **+~9 L3.**
+### Phase 2 — ✅ LANDED. Multi-site accumulation. **+7 L3.**
 
-- Delete the `collections.has(label)` decline in `registerCollection`.
-- A second registration UNIONs its member relation into the existing one (`make.union({all: true})`).
-- Member relations must agree on `of`; if they do not, DECLINE (Phase 3 lifts this).
+- The `collections.has(label)` decline is gone.
+- `Collection.sites` is a LIST of `{rel, order}`, in chain order, and `reduce()` builds the
+  `UNION ALL` at the read. Sites stay APART until then, which is what makes the reference's
+  ordering expressible — a pre-merged relation has already lost which rows came from where.
+- Member relations must agree on `of` (`sameMembers`); if they do not, DECLINE (Phase 3 lifts this).
 
-**Checkpoint:** the nine FAIL scenarios in §0 turn PASS. `mise run test:legacy-spine` will show the
-legacy floor unchanged (legacy still mis-answers them, it just is not the authority). Census `spine`
-column up.
+**Checkpoint — measured:** L3 1775 → **1782**, census `spine` 1202 → **1208**, legacy floor unchanged
+at 1692 (RelIR-only 83 → 90, legacy-only still 0). The census answer-change gate names exactly the six
+traversals whose answer was WRONG, which is the evidence that the route was mis-executing them.
+`sql-hygiene` banks one rise — `cap` bytes 2029 → 2656, traversals that used to decline now compiling.
 
-**Trap:** the ENCOUNTER channel. Each site's members carry that site's emission order, and the two
-orders are not comparable. Order is not pinned (§1), so the union may drop the channel — but it must
-drop it DELIBERATELY and the reduction must then fold unordered, not fold by a channel that means
-different things per arm.
+**Six of §0's nine.** The other three are not Phase 2's: two are MIXED member shapes (a `by(count())`
+site beside a `by(sum())` one; edge sites beside vertex ones) and go with Phase 3, and
+`cap("a").unfold().path()` is a path tail.
+
+**The ENCOUNTER trap, answered differently from the way this section first proposed.** Each site's
+members carry that site's emission order and the two are not comparable — but the fix is not to drop
+the channel. The reference drains one site's traversers into a `BulkSet` in encounter order and then
+`addAll`s that WHOLE set (`AggregateStep.java:124-153`, `Operator.java:178-196`), so site 1's members
+precede site 2's, and that order is free to reproduce: each arm projects its site ORDINAL beside its
+own encounter, and the fold orders by the pair. Deliberately dropping it would have bought
+nondeterminism that `mise run test:perturbed` would then have to police, in exchange for nothing.
+The generalization that made it one line: `foldScalars`/`foldElements` take an ORDER COLUMN LIST
+rather than one encounter column.
 
 ### Phase 2b — the reduction a `cap().unfold()` never needed.
 

@@ -670,14 +670,18 @@ export function unfoldList(
  * expression subplans, so one node would become a `Ref` in one place and stay itself in the other,
  * and `check` fails closed on the ambiguity ("names two different relations in one scope").
  *
- * The list's member order is the EMISSION order where one is carried: `Agg.orderBy` is what that
- * needs, so there is no node-set question. Without one the list keeps incidental row order, which is
- * what legacy does and what `analyzeChain` guarantees cannot matter (`fold` is a COLLECTING consumer,
+ * The list's member order is whatever COLUMNS the caller names, in order: `Agg.orderBy` is what that
+ * needs, so there is no node-set question. For a `fold()` that is the one encounter channel; a
+ * multi-site named collection names two (the SITE, then that site's encounter), because the
+ * reference appends one whole site's `BulkSet` after the previous one's
+ * (`AggregateStep.processAllStarts` → `Operator.addAll`). Naming columns rather than one encounter
+ * is what lets both be the same fold. With none the list keeps incidental row order, which is what
+ * legacy does and what `analyzeChain` guarantees cannot matter for a `fold` (a COLLECTING consumer,
  * so a chain that reaches one always demands an encounter).
  */
 export function foldScalars(
   input: Rel,
-  opts: { readonly type: ScalarType; readonly productiveNull?: boolean; readonly encounter?: string },
+  opts: { readonly type: ScalarType; readonly productiveNull?: boolean; readonly order?: readonly string[] },
   fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf } {
   // The type column and the position are named rather than passed as EXPRESSIONS, because the relation
@@ -686,7 +690,7 @@ export function foldScalars(
   const vtypeCol = perRowColumnOf(opts.type);
   const vtype = vtypeCol ? col(input.id, vtypeCol) : undefined;
   const flagged = vtype ? withLossyFlag(input, vtype, fresh) : input;
-  const order: readonly SortTerm[] = opts.encounter ? [{ expr: col(flagged.id, opts.encounter), dir: 'asc' }] : [];
+  const order: readonly SortTerm[] = (opts.order ?? []).map((column) => ({ expr: col(flagged.id, column), dir: 'asc' }));
   const value = col(flagged.id, 'v');
   const member = vtype
     ? {
@@ -733,15 +737,16 @@ export function foldScalars(
  * `execute.ts`); this is the increment that first PRODUCES one on this spine, which is exactly what
  * `listPayloadExpr`'s decline comment said it was waiting for.
  *
- * The member ORDER is the emission order where one is carried, which for a `fold()` is always:
- * `analyzeChain` makes `fold` a COLLECTING consumer, so a chain reaching one demands an encounter.
+ * The member ORDER is `foldScalars`' exactly — the columns the caller names, which for a `fold()` is
+ * always the one encounter channel: `analyzeChain` makes `fold` a COLLECTING consumer, so a chain
+ * reaching one demands an encounter.
  * `COALESCE(…, '[]')` because a fold over ZERO traversers emits `[]` rather than nothing —
  * `FoldStep` supplies a seed, which is the per-step rule §12 cites `gremlin-core` for.
  */
 export function foldElements(
-  input: Rel, elem: Elem, opts: { readonly encounter?: string }, fresh: Minter,
+  input: Rel, elem: Elem, opts: { readonly order?: readonly string[] }, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf } {
-  const order: readonly SortTerm[] = opts.encounter ? [{ expr: col(input.id, opts.encounter), dir: 'asc' }] : [];
+  const order: readonly SortTerm[] = (opts.order ?? []).map((column) => ({ expr: col(input.id, column), dir: 'asc' }));
   return {
     rel: make.aggregate({
       id: fresh('fe'), input, channels: [], type: typeOf(meta(LIST_COL, 'json')),

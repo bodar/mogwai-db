@@ -2300,7 +2300,7 @@ function scalarTail(
         ? out.type : UNKNOWN;
       const folded = foldScalars(rel, {
         type: streamType,
-        ...(encounter ? { encounter: encounter.col } : {}),
+        ...(encounter ? { order: [encounter.col] } : {}),
       }, fresh);
       return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
     }
@@ -3512,7 +3512,7 @@ function elementTail(
     if (step.name === 'fold') {
       if (argValues(step).length || isLocalScope(step) || step.modulators?.length || pathCarried(rel)) return null;
       const encounter = encounterOf(rel.channels);
-      const folded = foldElements(rel, elem, encounter ? { encounter: encounter.col } : {}, fresh);
+      const folded = foldElements(rel, elem, encounter ? { order: [encounter.col] } : {}, fresh);
       return listTail(folded.rel, folded.of, steps, at + 1, ctx, fresh, labels);
     }
     if (step.name === 'project') {
