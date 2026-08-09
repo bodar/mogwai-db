@@ -735,8 +735,8 @@ caught, and why each refusal's MESSAGE says what SQLite actually does rather tha
   two rewrites separate is load-bearing — `prune`'s analysis is keyed on the relational SPINE, so a `rewrite`
   that descended into subplans would prune every projection inside a correlated subquery down to its channels.
 
-**1. `prune`'s remainder** — what makes `unroll`'s n replicas affordable. ✅ `Join`/`Union`/`Aggregate` landed;
-🚧 `Recursive` is next, and **it is the node this phase introduces**, so it is the one that must not be missing.
+**1. ✅ `prune`'s remainder — DONE** (`Join`/`Union`/`Aggregate`/`Recursive`/`Values`). What makes `unroll`'s n
+replicas affordable.
 
 ⚠️ **It was never "add three cases", and the reason generalizes.** A `Project` is the only node that removes a
 column at SOURCE; every other kind's output is a function of its input's. So pruning below a `Join` does not
@@ -751,9 +751,21 @@ never dropped** (removing one makes the grouping COARSER); an **`Aggregate` keep
 a `Project` reading none of a whole-relation aggregate's outputs ERASES it, one row becomes N); a **channel is
 never pruned**. The safety property is a test: pruning nothing changes the SQL not at all.
 
-`Recursive` requires every declared column *for a stated reason*, not because the walk stopped there: its
-`step` is a FUNCTION of `self`, so what the body reads from the walk is only knowable by instantiating it, and
-the header, seed and step types must move together.
+⚠️ **`Values` is the OTHER node that removes a column at SOURCE, and only `Project` was doing so.** A walk's
+seed is typically a `Values`, so a `Recursive` whose header pruned left the seed wider than the step. It would
+have been the first thing `unroll` hit.
+
+⚠️ **A `Recursive`'s header, seed and step are ONE decision**, and its keep set is consumer-need + what the
+BODY reads back off the walk + channels — the second term knowable only by instantiating the step. **The
+self-ref substitution must happen INSIDE the rebuild pass**: `recursive`'s factory memoises `step`, so the
+original closure cannot be re-run against a new `self`, and substituting into the body up front leaves nodes
+declaring their old widths over a narrower child with nothing left to trigger a retype. Done inside the pass
+the self-ref shrinks like any other child and every downstream retype works unchanged.
+
+⚠️ **A recursive test body must be a single TERMINATING `Filter` over the `SelfRef`, and that shape is forced
+from both sides** — P1 puts the walk at the top level of the term's `FROM` so the body is one unary node, and
+step 0's P3 refusal removes `Limit` as the lazy way to stop. An unbounded body hangs the suite, which is
+`repeat()` behaving exactly as specified.
 
 **2. `flatten`** — join flattening / decorrelation into the P1 envelope, P1 legality enforced in `check`, a body
 that cannot be made legal throwing a clear deferral. Deletes `expandRepeatBody`, and `REPEAT_BODY_OK`'s
