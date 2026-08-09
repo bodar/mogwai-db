@@ -30,6 +30,7 @@ import type { Framed } from '../../src/execute.ts';
 import { exec } from '../support/executor.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
 import { isNondeterministic, isWrite, seeded } from '../support/graph.ts';
+import { multisetKey } from '../support/multiset.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 
 /** What the engine did with one traversal.
@@ -161,9 +162,18 @@ const h16 = (s: string): string => createHash('sha256').update(s).digest('hex').
 /**
  * The digest of an executed result.
  *
- * `ms` folds `bulk` in as a decimal string (never a raw bigint — JSON cannot hold one) and sorts,
- * so it denotes the traverser MULTISET, exactly what oracle.ts's `weigh()` compares.
+ * `ms` denotes the traverser MULTISET — `multisetKey`, the same `weigh()` L5's differential oracle
+ * uses, now shared from `test/support/multiset.ts` rather than spelled a second time here.
  *
+ * ⚠️ IT USED TO FOLD `bulk` IN PER ROW (`hex[i]*bulk`, sorted) under a comment claiming it was already
+ * this. It was not, and the difference is exactly the one this gate exists to be right about: the same
+ * multiset emitted as four bulk-1 rows and as `(a,1),(b,3)` hashed differently, so **every traversal
+ * that merely started collapsing reported a changed ANSWER**. Measured on the widened repeat unroll —
+ * `withStrategies(RepeatUnrollStrategy).V().repeat(__.both().has("age",lt(30))).times(2)` went 4 rows
+ * to 2 with the multiset `{1:1, 2:3}` unchanged, and this digest called it a regression. `n` (the row
+ * count) legitimately moves there and is deliberately NOT gated; `ms` is what the answer gate reads.
+ *
+
  * A CAVEAT that cost a probe to find and is easy to get wrong: sorting the outer multiset does NOT
  * make this order-immune. When `fold()`/`cap()`/`group()` collapses a stream into ONE traverser,
  * the member order lives INSIDE that traverser's GraphBinary buffer, so the buffer itself changes
@@ -176,7 +186,7 @@ function digest(framed: readonly Framed[]): Pick<Row, 'n' | 'd' | 'ms' | 'ord'> 
   return {
     n: framed.length,
     d: new Set(hex).size,
-    ms: h16(framed.map((f, i) => `${hex[i]}*${f.bulk}`).sort().join('|')),
+    ms: h16(multisetKey(framed)),
     ord: h16(hex.join('|')),
   };
 }

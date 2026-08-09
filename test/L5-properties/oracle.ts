@@ -17,6 +17,7 @@ import { exec } from '../support/executor.ts';
 import { isWrite, type StoreFactory } from '../support/graph.ts';
 import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
 import type { Framed } from '../../src/execute.ts';
+import { weigh } from '../support/multiset.ts';
 
 // `seeded`/`isWrite`/`StoreFactory` moved to test/support/graph.ts when the census became a second
 // consumer — a shared helper living inside one of its consumers is how a third ends up
@@ -40,25 +41,8 @@ export type Outcome =
   | { readonly kind: 'rows'; readonly weighed: ReadonlyMap<string, bigint>; readonly ordered: readonly string[] }
   | { readonly kind: 'threw'; readonly message: string };
 
-/**
- * A traverser multiset, keyed by the GraphBinary encoding of the value and valued by total bulk.
- *
- * This is the ONLY comparison that can hold across the movement-collapse switch. Collapse emits
- * one row carrying `SUM(bulk)`; the generic UNION-ALL form emits `bulk` separate rows ("same
- * result, more rows", per the flag's own comment). Both denote the same multiset of traversers, so
- * summing bulk per distinct value is what makes them comparable — and it is also just what a
- * traverser multiset IS (CLAUDE.md: "Traversers are multisets"). Expanding bulk into literal
- * copies would be equivalent but is not an option: collapse exists precisely because the walk
- * count it folds up can be exponential.
- */
-function weigh(framed: Framed[]): ReadonlyMap<string, bigint> {
-  const m = new Map<string, bigint>();
-  for (const f of framed) {
-    const k = f.buf.toString('hex');
-    m.set(k, (m.get(k) ?? 0n) + f.bulk);
-  }
-  return m;
-}
+// `weigh` moved to `test/support/multiset.ts` — the census needs the same answer, and its own copy
+// was subtly different in the one way that matters (see that module's header).
 
 /** Run `q` against `store` under `fastPaths`, capturing a throw as an outcome. */
 export function outcomeOf(store: GraphStore, q: string, fastPaths: FastPathConfig): Outcome {
