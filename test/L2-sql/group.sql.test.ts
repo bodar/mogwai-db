@@ -690,12 +690,15 @@ describe('group / properties SQL', () => {
     // for the pre-existing bug where sk silently got the fromV rowid.
     expect(read('g.withSack(0).V(1).outE().sack(assign).by(T.label).otherV().sack()', legacy).sql)
       .toContain('(SELECT name FROM labels WHERE id=n.label) AS sk'); // sk = the label, not the fv rowid
-    // local(__.sack(op).by(...)) folds the sack inside a child scope: a mutate sack is an
-    // element-preserving child step, so it lowers through the same engine per pushed parent.
+    // `local(__.sack(op).by(...))` NO LONGER REACHES A CHILD SCOPE AT ALL, and that is the point of
+    // the `inlineIdentityHostBody` Pass: a mutating sack emits exactly its input traverser, so the
+    // `local()` around it decides nothing and is spliced away before any lowering sees it. What used
+    // to be a per-pushed-parent child scope with its own `ROW_NUMBER() OVER ()` ordinal is now the
+    // same accumulator fold the bare form emits — the identical answer, one CTE instead of a scope.
     const localSack = read('g.withSack(0L).V().local(__.sack(sum).by("age")).sack()', legacy);
     expect(localSack.shape).toEqual({ kind: 'value', type: UNKNOWN });
-    expect(localSack.sql).toContain('ROW_NUMBER() OVER ()'); // the child-scope ordinal
-    expect(localSack.sql).toContain('AS sk'); // the fold lands in the sk slot within the scope
+    expect(localSack.sql).not.toContain('ROW_NUMBER() OVER ()');
+    expect(localSack.sql).toBe(read('g.withSack(0L).V().sack(sum).by("age").sack()', legacy).sql);
   });
 
   test('a sack is an ordinary carried CHANNEL — RelIR', () => {

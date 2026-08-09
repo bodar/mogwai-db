@@ -8,7 +8,7 @@ import { PASS_CATEGORIES } from '../../src/compiler/ir/pass.ts';
 import { canonicalizeConnectives } from '../../src/compiler/ir/strategies.ts';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { compile } from '../../src/compiler/compiler.ts';
-import { runPasses, EMPTY_STRATEGY_USE } from '../../src/compiler/ir/passes.ts';
+import { runPasses, EMPTY_STRATEGY_USE, childSteps } from '../../src/compiler/ir/passes.ts';
 
 const names = PASSES.map((p) => p.name);
 const ord = (name: string) => names.indexOf(name);
@@ -180,5 +180,58 @@ describe('the writeArguments verify Pass — a text-level refusal is not a spine
     // …and without the declaration the very same text is a refusal, from the same place.
     expect(() => compile('g.mergeV(__.select("c"))', {}, { spine: 'rel' }))
       .toThrow(/needs a withSideEffect/);
+  });
+});
+
+// ---------- inlineIdentityHostBody — a per-traverser host over a stream-identity body ----------
+//
+// `local(__.aggregate("a"))` IS `aggregate("a")`. TinkerPop's three per-traverser hosts differ only
+// in what they do with the body's RESULTS, so a body that emits exactly its input traverser — once,
+// unchanged — makes all three the identity and the host has nothing left to decide. Stating that as
+// a Pass is what makes it true at every position and in every tail at once, rather than a host each
+// lowering has to learn separately.
+describe('inlineIdentityHostBody: a per-traverser host over a stream-identity body IS its body', () => {
+  const chain = (g: string) =>
+    runPasses(stepChain(parseGremlin(g), {}), EMPTY_STRATEGY_USE, {}).steps.map((s: any) => s.name).join('.');
+
+  test('local(aggregate) / map(aggregate) / flatMap(aggregate) all splice', () => {
+    for (const host of ['local', 'map', 'flatMap'])
+      expect(chain('g.V().' + host + '(__.aggregate("a")).cap("a")')).toBe('V.aggregate.cap');
+  });
+
+  test("the body's by() rides through and folds onto the SPLICED step, not onto nothing", () => {
+    // The reason this Pass sits in `extract`: at this point `absorbModulators` has not run, so the
+    // body is the TWO steps `[aggregate, by]`. Splicing before the fold is what lets the modulator
+    // land on its host.
+    const steps = runPasses(stepChain(parseGremlin('g.V().local(aggregate("x").by("age")).cap("x")'), {}), EMPTY_STRATEGY_USE, {}).steps;
+    expect(steps.map((s: any) => s.name).join('.')).toBe('V.aggregate.cap');
+    expect((steps[1] as any).modulators).toEqual([['age']]);
+  });
+
+  test('it unwraps to a FIXPOINT — a spliced body that is itself an identity host splices too', () => {
+    expect(chain('g.V().local(__.local(__.aggregate("a"))).cap("a")')).toBe('V.aggregate.cap');
+  });
+
+  test('a MUTATING sack is stream-identity; a BARE sack() is a retype and is not', () => {
+    expect(chain('g.withSack(0).V().local(__.sack(sum).by("age")).sack()')).toBe('V.sack.sack');
+    // `local(__.sack())` REPLACES the traverser with the accumulator's value, so the host decides
+    // something and must survive.
+    expect(chain('g.withSack(0).V().local(__.sack())')).toBe('V.local');
+  });
+
+  test('a body that MOVES, PROJECTS or FILTERS is left alone — that is what the hosts are FOR', () => {
+    for (const body of ['__.out()', '__.out().count()', '__.values("name")', '__.has("name","marko")', '__.count()'])
+      expect(chain('g.V().local(' + body + ')')).toBe('V.local');
+  });
+
+  test('a barrier() body is NOT its body — the equivalence is with identity, not with barrier()', () => {
+    // `barrier()` inside a local scope is a no-op while `barrier()` in the chain is a real bulk
+    // barrier, so splicing would introduce one the user did not write.
+    expect(chain('g.V().local(__.barrier())')).toBe('V.local');
+  });
+
+  test('it reaches a NESTED body too, because every child chain re-runs the pipeline', () => {
+    const where: any = runPasses(stepChain(parseGremlin('g.V().where(__.local(__.aggregate("a")).values("name"))'), {}), EMPTY_STRATEGY_USE, {}).steps[1];
+    expect(childSteps(where.args[0].value.nested, {}).map((s: any) => s.name).join('.')).toBe('aggregate.values');
   });
 });

@@ -6,6 +6,7 @@ import {
     verifyStandard, verifyByModulatorArity,
     absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
     injectSubgraphRec, injectPartitionRec, markProductiveBy, isAlwaysProductiveFilterNoOp, verify,
+    inlineIdentityHostBody,
     NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
     type IRStep,
 } from './strategies.ts';
@@ -73,6 +74,14 @@ const EXTRACT: Pass[] = group('extract', [
   // the Subgraph/Partition injectors recurse into `{nested}` ARGS rather than into a Map's values.
   // Independent of desugarMatchString (disjoint step names), so the order between them is free.
   { name: 'desugarPropertyMap', applies: (steps) => steps.some((s) => s.name === 'property'), run: desugarPropertyMap },
+  // Also before decoration and before the folds, and the SECOND half is what places it: the body it
+  // splices in may HOST a `by()` (`local(aggregate("a").by("name"))`), so it has to arrive before
+  // `absorbModulators` for the modulator to land on the spliced step rather than on nothing.
+  {
+    name: 'inlineIdentityHostBody',
+    applies: (steps) => steps.some((s) => s.name === 'local' || s.name === 'map' || s.name === 'flatMap'),
+    run: (steps, ctx) => inlineIdentityHostBody(steps, ctx.params),
+  },
 ]);
 
 // ---------- fold (canonicalize multi-step shapes into carried fields) ----------

@@ -11,7 +11,7 @@
 import { describe, expect, test } from 'bun:test';
 import { executeQuery } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
-import { read, seededStore } from '../support/harness.ts';
+import { read, relOnly, seededStore } from '../support/harness.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 
@@ -81,7 +81,11 @@ describe('ordering comparability follows the BOUND’s own Gremlin type', () => 
     expect(await vals("g.V().values('age').is(P.gt(datetime('2020-01-01T00:00:00Z')))")).toEqual([]);
   });
 
-  test('a plain numeric bound is NOT comparable with a stored datetime', async () => {
+  // RELIR'S CLAIM, not legacy's: legacy's `compareKey` casts a stored `datetime` with the plain
+  // integrals, so it compares epoch millis against `20` and answers TRUE for both rows. That is a
+  // defect in a route with an end date, and restating it here would commit it — `relOnly` is the
+  // marker for exactly that (`test/support/harness.ts`).
+  relOnly('a plain numeric bound is NOT comparable with a stored datetime', async () => {
     expect(await vals("g.V().values('when').is(P.gt(20))")).toEqual([]);
   });
 

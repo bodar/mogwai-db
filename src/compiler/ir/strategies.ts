@@ -534,6 +534,67 @@ const isAllArg = (a: any): boolean =>
 // __.V(1).out("knows").values("name"))`) is left in place and fails closed at render (predicateSql
 // rejects a traversal operand with a clear deferral) — never silently dropped or mis-bound.
 
+// ---------- local()/map()/flatMap() over a body that leaves the stream alone ----------
+//
+// `local(__.aggregate("a"))` IS `aggregate("a")`, and so are the `map`/`flatMap` spellings of it.
+// TinkerPop's three per-traverser hosts differ only in a CARDINALITY POLICY over the body's results
+// (`LocalStep.processNextStart` emits every one, `TraversalMapStep` the first, `flatMap` every one),
+// and a body that emits exactly its input traverser, once, unchanged makes all three the identity —
+// so the host is a wrapper with nothing left to decide and the body belongs in the chain that hosts it.
+//
+// A Pass and not a lowering arm, for `foldConstantPredicateOperands`' reason: the equivalence is a
+// property of the STEP CHAIN and holds at every position and in every tail, so stating it once here
+// serves the element loop, the scalar tail and the list tail without any of them learning a host they
+// otherwise have no work to do for. It runs in `extract`, BEFORE `absorbModulators`, so a spliced
+// `aggregate("a").by("name")` still has its modulator folded onto it by the ordinary pipeline.
+//
+// ⚠️ THE SET IS DELIBERATELY TIGHT, and each absence is a real difference rather than caution:
+// `barrier()` inside a local scope is a no-op while `barrier()` in the chain is a real bulk barrier
+// (so `local(barrier())` is identity, NOT its body); a bare `sack()` READS the accumulator and retypes
+// the traverser, so only the `sack(Operator.x)` mutating form qualifies; and anything that MOVES,
+// PROJECTS or FILTERS is what the per-traverser hosts exist for.
+
+/** Steps that emit EXACTLY their input traverser, once and unchanged — they write side-effect or
+ *  channel state and leave the stream alone. A per-traverser host over a body of only these is that
+ *  body. Recursive on the hosts themselves, so `local(__.local(__.aggregate("a")))` unwraps too. */
+function isStreamIdentity(s: Step, params: Record<string, any>): boolean {
+  if (s.name === 'aggregate' || s.name === 'sideEffect' || s.name === 'identity') return true;
+  // The MUTATING sack form (`sack(Operator.sum).by("age")`) leaves the traverser alone; the bare read
+  // form is a retype to the accumulator's value, which is a different traverser entirely.
+  if (s.name === 'sack') return (s.args ?? []).length > 0;
+  return identityHostBody(s, params) !== null;
+}
+
+/** The body of a per-traverser host that is the IDENTITY on the stream, or `null`.
+ *
+ *  A `by()` is TRANSPARENT here and cannot be otherwise: this runs in `extract`, so `absorbModulators`
+ *  has not folded one onto its host yet and `local(aggregate("a").by("name"))` still arrives as the
+ *  TWO steps `[aggregate, by]`. A modulator is not a step of the stream at all — it decides what its
+ *  host reads — so what has to be identity is the host it will be folded onto, which the leading
+ *  `aggregate` already is. It is spliced through verbatim and the ordinary pipeline folds it after. */
+function identityHostBody(s: Step, params: Record<string, any>): Step[] | null {
+  if (s.name !== 'local' && s.name !== 'map' && s.name !== 'flatMap') return null;
+  const args = s.args ?? [];
+  if (args.length !== 1 || !isNested(args[0].value)) return null;
+  let body: Step[];
+  try { body = stepChain(args[0].value.nested, params); } catch { return null; }
+  if (!body.length || body[0].name === 'by') return null;
+  return body.every((inner) => inner.name === 'by' || isStreamIdentity(inner, params)) ? body : null;
+}
+
+/** Splice a per-traverser host whose body leaves the stream alone into the chain that hosts it. */
+export function inlineIdentityHostBody(steps: Step[], params: Record<string, any>): Step[] {
+  const out: Step[] = [];
+  for (const s of steps) {
+    const body = identityHostBody(s, params);
+    // RECURSE INTO THE SPLICED BODY, because a body that is itself an identity host
+    // (`local(__.local(__.aggregate("a")))`) splices to another one — and this pass has already
+    // walked past the position it lands in. A single pass would unwrap exactly one layer.
+    if (body) out.push(...inlineIdentityHostBody(body, params)); else out.push(s);
+  }
+  return out;
+}
+
 /** The literal a nested traversal is worth, or `undefined` when it is not a bare constant. A
  *  parse needing params we do not have (a nested normalize runs param-free) simply declines. */
 function constantOperand(nested: any, params: Record<string, any>): { value: any } | undefined {
