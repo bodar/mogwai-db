@@ -77,6 +77,11 @@ Three consequences, all of them simplifications:
    to contain a barrier, reasoning that a barrier-free body "already lowers through the flat
    expansion, so unrolling it buys no capability". It buys the largest one available.
 
+> ⚠️ **THE UNROLL CANNOT SHIP UNTIL §7 LANDS, and that is the whole of the remaining work.**
+> Unrolling deletes the ROUTE by which legacy reached its own, more permissive collapse analysis, and
+> the general one cannot yet admit what that route did. The consequence is not a slowdown: L3 hangs.
+> §1's decision stands; §7 is its precondition.
+
 The walk keeps a matching guard from the other side (`walk.ts`): a BOUNDED walk carrying nothing but
 `bulk` declines, because its traversers are interchangeable and enumerating them is a choice — and
 the wrong one. A walk carrying per-traverser IDENTITY (an alias bound before it, a sack, an
@@ -90,24 +95,44 @@ diagnosis came from reading what the corpus EXPECTS rather than from profiling: 
 expected result is 2.5×10¹⁵ is telling you what representation it requires. **A cost wall of this
 shape reads exactly like a hang, so treat an L3 duration regression as a semantics signal.**
 
-### Status of the amendment — IN FLIGHT, not landed
+### Status of the amendment — IN FLIGHT on a local branch, RED, gated on §7
 
 The doc is amended ahead of the code deliberately: §1 is the decision, and it is now WRONG on trunk.
-What implements it, currently uncommitted and red:
+Local WIP commits (`fc6e133`, `dae51ae`, `eab7822`, plus the strategy fix); **not pushed, and it
+hangs L3** — §7 is why, and §7 is the next piece of work.
 
-- `unrollFixedRepeat`'s "nothing to gain unless a barrier was blocking it" guard — **deleted**.
-- `walk.ts` — the `Recursive` regime (§3.1), plus the interchangeable-frontier decline above.
+Sound and worth keeping whatever §7 decides:
+
+- `walk.ts` — the `Recursive` regime (§3.1), plus the interchangeable-frontier decline above. It
+  covers the UNBOUNDED forms (`until`, `emit`, `emit(pred)`, a sack folded through the walk) and is
+  independent of the unroll widening.
 - the `loops` CHANNEL role (`src/channels.ts`) and the seam's `chain` arm (§3.1's open question,
   settled below).
+- **two real bugs found by the widening, both independent of it:**
+  - `tryUnroll` refused a named `repeat("a", …)` by testing the ARGUMENT COUNT, but the front end
+    splits the name off into `loopName` — so a named repeat arrived with one argument like any other
+    and was being unrolled, silently dropping the loop identity `loops("a")` reads.
+  - `withoutStrategies(RepeatUnrollStrategy)` did not suppress the pass. It was classified as an
+    inert no-op, which was true only while our unroll and TinkerPop's strategy did not overlap.
+- the `group()` collapse fix (§7.4 item 3's neighbour): `COLLECTING_CONSUMERS` treated EVERY
+  `group()` as an ordered member collection; TinkerPop splits on
+  `Grouping.hasBarrierInValueTraversal()`, so `by(__.count())` is a reduction and needs no emission
+  order. Closes a deferral `analyze.ts` had recorded in prose.
 
-Consequences still to work through, each a genuine one rather than churn — the widened unroll runs
-ABOVE the routing switch, so it moves both spines: seven `sql-hygiene` byte ratchets (n copies of a
-body is n times the text — banked, reason here), the L2 SQL pins that assert legacy's `WITH
-RECURSIVE` for traversals that no longer recurse on EITHER spine, two L5 ratchet entries that got
-BETTER (`repeat(__.both()).times(3).range(5,11)` no longer diverges between the fast-path
-positions), and one L5 GENERATOR bug the unroll exposed: it models a `repeat()` body as
-shape-preserving, but `repeat(__.has(…).inE('knows')).times(1)` ends on an EDGE — TinkerPop's
-`RepeatStep` is `<S,S>` in its Java signature and not at runtime.
+Blocked on §7:
+
+- `unrollFixedRepeat`'s "nothing to gain unless a barrier was blocking it" guard — **deleted**, and
+  that deletion is what hangs L3 until the collapse authorities are reconciled.
+
+Consequences already worked through, each genuine rather than churn — the widened unroll runs ABOVE
+the routing switch, so it moves both spines: seven `sql-hygiene` byte ratchets (n copies of a body is
+n times the text — banked), the L2 SQL pins that assert legacy's `WITH RECURSIVE` for traversals that
+no longer recurse on EITHER spine (repointed to `emit`/`simplePath()` bodies, which still walk), two
+L5 ratchet entries that got BETTER (`repeat(__.both()).times(3).range(5,11)` no longer diverges
+between the fast-path positions; a capability witness now executes), and one L5 GENERATOR bug the
+unroll exposed: it models a `repeat()` body as shape-preserving, but
+`repeat(__.has(…).inE('knows')).times(1)` ends on an EDGE — `RepeatStep` is `<S,S>` in its Java
+signature and not at runtime. Fixed with a `bodyEnds` constraint on the shape lattice.
 
 ### Why unroll lives at the IR level and not in RelIR
 
@@ -213,13 +238,17 @@ FOURTH way to consume a child body; it is the mechanism `rows` is already built 
 plus an origin mint plus a survival check), and the walk cannot go through `rows` because its input
 is the walk's own `SelfRef` and there is no host row to name an origin from.
 
-### 3.2 ~~The differential over the overlap cell~~ — WITHDRAWN, §1a
+### 3.2 ~~The differential over the overlap cell~~ — WITHDRAWN, §1a (conditional on §7)
 
 The approval required it because bounded + barrier-free bodies were legal BOTH ways. §1a measures
 that they are not: a bounded body must reach a regime that can collapse, and the walk cannot. With
 no overlap population there is nothing for a differential to compare, so this is discharged rather
 than deferred. What replaces it is the guard on each side — the unroll takes every bounded run it
 can express, and `walk.ts` declines a bounded walk over an interchangeable frontier.
+
+**This withdrawal inherits §7's precondition.** It holds only while the bounded cell actually reaches
+the phase-wise regime. If §7 does not land and bounded repeats stay with legacy, both regimes serve
+that population again and this differential is owed again with it.
 
 ### 3.3 Widen the unrolled body set further
 
@@ -309,3 +338,96 @@ unroll should only claim it when no other regime can.
   under arbitrary providers. Ours is set-at-a-time by construction, so "the whole frontier at
   iteration k" is what phase k's relation IS — the very property `RepeatStep.standardAlgorithm` has
   to special-case to get. That is the licence, and it is per-barrier.
+
+---
+
+## 7. THE COLLAPSE AUTHORITY — one, not two (the big change)
+
+**Status: the blocking precondition for §1's bounded cell. Not started. Scope is large and the
+direction is not in doubt — both references model it the way this section proposes, and neither
+models it the way we do today.**
+
+### 7.1 The finding
+
+There are TWO collapse analyses in this compiler, and they disagree:
+
+| | where | shape | admits |
+|---|---|---|---|
+| `collapseSafe` | `src/compiler/ir/analyze.ts` | ONE boolean for the WHOLE chain | movement/filter prefix + a reducer/`groupCount` terminal |
+| `suffixBulkSafe` / `bulkPlan` | `src/compiler/steps/tail/bulk.ts` | legacy's `repeat()`-specific suffix rule | the above **plus** `as(labels)`/`select(labels)` under a `count()` terminal |
+
+Legacy's repeat bulk path routes AROUND the general analysis: it collapses the walk's own hops
+itself, then hands a `(id, bulk)` frontier to the generic tail with `movementCollapse` FORCED ON.
+That is why `g.V().repeat(__.out()).times(5).as("a").out("writtenBy").as("b").select("a","b").count()`
+— 24 309 134 024 traversers over the grateful graph — answers today at all.
+
+Unrolling the repeat deletes that route. The general analysis then refuses the collapse, and the
+plan enumerates. **Measured: L3 goes from passing to a hang** (bun pinned at ~100% CPU, no output;
+`ci-7`/`ci-9` this session).
+
+### 7.2 Why the obvious fix is WRONG — measured, not predicted
+
+Relaxing `collapseSafe` to admit `as`/`select` under a `count()` terminal was tried and REFUTED by
+two independent instruments:
+
+- `test/compiler/analyze.exec.test.ts:65` pins `g.V().as("a").out().count()` → `collapseSafe: false`,
+  with the reason in the test name: *"as() carries identity"*.
+- the census answer-change gate: **52 executing traversals changed their answer.**
+
+The reason is POSITIONAL and a chain-global boolean cannot express it. In legacy's bulk path the
+labels are bound **after** the collapse, on a frontier of DISTINCT ids, where a label is well-defined
+per row. In the general prefix an `as()` may be bound **before** a collapse that then merges rows
+carrying different label values. Same steps, same terminal, opposite safety — decided by WHERE the
+collapse sits relative to the binding.
+
+### 7.3 The structural answer, and it is what both references already do
+
+**Collapse-safety is a property of a POSITION and the state carried there — not of a chain.**
+
+**TinkerPop decides it per traverser, by `equals`.** Bulking merges two traversers exactly when they
+are equal, and which state participates in equality is a property of the traverser CLASS, chosen from
+the traversal's requirements. The class names are the carried-state list:
+
+- `B_O_Traverser.equals` — object and future only, so two traversers on the same element MERGE
+  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/traverser/B_O_Traverser.java:70`).
+- `B_LP_O_S_SE_SL_Traverser.equals` — `super.equals(other) && other.path.equals(this.path)`, and the
+  path holds the `as()` bindings, so two traversers with different labels DO NOT merge
+  (`.../B_LP_O_S_SE_SL_Traverser.java:117`).
+- and the fail-closed case is already ours: `hashCode` returns
+  `carriesUnmergeableSack() ? System.identityHashCode(this) : …` (`ibid.:114`) — an unmergeable sack
+  can never merge with anything, which is exactly `CHANNEL_GROUP_POLICY`'s `'undefined'`.
+
+**Calcite decides it per RelNode, as METADATA.** Collation, uniqueness and row count are computed for
+a node through `RelMetadataQuery` (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/metadata/RelMetadataQuery.java`,
+with `RelMdCollation.java` / `RelMdColumnUniqueness.java`), never as a query-global flag. And whether
+an aggregate may be computed in PARTS and combined — precisely "may I collapse and then re-sum" — is
+declared per function by `SqlSplittableAggFunction`, whose own javadoc is the statement of our
+problem: *"Aggregate function that can be split into partial aggregates. For example, COUNT(x) can be
+split into COUNT(x) on subsets followed by SUM to combine those counts"*
+(`vendor/calcite/core/src/main/java/org/apache/calcite/sql/SqlSplittableAggFunction.java:42-48`).
+
+**We already model it correctly on ONE side.** RelIR's movement arm asks the question per node, of
+the channels carried AT that node — `ctx.collapse && !encounterOf(rel.channels) && groupableChannels(rel.channels)`
+(`src/compiler/rel/lower.ts`) — and `channels.ts`'s `CHANNEL_GROUP_POLICY` is the per-role table that
+answers it. The chain-global boolean is the LEGACY shape, and `collapseSafe` is the last place a
+whole-chain answer stands in for a per-position one.
+
+### 7.4 What lands
+
+1. **Make the per-position answer the only one.** A collapse is legal at a node when every channel
+   carried there has a defined answer under grouping — which `groupableChannels` already decides.
+   `collapseSafe` stops being a chain verdict and becomes, at most, a seeding hint.
+2. **An alias that nothing reads is not carried.** `as("a")` whose label no later step reads is dead;
+   dropping it (a `simplify` Pass) makes the collapse legal for the right reason instead of by
+   exception. This is `PathRetractionStrategy`'s own job upstream, and we currently list that strategy
+   as a no-op.
+3. **A `count()` terminal makes the traverser's VALUE unobservable**, which is what legitimises
+   legacy's `as`/`select` admission — state it once, positionally, rather than as a suffix pattern.
+4. **Delete `suffixBulkSafe`/`bulkPlan`'s copy.** One authority. The `edges` ratchet should fall.
+
+### 7.5 The instruments that must stay green
+
+The census answer-change gate is the one that already caught this once, so it is the gate, not a
+formality: **no executing traversal may change its answer on either spine.** Plus `test:perturbed`
+(order-fragility), the L3 floor, and — because a cost wall here reads as a hang rather than a failure
+— **an L3 wall-clock that stays in its normal band.**

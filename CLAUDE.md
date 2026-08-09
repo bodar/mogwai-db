@@ -37,7 +37,12 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
   both a per-iteration barrier and the RLE collapse; **unbounded** → `Recursive`; unbounded+barrier →
   a clear refusal. APPROVED, and it SUPERSEDES the RelIR build plan's Phase 3 step 4. Its §1a carries
   the measurement that AMENDED the approved table (a recursive term cannot hold an aggregate, so a
-  walk cannot collapse a multiset — and the corpus asks for 2.5×10¹⁵ traversers over 808 vertices)
+  walk cannot collapse a multiset — and the corpus asks for 2.5×10¹⁵ traversers over 808 vertices),
+  and its **§7 is the blocking precondition**: this compiler has TWO collapse authorities
+  (`ir/analyze.ts`'s chain-global `collapseSafe` and `steps/tail/bulk.ts`'s more permissive
+  repeat-specific `suffixBulkSafe`), the bounded cell cannot move until they are ONE, and the answer
+  is per-POSITION — which is how TinkerPop (`Traverser.equals` per traverser class) and Calcite
+  (`RelMetadataQuery` per node) both already model it
 - `docs/2026-08-09-named-collections-are-bindings-plan.md` — `aggregate("a")` RETAINS a relation under a
   name; `cap("a")` reduces it. APPROVED, not started. Supersedes `collection.ts`'s "registered twice →
   decline" and the `ctx.mutating` decline beside it, and carries the measurement that 9 of 13
