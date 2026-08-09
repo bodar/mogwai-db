@@ -232,11 +232,22 @@ export function rewriteRels(plan: Rel, f: (mapped: Rel, original: Rel) => Rel): 
  * here rather than private to a pass.
  *
  * A `SelfRef` defines nothing and names its walk positionally, so it is not a free reference.
+ *
+ * ⚠️ **VISITS EACH NODE ONCE — the plan is a DAG (§3.4) and the guard is not an optimization.**
+ * Both sets it accumulates are unions, so revisiting a shared node adds nothing; what it costs is
+ * TIME, exponentially. `both()` is the shape that shows it: each hop is a `Union` of two arms and
+ * both arms read the SAME input relation, so a walk without this guard visits 2^k nodes for k hops.
+ * Measured before the guard, on `g.V().both()…count()`: 3 ms at k=8, 169 ms at k=16, 2 660 ms at
+ * k=20, while the emitted SQL grew LINEARLY (~310 bytes per hop) throughout — the giveaway that the
+ * cost was a traversal and never the plan.
  */
 export function freeRelIds(plan: Rel): ReadonlySet<string> {
   const defined = new Set<string>();
   const referenced = new Set<string>();
+  const seen = new Set<Rel>();
   const go = (r: Rel): void => {
+    if (seen.has(r)) return;
+    seen.add(r);
     defined.add(r.id);
     relExprs(r).forEach((e) => forEachExpr(e, (node) => {
       if (node.kind === 'col') referenced.add(node.rel);

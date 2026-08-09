@@ -99,3 +99,41 @@ describe('property indexes: static vp indexes engage (no full scan)', () => {
     expect(usesVpIndex(d)).toBe(true);
   });
 });
+
+/**
+ * COMPILE COST IS LINEAR IN THE LENGTH OF THE CHAIN — the one regression this file asserts in WALL
+ * CLOCK, and the exception is the point.
+ *
+ * Everything above pins a PLAN SHAPE, deliberately: wall clock is flaky and a plan is not. This one
+ * has to be time, because the defect WAS time and nothing else. `both()` is a `Union` of two arms
+ * and both arms read the SAME input relation, so a k-hop chain is a DAG with 2^k paths through it —
+ * and a walk over it with no visited-guard takes 2^k steps. The emitted SQL stayed LINEAR
+ * throughout (~310 bytes per hop), which is exactly why no other instrument could see it: the plan
+ * was always right, only the walk that built it was exponential.
+ *
+ * Measured on `g.V().both()×k.count()`, before → after the guard in `freeRelIds` (`src/rel/walk.ts`):
+ * k=12 14 ms → 4 ms · k=16 169 ms → 4 ms · k=20 2 660 ms → 7 ms · k=80 unreachable → 36 ms.
+ *
+ * The bound is ~100× the measured time, so it guards against the exponential COMING BACK rather than
+ * setting a performance target. Any un-memoised DAG walk added to the compile path fails it.
+ */
+describe('compile cost is linear in the length of the chain', () => {
+  test('a 24-hop both() chain compiles in milliseconds, not minutes', () => {
+    const started = performance.now();
+    const compiled = compile(`g.V()${'.both()'.repeat(24)}.count()`, {});
+    const elapsed = performance.now() - started;
+    expect(compiled.kind).toBe('read');
+    expect(elapsed).toBeLessThan(2000);
+  });
+
+  test('doubling the hops roughly doubles the SQL, and never more', () => {
+    const sqlOf = (k: number) => {
+      const compiled = compile(`g.V()${'.both()'.repeat(k)}.count()`, {});
+      if (compiled.kind !== 'read') throw new Error('expected read plan');
+      return compiled.sql.length;
+    };
+    // The OUTPUT was linear even while the walk was exponential, so this is the other half of the
+    // property rather than a proxy for it: the plan has to stay linear too.
+    expect(sqlOf(40)).toBeLessThan(sqlOf(20) * 2.2);
+  });
+});
