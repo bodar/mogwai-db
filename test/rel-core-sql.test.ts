@@ -1,11 +1,13 @@
 import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
+import { fromTree } from '../src/rel/block.ts';
 import { emitQuery } from '../src/rel/emit.ts';
 import { planOf } from '../src/rel/plan.ts';
 import { col, compilerInt, compilerNull, compilerText, lit } from '../src/rel/expr.ts';
 import type { Expr } from '../src/rel/expr.ts';
 import { aggregate, distinct, filter, join, limit, project, recursive, scan as scanRel, sort, union, values, window } from '../src/rel/factory.ts';
 import type { Channels } from '../src/channels.ts';
+import type { Rel } from '../src/rel/rel.ts';
 import { relId } from '../src/rel/types.ts';
 
 /**
@@ -84,6 +86,113 @@ describe('RelIR relational-core SQL', () => {
       'SELECT n.id AS id, n.name AS name FROM nodes n UNION ALL SELECT m.id AS id, m.name AS name FROM nodes m',
       'WITH RECURSIVE walk(id, name) AS (SELECT v.column1 AS id, v.column2 AS name FROM (VALUES (?, ?)) v UNION ALL SELECT walk.id AS id, walk.name AS name FROM walk walk) SELECT * FROM walk',
     ]);
+  });
+
+  /**
+   * THE ANTI-DRIFT GATE FOR `src/rel/block.ts`.
+   *
+   * `check` decides a `Recursive` step's legality by asking the block analysis where the walk's
+   * reference LANDS — and that analysis is the emitter's fusion walk with every rendered expression
+   * removed. The rules themselves cannot disagree (`NEEDS_SUBQUERY`/`spliceable` have one
+   * definition, which the assembler reads), but the TRAVERSAL is written twice, and a divergence
+   * there is the worst failure available: a plan the checker admits and the emitter then wraps,
+   * which SQLite answers with `circular reference` — a production throw no unit test would see.
+   *
+   * So the analysis is pinned against the STRINGS. For each shape below, the relations `fromTree`
+   * says stand unwrapped in the FROM join tree must be exactly the aliases the emitted SQL puts
+   * there — a derived table, a table-valued function and a compound arm each contributing none.
+   */
+  test('the block analysis agrees with the SQL the emitter actually renders', () => {
+    /** FROM items standing UNWRAPPED at the top level of a single-SELECT statement. A `(SELECT …)`
+     *  is a derived table and a `json_each(…)` a table-valued function — neither is a relation of
+     *  the algebra standing in this FROM — while `(VALUES …)` IS a row source despite its parens. */
+    const emittedSources = (sql: string): readonly string[] => {
+      const tokens = sql.match(/\(|\)|[A-Za-z_][A-Za-z0-9_]*|\S/g) ?? [];
+      const closes = (from: number): number => {
+        let depth = 0;
+        for (let j = from; j < tokens.length; j++) {
+          if (tokens[j] === '(') depth++;
+          else if (tokens[j] === ')' && --depth === 0) return j;
+        }
+        throw new Error(`unbalanced parentheses in ${sql}`);
+      };
+      const out: string[] = [];
+      let depth = 0;
+      for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i]!;
+        if (token === '(') { depth++; continue; }
+        if (token === ')') { depth--; continue; }
+        if (depth !== 0 || !/^(FROM|JOIN)$/i.test(token)) continue;
+        const head = tokens[i + 1]!;
+        if (head === '(') {
+          const end = closes(i + 1);
+          if (/^VALUES$/i.test(tokens[i + 2] ?? '')) out.push(tokens[end + 1]!);
+          i = end + 1;
+        } else if (tokens[i + 2] === '(') {
+          i = closes(i + 2) + 1;                       // json_each(…) alias — an alias, not a source
+        } else {
+          out.push(tokens[i + 2]!);                    // <table> <alias>
+          i += 2;
+        }
+      }
+      return out;
+    };
+
+    const n = scan('n');
+    const m = scan('m');
+    const shadow = scanRel({ id: relId('shadow'), table: 'nodes', alias: 'n', channels, type: { cols } });
+    const v = values({ id: relId('v'), rows: [[lit(1, 'int'), lit('marko', 'text')]], channels, type: { cols } });
+    const both = (left: Rel, right: Rel, id: string, kind: 'inner' | 'left' | 'cross' | 'semi' | 'anti' = 'inner') =>
+      join({ id: relId(id), left, right, join: kind, channels,
+        // A LEFT join null-pads its right side, so those outputs must be declared nullable.
+        type: { cols: kind === 'semi' || kind === 'anti' ? [...cols]
+          : [...cols, ...cols.map((c) => ({ ...c, name: `${c.name}_r`, nullable: kind === 'left' }))] },
+        ...(kind === 'cross' ? {} : { on: eq(col(left.id, 'id'), col(right.id, 'id')) }) });
+    const pass = (id: string, input: Rel) => project({ id: relId(id), input, channels, type: { cols },
+      exprs: [['id', col(input.id, 'id')], ['name', col(input.id, 'name')]] });
+    const kept = (id: string, input: Rel) => filter({ id: relId(id), input, channels, type: { cols }, pred: eq(col(input.id, 'name'), lit('x', 'text')) });
+    const deduped = (id: string, input: Rel) => distinct({ id: relId(id), input, channels, type: { cols } });
+    const capped = (id: string, input: Rel) => limit({ id: relId(id), input, channels, type: { cols }, count: lit(2, 'int') });
+
+    const shapes = [
+      n,
+      pass('p1', n),
+      kept('f1', pass('p2', n)),
+      both(n, m, 'j1'),
+      pass('p3', both(n, m, 'j2')),
+      both(kept('f2', n), m, 'j3'),                    // a spliceable side lifts its own FROM item
+      both(deduped('d1', n), m, 'j4'),                 // …and a DISTINCT side fills a slot, so it nests
+      both(m, deduped('d2', n), 'j5'),
+      both(n, shadow, 'j6'),                           // an alias collision pushes the side into its own SELECT
+      both(n, m, 'j7', 'left'),
+      // ⚠️ A LEFT join may NOT splice its right side — its predicate has to stay inside the subquery,
+      // or an unmatched row is filtered instead of null-padded. The same side under an INNER join
+      // splices, so this pair is what makes the rule observable at all.
+      both(n, kept('f3', m), 'j11', 'left'),
+      both(n, kept('f4', m), 'j12'),
+      both(n, m, 'j8', 'cross'),
+      both(n, m, 'j9', 'semi'),                        // the right side is an EXISTS, never a FROM item
+      capped('l1', capped('l2', n)),                   // the occupied slot that nests
+      sort({ id: relId('s1'), input: deduped('d3', n), channels, type: { cols }, terms: [{ expr: col(relId('d3'), 'name'), dir: 'asc' }] }),
+      v,
+      pass('p4', v),
+      both(v, m, 'j10'),
+      aggregate({ id: relId('a1'), input: n, channels, type: { cols: [{ name: 'c', type: 'int', nullable: false }] }, groupBy: [], aggs: [['c', { kind: 'agg', fn: 'count', args: [] }]] }),
+      window({ id: relId('w1'), input: n, channels, type: { cols: [...cols, { name: 'rn', type: 'int', nullable: false }] },
+        specs: [['rn', { kind: 'window-expr', fn: 'row_number', args: [], spec: { partitionBy: [], orderBy: [{ expr: col(n.id, 'name'), dir: 'asc' }] } }]] }),
+    ];
+
+    for (const shape of shapes) {
+      const predicted = fromTree(shape).map((source) => (source.kind === 'scan' ? source.alias : source.id));
+      const sql = emitQuery(planOf(shape)).sql;
+      expect({ shape: shape.id, sources: predicted }).toEqual({ shape: shape.id, sources: [...emittedSources(sql)] });
+    }
+  });
+
+  /** A compound is a complete SELECT of its own, so nothing inside it stands in an enclosing FROM —
+   *  which is why the walk above cannot cover it, and why a `Union` step is refused outright. */
+  test('a compound relation exposes no FROM item to the level above it', () => {
+    expect(fromTree(union({ id: relId('u1'), inputs: [scan('n'), scan('m')], all: true, channels, type: { cols } }))).toEqual([]);
   });
 
   test('a run of operators is ONE SELECT, not one derived table per node', () => {
