@@ -126,6 +126,23 @@ export interface ChildValue {
   readonly expr: Expr;
   readonly framing: RelFraming;
   /**
+   * DID THE BODY HAVE ONLY ONE RESULT TO GIVE, or did this expression TAKE THE FIRST of several — the
+   * other end of the cardinality question `present` opens, and REQUIRED for the same reason `framing`
+   * is: only the arm that built the expression knows.
+   *
+   * The arm's contract is one value per host row, and there are two different ways to honour it.
+   * `__.out().count()` and `__.outV()` yield exactly one BY CONSTRUCTION — a reducing barrier, an
+   * endpoint the schema makes single-valued. `__.values('name')` yields one PER PROPERTY ROW and the
+   * expression picks the first in insertion order, which is `map()`'s semantics and is NOT
+   * `local()`/`flatMap()`'s.
+   *
+   * So a consumer that emits every result must refuse `'first'` and a consumer that wants the first
+   * may take either. Leaving it implicit meant reading it off the framing — "a reducing `result` marker
+   * means exactly one" — which is true today and true only by coincidence: it made `local(__.outV())`
+   * decline, because an endpoint re-root is single-valued without being a reducer.
+   */
+  readonly yields: 'one' | 'first';
+  /**
    * The value's PER-ROW type, where the body read one from storage — the second correlated read that
    * a `perRow` framing names a column for.
    *

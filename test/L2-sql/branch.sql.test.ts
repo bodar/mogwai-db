@@ -354,44 +354,47 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(scalar.sql.match(/PARTITION BY/g)?.length).toBe(1);
   });
 
-  test('map(__.<scalar>) → per-traverser scalar projection (value shape)', () => {
-    const m = read('g.V().map(__.out().count())');
+  test('map(__.<scalar>) → per-traverser scalar projection (value shape) — LEGACY lowering', () => {
+    // PINNED TO LEGACY THROUGHOUT, because every assertion below names legacy's own columns (`c.id`,
+    // `d.o0`, `p.o0`): a child-scope barrier over a preserved domain, so an empty child is an explicit
+    // zero row per origin. RelIR answers the shapes it covers as a CORRELATED SCALAR instead — its
+    // half is the `relOnly` test after this one — and pinning a spine's SQL pins BOTH (§10·4).
+    const legacy = (gremlin: string) => read(gremlin, { spine: 'legacy' });
+    const m = legacy('g.V().map(__.out().count())');
     expect(m.shape).toEqual({ kind: 'value', type: STATIC('long') }); // count() is a Long
-    // count() is a child-scope barrier, not a correlated scalar fast path: the
-    // preserved domain makes an empty child an explicit zero row per origin.
     expect(m.sql).toContain('COUNT(c.id) AS v');
     expect(m.sql).toContain('LEFT JOIN');
     expect(m.sql).toContain('GROUP BY d.o0');
-    const localCount = read('g.V().local(__.out().count())');
+    const localCount = legacy('g.V().local(__.out().count())');
     expect(localCount.sql).toContain('COUNT(c.id) AS v');
     expect(localCount.sql).toContain('LEFT JOIN');
-    const localRows = read('g.V(1).local(__.out().values("name").order().limit(2))');
+    const localRows = legacy('g.V(1).local(__.out().values("name").order().limit(2))');
     expect(localRows.sql).toContain('PARTITION BY p.o0 ORDER BY (CASE WHEN p.vtype');
     expect(localRows.sql).toContain('ELSE p.v END) ASC');
-    const carriedCount = read('g.V(1).as("a").local(__.out().count())');
+    const carriedCount = legacy('g.V(1).as("a").local(__.out().count())');
     expect(carriedCount.sql).toContain('COUNT(c.id) AS v, d.a0');
-    const childValue = read('g.V(1).map(__.values("name"))');
+    const childValue = legacy('g.V(1).map(__.values("name"))');
     expect(childValue.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     expect(childValue.sql).toContain('JOIN vertex_properties vp');
     expect(childValue.sql).toContain('ROW_NUMBER() OVER (PARTITION BY p.o0');
-    expect(read('g.V(1).map(__.values("name").toUpper())').sql).toContain('upper(p.v) AS v');
-    expect(read('g.V(1).map(__.out().values("name").order().by(Order.desc).limit(1))').sql)
+    expect(legacy('g.V(1).map(__.values("name").toUpper())').sql).toContain('upper(p.v) AS v');
+    expect(legacy('g.V(1).map(__.out().values("name").order().by(Order.desc).limit(1))').sql)
       .toContain('ELSE p.v END) DESC');
-    expect(read('g.V(1).local(__.out().values("name").tail(2))').sql)
+    expect(legacy('g.V(1).local(__.out().values("name").tail(2))').sql)
       .toContain('PARTITION BY p.o0 ORDER BY p.encounter DESC');
-    const reducedChild = read('g.V().map(__.out().values("name").is("lop").count())');
+    const reducedChild = legacy('g.V().map(__.out().values("name").is("lop").count())');
     // A SCOPED reducer counts child rows per parent and does NOT weight by bulk — that column
     // holds the PARENT's multiplicity here, and the domain re-projects it onto the result row, so
     // weighting would apply it twice (test/L2-sql/repeat-path.sql.test.ts P1.2 pins the semantics;
     // the rule is on lowerScopedScalarReducer). A per-key GROUP total does weight — that is P1.1.
     expect(reducedChild.sql).toContain('COUNT(s.encounter) AS v');
     expect(reducedChild.sql).toContain('LEFT JOIN');
-    const foldedChild = read('g.V().map(__.out().values("name").fold()).count(Scope.local)');
+    const foldedChild = legacy('g.V().map(__.out().values("name").fold()).count(Scope.local)');
     // The folded member now carries the per-list encoding decision (bare vs {t,v}); the
     // ORDER BY / FILTER productivity contract is unchanged.
     expect(foldedChild.sql).toContain('ORDER BY s.encounter) FILTER (WHERE s.encounter IS NOT NULL)');
     expect(foldedChild.sql).toContain("json('[]')");
-    expect(read('g.V().map(__.out().fold()).unfold().values("name")').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
+    expect(legacy('g.V().map(__.out().fold()).unfold().values("name")').shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     expect(() => compile('g.V().map(__.constant(1).discard())', {})).toThrow();
     // record/list-valued child bodies still defer; element bodies use generic child scope below.
     // A label select in a child body is NOT a deferral: select("a") with no binding in scope
@@ -400,7 +403,39 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(read('g.V().map(__.select("a"))').sql).toContain('WHERE 0');
     expect(() => compile('g.V().map(__.values("name")).map(__.values("age"))', {})).toThrow('map() after a scalar stream not yet supported');
     // The leaf now returns a ScalarStream instead of materializing terminal SQL.
-    expect(read('g.V().map(__.out().count()).is(P.gt(0)).count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
+    expect(legacy('g.V().map(__.out().count()).is(P.gt(0)).count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
+  });
+
+  relOnly('map()/flatMap()/local() are ONE lowering and three cardinality policies', () => {
+    // A correlated SCALAR, not a rejoined domain: the body's one value per host row IS `map`'s
+    // policy, and is what `local`/`flatMap` reduce to whenever the body had only one to give.
+    const m = read('g.V().map(__.out().count())');
+    expect(m.spine).toBe('rel');
+    expect(m.shape).toEqual({ kind: 'value', type: STATIC('long') }); // count() is a Long
+    expect(m.sql).toMatch(/SELECT \(SELECT \w+\.v AS v FROM \(SELECT COALESCE\(sum\(1\), 0\) AS v FROM edges/);
+    // No LEFT JOIN and no per-origin GROUP BY — the empty child's zero comes from `count()`'s own
+    // COALESCE, which is `CountGlobalStep`'s seed rather than a preserved domain row.
+    expect(m.sql).not.toContain('LEFT JOIN');
+    // The THREE HOSTS AGREE on a body that yields one, which is the point of the shared lowering.
+    for (const host of ['map', 'flatMap', 'local'])
+      expect(read(`g.V().${host}(__.out().count())`).sql, host).toBe(m.sql);
+
+    // A MULTI-VALUED property read is where the policies part: `map` takes the insertion-order first
+    // (`ORDER BY … LIMIT 1`), `local`/`flatMap` decline because they owe every value.
+    const first = read('g.V().map(__.values("name"))');
+    expect(first.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
+    expect(first.sql).toMatch(/ORDER BY \w+\.id ASC LIMIT 1/);
+    // …and the traverser is DROPPED where the body produced nothing, which is `TraversalMapStep`'s
+    // `EmptyTraverser` — an `EXISTS` over the property row rather than a test of the value's nullness,
+    // so a genuinely null value still counts as produced.
+    expect(first.sql).toContain('EXISTS (SELECT');
+    expect(read('g.V().local(__.values("name"))').spine).toBe('legacy');
+
+    // An ENDPOINT re-root is single-valued BY THE SCHEMA, so every host takes it — the case that
+    // proved the policy could not be read off a reducing framing marker.
+    const endpoint = read('g.E().local(__.outV())');
+    expect(endpoint.spine).toBe('rel');
+    expect(endpoint.shape).toEqual({ kind: 'vertex' });
   });
 
   test('map(__.<element body>) uses child scope + first-per-parent cardinality', () => {
@@ -512,9 +547,24 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     //
     // No Pick.none: TinkerPop passes unmatched inputs through as the ELEMENT, so the result is
     // genuinely mixed scalar/element → the variant merge, not a deferral.
-    const passthrough = read('g.V().choose(__.out().count()).option(1, __.values("name")).option(2, __.values("age"))');
+    // `{ spine: 'rel' }` for the reason the `Pick.unproductive` assertion below carries: the ordinals
+    // are an INTERNAL naming and the two spines spell the gate differently (`oarm` here, `ch_at` in
+    // legacy's `steps/prefix/branch.ts`). A plan-shape claim about RelIR should say so rather than
+    // asserting whatever the ambient position happens to emit.
+    const passthrough = read('g.V().choose(__.out().count()).option(1, __.values("name")).option(2, __.values("age"))', { spine: 'rel' });
     expect(passthrough.shape).toMatchObject({ kind: 'variant', arms: expect.arrayContaining([{ kind: 'vertex' }]) });
-    expect(passthrough.sql).toContain('NOT COALESCE'); // the unmatched (element) arm's gate
+    // The unmatched (element) arm's gate, and the two unmatched cases stay DISTINGUISHABLE: `-2` is
+    // `Pick.unproductive` (the choice produced nothing) and `-1` is `Pick.none` (it produced a value
+    // no option claims), which TinkerPop routes differently. Here the choice is a `count()`, which
+    // seeds 0 and is therefore ALWAYS productive — so its presence term folds to a literal and the
+    // `-2` arm is statically empty. That is the seam stating productivity rather than the lowering
+    // re-deriving it from the value's nullness.
+    expect(passthrough.sql).toContain('ELSE -1 END AS oarm');
+    // …and the `Pick.unproductive` ordinal is ABSENT, because `count()` seeds 0 and can never be
+    // unproductive. An arm that cannot fire is not merely dead SQL: emitting it would declare a
+    // scalar/element VARIANT for a traversal whose element arm never occurs. The seam states the
+    // productivity (`ChildValue.present === ALWAYS_PRODUCTIVE`) and the lowering reads it.
+    expect(passthrough.sql).not.toContain('-2');
     // An ELEMENT option body is an arm, not a CASE branch → the element merge.
     expect(read('g.V().choose(T.label).option("person", __.out("knows")).option(Pick.none, __.identity()).values("name")').shape.kind)
       .toBe('value');

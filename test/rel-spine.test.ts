@@ -330,6 +330,21 @@ const COVERED = [
   "g.V().or(__.outE('knows'), __.has(T.label,'software').or().has('age',P.gte(35)))",
   "g.V().not(__.or(__.has('age',P.gt(30)), __.hasLabel('software')))",
   "g.V().where(__.and(__.has('age'), __.out('created')))",
+  // THE PER-TRAVERSER CHILD HOSTS — `map`/`flatMap`/`local`, one lowering and three cardinality
+  // policies over the same correlated scalar. `map` takes the body's FIRST result and drops the
+  // traverser when there is none (`TraversalMapStep.processNextStart`); the other two emit every
+  // result, so they may take that expression only where the body had exactly ONE to give.
+  "g.V().map(__.outE().count())", "g.V().flatMap(__.outE().count())", "g.V().local(__.outE().count())",
+  "g.V().map(__.out().count())", "g.V().hasLabel('person').map(__.out('created').count())",
+  // A MULTI-VALUED property read is the case the policies disagree about, so both directions are
+  // listed: `map` picks the insertion-order first, `local` declines (see DECLINED).
+  "g.V().map(__.values('name'))", "g.V().map(__.values('age'))",
+  // …and an ENDPOINT re-root is single-valued BY THE SCHEMA without being a reducer, which is the
+  // shape that proved the policy could not be read off the framing.
+  "g.E().map(__.outV())", "g.E().local(__.outV())", "g.E().flatMap(__.inV())",
+  // A body that DROPS — `map(__.values('age'))` above emits nothing for the two software vertices,
+  // which is the productivity signal being required rather than assumed.
+  "g.V().map(__.values('age')).count()",
   // A SUB-TRAVERSAL `by()` projection — the child seam. A flat value body is an EXPRESSION over the
   // outer row; a body that MOVES and then REDUCES is `correlatedExists` minus the EXISTS, read for its
   // value. Both arms reach every by() host at once, which is why one entry per host is worth having.
@@ -399,6 +414,17 @@ const DECLINED = [
   "g.V().has('name',TextP.containing('ark'))",  // ftsSubstringPredicate's — see below
   "g.V().has('name',P.within(__.V().values('name').fold()))", // a run-time member list, not a set
   "g.V().has('name',null)",           // a null value: not a literal this route can compare
+  // The per-traverser hosts' own declines, each a CARDINALITY the correlated scalar cannot honour.
+  // A vertex property key is MULTI-VALUED, so an every-result policy needs the rejoin rather than the
+  // first; a fan-out body has no "first" a correlated subquery can name; a per-parent `fold()`/slice
+  // and a bare `count()` are barriers scoped to one start, which is the same rejoin.
+  "g.V().local(__.values('name'))",
+  "g.V().map(__.out())",
+  "g.V().local(__.outE().fold())",
+  "g.V().local(__.count())",
+  // A numeric reducer over an EMPTY child: the seam cannot state productivity (the aggregate is NULL
+  // both there and over an all-null input that `MaxLocalStep` genuinely emits), and `map` must drop.
+  "g.V().local(__.out().values('age').sum())",
 ];
 
 describe('the RelIR spine', () => {

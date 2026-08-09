@@ -970,6 +970,11 @@ const paramOf = (step: IRStep): { limitParam?: string | null; offsetParam?: stri
  *  handlers over one `reprojectRows`. */
 const SLICE_STEPS = new Set(['limit', 'skip', 'range', 'tail', 'sample']);
 
+/** The three steps that apply a CHILD BODY once per traverser. One set rather than three names at the
+ *  dispatch, because what separates them is a policy inside the lowering and not which loop owns
+ *  them — `perTraverserChild` is where that policy is written down. */
+const PER_TRAVERSER_HOSTS = new Set(['map', 'flatMap', 'local']);
+
 /** `tail(n)`/`sample(n)`'s count. Both default to 1, and neither takes a range, so the numeric
  *  argument is the whole decode — `sliceOf` deliberately refuses `tail` (see `sliceOp`). */
 const countArg = (step: IRStep): number =>
@@ -3300,6 +3305,9 @@ function elementTail(
       if (!selected) return null;
       return continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
+    // THE PER-TRAVERSER CHILD HOSTS — one lowering, three cardinality policies (`perTraverserChild`).
+    if (PER_TRAVERSER_HOSTS.has(step.name))
+      return perTraverserChild(step, rel, elem, steps, at, bulked, ctx, fresh, labels);
     if (step.name === 'union' || step.name === 'choose') {
       const framing = { kind: 'elements', elem } as const;
       const merged = step.name === 'union'
@@ -4033,9 +4041,21 @@ function chooseOptions(
   const NONE = -1;
   const UNPRODUCTIVE = -2;
   const keyed = arms.filter((arm) => arm.pick === 'key');
-  const whens: (readonly [Expr, Expr])[] = [
-    [{ kind: 'unary', op: 'not', arg: choice.present }, compilerInt(UNPRODUCTIVE)],
-  ];
+  /**
+   * CAN THIS CHOICE BE UNPRODUCTIVE AT ALL — read off the seam's own claim, not assumed.
+   *
+   * `Pick.unproductive` is the choice producing NOTHING and `Pick.none` a value no option claims;
+   * TinkerPop routes them differently, which is why the presence signal exists. But a choice that
+   * ALWAYS produces — `count()` seeds 0 — can never reach the first, so its `WHEN` is dead and, more
+   * importantly, the implicit PASS-THROUGH for an unclaimed `Pick.unproductive` is an arm that cannot
+   * fire. Emitting it anyway declares a shape the traversal never has: `choose(__.out().count())
+   * .option(1, __.values('name')).option(Pick.none, __.discard())` became a VARIANT of scalar and
+   * element where the reference gives a plain value stream. Right arity, wrong shape.
+   */
+  const canBeUnproductive = produced.present !== ALWAYS_PRODUCTIVE;
+  const whens: (readonly [Expr, Expr])[] = canBeUnproductive
+    ? [[{ kind: 'unary', op: 'not', arg: choice.present }, compilerInt(UNPRODUCTIVE)]]
+    : [];
   for (const [at, arm] of keyed.entries()) {
     const pred = predicateExpr(choice.expr, arm.key, subject, null, null, fresh);
     if (!pred) return null;
@@ -4087,7 +4107,8 @@ function chooseOptions(
   // sentinels, since every keyed ordinal is claimed by construction. Deriving it from the claims
   // rather than from which tokens were written is what keeps it right when both are, and what makes a
   // `discard` arm's rows disappear rather than fall through: its ordinal IS claimed.
-  const unclaimed = [NONE, UNPRODUCTIVE].filter((ordinal) => !claimed.includes(ordinal));
+  const unclaimed = [NONE, ...(canBeUnproductive ? [UNPRODUCTIVE] : [])]
+    .filter((ordinal) => !claimed.includes(ordinal));
   if (unclaimed.length) {
     built.push({
       rel: gate(unclaimed.map(takes).reduce((left, right) => ({ kind: 'binary', op: 'or', left, right }))),
@@ -4217,6 +4238,140 @@ const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
     ? bodyOf(nested, ctx.params, ctx.sideEffects)
     : rootedSteps(nested, ctx.params, ctx.sideEffects)),
 });
+
+/**
+ * DOES THIS RELATION YIELD AT MOST ONE ROW — the question a correlated SCALAR subquery must be able to
+ * answer YES to, asked of the plan rather than inferred from a framing marker.
+ *
+ * SQL's scalar subquery takes the first row of whatever it is given and says nothing about it, so a
+ * plan that can emit several is a wrong ANSWER chosen by scan order. The collapsing node is a REDUCING
+ * barrier — an `Aggregate` with no `groupBy`, which is one row by definition — or an explicit
+ * one-row `Limit`. Above it, row-count-preserving or row-count-REDUCING nodes are transparent: a
+ * `Project`/`Sort`/`Window` keeps the count, a `Filter`/`Distinct` can only lower it, and either way
+ * "at most one" survives. Anything else (a `Join`, a `Union`, a `Scan`, a `JsonEach`) can multiply and
+ * stops the walk.
+ *
+ * It is deliberately a SUFFICIENT test and not a complete one: answering "no" costs a decline, and
+ * answering "yes" wrongly costs an arbitrary row.
+ */
+function collapsedToOneRow(rel: Rel): boolean {
+  switch (rel.kind) {
+    case 'aggregate': return rel.groupBy.length === 0;
+    case 'limit': return rel.count?.kind === 'lit' && rel.count.value === 1;
+    case 'project': case 'sort': case 'window': case 'filter': case 'distinct': case 'materialize':
+      return collapsedToOneRow(rel.input);
+    default: return false;
+  }
+}
+
+/**
+ * `map()` / `flatMap()` / `local()` — A CHILD BODY APPLIED PER TRAVERSER, or `null` to decline.
+ *
+ * TinkerPop's three per-traverser hosts differ in ONE thing, and naming that thing is what makes them
+ * one lowering rather than three: the CARDINALITY POLICY.
+ *
+ * - `map(b)` takes the body's FIRST result and DROPS the traverser when there is none —
+ *   `TraversalMapStep.processNextStart` is `iterator.hasNext() ? traverser.split(iterator.next()) :
+ *   EmptyTraverser` (`gremlin-core/.../step/map/TraversalMapStep.java:49-53`).
+ * - `flatMap(b)` emits every result.
+ * - `local(b)` emits every result too, and additionally scopes the body's BARRIERS to one start.
+ *
+ * ## Why this arm is a correlated SCALAR and not a rejoined relation
+ *
+ * A correlated scalar answers "one value per host row", which is `map`'s policy EXACTLY and is also
+ * what `local`/`flatMap` reduce to whenever the body provably yields one — a reducing barrier. So the
+ * shapes that need no per-parent rejoin at all are served by the seam that already exists, and the
+ * REJOIN (a body that fans out under `local`/`flatMap`, a per-parent slice, a per-parent `fold()`)
+ * is the next increment rather than a prerequisite of this one. `child.rows` is what it will use.
+ *
+ * The decline that keeps this honest is the seam's own: `scalarChild` refuses a movement whose tail is
+ * not reducing, precisely because SQLite would silently take the first row of a fan-out. So
+ * `map(__.out().values('name'))` declines rather than answering an arbitrary member — a `map` DOES
+ * take the first, but "first" is a question about emission order that a correlated subquery cannot
+ * answer, and answering it by scan luck is the one thing the decline contract exists to prevent.
+ *
+ * PRODUCTIVITY is required, never assumed: `map` must drop an unproductive traverser, so a body whose
+ * productivity the seam cannot state (`ChildValue.present` absent — a numeric reducer over an empty
+ * child, which `correlatedExists` fails closed on for the same reason) declines here too.
+ */
+function perTraverserChild(
+  step: IRStep, rel: Rel, elem: Elem, steps: readonly IRStep[], at: number,
+  bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): Tail | null {
+  if (step.modulators?.length || step.optionArms) return null;
+  const [nested, extra] = argValues(step);
+  if (extra !== undefined || !isNested(nested)) return null;
+  const body = bodyOf(nested.nested, ctx.params);
+  if (!body?.length) return null;
+
+  const produced = scalarChild(body, elementHost(rel, elem, labels), ctx, fresh);
+  if (!produced) return null;
+  // THE POLICY, and it is the whole difference between the three steps: `local`/`flatMap` emit EVERY
+  // result, so a correlated scalar is their answer only where the body had exactly ONE to give, while
+  // `map` takes the first by definition. The seam states which (`ChildValue.yields`) rather than this
+  // reading it off the framing — a reducing `result` marker implies one, but so does an endpoint
+  // re-root that is not a reducer at all, and inferring it here made `local(__.outV())` decline.
+  if (step.name !== 'map' && produced.yields !== 'one') return null;
+  // An unproductive body DROPS the traverser at all three hosts (`map` by the citation above;
+  // `local`/`flatMap` because a body with no results contributes none), so the signal is required
+  // rather than assumed — `ChildValue.present`'s own contract.
+  if (!produced.present) return null;
+
+  /**
+   * The body's ONE result as this stream's PAYLOAD COLUMNS — an element re-roots to its rowid, a value
+   * to `v` plus whatever type column its framing declares. Any other framing declines: a correlated
+   * read yields one column, and a shape needing more is the rejoin's business.
+   */
+  const payload = ((): { readonly cols: readonly (readonly [ColMeta, Expr])[]; readonly framing: RelFraming } | null => {
+    if (produced.framing.kind === 'elements')
+      return { cols: [[meta('id', 'int', true), produced.expr]], framing: produced.framing };
+    if (produced.framing.kind !== 'scalar') return null;
+    // The type rides where the seam put it: a stored value's `vtype` is a second correlated read, so it
+    // becomes a column and the framing says `perRow`; a reducer's own tag is static and needs none.
+    return produced.vtype
+      ? {
+        cols: [[meta('v', 'any', true), produced.expr], [meta('vtype', 'text', true), produced.vtype]],
+        framing: { kind: 'scalar', type: PER_ROW('vtype') },
+      }
+      : { cols: [[meta('v', 'any', true), produced.expr]], framing: produced.framing };
+  })();
+  if (!payload) return null;
+
+  /**
+   * PROJECT, THEN FILTER THE COLUMN — never the other way round, and the reason is §3.3's scope rule
+   * rather than a plan-quality preference. Both the value and its productivity are correlated
+   * expressions over the HOST relation, and a `Col` names a relation in SCOPE, which is a node's DIRECT
+   * children. A `Filter` under the projection makes the host a GRANDchild of the projection; a `Filter`
+   * over it makes the host a grandchild of the filter. Either way the checker refuses ("no relation …
+   * is in scope for column 'id'") — measured on `g.V().map(__.values('name'))`.
+   *
+   * So the presence rides out as a COLUMN of the same projection that computes the value, which also
+   * makes it computed once. The third node drops it again so the tail sees exactly the payload its
+   * framing declares; the assembler fuses all three into one SELECT.
+   */
+  const channels = rel.channels;
+  const dropping = produced.present !== ALWAYS_PRODUCTIVE;
+  const PRESENT = 'mp';
+  const cols = [...payload.cols.map(([column]) => column), ...carriedCols(channels)];
+  const projected = make.project({
+    id: fresh('mc'), input: rel, channels,
+    type: typeOf(...cols, ...(dropping ? [meta(PRESENT, 'int', true)] : [])),
+    exprs: [
+      ...payload.cols.map(([column, expression]) => [column.name, expression] as const),
+      ...channels.map((channel) => [channel.col, col(rel.id, channel.col)] as const),
+      ...(dropping ? [[PRESENT, produced.present] as const] : []),
+    ],
+  });
+  if (!dropping) return continueAs(projected, payload.framing, steps, at + 1, bulked, ctx, fresh, labels);
+  const kept = make.filter({
+    id: fresh('mf'), input: projected, channels, type: projected.type, pred: col(projected.id, PRESENT),
+  });
+  const shed = make.project({
+    id: fresh('ms'), input: kept, channels, type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, col(kept.id, column.name)] as const),
+  });
+  return continueAs(shed, payload.framing, steps, at + 1, bulked, ctx, fresh, labels);
+}
 
 /**
  * A CHILD BODY'S ROWS over a host STREAM — the seam's FOURTH answer (`child.ts` states why).
@@ -4376,7 +4531,8 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   if (first.name === 'project' && body.length === 1) {
     const self = hostSelf(host);
     const node = self && recordNode(first, host, self.framing, self.col, childSeam(ctx, fresh), fresh);
-    return node && { expr: node, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } } };
+    // `project()` is a `ScalarMapStep` — one map per traverser, never several.
+    return node && { expr: node, framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } }, yields: 'one' };
   }
 
   // THE RE-ROOTING ARM — a step that turns this traverser into exactly ONE other traverser, so the
@@ -4392,7 +4548,9 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     // The body ENDS at the re-rooting (`by(__.outV())`) — the value is the new traverser itself, which
     // is an ELEMENT and a shape `ChildValue` already carries. A `by()` consumer that can only use a
     // scalar narrows it; one that can frame a member (`byNode`) makes it an element node.
-    if (body.length === 1) return { expr: rerooted.id, framing: { kind: 'elements', elem: rerooted.elem }, present: ALWAYS_PRODUCTIVE };
+    // ONE by the schema — that is `rerootedHost`'s whole membership rule — so a consumer that emits
+    // every result may take this expression, not only one that takes the first.
+    if (body.length === 1) return { expr: rerooted.id, framing: { kind: 'elements', elem: rerooted.elem }, present: ALWAYS_PRODUCTIVE, yields: 'one' };
     return scalarChild(body.slice(1), rerooted, ctx, fresh);
   }
 
@@ -4402,11 +4560,13 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     // A property's KEY is always present and always a string; its VALUE carries the stored `vtype` per
     // row, which is `propertyValue`'s channel read through a rowid instead of through the join.
     if (first.name === 'key' && !argValues(first).length)
-      return valueRun(body, 1, { value: propertyReadOf(host.id, host.ownerElem, 'key', fresh), type: STATIC('string'), vtype: undefined, present: ALWAYS_PRODUCTIVE }, host.row, childSeam(ctx, fresh), fresh);
+      return valueRun(body, 1, { value: propertyReadOf(host.id, host.ownerElem, 'key', fresh), type: STATIC('string'), vtype: undefined, present: ALWAYS_PRODUCTIVE, yields: 'one' }, host.row, childSeam(ctx, fresh), fresh);
     if (first.name === 'value' && !argValues(first).length)
       return valueRun(body, 1, {
         value: propertyReadOf(host.id, host.ownerElem, 'value', fresh), type: UNKNOWN,
         vtype: propertyReadOf(host.id, host.ownerElem, 'vtype', fresh), present: ALWAYS_PRODUCTIVE,
+        // A property traverser IS one property, so its key and its value are each exactly one.
+        yields: 'one',
       }, host.row, childSeam(ctx, fresh), fresh);
     return null;
   }
@@ -4426,11 +4586,18 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     const tail = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body, 1, false, ctx, fresh, NO_ALIASES);
     if (!tail || tail.framing.kind !== 'scalar'
       || (tail.framing.result !== 'count' && tail.framing.result !== 'number')) return null;
+    // …AND THE RELATION MUST ACTUALLY HAVE COLLAPSED, which the framing marker does NOT say.
+    //
+    // `result` is a TYPE fact — "this value is a count", which decides the `vt` column and the wire tag
+    // — and it was being read as a CARDINALITY one. That held only while the sole producer of a
+    // reducing framing was a global barrier. The moment `local(__.<reducer>)` became a per-TRAVERSER
+    // producer it stopped holding: `__.out().local(__.in().count())` is one count PER OUT-VERTEX, so
+    // the subquery has as many rows as the fan-out and SQLite silently takes the first. Measured — it
+    // answered `[1,3,3,null,null,null]` where the reference gives `[1,1,1,3,3,3]`.
+    if (!collapsedToOneRow(tail.rel)) return null;
 
-    // A per-row scalar tail could emit MANY rows and SQLite would silently take its first; only the
-    // reducing framings above have collapsed the child to one row. A fence anywhere below is also a
-    // decline: this plan is correlated to the outer row, and a Materialize forces a named CTE that
-    // cannot reference it.
+    // A fence anywhere below is also a decline: this plan is correlated to the outer row, and a
+    // Materialize forces a named CTE that cannot reference it.
     let materialized = false;
     forEachRel(tail.rel, (rel) => { if (rel.kind === 'materialize') materialized = true; });
     if (materialized) return null;
@@ -4448,7 +4615,17 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     // The REDUCER'S OWN framing, unchanged — `count()` is a `long` and a numeric reducer reports its
     // aggregate type. The `result` marker rides with it: a consumer that projects this as a record
     // field needs the same `vt` column the top-level scalar payload declares for the same value.
-    return { expr: { kind: 'scalar', plan: scalar }, framing: tail.framing };
+    //
+    // A COUNT SAYS IT IS ALWAYS PRODUCTIVE, and that is a CLAIM rather than the silence `undefined`
+    // means: `CountGlobalStep` seeds 0, so a count over an empty child still emits. Every other
+    // reducer stays silent because its productivity is not cheaply expressible — the aggregate is NULL
+    // over an empty child, but ALSO over an all-null one that `MaxLocalStep` genuinely emits, so
+    // `IS NOT NULL` would answer a different question. Saying it HERE rather than in each consumer is
+    // the seam's job: `valuePredicate` and the per-traverser child host both need exactly this fact.
+    // A REDUCING barrier has collapsed the child to one row, which is the guard three lines up.
+    return tail.framing.result === 'count'
+      ? { expr: { kind: 'scalar', plan: scalar }, framing: tail.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' }
+      : { expr: { kind: 'scalar', plan: scalar }, framing: tail.framing, yields: 'one' };
   }
 
   let value: Expr = host.id;
@@ -4461,6 +4638,9 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   // A STORED value's type rides per row, and only a consumer that can project a second column can use
   // it — so the expression travels beside the value and the framing says which.
   let vtype: Expr | undefined;
+  // HOW MANY the body had to give — see `ChildValue.yields`. Every leading step below names exactly
+  // one value except a property read, which picks the first of a possibly multi-valued key.
+  let yields: ChildValue['yields'] = 'one';
   let at = 0;
   const leading = body[0];
   if (leading?.name === 'values') {
@@ -4473,6 +4653,9 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     // A property read is the one leading step whose productivity is EXACTLY decidable and not the
     // same question as its value's nullness: the property row either exists or it does not.
     present = propertyExists(args[0], host, fresh);
+    // …and the one that may have had MORE to give: a vertex key is multi-valued and `byExpr` takes
+    // the insertion-order first, which is `map()`'s answer and not `local()`/`flatMap()`'s.
+    yields = 'first';
     at = 1;
   } else if (leading?.name === 'call') {
     // A `streaming` SERVICE is a value projection like any other, so it leads a body exactly as
@@ -4483,6 +4666,9 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     if (!produced) return null;
     value = produced.expr;
     if (produced.framing.kind === 'scalar') type = produced.framing.type;
+    // THE SERVICE'S OWN CLAIM rides out — it built the expression, so only it knows whether the
+    // contribution was one value or the first of several.
+    yields = produced.yields;
     at = 1;
   } else if (leading?.name === 'label' || leading?.name === 'id') {
     if ((leading.args ?? []).length) return null;
@@ -4530,7 +4716,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   // it; an element is not one. Measured on this very increment, so it is a guard with a witness.
   if (at === 0) return null;
 
-  return valueRun(body, at, { value, type, vtype, present }, host.row, childSeam(ctx, fresh), fresh);
+  return valueRun(body, at, { value, type, vtype, present, yields }, host.row, childSeam(ctx, fresh), fresh);
 }
 
 /**
@@ -4551,7 +4737,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
  */
 function valueRun(
   body: readonly IRStep[], from: number,
-  seed: { readonly value: Expr; readonly type: ScalarType; readonly vtype: Expr | undefined; readonly present?: Expr },
+  seed: { readonly value: Expr; readonly type: ScalarType; readonly vtype: Expr | undefined; readonly present?: Expr; readonly yields: ChildValue['yields'] },
   row: HostRow | undefined, child: ChildSeam, fresh: Minter,
 ): ChildValue | null {
   let value = seed.value;
@@ -4579,9 +4765,12 @@ function valueRun(
     vtype = undefined;
   }
   const produced = present ? { present } : {};
+  // A TRANSFORM RUN PRESERVES CARDINALITY — one value in, one value out at every member — so the
+  // seed's claim rides to the end unchanged. What decided it is the LEADING step: `values(k)` picks
+  // the first of a possibly multi-valued property, everything else names exactly one.
   return vtype
-    ? { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, ...produced }
-    : { expr: value, framing: { kind: 'scalar', type }, ...produced };
+    ? { expr: value, framing: { kind: 'scalar', type: PER_ROW('vtype') }, vtype, yields: seed.yields, ...produced }
+    : { expr: value, framing: { kind: 'scalar', type }, yields: seed.yields, ...produced };
 }
 
 /**
@@ -4614,7 +4803,9 @@ function scalarHostChild(
     if (argValues(leading).length) return null;
     at = 1;
   }
-  return valueRun(body, at, { value, type, vtype }, host.row, child, fresh);
+  // THE TRAVERSER IS THE VALUE, so a scalar host's body has exactly one to give — `constant()`
+  // replaces it and every transform maps it, neither of which can produce a second.
+  return valueRun(body, at, { value, type, vtype, yields: 'one' }, host.row, child, fresh);
 }
 
 function addedVertices(

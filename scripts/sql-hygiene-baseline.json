@@ -251,6 +251,12 @@
     "compiler": 43,
     "bound": 0
   },
+  "local": {
+    "binds": 0,
+    "bytes": 131,
+    "compiler": 3,
+    "bound": 0
+  },
   "lTrim": {
     "binds": 0,
     "bytes": 1377,
