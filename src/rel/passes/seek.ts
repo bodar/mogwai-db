@@ -1,8 +1,9 @@
 import { type Expr, col } from '../expr.ts';
 import * as make from '../factory.ts';
 import type { Rel, Table } from '../rel.ts';
-import { relId, type RelId } from '../types.ts';
-import { exprRels, forEachExpr, forEachRel, mapRelExprs, rewrite, rewriteExpr } from '../walk.ts';
+import { minter, type Minter } from '../mint.ts';
+import type { RelId } from '../types.ts';
+import { exprRels, forEachExpr, mapRelExprs, rewrite, rewriteExpr } from '../walk.ts';
 
 /**
  * `seek` — a PHYSICAL rewrite: turn a property predicate that can only be CHECKED into the relation
@@ -64,25 +65,6 @@ const PROPERTIES: Partial<Record<Table, { readonly table: Table; readonly owner:
   nodes: { table: 'vertex_properties', owner: 'node' },
   edges: { table: 'edge_properties', owner: 'edge' },
 };
-
-interface Minter { readonly id: (hint: string) => RelId; readonly alias: (hint: string) => string; }
-
-/** Fresh relation ids and SQL aliases that cannot collide with anything already in the plan. The
- *  pass mints its own rather than taking the lowering's `Minter`, because a `src/rel/` pass may not
- *  reach into `src/compiler/` — and because a pass must be runnable over any plan, including one a
- *  test hand-built. Same technique as `name`'s generated binding names. */
-function minter(plan: Rel): Minter {
-  const ids = new Set<string>();
-  const aliases = new Set<string>();
-  forEachRel(plan, (r) => { ids.add(r.id); if (r.kind === 'scan') aliases.add(r.alias); });
-  const next = (taken: Set<string>, hint: string): string => {
-    let n = 0;
-    while (taken.has(`${hint}${n}`)) n++;
-    taken.add(`${hint}${n}`);
-    return `${hint}${n}`;
-  };
-  return { id: (hint) => relId(next(ids, hint)), alias: (hint) => next(aliases, hint) };
-}
 
 /** Flatten an `AND` tree. A conjunct is what may be dropped independently of the rest. */
 function conjuncts(e: Expr): readonly Expr[] {

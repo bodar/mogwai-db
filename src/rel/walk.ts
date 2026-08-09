@@ -3,7 +3,7 @@ import { recursiveSelf } from './factory.ts';
 import * as make from './factory.ts';
 import type { Rel } from './rel.ts';
 import { isStmt, type Stmt } from './stmt.ts';
-import type { FrameBound, SortTerm, WindowSpec } from './types.ts';
+import type { FrameBound, RelId, SortTerm, WindowSpec } from './types.ts';
 
 /** The structure of a node is declared ONCE, here. Every analysis and every rewrite folds over
  * these functions instead of re-deriving the shape of the union, so a new kind is a compile error
@@ -99,20 +99,41 @@ const mapSpec = (spec: WindowSpec, f: (e: Expr) => Expr): WindowSpec => ({
 });
 
 /**
+ * What a rebuild may change ABOUT THE NODE ITSELF, as it constructs it.
+ *
+ * `type` is the only moment a width change can be expressed: a factory validates its declared type
+ * against its children, so a caller that rebuilds first and re-declares afterwards never reaches its
+ * own second step — the `Join` throws inside `mapRelChildren` (*"a inner Join emits its sides' 2
+ * columns; its type declares 4"*). `prune` is that caller.
+ *
+ * `id`/`alias` are the same argument for IDENTITY, and `unroll` is their caller: a replicated
+ * subplan must carry its OWN relation ids and SQL aliases (§12 — two sides of one join sharing an
+ * alias emit it twice, `ambiguous column name`). Both are the reason the leaf arms below rebuild at
+ * all; without an identity override a leaf is returned untouched, so nothing else changes.
+ */
+export interface RelOverride {
+  readonly type?: Rel['type'];
+  readonly id?: RelId;
+  readonly alias?: string;
+}
+
+/**
  * Replace a node's child relations, rebuilding through the kind's factory. Never a spread: a spread
  * keeps an obsolete field and loses the construction brand.
- *
- * `retype` overrides the declared columns AS THE NODE IS CONSTRUCTED, which is the only moment a
- * width change can be expressed: a factory validates its declared type against its children, so a
- * caller that rebuilds first and re-declares afterwards never reaches its own second step — the
- * `Join` throws inside this function (`a inner Join emits its sides' 2 columns; its type declares
- * 4`). `prune` is that caller, and the alternative was a private per-kind copy of this switch.
  */
-export function mapRelChildren(r: Rel, f: (child: Rel) => Rel, retype?: Rel['type']): Rel {
-  const { id, channels } = r;
-  const type = retype ?? r.type;
+export function mapRelChildren(r: Rel, f: (child: Rel) => Rel, override?: RelOverride): Rel {
+  const { channels } = r;
+  const id = override?.id ?? r.id;
+  const type = override?.type ?? r.type;
+  const identity = override?.id !== undefined || override?.alias !== undefined;
   switch (r.kind) {
-    case 'scan': case 'values': case 'self-ref': case 'ref': return r;
+    // A leaf has no children to replace, so only an IDENTITY change gives it anything to rebuild
+    // for — and rebuilding one otherwise would hand every caller a fresh object where it had been
+    // told nothing changed.
+    case 'scan': return identity ? make.scan({ id, channels, type, table: r.table, alias: override?.alias ?? r.alias }) : r;
+    case 'values': return identity ? make.values({ id, channels, type, rows: r.rows }) : r;
+    case 'self-ref': return identity ? make.selfRef({ id, channels, type, name: r.name }) : r;
+    case 'ref': return identity ? make.ref({ id, channels, type, name: r.name }) : r;
     case 'project': return make.project({ id, channels, type, input: f(r.input), exprs: r.exprs });
     case 'filter': return make.filter({ id, channels, type, input: f(r.input), pred: r.pred });
     case 'aggregate': return make.aggregate({ id, channels, type, input: f(r.input), groupBy: r.groupBy, aggs: r.aggs, having: r.having });

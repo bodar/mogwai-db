@@ -7,11 +7,13 @@ import { emitQuery } from '../src/rel/emit.ts';
 import { planOf } from '../src/rel/plan.ts';
 import { fuse } from '../src/rel/passes/fuse.ts';
 import { name } from '../src/rel/passes/name.ts';
+import { unroll } from '../src/rel/passes/unroll.ts';
+import { minter, refresh } from '../src/rel/mint.ts';
 import { prune } from '../src/rel/passes/prune.ts';
 import type { Channels } from '../src/channels.ts';
 import { isRel, type Rel } from '../src/rel/rel.ts';
 import { relId } from '../src/rel/types.ts';
-import { freeRelIds } from '../src/rel/walk.ts';
+import { forEachRel, freeRelIds } from '../src/rel/walk.ts';
 
 const channels: Channels = [];
 const cols = [{ name: 'id', type: 'int', nullable: false }, { name: 'name', type: 'text', nullable: false }] as const;
@@ -410,6 +412,110 @@ describe('RelIR', () => {
     const db = new Database(':memory:');
     expect(db.query(emitted.sql).all(...emitted.binds)).toEqual([{ id: 1 }]);
     db.close();
+  });
+
+  /**
+   * `unroll` (§4.3) — the second lowering of a BOUNDED `repeat()`, and the one with none of the
+   * recursive term's limits: 48 of the corpus's 53 barrier bodies are `times(n)`-bounded, and no
+   * per-iteration barrier is expressible inside a recursive term in ANY lowering (P3).
+   *
+   * It returns the LEVELS, not a result — which of them a traversal emits is a Gremlin question
+   * (`times(n)` alone yields the last, `emit()` adds more), and answering it here would put Gremlin's
+   * vocabulary in a `Rel → Rel` pass.
+   */
+  describe('unroll', () => {
+    const walkCols = [{ name: 'id', type: 'int', nullable: false }] as const;
+    const edgeCols = [{ name: 'src', type: 'int', nullable: false }, { name: 'tgt', type: 'int', nullable: false }] as const;
+    const hopWalk = (id: string, wrap: (step: Rel) => Rel = (step) => step) => {
+      const seed = valuesRel({ id: relId(`${id}Seed`), rows: [[lit(1, 'int')]], channels, type: { cols: walkCols } });
+      return recursiveRel({ id: relId(id), name: id, cols: ['id'], seed, channels, type: { cols: walkCols },
+        step: (self) => {
+          const edges = scanRel({ id: relId(`${id}E`), table: 'edges', alias: 'e', channels, type: { cols: edgeCols } });
+          const hop = join({ id: relId(`${id}Hop`), left: self, right: edges, join: 'inner', channels,
+            type: { cols: [...walkCols, ...edgeCols] },
+            on: { kind: 'binary', op: '=', left: col(self.id, 'id'), right: col(edges.id, 'src') } });
+          return wrap(projectRel({ id: relId(`${id}Next`), input: hop, channels, type: { cols: walkCols },
+            exprs: [['id', col(hop.id, 'tgt')]] }));
+        },
+      });
+    };
+    const chainDb = () => {
+      const db = new Database(':memory:');
+      db.run('CREATE TABLE edges(id INTEGER PRIMARY KEY, uid TEXT, src INTEGER, label INTEGER, tgt INTEGER)');
+      db.run('INSERT INTO edges(src, label, tgt) VALUES (1,0,2),(2,0,3),(3,0,4)');
+      return db;
+    };
+
+    test('level 0 is the seed, and level n is n applications of the step', () => {
+      const walk = hopWalk('u');
+      if (walk.kind !== 'recursive') throw new Error('not recursive');
+      expect(unroll(walk, 0, minter(walk))).toEqual([walk.seed]);
+
+      const levels = unroll(walk, 3, minter(walk));
+      expect(levels).toHaveLength(4);
+      const db = chainDb();
+      // 1 --e--> 2 --e--> 3 --e--> 4, so level i is the vertex i hops from 1.
+      expect(levels.map((level) => {
+        expect(() => check(level)).not.toThrow();
+        const emitted = emitQuery(planOf(level));
+        return db.query(emitted.sql).all(...emitted.binds);
+      })).toEqual([[{ id: 1 }], [{ id: 2 }], [{ id: 3 }], [{ id: 4 }]]);
+      db.close();
+    });
+
+    /** ⚠️ §12's trap: a replicated subplan must carry its OWN ids and aliases. Two relations sharing
+     *  a `RelId` in one scope make every `Col` against it ambiguous and the last binding silently
+     *  wins; two FROM items sharing a SQL alias are `ambiguous column name`. A chain of levels puts
+     *  every replica in one scope, so both would fire — and only the join case has a checker rule. */
+    test('every replica carries its own relation ids and scan aliases', () => {
+      const walk = hopWalk('uid');
+      if (walk.kind !== 'recursive') throw new Error('not recursive');
+      const top = unroll(walk, 3, minter(walk))[3]!;
+      const ids: string[] = [];
+      const aliases: string[] = [];
+      forEachRel(top, (r) => { ids.push(r.id); if (r.kind === 'scan') aliases.push(r.alias); });
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(new Set(aliases).size).toBe(aliases.length);
+      // …and no replica still names the walk it came from.
+      expect(ids).not.toContain('uid');
+    });
+
+    /** THE POINT OF THE PASS: a per-iteration barrier that a recursive term accepts and silently
+     *  ignores (P3) is an ordinary operator once the walk is levels. */
+    test('a per-iteration barrier the Recursive must refuse is legal unrolled', () => {
+      const deduped = hopWalk('ub', (step) => distinctRel({ id: relId('ubDedup'), input: step, channels, type: step.type }));
+      expect(() => check(deduped)).toThrow('silently ignores it — no per-iteration dedup exists');
+
+      if (deduped.kind !== 'recursive') throw new Error('not recursive');
+      const level = unroll(deduped, 2, minter(deduped))[2]!;
+      expect(() => check(level)).not.toThrow();
+      const emitted = emitQuery(planOf(level));
+      expect(emitted.sql).toContain('DISTINCT');
+      const db = chainDb();
+      expect(db.query(emitted.sql).all(...emitted.binds)).toEqual([{ id: 3 }]);
+      db.close();
+    });
+
+    test('refuses a count that is not a whole number of iterations', () => {
+      const walk = hopWalk('un');
+      if (walk.kind !== 'recursive') throw new Error('not recursive');
+      expect(() => unroll(walk, -1, minter(walk))).toThrow('non-negative whole number');
+      expect(() => unroll(walk, 1.5, minter(walk))).toThrow('non-negative whole number');
+    });
+
+    /** ⚠️ A node reached twice in the DAG is copied ONCE. Copying per occurrence turns a DAG into a
+     *  tree, which is what `name`'s occurrence analysis reads — the copy would then be spelled in
+     *  full at every use instead of bound once (§3.6's statement-text budget). */
+    test('refresh preserves sharing across the copy', () => {
+      const joined = sharedUnderTwoSides();
+      const copy = refresh(joined, minter(joined));
+      const shared: Rel[] = [];
+      forEachRel(copy, (r) => { if (r.kind === 'project') shared.push(r); });
+      // One `Project` in the copy, reached from both sides — as in the original.
+      expect(shared).toHaveLength(1);
+      expect(() => check(copy)).not.toThrow();
+      expect(emitQuery(planOf(copy)).sql).not.toEqual(emitQuery(planOf(joined)).sql);
+    });
   });
 
   test('rejects a plan above the Durable Objects bind budget', () => {
