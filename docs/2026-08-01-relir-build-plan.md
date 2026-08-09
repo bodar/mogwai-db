@@ -804,6 +804,17 @@ Two defects fell out of stating it properly, each a wrong ANSWER rather than an 
   other route — a node the recursive term shares with itself — correct, and `unroll`'s replicas are exactly
   the shape that would have hit it.
 
+**2b. ✅ The barrier laws follow the SELECT, not the node children — DONE.** ⚠️ **Step 0 relaxed the boundary
+from "any subplan" to "a subquery"; it is really A NESTED SELECT, and a joined DERIVED TABLE is one.** The
+laws walked `relChildren` from the term root, so a `repeat()` body joining against any deduped, ranked or
+capped relation was refused. Measured on the same 3-edge chain, all returning `1,2,3,4`: an aggregate, a
+window function, a `DISTINCT` and an `ORDER BY … LIMIT`, each inside a derived table joined into the recursive
+term — against the controls `recursive aggregate queries not supported` and `cannot use window functions in
+recursive queries` for the same two FUSED into the term. `block.ts` answers which nodes those are
+(`fusedInto`, one more field on the shape the same walk already computes), and `check` folds the law table
+over it. **This is the compounding half: the FIRST consumer of the block analysis beyond the question it was
+built for, and both questions are now one walk.**
+
 Only the bodies that genuinely cannot land in that FROM need the REWRITE, and those are what `flatten` proper
 is for. This is the plan's own wording ("P1 legality enforced in `check`") taken seriously rather than a
 change of direction.
