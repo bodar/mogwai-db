@@ -8,37 +8,106 @@ first for anything `repeat()`-shaped; read the build plan for everything else.
 
 ---
 
-## 1. THE DECISION — a total function, not a preference
+## 1. THE DECISION — a total function on ONE axis
+
+> **AMENDED 2026-08-09 by measurement. The original table had a two-axis split with an OVERLAP
+> cell, and preferred `Recursive` inside it. That preference is refuted — see §1a. The overlap cell
+> does not exist, so the decision is simpler than the approval assumed and §3.2's differential is
+> discharged by construction rather than by a test.**
 
 `repeat()` has TWO lowerings, and which one applies is decided from the traversal, never guessed:
 
-| | body has **no** per-iteration barrier | body **has** a per-iteration barrier |
+| | which regime | why it is the only one |
 |---|---|---|
-| **bounded** — a compile-time `times(n)` | **`Recursive`** + a depth predicate | **UNROLL** (IR level) |
-| **unbounded** — `until()` / bare `emit()` | **`Recursive`** | **refuse, clearly** — the wall |
+| **bounded** — a compile-time `times(n)` | **UNROLL** (IR level) | only PHASES can carry a per-iteration barrier **and** the RLE collapse |
+| **unbounded** — `until()` / bare `emit()` | **`Recursive`** (the walk) | no finite n exists |
+| **unbounded + a per-iteration barrier** | **refuse, clearly** | the honest wall |
 
 **Neither regime alone is sufficient, and neither insufficiency shrinks with effort.**
 
 - **Unroll cannot express an unbounded walk.** No finite n exists for `until(pred)` or a bare
   `emit()`. That removes reachability, transitive closure and shortest path — the things a graph
   database is for.
-- **`Recursive` cannot express a per-iteration barrier.** SQLite's recursive term is a restricted
-  sub-language: no aggregate, no window, and `DISTINCT`/`LIMIT`/`ORDER BY` are ACCEPTED while meaning
-  something else (P3). SQLite decides this; no amount of lowering work moves it.
+- **`Recursive` cannot express a per-iteration barrier, and cannot COLLAPSE.** SQLite's recursive
+  term is a restricted sub-language: no aggregate, no window, and `DISTINCT`/`LIMIT`/`ORDER BY` are
+  ACCEPTED while meaning something else (P3). SQLite decides this; no amount of lowering work moves
+  it. The second half of that sentence is §1a and is the amendment.
 
-The two failure sets are otherwise disjoint, so the union covers the language minus the bottom-right
-cell — which is genuinely inexpressible in single-pass SQL and is the honest wall.
+### Why each row is what it is
 
-### Why each cell is what it is
-
-- **bounded + no barrier → `Recursive`.** Both regimes are legal here; `Recursive` is preferred
-  because its statement text is O(1) in depth rather than O(n), and because `times($x)` stays a BIND
-  against the depth column instead of being reduced to a compile-time constant (the root
-  `CLAUDE.md` parameter rule). **This cell is the DIFFERENTIAL population — see §4.**
-- **bounded + barrier → unroll.** The only regime that can express it. Phase k's relation IS the
-  frontier at iteration k, which is what makes a phase-local barrier equal a per-iteration one.
-- **unbounded + no barrier → `Recursive`.** The only regime that can express it.
+- **bounded → unroll.** Phase k's relation IS the frontier at iteration k, which is what makes a
+  phase-local barrier equal a per-iteration one — and what makes the frontier an ordinary relation a
+  `GROUP BY id, SUM(bulk)` may collapse. `times($x)` is the one exception the root `CLAUDE.md`
+  names: the unroll reduces the parameter to a compile-time constant at the last responsible moment.
+- **unbounded → `Recursive`.** The only regime that can express it.
 - **unbounded + barrier → refuse.** State the wall in the message; do not approximate.
+
+## 1a. THE MEASUREMENT THAT AMENDED §1 — a walk cannot carry a multiset
+
+The original §1 preferred `Recursive` for a bounded barrier-free body, on two grounds: statement
+text O(1) in depth rather than O(n), and `times($x)` staying a bind. **Both are true and both are
+outweighed, by a number the corpus itself states.**
+
+`map/Count.feature`:
+
+```
+g.V().repeat(__.out()).times(8).count()      # the grateful graph, 808 vertices
+  → 2 505 037 961 767 380
+```
+
+Two and a half QUADRILLION traversers over 808 vertices. That number exists only because the
+frontier at iteration k is a MULTISET the reducer SUMS — a plan emitting one row per traverser
+cannot produce it in any amount of time, at any level of query-planner cleverness. What produces it
+is `GROUP BY id, SUM(bulk)` per hop, i.e. the RLE collapse the `bulk` channel exists for.
+
+**That collapse is an AGGREGATE, and SQLite forbids an aggregate in a recursive term.** It is the
+same wall as a per-iteration barrier — `src/rel/recursive.ts`'s `BARRIER_IN_TERM` refuses the exact
+node — seen from the COST side rather than the legality side. So the recursive regime cannot
+collapse, at any depth, ever; and an unrolled phase is an ordinary relation that collapses like any
+other movement, which `ir/analyze.ts`'s `collapseSafe` already decides for a flat chain (it returns
+`false` on sight of a `repeat`, and after the unroll there is no `repeat` to see).
+
+Three consequences, all of them simplifications:
+
+1. **The overlap cell is gone.** Bounded goes to phases because only phases collapse; unbounded goes
+   to the walk because only a walk has no finite n. Nothing is legal both ways.
+2. **§3.2's differential is discharged by construction.** It existed to stop two regimes disagreeing
+   over a population that both could serve. There is no such population.
+3. **`unrollFixedRepeat`'s "nothing to gain" guard was wrong** and is deleted. It required the body
+   to contain a barrier, reasoning that a barrier-free body "already lowers through the flat
+   expansion, so unrolling it buys no capability". It buys the largest one available.
+
+The walk keeps a matching guard from the other side (`walk.ts`): a BOUNDED walk carrying nothing but
+`bulk` declines, because its traversers are interchangeable and enumerating them is a choice — and
+the wrong one. A walk carrying per-traverser IDENTITY (an alias bound before it, a sack, an
+`origin`) has traversers no collapse may merge, so every route enumerates and this one is not worse
+than the one it replaces.
+
+**How it was found, because the method matters more than the finding.** The walk was built first and
+admitted the bounded cell as §1 said it should. `mise run ci` then went from a passing L3 to a
+600 s TIMEOUT — not a wrong answer, not a throw, and nothing any static gate could see. The
+diagnosis came from reading what the corpus EXPECTS rather than from profiling: a scenario whose
+expected result is 2.5×10¹⁵ is telling you what representation it requires. **A cost wall of this
+shape reads exactly like a hang, so treat an L3 duration regression as a semantics signal.**
+
+### Status of the amendment — IN FLIGHT, not landed
+
+The doc is amended ahead of the code deliberately: §1 is the decision, and it is now WRONG on trunk.
+What implements it, currently uncommitted and red:
+
+- `unrollFixedRepeat`'s "nothing to gain unless a barrier was blocking it" guard — **deleted**.
+- `walk.ts` — the `Recursive` regime (§3.1), plus the interchangeable-frontier decline above.
+- the `loops` CHANNEL role (`src/channels.ts`) and the seam's `chain` arm (§3.1's open question,
+  settled below).
+
+Consequences still to work through, each a genuine one rather than churn — the widened unroll runs
+ABOVE the routing switch, so it moves both spines: seven `sql-hygiene` byte ratchets (n copies of a
+body is n times the text — banked, reason here), the L2 SQL pins that assert legacy's `WITH
+RECURSIVE` for traversals that no longer recurse on EITHER spine, two L5 ratchet entries that got
+BETTER (`repeat(__.both()).times(3).range(5,11)` no longer diverges between the fast-path
+positions), and one L5 GENERATOR bug the unroll exposed: it models a `repeat()` body as
+shape-preserving, but `repeat(__.has(…).inE('knows')).times(1)` ends on an EDGE — TinkerPop's
+`RepeatStep` is `<S,S>` in its Java signature and not at runtime.
 
 ### Why unroll lives at the IR level and not in RelIR
 
@@ -92,6 +161,12 @@ Ordered as committed. All green on `mise run ci` + pushed.
    from the TEXT measurement (~1 KB/step worst case, ~300 b/step typical, 100 KB DO cap).
    **L3 1763 → 1775 (RelIR) and 1681 → 1692 (legacy)** — this pass is above the routing switch, so
    both floors move; neither shed a name. Census re-recorded, +6 (1063 → 1069).
+7. **`f5b1951` — the recursive-term laws became ONE answer for TWO callers.** The four closures
+   inside `check` (`BARRIER_IN_TERM`, `recursiveTerm`, `topLevelSelf`, `fencedSelf`) are
+   `recursiveViolation` in `src/rel/recursive.ts`, returning the message or `undefined`. `check`
+   throws it; the LOWERING declines on it. A second copy in the lowering would drift silently in the
+   dangerous direction — the lowering admits, `check` throws, and the failure reads as a
+   `rel-sweep` violation whose cause is a rule spelled twice. Messages byte-identical.
 
 ---
 
@@ -118,20 +193,33 @@ other lane (see §5):
   is NULL, and TinkerPop KEEPS a traverser whose body produced nothing.
 - **Productivity is its own conjunct**: a value-compare body needs `ChildValue.present` ANDed in.
 
-Open sub-question to settle when starting: **how the depth bound is carried.** A plain extra column
-in the walk header is the cheap answer; a `loops` CHANNEL ROLE is the substrate answer and would make
-`loops()`, `until(loops().is(n))` and `times($x)`-as-a-bind all fall out of one mechanism. The channel
-route touches `src/channels.ts` + `obligations.ts` (cross-cutting), so agree it with the other lane
-before starting.
+**SETTLED — the depth is a `loops` CHANNEL, and the cheap answer does not work.** The open question
+was channel-vs-plain-column. A plain extra column in the walk header is not merely less general, it
+is unbuildable: the body's own projections declare `elementCols`, so anything not carried as a
+channel is projected away at the FIRST hop, and the `loops + 1` bump then has nothing to read —
+`col(self, 'loops')` is out of scope by the time the term closes. Carrying it as a channel makes the
+ordinary §3.5 preservation contract do the work, and it is the same fact `Traverser.loops()` names,
+so `loops()`, `until(__.loops().is(n))` and a `by(__.loops())` fall out of one mechanism.
 
-### 3.2 The differential over the overlap cell
+Cost to the channel core was one role and five total-table entries, all additive: merge `identical`
+(a fork inside a body cannot rebind the counter), barrier `drop` (`RepeatEndStep` calls
+`resetLoops()` on everything it emits), group `undefined` (a grouping across depths would take the
+counter from an arbitrary member — which is also what switches the movement collapse off inside a
+body, correctly), row-unique `false`, and a `ROLE_ORDER` slot. `obligations.ts` needed NOTHING: every
+obligation is already driven off the role tables.
 
-**Required by the approval, not optional.** Bounded + barrier-free bodies are legal BOTH ways, so
-nothing but a test stops the two regimes disagreeing. Same traversal, both regimes, same rows.
+The seam grew one arm, `chain(input, framing, body, aliases)` — the fold's own re-entry. It is not a
+FOURTH way to consume a child body; it is the mechanism `rows` is already built from (`rows` = this
+plus an origin mint plus a survival check), and the walk cannot go through `rows` because its input
+is the walk's own `SelfRef` and there is no host row to name an origin from.
 
-The natural home is L4 (`.feature`) plus a forced-regime switch, in the shape of the existing
-fast-path differential: one side declares the semantic authority. Population: every
-`repeat(<movement/filter body>).times(n)` in the L1 corpus.
+### 3.2 ~~The differential over the overlap cell~~ — WITHDRAWN, §1a
+
+The approval required it because bounded + barrier-free bodies were legal BOTH ways. §1a measures
+that they are not: a bounded body must reach a regime that can collapse, and the walk cannot. With
+no overlap population there is nothing for a differential to compare, so this is discharged rather
+than deferred. What replaces it is the guard on each side — the unroll takes every bounded run it
+can express, and `walk.ts` declines a bounded walk over an interchangeable frontier.
 
 ### 3.3 Widen the unrolled body set further
 
@@ -202,6 +290,20 @@ unroll should only claim it when no other regime can.
   `order().by(k)` body. DO caps a statement at 100 KB.
 - **Compile cost is LINEAR in chain length** — since `2b4fd3c`. It was not; if it looks superlinear
   again, look for an un-memoised DAG walk before anything else.
+- **A `Recursive` TERM IS A COMPOUND, and `both()` is expressible only that way.** Measured,
+  bun:sqlite 3.53.0: `seed UNION ALL <arm1> UNION ALL <arm2>`, each arm referencing the walk exactly
+  once, returns the right rows; the SAME two arms behind a derived table are `circular reference: w`.
+  The emitter already renders a `Union` as unparenthesised select-CORES, so it needs no change — what
+  needs changing is that "exactly once" and "at the top level of FROM" become questions about an ARM
+  (`recursiveViolation`). NOT YET BUILT: today a `both()` body declines, and so does any body whose
+  loop-counter bump sits over a union, which is every multi-arm one. The rewrite it needs is the
+  textbook distribution of `Project`/`Filter` through a `UNION ALL`.
+- **A body that registers a NAMED SIDE EFFECT must decline, and the test is the registration.**
+  `repeat(__.out().group('a').by('name')).times(2).cap('a')` puts a relation from inside the term
+  into chain-global state, and `cap()` reads it from OUTSIDE the walk — `circular reference` to
+  SQLite, "SelfRef is legal only in its Recursive step" to `check`, i.e. a THROW from where legacy
+  answers. Declining on `ctx.collections` having grown refuses every side-effect form at once,
+  including ones not yet invented; a list of step names would not.
 - **`unrollFixedRepeat` is TinkerPop's `RepeatUnrollStrategy`, widened deliberately.** Upstream's
   `ALLOWED_STEP_CLASSES` admits movement + `has()` and NO barrier, because its concern is laziness
   under arbitrary providers. Ours is set-at-a-time by construction, so "the whole frontier at

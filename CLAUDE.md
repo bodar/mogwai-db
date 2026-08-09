@@ -33,8 +33,11 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
   web session's context (`SessionStart` stdout IS context) and nothing else loads it, so a local
   session doesn't pay for facts it cannot observe. Add web-session facts THERE, not here
 - `docs/2026-08-09-repeat-two-regimes-plan.md` — `repeat()` is TWO lowerings chosen by a total function
-  (bounded+barrier → the IR unroll; everything else expressible → `Recursive`; unbounded+barrier → a clear
-  refusal). APPROVED, and it SUPERSEDES the RelIR build plan's Phase 3 step 4
+  on ONE axis: **bounded** (a compile-time `times(n)`) → the IR unroll, because only PHASES can carry
+  both a per-iteration barrier and the RLE collapse; **unbounded** → `Recursive`; unbounded+barrier →
+  a clear refusal. APPROVED, and it SUPERSEDES the RelIR build plan's Phase 3 step 4. Its §1a carries
+  the measurement that AMENDED the approved table (a recursive term cannot hold an aggregate, so a
+  walk cannot collapse a multiset — and the corpus asks for 2.5×10¹⁵ traversers over 808 vertices)
 - `docs/2026-08-09-named-collections-are-bindings-plan.md` — `aggregate("a")` RETAINS a relation under a
   name; `cap("a")` reduces it. APPROVED, not started. Supersedes `collection.ts`'s "registered twice →
   decline" and the `ctx.mutating` decline beside it, and carries the measurement that 9 of 13
