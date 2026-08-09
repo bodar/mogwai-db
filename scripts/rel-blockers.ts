@@ -35,6 +35,27 @@
  * Without it the instrument ranks the wrong work while looking precise, which is worse than a coarse
  * number honestly labelled.
  *
+ * ## The blocked count is THREE populations, and "does legacy COMPILE it" is the wrong split
+ *
+ * A blocked traversal is one of: one some route already ANSWERS (migrating it closes the cut and the
+ * answer is already known-correct), one NOBODY answers (lowering it is an outright L3 gain), or one no
+ * L3 scenario runs at all (out of the suite's scope — it says nothing either way).
+ *
+ * ⚠️ **The earlier split asked `compilePlan(q, {}, {spine:'legacy'})` whether legacy COMPILES the
+ * traversal, and that is a different question from whether legacy ANSWERS it.** Measured
+ * 2026-08-09: every one of the eleven `aggregate` rows it reported as "a real gap the route answers"
+ * is a traversal legacy compiles and silently MIS-answers — `register` keeps the last entry of a
+ * `Map`, so a label filled at two chain positions discards the first site's members
+ * (`src/compiler/steps/prefix/sideeffect.ts:163-164`). A family that ranking called cut-only was
+ * worth ~9 L3 outright. So the split here is the CONFORMANCE RESULT, joined through
+ * `test/L1-corpus/scenarios.tsv` — the scenario a traversal came from — against the two floors in
+ * `test/L3-conformance/l3-state.json`. It is committed data, so this stays submodule-free and
+ * needs no run.
+ *
+ * The `L3` column is the number to rank an increment by: the scenarios that would newly have a
+ * chance of passing, counted per scenario rather than per traversal because that is the unit the
+ * conformance floor moves in.
+ *
  * ## `--step <name>` — the count is the ranking, the LIST is the increment
  *
  * A family total says what to do next; it says nothing about what the increment IS. That question —
@@ -50,6 +71,48 @@ import { lowerToRel } from '../src/compiler/rel/lower.ts';
 
 const CORPUS = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.meta.url)).text())
   .split('\n').filter(Boolean);
+
+/** Which SCENARIOS name a traversal — many-to-many, emitted beside `corpus.txt` by `regen-corpus.ts`. */
+const SCENARIOS = new Map<string, string[]>();
+for (const line of (await Bun.file(new URL('../test/L1-corpus/scenarios.tsv', import.meta.url)).text()).split('\n')) {
+  const tab = line.indexOf('\t');
+  if (tab < 0) continue;
+  const [name, query] = [line.slice(0, tab), line.slice(tab + 1)];
+  const named = SCENARIOS.get(query);
+  if (named) named.push(name); else SCENARIOS.set(query, [name]);
+}
+
+const L3_STATE = await Bun.file(new URL('../test/L3-conformance/l3-state.json', import.meta.url)).json();
+/**
+ * ANSWERED = the UNION of the two floors, because the question is "does ANY route answer it", and
+ * that union is already the project's own definition of the real floor (`test/CLAUDE.md`, the
+ * asymmetric gate). A name the default position holds is answered whether RelIR or the legacy
+ * fallback produced it — which is exactly the fact that makes lowering it cut-closing rather than a
+ * gain.
+ */
+const ANSWERED: ReadonlySet<string> = new Set<string>([...L3_STATE.passed, ...L3_STATE.legacySpine.passed]);
+/**
+ * RUN = every name either floor has an opinion about. A scenario in NEITHER set is not a failure —
+ * L3 never ran it (a skipped tag, or an upstream scenario newer than the last recorded run), and
+ * counting it as a gain would invent an upside the suite cannot confirm.
+ */
+const RUN: ReadonlySet<string> = new Set<string>([
+  ...L3_STATE.passed, ...L3_STATE.failed, ...L3_STATE.legacySpine.passed, ...L3_STATE.legacySpine.failed,
+]);
+
+/** The three populations a blocked traversal falls into, plus the scenarios that would newly have a
+ *  chance of passing if its family lowered. */
+type Verdict = { readonly population: 'answered' | 'open' | 'unscored'; readonly gain: number };
+function verdictOf(query: string): Verdict {
+  const named = (SCENARIOS.get(query) ?? []).filter((name) => RUN.has(name));
+  if (!named.length) return { population: 'unscored', gain: 0 };
+  const failing = named.filter((name) => !ANSWERED.has(name));
+  // ALL of a traversal's scored scenarios must be answered before it counts as cut-only. One traversal
+  // is routinely shared across graph fixtures, and a route that answers it over `gmodern` but not over
+  // `gcrew` has not answered it — that partial case is upside, and filing it as cut-closing is the
+  // understatement this split exists to remove.
+  return { population: failing.length ? 'open' : 'answered', gain: failing.length };
+}
 
 /**
  * The FAMILIES, by what a single lowering would have to say — not by TinkerPop's package layout.
@@ -123,9 +186,11 @@ const wanted = ((): string | null => {
   return i < 0 ? null : (process.argv[i + 1] ?? null);
 })();
 
-const blockedAt = new Map<string, number>();
+/** Per BLAMED step: the three populations and the scenario upside. `blocked` is their total. */
+type Tally = { blocked: number; answered: number; open: number; unscored: number; gain: number };
+const blockedAt = new Map<string, Tally>();
 const blockedTraversals: string[] = [];
-let covered = 0, unparsed = 0;
+let covered = 0, unparsed = 0, raised = 0;
 
 for (const query of CORPUS) {
   let steps: IRStep[];
@@ -138,12 +203,18 @@ for (const query of CORPUS) {
   // with no seed declines at its first `sack()` and reads as vocabulary the algebra cannot express,
   // when what happened is that this instrument did not hand it one (§6·6).
   let sack: ReturnType<typeof extractSack>;
+  // TWO failures wear one `catch` unless they are separated, and conflating them mis-states this
+  // instrument's own denominator: L1 holds parse+chain at 100.0%, so a traversal that does not reach
+  // `lowerToRel` did not fail to PARSE — an IR Pass raised on it. That raise is frequently the correct
+  // permanent answer (§6·5: "the answer is an ERROR" is never a capability), so it is neither a gap nor
+  // L1's business, and the old label said it was both.
+  let tree: ReturnType<typeof parseGremlin>;
+  try { tree = parseGremlin(query); } catch { unparsed++; continue; }
   try {
-    const tree = parseGremlin(query);
     steps = runPasses(stepChain(tree, {}), extractStrategies(tree, {}), {}).steps as IRStep[];
     sideEffects = extractSideEffects(tree, {});
     sack = extractSack(tree, {});
-  } catch { unparsed++; continue; }
+  } catch { raised++; continue; }
   if (!steps.length) continue;
   // EVERY prefix, never stopping at the first decline — because coverage is NOT monotonic in prefix
   // length and assuming it was made this instrument understate its own subject.
@@ -166,29 +237,47 @@ for (const query of CORPUS) {
   // When even the SOURCE declines, the source is the blocker.
   const step = steps[longest] ?? steps[0]!;
   const name = blame(step);
-  blockedAt.set(name, (blockedAt.get(name) ?? 0) + 1);
+  const verdict = verdictOf(query);
+  const tally = blockedAt.get(name) ?? { blocked: 0, answered: 0, open: 0, unscored: 0, gain: 0 };
+  tally.blocked++;
+  tally[verdict.population]++;
+  tally.gain += verdict.gain;
+  blockedAt.set(name, tally);
   // The POSITION is half the answer: the same step name at the source and mid-chain are two different
   // increments (a one-row `Values` input versus the traverser stream), and a list that omitted it
-  // would hide the split it exists to show.
-  if (name === wanted) blockedTraversals.push(`  [${longest}/${steps.length}] ${query}`);
+  // would hide the split it exists to show. The POPULATION is the other half — a traversal no route
+  // answers is a different increment from one that only needs migrating.
+  if (name === wanted) blockedTraversals.push(`  ${verdict.population.padEnd(8)} [${longest}/${steps.length}] ${query}`);
 }
 
-const total = (members: readonly string[]) => members.reduce((sum, m) => sum + (blockedAt.get(m) ?? 0), 0);
+const EMPTY: Tally = { blocked: 0, answered: 0, open: 0, unscored: 0, gain: 0 };
+const sum = (members: readonly string[], of: keyof Tally) =>
+  members.reduce((n, m) => n + (blockedAt.get(m) ?? EMPTY)[of], 0);
 const breakdown = (members: readonly string[]) => members
-  .map((m) => [m, blockedAt.get(m) ?? 0] as const).filter(([, n]) => n > 0)
+  .map((m) => [m, (blockedAt.get(m) ?? EMPTY).blocked] as const).filter(([, n]) => n > 0)
   .sort((a, b) => b[1] - a[1]).map(([m, n]) => `${m}:${n}`).join(' ');
+const row = (label: string, members: readonly string[]) => [
+  String(sum(members, 'blocked')).padStart(6), String(sum(members, 'answered')).padStart(9),
+  String(sum(members, 'open')).padStart(5), String(sum(members, 'unscored')).padStart(9),
+  String(sum(members, 'gain')).padStart(5), ' ', label.padEnd(19), breakdown(members),
+].join('');
 
-console.log(`rel-blockers: ${covered}/${CORPUS.length} corpus traversals fully covered (${unparsed} unparsed — L1's business, not this one)\n`);
-console.log('  BY FAMILY — the number to rank by:');
-for (const [name, members] of Object.entries(FAMILIES).sort((a, b) => total(b[1]) - total(a[1])))
-  console.log(`  ${String(total(members)).padStart(4)}  ${name.padEnd(19)} ${breakdown(members)}`);
+console.log(`rel-blockers: ${covered}/${CORPUS.length} corpus traversals fully covered`);
+console.log(`  ${unparsed} unparsed (L1's business, not this one) · ${raised} raised in the IR Pass tier before any lowering was attempted (§6·5 — often the correct permanent answer)\n`);
+console.log('  BY FAMILY — blocked splits into three populations; L3 is the scenario upside:');
+console.log('  blocked  answered  open  unscored   L3  family');
+for (const [name, members] of Object.entries(FAMILIES).sort((a, b) => sum(b[1], 'blocked') - sum(a[1], 'blocked')))
+  console.log(row(name, members));
 
 const inAFamily = new Set(Object.values(FAMILIES).flat());
-const residue = [...blockedAt].filter(([step]) => !inAFamily.has(step)).sort((a, b) => b[1] - a[1]);
+const residue = [...blockedAt].filter(([step]) => !inAFamily.has(step)).sort((a, b) => b[1].blocked - a[1].blocked);
 console.log('\n  IN NO FAMILY — where the next family gets recognized:');
-console.log(`  ${residue.map(([step, n]) => `${step}:${n}`).join(' ')}`);
+console.log(`  ${residue.map(([step, t]) => `${step}:${t.blocked}`).join(' ')}`);
+console.log(`\n  RANKED BY L3 UPSIDE — the scenarios no route answers today, per family:`);
+for (const [name, members] of Object.entries(FAMILIES).sort((a, b) => sum(b[1], 'gain') - sum(a[1], 'gain')))
+  if (sum(members, 'gain') > 0) console.log(`  ${String(sum(members, 'gain')).padStart(4)}  ${name}`);
 
 if (wanted) {
-  console.log(`\n  BLOCKED AT ${wanted}() — [covered prefix/steps] traversal:`);
+  console.log(`\n  BLOCKED AT ${wanted}() — [population] [covered prefix/steps] traversal:`);
   console.log(blockedTraversals.length ? blockedTraversals.join('\n') : '  (none)');
 }

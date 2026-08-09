@@ -607,11 +607,22 @@ mostly literal-typed casts and error-raising forms rather than one lowering), br
 aliases (32 — `select` 27, dominated by `Pop.all`/`Pop.mixed` history reads), the rest of the map shape
 (24), side effects (21), then `local`, `match`, `where`, the `path` tails.
 
-⚠️ **RANK OFF THE CUT, AND FILTER IT ON "THE ROUTE ANSWERS" — `rel-blockers` counts three populations
-as one (§6·5) and the filtered ranking is a different list.** A ~40-line throwaway that reruns the
-prefix scan and asks `compilePlan(q, {}, {spine:'legacy'})` whether legacy compiles it at all splits
-the 811 blocked corpus traversals into 436 REAL GAPS and 375 that no route answers (our deferrals plus
-TinkerPop's own refusals). Measured 2026-08-09: the plain counter led with the scalar transforms at 53;
+✅ **RANK OFF THE CUT, AND FILTER IT ON "THE ROUTE ANSWERS" — `rel-blockers` DOES BOTH NOW.** It prints
+`blocked` split into `answered` (some route already answers it, so lowering it closes the cut) /
+`open` (nobody answers it, so lowering it is an outright L3 gain) / `unscored` (no L3 scenario runs
+it), plus an `L3` column counting the scenarios in reach. The join is the committed
+`test/L1-corpus/scenarios.tsv` — which scenario each traversal came from, emitted beside `corpus.txt`
+by one extraction pass — against both floors of `l3-state.json`, so the instrument needs no run and
+no submodule. It also stopped calling a Pass-tier raise "unparsed": L1 holds parse at 100.0%, so those
+426 are §6·5's permanent answers, not this instrument's denominator.
+⚠️ **The ~40-line throwaway it replaced asked the WRONG QUESTION and its numbers below are stale.**
+`compilePlan(q, {}, {spine:'legacy'})` tests whether legacy COMPILES a traversal, not whether it
+ANSWERS one — and `sideEffect/Aggregate.feature`'s multi-site rows are the counter-example that cost
+the measurement: legacy compiles all of them and silently mis-answers nine, because `register` keeps
+the last entry of a `Map` (`docs/2026-08-09-named-collections-are-bindings-plan.md` §0). Read what
+follows as history; re-run the instrument for the current list.
+It split the 811 blocked corpus traversals into 436 "REAL GAPS" and 375 that no route answers (our
+deferrals plus TinkerPop's own refusals). Measured 2026-08-09: the plain counter led with the scalar transforms at 53;
 the filtered one leads with `match` 47 · `local` 46 · row ops 30 · `is` 26 · branch 22 · `has` 20, and
 it surfaced a cluster the per-step table hides entirely — the FILTER FAMILY over a value stream
 (`and` 10 · `or` 10 · `filter` 9 · `not` 5 · `where` 8), which was 42 gaps of one lowering. All of it

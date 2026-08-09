@@ -50,15 +50,16 @@ PASS ×4 (by luck — a dedup/groupCount/count/simplePath downstream hides the l
 
 So this is an **outright L3 gain of ~9**, not a cut-only item.
 
-> ⚠️ **THE CUT-FILTERED RANKING INSTRUMENT HAS A FLAW — FIX IT BEFORE TRUSTING IT AGAIN.** The
-> throwaway described in `docs/2026-08-01-relir-build-plan.md` §Phase 2 splits blocked traversals by
-> asking `compilePlan(q, {}, {spine:'legacy'})` whether legacy **compiles** them. That is not the
-> same question as whether legacy **answers correctly**, and this family is the counter-example: all
-> eleven `aggregate` rows it reported as "REAL GAPS the route answers" are traversals legacy compiles
-> and silently mis-answers. The correct filter runs the traversal on a seeded store and compares, or
-> — cheaper and good enough — cross-references `l3-state.json`'s `passed` set. Until it does, read
-> "the route answers" as "the route COMPILES", and treat a family whose scenarios are absent from
-> `passed` as BETTER value than the ranking claims, not worse.
+> ✅ **THE RANKING INSTRUMENT IS FIXED — `mise run rel-blockers` now splits on the CONFORMANCE
+> RESULT.** The throwaway it replaced (described in `docs/2026-08-01-relir-build-plan.md` §Phase 2)
+> asked `compilePlan(q, {}, {spine:'legacy'})` whether legacy **compiles** a traversal, which is not
+> the question of whether legacy **answers** it — and this family was the counter-example: every
+> `aggregate` row it called "a REAL GAP the route answers" is one legacy compiles and silently
+> mis-answers. The split is now `answered` / `open` / `unscored`, joined through the committed
+> `test/L1-corpus/scenarios.tsv` (which scenario a traversal came from) against both floors in
+> `l3-state.json`, plus an `L3` column counting the scenarios a family would newly put in reach.
+> It reproduces this section unaided: `mise run rel-blockers --step aggregate` prints the nine
+> multi-site rows as `open` and the four single-site ones as `answered`.
 
 ---
 
