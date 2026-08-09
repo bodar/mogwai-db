@@ -175,9 +175,8 @@ would be a throw out of a lowering whose contract is `null`, and legacy would ne
   wiring it.
 - 🚧 **`flatten` (§4.2)** *(Phase 3)* — join flattening / decorrelation into the P1 envelope. Deletes
   `expandRepeatBody`. Most of it dissolved into the legality ANALYSIS (Phase 3 step 2a).
-- ⛔ **`unroll` (§4.3)** — **WITHDRAWN.** `unrollFixedRepeat` (`ir/strategies.ts`) already unrolls
-  `repeat().times(n)` one layer up, into the FLAT chain; a Rel-level copy would be a second replicator.
-  See Phase 3 step 4. `src/rel/mint.ts` keeps `minter` alone, for `seek`.
+- ⛔ **`unroll` (§4.3)** — **WITHDRAWN**, restore point `9e0e307`. `repeat()` is a two-regime family;
+  `docs/2026-08-09-repeat-two-regimes-plan.md` is its plan. `src/rel/mint.ts` keeps `minter` alone, for `seek`.
 - 🚧 **`recognize` (§4.7)** *(Phase 4)* — the fast paths as plan rewrites, so a fast-path decline can be lifted.
 
 **Declared is not wired.** Only `name` has a production caller today; the rest are built-and-tested (or
@@ -835,39 +834,22 @@ its header before concluding a body is inexpressible.
 of the 125 corpus `repeat()`s have a NON-barrier body and need nothing beyond `Recursive`, already in the closed
 node set (`Recursive.step` is a function; seed/step channels identical, §3.3).
 
-**4. 🚧 `times(n)` unrolls AT THE IR LEVEL, not in RelIR — the plan's own §4.3 is WITHDRAWN.**
+**4. ➡️ MOVED — `repeat()` is a TWO-REGIME family, and the plan for it is
+`docs/2026-08-09-repeat-two-regimes-plan.md`.** That doc is APPROVED and supersedes this section; read it
+first for anything `repeat()`-shaped.
 
-⚠️ **`unrollFixedRepeat` (`src/compiler/ir/strategies.ts`) already does this one layer up**, and it is
-TinkerPop's own `RepeatUnrollStrategy` widened by one name. It rewrites `repeat(body).times(n)` into n
-copies of the body IN THE FLAT STEP CHAIN, before `formRepeatRegions`, so every later pass and the whole
-lowering see ordinary chain steps. A Rel-level `unroll` would be a SECOND place that knows how to replicate
-a body, and the flat splice is strictly better for combinatorial completeness: the replicated steps compose
-with everything by construction, rather than through whatever the replicating pass reproduces.
+The decision in one line: `Recursive` wherever the walk is unbounded or its body holds no per-iteration
+barrier; the IR-level unroll (`unrollFixedRepeat`, `ir/strategies.ts`) for a bounded `times(n)` whose body
+holds one; a clear refusal for unbounded-AND-barrier, which is not expressible in single-pass SQL.
+**Neither regime alone is sufficient and neither insufficiency shrinks with effort** — unroll cannot express
+an unbounded walk, and SQLite's recursive term cannot express a per-iteration barrier. §4.3's Rel-level
+`unroll` is WITHDRAWN (restore point `9e0e307`): the IR unroll produces a FLAT chain, so the whole lowering
+handles it uniformly and every future step family is inherited free.
 
-Its narrowness is **pass ORDER, not a law** — it runs BEFORE `absorbModulators`, so a body containing a
-modulator host (`order().by(k)`, `group().by(…)`, `dedup().by(…)`) arrives with its `by()` still a loose
-step and is refused; and `UNROLLABLE_BARRIERS` is the single name `dedup`. So step 4 is: **run it after
-`absorbModulators` and widen the admitted body set**, one barrier per commit with an L4 pin.
-
-A Rel-level `unroll` (levels of a bounded walk) plus `refresh` (copy a subplan under fresh ids) WAS built
-and is reverted; the restore point is `9e0e307`. `minter` stays in `src/rel/mint.ts` — `seek` uses it, and
-"a fresh name cannot collide" is the algebra's rule rather than that pass's.
-
-⚠️ **Four costs the IR level carries, none of them fatal and all of them to be handled in step 4:**
-
-- **Statement text is multiplied before anything can see it.** n copies of the body, and n×m for a nested
-  repeat, decided by a pass with no view of the rendered size. Today the only backstop is
-  `cfLimitViolation` at the very end of the RelIR spine (a decline), and legacy has none. Widening the
-  admitted set widens what can reach that wall, so step 4 owns a ceiling on `n × body length`.
-- **`times($x)` must be reduced to a value at pass time.** This is the ONE early-reduction exception the
-  root `CLAUDE.md` names (`docs/archive/2026-08-05-parameters-are-the-only-binds.md`), and widening the pass
-  widens its blast radius: more traversals lose the statement-cache benefit of a parameterised `times`.
-- **The unrolled chain is no longer RECOGNISABLE as a repeat.** `loops()`, a named `repeat('a', …)` and
-  `emit()`'s intermediate frontiers have nothing to attach to, which is exactly why the pass declines all
-  three today — and any widening must keep declining them rather than approximating them.
-- **It changes LEGACY's answers too**, since the pass runs above the routing switch. Every increment
-  therefore needs the census plus `test:legacy-spine`, not just `ci` (`docs/outstanding-work.md`'s rule that
-  `ci` does not contain the differential).
+Landed so far: the body is normalized before splicing, `UNROLLABLE_BARRIERS` covers `dedup` + the slice
+family + `order`, and a text ceiling is in place. L3 1763 → 1775 (RelIR) and 1681 → 1692 (legacy). What is
+left, in order: the `Recursive` regime (step 3 — the gate), the differential over the cell where both
+regimes are legal, and one more barrier name at a time.
 
 🔴 **The 5 `until()`/`emit()` barrier bodies hit the P3 wall and are not expressible in ANY lowering.** That
 deviation needs accepting, not engineering. The three routes partition the family: **125 = 72 `Recursive` + 48

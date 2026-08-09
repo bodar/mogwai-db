@@ -32,6 +32,9 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
   and the one environment whose egress lets this project build. `session-start.sh` prints it into a
   web session's context (`SessionStart` stdout IS context) and nothing else loads it, so a local
   session doesn't pay for facts it cannot observe. Add web-session facts THERE, not here
+- `docs/2026-08-09-repeat-two-regimes-plan.md` — `repeat()` is TWO lowerings chosen by a total function
+  (bounded+barrier → the IR unroll; everything else expressible → `Recursive`; unbounded+barrier → a clear
+  refusal). APPROVED, and it SUPERSEDES the RelIR build plan's Phase 3 step 4
 - `docs/2026-07-25-wire-and-storage-facts.md` — Map.Entry wire framing + the `MapStream` model
 - `docs/2026-07-28-property-based-testing-l5.md` — L5's oracle design space + the two oracles built.
   Its "architectural lesson" section is CORRECTED by the shape doc below — the boundary is the anchor
