@@ -316,6 +316,68 @@ describe('RelIR', () => {
     expect(() => check(pruned)).not.toThrow();
   });
 
+  // The pass's declared remainder. Each case asserts BOTH halves, and the second is the one that
+  // made this more than "add a case": pruning below these kinds retypes the node itself, or `check`
+  // rejects the result immediately (a Join declaring a width its sides no longer have).
+  test('prunes below a Join, retyping the join and the unary chain above it', () => {
+    const left = projectRel({ id: relId('jl'), input: scan, channels, type: { cols },
+      exprs: [['id', col(scan.id, 'id')], ['name', col(scan.id, 'name')]] });
+    const right = projectRel({ id: relId('jr'), input: scan, channels, type: { cols: pairedCols.slice(2) },
+      exprs: [['id_r', col(scan.id, 'id')], ['name_r', col(scan.id, 'name')]] });
+    const joined = join({ id: relId('j'), left, right, join: 'inner', channels, type: { cols: pairedCols },
+      on: { kind: 'binary', op: '=', left: col(left.id, 'id'), right: col(right.id, 'id_r') } });
+    const capped = limitRel({ id: relId('jlim'), input: joined, channels, type: { cols: pairedCols }, count: lit(5, 'int') });
+
+    const pruned = prune(capped, ['id']);
+    expect(() => check(pruned)).not.toThrow();
+    // `name`/`name_r` are unobserved; `id` and `id_r` are read by the ON, so both survive.
+    expect(pruned.type.cols.map((c) => c.name)).toEqual(['id', 'id_r']);
+  });
+
+  test('prunes an Aggregate to the aggregates that are read, never its group keys', () => {
+    const source = projectRel({ id: relId('as'), input: scan, channels, type: { cols },
+      exprs: [['id', col(scan.id, 'id')], ['name', col(scan.id, 'name')]] });
+    const grouped = aggregateRel({ id: relId('ag'), input: source, channels,
+      type: { cols: [{ name: 'id', type: 'int', nullable: false }, { name: 'n', type: 'int', nullable: false }, { name: 'hi', type: 'text', nullable: false }] },
+      groupBy: [col(source.id, 'id')],
+      aggs: [['n', { kind: 'agg', fn: 'count', args: [] }], ['hi', { kind: 'agg', fn: 'max', args: [col(source.id, 'name')] }]] });
+
+    const pruned = prune(grouped, ['id', 'n']);
+    expect(() => check(pruned)).not.toThrow();
+    // The group key stays whether or not it was asked for — dropping one makes the grouping COARSER,
+    // which is a different answer with the right shape.
+    expect(pruned.type.cols.map((c) => c.name)).toEqual(['id', 'n']);
+  });
+
+  // §12 / Calcite's `fieldsUsed.isEmpty()`: a whole-relation Aggregate whose outputs are all
+  // unobserved must not lose its last one, or the aggregation is ERASED and one row becomes N.
+  test('never prunes a whole-relation Aggregate to zero outputs', () => {
+    const counted = aggregateRel({ id: relId('ac'), input: scan, channels,
+      type: { cols: [{ name: 'n', type: 'int', nullable: false }] },
+      groupBy: [], aggs: [['n', { kind: 'agg', fn: 'count', args: [] }]] });
+    const pruned = prune(counted, []);
+    expect(pruned.type.cols.map((c) => c.name)).toEqual(['n']);
+    expect(() => check(pruned)).not.toThrow();
+  });
+
+  test('prunes every arm of a Union identically', () => {
+    const arm = (id: string) => projectRel({ id: relId(id), input: scan, channels, type: { cols },
+      exprs: [['id', col(scan.id, 'id')], ['name', col(scan.id, 'name')]] });
+    const merged = union({ id: relId('u'), inputs: [arm('u1'), arm('u2')], all: true, channels, type: { cols } });
+    const pruned = prune(merged, ['id']);
+    expect(() => check(pruned)).not.toThrow();
+    expect(pruned.type.cols.map((c) => c.name)).toEqual(['id']);
+    if (pruned.kind === 'union') for (const input of pruned.inputs) expect(input.type.cols.map((c) => c.name)).toEqual(['id']);
+  });
+
+  // The safety property that lets this pass sit in front of an emitter whose SQL is snapshot-tested.
+  // Node IDENTITY is not it — `rewrite` rebuilds every node through its factory either way — so the
+  // claim is about the emitted statement.
+  test('pruning nothing changes the SQL not at all', () => {
+    const joined = sharedUnderTwoSides();
+    expect(emitQuery(planOf(prune(joined))).sql).toBe(emitQuery(planOf(joined)).sql);
+  });
+
   test('type-preserving nodes declare exactly their input type', () => {
     const wellFormed = [
       filter({ id: relId('typedFilter'), input: scan, channels, type: { cols }, pred: lit(1, 'int') }),

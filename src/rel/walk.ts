@@ -98,10 +98,19 @@ const mapSpec = (spec: WindowSpec, f: (e: Expr) => Expr): WindowSpec => ({
   frame: spec.frame && { ...spec.frame, start: mapBound(spec.frame.start, f), end: mapBound(spec.frame.end, f) },
 });
 
-/** Replace a node's child relations, rebuilding through the kind's factory. Never a spread: a
- * spread keeps an obsolete field and loses the construction brand. */
-export function mapRelChildren(r: Rel, f: (child: Rel) => Rel): Rel {
-  const { id, channels, type } = r;
+/**
+ * Replace a node's child relations, rebuilding through the kind's factory. Never a spread: a spread
+ * keeps an obsolete field and loses the construction brand.
+ *
+ * `retype` overrides the declared columns AS THE NODE IS CONSTRUCTED, which is the only moment a
+ * width change can be expressed: a factory validates its declared type against its children, so a
+ * caller that rebuilds first and re-declares afterwards never reaches its own second step — the
+ * `Join` throws inside this function (`a inner Join emits its sides' 2 columns; its type declares
+ * 4`). `prune` is that caller, and the alternative was a private per-kind copy of this switch.
+ */
+export function mapRelChildren(r: Rel, f: (child: Rel) => Rel, retype?: Rel['type']): Rel {
+  const { id, channels } = r;
+  const type = retype ?? r.type;
   switch (r.kind) {
     case 'scan': case 'values': case 'self-ref': case 'ref': return r;
     case 'project': return make.project({ id, channels, type, input: f(r.input), exprs: r.exprs });
