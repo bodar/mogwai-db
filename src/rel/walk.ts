@@ -248,6 +248,26 @@ export function freeRelIds(plan: Rel): ReadonlySet<string> {
   return new Set([...referenced].filter((id) => !defined.has(id)));
 }
 
+/**
+ * Does this subtree contain a walk's own reference — SelfRef of `name`, or of ANY walk when no name
+ * is given?
+ *
+ * ⚠️ **A `SelfRef` may not leave the recursive term it belongs to**, and that one fact has two
+ * consumers, which is why it is here rather than private to either. `name` may not hoist such a
+ * subtree into a CTE beside the statement — SQLite answers `circular reference`, because its rule is
+ * POSITIONAL rather than a count (P1). And `check` refuses a `Materialize` over one for exactly the
+ * same reason: a fence's whole purpose is to force that CTE boundary, so over the walk's own
+ * reference it is a shape with no legal spelling rather than a hint the emitter may ignore.
+ *
+ * ⚠️ It counts a reference inside a CORRELATED SUBPLAN too. Hoisting the subplan moves that
+ * reference just as surely as hoisting the spine would.
+ */
+export function containsSelfRef(plan: Rel, name?: string): boolean {
+  let found = false;
+  forEachRel(plan, (r) => { if (r.kind === 'self-ref' && (name === undefined || r.name === name)) found = true; });
+  return found;
+}
+
 /** Visit every relation in the DAG once, plus every relation correlated from an expression. */
 export function forEachRel(plan: Rel, visit: (r: Rel) => void): void {
   const seen = new Set<Rel>();

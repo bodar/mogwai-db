@@ -1,10 +1,11 @@
+import { fromTree } from './block.ts';
 import { bindsAsParameter, type Expr } from './expr.ts';
 import { joinWidth, scan } from './factory.ts';
 import { checkChannels } from './obligations.ts';
 import { isRel, type Rel, type RelKind } from './rel.ts';
 import { retained, type Binding, type Plan } from './plan.ts';
 import { isStmt, type Stmt } from './stmt.ts';
-import { exprChildren, exprRels, recursiveStep, refNames, relChildren, relExprs } from './walk.ts';
+import { containsSelfRef, exprChildren, exprRels, forEachRel, recursiveStep, refNames, relChildren, relExprs } from './walk.ts';
 import { EXCLUDED } from './types.ts';
 
 export const DO_BIND_CAP = 100;
@@ -174,21 +175,29 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
     references(term);
     return { selfRefs, barrier };
   };
-  const topLevelSelf = (term: Rel, name: string): boolean => {
-    if (term.kind === 'self-ref') return term.name === name;
-    // The emitter can place a direct source at the recursive term's FROM, but it may not
-    // unwrap a derived unary chain. `flatten` is the pass that makes broader bodies legal.
-    //
-    // `Materialize` is deliberately NOT in this set, though it is a unary node like the others: it
-    // is the one whose whole purpose is to FORCE a named CTE boundary, which is the derived-table
-    // wrapping of the self reference that P1 measured as fatal — `circular reference`, even as the
-    // sole reference, because SQLite's rule is positional rather than a count. A fence belongs
-    // outside the recursive term, never between it and its own walk.
-    if (term.kind === 'project' || term.kind === 'filter' || term.kind === 'sort' || term.kind === 'limit'
-      || term.kind === 'distinct' || term.kind === 'window' || term.kind === 'explode')
-      return term.input?.kind === 'self-ref' && term.input.name === name;
-    return term.kind === 'join'
-      && ((term.left.kind === 'self-ref' && term.left.name === name) || (term.right.kind === 'self-ref' && term.right.name === name));
+  /**
+   * P1's law: the walk's reference lands in the recursive term's `FROM` join tree, UNWRAPPED.
+   *
+   * ⚠️ **This is a structural question, not a one-level shape match, and the difference is the most
+   * common `repeat()` body there is.** SQL's `FROM` is a join TREE and everything in it is
+   * top-level, however many algebra nodes sit above it — so `project(join(self, edges))`, refused by
+   * the shape match this replaces, denotes the canonical recursive walk. Whether a node's input ends
+   * up in the same `FROM` or behind a derived table is decided by the EMITTER's fusion rules, so
+   * that is what `fromTree` asks (`block.ts`), rather than a second guess at them here.
+   */
+  const topLevelSelf = (term: Rel, name: string): boolean =>
+    fromTree(term).some((source) => source.kind === 'self-ref' && source.name === name);
+  /**
+   * A `Materialize` over the walk's own reference. It is the one unary node the fusion analysis
+   * above cannot answer for, because its boundary is not a derived table the emitter opens but a CTE
+   * the `Name` pass makes — and a walk referenced from inside a CTE beside its own statement is
+   * `circular reference`, even as the SOLE reference, because SQLite's rule is positional rather
+   * than a count (P1). A fence belongs outside the recursive term, never between it and its walk.
+   */
+  const fencedSelf = (term: Rel, name: string): boolean => {
+    let fenced = false;
+    forEachRel(term, (r) => { if (r.kind === 'materialize' && containsSelfRef(r, name)) fenced = true; });
+    return fenced;
   };
   const checkExpr = (e: Expr, scope: Scope): void => {
     if (e.kind === 'col') {
@@ -324,6 +333,7 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
       const term = recursiveTerm(step, node.name);
       if (term.selfRefs !== 1) throw new Error(`RelIR: Recursive step must reference '${node.name}' exactly once (found ${term.selfRefs})`);
       if (term.barrier) throw new Error(`RelIR: ${term.barrier}`);
+      if (fencedSelf(step, node.name)) throw new Error(`RelIR: a Materialize over the '${node.name}' reference forces a CTE boundary, and SQLite reports 'circular reference' for a walk referenced from inside one; fence outside the walk`);
       if (!topLevelSelf(step, node.name)) throw new Error(`RelIR: Recursive step must reference '${node.name}' at the top level of FROM; run flatten first`);
       if (!sameColumns(node.seed.type.cols, step.type.cols)) throw new Error('RelIR: Recursive seed and step types must be identical');
     },

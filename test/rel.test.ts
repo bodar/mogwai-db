@@ -136,28 +136,109 @@ describe('RelIR', () => {
     db.close();
   });
 
-  test('rejects recursive aggregates and hidden recursive references', () => {
+  test('rejects a recursive aggregate, and a FENCE over the walk reference', () => {
     const oneCol = [{ name: 'id', type: 'int', nullable: false }] as const;
     const seed = valuesRel({ id: relId('seed'), rows: [[lit(1, 'int')]], channels, type: { cols: oneCol } });
     const aggregate = recursiveRel({ id: relId('walk'), name: 'walk', cols: ['id'], seed, channels, type: { cols: oneCol },
       step: (self) => aggregateRel({ id: relId('a'), input: self, channels, type: { cols: oneCol }, groupBy: [], aggs: [['id', { kind: 'agg', fn: 'max', args: [col(self.id, 'id')] }]] }),
     });
     expect(() => check(aggregate)).toThrow('SQLite forbids aggregate queries in a recursive term');
-    const hidden = recursiveRel({ id: relId('hiddenWalk'), name: 'hiddenWalk', cols: ['id'], seed, channels, type: { cols: oneCol },
-      step: (self) => {
-        const inner = filter({ id: relId('inner'), input: self, channels, type: { cols: oneCol }, pred: { kind: 'binary', op: '>', left: col(self.id, 'id'), right: lit(0, 'int') } });
-        return projectRel({ id: relId('outer'), input: inner, channels, type: { cols: oneCol }, exprs: [['id', col(inner.id, 'id')]] });
-      },
-    });
-    expect(() => check(hidden)).toThrow("must reference 'hiddenWalk' at the top level of FROM");
-    // A FENCE is the same rejection, and it is the one worth naming: a `Materialize` is a legal
-    // unary node whose whole purpose is to force a named CTE boundary, which is exactly the derived
-    // table P1 measured as fatal (`circular reference`) even as the SOLE reference — SQLite's rule
-    // is positional, not a count. So it is refused where a `Filter` is admitted.
+    // A `Materialize` is a legal unary node whose whole purpose is to force a named CTE boundary,
+    // which is exactly the wrapping P1 measured as fatal (`circular reference`) even as the SOLE
+    // reference — SQLite's rule is positional, not a count. It is the one unary node the fusion
+    // analysis cannot answer for, because its boundary is a CTE the `Name` pass makes rather than a
+    // derived table the emitter opens. So it is refused where a `Filter` is admitted.
     const fenced = recursiveRel({ id: relId('fencedWalk'), name: 'fencedWalk', cols: ['id'], seed, channels, type: { cols: oneCol },
       step: (self) => materialize({ id: relId('fence'), name: 'fence', input: self, channels, type: { cols: oneCol } }),
     });
-    expect(() => check(fenced)).toThrow("must reference 'fencedWalk' at the top level of FROM");
+    expect(() => check(fenced)).toThrow("a Materialize over the 'fencedWalk' reference forces a CTE boundary");
+    // …and the pass agrees rather than merely being refused downstream: `name` must not hoist a
+    // subtree holding the walk's own reference, which `freeRelIds` alone does not forbid (a SelfRef
+    // names its walk positionally, so such a subtree is free-reference-clean and looked bindable).
+    expect(name(fenced).bindings.map((binding) => binding.name)).not.toContain('fence');
+  });
+
+  /**
+   * P1's law is that the walk's reference is not wrapped in a DERIVED TABLE — a different question
+   * from how many algebra nodes sit above it, because SQL's `FROM` is a join TREE and everything in
+   * it is top-level. The one-level shape match this replaces refused the commonest `repeat()` body
+   * there is.
+   *
+   * Every admitted row is measured on bun:sqlite 3.53.0 over a 3-edge chain and returns `1,2,3,4`;
+   * both refused rows return `circular reference: w`.
+   *
+   * | shape | SQLite |
+   * |---|---|
+   * | `FROM w INNER JOIN edges e` / `FROM edges e INNER JOIN w` | legal |
+   * | `FROM w LEFT JOIN edges e` / `FROM edges e LEFT JOIN w` | legal |
+   * | `FROM w, edges e` (cross) · nested joins · a `w`-correlated `EXISTS` | legal |
+   * | `FROM (SELECT id FROM w) x` | **circular reference** |
+   * | `w` only inside a correlated scalar | **circular reference** |
+   */
+  test('admits the walk reference ANYWHERE unwrapped in the term FROM — a join tree is top level', () => {
+    const walkCols = [{ name: 'id', type: 'int', nullable: false }] as const;
+    const edgeCols = [{ name: 'src', type: 'int', nullable: false }, { name: 'tgt', type: 'int', nullable: false }] as const;
+    const seed = valuesRel({ id: relId('seed'), rows: [[lit(1, 'int')]], channels, type: { cols: walkCols } });
+    // The canonical one-hop movement body: `project(join(self, edges))`.
+    const walk = recursiveRel({ id: relId('w'), name: 'w', cols: ['id'], seed, channels, type: { cols: walkCols },
+      step: (self) => {
+        const edges = scanRel({ id: relId('e'), table: 'edges', alias: 'e', channels, type: { cols: edgeCols } });
+        const hop = join({ id: relId('hop'), left: self, right: edges, join: 'inner', channels,
+          type: { cols: [...walkCols, ...edgeCols] },
+          on: { kind: 'binary', op: '=', left: col(self.id, 'id'), right: col(edges.id, 'src') } });
+        return projectRel({ id: relId('next'), input: hop, channels, type: { cols: walkCols }, exprs: [['id', col(hop.id, 'tgt')]] });
+      },
+    });
+    expect(() => check(walk)).not.toThrow();
+    const emitted = emitQuery(planOf(walk));
+    // UNWRAPPED: the walk stands in the FROM join tree itself, not behind a derived SELECT.
+    expect(emitted.sql).toContain('FROM w w INNER JOIN edges e');
+
+    const db = new Database(':memory:');
+    db.run('CREATE TABLE edges(id INTEGER PRIMARY KEY, uid TEXT, src INTEGER, label INTEGER, tgt INTEGER)');
+    db.run('INSERT INTO edges(src, label, tgt) VALUES (1,0,2),(2,0,3),(3,0,4)');
+    expect(db.query(emitted.sql).all(...emitted.binds)).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }]);
+    db.close();
+
+    // …and the same body one node deeper still lands in the same FROM.
+    const filtered = recursiveRel({ id: relId('w2'), name: 'w2', cols: ['id'], seed, channels, type: { cols: walkCols },
+      step: (self) => {
+        const edges = scanRel({ id: relId('e2'), table: 'edges', alias: 'e2', channels, type: { cols: edgeCols } });
+        const hop = join({ id: relId('hop2'), left: self, right: edges, join: 'inner', channels,
+          type: { cols: [...walkCols, ...edgeCols] },
+          on: { kind: 'binary', op: '=', left: col(self.id, 'id'), right: col(edges.id, 'src') } });
+        const kept = filter({ id: relId('kept'), input: hop, channels, type: { cols: [...walkCols, ...edgeCols] },
+          pred: { kind: 'binary', op: '<', left: col(hop.id, 'tgt'), right: lit(4, 'int') } });
+        return projectRel({ id: relId('next2'), input: kept, channels, type: { cols: walkCols }, exprs: [['id', col(kept.id, 'tgt')]] });
+      },
+    });
+    expect(() => check(filtered)).not.toThrow();
+  });
+
+  /** The other half of the same law: a reference the emitter WOULD wrap is still refused, and the
+   *  message still points at `flatten`. A `Union` step is a compound — a complete SELECT of its own
+   *  — so nothing inside it is in the outer term's FROM at all. */
+  test('refuses a walk reference the emitter would wrap in a derived SELECT', () => {
+    const walkCols = [{ name: 'id', type: 'int', nullable: false }] as const;
+    const seed = valuesRel({ id: relId('seedU'), rows: [[lit(1, 'int')]], channels, type: { cols: walkCols } });
+    const compound = recursiveRel({ id: relId('wu'), name: 'wu', cols: ['id'], seed, channels, type: { cols: walkCols },
+      step: (self) => {
+        const other = valuesRel({ id: relId('otherU'), rows: [[lit(9, 'int')]], channels, type: { cols: walkCols } });
+        return union({ id: relId('armsU'), inputs: [self, other], all: true, channels, type: { cols: walkCols } });
+      },
+    });
+    expect(() => check(compound)).toThrow("must reference 'wu' at the top level of FROM");
+
+    // And the shape SQLite names outright: the walk referenced ONLY from a correlated scalar.
+    const scalarOnly = recursiveRel({ id: relId('ws'), name: 'ws', cols: ['id'], seed, channels, type: { cols: walkCols },
+      step: (self) => {
+        const inner = projectRel({ id: relId('innerS'), input: self, channels, type: { cols: walkCols }, exprs: [['id', col(self.id, 'id')]] });
+        const one = valuesRel({ id: relId('oneS'), rows: [[lit(1, 'int')]], channels, type: { cols: walkCols } });
+        return projectRel({ id: relId('outerS'), input: one, channels, type: { cols: walkCols },
+          exprs: [['id', { kind: 'scalar', plan: inner }]] });
+      },
+    });
+    expect(() => check(scalarOnly)).toThrow("must reference 'ws' at the top level of FROM");
   });
 
   // P3 — SQLite ACCEPTS all three and none of them means what an author writing it means. Measured

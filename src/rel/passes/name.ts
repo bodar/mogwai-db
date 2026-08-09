@@ -1,7 +1,7 @@
 import { ref } from '../factory.ts';
 import { plan, type Binding, type Plan } from '../plan.ts';
 import type { Rel } from '../rel.ts';
-import { exprRels, forEachExpr, freeRelIds, relChildren, relExprs, rewriteRels } from '../walk.ts';
+import { containsSelfRef, exprRels, forEachExpr, freeRelIds, relChildren, relExprs, rewriteRels } from '../walk.ts';
 
 /**
  * Decide which DAG vertices deserve a named boundary, and REWRITE them into `Plan` bindings.
@@ -51,9 +51,16 @@ export function name(root: Rel): Plan {
    * That is also why the test lives in `walk.ts`: `flatten` (§4.2) decides what it must DECORRELATE
    * with exactly this fact, and two implementations of "is this subtree self-contained" is two
    * chances to get it wrong.
-   */
+   *
+   * ⚠️ **A subtree holding a walk's own reference may not be bound either, and `freeRelIds` does not
+   * say so** — a `SelfRef` names its walk POSITIONALLY rather than by a `Col`, so such a subtree is
+   * free-reference-clean and looked bindable. Hoisting it puts the reference in a CTE beside its own
+   * recursive statement, which SQLite answers with `circular reference`. It is reachable two ways —
+   * a `Materialize` inside a recursive term (always), and any node the term shares with itself — and
+   * `check` refuses the first outright, so what this arm keeps correct is the second. */
   const binds = (rel: Rel): boolean =>
-    rel !== root && ((counts.get(rel) ?? 0) > 1 || rel.kind === 'materialize') && freeRelIds(rel).size === 0;
+    rel !== root && ((counts.get(rel) ?? 0) > 1 || rel.kind === 'materialize')
+    && freeRelIds(rel).size === 0 && !containsSelfRef(rel);
 
   const bindings: Binding[] = [];
   // Bottom-up and memoised, so a binding is pushed after every binding it depends on, and the

@@ -1,4 +1,5 @@
 import { empty, identifier, keyedValue, list, q, raw, render, textLiteral, value, type Expression } from '../sql/kernel/q.ts';
+import { NEEDS_SUBQUERY, grouped, spliceable, type Slots } from './block.ts';
 import { BindBudgetExceeded, DO_BIND_CAP, checkPlan } from './check.ts';
 import type { Expr } from './expr.ts';
 import { recursiveSelf } from './factory.ts';
@@ -62,14 +63,17 @@ interface JoinItem { readonly kind: 'inner' | 'left' | 'cross'; readonly item: F
 type Cols = ReadonlyMap<string, Expression>;
 type Scope = ReadonlyMap<string, Cols>;
 
-interface Block {
+/**
+ * A block under assembly. It IS a `Slots` (`block.ts`) carrying rendered expressions in the slots,
+ * which is what lets one definition of the fusion rules serve both this assembler and the checker's
+ * structural analysis — see `NEEDS_SUBQUERY`.
+ */
+interface Block extends Slots {
   readonly kind: 'block';
   readonly select: readonly (readonly [string, Expression])[];
   readonly from: FromItem;
   readonly joins: readonly JoinItem[];
   readonly where?: Expression;
-  /** Present (even empty) once the block aggregates: `[]` is a whole-relation aggregate, which
-   * emits no GROUP BY clause but still occupies the slot. */
   readonly groupBy?: readonly Expression[];
   readonly having?: Expression;
   readonly orderBy?: readonly Expression[];
@@ -93,12 +97,6 @@ const colsOf = (alias: string, r: Rel): Cols => new Map(r.type.cols.map((column)
 const conjoin = (left: Expression | undefined, right: Expression | undefined): Expression | undefined =>
   left && right ? q`(${left} AND ${right})` : left ?? right;
 const concat = (parts: readonly Expression[]): Expression => (parts.length ? list(parts, '') : empty);
-
-/** Slots whose occupancy means a node cannot be fused into this block. */
-const tailUsed = (b: Block): boolean => b.orderBy !== undefined || b.limit !== undefined || b.offset !== undefined || b.distinct;
-const grouped = (b: Block): boolean => b.groupBy !== undefined;
-/** A side of a join may be spliced into the join's own FROM only when it fills nothing else. */
-const spliceable = (b: Block): boolean => !grouped(b) && b.having === undefined && !tailUsed(b) && !b.windowed;
 
 interface Side {
   readonly from: FromItem;
@@ -315,21 +313,21 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         // aggregate: replacing the latter with constants would erase the aggregate's one-row shape.
         // This deliberately takes Calcite's safe superset instead of recursively proving which input
         // fields an arbitrary Expr reads; see SqlImplementor.java:2223-2241 (`fieldsUsed.isEmpty()`).
-        const b = inputBlock(r.input, outer, (input) => input.distinct || (grouped(input) && input.groupBy?.length === 0));
+        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.project);
         const select = r.exprs.map(([name, e]) => [name, expr(e, b.scope)] as const);
         return { ...b, select, scope: withRel(b.scope, r.id, new Map(select)) };
       }
 
       case 'filter': {
         // Over an aggregate this IS `HAVING` — one of §3's declared collapses, not a second node.
-        const b = inputBlock(r.input, outer, (input) => input.windowed || tailUsed(input) || input.having !== undefined);
+        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.filter);
         const pred = expr(r.pred, b.scope);
         const placed = grouped(b) ? { having: conjoin(b.having, pred) } : { where: conjoin(b.where, pred) };
         return { ...b, ...placed, scope: withRel(b.scope, r.id, outMap(b)) };
       }
 
       case 'aggregate': {
-        const b = inputBlock(r.input, outer, (input) => input.windowed || grouped(input) || tailUsed(input));
+        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.aggregate);
         const groupBy = r.groupBy.map((e) => expr(e, b.scope));
         const keys = r.type.cols.slice(0, groupBy.length).map((column) => column.name);
         const select = [
@@ -347,12 +345,12 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         // `g.V().order().by("age").range(1,3).values("name")`: the key spelled THREE times and 30
         // binds against legacy's 5, so a second `order()` in one chain would approach the DO cap and
         // fail closed where legacy answers. Naming the column costs one nested SELECT.
-        const b = inputBlock(r.input, outer, (input) => input.orderBy !== undefined || input.limit !== undefined || input.offset !== undefined || input.distinct || input.windowed);
+        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.sort);
         return { ...b, orderBy: r.terms.map((term) => sortTerm(term, b.scope)), scope: withRel(b.scope, r.id, outMap(b)) };
       }
 
       case 'limit': {
-        const b = inputBlock(r.input, outer, (input) => input.limit !== undefined || input.offset !== undefined);
+        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.limit);
         return {
           ...b,
           limit: r.count ? expr(r.count, b.scope) : undefined,
@@ -362,7 +360,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       }
 
       case 'distinct': {
-        const b = inputBlock(r.input, outer, (input) => tailUsed(input));
+        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.distinct);
         return { ...b, distinct: true, scope: withRel(b.scope, r.id, outMap(b)) };
       }
 
@@ -374,7 +372,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         // produces whenever a step MINTS an emission order and a later window ranks by it
         // (`dedup().by(k)` after `order()`, the cumulative-bulk slice). Refusing here is total; the
         // alternative was a `Materialize` fence at each such site, i.e. remembering the rule N times.
-        const b = inputBlock(r.input, outer, (input) => tailUsed(input) || input.windowed);
+        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.window);
         const select = [...b.select, ...r.specs.map(([name, spec]) => [name, expr(spec, b.scope)] as const)];
         return { ...b, select, windowed: true, scope: withRel(b.scope, r.id, new Map(select)) };
       }
@@ -392,14 +390,14 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
           const select = explodeColumns(r.as).map(memberCol);
           return { kind: 'block', select, from: item, joins: [], distinct: false, windowed: false, scope: withRel(outer, r.id, new Map(select)) };
         }
-        const b = inputBlock(r.input, outer, (input) => input.windowed || grouped(input) || tailUsed(input));
+        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.explode);
         const item: FromItem = { text: q`json_each(${expr(r.expr, b.scope)})`, alias: r.id };
         const select = [...b.select, ...explodeColumns(r.as).map(memberCol)];
         return { ...b, joins: [...b.joins, { kind: 'cross', item }], select, scope: withRel(b.scope, r.id, new Map(select)) };
       }
 
       case 'materialize': {
-        const b = inputBlock(r.input, outer, () => false);
+        const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.materialize);
         return { ...b, scope: withRel(b.scope, r.id, outMap(b)) };
       }
 
@@ -436,7 +434,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       case 'union': return {
         kind: 'closed',
         body: list(
-          r.inputs.map((input) => renderBlock(inputBlock(input, outer, (arm) => arm.orderBy !== undefined || arm.limit !== undefined || arm.offset !== undefined))),
+          r.inputs.map((input) => renderBlock(inputBlock(input, outer, NEEDS_SUBQUERY.union))),
           r.all ? ' UNION ALL ' : ' UNION ',
         ),
       };
