@@ -607,6 +607,24 @@ mostly literal-typed casts and error-raising forms rather than one lowering), br
 aliases (32 — `select` 27, dominated by `Pop.all`/`Pop.mixed` history reads), the rest of the map shape
 (24), side effects (21), then `local`, `match`, `where`, the `path` tails.
 
+⚠️ **RANK OFF THE CUT, AND FILTER IT ON "THE ROUTE ANSWERS" — `rel-blockers` counts three populations
+as one (§6·5) and the filtered ranking is a different list.** A ~40-line throwaway that reruns the
+prefix scan and asks `compilePlan(q, {}, {spine:'legacy'})` whether legacy compiles it at all splits
+the 811 blocked corpus traversals into 436 REAL GAPS and 375 that no route answers (our deferrals plus
+TinkerPop's own refusals). Measured 2026-08-09: the plain counter led with the scalar transforms at 53;
+the filtered one leads with `match` 47 · `local` 46 · row ops 30 · `is` 26 · branch 22 · `has` 20, and
+it surfaced a cluster the per-step table hides entirely — the FILTER FAMILY over a value stream
+(`and` 10 · `or` 10 · `filter` 9 · `not` 5 · `where` 8), which was 42 gaps of one lowering. All of it
+was element-only for a SIGNATURE reason rather than an algebraic one (`Subject` carried an `Elem`
+beside it), so `Subject` became a total union over the traverser shape exactly as `ChildHost` already
+was, `is(P)` joined `sourceFilter` beside the connectives, and `where(P)`/`filter(P)` with no body
+became `is(P)` guarded by the live alias map. Landed alongside it: an IR Pass stating that a
+per-traverser host over a STREAM-IDENTITY body IS that body (`local(__.aggregate('a'))` is
+`aggregate('a')`, and so are the `map`/`flatMap` spellings), and a wrong ANSWER the new position
+exposed — `ordered()` took the bound's VALUE and not its declared type, so a `datetime`/`duration`
+bound tested the plain numeric vtypes and answered FALSE for a comparison the reference performs.
+Session total: the CUT 558 → 502, census coverage 1026 → 1120 (48.7%).
+
 ✅ **THE OVERRIDE IS SPENT — gap 4's element-keyed side reads LANDED, and `mise run L3:rel-only` now
 reports: 1130/2260 against the default position's 1761.** Every ranking below can finally be read off
 the cut itself rather than off a proxy. What the blocker column said (`MapOf`'s `elem` tag declines)
