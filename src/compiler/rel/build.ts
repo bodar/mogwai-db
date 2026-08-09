@@ -195,6 +195,35 @@ export function and(left: Expr | undefined, right: Expr | undefined): Expr {
 
 export const eq = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '=', left, right });
 
+/** `a OR b`, and `or(undefined, b)` is `b` — `and`'s twin, so a connective folded over N arms needs no
+ *  seed value and the two connectives fold the same way. */
+export function or(left: Expr | undefined, right: Expr): Expr {
+  return left ? { kind: 'binary', op: 'or', left, right } : right;
+}
+
+/**
+ * "THIS BODY DID NOT TEST TRUE" — the NULL-SAFE negation a filter STEP owes, and it is not `NOT`.
+ *
+ * `NotStep.filter` is `!TraversalUtil.test(traverser, body)`, and `test` is a two-valued question:
+ * the body produced output, or it did not. SQL's `NOT` is three-valued, so `NOT (<unproductive
+ * projection> = 29)` is `NOT NULL` = NULL = the row is DROPPED — the exact opposite of TinkerPop's
+ * answer, which passes a traverser whose body produced nothing.
+ *
+ * ⚠️ **MEASURED, as a wrong answer on this route.** `g.V().not(__.values('age').is(P.eq(29)))` lost
+ * `lop` and `ripple` (no `age` at all) where legacy and the reference keep them. It went unseen
+ * because it is per-PREDICATE: a range comparison is already total — `predicateExpr` wraps it in a
+ * `typeof` guard whose ELSE is a false literal, so `gt` was right — while `eq`/`neq`/`within` compare
+ * directly and go NULL. So the positive reasoning that "productivity falls out of SQL's own null
+ * semantics" is TRUE for a filter and FALSE the moment it is negated, and the fix belongs at the
+ * negation rather than in every predicate.
+ *
+ * `x IS NOT 1` and not `COALESCE(x, 0) = 0`: SQLite's `IS NOT` is the null-safe comparison, so this is
+ * one node and reads as the question it asks. Every predicate this module builds is `0`/`1`/NULL —
+ * an `Exists`, a comparison, or a connective over those — so testing against `1` is total.
+ */
+export const notProduced = (pred: Expr): Expr =>
+  ({ kind: 'binary', op: 'is not', left: pred, right: compilerInt(1) });
+
 /** `SELECT id FROM labels WHERE name IN (…)` — the name→id indirection every label-aware step
  *  reaches through, and the reason `labels` is a `Scan` table rather than a string in an emitter. */
 /**

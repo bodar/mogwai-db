@@ -17,7 +17,7 @@ import { assertStreamColumns, toGroupStream, toPathStream, toPropertyStream, toR
 import { popChildScope, pushChildScope, reuseCurrentFrame } from '../../src/compiler/steps/tail/child.ts';
 import { rootLayout } from '../../src/compiler/steps/context/context.ts';
 import { readdirSync, readFileSync } from 'node:fs';
-import { grouped, read, run, runWith, seededStore } from '../support/harness.ts';
+import { grouped, read, relirOff, run, runWith, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -186,13 +186,24 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
   });
 
   test('SubgraphStrategy injects the vertex criterion as a filter after every vertex step', () => {
-    // vertices: __.has(k,P) → a where() filter CTE spliced after V() (and after each
-    // out/in/both). Both endpoints of a hop are checked: source filtered before, the
-    // moved-to vertex filtered after.
-    const sql = read('g.withStrategies(new SubgraphStrategy(vertices: __.has("name", P.within("a","b")))).V().values("name")').sql;
+    // vertices: __.has(k,P) → a `where()` filter spliced after V() (and after each out/in/both).
+    // Both endpoints of a hop are checked: source filtered before, the moved-to vertex after.
+    //
+    // Pinned to the LEGACY spine deliberately: the criterion body is a FILTER-ONLY `where()`, which
+    // RelIR now answers, and the two spines spell the injected clause differently by design (a CTE
+    // chain against a driving seek plus a correlated `EXISTS`). What the strategy MEANS is asserted
+    // on both routes by the answer tests below; this one is about legacy's splice.
+    const sql = read('g.withStrategies(new SubgraphStrategy(vertices: __.has("name", P.within("a","b")))).V().values("name")', { spine: 'legacy' }).sql;
     expect(sql).toContain('EXISTS(SELECT 1 FROM vertex_properties WHERE node=n.id AND key=? AND value in (?, ?))'); // criterion applied
     // after V() the filter is c1 (source c0 → filtered c1)
     expect(sql).toMatch(/c1\(id, bulk\) as \(SELECT n\.id, p\.bulk FROM nodes n JOIN c0 p .* WHERE EXISTS\(SELECT 1 FROM vertex_properties WHERE node=n\.id AND key=\? AND value in/);
+    // …and the RelIR route applies the SAME criterion, as a driving seek plus the correlated test.
+    if (!relirOff) {
+      const rel = read('g.withStrategies(new SubgraphStrategy(vertices: __.has("name", P.within("a","b")))).V().values("name")');
+      expect(rel.spine).toBe('rel');
+      expect(rel.sql).toContain("rsk0.value IN ('a', 'b')");
+      expect(rel.sql).toMatch(/WHERE EXISTS \(SELECT 1 AS one FROM vertex_properties .* IN \('a', 'b'\)\)/s);
+    }
   });
 
   test('PartitionStrategy read-filter isolates partitions; write-stamp tags created elements', () => {

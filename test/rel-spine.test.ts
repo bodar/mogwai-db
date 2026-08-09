@@ -306,10 +306,30 @@ const COVERED = [
   'g.V().where(__.out().limit(1))', 'g.V().not(__.out().count().is(P.gt(2)))',
   // A body that PROJECTS a value and then TESTS it is a COMPARISON, not an existence question — the
   // seam's third predicate answer. `correlatedExists` declines every body whose head is not a
-  // movement, so these were the branch/where family's shared gap; SQL's own null semantics give the
-  // productivity rule for free (an unproductive projection is NULL, and NULL is not true).
+  // movement, so these were the branch/where family's shared gap.
   "g.V().where(__.values('age').is(P.gt(30)))", "g.V().not(__.values('age').is(P.gt(30)))",
   "g.V().choose(__.values('age').is(P.gt(30)), __.out(), __.in())",
+  // PRODUCTIVITY does NOT fall out of SQL's null semantics, and these are the shapes that proved it.
+  // `predicateExpr` spells `neq` null-safely — right for a property ROW, wrong for a projection that
+  // may not exist — so a productivity conjunct is its own term; and a NEGATION must be null-safe,
+  // because `NOT NULL` is NULL and dropped the traverser from both sides at once. Both directions of
+  // each predicate are listed, since the defect was visible only by comparing them.
+  "g.V().where(__.values('age').is(P.eq(29)))", "g.V().not(__.values('age').is(P.eq(29)))",
+  "g.V().where(__.values('age').is(P.neq(29)))", "g.V().not(__.values('age').is(P.neq(29)))",
+  "g.V().where(__.values('age').is(P.within(29,32)))", "g.V().not(__.values('age').is(P.within(29,32)))",
+  // A FILTER-ONLY body is the seam's FIRST predicate answer, and `where`/`filter`/`not` had been
+  // offered only the other two — a body every clause of which the source-filter builder already made.
+  "g.V().where(__.has('name','marko'))", "g.V().filter(__.has('age',P.gt(27)))",
+  "g.V().not(__.has('age'))", "g.V().where(__.hasLabel('person').has('age',P.gt(30)))",
+  // THE CONNECTIVE STEPS, which are the connective over the answers their arms already have. They
+  // land in the one clause builder `bodyPredicate` loops over, so they compose at every filter
+  // position: at the source, nested in a `where()`, inside each other, and under a `not()`.
+  "g.V().and(__.has('age',P.gt(27)), __.outE().count().is(P.gte(2)))",
+  "g.V().or(__.has('age',P.gt(27)), __.outE().count().is(P.gte(2)))",
+  "g.V().and(__.outE(), __.has(T.label,'person').and().has('age',P.gte(32)))",
+  "g.V().or(__.outE('knows'), __.has(T.label,'software').or().has('age',P.gte(35)))",
+  "g.V().not(__.or(__.has('age',P.gt(30)), __.hasLabel('software')))",
+  "g.V().where(__.and(__.has('age'), __.out('created')))",
   // A SUB-TRAVERSAL `by()` projection — the child seam. A flat value body is an EXPRESSION over the
   // outer row; a body that MOVES and then REDUCES is `correlatedExists` minus the EXISTS, read for its
   // value. Both arms reach every by() host at once, which is why one entry per host is worth having.
@@ -379,7 +399,6 @@ const DECLINED = [
   "g.V().has('name',TextP.containing('ark'))",  // ftsSubstringPredicate's — see below
   "g.V().has('name',P.within(__.V().values('name').fold()))", // a run-time member list, not a set
   "g.V().has('name',null)",           // a null value: not a literal this route can compare
-  "g.V().where(__.has('name','marko'))", // a filter-only body is a predicate on the SAME traverser
 ];
 
 describe('the RelIR spine', () => {

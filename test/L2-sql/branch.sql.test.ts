@@ -10,7 +10,7 @@ import { test, expect, describe } from 'bun:test';
 import { PER_ROW, SCALAR_MEMBERS, STATIC, UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
-import { read, run, seededStore } from '../support/harness.ts';
+import { read, relOnly, run, seededStore } from '../support/harness.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
@@ -74,26 +74,32 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(read("g.union(__.V().values('name'), __.V().hasLabel('person'))", { spine: 'rel' }).spine).toBe('rel');
   });
 
-  test('and()/or() combine branch predicates; nested where(__.and)', () => {
+  relOnly('and()/or() combine branch predicates; nested where(__.and)', () => {
+    // THE CONNECTIVE STEPS, on RelIR. `ConnectiveStep` is a `FilterStep` whose `filter` runs
+    // `TraversalUtil.test` per arm, so the lowering is the connective over the answers the arms
+    // already have — each movement arm is the correlated `EXISTS` a `where()` body would be.
     const a = read('g.V().and(__.out("knows"), __.out("created"))');
-    expect(a.sql).toContain('WHERE ((EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT n.id AS id) p ON e.src=p.id AND e.label IN');
-    expect(a.sql).toContain(') AND (EXISTS(');
-    expect(read('g.V().or(__.out("knows"), __.in("created"))').sql).toContain(') OR (EXISTS(');
-    // A SINGLE arm is legal Gremlin — `and(t)`/`or(t)` is just "t must produce" — and the generic
-    // child-existence combiner always lowered it. The inline path used to THROW here, which made it
-    // NARROWER than the path it accelerates (V().or(__.out()) ran with predicateInlining off and
-    // failed with it on). Both paths now accept one arm; ZERO arms still throws.
-    expect(read('g.V().and(__.out("knows"))').sql).toContain('EXISTS(');
-    expect(read('g.V().or(__.out("knows"))').sql).toContain('EXISTS(');
+    expect(a.spine).toBe('rel');
+    expect(a.sql).toMatch(/WHERE \(EXISTS \(.*\) AND EXISTS \(/s);
+    expect(read('g.V().or(__.out("knows"), __.in("created"))').sql).toMatch(/WHERE \(EXISTS \(.*\) OR EXISTS \(/s);
+    // A SINGLE arm is legal Gremlin — `and(t)`/`or(t)` is just "t must produce". ZERO arms declines
+    // here (the only way an empty connective reaches a lowering is an infix marker the Pass tier
+    // should have rewritten) and the legacy route still throws for it.
+    expect(read('g.V().and(__.out("knows"))').sql).toContain('EXISTS (');
+    expect(read('g.V().or(__.out("knows"))').sql).toContain('EXISTS (');
   });
 
-  test('infix .and()/.or() connectors split a predicate body (where/choose/until)', () => {
-    // where(has().and().has()) → ((p0) AND (p1))
+  relOnly('infix .and()/.or() connectors split a predicate body (where/choose/until)', () => {
+    // where(has().and().has()) → ((p0) AND (p1)). A Pass canonicalizes TinkerPop's `ConnectiveStrategy`
+    // into the nested form, so both spines see one shape and neither lowering knows the infix rule.
     const a = read('g.V().where(__.has("name","x").and().has("age",P.gt(1)))');
     expect(a.sql).toContain(' AND ');
-    expect(a.binds).toEqual(['name', 'x', 'age', 1]);
-    // or() → ((p0) OR (p1)); OR binds looser so mixed a.and().b.or().c groups as ((a AND b) OR c)
-    expect(read('g.V().where(__.has("name","x").or().has("age",P.gt(1)))').sql).toContain(') OR (');
+    // NO BINDS: `'name'`, `'x'` and `1` are PARSED LITERALS, and a literal inlines as a typed SQL
+    // literal on this route — a `?` serves a user PARAMETER and nothing else. The legacy spelling
+    // bound all four, which is the position that is being deleted rather than a fact to restate.
+    expect(a.binds).toEqual([]);
+    // or() → (p0 OR p1); OR binds looser so mixed a.and().b.or().c groups as ((a AND b) OR c)
+    expect(read('g.V().where(__.has("name","x").or().has("age",P.gt(1)))').sql).toMatch(/EXISTS \(.*\) OR EXISTS \(/s);
     const mixed = read('g.V().where(__.hasLabel("person").and().out("created").or().hasLabel("software"))');
     expect(mixed.sql).toMatch(/\(\(.*AND.*\).*OR.*\)/s);
     // choose() infix predicate now routes through the same split (movement conjunct →

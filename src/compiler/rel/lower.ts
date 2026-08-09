@@ -28,7 +28,7 @@ import { containsTextSearch, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, ty
 import { foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
   and, byEncounter, carriedCols, EDGE_COLS, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, labelArgsAllStrings,
-  labelIds, meta, minter, NODE_COLS, PROPERTIES, renumber, storedValue, typeOf, type Minter,
+  labelIds, meta, minter, NODE_COLS, notProduced, or, PROPERTIES, renumber, storedValue, typeOf, type Minter,
 } from './build.ts';
 import { bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
@@ -337,6 +337,36 @@ function bodyPredicate(
 }
 
 /**
+ * A CHILD BODY AS A BOOLEAN over the subject row, NEGATED or not — the seam's `predicate` answer, and
+ * the ONE place the three shapes are tried in order.
+ *
+ * It exists because the order used to be spelled twice and the two spellings had DIFFERENT CONTENT:
+ * the seam offered `bodyPredicate` (all three shapes) while `sourceFilter`'s own `where`/`filter`/`not`
+ * arm offered only the last two — so `where(__.has('age', P.gt(27)))`, a filter-only body whose every
+ * clause this module already builds, declined at the position it is most often written in. §6·6's rule
+ * exactly: the algebra could express it and no route was handing it over.
+ *
+ * ## Why a negation is not `NOT` of the positive answer, except when it is
+ *
+ * `correlatedExists` and `valuePredicate` take a `negate` flag because each can negate itself
+ * EXACTLY — a `NOT EXISTS` is total, and `valuePredicate` now wraps its comparison null-safely. A
+ * filter-only conjunction has no such flag, so it negates through `notProduced` (`build.ts`), which is
+ * where the two-valued-versus-three-valued difference is stated once.
+ */
+function childPredicate(
+  body: readonly IRStep[], subject: Subject, elem: Elem, fresh: Minter, ctx: ChainCtx, negated: boolean,
+): Expr | null {
+  if (!negated) return bodyPredicate(body, subject, elem, fresh, ctx);
+  // The two self-negating shapes FIRST, so every body they already answered keeps the SQL it has and
+  // this is new coverage rather than a re-spelling — `valuePredicate`'s own ordering rule, one level up.
+  const exact = correlatedExists(body, subject, elem, fresh, ctx, true)
+    ?? valuePredicate(body, subject, elem, fresh, ctx, true);
+  if (exact) return exact;
+  const positive = bodyPredicate(body, subject, elem, fresh, ctx);
+  return positive && notProduced(positive);
+}
+
+/**
  * A body that PROJECTS a value and then TESTS it — `where(__.values('age').is(P.gt(30)))`,
  * `where(__.call(dc).is(3))` — as a comparison rather than an existence question.
  *
@@ -368,7 +398,37 @@ function valuePredicate(
     ? { kind: 'static', type: produced.framing.type.type, text: produced.framing.type.text }
     : SUBJECT_UNKNOWN;
   const pred = predicateExpr(produced.expr, args[0], type, last.args[0]?.type ?? null, last.args[0]?.name ?? null, fresh);
-  return pred && (negate ? { kind: 'unary', op: 'not', arg: pred } : pred);
+  if (!pred) return null;
+  /**
+   * PRODUCTIVITY IS ITS OWN CONJUNCT, not a property of the comparison — and the paragraph above,
+   * which said otherwise, was WRONG in a way that cost two answers.
+   *
+   * "An unproductive projection is NULL, every comparison against NULL is NULL, and NULL is not true"
+   * holds only for the predicates that compare DIRECTLY. `predicateExpr` spells `neq` NULL-SAFELY —
+   * `(v = x) IS NOT 1` — because that is right for a property ROW, where a stored null genuinely does
+   * differ from 29. Over a projection that may not EXIST it answers TRUE for a traverser TinkerPop
+   * drops, and the negation then drops one it keeps.
+   *
+   * ⚠️ MEASURED on the modern graph, both directions at once:
+   * `g.V().where(__.values('age').is(P.neq(29)))` KEPT `lop`/`ripple` (no `age` at all), and
+   * `g.V().not(__.values('age').is(P.neq(29)))` dropped them. So the fix is not another null-safe
+   * predicate — it is asking the question the seam already answers.
+   */
+  if (!produced.present) {
+    // The seam CANNOT SAY, and `ChildValue.present` is explicit that this is not "always productive".
+    // It is safe to proceed only where the value cannot be absent-but-non-null: a numeric REDUCER over
+    // an empty child is exactly that shape, and `correlatedExists` fails closed on the identical fact
+    // one arm along. Everything else reaching here compares directly and is NULL-false either way.
+    if (produced.framing.kind === 'scalar' && produced.framing.result === 'number') return null;
+    return negate ? notProduced(pred) : pred;
+  }
+  // A body that says it is ALWAYS productive contributes no clause — the conjunct would be a literal
+  // `1 = 1` in every emitted statement, which is bytes in the hottest filter position there is.
+  const tested = produced.present === ALWAYS_PRODUCTIVE ? pred : and(produced.present, pred);
+  // NEGATION IS NULL-SAFE AND `NOT` IS NOT — see `notProduced` (`build.ts`), which carries the second
+  // measured wrong answer this line produced. `NOT NULL` is NULL, so a traverser whose body produced
+  // nothing was dropped from BOTH sides of the negation.
+  return negate ? notProduced(tested) : tested;
 }
 
 function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter, ctx: ChainCtx): Expr | null {
@@ -410,11 +470,53 @@ function sourceFilter(step: IRStep, subject: Subject, elem: Elem, fresh: Minter,
     // which is the same instrument-shaped finding as the four before it.
     const body = bodyOf(nested.nested, ctx.params);
     if (!body?.length) return null;
-    // A body whose head is a correlated VALUE rather than a movement is not an existence question at
-    // all (`valuePredicate`) — `correlatedExists` declines it, and the fallback is what makes
-    // `where(__.values('age').is(P.gt(30)))` and `where(__.call(dc).is(3))` ordinary clauses.
-    return correlatedExists(body, subject, elem, fresh, ctx, step.name === 'not')
-      ?? valuePredicate(body, subject, elem, fresh, ctx, step.name === 'not');
+    // ALL THREE SHAPES, through the one answer: a FILTER-ONLY body is a conjunction over this row, a
+    // body that MOVES is a correlated `EXISTS`, and a body that PROJECTS a value is that value
+    // compared. This used to offer only the last two, so `where(__.has('age', P.gt(27)))` declined —
+    // a body every clause of which this very function builds.
+    return childPredicate(body, subject, elem, fresh, ctx, step.name === 'not');
+  }
+
+  /**
+   * `and(a, b, …)` / `or(a, b, …)` — THE CONNECTIVE STEPS, which are the connective applied to the
+   * answers their arms already have. `ConnectiveStep` is a `FilterStep` whose `filter` runs
+   * `TraversalUtil.test` over each arm (`AndStep` returns false on the first failure, `OrStep` true on
+   * the first success — `gremlin-core/.../step/filter/{And,Or}Step.java`), so there is no new question
+   * here and nothing to lower but the fold.
+   *
+   * It lands in `sourceFilter` rather than in a tail, and that placement is the whole value: this is
+   * the ONE clause builder `bodyPredicate` loops over, so a connective becomes available at EVERY
+   * filter position at once — at the source, mid-chain, nested inside a `where()`, inside another
+   * connective, as a `choose()` condition, and under a `not()`. A tail-local arm would have served one.
+   *
+   * The INFIX form (`has(k,v).and().has(k,v)`) never reaches here: a Pass already canonicalizes
+   * TinkerPop's `ConnectiveStrategy` into this nested form, which is why the lowering knows only one.
+   *
+   * NULLs need no care in EITHER connective, and it is worth stating because the negation next door
+   * does: SQL's `AND` yields NULL-or-false exactly where an arm failed to produce, and its `OR` yields
+   * true as soon as one arm did — both of which are the reference's answer. Only `NOT` inverts the
+   * unknown, which is `notProduced`'s subject.
+   */
+  if (step.name === 'and' || step.name === 'or') {
+    // ZERO ARMS is vacuously true for `and` and false for `or` by the reference's own loop, and it
+    // DECLINES here rather than being answered: the only way an empty connective reaches a lowering is
+    // if the infix canonicalization left a marker behind, and answering a marker as a filter would be
+    // mis-executing a chain the Pass tier should have rewritten.
+    if (!args.length) return null;
+    if (!ctx.correlatedChildren) return null;
+    let clause: Expr | undefined;
+    for (const arm of args) {
+      if (!isNested(arm)) return null;
+      const body = bodyOf(arm.nested, ctx.params);
+      if (!body?.length) return null;
+      const pred = childPredicate(body, subject, elem, fresh, ctx, false);
+      // ONE ARM THIS ROUTE CANNOT ANSWER DECLINES THE WHOLE STEP. A connective is not decomposable
+      // into the arms it happens to understand: dropping an arm of an `and` widens the result and
+      // dropping one of an `or` narrows it, and either is a plausible answer to a different question.
+      if (!pred) return null;
+      clause = step.name === 'and' ? and(clause, pred) : or(clause, pred);
+    }
+    return clause ?? null;
   }
 
   // `hasNot(key)` is a bare `has(key)` NEGATED, and it reuses that clause rather than spelling a second
