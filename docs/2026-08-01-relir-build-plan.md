@@ -602,14 +602,20 @@ mostly literal-typed casts and error-raising forms rather than one lowering), br
 aliases (32 — `select` 27, dominated by `Pop.all`/`Pop.mixed` history reads), the rest of the map shape
 (24), side effects (21), then `local`, `match`, `where`, the `path` tails.
 
-⚠️ **THAT RANKING HAS ONE OVERRIDE, AND IT IS NOT A COVERAGE ARGUMENT.** Gap 4's **element-keyed side
-reads** are what upstream's own graph-snapshot reads use — `getVertices`/`getEdges`/
-`getVertexProperties` in `vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/world.js:147-180`,
-i.e. `group().by(__.project(…)).by(__.tail())` over `E`, `V` and `V().properties()`. They route to
-legacy, so they RAISE under the `rel-only` position and cucumber dies in `BeforeAll` before a scenario
-runs: **the cut measurement cannot report at all until they lower.** A gap that blocks an INSTRUMENT
-outranks one that costs scenarios, because until it lands every other ranking is being read off the
-proxy. Take gap 4 first.
+✅ **THE OVERRIDE IS SPENT — gap 4's element-keyed side reads LANDED, and `mise run L3:rel-only` now
+reports: 1130/2260 against the default position's 1761.** Every ranking below can finally be read off
+the cut itself rather than off a proxy. What the blocker column said (`MapOf`'s `elem` tag declines)
+was not what stopped them, and that is §6·6's lesson at a sixth witness: a group KEY never needed an
+`elem` side at all. A `project()` key is the RECORD shape collapsed to a map VALUE — the boundary
+`record.ts`'s own header already named — so it is one `{t:'map', v:[[k,node],…]}` column and the
+ordinary `mapValue` shape. Nothing entered the node set. Three shapes became first-class instead: a
+correlated `recordNode` sharing its field loop with `recordOf`; a PROPERTY `ChildHost`, addressed by
+its rowid exactly as an element is, so `group()` over a property stream needs no property-specific
+reader; and a HOST RE-ROOTING for the steps that yield exactly one traverser by the schema
+(`outV`/`inV` off an edge, `element()` off a property), which is what lets
+`by(__.outV().values('name'))` be a correlated value where the generic movement arm must refuse a
+non-reducing tail. A property also joined vertex and edge in the typed tree (`{t:'property'}`), one
+arm over the tuple `framePropertyRow` already read.
 
 Named gaps inside those, each with its blocker stated so it is not re-derived:
 
@@ -618,7 +624,7 @@ Named gaps inside those, each with its blocker stated so it is not re-derived:
 | 1 | **Group VALUE forms** — `group().by(k).by(__.out().count())`, `by(__.tail())` | Nothing. Legacy-only today, and they are what stops legacy shedding its group KEY (34 tests, an L3 scenario, a conformance gate) |
 | 2 | **Set-op keeps its members' types** — `values('when').fold().merge(…)` returns raw millis | The lossy test must span BOTH sides; `withLossyFlag` asks it of one relation. ⚠️ Gating on the compile-time `typed` flag is NOT the same question and was measured wrong (6 differentials) |
 | 3 | **`memberTypeTag` returns a NULL tag unresolved** for a wrapped member whose `t` is null (what `path().by(<transform>)` writes), where a null tag means "infer from the value" everywhere else | Nothing — inert until tags join a comparison, which is how it was found |
-| 4 | 🔴 **Map family residue — TAKE THIS FIRST, on a reason that is not its coverage.** Selective token subsets (`with(tokens, ids)`), the `by(__.unfold())` that pairs with them, `order(Scope.local)` over map entries, **element-keyed side reads** | The last needs a list whose members may be ELEMENTS (`MapOf`'s `elem` tag declines today). ⚠️ **It also gates the CUT MEASUREMENT** — see below |
+| 4 | **Map family residue** — selective token subsets (`with(tokens, ids)`), the `by(__.unfold())` that pairs with them, `order(Scope.local)` over map entries. ✅ **element-keyed side reads LANDED** (above) | The stated blocker for the side reads was wrong and cost nothing to find: they never needed an `elem` map side. What is left needs a list whose members may be ELEMENTS |
 | 5 | **Group-scoped reducer: `count()` with a non-empty body, and a SCALAR host** | The empty pool is PER-REDUCER and decides INNER vs LEFT join (`CountGlobalStep` seeds 0 and keeps its key; `SumGlobalStep` does not). A scalar host needs `origin` to name a parent without a rowid — channels-core |
 | 6 | **Two `sack` declines** — `withSack(seed, Operator.x)` (a MERGE policy for the role, channels-core) and `barrier(Barrier.normSack)` (its own step) | Both honest |
 | 7 | **L4 sweep** — two committed expectations encoded legacy's bug. An addendum written against one implementation records that implementation, not the reference | Nobody has swept the rest |
