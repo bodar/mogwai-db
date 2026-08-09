@@ -693,12 +693,41 @@ divergence stays visible; what is gone is the obligation to make legacy agree.
 
 The one family whose absence disqualifies the server, so deletion waits on it and on nothing else.
 
-**0. Checker hardening — PREREQS, not follow-ups.** Refuse `Distinct`/`Limit`/`Sort` inside a recursive term
-(P3); a whole-row `Distinct` may not carry a per-row-unique channel; an `aggs` entry may not reference an input
-column outside an `Agg`; `name` must walk expression subplans (a shared node in a `Scalar`/`Exists` body is
-inlined twice). ⚠️ These sat in §10·6 under "orthogonal to the phases" *while being labelled Phase 3 prereqs* —
-a prereq of the gate is not orthogonal to the gate, and filing it as one is how it gets ranked against the work
-it blocks.
+**0. ✅ Checker hardening — PREREQS, not follow-ups — DONE.** ⚠️ These sat in §10·6 under "orthogonal to the
+phases" *while being labelled Phase 3 prereqs* — a prereq of the gate is not orthogonal to the gate, and filing
+it as one is how it gets ranked against the work it blocks.
+
+⚠️ **All four guard ONE failure mode, and naming it is worth more than the list: SQLite ACCEPTS the
+construct and returns a wrong answer.** Not a throw, not a crash, not a plan-shape change — right arity, right
+shape, wrong rows. No instrument in this repo sees that, which is why the checker is the only place it can be
+caught, and why each refusal's MESSAGE says what SQLite actually does rather than "unsupported".
+
+- **`Distinct`/`Limit`/`Sort` in a recursive term** (P3). Measured: `DISTINCT` is inert (duplicates survive,
+  byte-identical to the same walk without it) and `LIMIT 2` caps the WHOLE walk, not each iteration. So a
+  `repeat(…dedup())` body compiled to an inert keyword — and `topLevelSelf` had listed all three as legal
+  unary wrappers on the self-reference.
+- ⚠️ **…and the same walk was TOO STRICT the other way, which would have blocked step 2.** It descended
+  through `exprRels`, so the aggregate/window laws fired inside correlated subplans. Measured LEGAL: an
+  aggregate in a correlated scalar inside a recursive term, a window function, and a self-reference (P2's own
+  finding). `flatten` decorrelates into exactly those shapes. The barrier laws now follow the term's own
+  relational spine and stop at every subquery boundary; the self-reference COUNT keeps descending.
+- **A whole-row `Distinct` may not carry a ROW-UNIQUE channel** — every row differs there, so it collapses
+  nothing. Needed a policy rather than a pattern-match, so it is the channel core's **fourth total table**,
+  `CHANNEL_ROW_UNIQUE`. ⚠️ `bulk` is deliberately NOT row-unique: the landed unordered `dedup()` projects
+  `bulk = 1` (a LITERAL) and dedups over `(id, 1)`, which is correct — a blanket "a Distinct may carry no
+  channels" would have refused shipped code, and a rule relaxed the first time it meets real code was never
+  the rule.
+- **An `aggs` entry may not reference a bare input column.** SQLite accepts `SELECT k, x … GROUP BY k` and
+  returns `x` from an ARBITRARY row of each group; every other engine rejects it. `test:perturbed` is the only
+  instrument that could ever see the result, and only by luck.
+- **`name` walks expression subplans**, so a node shared between the spine and a `Scalar`/`Exists` body is
+  bound once instead of inlined at both. ⚠️ **A CORRELATED subtree may not be bound** — a binding is a CTE
+  beside the statement, and a subtree whose `Col`s resolve outside it stops resolving there, silently captured
+  by a same-named relation rather than failing. The admission rule is therefore a free-reference test, not the
+  occurrence count. Two pieces of shared substrate fell out, both of which step 2 needs: **`freeRelIds`**
+  (what `flatten` must DECORRELATE is the same fact) and **`rewriteRels`** beside `rewrite`. ⚠️ Keeping those
+  two rewrites separate is load-bearing — `prune`'s analysis is keyed on the relational SPINE, so a `rewrite`
+  that descended into subplans would prune every projection inside a correlated subquery down to its channels.
 
 **1. `prune`'s remainder** — pruning below `Join`/`Union`/`Aggregate`/**`Recursive`**, under all four of which
 every declared column is required today; `src/rel/passes/prune.ts` states the remainder at the code, which is
