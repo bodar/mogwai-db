@@ -1,4 +1,4 @@
-import { fromTree } from './block.ts';
+import { fromTree, fusedInto } from './block.ts';
 import { bindsAsParameter, type Expr } from './expr.ts';
 import { joinWidth, scan } from './factory.ts';
 import { checkChannels } from './obligations.ts';
@@ -117,13 +117,14 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
    * defect in both directions. Each row below is measured on bun:sqlite 3.53.0, not reasoned from
    * the docs (whose "must not appear anywhere else" is stricter than the engine, per P2).
    *
-   * **The BARRIER laws apply to the recursive SELECT ITSELF and stop at a subquery boundary.** A
-   * nested SELECT is a different SELECT and the engine treats it as one:
+   * **The BARRIER laws apply to the recursive SELECT ITSELF and stop at EVERY nested SELECT.** A
+   * nested SELECT is a different SELECT and the engine treats it as one — a correlated subquery and
+   * a joined DERIVED TABLE alike:
    *
-   * | in the recursive term proper | in a correlated subquery inside it |
+   * | in the recursive term proper | in a nested SELECT inside it |
    * |---|---|
    * | aggregate → `recursive aggregate queries not supported` | aggregate → **legal** |
-   * | window → refused | window → **legal** |
+   * | window → `cannot use window functions in recursive queries` | window → **legal** |
    * | `DISTINCT` → accepted and **INERT** (duplicates survive) | its own SELECT's, honoured |
    * | `LIMIT` → accepted as a **WHOLE-CTE cap** | its own SELECT's, honoured |
    * | `ORDER BY` → accepted, whole-CTE | its own SELECT's, honoured |
@@ -132,6 +133,13 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
    * exactly these correlated scalars — P2 lists them as legal-but-refused-today — so a law that
    * fires inside one would refuse the shapes Phase 3 is built to produce. Refusing a legal input to
    * keep a check simple is the failure mode the root CLAUDE.md names by hand.
+   *
+   * ⚠️ **…and the boundary is not "an expression subplan" but "a nested SELECT", which is why this
+   * asks `fusedInto` rather than walking node children.** All four barriers are legal in a derived
+   * table joined into a recursive term (measured: an aggregate, a window function, a `DISTINCT` and
+   * an `ORDER BY … LIMIT` each returned the right rows), and a node-children walk refused every one
+   * of them — a `repeat()` body joining against any ranked, deduped or capped relation. Which nodes
+   * end up in one SELECT is the EMITTER's fusion decision, so the analysis asks it.
    *
    * ⚠️ **`Distinct`/`Limit`/`Sort` are refused here even though SQLite ACCEPTS them, and that is the
    * point** (P3). They are silently not what an author writing them means: a `repeat(…dedup())` body
@@ -154,16 +162,12 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
   const recursiveTerm = (term: Rel, name: string): { selfRefs: number; barrier?: string } => {
     let selfRefs = 0;
     let barrier: string | undefined;
-    const refuse = (kind: RelKind): void => { barrier ??= BARRIER_IN_TERM[kind]; };
-    /** The term's OWN relational spine — through relational children only, never into a subplan. */
+    // The term's OWN `SELECT` — the nodes that FUSE into it, which stops at every nested SELECT: a
+    // derived table and a correlated subquery alike (`fusedInto`, block.ts).
     // Node kinds only: an `Agg` is legal nowhere but `Aggregate.aggs` and a `WindowExpr` nowhere but
     // `Window.specs` (checked in `checkExpr`), so the two node kinds ARE the two expression forms and
     // scanning expressions here would be the same law spelled twice.
-    const spine = (r: Rel): void => {
-      if (r.kind === 'self-ref') return;
-      refuse(r.kind);
-      relChildren(r).forEach(spine);
-    };
+    for (const node of fusedInto(term)) barrier ??= BARRIER_IN_TERM[node.kind];
     /** Self-references, wherever they are — including inside a correlated subplan (P2). */
     const expression = (e: Expr): void => { exprRels(e).forEach(references); exprChildren(e).forEach(expression); };
     const references = (r: Rel): void => {
@@ -171,7 +175,6 @@ export function check(plan: Rel | Stmt, bindings: ReadonlyMap<string, Rel | Stmt
       relExprs(r).forEach(expression);
       relChildren(r).forEach(references);
     };
-    spine(term);
     references(term);
     return { selfRefs, barrier };
   };

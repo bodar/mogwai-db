@@ -215,6 +215,46 @@ describe('RelIR', () => {
     expect(() => check(filtered)).not.toThrow();
   });
 
+  /**
+   * The barrier laws are laws of the recursive SELECT ITSELF, and the boundary is a nested SELECT —
+   * a joined DERIVED TABLE exactly as much as a correlated subquery. Measured on bun:sqlite 3.53.0:
+   * an aggregate, a window function, a `DISTINCT` and an `ORDER BY … LIMIT` each return the right
+   * rows inside a derived table joined into a recursive term, while the same aggregate and window
+   * fused into the term proper are `recursive aggregate queries not supported` / `cannot use window
+   * functions in recursive queries`. Walking node CHILDREN refused all four — a `repeat()` body
+   * joining against any deduped, ranked or capped relation.
+   */
+  test('admits a barrier inside a DERIVED TABLE joined into a recursive term, and refuses the same one fused', () => {
+    const walkCols = [{ name: 'id', type: 'int', nullable: false }] as const;
+    const edgeCols = [{ name: 'src', type: 'int', nullable: false }, { name: 'tgt', type: 'int', nullable: false }] as const;
+    const seed = valuesRel({ id: relId('seedB'), rows: [[lit(1, 'int')]], channels, type: { cols: walkCols } });
+    const walk = recursiveRel({ id: relId('wb'), name: 'wb', cols: ['id'], seed, channels, type: { cols: walkCols },
+      step: (self) => {
+        const edges = scanRel({ id: relId('eb'), table: 'edges', alias: 'eb', channels, type: { cols: edgeCols } });
+        // A DISTINCT fills a slot, so the side is not spliceable — the emitter gives it its own
+        // SELECT, and everything in that SELECT is out of the recursive term's scope.
+        const unique = distinctRel({ id: relId('ub'), input: edges, channels, type: { cols: edgeCols } });
+        const hop = join({ id: relId('hopB'), left: self, right: unique, join: 'inner', channels,
+          type: { cols: [...walkCols, ...edgeCols] },
+          on: { kind: 'binary', op: '=', left: col(self.id, 'id'), right: col(unique.id, 'src') } });
+        return projectRel({ id: relId('nextB'), input: hop, channels, type: { cols: walkCols }, exprs: [['id', col(hop.id, 'tgt')]] });
+      },
+    });
+    expect(() => check(walk)).not.toThrow();
+    const emitted = emitQuery(planOf(walk));
+    const db = new Database(':memory:');
+    db.run('CREATE TABLE edges(id INTEGER PRIMARY KEY, uid TEXT, src INTEGER, label INTEGER, tgt INTEGER)');
+    db.run('INSERT INTO edges(src, label, tgt) VALUES (1,0,2),(2,0,3),(3,0,4)');
+    expect(db.query(emitted.sql).all(...emitted.binds)).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }]);
+    db.close();
+
+    // …and FUSED into the term it is the P3 refusal, unchanged: an inert keyword is a wrong answer.
+    const fusedDedup = recursiveRel({ id: relId('wf'), name: 'wf', cols: ['id'], seed, channels, type: { cols: walkCols },
+      step: (self) => distinctRel({ id: relId('df'), input: self, channels, type: { cols: walkCols } }),
+    });
+    expect(() => check(fusedDedup)).toThrow('silently ignores it — no per-iteration dedup exists');
+  });
+
   /** The other half of the same law: a reference the emitter WOULD wrap is still refused, and the
    *  message still points at `flatten`. A `Union` step is a compound — a complete SELECT of its own
    *  — so nothing inside it is in the outer term's FROM at all. */

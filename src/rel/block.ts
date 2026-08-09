@@ -95,6 +95,10 @@ export interface BlockShape {
   /** The relations standing unwrapped in this block's FROM join tree, in order. A DERIVED table
    *  contributes none: what is inside it is a different SELECT. */
   readonly sources: readonly Rel[];
+  /** Every node whose operator lands in THIS `SELECT`, outermost first — what a law about "this
+   *  SELECT" applies to. A node behind a derived table or a correlated subquery is in a different
+   *  SELECT and contributes none. */
+  readonly fused: readonly Rel[];
 }
 export type Shape = BlockShape | 'closed';
 
@@ -103,9 +107,12 @@ const EMPTY: Slots = { distinct: false, windowed: false };
 const direct = (r: Rel): boolean => r.kind === 'scan' || r.kind === 'values' || r.kind === 'self-ref' || r.kind === 'ref';
 /** How the emitter aliases a FROM item: a `Scan` carries its own, everything else uses its `RelId`. */
 const aliasOf = (r: Rel): string => (r.kind === 'scan' ? r.alias : r.id);
-/** A relation the block reaches only through a derived table: a fresh SELECT, one alias, no sources. */
-const derived = (r: Rel): BlockShape => ({ slots: EMPTY, aliases: [r.id], sources: [] });
-const leaf = (r: Rel): BlockShape => ({ slots: EMPTY, aliases: [aliasOf(r)], sources: [r] });
+/** A relation the block reaches only through a derived table: a fresh SELECT, one alias, no sources
+ *  — and nothing of what is inside it belongs to this SELECT. */
+const derived = (r: Rel): BlockShape => ({ slots: EMPTY, aliases: [r.id], sources: [], fused: [] });
+const leaf = (r: Rel): BlockShape => ({ slots: EMPTY, aliases: [aliasOf(r)], sources: [r], fused: [r] });
+/** A unary node's own block: its operator lands in the block its input gave it. */
+const over = (r: Rel, b: BlockShape, slots: Slots = b.slots): BlockShape => ({ ...b, slots, fused: [r, ...b.fused] });
 
 const cache = new WeakMap<Rel, Shape>();
 
@@ -144,50 +151,56 @@ const sideShape = (r: Rel, mayFuse: boolean, taken: ReadonlySet<string>): BlockS
 function compute(r: Rel): Shape {
   switch (r.kind) {
     case 'scan': case 'values': case 'self-ref': case 'ref': return leaf(r);
-    case 'project': case 'materialize': return inputShape(r.input, r.kind);
+    case 'project': case 'materialize': return over(r, inputShape(r.input, r.kind));
     case 'filter': {
       const b = inputShape(r.input, 'filter');
       // Over a grouped block the predicate is a HAVING; otherwise it is a WHERE, which occupies no
       // slot this analysis tracks (nothing is ever blocked by one).
-      return grouped(b.slots) ? { ...b, slots: { ...b.slots, having: r.pred } } : b;
+      return over(r, b, grouped(b.slots) ? { ...b.slots, having: r.pred } : b.slots);
     }
     case 'aggregate': {
       const b = inputShape(r.input, 'aggregate');
-      return { ...b, slots: { ...b.slots, groupBy: r.groupBy, having: r.having } };
+      return over(r, b, { ...b.slots, groupBy: r.groupBy, having: r.having });
     }
     case 'sort': {
       const b = inputShape(r.input, 'sort');
-      return { ...b, slots: { ...b.slots, orderBy: r.terms } };
+      return over(r, b, { ...b.slots, orderBy: r.terms });
     }
     case 'limit': {
       const b = inputShape(r.input, 'limit');
-      return { ...b, slots: { ...b.slots, limit: r.count, offset: r.offset } };
+      return over(r, b, { ...b.slots, limit: r.count, offset: r.offset });
     }
     case 'distinct': {
       const b = inputShape(r.input, 'distinct');
-      return { ...b, slots: { ...b.slots, distinct: true } };
+      return over(r, b, { ...b.slots, distinct: true });
     }
     case 'window': {
       const b = inputShape(r.input, 'window');
-      return { ...b, slots: { ...b.slots, windowed: true } };
+      return over(r, b, { ...b.slots, windowed: true });
     }
     case 'explode': {
       // `json_each(…)` is a table-valued FROM item, never a relation of the algebra — so it takes an
       // alias and contributes no source. Source-less, it IS the whole FROM (the correlated form).
-      if (!r.input) return { slots: EMPTY, aliases: [r.id], sources: [] };
+      if (!r.input) return { slots: EMPTY, aliases: [r.id], sources: [], fused: [r] };
       const b = inputShape(r.input, 'explode');
-      return { ...b, aliases: [...b.aliases, r.id] };
+      return { ...over(r, b), aliases: [...b.aliases, r.id] };
     }
     case 'join': {
       const left = sideShape(r.left, true, new Set());
       const taken = new Set(left.aliases);
       // A semi/anti join's right side is an `EXISTS` in the WHERE — a nested SELECT, so it adds
-      // neither a FROM item nor a source to THIS block.
-      if (r.join === 'semi' || r.join === 'anti') return { slots: EMPTY, aliases: left.aliases, sources: left.sources };
+      // neither a FROM item, nor a source, nor a fused operator to THIS block.
+      if (r.join === 'semi' || r.join === 'anti')
+        return { slots: EMPTY, aliases: left.aliases, sources: left.sources, fused: [r, ...left.fused] };
       // Only an inner/cross join may splice its right side: a LEFT join's right-side predicate must
       // stay inside the subquery, or an unmatched row is filtered instead of null-padded.
       const right = sideShape(r.right, r.join === 'inner' || r.join === 'cross', taken);
-      return { slots: EMPTY, aliases: [...left.aliases, ...right.aliases], sources: [...left.sources, ...right.sources] };
+      return {
+        slots: EMPTY,
+        aliases: [...left.aliases, ...right.aliases],
+        sources: [...left.sources, ...right.sources],
+        fused: [r, ...left.fused, ...right.fused],
+      };
     }
     case 'union': case 'recursive': return 'closed';
   }
@@ -206,4 +219,19 @@ function compute(r: Rel): Shape {
 export const fromTree = (r: Rel): readonly Rel[] => {
   const shape = shapeOf(r);
   return shape === 'closed' ? [] : shape.sources;
+};
+
+/**
+ * THE NODES WHOSE OPERATORS LAND IN THIS RELATION'S OWN `SELECT`, outermost first.
+ *
+ * ⚠️ **A law about "this SELECT" applies to exactly these, and a node behind a DERIVED TABLE is in a
+ * different SELECT — the same fact P2 established for a correlated subquery.** Measured, bun:sqlite
+ * 3.53.0: an aggregate, a window function, a `DISTINCT` and an `ORDER BY … LIMIT` each run and
+ * return the right rows inside a derived table joined into a recursive term, while the same two
+ * fused into the term proper are `recursive aggregate queries not supported` and `cannot use window
+ * functions in recursive queries`. Walking node children instead refuses the first four.
+ */
+export const fusedInto = (r: Rel): readonly Rel[] => {
+  const shape = shapeOf(r);
+  return shape === 'closed' ? [r] : shape.fused;
 };
