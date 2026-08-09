@@ -1920,6 +1920,14 @@ function scalarTail(
       // traverser. One rule, two hosts (§6·6's "a child body works wherever it is LEGAL" applied to a
       // barrier rather than to a body).
       if (argValues(step).length) {
+        // ⚠️ A KEYED `group("a")` IN A PROGRAM WITH EFFECTS STILL DECLINES — the one `mutating` site
+        // the snapshot binding does NOT close, and for a platform reason rather than an unfinished
+        // one. An `aggregate` site binds its MEMBER ROWS, whose columns cross the executor seam; a
+        // grouping barrier's relation is a one-row JSONB map payload, and a retained binding travels
+        // as JSON (`src/program.ts`), which fails closed on exactly that. The answer is Phase 4 of
+        // `docs/2026-08-09-named-collections-are-bindings-plan.md`, not a second snapshot: once the
+        // keyed forms hold `(key, value-contribution)` MEMBER rows and run `groupBarrier` at the
+        // `cap`, they take the aggregate sites' binding unchanged.
         if (ctx.mutating) return null;
         if (!registerMap(step, { rel: grouped.rel, framing }, ctx.collections, ctx.sideEffectReducers)) return null;
         continue;
@@ -2276,8 +2284,15 @@ function scalarTail(
     // reason: a shape works wherever it is legal, not wherever a host was taught it. The members of a
     // scalar collection are the VALUES, keeping their per-row type.
     if (step.name === 'aggregate') {
-      if (ctx.mutating) return null;
-      if (!registerCollection(step, rel, host, out, ctx.collections, ctx.sideEffectReducers, childSeam(ctx, fresh), fresh)) return null;
+      const snapshot = registerCollection(step, rel, host, out, ctx.collections, ctx.sideEffectReducers,
+        childSeam(ctx, fresh), fresh, ctx.mutating);
+      if (!snapshot) return null;
+      // The element tail's rule, at the value tail: a snapshot is an execution step and belongs in
+      // the effect sequence at THIS position.
+      if (snapshot.length) {
+        const tail = scalarTail(rel, out, steps, at + 1, bulked, ctx, fresh, labels);
+        return tail && { ...tail, effects: [...snapshot, ...(tail.effects ?? [])] };
+      }
       continue;
     }
     if (step.name === 'cap') {
@@ -3485,6 +3500,14 @@ function elementTail(
       // `aggregate`'s contract exactly. So the map is registered and the loop CONTINUES from the
       // unchanged relation; only the unkeyed form becomes the traverser.
       if (argValues(step).length) {
+        // ⚠️ A KEYED `group("a")` IN A PROGRAM WITH EFFECTS STILL DECLINES — the one `mutating` site
+        // the snapshot binding does NOT close, and for a platform reason rather than an unfinished
+        // one. An `aggregate` site binds its MEMBER ROWS, whose columns cross the executor seam; a
+        // grouping barrier's relation is a one-row JSONB map payload, and a retained binding travels
+        // as JSON (`src/program.ts`), which fails closed on exactly that. The answer is Phase 4 of
+        // `docs/2026-08-09-named-collections-are-bindings-plan.md`, not a second snapshot: once the
+        // keyed forms hold `(key, value-contribution)` MEMBER rows and run `groupBarrier` at the
+        // `cap`, they take the aggregate sites' binding unchanged.
         if (ctx.mutating) return null;
         if (!registerMap(step, { rel: grouped.rel, framing }, ctx.collections, ctx.sideEffectReducers)) return null;
         continue;
@@ -3509,9 +3532,17 @@ function elementTail(
     // `aggregate("a")` — fill a NAMED COLLECTION and pass the traversers through. Shape-preserving,
     // so it sits in the ordinary loop beside `as()`; what it changes is chain state, not the relation.
     if (step.name === 'aggregate') {
-      if (ctx.mutating || pathCarried(rel)) return null;
-      if (!registerCollection(step, rel, elementHost(rel, elem, labels), { kind: 'elements', elem },
-        ctx.collections, ctx.sideEffectReducers, childSeam(ctx, fresh), fresh)) return null;
+      if (pathCarried(rel)) return null;
+      const snapshot = registerCollection(step, rel, elementHost(rel, elem, labels), { kind: 'elements', elem },
+        ctx.collections, ctx.sideEffectReducers, childSeam(ctx, fresh), fresh, ctx.mutating);
+      if (!snapshot) return null;
+      // A SNAPSHOT IS AN EXECUTION STEP, so it enters the effect sequence HERE — before whatever the
+      // rest of the chain writes, which is the whole point of taking it. Same prepend a write step
+      // makes, for the same reason: the recursion returns the tail from after this position.
+      if (snapshot.length) {
+        const tail = elementTail(rel, elem, steps, at + 1, bulked, ctx, fresh, labels);
+        return tail && { ...tail, effects: [...snapshot, ...(tail.effects ?? [])] };
+      }
       continue;
     }
     // `cap("a")` — the collection as ONE list traverser. A SHAPE BOUNDARY, and a total re-root: the

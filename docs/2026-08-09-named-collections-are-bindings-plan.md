@@ -364,15 +364,36 @@ it is fine (side effects are root-global); a collection registered OUTSIDE and r
 too. What is NOT fine is a rooted body whose member relation references the outer chain's rows —
 `checkPlan`'s scope check catches that, and it must stay caught rather than be worked around.
 
-### Phase 6 — the `snapshot` binding deletes the `ctx.mutating` decline.
+### Phase 6 — ✅ LANDED for `aggregate`. The `snapshot` binding deletes two of the four declines.
 
-Register the collection as `{name, node: members, snapshot: true}`. Copy the pattern verbatim from
-`write.ts:149-161`. Delete all four `if (ctx.mutating) return null` sites and the `mutating` field if
-nothing else reads it.
+Each site is registered as `{name, node: <the narrowed member rows>, snapshot: true}` and the site's
+relation becomes a `Ref` to it — `write.ts`'s pattern, and `runProgram` already honoured it. The
+bindings come back from `registerCollection` so the caller can put them in the effect sequence AT
+THAT POSITION, which is the same prepend a write step makes and for the same reason.
 
-**Checkpoint:** `mise run rel-sweep` is the gate that matters — a snapshot mistake shows up as
-`checkPlan` throwing, i.e. RelIR erroring where legacy answers, which is the one failure the routing
-switch cannot absorb.
+⚠️ **The site is NARROWED to its member columns before it is bound, and that is not tidiness.** A
+retained binding's rows cross the executor seam as JSON (`src/program.ts`), which fails closed on what
+it cannot carry — and an element site's raw relation carries the alias channel as JSONB.
+
+**Checkpoint — measured:** `mise run rel-sweep` **0 violations** (the gate that matters: a snapshot
+mistake is `checkPlan` throwing, i.e. RelIR erroring where legacy answers). L3 1782, census 1208 and
+the legacy floor 1692 all unchanged, which is expected — only 4 corpus traversals contain both a
+mutating step and a named collection, and each of the four ALSO needs something else (a multi-label
+`cap`, `select` over a collection label, a group as a property value, a groupCount as an `addE`
+label). The evidence is three L4 scenarios in `aggregate-snapshot-write.feature`, each of which
+declines outright without this, plus four shapes measured lowering that did not before:
+`g.V().aggregate("a").addV("x").cap("a")`,
+`g.V().hasLabel("person").aggregate("a").out("created").drop()`,
+`g.V().values("name").aggregate("a").addV("x").cap("a")`, and
+`g.V().aggregate("a").cap("a").unfold().property("k","v")`.
+
+⚠️ **THE TWO KEYED-FORM DECLINES STAY, for a platform reason and not an unfinished one.** A
+`group("a")`/`groupCount("a")` registers a grouping barrier's relation, which is a one-row JSONB map
+payload — and a retained binding travels as JSON, which fails closed on exactly that (root
+`CLAUDE.md`: a `RETURNING` feeding a retained binding projects `json(x)`, never `jsonb`). The answer
+is Phase 4, not a second snapshot: once the keyed forms hold `(key, value-contribution)` MEMBER rows
+and run `groupBarrier` at the `cap`, they take the aggregate sites' binding unchanged. `ChainCtx.mutating`
+therefore survives, with two readers instead of four.
 
 ### Phase 7 — the merge POLICY: seed + `Operator`.
 

@@ -2,6 +2,7 @@ import { col, compilerInt, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import type { Rel } from '../../rel/rel.ts';
+import type { Binding } from '../../rel/plan.ts';
 import { meetScalarTypes, perRowCols, sameScalarType, typeCarriedBy, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { isLocalScope } from '../ir/step.ts';
@@ -40,15 +41,10 @@ import type { Channel } from '../../channels.ts';
  *
  * ## What declines, and why each is the honest answer
  *
- * - **a chain with a MUTATING step.** A shared read node is re-evaluated by every statement that
- *   names it, which is correct in a read program and a silent wrong answer in one with effects — the
- *   collection would see the graph AFTER the write. §3.0's answer is a `snapshot` binding, and that
- *   is the increment this one is a prerequisite for, not a shortcut it may take.
- * - **a label registered TWICE.** Phase 2's subject: a second registration becomes a `UNION ALL` into
- *   the existing member relation, which is the reference's answer (side effects live on the ROOT
- *   traversal, `AggregateStep.java:57`) and which the member-row shape below is what makes expressible.
- *   Until then, failing closed beats keeping whichever arm ran last — which is what LEGACY does
- *   silently (`steps/prefix/sideeffect.ts:163-164`, and it mis-answers nine L3 scenarios).
+ * (A chain with a MUTATING step and a label registered TWICE both used to be here. Neither is a
+ * decline any more: the sites are a list unioned at the read, and in a program with effects each is
+ * a `snapshot` binding — see `snapshotted`.)
+ *
  * - **`aggregate(Scope.local, "a")`** — TinkerPop 4's replacement for the lazy `store()`, which is
  *   non-blocking. Relationally that is the same SET at the end of the traversal and a DIFFERENT one
  *   read mid-traversal, so it is only safe once a mid-chain read exists to distinguish them.
@@ -144,13 +140,17 @@ function labelOf(step: IRStep): string | null {
  *
  * PRODUCTIVITY is the by() vocabulary's, unchanged: a traverser whose `by()` yields nothing
  * contributes NO member (`TraversalUtil.produce` again), and `ProductiveByStrategy` turns that off.
+ *
+ * **IN A PROGRAM WITH EFFECTS THE SITE IS SNAPSHOTTED**, and the bindings come back so the caller can
+ * put them in the chain's effect sequence AT THIS POSITION — see `snapshotted`. A `null` return is
+ * the decline; an EMPTY array is a registration that needed no binding, which is every read program.
  */
 export function registerCollection(
   step: IRStep, input: Rel, host: ChildHost, framing: RelFraming, collections: Collections,
-  reducers: ReadonlySet<string>, child: ChildSeam, fresh: Minter,
-): boolean {
+  reducers: ReadonlySet<string>, child: ChildSeam, fresh: Minter, mutating: boolean,
+): readonly Binding[] | null {
   const label = labelOf(step);
-  if (label === null) return false;
+  if (label === null) return null;
   // A `withSideEffect(name, seed, Operator.x)` collection is NOT empty when the traversal starts and
   // is not merged by concatenation either: the declaration supplies an initial value and the operator
   // says how each contribution combines with it. Registering here would silently drop both and answer
@@ -161,20 +161,55 @@ export function registerCollection(
   // the reducer form when building that registry (its value is not a constant to substitute), so
   // before `sideEffectReducers` existed this decline was not expressible at all — the label read as
   // fresh. A fact the front end drops is one no lowering can decline on.
-  if (reducers.has(label)) return false;
+  if (reducers.has(label)) return null;
   const bys = modulations(step, 1, child);
-  if (!bys) return false;
+  if (!bys) return null;
   const encounter = input.channels.find((channel) => channel.role === 'encounter');
-  const retained = bys[0]
+  const built = bys[0]
     ? projectedMembers(step, input, host, framing, bys[0], encounter, child, fresh)
     : traverserMembers(input, framing, encounter);
-  if (!retained) return false;
+  if (!built) return null;
+  const { collection: retained, bindings } = mutating ? snapshotted(built, fresh) : { collection: built, bindings: [] };
   const held = collections.get(label);
-  if (!held) { collections.set(label, retained); return true; }
+  if (!held) { collections.set(label, retained); return bindings; }
   const accumulated = accumulate(held, retained, fresh);
-  if (!accumulated) return false;
+  if (!accumulated) return null;
   collections.set(label, accumulated);
-  return true;
+  return bindings;
+}
+
+/**
+ * THE SITE'S ROWS, TAKEN — a `snapshot` binding plus a `Ref` to it, which is what makes a named
+ * collection legal in a program with effects.
+ *
+ * A CTE is re-evaluated by every statement that names it: correct in a read program, a silent wrong
+ * answer in one with effects, because the collection would then see the graph AFTER the write. That
+ * is §3.0's answer and it is already built — `write.ts` produces exactly this shape and `runProgram`
+ * already retains it — so the four `if (ctx.mutating) return null` declines were a placeholder for
+ * machinery that had shipped.
+ *
+ * ⚠️ **The site is NARROWED to its member columns before it is bound, and that is not tidiness.** A
+ * retained binding's rows cross the executor seam as JSON (`src/program.ts`), which fails closed on
+ * what it cannot carry — and an element site's raw relation carries the alias channel as JSONB. The
+ * members are what the collection is FOR, so binding them rather than the whole traverser row is both
+ * the smaller statement and the one whose columns can travel.
+ */
+function snapshotted(
+  collection: Collection, fresh: Minter,
+): { readonly collection: Collection; readonly bindings: readonly Binding[] } {
+  const cols = [...memberCols(collection.of), ...collection.sites[0]!.order];
+  const bindings: Binding[] = [];
+  const sites = collection.sites.map((site) => {
+    const narrowed = make.project({
+      id: fresh('cs'), input: site.rel, channels: [],
+      type: typeOf(...cols.map((name) => site.rel.type.cols.find((column) => column.name === name) ?? meta(name, 'any'))),
+      exprs: cols.map((name) => [name, col(site.rel.id, name)] as const),
+    });
+    const name = fresh('agg');
+    bindings.push({ name, node: narrowed, snapshot: true });
+    return { ...site, rel: make.ref({ id: fresh('r'), name, channels: [], type: narrowed.type }) };
+  });
+  return { collection: { ...collection, sites }, bindings };
 }
 
 /**
