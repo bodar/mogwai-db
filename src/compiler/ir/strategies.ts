@@ -1123,8 +1123,16 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
   if (!rep || !times) return null;
   const n = (times.args ?? [])[0]?.value;
   if (typeof n !== 'number' || !Number.isInteger(n) || n < 1) return null;
-  // A named repeat("a", body) carries a loop counter loops("a") can read; only the single-arg form
-  // is a plain n applications.
+  // A named `repeat("a", body)` carries a loop counter `loops("a")` can read from arbitrarily deep
+  // inside the body, including from a NESTED repeat's — so the phases have no counter to attach it to
+  // and unrolling silently drops the identity. §3.4: this refusal must stay a refusal.
+  //
+  // ⚠️ **Read `loopName`, not the argument COUNT.** The front end splits the name off the step
+  // (`frontend.ts` pushes `{args: [args[1]], loopName: args[0].value}`), so a named repeat arrives with
+  // exactly ONE argument like any other and the arity test this replaces never fired once. Measured on
+  // trunk before the fix: `g.V().repeat("a", __.out().dedup()).times(2)` unrolled to
+  // `V.out.dedup.out.dedup`, byte-identical to the unnamed form.
+  if (rep.loopName) return null;
   const args = rep.args ?? [];
   if (args.length !== 1 || !isNested(args[0].value)) return null;
   // NORMALIZED, not raw. The body crosses the same seam every other child body does (`childSteps`),

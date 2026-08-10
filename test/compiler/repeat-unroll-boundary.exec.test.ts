@@ -34,6 +34,8 @@
 // keep the line visible rather than to bless a direction.
 import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
+import { normalize } from '../../src/compiler/ir/passes.ts';
+import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { bagOf, run, seededStore } from '../support/harness.ts';
 
 const store = seededStore();
@@ -96,7 +98,29 @@ describe('the repeat() unroll boundary', () => {
       'g.V().repeat(__.dedup().both()).times(2).emit()',
       'g.V().emit().repeat(__.dedup().both()).times(2)',
       "g.V().repeat(__.dedup().both()).until(__.has('name','lop'))",
+      // The NAMED loop, which this test's own name has always claimed and its list did not contain —
+      // and that gap is exactly how the defect below survived.
+      'g.V().repeat("a", __.dedup().both()).times(2)',
     ]) expect(() => compile(q, {})).toThrow();
+  });
+
+  test('a NAMED repeat is not unrolled — the identity has nowhere to go', () => {
+    // The refusal above is asserted through a downstream throw, which is necessary but not sufficient:
+    // it would still pass if the unroll fired and something later happened to refuse. So pin the
+    // property itself — the `repeat` step SURVIVES normalization.
+    //
+    // MEASURED as a live defect on trunk before this fix: `tryUnroll` rejected a named repeat by
+    // testing the ARGUMENT COUNT, but `frontend.ts` splits the name onto `loopName`, so a named repeat
+    // arrives with exactly one argument like any other. `g.V().repeat("a", __.out().dedup()).times(2)`
+    // unrolled to `V.out.dedup.out.dedup` — byte-identical to the unnamed form, with `loops("a")`'s
+    // counter silently gone. The arity test never fired once.
+    // `nested: false` — these are ROOT traversals, and `normalize` defaults the other way (see its own
+    // comment: every `src/` caller holds a body, so that is the safe default).
+    const rolled = (g: string) =>
+      normalize(stepChain(parseGremlin(g), {}), {}, undefined, false).steps.map((s) => s.name);
+    expect(rolled('g.V().repeat("a", __.out().dedup()).times(2)')).toContain('repeat');
+    // …and the unnamed form still unrolls, so the guard is about the NAME and nothing else.
+    expect(rolled('g.V().repeat(__.out().dedup()).times(2)')).not.toContain('repeat');
   });
 
   test('a barrier body defers, and identically however RepeatUnrollStrategy is spelled', () => {

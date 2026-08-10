@@ -527,11 +527,16 @@ Nothing below is on trunk. Each is a reference-read from `origin/repeat-two-regi
 build ON TRUNK — never a cherry-pick of that branch's commits, which are against a moved
 `src/compiler/rel/`.
 
-1. **`tryUnroll` must read `loopName`, not the argument count.** A named `repeat("a", …)` arrives with
-   ONE argument because the front end splits the name onto `loopName`, so the arity test never fired and
-   a named repeat was being unrolled — silently dropping the loop identity `loops("a")` reads. A
-   correctness fix on trunk TODAY, independent of everything else, a few lines, with a census traversal
-   behind it. Do this one first because it is pure win and it exercises the loop.
+1. ✅ **LANDED — `tryUnroll` reads `loopName`, not the argument count.** A named `repeat("a", …)` arrives
+   with ONE argument because the front end splits the name onto `loopName`, so the arity test never
+   fired once and a named repeat WAS being unrolled — silently dropping the loop identity `loops("a")`
+   reads. Measured before the fix: `g.V().repeat("a", __.out().dedup()).times(2)` normalized to
+   `V.out.dedup.out.dedup`, byte-identical to the unnamed form.
+   The test that should have caught it was named *"emit, until and a named loop all decline"* and its
+   list contained only `emit` and `until` — **a pin whose name over-claimed its own body**, which is
+   worth more than the fix: when a refusal is asserted through a downstream throw, also pin the
+   PROPERTY (here, that the `repeat` step survives normalization), because a throw can come from
+   anywhere.
 2. **`withoutStrategies(RepeatUnrollStrategy)` must suppress the pass.** Same size, same independence.
    It was classified inert, which was true only while our unroll and TinkerPop's strategy did not
    overlap; §1 makes them the same transformation. A corpus traversal asserts it.
