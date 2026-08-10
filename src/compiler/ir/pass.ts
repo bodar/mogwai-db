@@ -60,6 +60,19 @@ export interface PassContext {
   /** Out-of-band results a pass may set. Mutable bag, written only by the `extract` category
    *  (stripTerminal's discard flag → the iterate() "run for effect, return nothing" shape). */
   readonly out: { discard: boolean };
+  /** Is this a CHILD body rather than the traversal's own chain? `childSteps` runs the identical
+   *  pipeline over every nested `__.…` body, so almost no pass needs to care — which is the point, and
+   *  why this is a flag rather than a second pipeline.
+   *
+   *  It exists for the one class of pass that CANNOT answer locally: a rewrite whose justification is
+   *  a WHOLE-TRAVERSAL property. Label liveness is the case — the `as('a')` in
+   *  `g.union(__.V(1).as('a').out(), __.V(2)).select('a')` is unread *within its arm* and read by the
+   *  chain that hosts it, so a body normalized in isolation deletes a live bind. Measured: it answered
+   *  `[]` where that arm's three traversers were expected.
+   *
+   *  A pass reading this must gate on `!ctx.nested` (do nothing in a child), never invert it — a body
+   *  is not the place to conclude anything the enclosing chain could contradict. */
+  readonly nested: boolean;
 }
 
 export interface Pass {

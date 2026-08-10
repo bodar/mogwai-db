@@ -16,7 +16,6 @@ import type { GraphStore } from '../../src/storage.ts';
 import { exec } from '../support/executor.ts';
 import { isWrite, type StoreFactory } from '../support/graph.ts';
 import { DEFAULT_FAST_PATHS, type FastPathConfig } from '../../src/compiler/options/fast-paths.ts';
-import type { Framed } from '../../src/execute.ts';
 import { weigh } from '../support/multiset.ts';
 
 // `seeded`/`isWrite`/`StoreFactory` moved to test/support/graph.ts when the census became a second

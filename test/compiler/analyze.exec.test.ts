@@ -8,8 +8,13 @@ import { normalize } from '../../src/compiler/ir/passes.ts';
 import { analyzeChain } from '../../src/compiler/ir/analyze.ts';
 
 /** Parse + normalize (so order().by() has its .bys folded, exactly as the compiler sees it),
- *  then analyze. Facts are computed over the canonical IRStep chain, not the raw parse. */
-const facts = (gremlin: string) => analyzeChain(normalize(stepChain(parseGremlin(gremlin), {})).steps);
+ *  then analyze. Facts are computed over the canonical IRStep chain, not the raw parse.
+ *
+ *  `nested: false` because these ARE root traversals, and `normalize` defaults the other way (see its
+ *  own comment — every `src/` caller holds a body, so that is the safe default). It matters here: the
+ *  label retractions are root-only, so a body-normalized chain would keep an `as()` the compiler has
+ *  already dropped and these pins would describe a chain no compile produces. */
+const facts = (gremlin: string) => analyzeChain(normalize(stepChain(parseGremlin(gremlin), {}), {}, undefined, false).steps);
 
 describe('ChainFacts.tracksPath', () => {
   test('true iff a top-level path-family step is present', () => {
@@ -62,7 +67,18 @@ describe('ChainFacts.collapseSafe', () => {
   });
   test('false when identity is carried between the source and terminal', () => {
     expect(facts('g.V().out().path().count()').collapseSafe).toBe(false); // path carries identity
-    expect(facts('g.V().as("a").out().count()').collapseSafe).toBe(false); // as() carries identity
+    // A LIVE as() still carries identity, and these are the two ways it stays live: a later step reads
+    // the label's value, so `retractUnreadAlias` cannot drop it and this predicate must still refuse.
+    expect(facts('g.V().as("a").out().select("a").out().count()').collapseSafe).toBe(false);
+    expect(facts('g.V().as("a").out().where("a", P.neq("b")).as("b").count()').collapseSafe).toBe(false);
+  });
+  test('a DEAD as() is not identity — nothing reads it, so it is gone before this runs', () => {
+    // This case used to be pinned `false` here, with the reason "as() carries identity". The label was
+    // never read, so what it carried was nothing: `retractUnreadAlias` (ir/labels.ts, §7.4 item 2 of
+    // the repeat two-regimes plan) drops it and the chain reaching this analysis is `V().out().count()`.
+    // Relaxing collapseSafe to ADMIT a carried as() is a different change and remains refuted — 52
+    // executing census traversals changed their answer when it was tried.
+    expect(facts('g.V().as("a").out().count()').collapseSafe).toBe(true);
   });
 });
 

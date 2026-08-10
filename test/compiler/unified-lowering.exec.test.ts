@@ -85,7 +85,11 @@ describe('unified lowering characterization', () => {
         // select() re-root reads it — no second label mechanism, just the engine's one
         // element-body fold running over the inline seed.
         key: 'predicateInlining',
-        query: 'g.V().as("x").where(__.out().as("z").select("z").has("name","lop")).values("name").order()',
+        // The trailing `select("x")` is what keeps the OUTER label alive, and the numbering is the
+        // reason it has to: `retractUnreadAlias` (ir/labels.ts) drops an `as()` no later step reads, so
+        // without a reader `x` is gone, no `a0` is seeded, and the body's own bind lands at `a0` —
+        // which is a different claim than the one this row makes.
+        query: 'g.V().as("x").where(__.out().as("z").select("z").has("name","lop")).select("x").values("name").order()',
         fastSql: 'AS a1 FROM',
         genericSql: 'ROW_NUMBER() OVER () AS o0',
       },
@@ -783,9 +787,15 @@ relOnly('a shared row op fails closed rather than answering a different question
   // `RangeGlobalStep` slices the TRAVERSER stream, so taking two of one map yields the map — which is
   // why this line asserts an ANSWER where the three below assert refusals.
   expect(run(store, "g.V().group().by('name').limit(2)")).toHaveLength(1);
-  // Carried label state makes a bare DISTINCT over the row the wrong collapse key.
-  expect(() => run(store, "g.V().as('x').local(__.out().fold()).dedup()"))
+  // Carried label state makes a bare DISTINCT over the row the wrong collapse key — and CARRIED is now
+  // the operative word. The label has to be READ for the state to exist at all: `retractUnreadAlias`
+  // (ir/labels.ts) drops an `as('x')` nothing reads, so the same traversal without the `select('x')`
+  // carries nothing and answers — four distinct folded lists, which is the reference's answer, since
+  // `DedupGlobalStep` keys on the traverser's object and never on its labels. The refusal is about the
+  // collapse key we cannot express, not about the `as()` being present in the text.
+  expect(() => run(store, "g.V().as('x').local(__.out().fold()).dedup().select('x')"))
     .toThrow('carried path/label state');
+  expect(run(store, "g.V().as('x').local(__.out().fold()).dedup()")).toHaveLength(4);
   // A by()-scoped dedup is a different collapse key entirely.
   expect(() => run(store, "g.V().local(__.out().fold()).dedup().by('x')")).toThrow('dedup().by()');
   // Scope.local addresses MEMBERS, not rows, so the shared op declines and the list arm's OWN

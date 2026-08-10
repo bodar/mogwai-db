@@ -444,9 +444,13 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
     // and the order().by() SQL tests. They must NOT throw.
     expect(() => compile('g.V().order().by("name").by(__.values("age"))', {})).not.toThrow();
     expect(() => compile('g.V().order().by(__.in().count()).by(__.out().count())', {})).not.toThrow();
-    // dedup: dedup(labels) is supported (see the dedup(labels) test); bare dedup after as()
-    // stays deferred rather than answered wrongly (path-distinct semantics).
-    expect(() => compile('g.V().as("a").out().dedup()', {})).toThrow('dedup() after as() not yet supported');
+    // dedup: dedup(labels) is supported (see the dedup(labels) test); bare dedup after a LIVE as()
+    // stays deferred rather than answered wrongly (path-distinct semantics). The `select("a")` is what
+    // makes it live — `retractUnreadAlias` (ir/labels.ts) drops a label no later step reads, and
+    // `g.V().as("a").out().dedup()` then answers, correctly: `DedupGlobalStep` keys on the traverser's
+    // object, never on its labels, so with nothing reading `a` there is no path-distinct question.
+    expect(() => compile('g.V().as("a").out().dedup().select("a")', {})).toThrow('dedup() after as() not yet supported');
+    expect(() => compile('g.V().as("a").out().dedup()', {})).not.toThrow();
     // …and a second by() on dedup is an ARITY violation, not a deferral — DedupGlobalStep's own
     // wording, from the byModulatorArity verify Pass.
     expect(() => compile('g.V().dedup().by("age").by("name")', {})).toThrow('Dedup step can only have one by modulator');

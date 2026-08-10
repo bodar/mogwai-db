@@ -6,7 +6,7 @@ import {
     verifyStandard, verifyByModulatorArity,
     absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
     injectSubgraphRec, injectPartitionRec, markProductiveBy, isAlwaysProductiveFilterNoOp, verify,
-    inlineIdentityHostBody,
+    inlineIdentityHostBody, retractUnobservedSelect, retractUnreadAlias,
     NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
     type IRStep,
 } from './strategies.ts';
@@ -145,6 +145,37 @@ const SIMPLIFY: Pass[] = group('simplify', [
     applies: (steps) => steps.some((s) => ['where', 'filter', 'not', 'and', 'or'].includes(s.name)),
     run: (steps, ctx) => isAlwaysProductiveFilterNoOp(steps, ctx.params) as IRStep[],
   },
+  // THE TWO LABEL RETRACTIONS, and the order between them is one-directional rather than a fixpoint:
+  // retracting a `select` can make a label unread, while retracting an `as` never manufactures a
+  // `select`. So one pass through this array in this order is provably enough.
+  //
+  // Both run AFTER canonicalize (guaranteed by the category ordinal), which is what lets them see the
+  // final shape and carry no special cases: a bounded `repeat().times(n)` is already n spliced steps
+  // (`unrollFixedRepeat`), a `by()` is already `.modulators`, a `choose()`'s arms are already
+  // `.optionArms`, and a where()-body end label is already `select`/`where(P.eq)`
+  // (`rewriteWhereEndLabels`) — so the read scan never has to know that grammar. After
+  // `isAlwaysProductiveFilterNoOp` for the same reason: it can DELETE a body that reads a label, and
+  // the liveness answer must be computed over the final chain.
+  //
+  // BOTH ARE ROOT-ONLY (`!ctx.nested`), and that is the rule rather than a precaution: liveness is a
+  // property of the WHOLE traversal, so a body normalized in isolation cannot answer it. A child body's
+  // binds are read by the chain that hosts it — `g.union(__.V(1).as('a').out(), __.V(2)).select('a')`
+  // reads `a` after the merge, where the arm cannot see it. The root run still descends into every
+  // nested body to COLLECT reads (`labelReads`), so nothing is missed by looking only from the top; it
+  // is only REMOVAL that is confined to the chain able to see all of its readers.
+  {
+    name: 'retractUnobservedSelect',
+    applies: (steps, ctx) => !ctx.nested && steps.some((s) => s.name === 'select'),
+    run: (steps, ctx) => retractUnobservedSelect(steps, ctx.params, ctx.out.discard),
+  },
+  {
+    // Suppressible, exactly as `unrollFixedRepeat` is: we perform `PathRetractionStrategy` now
+    // (see NO_OP_STRATEGIES), so a user who disables it is entitled to the un-retracted plan.
+    name: 'retractUnreadAlias',
+    applies: (steps, ctx) => !ctx.nested && steps.some((s) => s.name === 'as')
+      && !ctx.strategies.without.some((s) => s === 'PathRetractionStrategy'),
+    run: (steps, ctx) => retractUnreadAlias(steps, ctx.params),
+  },
 ]);
 
 // ---------- decoration (external withStrategies; config-gated) ----------
@@ -248,10 +279,21 @@ const DECORATION_ORDINAL = PASS_CATEGORIES.indexOf('decoration');
  *  entry point every NESTED sub-chain uses (child bodies, match patterns, write targets, correlated
  *  predicates). A sub-chain carries no withStrategies of its own, so EMPTY_STRATEGY_USE is exactly
  *  right; this is `runPasses` with no strategies, named for the sub-chain intent. */
+/** ⚠️ `nested` DEFAULTS TO TRUE HERE, and the asymmetry with `runPasses` is the fail-closed choice.
+ *
+ *  `compiler.ts` is the only caller holding a traversal's OWN chain, and it reaches `runPasses`
+ *  directly; every `normalize` call site in `src/` is a nested body of some kind — a branch arm, a
+ *  write's inner traversal, a correlated child, or a rooted arm `childSteps` cannot serve because it
+ *  carries its own source (`rel/lower.ts`'s `rootedSteps`, `prefix/branch.ts`'s union arms). So the
+ *  default that cannot silently break something is "this is a body". Getting it the other way round
+ *  deleted a live `as()` from a union arm and answered `[]`, and chasing the call sites one by one
+ *  would leave the NEXT one broken; a new nested caller now inherits the safe answer instead. A caller
+ *  that genuinely holds a root chain says so. */
 export function normalize(
   steps: Step[], params: Record<string, any> = {}, sideEffects: Map<string, any> = NO_SIDE_EFFECTS,
+  nested = true,
 ): { steps: IRStep[]; discard: boolean } {
-  return runPasses(steps, EMPTY_STRATEGY_USE, params, sideEffects);
+  return runPasses(steps, EMPTY_STRATEGY_USE, params, sideEffects, nested);
 }
 
 /** No `withSideEffect` declared. One shared value, so a caller that has none allocates nothing and
@@ -289,13 +331,14 @@ export const childSteps = (nested: any, params: Record<string, any>, sideEffects
  *  invariant instead of a ladder `else throw`. `discard` rides out-of-band on ctx.out. */
 export function runPasses(
   steps: Step[], use: StrategyUse, params: Record<string, any> = {}, sideEffects: Map<string, any> = NO_SIDE_EFFECTS,
+  nested = false,
 ): { steps: IRStep[]; discard: boolean } {
   for (const name of use.without)
     if (ALWAYS_ON_STRATEGIES.has(name))
       throw new Error(`withoutStrategies(${name}) is not supported: its effect (infix .and()/.or() folding) is unconditionally applied by this compiler and cannot be disabled.`);
   const removed = new Set(use.without);
   const active = use.with.filter((s) => !removed.has(s.name) && !NO_OP_STRATEGIES.has(s.name));
-  const ctx: PassContext = { params, sideEffects, strategies: { with: active, without: use.without }, originalChain: [], out: { discard: false } };
+  const ctx: PassContext = { params, sideEffects, strategies: { with: active, without: use.without }, originalChain: [], out: { discard: false }, nested };
 
   // Fail-closed invariant: every active (non-suppressed, non-no-op) strategy must be claimed by a
   // decoration/verify pass of the same name, else it is a semantic/unknown strategy that would

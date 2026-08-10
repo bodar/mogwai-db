@@ -1,5 +1,6 @@
 import { stepChain, isCardinalityArg, isCardinalityValueArg, isDirectionArg, isNested, isPred, isScopeArg, arg, argValues, type Arg, type Step, type StrategySpec } from '../../gremlin/frontend.ts';
 import { bodyAlwaysProduces } from './productivity.ts';
+import { asLabelsOf, cardinalityOnlyTerminalAt, labelReads, labelsBoundBefore, matchLabelsOf } from './labels.ts';
 import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { mapEntryType } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
@@ -75,6 +76,12 @@ export const NO_OP_STRATEGIES = new Set([
   'CountStrategy', 'IdentityRemovalStrategy', 'FilterRankingStrategy',
   'LazyBarrierStrategy', 'EarlyLimitStrategy', 'OrderLimitStrategy',
   'AdjacentToIncidentStrategy', 'IncidentToAdjacentStrategy', 'InlineFilterStrategy',
+  // ⚠️ `PathRetractionStrategy` is the SECOND entry whose "no-op" claim is about the RESULT and not
+  // about the plan — same standing as `RepeatUnrollStrategy` below, and for the same reason: we now
+  // perform it (`retractUnreadAlias`), so `withStrategies` asks for what already happens while
+  // `withoutStrategies` genuinely suppresses the pass (`passes.ts`). Dropping a label nothing reads
+  // cannot change an answer, which is why it stays in a set whose contract is result-preservation;
+  // what a user disabling it is entitled to is the un-retracted PLAN.
   'PathRetractionStrategy', 'PathProcessorStrategy', 'ByModulatorOptimizationStrategy',
   'RepeatUnrollStrategy', 'MatchAlgorithmStrategy', 'MatchPredicateStrategy',
   // GValue/requirement planning: subsumed by our q-kernel bound-value model (locked
@@ -1229,30 +1236,8 @@ export function absorbOptionArms(steps: IRStep[]): IRStep[] {
 
 // ---------- WhereEndStep: a label on a where()-body's last step is a CONSTRAINT ----------
 
-/** PURE. The string labels an `as()` step binds (`as('a','b')` binds both). */
-const asLabelsOf = (s: Step): string[] =>
-  s.name === 'as' ? (s.args ?? []).map((a) => a.value).filter((a: any): a is string => typeof a === 'string') : [];
-
-/** PURE. The labels a `match()` step binds — the `as(start)`/`as(end)` wrapping each of its pattern
- *  arguments. A step's OWN `as()` is not the only way a label enters scope, and match() is the case
- *  that matters here: it binds inside its arguments, so a chain that reads `where(__.as('c')…)`
- *  after a match() sees a label this pass would otherwise call unbound and throw on — even though
- *  the lowering carries the column perfectly well. Syntactic and shape-free, exactly like
- *  `asLabelsOf`: the pattern body is re-read with the same `stepChain` primitive every other scanner
- *  in this file uses, and a FILTER argument (`not(…)`/`where(…)`, which binds nothing — see
- *  prefix/match.ts) contributes no label because it does not open with `as()`. */
-const matchLabelsOf = (s: Step, params: Record<string, any>): string[] => {
-  if (s.name !== 'match') return [];
-  const out: string[] = [];
-  for (const { value: a } of s.args ?? []) {
-    if (!isNested(a)) continue;
-    const chain = stepChain(a.nested, params);
-    if (chain[0]?.name !== 'as') continue;
-    out.push(...asLabelsOf(chain[0]));
-    if (chain.length > 1) out.push(...asLabelsOf(chain[chain.length - 1]));
-  }
-  return out;
-};
+/** `asLabelsOf`/`matchLabelsOf` are `ir/labels.ts`'s — the bind side of the same vocabulary the
+ *  label retractions read. They were private here while this rewrite was their only consumer. */
 
 /** The connective hosts TinkerPop's `WhereTraversalStep.configureStartAndEndSteps` recurses
  *  THROUGH when locating a where()-body's start and end: a ConnectiveStep (`and`/`or`) or a
@@ -1400,6 +1385,104 @@ export function rewriteWhereEndLabels(steps: IRStep[], params: Record<string, an
     return chainChanged ? out : null;
   };
   return (walk(steps, new Set()) ?? steps) as IRStep[];
+}
+
+// ---------- label retraction: state nobody reads is not carried ----------
+//
+// TWO provable no-op removals, and together they are what makes collapse-safety a property of the
+// state a position actually CARRIES rather than of the whole chain (§7 of
+// `docs/2026-08-09-repeat-two-regimes-plan.md`).
+//
+// The problem they solve: `g.V().repeat(__.out()).times(5).as("a").out("writtenBy").as("b")
+// .select("a","b").count()` is 24 309 134 024 traversers over the grateful graph, and it answers
+// today only because legacy's repeat-specific bulk path admitted `as`/`select` under a `count()`
+// through a SUFFIX rule of its own. Widening the unroll (§1a) splices the `repeat` away, that route
+// stops firing, and the chain-global `collapseSafe` refuses the collapse on sight of the `as()` — so
+// the plan enumerates. Relaxing `collapseSafe` to admit the pair was tried and REFUTED: 52 executing
+// traversals changed their answer, because the question is POSITIONAL (legacy bound its labels AFTER
+// the collapse, on a frontier of distinct ids) and a chain verdict cannot say "safe here, unsafe
+// there".
+//
+// So neither pass relaxes anything. They DELETE the identity, and the per-position checks that
+// already exist on both spines — `isBulkOnly` (steps/prefix/movement.ts) and
+// `groupableChannels`/`CHANNEL_GROUP_POLICY` (src/channels.ts), the latter re-checked as a law by
+// `src/rel/obligations.ts` — then admit the collapse as strict as they are today.
+
+/** A `select('a','b')` and nothing more: bare label strings, no `by()`, no Pop, no option arms. A
+ *  modulator or a Pop READS the binding's value, which is the whole question below. */
+function isPlainLabelSelect(s: IRStep): boolean {
+  if (s.name !== 'select' || !(s.args ?? []).length) return false;
+  if (s.modulators?.length || s.optionArms?.length) return false;
+  return (s.args ?? []).every((a) => typeof a.value === 'string');
+}
+
+/**
+ * `select(labels)` FEEDING A CARDINALITY-ONLY TERMINAL OBSERVES NOTHING — retract the read.
+ *
+ * `select('a','b').count()` counts MAPS, one per surviving traverser, and `count()` cannot look
+ * inside one (`cardinalityOnlyTerminalAt` carries the reference citation). So the labels' VALUES are
+ * unobservable and the only thing `select()` still contributes is its PRESENCE filter: TinkerPop
+ * drops a traverser whose label is unbound (which is `aliasPresent`, `rel/alias.ts`), never errors.
+ *
+ * Where every named label is bound UNCONDITIONALLY upstream that filter is a tautology — no traverser
+ * is dropped — and the step is provably inert. Where it is not, the step STAYS: the general form would
+ * be a rewrite to an existence guard over a `select(labels)`-shaped body, which the child-existence
+ * gate cannot build today. That is `isAlwaysProductiveFilterNoOp`'s own "the gate cannot be HANDED
+ * this" boundary, named rather than approximated — a decline costs a collapse, never an answer.
+ *
+ * The DISCARD terminal needs no binding proof at all, and that asymmetry is real rather than an
+ * oversight: `iterate()` throws the whole result away, so a dropped traverser is not observable
+ * either.
+ */
+export function retractUnobservedSelect(steps: IRStep[], params: Record<string, any>, discard: boolean): IRStep[] {
+  const out: IRStep[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    if (!isPlainLabelSelect(s) || !cardinalityOnlyTerminalAt(steps, i + 1, discard)) { out.push(s); continue; }
+    // `i + 1 === steps.length` is the discard arm — nothing about the stream survives, so the
+    // presence filter is unobservable whether or not the labels were bound.
+    if (i + 1 < steps.length) {
+      const bound = labelsBoundBefore(steps, i, params);
+      if (!(s.args ?? []).every((a) => bound.has(a.value as string))) { out.push(s); continue; }
+    }
+  }
+  return out;
+}
+
+/**
+ * AN ALIAS NOTHING READS IS NOT CARRIED — `PathRetractionStrategy`, actually performed.
+ *
+ * Upstream drops a label once no step downstream needs it, and we listed that strategy among the ones
+ * we treat as inert while carrying every label to the end of the chain. Carrying one is not free: an
+ * `alias` channel's group policy is `'undefined'` (`src/channels.ts` — a grouping would take the
+ * label from an arbitrary member), so a dead `as()` costs the movement collapse, the `dedup()`
+ * reduction and every grouping downstream of it, for a value no one can observe.
+ *
+ * Liveness is per label NAME over the WHOLE tree (see `labelReads`), not per bind site, which is what
+ * keeps a rebind's history intact: `as('a')…as('a')` with a `select(Pop.first,'a')` somewhere reads
+ * the name, so both binds stay. Removal is top-level only for now; the read scan is already
+ * whole-tree, so widening it later is a change to this loop alone.
+ *
+ * A TRAILING `as()` IS LEFT ALONE — retract only where it buys something, which is the same trigger
+ * gate `unrollFixedRepeat` applies to itself. Nothing follows the last step, so there is no collapse,
+ * `dedup()` or grouping downstream for the dead channel to be costing; all the removal would change is
+ * the SQL text. It would also be the only thing that could take a whole vocabulary family out of
+ * `scripts/sql-hygiene-baseline.json` (measured: the `as` family's sole corpus witness is a write
+ * traversal ending in `.as("b")`), and a ratchet losing its witness for a rewrite that buys nothing is
+ * evidence deleted rather than moved.
+ */
+export function retractUnreadAlias(steps: IRStep[], params: Record<string, any>): IRStep[] {
+  const reads = labelReads(steps, params);
+  if (reads.all) return steps;
+  const out: IRStep[] = [];
+  for (const [i, s] of steps.entries()) {
+    if (s.name !== 'as' || i === steps.length - 1) { out.push(s); continue; }
+    const args = s.args ?? [];
+    const keep = args.filter((a) => typeof a.value !== 'string' || reads.labels.has(a.value));
+    if (keep.length === args.length) { out.push(s); continue; }
+    if (keep.length) out.push({ ...s, args: keep });
+  }
+  return out;
 }
 
 // ---------- the MATCH-string desugar ----------

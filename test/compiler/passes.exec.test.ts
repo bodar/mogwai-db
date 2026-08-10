@@ -235,3 +235,80 @@ describe('inlineIdentityHostBody: a per-traverser host over a stream-identity bo
     expect(childSteps(where.args[0].value.nested, {}).map((s: any) => s.name).join('.')).toBe('aggregate.values');
   });
 });
+
+describe('the label retractions: state nobody reads is not carried (§7.4 items 2-3)', () => {
+  const chain = (g: string) =>
+    runPasses(stepChain(parseGremlin(g), {}), EMPTY_STRATEGY_USE, {}).steps.map((s: any) => s.name).join('.');
+
+  // NOTE: the shape §7 blocks on — `repeat(__.out()).times(5).as("a").out("writtenBy").as("b")
+  // .select("a","b").count()`, 24 309 134 024 traversers over the grateful graph — is NOT pinned here.
+  // Both retractions fire on it correctly, but the chain still contains `repeat`: `unrollFixedRepeat`
+  // only splices a body that carries a barrier, so a bare `out()` body stays rolled on this trunk. The
+  // pin belongs with the widened unroll (archived on origin/repeat-two-regimes), where the spliced
+  // chain is what the retractions then reduce to plain movement.
+
+  test('a dead as() goes; a label read by a later step stays', () => {
+    expect(chain('g.V().as("a").out().count()')).toBe('V.out.count');
+    // `select("a")` re-roots the stream, so the value IS observed downstream.
+    expect(chain('g.V().as("a").out().select("a").out().count()')).toBe('V.as.out.select.out.count');
+    // …and a label reached only as a PREDICATE OPERAND is read just as much.
+    expect(chain('g.V().as("a").out().where("a", P.neq("b")).as("b").count()')).toBe('V.as.out.where.as.count');
+  });
+
+  test('a label spelled INSIDE a string is read — math()/format() name their variables there', () => {
+    // Measured: treating 'b + a' as one opaque name deleted a label math() then threw on.
+    expect(chain('g.V().as("a").out().as("b").math("b + a")')).toBe('V.as.out.as.math');
+  });
+
+  test('a select() whose terminal is NOT cardinality-only keeps its read', () => {
+    expect(chain('g.V().as("a").out().select("a").values("name")')).toBe('V.as.out.select.values');
+  });
+
+  test('a BARRIER between the bind and the read un-binds it, so the select stays', () => {
+    // CHANNEL_BARRIER_POLICY calls the alias role `consumed`. Asserted as an ANSWER in
+    // test/L4-addendum: `…as('x').values('age').union(__.min(), __.identity()).select('x').count()` is
+    // 4 and not 5, because select('x') drops the min() arm's traverser.
+    expect(chain('g.V().as("x").values("age").union(__.min(), __.identity()).select("x").count()'))
+      .toBe('V.as.values.union.select.count');
+  });
+
+  test('a conditional bind cannot make the presence filter a tautology', () => {
+    // as('a') lives inside a choose() arm, so only traversers routed through that arm carry it.
+    expect(chain('g.V().choose(__.hasLabel("person"), __.as("a").out(), __.identity()).select("a").count()'))
+      .toBe('V.choose.select.count');
+  });
+
+  test("a match() pattern's variables are READS of the enclosing scope, not fresh binds", () => {
+    // `match(__.as('a')…)` re-roots on whatever `a` already holds — TinkerPop's variable-location
+    // rule — and `rewriteWhereEndLabels` leaves a PATTERN argument's labels alone, so the
+    // as()-is-a-bind rule would miss them. This answered at trunk and DEFERRED once the retraction
+    // dropped both outer binds as unread.
+    expect(chain('g.V().as("a").out().as("b").match(__.as("a").out().count().as("c"), __.as("b").in().count().as("c"))'))
+      .toBe('V.as.out.as.match');
+  });
+
+  test('path() reads every label, so nothing is retractable beneath one', () => {
+    expect(chain('g.V().as("a").out().path()')).toBe('V.as.out.path');
+  });
+
+  test('a TRAILING as() is left alone — retract only where it buys something', () => {
+    expect(chain('g.V().out().as("a")')).toBe('V.out.as');
+  });
+
+  test('REMOVAL is root-only: an arm binds, the chain that hosts it reads', () => {
+    // Liveness is a whole-traversal property. A body normalized alone cannot see `select("a")` after
+    // the merge, and deleting the bind there answered [] where three traversers were expected.
+    const arm = 'g.union(__.V(1).as("a").out(), __.V(2)).select("a")';
+    expect(chain(arm)).toBe('union.select');
+    const union: any = runPasses(stepChain(parseGremlin(arm), {}), EMPTY_STRATEGY_USE, {}).steps[0];
+    expect(childSteps(union.args[0].value.nested, {}).map((s: any) => s.name).join('.')).toBe('V.as.out');
+  });
+
+  test('withoutStrategies(PathRetractionStrategy) genuinely suppresses the retraction', () => {
+    const suppressed = runPasses(
+      stepChain(parseGremlin('g.V().as("a").out().count()'), {}),
+      { with: [], without: ['PathRetractionStrategy'] }, {},
+    ).steps.map((s: any) => s.name).join('.');
+    expect(suppressed).toBe('V.as.out.count');
+  });
+});

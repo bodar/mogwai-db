@@ -307,8 +307,10 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // fail closed: steps that must look inside a heterogeneous row cannot apply
     expect(() => compile(`${base}.out()`, {})).toThrow('out() on a variant value not yet supported');
     expect(() => compile(`${base}.order()`, {})).toThrow('order() on a variant value not yet supported');
-    // dedup with carried label state defers rather than over-collapsing
-    expect(() => compile(`g.V().as("a").union(__.values("name"), __.out()).dedup()`, {}))
+    // dedup with carried label state defers rather than over-collapsing. The `select("a")` is what
+    // makes the state CARRIED: `retractUnreadAlias` (ir/labels.ts) drops an `as()` no later step
+    // reads, so without a reader there is no label for the dedup to be unable to collapse over.
+    expect(() => compile(`g.V().as("a").union(__.values("name"), __.out()).dedup().select("a")`, {}))
       .toThrow('dedup() over a variant value with carried path/label state not yet supported');
   });
 
@@ -371,7 +373,9 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     const localRows = legacy('g.V(1).local(__.out().values("name").order().limit(2))');
     expect(localRows.sql).toContain('PARTITION BY p.o0 ORDER BY (CASE WHEN p.vtype');
     expect(localRows.sql).toContain('ELSE p.v END) ASC');
-    const carriedCount = legacy('g.V(1).as("a").local(__.out().count())');
+    // The `select("a")` is what keeps the alias column alive to be carried: a label no later step
+    // reads is retracted before lowering (`retractUnreadAlias`), so `d.a0` would not exist to pin.
+    const carriedCount = legacy('g.V(1).as("a").local(__.out().count()).select("a")');
     expect(carriedCount.sql).toContain('COUNT(c.id) AS v, d.a0');
     const childValue = legacy('g.V(1).map(__.values("name"))');
     expect(childValue.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });

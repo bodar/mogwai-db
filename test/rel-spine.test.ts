@@ -1865,8 +1865,13 @@ describe('the RelIR spine', () => {
     expect(endpoints(knows)).toEqual(endpoints(top));
   });
 
+  // The relirAhead subject is the LIVE-LABEL form, and it has to be: legacy's refusal is about
+  // carrying an alias AND a sack at once, and `retractUnreadAlias` (ir/labels.ts) drops an `as()` no
+  // later step reads — so the bare `…sack()` form now has no alias to coexist with and legacy ANSWERS
+  // it. That is a coverage gain on the route being deleted, not a lost refusal; what still diverges,
+  // and what this test is about, is the form that actually reads the label.
   test('a sack COEXISTS with every other per-traverser channel', relirAhead(
-    'g.V().as("a").sack(assign).by("age").sack()',
+    'g.V().as("a").sack(assign).by("age").sack().select("a").values("name")',
     () => {
       // Legacy THROWS `sack(Operator.x) after as()/path() state not yet supported` — it hand-rolls the
       // carried-column re-projection and refuses rather than get the slot order wrong. Here a sack is
