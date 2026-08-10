@@ -296,10 +296,14 @@ describe('repeat / path SQL', () => {
     expect(() => compile('g.V().repeat(__.out())', {})).toThrow('repeat() requires times(), until(), or emit()');
     // unbounded emit() now compiles — no artificial depth cap; it terminates at the
     // natural fixpoint (frontier exhaustion) on an acyclic body.
+    // The RelIR walk now claims this, so the assertions are the SHARED contract — a recursive CTE
+    // with no depth cap, filtered to the emit-after band — rather than either spine's private
+    // spelling of it (legacy said `with recursive` / `depth >= 1`, RelIR says `WITH RECURSIVE` and
+    // names the band off its own `loops` channel).
     const em = read('g.V().repeat(__.out()).emit()');
-    expect(em.sql).toContain('with recursive');
+    expect(em.sql.toLowerCase()).toContain('with recursive');
     expect(em.sql).not.toContain('depth <');       // no depth cap in the recursion
-    expect(em.sql).toContain('WHERE depth >= 1');   // emit-after band
+    expect(em.sql).toMatch(relirOff ? /WHERE depth >= 1/ : /lp0 > 0/); // emit-after band
     // a barrier body step (order/dedup/limit/…) can't live in a recursive term → defers.
     expect(() => compile('g.V().repeat(__.out().groupCount()).times(2)', {})).toThrow('not yet supported');
     // The named overload is normalized to the same body channel before lowering;
@@ -650,8 +654,44 @@ describe('repeat / path SQL', () => {
 
   test('until() defers the combinations not yet built', () => {
     expect(() => compile('g.V(1).repeat(__.out()).until(__.has("name","x")).times(3)', {})).toThrow('until() together with times() not yet supported');
-    expect(() => compile('g.V(1).repeat(__.out()).emit().until(__.has("name","x"))', {})).toThrow('until() together with emit() not yet supported');
+    // `repeat()` with NEITHER modulator answers the empty result in TinkerPop rather than raising
+    // (`RepeatEndStep` re-loops to exhaustion and `processTraverser` returns `EmptyTraverser`), so
+    // this throw is a DEFERRAL, not the specified behaviour. The recursive walk declines it for now.
     expect(() => compile('g.V(1).repeat(__.out())', {})).toThrow('repeat() requires times(), until(), or emit()');
+  });
+
+  // ---------- bare emit() through the recursive walk ----------
+
+  relOnly('emit() BEFORE repeat needs no exit filter — the walk relation IS the emitted set', () => {
+    const p = read('g.V(1).emit().repeat(__.out())');
+    expect(p.spine).toBe('rel');
+    expect(p.sql).toMatch(/WITH RECURSIVE wk_w\d+\(id, lp0, bulk\)/);
+    // Every row the walk holds leaves it, seed included, so nothing filters the walk on the way out.
+    expect(p.sql).not.toMatch(/FROM wk_w\d+ \w+ WHERE/);
+  });
+
+  relOnly('emit() AFTER repeat filters the walk to depth >= 1, excluding the seed', () => {
+    const p = read('g.V(1).repeat(__.out()).emit()');
+    expect(p.spine).toBe('rel');
+    expect(p.sql).toMatch(/w\d+\.lp0 > 0/);
+  });
+
+  relOnly('until-after is SUBSUMED by emit-after: one depth test, not a disjunction', () => {
+    // The until-after exit is literally and(deeper, tested), so `deeper OR (deeper AND tested)`
+    // reduces to `deeper` — the predicate must not be spelled into the output filter at all.
+    const p = read('g.V(1).repeat(__.out()).until(__.hasLabel("software")).emit()');
+    expect(p.spine).toBe('rel');
+    expect(p.sql).toMatch(/w\d+\.lp0 > 0/);
+    // …while the EXPANSION guard still consults it, so the walk stops at a software vertex.
+    expect(p.sql).toContain('IS NOT 1');
+  });
+
+  relOnly('until-before with emit-after is a UNION ALL of two arms, not one predicate', () => {
+    // The two output routes cannot suppress each other, so a row satisfying both leaves TWICE.
+    const p = read('g.V(1).until(__.hasLabel("software")).repeat(__.out()).emit()');
+    expect(p.spine).toBe('rel');
+    expect(p.sql).toContain(' UNION ALL ');
+    expect(p.sql).toMatch(/w\d+\.lp0 > 0/);
   });
 
   // ---------- sack folded through the recursive walk (foldable carried column) ----------

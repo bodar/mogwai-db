@@ -293,6 +293,55 @@ test('an unproductive until predicate does not exit the walk', () => {
   expect(uNames(store, query)).toEqual([]);
 });
 
+// ---------- bare emit(): the four modulator POSITIONS ----------
+//
+// `emit()` is a constant-true predicate (TrueTraversal), and `emitFirst`/`untilFirst` are set
+// independently by whether each modulator was written before `repeat()`
+// (gremlin-core RepeatStep.java:89,100). At a SHARED position the two checks suppress each other —
+// `processTraverser` returns on a until-first exit before the emit-first check (:265-278), and the
+// emit-last check sits in the ELSE of the until-last check (:339-352) — so every output row leaves
+// once. At OPPOSITE positions neither can, which the last test below pins.
+
+test('emit() with no until(): before repeat includes the seed, after repeat does not', () => {
+  const store = seededStore();
+  // marko: d1 {vadas,josh,lop}, d2 {ripple,lop} — the walk runs to its natural fixpoint, uncapped.
+  expect(uNames(store, 'g.V(1).repeat(__.out()).emit()').sort())
+    .toEqual(['josh', 'lop', 'lop', 'ripple', 'vadas']);
+  expect(uNames(store, 'g.V(1).emit().repeat(__.out())').sort())
+    .toEqual(['josh', 'lop', 'lop', 'marko', 'ripple', 'vadas']);
+});
+
+relOnly('until() and emit() at a SHARED position: each output row leaves the walk once', () => {
+  const store = seededStore();
+  // Both AFTER: the end step exits OR emits, never both — and emit-after admits every depth >= 1,
+  // which subsumes the exit, so the answer is the whole walk below the seed.
+  expect(uNames(store, 'g.V(1).repeat(__.out()).until(__.hasLabel("software")).emit()').sort())
+    .toEqual(['josh', 'lop', 'lop', 'ripple', 'vadas']);
+  // Both BEFORE: the head exits OR emits, so the whole walk leaves, seed included.
+  expect(uNames(store, 'g.V(1).emit().until(__.hasLabel("software")).repeat(__.out())').sort())
+    .toEqual(['josh', 'lop', 'lop', 'marko', 'ripple', 'vadas']);
+  // emit BEFORE with until AFTER is also once-each: an end-step exit never reaches the head, so it
+  // is never additionally emitted.
+  expect(uNames(store, 'g.V(1).emit().repeat(__.out()).until(__.hasLabel("software"))').sort())
+    .toEqual(['josh', 'lop', 'lop', 'marko', 'ripple', 'vadas']);
+});
+
+relOnly('until() BEFORE with emit() AFTER emits and THEN exits — the row leaves twice', () => {
+  const store = seededStore();
+  // The one order where emit runs first in a traverser's journey, so neither check suppresses the
+  // other. The corpus states the same asymmetry as a measurement: repeat(…).emit() answers `java`
+  // while until(constant(true)).repeat(…).emit() answers `java, java`
+  // (gremlin-test branch/Repeat.feature:258-284).
+  //
+  // Walk from marko: marko(d0), {vadas,josh,lop}(d1), {ripple,lop}(d2) — expansion stops at a
+  // software vertex. Output = {depth >= 1} + {predicate holds} = 5 + 3 rows.
+  expect(uNames(store, 'g.V(1).until(__.hasLabel("software")).repeat(__.out()).emit()').sort())
+    .toEqual(['josh', 'lop', 'lop', 'lop', 'lop', 'ripple', 'ripple', 'vadas']);
+  // A predicate holding at ONE row doubles exactly that row: ripple, and nothing else.
+  expect(uNames(store, 'g.V(1).until(__.has("name","ripple")).repeat(__.out()).emit()').sort())
+    .toEqual(['josh', 'lop', 'lop', 'ripple', 'ripple', 'vadas']);
+});
+
 test('until(loops().is(n)) is equivalent to times(n)', () => {
   const store = seededStore();
   const byUntil = uNames(store, 'g.V(1).repeat(__.out()).until(__.loops().is(2))').sort();

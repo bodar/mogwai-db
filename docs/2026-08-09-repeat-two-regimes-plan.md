@@ -613,8 +613,33 @@ moved `src/compiler/rel/`.
      and the predicate arm's `ChildValue.present` remains its own conjunct (pinned with a missing-value
      `neq`, the case that otherwise exits wrongly). Body effects, shape/channel changes, `times`,
      `emit`, named loops and path/encounter state still decline.
-   - Next admit one form per increment: bare `emit()`, then `emit(pred)`, then a sack folded through
-     the walk. Each admission carries its own §3.1 constraint and L2 pin.
+   - ✅ **LANDED — bare `emit()`, at all four modulator POSITIONS.** `emit()` is a constant-true
+     predicate (`TrueTraversal`, `GraphTraversal.java:4460`) and `emitFirst`/`untilFirst` are
+     INDEPENDENT flags, each set iff its modulator was written before `repeat`
+     (`RepeatStep.java:89,100`); `doUntil`/`doEmit` fire only at the matching position (`:125-131`).
+     Three positions are one filter and the fourth is not, which is a semantics fact rather than a
+     lowering convenience: at a SHARED position the checks suppress each other — the head RETURNS on
+     a until-first exit before the emit-first check (`:265-278`), and the emit-last check sits in the
+     ELSE of the until-last check (`:339-352`) — so each output row leaves once. **`until` BEFORE with
+     `emit` AFTER is the one order where emit runs first in a traverser's journey**, so the row is
+     emitted at `RepeatEndStep` and then exits at the head: it leaves TWICE, and that is a multiset
+     sum (`UNION ALL`, Calcite's `RepeatUnion.all`), never a disjunction. The corpus states the same
+     asymmetry as a measurement — `repeat(…).emit()` answers `java` while
+     `until(constant(true)).repeat(…).emit()` answers `java, java`
+     (`gremlin-test .../branch/Repeat.feature:258-284`).
+     **This is new capability on BOTH spines, not a migration:** legacy throws
+     *"until() together with emit() not yet supported"* for every one of the four.
+     Known cost, deliberately taken: the two `UNION ALL` arms read the same walk node and `name.ts`
+     cannot bind it as a shared CTE (a recursive node contains its own `SelfRef`), so that one
+     position spells and computes the walk twice. The refinement is a `bulk` channel doubled in
+     place — which is what `RepeatStep.getRequirements()`'s unconditional `TraverserRequirement.BULK`
+     describes — and it needs the walk to MINT a bulk channel when its input carries none.
+   - Next admit one form per increment: `emit(pred)`, then a sack folded through the walk. Each
+     admission carries its own §3.1 constraint and L2 pin.
+   - Not a cell but noted where it was found: **`repeat()` with NEITHER modulator is specified as
+     the EMPTY result**, not an error — `RepeatEndStep` re-loops to exhaustion and `processTraverser`
+     answers `EmptyTraverser` throughout. Both spines currently raise *"repeat() requires times(),
+     until(), or emit()"*, which is a fail-closed deferral rather than the specified behaviour.
 7. **§7.4 item 4 — delete `bulk.ts`**, together with the byte budget item 4 names. After 4 lands this
    file is already unreachable for everything its tests cover, which is what makes the deletion small.
 8. **§7.4 item 1 — the per-position collapse answer.** Last, because it is the largest and because
