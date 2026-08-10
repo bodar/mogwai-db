@@ -83,6 +83,12 @@ export const NO_OP_STRATEGIES = new Set([
   // cannot change an answer, which is why it stays in a set whose contract is result-preservation;
   // what a user disabling it is entitled to is the un-retracted PLAN.
   'PathRetractionStrategy', 'PathProcessorStrategy', 'ByModulatorOptimizationStrategy',
+  // ⚠️ `RepeatUnrollStrategy` is the THIRD such entry, and its suppression is the one that is
+  // PARTIAL. We perform the strategy (`unrollFixedRepeat`) and we also go past it, onto barrier
+  // bodies upstream's `ALLOWED_STEP_CLASSES` refuses — so `withoutStrategies` suppresses the half
+  // that is the strategy and leaves the widening alone, which is the only reading under which a
+  // traversal we can answer does not become a throw. The rule, the pin and the corpus scenario that
+  // measures it are on the decline in `tryUnroll`.
   'RepeatUnrollStrategy', 'MatchAlgorithmStrategy', 'MatchPredicateStrategy',
   // GValue/requirement planning: subsumed by our q-kernel bound-value model (locked
   // decision #1 — no bytecode) and the absence of a traverser-requirement scheduler.
@@ -1046,6 +1052,45 @@ const UNROLLABLE_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = {
   order: () => true,
 };
 
+/**
+ * `withoutStrategies(RepeatUnrollStrategy)` — mark every `repeat` at EVERY depth, so `tryUnroll`
+ * declines the half of its work that IS that strategy (see the decline in `tryUnroll` for which half
+ * and why it is not all of it).
+ *
+ * The mark rides on the STEP rather than being read from `ctx.strategies` where the pass runs, and
+ * that is forced rather than stylistic: a nested body (`union(__.repeat(__.out()).times(2))`) is
+ * normalized LATER and in ISOLATION — `normalize` passes `EMPTY_STRATEGY_USE` by construction, since a
+ * sub-chain carries no strategies of its own — so a root-only consult would honour the request at the
+ * top level and silently ignore it one nesting level down. `withoutStrategies` is a property of the
+ * traversal SOURCE, so it holds at every depth or it is a lie.
+ *
+ * IDENTITY-PRESERVING for `canonicalizeConnectives`' measured reason: a `{nested}` arg may still be a
+ * raw PARSE TREE and one consumer needs it to stay that way (`services/params/traversal-param.ts`
+ * un-parses a `call().with("traversal", __.V())` via the client's TranslateVisitor, which requires
+ * `tree.accept`). So an arg — and a whole level — holding no `repeat` is returned BY REFERENCE, and
+ * only a branch that genuinely marked something is rebuilt.
+ */
+export function markUnrollSuppressed(steps: Step[], params: Record<string, any>): IRStep[] {
+  let changed = false;
+  const marked = steps.map((s) => {
+    let argsChanged = false;
+    const args = s.args.map((a) => {
+      if (!isNested(a.value)) return a;
+      const inner = stepChain(a.value.nested, params);
+      const innerMarked = markUnrollSuppressed(inner, params);
+      if (innerMarked === inner) return a; // untouched → keep the ORIGINAL arg, parse tree intact
+      argsChanged = true;
+      return arg(nestedArg(innerMarked));
+    });
+    if (s.name !== 'repeat' && !argsChanged) return s;
+    changed = true;
+    const next: IRStep = argsChanged ? { ...s, args } : { ...s };
+    if (s.name === 'repeat') next.unrollSuppressed = true;
+    return next;
+  });
+  return (changed ? marked : steps) as IRStep[];
+}
+
 /** A body step an unrolled phase may contain: one of the barriers above, or a row-local
  *  movement/filter the main chain already lowers. */
 const unrollableBodyStep = (s: Step): boolean =>
@@ -1118,7 +1163,10 @@ export function unrollFixedRepeat(steps: Step[], params: Record<string, any>, bo
 /** One repeat run → its unrolled steps, or null to leave the run alone. */
 function tryUnroll(region: Step[], params: Record<string, any>, childBody: ChildBody): Step[] | null {
   if (region.length !== 2) return null;
-  const rep = region.find((s) => s.name === 'repeat');
+  // Typed `IRStep` at the declaration, not cast at the use: the mark below is a compiler-side field
+  // and every value reaching this pass IS an `IRStep` (the pipeline's chain type). A cast at the read
+  // would be the `as any` trap in disguise — a rename would survive it and yield `undefined`.
+  const rep: IRStep | undefined = region.find((s) => s.name === 'repeat');
   const times = region.find((s) => s.name === 'times');
   if (!rep || !times) return null;
   const n = (times.args ?? [])[0]?.value;
@@ -1143,9 +1191,31 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
   // the pipeline this pass happens to sit.
   const body = childBody(args[0].value.nested, params);
   if (!body.length || !body.every(unrollableBodyStep)) return null;
+  // `withoutStrategies(RepeatUnrollStrategy)` — SCOPED TO THE TRANSFORMATION THAT STRATEGY PERFORMS,
+  // which is the barrier-free half of this pass and not all of it. Read at the vendored pin:
+  // `ALLOWED_STEP_CLASSES` is `VertexStepContract`/`EdgeVertexStep`/`EdgeOtherVertexStep`/`HasStep` +
+  // a nested `RepeatStep` (movement and `has()`, NO barrier), and the class comment says why —
+  // "intentionally conservative as there have been unintentional traversal semantics changes in the
+  // past when allowing a large variety of steps (especially barriers)"
+  // (vendor/tinkerpop/gremlin-core/.../strategy/optimization/RepeatUnrollStrategy.java:71-77).
+  //
+  // So a body with a barrier is NOT that strategy's business in either direction: upstream declines it
+  // (the corpus says so in its own words — "this traversal is not expected to be unrolled by the
+  // strategy but should have consistent semantics compared to traversal without the strategy applied",
+  // RepeatUnrollStrategy.feature) and for US the unroll is the only route that EXPRESSES such a body at
+  // all. Suppressing it there would turn a traversal we answer into a throw:
+  // `g.withoutStrategies(RepeatUnrollStrategy).V().repeat(both().limit(1)).times(2)` is a corpus
+  // scenario expecting a count of 1. Declining an input we can serve, to honour a request about a
+  // strategy that never touched this body, is the fail-closed rule read backwards.
+  //
+  // The set is stated as the DIFFERENCE rather than as a second vocabulary (step.ts's rule: derive with
+  // a named difference, never merge) — `unrollableBodyStep` minus `UNROLLABLE_BARRIERS` IS upstream's
+  // admitted set, so the two cannot drift apart as either grows.
+  const widensPastTheStrategy = body.some((s) => s.name in UNROLLABLE_BARRIERS);
+  if (rep.unrollSuppressed && !widensPastTheStrategy) return null;
   // Nothing to gain unless a barrier is what was blocking it: a barrier-free body already lowers
   // through the flat expansion, and unrolling it would change the SQL for no capability.
-  if (!body.some((s) => s.name in UNROLLABLE_BARRIERS)) return null;
+  if (!widensPastTheStrategy) return null;
   // §3.6's statement-text budget, owned where the multiplication happens (see MAX_UNROLLED_STEPS).
   if (n * body.length > MAX_UNROLLED_STEPS) return null;
   const phases: Step[] = [];

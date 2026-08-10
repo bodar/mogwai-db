@@ -1,7 +1,7 @@
 import { isNested, stepChain, type Step, type StrategyUse } from '../../gremlin/frontend.ts';
 import { PASS_CATEGORIES, type Pass, type PassCategory, type PassContext } from './pass.ts';
 import {
-    stripTerminal, desugarMatchString, desugarPropertyMap, formRepeatRegions, unrollFixedRepeat, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
+    stripTerminal, desugarMatchString, desugarPropertyMap, formRepeatRegions, unrollFixedRepeat, markUnrollSuppressed, absorbModulators, absorbOptionArms, absorbCallWith, desugarIo,
     canonicalizeConnectives, foldConstantPredicateOperands, rewriteWhereEndLabels,
     verifyStandard, verifyByModulatorArity,
     absorbValueMapWith, collapseFoldCountLocal, dropRedundantOrder,
@@ -110,6 +110,16 @@ const FOLD: Pass[] = group('canonicalize', [
   // it mints is `normalize()`d again when compiled as a child, so a by()/repeat cluster inside a
   // folded operand still canonicalizes.
   { name: 'ConnectiveStrategy', run: (steps, ctx) => canonicalizeConnectives(steps, ctx.params) },
+  // BEFORE the unroll, and it must run even when the top level holds no `times` at all — a nested
+  // `union(__.repeat(__.out()).times(2))` is the shape the mark exists for. Cost when the user named
+  // nothing is zero (`applies` reads the strategy list, never the chain); cost when they did is one
+  // identity-preserving walk. ROOT-only by construction rather than by an `!ctx.nested` test: only a
+  // root `runPasses` has a `without` list, so a nested re-entry finds the mark already on the step.
+  {
+    name: 'markUnrollSuppressed',
+    applies: (_steps, ctx) => ctx.strategies.without.includes('RepeatUnrollStrategy'),
+    run: (steps, ctx) => markUnrollSuppressed(steps, ctx.params),
+  },
   // BEFORE formRepeatRegions and on the FLAT chain: an unrolled `repeat(body).times(n)` becomes
   // ordinary chain steps, so every later pass sees them as if the user had written them out. Placed
   // in canonicalize rather than simplify because it is not a no-op removal — it changes the chain's

@@ -34,8 +34,8 @@
 // keep the line visible rather than to bless a direction.
 import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
-import { normalize } from '../../src/compiler/ir/passes.ts';
-import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
+import { normalize, runPasses } from '../../src/compiler/ir/passes.ts';
+import { extractStrategies, parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { bagOf, run, seededStore } from '../support/harness.ts';
 
 const store = seededStore();
@@ -138,6 +138,62 @@ describe('the repeat() unroll boundary', () => {
     });
     for (const m of messages) expect(m).toContain('sample() is a per-iteration GLOBAL barrier over the whole frontier');
     expect(new Set(messages).size).toBe(1);
+  });
+
+  test('withoutStrategies(RepeatUnrollStrategy) suppresses the STRATEGY, not the widening', () => {
+    // The suppression is scoped to what `RepeatUnrollStrategy` actually does — a body of movement +
+    // has() (`ALLOWED_STEP_CLASSES`). A BARRIER body is outside it in both directions: upstream
+    // declines to unroll it, and for us the unroll is the only route that expresses it. So the mark
+    // must NOT reach it, and this is the assertion that costs an answer if it ever does — the corpus
+    // scenario `g_withoutStrategiesXRepeatUnrollStrategyX_V_repeatXboth_limitX1XX_timesX2X` expects a
+    // count of 1 (RepeatUnrollStrategy.feature), and without the unroll a `limit` body throws.
+    // Through `runPasses` WITH the extracted strategies, which is the seam `compile` uses: a
+    // `withoutStrategies(...)` subtree is source configuration, so `stepChain` drops it and only
+    // `extractStrategies` sees it — a `normalize` of the same text would silently carry no strategies.
+    const marked = (g: string) => {
+      const tree = parseGremlin(g);
+      return runPasses(stepChain(tree, {}), extractStrategies(tree, {}), {}, undefined, false).steps;
+    };
+    for (const spelling of ['g.V()', 'g.withoutStrategies(RepeatUnrollStrategy).V()']) {
+      const chain = marked(`${spelling}.repeat(__.both().limit(1)).times(2)`);
+      expect(chain.map((s) => s.name)).not.toContain('repeat');
+      expect(chain.filter((s) => s.name === 'limit')).toHaveLength(2);
+    }
+    // …and the answer is what the corpus asserts, on the real store, however it is spelled.
+    expect(vals('g.withoutStrategies(RepeatUnrollStrategy).V().repeat(__.both().limit(1)).times(2)'))
+      .toEqual(vals('g.V().repeat(__.both().limit(1)).times(2)'));
+
+    // The other half: a body upstream WOULD unroll is suppressed, and the `repeat` step survives
+    // normalization. Pinned as the PROPERTY rather than through a downstream throw (there is none —
+    // a movement body compiles either way), which is the lesson the named-repeat defect above taught.
+    // Today `tryUnroll` also declines this body for a second reason (a barrier-free body buys no
+    // capability, so the pass leaves it alone); when THAT guard goes, this assertion is what keeps the
+    // suppression honest.
+    const suppressed = marked('g.withoutStrategies(RepeatUnrollStrategy).V().repeat(__.out().has("name")).times(2)');
+    expect(suppressed.map((s) => s.name)).toContain('repeat');
+    expect(suppressed.find((s) => s.name === 'repeat')!.unrollSuppressed).toBe(true);
+  });
+
+  test('the mark reaches a repeat at EVERY depth — a source strategy is not a top-level fact', () => {
+    // `withoutStrategies` configures the traversal SOURCE, so it holds inside a body too. A nested
+    // body is normalized later and in isolation (`normalize` passes EMPTY_STRATEGY_USE by
+    // construction), so a root-only consult would honour the request at the top level and ignore it
+    // one level down — which is why the answer is a mark on the step rather than a flag read where
+    // the pass runs.
+    const repeatsOf = (steps: readonly any[]): any[] => steps.flatMap((s) => [
+      ...(s.name === 'repeat' ? [s] : []),
+      ...s.args.flatMap((a: any) => (a.value && Array.isArray(a.value.nested) ? repeatsOf(a.value.nested) : [])),
+    ]);
+    const tree = parseGremlin('g.withoutStrategies(RepeatUnrollStrategy).V().union(__.repeat(__.out()).times(2), __.both())');
+    const nested = runPasses(stepChain(tree, {}), extractStrategies(tree, {}), {}, undefined, false).steps;
+    const found = repeatsOf(nested);
+    expect(found).toHaveLength(1);
+    expect(found[0].unrollSuppressed).toBe(true);
+    // An arg holding no repeat keeps its original PARSE TREE — the identity-preservation
+    // `canonicalizeConnectives` had to measure (traversal-param un-parses a sub-traversal via
+    // `tree.accept`, which an arg rewritten to Step[] no longer has).
+    const union = nested.find((s) => s.name === 'union')!;
+    expect(Array.isArray((union.args[1].value as any).nested)).toBe(false);
   });
 
   test('the deferral names the per-iteration frontier, which is the reference reading', () => {

@@ -20,10 +20,13 @@ import { normalizeTypeName } from '../../gremlin/types.ts';
  *    (`absorbModulators`): order/select/project/group's by(), and the single
  *    by(key) an alias-compare where()/not() carries.
  *  - `optionArms` — a choose()'s option() arms (`absorbOptionArms`).
+ *  - `unrollSuppressed` — this `repeat` sits under a `withoutStrategies(RepeatUnrollStrategy)`
+ *    (`markUnrollSuppressed`). A mark on the STEP rather than a flag consulted at the root, because
+ *    a body is normalized in isolation later and a root-only answer cannot reach it.
  * The compilers read these fields instead of re-scanning, so the whole read
  * dispatch is a peek-free fold over the step list.
  */
-export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; from?: string; to?: string; withArgs?: [string, any][] };
+export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; unrollSuppressed?: boolean; from?: string; to?: string; withArgs?: [string, any][] };
 
 // ---------- step-name vocabularies: DERIVE with a named difference, never merge ----------
 //

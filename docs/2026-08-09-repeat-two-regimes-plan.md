@@ -537,9 +537,37 @@ build ON TRUNK — never a cherry-pick of that branch's commits, which are again
    worth more than the fix: when a refusal is asserted through a downstream throw, also pin the
    PROPERTY (here, that the `repeat` step survives normalization), because a throw can come from
    anywhere.
-2. **`withoutStrategies(RepeatUnrollStrategy)` must suppress the pass.** Same size, same independence.
-   It was classified inert, which was true only while our unroll and TinkerPop's strategy did not
-   overlap; §1 makes them the same transformation. A corpus traversal asserts it.
+2. ✅ **LANDED — `withoutStrategies(RepeatUnrollStrategy)` suppresses the STRATEGY, not the widening.**
+   This increment's wording above was "must suppress the pass", and that is **too strong** — the
+   reference says so, and the corpus would have gone red on it. `ALLOWED_STEP_CLASSES` is movement +
+   `HasStep` + a nested `RepeatStep`, with NO barrier
+   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/optimization/RepeatUnrollStrategy.java:71-77`).
+   So our pass does two things and only ONE of them is that strategy: a **barrier-free** body is the
+   transformation upstream performs (suppressible, and free — such a body already lowers through the
+   flat expansion), while a **barrier** body is our widening, which upstream refuses and which for us
+   is the only route that EXPRESSES the body. Suppressing it there converts a traversal we answer into
+   a throw: `g.withoutStrategies(RepeatUnrollStrategy).V().repeat(both().limit(1)).times(2)` is a
+   corpus scenario expecting a count of 1, and `RepeatUnrollStrategy.feature` states the principle in
+   its own words — *"this traversal is not expected to be unrolled by the strategy but should have
+   consistent semantics compared to traversal without the strategy applied"*. Declining an input we can
+   serve, to honour a request about a strategy that never touched the body, is the fail-closed rule read
+   backwards. The admitted set is spelled as the DIFFERENCE (`unrollableBodyStep` minus
+   `UNROLLABLE_BARRIERS`), so it cannot drift from upstream's as either grows.
+   **Two facts that cost more than the fix:**
+   - **The suppression is a mark on the STEP (`IRStep.unrollSuppressed`), not a flag read where the
+     pass runs.** Forced, not stylistic: a nested body is normalized LATER and in ISOLATION —
+     `normalize` passes `EMPTY_STRATEGY_USE` by construction — so a root-only consult honours the
+     request at the top level and silently ignores it inside `union(__.repeat(__.out()).times(2))`.
+     `withoutStrategies` configures the traversal SOURCE, so it holds at every depth or it is a lie.
+     The marking recursion is identity-preserving for `canonicalizeConnectives`' measured reason: an
+     arg holding no `repeat` keeps its raw PARSE TREE, which `traversal-param` needs for `tree.accept`.
+   - **It is behaviour-neutral TODAY by construction**, which is what made it green on its own: the set
+     it suppresses is exactly the set `tryUnroll` already declines for its separate "nothing to gain"
+     reason. It becomes load-bearing at increment 4, which deletes that guard — so this is the guard
+     that must exist FIRST, or the widening makes `withoutStrategies` a lie for movement bodies. With
+     no behavioural difference to assert, the pins are PROPERTIES (the mark at depth, the parse-tree
+     preservation, and a barrier body still unrolling under suppression) — the lesson increment 1 paid
+     for. Measured green: L3 1783 RelIR / 1693 legacy and the census 1208, all unchanged.
 3. **The `group()` collapse fix** — `COLLECTING_CONSUMERS` treats every `group()` as an ordered member
    collection, while TinkerPop splits on `Grouping.hasBarrierInValueTraversal()`. Independent of the
    unroll. ⚠️ On the archived branch this one BROKE a test (`branch.exec.test.ts`, "a uniform-element
