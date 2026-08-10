@@ -37,8 +37,8 @@
   },
   "as": {
     "binds": 12,
-    "bytes": 1012,
-    "compiler": 14,
+    "bytes": 855,
+    "compiler": 13,
     "bound": 30
   },
   "asBool": {

@@ -217,7 +217,6 @@ deferred	legacy	step not implemented: pageRank()	g.V().hasLabel("software").has(
 deferred	legacy	step not implemented: index()	g.V().hasLabel("software").index().unfold()
 deferred	legacy	step not implemented: index()	g.V().hasLabel("software").order().by("name").index().with(WithOptions.indexer, WithOptions.map)
 deferred	legacy	index() on a list value not yet supported	g.V().hasLabel("software").values("name").fold().order(Scope.local).index().unfold().order().by(__.tail(Scope.local, 1))
-deferred	legacy	alias holds a value, not an element	g.V().hasLabel("song").match( __.as("a").values("name").as("b"), __.as("a").values("performances").as("c")).select("b", "c").count()
 unbound	legacy	Unbound parameter 'xx1'	g.V().hasLabel(xx1).hasLabel("software")
 unbound	legacy	Unbound parameter 'xx1'	g.V().hasLabel(xx1,xx2)
 unbound	legacy	Unbound parameter 'xx1'	g.V().in().hasId(P.neq(xx1))
