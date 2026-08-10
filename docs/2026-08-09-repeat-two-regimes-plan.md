@@ -84,8 +84,8 @@ Three consequences, all of them simplifications:
 > **That precondition is now ON TRUNK** — §7.4 items 2 and 3, as the two label retractions (`c75469c`).
 > A dead `as()` is deleted before the analysis sees it, and a `select(labels)` feeding a `count()` is
 > deleted because `count()` observes no value, so the chain reaching `collapseSafe` has no identity to
-> refuse — no rule was relaxed. **The widening itself is still NOT on trunk**, and it is the next
-> increment: see §8.
+> refuse — no rule was relaxed. **The widening is now ON TRUNK too**, as §8 item 4 — every bounded
+> body takes the phase regime and L3 moved 1783→1787 RelIR / 1693→1697 legacy. §8 is the live status.
 
 The walk keeps a matching guard from the other side (`walk.ts`): a BOUNDED walk carrying nothing but
 `bulk` declines, because its traversers are interchangeable and enumerating them is a choice — and
@@ -100,11 +100,17 @@ diagnosis came from reading what the corpus EXPECTS rather than from profiling: 
 expected result is 2.5×10¹⁵ is telling you what representation it requires. **A cost wall of this
 shape reads exactly like a hang, so treat an L3 duration regression as a semantics signal.**
 
-### Status of the amendment — ARCHIVED on `origin/repeat-two-regimes`, NOT on trunk
+### Status of the amendment — the BRANCH is archived; §8 says what is on trunk
 
-**§1 is the decision and it is still not implemented on trunk.** The code that implemented it was
-written as one large branch, went 12 tests red, and was abandoned in that state; it is preserved on
-**`origin/repeat-two-regimes`** and nothing below is on trunk unless this doc says so.
+**§1 is the decision, and it is now largely implemented on trunk — §8 is the authority on which
+cells, and this section is only about the abandoned BRANCH.** Both regimes are live: the bounded
+unroll (§8 item 4) and the `Recursive` walk with `until` and bare `emit()` at every modulator
+position (§8 item 6). What remains is `emit(pred)`, the sack fold, `bulk.ts`'s deletion and the
+per-position collapse answer.
+
+The code that FIRST implemented §1 was written as one large branch, went 12 tests red, and was
+abandoned in that state; it is preserved on **`origin/repeat-two-regimes`** and nothing in the list
+below reached trunk from it by merge — each piece was rebuilt, as §8 records.
 
 > ⚠️ **THAT BRANCH IS A REFERENCE, NEVER A BASE.** Do not rebase onto it, do not cherry-pick it
 > wholesale. It is 4 `wip:` commits against a `src/compiler/rel/` that has since moved (the
@@ -120,7 +126,8 @@ What that branch contains, and what has since reached trunk:
 
 - `walk.ts` — the `Recursive` regime (§3.1), plus the interchangeable-frontier decline above. It
   covers the UNBOUNDED forms (`until`, `emit`, `emit(pred)`, a sack folded through the walk) and is
-  independent of the unroll widening.
+  independent of the unroll widening. **Rebuilt on trunk through §8 item 6 as far as bare `emit()`;
+  read the branch only for `emit(pred)` and the sack fold, the two cells still outstanding.**
 - the `loops` CHANNEL role (`src/channels.ts`) and the seam's `chain` arm (§3.1's open question,
   settled below).
 - **two real bugs found by the widening, both independent of it:**
