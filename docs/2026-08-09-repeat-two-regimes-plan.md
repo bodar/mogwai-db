@@ -77,10 +77,15 @@ Three consequences, all of them simplifications:
    to contain a barrier, reasoning that a barrier-free body "already lowers through the flat
    expansion, so unrolling it buys no capability". It buys the largest one available.
 
-> ⚠️ **THE UNROLL CANNOT SHIP UNTIL §7 LANDS, and that is the whole of the remaining work.**
-> Unrolling deletes the ROUTE by which legacy reached its own, more permissive collapse analysis, and
-> the general one cannot yet admit what that route did. The consequence is not a slowdown: L3 hangs.
-> §1's decision stands; §7 is its precondition.
+> ⚠️ **THE UNROLL CANNOT SHIP UNTIL §7's PRECONDITION LANDS.** Unrolling deletes the ROUTE by which
+> legacy reached its own, more permissive collapse analysis, and the general one could not admit what
+> that route did. The consequence is not a slowdown: L3 hangs.
+>
+> **That precondition is now ON TRUNK** — §7.4 items 2 and 3, as the two label retractions (`c75469c`).
+> A dead `as()` is deleted before the analysis sees it, and a `select(labels)` feeding a `count()` is
+> deleted because `count()` observes no value, so the chain reaching `collapseSafe` has no identity to
+> refuse — no rule was relaxed. **The widening itself is still NOT on trunk**, and it is the next
+> increment: see §8.
 
 The walk keeps a matching guard from the other side (`walk.ts`): a BOUNDED walk carrying nothing but
 `bulk` declines, because its traversers are interchangeable and enumerating them is a choice — and
@@ -95,13 +100,23 @@ diagnosis came from reading what the corpus EXPECTS rather than from profiling: 
 expected result is 2.5×10¹⁵ is telling you what representation it requires. **A cost wall of this
 shape reads exactly like a hang, so treat an L3 duration regression as a semantics signal.**
 
-### Status of the amendment — IN FLIGHT on a local branch, RED, gated on §7
+### Status of the amendment — ARCHIVED on `origin/repeat-two-regimes`, NOT on trunk
 
-The doc is amended ahead of the code deliberately: §1 is the decision, and it is now WRONG on trunk.
-Local WIP commits (`fc6e133`, `dae51ae`, `eab7822`, plus the strategy fix); **not pushed, and it
-hangs L3** — §7 is why, and §7 is the next piece of work.
+**§1 is the decision and it is still not implemented on trunk.** The code that implemented it was
+written as one large branch, went 12 tests red, and was abandoned in that state; it is preserved on
+**`origin/repeat-two-regimes`** and nothing below is on trunk unless this doc says so.
 
-Sound and worth keeping whatever §7 decides:
+> ⚠️ **THAT BRANCH IS A REFERENCE, NEVER A BASE.** Do not rebase onto it, do not cherry-pick it
+> wholesale. It is 4 `wip:` commits against a `src/compiler/rel/` that has since moved (the
+> named-collections work landed on top of it), and it was red on its own terms. Read it for the
+> already-solved shape of a piece you are about to build, then build that piece on trunk. §8 is the
+> order to do that in.
+>
+> The reason this warning is here rather than in a commit message: a later session inherited that
+> branch as its HEAD and spent most of a day establishing which of its 14 failures were its own. The
+> failure mode is not the code, it is treating an unfinished branch as ground truth.
+
+What that branch contains, and what has since reached trunk:
 
 - `walk.ts` — the `Recursive` regime (§3.1), plus the interchangeable-frontier decline above. It
   covers the UNBOUNDED forms (`until`, `emit`, `emit(pred)`, a sack folded through the walk) and is
@@ -119,10 +134,18 @@ Sound and worth keeping whatever §7 decides:
   `Grouping.hasBarrierInValueTraversal()`, so `by(__.count())` is a reduction and needs no emission
   order. Closes a deferral `analyze.ts` had recorded in prose.
 
-Blocked on §7:
+- **`unrollFixedRepeat`'s "nothing to gain unless a barrier was blocking it" guard, deleted** — the
+  widening itself, and on that branch the thing that hung L3. Its blocker is now discharged on trunk
+  (the retractions), so this is §8's first real increment rather than a blocked item.
 
-- `unrollFixedRepeat`'s "nothing to gain unless a barrier was blocking it" guard — **deleted**, and
-  that deletion is what hangs L3 until the collapse authorities are reconciled.
+**Already extracted to trunk from that branch** (`e46234e..1fb96e8`), each verified green on BOTH
+spines before push:
+
+- the two label retractions + `ir/labels.ts` (§7.4 items 2-3). **They change ZERO answers**, measured
+  rather than argued: the census changed-set is the same 92 traversals with the digest fix alone as
+  with the retractions on top.
+- the census answer digest, which was **miscalibrated and is why §7.2's number cannot be trusted** —
+  see the warning in §7.2.
 
 Consequences already worked through, each genuine rather than churn — the widened unroll runs ABOVE
 the routing switch, so it moves both spines: seven `sql-hygiene` byte ratchets (n copies of a body is
@@ -343,7 +366,11 @@ unroll should only claim it when no other regime can.
 
 ## 7. THE COLLAPSE AUTHORITY — one, not two (the big change)
 
-**Status: the blocking precondition for §1's bounded cell. Not started. Scope is large and the
+**Status: items 2 and 3 LANDED on trunk (`c75469c`); items 1 and 4 not started.** That is enough to
+discharge the bounded cell's precondition — the identity the general analysis refused is now deleted
+before it sees it — so §8's increments can proceed while the per-position rewrite (item 1) and
+`bulk.ts`'s deletion (item 4) remain open. The original framing follows, still accurate about the
+finding. Scope of what is LEFT is large and the
 direction is not in doubt — both references model it the way this section proposes, and neither
 models it the way we do today.**
 
@@ -367,12 +394,25 @@ plan enumerates. **Measured: L3 goes from passing to a hang** (bun pinned at ~10
 
 ### 7.2 Why the obvious fix is WRONG — measured, not predicted
 
-Relaxing `collapseSafe` to admit `as`/`select` under a `count()` terminal was tried and REFUTED by
-two independent instruments:
+Relaxing `collapseSafe` to admit `as`/`select` under a `count()` terminal was tried and REFUTED. The
+ARGUMENT below is sound and is what settles it; one of the two numbers originally cited is not.
 
-- `test/compiler/analyze.exec.test.ts:65` pins `g.V().as("a").out().count()` → `collapseSafe: false`,
-  with the reason in the test name: *"as() carries identity"*.
-- the census answer-change gate: **52 executing traversals changed their answer.**
+- `test/compiler/analyze.exec.test.ts` pinned `g.V().as("a").out().count()` → `collapseSafe: false`,
+  with the reason in the test name: *"as() carries identity"*. **That pin has since MOVED, and not by
+  relaxation:** the label is never read, so `retractUnreadAlias` deletes it and the chain reaching this
+  analysis is `V().out().count()`, which is `true`. What the assertion was protecting is now pinned by
+  the two shapes where an `as()` genuinely IS read — a later `select` of it, and a predicate operand
+  naming it — both still `false`.
+- ⚠️ **"52 executing traversals changed their answer" IS NOT TRUSTWORTHY, and the reason matters more
+  than the number.** It came from the census answer digest, which folded `bulk` in PER ROW under a
+  comment claiming it denoted the traverser multiset. It did not: the same multiset emitted as four
+  `bulk`-1 rows and as `(a,1),(b,3)` hashed differently, so **every traversal that merely started
+  collapsing reported a changed answer** — by the one instrument §7.5 names as THE gate for this work.
+  Fixed on trunk (`040212d`, `test/support/multiset.ts`, now shared with L5's oracle, which had it
+  right all along). Anyone re-deriving this decision must re-measure.
+
+The refutation stands on its own without that number, because the reason is structural and §7.3 states
+it: the safety is POSITIONAL, and a chain-global boolean cannot say "safe here, unsafe there".
 
 The reason is POSITIONAL and a chain-global boolean cannot express it. In legacy's bulk path the
 labels are bound **after** the collapse, on a frontier of DISTINCT ids, where a label is well-defined
@@ -417,13 +457,24 @@ whole-chain answer stands in for a per-position one.
 1. **Make the per-position answer the only one.** A collapse is legal at a node when every channel
    carried there has a defined answer under grouping — which `groupableChannels` already decides.
    `collapseSafe` stops being a chain verdict and becomes, at most, a seeding hint.
-2. **An alias that nothing reads is not carried.** `as("a")` whose label no later step reads is dead;
-   dropping it (a `simplify` Pass) makes the collapse legal for the right reason instead of by
-   exception. This is `PathRetractionStrategy`'s own job upstream, and we currently list that strategy
-   as a no-op.
-3. **A `count()` terminal makes the traverser's VALUE unobservable**, which is what legitimises
-   legacy's `as`/`select` admission — state it once, positionally, rather than as a suffix pattern.
+2. ✅ **LANDED (`c75469c`) — an alias that nothing reads is not carried.** `retractUnreadAlias`, a
+   `simplify` Pass. This is `PathRetractionStrategy`, which we listed as a no-op while performing none
+   of it; it now genuinely fires and `withoutStrategies` genuinely suppresses it.
+3. ✅ **LANDED (`c75469c`) — a `count()` terminal makes the traverser's VALUE unobservable.** Stated as
+   a REWRITE rather than as a suffix pattern: `retractUnobservedSelect` deletes the `select(labels)`,
+   which is what "unobservable" means operationally. `ir/labels.ts` is the one authority for who binds
+   a label and who reads one.
+   Four rules each cost a measurement — see that module and `test/compiler/passes.exec.test.ts`:
+   removal is ROOT-only (liveness is a whole-traversal property); a BARRIER between bind and read
+   un-binds it; a label can be spelled INSIDE a string (`math('b + a')`); a `match()` pattern's
+   variables are READS of the enclosing scope.
 4. **Delete `suffixBulkSafe`/`bulkPlan`'s copy.** One authority. The `edges` ratchet should fall.
+   ⚠️ **Measured, and it changes when this is safe:** `bulk.ts` is ALREADY unreachable for every shape
+   its own tests exercise once the unroll is widened — `unrollFixedRepeat` splices the `repeat` away in
+   canonicalize, so `bulkPlan`'s `findIndex(s => s.name === 'repeat' && s.repeatRegion)` finds nothing.
+   Its one remaining exclusive route is `times(n)` beyond what `MAX_UNROLLED_STEPS` admits (n > 100 for
+   a one-step body), where `bulkPlan` has no cap at all. Delete it together with a per-body-step BYTE
+   budget against the 100 KB statement cap, or the deletion is a silent narrowing at depth.
 
 ### 7.5 The instruments that must stay green
 
@@ -431,3 +482,91 @@ The census answer-change gate is the one that already caught this once, so it is
 formality: **no executing traversal may change its answer on either spine.** Plus `test:perturbed`
 (order-fragility), the L3 floor, and — because a cost wall here reads as a hang rather than a failure
 — **an L3 wall-clock that stays in its normal band.**
+
+⚠️ **The gate itself was wrong until `040212d`, and that is the cautionary half of this section.** Its
+digest was not a multiset (see §7.2), so it fired on any collapse widening and its verdicts were not
+evidence. Two consequences for anyone using it here:
+
+- **`n` (the row count) legitimately moves under a collapse and is deliberately NOT gated**; `ms` is
+  what the answer gate reads. A collapse turning 4 rows into `(a,1),(b,3)` is the same answer.
+- **`mise run test:legacy-spine` is not optional for this work and `ci` does not contain it.** Every
+  pass in §8 runs ABOVE the routing switch, so it moves legacy's answers too. On the extraction it
+  caught two pins `ci` structurally could not: a `relirAhead` subject whose label had gone dead, and an
+  assertion naming one spine's spelling of the collapse.
+
+---
+
+## 8. HOW THIS SHIPS — one pushable increment at a time
+
+**This section overrides the ordering implied by §3.** §3 is still the right decomposition of the
+PROBLEM; it is the wrong decomposition of the WORK, because it describes a destination rather than a
+sequence of green trunks. The first attempt at this built the whole of §1 on a branch, went 12 tests
+red, and was abandoned — and the cost was not the code, it was that no intermediate state was ever
+provably good, so nothing could be salvaged without re-measuring everything.
+
+### The rule
+
+**Every increment is: smallest change that compiles → `mise run ci` → `mise run test:legacy-spine` →
+commit → push to trunk. Before starting the next one.** If an increment cannot be made green on its
+own, it is not an increment — split it again, or put a decline in front of it so the new code is
+unreachable until the piece that needs it lands.
+
+Two techniques make pieces smaller than they look, and both are already used here:
+
+- **Land the mechanism DECLINING everything, then admit shapes one at a time.** A new module that
+  always returns `null` is green by construction and reviewable on its own; each admitted shape after
+  it is a small diff with its own argument and its own pin. This is how the unroll's
+  `UNROLLABLE_BARRIERS` grew (`dedup`, then the slice family, then `order`).
+- **Land a rewrite that makes the hard case disappear before landing the hard case.** The retractions
+  are exactly this: they were not "part of the unroll", they were the thing that made the unroll's
+  blocker not exist. Look for that shape first — it is usually smaller than the feature.
+
+### The order, with what makes each one independently green
+
+Nothing below is on trunk. Each is a reference-read from `origin/repeat-two-regimes` followed by a
+build ON TRUNK — never a cherry-pick of that branch's commits, which are against a moved
+`src/compiler/rel/`.
+
+1. **`tryUnroll` must read `loopName`, not the argument count.** A named `repeat("a", …)` arrives with
+   ONE argument because the front end splits the name onto `loopName`, so the arity test never fired and
+   a named repeat was being unrolled — silently dropping the loop identity `loops("a")` reads. A
+   correctness fix on trunk TODAY, independent of everything else, a few lines, with a census traversal
+   behind it. Do this one first because it is pure win and it exercises the loop.
+2. **`withoutStrategies(RepeatUnrollStrategy)` must suppress the pass.** Same size, same independence.
+   It was classified inert, which was true only while our unroll and TinkerPop's strategy did not
+   overlap; §1 makes them the same transformation. A corpus traversal asserts it.
+3. **The `group()` collapse fix** — `COLLECTING_CONSUMERS` treats every `group()` as an ordered member
+   collection, while TinkerPop splits on `Grouping.hasBarrierInValueTraversal()`. Independent of the
+   unroll. ⚠️ On the archived branch this one BROKE a test (`branch.exec.test.ts`, "a uniform-element
+   branch composes as a child-body value at every position") — bisected to `eab7822`. Land it only with
+   that resolved; it is the reason this is an increment of its own rather than a rider.
+4. **Widen the unroll — delete the "nothing to gain unless a barrier was blocking it" guard.** §1a is
+   the argument, and its blocker is discharged (the retractions are on trunk). **Test this before
+   assuming it:** it is the increment most likely to move L3 and the census, it is where the 600 s hang
+   lived, and it must be measured with an L3 WALL-CLOCK in band as well as a green gate. Expect L2 SQL
+   pins that name `bulk.ts`'s spelling to need repointing to the generic collapse's — assert STRUCTURE
+   and spine-agnostically, since these files run under both spines.
+5. **The `loops` channel role** — one `ChannelRole` plus five total-table entries in `src/channels.ts`.
+   Additive and behaviour-free on its own (nothing mints the channel yet), so it is green trivially, and
+   `obligations.ts` needs NOTHING because every obligation already reads the role tables. Land it before
+   the walk so the walk is a smaller diff.
+6. **`walk.ts` — the `Recursive` regime (§3.1)**, and this is the one to split hardest. Land the module
+   plus its dispatch hook DECLINING every shape, then admit one form per increment: `until(pred)`, then
+   bare `emit()`, then `emit(pred)`, then a sack folded through the walk. Each admission carries the
+   §3.1 constraints (`childPredicate`, `notProduced` for NULL-safe negation, `ChildValue.present` as its
+   own conjunct) and its own L2 pin.
+7. **§7.4 item 4 — delete `bulk.ts`**, together with the byte budget item 4 names. After 4 lands this
+   file is already unreachable for everything its tests cover, which is what makes the deletion small.
+8. **§7.4 item 1 — the per-position collapse answer.** Last, because it is the largest and because
+   everything above narrows it: with `bulk.ts` gone there is one authority already, and what remains is
+   turning `collapseSafe` from a chain verdict into a positional query. Its residual content is smaller
+   than §7.1 implies — three of its five refusal families (`otherV`'s `fromV`, `sack`, `path`) are
+   already answered per-position by `CHANNEL_GROUP_POLICY`, leaving only *bulk-unaware row readers*
+   (a slice or `sample()` that reads rows where it must read traversers).
+
+### What to do when an increment goes red
+
+**Baseline it before blaming it.** Check out the SHA and run the affected files — do NOT use
+`git checkout <sha> -- src/`, which leaves files the later commit ADDED in place and gives you a hybrid
+that lies. Compare failure NAME SETS, not counts, because a swap hides in a count. And `.logs/<task>.log`
+is the LAST RUN in a reused directory, never a baseline.
