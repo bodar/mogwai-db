@@ -594,10 +594,14 @@ moved `src/compiler/rel/`.
    The dedicated L3 wall-clock was 35.9 s (49 pass), the full gate stayed in its normal multi-minute
    band rather than the former 600 s hang, and reverse-scan perturbation retained exactly its prior ten
    failure names. Seven SQL byte ceilings were re-recorded for the deliberately expanded phase SQL.
-5. **The `loops` channel role** — one `ChannelRole` plus five total-table entries in `src/channels.ts`.
-   Additive and behaviour-free on its own (nothing mints the channel yet), so it is green trivially, and
-   `obligations.ts` needs NOTHING because every obligation already reads the role tables. Land it before
-   the walk so the walk is a smaller diff.
+5. ✅ **LANDED — the `loops` channel role:** one `ChannelRole`, five policy/order entries in
+   `src/channels.ts`, and the `INT NOT NULL` entry required by RelIR's newer total column-descriptor
+   table. It is rigid across arms, dropped at a barrier, ordered beside the other carried state,
+   undefined under grouping, and not row-unique. TinkerPop's `RepeatEndStep` increments the
+   per-traverser counter and resets it on every exit; Calcite's `RelNode.getVariablesSet()` likewise
+   declares carried state at the relational position where it is live. This increment remains
+   behaviour-free because nothing mints the channel yet, and `obligations.ts` needs nothing because
+   every obligation already reads the total role tables.
 6. **`walk.ts` — the `Recursive` regime (§3.1)**, and this is the one to split hardest. Land the module
    plus its dispatch hook DECLINING every shape, then admit one form per increment: `until(pred)`, then
    bare `emit()`, then `emit(pred)`, then a sack folded through the walk. Each admission carries the

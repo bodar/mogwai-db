@@ -22,7 +22,7 @@
  */
 
 /** What a carried column IS, from the algebra's point of view — never what it means to Gremlin. */
-export type ChannelRole = 'alias' | 'path' | 'origin' | 'branchOrder' | 'sack' | 'fromV' | 'encounter' | 'bulk';
+export type ChannelRole = 'alias' | 'path' | 'origin' | 'branchOrder' | 'sack' | 'fromV' | 'encounter' | 'bulk' | 'loops';
 
 export interface Channel { readonly col: string; readonly role: ChannelRole; }
 export type Channels = readonly Channel[];
@@ -50,6 +50,9 @@ export const CHANNEL_MERGE_POLICY: Readonly<Record<ChannelRole, Exclude<MergePol
   fromV: 'identical',
   encounter: 'identical',
   bulk: 'identical',
+  // A fork inside a walk body cannot rebind the loop counter: every arm reads the same incoming
+  // value and the bump happens once when the term closes.
+  loops: 'identical',
 };
 
 /**
@@ -69,6 +72,8 @@ export const CHANNEL_BARRIER_POLICY: Readonly<Record<ChannelRole, BarrierPolicy>
   fromV: 'drop',
   encounter: 'drop',
   bulk: 'drop',
+  // TinkerPop likewise calls resetLoops() on every traverser emitted from RepeatEndStep.
+  loops: 'drop',
 };
 
 /** Same-scope peer arms must agree on the rigid roles; re-homed child arms cannot be compared with
@@ -82,7 +87,7 @@ export type RigidPolicy = 'peer' | 'rehomed';
  * would see a merge silently reorder its columns. The framing layer's own column accessor is the
  * tie — `test/channel-contracts.test.ts` pins the two against each other.
  */
-export const ROLE_ORDER: readonly ChannelRole[] = ['alias', 'sack', 'bulk', 'origin', 'branchOrder', 'fromV', 'encounter', 'path'];
+export const ROLE_ORDER: readonly ChannelRole[] = ['alias', 'sack', 'loops', 'bulk', 'origin', 'branchOrder', 'fromV', 'encounter', 'path'];
 
 export const channelCols = (channels: Channels): readonly string[] => channels.map((channel) => channel.col);
 
@@ -156,6 +161,8 @@ export const CHANNEL_GROUP_POLICY: Readonly<Record<ChannelRole, 'combine' | 'und
   branchOrder: 'undefined',
   sack: 'undefined',
   fromV: 'undefined',
+  // Choosing one member's depth when a group spans iterations would be arbitrary.
+  loops: 'undefined',
 };
 
 /** May a grouping carry this whole channel list through? See `CHANNEL_GROUP_POLICY`. */
@@ -193,6 +200,8 @@ export const CHANNEL_ROW_UNIQUE: Readonly<Record<ChannelRole, boolean>> = {
   sack: false,
   fromV: false,
   bulk: false,
+  // A whole frontier shares its iteration number.
+  loops: false,
 };
 
 /** The channels that make a whole-row `DISTINCT` inert — empty is the only legal answer for one. */

@@ -41,6 +41,8 @@ const CHANNEL_COL: Readonly<Record<ChannelRole, { readonly type: SqlType; readon
   path: { type: 'json', nullable: true },
   // A per-traverser scalar of whatever the sack's seed was.
   sack: { type: 'any', nullable: true },
+  // The current repeat depth exists on every row while the walk carries it.
+  loops: { type: 'int', nullable: false },
   bulk: { type: 'int', nullable: false },
   encounter: { type: 'int', nullable: false },
   origin: { type: 'int', nullable: false },
