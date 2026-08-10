@@ -655,7 +655,38 @@ moved `src/compiler/rel/`.
      traversal. `emit(P)` — the raw-predicate overload, wrapped upstream in `__.filter(P)` — declines
      exactly as `until(P)` does, and `loops()` inside either modulator declines too, since the child
      seam does not lower per-traverser state. Cut 1305 → 1306.
-   - Next: a sack folded through the walk, carrying its own §3.1 constraint and L2 pin.
+   - ✅ **LANDED — a sack folded through the walk, and CARRIED STATE readable from any child body.**
+     The fold itself needed no rule of its own: its update law is the recursive term's — read the
+     previous row's column, write the folded value — which is what `loops` already does, and
+     `sackMutate` builds only `Project`/`Filter`, neither refused by `BARRIER_IN_TERM`. A body that
+     MINTS the channel (`sack(assign)` with no `withSack`) lengthens the channel list and the
+     `sameChannels` round-trip already rejected it. Fan-out needs no split operator: TinkerPop applies
+     one only where `withSack` declares it (`O_OB_S_SE_SL_Traverser.split`), and our Gremlin-string
+     surface can only supply an `Operator.*`, which is a MERGE — so the reachable behaviour is the
+     default copy-to-every-fan-out, which the term's projection does by construction.
+     `sack(op).by(<traversal>)` is admitted, which legacy refuses: a correlated scalar subquery is a
+     NESTED select, and the measured barrier table stops at every one of those.
+   - ✅ **LANDED — the substrate that made the above worth doing: `childHostOf` passes the host ROW.**
+     `until(__.sack().is(P))` and `until(__.loops().is(n))` were unreadable not because a walk is
+     special but because the predicate seam handed a child body the traverser's VALUE and dropped its
+     carried STATE — `Subject` has `rel`, and `childHostOf` built a host with no `row`. TinkerPop
+     evaluates a child on a SPLIT OF THE WHOLE TRAVERSER at bulk 1 (`TraversalUtil.prepare`), which is
+     why `LoopsStep`/`SackStep` are ordinary `ScalarMapStep`s over `traverser.loops()`/`sack()` and why
+     the model has no "sack inside until()" case at all — legacy's `sackPred`/`sackWhereGuard`
+     shape-matches are an artifact of legacy, not the semantics. Calcite frames the identical thing as
+     the correlating row being bound and the inner plan referencing its fields (`RexCorrelVariable`).
+     So: one arm over a channel ROLE (`CARRIED_READ`), not a reader per step. It applies wherever a
+     child body is lowered, not only in a walk — `where(__.sack().is(P))` on an ordinary chain works
+     by the same code. Census 1232 → 1233 (one traversal changed SPINE with its result digest
+     unchanged), cut 1306 → 1307.
+     ⚠️ **Also measured, and NOT fixed here because legacy is the disposable route:** legacy folds a
+     null where an unproductive `by()` must FILTER the traverser — `SackValueStep.processNextStart`
+     returns `EmptyTraverser.instance()` when `!product.isProductive()`. RelIR's productivity conjunct
+     already matches the reference, so the two spines answer differently and these pins are `relOnly`
+     by necessity rather than convention. Legacy also captures `withSack`'s second operator
+     (`frontend.ts:362`) and never reads it, so a declared merge operator is silently ignored there;
+     RelIR declines it (`sack.ts:69`).
+   - Next: `repeat()` with NEITHER modulator (below), then §8 items 7 and 8.
    - Not a cell but noted where it was found: **`repeat()` with NEITHER modulator is specified as
      the EMPTY result**, not an error — `RepeatEndStep` re-loops to exhaustion and `processTraverser`
      answers `EmptyTraverser` throughout. Both spines currently raise *"repeat() requires times(),

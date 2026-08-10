@@ -62,14 +62,18 @@ describe('repeat / path SQL', () => {
       expect(after.sql).toMatch(/w\d+\.lp0 > 0/);             // seed not emitted under emit-after
       expect(after.sql).toMatch(/EXISTS \(SELECT 1 AS one FROM vertex_properties/); // has() predicate
     }
-    // `loops()` inside a modulator predicate is per-traverser state the child seam does not lower,
-    // so the walk declines it and the correlated-seed assertions below stay legacy's.
-    // emit-before: the seed source is aliased (w) so the predicate's correlated nodes
-    // subquery references the seed id, not a self-match; loops() composes via .or().
+    // emit-before with a COMPOSITE predicate: a correlated property test OR a per-traverser state
+    // read. Both spines combine them through their ordinary infix machinery — no bespoke until/emit
+    // parser — so the assertion is the OR, and each spine spells its own two operands.
     const before = read('g.V(1).emit(__.has("name","marko").or().loops().is(2)).repeat(__.out())');
-    expect(before.sql).toContain('SELECT w.id AS id');        // seed aliased for the correlated test
-    expect(before.sql).toContain('c1.depth + 1 = ?');         // loops() → depth compare
     expect(before.sql).toMatch(/\) OR \(/);                    // has() OR loops()
+    if (relirOff) {
+      expect(before.sql).toContain('SELECT w.id AS id');       // seed aliased for the correlated test
+      expect(before.sql).toContain('c1.depth + 1 = ?');        // loops() → depth compare
+    } else {
+      expect(before.sql).toMatch(/EXISTS \(SELECT 1 AS one FROM vertex_properties/);
+      expect(before.sql).toMatch(/w\d+\.lp0 = 2/);             // loops() → the carried `loops` channel
+    }
   });
 
   test('both() repeat emits two recursive terms', () => {
@@ -624,7 +628,9 @@ describe('repeat / path SQL', () => {
 
   test('until(loops().is(n)) tests the depth counter, not an element', () => {
     const p = read('g.V(1).repeat(__.out()).until(__.loops().is(2))');
-    expect(p.sql).toContain('c1.depth + 1 = ?');     // done = (new depth) = 2
+    // `loops()` is a read of CARRIED STATE, so each spine names its own counter: legacy's
+    // materialized `depth`, RelIR's `loops` channel. Both compare it to the literal 2.
+    expect(p.sql).toMatch(relirOff ? /c1\.depth \+ 1 = \?/ : /w\d+\.lp0 = 2/);
   });
 
   test('until() composes loops() with an element predicate via the shared infix machinery', () => {
@@ -762,10 +768,30 @@ describe('repeat / path SQL', () => {
       .toThrow('a repeat() body must end on a vertex');
   });
 
-  test('until(__.sack().is(P)) reads the accumulated sack in the done column', () => {
+  test('until(__.sack().is(P)) reads the accumulated sack', () => {
     const p = read("g.withSack(0L).V(1).repeat(__.sack(sum).by('age')).until(__.sack().is(gte(50))).sack()");
-    // the done column tests the freshly-folded sack against the predicate.
-    expect(p.sql).toMatch(/CASE WHEN \(c\d+\.sk \+ \(SELECT value FROM vertex_properties[^)]*\)\) >= \? THEN 1 ELSE 0 END AS done/);
+    if (relirOff) {
+      // legacy tests the freshly-folded sack in a materialized `done` column.
+      expect(p.sql).toMatch(/CASE WHEN \(c\d+\.sk \+ \(SELECT value FROM vertex_properties[^)]*\)\) >= \? THEN 1 ELSE 0 END AS done/);
+    } else {
+      // RelIR reads the carried `sack` channel of the walk row, the same way `loops()` reads its own
+      // channel — one carried-state reader over a role, not a predicate that knows about sacks.
+      // The walk header is the rowid then the channels in ROLE_ORDER, so the sack rides beside the
+      // loop counter rather than in a column of its own invention.
+      expect(p.sql).toMatch(/WITH RECURSIVE wk_w\d+\(id, sack, lp0, bulk\)/);
+      expect(p.sql).toMatch(/w\d+\.sack >= 50/);
+      // A sack holds whatever its seed was, so the comparison is TYPE-GUARDED rather than assuming a
+      // number — the same honesty `ScalarType.UNKNOWN` buys everywhere else.
+      expect(p.sql).toMatch(/typeof\(w\d+\.sack\) IN \('integer', 'real'\)/);
+    }
+  });
+
+  relOnly('a MOVEMENT-FREE body still makes progress when the sack does', () => {
+    // The vertex never changes, so only the accumulator can terminate the walk: 0 → 29 → 58 exits at
+    // >= 50. Worth pinning because "the body must move" is the intuition a sack fold breaks.
+    const store = seededStore();
+    const rows = run(store, "g.withSack(0L).V(1).repeat(__.sack(sum).by('age')).until(__.sack().is(gte(50))).sack()");
+    expect((rows as any[]).map((r) => r.v)).toEqual([58]);
   });
 
   test('a body-terminal aggregate() collects the walk rows (depth ≥ 1) into a bag CTE', () => {

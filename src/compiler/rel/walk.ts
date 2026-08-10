@@ -89,10 +89,20 @@ export function repeatWalk(
   if (emit && (emit.args ?? []).length === 1 && !emitted?.length) return null;
 
   // Encounter is a unique position that cannot repeat at every depth; path needs its own append
-  // regime; sack folding is its own later admission. Keep all three explicit rather than carrying
-  // state through a regime whose update law this increment has not reviewed.
+  // regime. Both stay explicit rather than being carried through a regime whose update law this
+  // route has not reviewed.
+  //
+  // A SACK does ride through, and it needs no rule here beyond the ones already holding. Its update
+  // law is the recursive term's own — read the previous row's column, write the folded value — which
+  // is exactly what `loops` already does one line down, and `sackMutate` builds only `Project` and
+  // `Filter`, neither of which `BARRIER_IN_TERM` refuses. The dangerous case is a body that MINTS the
+  // channel (`sack(assign)` with no `withSack`): that lengthens the channel list, and the
+  // `sameChannels` round-trip below rejects it. Fan-out needs no split operator either — TinkerPop
+  // applies one only when `withSack` declares it (`O_OB_S_SE_SL_Traverser.split`), and the Gremlin
+  // string grammar can only supply an `Operator.*`, which is a merge; with none, the sack is copied
+  // to every fan-out row, which is what the term's projection does by construction.
   for (const channel of input.channels)
-    if (channel.role === 'encounter' || channel.role === 'path' || channel.role === 'sack') return null;
+    if (channel.role === 'encounter' || channel.role === 'path') return null;
 
   const depth: Channel = {
     col: `lp${input.channels.filter((channel) => channel.role === 'loops').length}`,

@@ -1,4 +1,4 @@
-import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
+import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type ChannelRole, type Channels } from '../../channels.ts';
 import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
@@ -130,6 +130,20 @@ const ALWAYS_PRODUCTIVE: Expr = { kind: 'binary', op: '=', left: compilerInt(1),
 
 /** No label bound yet. One shared value, because an empty Map is the seed at every entry point. */
 const NO_ALIASES: AliasMap = new Map();
+
+/**
+ * THE PER-TRAVERSER STATE A CHILD BODY MAY READ, by the channel ROLE each step names.
+ *
+ * A table rather than two arms because the question is uniform: these steps do not compute anything,
+ * they REFERENCE state the parent row already carries. TinkerPop's own vocabulary is the same shape —
+ * `LoopsStep`/`SackStep` are both `ScalarMapStep`s whose `map` is one `traverser.x()` call, and each
+ * declares what it needs through `getRequirements()` (`TraverserRequirement.SACK`/`SINGLE_LOOP`)
+ * exactly as Calcite's `RelNode.getVariablesSet()` declares what a node sets.
+ *
+ * Roles absent here are absent on purpose: `path` and `encounter` are not scalars, and `bulk` is a
+ * multiplicity the language gives no step to read.
+ */
+const CARRIED_READ: Readonly<Record<string, ChannelRole>> = { sack: 'sack', loops: 'loops' };
 
 /** The bulk channel every element source seeds: the RLE traverser count a reducer reads as
  *  `SUM(bulk)` and a movement collapse merges convergent walks on. One channel, one column, and the
@@ -432,11 +446,28 @@ function valuePredicate(
   return negate ? notProduced(tested) : tested;
 }
 
-/** The traverser a child body is rooted at, as the CHILD SEAM's host — one derivation, so the
- *  predicate arm and the projection arm cannot disagree about what the subject IS. */
-const childHostOf = (subject: Subject): ChildHost => subject.kind === 'element'
-  ? { kind: 'element', id: subject.id, elem: subject.elem }
-  : { kind: 'scalar', value: subject.value, ...(subject.vtype ? { vtype: subject.vtype } : {}) };
+/**
+ * The traverser a child body is rooted at, as the CHILD SEAM's host — one derivation, so the
+ * predicate arm and the projection arm cannot disagree about what the subject IS.
+ *
+ * ⚠️ **The ROW rides along, and dropping it was the reason no child body could read per-traverser
+ * state.** TinkerPop evaluates a child traversal on a SPLIT OF THE WHOLE TRAVERSER
+ * (`TraversalUtil.prepare`: `traverser.split()`, then `setBulk(1L)`), so `sack()` and `loops()` are
+ * ordinary `ScalarMapStep`s reading `traverser.sack()`/`traverser.loops()` — there is no
+ * "sack inside until()" special case in the model. Handing over `subject.id` alone is handing over
+ * `traverser.get()` instead of the traverser. Calcite frames the same thing as the correlating row
+ * being bound and the inner plan referencing its fields (`RexCorrelVariable`).
+ *
+ * `NO_ALIASES` because the predicate seam genuinely has no alias SCOPE to give — `Subject` carries
+ * the relation, not the labels live on it — and the alias reader declines rather than guessing when
+ * it finds none, which is what it already did with no row at all.
+ */
+const childHostOf = (subject: Subject): ChildHost => {
+  const row = { row: { rel: subject.rel, aliases: NO_ALIASES } };
+  return subject.kind === 'element'
+    ? { kind: 'element', id: subject.id, elem: subject.elem, ...row }
+    : { kind: 'scalar', value: subject.value, ...(subject.vtype ? { vtype: subject.vtype } : {}), ...row };
+};
 
 /** The subject of a clause that reads an ELEMENT — a property row, a label row, an id. Named because
  *  three clause builders take it and each would otherwise re-state the narrowing in its signature. */
@@ -4849,6 +4880,27 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     if (!projected) return null;
     value = projected.value;
     type = projected.framing.kind === 'scalar' ? projected.framing.type : UNKNOWN;
+    at = 1;
+  } else if (CARRIED_READ[leading?.name ?? ''] !== undefined && !(leading!.args ?? []).length) {
+    // A PER-TRAVERSER STATE READ — `sack()`, `loops()` — and it is ONE arm over a channel ROLE rather
+    // than a reader per step, because that is what the state IS: a column of the row the host rides
+    // on. TinkerPop reaches it by splitting the whole traverser into the child
+    // (`TraversalUtil.prepare`), so these are ordinary `ScalarMapStep`s over `traverser.sack()` /
+    // `traverser.loops()`; Calcite reaches the same place through the correlating row
+    // (`RexCorrelVariable`). Both say the child references the PARENT ROW, which `host.row` is.
+    //
+    // Zero-arg only. `sack(Operator.x)` is a MUTATION and not a read, and `loops("a")` names a loop
+    // this route does not model — a named `repeat` declines in `walk.ts` before reaching here.
+    const carried = host.row?.rel.channels.find((channel) => channel.role === CARRIED_READ[leading!.name]);
+    // The state is not carried HERE — `sack()` with no `withSack()`, `loops()` outside a walk. The
+    // reference raises for both; declining hands the whole traversal to a route that can say so.
+    if (!carried) return null;
+    value = col(host.row!.rel.id, carried.col);
+    // Live on every row of a relation that carries the channel at all, which is what makes this a
+    // CLAIM rather than the silence `undefined` means.
+    present = ALWAYS_PRODUCTIVE;
+    // `loops()` is an int by construction (`CHANNEL_COL`); a sack holds whatever its seed was.
+    if (carried.role === 'loops') type = STATIC('int');
     at = 1;
   } else if (leading?.name === 'constant') {
     const args = argValues(leading);

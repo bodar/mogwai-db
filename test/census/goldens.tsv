@@ -167,7 +167,7 @@ ran	rel	6	2	6e23d2c984d18536	57a8b2d590adb93b	ran	6e23d2c984d18536	g.V().dropLab
 ran	rel	6	2	6e23d2c984d18536	57a8b2d590adb93b	ran	6e23d2c984d18536	g.V().dropLabel(constant(["a", "b"])).labels()
 ran	rel	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	ran	e3b0c44298fc1c14	g.V().dropLabels().labels()
 ran	rel	6	6	2408155c943ce501	0bb373cfd50a3429	ran	2408155c943ce501	g.V().elementMap()
-ran	legacy	3	3	0ef89e9d841291cb	f1a147be1354fc90	ran	0ef89e9d841291cb	g.V().emit(__.has("name", "marko").or().loops().is(2)).repeat(__.out()).values("name")
+ran	rel	3	3	0ef89e9d841291cb	3d17e608422ba0bd	ran	0ef89e9d841291cb	g.V().emit(__.has("name", "marko").or().loops().is(2)).repeat(__.out()).values("name")
 ran	rel	6	6	6a72838f15adf7d6	21c409acd1141f6d	ran	6a72838f15adf7d6	g.V().filter(__.constant(0))
 ran	rel	2	2	d37477f9ec2fc605	a21e1e31dbe42070	ran	d37477f9ec2fc605	g.V().filter(__.has("lang","java"))
 ran	legacy	2	2	bf740234bb77f1ed	dff54e23a16841e8	ran	bf740234bb77f1ed	g.V().filter(__.has("name", TextP.startingWith("m").or(TextP.startingWith("p"))))

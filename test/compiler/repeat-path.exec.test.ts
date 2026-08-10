@@ -375,6 +375,48 @@ relOnly('emit(pred) doubles under until-before/emit-after, exactly as the bare f
     .toEqual(['lop', 'lop', 'lop', 'lop', 'ripple', 'ripple']);
 });
 
+// ---------- a sack folded through the walk, and carried state read from a child body ----------
+//
+// TinkerPop evaluates a child traversal on a SPLIT of the whole traverser at bulk 1
+// (TraversalUtil.prepare), so sack() and loops() are ordinary ScalarMapSteps reading traverser state
+// — there is no "sack inside until()" special case in the model. Ours reaches the same place through
+// the host's ROW, which is Calcite's correlating row (RexCorrelVariable).
+
+relOnly('a sack folds through the recursive walk, one iteration at a time', () => {
+  const store = seededStore();
+  // marko's out-neighbours: vadas 27, josh 32, lop has NO age. An unproductive by() FILTERS the
+  // traverser rather than folding a null — SackValueStep returns EmptyTraverser.instance() — so lop
+  // never reaches the output at all.
+  expect((run(store, 'g.withSack(0).V(1).repeat(__.out().sack(Operator.sum).by("age")).emit().sack()') as any[])
+    .map((r) => r.v).sort()).toEqual([27, 32]);
+  // by(traversal) folds too: a correlated scalar subquery is a NESTED select, which the recursive
+  // term admits (BARRIER_IN_TERM stops at every nested SELECT).
+  expect((run(store, 'g.withSack(0).V(1).repeat(__.out().sack(Operator.sum).by(__.values("age"))).emit().sack()') as any[])
+    .map((r) => r.v).sort()).toEqual([27, 32]);
+  // a per-hop decay factor — the multiplicative form, two hops deep.
+  expect((run(store, 'g.withSack(1.0).V(1).repeat(__.out().sack(Operator.mult).by(__.constant(0.5))).emit().sack()') as any[])
+    .map((r) => r.v).sort()).toEqual([0.25, 0.25, 0.5, 0.5, 0.5]);
+});
+
+relOnly('until()/emit() READ the carried sack, and loops() reads the counter', () => {
+  const store = seededStore();
+  // vadas folds 27 and keeps going; josh folds 32 and exits. lop is filtered by the unproductive by().
+  expect((run(store, 'g.withSack(0).V(1).repeat(__.out().sack(Operator.sum).by("age")).until(__.sack().is(P.gt(30))).sack()') as any[])
+    .map((r) => r.v)).toEqual([32]);
+  expect((run(store, 'g.withSack(0).V(1).repeat(__.out().sack(Operator.sum).by("age")).emit(__.sack().is(P.gt(30))).sack()') as any[])
+    .map((r) => r.v)).toEqual([32]);
+  // A sack that never folds never satisfies the exit, and the walk still terminates by exhaustion.
+  expect(run(store, 'g.withSack(0).V(1).repeat(__.out()).until(__.sack().is(P.gt(10)))')).toEqual([]);
+});
+
+relOnly('carried state is readable OUTSIDE a repeat too — the seam, not the walk', () => {
+  const store = seededStore();
+  // where(__.sack().is(P)) on an ordinary chain. This is the whole point of teaching the child seam
+  // rather than the walk: the same read works wherever a child body is lowered.
+  expect((run(store, 'g.withSack(0).V().sack(Operator.sum).by("age").where(__.sack().is(P.gt(30))).sack()') as any[])
+    .map((r) => r.v).sort()).toEqual([32, 35]);
+});
+
 test('until(loops().is(n)) is equivalent to times(n)', () => {
   const store = seededStore();
   const byUntil = uNames(store, 'g.V(1).repeat(__.out()).until(__.loops().is(2))').sort();
