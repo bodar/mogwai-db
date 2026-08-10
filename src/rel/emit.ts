@@ -534,6 +534,9 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
   const parts = (input: Plan): { readonly effects: readonly Step[]; readonly result?: Expression } => {
     const effects: Step[] = [];
     const ctes: Expression[] = [];
+    // ONE `WITH` list, so a single recursive member makes the whole list RECURSIVE — SQLite's keyword
+    // is a property of the list, not of the member that needs it.
+    let recursiveList = false;
     const resultBinding = input.result.kind === 'ref' ? bindings.get(input.result.name) : undefined;
     const lastRetained = resultBinding && retained(resultBinding) ? resultBinding.name : undefined;
     for (const binding of input.bindings) {
@@ -541,7 +544,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       // differs. That is what makes "the value at this point" one concept: the executor cannot tell
       // the two apart, and neither can a later `Ref`.
       const retain = (body: Expression): void => {
-        effects.push({ binding: binding.name, result: binding.name === lastRetained, emitted: renderStep(withCtes(ctes, body)) });
+        effects.push({ binding: binding.name, result: binding.name === lastRetained, emitted: renderStep(withCtes(ctes, body, recursiveList)) });
       };
       // `isStmt` first because it NARROWS the union `retained` only answers a question about, so the
       // CTE arm below has a `Rel`. Then `retained`, not `binding.snapshot`: this is the STEP
@@ -550,6 +553,16 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       // reached the caller as SQLite's own constraint error instead of the reference's message.
       if (isStmt(binding.node)) { retain(statement(binding.node)); continue; }
       if (retained(binding)) { retain(renderRel(binding.node, EMPTY_SCOPE)); continue; }
+      // A SHARED WALK IS A CTE, not a block inlined at each reference. `renderRel` would give the
+      // self-contained `WITH RECURSIVE w AS (…) SELECT * FROM w`, which nests a second WITH inside
+      // this list and — being spelled per occurrence — computes the walk once per reference. Hoisting
+      // the DEFINITION into this list instead is the same merge `input.result` already gets below,
+      // and it is what makes the walk's own name load-bearing (`name.ts` binds it under that name).
+      if (binding.node.kind === 'recursive') {
+        recursiveList = true;
+        ctes.push(recursiveDefinition(binding.node, EMPTY_SCOPE));
+        continue;
+      }
       // A `fenced` Materialize renders `AS MATERIALIZED` — a barrier SQLite may not flatten. Only the
       // fenced ones ask for it; every other CTE stays the flatten-freely default (see `Rel.materialize`).
       const materialized = binding.node.kind === 'materialize' && binding.node.fenced ? raw('MATERIALIZED ') : empty;
@@ -559,7 +572,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
     // A recursive root must share ONE `WITH RECURSIVE` list with the bindings beside it.
     const result = input.result.kind === 'recursive' && ctes.length
       ? q`WITH RECURSIVE ${list([...ctes, recursiveDefinition(input.result, EMPTY_SCOPE)])} SELECT * FROM ${ident(input.result.name)}`
-      : withCtes(ctes, renderRel(input.result, EMPTY_SCOPE));
+      : withCtes(ctes, renderRel(input.result, EMPTY_SCOPE), recursiveList);
     return { effects, result };
   };
 

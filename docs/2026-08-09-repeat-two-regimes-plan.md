@@ -629,11 +629,15 @@ moved `src/compiler/rel/`.
      (`gremlin-test .../branch/Repeat.feature:258-284`).
      **This is new capability on BOTH spines, not a migration:** legacy throws
      *"until() together with emit() not yet supported"* for every one of the four.
-     Known cost, deliberately taken: the two `UNION ALL` arms read the same walk node and `name.ts`
-     cannot bind it as a shared CTE (a recursive node contains its own `SelfRef`), so that one
-     position spells and computes the walk twice. The refinement is a `bulk` channel doubled in
-     place — which is what `RepeatStep.getRequirements()`'s unconditional `TraverserRequirement.BULK`
-     describes — and it needs the walk to MINT a bulk channel when its input carries none.
+   - ✅ **LANDED — a SHARED walk is one CTE (`name.ts`/`emit.ts`).** Found by the cell above and fixed
+     rather than carried: `binds` asked `containsSelfRef`, but a `Recursive` node BINDS its own name,
+     so every walk looked unbindable and a shared one was spelled — and computed — once per
+     reference. The question is FREE reference (`hasFreeSelfRef`), which is `freeRelIds`' rule for the
+     reference kind a `Col` cannot express. The emitter then hoists a bound walk's DEFINITION into
+     the shared `WITH` list, the same merge a recursive ROOT already got, which is what makes the
+     walk's own name load-bearing. Measured on the `UNION ALL` position above: two `WITH RECURSIVE`
+     blocks became one, 1,928 → 1,482 bytes, same answer. Generic — it pays for any multiply-read
+     walk, not just this one.
    - Next admit one form per increment: `emit(pred)`, then a sack folded through the walk. Each
      admission carries its own §3.1 constraint and L2 pin.
    - Not a cell but noted where it was found: **`repeat()` with NEITHER modulator is specified as

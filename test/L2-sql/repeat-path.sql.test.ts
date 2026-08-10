@@ -692,6 +692,11 @@ describe('repeat / path SQL', () => {
     expect(p.spine).toBe('rel');
     expect(p.sql).toContain(' UNION ALL ');
     expect(p.sql).toMatch(/w\d+\.lp0 > 0/);
+    // …and the two arms SHARE one walk. `name.ts` binds a multiply-read `Recursive` under its own
+    // name because its `SelfRef` is BOUND, not free; asking containment instead made every walk
+    // unbindable and spelled this block twice (measured: 1,928 → 1,482 bytes).
+    expect(p.sql.match(/WITH RECURSIVE/g)).toHaveLength(1);
+    expect(p.sql.match(/wk_w\d+\(id, lp0, bulk\) AS \(/g)).toHaveLength(1);
   });
 
   // ---------- sack folded through the recursive walk (foldable carried column) ----------

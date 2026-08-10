@@ -1,7 +1,7 @@
 import { ref } from '../factory.ts';
 import { plan, type Binding, type Plan } from '../plan.ts';
 import type { Rel } from '../rel.ts';
-import { containsSelfRef, exprRels, forEachExpr, freeRelIds, relChildren, relExprs, rewriteRels } from '../walk.ts';
+import { exprRels, forEachExpr, freeRelIds, hasFreeSelfRef, relChildren, relExprs, rewriteRels } from '../walk.ts';
 
 /**
  * Decide which DAG vertices deserve a named boundary, and REWRITE them into `Plan` bindings.
@@ -32,8 +32,10 @@ export function name(root: Rel): Plan {
   };
   visit(root);
 
-  // An explicit Materialize name is the caller's, so generated names must not collide with one.
-  const taken = new Set([...counts.keys()].flatMap((rel) => (rel.kind === 'materialize' && rel.name ? [rel.name] : [])));
+  // An explicit Materialize name is the caller's, and a Recursive's name is its CTE's — the walk's
+  // own term refers to it — so generated names must not collide with either.
+  const taken = new Set([...counts.keys()].flatMap((rel) =>
+    ((rel.kind === 'materialize' && rel.name) || rel.kind === 'recursive' ? [rel.name] : [])));
   let n = 0;
   const generate = (): string => {
     let candidate = `r${n++}`;
@@ -57,17 +59,26 @@ export function name(root: Rel): Plan {
    * free-reference-clean and looked bindable. Hoisting it puts the reference in a CTE beside its own
    * recursive statement, which SQLite answers with `circular reference`. It is reachable two ways —
    * a `Materialize` inside a recursive term (always), and any node the term shares with itself — and
-   * `check` refuses the first outright, so what this arm keeps correct is the second. */
+   * `check` refuses the first outright, so what this arm keeps correct is the second.
+   *
+   * ⚠️ **The question is FREE reference, not containment**, and the difference is a whole `Recursive`
+   * node: it binds its own name, so moving it moves the definition too. `containsSelfRef` made every
+   * walk unbindable — a walk always holds its own reference — so a SHARED walk lost its CTE and was
+   * spelled, and computed, once per occurrence (`hasFreeSelfRef` carries the measurement). */
   const binds = (rel: Rel): boolean =>
     rel !== root && ((counts.get(rel) ?? 0) > 1 || rel.kind === 'materialize')
-    && freeRelIds(rel).size === 0 && !containsSelfRef(rel);
+    && freeRelIds(rel).size === 0 && !hasFreeSelfRef(rel);
 
   const bindings: Binding[] = [];
   // Bottom-up and memoised, so a binding is pushed after every binding it depends on, and the
   // second occurrence of a shared node gets the SAME `Ref` — the ordering `checkPlan` then proves.
   const result = rewriteRels(root, (mapped, original) => {
     if (!binds(original)) return mapped;
-    const bound = original.kind === 'materialize' && original.name ? original.name : generate();
+    // A Recursive binds under its OWN name rather than a generated one: its term already refers to
+    // that name, so a second name would need the definition rewritten to match.
+    const declared = original.kind === 'recursive' ? original.name
+      : original.kind === 'materialize' ? original.name : undefined;
+    const bound = declared ?? generate();
     bindings.push({ name: bound, node: mapped });
     return ref({ id: original.id, name: bound, channels: mapped.channels, type: mapped.type });
   });

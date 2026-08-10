@@ -279,6 +279,34 @@ export function containsSelfRef(plan: Rel, name?: string): boolean {
   return found;
 }
 
+/**
+ * Does this subtree reference a walk DEFINED OUTSIDE it — the FREE-reference question, and the one
+ * `name` must ask rather than `containsSelfRef`.
+ *
+ * A `Recursive` node BINDS its own name, so its `SelfRef` is not free and moving the whole node
+ * moves the definition with it. Asking the containment question instead makes every walk unbindable,
+ * because a walk always holds its own reference — which silently costs a SHARED walk its CTE and has
+ * it spelled, and computed, once per occurrence. Measured on
+ * `g.V(1).until(hasLabel("software")).repeat(out()).emit()`, whose two output arms read one walk:
+ * the whole `WITH RECURSIVE` block appeared verbatim twice, 1,025 → 1,928 bytes.
+ *
+ * This is `freeRelIds`' rule for the OTHER kind of reference, and it is deliberately the same shape:
+ * a subtree is movable when nothing in it resolves against something it left behind. A `SelfRef`
+ * names its walk positionally rather than through a `Col`, which is exactly why `freeRelIds` cannot
+ * see it and this exists beside it.
+ */
+export function hasFreeSelfRef(plan: Rel): boolean {
+  const bound = new Set<string>();
+  const referenced = new Set<string>();
+  // ONE traversal: `forEachRel` already descends a recursive node's step and every correlated
+  // subplan, so a reference inside either is found and a definition inside either binds it.
+  forEachRel(plan, (r) => {
+    if (r.kind === 'recursive') bound.add(r.name);
+    if (r.kind === 'self-ref') referenced.add(r.name);
+  });
+  return [...referenced].some((name) => !bound.has(name));
+}
+
 /** Visit every relation in the DAG once, plus every relation correlated from an expression. */
 export function forEachRel(plan: Rel, visit: (r: Rel) => void): void {
   const seen = new Set<Rel>();

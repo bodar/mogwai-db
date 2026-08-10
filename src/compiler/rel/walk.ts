@@ -170,13 +170,8 @@ export function repeatWalk(
     // The two routes fire independently, so a row satisfying both leaves TWICE — a MULTISET sum,
     // which is a `UNION ALL` of the two arms (Calcite's `RepeatUnion.all`,
     // `vendor/calcite/core/src/main/java/org/apache/calcite/rel/core/RepeatUnion.java`), never a
-    // disjunction. Both arms read the SAME walk node, and `name.ts` cannot bind it as a shared CTE
-    // because a recursive node contains its own `SelfRef` (`binds`, name.ts:61-63) — so the walk is
-    // spelled twice and computed twice. That is a COST, not a wrong answer, and it buys the last of
-    // the four positions rather than leaving one of them answered by nothing on either spine. The
-    // refinement is a `bulk` channel doubled in place, which is what TinkerPop's unconditional
-    // `TraverserRequirement.BULK` describes; it needs the walk to MINT a bulk channel when its input
-    // carries none, so it is its own change.
+    // disjunction. Both arms read the SAME walk node and `name.ts` binds it once, so the walk is one
+    // CTE the two arms share rather than a block spelled per reference.
     const exited = exits(walk);
     if (!exited) return null;
     surviving = make.union({
