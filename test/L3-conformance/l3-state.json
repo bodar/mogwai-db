@@ -2267,7 +2267,7 @@
   ],
   "_comment": "L3 conformance last-known runs: the top-level passing/failing scenario sets are the default (RelIR-on) floor; `legacySpine` is the legacy floor. Each configuration replaces only its own section on a clean local run (CI never rewrites). The two gate ASYMMETRICALLY: the RelIR floor fails on any regression or a lower count; the legacy floor may only lose scenarios the RelIR floor holds, and fails on a name no spine holds (the union of the two `passed` sets is the real floor). `passing` = passed.length in each section. Commit this file with every bump. Never hand-edit either `passed` to hide a regression.",
   "legacySpine": {
-    "passing": 1692,
+    "passing": 1693,
     "total": 2260,
     "passed": [
       "InjectX1dX_andXerror_errorX",
@@ -2868,6 +2868,7 @@
       "g_V_hasLabelXsongX_groupXaX_byXnameX_byXproperties_groupCount_byXlabelXX_out_capXaX",
       "g_V_hasLabelXsongX_group_byXnameX_byXproperties_groupCount_byXlabelXX",
       "g_V_hasLabelXsongX_order_byXperformances_descX_byXnameX_rangeX110_120X_name",
+      "g_V_hasLabelXsongsX_matchXa_name_b__a_performances_cX_selectXb_cX_count",
       "g_V_hasLabel_value_concat_X_X_concat_XpersonX",
       "g_V_hasNotXageX_name",
       "g_V_hasXageX_asXaX_out_in_hasXageX_asXbX_selectXa_bX_whereXa_eqXbXX",
@@ -4172,7 +4173,6 @@
       "g_V_hasLabelXsoftwareX_name_fold_orderXlocalX_index_unfold_order_byXtailXlocal_1XX",
       "g_V_hasLabelXsoftwareX_order_byXnameX_index_withXmapX",
       "g_V_hasLabelXsoftwareX_valueXnameX_replaceXnull_iX",
-      "g_V_hasLabelXsongsX_matchXa_name_b__a_performances_cX_selectXb_cX_count",
       "g_V_hasXageX_asXaX_out_in_hasXageX_asXbX_selectXa_bX_whereXa_outXknowsX_bX",
       "g_V_hasXageX_asXaX_out_in_hasXageX_asXbX_selectXa_bX_whereXb_hasXname_markoXX",
       "g_V_hasXageX_valueMap_mathXit_plus_itXbyXselectXageX_unfoldXX",
