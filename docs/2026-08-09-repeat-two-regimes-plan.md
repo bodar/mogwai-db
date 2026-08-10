@@ -645,8 +645,17 @@ moved `src/compiler/rel/`.
      walk's own name load-bearing. Measured on the `UNION ALL` position above: two `WITH RECURSIVE`
      blocks became one, 1,928 → 1,482 bytes, same answer. Generic — it pays for any multiply-read
      walk, not just this one.
-   - Next admit one form per increment: `emit(pred)`, then a sack folded through the walk. Each
-     admission carries its own §3.1 constraint and L2 pin.
+   - ✅ **LANDED — `emit(pred)`, at all four positions.** The position algebra above is unchanged; what
+     a predicate removes is the bare form's one SIMPLIFICATION. Bare `emit`-after IS `deeper`, so it
+     subsumes an `until`-after exit (literally `and(deeper, …)`) and no disjunction is spelled; with a
+     predicate the two conditions are independent and `or(exit, emit)` is emitted, while the
+     until-before/emit-after position stays a `UNION ALL` of the two arms. Unproductivity needs no new
+     machinery: an emit predicate that produces nothing is NULL, and NULL neither passes the output
+     filter nor survives the `OR`, which is `TraversalUtil.test`'s answer for an unproductive
+     traversal. `emit(P)` — the raw-predicate overload, wrapped upstream in `__.filter(P)` — declines
+     exactly as `until(P)` does, and `loops()` inside either modulator declines too, since the child
+     seam does not lower per-traverser state. Cut 1305 → 1306.
+   - Next: a sack folded through the walk, carrying its own §3.1 constraint and L2 pin.
    - Not a cell but noted where it was found: **`repeat()` with NEITHER modulator is specified as
      the EMPTY result**, not an error — `RepeatEndStep` re-loops to exhaustion and `processTraverser`
      answers `EmptyTraverser` throughout. Both spines currently raise *"repeat() requires times(),

@@ -342,6 +342,39 @@ relOnly('until() BEFORE with emit() AFTER emits and THEN exits — the row leave
     .toEqual(['josh', 'lop', 'lop', 'ripple', 'ripple', 'vadas']);
 });
 
+relOnly('emit(pred) selects which rows leave, at either position', () => {
+  const store = seededStore();
+  // No until, so the walk runs to exhaustion: marko(d0), {vadas,josh,lop}(d1), {ripple,lop}(d2).
+  // After repeat the predicate follows incrLoops, so the seed can never emit…
+  expect(uNames(store, 'g.V(1).repeat(__.out()).emit(__.hasLabel("software"))').sort())
+    .toEqual(['lop', 'lop', 'ripple']);
+  // …while before repeat it is tested at every depth INCLUDING the seed, which is the only
+  // difference between these two — marko is a person, so it shows up in the second and not the first.
+  expect(uNames(store, 'g.V(1).emit(__.hasLabel("person")).repeat(__.out())').sort())
+    .toEqual(['josh', 'marko', 'vadas']);
+});
+
+relOnly('emit(pred) and until(pred) are INDEPENDENT conditions once the predicate is not constant', () => {
+  const store = seededStore();
+  // Bare emit-after is exactly `deeper`, which subsumes an until-after exit. A predicate does not:
+  // these two select disjoint rows, so the output is a genuine disjunction of both.
+  // exits {lop(d1), ripple, lop(d2)} OR emits {vadas, josh} — five rows, each leaving once.
+  expect(uNames(store, 'g.V(1).repeat(__.out()).until(__.hasLabel("software")).emit(__.hasLabel("person"))').sort())
+    .toEqual(['josh', 'lop', 'lop', 'ripple', 'vadas']);
+  // emit BEFORE with until AFTER stays once-each: an end-step exit never reaches the head, so it is
+  // never additionally emitted even when it satisfies the emit predicate too.
+  expect(uNames(store, 'g.V(1).emit(__.hasLabel("software")).repeat(__.out()).until(__.hasLabel("software"))').sort())
+    .toEqual(['lop', 'lop', 'ripple']);
+});
+
+relOnly('emit(pred) doubles under until-before/emit-after, exactly as the bare form does', () => {
+  const store = seededStore();
+  // Both conditions select the same three rows here, and neither check suppresses the other, so
+  // every one of them leaves twice. A disjunction would answer three rows instead of six.
+  expect(uNames(store, 'g.V(1).until(__.hasLabel("software")).repeat(__.out()).emit(__.hasLabel("software"))').sort())
+    .toEqual(['lop', 'lop', 'lop', 'lop', 'ripple', 'ripple']);
+});
+
 test('until(loops().is(n)) is equivalent to times(n)', () => {
   const store = seededStore();
   const byUntil = uNames(store, 'g.V(1).repeat(__.out()).until(__.loops().is(2))').sort();

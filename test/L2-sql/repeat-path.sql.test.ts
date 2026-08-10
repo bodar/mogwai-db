@@ -48,12 +48,22 @@ describe('repeat / path SQL', () => {
   });
 
   test('emit(predicate) carries an emit column tested per row (same engine as until)', () => {
-    // emit-after: the seed is never emitted (0 AS emit); each recursive row is tested.
+    // emit-after: the seed is never emitted; each recursive row is tested. The RelIR walk claims
+    // this one, and the two spines say it differently — legacy carries a materialized `emit` column,
+    // RelIR filters the walk on its `loops` channel — so the assertions follow the route rather than
+    // pinning the spelling of a route this query no longer takes.
     const after = read('g.V(1).repeat(__.out()).emit(__.has("name","josh"))');
-    expect(after.sql).toContain('0 AS emit');                 // seed not emitted under emit-after
-    expect(after.sql).toContain('AS emit FROM');              // recursive rows tested
-    expect(after.sql).toContain('WHERE emit = 1');            // output = emitted rows
-    expect(after.sql).toContain('EXISTS(SELECT 1 FROM vertex_properties'); // has() predicate
+    if (relirOff) {
+      expect(after.sql).toContain('0 AS emit');               // seed not emitted under emit-after
+      expect(after.sql).toContain('AS emit FROM');            // recursive rows tested
+      expect(after.sql).toContain('WHERE emit = 1');          // output = emitted rows
+      expect(after.sql).toContain('EXISTS(SELECT 1 FROM vertex_properties'); // has() predicate
+    } else {
+      expect(after.sql).toMatch(/w\d+\.lp0 > 0/);             // seed not emitted under emit-after
+      expect(after.sql).toMatch(/EXISTS \(SELECT 1 AS one FROM vertex_properties/); // has() predicate
+    }
+    // `loops()` inside a modulator predicate is per-traverser state the child seam does not lower,
+    // so the walk declines it and the correlated-seed assertions below stay legacy's.
     // emit-before: the seed source is aliased (w) so the predicate's correlated nodes
     // subquery references the seed id, not a self-match; loops() composes via .or().
     const before = read('g.V(1).emit(__.has("name","marko").or().loops().is(2)).repeat(__.out())');
@@ -684,6 +694,17 @@ describe('repeat / path SQL', () => {
     expect(p.sql).toMatch(/w\d+\.lp0 > 0/);
     // …while the EXPANSION guard still consults it, so the walk stops at a software vertex.
     expect(p.sql).toContain('IS NOT 1');
+  });
+
+  relOnly('emit(pred) spells the disjunction that bare emit does not need', () => {
+    // Bare emit-after IS `deeper`, so an until-after exit — literally and(deeper, …) — is subsumed
+    // and no OR is emitted. A predicate makes the two conditions independent, so both appear.
+    const bare = read('g.V(1).repeat(__.out()).until(__.hasLabel("software")).emit()');
+    expect(bare.sql).not.toContain(') OR (');
+    const pred = read('g.V(1).repeat(__.out()).until(__.hasLabel("software")).emit(__.hasLabel("person"))');
+    expect(pred.spine).toBe('rel');
+    expect(pred.sql).toContain(') OR (');
+    expect(pred.sql).toMatch(/w\d+\.lp0 > 0/);
   });
 
   relOnly('until-before with emit-after is a UNION ALL of two arms, not one predicate', () => {

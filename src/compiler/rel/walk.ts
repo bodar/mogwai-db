@@ -6,9 +6,13 @@ import type { Rel } from '../../rel/rel.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import type { Elem } from '../plan/plan.ts';
-import { and, carriedCols, elementCols, meta, notProduced, typeOf, type Minter } from './build.ts';
+import { and, carriedCols, elementCols, meta, notProduced, or, typeOf, type Minter } from './build.ts';
 import type { ChildSeam, Subject } from './child.ts';
 import type { RelFraming } from './framing.ts';
+
+/** "Every row the walk holds" — an output condition that needs no filter, distinct from the absence
+ *  of a condition. */
+const ALL = Symbol('walk.all');
 
 /** A recursive element walk before the enclosing fold consumes its remaining steps. */
 interface WalkRead {
@@ -20,13 +24,13 @@ interface WalkRead {
 /**
  * `repeat()`'s unbounded `Recursive` regime.
  *
- * Admissions land one at a time (§8.6). This increment admits a predicate `until` and a BARE
- * `emit()`, each before or after `repeat`, in ALL FOUR position combinations; `times`, `emit(pred)`,
- * named loops, path state, body effects, shape changes and carried state changes still decline to
- * the whole-chain fallback.
+ * Admissions land one at a time (§8.6). This increment admits a predicate `until` and `emit()` in
+ * both its bare and its predicate form, each before or after `repeat`, in ALL FOUR position
+ * combinations; `times`, named loops, path state, body effects, shape changes and carried state
+ * changes still decline to the whole-chain fallback.
  *
  * **OUTPUT POSITIONS — why three of the four combinations are one filter and the fourth is not.**
- * `emit()` is a constant-true predicate (`TrueTraversal.instance()`, `GraphTraversal.java:4460`) and
+ * Bare `emit()` is a constant-true predicate (`TrueTraversal.instance()`, `GraphTraversal.java:4460`) and
  * `emitFirst`/`untilFirst` are independent flags, each set iff its modulator was written before
  * `repeat` (`RepeatStep.java:89,100`); `doUntil`/`doEmit` then fire only at the MATCHING position
  * (`:125-131`). At the head, a until-first exit RETURNS before the emit-first check (`:265-278`);
@@ -65,8 +69,7 @@ export function repeatWalk(
   if (!until && !emit) return null;
   if ((repeat.args ?? []).length !== 1 || repeat.loopName) return null;
   if (until && (until.args ?? []).length !== 1) return null;
-  // Bare `emit()` only; `emit(pred)` is the next cell.
-  if (emit && (emit.args ?? []).length !== 0) return null;
+  if (emit && (emit.args ?? []).length > 1) return null;
   for (const clustered of region) if (clustered.modulators?.length || clustered.optionArms) return null;
 
   const untilFirst = !!until && region.indexOf(until) < region.indexOf(repeat);
@@ -78,6 +81,12 @@ export function repeatWalk(
   if (!body?.length) return null;
   const predicate = until ? child.body(until.args[0]?.value?.nested, 'child') : undefined;
   if (until && !predicate?.length) return null;
+  // `emit(pred)` carries a nested traversal. The `emit(P)` overload wraps a raw predicate in
+  // `__.filter(P)` upstream and does not reach us as one, so it declines here exactly as `until(P)`
+  // already does rather than being silently read as a traversal.
+  const emitted = emit && (emit.args ?? []).length === 1
+    ? child.body(emit.args[0]?.value?.nested, 'child') : undefined;
+  if (emit && (emit.args ?? []).length === 1 && !emitted?.length) return null;
 
   // Encounter is a unique position that cannot repeat at every depth; path needs its own append
   // regime; sack folding is its own later admission. Keep all three explicit rather than carrying
@@ -108,16 +117,35 @@ export function repeatWalk(
     return untilFirst ? tested : and(deeper(rel), tested);
   };
   /**
-   * WHICH ROWS LEAVE THE WALK — `undefined` for "all of them", so the common case emits no filter.
-   *
-   * With no `emit` this is the exit condition alone. Bare `emit` BEFORE `repeat` admits every row
-   * the walk holds, seed included. Bare `emit` AFTER admits depth ≥ 1 — and that SUBSUMES an
-   * `until`-after exit, which is literally `and(deeper, …)`, so the disjunction reduces to `deeper`
-   * rather than being spelled as one. `twice` takes neither branch: its two routes are separate
-   * ARMS, not one predicate.
+   * The `emit` condition at `rel`, or `null` where its predicate does not lower. `ALL` is the whole
+   * walk with no filter at all — a BARE `emit` is a constant-true predicate, so before `repeat` it
+   * admits every row the walk holds, seed included. After `repeat` it follows `incrLoops`, so both
+   * forms carry the depth test.
    */
-  const leaves = (rel: Rel): Expr | null | undefined =>
-    (emit ? (emitFirst ? undefined : deeper(rel)) : exits(rel));
+  const emits = (rel: Rel): Expr | typeof ALL | null => {
+    if (!emitted) return emitFirst ? ALL : deeper(rel);
+    const tested = child.predicate(emitted, subject(rel), false);
+    if (!tested) return null;
+    return emitFirst ? tested : and(deeper(rel), tested);
+  };
+  /**
+   * WHICH ROWS LEAVE THE WALK, as ONE predicate — the three position combinations whose two checks
+   * suppress each other, so a qualifying row leaves exactly once. `twice` takes neither branch: its
+   * routes are separate ARMS, not a disjunction.
+   *
+   * The one simplification is BARE `emit` after `repeat`: it is exactly `deeper`, which SUBSUMES an
+   * `until`-after exit because that exit is literally `and(deeper, …)`. With `emit(pred)` the two
+   * conditions are independent and the disjunction is spelled.
+   */
+  const leaves = (rel: Rel): Expr | typeof ALL | null => {
+    if (!emit) return exits(rel) ?? null;
+    const emitting = emits(rel);
+    if (emitting === null || emitting === ALL) return emitting;
+    const exiting = exits(rel);
+    if (exiting === null) return null;
+    if (exiting === undefined) return emitting;
+    return emitted ? or(exiting, emitting) : emitting;
+  };
 
   const seed = make.project({
     id: fresh('ws'), input, channels: carried, type: walkType,
@@ -173,15 +201,18 @@ export function repeatWalk(
     // disjunction. Both arms read the SAME walk node and `name.ts` binds it once, so the walk is one
     // CTE the two arms share rather than a block spelled per reference.
     const exited = exits(walk);
-    if (!exited) return null;
+    const emitting = emits(walk);
+    // `ALL` cannot arise here — it needs `emitFirst`, which `twice` excludes — but the walk declines
+    // rather than assuming that, because an unfiltered arm would double every row in the walk.
+    if (!exited || emitting === null || emitting === ALL) return null;
     surviving = make.union({
       id: fresh('wu'), channels: carried, type: walkType, all: true,
-      inputs: [exited, deeper(walk)].map((pred, i) => arm(i === 0 ? 'wf' : 'we', pred)),
+      inputs: [arm('wf', exited), arm('we', emitting)],
     });
   } else {
     const leaving = leaves(walk);
     if (leaving === null) return null;
-    surviving = leaving === undefined ? walk : arm('wf', leaving);
+    surviving = leaving === ALL ? walk : arm('wf', leaving);
   }
   // RepeatEndStep resets the counter on exit, so it never escapes the walk relation.
   const out = make.project({
