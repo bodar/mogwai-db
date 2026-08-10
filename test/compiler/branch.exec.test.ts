@@ -240,7 +240,7 @@ test('sack clones through coalesce()/optional()/choose() forks', () => {
     .toEqual([3, 3, 3]); // 3 out-neighbours, each carrying sack=3
 });
 
-test('a uniform-element branch composes as a child-body value at every position', () => {
+test('a uniform-element branch composes as a child-body value at every position', async () => {
   const store = seededStore();
   // local()/flatMap() of an element branch == the flattened branch (all cardinality). The branch
   // folds through lowerElementSteps in the pushed child scope, identical to inlining it.
@@ -257,7 +257,9 @@ test('a uniform-element branch composes as a child-body value at every position'
     .toEqual(['josh', 'marko', 'peter', 'vadas']);
   // group().by(value) reduces the element branch per key — the top "group().by(traversal) value"
   // deferral bucket now composes for an element-armed branch.
-  expect(run(store, 'g.V().hasLabel("person").group().by("name").by(__.union(__.out(), __.in()).count())').map((r) => [r.gk, r.gv]).sort())
+  const [grouped] = await decodeAll(executeQuery(store,
+    'g.V().hasLabel("person").group().by("name").by(__.union(__.out(), __.in()).count())', {}));
+  expect([...grouped].sort())
     .toEqual([['josh', 3], ['marko', 3], ['peter', 1], ['vadas', 1]]);
   // a scalar-armed branch (constants) keeps its OWN scalar path — no regression from the widening.
   // local() is all-cardinality, so both constant arms survive (element widening never claimed it).

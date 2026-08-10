@@ -523,9 +523,9 @@ Two techniques make pieces smaller than they look, and both are already used her
 
 ### The order, with what makes each one independently green
 
-Nothing below is on trunk. Each is a reference-read from `origin/repeat-two-regimes` followed by a
-build ON TRUNK — never a cherry-pick of that branch's commits, which are against a moved
-`src/compiler/rel/`.
+Items 1–3 are on trunk. Each remaining item is a reference-read from `origin/repeat-two-regimes`
+followed by a build ON TRUNK — never a cherry-pick of that branch's commits, which are against a
+moved `src/compiler/rel/`.
 
 1. ✅ **LANDED — `tryUnroll` reads `loopName`, not the argument count.** A named `repeat("a", …)` arrives
    with ONE argument because the front end splits the name onto `loopName`, so the arity test never
@@ -568,11 +568,21 @@ build ON TRUNK — never a cherry-pick of that branch's commits, which are again
      no behavioural difference to assert, the pins are PROPERTIES (the mark at depth, the parse-tree
      preservation, and a barrier body still unrolling under suppression) — the lesson increment 1 paid
      for. Measured green: L3 1783 RelIR / 1693 legacy and the census 1208, all unchanged.
-3. **The `group()` collapse fix** — `COLLECTING_CONSUMERS` treats every `group()` as an ordered member
-   collection, while TinkerPop splits on `Grouping.hasBarrierInValueTraversal()`. Independent of the
-   unroll. ⚠️ On the archived branch this one BROKE a test (`branch.exec.test.ts`, "a uniform-element
-   branch composes as a child-body value at every position") — bisected to `eab7822`. Land it only with
-   that resolved; it is the reason this is an increment of its own rather than a rider.
+3. ✅ **LANDED — the `group()` collapse fix.** `COLLECTING_CONSUMERS` treated every `group()` as an
+   ordered member collection, while TinkerPop first splits on
+   `Grouping.hasBarrierInValueTraversal()`. The archived implementation's “any barrier means
+   order-free” was too broad: `FoldStep` is itself a barrier and its `addAll` observes member order.
+   Calcite supplied the missing second question — `SqlAggFunction.requiresGroupOrder()` is per
+   aggregate — so only a global numeric reducer/count at the observable tail drops the encounter.
+   Collapse is narrower again: only `count()` is admitted, matching
+   `SqlSplittableAggFunction.CountSplitter`'s COUNT-over-partitions then SUM contract.
+
+   The archived branch's broken test (`branch.exec.test.ts`, "a uniform-element branch composes as a
+   child-body value at every position", bisected to `eab7822`) was a test-boundary defect: removing
+   the unnecessary encounter let RelIR claim the query and return its canonical framed Map, while the
+   assertion read legacy's internal `gk`/`gv` rows. It now asserts the public framed Map on either
+   spine. `test:perturbed` kept the exact same ten failure names as the pre-increment SHA; L3 stayed
+   1783/1693 and the census stayed 1208.
 4. **Widen the unroll — delete the "nothing to gain unless a barrier was blocking it" guard.** §1a is
    the argument, and its blocker is discharged (the retractions are on trunk). **Test this before
    assuming it:** it is the increment most likely to move L3 and the census, it is where the 600 s hang

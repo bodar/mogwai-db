@@ -48,6 +48,14 @@ describe('ChainFacts.demandsEncounter', () => {
     // demands the encounter in its own right (a collection's member order is observable).
     expect(facts('g.inject(1, 2, 3).limit(2)').demandsEncounter).toBe(true);
   });
+  test('group() distinguishes an ordered member collection from a reducing value traversal', () => {
+    expect(facts('g.V().group().by(T.label)').demandsEncounter).toBe(true);
+    expect(facts('g.V().group().by(T.label).by("name")').demandsEncounter).toBe(true);
+    expect(facts('g.V().group().by(T.label).by(__.fold())').demandsEncounter).toBe(true);
+    expect(facts('g.V().group().by(T.label).by(__.count())').demandsEncounter).toBe(false);
+    expect(facts('g.V().group().by(T.label).by(__.out().count())').demandsEncounter).toBe(false);
+    expect(facts('g.V().group().by(T.label).by(__.outE().values("weight").sum())').demandsEncounter).toBe(false);
+  });
   test('a plain order() between the fan-out and the slice clears the demand', () => {
     // order() re-establishes a total order, so the following limit needs no emission encounter.
     expect(facts('g.V().out().order().by("name").limit(2)').demandsEncounter).toBe(false);
@@ -64,6 +72,11 @@ describe('ChainFacts.collapseSafe', () => {
   test('an element leaf after movement is collapse-safe (framed as (v, bulk))', () => {
     expect(facts('g.V().out()').collapseSafe).toBe(true);
     expect(facts('g.V().out().both()').collapseSafe).toBe(true);
+  });
+  test('a count-valued group with a non-fan-out key is a collapse-safe terminal', () => {
+    expect(facts('g.V().out().group().by(T.label).by(__.count())').collapseSafe).toBe(true);
+    expect(facts('g.V().out().group().by(__.label()).by(__.count())').collapseSafe).toBe(false);
+    expect(facts('g.V().out().group().by(T.label).by(__.sum())').collapseSafe).toBe(false);
   });
   test('false when identity is carried between the source and terminal', () => {
     expect(facts('g.V().out().path().count()').collapseSafe).toBe(false); // path carries identity

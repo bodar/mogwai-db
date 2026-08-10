@@ -1,6 +1,6 @@
 import { type IRStep } from './strategies.ts';
-import { isTokenArg, argValues } from '../../gremlin/frontend.ts';
-import { isLocalScope, PATH_FAMILY, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, unionOf } from './step.ts';
+import { isNested, isTokenArg, argValues, stepChain } from '../../gremlin/frontend.ts';
+import { isLocalScope, isStreamBarrier, PATH_FAMILY, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, unionOf } from './step.ts';
 
 // ---------- whole-chain analysis: annotate, never rewrite ----------
 //
@@ -83,6 +83,31 @@ const POSITIONAL_CONSUMERS = new Set(['limit', 'range', 'skip', 'tail']);
  *  Scope.local family — is invisible to it. `cap` is the step that makes a collection's member
  *  order observable and it is always at the top level, so it is the one that cannot be missed. */
 const COLLECTING_CONSUMERS = new Set(['fold', 'aggregate', 'cap', 'group']);
+
+/** Does this `group()` reduce each key's values to an order-insensitive scalar?
+ * TinkerPop first makes the structural distinction in `Grouping.hasBarrierInValueTraversal`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Grouping.java`).
+ * Calcite keeps the corresponding property on each aggregate as `requiresGroupOrder`
+ * (`vendor/calcite/core/src/main/java/org/apache/calcite/sql/SqlAggFunction.java`), rather than on
+ * GROUP BY itself. Both checks matter: `fold()` is itself a non-local barrier, but its `addAll`
+ * reducer observes member order. A missing value by() and a literal/property value by() are also
+ * converted to folds, so all three remain collections. Conservatively retain encounter for a
+ * post-barrier transform; only a global numeric reducer/count at the observable tail is classified. */
+function groupReducesItsValues(step: IRStep): boolean {
+  if (step.name !== 'group') return false;
+  const value = (step.modulators ?? [])[1]?.[0];
+  if (value === undefined || !isNested(value)) return false;
+  try {
+    const inner = stepChain(value.nested, {});
+    return inner.some(isStreamBarrier) && inner.length > 0
+      && REDUCERS.has(inner.at(-1)!.name) && isStreamBarrier(inner.at(-1)!);
+  } catch {
+    return false;
+  }
+}
+
+const collectsInOrder = (step: IRStep): boolean =>
+  COLLECTING_CONSUMERS.has(step.name) && !groupReducesItsValues(step);
 /** The WRITE steps, which are order-sensitive for a reason none of the read consumers share: a
  *  write ASSIGNS ids, in the order it consumes its driver rows, and those ids are observable —
  *  `g.V().as("a").in("created").addE("createdBy").from("a")` creates the same four edges under a
@@ -130,7 +155,7 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
     // Measured with `mise run test:perturbed`: 41 corpus traversals and 13 L3 scenarios changed
     // their answer under a reversed scan. Do NOT "simplify" this into the fan-out branch below —
     // that is the shape that was wrong.
-    if (COLLECTING_CONSUMERS.has(s.name)) return true;
+    if (collectsInOrder(s)) return true;
     // A write consumes its driver rows one at a time and assigns ids as it goes — see WRITE_STEPS.
     // Like a collection and unlike a slice, it needs the encounter with no fan-out at all: a bare
     // `g.V().addE(…)` observes the source's order exactly as much as `g.V().out().addE(…)` does.
@@ -182,16 +207,41 @@ const COLLAPSE_REDUCERS = REDUCERS;
  *  big fan-out/repeat" correctness+tractability case. A bare key (the element identity), a
  *  property key `by('name')`, or a token key `by(T.label)` all follow the element's identity,
  *  so merging same-id rows keeps every key intact. A by(traversal) key can fan out (one
- *  traverser → many keys), which a GROUP BY-id merge would corrupt → left unsafe. group()
- *  (element/list values) and group().by().by(reducer) are NOT admitted here: their weighting
- *  is correct-by-construction but their collapse gating is deferred (see the wire-bulking doc). */
-function groupCountCollapseTerminal(step: IRStep): boolean {
+ *  traverser → many keys), which a GROUP BY-id merge would corrupt → left unsafe. A
+ *  `group().by().by(__.count())` has the same split and is admitted by the shared terminal below;
+ *  element/list-valued groups and every other reducer remain deferred. */
+function bulkGroupCollapseTerminal(step: IRStep): boolean {
+  if (step.name === 'group') return reducingGroupCollapseTerminal(step);
   if (step.name !== 'groupCount' || (step.args?.length ?? 0) !== 0) return false;
   const modulators = step.modulators ?? [];
   if (modulators.length === 0) return true;
   if (modulators.length !== 1) return false;
   const a = modulators[0]?.[0];
-  return a === undefined || typeof a === 'string' || isTokenArg(a);
+  return nonFanoutKey(a);
+}
+
+/** A bare, property, or token key yields exactly one key per traverser. A traversal key may fan out,
+ * so merging by element identity before it would change the answer. */
+const nonFanoutKey = (a: unknown): boolean => a === undefined || typeof a === 'string' || isTokenArg(a);
+
+/** `group().by(<non-fan-out key>).by(__.count())` is weighted by SUM(bulk) per key just like
+ * `groupCount()`. This is Calcite's `SqlSplittableAggFunction.CountSplitter`: COUNT over partitions
+ * followed by SUM of the partial counts
+ * (`vendor/calcite/core/src/main/java/org/apache/calcite/sql/SqlSplittableAggFunction.java`). Keep
+ * this deliberately narrower than `groupReducesItsValues`: an aggregate may ignore encounter order
+ * without being splittable over an (id, bulk) frontier. */
+function reducingGroupCollapseTerminal(step: IRStep): boolean {
+  if (step.name !== 'group' || (step.args?.length ?? 0) !== 0) return false;
+  const bys = step.modulators ?? [];
+  if (bys.length === 0 || bys.length > 2 || !nonFanoutKey(bys[0]?.[0])) return false;
+  const value = bys[1]?.[0];
+  if (!isNested(value)) return false;
+  try {
+    const inner = stepChain(value.nested, {});
+    return inner.length === 1 && inner[0].name === 'count' && (inner[0].args?.length ?? 0) === 0;
+  } catch {
+    return false;
+  }
 }
 
 function computeCollapseSafe(steps: IRStep[]): boolean {
@@ -207,7 +257,7 @@ function computeCollapseSafe(steps: IRStep[]): boolean {
   let end = n; // exclusive bound of the movement/filter prefix
   const last = steps[n - 1];
   const reducerTerminal = COLLAPSE_REDUCERS.has(last.name) && (last.args?.length ?? 0) === 0;
-  const groupCountTerminal = groupCountCollapseTerminal(last);
+  const groupCountTerminal = bulkGroupCollapseTerminal(last);
   if (reducerTerminal || groupCountTerminal) {
     end = n - 1;
     if (reducerTerminal && end >= 2 && COLLAPSE_PROJ.has(steps[end - 1].name)) end -= 1; // one scalar projection before the reducer
