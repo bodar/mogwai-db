@@ -46,6 +46,7 @@ import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantArm, variantArmOf, variantHasList, variantPayload, type VariantArm } from './variant.ts';
 import { readCollection, registerCollection, registerMap, type Collections } from './collection.ts';
+import { repeatWalk } from './walk.ts';
 import { optionArms, type OptionArm } from '../ir/option-map.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
 
@@ -3467,6 +3468,11 @@ function elementTail(
       // At bulk 1 that is the same answer as the plain slice, so the cost is SQL shape and never
       // correctness — the same trade the movement loop already makes.
       return continueAs(merged.rel, merged.framing, steps, at + 1, bulked || ctx.collapse, ctx, fresh, labels);
+    }
+    if (step.name === 'repeat') {
+      const walked = repeatWalk(step, rel, elem, childSeam(ctx, fresh), fresh, labels);
+      if (!walked) return null;
+      return continueAs(walked.rel, walked.framing, steps, at + 1, bulked, ctx, fresh, walked.aliases);
     }
     if (step.name === 'path') {
       if (!pathCarried(rel) || step.optionArms || (step.args ?? []).length

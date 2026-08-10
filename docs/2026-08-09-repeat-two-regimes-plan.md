@@ -602,11 +602,14 @@ moved `src/compiler/rel/`.
    declares carried state at the relational position where it is live. This increment remains
    behaviour-free because nothing mints the channel yet, and `obligations.ts` needs nothing because
    every obligation already reads the total role tables.
-6. **`walk.ts` — the `Recursive` regime (§3.1)**, and this is the one to split hardest. Land the module
-   plus its dispatch hook DECLINING every shape, then admit one form per increment: `until(pred)`, then
-   bare `emit()`, then `emit(pred)`, then a sack folded through the walk. Each admission carries the
-   §3.1 constraints (`childPredicate`, `notProduced` for NULL-safe negation, `ChildValue.present` as its
-   own conjunct) and its own L2 pin.
+6. 🚧 **`walk.ts` — the `Recursive` regime (§3.1)**, split hardest:
+   - ✅ **LANDED — the module and `elementTail` dispatch hook, declining every shape.** The scaffold
+     declares the eventual element-walk contract but mints no relation and changes no route: `null`
+     still hands the whole traversal to legacy. The child fold seam and recursive machinery wait for
+     the first admitted form rather than landing as unreachable speculative code.
+   - Next admit one form per increment: `until(pred)`, then bare `emit()`, then `emit(pred)`, then a
+     sack folded through the walk. Each admission carries the §3.1 constraints (`childPredicate`,
+     `notProduced` for NULL-safe negation, `ChildValue.present` as its own conjunct) and its own L2 pin.
 7. **§7.4 item 4 — delete `bulk.ts`**, together with the byte budget item 4 names. After 4 lands this
    file is already unreachable for everything its tests cover, which is what makes the deletion small.
 8. **§7.4 item 1 — the per-position collapse answer.** Last, because it is the largest and because
