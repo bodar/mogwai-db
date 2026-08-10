@@ -90,8 +90,19 @@ export interface ChildSeam {
    * payload (§3.5), so a plain column naming the parent would not survive the first hop.
    */
   readonly rows: (body: readonly IRStep[], input: Rel, elem: Elem, aliases: AliasMap) => ChildRows | null;
+  /**
+   * Run the ordinary fold over a supplied stream. This is not another way to consume a child
+   * result: the recursive walk needs the body relation itself, rooted at its `SelfRef`, so it hands
+   * that relation back to the same fold every top-level chain uses.
+   */
+  readonly chain: (input: Rel, framing: RelFraming, body: readonly IRStep[], aliases: AliasMap) => ChainRead | null;
   /** A nested argument's normalized body, or `null` where normalizing it RAISES. */
   readonly body: (nested: unknown, scope: BodyScope) => readonly IRStep[] | null;
+}
+
+/** A continued chain: a rooted read plus the labels live at its end. */
+export interface ChainRead extends RootedRead {
+  readonly aliases: AliasMap;
 }
 
 /**

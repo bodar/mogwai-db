@@ -13,7 +13,7 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { executeQuery, executeFramed } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
-import { grouped, read, relirOff, run, runWith, seededStore } from '../support/harness.ts';
+import { grouped, read, relOnly, relirOff, run, runWith, seededStore } from '../support/harness.ts';
 import { detail } from '../support/output.ts';
 
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
@@ -599,11 +599,12 @@ describe('repeat / path SQL', () => {
     expect(p.sql.replace(/\s+/g, ' ')).not.toMatch(/DISTINCT[^)]*ROW_NUMBER/);
   });
 
-  test('until() compiles a `done` column: expand from done=0, output done=1', () => {
+  relOnly('until(predicate) carries loops and guards the recursive frontier with the shared predicate', () => {
     const p = read('g.V(1).repeat(__.out()).until(__.has("name","ripple"))');
-    expect(p.sql).toContain('AS done');
-    expect(p.sql).toContain('c1.done=0');           // expand only from still-looping rows
-    expect(p.sql).toContain('WHERE done = 1');       // output satisfied rows
+    expect(p.spine).toBe('rel');
+    expect(p.sql).toMatch(/WITH RECURSIVE wk_w\d+\(id, lp0, bulk\)/);
+    expect(p.sql).toMatch(/w\d+\.lp0 \+ 1/);
+    expect(p.sql).toContain('IS NOT 1');             // NULL-safe: only predicate TRUE stops expansion
     expect(p.sql).not.toContain('depth <');          // no artificial depth cap — runs to fixpoint
   });
 
@@ -623,12 +624,13 @@ describe('repeat / path SQL', () => {
     expect(andp.sql).toContain(') AND (');
   });
 
-  test('while-do (until before repeat) qualifies the seed id in the correlated predicate', () => {
+  relOnly('while-do (until before repeat) qualifies the seed id in the correlated predicate', () => {
     const p = read('g.V(3).until(__.has("name","lop")).repeat(__.out())');
-    // seed source aliased `w` so until()'s correlated predicate references the seed as
-    // `node=w.id`, not the `node=id` self-match that would read the wrong row.
-    expect(p.sql).toContain('node=w.id');
-    expect(p.sql).not.toContain('node=id ');
+    expect(p.spine).toBe('rel');
+    // Both the seed and later rows are tested through the walk relation's qualified id, never the
+    // `node=id` self-match that would read the wrong property row.
+    expect(p.sql).toMatch(/rp\d+\.node = w\d+\.id/);
+    expect(p.sql).not.toContain('node = id');
   });
 
   test('until().path() carries both the JSONB path array and the done column', () => {
@@ -638,15 +640,12 @@ describe('repeat / path SQL', () => {
     expect(p.shape).toEqual({ kind: 'pathGrouped', elem: 'vertex', byKey: false });
   });
 
-  test('until(__.out()) correlates the EXISTS on the walk row via the FROM boundary', () => {
-    // until() has no generic (materialized) fallback — a CTE cannot reference the
-    // recursive term's outer row — so it correlates through the SAME inline movement
-    // child as where()/choose(). The walk aliases its edges `e`; the child's own movement
-    // also aliases `edges e`, but the seed `(SELECT e.tgt AS id)` is a FROM-clause derived
-    // table so the child's `e` is NOT laterally visible to it — the seed's `e.tgt` binds
-    // to the WALK's `e` through the WHERE-clause EXISTS boundary. No self-shadow, no xe.
+  relOnly('until(__.out()) correlates the EXISTS on the walk row via the FROM boundary', () => {
+    // The walk uses the SAME child predicate as where()/choose(), so its movement EXISTS is
+    // correlated directly to the qualified SelfRef row rather than to a private repeat compiler.
     const p = read('g.V(1).repeat(__.out()).until(__.out())');
-    expect(p.sql).toContain('EXISTS(SELECT 1 FROM (SELECT e.tgt AS id FROM edges e JOIN (SELECT e.tgt AS id) p ON e.src=p.id) c)');
+    expect(p.spine).toBe('rel');
+    expect(p.sql).toMatch(/EXISTS \(SELECT rme\d+\.tgt AS one FROM edges rme\d+ WHERE \(rme\d+\.src = w\d+\.id\)\)/);
   });
 
   test('until() defers the combinations not yet built', () => {

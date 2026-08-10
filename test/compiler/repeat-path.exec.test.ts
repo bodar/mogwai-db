@@ -7,7 +7,7 @@ import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { exec, executeQuery } from '../support/executor.ts';
 import { decode, decodeAll } from '../support/decode.ts';
 import { rawVertex } from '../support/graph.ts';
-import { bagOf, grouped as groupedRows, run, seededStore } from '../support/harness.ts';
+import { bagOf, grouped as groupedRows, relOnly, run, seededStore } from '../support/harness.ts';
 import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
 
 // ---------- execution semantics against a seeded store ----------
@@ -285,6 +285,14 @@ test('do-while: repeat(out()).until(pred) runs the body then tests, multiset-cor
   expect(uNames(store, 'g.V(1).repeat(__.out()).until(__.hasLabel("software"))').sort()).toEqual(['lop', 'lop', 'ripple']);
 });
 
+test('an unproductive until predicate does not exit the walk', () => {
+  const store = seededStore();
+  const query = "g.V(1).repeat(__.out()).until(__.values('missing').is(P.neq(29)))";
+  // `neq` is deliberately NULL-safe for a STORED null, so the separate productivity conjunct is
+  // load-bearing here: no `missing` value means the predicate produced nothing, not that it differed.
+  expect(uNames(store, query)).toEqual([]);
+});
+
 test('until(loops().is(n)) is equivalent to times(n)', () => {
   const store = seededStore();
   const byUntil = uNames(store, 'g.V(1).repeat(__.out()).until(__.loops().is(2))').sort();
@@ -556,16 +564,19 @@ describe('until()/emit(): the keyed-relation fallback', () => {
     }
   });
 
-  test('a PER-ITERATION predicate keeps the inline route and still fails closed beyond it', () => {
+  test('a PER-ITERATION state predicate keeps the inline route', () => {
     const store = seededStore();
     // loops()/sack() read state that does not exist per-vertex, so they are outside the row-local
     // vocabulary and keyedChildRelation declines them on its own — no separate guard needed.
     // These work because INLINE serves them; the keyed route is never consulted.
     expect(ids(store, 'g.V(1).until(__.loops().is(2)).repeat(__.out())').length).toBeGreaterThan(0);
-    // Beyond BOTH routes: a per-iteration body the inline compiler also declines. The deferral must
-    // name why rather than reciting a vocabulary.
-    expect(() => run(store, 'g.V(1).until(__.out().order().by("name").limit(1)).repeat(__.out())'))
-      .toThrow(/not yet supported/);
+  });
+
+  relOnly('the recursive walk inherits the shared predicate seam', () => {
+    const store = seededStore();
+    // The RelIR walk inherits the shared predicate seam. For productivity, order().limit(1) after a
+    // movement is exactly EXISTS; marko has an outgoing edge, so while-do emits the seed unchanged.
+    expect(ids(store, 'g.V(1).until(__.out().order().by("name").limit(1)).repeat(__.out())')).toEqual([1]);
   });
 });
 

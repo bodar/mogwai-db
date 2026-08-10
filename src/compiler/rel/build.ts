@@ -55,6 +55,10 @@ const CHANNEL_COL: Readonly<Record<ChannelRole, { readonly type: SqlType; readon
 export const carriedCols = (channels: Channels): readonly ColMeta[] =>
   channels.map((channel) => meta(channel.col, CHANNEL_COL[channel.role].type, CHANNEL_COL[channel.role].nullable));
 
+/** An element traverser's rowid followed by every carried channel, in canonical channel order. */
+export const elementCols = (channels: Channels): readonly ColMeta[] =>
+  [meta('id', 'int'), ...carriedCols(channels)];
+
 /** A relation's PAYLOAD columns: everything that is not a carried channel, in emission order. The
  *  payload-then-channels layout is an invariant of every relation this lowering builds, so a step
  *  that rebuilds a relation asks for the halves rather than re-deriving which is which. */

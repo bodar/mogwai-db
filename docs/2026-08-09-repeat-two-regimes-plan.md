@@ -607,9 +607,14 @@ moved `src/compiler/rel/`.
      declares the eventual element-walk contract but mints no relation and changes no route: `null`
      still hands the whole traversal to legacy. The child fold seam and recursive machinery wait for
      the first admitted form rather than landing as unreachable speculative code.
-   - Next admit one form per increment: `until(pred)`, then bare `emit()`, then `emit(pred)`, then a
-     sack folded through the walk. Each admission carries the §3.1 constraints (`childPredicate`,
-     `notProduced` for NULL-safe negation, `ChildValue.present` as its own conjunct) and its own L2 pin.
+   - ✅ **LANDED — predicate `until`, before or after `repeat`.** The walk re-enters the ordinary fold
+     over its `SelfRef`, and both the expansion guard and exit filter use the shared child predicate.
+     `notProduced` makes an unproductive predicate continue rather than becoming SQL's `NOT NULL`,
+     and the predicate arm's `ChildValue.present` remains its own conjunct (pinned with a missing-value
+     `neq`, the case that otherwise exits wrongly). Body effects, shape/channel changes, `times`,
+     `emit`, named loops and path/encounter state still decline.
+   - Next admit one form per increment: bare `emit()`, then `emit(pred)`, then a sack folded through
+     the walk. Each admission carries its own §3.1 constraint and L2 pin.
 7. **§7.4 item 4 — delete `bulk.ts`**, together with the byte budget item 4 names. After 4 lands this
    file is already unreachable for everything its tests cover, which is what makes the deletion small.
 8. **§7.4 item 1 — the per-position collapse answer.** Last, because it is the largest and because

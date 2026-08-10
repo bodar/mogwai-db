@@ -27,13 +27,13 @@ import { childSteps, normalize } from '../ir/passes.ts';
 import { containsTextSearch, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
-  and, byEncounter, carriedCols, EDGE_COLS, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, labelArgsAllStrings,
+  and, byEncounter, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, labelArgsAllStrings,
   labelIds, meta, minter, NODE_COLS, notProduced, or, PROPERTIES, renumber, storedValue, typeOf, withMergedVtype, type Minter,
 } from './build.ts';
 import { bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
 import { byExpr, modulations, orderProductivity, productivityFilter, propertyExists, propertyVtype, type Modulation } from './modulator.ts';
-import type { ChildHost, ChildRows, ChildSeam, ChildValue, HostRow, RootedRead, Subject } from './child.ts';
+import type { ChainRead, ChildHost, ChildRows, ChildSeam, ChildValue, HostRow, RootedRead, Subject } from './child.ts';
 import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
@@ -110,8 +110,7 @@ export interface RelLowering {
 
 /** A lowered chain BEFORE naming and the budget — the relation, plus the two facts about it that are
  *  not properties of the relation itself. Every tail function returns this shape. */
-type Tail = FramedRel & {
-  readonly aliases: AliasMap;
+type Tail = ChainRead & {
   /**
    * THE STATEMENTS THIS CHAIN RUNS BEFORE ITS RESULT IS READ — a write's effects, in execution order
    * (§3.0: effects are legal only at a `Plan` binding).
@@ -180,10 +179,6 @@ const encounterOf = (channels: Channels): Channel | undefined =>
  * chain no longer has one element shape decided at its source, so every producer here asks its
  * INPUT what it carries. A role this route grows tomorrow gets its column with no edit at all.
  */
-const elementCols = (channels: Channels): readonly ColMeta[] => [meta('id', 'int'), ...carriedCols(channels)];
-
-
-
 /**
  * A source-scope FILTER as a predicate over the element scan — the whole of `hasLabel`/`has` that
  * needs no predicate vocabulary.
@@ -4390,6 +4385,13 @@ const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
     : bodyPredicate(body, subject, fresh, ctx)),
   rooted: (steps) => rootedRead(steps, ctx, fresh),
   rows: (body, input, elem, aliases) => childRows(body, input, elem, aliases, ctx, fresh),
+  // `bulked: false` is a fold RESET, and it is safe for a reason worth naming rather than trusting:
+  // every step whose lowering READS `bulked` — the slice family and a grouping barrier — mints a
+  // `limit`/`window`/`sort`/`aggregate` node, and each of those is refused outright inside a
+  // recursive term (`BARRIER_IN_TERM`, src/rel/recursive.ts). So no caller of this seam can reach a
+  // step that would answer differently for a bulked row. Admitting a per-iteration barrier here
+  // would break that coincidence, and that is the increment that must pass `bulked` through.
+  chain: (input, framing, body, aliases) => continueAs(input, framing, body, 0, false, ctx, fresh, aliases),
   body: (nested, scope) => (scope === 'child'
     ? bodyOf(nested, ctx.params, ctx.sideEffects)
     : rootedSteps(nested, ctx.params, ctx.sideEffects)),
