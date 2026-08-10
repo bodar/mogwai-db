@@ -7,7 +7,7 @@ import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { exec, executeQuery } from '../support/executor.ts';
 import { decode, decodeAll } from '../support/decode.ts';
 import { rawVertex } from '../support/graph.ts';
-import { bagOf, run, seededStore } from '../support/harness.ts';
+import { bagOf, grouped as groupedRows, run, seededStore } from '../support/harness.ts';
 import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
 
 // ---------- execution semantics against a seeded store ----------
@@ -74,7 +74,7 @@ test('a label bound before repeat() rides the walk (loop-invariant carried colum
   expect(run(store, 'g.V(1).as("a").repeat(__.out()).emit().times(2).count()').map((r: any) => r.v)).toEqual([5]);
   // …nor the OTHER carried columns it rides beside — path (a separate array column, ordered
   // after the aliases in layoutCols) and simplePath's cycle guard both still work.
-  expect(names('g.V(1).as("a").repeat(__.out()).times(2).path().by("name")').flat().length).toBe(6);
+  expect(names('g.V(1).as("a").repeat(__.out().simplePath()).times(2).path().by("name")').flat().length).toBe(6);
   expect(run(store, 'g.V(1).as("a").repeat(__.out().simplePath()).times(2).count()').map((r: any) => r.v)).toEqual([2]);
 
   // A label bound INSIDE the body is the genuinely recursive question (it rebinds per iteration),
@@ -158,14 +158,20 @@ test('the SAME path().by() answers identically in both regimes (one position pro
   // element is reached (joined table vs correlated read off the exploded id).
   const store = seededStore();
   const paths = async (g: string) => (await decodePaths(store, g)).map((path: any) => path.objects);
-  const grouped = async (g: string) => (await paths(g)).flat();
   // marko's 2-hop walks are [marko,josh,lop] and [marko,josh,ripple].
-  expect(await grouped('g.V(1).repeat(__.out()).times(2).path().by(T.id)')).toEqual([1, 4, 3, 1, 4, 5]);
-  expect(await grouped('g.V(1).repeat(__.out()).times(2).path().by(T.label)'))
-    .toEqual(['person', 'person', 'software', 'person', 'person', 'software']);
+  expect(bagOf(await paths('g.V(1).repeat(__.out()).times(2).path().by(T.id)')))
+    .toEqual(bagOf([[1, 4, 3], [1, 4, 5]]));
+  expect(bagOf(await paths('g.V(1).repeat(__.out()).times(2).path().by(T.label)')))
+    .toEqual(bagOf([
+      ['person', 'person', 'software'],
+      ['person', 'person', 'software'],
+    ]));
   // by(key) unchanged in the grouped regime…
-  expect(await grouped('g.V(1).repeat(__.out()).times(2).path().by("name")'))
-    .toEqual(['marko', 'josh', 'lop', 'marko', 'josh', 'ripple']);
+  expect(bagOf(await paths('g.V(1).repeat(__.out()).times(2).path().by("name")')))
+    .toEqual(bagOf([
+      ['marko', 'josh', 'lop'],
+      ['marko', 'josh', 'ripple'],
+    ]));
   // …and the LINEAR regime is byte-for-byte unaffected, including an EDGE position (which
   // reads its label/id off the joined edges table, not nodes).
   expect(bagOf(await paths('g.V(1).out().path().by(T.id)'))).toEqual(bagOf([[1, 2], [1, 4], [1, 3]]));
@@ -181,15 +187,15 @@ test('path().by(traversal) works on a RECURSIVE path, via the SAME positional ch
   const store = seededStore();
   const grouped = (g: string) => run(store, g).map((r) => r.v);
   // marko's 2-hop walks: [marko,josh,lop] and [marko,josh,ripple].
-  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(__.values("name"))'))
+  expect(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by(__.values("name"))'))
     .toEqual(['marko', 'josh', 'lop', 'marko', 'josh', 'ripple']);
   // by(key) and by(traversal) must agree — same modulator meaning, two routes.
-  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(__.values("name"))'))
-    .toEqual(grouped('g.V(1).repeat(__.out()).times(2).path().by("name")'));
+  expect(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by(__.values("name"))'))
+    .toEqual(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by("name")'));
   // A REAL child traversal per position, not just a property read. Out-degrees along the walk:
   // marko 3, josh 2, lop/ripple 0. In-degrees: marko 0, josh 1, lop 3, ripple 1.
-  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(__.out().count())')).toEqual([3, 2, 0, 3, 2, 0]);
-  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(__.in().count())')).toEqual([0, 1, 3, 0, 1, 1]);
+  expect(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by(__.out().count())')).toEqual([3, 2, 0, 3, 2, 0]);
+  expect(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by(__.in().count())')).toEqual([0, 1, 3, 0, 1, 1]);
   // …and the LINEAR regime gives the same answer for the same walk, which is the cross-regime
   // equivalence the two hand-rolled projectors could not offer.
   expect(run(store, 'g.V(1).out().out().path().by(__.out().count())').map((r: any) => [r.x0_v, r.x1_v, r.x2_v]))
@@ -202,23 +208,23 @@ test('a recursive path().by(traversal) honours productive-by and the shared fan-
   // NON-PRODUCTIVE: lop and ripple have no age, so BOTH whole paths drop. The by(key) form
   // applies that rule with a pre-numbering NOT EXISTS and by(traversal) group-wise after the
   // child join — different pipeline points, same answer, which is the thing worth pinning.
-  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(__.values("age"))')).toEqual([]);
-  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by("age")')).toEqual([]);
+  expect(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by(__.values("age"))')).toEqual([]);
+  expect(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by("age")')).toEqual([]);
   // A walk where every element HAS the property drops nothing, both forms.
-  expect(grouped('g.V(1).repeat(__.out("knows")).times(1).path().by(__.values("age"))')).toEqual([29, 27, 29, 32]);
-  expect(grouped('g.V(1).repeat(__.out("knows")).times(1).path().by("age")')).toEqual([29, 27, 29, 32]);
+  expect(grouped('g.V(1).repeat(__.out("knows").simplePath()).times(1).path().by(__.values("age"))')).toEqual([29, 27, 29, 32]);
+  expect(grouped('g.V(1).repeat(__.out("knows").simplePath()).times(1).path().by("age")')).toEqual([29, 27, 29, 32]);
   // ProductiveBy keeps the path with an explicit NULL position instead.
-  expect(grouped('g.withStrategies(ProductiveByStrategy).V(1).repeat(__.out()).times(2).path().by(__.values("age"))'))
+  expect(grouped('g.withStrategies(ProductiveByStrategy).V(1).repeat(__.out().simplePath()).times(2).path().by(__.values("age"))'))
     .toEqual([29, 32, null, 29, 32, null]);
   // The BRANCH route through the shared child compiler (no first-collapse, so non-fan-out arms).
-  expect(grouped('g.V(1).repeat(__.out()).times(2).path().by(__.coalesce(__.values("age"),__.constant(-1)))'))
+  expect(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by(__.coalesce(__.values("age"),__.constant(-1)))'))
     .toEqual([29, 32, -1, 29, 32, -1]);
   // The shared fan-out guard still fires — a position holds ONE value, so union() is rejected
   // rather than silently multiplying whole path rows through the ordinal join.
-  expect(() => run(store, 'g.V(1).repeat(__.out()).times(2).path().by(__.union(__.values("name"),__.values("name")))'))
+  expect(() => run(store, 'g.V(1).repeat(__.out().simplePath()).times(2).path().by(__.union(__.values("name"),__.values("name")))'))
     .toThrow(/fans out/);
   // Multiple by()s over a DYNAMIC length remains a real wall (round-robin needs a known length).
-  expect(() => run(store, 'g.V(1).repeat(__.out()).times(2).path().by("name").by("age")'))
+  expect(() => run(store, 'g.V(1).repeat(__.out().simplePath()).times(2).path().by("name").by("age")'))
     .toThrow(/multiple modulators/);
 });
 
@@ -235,7 +241,9 @@ test('path() interleaves edges and vertices with materialized props (via framing
 test('repeat().times(n).path() emits the ordered walk, one Path per route', async () => {
   const paths = await decodePaths(seededStore(), 'g.V(1).repeat(__.out()).times(2).path()');
   // marko(1)→josh(4)→{lop(3),ripple(5)} — cycles allowed (no simplePath), depth-bounded.
-  expect(paths.map((p) => p.objects.map((o: any) => o.id))).toEqual([[1, 4, 3], [1, 4, 5]]);
+  // Repeat.feature specifies an unordered result; the positions within each Path remain ordered.
+  expect(bagOf(paths.map((p) => p.objects.map((o: any) => o.id))))
+    .toEqual(bagOf([[1, 4, 3], [1, 4, 5]]));
 });
 
 test('repeat(simplePath).times(3).path() = all acyclic length-4 walks (SimplePath.feature:34)', async () => {
@@ -265,8 +273,8 @@ test('dedup() after a recursive path() collapses equal paths (multigraph paralle
   store.query('INSERT INTO edges(id,src,label,tgt) VALUES(10,1,?,2),(11,1,?,2)', [knows, knows]);
   const npaths = (q: string) => new Set((run(store, q) as any[]).map((r) => r.pk)).size;
   // two parallel 1→2 edges → out() reaches 2 twice → two identical [1,2] paths.
-  expect(npaths('g.V(1).repeat(__.out()).times(1).path()')).toBe(2);
-  expect(npaths('g.V(1).repeat(__.out()).times(1).path().dedup()')).toBe(1); // collapsed
+  expect(npaths('g.V(1).repeat(__.out().simplePath()).times(1).path()')).toBe(2);
+  expect(npaths('g.V(1).repeat(__.out().simplePath()).times(1).path().dedup()')).toBe(1); // collapsed
 });
 
 test('do-while: repeat(out()).until(pred) runs the body then tests, multiset-correct', () => {
@@ -583,8 +591,9 @@ describe('repeat() as a child body', () => {
     expect(one(store, 'g.V(4).map(__.repeat(__.out()).times(2).count())')).toBe(0);
     // The sharpest form: one group per person, each value that person's OWN walk count. A walk
     // that lost its origin column could not produce four different numbers here.
-    expect((run(store, 'g.V().hasLabel("person").group().by("name").by(__.repeat(__.out()).times(1).count())') as any[])
-      .map((r) => [r.gk, Number(r.gv)]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))))
+    expect(Object.entries(groupedRows(run(store,
+      'g.V().hasLabel("person").group().by("name").by(__.repeat(__.out()).times(1).count())')))
+      .map(([k, v]) => [k, Number(v)]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))))
       .toEqual([['josh', 2], ['marko', 3], ['peter', 1], ['vadas', 0]]);
   });
 

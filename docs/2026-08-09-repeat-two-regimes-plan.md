@@ -583,12 +583,17 @@ moved `src/compiler/rel/`.
    assertion read legacy's internal `gk`/`gv` rows. It now asserts the public framed Map on either
    spine. `test:perturbed` kept the exact same ten failure names as the pre-increment SHA; L3 stayed
    1783/1693 and the census stayed 1208.
-4. **Widen the unroll — delete the "nothing to gain unless a barrier was blocking it" guard.** §1a is
-   the argument, and its blocker is discharged (the retractions are on trunk). **Test this before
-   assuming it:** it is the increment most likely to move L3 and the census, it is where the 600 s hang
-   lived, and it must be measured with an L3 WALL-CLOCK in band as well as a green gate. Expect L2 SQL
-   pins that name `bulk.ts`'s spelling to need repointing to the generic collapse's — assert STRUCTURE
-   and spine-agnostically, since these files run under both spines.
+4. ✅ **LANDED — widen the unroll by deleting the "nothing to gain unless a barrier was blocking it"
+   guard.** Every bounded body now takes the phase regime; `withoutStrategies(RepeatUnrollStrategy)`
+   still suppresses exactly upstream's barrier-free subset. The generic per-phase collapse replaced
+   the repeat-specific SQL spelling without changing legacy production code, so the affected L2 pins
+   now assert shared structure rather than a spine's private spelling. Measured: L3 moved
+   1783→1787 RelIR and 1693→1697 legacy, with no regressions; the census gained four executing
+   traversals and RelIR coverage moved 1208→1232. One existing unordered `range()` scenario changed
+   digest on BOTH spines; TinkerPop specifies only membership for it, so this is not a semantic change.
+   The dedicated L3 wall-clock was 35.9 s (49 pass), the full gate stayed in its normal multi-minute
+   band rather than the former 600 s hang, and reverse-scan perturbation retained exactly its prior ten
+   failure names. Seven SQL byte ceilings were re-recorded for the deliberately expanded phase SQL.
 5. **The `loops` channel role** — one `ChannelRole` plus five total-table entries in `src/channels.ts`.
    Additive and behaviour-free on its own (nothing mints the channel yet), so it is green trivially, and
    `obligations.ts` needs NOTHING because every obligation already reads the role tables. Land it before

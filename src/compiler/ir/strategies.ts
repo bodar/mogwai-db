@@ -1127,11 +1127,10 @@ type ChildBody = (nested: any, params: Record<string, any>) => IRStep[];
  * `repeat(body).times(n)` → the body spliced n times, when every step in the body is one an
  * unrolled phase reproduces exactly.
  *
- * This is TinkerPop's `RepeatUnrollStrategy` widened by exactly one step name, and the widening is
- * the whole point: the bodies that strategy admits (movement + `has()`) already compile here through
- * the flat expansion, so unrolling THOSE buys nothing. What does not compile is a body with a
- * barrier, because a recursive CTE cannot window across iterations — and an unrolled body has no
- * iterations to window across. See `UNROLLABLE_BARRIERS` for why the admitted set is one name.
+ * This is TinkerPop's `RepeatUnrollStrategy` widened past its conservative barrier boundary. Every
+ * bounded body in the admitted set unrolls: an ordinary phase can collapse its multiset frontier,
+ * while SQLite forbids the aggregate that collapse requires inside a recursive term. Barriers have
+ * the additional expressiveness argument recorded by `UNROLLABLE_BARRIERS`.
  *
  * Runs BEFORE `formRepeatRegions` and on the FLAT chain, which is what makes it cheap: the spliced
  * steps are ordinary chain steps and every later pass — modulator absorption, the simplify group,
@@ -1213,9 +1212,11 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
   // admitted set, so the two cannot drift apart as either grows.
   const widensPastTheStrategy = body.some((s) => s.name in UNROLLABLE_BARRIERS);
   if (rep.unrollSuppressed && !widensPastTheStrategy) return null;
-  // Nothing to gain unless a barrier is what was blocking it: a barrier-free body already lowers
-  // through the flat expansion, and unrolling it would change the SQL for no capability.
-  if (!widensPastTheStrategy) return null;
+  // Barrier-free bodies unroll too. A bounded frontier is a multiset, and only an ordinary phase can
+  // collapse it with GROUP BY + SUM(bulk): SQLite forbids that aggregate in a recursive term. This is
+  // Calcite's COUNT-over-partitions then SUM contract (`SqlSplittableAggFunction.CountSplitter`) at
+  // each phase boundary. TinkerPop's strategy remains suppressible above; its conservative admitted
+  // set and provider-independent concern do not define this compiler's physical regime split.
   // §3.6's statement-text budget, owned where the multiplication happens (see MAX_UNROLLED_STEPS).
   if (n * body.length > MAX_UNROLLED_STEPS) return null;
   const phases: Step[] = [];

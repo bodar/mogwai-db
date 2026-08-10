@@ -1795,11 +1795,10 @@ describe('the RelIR spine', () => {
     // Asking for RelIR does not make an uncovered chain route there, and asking for legacy always
     // works. Coverage is a property of the CHAIN; if these ever diverge the router has started
     // deciding something the lowering should own.
-    // Any chain the fold has not learned serves — this one is `repeat()`, and it will need replacing
-    // when that lands, which is the point: there is no permanently uncovered chain and pinning one
-    // would be pinning a gap rather than the rule. (It was `valueMap()` until the map producer landed,
-    // which is this comment working as intended.)
-    expect(read('g.V().repeat(__.both()).times(2)', { spine: 'rel' }).spine).toBe('legacy');
+    // Any chain the fold has not learned serves, and it must be replaced when that one lands: the
+    // witness was valueMap(), then bounded repeat(), and is now match(). The churn is the point—no
+    // permanently unsupported traversal is being mistaken for the routing rule.
+    expect(read("g.V().match(__.as('a').out('created').as('b'))", { spine: 'rel' }).spine).toBe('legacy');
     expect(read('g.V()', { spine: 'legacy' }).spine).toBe('legacy');
     expect(read('g.V()', { spine: 'rel' }).spine).toBe('rel');
   });

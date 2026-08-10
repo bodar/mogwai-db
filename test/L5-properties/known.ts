@@ -11,22 +11,12 @@
 // semantic authority, so a difference is always a defect in the optimized lowering (or in a layer
 // beneath both).
 //
-// The ONE principled exception, and it is the ORACLE's blind spot rather than a licence: where
-// TinkerPop itself leaves an emission ORDER unspecified (a `the result should be OF` scenario), the
-// two routes may legitimately pick different valid windows — and a POSITIONAL consumer turns that
-// within-spec order difference into a `multiset` difference this oracle cannot tell from a wrong
-// answer. Such an entry is kept because this is the only channel that can suppress it, and it must
-// PROVE within-spec by citing the reference scenario — never assert it. `repeatBodyExpansion` is the
-// only one, and the day the oracle can read a traversal's reference assertion it moves out of here.
-//
 // ****  EMPTY IS THE INTENDED STATE. THE LIST IS NOT EMPTY — see the entries below.  ****
 //
 // (This line claimed emptiness while an entry already sat below it; a header that describes a state
-// the file has left is worse than no header, because it is read as a summary. TWO entries today:
-// `repeatBodyExpansion`, an under-determined emission ORDER neither route owns (the within-spec
-// exception above); and `predicateInlining`, a genuine contract defect — the generic path THROWS on a
-// child body the fast path answers (a slice-then-values existence test the legacy child lowering
-// cannot express).
+// the file has left is worse than no header, because it is read as a summary. One entry remains:
+// `predicateInlining`, a genuine contract defect — the generic path THROWS on a child body the fast
+// path answers (a slice-then-values existence test the legacy child lowering cannot express).
 //
 // The `propertySeek` entry that sat here was NOT a fast-path defect at all — it was a wrong ANSWER
 // present in BOTH spine positions (this oracle's own blind spot), which `propertySeek` merely masked
@@ -87,35 +77,6 @@ export interface KnownDivergence {
 }
 
 export const KNOWN: readonly KnownDivergence[] = [
-  {
-    query: 'g.V().repeat(__.both()).times(3).range(5, 11)',
-    fastPath: 'repeatBodyExpansion',
-    diagnosis:
-      "repeat()'s two body routes emit the walk in different orders, and a POSITIONAL consumer after "
-      + 'the walk then picks a different window from the same multiset. The flat expansion walks the '
-      + 'frontier inline; the keyed relation joins a precompiled (from_id, to_id) table, and SQLite '
-      + 'has no reason to visit the two in the same order. Neither is wrong ON ITS OWN — the walk has '
-      + 'no emission order to be faithful to, because a recursive CTE cannot window across iterations '
-      + '(the encounter demand pass returns false at repeat()/match() for exactly this reason, '
-      + 'ir/analyze.ts). '
-      + 'AND TINKERPOP AGREES THE ORDER IS UNSPECIFIED — THIS IS NOT A LOWERING DEFECT: the reference '
-      + 'scenario for this EXACT traversal, g_V_repeatXbothX_timesX3X_rangeX5_11X, asserts `the result '
-      + 'should be OF` v[marko]/v[josh]/v[peter]/v[lop]/v[vadas]/v[ripple] — i.e. each of the six '
-      + 'results need only be ONE OF the six vertices, not a fixed window (vendor/tinkerpop/gremlin-'
-      + 'test/src/main/resources/org/apache/tinkerpop/gremlin/test/features/filter/Range.feature, at '
-      + 'the pin). Both routes return six valid vertices, so both PASS conformance; they simply pick '
-      + "different valid windows. This is the `order`-telemetry class that a slice amplified into a "
-      + 'multiset difference the oracle cannot recognise as within-spec — the limitation is the '
-      + "ORACLE's (it compares specific multisets), not the lowering's. It is kept here because that "
-      + 'is the only channel to suppress it; docs/outstanding-work.md item 20 names this traversal as '
-      + 'EXPECTED under the perturbation instrument (an exemption, not a fix), and item 4 owns the '
-      + 'OPTIONAL primitive that would make repeat()-then-slice determinate — a nicety the reference '
-      + 'does not require, NOT a correctness debt. '
-      + 'THIS ENTRY IS WHY THE FLAG WAS ADDED: the flat expansion always won where it recognised a '
-      + 'body, so nothing could compare the two routes at all. The first sweep with the switch found '
-      + 'exactly one disagreement across the corpus, which is the useful result either way.',
-    family: { query: /^g\.V\(\)\.repeat\(__\.both\(\)\)\.times\(3\)\.range\(/ },
-  },
   {
     query: "g.V(1).outE().outV().has('name', TextP.containing('a')).where(__.out().range(0, 2).values('name'))",
     fastPath: 'predicateInlining',

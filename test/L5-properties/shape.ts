@@ -48,6 +48,15 @@ export interface Transition {
   /** Input shape of each child body this step needs. Empty/absent = no child traversal. */
   readonly bodies?: readonly Shape[];
   /**
+   * Shape each child body must also END at when this step's declared output depends on the body.
+   *
+   * `bodies` constrains only the input. Filters pass their host through whatever their predicate
+   * body produces, but branch/local/repeat outputs inherit the body: claiming `vertex` for
+   * `repeat(__.inE()).times(1)` made the generator's own type assertion false. Repeat especially
+   * must be an endomorphism for iteration two to accept iteration one's output.
+   */
+  readonly bodyEnds?: Shape;
+  /**
    * For a LIST transition: only legal when the list's MEMBERS have this shape.
    *
    * `list` is the one state that is not self-describing — a list of numbers and a list of vertices
@@ -111,10 +120,10 @@ function elementSteps(kind: 'vertex' | 'edge'): Transition[] {
     { name: 'or', to: self, bodies: [self, self], render: (c) => `or(${c.bodies[0]}, ${c.bodies[1]})` },
 
     // ---- branches: one arm triage, four merges (src/compiler/steps/CLAUDE.md)
-    { name: 'union', to: self, bodies: [self, self], render: (c) => `union(${c.bodies[0]}, ${c.bodies[1]})` },
-    { name: 'coalesce', to: self, bodies: [self, self], render: (c) => `coalesce(${c.bodies[0]}, ${c.bodies[1]})` },
-    { name: 'optional', to: self, bodies: [self], render: (c) => `optional(${c.bodies[0]})` }, // singleHopOptional
-    { name: 'local', to: self, bodies: [self], render: (c) => `local(${c.bodies[0]})` },
+    { name: 'union', to: self, bodies: [self, self], bodyEnds: self, render: (c) => `union(${c.bodies[0]}, ${c.bodies[1]})` },
+    { name: 'coalesce', to: self, bodies: [self, self], bodyEnds: self, render: (c) => `coalesce(${c.bodies[0]}, ${c.bodies[1]})` },
+    { name: 'optional', to: self, bodies: [self], bodyEnds: self, render: (c) => `optional(${c.bodies[0]})` }, // singleHopOptional
+    { name: 'local', to: self, bodies: [self], bodyEnds: self, render: (c) => `local(${c.bodies[0]})` },
 
     // ---- ordering / slicing: the positional consumers that make the emission-order encounter live
     { name: 'order', to: self, render: (c) => `order().by(${lit(c.pick(keys))}${c.pick(['', ', asc', ', desc'])})` },
@@ -159,7 +168,7 @@ const VERTEX: Transition[] = [
   { name: 'cyclicPath', to: 'vertex', render: () => 'cyclicPath()' },
   // repeat() has NO artificial depth cap (CLAUDE.md) — a cyclic body without simplePath() is
   // infinite per the spec, so every generated loop is bounded by times().
-  { name: 'repeat', to: 'vertex', bodies: ['vertex'], render: (c) => `repeat(${c.bodies[0]}).times(${c.pick([1, 2])})` },
+  { name: 'repeat', to: 'vertex', bodies: ['vertex'], bodyEnds: 'vertex', render: (c) => `repeat(${c.bodies[0]}).times(${c.pick([1, 2])})` },
 ];
 
 // ---------- edge ----------

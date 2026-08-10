@@ -142,28 +142,26 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
   test('traverser bulking: times(n).count() unrolls to GROUP-BY-SUM(bulk) CTEs, not a recursion', () => {
     const c = read('g.V().repeat(__.out()).times(3).count()');
     expect(c.shape).toEqual({ kind: 'value', type: STATIC('long') });
-    // The bulk path: a per-depth GROUP-BY-SUM, one non-recursive CTE per hop, summed at
-    // the end. SQLite rejects an aggregate in a recursive term, so it MUST NOT recurse.
+    // One per-hop GROUP-BY-SUM, then a final sum. The widened IR unroll runs above the routing
+    // switch, so this is the ordinary movement collapse rather than bulk.ts's repeat-specific route.
+    // Assert the structure spine-neutrally: RelIR and legacy use different aliases and case.
     expect(c.sql).not.toContain('recursive');
-    expect(c.sql).toContain('SUM(b) AS bulk');
-    expect(c.sql).toContain('GROUP BY nb');
-    expect(c.sql).toContain('COALESCE(SUM(s.bulk), 0) AS v');
-    // times(3) → f0 (seed) + three hop CTEs.
-    expect((c.sql.match(/GROUP BY nb/g) ?? []).length).toBe(3);
+    expect(c.sql).toMatch(/sum\((?:\w+\.)?bulk\) AS bulk/i);
+    expect(c.sql).toMatch(/COALESCE\(sum\(/i);
+    expect((c.sql.match(/GROUP BY/g) ?? []).length).toBe(3);
     // A post-repeat as()/movement/select() chain discarded by count remains bulkable: the
     // collapsed frontier re-enters generic lowering, and count() sums bulk regardless of the
     // identity as()/select() name (cardinality is unchanged). The times(5) unroll is five
-    // GROUP-BY-SUM frontiers; the post-as() out("writtenBy") hop rides bulk forward as a plain
-    // UNION-ALL movement (per-hop collapse is off once an alias is live) — still bounded from the
-    // |V|-bounded frontier, never the exponential walk count, and never a recursion.
+    // GROUP-BY-SUM frontiers. The count-terminal retractions remove the unobservable select and its
+    // now-dead aliases, so the post-repeat out("writtenBy") hop collapses too: six phases in total.
     const selected = read('g.V().repeat(__.out()).times(5).as("a").out("writtenBy").as("b").select("a","b").count()');
     expect(selected.sql).not.toContain('recursive');
-    expect((selected.sql.match(/GROUP BY nb/g) ?? []).length).toBe(5);
+    expect((selected.sql.match(/GROUP BY/g) ?? []).length).toBe(6);
     expect(selected.shape).toEqual({ kind: 'value', type: STATIC('long') });
-    // A NON-bulkable repeat (path/emit/complex body) stays the enumerate-walk
-    // recursion — bulking must not hijack it. emit() has no compile-time depth.
+    // A body the splice cannot express stays recursive. A trailing path() is not such a body—it now
+    // rides the flat phases—so simplePath() belongs inside the repeat to keep this a walk assertion.
     expect(read('g.V(1).repeat(__.out()).emit().times(2).count()').sql).toContain('recursive');
-    expect(read('g.V(1).repeat(__.out()).times(2).path()').sql).toContain('recursive');
+    expect(read('g.V(1).repeat(__.out().simplePath()).times(2).path()').sql).toContain('recursive');
   });
 
   test('result-preserving optimization strategies accepted as no-ops (correct-by-design)', () => {

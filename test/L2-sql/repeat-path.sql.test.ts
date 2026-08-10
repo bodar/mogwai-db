@@ -34,17 +34,17 @@ describe('repeat / path SQL', () => {
     expect(() => compile('g.V().as("a").both().as("b").dedup("a","b").by(__.out())', {})).toThrow('not yet supported');
   });
 
-  test('repeat().times() → WITH RECURSIVE walk c1(id, depth); final depth only', () => {
+  test('a bounded times(n) unrolls into phases; an unexpressible body still walks', () => {
     const p = read('g.V().repeat(__.out()).times(2).values("name")');
-    expect(p.sql).toContain('with recursive');
-    expect(p.sql).toContain('as (SELECT id, 0 AS depth FROM c0 UNION ALL SELECT e.tgt AS id, c1.depth + 1 AS depth FROM c1 JOIN edges e ON e.src=c1.id WHERE c1.depth < 2)');
-    expect(p.sql).toContain('WHERE depth = 2');
+    expect(p.sql).not.toContain('with recursive');
+    expect((p.sql.match(/(?:FROM|JOIN) edges\b/g) ?? []).length).toBe(2);
+    expect(read('g.V(1).repeat(__.out().simplePath()).times(2).path()').sql.toLowerCase())
+      .toContain('with recursive');
   });
 
   test('emit position controls the projected depth band', () => {
     expect(read('g.V().repeat(__.out()).times(2).emit()').sql).toContain('WHERE depth >= 1'); // after → iterations
     expect(read('g.V().emit().repeat(__.out()).times(2)').sql).toContain('WHERE depth >= 0'); // before → + seed
-    expect(read('g.V().repeat(__.out()).times(2)').sql).toContain('SUM(b) AS bulk');           // times only, single move → the bulk unroll (bounded frontier, no recursion)
   });
 
   test('emit(predicate) carries an emit column tested per row (same engine as until)', () => {
@@ -94,17 +94,12 @@ describe('repeat / path SQL', () => {
     expect(framed.length).toBeLessThanOrEqual(12);
     expect(framed.reduce((s, f) => s + f.bulk, 0n)).toBe(2572306572n);
 
-    // A flavour of the gap at a depth the recursive path still finishes (times(4) ≈ tens of ms):
-    // the bulk unroll is orders of magnitude faster. Loose bound (real gap ~170×) so a busy CI box
-    // never flakes; the measured numbers print under `$MOGWAI_VERBOSE` (a benchmark line on every
-    // green run is exactly the output nobody reads).
-    const ms = (bulk: boolean) => {
-      const p = read('g.V().repeat(__.both()).times(4).count()', { fastPaths: { bulkRepeatCount: bulk } });
-      const t = performance.now(); store.query(p.sql, p.binds); return performance.now() - t;
-    };
-    const bulkMs = ms(true), recursiveMs = ms(false);
-    detail(() => `bulk repeat times(4) on K12: bulk ${bulkMs.toFixed(2)}ms vs recursive ${recursiveMs.toFixed(1)}ms (${(recursiveMs / bulkMs).toFixed(0)}×)`);
-    expect(recursiveMs).toBeGreaterThan(bulkMs * 5);
+    // Collapse is now structural rather than controlled by bulkRepeatCount: bounded repeats splice
+    // above the switch and every phase collapses through the ordinary movement machinery.
+    const collapsed = read('g.V().repeat(__.both()).times(4).count()');
+    expect(collapsed.sql).not.toContain('recursive');
+    expect((collapsed.sql.match(/sum\([^)]*bulk\) AS bulk/gi) ?? []).length).toBe(4);
+    detail(() => 'bulk repeat times(4) on K12: 4 per-hop collapses, no recursive term');
   });
 
   test('bulk overflowing i64 fails loud (native, matches TinkerPop long bulk)', () => {
@@ -138,14 +133,16 @@ describe('repeat / path SQL', () => {
     ]) {
       const p = compile(gq, {}); if (p.kind !== 'read') throw new Error('read');
       expect(p.sql).not.toContain('recursive');
-      expect(p.sql).toContain('SUM(b) AS bulk'); // the unrolled per-hop frontier collapse
+      expect(p.sql).toMatch(/sum\([a-z0-9_.]*bulk\) AS bulk/i); // per-hop frontier collapse
+      expect(p.sql.toUpperCase()).toContain('GROUP BY');
     }
 
     // Correctness: groupCount() per vertex sums to the full traverser total (each of 12 ids gets
     // its multiplicity), and values('w').sum() = w·(total) with w=2. All computed in ms.
-    const gc = Object.fromEntries(
-      store.query<{ gk: any; gv: number }>(...(() => { const p = compile('g.V().repeat(__.both()).times(8).groupCount().by(T.id)', {}); if (p.kind !== 'read') throw new Error('read'); return [p.sql, p.binds] as const; })())
-        .map((r) => [String(r.gk), Number(r.gv)]));
+    // `grouped` reads legacy's `(gk, gv)` rows and RelIR's framed Map through one public-result view.
+    const gc = Object.fromEntries(Object.entries(
+      grouped(run(store, 'g.V().repeat(__.both()).times(8).groupCount().by(T.id)')),
+    ).map(([k, v]) => [k, Number(v)]));
     const total = Object.values(gc).reduce((s, n) => s + n, 0);
     expect(total).toBe(2572306572);
     expect(Object.keys(gc).length).toBe(12); // one bounded key per reachable vertex, not 2.5e9 rows
@@ -312,22 +309,22 @@ describe('repeat / path SQL', () => {
     // …and a cluster with NO repeat at all is invalid Gremlin, not a deferral — refused with
     // StandardVerificationStrategy's own wording (see test/compiler/by-modulator-arity).
     expect(() => compile('g.V().emit().times(2)', {})).toThrow('The repeat()-traversal was not defined');
-    // a second repeat is NOT swallowed — it compiles as a chained cluster (two walks)
+    // A second repeat is not swallowed: bounded, each cluster contributes its own spliced hop.
     const chained = read('g.V().repeat(__.out()).times(1).repeat(__.out()).times(1).values("name")');
-    expect((chained.sql.match(/UNION ALL SELECT e\.tgt/g) || []).length).toBe(2); // two walk CTEs
+    expect((chained.sql.match(/(?:FROM|JOIN) edges\b/g) ?? []).length).toBe(2);
   });
 
   test('repeat() body generality: movement + has(), multi-hop, both()-cartesian', () => {
-    // bare single movement stays unchanged (alias `e`, no per-hop suffix).
-    expect(read('g.V(1).repeat(__.out()).times(2)').sql).toContain('JOIN edges e ON e.src=');
+    // emit() keeps these assertions on the recursive body's movement compiler.
+    expect(read('g.V(1).repeat(__.out()).times(2).emit()').sql).toContain('JOIN edges e ON e.src=');
     // movement + has() → a correlated EXISTS filter on the hop's landing node.
-    const f = read('g.V(1).repeat(__.out().has("lang","java")).times(2)');
+    const f = read('g.V(1).repeat(__.out().has("lang","java")).times(2).emit()');
     expect(f.sql).toContain('JOIN edges re1 ON re1.src=');
     expect(f.sql).toContain('EXISTS(SELECT 1 FROM vertex_properties'); // the has() filter
     // multi-hop body → a JOIN chain (two edges) in one recursive SELECT.
-    expect(read('g.V(1).repeat(__.in().out()).times(2)').sql).toMatch(/JOIN edges re1 .* JOIN edges re2 /);
+    expect(read('g.V(1).repeat(__.in().out()).times(2).emit()').sql).toMatch(/JOIN edges re1 .* JOIN edges re2 /);
     // both() + has() → cartesian over both directions = 2 recursive SELECTs.
-    const b = read('g.V().repeat(__.both().has("age",P.lt(30))).times(2)');
+    const b = read('g.V().repeat(__.both().has("age",P.lt(30))).times(2).emit()');
     expect((b.sql.match(/EXISTS\(SELECT 1 FROM vertex_properties/g) || []).length).toBe(2);
     // Barrier/collection body steps still defer — they cannot live in a recursive term. `dedup`, the
     // slice family and `order` are no longer among them: a fixed times(n) UNROLLS each into n
@@ -337,8 +334,9 @@ describe('repeat / path SQL', () => {
     // …and the dedup body reaches SQL now, with no recursive term at all — n spliced phases.
     expect(read('g.V().repeat(__.out().dedup()).times(2)').sql).not.toContain('RECURSIVE');
     expect(() => compile('g.V().repeat(__.local(__.out())).times(2)', {})).toThrow('not yet supported');
-    // multi-hop body + path() defers (intermediate positions lost).
-    expect(() => compile('g.V(1).repeat(__.in().out()).times(2).path()', {})).toThrow('multi-hop repeat() body');
+    // A recursive multi-hop path still defers; bounded movements flatten into an ordinary path.
+    expect(() => compile('g.V(1).repeat(__.in().out().simplePath()).times(2).path()', {})).toThrow('multi-hop repeat() body');
+    expect(read('g.V(1).repeat(__.in().out()).times(2).path()').shape.kind).toMatch(/^(path|jsonbPath)$/);
   });
 
   test('path() threads a per-position column through the movement fold', () => {
@@ -407,7 +405,7 @@ describe('repeat / path SQL', () => {
       expect(rel.sql).toContain('COALESCE(sum(');
     }
     // count() over a recursive (grouped) path → COUNT(DISTINCT pk), not exploded elements
-    const rc = read('g.V(1).repeat(__.out()).times(2).path().count()');
+    const rc = read('g.V(1).repeat(__.out().simplePath()).times(2).path().count()');
     expect(rc.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(rc.sql).toContain('COUNT(DISTINCT');
     // is(typeOf(GType.PATH)) is identity — a path IS a Path, so the result stays a path
@@ -456,7 +454,8 @@ describe('repeat / path SQL', () => {
     expect(() => compile('g.V().as("a").out().path().from("z")', {})).toThrow('not bound to a path position');
     // from()/to() over a recursive repeat().path() fails closed (a recursive path has no
     // static per-position labels — here the as()-before-repeat deferral trips first).
-    expect(() => compile('g.V().as("a").repeat(__.out()).times(2).path().from("a")', {})).toThrow('not yet supported');
+    expect(() => compile('g.V().as("a").repeat(__.out().simplePath()).times(2).path().from("a")', {})).toThrow('not yet supported');
+    expect(read('g.V().as("a").repeat(__.out()).times(2).path().from("a")').shape.kind).toMatch(/^(path|jsonbPath)$/);
   });
 
   test('path().by(T.token) and path().by(__.traversal): per-position scalar', () => {
@@ -543,7 +542,7 @@ describe('repeat / path SQL', () => {
   });
 
   test('repeat().path() accumulates a JSONB array through the WITH RECURSIVE walk', () => {
-    const p = read('g.V(1).repeat(__.out()).times(2).path()');
+    const p = read('g.V(1).repeat(__.out().simplePath()).times(2).path()');
     expect(p.sql).toContain('jsonb_array(id) AS path');                  // seed
     expect(p.sql).toContain("jsonb_insert(c1.path, '$[#]', e.tgt) AS path"); // append per hop
     expect(p.sql).toContain('json_each(pp.path) je JOIN nodes n ON n.id=je.value'); // explode + materialize
@@ -551,7 +550,7 @@ describe('repeat / path SQL', () => {
   });
 
   test('recursive path().by(key) projects each position to a scalar (not the whole element)', () => {
-    const p = read('g.V(1).repeat(__.out()).times(2).path().by("name")');
+    const p = read('g.V(1).repeat(__.out().simplePath()).times(2).path().by("name")');
     // each exploded position is the property scalar `v`, correlated on je.value
     expect(p.sql).toContain('AS v FROM');
     expect(p.sql).toContain('SELECT value FROM vertex_properties WHERE node=je.value AND key=?');
@@ -579,13 +578,18 @@ describe('repeat / path SQL', () => {
   });
 
   test('recursive path() defers mixed/edge/emit forms with clear errors', () => {
-    expect(() => compile('g.V(1).out().repeat(__.out()).times(2).path()', {})).toThrow('path() spanning more than one repeat()/movement is not yet supported');
+    expect(() => compile('g.V(1).out().repeat(__.out().simplePath()).times(2).path()', {})).toThrow('path() spanning more than one repeat()/movement is not yet supported');
+    expect(read('g.V(1).out().repeat(__.out()).times(2).path()').shape.kind).toMatch(/^(path|jsonbPath)$/);
     // an edge-step body now COMPILES; only path()/simplePath() OVER it is deferred (edge-aware path regime).
-    expect(() => compile('g.V().repeat(__.outE().inV()).times(2).path()', {})).toThrow('edge steps (outE()/inV()) in a repeat() body not yet supported');
+    expect(() => compile('g.V().repeat(__.outE().inV().simplePath()).times(2).path()', {}))
+      .toThrow('edge steps (outE()/inV()) in a repeat() body not yet supported');
     expect(() => compile('g.V().repeat(__.out()).emit().times(2).path()', {})).toThrow('emit() with path() not yet supported');
     // A SECOND repeat cluster after an array-tracked path() would reseed the walk and
     // silently drop the first walk's segment — fail closed instead.
-    expect(() => compile('g.V(1).repeat(__.out()).times(1).repeat(__.out()).times(1).path()', {})).toThrow('path() spanning more than one repeat()/movement is not yet supported');
+    expect(() => compile('g.V(1).repeat(__.out().simplePath()).times(1).repeat(__.out().simplePath()).times(1).path()', {}))
+      .toThrow('path() spanning more than one repeat()/movement is not yet supported');
+    expect(read('g.V(1).repeat(__.out()).times(1).repeat(__.out()).times(1).path()').shape.kind)
+      .toMatch(/^(path|jsonbPath)$/);
   });
 
   test('dedup() after a recursive path() distinct-ifies BEFORE row-numbering (ROW_NUMBER would defeat DISTINCT)', () => {

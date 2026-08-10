@@ -418,7 +418,7 @@ describe('the alias comparison is shape-uniform', () => {
     // A grouped (recursive) path has one row per RUN and a group() is one whole result — filtering
     // their rows would answer a different question, so `cardinalityOf` refuses inside the shared
     // re-projection rather than each shape having to remember.
-    expect(() => compile("g.V().as('a').repeat(__.out()).times(2).as('b').path().where('a', P.neq('b'))", {}))
+    expect(() => compile("g.V().as('a').repeat(__.out().simplePath()).times(2).as('b').path().where('a', P.neq('b'))", {}))
       .toThrow('rows are not its traversers');
     expect(() => compile("g.V().as('a').out().as('b').group().by('name').where('a', P.neq('b'))", {}))
       .toThrow('where() on a group value not yet supported');

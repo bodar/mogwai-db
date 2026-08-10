@@ -68,8 +68,11 @@ export const traversal = (budget: Budget): fc.Arbitrary<Generated> =>
         const bodies = (t.bodies ?? []).map((bodyShape) => {
           const inner = walk(bodyShape, { steps: Math.max(1, budgetLeft.steps - 1), depth: budgetLeft.depth - 1 });
           // An empty child body is not valid Gremlin — fall back to identity() so a body is always
-          // a real anonymous traversal.
-          return `__.${inner.src === '' ? 'identity()' : inner.src}`;
+          // a real anonymous traversal. Where the host's output inherits its body, a body ending at
+          // another shape would also make the generator's declared shape a lie; identity() is the
+          // always-legal, shape-preserving fallback.
+          const wrongEnd = t.bodyEnds !== undefined && inner.shape !== t.bodyEnds;
+          return `__.${inner.src === '' || wrongEnd ? 'identity()' : inner.src}`;
         });
         parts.push(t.render(ctxFrom(bodies, pick)));
         // Only fold() establishes the member shape an ensuing unfold() restores.

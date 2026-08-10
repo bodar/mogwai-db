@@ -42,15 +42,23 @@ const store = seededStore();
 const vals = (q: string) => (run(store, q) as any[]).map((r) => r.v ?? r.id);
 
 describe('the repeat() unroll boundary', () => {
-  test("the bodies RepeatUnrollStrategy admits — movement and has() — already compile", () => {
+  test("the bodies RepeatUnrollStrategy admits — movement and has() — unroll into phases", () => {
     // ALLOWED_STEP_CLASSES exactly: a vertex step, an edge-vertex step, and has().
     // repeat() is deliberately outside the emission-order substrate (analyze.ts returns false for
     // it), so these are multisets.
     expect(bagOf(vals('g.V(1).repeat(__.out()).times(2)'))).toEqual([3, 5]);
     expect(bagOf(vals('g.V(1).repeat(__.outE().inV()).times(2)'))).toEqual([3, 5]);
     expect(bagOf(vals("g.V(1).repeat(__.out().has('name')).times(2)"))).toEqual([3, 5]);
-    // …so unrolling them would buy nothing. Every traversal item 3 counts is a BARRIER body, which is
-    // the set the reference strategy refuses — that gap is the item, and it is not a free rewrite.
+    // They already compiled through the recursive expansion, but bounded phases are the only regime
+    // that can collapse a multiset frontier. Pin the transformation itself: answer equality alone
+    // would not distinguish the old enumerate-every-walk plan from the phase-wise one.
+    const names = (g: string) =>
+      normalize(stepChain(parseGremlin(g), {}), {}, undefined, false).steps.map((s) => s.name);
+    for (const q of [
+      'g.V(1).repeat(__.out()).times(2)',
+      'g.V(1).repeat(__.outE().inV()).times(2)',
+      "g.V(1).repeat(__.out().has('name')).times(2)",
+    ]) expect(names(q)).not.toContain('repeat');
   });
 
   test('the one barrier we DO unroll agrees with the hand-written phases', () => {
