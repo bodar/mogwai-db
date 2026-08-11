@@ -19,7 +19,7 @@ import {
     unionOf, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, OTHER_V, VERTEX_SOURCE, EDGE_SOURCE,
     PATH_FAMILY, NUMERIC_REDUCERS, REDUCERS,
 } from '../../src/compiler/ir/step.ts';
-import { COLLAPSE_MOVES } from '../../src/compiler/ir/analyze.ts';
+import { COLLAPSE_MOVES } from '../../src/compiler/ir/bulk.ts';
 import { POSITION_MOVEMENTS } from '../../src/compiler/steps/tail/path.ts';
 
 const sorted = (s: ReadonlySet<string>) => [...s].sort();

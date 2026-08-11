@@ -1,6 +1,7 @@
 import { type IRStep } from './strategies.ts';
-import { isNested, isTokenArg, argValues, stepChain } from '../../gremlin/frontend.ts';
-import { isLocalScope, isStreamBarrier, PATH_FAMILY, REDUCERS, VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES, unionOf } from './step.ts';
+import { argValues, isNested, stepChain } from '../../gremlin/frontend.ts';
+import { isLocalScope, isPlainOrder, isStreamBarrier, PATH_FAMILY, REDUCERS } from './step.ts';
+import { bulkGroupCollapseTerminal, COLLAPSE_FILTERS, COLLAPSE_MOVES, COLLAPSE_PROJ } from './bulk.ts';
 
 // ---------- whole-chain analysis: annotate, never rewrite ----------
 //
@@ -34,17 +35,6 @@ export interface ChainFacts {
 /** Steps that need the linear path threaded through the fold: the source vertex becomes path
  *  position p0 and every hop appends a position. */
 const PATH_STEPS = PATH_FAMILY;
-
-/** A bare/keyed `order()` (no by(traversal)) re-establishes a deterministic total order. It
- *  is THE shared hinge of the two scans below: such an order() both clears "needs an emission
- *  encounter" (a following slice sorts deterministically without one) AND is exactly the
- *  order() after which movementCollapse's post-order limit/range/skip stay result-safe. Both
- *  scans call this one predicate so they cannot disagree on what an order() does — the drift
- *  risk the old two-file prose "must agree" comment carried. order().by(traversal) is NOT
- *  plain (it mints its own encounter / is a nested sort) and returns false. */
-function isPlainOrder(step: IRStep): boolean {
-  return step.name === 'order' && (step.modulators ?? []).every((by: any[]) => by.length === 0 || typeof by[0] === 'string');
-}
 
 // ---------- demandsEncounter (moved verbatim from strategies.ts demandsEncounterOrder) ----------
 //
@@ -185,64 +175,24 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
   return false;
 }
 
-// ---------- collapseSafe (moved verbatim from engine.ts chainCollapseSafe) ----------
+// ---------- collapseSafe — THE CHAIN-GLOBAL question, and the last of its kind ----------
 //
 // Convergent-walk collapse (SELECT id, SUM(bulk) GROUP BY id at each movement) is
 // result-equivalent ONLY when the whole chain is a linear movement/filter prefix ending in a
 // global bulk-aware reducer: nothing carries per-traverser identity (path/as/sack), nothing
 // is bulk-unaware on rows (order/limit/range/sample), and no branch/barrier/re-entry sits
 // between the collapse and the reducer's SUM(bulk). Anything outside these sets → not safe →
-// the plain UNION-ALL movement (identical result, unbounded rows). otherV is deliberately
-// excluded (its fromV context is per-traverser identity).
-// NOTE the absent OTHER_V: otherV carries fromV (per-traverser identity), which a
-// GROUP BY-id collapse would destroy. Excluded deliberately, and now visibly so.
-export const COLLAPSE_MOVES = unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES);
-const COLLAPSE_FILTERS = new Set(['has', 'hasLabel', 'hasId', 'where', 'filter', 'not', 'and', 'or']);
-const COLLAPSE_PROJ = new Set(['values', 'id', 'label']); // a scalar projection feeding a numeric reducer
+// the plain UNION-ALL movement (identical result, unbounded rows).
+//
+// **It answers TWO questions at once, and only one of them is chain-global.** "Does the state
+// carried here survive a merge" is a property of a POSITION (`channels.ts`'s
+// `CHANNEL_GROUP_POLICY`), and "will the multiplicity be read" is a property of a SUFFIX
+// (`ir/bulk.ts`'s `bulkObservedFrom`). Folding both into one boolean for the whole chain is
+// what makes this refuse a collapse at a hop where nothing but `bulk` is carried — see §7.2/§7.3
+// of `docs/2026-08-09-repeat-two-regimes-plan.md`, and `ir/bulk.ts`'s header for the two
+// references that both model it positionally. The vocabularies below are imported from there
+// rather than spelled again here, so the two answers cannot drift while both exist.
 const COLLAPSE_REDUCERS = REDUCERS;
-
-/** A `groupCount()` terminal whose key does NOT fan out is a bulk-mergeable barrier: it
- *  weights every group by SUM(bulk) (see lowerGroup's isCount), so collapsing convergent
- *  walks into (element, N) before it is result-equivalent — the exact "groupCount after a
- *  big fan-out/repeat" correctness+tractability case. A bare key (the element identity), a
- *  property key `by('name')`, or a token key `by(T.label)` all follow the element's identity,
- *  so merging same-id rows keeps every key intact. A by(traversal) key can fan out (one
- *  traverser → many keys), which a GROUP BY-id merge would corrupt → left unsafe. A
- *  `group().by().by(__.count())` has the same split and is admitted by the shared terminal below;
- *  element/list-valued groups and every other reducer remain deferred. */
-function bulkGroupCollapseTerminal(step: IRStep): boolean {
-  if (step.name === 'group') return reducingGroupCollapseTerminal(step);
-  if (step.name !== 'groupCount' || (step.args?.length ?? 0) !== 0) return false;
-  const modulators = step.modulators ?? [];
-  if (modulators.length === 0) return true;
-  if (modulators.length !== 1) return false;
-  const a = modulators[0]?.[0];
-  return nonFanoutKey(a);
-}
-
-/** A bare, property, or token key yields exactly one key per traverser. A traversal key may fan out,
- * so merging by element identity before it would change the answer. */
-const nonFanoutKey = (a: unknown): boolean => a === undefined || typeof a === 'string' || isTokenArg(a);
-
-/** `group().by(<non-fan-out key>).by(__.count())` is weighted by SUM(bulk) per key just like
- * `groupCount()`. This is Calcite's `SqlSplittableAggFunction.CountSplitter`: COUNT over partitions
- * followed by SUM of the partial counts
- * (`vendor/calcite/core/src/main/java/org/apache/calcite/sql/SqlSplittableAggFunction.java`). Keep
- * this deliberately narrower than `groupReducesItsValues`: an aggregate may ignore encounter order
- * without being splittable over an (id, bulk) frontier. */
-function reducingGroupCollapseTerminal(step: IRStep): boolean {
-  if (step.name !== 'group' || (step.args?.length ?? 0) !== 0) return false;
-  const bys = step.modulators ?? [];
-  if (bys.length === 0 || bys.length > 2 || !nonFanoutKey(bys[0]?.[0])) return false;
-  const value = bys[1]?.[0];
-  if (!isNested(value)) return false;
-  try {
-    const inner = stepChain(value.nested, {});
-    return inner.length === 1 && inner[0].name === 'count' && (inner[0].args?.length ?? 0) === 0;
-  } catch {
-    return false;
-  }
-}
 
 function computeCollapseSafe(steps: IRStep[]): boolean {
   const n = steps.length;

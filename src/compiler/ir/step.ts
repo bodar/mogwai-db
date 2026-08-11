@@ -138,6 +138,18 @@ export const isStreamBarrier = (s: IRStep): boolean => isGlobalBarrier(s) && !is
 export const isLocalScope = (s: IRStep): boolean =>
   (s.args ?? []).some((a) => isScopeArg(a.value) && a.value.scope === 'local');
 
+/** A bare/keyed `order()` (no by(traversal)) re-establishes a deterministic total order. It is THE
+ *  shared hinge of three scans, which is why it is a base here rather than a private helper: such an
+ *  order() clears "needs an emission encounter" (a following slice sorts deterministically without
+ *  one), it is exactly the order() after which a bulk-aware limit/range/skip/tail stays
+ *  result-safe (`ir/bulk.ts`), and it is what `computeCollapseSafe` reads for the same reason. All
+ *  three call this one predicate so they cannot disagree on what an order() does — the drift risk a
+ *  prose "these must agree" comment used to carry. order().by(traversal) is NOT plain (it mints its
+ *  own encounter / is a nested sort) and returns false. */
+export function isPlainOrder(step: IRStep): boolean {
+  return step.name === 'order' && (step.modulators ?? []).every((by: any[]) => by.length === 0 || typeof by[0] === 'string');
+}
+
 /** The three steps that denote a window. `tail` is deliberately NOT one: "the last n" cannot be
  *  turned into an offset without knowing how many there are, which is a question about the STREAM,
  *  not about the step — so its hosts keep their own derivation until item 17 gives them a count. */

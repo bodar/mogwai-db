@@ -11,6 +11,7 @@ import type { Rel } from '../../rel/rel.ts';
 import { exprChildren, forEachRel } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
 import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
+import { bulkObservedFrom } from '../ir/bulk.ts';
 import { meetScalarTypes, memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
@@ -3449,7 +3450,15 @@ function elementTail(
       // reason. `check` catches it either way (the obligation refuses a grouped Aggregate carrying a
       // non-combinable role), but as a THROW where legacy answers, which is the one failure the
       // routing switch cannot absorb: `rel-sweep` found exactly that on `V().as('a').both()`.
-      const collapsing = ctx.collapse && !encounterOf(moved.rel.channels) && groupableChannels(moved.rel.channels);
+      // THE THIRD CONDITION IS THE SUFFIX, and it is the half a channel cannot state. The two above
+      // ask whether these rows may MERGE here; a collapse is also only result-equivalent while every
+      // consumer BEHIND it reads the multiplicity the merge created. `bulkObservedFrom` is that
+      // question, asked of this position (`ir/bulk.ts`, which carries the TinkerPop/Calcite prior art
+      // for why it is positional). Without it a widened collapse is not slower, it is WRONG: only the
+      // `elements` framing arm carries `bulk` to the wire, so a chain that retypes to a scalar and
+      // ends would answer N traversers as one row.
+      const collapsing = ctx.collapse && !encounterOf(moved.rel.channels) && groupableChannels(moved.rel.channels)
+        && bulkObservedFrom(steps, at + 1);
       rel = collapsing ? coalesce(moved.rel, fresh) : moved.rel;
       bulked = bulked || collapsing;
       elem = moved.elem;
@@ -3679,6 +3688,17 @@ function elementTail(
     }
     const row = rowOp(step, rel, elem, bulked, ctx, fresh, labels);
     if (!row) break;
+    // A `dedup()` THAT LOWERED RESET THE MULTIPLICITY, and the fold learns it. Every arm `rowOp`
+    // admits projects `bulk` as the literal 1 — the unordered `Distinct`, the ordered
+    // `MIN(encounter)` aggregate and `dedupBy`'s ranked window alike — because a survivor stands for
+    // itself (`DedupGlobalStep.filter`'s unconditional `setBulk(1L)`,
+    // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/DedupGlobalStep.java:75`).
+    // This used to be left conservative, which "costs the heavier slice form and never a wrong
+    // answer" only while nothing collapsed in front of a dedup: once `bulkObservedFrom` admits a
+    // collapse before one, a stale `bulked` sends the following slice to `bulkSlice`, which DECLINES
+    // without an emission order — turning a widened optimization into lost coverage. `dedupBy`'s own
+    // comment predicted this exact relaxation.
+    if (step.name === 'dedup') bulked = false;
     rel = row;
   }
 

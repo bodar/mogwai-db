@@ -6,6 +6,7 @@ import { test, expect, describe } from 'bun:test';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { normalize } from '../../src/compiler/ir/passes.ts';
 import { analyzeChain } from '../../src/compiler/ir/analyze.ts';
+import { bulkObservedFrom } from '../../src/compiler/ir/bulk.ts';
 
 /** Parse + normalize (so order().by() has its .bys folded, exactly as the compiler sees it),
  *  then analyze. Facts are computed over the canonical IRStep chain, not the raw parse.
@@ -92,6 +93,98 @@ describe('ChainFacts.collapseSafe', () => {
     // Relaxing collapseSafe to ADMIT a carried as() is a different change and remains refuted — 52
     // executing census traversals changed their answer when it was tried.
     expect(facts('g.V().as("a").out().count()').collapseSafe).toBe(true);
+  });
+});
+
+describe('bulkObservedFrom — the POSITIONAL half (src/compiler/ir/bulk.ts)', () => {
+  /** The suffix question, asked at the position a collapse would sit at. `from` is the index AFTER the
+   *  hop being collapsed, which is what the movement fold passes (`at + 1`). */
+  const observed = (gremlin: string, from: number) =>
+    bulkObservedFrom(normalize(stepChain(parseGremlin(gremlin), {}), {}, undefined, false).steps, from);
+
+  test('an element leaf observes it — that framing RLEs (v, bulk) onto the wire', () => {
+    expect(observed('g.V().out()', 2)).toBe(true);
+    expect(observed('g.V().out().both()', 2)).toBe(true);
+    expect(observed('g.V().out().has("name","marko")', 2)).toBe(true);
+  });
+
+  test('a global reducer observes it, and ENDS the question — nothing behind it sees a multiplicity', () => {
+    expect(observed('g.V().out().count()', 2)).toBe(true);
+    expect(observed('g.V().out().out().count()', 2)).toBe(true);
+    // `count()` is a barrier with a seed, so a step AFTER it reads one row and no bulk.
+    expect(observed('g.V().out().count().is(P.gt(2))', 2)).toBe(true);
+  });
+
+  test('THE LEAF IS A QUESTION, NOT AN ASSUMPTION: only `elements` carries bulk to the wire', () => {
+    // The finding this module records. A scalar/list/map/record/path leaf projects no `bulk` column
+    // (`lower.ts`'s `framed` — every arm but `elements`), so N traversers would answer as ONE row.
+    expect(observed('g.V().out().values("name")', 2)).toBe(false);
+    expect(observed('g.V().out().fold()', 2)).toBe(false);
+    expect(observed('g.V().out().path()', 2)).toBe(false);
+    // ...but the same projection feeding a reducer is fine: it carries bulk as an ordinary column
+    // into the scalar vocabulary, and the reducer weights by it.
+    expect(observed('g.V().out().values("age").sum()', 2)).toBe(true);
+    expect(observed('g.V().out().id().count()', 2)).toBe(true);
+  });
+
+  test('a slice is admitted only behind a plain order(), because bulkSlice needs a position to trim along', () => {
+    // The widening the chain verdict cannot express: it admits a post-order slice ONLY under an
+    // element terminal, since it cannot see that a reducer behind the slice sums what was trimmed.
+    expect(observed('g.V().out().order().by("name").limit(2).count()', 2)).toBe(true);
+    expect(observed('g.V().out().order().by("name").tail(2)', 2)).toBe(true);
+    // With no order there is nothing to accumulate along — `sliceOp` declines a bulked relation
+    // outright, so admitting the collapse here would cost COVERAGE, not just tractability.
+    expect(observed('g.V().out().limit(2)', 2)).toBe(false);
+    expect(observed('g.V().out().range(0,2).count()', 2)).toBe(false);
+    // order().by(traversal) is not plain (shared isPlainOrder), so it opens nothing.
+    expect(observed('g.V().out().order().by(__.values("name")).limit(2)', 2)).toBe(false);
+  });
+
+  test('`sample` reads rows at EVERY position — a uniform sample of rows is not one of traversers', () => {
+    expect(observed('g.V().out().sample(2)', 2)).toBe(false);
+    expect(observed('g.V().out().order().by("name").sample(2)', 2)).toBe(false);
+  });
+
+  test('a dedup() RESETS the multiplicity, so it ends the question too', () => {
+    // DedupGlobalStep.filter calls setBulk(1L) unconditionally, and every arm rowOp admits projects
+    // the literal 1. So a slice BEHIND a dedup never meets a multiplicity.
+    expect(observed('g.V().out().dedup()', 2)).toBe(true);
+    expect(observed('g.V().out().dedup().limit(2)', 2)).toBe(true);
+    expect(observed('g.V().out().dedup().by("name").count()', 2)).toBe(true);
+    // Scope.local addresses a VALUE's members, not the stream's rows — a different step wearing the
+    // same name, and not one shown to reset anything here.
+    expect(observed('g.V().out().fold().dedup(Scope.local)', 2)).toBe(false);
+  });
+
+  test('an as() is transparent — a label bound AFTER a collapse is well-defined per distinct id', () => {
+    // §7.2's positional half: the chain verdict refuses any as() in the prefix because it cannot tell
+    // a label bound before a collapse from one bound after it. This can.
+    expect(observed('g.V().out().as("a").out().count()', 2)).toBe(true);
+    expect(observed('g.V().out().as("a").count()', 2)).toBe(true);
+  });
+
+  test('unlearned vocabulary declines, which costs an opportunity and never an answer', () => {
+    // `select` is the next candidate and is deliberately not admitted yet (see the module header).
+    // NOTE the terminal: under a `count()` the select would not be here at all — `retractUnobservedSelect`
+    // (§7.4 item 3) deletes it because a count observes no value, and `retractUnreadAlias` then drops
+    // the dead `as()`, so `…as("a").out().select("a").count()` normalizes to `V().out().out().count()`
+    // and answers TRUE for a chain that no longer contains either step. Pin the OBSERVABLE form.
+    expect(observed('g.V().out().as("a").out().select("a")', 2)).toBe(false);
+    expect(observed('g.V().out().as("a").out().select("a").values("name")', 2)).toBe(false);
+    expect(observed('g.V().out().union(__.out(),__.in()).count()', 2)).toBe(false);
+    expect(observed('g.V().out().aggregate("x").count()', 2)).toBe(false);
+    expect(observed('g.V().out().groupCount().by(__.label())', 2)).toBe(false);
+  });
+
+  test('a non-fan-out groupCount/group-by-count observes it (Calcite CountSplitter)', () => {
+    expect(observed('g.V().out().groupCount()', 2)).toBe(true);
+    expect(observed('g.V().out().groupCount().by("name")', 2)).toBe(true);
+    expect(observed('g.V().out().group().by(T.label).by(__.count())', 2)).toBe(true);
+    expect(observed('g.V().out().group().by(T.label).by(__.sum())', 2)).toBe(false);
+  });
+
+  test('asked past the end of the chain, the last movement IS the element leaf', () => {
+    expect(observed('g.V().out()', 9)).toBe(true);
   });
 });
 
