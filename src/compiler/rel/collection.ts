@@ -14,6 +14,7 @@ import { byField, isProductiveBy, modulations, productivityFilter } from './modu
 import { foldElements, foldScalars } from './list.ts';
 import { carriedCols, eq, meta, typeOf, withMergedVtype, type Minter } from './build.ts';
 import { framingCols, type FramedRel, type RelFraming } from './framing.ts';
+import { groupMap, groupRowCols, ORD_COL, sameGroupRecipe, type GroupRecipe, type GroupRows } from './map.ts';
 import { ADD_ALL, ASSIGN, BULK_OPS, COLLECTION_OPS, FOLD_OPS, isLogicalOp, mergeStep } from './operator.ts';
 import { constLit } from './const.ts';
 import type { Channel } from '../../channels.ts';
@@ -135,23 +136,30 @@ export type Members =
   /** A VALUE stream's traversers, or a `by()` projection's values; the member is the row's `v`. */
   | { readonly kind: 'scalars'; readonly type: ScalarType; readonly productiveNull: boolean }
   /**
-   * ALREADY REDUCED by whoever registered it — `group("a")`/`groupCount("a")`, whose map a grouping
-   * barrier built before this module ever saw it. The arm is a transitional one: Phase 4 gives the
-   * keyed forms member rows too (a `(key, value-contribution)` pair reduced by `groupBarrier` at the
-   * cap), at which point `registerMap` and this arm disappear together. It exists rather than a
-   * `reduce?:` optional because a partly-total descriptor is the failure mode the totality invariant
-   * was earned against.
+   * A KEYED GROUPING's contributions — `group("a")`/`groupCount("a")`, whose member is a
+   * `(key, value-contribution)` pair and whose reduction is `groupMap` at the `cap`.
+   *
+   * The arm the other two are the model for, and it used to be `reduced`: the map was built at the WRITE
+   * site and stored finished, which is defensible for one site and wrong for a second — `GroupBiOperator`
+   * merges per KEY, so two positions filling one label hold both sites' contributions and a stored map
+   * has already thrown away which rows came from where. Same argument the module header makes for
+   * `aggregate`, one container along.
+   *
+   * `recipe` is what `groupMap` needs and is comparable DATA, so `accumulate` can refuse two sites whose
+   * groupings would not be the same grouping (`sameGroupRecipe`, `map.ts`).
+   */
+  | { readonly kind: 'grouped'; readonly recipe: GroupRecipe }
+  /**
+   * A POOLED grouping, ALREADY REDUCED — `group("a").by(k).by(<reducing traversal>)`, whose value side is
+   * a JOIN over the group's members' child rows (`groupReduced`, `map.ts`).
+   *
+   * The one arm with no member rows behind it, and therefore the one that is SINGLE-SITE by construction:
+   * the child rows POOL per group and the barrier reduces the pool once, so there is no
+   * `(key, contribution)` pair a second site could contribute. It is not a transitional arm — it is what
+   * "this shape genuinely has no member relation" looks like, and a second registration on the label
+   * declines rather than being merged into a map that has already discarded where its rows came from.
    */
   | { readonly kind: 'reduced'; readonly framing: RelFraming };
-
-/** A collection whose members are ROWS — every `Members` arm but the transitional `reduced` one, whose
- *  "members" are a map a grouping barrier already built.
- *
- *  Named because it is what most of this module actually operates on: a site is unioned, a type is met, a
- *  seed is prepended and a snapshot is narrowed to member COLUMNS, and none of those means anything for a
- *  pre-reduced map. Stating it once is also what makes `reduce()`'s single `reduced` arm the only place
- *  that arm is handled — the alternative was a re-check at every one of them. */
-export type RowMembered = Collection & { readonly of: Exclude<Members, { readonly kind: 'reduced' }> };
 
 /** The registry a chain carries — MUTABLE, because a side effect is chain-global state written at one
  *  step and read at another, which is the one thing a fold's return value cannot carry backwards. */
@@ -229,12 +237,11 @@ export function registerCollection(
   const { collection: retained, bindings } = mutating ? snapshotted(policied, fresh) : { collection: policied, bindings: [] };
   const held = collections.get(label);
   if (!held) { collections.set(label, retained); return bindings; }
-  // A label a KEYED form already filled holds a map, and `Operator.addAll` over a Map and a Collection
-  // is the reference's own IllegalArgumentException ("Objects must be both of Map or Collection",
-  // `Operator.java:178-196`) — an error, not a member relation to union onto. It declined before this
-  // narrowing too, via `accumulate`'s scalars check; naming it here is what makes that deliberate.
-  if (held.of.kind === 'reduced') return null;
-  const accumulated = accumulate({ ...held, of: held.of }, retained, fresh);
+  // A label a KEYED form already filled holds `(key, contribution)` members, and an `aggregate` site's
+  // are bare values: mixing them is `Operator.addAll` over a Map and a Collection, which is the
+  // reference's own IllegalArgumentException ("Objects must be both of Map or Collection",
+  // `Operator.java:178-196`) — an error, not two member relations to union.
+  const accumulated = accumulate(held, retained, fresh);
   if (!accumulated) return null;
   collections.set(label, accumulated);
   return bindings;
@@ -257,8 +264,8 @@ export function registerCollection(
  * the smaller statement and the one whose columns can travel.
  */
 function snapshotted(
-  collection: RowMembered, fresh: Minter,
-): { readonly collection: RowMembered; readonly bindings: readonly Binding[] } {
+  collection: Collection, fresh: Minter,
+): { readonly collection: Collection; readonly bindings: readonly Binding[] } {
   const cols = [...memberCols(collection.of), ...collection.sites[0]!.order];
   const bindings: Binding[] = [];
   const sites = collection.sites.map((site) => {
@@ -286,7 +293,7 @@ function snapshotted(
  * SHAPES is the dynamic-tag variant's question, one level down at the member encoding, and is not
  * this module's to invent.
  */
-function accumulate(held: RowMembered, added: RowMembered, fresh: Minter): RowMembered | null {
+function accumulate(held: Collection, added: Collection, fresh: Minter): Collection | null {
   const sites = [...held.sites, ...added.sites];
   // The POLICY is the LABEL's, not the site's — one `withSideEffect` declaration, however many
   // registration positions read it — so it is carried rather than merged, and the two sides cannot
@@ -294,6 +301,15 @@ function accumulate(held: RowMembered, added: RowMembered, fresh: Minter): RowMe
   const merge = held.merge;
   if (held.of.kind === 'elements' && added.of.kind === 'elements')
     return held.of.elem === added.of.elem ? { sites, of: held.of, merge } : null;
+  // TWO KEYED SITES must be the same GROUPING, and `sameGroupRecipe` is the whole test — that is what the
+  // recipe being comparable DATA buys (`map.ts`). Two sites whose recipes differ would otherwise be
+  // aggregated by the first one's, which is a plausibly-wrong map rather than a decline.
+  // A POOLED grouping has no member rows, so a second site has nothing to union onto it — see the
+  // `reduced` arm. It declines rather than silently keeping one site's map.
+  if (held.of.kind === 'reduced' || added.of.kind === 'reduced') return null;
+  if (held.of.kind === 'grouped' || added.of.kind === 'grouped')
+    return held.of.kind === 'grouped' && added.of.kind === 'grouped'
+      && sameGroupRecipe(held.of.recipe, added.of.recipe) ? { sites, of: held.of, merge } : null;
   if (held.of.kind !== 'scalars' || added.of.kind !== 'scalars') return null;
   // `productiveNull` is orthogonal to the type and says whether a NULL member is a REAL value or the
   // framer's signal to emit nothing. Two sites that answer it differently are two different member
@@ -321,21 +337,40 @@ const honouring = (sites: readonly Site[], from: ScalarType, to: ScalarType, fre
  * already run `groupBarrier`, because deciding a grouping is the map shape's job and not this
  * module's. What is shared is the registry discipline: the same label rules, the same refusals.
  */
-export function registerMap(
-  step: IRStep, built: FramedRel, collections: Collections,
-  policies: ReadonlyMap<string, MergePolicy>,
+export function registerGrouping(
+  step: IRStep, rows: GroupRows, collections: Collections,
+  policies: ReadonlyMap<string, MergePolicy>, fresh: Minter,
 ): boolean {
   const label = labelOf(step);
+  if (label === null) return false;
   // A DECLARED policy on a keyed label is a seeded map merge — `GroupSideEffectStep` registers
-  // `(HashMapSupplier, Operator.addAll)` and `registerIfAbsent` keeps a declared supplier, so the
+  // `(HashMapSupplier, GroupBiOperator)` and `registerIfAbsent` keeps a declared supplier, so the
   // grouping accumulates INTO the declared map. Nothing here builds that, and registering anyway would
-  // drop the seed silently, so it declines. Phase 4's keyed unification is where it lands.
-  if (label === null || collections.has(label) || policies.has(label)) return false;
-  collections.set(label, {
-    sites: [{ rel: built.rel, order: [], perTraverser: false }],
-    of: { kind: 'reduced', framing: built.framing },
-    merge: undefined,
-  });
+  // drop the seed silently, so it declines.
+  if (policies.has(label)) return false;
+  // A COLLECTING grouping states its member order and a COUNTING one has none to state — its rows carry
+  // no `go` column at all (`groupRowCols`), and a count is order-free by construction. Naming a column
+  // the site does not have is what `accumulated` would then project, and the checker catches it.
+  //
+  // A POOLED value registers its FINISHED map instead, and `accumulate` then refuses a second site: the
+  // group's members' child rows pool and the barrier reduces the pool once, so there is no
+  // `(key, contribution)` row a union could take. See the `reduced` arm.
+  const added: Collection = rows.done
+    ? {
+      sites: [{ rel: rows.done.rel, order: [], perTraverser: true }],
+      of: { kind: 'reduced', framing: { kind: 'map', keyOf: rows.done.keyOf, valOf: rows.done.valOf } },
+      merge: undefined,
+    }
+    : {
+      sites: [{ rel: rows.rel, order: rows.recipe.counting ? [] : [ORD_COL], perTraverser: true }],
+      of: { kind: 'grouped', recipe: rows.recipe },
+      merge: undefined,
+    };
+  const held = collections.get(label);
+  if (!held) { collections.set(label, added); return true; }
+  const accumulated = accumulate(held, added, fresh);
+  if (!accumulated) return false;
+  collections.set(label, accumulated);
   return true;
 }
 
@@ -347,7 +382,7 @@ const orderOf = (encounter: Channel | undefined): readonly string[] => encounter
  *  stream already had. */
 function traverserMembers(
   step: IRStep, input: Rel, framing: RelFraming, encounter: Channel | undefined,
-): RowMembered | null {
+): Collection | null {
   const sites = [{ rel: input, order: orderOf(encounter), perTraverser: ranPerTraverser(step) }];
   if (framing.kind === 'elements') return { sites, of: { kind: 'elements', elem: framing.elem }, merge: undefined };
   if (framing.kind !== 'scalar') return null;
@@ -365,7 +400,7 @@ function projectedMembers(
   step: IRStep, input: Rel, host: ChildHost, framing: RelFraming,
   modulation: import('./modulator.ts').Modulation, encounter: Channel | undefined,
   child: ChildSeam, fresh: Minter,
-): RowMembered | null {
+): Collection | null {
   const field = byField(step, modulation, host, framing, (name) => col(input.id, name), fresh, child);
   if (!field || field.framing.kind !== 'scalar') return null;
   // A numeric reducer's type is the aggregate's runtime `typeof` in `vt`, which `byField` already
@@ -431,14 +466,28 @@ function projectedMembers(
  * `cap()` over it is an EMPTY list — which is what the reference's `BulkSet` seed supplies.
  */
 export function reduce(collection: Collection, fresh: Minter): FramedRel | null {
-  const held = collection.of;
-  if (held.kind === 'reduced') return { rel: collection.sites[0]!.rel, framing: held.framing };
+  // A KEYED GROUPING reduces per KEY rather than into a list, so its policy question is a different one
+  // (`GroupBiOperator` merges maps, not members) and `registerGrouping` refuses a declared one outright.
+  // What it shares with the other two arms is everything that matters: N sites are a `UNION ALL` of
+  // member relations, ordered by (site ordinal, that site's own), reduced ONCE at the read.
+  if (collection.of.kind === 'reduced') return { rel: collection.sites[0]!.rel, framing: collection.of.framing };
+  if (collection.of.kind === 'grouped') {
+    const { recipe } = collection.of;
+    const grouped = collection.sites.length === 1
+      ? { site: collection.sites[0]!, order: [ORD_COL] as readonly string[] }
+      : (() => {
+        const site = accumulated(collection.sites, groupRowCols(recipe), fresh);
+        return { site, order: site.order };
+      })();
+    const map = groupMap(grouped.site.rel, recipe, fresh, grouped.order);
+    return { rel: map.rel, framing: { kind: 'map', keyOf: map.keyOf, valOf: map.valOf } };
+  }
   // `addAll` IS the ordinary list fold — over one more site. So the policy is spent BEFORE the
   // reduction rather than instead of it, and everything downstream sees a plain collection.
-  const rowed: RowMembered = { ...collection, of: held };
-  const seeded = collection.merge?.operator === ADD_ALL ? seedAsSite(rowed, fresh) : rowed;
+  const seeded = collection.merge?.operator === ADD_ALL ? seedAsSite(collection, fresh) : collection;
   if (!seeded) return null;
   const { sites, of, merge } = seeded;
+  if (of.kind === 'grouped' || of.kind === 'reduced') return null;
   // `assign` REPLACES, so only the LAST merge survives and every site before it is dead — which makes
   // it the one policy that narrows the site list rather than reading all of it.
   const surviving = merge?.operator === ASSIGN ? [sites[sites.length - 1]!] : sites;
@@ -543,7 +592,7 @@ function firstOccurrences(site: Site, cols: readonly string[], fresh: Minter): S
  * A `Set` seed is the same prepend — a JS `Set` still carries its items as `members` — and the DEDUP it
  * additionally implies belongs at the read, over every site's members at once (`firstOccurrences`).
  */
-function seedAsSite({ sites, of, merge }: RowMembered, fresh: Minter): RowMembered | null {
+function seedAsSite({ sites, of, merge }: Collection, fresh: Minter): Collection | null {
   // Only a collection LITERAL carries per-item `Arg`s. A bound list PARAMETER is ONE oversized value
   // with no members to spell as rows, and a SCALAR seed is `Operator.addAll`'s own
   // IllegalArgumentException ("Objects must be both of Map or Collection") rather than a list to prepend.
@@ -713,7 +762,9 @@ function seededFold(
  *  must project down to before it can be unioned with another — everything else it carries (its
  *  aliases, its path, its own encounter) is about the chain position, not about the member. */
 const memberCols = (of: Members): readonly string[] =>
-  of.kind === 'elements' ? ['id'] : of.kind === 'scalars' ? ['v', ...perRowCols(of.type)] : [];
+  of.kind === 'elements' ? ['id']
+    : of.kind === 'scalars' ? ['v', ...perRowCols(of.type)]
+      : of.kind === 'grouped' ? groupRowCols(of.recipe) : [];
 
 /** The ORDINAL of the site a member came from, and that site's own emission position — see
  *  `Collection.sites`. Ordering by the pair is what reproduces `Operator.addAll` appending one whole

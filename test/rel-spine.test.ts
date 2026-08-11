@@ -439,6 +439,15 @@ const DECLINED = [
   'g.V().hasLabel("software").group().by("name").by(__.bothE().values("weight").mean())',
   'g.V().order().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
   'g.V().dedup().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
+  // A `groupCount` site beside a `group` site on ONE label is not one grouping: `registerIfAbsent` keeps
+  // the FIRST reducer, so the reference merges a `Map<K,Long>` with a `Map<K,List<V>>` through
+  // `GroupCountBiOperator` and raises. Refusing is what comparing the aggregation recipe as DATA buys —
+  // picking one site's recipe would answer a plausible map (`sameGroupRecipe`, `compiler/rel/map.ts`).
+  'g.V().groupCount("a").by("name").out().group("a").by("name").cap("a")',
+  // A POOLED value (`group("a").by(k).by(<reducing traversal>)`) has no `(key, contribution)` row behind
+  // it — the members' child rows pool and the barrier reduces the pool once — so a SECOND site has
+  // nothing to union onto it, and the label declines rather than keeping one site's finished map.
+  'g.V().group("a").by(T.label).by(__.outE().values("weight").sum()).out().group("a").by(T.label).by(__.outE().values("weight").sum()).cap("a")',
   'g.addV("person")',                 // a write
   "g.V().has('name',TextP.containing('ark'))",  // ftsSubstringPredicate's — see below
   "g.V().has('name',P.within(__.V().values('name').fold()))", // a run-time member list, not a set

@@ -40,13 +40,13 @@ import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
-import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, mapEntryPayload, mapKey, mapPayload, mapSide, mapSize, unfoldMap } from './map.ts';
+import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapPayload, mapSide, mapSize, unfoldMap } from './map.ts';
 import { edgeEndpoint, elementPayload } from './element.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
 import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantArm, variantArmOf, variantHasList, variantPayload, type VariantArm } from './variant.ts';
-import { readCollection, registerCollection, registerMap, type Collections } from './collection.ts';
+import { readCollection, registerCollection, registerGrouping, type Collections } from './collection.ts';
 import { repeatWalk } from './walk.ts';
 import { optionArms, type OptionArm } from '../ir/option-map.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
@@ -1976,27 +1976,29 @@ function scalarTail(
     // projection… it arrives with the scalar-host caller that does not exist yet"), and the caller is
     // all that was missing: `byNode`'s scalar arm already tags the value with its own `vtype`.
     if (step.name === 'group' || step.name === 'groupCount') {
-      const grouped = groupBarrier(rel, host, step, bulked, childSeam(ctx, fresh), fresh);
-      if (!grouped) return null;
-      const framing = { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf } as const;
+      // ONE call for both forms: the barrier's map and the keyed form's member ROWS come out of the same
+      // computation, split at `groupRows`/`groupMap` (`map.ts`). The keyed form registers the rows and
+      // the reduction happens at the `cap`, which is where a label filled at N positions can be one
+      // grouping over the UNION of them.
+      const rows = groupRows(rel, host, step, bulked, childSeam(ctx, fresh), fresh);
+      if (!rows) return null;
       // A LABELLED form is a SIDE EFFECT: it fills the named map and passes its traversers on, exactly
       // as it does over an element stream — so the loop CONTINUES and only the unkeyed form becomes the
       // traverser. One rule, two hosts (§6·6's "a child body works wherever it is LEGAL" applied to a
       // barrier rather than to a body).
       if (argValues(step).length) {
-        // ⚠️ A KEYED `group("a")` IN A PROGRAM WITH EFFECTS STILL DECLINES — the one `mutating` site
-        // the snapshot binding does NOT close, and for a platform reason rather than an unfinished
-        // one. An `aggregate` site binds its MEMBER ROWS, whose columns cross the executor seam; a
-        // grouping barrier's relation is a one-row JSONB map payload, and a retained binding travels
-        // as JSON (`src/program.ts`), which fails closed on exactly that. The answer is Phase 4 of
-        // `docs/2026-08-09-named-collections-are-bindings-plan.md`, not a second snapshot: once the
-        // keyed forms hold `(key, value-contribution)` MEMBER rows and run `groupBarrier` at the
-        // `cap`, they take the aggregate sites' binding unchanged.
+        // ⚠️ A KEYED `group("a")` IN A PROGRAM WITH EFFECTS STILL DECLINES, and the reason narrowed
+        // rather than went away. The sites now hold `(key, contribution)` MEMBER rows, which is what
+        // Phase 4 said would let them take the aggregate sites' `snapshot` binding — but the KEY column
+        // holds a JSONB node, and a retained binding travels as JSON (`src/program.ts`), which fails
+        // closed on exactly that. Projecting `json(gk)` at the binding is the remaining step.
         if (ctx.mutating) return null;
-        if (!registerMap(step, { rel: grouped.rel, framing }, ctx.collections, ctx.sideEffectPolicies)) return null;
+        if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, fresh)) return null;
         continue;
       }
-      return continueAs(grouped.rel, framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
+      const grouped = rows.done ?? groupMap(rows.rel, rows.recipe, fresh);
+      return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf },
+        steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
 
     // `project()` over a VALUE traverser — the identical record builder, with the host's own framing as
@@ -3608,27 +3610,29 @@ function elementTail(
     // vocabulary (unfold to entries, select(Column.*)) exists, so this cannot silently drop a tail.
     if (step.name === 'groupCount' || step.name === 'group') {
       if (pathCarried(rel)) return null;
-      const grouped = groupBarrier(rel, elementHost(rel, elem, labels), step, bulked, childSeam(ctx, fresh), fresh);
-      if (!grouped) return null;
-      const framing = { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf } as const;
+      // ONE call for both forms: the barrier's map and the keyed form's member ROWS come out of the same
+      // computation, split at `groupRows`/`groupMap` (`map.ts`). The keyed form registers the rows and
+      // the reduction happens at the `cap`, which is where a label filled at N positions can be one
+      // grouping over the UNION of them.
+      const rows = groupRows(rel, elementHost(rel, elem, labels), step, bulked, childSeam(ctx, fresh), fresh);
+      if (!rows) return null;
       // A LABELLED `group("a")`/`groupCount("a")` is a SIDE EFFECT, not a barrier result:
       // `GroupSideEffectStep` fills the named map and passes its incoming traversers ON, which is
       // `aggregate`'s contract exactly. So the map is registered and the loop CONTINUES from the
       // unchanged relation; only the unkeyed form becomes the traverser.
       if (argValues(step).length) {
-        // ⚠️ A KEYED `group("a")` IN A PROGRAM WITH EFFECTS STILL DECLINES — the one `mutating` site
-        // the snapshot binding does NOT close, and for a platform reason rather than an unfinished
-        // one. An `aggregate` site binds its MEMBER ROWS, whose columns cross the executor seam; a
-        // grouping barrier's relation is a one-row JSONB map payload, and a retained binding travels
-        // as JSON (`src/program.ts`), which fails closed on exactly that. The answer is Phase 4 of
-        // `docs/2026-08-09-named-collections-are-bindings-plan.md`, not a second snapshot: once the
-        // keyed forms hold `(key, value-contribution)` MEMBER rows and run `groupBarrier` at the
-        // `cap`, they take the aggregate sites' binding unchanged.
+        // ⚠️ A KEYED `group("a")` IN A PROGRAM WITH EFFECTS STILL DECLINES, and the reason narrowed
+        // rather than went away. The sites now hold `(key, contribution)` MEMBER rows, which is what
+        // Phase 4 said would let them take the aggregate sites' `snapshot` binding — but the KEY column
+        // holds a JSONB node, and a retained binding travels as JSON (`src/program.ts`), which fails
+        // closed on exactly that. Projecting `json(gk)` at the binding is the remaining step.
         if (ctx.mutating) return null;
-        if (!registerMap(step, { rel: grouped.rel, framing }, ctx.collections, ctx.sideEffectPolicies)) return null;
+        if (!registerGrouping(step, rows, ctx.collections, ctx.sideEffectPolicies, fresh)) return null;
         continue;
       }
-      return continueAs(grouped.rel, framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
+      const grouped = rows.done ?? groupMap(rows.rel, rows.recipe, fresh);
+      return continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf },
+        steps, at + 1, false, ctx, fresh, NO_ALIASES);
     }
     // `project()` — a per-row RECORD, and NOT a barrier: the channels ride through, so the alias map
     // carries and a following `select(label)` still finds its label. That is the whole difference from

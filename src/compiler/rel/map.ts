@@ -97,7 +97,7 @@ const MEMBER_COL = 'gt';
  *  takes rows in scan order. The emission position where the chain has one, the traverser's own rowid
  *  otherwise — total either way, and a SEPARATE column from the member because a projected VALUE is not
  *  an order (two traversers can share one). */
-const ORD_COL = 'go';
+export const ORD_COL = 'go';
 
 /**
  * `group()`/`groupCount()` with NO side-effect label — the barrier, as a map value, or `null` to
@@ -403,8 +403,13 @@ const POOLED_RECIPE = (step: IRStep): GroupRecipe =>
  *
  * Everything it needs about the rows is in `recipe`; everything it needs about their VALUES is already in
  * the columns. That is what lets N sites share one call.
+ *
+ * `order` is the MEMBER order — one column for a single site, and (site ordinal, that site's own) over a
+ * union, which is the order `Collection.sites` already pins. It is an argument rather than a `recipe`
+ * field because it is a property of the RELATION being aggregated, not of the grouping: two sites must
+ * agree about their recipe and cannot agree about a column only their union has.
  */
-export function groupMap(rows: Rel, recipe: GroupRecipe, fresh: Minter): GroupedMap {
+export function groupMap(rows: Rel, recipe: GroupRecipe, fresh: Minter, order: readonly string[] = [ORD_COL]): GroupedMap {
   const { counting, keyElem, bulkCol } = recipe;
   // THE VALUE. `groupCount()` reduces the group to a traverser COUNT — `SUM(bulk)` where the stream
   // carries a multiplicity, `COUNT(*)` where it cannot, identical while bulk ≡ 1 and correct after a
@@ -425,7 +430,7 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, fresh: Minter): Grouped
     ? (bulkCol
       ? { kind: 'agg', fn: 'sum', args: [col(rows.id, bulkCol)] }
       : { kind: 'agg', fn: 'count', args: [compilerInt(1)] })
-    : collectedValue(rows, recipe, fresh);
+    : collectedValue(rows, recipe, fresh, order);
   const productive = make.aggregate({
     id: fresh('gb'), input: rows,
     channels: [], type: typeOf(meta(KEY_COL, 'json', true), meta(VAL_COL, counting ? 'int' : 'json')),
@@ -471,7 +476,7 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, fresh: Minter): Grouped
  * `groupCount()` has none: naming those columns unconditionally worked only while the member expression
  * could be re-derived from the HOST, which is the one thing a recipe shared by N sites cannot reach.
  */
-function collectedValue(rows: Rel, recipe: GroupRecipe, fresh: Minter): Expr {
+function collectedValue(rows: Rel, recipe: GroupRecipe, fresh: Minter, order: readonly string[]): Expr {
   const { member, single, memberDrop: dropMembers, step } = recipe;
   const collected = member?.kind === 'node'
     // A projected VALUE is already a self-describing `{t,v}` node (`byNode` builds it from the row the
@@ -496,7 +501,7 @@ function collectedValue(rows: Rel, recipe: GroupRecipe, fresh: Minter): Expr {
   const memberDrop = dropMembers ? productivityFilter(step, col(rows.id, MEMBER_COL)) : undefined;
   const memberAggregate: Expr = {
     kind: 'agg', fn: 'json_group_array', args: [collected],
-    orderBy: [{ expr: col(rows.id, ORD_COL), dir: 'asc' }],
+    orderBy: order.map((name) => ({ expr: col(rows.id, name), dir: 'asc' as const })),
     ...(memberDrop ? { filter: memberDrop } : {}),
   };
   const groupedValue: Expr = single
