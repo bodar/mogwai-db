@@ -507,8 +507,20 @@ whole-chain answer stands in for a per-position one.
    its own tests exercise once the unroll is widened — `unrollFixedRepeat` splices the `repeat` away in
    canonicalize, so `bulkPlan`'s `findIndex(s => s.name === 'repeat' && s.repeatRegion)` finds nothing.
    Its one remaining exclusive route is `times(n)` beyond what `MAX_UNROLLED_STEPS` admits (n > 100 for
-   a one-step body), where `bulkPlan` has no cap at all. Delete it together with a per-body-step BYTE
-   budget against the 100 KB statement cap, or the deletion is a silent narrowing at depth.
+   a one-step body), where `bulkPlan` has no cap at all.
+   ⚠️ **This bullet used to say "delete it together with a per-body-step BYTE budget, or the deletion
+   is a silent narrowing at depth". Both halves were wrong.** Nothing about it is silent: past the cap
+   `tryUnroll` declines at COMPILE time, and a statement over the DO's 100 KB cap is a loud error
+   there — while `test:cf-limits` already asserts that wall on Bun, which is the only genuinely silent
+   direction (dev/prod divergence). And the budget is not missing: `MAX_UNROLLED_STEPS = 100` IS the
+   byte budget, derived as 100 KB ÷ the ~1 KB worst-case per-step cost.
+   So the deletion does NOT depend on the budget. It narrows `times(n > 100)` to a clear deferral,
+   and that is the whole cost. **The budget is a separate improvement, and the measurement says it is
+   worth more than the cap suggests:** the 1 KB figure is an `order().by(k)` body, while a MOVEMENT
+   body unrolls at ~140 bytes/step (measured: `times(99)` is 13,824 bytes of SQL, `times(50)` 7,307).
+   Charging a body its own per-step cost instead of the worst case would take a movement body from
+   100 steps to roughly 700 before the same 100 KB is spent — shrinking the narrowing rather than
+   being what makes the deletion safe.
 
 ### 7.5 The instruments that must stay green
 
@@ -752,8 +764,11 @@ moved `src/compiler/rel/`.
      the EMPTY result**, not an error — `RepeatEndStep` re-loops to exhaustion and `processTraverser`
      answers `EmptyTraverser` throughout. Both spines currently raise *"repeat() requires times(),
      until(), or emit()"*, which is a fail-closed deferral rather than the specified behaviour.
-7. **§7.4 item 4 — delete `bulk.ts`**, together with the byte budget item 4 names. After 4 lands this
-   file is already unreachable for everything its tests cover, which is what makes the deletion small.
+7. **§7.4 item 4 — delete `bulk.ts`.** After 4 lands this file is already unreachable for everything
+   its tests cover, which is what makes the deletion small. It does NOT have to wait for the byte
+   budget — see item 4, whose claim that it did was wrong in both halves. Deleting it narrows
+   `times(n > 100)` to a compile-time deferral; the budget is a separate refinement that would shrink
+   that narrowing to roughly `n > 700` for a movement body.
 8. **§7.4 item 1 — the per-position collapse answer.** Last, because it is the largest and because
    everything above narrows it: with `bulk.ts` gone there is one authority already, and what remains is
    turning `collapseSafe` from a chain verdict into a positional query. Its residual content is smaller
