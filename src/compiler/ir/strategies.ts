@@ -1105,14 +1105,14 @@ const unrollableBodyStep = (s: Step): boolean =>
  * statement cap divided by the worst measured per-step cost (~1 KB for an `order().by(k)` body).
  * Two things were wrong with charging every body that rate. It is a STEP count standing in for
  * BYTES, and a movement body actually costs ~140 bytes per spliced step — measured, `times(99)` is
- * 13,824 bytes of SQL — so the ceiling refused seven times more than the platform does. And the real
- * limit is already enforced, on the real bytes, by `cfLimitViolation` at the END of the RelIR spine
- * (`src/compiler/rel/spine.ts`) — which lives in the COMPILER, so it applies on every runtime rather
- * than only where a driver opts in.
+ * 13,824 bytes of SQL — so the ceiling refused seven times more than the platform does. And it was a
+ * platform constant inside a compiler decision, which is the thing that makes a compiler wrong the
+ * moment the platform changes: a raised Cloudflare cap would need a release before anyone saw it.
  *
- * So the pass no longer guesses. It unrolls, and the emitted text is measured against the platform's
- * own number. What that costs is stated plainly: past ~700 steps for a movement body the spine
- * declines on bytes, which is a clear deferral rather than a shipped statement the DO would reject.
+ * So the pass no longer guesses, and nothing replaces it here. A Durable Object enforces its own
+ * statement limits and rejects what it cannot run. The caps are asserted in the BUILD instead —
+ * `CfLimitedSql` makes Bun refuse exactly what a DO refuses (`mise run test:cf-limits`), and
+ * `rel-sweep`/`sql-hygiene` ask `cfLimitViolation` of every corpus plan as CI gates.
  */
 
 /** `childSteps` (`ir/passes.ts`), injected. It runs the WHOLE pass pipeline over the nested body, and
@@ -1214,8 +1214,7 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
   // Calcite's COUNT-over-partitions then SUM contract (`SqlSplittableAggFunction.CountSplitter`) at
   // each phase boundary. TinkerPop's strategy remains suppressible above; its conservative admitted
   // set and provider-independent concern do not define this compiler's physical regime split.
-  // No ceiling here: the emitted BYTES are measured against the DO's cap by `cfLimitViolation` at
-  // the end of the RelIR spine, which is the platform's real number rather than a proxy for it.
+  // No ceiling here: the platform enforces its own statement limits, and the build asserts them.
   const phases: Step[] = [];
   for (let k = 0; k < n; k++) phases.push(...body.map((s) => ({ ...s })));
   return phases;

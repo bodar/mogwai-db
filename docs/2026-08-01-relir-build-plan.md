@@ -170,7 +170,20 @@ would be a throw out of a lowering whose contract is `null`, and legacy would ne
   ONLY pass with a production caller (`lower.ts`).
 - **`prune` (§4.5)** — column pruning. Phase 3 prerequisite: a walk carries only what its body and its
   consumer read.
-- **`land` (§4.5b)** — the bind-budget lowering (an over-budget `Values` → one JSON bind).
+- ⛔ **`land` (§4.5b)** — **WITHDRAWN 2026-08-11.** It was to lower an over-budget `Values` into one
+  JSON bind. There is no over-budget case to lower: a set sized by DATA is a bound-param collection,
+  which already crosses as ONE `json_each` bind on the parameter path unconditionally, and a set
+  sized by the QUERY TEXT inlines as literals costing zero bound parameters. Converting the latter
+  would MANUFACTURE a bind for a constant, which the root `CLAUDE.md` forbids outright.
+  A pass that transparently rewrites a statement to fit a platform number is also the wrong shape:
+  the platform enforces its own limits, and the build asserts them (`CfLimitedSql`, `rel-sweep`,
+  `sql-hygiene`).
+  **RelIR's `SET_BIND_LIMIT` is deleted** — it was a REFUSAL, and a measured one: `within(<26
+  literals>)` declined while 25 compiled, both at zero binds, so a cap derived from the 100-BIND wall
+  was refusing queries that spend none of it. **Legacy's copy STAYS until the spine is deleted**, and
+  the reason is worth recording because removing it looked safe and was not: on the RelIR path a
+  bound-param collection reaches `jsonEachSet` unconditionally, but on the legacy path that threshold
+  IS the mechanism — deleting it took `within(<300-element param>)` from 1 bind to 301.
 - **`fuse` (§4.4)** — small semantic rewrites. Ask which still buys anything the assembler doesn't before
   wiring it.
 - 🚧 **`flatten` (§4.2)** *(Phase 3)* — join flattening / decorrelation into the P1 envelope. Deletes

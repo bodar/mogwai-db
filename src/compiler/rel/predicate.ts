@@ -1,6 +1,5 @@
 import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
 import { jsonEachSet, type Minter } from './build.ts';
-import { CF_MAX_BINDS } from '../../cf-limits.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
 import { gtypeName, arg, collectionMembers, type Arg } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, normalizeTypeName, STORAGE_CLASS, type TypeNode } from '../../gremlin/types.ts';
@@ -96,11 +95,6 @@ const exactTailCast = (value: unknown): SqlType | null =>
  *  `long` is already INTEGER, an `asNumber(BIGDECIMAL)` REAL) and the conversion on the decimal/nanos-TEXT
  *  form (`inject(9.99m)` → REAL), so it is correct once `type.text` says which storage class is in hand. */
 const STATIC_SUBJECT_CAST: Record<string, SqlType> = { bigdecimal: 'real', long: 'int', bigint: 'int', duration: 'int' };
-
-/** Above this, a big set DECLINES rather than emitting binds it cannot afford — the DO 100-parameter
- *  wall. A big LITERAL set inlines (0 binds) and is unaffected; only a big PARAM/data set is capped.
- *  There is deliberately no >100-value blob conversion (removed 2026-08-06). */
-const SET_BIND_LIMIT = Math.floor(CF_MAX_BINDS / 4);
 
 /** Storage classes `compareKey` casts to, as `plan.ts` measured them. A fixed compile-time
  *  vocabulary — never user input — so there is no injection surface in the names themselves. */
@@ -408,7 +402,12 @@ export function predicateExpr(
     // SQLite rejects an empty `IN ()`, so the degenerate sets fold to their truth value: within
     // nothing is never, without nothing is always.
     if (!memberArgs.length) return op === 'within' ? CONSTANT.false : CONSTANT.true;
-    if (memberArgs.length > SET_BIND_LIMIT) return null;   // a big LITERAL set still declines (unchanged)
+    // NO SIZE LIMIT. A vararg set is bounded by the QUERY TEXT, and its members INLINE — 26 literals
+    // cost zero bound parameters, so a cap derived from the 100-BIND wall was refusing queries that
+    // spend none of it (measured: `within(<26 literals>)` declined while `within(<25>)` compiled, both
+    // at 0 binds). The set whose size is a function of DATA is the named-collection branch above, which
+    // crosses as ONE `json_each` bind unconditionally — that is where the rule lives, and it needs no
+    // threshold to enforce it.
     const members = memberArgs.map((o) => operand(o.value, o.type, o.name));
     if (members.some((m) => !m)) return null;
     const inList: Expr = { kind: 'in-list', expr: subject, values: members as Expr[] };
