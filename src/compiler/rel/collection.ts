@@ -1,10 +1,11 @@
-import { col, compilerInt, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { recursiveViolation } from '../../rel/recursive.ts';
 import { argValues, type MergePolicy } from '../../gremlin/frontend.ts';
+import { flatType } from '../../gremlin/types.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Binding } from '../../rel/plan.ts';
-import { meetScalarTypes, perRowCols, sameScalarType, STATIC, typeCarriedBy, UNKNOWN, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
+import { meetScalarTypes, perRowColumnOf, perRowCols, sameScalarType, STATIC, staticTypeOf, typeCarriedBy, UNKNOWN, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
 import { isLocalScope } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
@@ -13,7 +14,7 @@ import { byField, isProductiveBy, modulations, productivityFilter } from './modu
 import { foldElements, foldScalars } from './list.ts';
 import { carriedCols, eq, meta, typeOf, withMergedVtype, type Minter } from './build.ts';
 import { framingCols, type FramedRel, type RelFraming } from './framing.ts';
-import { BULK_OPS, FOLD_OPS, isLogicalOp, mergeStep } from './operator.ts';
+import { ADD_ALL, BULK_OPS, COLLECTION_OPS, FOLD_OPS, isLogicalOp, mergeStep } from './operator.ts';
 import { constLit } from './const.ts';
 import type { Channel } from '../../channels.ts';
 
@@ -128,6 +129,15 @@ export type Members =
    */
   | { readonly kind: 'reduced'; readonly framing: RelFraming };
 
+/** A collection whose members are ROWS — every `Members` arm but the transitional `reduced` one, whose
+ *  "members" are a map a grouping barrier already built.
+ *
+ *  Named because it is what most of this module actually operates on: a site is unioned, a type is met, a
+ *  seed is prepended and a snapshot is narrowed to member COLUMNS, and none of those means anything for a
+ *  pre-reduced map. Stating it once is also what makes `reduce()`'s single `reduced` arm the only place
+ *  that arm is handled — the alternative was a re-check at every one of them. */
+export type RowMembered = Collection & { readonly of: Exclude<Members, { readonly kind: 'reduced' }> };
+
 /** The registry a chain carries — MUTABLE, because a side effect is chain-global state written at one
  *  step and read at another, which is the one thing a fold's return value cannot carry backwards. */
 export type Collections = Map<string, Collection>;
@@ -172,19 +182,18 @@ export function registerCollection(
   if (label === null) return null;
   // A `withSideEffect(name, seed, Operator.x)` collection is NOT empty when the traversal starts and
   // is not merged by concatenation either: the declaration supplies an initial value and the operator
-  // says how each contribution combines with it. Both facts travel on the policy and are spent at the
-  // READ, which is where the reference spends them too — so the registration's only business with
-  // them is to carry them and to refuse an operator this route cannot yet fold. The BULK pair
-  // (`addAll`/`assign`) is that refusal: it merges a site's whole member SET rather than one member at
-  // a time (`AggregateStep.java:131-151`), which is a question about the member relation and not about
-  // this expression.
+  // says how each contribution combines with it. Both facts travel on the policy and are SPENT AT THE
+  // READ, which is where the reference spends them too (`SideEffectCapStep.generateFinalResult`) — so
+  // the registration's only business with them is to carry them and to refuse an operator no read can
+  // spend. `COLLECTION_OPS` is that one authority (`operator.ts`), which is why `assign` is refused
+  // here by name rather than by a shape check three functions away.
   //
   // `reducers` is a separate map from the constant registry, and it has to be: the front end skips
   // the reducer form when building that registry (its value is not a constant to substitute), so
   // before `sideEffectReducers` existed this fact was not visible at all — the label read as fresh.
   // A fact the front end drops is one no lowering can either fold or decline on.
   const merge = reducers.get(label);
-  if (merge && !(merge.operator !== undefined && FOLD_OPS.has(merge.operator))) return null;
+  if (merge && !(merge.operator !== undefined && COLLECTION_OPS.has(merge.operator))) return null;
   const bys = modulations(step, 1, child);
   if (!bys) return null;
   const encounter = input.channels.find((channel) => channel.role === 'encounter');
@@ -196,7 +205,12 @@ export function registerCollection(
   const { collection: retained, bindings } = mutating ? snapshotted(policied, fresh) : { collection: policied, bindings: [] };
   const held = collections.get(label);
   if (!held) { collections.set(label, retained); return bindings; }
-  const accumulated = accumulate(held, retained, fresh);
+  // A label a KEYED form already filled holds a map, and `Operator.addAll` over a Map and a Collection
+  // is the reference's own IllegalArgumentException ("Objects must be both of Map or Collection",
+  // `Operator.java:178-196`) — an error, not a member relation to union onto. It declined before this
+  // narrowing too, via `accumulate`'s scalars check; naming it here is what makes that deliberate.
+  if (held.of.kind === 'reduced') return null;
+  const accumulated = accumulate({ ...held, of: held.of }, retained, fresh);
   if (!accumulated) return null;
   collections.set(label, accumulated);
   return bindings;
@@ -219,8 +233,8 @@ export function registerCollection(
  * the smaller statement and the one whose columns can travel.
  */
 function snapshotted(
-  collection: Collection, fresh: Minter,
-): { readonly collection: Collection; readonly bindings: readonly Binding[] } {
+  collection: RowMembered, fresh: Minter,
+): { readonly collection: RowMembered; readonly bindings: readonly Binding[] } {
   const cols = [...memberCols(collection.of), ...collection.sites[0]!.order];
   const bindings: Binding[] = [];
   const sites = collection.sites.map((site) => {
@@ -248,7 +262,7 @@ function snapshotted(
  * SHAPES is the dynamic-tag variant's question, one level down at the member encoding, and is not
  * this module's to invent.
  */
-function accumulate(held: Collection, added: Collection, fresh: Minter): Collection | null {
+function accumulate(held: RowMembered, added: RowMembered, fresh: Minter): RowMembered | null {
   const sites = [...held.sites, ...added.sites];
   // The POLICY is the LABEL's, not the site's — one `withSideEffect` declaration, however many
   // registration positions read it — so it is carried rather than merged, and the two sides cannot
@@ -305,7 +319,7 @@ const orderOf = (encounter: Channel | undefined): readonly string[] => encounter
  *  stream already had. */
 function traverserMembers(
   input: Rel, framing: RelFraming, encounter: Channel | undefined,
-): Collection | null {
+): RowMembered | null {
   const sites = [{ rel: input, order: orderOf(encounter) }];
   if (framing.kind === 'elements') return { sites, of: { kind: 'elements', elem: framing.elem }, merge: undefined };
   if (framing.kind !== 'scalar') return null;
@@ -323,7 +337,7 @@ function projectedMembers(
   step: IRStep, input: Rel, host: ChildHost, framing: RelFraming,
   modulation: import('./modulator.ts').Modulation, encounter: Channel | undefined,
   child: ChildSeam, fresh: Minter,
-): Collection | null {
+): RowMembered | null {
   const field = byField(step, modulation, host, framing, (name) => col(input.id, name), fresh, child);
   if (!field || field.framing.kind !== 'scalar') return null;
   // A numeric reducer's type is the aggregate's runtime `typeof` in `vt`, which `byField` already
@@ -388,14 +402,74 @@ function projectedMembers(
  * A collection NOTHING reached needs no arm: both folds `COALESCE` an empty aggregate to `[]`, so
  * `cap()` over it is an EMPTY list — which is what the reference's `BulkSet` seed supplies.
  */
-export function reduce({ sites, of, merge }: Collection, fresh: Minter): FramedRel | null {
-  if (of.kind === 'reduced') return { rel: sites[0]!.rel, framing: of.framing };
+export function reduce(collection: Collection, fresh: Minter): FramedRel | null {
+  const held = collection.of;
+  if (held.kind === 'reduced') return { rel: collection.sites[0]!.rel, framing: held.framing };
+  // `addAll` IS the ordinary list fold — over one more site. So the policy is spent BEFORE the
+  // reduction rather than instead of it, and everything downstream sees a plain collection.
+  const rowed: RowMembered = { ...collection, of: held };
+  const seeded = collection.merge?.operator === ADD_ALL ? seedAsSite(rowed, fresh) : rowed;
+  if (!seeded) return null;
+  const { sites, of, merge } = seeded;
   const { rel, order } = sites.length === 1 ? sites[0]! : accumulated(sites, memberCols(of), fresh);
-  // A DECLARED merge policy replaces the fold outright: the members combine into the seed by the
-  // operator, and for everything but the BULK pair that is a SCALAR rather than a list.
-  if (merge) return seededFold(rel, order, of, merge, fresh);
+  // Every other DECLARED policy replaces the fold outright: the members combine into the seed by the
+  // operator, and the answer is a SCALAR rather than a list.
+  if (merge && merge.operator !== ADD_ALL) return seededFold(rel, order, of, merge, fresh);
   if (of.kind === 'elements') return listed(foldElements(rel, of.elem, { order }, fresh));
   return listed(foldScalars(rel, { type: of.type, productiveNull: of.productiveNull, order }, fresh));
+}
+
+/**
+ * `Operator.addAll` — THE SEED'S ITEMS AS SITE 0, so the reduction stays the list fold. `null` declines.
+ *
+ * `addAll(a, b)` is `a.addAll(b)` (`Operator.java:178-196`), and the value `AggregateStep` hands it is the
+ * site's whole `BulkSet` (`:147-148` — `addAll` is one of the two BULK operators). So the answer is the
+ * seed's items, then site 1's members, then site 2's: `Collection.sites` with one more site in FRONT, which
+ * is a thing this module already knows how to be. Nothing new decides the order and nothing new merges the
+ * types — the seed goes through `accumulate` exactly as a second `aggregate("a")` position does, so a
+ * String seed beside Integer members MEETS at a per-value type rather than mis-tagging either side.
+ *
+ * ⚠️ **A `Set` seed DEDUPS** (`Aggregate.feature:279-563`), which is the one place a collection's multiset
+ * licence is revoked and the one thing this does not do — so it declines rather than answering a list.
+ */
+function seedAsSite({ sites, of, merge }: RowMembered, fresh: Minter): RowMembered | null {
+  // Only a collection LITERAL carries per-item `Arg`s. A bound list PARAMETER is ONE oversized value
+  // with no members to spell as rows, and a SCALAR seed is `Operator.addAll`'s own
+  // IllegalArgumentException ("Objects must be both of Map or Collection") rather than a list to prepend.
+  const items = merge?.seed.members;
+  if (!items || merge!.seed.value instanceof Set) return null;
+  // An EMPTY seed adds nothing, and `Values` has no empty form — so it is the absence of a site, not a
+  // site of no rows.
+  if (!items.length) return { sites, of, merge };
+  // Mixed member SHAPES — a scalar seed beside ELEMENT members — is the member-level tagged union
+  // (Phase 3b), one level below the stream variant. Not this function's to invent.
+  if (of.kind !== 'scalars') return null;
+  const literals = items.map(constLit);
+  if (literals.some((literal) => literal === null)) return null;
+  // Each item's DECLARED type, met the same way two sites' are. Where the items agree the seed site is
+  // STATIC and costs no column; where they disagree the tag rides per row in the meet's own column,
+  // which is `injectSource`'s arm for exactly the same problem one layer up.
+  const itemTypes = items.map((item) => {
+    const tag = flatType(item.type);
+    return tag === null || tag === 'list' || tag === 'map' || tag === 'set' ? UNKNOWN : STATIC(tag);
+  });
+  const type = meetScalarTypes(itemTypes);
+  const tagColumn = perRowColumnOf(type);
+  const seed: Site = {
+    rel: make.values({
+      id: fresh('sd'), channels: [],
+      type: typeOf(meta('v', 'any', true), ...(tagColumn ? [meta(tagColumn, 'text', true)] : [])),
+      rows: literals.map((literal, i) => {
+        const tag = staticTypeOf(itemTypes[i]!);
+        return tagColumn ? [literal!, tag ? compilerText(tag) : compilerNull('text')] : [literal!];
+      }),
+    }),
+    // NO order of its own: the seed's items are a written-down sequence and the `Values` rows carry it
+    // incidentally, exactly as a site with no encounter channel does.
+    order: [],
+  };
+  return accumulate({ sites: [seed], of: { kind: 'scalars', type, productiveNull: of.productiveNull }, merge },
+    { sites, of, merge }, fresh);
 }
 
 /** The walk's two columns: the member ordinal reached so far, and the accumulator. Named apart from

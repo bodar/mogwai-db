@@ -37,14 +37,35 @@ import { compilerNull, type Expr } from '../../rel/expr.ts';
  * so a `ProductiveByStrategy` traversal is the only place the difference shows and no scenario names it.
  */
 
+/**
+ * `Operator.addAll`, AS THE FRONT END SPELLS IT — lowercased, because `enumSuffix` lowercases every enum
+ * suffix it reads (`Merge.onCreate` → `oncreate`) and one convention across the whole tagged-arg
+ * vocabulary is worth more than matching Java's camelCase in one set. Named rather than inlined so the
+ * three places that test for it cannot disagree about the casing — which they silently did once.
+ */
+export const ADD_ALL = 'addall';
+
 /** The BULK pair — `sideEffects.add` receives a whole site's members, not one member
  *  (`AggregateStep.java:131-132`). A collection question, not an expression one. */
-export const BULK_OPS: ReadonlySet<string> = new Set(['addAll', 'assign']);
+export const BULK_OPS: ReadonlySet<string> = new Set([ADD_ALL, 'assign']);
 
 /** The operators `mergeStep` spells — every `Operator` that folds MEMBER BY MEMBER. `sumLong` is
  *  absent: it is `add` narrowed to `long` by a cast the Gremlin string grammar cannot even produce a
  *  use for here, so admitting it would claim a promotion rule nothing has asked for. */
 export const FOLD_OPS: ReadonlySet<string> = new Set(['sum', 'minus', 'mult', 'div', 'min', 'max', 'and', 'or']);
+
+/**
+ * The operators a NAMED COLLECTION's read can spend — `FOLD_OPS` plus `addAll`, whose bulk value is the
+ * seed's items as one more site (`collection.ts`, `seedAsSite`).
+ *
+ * `assign` is the one absent, and for a reason no expression can supply: it is the ONLY operator whose
+ * answer differs between a global `aggregate("a")` and a `local(aggregate("a"))`, because it discards
+ * everything before the last `add` and a `LocalStep` makes every traverser its own barrier. Our IR
+ * SPLICES the `local()` wrapper away (`ir/strategies.ts`, `inlineIdentityHostBody`) — correct for every
+ * operator here and unrecoverable for that one, so the fact has to be recorded by the pass that erases
+ * it before this set can grow.
+ */
+export const COLLECTION_OPS: ReadonlySet<string> = new Set([...FOLD_OPS, ADD_ALL]);
 
 /** `a IS NULL` / `a IS NOT NULL`. */
 const isNull = (e: Expr): Expr => ({ kind: 'binary', op: 'is', left: e, right: compilerNull() });

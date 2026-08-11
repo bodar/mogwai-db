@@ -439,11 +439,11 @@ const DECLINED = [
   'g.V().hasLabel("software").group().by("name").by(__.bothE().values("weight").mean())',
   'g.V().order().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
   'g.V().dedup().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
-  // The BULK half of the reducer form of withSideEffect: `addAll`/`assign` fold a site's whole member
-  // SET rather than one member at a time (`AggregateStep.java:131-151`), so they are a question about
-  // the member relation and not about the fold expression. Every other `Operator` routes — see
-  // 'a SEEDED, operator-merged collection is a LEFT FOLD over the ordered members'.
-  'g.withSideEffect("a", [1i,2i], Operator.addAll).V().aggregate("a").by("age").cap("a")',
+  // `Operator.assign` — the one merge policy no expression can spell, because it is the only operator
+  // whose answer differs between a global `aggregate("a")` and a `local(aggregate("a"))` and the IR
+  // splice erases which it was (`COLLECTION_OPS`, `compiler/rel/operator.ts`). Every other operator
+  // routes — see 'a SEEDED, operator-merged collection is a LEFT FOLD over the ordered members'.
+  'g.withSideEffect("a", [1i,2i], Operator.assign).V().aggregate("a").by("age").cap("a")',
   'g.addV("person")',                 // a write
   "g.V().has('name',TextP.containing('ark'))",  // ftsSubstringPredicate's — see below
   "g.V().has('name',P.within(__.V().values('name').fold()))", // a run-time member list, not a set
@@ -2064,12 +2064,25 @@ describe('the RelIR spine', () => {
     expect(await decodeAll(exec(seededStore(), undefined, undefined, 'rel')
       .buffers('g.withSideEffect("a", 0, Operator.sum).V().aggregate("a").by("age").aggregate("a").by("age").cap("a")', {}, {})))
       .toEqual([246]);
-    // The BULK pair still declines: they fold a site's whole member SET rather than one member at a
-    // time (`AggregateStep.java:131-151`), which is a member-relation question, not this expression's.
-    for (const operator of ['addAll', 'assign']) {
-      const gremlin = `g.withSideEffect("a", [1i,2i], Operator.${operator}).V().aggregate("a").by("age").cap("a")`;
-      expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('legacy');
-    }
+    // `addAll` is the SEED AS SITE 0 — `Operator.addAll(seedCollection, siteBulkSet)` appends, so the
+    // answer is the seed's items followed by every member and the reduction stays the list fold.
+    // `Aggregate.feature:507-524`'s own numbers.
+    expect(await decodeAll(exec(seededStore(), undefined, undefined, 'rel')
+      .buffers('g.withSideEffect("a", [1i,2i,3i], Operator.addAll).V().aggregate("a").by("age").cap("a")', {}, {})))
+      .toEqual([[1, 2, 3, 29, 27, 32, 35]]);
+    // The seed goes through `accumulate`, so the ITEMS' types meet with the members' rather than
+    // either side being mis-tagged — a String item beside an Integer item beside String members.
+    expect(await decodeAll(exec(seededStore(), undefined, undefined, 'rel')
+      .buffers('g.withSideEffect("a", ["x",1i], Operator.addAll).V().values("name").aggregate("a").cap("a")', {}, {})))
+      .toEqual([['x', 1, 'marko', 'vadas', 'lop', 'josh', 'ripple', 'peter']]);
+    // `assign` still declines: it is the one operator whose answer differs between a global barrier
+    // and a `local(aggregate(…))` one, and the IR splice erases which it was (`COLLECTION_OPS`).
+    expect(read('g.withSideEffect("a", [1i,2i], Operator.assign).V().aggregate("a").by("age").cap("a")', { spine: 'rel' }).spine)
+      .toBe('legacy');
+    // A `Set` seed DEDUPS, which is the one place a collection's multiset licence is revoked — and the
+    // one thing `seedAsSite` does not do, so it declines rather than answering a list.
+    expect(read('g.withSideEffect("a", {1i,2i}, Operator.addAll).V().aggregate("a").by("age").cap("a")', { spine: 'rel' }).spine)
+      .toBe('legacy');
     // An ELEMENT-membered collection declines too — `Operator.sum` over a Vertex is a
     // ClassCastException in the reference, so there is no fold to build.
     expect(read('g.withSideEffect("a", 1, Operator.sum).V().aggregate("a").cap("a")', { spine: 'rel' }).spine).toBe('legacy');
