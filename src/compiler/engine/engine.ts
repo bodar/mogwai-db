@@ -2,7 +2,7 @@ import { empty, q, value, list, Query, type Expression } from '../../sql/kernel/
 import { type Elem, elemTable } from '../plan/plan.ts';
 import { flattenListArgs, isColumnArg, isOperatorArg, isPopArg, arg, argValues } from '../../gremlin/frontend.ts';
 import { type IRStep } from '../ir/strategies.ts';
-import { analyzeChain, canCarryEncounter, type ChainFacts } from '../ir/analyze.ts';
+import { analyzeChain, canCarryEncounter, legacyCollapseSafe, type ChainFacts } from '../ir/analyze.ts';
 import { layoutCols, rootLayout, trackFromV, type LoweringState, type ElementStream, type StepFn } from '../steps/context/context.ts';
 import { move, toEdge, toVertex, otherV, reSource } from '../steps/prefix/movement.ts';
 import { as, hasLabel, has, hasNot, hasId, where, andOr, dedup, simplePath, cyclicPath } from '../steps/prefix/filter.ts';
@@ -186,7 +186,7 @@ export class LoweringEngine implements Engine {
   private child(params: Record<string, any>, steps?: IRStep[], q?: Query): LoweringEngine {
     const base = this.request.fastPaths;
     return new LoweringEngine(this.request, {
-      q, params, fastPaths: steps ? collapseSafeFastPaths(base, analyzeChain(steps)) : base,
+      q, params, fastPaths: steps ? collapseSafeFastPaths(base, steps) : base,
     });
   }
 
@@ -592,9 +592,15 @@ export class LoweringEngine implements Engine {
   }
 }
 
-/** Whether movement collapse is result-safe for this whole chain (see ChainFacts.collapseSafe).
- *  Exposed so the compile-scope wiring can gate the fastPaths flag once per compilation. Takes
- *  ChainFacts (not steps) so the caller's single analyzeChain() serves both this gate and the seed. */
-export function collapseSafeFastPaths(base: FastPathConfig, facts: ChainFacts): FastPathConfig {
-  return { ...base, movementCollapse: base.movementCollapse && facts.collapseSafe && !facts.demandsEncounter };
+/**
+ * LEGACY'S movement-collapse gate — whether the collapse is result-safe for this WHOLE chain.
+ *
+ * It takes STEPS again rather than `ChainFacts`, and the reason is the §7.4-item-1 change rather than
+ * convenience: collapse-safety is no longer a chain FACT. RelIR answers the same question per position
+ * (`groupableChannels` at the node, `ir/bulk.ts` over the suffix) and never reads this, so the verdict
+ * belongs to the one route that has no positional answer to fall back on. `legacyCollapseSafe` also
+ * folds the encounter mutual-exclusion in, so this no longer restates half the rule at the call site.
+ */
+export function collapseSafeFastPaths(base: FastPathConfig, steps: IRStep[]): FastPathConfig {
+  return { ...base, movementCollapse: base.movementCollapse && legacyCollapseSafe(steps) };
 }

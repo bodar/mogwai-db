@@ -1,11 +1,15 @@
-// ChainFacts (src/compiler/ir/analyze.ts): the whole-chain analysis consolidated from the
-// former chainTracksPath / demandsEncounterOrder / chainCollapseSafe scans. These assert the
-// facts a chain yields, and in particular that demandsEncounter and collapseSafe AGREE about
-// what a plain order() does — the drift risk the shared isPlainOrder() predicate removes.
+// The whole-chain analysis (src/compiler/ir/analyze.ts), consolidated from the former
+// chainTracksPath / demandsEncounterOrder / chainCollapseSafe scans, plus the POSITIONAL collapse
+// answer that replaced the third of those as a chain fact (src/compiler/ir/bulk.ts).
+//
+// Three groups, and the split between them is the subject: `ChainFacts` holds what BOTH spines read;
+// `legacyCollapseSafe` is the whole-chain collapse verdict, now legacy's alone; `bulkObservedFrom` is
+// the suffix question RelIR asks at each hop instead. The invariant that outlives all of it is that
+// they cannot disagree about what a plain order() does, which is why `isPlainOrder` has one home.
 import { test, expect, describe } from 'bun:test';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { normalize } from '../../src/compiler/ir/passes.ts';
-import { analyzeChain } from '../../src/compiler/ir/analyze.ts';
+import { analyzeChain, legacyCollapseSafe } from '../../src/compiler/ir/analyze.ts';
 import { bulkObservedFrom } from '../../src/compiler/ir/bulk.ts';
 
 /** Parse + normalize (so order().by() has its .bys folded, exactly as the compiler sees it),
@@ -16,6 +20,13 @@ import { bulkObservedFrom } from '../../src/compiler/ir/bulk.ts';
  *  label retractions are root-only, so a body-normalized chain would keep an `as()` the compiler has
  *  already dropped and these pins would describe a chain no compile produces. */
 const facts = (gremlin: string) => analyzeChain(normalize(stepChain(parseGremlin(gremlin), {}), {}, undefined, false).steps);
+
+/** LEGACY's chain-global collapse verdict. No longer a `ChainFacts` field — RelIR answers the same
+ *  question per position (`bulkObservedFrom` below, plus `groupableChannels` at the node), so the
+ *  whole-chain form belongs to the one route with no positional answer. These pins are unchanged in
+ *  MEANING: what they describe is now explicitly legacy's gate rather than a fact about the chain. */
+const collapseSafe = (gremlin: string) =>
+  legacyCollapseSafe(normalize(stepChain(parseGremlin(gremlin), {}), {}, undefined, false).steps);
 
 describe('ChainFacts.tracksPath', () => {
   test('true iff a top-level path-family step is present', () => {
@@ -65,26 +76,26 @@ describe('ChainFacts.demandsEncounter', () => {
   });
 });
 
-describe('ChainFacts.collapseSafe', () => {
+describe('legacyCollapseSafe — the chain-global verdict, legacy\'s alone', () => {
   test('true for a reducer-terminal pure movement/filter chain', () => {
-    expect(facts('g.V().out().out().count()').collapseSafe).toBe(true);
-    expect(facts('g.V().hasLabel("person").out("knows").count()').collapseSafe).toBe(true);
+    expect(collapseSafe('g.V().out().out().count()')).toBe(true);
+    expect(collapseSafe('g.V().hasLabel("person").out("knows").count()')).toBe(true);
   });
   test('an element leaf after movement is collapse-safe (framed as (v, bulk))', () => {
-    expect(facts('g.V().out()').collapseSafe).toBe(true);
-    expect(facts('g.V().out().both()').collapseSafe).toBe(true);
+    expect(collapseSafe('g.V().out()')).toBe(true);
+    expect(collapseSafe('g.V().out().both()')).toBe(true);
   });
   test('a count-valued group with a non-fan-out key is a collapse-safe terminal', () => {
-    expect(facts('g.V().out().group().by(T.label).by(__.count())').collapseSafe).toBe(true);
-    expect(facts('g.V().out().group().by(__.label()).by(__.count())').collapseSafe).toBe(false);
-    expect(facts('g.V().out().group().by(T.label).by(__.sum())').collapseSafe).toBe(false);
+    expect(collapseSafe('g.V().out().group().by(T.label).by(__.count())')).toBe(true);
+    expect(collapseSafe('g.V().out().group().by(__.label()).by(__.count())')).toBe(false);
+    expect(collapseSafe('g.V().out().group().by(T.label).by(__.sum())')).toBe(false);
   });
   test('false when identity is carried between the source and terminal', () => {
-    expect(facts('g.V().out().path().count()').collapseSafe).toBe(false); // path carries identity
+    expect(collapseSafe('g.V().out().path().count()')).toBe(false); // path carries identity
     // A LIVE as() still carries identity, and these are the two ways it stays live: a later step reads
     // the label's value, so `retractUnreadAlias` cannot drop it and this predicate must still refuse.
-    expect(facts('g.V().as("a").out().select("a").out().count()').collapseSafe).toBe(false);
-    expect(facts('g.V().as("a").out().where("a", P.neq("b")).as("b").count()').collapseSafe).toBe(false);
+    expect(collapseSafe('g.V().as("a").out().select("a").out().count()')).toBe(false);
+    expect(collapseSafe('g.V().as("a").out().where("a", P.neq("b")).as("b").count()')).toBe(false);
   });
   test('a DEAD as() is not identity — nothing reads it, so it is gone before this runs', () => {
     // This case used to be pinned `false` here, with the reason "as() carries identity". The label was
@@ -92,7 +103,7 @@ describe('ChainFacts.collapseSafe', () => {
     // the repeat two-regimes plan) drops it and the chain reaching this analysis is `V().out().count()`.
     // Relaxing collapseSafe to ADMIT a carried as() is a different change and remains refuted — 52
     // executing census traversals changed their answer when it was tried.
-    expect(facts('g.V().as("a").out().count()').collapseSafe).toBe(true);
+    expect(collapseSafe('g.V().as("a").out().count()')).toBe(true);
   });
 });
 
@@ -188,11 +199,13 @@ describe('bulkObservedFrom — the POSITIONAL half (src/compiler/ir/bulk.ts)', (
   });
 });
 
-describe('demandsEncounter and collapseSafe agree on a plain order() (shared isPlainOrder)', () => {
+describe('demandsEncounter and the collapse answers agree on a plain order() (shared isPlainOrder)', () => {
   // The single most important invariant of the consolidation: the order() that clears
-  // demandsEncounter is EXACTLY the order() after which movementCollapse's post-order slice is
-  // safe. A keyed order() before a limit → demandsEncounter false; the same chain terminating in
-  // a reducer stays collapseSafe. If the two predicates ever drift, one of these flips.
+  // demandsEncounter is EXACTLY the order() after which a post-order slice is bulk-safe. A keyed
+  // order() before a limit → demandsEncounter false; the same chain terminating in a reducer stays
+  // collapse-safe. If the predicates ever drift, one of these flips. There are THREE consumers of
+  // it now (this scan, `legacyCollapseSafe`, and `bulkObservedFrom`'s `sawOrder`), which is why it
+  // moved to `ir/step.ts` rather than staying private to this module.
   test('keyed order() clears encounter demand', () => {
     const f = facts('g.V().out().order().by("name").limit(2)');
     expect(f.demandsEncounter).toBe(false);

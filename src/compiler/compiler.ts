@@ -2,7 +2,6 @@ import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEff
 import { type TypeNode } from '../gremlin/types.ts';
 import { runPasses } from './ir/passes.ts';
 import { LoweringEngine, collapseSafeFastPaths } from './engine/engine.ts';
-import { analyzeChain } from './ir/analyze.ts';
 import { routeWrite } from './steps/write/write.ts';
 import { type Executable } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
@@ -71,7 +70,7 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   const request = createRequestScope(app, {
     params, federationDepth: resolveFederationDepth(options), sourceOptions: extractSourceOptions(tree, params),
   });
-  const engine = new LoweringEngine(request, { fastPaths: collapseSafeFastPaths(request.fastPaths, analyzeChain(steps)) });
+  const engine = new LoweringEngine(request, { fastPaths: collapseSafeFastPaths(request.fastPaths, steps) });
 
   // THE SPINE ROUTE (§6·1). A chain the RelIR lowering covers end-to-end compiles there; anything
   // else — a step it has not learned, a write it cannot express, a sack — falls through to the legacy

@@ -1277,7 +1277,6 @@ export function sourceUnion(engine: Engine, step: IRStep, params: Record<string,
   const armFacts: ChainFacts = {
     tracksPath: facts.tracksPath || own.some((f) => f.tracksPath),
     demandsEncounter: facts.demandsEncounter || own.some((f) => f.demandsEncounter),
-    collapseSafe: false, // gated per-compile at engine construction; never re-read from here
   };
   const arms = bodies.map((body) => engine.lowerRootedArm(body, params, sackInit, armFacts));
   // Name the offending arm's SHAPE before anything else: a map/group/record/path/variant branch
