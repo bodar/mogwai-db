@@ -28,6 +28,16 @@ import { normalizeTypeName } from '../../gremlin/types.ts';
  */
 export type IRStep = Step & { repeatRegion?: Step[]; modulators?: any[][]; optionArms?: Step[]; productiveBy?: boolean; unrollSuppressed?: boolean; from?: string; to?: string; withArgs?: [string, any][] };
 
+/** Did this step run inside a PER-TRAVERSER host (`local`/`map`/`flatMap`) whose wrapper the splice pass
+ *  erased — `inlineIdentityHostBody`, `ir/strategies.ts`?
+ *
+ *  It matters for a LOCAL BARRIER and nowhere else: such a step sees one traverser at a time here and
+ *  the whole stream at chain position, which is invisible for every step whose answer does not depend
+ *  on how many traversers one barrier holds — and observable for the one that does
+ *  (`aggregate("a")` under `Operator.assign`). Read off the step rather than re-derived, because the
+ *  pass that deleted the wrapper is the only thing that still knew. */
+export const ranPerTraverser = (s: IRStep): boolean => s.perTraverser === true;
+
 // ---------- step-name vocabularies: DERIVE with a named difference, never merge ----------
 //
 // A dozen step-name Sets across the compiler overlap without being interchangeable, and their

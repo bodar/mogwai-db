@@ -610,7 +610,26 @@ function identityHostBody(s: Step, params: Record<string, any>): Step[] | null {
   return body.every((inner) => inner.name === 'by' || isStreamIdentity(inner, params)) ? body : null;
 }
 
-/** Splice a per-traverser host whose body leaves the stream alone into the chain that hosts it. */
+/**
+ * Splice a per-traverser host whose body leaves the stream alone into the chain that hosts it.
+ *
+ * ⚠️ **THE SPLICE RECORDS THE GRANULARITY IT ERASES, and that is not bookkeeping.** A
+ * `local`/`map`/`flatMap` body runs ONCE PER TRAVERSER, so a LOCAL BARRIER inside it sees one
+ * traverser at a time where the same step at chain position sees the whole stream. For almost every
+ * step that difference is invisible — which is what makes the splice legal at all — but it is
+ * OBSERVABLE for a step whose answer depends on how many traversers one barrier holds, and
+ * `aggregate("a")` under `Operator.assign` is exactly that: `AggregateStep.processAllStarts` drains
+ * its starts into ONE `BulkSet` and assigns the whole thing, so a global barrier assigns every member
+ * and a per-traverser one assigns the last traverser's single member
+ * (`Aggregate.feature:552-575` states both: `[29,27,32,35]` from the global form, `[35]` from the
+ * `local` one after an `order().by("age")`).
+ *
+ * So the fact travels on the spliced step rather than being re-derived later, for `Arg.name`'s reason:
+ * a lowering cannot recover what an earlier phase deleted. It is deliberately NOT a reason to stop
+ * splicing — the splice is what makes every OTHER step in the body compose — and it is deliberately
+ * unconditional rather than only-for-`aggregate`, because "this step ran per traverser" is a property
+ * of the position, not of who happens to read it today.
+ */
 export function inlineIdentityHostBody(steps: Step[], params: Record<string, any>): Step[] {
   const out: Step[] = [];
   for (const s of steps) {
@@ -618,10 +637,14 @@ export function inlineIdentityHostBody(steps: Step[], params: Record<string, any
     // RECURSE INTO THE SPLICED BODY, because a body that is itself an identity host
     // (`local(__.local(__.aggregate("a")))`) splices to another one — and this pass has already
     // walked past the position it lands in. A single pass would unwrap exactly one layer.
-    if (body) out.push(...inlineIdentityHostBody(body, params)); else out.push(s);
+    if (body) out.push(...inlineIdentityHostBody(body, params).map(perTraverser)); else out.push(s);
   }
   return out;
 }
+
+/** A step marked as having run inside a PER-TRAVERSER host. A modulator is not a step of the stream at
+ *  all, so it takes no mark — its host's is the one that counts. */
+const perTraverser = (s: Step): Step => s.name === 'by' ? s : { ...s, perTraverser: true };
 
 /** The literal a nested traversal is worth, or `undefined` when it is not a bare constant. A
  *  parse needing params we do not have (a nested normalize runs param-free) simply declines. */

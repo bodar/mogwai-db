@@ -7,14 +7,14 @@ import type { Rel } from '../../rel/rel.ts';
 import type { Binding } from '../../rel/plan.ts';
 import { meetScalarTypes, perRowColumnOf, perRowCols, sameScalarType, STATIC, staticTypeOf, typeCarriedBy, UNKNOWN, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
-import { isLocalScope } from '../ir/step.ts';
+import { isLocalScope, ranPerTraverser } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { byField, isProductiveBy, modulations, productivityFilter } from './modulator.ts';
 import { foldElements, foldScalars } from './list.ts';
 import { carriedCols, eq, meta, typeOf, withMergedVtype, type Minter } from './build.ts';
 import { framingCols, type FramedRel, type RelFraming } from './framing.ts';
-import { ADD_ALL, BULK_OPS, COLLECTION_OPS, FOLD_OPS, isLogicalOp, mergeStep } from './operator.ts';
+import { ADD_ALL, ASSIGN, BULK_OPS, COLLECTION_OPS, FOLD_OPS, isLogicalOp, mergeStep } from './operator.ts';
 import { constLit } from './const.ts';
 import type { Channel } from '../../channels.ts';
 
@@ -103,6 +103,21 @@ export interface Collection {
 export interface Site {
   readonly rel: Rel;
   readonly order: readonly string[];
+  /**
+   * DID THIS SITE'S BARRIER HOLD ONE TRAVERSER AT A TIME, or the whole stream?
+   *
+   * `AggregateStep.processAllStarts` drains its starts into ONE `BulkSet` and, for a BULK operator,
+   * merges that whole set as a single value (`:131-151`). Under `local(aggregate(…))` a `LocalStep`
+   * runs the body per traverser, so each of those "sets" holds one member. For every operator that
+   * folds MEMBER BY MEMBER the distinction is invisible — which is why the IR is free to splice the
+   * `local()` away — and for `Operator.assign` it is the whole answer: the global form assigns every
+   * member and the per-traverser form assigns the last one alone.
+   *
+   * It is a property of the SITE and not of the collection, because two positions in one chain may
+   * differ; and it is read off the step (`ranPerTraverser`) rather than re-derived, because the pass
+   * that erased the wrapper is the only thing that still knew.
+   */
+  readonly perTraverser: boolean;
 }
 
 /**
@@ -208,7 +223,7 @@ export function registerCollection(
   const encounter = input.channels.find((channel) => channel.role === 'encounter');
   const built = bys[0]
     ? projectedMembers(step, input, host, framing, bys[0], encounter, child, fresh)
-    : traverserMembers(input, framing, encounter);
+    : traverserMembers(step, input, framing, encounter);
   if (!built) return null;
   const policied = { ...built, merge };
   const { collection: retained, bindings } = mutating ? snapshotted(policied, fresh) : { collection: policied, bindings: [] };
@@ -317,7 +332,7 @@ export function registerMap(
   // drop the seed silently, so it declines. Phase 4's keyed unification is where it lands.
   if (label === null || collections.has(label) || policies.has(label)) return false;
   collections.set(label, {
-    sites: [{ rel: built.rel, order: [] }],
+    sites: [{ rel: built.rel, order: [], perTraverser: false }],
     of: { kind: 'reduced', framing: built.framing },
     merge: undefined,
   });
@@ -331,9 +346,9 @@ const orderOf = (encounter: Channel | undefined): readonly string[] => encounter
 /** The BARE `aggregate("a")` — the traversers themselves are the members, in whichever shape the
  *  stream already had. */
 function traverserMembers(
-  input: Rel, framing: RelFraming, encounter: Channel | undefined,
+  step: IRStep, input: Rel, framing: RelFraming, encounter: Channel | undefined,
 ): RowMembered | null {
-  const sites = [{ rel: input, order: orderOf(encounter) }];
+  const sites = [{ rel: input, order: orderOf(encounter), perTraverser: ranPerTraverser(step) }];
   if (framing.kind === 'elements') return { sites, of: { kind: 'elements', elem: framing.elem }, merge: undefined };
   if (framing.kind !== 'scalar') return null;
   return { sites, of: { kind: 'scalars', type: framing.type, productiveNull: false }, merge: undefined };
@@ -390,7 +405,7 @@ function projectedMembers(
   // nulls emits nothing where a bare one emits null" got recorded as an open question about
   // `MaxLocalStep`. It was never that; it was one field falling out of a constant.
   return {
-    sites: [{ rel: rows, order: orderOf(encounter) }],
+    sites: [{ rel: rows, order: orderOf(encounter), perTraverser: ranPerTraverser(step) }],
     of: {
       kind: 'scalars',
       type: typeCarriedBy(field.framing.type, (column) => cols.some((declared) => declared.name === column)),
@@ -424,18 +439,57 @@ export function reduce(collection: Collection, fresh: Minter): FramedRel | null 
   const seeded = collection.merge?.operator === ADD_ALL ? seedAsSite(rowed, fresh) : rowed;
   if (!seeded) return null;
   const { sites, of, merge } = seeded;
-  const accumulation = sites.length === 1 ? sites[0]! : accumulated(sites, memberCols(of), fresh);
+  // `assign` REPLACES, so only the LAST merge survives and every site before it is dead — which makes
+  // it the one policy that narrows the site list rather than reading all of it.
+  const surviving = merge?.operator === ASSIGN ? [sites[sites.length - 1]!] : sites;
+  const accumulation = surviving.length === 1 ? surviving[0]! : accumulated(surviving, memberCols(of), fresh);
   // Every other DECLARED policy replaces the fold outright: the members combine into the seed by the
   // operator, and the answer is a SCALAR rather than a list.
-  if (merge && merge.operator !== ADD_ALL)
+  if (merge && merge.operator !== ADD_ALL && merge.operator !== ASSIGN)
     return seededFold(accumulation.rel, accumulation.order, of, merge, fresh);
-  // A SET seed makes `addAll` DEDUP, and it also makes the answer a Set on the wire.
-  const setSeeded = merge?.seed.value instanceof Set;
-  const { rel, order } = setSeeded ? firstOccurrences(accumulation, memberCols(of), fresh) : accumulation;
+  // A PER-TRAVERSER `assign` assigns a one-member set each time, so the answer is the LAST member
+  // alone; a global one assigns the whole set. Both discard the seed, which is what `assign` IS.
+  const assigned = merge?.operator === ASSIGN && accumulation.perTraverser
+    ? lastMember(accumulation, fresh) : accumulation;
+  // A SET seed makes `addAll` DEDUP, and it also makes the answer a Set on the wire. `assign` discards
+  // the seed, so its set-ness goes with it — the assigned value is the site's own `BulkSet`.
+  const setSeeded = merge?.operator === ADD_ALL && merge.seed.value instanceof Set;
+  const { rel, order } = setSeeded ? firstOccurrences(assigned, memberCols(of), fresh) : assigned;
   const folded = of.kind === 'elements'
     ? listed(foldElements(rel, of.elem, { order }, fresh))
     : listed(foldScalars(rel, { type: of.type, productiveNull: of.productiveNull, order }, fresh));
   return setSeeded ? { ...folded, framing: { ...folded.framing, set: true } } : folded;
+}
+
+/**
+ * THE LAST MEMBER ALONE — what a PER-TRAVERSER `Operator.assign` leaves behind.
+ *
+ * `assign` returns its second argument (`Operator.java:104-110`), so the collection is whatever the
+ * final `sideEffects.add` handed it. Under `local(aggregate(…))` a `LocalStep` makes every traverser its
+ * own barrier, so that final value is a one-member `BulkSet` — the last traverser's — and `cap` returns
+ * it as a one-member list. The corpus states the difference rather than describing it: the same
+ * declaration answers `[29,27,32,35]` at chain position and `[35]` under `local` after an
+ * `order().by("age")` (`Aggregate.feature:552-575`).
+ *
+ * ⚠️ **"Last" is only as defined as the site's own order, and that is the REFERENCE's answer too** —
+ * which is exactly why its scenario adds an `order().by("age")` and says so in a comment. With no
+ * ordering the pick is arbitrary in TinkerPop as well, so an arbitrary pick here is faithful rather
+ * than sloppy; what would not be faithful is inventing an order to look deterministic.
+ */
+function lastMember(site: Site, fresh: Minter): Site {
+  // The channels ride through, and every node here must say so: a member relation still carries the
+  // encounter channel that ORDERS it, and the obligation checker refuses a slice that silently drops one
+  // ("sort changed its carried channels") rather than letting the declared schema desync from the rows.
+  const carried = site.rel.channels;
+  const ordered = make.sort({
+    id: fresh('sy'), input: site.rel, channels: carried, type: site.rel.type,
+    terms: site.order.map((name) => ({ expr: col(site.rel.id, name), dir: 'desc' as const })),
+  });
+  return {
+    rel: make.limit({ id: fresh('sz'), input: ordered, channels: carried, type: ordered.type, count: compilerInt(1) }),
+    order: site.order,
+    perTraverser: site.perTraverser,
+  };
 }
 
 /**
@@ -454,8 +508,9 @@ export function reduce(collection: Collection, fresh: Minter): FramedRel | null 
  */
 function firstOccurrences(site: Site, cols: readonly string[], fresh: Minter): Site {
   const kept = 'sq';
+  const carried = site.rel.channels;
   const ranked = make.window({
-    id: fresh('sk'), input: site.rel, channels: [],
+    id: fresh('sk'), input: site.rel, channels: carried,
     type: typeOf(...site.rel.type.cols, meta(kept, 'int')),
     specs: [[kept, {
       kind: 'window-expr', fn: 'row_number', args: [],
@@ -467,10 +522,11 @@ function firstOccurrences(site: Site, cols: readonly string[], fresh: Minter): S
   });
   return {
     rel: make.filter({
-      id: fresh('sx'), input: ranked, channels: [], type: ranked.type,
+      id: fresh('sx'), input: ranked, channels: carried, type: ranked.type,
       pred: eq(col(ranked.id, kept), compilerInt(1)),
     }),
     order: site.order,
+    perTraverser: site.perTraverser,
   };
 }
 
@@ -522,6 +578,10 @@ function seedAsSite({ sites, of, merge }: RowMembered, fresh: Minter): RowMember
     // NO order of its own: the seed's items are a written-down sequence and the `Values` rows carry it
     // incidentally, exactly as a site with no encounter channel does.
     order: [],
+    // The seed is not a barrier at all — it is a written-down value — so the granularity question does
+    // not arise for it. `false` is the answer that makes `addAll` behave, and `addAll` is the only
+    // operator that ever sees this site.
+    perTraverser: false,
   };
   return accumulate({ sites: [seed], of: { kind: 'scalars', type, productiveNull: of.productiveNull }, merge },
     { sites, of, merge }, fresh);
@@ -695,6 +755,9 @@ function accumulated(sites: readonly Site[], cols: readonly string[], fresh: Min
   return {
     rel: make.union({ id: fresh('cu'), inputs: arms, all: true, channels: [], type }),
     order: [SITE_COL, SITE_ENCOUNTER_COL],
+    // The ACCUMULATION's granularity is the LAST site's, because that is the barrier whose merge lands
+    // last and `assign` keeps only the last one. Every other operator ignores it.
+    perTraverser: sites[sites.length - 1]!.perTraverser,
   };
 }
 

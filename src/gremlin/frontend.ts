@@ -97,6 +97,12 @@ export interface Step {
   /** `repeat(name, body)` has the same body channel as `repeat(body)`; its name
    * remains explicit metadata for the lowering that owns named loop counters. */
   loopName?: string;
+  /** Set by the `extract`-tier pass that SPLICES a per-traverser host's body into the flat chain
+   *  (`inlineIdentityHostBody`): this step ran inside a `local`/`map`/`flatMap`, so a local barrier at
+   *  this position holds ONE traverser rather than the stream. It lives on `Step` rather than on
+   *  `IRStep` only because the pass that knows it runs before the IR does; read it through
+   *  `ranPerTraverser` (`compiler/ir/step.ts`), which is where what it MEANS is written down. */
+  perTraverser?: boolean;
 }
 
 // ---------- tagged non-value arguments ----------

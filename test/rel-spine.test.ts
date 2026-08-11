@@ -439,11 +439,6 @@ const DECLINED = [
   'g.V().hasLabel("software").group().by("name").by(__.bothE().values("weight").mean())',
   'g.V().order().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
   'g.V().dedup().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
-  // `Operator.assign` — the one merge policy no expression can spell, because it is the only operator
-  // whose answer differs between a global `aggregate("a")` and a `local(aggregate("a"))` and the IR
-  // splice erases which it was (`COLLECTION_OPS`, `compiler/rel/operator.ts`). Every other operator
-  // routes — see 'a SEEDED, operator-merged collection is a LEFT FOLD over the ordered members'.
-  'g.withSideEffect("a", [1i,2i], Operator.assign).V().aggregate("a").by("age").cap("a")',
   'g.addV("person")',                 // a write
   "g.V().has('name',TextP.containing('ark'))",  // ftsSubstringPredicate's — see below
   "g.V().has('name',P.within(__.V().values('name').fold()))", // a run-time member list, not a set
@@ -2075,10 +2070,21 @@ describe('the RelIR spine', () => {
     expect(await decodeAll(exec(seededStore(), undefined, undefined, 'rel')
       .buffers('g.withSideEffect("a", ["x",1i], Operator.addAll).V().values("name").aggregate("a").cap("a")', {}, {})))
       .toEqual([['x', 1, 'marko', 'vadas', 'lop', 'josh', 'ripple', 'peter']]);
-    // `assign` still declines: it is the one operator whose answer differs between a global barrier
-    // and a `local(aggregate(…))` one, and the IR splice erases which it was (`COLLECTION_OPS`).
-    expect(read('g.withSideEffect("a", [1i,2i], Operator.assign).V().aggregate("a").by("age").cap("a")', { spine: 'rel' }).spine)
-      .toBe('legacy');
+    // `assign` REPLACES, so the answer is whatever the LAST `sideEffects.add` handed it and the seed is
+    // gone — and it is the one operator whose answer depends on how many traversers ONE barrier held.
+    // `Aggregate.feature:552-575` states both halves; the `local` form's `order().by("age")` is upstream's
+    // own way of making "last" mean something (with no ordering the pick is arbitrary there too).
+    expect(await decodeAll(exec(seededStore(), undefined, undefined, 'rel')
+      .buffers('g.withSideEffect("a", [1i,2i,3i], Operator.assign).V().aggregate("a").by("age").cap("a")', {}, {})))
+      .toEqual([[29, 27, 32, 35]]);
+    expect(await decodeAll(exec(seededStore(), undefined, undefined, 'rel')
+      .buffers('g.withSideEffect("a", [1i,2i,3i], Operator.assign).V().order().by("age").local(__.aggregate("a").by("age")).cap("a")', {}, {})))
+      .toEqual([[35]]);
+    // Two SITES under `assign`: the first merge is overwritten by the second, so only the last site's
+    // members survive — which is why this policy NARROWS the site list rather than reading all of it.
+    expect(await decodeAll(exec(seededStore(), undefined, undefined, 'rel')
+      .buffers('g.withSideEffect("a", [9i], Operator.assign).V().aggregate("a").by("age").aggregate("a").by("name").cap("a")', {}, {})))
+      .toEqual([['marko', 'vadas', 'lop', 'josh', 'ripple', 'peter']]);
     // A `Set` seed DEDUPS — `addAll(a, b)` is `a.addAll(b)`, so when `a` is a Set every later
     // contribution is offered to `Set.add` and a repeat changes nothing. The one place a collection's
     // multiset licence is revoked, and it also makes the answer a SET on the wire (GraphBinary spells

@@ -45,9 +45,12 @@ import { compilerNull, type Expr } from '../../rel/expr.ts';
  */
 export const ADD_ALL = 'addall';
 
+/** `Operator.assign`, as the front end spells it — see `ADD_ALL` for why these are named. */
+export const ASSIGN = 'assign';
+
 /** The BULK pair — `sideEffects.add` receives a whole site's members, not one member
  *  (`AggregateStep.java:131-132`). A collection question, not an expression one. */
-export const BULK_OPS: ReadonlySet<string> = new Set([ADD_ALL, 'assign']);
+export const BULK_OPS: ReadonlySet<string> = new Set([ADD_ALL, ASSIGN]);
 
 /** The operators `mergeStep` spells — every `Operator` that folds MEMBER BY MEMBER. `sumLong` is
  *  absent: it is `add` narrowed to `long` by a cast the Gremlin string grammar cannot even produce a
@@ -55,17 +58,14 @@ export const BULK_OPS: ReadonlySet<string> = new Set([ADD_ALL, 'assign']);
 export const FOLD_OPS: ReadonlySet<string> = new Set(['sum', 'minus', 'mult', 'div', 'min', 'max', 'and', 'or']);
 
 /**
- * The operators a NAMED COLLECTION's read can spend — `FOLD_OPS` plus `addAll`, whose bulk value is the
- * seed's items as one more site (`collection.ts`, `seedAsSite`).
+ * The operators a NAMED COLLECTION's read can spend — every `Operator` the Gremlin string grammar can
+ * name, now that the two BULK ones are member-relation answers rather than expressions
+ * (`collection.ts`: `seedAsSite` for `addAll`, `lastMember` for a per-traverser `assign`).
  *
- * `assign` is the one absent, and for a reason no expression can supply: it is the ONLY operator whose
- * answer differs between a global `aggregate("a")` and a `local(aggregate("a"))`, because it discards
- * everything before the last `add` and a `LocalStep` makes every traverser its own barrier. Our IR
- * SPLICES the `local()` wrapper away (`ir/strategies.ts`, `inlineIdentityHostBody`) — correct for every
- * operator here and unrecoverable for that one, so the fact has to be recorded by the pass that erases
- * it before this set can grow.
+ * `sumLong` is the one absent, and it is absent from `FOLD_OPS` for the same reason: it is `add`
+ * narrowed to `long` by a cast nothing has asked for.
  */
-export const COLLECTION_OPS: ReadonlySet<string> = new Set([...FOLD_OPS, ADD_ALL]);
+export const COLLECTION_OPS: ReadonlySet<string> = new Set([...FOLD_OPS, ...BULK_OPS]);
 
 /** `a IS NULL` / `a IS NOT NULL`. */
 const isNull = (e: Expr): Expr => ({ kind: 'binary', op: 'is', left: e, right: compilerNull() });
