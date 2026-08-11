@@ -524,12 +524,16 @@ the walk (`until`/`emit`/`emit(pred)` at all four modulator positions, a sack fo
   is not.** Relaxing `unrollableBodyStep` to a deny-list moves routing **33 → 43 only**; the other 69 are
   blocked by steps the SPLICED chain still cannot lower (`select`, `local`, `group`, the map shape). **Most of
   the repeat gap is the ordinary Phase 2 coverage gap wearing a `repeat` costume** — work Phase 2's families.
-- 🚧 **The deny-list conversion — +10.** The transformation's validity is a property of `repeat`, not of the
-  body's step names, so the allow-list is the accidental model; the end state is a deny-list of exactly
-  `loops()`, a named `repeat('a',…)`, `emit()`, `until()`. **Blocked on:** the SIDE-EFFECT subset
-  (`group('a')`, `aggregate`) needs an argument about accumulation ACROSS phases, which is
-  `docs/2026-08-09-named-collections-are-bindings-plan.md` (9 of 13 multi-site aggregate scenarios fail on
-  BOTH spines today). Land the stateless half; leave that one there.
+- 🚧 **The deny-list conversion — +10, and NOT blocked on anything.** The transformation's validity is a
+  property of `repeat`, not of the body's step names, so the allow-list is the accidental model; the end state
+  is a deny-list of exactly `loops()`, a named `repeat('a',…)`, `emit()`, `until()`.
+  ⚠️ **This item carried a stale blocker for two days and the correction is the lesson.** It said the
+  SIDE-EFFECT subset needed "an argument about accumulation ACROSS phases" from
+  `docs/2026-08-09-named-collections-are-bindings-plan.md`. That argument is multi-site accumulation, which
+  LANDED in that plan's Phase 2 — an unrolled body simply IS N sites. Verified by admitting `aggregate` and
+  running it: `g.V().repeat(__.aggregate("a")).times(2).cap("a").unfold()` returns each of six vertices twice,
+  which is `Aggregate.feature:743-763` exactly. The +10 measurement already admitted side-effect bodies, so
+  the number stands. *Read a decline's REASON, not its date.*
 - 🚧 **A parameterised `times($x)` should PREFER the walk**, where it stays a bind. Unrolling forces the one
   early parameter reduction the root `CLAUDE.md` names, so the unroll should claim it only when no other
   regime can express the body.
