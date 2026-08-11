@@ -375,6 +375,27 @@ relOnly('emit(pred) doubles under until-before/emit-after, exactly as the bare f
     .toEqual(['lop', 'lop', 'lop', 'lop', 'ripple', 'ripple']);
 });
 
+relOnly('a MULTI-ARM body walks: both() is a compound term, one arm per direction', () => {
+  const store = seededStore();
+  // ⚠️ COMPARE THROUGH count(), NOT ROWS. The bounded regime RLE-collapses duplicates into `bulk`
+  // while a walk cannot collapse at all (§1: SQLite forbids the aggregate in a recursive term), so
+  // the two regimes hold the SAME multiset in different representations. Raw rows compare the
+  // representation; count() sums bulk and compares the answer.
+  const walked = (n: number) => (run(store, `g.V(1).repeat(__.both()).until(__.loops().is(${n})).count()`) as any[])[0].v;
+  const bounded = (n: number) => (run(store, `g.V(1).repeat(__.both()).times(${n}).count()`) as any[])[0].v;
+  expect([walked(1), walked(2), walked(3)]).toEqual([3, 7, 17]);
+  expect([walked(1), walked(2), walked(3)]).toEqual([bounded(1), bounded(2), bounded(3)]);
+});
+
+relOnly('both() through the walk yields a SELF-LOOP twice — the multiset rule survives the compound', () => {
+  const store = seededStore();
+  rawVertex(store, 900, 'person');
+  store.query('INSERT INTO edges(id,src,label,tgt) VALUES(950,900,?,900)', [store.labelId('knows')]);
+  // The one shape a disjunctive single-arm join would get wrong: `e.src = w.id OR e.tgt = w.id`
+  // matches a self-loop once. Two arms match it once each, which is what both() means.
+  expect((run(store, 'g.V(900).repeat(__.both()).until(__.loops().is(1)).count()') as any[])[0].v).toBe(2);
+});
+
 relOnly('repeat() with NEITHER modulator is the empty result, and the chain folds over it', () => {
   const store = seededStore();
   // Nothing ever leaves the loop, so the traversal is empty…

@@ -371,9 +371,19 @@ unroll should only claim it when no other regime can.
   once, returns the right rows; the SAME two arms behind a derived table are `circular reference: w`.
   The emitter already renders a `Union` as unparenthesised select-CORES, so it needs no change — what
   needs changing is that "exactly once" and "at the top level of FROM" become questions about an ARM
-  (`recursiveViolation`). NOT YET BUILT: today a `both()` body declines, and so does any body whose
-  loop-counter bump sits over a union, which is every multi-arm one. The rewrite it needs is the
-  textbook distribution of `Project`/`Filter` through a `UNION ALL`.
+  (`recursiveViolation`). ✅ **BUILT** — `recursiveViolation` asks per arm and `walk.ts` distributes the
+  loop-counter bump over the arms (Calcite's `ProjectSetOpTransposeRule`), which was the exact trigger
+  named here. Verified bulk-independently, since the two regimes hold the same multiset in different
+  representations: `repeat(both()).until(loops().is(n)).count()` equals `times(n).count()` at depths
+  1/2/3 (3, 7, 17) and a SELF-LOOP counts 2. Still declining: a body where the union is not the top
+  node, e.g. `bothE().inV()`, which needs the same distribution through a JOIN.
+  **Two further arm laws, measured while building it:**
+  - **Every arm must itself be recursive.** `SELECT 1 UNION ALL SELECT x FROM w UNION ALL SELECT 9` is
+    `circular reference: w` — a non-recursive arm in the recursive position is refused, so "exactly
+    once" is per arm in both directions, not merely an upper bound.
+  - **Only `UNION ALL` splits.** A compound `UNION` dedups across the WHOLE walk rather than within an
+    iteration — P3's category, accepted by SQLite and silently answering a set where the semantics are
+    a multiset — so `recursiveViolation` refuses it by name.
 - **A body that registers a NAMED SIDE EFFECT must decline, and the test is the registration.**
   `repeat(__.out().group('a').by('name')).times(2).cap('a')` puts a relation from inside the term
   into chain-global state, and `cap()` reads it from OUTSIDE the walk — `circular reference` to
@@ -718,12 +728,22 @@ moved `src/compiler/rel/`.
      evaluating it is Calcite's `PruneEmptyRules`; it is NOT the depth cap the root `CLAUDE.md`
      forbids, because a cap truncates a PRODUCTIVE traversal and changes its answer while this changes
      no answer at all — only whether a query that provably returns nothing spins to prove it.
-   - **Found here, not fixed: an unbounded `both()` body declines on SHAPE, at every modulator.** It
-     lowers to two directional arms, so the term holds TWO `SelfRef`s and `recursiveViolation` refuses
-     it ("exactly once"). The single-term spelling exists — one self-reference joined with a
-     disjunctive condition (`e.src = w.id OR e.tgt = w.id`) — so this is a lowering gap rather than a
-     wall, and it is the largest remaining one in the walk: every unbounded `both()` traversal is on
-     the legacy route because of it.
+   - **Confirmed here as the largest remaining gap: an unbounded `both()` body declines on SHAPE, at
+     every modulator** — §6 already owns the measurement and the plan (a term is a COMPOUND; the
+     emitter needs no change; "exactly once" and "top level of FROM" become questions about an ARM;
+     the rewrite is the textbook distribution of `Project`/`Filter` through a `UNION ALL`). What this
+     cell adds is only the confirmation that the trigger is the LOOP-COUNTER bump §6 predicted: the
+     walk's term is `project(union(arm₁, arm₂))`, and a projection over a compound takes a derived
+     table, which is the shape §6 measured as `circular reference`.
+     ⚠️ **A disjunctive single-arm join is NOT a shortcut past it, and an earlier revision of this
+     bullet said it was — wrong, and recorded so it is not retried.** `ON (e.src = w.id OR e.tgt =
+     w.id)` matches a SELF-LOOP once, where `both()` must yield the vertex TWICE: the multiset rule
+     `HOPS`' own comment states, pinned by `unified-lowering.exec.test.ts` ("both() on a self-loop
+     yields the vertex twice") and by L5's `laws.ts` ("the multiset SUM of the two directions, not
+     their set union"). It is worth naming because of WHICH failure mode it has — a derived table
+     fails LOUDLY (`circular reference`), while a disjunctive join returns a plausible row set that is
+     silently short by one row per self-loop, which is P3's category and the one no instrument here
+     catches.
    - Next: §8 items 7 and 8.
    - Not a cell but noted where it was found: **`repeat()` with NEITHER modulator is specified as
      the EMPTY result**, not an error — `RepeatEndStep` re-loops to exhaustion and `processTraverser`

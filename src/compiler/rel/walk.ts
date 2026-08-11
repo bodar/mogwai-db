@@ -180,14 +180,33 @@ export function repeatWalk(
         termValid = false;
         return self;
       }
-      return make.project({
-        id: fresh('wi'), input: term.rel, channels: carried, type: walkType,
-        exprs: [['id', col(term.rel.id, 'id')], ...carried.map((channel) => [channel.col,
+      /** The counter bump, over ONE source relation. */
+      const bump = (source: Rel): Rel => make.project({
+        id: fresh('wi'), input: source, channels: carried, type: walkType,
+        exprs: [['id', col(source.id, 'id')], ...carried.map((channel) => [channel.col,
           channel === depth
-            ? { kind: 'binary', op: '+', left: col(term.rel.id, channel.col), right: compilerInt(1) } as Expr
-            : col(term.rel.id, channel.col),
+            ? { kind: 'binary', op: '+', left: col(source.id, channel.col), right: compilerInt(1) } as Expr
+            : col(source.id, channel.col),
         ] as const)],
       });
+      /**
+       * ⚠️ **A TERM IS A COMPOUND, so the bump DISTRIBUTES over its arms rather than sitting above
+       * them.** `both()`/`bothE()`/`bothV()` are two `HOPS` entries unioned `ALL`, each arm joining
+       * the frontier — which in a walk IS the `SelfRef`. Left alone, the counter bump is one
+       * projection over the compound, a projection over a compound takes a DERIVED TABLE, and that
+       * collects both references into one subquery: `circular reference` (§6). Distributed, each arm
+       * becomes its own recursive term referencing the walk once, which SQLite accepts and which is
+       * what makes a self-loop yield the vertex twice. This is the textbook `Project` through
+       * `UNION ALL` distribution — Calcite's `ProjectSetOpTransposeRule`.
+       *
+       * Only a top-level `UNION ALL` distributes. A non-`ALL` compound would dedup the whole walk,
+       * and `recursiveViolation` refuses it by name rather than letting this quietly rebuild it.
+       */
+      return term.rel.kind === 'union' && term.rel.all
+        ? make.union({
+          id: fresh('wd'), inputs: term.rel.inputs.map(bump), all: true, channels: carried, type: walkType,
+        })
+        : bump(term.rel);
     },
   });
 

@@ -675,6 +675,21 @@ describe('repeat / path SQL', () => {
     expect(() => compile('g.V(1).repeat(__.out()).until(__.has("name","x")).times(3)', {})).toThrow('until() together with times() not yet supported');
   });
 
+  relOnly('a both() walk is a COMPOUND term — one arm per direction, not one arm with an OR', () => {
+    const p = read('g.V(1).repeat(__.both()).emit()');
+    expect(p.spine).toBe('rel');
+    // seed UNION ALL arm1 UNION ALL arm2 — each arm references the walk exactly once, which is the
+    // only shape SQLite accepts (§6). The counter bump distributes over the arms rather than sitting
+    // above them, because a projection over a compound would take a derived table and collect both
+    // references into one subquery.
+    expect(p.sql.match(/UNION ALL/g)).toHaveLength(2);
+    expect(p.sql).toMatch(/WITH RECURSIVE wk_w\d+\(id, lp0, bulk\)/);
+    // both directions present, and no disjunctive single-arm join standing in for them
+    expect(p.sql).toMatch(/\.src = w\d+\.id/);
+    expect(p.sql).toMatch(/\.tgt = w\d+\.id/);
+    expect(p.sql).not.toMatch(/src = w\d+\.id\) OR \(/);
+  });
+
   relOnly('a no-modulator repeat PRUNES to an empty relation instead of walking', () => {
     // Nothing can leave the walk, so evaluating it is pure cost. The walk is still BUILT — that is
     // what proves the body lowers, carries no effects and changes no shape — and then discarded, the

@@ -255,10 +255,18 @@ describe('RelIR', () => {
     expect(() => check(fusedDedup)).toThrow('silently ignores it — no per-iteration dedup exists');
   });
 
-  /** The other half of the same law: a reference the emitter WOULD wrap is still refused, and the
-   *  message still points at `flatten`. A `Union` step is a compound — a complete SELECT of its own
-   *  — so nothing inside it is in the outer term's FROM at all. */
-  test('refuses a walk reference the emitter would wrap in a derived SELECT', () => {
+  /**
+   * A COMPOUND STEP IS N RECURSIVE TERMS, so every arm must itself be one.
+   *
+   * This test used to read "a `Union` step is a compound — a complete SELECT of its own — so nothing
+   * inside it is in the outer term's FROM at all", and refused the shape for that reason. The
+   * diagnosis was wrong and the refusal right by luck: SQLite reads `seed UNION ALL a UNION ALL b` as
+   * one recursive term per ARM, which is exactly what lets a `both()` body walk. What it will not
+   * accept is a NON-recursive arm sitting in the recursive position — measured, bun:sqlite 3.53.0:
+   * `SELECT 1 UNION ALL SELECT x FROM w UNION ALL SELECT 9` is `circular reference: w`. So the arm
+   * carrying no reference at all is the defect here, and that is what the message now says.
+   */
+  test('refuses a compound recursive step whose arm is not itself recursive', () => {
     const walkCols = [{ name: 'id', type: 'int', nullable: false }] as const;
     const seed = valuesRel({ id: relId('seedU'), rows: [[lit(1, 'int')]], channels, type: { cols: walkCols } });
     const compound = recursiveRel({ id: relId('wu'), name: 'wu', cols: ['id'], seed, channels, type: { cols: walkCols },
@@ -267,7 +275,7 @@ describe('RelIR', () => {
         return union({ id: relId('armsU'), inputs: [self, other], all: true, channels, type: { cols: walkCols } });
       },
     });
-    expect(() => check(compound)).toThrow("must reference 'wu' at the top level of FROM");
+    expect(() => check(compound)).toThrow("must reference 'wu' exactly once per compound arm (found 0)");
 
     // And the shape SQLite names outright: the walk referenced ONLY from a correlated scalar.
     const scalarOnly = recursiveRel({ id: relId('ws'), name: 'ws', cols: ['id'], seed, channels, type: { cols: walkCols },

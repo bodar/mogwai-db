@@ -133,12 +133,29 @@ const sameColumns = (left: Rel['type']['cols'], right: Rel['type']['cols']): boo
  */
 export function recursiveViolation(node: Extract<Rel, { readonly kind: 'recursive' }>): string | undefined {
   const step = recursiveStep(node);
-  const term = recursiveTerm(step, node.name);
-  if (term.selfRefs !== 1) return `Recursive step must reference '${node.name}' exactly once (found ${term.selfRefs})`;
-  if (term.barrier) return term.barrier;
-  if (fencedSelf(step, node.name))
-    return `a Materialize over the '${node.name}' reference forces a CTE boundary, and SQLite reports 'circular reference' for a walk referenced from inside one; fence outside the walk`;
-  if (!topLevelSelf(step, node.name)) return `Recursive step must reference '${node.name}' at the top level of FROM; run flatten first`;
+  /**
+   * ⚠️ **A TERM IS A COMPOUND, so every law below is a question about an ARM.** SQLite reads
+   * `seed UNION ALL arm₁ UNION ALL arm₂` as one recursive term PER ARM: each must reference the walk
+   * exactly once, and the same two arms behind a derived table are `circular reference` (measured,
+   * §6 of `docs/2026-08-09-repeat-two-regimes-plan.md`). Asking the questions of the whole step
+   * instead is what refused every multi-arm body — `both()`/`bothE()`/`bothV()` are two `HOPS`
+   * entries unioned, so a walk over one holds two references in what is really two terms.
+   *
+   * ⚠️ **Only a UNION ALL splits.** A compound `UNION` in a recursive term dedups across the WHOLE
+   * walk rather than within an iteration, which is P3's category exactly: SQLite ACCEPTS it and
+   * silently answers a set where the traverser multiset is the semantics. Refused by name.
+   */
+  if (step.kind === 'union' && !step.all)
+    return `a compound UNION in a recursive term dedups the WHOLE walk rather than one iteration (P3), which SQLite accepts and answers as a set; a recursive term's arms must be UNION ALL`;
+  const arms = step.kind === 'union' ? step.inputs : [step];
+  for (const arm of arms) {
+    const term = recursiveTerm(arm, node.name);
+    if (term.selfRefs !== 1) return `Recursive step must reference '${node.name}' exactly once per compound arm (found ${term.selfRefs})`;
+    if (term.barrier) return term.barrier;
+    if (fencedSelf(arm, node.name))
+      return `a Materialize over the '${node.name}' reference forces a CTE boundary, and SQLite reports 'circular reference' for a walk referenced from inside one; fence outside the walk`;
+    if (!topLevelSelf(arm, node.name)) return `Recursive step must reference '${node.name}' at the top level of FROM; run flatten first`;
+  }
   if (!sameColumns(node.seed.type.cols, step.type.cols)) return 'Recursive seed and step types must be identical';
   return undefined;
 }
