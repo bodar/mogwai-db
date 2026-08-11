@@ -122,6 +122,20 @@ dangerous transition is *still runs, different answer* — an auto-record would 
 regression it exists to catch. Re-recording is a command, and a re-record with no reason in the
 commit message is indistinguishable from the regression it hides.
 
+**⚠️ THE ONE TRANSITION NO GATE SEES: a clean DEFERRAL becoming a RUN with a WRONG answer.** The
+answer-change gate compares traversals that ran in BOTH artifacts, so a traversal that previously
+threw has no prior answer to differ from — it simply appears, and every gate passes. That is not
+hypothetical: it happened twice in one session, both times from admitting a step to an IR Pass
+(`isStreamIdentity`), where RelIR still declined further along the chain and LEGACY then answered
+half a multiset. **So when `ran` RISES, read the new rows and their `spine` column.** A new
+`spine=rel` row is coverage; a new `spine=legacy` row is a traversal we have just started answering
+through the route with the known defects, and it needs the same scrutiny as an answer change.
+
+**⚠️ `goldens.tsv` and `deferrals.tsv` are ONE artifact in two files.** `census-record` writes both,
+so reverting one with `git checkout --` leaves the pair inconsistent and the next run fails at gate 1
+(*"N corpus traversal(s) not in the artifact"*) rather than at anything real. Restore or commit them
+together.
+
 **It records 17 `crashed` rows — fail-closed VIOLATIONS that exist today** (10 bun:sqlite bind
 rejections, 3 raw `TypeError`s, 2 `RangeError`s, 1 `UNIQUE constraint`, and 1 case of us emitting
 syntactically invalid SQL). The gate holds that count from growing; each one should become a clear

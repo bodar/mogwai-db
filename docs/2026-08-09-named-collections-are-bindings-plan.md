@@ -154,8 +154,8 @@ and legacy's last-write-wins answered a plausible half. Attempt 2 (after the sub
 scenario continues `…cap("a").select(Column.keys).unfold().both().local(groupCount("a")).cap("a")`, and
 RelIR declines at `select(Column.keys)` over an ELEMENT-keyed map — so the chain still reaches legacy,
 which still answers one site. Both times the splice turned a clean DEFERRAL into a wrong answer and the
-census caught it (`ran` +1 with no answer-change flag, which is the one transition that gate cannot see
-— check the `spine` column when `ran` rises).
+census caught it (`ran` +1 with no answer-change flag — the one transition that gate structurally cannot
+see, now written up in `test/CLAUDE.md`).
 
 ⚠️ **So the order is fixed: element-keyed `select(Column.keys)` FIRST, then the admission.** On its own
 the admission still fixes zero scenarios — the other `local(group…)` bodies contain a `select`/
