@@ -439,11 +439,11 @@ const DECLINED = [
   'g.V().hasLabel("software").group().by("name").by(__.bothE().values("weight").mean())',
   'g.V().order().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
   'g.V().dedup().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
-  // The REDUCER form of withSideEffect (`(k, seed, BiFunction)`) is left UNREGISTERED by the
-  // front-end, so it is not a compile-time constant — and `aggregate`/`cap` are a named-collection
-  // substrate this route has not learned. Both halves decline, which is what makes lifting the
-  // route-level `sideEffects.size === 0` gate safe rather than a wager.
-  'g.withSideEffect("a", 1, Operator.max).V().aggregate("a").by("age").cap("a")',
+  // The BULK half of the reducer form of withSideEffect: `addAll`/`assign` fold a site's whole member
+  // SET rather than one member at a time (`AggregateStep.java:131-151`), so they are a question about
+  // the member relation and not about the fold expression. Every other `Operator` routes — see
+  // 'a SEEDED, operator-merged collection is a LEFT FOLD over the ordered members'.
+  'g.withSideEffect("a", [1i,2i], Operator.addAll).V().aggregate("a").by("age").cap("a")',
   'g.addV("person")',                 // a write
   "g.V().has('name',TextP.containing('ark'))",  // ftsSubstringPredicate's — see below
   "g.V().has('name',P.within(__.V().values('name').fold()))", // a run-time member list, not a set
@@ -2016,18 +2016,63 @@ describe('the RelIR spine', () => {
     })();
   });
 
-  test('a SEEDED, operator-merged collection declines — the fact now reaches the lowering', () => {
-    // `withSideEffect("a", 1, Operator.max)` supplies an initial value AND a merge policy, neither of
-    // which this substrate expresses; registering the label anyway would answer a plausible list with
-    // both silently dropped. The decline was IMPOSSIBLE TO WRITE until the front end reported the
-    // form: `extractSideEffects` skips it (correctly — there is no constant to substitute) and
-    // recorded nothing, so the label read as fresh. `sideEffectReducers` is that missing fact, and it
-    // travels as a settled value exactly as `withSack`'s seed does rather than as a route-level gate
-    // (§6·6: a gate reads identically to a missing lowering in every counter the migration owns).
-    for (const operator of ['max', 'min', 'sum', 'mult', 'assign']) {
-      const gremlin = `g.withSideEffect("a", 1, Operator.${operator}).V().aggregate("a").by("age").cap("a")`;
+  test('a SEEDED, operator-merged collection is a LEFT FOLD over the ordered members', async () => {
+    // `withSideEffect("a", 1, Operator.max)` supplies an initial value AND a merge policy, and
+    // `sideEffects.add` spends both as one seeded LEFT FOLD —
+    // `set(k, getReducer(k).apply(get(k), v))`
+    // (`vendor/tinkerpop/gremlin-core/.../util/DefaultTraversalSideEffects.java:88-91`). The
+    // expectations below are the REFERENCE's, from `sideEffect/Aggregate.feature:279-563` over
+    // `gmodern`'s ages 29/27/32/35, so they cannot be read off our own output.
+    //
+    // ⚠️ **LEGACY IS THE WRONG ORACLE HERE and this used to assert the opposite.** Until the fold
+    // landed, RelIR declined and legacy answered the plain member list with the seed and the operator
+    // silently dropped — a wrong ANSWER on the only route that took it. So the assertion is against
+    // the reference's number, never against a spine differential.
+    const seeded = (declaration: string) =>
+      `g.withSideEffect("a", ${declaration}).V().aggregate("a").by("age").cap("a")`;
+    const cases: readonly (readonly [string, unknown])[] = [
+      ['1, Operator.sum', 124],          // 1+29+27+32+35
+      ['123, Operator.minus', 0],        // 123-29-27-32-35
+      ['2, Operator.mult', 1753920],     // 2*29*27*32*35
+      ['876960, Operator.div', 1],       // 876960/29/27/32/35, INTEGER division at every step
+      ['1, Operator.min', 1],            // the extremum INCLUDES the seed
+      ['100, Operator.min', 27],
+      ['1, Operator.max', 35],
+      ['100, Operator.max', 100],
+    ];
+    for (const [declaration, expected] of cases) {
+      const gremlin = seeded(declaration);
+      expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('rel');
+      expect(await decodeAll(exec(seededStore(), undefined, undefined, 'rel').buffers(gremlin, {}, {})), gremlin)
+        .toEqual([expected]);
+    }
+    // `and`/`or` fold BOOLEANS, so their result states a static type rather than reading `typeof` —
+    // SQLite has no boolean storage class and `typeof(0)` is `integer`, which would frame as a number.
+    for (const [operator, expected] of [['and', false], ['or', true]] as const) {
+      const gremlin = `g.withSideEffect("a", true, Operator.${operator}).V().constant(false).aggregate("a").cap("a")`;
+      expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('rel');
+      expect(await decodeAll(exec(seededStore(), undefined, undefined, 'rel').buffers(gremlin, {}, {})), gremlin)
+        .toEqual([expected]);
+    }
+    // A collection NOTHING reached still answers the SEED — `get(k)` over a side effect nothing added
+    // to is the registered supplier's value, and it falls out of the walk's own seed row.
+    expect(await decodeAll(exec(seededStore(), undefined, undefined, 'rel')
+      .buffers('g.withSideEffect("a", 7, Operator.min).V().limit(0).aggregate("a").by("age").cap("a")', {}, {})))
+      .toEqual([7]);
+    // MULTI-SITE, which is where the fold meets Phase 2: two positions filling one label are a
+    // `UNION ALL` of member relations, so the fold runs over 2×123 members and the seed once.
+    expect(await decodeAll(exec(seededStore(), undefined, undefined, 'rel')
+      .buffers('g.withSideEffect("a", 0, Operator.sum).V().aggregate("a").by("age").aggregate("a").by("age").cap("a")', {}, {})))
+      .toEqual([246]);
+    // The BULK pair still declines: they fold a site's whole member SET rather than one member at a
+    // time (`AggregateStep.java:131-151`), which is a member-relation question, not this expression's.
+    for (const operator of ['addAll', 'assign']) {
+      const gremlin = `g.withSideEffect("a", [1i,2i], Operator.${operator}).V().aggregate("a").by("age").cap("a")`;
       expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('legacy');
     }
+    // An ELEMENT-membered collection declines too — `Operator.sum` over a Vertex is a
+    // ClassCastException in the reference, so there is no fold to build.
+    expect(read('g.withSideEffect("a", 1, Operator.sum).V().aggregate("a").cap("a")', { spine: 'rel' }).spine).toBe('legacy');
     // The CONSTANT form is unaffected and still registers — the two facts are separate on purpose.
     expect(read('g.withSideEffect("a", 1).V().aggregate("b").by("age").cap("b")', { spine: 'rel' }).spine).toBe('rel');
   });

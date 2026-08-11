@@ -19,7 +19,7 @@ import { recordField, recordNode, recordOf, recordPayload, selectKeys } from './
 import { propertyElement, propertyKey, propertyPayload, propertyReadOf, propertyRelation, propertyRowId, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
-import { isColumnArg, isNested, isPred, isTokenArg, stepChain, argValues, arg, type Arg, type SackSpec } from '../../gremlin/frontend.ts';
+import { isColumnArg, isNested, isPred, isTokenArg, stepChain, argValues, arg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
 import type { IRStep } from '../ir/strategies.ts';
@@ -268,12 +268,12 @@ interface ChainCtx extends FilterCtx {
   readonly labelRegime: LabelRegime;
   /** The `withSideEffect(name, constant)` registry the FRONT END extracted. See `Lowering`. */
   readonly sideEffects: Map<string, any>;
-  /** The labels declared with the REDUCER form of `withSideEffect`. See `Lowering`. */
-  readonly sideEffectReducers: ReadonlySet<string>;
+  /** The merge POLICY declared with the REDUCER form of `withSideEffect`, by label. See `Lowering`. */
+  readonly sideEffectReducers: ReadonlyMap<string, MergePolicy>;
   /** The services this chain names, resolved at the DI boundary. See `Lowering.services`. */
   readonly services: ReadonlyMap<string, Service>;
-  /** `withSack(seed)`'s seed, or `null`. See `Lowering.sack`. */
-  readonly sack: SackSpec | null;
+  /** `withSack(seed[, Operator.x])`'s policy, or `null`. See `Lowering.sack`. */
+  readonly sack: MergePolicy | null;
   /**
    * THE NAMED COLLECTIONS this chain has filled so far — `aggregate("a")` writes one, `cap("a")`
    * reads it back.
@@ -3009,10 +3009,11 @@ export interface Lowering {
    * once and read here as data. An absent name simply is not in the map, and the call declines.
    */
   readonly services?: ReadonlyMap<string, Service>;
-  /** `withSack(seed)`'s seed, as the front end extracted it — a SOURCE-level declaration, settled
-   *  before a step is lowered, so it is a settled value like `labelCardinality` rather than a step
-   *  argument. `null`/absent means the traversal declares no sack and no channel is minted. */
-  readonly sack?: SackSpec | null;
+  /** `withSack(seed[, Operator.x])`'s policy, as the front end extracted it — a SOURCE-level
+   *  declaration, settled before a step is lowered, so it is a settled value like `labelCardinality`
+   *  rather than a step argument. `null`/absent means the traversal declares no sack and no channel is
+   *  minted. */
+  readonly sack?: MergePolicy | null;
   /**
    * The `withSideEffect(name, constant)` registry — the SECOND compile-scope constant environment a
    * nested argument resolves against, beside the wire `bindings` in `params`.
@@ -3033,13 +3034,13 @@ export interface Lowering {
    *
    * Separate from `sideEffects` because it is a different KIND of fact: that map holds constants a
    * `select(name)` substitutes, and a reducer-form declaration has no constant to give. What it has
-   * is a policy, and until a merge policy is expressible the only honest thing to do with the name is
-   * DECLINE it — which is impossible unless the lowering can see it, and it could not: the front end
-   * skipped the form and recorded nothing, so a `aggregate(name)` registered as though the label were
-   * fresh and silently dropped both the seed and the operator. `withSack`'s seed travels the same way
-   * and for the same reason.
+   * is a POLICY — a seed plus the operator each contribution folds into it with — which the collection
+   * spends at the READ (`collection.ts`, `seededFold`). It travels because a fact the front end drops
+   * is one no lowering can either fold or decline on: the form used to be skipped entirely, so an
+   * `aggregate(name)` registered as though the label were fresh and silently dropped both the seed and
+   * the operator. `withSack`'s policy travels the same way and for the same reason.
    */
-  readonly sideEffectReducers?: ReadonlySet<string>;
+  readonly sideEffectReducers?: ReadonlyMap<string, MergePolicy>;
   /**
    * THE NAMED-COLLECTION REGISTRY a rooted sub-chain SHARES with the chain around it — see
    * `ChainCtx.collections`, which this becomes.
@@ -3081,7 +3082,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
 const NO_SIDE_EFFECTS: Map<string, any> = new Map();
 
 /** No reducer-form `withSideEffect` declared. */
-const NO_SIDE_EFFECT_REDUCERS: ReadonlySet<string> = new Set();
+const NO_SIDE_EFFECT_REDUCERS: ReadonlyMap<string, MergePolicy> = new Map();
 
 /** No services resolved — an instrument or a test lowering without a registry. Every `call()` then
  *  declines, which is the same answer an unregistered name gets. */

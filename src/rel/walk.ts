@@ -124,7 +124,29 @@ export function mapRelChildren(r: Rel, f: (child: Rel) => Rel, retype?: Rel['typ
     case 'materialize': return make.materialize({ id, channels, type, input: f(r.input), name: r.name, fenced: r.fenced });
     case 'join': return make.join({ id, channels, type, left: f(r.left), right: f(r.right), join: r.join, on: r.on, ordered: r.ordered });
     case 'union': return make.union({ id, channels, type, inputs: r.inputs.map(f), all: r.all });
-    case 'recursive': return make.recursive({ id, channels, type, name: r.name, cols: r.cols, seed: f(r.seed), step: (self) => f(r.step(self)) });
+    /**
+     * ⚠️ **THE TERM IS REWRITTEN NOW, not on first use, and the laziness it replaces was a silent
+     * wrong PLAN.** A pass whose callback has an effect beyond its return value — `name` PUSHES a
+     * `Plan` binding — must have that effect while the plan is still being built. With the rewrite
+     * deferred into the returned closure, a node the pass hoisted out of the recursive term was bound
+     * only when the EMITTER first asked for the step, which is after `plan()` has copied the binding
+     * list: the term then held a `Ref` to a binding the plan did not contain at all
+     * (`checkPlan`: *"Ref 'r0' is not a Plan binding declared before this point"*). Reachable from any
+     * term with a SHARED subtree in it — a seeded fold over a multi-site collection is the first one
+     * built (`compiler/rel/collection.ts`, `seededFold`).
+     *
+     * The seed is rewritten FIRST so its bindings are declared before the term's, which is the order
+     * the `WITH` list renders them in.
+     *
+     * `recursiveSelf(r)` is the right argument even though `r` is the OLD node: it reads only
+     * `{id, name, channels, type}`, and all four are preserved by this rebuild — so the self-ref the
+     * term captures is the one the new node's own `recursiveStep` would hand it.
+     */
+    case 'recursive': {
+      const seed = f(r.seed);
+      const step = f(r.step(recursiveSelf(r)));
+      return make.recursive({ id, channels, type, name: r.name, cols: r.cols, seed, step: () => step });
+    }
   }
 }
 

@@ -2,7 +2,7 @@ import type { GraphStore } from '../../../storage.ts';
 import { q, value, list, raw, render, type Expression, type Query, type Relation } from '../../../sql/kernel/q.ts';
 import { labelIn, labelNameFor, propHasFor, sqlElem, elemTable, type Elem, vertexLabelIn } from '../../plan/plan.ts';
 import { gremlinTypeOf, propertyValueBind, valueNodeFromStored, type CanonicalType, type TypeNode, type ValueNode } from '../../../gremlin/types.ts';
-import { stepChain, arg, argValues, isNested, isTokenArg, type Step, type SackSpec } from '../../../gremlin/frontend.ts';
+import { stepChain, arg, argValues, isNested, isTokenArg, type Step, type MergePolicy } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { isStreamBarrier } from '../../ir/step.ts';
 import { normalize } from '../../ir/passes.ts';
@@ -1202,7 +1202,7 @@ function compileMergeE(engine: Engine, steps: IRStep[], params: Record<string, a
 // Ordered rules: the first whose `match` fires compiles the chain. Order matters
 // (addE before addV; drop must be the terminal step) — hence a rule list, not a
 // name→fn Map. Returns null when the chain is a read (compiler falls to compileRead).
-interface WriteRule { match: (steps: IRStep[]) => boolean; compile: (engine: Engine, steps: IRStep[], params: Record<string, any>, sackInit?: SackSpec, sideEffects?: Map<string, any>) => WritePlan | Compiled; }
+interface WriteRule { match: (steps: IRStep[]) => boolean; compile: (engine: Engine, steps: IRStep[], params: Record<string, any>, sackInit?: MergePolicy, sideEffects?: Map<string, any>) => WritePlan | Compiled; }
 
 /** The label-mutation steps. They are WRITE steps, so they route here — and under a graph whose
  *  declared LabelCardinality is immutable that routing ends in a refusal, which is the SPECIFIED
@@ -1317,7 +1317,7 @@ const WRITE_RULES: WriteRule[] = [
  *  the compiler for this compilation) is threaded so write compilers reach the read spine (a nested
  *  value/endpoint read, a target-id prefix) through it — each such sub-compile mints its own fresh
  *  child engine (buildPrefixFresh / compileReadCompiled). */
-export function routeWrite(engine: Engine, steps: IRStep[], params: Record<string, any>, sackInit?: SackSpec, sideEffects?: Map<string, any>): WritePlan | Compiled | null {
+export function routeWrite(engine: Engine, steps: IRStep[], params: Record<string, any>, sackInit?: MergePolicy, sideEffects?: Map<string, any>): WritePlan | Compiled | null {
   for (const rule of WRITE_RULES) if (rule.match(steps)) return rule.compile(engine, steps, params, sackInit, sideEffects);
   return null;
 }

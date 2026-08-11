@@ -1,6 +1,6 @@
 import { q, value, list } from '../../../sql/kernel/q.ts';
 import { jsonbArrayOf } from '../../plan/plan.ts';
-import { flattenListArgs, argValues, type SackSpec } from '../../../gremlin/frontend.ts';
+import { flattenListArgs, argValues, type MergePolicy } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { patchLayout, type LoweringState } from '../context/context.ts';
 import { toListStream, toScalarStream, type Stream } from '../context/stream.ts';
@@ -21,7 +21,7 @@ import { SCALAR_MEMBERS } from '../../../sql/kernel/render.ts';
  * seeded by the ordinary rooted-source path like `V()`/`E()`/`union()` and lowered by the ordinary
  * loop. It used to have a whole-traversal entry point of its own purely because the WRITE dispatcher
  * routed it (plan §Phase 1). */
-export function seedInject(carry: LoweringState, steps: IRStep[], sackInit?: SackSpec): { stream: Stream; at: number } {
+export function seedInject(carry: LoweringState, steps: IRStep[], sackInit?: MergePolicy): { stream: Stream; at: number } {
   const Q = carry.q;
 
   // Each all-array argument is one list traverser, not scalar varargs.
@@ -50,7 +50,7 @@ export function seedInject(carry: LoweringState, steps: IRStep[], sackInit?: Sac
     ? { ...carry, traverserLayout: patchLayout(carry.traverserLayout, { sack: 'sk' }) }
     : carry;
   const cols = sackInit ? ['v', 'sk'] : ['v'];
-  const row = (v: any) => sackInit ? q`(${value(v)}, ${value(sackInit.init)})` : q`(${value(v)})`;
+  const row = (v: any) => sackInit ? q`(${value(v)}, ${value(sackInit.seed.value)})` : q`(${value(v)})`;
   const rel = vals.length
     ? Q.cte(q`VALUES ${list(vals.map(row), ', ')}`, cols)
     : Q.cte(sackInit ? q`SELECT NULL AS v, NULL AS sk WHERE 0` : q`SELECT NULL AS v WHERE 0`, cols);

@@ -1,7 +1,7 @@
 import { CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext } from 'antlr4ng';
 import { GremlinLexer } from '../../parser/GremlinLexer.ts';
 import { GremlinParser } from '../../parser/GremlinParser.ts';
-import { flatType, fitsSafeInteger, BigDecimal, Duration, type TypeNode, type CanonicalType, type MapEntryType } from './types.ts';
+import { fitsSafeInteger, BigDecimal, Duration, type TypeNode, type CanonicalType, type MapEntryType } from './types.ts';
 
 // ---------- parsing ----------
 //
@@ -340,27 +340,47 @@ export function extractStrategies(tree: any, params: Record<string, any>): Strat
   return use;
 }
 
-// ---------- sack extraction ----------
+// ---------- the merge policy: a seed plus how contributions combine into it ----------
 //
-// withSack(init[, mergeOperator]) is a TraversalSourceSelfMethod_* node (like
-// withStrategies) — not part of the step chain. Pull the initial sack value (and its
-// numeric subtype, for framing) plus the optional merge operator straight from the
-// tree. split/merge-on-fork semantics are deferred; only the initial value is used
-// today (the seed for every traverser's carried sack column).
+// `withSack(seed[, Operator.x])` and `withSideEffect(key, seed, Operator.x)` are
+// TraversalSourceSelfMethod_* nodes (like withStrategies) — not part of the step chain — and they
+// declare THE SAME OBJECT: an initial value, and the `BinaryOperator` each later contribution is
+// folded into it with. TinkerPop registers both through one call
+// (`DefaultTraversalSideEffects.register(key, initialValue, reducer)`,
+// `vendor/tinkerpop/gremlin-core/.../util/DefaultTraversalSideEffects.java:96-103`; a sack is
+// registered the same way by `TraversalSource.withSack`), so one type here rather than two.
 
-export interface SackSpec { init: any; initType: string | null; mergeOp?: string; }
+/**
+ * A SEED plus how each contribution MERGES into it.
+ *
+ * The seed is a whole `Arg` — value + canonical type + wire-parameter name — rather than a
+ * value/`initType` pair, because that pair could not carry the third fact and the one place that
+ * rebuilt an `Arg` out of it therefore dropped it: a parameterized seed (`withSack($x)`) lost its
+ * name and inlined where the bind rule says it binds (root `CLAUDE.md`, "A BIND SERVES A USER
+ * PARAMETER").
+ *
+ * `operator` is absent for a bare `withSack(seed)`, which merges nothing — the two-argument form is
+ * the one that names a policy. The compiler decides what to do about it; this reports what the
+ * traversal DECLARED.
+ */
+export interface MergePolicy { readonly seed: Arg; readonly operator?: string; }
 
-/** Pull withSack(init[, Operator.x]) out of the parse tree, or null if none. */
-export function extractSack(tree: any, params: Record<string, any>): SackSpec | null {
+/** Pull withSack(seed[, Operator.x]) out of the parse tree, or null if none. */
+export function extractSack(tree: any, params: Record<string, any>): MergePolicy | null {
   const w = descendants(tree, 'TraversalSourceSelfMethod_withSackContext')[0];
   if (!w) return null;
   const gl = descendants(w, 'GenericLiteralContext')[0];
   if (!gl) throw new Error('withSack() requires an initial value');
   const out: Arg[] = [];
   walkArgs(gl, out, params);
-  const op = descendants(w, 'TraversalOperatorContext')[0];
-  return { init: out[0].value, initType: flatType(out[0].type), mergeOp: op ? enumSuffix(op) : undefined };
+  return { seed: out[0]!, operator: operatorNamed(w) };
 }
+
+/** The `Operator.x` a source-level declaration names, or `undefined`. */
+const operatorNamed = (node: any): string | undefined => {
+  const op = descendants(node, 'TraversalOperatorContext')[0];
+  return op ? enumSuffix(op) : undefined;
+};
 
 /** Pull SOURCE-level `g.with(key[, value])` options into a key→value registry.
  *
@@ -406,32 +426,34 @@ export function extractSideEffects(tree: any, params: Record<string, any>): Map<
 }
 
 /**
- * The LABELS declared with the reducer form `withSideEffect(key, seed, Operator.x)`.
+ * The MERGE POLICY each `withSideEffect(key, seed, Operator.x)` declares, by label.
  *
  * A FACT THE FRONT END WAS DROPPING, and the drop was silent. `extractSideEffects` skips this form
  * because its value is not a constant to substitute — correct — but skipping it left the compiler
  * unable to tell a seeded, operator-merged collection from a fresh one, and a lowering that cannot
- * SEE a fact cannot decline on it. `compiler.ts` already says where that decline belongs ("the
- * reducer form of `withSideEffect`, which the front-end leaves unregistered, declines inside the
- * lowering like any other unlearned step"); this is what makes that possible, and it is the same
- * move `withSack`'s seed made — the fact travels as a settled value rather than as a route-level gate.
- *
- * A SET rather than a map of seeds: nothing can USE the seed until the operator merge is expressible,
- * and handing over a value no consumer may act on invites exactly the silent half-support this
- * function exists to end. When a merge policy lands, this widens to carry both — one place.
+ * SEE a fact cannot decline on it. It is the same move `withSack`'s seed made, and it now travels as
+ * the same object: this used to be a bare SET of labels, because with the decline standing nothing
+ * could USE the seed, and handing over a value no consumer may act on invites exactly the silent
+ * half-support the set existed to end. The lowering folds the policy now, so the fact travels whole.
  *
  * The front-end stays a thin translator either way: this reports what the traversal DECLARED, and
  * what to do about it is entirely the compiler's.
  */
-export function sideEffectReducers(tree: any, params: Record<string, any>): ReadonlySet<string> {
-  const out = new Set<string>();
+export function sideEffectReducers(tree: any, params: Record<string, any>): ReadonlyMap<string, MergePolicy> {
+  const out = new Map<string, MergePolicy>();
   for (const w of descendants(tree, 'TraversalSourceSelfMethod_withSideEffectContext')) {
     if (!descendants(w, 'TraversalBiFunctionContext').length) continue;
     const keyNode = descendants(w, 'StringLiteralContext')[0];
-    if (!keyNode) continue;
-    const ks: Arg[] = [];
+    const seedNode = descendants(w, 'GenericLiteralContext')[0];
+    if (!keyNode || !seedNode) continue;
+    const ks: Arg[] = [], seed: Arg[] = [];
     walkArgs(keyNode, ks, params);
-    if (typeof ks[0]?.value === 'string') out.add(ks[0].value);
+    walkArgs(seedNode, seed, params);
+    // A COLLECTION seed is ONE `Arg` carrying a JS array/Set (`collectionArg`), not N flattened ones,
+    // so the seed is `seed[0]` whatever its shape — and a scalar-only consumer declines on it through
+    // `constLit`, which has no literal form for a collection.
+    if (typeof ks[0]?.value === 'string' && seed.length)
+      out.set(ks[0].value, { seed: seed[0]!, operator: operatorNamed(w) });
   }
   return out;
 }

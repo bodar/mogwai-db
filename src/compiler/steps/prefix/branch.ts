@@ -1,4 +1,4 @@
-import { argValues, isNested, isOperatorArg, isTokenArg, stepChain, type SackSpec, type Step } from '../../../gremlin/frontend.ts';
+import { argValues, isNested, isOperatorArg, isTokenArg, stepChain, type MergePolicy, type Step } from '../../../gremlin/frontend.ts';
 import { empty, list, paren, q, raw, Relation, value, type Expression } from '../../../sql/kernel/q.ts';
 import { staticTypeOf } from '../../../sql/kernel/render.ts';
 import { edges } from '../../../sql/schema.ts';
@@ -1262,7 +1262,7 @@ const isVariantArmKind = (s: Stream): s is ArmStream =>
   s.kind === 'elements' || s.kind === 'scalar' || s.kind === 'list';
 
 /** Lower `union(b1, b2, …)` in SOURCE position to one merged Stream. */
-export function sourceUnion(engine: Engine, step: IRStep, params: Record<string, any>, sackInit: SackSpec | undefined, facts: ChainFacts): Stream {
+export function sourceUnion(engine: Engine, step: IRStep, params: Record<string, any>, sackInit: MergePolicy | undefined, facts: ChainFacts): Stream {
   const seed: LoweringState = { q: engine.q, params, traverserLayout: rootLayout() };
   const branches = argValues(step).filter(isNested);
   // union() with no branches emits nothing (TinkerPop: the result is empty). Not an arity error —

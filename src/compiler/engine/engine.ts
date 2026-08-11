@@ -13,7 +13,7 @@ import { match } from '../steps/prefix/match.ts';
 import { identity, limit, range, sample, skip, tail } from '../steps/prefix/passthrough.ts';
 import { sack } from '../steps/prefix/sack.ts';
 import { aggregate, group as groupSE, groupCount as groupCountSE } from '../steps/prefix/sideeffect.ts';
-import { type SackSpec } from '../../gremlin/frontend.ts';
+import { type MergePolicy } from '../../gremlin/frontend.ts';
 import { compileTail, compileFromScalar } from '../steps/tail/projection.ts';
 import { compileFromGroup, compileFromProperty } from '../steps/tail/group.ts';
 import { compileFromList, compileFromMap, compileFromMapEntry } from '../steps/tail/list.ts';
@@ -193,7 +193,7 @@ export class LoweringEngine implements Engine {
   /** Seed the source CTE (c0) from V(...)/E(...) and its optional id list. When the
    *  chain tracks a path, the source element is path position p0 (projected as the
    *  extra `p0` column). */
-  private seedSource(first: IRStep, params: Record<string, any>, trackPath: boolean, sackInit?: SackSpec, wantsEncounter = false): ElementStream {
+  private seedSource(first: IRStep, params: Record<string, any>, trackPath: boolean, sackInit?: MergePolicy, wantsEncounter = false): ElementStream {
     const query = this.q;
     const elem: Elem = first.name === 'E' ? 'edge' : 'vertex';
     const srcRel = elemTable(elem);
@@ -205,7 +205,7 @@ export class LoweringEngine implements Engine {
     // The emission-order `encounter` is seeded (= rowid order) only when the chain demands it.
     const projections: Expression[] = [q`id`];
     const cols: string[] = ['id'];
-    if (sackInit) { projections.push(q`${value(sackInit.init)} AS sk`); cols.push('sk'); }
+    if (sackInit) { projections.push(q`${value(sackInit.seed.value)} AS sk`); cols.push('sk'); }
     projections.push(q`1 AS bulk`); cols.push('bulk');
     if (wantsEncounter) { projections.push(q`id AS encounter`); cols.push('encounter'); }
     if (trackPath) { projections.push(q`id AS p0`); cols.push('p0'); }
@@ -239,7 +239,7 @@ export class LoweringEngine implements Engine {
    *  `ElementStream`); a `call()` service seeds whatever shape it produces. A BARRIER call()
    *  source suspends into a SegmentPlan, which only compileRead can build — it intercepts that
    *  form before reaching here, so a barrier arriving at this seam is out of position. */
-  private seedRooted(steps: IRStep[], params: Record<string, any>, sackInit: SackSpec | undefined, facts: ChainFacts): { stream: Stream; at: number } {
+  private seedRooted(steps: IRStep[], params: Record<string, any>, sackInit: MergePolicy | undefined, facts: ChainFacts): { stream: Stream; at: number } {
     const first = steps[0];
     if (first.name === 'V' || first.name === 'E')
       return { stream: this.seedSource(first, params, facts.tracksPath, sackInit, facts.demandsEncounter), at: 1 };
@@ -273,7 +273,7 @@ export class LoweringEngine implements Engine {
    *  the root element projection, because a branch merge consumes a relation, not a framed leaf.
    *  `facts` lets the caller impose the OUTER chain's path/encounter demands, which the arm's own
    *  text cannot show. */
-  lowerRootedArm(steps: IRStep[], params: Record<string, any>, sackInit?: SackSpec, facts: ChainFacts = analyzeChain(steps)): Stream {
+  lowerRootedArm(steps: IRStep[], params: Record<string, any>, sackInit?: MergePolicy, facts: ChainFacts = analyzeChain(steps)): Stream {
     const seeded = this.seedRooted(steps, params, sackInit, facts);
     // An element seed folds its movement/filter prefix here so a pure element chain can stop
     // before compileTail; every other shape goes straight to the shared loop.
@@ -368,7 +368,7 @@ export class LoweringEngine implements Engine {
   /** Seed an ELEMENT source + fold its movement/filter prefix. The write path's entry into the
    *  read spine (a target-id relation); a source whose merge is not element-shaped fails closed
    *  here rather than being silently mis-typed. */
-  buildPrefix(steps: IRStep[], params: Record<string, any> = {}, sackInit?: SackSpec, facts: ChainFacts = analyzeChain(steps)): { st: ElementStream; stop: number } {
+  buildPrefix(steps: IRStep[], params: Record<string, any> = {}, sackInit?: MergePolicy, facts: ChainFacts = analyzeChain(steps)): { st: ElementStream; stop: number } {
     const { stream, at } = this.seedRooted(steps, params, sackInit, facts);
     if (stream.kind !== 'elements')
       throw new Error(`${steps[0].name}() as a source produces a ${stream.kind} value, which is not an element prefix`);
@@ -499,7 +499,7 @@ export class LoweringEngine implements Engine {
 
   /** A read traversal: prefix fold + shaped lowering loop.
    *  `sackInit` (from withSack()) seeds the carried sack column at the source. */
-  compileRead(steps: IRStep[], params: Record<string, any> = this.params, sackInit?: SackSpec): Compiled | SegmentPlan {
+  compileRead(steps: IRStep[], params: Record<string, any> = this.params, sackInit?: MergePolicy): Compiled | SegmentPlan {
     // call() as a SOURCE (g.call(...)): the service seeds the initial Stream (of whatever
     // shape it produces — a list of names, a Property stream), and the generic shaped
     // lowering loop takes over from step 1. A peer of the buildPrefix (V/E/union) path, not
@@ -560,7 +560,7 @@ export class LoweringEngine implements Engine {
    *  source (only a TOP-LEVEL g.call(barrier) suspends). Mints a FRESH child scope (fresh Query,
    *  SAME request scope) so the nested compile inherits registry/fastPaths/depth/source options. Asserts the invariant
    *  rather than silently mis-typing. */
-  compileReadCompiled(steps: IRStep[], params: Record<string, any> = {}, sackInit?: SackSpec): Compiled {
+  compileReadCompiled(steps: IRStep[], params: Record<string, any> = {}, sackInit?: MergePolicy): Compiled {
     const plan = this.child(params, steps).compileRead(steps, params, sackInit);
     if (plan.kind === 'segment') throw new Error('a nested sub-traversal cannot be a barrier/federated source');
     return plan;

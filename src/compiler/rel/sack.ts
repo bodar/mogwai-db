@@ -4,7 +4,7 @@ import { col, compilerNull, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { UNKNOWN } from '../../sql/kernel/render.ts';
-import { arg, type SackSpec } from '../../gremlin/frontend.ts';
+import type { MergePolicy } from '../../gremlin/frontend.ts';
 import { SACK_OPS } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
 import { carriedCols, meta, payloadCols, typeOf, type Minter } from './build.ts';
@@ -64,10 +64,12 @@ export const sackCarried = (rel: Rel): boolean => rel.channels.some((channel) =>
  * sack is carried state layered on top. The assembler fuses it back into one SELECT, so the extra
  * node costs nothing and the seeding rule has one home.
  */
-export function seedSack(rel: Rel, spec: SackSpec, fresh: Minter): Rel | null {
+export function seedSack(rel: Rel, spec: MergePolicy, fresh: Minter): Rel | null {
   // A merge operator is a channel-policy question, not a seed value — see the module header.
-  if (spec.mergeOp !== undefined) return null;
-  const seed = constLit(arg(spec.init, spec.initType as never, null));
+  if (spec.operator !== undefined) return null;
+  // The seed travels as a whole `Arg`, so a PARAMETERIZED seed (`withSack($x)`) binds rather than
+  // inlining — which the value/`initType` pair this replaced could not express, and therefore lost.
+  const seed = constLit(spec.seed);
   if (!seed) return null;
   const channels = withChannel(rel.channels, SACK_CHANNEL);
   const payload = payloadCols(rel);

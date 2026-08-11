@@ -22,7 +22,7 @@
 import type { Query } from '../../sql/kernel/q.ts';
 import { fastPathContext, type FastPathConfig, type FastPathContext } from '../options/fast-paths.ts';
 import type { ServiceRegistry } from '../../services/spi/types.ts';
-import type { SackSpec } from '../../gremlin/frontend.ts';
+import type { MergePolicy } from '../../gremlin/frontend.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChainFacts } from '../ir/analyze.ts';
 import type { Compiled } from '../../sql/kernel/render.ts';
@@ -70,13 +70,13 @@ export interface Engine {
    *  returns the stream and where the prefix ends. Uses THIS engine's Query — one prefix per
    *  engine. `facts` supplies tracksPath + demandsEncounter for the seed; omitted → the impl
    *  computes analyzeChain(steps) itself. */
-  buildPrefix(steps: IRStep[], params?: Record<string, any>, sackInit?: SackSpec, facts?: ChainFacts): { st: ElementStream; stop: number };
+  buildPrefix(steps: IRStep[], params?: Record<string, any>, sackInit?: MergePolicy, facts?: ChainFacts): { st: ElementStream; stop: number };
 
   /** Lower a fully ROOTED chain to its relational Stream, of whatever shape it produces — the
    *  `union()` SOURCE arm compiler. compileRead's spine minus the root materialization (a branch
    *  merge consumes a relation, not a framed leaf). `facts` imposes the OUTER chain's
    *  path/encounter demands, which a branch's own text cannot show. */
-  lowerRootedArm(steps: IRStep[], params: Record<string, any>, sackInit?: SackSpec, facts?: ChainFacts): Stream;
+  lowerRootedArm(steps: IRStep[], params: Record<string, any>, sackInit?: MergePolicy, facts?: ChainFacts): Stream;
 
   /** buildPrefix on a FRESH child engine (fresh Query, same request scope) — for the write path, which
    *  materializes several independent target-id relations in one traversal (each needs its own WITH,
@@ -104,11 +104,11 @@ export interface Engine {
   lowerStepsStrict(initial: Stream, steps: IRStep[], from: number): Stream;
 
   /** A read traversal: prefix fold + shaped lowering loop. A source barrier call() suspends. */
-  compileRead(steps: IRStep[], params?: Record<string, any>, sackInit?: SackSpec): Compiled | SegmentPlan;
+  compileRead(steps: IRStep[], params?: Record<string, any>, sackInit?: MergePolicy): Compiled | SegmentPlan;
 
   /** compileRead narrowed to a synchronous Compiled, on a FRESH child engine (fresh Query, same
    *  request scope) for the nested sub-traversal — a within()/all() operand, a merge body. */
-  compileReadCompiled(steps: IRStep[], params?: Record<string, any>, sackInit?: SackSpec): Compiled;
+  compileReadCompiled(steps: IRStep[], params?: Record<string, any>, sackInit?: MergePolicy): Compiled;
 
   /** Compile a nested read body from one materialized element traverser. This is the write
    * argument seam: it preserves the driver's carried schema rather than rebuilding only V(id). */

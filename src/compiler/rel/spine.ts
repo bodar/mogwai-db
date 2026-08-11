@@ -4,7 +4,7 @@ import { emitProgram } from '../../rel/emit.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { LabelRegime } from '../../api.ts';
 import type { Service } from '../../services/spi/types.ts';
-import type { SackSpec } from '../../gremlin/frontend.ts';
+import type { MergePolicy } from '../../gremlin/frontend.ts';
 import { lowerToRel } from './lower.ts';
 
 /**
@@ -39,17 +39,17 @@ export interface RelRequest {
    *  from (§api.ts). It crosses as its own settled value rather than being re-derived inside the
    *  lowering from a source-options map the algebra has no business reading. */
   readonly labelRegime: LabelRegime;
-  /** `withSack(seed)`'s seed, as the front end extracted it, or `null`. A SOURCE-level declaration
+  /** `withSack(seed[, Operator.x])`'s policy, as the front end extracted it, or `null`. A SOURCE-level declaration
    *  settled before a compile starts, so it crosses as a settled VALUE rather than a step argument —
    *  and it is here rather than being a route GATE because a gate reads identically to a missing
    *  lowering in every counter the migration owns (§6·6). */
-  readonly sack: SackSpec | null;
-  /** The labels declared with the REDUCER form `withSideEffect(name, seed, Operator.x)`. It crosses
-   *  for `sack`'s reason and is a SEPARATE fact from the constant registry: the front end skips the
-   *  reducer form when building that map (there is no constant to substitute), so without this the
-   *  lowering cannot tell a seeded, operator-merged collection from a fresh one — and a fact a
-   *  lowering cannot SEE is one it cannot decline on. */
-  readonly sideEffectReducers: ReadonlySet<string>;
+  readonly sack: MergePolicy | null;
+  /** The MERGE POLICY declared with the REDUCER form `withSideEffect(name, seed, Operator.x)`, by
+   *  label. It crosses for `sack`'s reason and is a SEPARATE fact from the constant registry: the
+   *  front end skips the reducer form when building that map (there is no constant to substitute), so
+   *  without this the lowering cannot tell a seeded, operator-merged collection from a fresh one —
+   *  and a fact a lowering cannot SEE is one it can neither fold nor decline on. */
+  readonly sideEffectReducers: ReadonlyMap<string, MergePolicy>;
 }
 
 /**
