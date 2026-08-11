@@ -419,7 +419,10 @@ export function verify(spec: StrategySpec, steps: Step[]): void {
 function isPropertyMapForm(s: IRStep): boolean {
   const args = (s.args ?? []).map((a) => a.value);
   const off = isCardinalityArg(args[0]) && !isCardinalityValueArg(args[0]) ? 1 : 0;
-  return s.name === 'property' && args.length === off + 1 && args[off] instanceof Map;
+  // A NULL in the map position is upstream's own no-op and belongs to this form, not to a value write:
+  // the arity is what separates them, so `property(null)`/`property(set, null)` match here while
+  // `property('k', null)` — a real write of a null VALUE — does not (its args.length is off + 2).
+  return s.name === 'property' && args.length === off + 1 && (args[off] instanceof Map || args[off] === null);
 }
 
 /** `property([k1:v1, k2:v2])` → `property(k1,v1).property(k2,v2)`, and
@@ -438,6 +441,16 @@ function isPropertyMapForm(s: IRStep): boolean {
  *  An empty map expands to nothing, which is also upstream's answer (`property([:])` adds no step
  *  at all, so `g.V().property([:])` is `g.V()`).
  *
+ *  **A NULL map is the same no-op, and it is the DSL's answer rather than a step's** — which is why it
+ *  belongs here and not in a write lowering. `property(Map)` is guarded `if (value != null)` and adds
+ *  no step for a null (`GraphTraversal.java:4122-4133`), and the cardinality overload spells it out:
+ *  *"Just return the input if you pass a null"* (`ibid.:4089-4091`). The corpus asserts the observable
+ *  consequence rather than an error — `g.addV("person").property(null)` and
+ *  `g.addV("foo").property(set, null)` each yield ONE vertex with NO properties
+ *  (`gremlin-test .../features/map/AddVertex.feature`, `g_addV_propertyXnullX` /
+ *  `g_addV_propertyXset_nullX`). Both passed only through the legacy write route before this, so
+ *  covering them here is what makes them survive that route's deletion.
+ *
  *  Runs in `extract`, before decoration, for the same reason desugarMatchString does: a map VALUE
  *  may be a nested traversal (`[k: __.trav]` is legal — `mapEntry : mapKey COLON genericLiteral`
  *  admits `nestedTraversal`), and the Subgraph/Partition injectors recurse into `{nested}` ARGS,
@@ -450,7 +463,9 @@ export function desugarPropertyMap(steps: IRStep[]): IRStep[] {
     const off = isCardinalityArg(s.args[0].value) && !isCardinalityValueArg(s.args[0].value) ? 1 : 0;
     const outer = off ? (s.args[0].value as { cardinality: string }).cardinality : null;
     const entryType = s.args[off]?.type ?? null;
-    for (const [k, v] of s.args[off].value as Map<any, any>) {
+    // A null map contributes NOTHING, exactly as an empty one does — see the header.
+    const entries = (s.args[off].value ?? new Map<any, any>()) as Map<any, any>;
+    for (const [k, v] of entries) {
       const cv = isCardinalityValueArg(v) ? v : null;
       const card = cv ? cv.cardinality : outer;
       // The entry's captured value TYPE. A CardinalityValue entry has none (the parser records
