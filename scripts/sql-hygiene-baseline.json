@@ -1,19 +1,19 @@
 {
   "addE": {
     "binds": 12,
-    "bytes": 790,
+    "bytes": 779,
     "compiler": 11,
     "bound": 30
   },
   "addLabel": {
     "binds": 4,
-    "bytes": 788,
+    "bytes": 777,
     "compiler": 6,
     "bound": 2
   },
   "addV": {
     "binds": 4,
-    "bytes": 828,
+    "bytes": 817,
     "compiler": 6,
     "bound": 3
   },
@@ -25,7 +25,7 @@
   },
   "and": {
     "binds": 2,
-    "bytes": 1532,
+    "bytes": 1396,
     "compiler": 15,
     "bound": 2
   },
@@ -37,7 +37,7 @@
   },
   "as": {
     "binds": 12,
-    "bytes": 855,
+    "bytes": 844,
     "compiler": 13,
     "bound": 30
   },
@@ -109,7 +109,7 @@
   },
   "constant": {
     "binds": 0,
-    "bytes": 1311,
+    "bytes": 1250,
     "compiler": 11,
     "bound": 0
   },
@@ -133,7 +133,7 @@
   },
   "dedup": {
     "binds": 0,
-    "bytes": 1864,
+    "bytes": 1854,
     "compiler": 27,
     "bound": 0
   },
@@ -157,25 +157,25 @@
   },
   "dropLabel": {
     "binds": 3,
-    "bytes": 788,
+    "bytes": 777,
     "compiler": 6,
     "bound": 0
   },
   "dropLabels": {
     "binds": 2,
-    "bytes": 788,
+    "bytes": 777,
     "compiler": 6,
     "bound": 0
   },
   "E": {
     "binds": 0,
-    "bytes": 680,
+    "bytes": 669,
     "compiler": 4,
     "bound": 0
   },
   "element": {
     "binds": 0,
-    "bytes": 840,
+    "bytes": 829,
     "compiler": 5,
     "bound": 0
   },
@@ -187,7 +187,7 @@
   },
   "filter": {
     "binds": 4,
-    "bytes": 1250,
+    "bytes": 1239,
     "compiler": 15,
     "bound": 4
   },
@@ -211,19 +211,19 @@
   },
   "groupCount": {
     "binds": 0,
-    "bytes": 2052,
-    "compiler": 20,
+    "bytes": 1870,
+    "compiler": 21,
     "bound": 0
   },
   "has": {
     "binds": 0,
-    "bytes": 2418,
+    "bytes": 2407,
     "compiler": 67,
     "bound": 0
   },
   "hasLabel": {
     "binds": 0,
-    "bytes": 1073,
+    "bytes": 1062,
     "compiler": 7,
     "bound": 0
   },
@@ -277,8 +277,8 @@
   },
   "limit": {
     "binds": 0,
-    "bytes": 3734,
-    "compiler": 43,
+    "bytes": 4174,
+    "compiler": 44,
     "bound": 0
   },
   "local": {
@@ -319,13 +319,13 @@
   },
   "mergeE": {
     "binds": 7,
-    "bytes": 992,
+    "bytes": 973,
     "compiler": 9,
     "bound": 0
   },
   "mergeV": {
     "binds": 12,
-    "bytes": 1085,
+    "bytes": 1065,
     "compiler": 19,
     "bound": 17
   },
@@ -349,13 +349,13 @@
   },
   "option": {
     "binds": 15,
-    "bytes": 1312,
+    "bytes": 1293,
     "compiler": 20,
     "bound": 35
   },
   "or": {
     "binds": 2,
-    "bytes": 1202,
+    "bytes": 1191,
     "compiler": 12,
     "bound": 2
   },
@@ -403,7 +403,7 @@
   },
   "property": {
     "binds": 18,
-    "bytes": 1017,
+    "bytes": 1006,
     "compiler": 76,
     "bound": 216
   },
@@ -427,13 +427,13 @@
   },
   "sack": {
     "binds": 0,
-    "bytes": 505,
+    "bytes": 410,
     "compiler": 5,
     "bound": 0
   },
   "sample": {
     "binds": 0,
-    "bytes": 1055,
+    "bytes": 1037,
     "compiler": 6,
     "bound": 0
   },
@@ -457,19 +457,19 @@
   },
   "sum": {
     "binds": 0,
-    "bytes": 2803,
+    "bytes": 2674,
     "compiler": 36,
     "bound": 0
   },
   "tail": {
     "binds": 0,
-    "bytes": 2174,
+    "bytes": 2155,
     "compiler": 16,
     "bound": 0
   },
   "to": {
     "binds": 13,
-    "bytes": 949,
+    "bytes": 938,
     "compiler": 67,
     "bound": 180
   },
@@ -505,7 +505,7 @@
   },
   "V": {
     "binds": 0,
-    "bytes": 746,
+    "bytes": 735,
     "compiler": 4,
     "bound": 0
   },
@@ -529,7 +529,7 @@
   },
   "where": {
     "binds": 0,
-    "bytes": 1617,
+    "bytes": 1606,
     "compiler": 24,
     "bound": 0
   }

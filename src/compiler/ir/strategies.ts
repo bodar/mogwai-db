@@ -593,6 +593,12 @@ function isStreamIdentity(s: Step, params: Record<string, any>): boolean {
   return identityHostBody(s, params) !== null;
 }
 
+/** Is this step's single argument a side-effect LABEL — the one form that makes a grouping a SIDE EFFECT
+ *  (`GroupSideEffectStep`, which passes its traversers on) rather than a `ReducingBarrierStep` that
+ *  replaces the stream with a map? Asked of the RAW step, because the passes that need it run before the
+ *  IR exists; `collection.ts`'s `labelOf` asks the same question of the lowered one. */
+const labelled = (s: Step): boolean => (s.args ?? []).length === 1 && typeof s.args[0]!.value === 'string';
+
 /** The body of a per-traverser host that is the IDENTITY on the stream, or `null`.
  *
  *  A `by()` is TRANSPARENT here and cannot be otherwise: this runs in `extract`, so `absorbModulators`
@@ -1088,6 +1094,30 @@ const UNROLLABLE_BARRIERS: Readonly<Record<string, (s: Step) => boolean>> = {
   // `repeat()` is outside the emission-order substrate, so the rolled form has no order to disagree
   // with.
   order: () => true,
+  /**
+   * THE NAMED SIDE EFFECTS, and their argument is `Collection.sites` rather than statelessness.
+   *
+   * These three DO carry state between invocations — that is what a side effect is — so the `dedup`
+   * argument does not apply and a different one is needed. It is this: the state they carry lives on
+   * the ROOT traversal (`AggregateStep.java:57` resolves through `getTraversal().getSideEffects()`),
+   * and the reference REFILLS the same label at every iteration — each vertex appears once per pass
+   * (`Aggregate.feature:743-763`). Unrolled, phase k's relation IS the frontier at iteration k, so n
+   * phases are n registration SITES of one label; and N sites accumulating into one collection, read
+   * once at the `cap`, is exactly the substrate `collection.ts` is built on. Nothing has to be
+   * carried between phases at all, because the accumulation was never at the write site.
+   *
+   * ⚠️ **KEYED ONLY, for the two groupings.** A bare `group()`/`groupCount()` is a
+   * `ReducingBarrierStep` that REPLACES the stream with a map, so phase k+1 would receive a map where
+   * the rolled form receives the frontier — a shape change no phase can reproduce. `aggregate` has no
+   * such form (its label is required), so it needs no gate.
+   *
+   * ⚠️ **`sack(Operator.x)` is deliberately absent** even though it also passes traversers through: its
+   * state is a per-traverser CHANNEL rather than a root collection, so the argument above says nothing
+   * about it and it would need its own (see `repeatWalk`, which admits it through the other regime).
+   */
+  aggregate: () => true,
+  group: labelled,
+  groupCount: labelled,
 };
 
 /**

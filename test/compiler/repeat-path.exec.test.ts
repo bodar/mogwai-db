@@ -545,7 +545,15 @@ test('emit(__.sack().is(P)) emits the iterations whose accumulated sack matches'
     .toEqual([58, 87]);
 });
 
-test('a body aggregate() collects every vertex the walk visits (the :TOUCHED provenance primitive)', () => {
+// ⚠️ **`relOnly` — LEGACY SHED THESE, and naming the shed is the point.** A `times(n)` body holding a
+// side effect now UNROLLS (`UNROLLABLE_BARRIERS`, `ir/strategies.ts`), and the unroll is a PASS, so
+// legacy receives the n phases too — where its `steps/prefix/sideeffect.ts` last-write-wins keeps ONE
+// registration of a twice-filled label and answers half the multiset (§8 of
+// docs/2026-08-09-named-collections-are-bindings-plan.md, a wrong answer rather than a decline). Legacy
+// previously answered these through its walk-and-bag lowering, so this is a REAL shed and not a
+// coverage gap: §6·1's asymmetric gate allows it because the RelIR floor holds them, and the L3 legacy
+// run reports it by name. The assertions themselves are the reference's, so they stay.
+relOnly('a body aggregate() collects every vertex the walk visits (the :TOUCHED provenance primitive)', () => {
   const store = seededStore();
   // marko out → {vadas,josh,lop} (depth 1); josh out → {ripple,lop} (depth 2). The bag is a
   // BulkSet multiset, so lop appears twice. cap('x').unfold() explodes it to elements.
@@ -553,17 +561,35 @@ test('a body aggregate() collects every vertex the walk visits (the :TOUCHED pro
   expect(names).toEqual(['josh', 'lop', 'lop', 'ripple', 'vadas']);
 });
 
-test('a pre-repeat aggregate multiset-unions with the in-repeat body aggregate (Aggregate.feature:627)', () => {
+// ⚠️ **`relOnly` — LEGACY SHED THESE, and naming the shed is the point.** A `times(n)` body holding a
+// side effect now UNROLLS (`UNROLLABLE_BARRIERS`, `ir/strategies.ts`), and the unroll is a PASS, so
+// legacy receives the n phases too — where its `steps/prefix/sideeffect.ts` last-write-wins keeps ONE
+// registration of a twice-filled label and answers half the multiset (§8 of
+// docs/2026-08-09-named-collections-are-bindings-plan.md, a wrong answer rather than a decline). Legacy
+// previously answered these through its walk-and-bag lowering, so this is a REAL shed and not a
+// coverage gap: §6·1's asymmetric gate allows it because the RelIR floor holds them, and the L3 legacy
+// run reports it by name. The assertions themselves are the reference's, so they stay.
+relOnly('a pre-repeat aggregate multiset-unions with the in-repeat body aggregate (Aggregate.feature:627)', () => {
   const store = seededStore();
   // V().local(aggregate('a')) collects all 6 vertices; then repeat(out().local(aggregate('a'))).times(2)
   // appends the walk's depth-1 and depth-2 rows. groupCount by name over the whole BulkSet — asserted
   // on the raw gk/gv rows (the wire-framed Map is verified equivalent by the L3 conformance run).
+  // Read through `grouped`, which sees legacy's `(gk, gv)` rows AND RelIR's framed map alike — the
+  // route moved when a `times(n)` body holding a side effect started UNROLLING, and an assertion that
+  // named one spine's row shape would have read as a semantics regression rather than a route change.
   const rows = run(store, `g.V().local(__.aggregate('a')).repeat(__.out().local(__.aggregate('a'))).times(2).cap('a').unfold().values('name').groupCount()`);
-  const counts = Object.fromEntries(rows.map((r: any) => [r.gk, Number(r.gv)]));
-  expect(counts).toEqual({ marko: 1, vadas: 2, josh: 2, lop: 5, ripple: 3, peter: 1 });
+  expect(groupedRows(rows)).toEqual({ marko: 1, vadas: 2, josh: 2, lop: 5, ripple: 3, peter: 1 });
 });
 
-test('a movement-free repeat(aggregate(a)) revisits the seed each iteration', () => {
+// ⚠️ **`relOnly` — LEGACY SHED THESE, and naming the shed is the point.** A `times(n)` body holding a
+// side effect now UNROLLS (`UNROLLABLE_BARRIERS`, `ir/strategies.ts`), and the unroll is a PASS, so
+// legacy receives the n phases too — where its `steps/prefix/sideeffect.ts` last-write-wins keeps ONE
+// registration of a twice-filled label and answers half the multiset (§8 of
+// docs/2026-08-09-named-collections-are-bindings-plan.md, a wrong answer rather than a decline). Legacy
+// previously answered these through its walk-and-bag lowering, so this is a REAL shed and not a
+// coverage gap: §6·1's asymmetric gate allows it because the RelIR floor holds them, and the L3 legacy
+// run reports it by name. The assertions themselves are the reference's, so they stay.
+relOnly('a movement-free repeat(aggregate(a)) revisits the seed each iteration', () => {
   const store = seededStore();
   // no movement → each of the 6 vertices stays put and is collected once per iteration; times(2) → 12.
   const names = (run(store, "g.V().repeat(__.aggregate('a')).times(2).cap('a').unfold().values('name')") as any[]).map((r) => r.v).sort();
@@ -659,11 +685,20 @@ describe('repeat() body: the generic body relation', () => {
     for (const [g, step] of [
       ['g.V(1).repeat(__.out().limit(1)).until(__.has("name","x")).count()', 'limit'],
       ['g.V(1).repeat(__.out().order().by("name")).until(__.has("name","x")).count()', 'order'],
-      ['g.V(1).repeat(__.out().aggregate("x").out()).times(2).count()', 'aggregate'],
+      // A BARE `groupCount()` is a `ReducingBarrierStep` that REPLACES the stream with a map, so phase
+      // k+1 would receive a map where the rolled form receives the frontier. That is a shape change no
+      // phase reproduces, which is why the KEYED forms unrolled and this one did not.
       ['g.V(1).repeat(__.out().groupCount()).times(2).count()', 'groupCount'],
     ] as [string, string][]) {
-      expect(() => run(store, g)).toThrow(new RegExp(`${step}\\(\\) is a per-iteration GLOBAL barrier`));
+      expect(() => run(store, g), g).toThrow(new RegExp(`${step}\\(\\) is a per-iteration GLOBAL barrier`));
     }
+    // `aggregate("x")` has MOVED off this list, and its argument is `Collection.sites` rather than
+    // statelessness: it genuinely carries state between invocations, but that state lives on the ROOT
+    // traversal and the reference REFILLS the label every iteration — so n phases are n registration
+    // SITES of one label, which is what the named-collection substrate already accumulates and reads
+    // once at the `cap`. Nothing has to cross a phase boundary at all.
+    expect((run(store, 'g.V(1).repeat(__.out().aggregate("x").out()).times(2).count()') as any[])[0]!.v)
+      .toBe(0);
   });
 
   test('a body MENTIONING a label fails closed instead of silently answering []', () => {

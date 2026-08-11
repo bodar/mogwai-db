@@ -820,18 +820,42 @@ describe('repeat / path SQL', () => {
     expect((rows as any[]).map((r) => r.v)).toEqual([58]);
   });
 
-  test('a body-terminal aggregate() collects the walk rows (depth ≥ 1) into a bag CTE', () => {
-    const p = read("g.V(1).repeat(__.out().aggregate('x')).times(2).cap('x')");
+  // ⚠️ **These two moved from `times(2)` to `until(…)`, and the reason is that the SHAPE they assert no
+  // longer exists for a bounded body ON EITHER SPINE.** `unrollFixedRepeat` is an IR PASS, so a
+  // `times(n)` body holding a side effect is spliced into n ordinary phases before either route sees it
+  // — there is no walk left to carry a `depth` column or a bag CTE. An UNBOUNDED body has no phases to
+  // unroll into, which is the two-regime split, so it is where legacy's walk-and-bag lowering still
+  // lives and where it is still worth pinning while the route exists.
+  const legacySpine = { spine: 'legacy' as const };
+
+  test("a body-terminal aggregate() collects the walk rows (depth ≥ 1) into a bag CTE — LEGACY's UNBOUNDED shape", () => {
+    const p = read("g.V(1).repeat(__.out().aggregate('x')).until(__.has('name','zz')).cap('x')", legacySpine);
     // the aggregate bag is a post-walk jsonb list sourced from the walk's non-seed rows.
     expect(p.sql).toContain('AS m FROM');
     expect(p.sql).toContain('WHERE w.depth >= 1');
     // local(__.aggregate('x')) folds the same way (local scopes the side-effect per traverser).
-    expect(read("g.V(1).repeat(__.out().local(__.aggregate('x'))).times(2).cap('x')").sql).toContain('WHERE w.depth >= 1');
+    expect(read("g.V(1).repeat(__.out().local(__.aggregate('x'))).until(__.has('name','zz')).cap('x')", legacySpine).sql)
+      .toContain('WHERE w.depth >= 1');
   });
 
-  test('a pre-repeat aggregate bag is multiset-unioned with the in-repeat rows (BulkSet)', () => {
-    const p = read("g.V().local(__.aggregate('a')).repeat(__.out().local(__.aggregate('a'))).times(2).cap('a')");
+  test("a pre-repeat aggregate bag is multiset-unioned with the in-repeat rows (BulkSet) — LEGACY's UNBOUNDED shape", () => {
+    const p = read("g.V().local(__.aggregate('a')).repeat(__.out().local(__.aggregate('a'))).until(__.has('name','zz')).cap('a')", legacySpine);
     expect(p.sql).toContain('json_each'); // prior bag's members unioned first
     expect(p.sql).toContain('UNION ALL SELECT'); // then the walk's depth≥1 rows
+  });
+
+  test('the BOUNDED spellings UNROLL instead — n phases, n sites, one union at the cap', () => {
+    // The other half of the pair above, so the regime split is asserted rather than implied. An
+    // unrolled body has no walk at all, which is why none of legacy's markers can appear — and it is
+    // the PASS that does it, so this holds whichever route the phases then take.
+    for (const gremlin of [
+      "g.V(1).repeat(__.out().aggregate('x')).times(2).cap('x')",
+      "g.V().local(__.aggregate('a')).repeat(__.out().local(__.aggregate('a'))).times(2).cap('a')",
+    ]) {
+      const p = read(gremlin, { spine: 'rel' });
+      expect(p.spine, gremlin).toBe('rel');
+      expect(p.sql, gremlin).not.toContain('w.depth');
+      expect(p.sql, gremlin).not.toContain('RECURSIVE');
+    }
   });
 });
