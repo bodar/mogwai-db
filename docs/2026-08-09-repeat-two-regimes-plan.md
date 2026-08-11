@@ -828,16 +828,49 @@ moved `src/compiler/rel/`.
      form and never a wrong answer" only while nothing collapses in front of a dedup; after 8b a stale
      flag sends the following slice to `bulkSlice`, which DECLINES with no emission order — lost
      coverage, not a slower plan.
-   - 8b. **NEXT — flip the authority: RelIR stops reading the chain verdict.** `compiler.ts` passes the
-     raw strategy switch, and `collapseSafe` becomes legacy-local. This is where the widening actually
-     fires; the gates are the census answer-change gate on BOTH spines, the cut, the L3 floors and an
-     L3 wall-clock in its normal band (a cost wall here reads as a hang — §1a). Two shapes already
-     pinned as admitted-here/refused-by-the-verdict measure it:
-     `g.V().out().order().by('name').limit(2).count()` and `g.V().out().dedup().limit(2)`.
-     ⚠️ **Watch the element leaf's `bulk` column.** `framed` projects it on `{bulk: collapse}`, so a
-     raw-switch `collapse` would project one for every element leaf whether or not anything collapsed,
-     re-recording SQL byte ratchets broadly for no behaviour. The positional answer is already in hand
-     — the fold's `bulked` — so pass THAT, not the switch.
+   - 8b-i. ✅ **LANDED (`6e8a3f2`) — the element leaf's `bulk` column is the POSITIONAL fact.** `framed`
+     read `{bulk: collapse}` — the switch, which says a collapse was PERMITTED — where the wire needs to
+     know whether one HAPPENED. So the fold's `bulked` travels out as a REQUIRED field on `Tail`, and
+     required is the point: only the `elements` arm projects the column, so a site that produced an
+     element result and forgot to say whether it collapsed would answer N traversers as one row. tsc
+     enumerated all fourteen construction sites instead of leaving them to be guessed. Net effect today
+     is a simplification — a chain the verdict called safe but whose hops all declined per-node no
+     longer carries a constant-1 column.
+   - 8b-ii. ✅ **LANDED (`7d3b100`) — the flip. `compiler.ts` passes the raw strategy switch.** Measured
+     reach over the L1 corpus: **42 → 50** traversals emit a collapse, out of the same 1,004 RelIR
+     reads; `g.V().as('a').out().as('b')` is §7.2's case exactly. Gates all held — the census
+     answer-change gate on both spines, L3 1787/1697, coverage 1233, no SQL byte ceiling re-recorded,
+     L3 wall-clock 260 s (its normal band, not §1a's hang), and `test:perturbed` kept exactly its
+     documented ten failure names.
+     **Three defects it exposed, none of them about collapse WIDTH, and each one a fact worth keeping:**
+     - **A recursive TERM cannot collapse** — `coalesce` is a grouped `Aggregate`, which SQLite refuses
+       as *"recursive aggregate queries not supported"*. Free while the verdict was the gate (a chain
+       holding `repeat` was never collapse-safe); without narrowing it, every unbounded `repeat()` would
+       lower a term the checker then refuses.
+     - **A BODY's end is not the wire.** `bulkObservedFrom` walks to the end of the `steps` it is given;
+       for the root chain that end RLEs `(v, bulk)` onto the wire, but a `union` arm, an `option()` arm
+       or a `where()` child continues into an enclosing context it cannot see.
+       `g.V().union(__.values('name'), __.out())` collapsed inside the arm and the enclosing VARIANT
+       framing then dropped the column and the traversers with it. Both are one named narrowing,
+       `inBody`, at every body re-entry — and `framed` carries the fail-closed BACKSTOP: a multiplicity
+       arriving at a framing arm with no column for it DECLINES. That is what makes `inBody`'s call-site
+       completeness a tractability question rather than a correctness one.
+     - **`bulked` goes STALE at a barrier**, which drops the `bulk` channel because it has consumed the
+       multiset. Reading the flag alone declined `g.V().out().values('age').sum()`. `carriesMultiplicity`
+       asks the flag AND the relation.
+     Also deleted: `bulked || ctx.collapse` after an arm merge. It existed because an arm might have
+     collapsed unreported; with `inBody` no arm can mint a multiplicity, and keeping it once the switch
+     stopped implying the verdict would have made EVERY merge bulked — which trips the backstop.
+     **A test lesson that generalizes: state a comparison in TRAVERSERS, not rows.** Three apparent
+     failures were row-count assertions, and §7.5 already says the row count legitimately moves under a
+     collapse. `rowMultiset`/`traverserCount` now sit beside `weigh` in `test/support/multiset.ts`. The
+     alias partition law is the clearest case: the unfiltered chain's aliases are dead and retracted so
+     it collapses to 3 rows holding 12 traversers, while each `where()` half keeps its labels live and
+     cannot collapse — 3 ≠ 12 by rows, equal by traversers, law intact.
+     ⚠️ **`g.V().out().dedup().limit(2)` does NOT collapse, and the reason is not this predicate.**
+     `bulkObservedFrom` admits it (a dedup resets the multiplicity), but a slice after a fan-out makes
+     `demandsEncounter` true, so the source seeds the emission order and the hop is refused by the
+     mutual-exclusion conjunct instead. The pin asserts the predicate, which is what it measures.
    - 8c. **Then admit the remaining vocabulary, one name with one argument.** `select` first (a
      single-label select re-frames to the element an alias holds and looks bulk-transparent, but
      whether `selectKeys` carries the channel has not been measured), then `otherV`, then the
