@@ -9,6 +9,6 @@
 # Phase 0 (docs/2026-08-01-relir-build-plan.md §10) is OVER when the exempt rows are the only
 # rows left. See scripts/edges-check.ts.
 file	floor	exempt	note
-src/compiler/engine/engine.ts	77	yes	the legacy dispatcher itself — deleted whole in Phase 4
+src/compiler/engine/engine.ts	76	yes	the legacy dispatcher itself — deleted whole in Phase 4
 src/compiler/engine/deps.ts	5	yes	the legacy Engine INTERFACE — legacy's object model typing legacy's own engine; reached only from steps/ + the legacy Query.engine field, and RelIR needs no Engine (see RelRequest, rel/spine.ts). Dies with engine.ts
 src/compiler/compiler.ts	1	yes	the routing switch (routeWrite) — Phase 1 cuts the write arm, Phase 4 the rest

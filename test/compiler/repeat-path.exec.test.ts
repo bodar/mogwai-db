@@ -45,9 +45,10 @@ test('a prefix limit is consumed before repeat() drops its encounter column', ()
   const store = seededStore();
   const q = "g.V().hasLabel('person').limit(1).repeat(__.out()).times(1)";
   // The generic repeat route used to declare the prefix's encounter column after the walk had
-  // dropped it, producing SQLite's "table cN has 2 values for 3 columns".  Disable the bulking
-  // fast path so this exercises that semantic authority directly.
-  const generic = exec(store, undefined, { ...DEFAULT_FAST_PATHS, bulkRepeatCount: false });
+  // dropped it, producing SQLite's "table cN has 2 values for 3 columns". This used to disable the
+  // bulking fast path to reach that route; the fast path is deleted, so the route is simply the one
+  // every bounded repeat takes.
+  const generic = exec(store, undefined, DEFAULT_FAST_PATHS);
   expect(generic.framed(q, {})).toHaveLength(3);
 });
 

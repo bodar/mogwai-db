@@ -764,11 +764,30 @@ moved `src/compiler/rel/`.
      the EMPTY result**, not an error — `RepeatEndStep` re-loops to exhaustion and `processTraverser`
      answers `EmptyTraverser` throughout. Both spines currently raise *"repeat() requires times(),
      until(), or emit()"*, which is a fail-closed deferral rather than the specified behaviour.
-7. **§7.4 item 4 — delete `bulk.ts`.** After 4 lands this file is already unreachable for everything
-   its tests cover, which is what makes the deletion small. It does NOT have to wait for the byte
-   budget — see item 4, whose claim that it did was wrong in both halves. Deleting it narrows
-   `times(n > 100)` to a compile-time deferral; the budget is a separate refinement that would shrink
-   that narrowing to roughly `n > 700` for a movement body.
+7. ✅ **LANDED — §7.4 item 4, `bulk.ts` deleted, and the step ceiling with it.**
+   **It cost nothing, measured.** `BulkRepeatCountFastPath` existed to keep a dense bounded count
+   tractable by collapsing the frontier; item 4's widened unroll now splices every bounded body into
+   phases that collapse the same way, so the fast path had become a second implementation of a
+   capability the general route acquired. On the K12 fixture the case it was built for —
+   `repeat(both()).times(8).count()`, 2,572,306,572 walks — takes **5.3 ms with it and 5.3 ms
+   without**, same count. Nothing to rewrite on RelIR either: the unroll is an IR pass, so both
+   spines already have it.
+   **`MAX_UNROLLED_STEPS` went too.** It was a STEP count standing in for the DO's 100 KB, charging
+   every body the worst per-step cost (~1 KB for `order().by(k)`) when a movement body costs ~140
+   bytes — so it refused about 7× more than the platform does, and it sent a `dedup()` body past 100
+   steps to a route that cannot express a per-iteration barrier at all.
+   **And the platform's caps left production entirely**, which is the durable part. `spine.ts` used
+   `cfLimitViolation` as a routing DECLINE; a platform constant compiled into a routing decision makes
+   the compiler wrong the moment the platform changes — a raised Cloudflare cap would need a release
+   before any user saw it. The DO enforces its own limits. The caps now live where an assertion
+   belongs: `CfLimitedSql` makes Bun refuse exactly what a DO refuses (`mise run test:cf-limits`, the
+   whole suite, green at 2,071), and `rel-sweep`/`sql-hygiene` ask `cfLimitViolation` of every corpus
+   plan as CI gates — 67,320 rendered plans, 0 violations. What may still read a cap is a STRATEGY and
+   never a refusal (`SET_BIND_LIMIT`'s IN-list-vs-JSON choice, `rowbatch`'s chunk size): both stay
+   correct if the cap moves, merely conservative, which is the test a platform number must pass to
+   appear in shipping code.
+   The `edges` ratchet fell as predicted, and its report now reads *"PHASE 0 IS OVER — only the exempt
+   legacy files reach into `src/compiler/steps/`."*
 8. **§7.4 item 1 — the per-position collapse answer.** Last, because it is the largest and because
    everything above narrows it: with `bulk.ts` gone there is one authority already, and what remains is
    turning `collapseSafe` from a chain verdict into a positional query. Its residual content is smaller

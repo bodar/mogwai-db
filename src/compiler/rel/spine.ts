@@ -1,7 +1,6 @@
 import { render } from '../../sql/kernel/q.ts';
 import type { Compiled, Program } from '../../sql/kernel/render.ts';
 import { emitProgram } from '../../rel/emit.ts';
-import { cfLimitViolation } from '../../cf-limits.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { LabelRegime } from '../../api.ts';
 import type { Service } from '../../services/spi/types.ts';
@@ -141,10 +140,7 @@ export function compileViaRel(
   });
   if (!lowered) return null;
 
-  // The platform budget is asked PER STATEMENT here for the same reason it is inside `lowerToRel`:
-  // each step is its own query, so each meets the 100-bind and 100 KB walls on its own.
   const { effects, result: relational } = emitProgram(lowered.plan);
-  if (effects.some((step) => cfLimitViolation(step.emitted.sql, step.emitted.binds))) return null;
 
   // A DISCARD leaves through its own door, and the reason is that there is nothing to read: `drop()`'s
   // result relation is a statement with an empty `RETURNING`, so the whole traversal IS its effects.
@@ -157,16 +153,27 @@ export function compileViaRel(
   }
 
   const { sql, binds } = render(relational);
-  // THE LAST BUDGET CHECK IS THE PLATFORM'S OWN, MEASURED ON WHAT A DURABLE OBJECT ACTUALLY GETS.
-  //
-  // `lowerToRel` owns the BIND decision and renders to take it, so this is a backstop for the one thing
-  // that decision cannot see: the 100 KB statement-TEXT cap, which §3.6 gives the plan and nothing else
-  // enforced. It comes from `cfLimitViolation` — the one authority for what the platform refuses —
-  // because a second constant here would be a second chance to disagree with it.
-  //
-  // A DECLINE and not a throw: legacy answers these today, and a plan we cannot ship is coverage we do
-  // not have. If it ever fires, the census's per-query spine ratchet is what reports it.
-  if (cfLimitViolation(sql, binds)) return null;
+  /**
+   * THE PLATFORM'S LIMITS ARE NOT CHECKED HERE, AND THAT IS DELIBERATE.
+   *
+   * This used to decline any program whose statements breached Cloudflare's 100-bind / 100 KB caps.
+   * A platform constant compiled into a ROUTING decision makes the compiler wrong the moment the
+   * platform changes: if Cloudflare raises the cap, every query between the old number and the new
+   * one keeps being refused until we ship a release, for no reason a user can see. The DO enforces
+   * its own limits and rejects what it cannot run; duplicating that here buys nothing at runtime and
+   * costs a redeploy to un-buy.
+   *
+   * So the caps live where an assertion belongs — in the build, not in the product. `CfLimitedSql`
+   * (`src/cf-limits.ts`) is an `Sql` DECORATOR that makes Bun refuse exactly what a DO refuses, and
+   * `mise run test:cf-limits` runs the whole suite behind it; `rel-sweep` and `sql-hygiene` ask
+   * `cfLimitViolation` of every corpus plan as CI gates. Those keep the dev/prod divergence visible —
+   * which was the real value all along — while production stays governed by the platform itself.
+   *
+   * What remains keyed to the constants is only ever a STRATEGY, never a refusal: `SET_BIND_LIMIT`
+   * chooses an IN-list over a JSON bind, and `rowbatch`'s `BIND_BUDGET` picks a chunk size. Both stay
+   * correct if the cap moves — merely conservative — which is the test a platform number has to pass
+   * before it may appear in shipping code.
+   */
   // A traversal that WROTE frames its rows through exactly this projection — the effects ran first, and
   // the framing read is the program's last step. A write reaches the SAME payload projection a pure read
   // does rather than a write-shaped copy, which is the property §10·10 had to preserve while moving where

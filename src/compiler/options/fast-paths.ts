@@ -7,7 +7,6 @@ import type { ChainFacts } from '../ir/analyze.ts';
 export interface FastPathConfig {
   readonly predicateInlining: boolean;
   readonly singleHopOptional: boolean;
-  readonly bulkRepeatCount: boolean;
   /** For a substring predicate (containing/startingWith/endingWith + not*) whose term is
    *  >= 3 chars over a STORED property, route through the property_fts trigram index instead
    *  of a base-table LIKE scan. Disabling routes through the generic (semantically identical,
@@ -95,7 +94,6 @@ export interface CompileOptions {
 export const DEFAULT_FAST_PATHS: FastPathConfig = Object.freeze({
   predicateInlining: true,
   singleHopOptional: true,
-  bulkRepeatCount: true,
   ftsSubstringPredicate: true,
   scalarPredicateInlining: true,
   movementCollapse: true,

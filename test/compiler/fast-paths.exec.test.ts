@@ -5,18 +5,17 @@
 // test fails HERE, at review time.
 import { test, expect, describe } from 'bun:test';
 import { DEFAULT_FAST_PATHS, GATE_ONLY_FAST_PATHS, type FastPath } from '../../src/compiler/options/fast-paths.ts';
-import { BulkRepeatCountFastPath } from '../../src/compiler/steps/tail/bulk.ts';
 import { MovementCollapseFastPath } from '../../src/compiler/steps/prefix/movement.ts';
 import { SingleHopOptionalFastPath } from '../../src/compiler/steps/prefix/branch.ts';
 import { PredicateInliningFastPath } from '../../src/compiler/steps/prefix/predicate.ts';
 import { ScalarPredicateInliningFastPath } from '../../src/compiler/steps/tail/scalar-arm.ts';
 import { FtsSubstringFastPath } from '../../src/compiler/plan/plan.ts';
 
-// The six FastPath objects, gathered here purely for the completeness assertions below. This is NOT
+// The five FastPath objects, gathered here purely for the completeness assertions below. This is NOT
 // a dispatch registry — each object is invoked at its own family-local site; this array only exists
 // to check the set is complete + well-formed.
 const ALL: FastPath<any, any>[] = [
-  BulkRepeatCountFastPath, MovementCollapseFastPath, SingleHopOptionalFastPath,
+  MovementCollapseFastPath, SingleHopOptionalFastPath,
   PredicateInliningFastPath, ScalarPredicateInliningFastPath, FtsSubstringFastPath,
 ];
 

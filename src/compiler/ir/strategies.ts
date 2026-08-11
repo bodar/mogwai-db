@@ -1099,24 +1099,21 @@ const unrollableBodyStep = (s: Step): boolean =>
   || s.name === 'has' || s.name === 'hasLabel' || s.name === 'hasId' || s.name === 'identity';
 
 /**
- * THE STATEMENT-TEXT CEILING, and it belongs to this pass because this pass is what multiplies.
+ * THE STATEMENT-TEXT CEILING WAS A PROXY, AND IT IS GONE.
  *
- * n copies of a body is n times the SQL, and n×m for a nested `repeat`. A Durable Object caps a
- * statement at 100 KB (`src/cf-limits.ts`); the only thing that measures it today is
- * `cfLimitViolation` at the END of the RelIR spine — a decline — and legacy checks nothing at all.
- * So the pass refuses rather than handing downstream a chain that cannot ship.
+ * `MAX_UNROLLED_STEPS = 100` used to stop the multiplication here, derived as the DO's 100 KB
+ * statement cap divided by the worst measured per-step cost (~1 KB for an `order().by(k)` body).
+ * Two things were wrong with charging every body that rate. It is a STEP count standing in for
+ * BYTES, and a movement body actually costs ~140 bytes per spliced step — measured, `times(99)` is
+ * 13,824 bytes of SQL — so the ceiling refused seven times more than the platform does. And the real
+ * limit is already enforced, on the real bytes, by `cfLimitViolation` at the END of the RelIR spine
+ * (`src/compiler/rel/spine.ts`) — which lives in the COMPILER, so it applies on every runtime rather
+ * than only where a driver opts in.
  *
- * MEASURED, not chosen, and the first number measured was the WRONG ONE. Compile time looked
- * superlinear — `times(24)` took 50 s — which would have made the ceiling ~32 steps. That was not
- * this pass's cost at all: it was an un-memoised DAG walk in `freeRelIds` (`src/rel/walk.ts`), and
- * with the visited-guard in place `times(48)` compiles in 18 ms. With time linear, the real
- * constraint is the text, and the worst per-step cost measured is an `order().by(k)` body at ~1 KB
- * of SQL per spliced step (a movement or `dedup` body is ~300 bytes). 100 KB at 1 KB per step is
- * 100 steps, which is where this sits — every realistic `times(n)` is far below it (the corpus's
- * largest is `times(10)` over a two-step body) while the multiplication is bounded BY CONSTRUCTION
- * rather than by what the corpus happens to contain.
+ * So the pass no longer guesses. It unrolls, and the emitted text is measured against the platform's
+ * own number. What that costs is stated plainly: past ~700 steps for a movement body the spine
+ * declines on bytes, which is a clear deferral rather than a shipped statement the DO would reject.
  */
-const MAX_UNROLLED_STEPS = 100;
 
 /** `childSteps` (`ir/passes.ts`), injected. It runs the WHOLE pass pipeline over the nested body, and
  *  that pipeline is what this file's passes are folded into — so taking it as an argument is what
@@ -1217,8 +1214,8 @@ function tryUnroll(region: Step[], params: Record<string, any>, childBody: Child
   // Calcite's COUNT-over-partitions then SUM contract (`SqlSplittableAggFunction.CountSplitter`) at
   // each phase boundary. TinkerPop's strategy remains suppressible above; its conservative admitted
   // set and provider-independent concern do not define this compiler's physical regime split.
-  // §3.6's statement-text budget, owned where the multiplication happens (see MAX_UNROLLED_STEPS).
-  if (n * body.length > MAX_UNROLLED_STEPS) return null;
+  // No ceiling here: the emitted BYTES are measured against the DO's cap by `cfLimitViolation` at
+  // the end of the RelIR spine, which is the platform's real number rather than a proxy for it.
   const phases: Step[] = [];
   for (let k = 0; k < n; k++) phases.push(...body.map((s) => ({ ...s })));
   return phases;

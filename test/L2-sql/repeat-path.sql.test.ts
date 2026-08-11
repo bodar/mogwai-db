@@ -94,9 +94,11 @@ describe('repeat / path SQL', () => {
     for (const a of ids) for (const b of ids) if (a < b) store.query('INSERT INTO edges(src,label,tgt) VALUES (?,?,?)', [a, 0, b]);
     store.query('INSERT OR IGNORE INTO labels(id,name) VALUES (0,?)', ['n']);
 
-    // times(4): recursive still finishes, so assert bulk == recursive (correctness).
-    const r4 = read('g.V().repeat(__.both()).times(4).count()', { fastPaths: { bulkRepeatCount: false } });
-    const b4 = read('g.V().repeat(__.both()).times(4).count()', { fastPaths: { bulkRepeatCount: true } });
+    // times(4): the collapsed frontier must answer what enumerating every walk answers. The oracle
+    // used to be the deleted `bulkRepeatCount` fast path; it is now `movementCollapse`, which is the
+    // same claim — an RLE frontier against the plain UNION-ALL movement.
+    const r4 = read('g.V().repeat(__.both()).times(4).count()', { fastPaths: { movementCollapse: false } });
+    const b4 = read('g.V().repeat(__.both()).times(4).count()', { fastPaths: { movementCollapse: true } });
     expect(Number(store.query<{ v: number }>(b4.sql, b4.binds)[0].v)).toBe(Number(store.query<{ v: number }>(r4.sql, r4.binds)[0].v));
 
     // times(8): only the bulk path can compute this — the exact total, in milliseconds.

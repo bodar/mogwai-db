@@ -22,8 +22,7 @@ import { compileFromPath } from '../steps/tail/path.ts';
 import { asOnStream, selectOneFromAlias } from '../steps/tail/labelselect.ts';
 import { assertStreamColumns, continueLowering, isSuspension, toElementStream, toScalarStream, type LoweringResult, type LoweringSuspension, type Stream } from '../steps/context/stream.ts';
 import { type Compiled } from '../../sql/kernel/render.ts';
-import { BulkRepeatCountFastPath } from '../steps/tail/bulk.ts';
-import { runFastPath, fastPathContext, type FastPathConfig } from '../options/fast-paths.ts';
+import { type FastPathConfig } from '../options/fast-paths.ts';
 import type { ServiceRegistry } from '../../services/spi/types.ts';
 import { lowerScalarRows } from '../steps/tail/scalar.ts';
 import { seedCall, type BarrierPoint, type MidBarrierPoint } from '../steps/tail/call.ts';
@@ -512,13 +511,6 @@ export class LoweringEngine implements Engine {
       // reaches here — it is a `rel` contribution and `seedCall` refuses with the message that says so.
       return this.segmentFromBarrier(seedCall(steps[0], params, this.registry, steps, this.federationDepth), params);
     }
-
-    // Traverser bulking: a `repeat(...).times(n).count()` (path/as/sack-free) compiles to
-    // unrolled GROUP-BY-SUM(bulk) CTEs instead of an enumerate-every-walk recursion, so a
-    // dense/deep count (grateful times(8) ≈ 2.5e15 walks) stays tractable. Null → not the
-    // bulkable shape; fall through to the normal fold. See steps/tail/bulk.ts.
-    const bulked = runFastPath(BulkRepeatCountFastPath, fastPathContext(this.fastPaths), this, steps, params, sackInit);
-    if (bulked) return bulked;
 
     // Whole-chain facts, computed ONCE here (analyze): tracksPath + demandsEncounter feed the
     // source seed, and the movementCollapse gate already read collapseSafe at engine construction

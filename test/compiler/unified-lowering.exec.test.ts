@@ -100,17 +100,6 @@ describe('unified lowering characterization', () => {
         genericSql: 'UNION ALL SELECT id',
       },
       {
-        // fast = the unrolled GROUP-BY-SUM(bulk) frontier CTEs, whose collapsed (id,bulk) relation
-        // re-enters generic lowering; count() finishes via lowerGlobalCount's COALESCE(SUM(bulk)).
-        // generic = the enumerate-every-walk recursive CTE. Same total either way.
-        key: 'bulkRepeatCount',
-        // The IR unroll owns every admitted body up to its 100-step text budget. `times(101)` is
-        // bulk.ts's one remaining exclusive route (§7.4): enabled uses phases, disabled walks.
-        query: 'g.V().repeat(__.out()).times(101).count()',
-        fastSql: 'SUM(s.bulk)',
-        genericSql: 'with recursive',
-      },
-      {
         // frontier collapse: fast = each movement wraps its walks in SUM(bulk) GROUP BY id
         // (bounded frontier); generic = the plain UNION-ALL movement CTE. The terminal count's
         // SUM(bulk) makes them the same total either way.
@@ -229,9 +218,8 @@ describe('unified lowering characterization', () => {
     // bulk-carrying element stream, and the element leaf frames each vertex as (v, bulk) — the same
     // p.bulk projection movementCollapse uses — so the RLE-expanded multiset equals the generic
     // recursive-CTE enumeration.
-    expect(read('g.V(1).repeat(__.both()).times(2)', { fastPaths: { bulkRepeatCount: true } }).sql)
+    expect(read('g.V(1).repeat(__.both()).times(2)').sql)
       .toMatch(/AS props, \w+\.bulk AS bulk FROM/);
-    expect(idBag('g.V(1).repeat(__.both()).times(2)', { bulkRepeatCount: true })).toEqual(idBag('g.V(1).repeat(__.both()).times(2)', { bulkRepeatCount: false }));
 
     // Bulk-aware order()+limit/range/skip (element-terminal): the collapsed cumulative-bulk window
     // yields the SAME ordered traverser slice as enumerate-then-sort-then-slice. Compare the
@@ -255,9 +243,13 @@ describe('unified lowering characterization', () => {
     // frontier feeds the generic bulk-aware barrier (SUM(bulk) per key / SUM(v·bulk)), so a
     // dense/deep repeat stays bounded by |V| yet gives the SAME reduction as the enumerate-every-
     // walk recursive form. group/groupCount rows carry (gk, gv); a scalar reducer carries (v). Both
-    // are order-independent aggregates → compare sorted rows. This is the equivalence obligation the
-    // bulkRepeatCount FastPath's equivalentWhen names.
-    const rows = (query: string, on: boolean) => runWith(store, query, { fastPaths: { bulkRepeatCount: on } })
+    // are order-independent aggregates → compare sorted rows.
+    //
+    // The oracle used to be the `bulkRepeatCount` fast path against the generic route. That fast path
+    // is deleted (§8 item 7), and the equivalence it asserted did not die with it — it is the SAME
+    // claim one flag along: an RLE-collapsed frontier answers what enumerating every walk answers.
+    // `movementCollapse` is the switch that still expresses it, so the oracle moved rather than went.
+    const rows = (query: string, on: boolean) => runWith(store, query, { fastPaths: { movementCollapse: on } })
       .map((r: any) => JSON.stringify(bare(r))).sort();
     for (const query of [
       'g.V().repeat(__.both()).times(2).groupCount()',                 // bare element key
@@ -270,9 +262,11 @@ describe('unified lowering characterization', () => {
     ]) {
       expect(rows(query, true)).toEqual(rows(query, false));
     }
-    // The switch remains observable only beyond the IR unroll's text budget.
-    expect(read('g.V().repeat(__.out()).times(101).count()', { fastPaths: { bulkRepeatCount: true } }).sql).not.toContain('with recursive');
-    expect(read('g.V().repeat(__.out()).times(101).count()', { fastPaths: { bulkRepeatCount: false } }).sql).toContain('with recursive');
+    // …and the unroll owns EVERY bounded n now that its step ceiling is gone: `times(101)` used to
+    // fall past the ceiling to a recursive walk that cannot collapse, which is the one thing a
+    // bounded repeat must be able to do (§1). The only bound left is the real one — `cfLimitViolation`
+    // measuring the emitted bytes against the DO's 100 KB cap.
+    expect(read('g.V().repeat(__.out()).times(101).count()').sql).not.toContain('with recursive');
   });
 
   test('the inline correlated predicate child stays index-only (no MATERIALIZE)', () => {

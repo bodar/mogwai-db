@@ -89,13 +89,34 @@ describe('the repeat() unroll boundary', () => {
     for (const [rolled, written] of pairs) expect(vals(rolled)).toEqual(vals(written));
   });
 
-  /** §3.6's statement-text budget, which this pass is what multiplies: n copies of a body is n times
-   *  the SQL and n×m for a nested repeat. Above the ceiling the pass declines and today's deferral
-   *  stands, rather than handing downstream a chain that cannot ship to a Durable Object. */
-  test('declines above the unrolled-size ceiling instead of multiplying without bound', () => {
-    expect(() => compile('g.V().repeat(__.both().dedup()).times(49).count()', {})).not.toThrow();
-    expect(() => compile('g.V().repeat(__.both().dedup()).times(51).count()', {}))
-      .toThrow('per-iteration GLOBAL barrier over the whole frontier');
+  /**
+   * THE STEP CEILING IS GONE, AND `times(51)` IS THE WITNESS.
+   *
+   * The pass used to refuse past 100 spliced steps — a step count standing in for the DO's 100 KB of
+   * statement text, charging every body the worst measured per-step cost. A `both().dedup()` body is
+   * two steps, so `times(51)` was 102 and fell to a route that cannot express a per-iteration barrier
+   * at all, which is the one thing the unroll exists for (§1). Both sides of that old boundary now
+   * unroll, and so does a body far past it.
+   *
+   * Nothing replaces it in the compiler: a platform constant does not belong in a routing decision,
+   * because the platform enforces its own limits and a raised cap should not need a release. The caps
+   * are asserted in the BUILD instead — `CfLimitedSql` makes Bun refuse what a DO refuses, and
+   * `rel-sweep`/`sql-hygiene` ask `cfLimitViolation` of every corpus plan.
+   */
+  test('the unroll has no step ceiling — the platform owns its own limits', () => {
+    for (const n of [49, 51, 200]) {
+      expect(() => compile(`g.V().repeat(__.both().dedup()).times(${n}).count()`, {})).not.toThrow();
+    }
+    // …and the multiplication is still LINEAR in n, so the text a body costs stays predictable.
+    const bytes = (n: number): number => {
+      const plan = compile(`g.V().repeat(__.both().dedup()).times(${n}).count()`, {});
+      if (!('sql' in plan)) throw new Error('expected a read plan');
+      return plan.sql.length;
+    };
+    const small = bytes(50);
+    const large = bytes(200);
+    expect(large).toBeGreaterThan(small * 3);
+    expect(large).toBeLessThan(small * 5);
   });
 
   test('the run must be exactly repeat + times — emit, until and a named loop all decline', () => {
