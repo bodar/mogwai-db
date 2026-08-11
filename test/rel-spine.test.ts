@@ -25,11 +25,39 @@ import { PER_ROW, STATIC } from '../src/sql/kernel/render.ts';
  */
 
 const store = seededStore();
+
+/**
+ * TWO SPINES' RAW ROWS, COMPARED AS ANSWERS RATHER THAN AS COLUMN LISTS.
+ *
+ * **A missing `bulk` column IS `bulk: 1`** — that is what the wire framer does with an uncollapsed row,
+ * and it is the ordinary case for most traversals on either spine. What the two spines legitimately
+ * disagree about is whether they SPELL a constant-1 one: RelIR projects the column only where a
+ * collapse actually happened (`Tail.bulked`, the positional answer), while legacy projects it off its
+ * chain-global `movementCollapse` flag. Comparing the presence of that column compares a lowering
+ * detail, not a result.
+ *
+ * It normalizes the ABSENCE only, never the VALUE, which is what keeps the teeth: this file
+ * deliberately exercises the trimmed-bulk slices (`g.V().both().order().by('name').limit(2)` and
+ * friends), where a boundary row's multiplicity is trimmed to 2 and asserting it against a 1 must
+ * still fail.
+ *
+ * `bulk` is spelled FIRST so the key position is the same whichever spine supplied the row — the
+ * spread overwrites a present value without moving the key — which is what lets `rowsVia` keep
+ * comparing rows as JSON strings.
+ */
+const bulkDefaulted = (rows: readonly any[]) => rows.map((row) => ({ bulk: 1, ...row }));
+
 const rowsVia = (gremlin: string, spine: 'rel' | 'legacy') => {
   const plan = read(gremlin, { spine });
   expect(plan.spine).toBe(spine === 'rel' ? 'rel' : 'legacy');
-  return store.query(plan.sql, plan.binds).map((row) => JSON.stringify(row)).sort();
+  return bulkDefaulted(store.query(plan.sql, plan.binds)).map((row) => JSON.stringify(row)).sort();
 };
+
+const sameRows = (
+  rel: { readonly sql: string; readonly binds: readonly any[] },
+  legacy: { readonly sql: string; readonly binds: readonly any[] },
+) => expect(bulkDefaulted(store.query(rel.sql, rel.binds as any[])))
+  .toEqual(bulkDefaulted(store.query(legacy.sql, legacy.binds as any[])));
 
 /** Every shape the lowering covers today. Growing coverage means growing this list. */
 const COVERED = [
@@ -1306,7 +1334,7 @@ describe('the RelIR spine', () => {
       if (rel.kind !== 'read' || legacy.kind !== 'read') throw new Error('expected read plans');
       expect(rel.spine).toBe('rel');
       expect(rel.binds).toContain(count);
-      expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
+      sameRows(rel, legacy);
     }
     const literal = compile('g.V().limit(2)', {}, { spine: 'rel' });
     if (literal.kind === 'read') expect(literal.binds).not.toContain(2);
@@ -1321,7 +1349,7 @@ describe('the RelIR spine', () => {
       "g.V().values('name').limit(2)", "g.V().values('name').skip(1)", "g.V().out().values('name').limit(2)"]) {
       const rel = read(gremlin, { spine: 'rel' });
       const legacy = read(gremlin, { spine: 'legacy' });
-      expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
+      sameRows(rel, legacy);
     }
   });
 
@@ -1337,7 +1365,7 @@ describe('the RelIR spine', () => {
       "g.V().out().values('name').order()", "g.V().values('age').order().is(P.gt(29))"]) {
       const rel = read(gremlin, { spine: 'rel' });
       const legacy = read(gremlin, { spine: 'legacy' });
-      expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
+      sameRows(rel, legacy);
     }
     // …and one ABSOLUTE assertion, because a differential agrees when both sides are wrong: the
     // ascending sequence itself, which no scan order can produce by luck three times over.
@@ -1364,7 +1392,7 @@ describe('the RelIR spine', () => {
       "g.V().both().both().order().by('name').limit(3)"]) {
       const rel = read(gremlin, { spine: 'rel' });
       const legacy = read(gremlin, { spine: 'legacy' });
-      expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
+      sameRows(rel, legacy);
     }
     // …plus two ABSOLUTE assertions, because a differential agrees when both sides are wrong. The
     // modern graph's names ascending, and the same list reversed — no scan order produces either by
@@ -1467,7 +1495,7 @@ describe('the RelIR spine', () => {
       "g.V().values('name').tail(2)", "g.V().order().by('name').tail(2)", "g.V().hasLabel('person').tail(2)"]) {
       const rel = read(gremlin, { spine: 'rel' });
       const legacy = read(gremlin, { spine: 'legacy' });
-      expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
+      sameRows(rel, legacy);
     }
     // …and an ABSOLUTE one: the LAST two names in emission order, reported forwards.
     const last = read("g.V().order().by('name').tail(2)", { spine: 'rel' });
@@ -1701,7 +1729,7 @@ describe('the RelIR spine', () => {
       "g.V().dedup().by('lang').values('name')", "g.V().out().dedup().by('lang').limit(2)"]) {
       const rel = read(gremlin, { spine: 'rel' });
       const legacy = read(gremlin, { spine: 'legacy' });
-      expect(store.query(rel.sql, rel.binds)).toEqual(store.query(legacy.sql, legacy.binds));
+      sameRows(rel, legacy);
     }
   });
 

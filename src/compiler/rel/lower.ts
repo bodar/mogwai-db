@@ -113,6 +113,20 @@ export interface RelLowering {
  *  not properties of the relation itself. Every tail function returns this shape. */
 type Tail = ChainRead & {
   /**
+   * DOES A ROW OF THIS RESULT STAND FOR MORE THAN ONE TRAVERSER — the fold's `bulked`, carried out to
+   * the payload projection because the leaf is the last consumer of a multiplicity and the only one
+   * that can still lose it.
+   *
+   * REQUIRED rather than optional, and that is the whole point: only the `elements` framing arm
+   * projects a `bulk` column (`framed`), so a site that produced an element result and forgot to say
+   * whether it collapsed would answer N traversers as one row. A required field makes that a compile
+   * error instead of a silent fail-open. It used to be read off the collapse SWITCH, which was correct
+   * only while the switch also carried the chain-global collapse verdict — once the decision is
+   * positional the switch can be on where nothing collapsed, and projecting a constant-1 column then
+   * re-spells the SQL of every element leaf for no behaviour.
+   */
+  readonly bulked: boolean;
+  /**
    * THE STATEMENTS THIS CHAIN RUNS BEFORE ITS RESULT IS READ — a write's effects, in execution order
    * (§3.0: effects are legal only at a `Plan` binding).
    *
@@ -2378,7 +2392,7 @@ function scalarTail(
 
     return null;
   }
-  return { rel, framing: out, aliases: labels };
+  return { rel, framing: out, aliases: labels, bulked };
 }
 
 /**
@@ -2658,7 +2672,7 @@ function listTail(
     if (setOp) {
       rel = setOp.rel;
       items = setOp.of;
-      if (setOp.set) return { rel, framing: { kind: 'list', of: items, set: true }, aliases: labels };
+      if (setOp.set) return { rel, framing: { kind: 'list', of: items, set: true }, aliases: labels, bulked: false };
       continue;
     }
 
@@ -2674,7 +2688,7 @@ function listTail(
       steps, at + 1, false, ctx, fresh, labels,
     );
   }
-  return { rel, framing: { kind: 'list', of: items, ...(set ? { set } : {}) }, aliases: labels };
+  return { rel, framing: { kind: 'list', of: items, ...(set ? { set } : {}) }, aliases: labels, bulked: false };
 }
 
 /**
@@ -2737,7 +2751,7 @@ function pathTail(
     if (PATH_LIST_OPS.has(step.name)) return scalars ? listTail(rel, of, steps, at, ctx, fresh, labels) : null;
     return null;
   }
-  return { rel, framing: { kind: 'path', of, scalars }, aliases: labels };
+  return { rel, framing: { kind: 'path', of, scalars }, aliases: labels, bulked: false };
 }
 
 /**
@@ -2833,7 +2847,7 @@ function mapTail(
     if (!sliced) return null;
     rel = sliced;
   }
-  return { rel, framing: { kind: 'map', keyOf, valOf }, aliases: labels };
+  return { rel, framing: { kind: 'map', keyOf, valOf }, aliases: labels, bulked: false };
 }
 
 /**
@@ -2925,7 +2939,7 @@ function mapEntryTail(
     if (!sliced) return null;
     rel = sliced;
   }
-  return { rel, framing: { kind: 'mapEntry', keyOf, valOf }, aliases: labels };
+  return { rel, framing: { kind: 'mapEntry', keyOf, valOf }, aliases: labels, bulked: false };
 }
 
 
@@ -3093,11 +3107,24 @@ const NO_SERVICES: ReadonlyMap<string, Service> = new Map();
  * because the projection's own correlated subplans are part of the plan whose CTEs are chosen and whose
  * binds are counted.
  */
-const framed = (chain: Tail, collapse: boolean, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null => {
+/**
+ * **`bulk` COMES FROM THE CHAIN'S OWN `bulked`, NOT FROM THE COLLAPSE SWITCH.** The switch says a
+ * collapse was PERMITTED; `bulked` says one HAPPENED, and the two stop agreeing the moment the
+ * decision is positional (`ir/bulk.ts`) rather than a chain verdict. Reading the switch would then
+ * project a constant-1 `bulk` column onto every element leaf of every traversal — correct, since the
+ * framer repeats such a row once, and pure noise in the SQL of every query that never collapsed.
+ *
+ * Every other arm passes `false` and it is INERT: only this arm projects a `bulk` column at all, and
+ * `bulkObservedFrom` refuses a collapse in front of a chain that retypes to any of them, so a
+ * multiplicity provably never reaches one. If a future increment admits a retyping consumer that
+ * WEIGHTS by bulk (a `fold()` that replicates members, say), that arm owes this projection a column
+ * and the `false` beside it becomes a real claim rather than a formality.
+ */
+const framed = (chain: Tail, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null => {
   const framing = chain.framing;
   switch (framing.kind) {
     case 'elements': return {
-      rel: elementPayload(chain.rel, framing.elem, { bulk: collapse }, fresh),
+      rel: elementPayload(chain.rel, framing.elem, { bulk: chain.bulked }, fresh),
       shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },
     };
     case 'scalar': return scalarPayload(chain.rel, framing, fresh);
@@ -3156,8 +3183,8 @@ const scalarPayload = (
   };
 };
 
-const lowered = (chain: Tail, collapse: boolean, propertySeek: boolean, fresh: Minter): RelLowering | null => {
-  const wire = framed(chain, collapse, fresh);
+const lowered = (chain: Tail, propertySeek: boolean, fresh: Minter): RelLowering | null => {
+  const wire = framed(chain, fresh);
   // A shape whose payload projection is not built yet is COVERAGE WE DO NOT HAVE, so it declines exactly as
   // an unlearned step does. It must not throw: legacy answers these, and `rel-sweep` is the gate that
   // proves this seam never raises where the other spine has an answer.
@@ -3215,7 +3242,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   const fresh = minter();
   const settled = settle(opts);
   const chain = lowerChain(steps, settled, fresh);
-  return chain && lowered(chain, settled.collapse, settled.propertySeek, fresh);
+  return chain && lowered(chain, settled.propertySeek, fresh);
 }
 
 /**
@@ -3684,7 +3711,7 @@ function elementTail(
       // have rejected is to decline it, not to lower the prefix and forget the rest.
       if (at !== steps.length - 1 || step.modulators?.length || step.optionArms || (step.args ?? []).length) return null;
       const dropped = elementDrop(rel, elem, fresh);
-      return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: dropped.bindings };
+      return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: dropped.bindings, bulked: false };
     }
     const row = rowOp(step, rel, elem, bulked, ctx, fresh, labels);
     if (!row) break;
@@ -3702,7 +3729,7 @@ function elementTail(
     rel = row;
   }
 
-  if (at === steps.length) return { rel, framing: { kind: 'elements', elem }, aliases: labels };
+  if (at === steps.length) return { rel, framing: { kind: 'elements', elem }, aliases: labels, bulked };
 
   if (pathCarried(rel)) return null;
   const retyped = terminal(steps[at], rel, elem, fresh, ctx, labels);
@@ -3752,7 +3779,7 @@ function continueAs(
     // A VARIANT is TERMINAL here. Legacy answers a handful of steps over one (a `count`, a slice, an
     // alias compare); each is expressible and none is written, so a step after a variant DECLINES
     // rather than being silently dropped — the map arm's reasoning exactly.
-    case 'variant': return from === steps.length ? { rel, framing, aliases: labels } : null;
+    case 'variant': return from === steps.length ? { rel, framing, aliases: labels, bulked: false } : null;
     case 'discard': return null;
   }
 }
@@ -3772,7 +3799,7 @@ function propertyTail(
   rel: Rel, elem: Elem, steps: readonly IRStep[], from: number,
   bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | null {
-  if (from === steps.length) return { rel, framing: { kind: 'property', ownerElem: elem }, aliases: labels };
+  if (from === steps.length) return { rel, framing: { kind: 'property', ownerElem: elem }, aliases: labels, bulked: false };
   const step = steps[from]!;
 
   // THE GROUP BARRIER, over a property stream. It needs nothing property-specific: `groupBarrier` asks
@@ -3794,7 +3821,7 @@ function propertyTail(
   if (step.name === 'drop') {
     if (from !== steps.length - 1) return null;
     const dropped = propertyDrop(rel, elem, fresh);
-    return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: dropped.bindings };
+    return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: dropped.bindings, bulked: false };
   }
   const retyped = step.name === 'key' ? propertyKey(rel, fresh)
     : step.name === 'value' ? propertyValue(rel, fresh)
@@ -3914,7 +3941,7 @@ function recordTail(
     // fields silently.
     return null;
   }
-  return { rel, framing: { kind: 'record', fields }, aliases: labels };
+  return { rel, framing: { kind: 'record', fields }, aliases: labels, bulked: false };
 }
 
 /**
@@ -4035,7 +4062,7 @@ function sourceUnion(
     if (!body?.length) return null;
     const read = rootedRead(body, ctx, fresh);
     if (!read || read.effects?.length) return null;
-    arms.push({ rel: read.rel, framing: read.framing, aliases: NO_ALIASES });
+    arms.push({ rel: read.rel, framing: read.framing, aliases: NO_ALIASES, bulked: ctx.collapse });
   }
   return mergeArms(arms, arms[0]!.rel.channels, NO_ALIASES, fresh);
 }
@@ -4316,6 +4343,9 @@ function chooseOptions(
       rel: gate(unclaimed.map(takes).reduce((left, right) => ({ kind: 'binary', op: 'or', left, right }))),
       framing,
       aliases: labels,
+      // The pass-through arm IS the branch's input, unchanged, so it stands for exactly what the input
+      // did — nothing here collapses and nothing resets a multiplicity.
+      bulked,
     });
   }
   if (built.length < 2) return null;
