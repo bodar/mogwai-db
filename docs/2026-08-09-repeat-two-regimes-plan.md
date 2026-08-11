@@ -636,7 +636,10 @@ moved `src/compiler/rel/`.
    declares carried state at the relational position where it is live. This increment remains
    behaviour-free because nothing mints the channel yet, and `obligations.ts` needs nothing because
    every obligation already reads the total role tables.
-6. 🚧 **`walk.ts` — the `Recursive` regime (§3.1)**, split hardest:
+6. ✅ **LANDED — `walk.ts`, the `Recursive` regime (§3.1)**, split hardest. Every cell below is on
+   trunk. The two gaps recorded at the end are NOT part of this item: they are what the walk needs to
+   let the LEGACY ROUTE be deleted (the RelIR build plan's goal), not to close this plan, whose
+   remaining work is items 7 and 8.
    - ✅ **LANDED — the module and `elementTail` dispatch hook, declining every shape.** The scaffold
      declares the eventual element-walk contract but mints no relation and changes no route: `null`
      still hands the whole traversal to legacy. The child fold seam and recursive machinery wait for
