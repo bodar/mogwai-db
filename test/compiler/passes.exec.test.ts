@@ -312,3 +312,46 @@ describe('the label retractions: state nobody reads is not carried (§7.4 items 
     expect(suppressed).toBe('V.as.out.count');
   });
 });
+
+describe('labelMutationTarget — a specified refusal, raised ABOVE the routing switch', () => {
+  const raises = (gremlin: string, spine?: 'rel' | 'legacy' | 'rel-only') =>
+    expect(() => compile(gremlin, {}, spine ? { spine } : undefined)).toThrow('Label mutation is not supported');
+
+  test('an edge stream refuses all three mutations, on EVERY spine position', () => {
+    // The three conformance scenarios that assert the message, and the reason this Pass exists: they
+    // passed only because legacy's write DISPATCHER raised on the way past, so deleting that route
+    // would have deleted the answer. `rel-only` is the position that proves it survives — it forbids
+    // the legacy fallback, so a refusal that still fires there is one no route owns.
+    for (const gremlin of ['g.E().addLabel("friend").labels().fold()',
+      'g.E().dropLabel("knows").labels().fold()', 'g.E().dropLabels().labels()']) {
+      for (const spine of ['rel', 'legacy', 'rel-only'] as const) raises(gremlin, spine);
+    }
+  });
+
+  test('the target is the STREAM, not the source step — a movement to edges refuses too', () => {
+    raises('g.V().outE().addLabel("x")');
+    raises('g.V().bothE().dropLabel("knows")');
+  });
+
+  test('a VERTEX stream is untouched, including back through an endpoint movement', () => {
+    // otherV/inV/outV land on a vertex, so a mutation after one is legal — the case a source-only
+    // test would pass while being wrong.
+    for (const gremlin of ['g.V().addLabel("friend")', 'g.V().addLabel("friend").labels().fold()',
+      'g.V().dropLabels().labels()', 'g.V().bothE().otherV().addLabel("x")',
+      'g.V().outE().inV().addLabel("x")']) {
+      expect(() => compile(gremlin, {}, undefined), gremlin).not.toThrow();
+    }
+  });
+
+  test('a prefix it cannot TYPE is left to the lowerings, never raised on', () => {
+    // `elementKindAt`'s third answer. A verifier that guessed here would refuse traversals nobody
+    // analysed; the honest answer is to decline to answer and let the route decide. These must not
+    // raise the label-mutation message — whatever else they do.
+    for (const gremlin of ['g.V().union(__.outE(), __.inE()).addLabel("x")',
+      'g.V().as("a").select("a").addLabel("x")']) {
+      let message = '';
+      try { compile(gremlin, {}, undefined); } catch (e: any) { message = e.message; }
+      expect(message, gremlin).not.toContain('Label mutation is not supported');
+    }
+  });
+});

@@ -4,8 +4,9 @@ import {
   stepChain, type Step,
 } from '../../gremlin/frontend.ts';
 import { validateLabel, validatePropertyKey } from '../../gremlin/validate.ts';
-import type { VertexCardinality } from '../../api.ts';
+import { LABEL_MUTATION_UNSUPPORTED, type VertexCardinality } from '../../api.ts';
 import type { IRStep } from './strategies.ts';
+import { elementKindAt, LABEL_MUTATIONS } from './step.ts';
 
 /**
  * WHAT A WRITE STEP'S ARGUMENTS MEAN — the ONE authority, above the routing switch (§6·5).
@@ -566,5 +567,36 @@ export function verifyWriteArgs(steps: readonly IRStep[], params: Record<string,
     let end = at + 1;
     while (end < steps.length && (steps[end]!.name === 'option' || steps[end]!.name === 'property')) end++;
     guarded(() => { mergeMaps(step, steps.slice(at + 1, end), step.name as 'mergeV' | 'mergeE', sideEffects, params); });
+  }
+}
+
+/**
+ * A LABEL MUTATION ON AN EDGE IS A SPECIFIED REFUSAL, and it belongs above the routing switch.
+ *
+ * TinkerPop fixes an edge's label cardinality at exactly one and immutable, so `addLabel`,
+ * `dropLabel` and `dropLabels` on an edge stream are errors rather than gaps — the conformance suite
+ * asserts the message directly (`g_E_addLabelXfriendX_labels_fold`, `g_E_dropLabelXknowsX_labels`,
+ * `g_E_dropLabels_labels`, each *"the traversal will raise an error with message containing text of
+ * 'Label mutation is not supported'"*, `gremlin-test .../features/sideEffect/{AddLabel,DropLabel}.feature`).
+ *
+ * **It lived in `steps/write/write.ts` and that made three passing scenarios the property of a route
+ * with an end date.** They pass today on BOTH spines only because RelIR declines the shape and legacy's
+ * write dispatcher raises on the way past; deleting that dispatcher would have deleted the answer. This
+ * is §6·5 and the "legacy must not be the authority" rule in one: an ERROR is never a capability, so it
+ * is owed by whichever spine runs the traversal, which means it is owed above both.
+ *
+ * ⚠️ **It is the STREAM's element kind, not an argument** — the one write refusal here that is — so it
+ * asks `elementKindAt`, whose third answer is `undefined`. A chain whose prefix this cannot type
+ * (a branch, a re-entry, a child host) is left to the lowerings rather than raised on: a verifier must
+ * never narrow what the lowerings may attempt, and never raise on a traversal it has not understood.
+ * The immutable-graph sibling refusal does NOT move with it and could not: it reads a graph capability,
+ * while this is a fact about Gremlin.
+ */
+export function verifyLabelMutationTarget(steps: readonly IRStep[]): void {
+  for (let at = 0; at < steps.length; at++) {
+    const step = steps[at]!;
+    if (!LABEL_MUTATIONS.has(step.name)) continue;
+    if (elementKindAt(steps, at) === 'edge')
+      throw new Error(`${LABEL_MUTATION_UNSUPPORTED}: ${step.name}() on an edge`);
   }
 }

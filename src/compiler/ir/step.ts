@@ -138,6 +138,57 @@ export const isStreamBarrier = (s: IRStep): boolean => isGlobalBarrier(s) && !is
 export const isLocalScope = (s: IRStep): boolean =>
   (s.args ?? []).some((a) => isScopeArg(a.value) && a.value.scope === 'local');
 
+/** The three steps that MUTATE an element's labels. A base here rather than a private set in a
+ *  lowering, because the question "is this traversal a label mutation" is now asked ABOVE the routing
+ *  switch (`verifyLabelMutationTarget`) as well as inside one. */
+export const LABEL_MUTATIONS: ReadonlySet<string> = new Set(['addLabel', 'dropLabel', 'dropLabels']);
+
+/** Which kind of element a chain's prefix leaves on the stream. */
+export type ElementKind = 'vertex' | 'edge';
+
+/**
+ * WHICH ELEMENT KIND THE STREAM HOLDS AT `at`, or `undefined` for **cannot say**.
+ *
+ * A deliberately small, TOTAL walk of the movement vocabulary, and the third answer is the load-bearing
+ * one: this exists so a `verify` Pass can raise a refusal that is a property of the STREAM rather than
+ * of a step's arguments, and a Pass that guessed would raise on a traversal it had not understood.
+ * Everything outside the vocabulary below — a branch, a re-entry, a `select`, a child host — answers
+ * `undefined`, and the caller leaves such a chain to the lowering.
+ *
+ * It is not a shape ANNOTATION and must not grow into one: `docs/2026-07-28-shape-vocabulary-architecture.md`
+ * draws the line that a Pass may CONSULT shape and never CONSTRUCT it, and the reason this stays a local
+ * question is that its one caller needs a single fact (vertex or edge) about a single position, where a
+ * shape vocabulary carries member encodings, key/value sides and framings it has no business inventing.
+ */
+export function elementKindAt(steps: readonly IRStep[], at: number): ElementKind | undefined {
+  let kind: ElementKind | undefined;
+  for (let i = 0; i < at && i < steps.length; i++) {
+    const name = steps[i].name;
+    if (name === 'V' || VERTEX_MOVES.has(name) || ENDPOINT_MOVES.has(name) || OTHER_V.has(name)) kind = 'vertex';
+    else if (name === 'E' || EDGE_MOVES.has(name)) kind = 'edge';
+    // A mid-chain creation RE-ROOTS the stream onto what it created.
+    else if (name === 'addV' || name === 'mergeV') kind = 'vertex';
+    else if (name === 'addE' || name === 'mergeE') kind = 'edge';
+    // Shape-PRESERVING: the stream is whatever it already was. A filter drops rows, a label binds, a
+    // slice picks; none of them retypes. `LABEL_MUTATIONS` are here because they are side-effect steps
+    // that pass the SAME traverser on (`compileLabelMutation`'s own note), which is what makes a second
+    // one after the first still answerable.
+    else if (SHAPE_PRESERVING.has(name) || LABEL_MUTATIONS.has(name)) continue;
+    else return undefined; // cannot say — and saying so is the point
+  }
+  return kind;
+}
+
+/** The steps `elementKindAt` may walk THROUGH. Kept narrow on purpose: a name absent here costs a
+ *  refusal that is left to the lowering, while a name wrongly present costs a raise on a traversal
+ *  nobody analysed. Absent by intent: every branch, every re-entry, every child host, `property`
+ *  (whose own value may re-root) and every retype (`values`, `label`, `id`, `fold`, `path`, …). */
+const SHAPE_PRESERVING: ReadonlySet<string> = new Set([
+  'has', 'hasLabel', 'hasId', 'hasKey', 'hasValue', 'hasNot', 'is', 'where', 'filter', 'not', 'and', 'or',
+  'as', 'identity', 'barrier', 'dedup', 'order', 'limit', 'range', 'skip', 'tail', 'sample',
+  'simplePath', 'cyclicPath', 'none', 'drop',
+]);
+
 /** A bare/keyed `order()` (no by(traversal)) re-establishes a deterministic total order. It is THE
  *  shared hinge of three scans, which is why it is a base here rather than a private helper: such an
  *  order() clears "needs an emission encounter" (a following slice sorts deterministically without

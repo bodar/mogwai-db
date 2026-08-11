@@ -1243,11 +1243,11 @@ function compileLabelMutation(engine: Engine, steps: IRStep[], params: Record<st
   const at = steps.findIndex((s) => LABEL_MUTATIONS.has(s.name));
   const step = steps[at];
   const { st } = engine.buildPrefix(steps.slice(0, at), params);
-  // The REFUSAL comes first, before any question about what follows: a graph that cannot mutate
-  // labels must say so whatever the tail is. `g.E().addLabel("friend").labels().fold()` asserts
-  // exactly that, and checking the tail first answered "step not implemented after addLabel()".
-  if (st.elem === 'edge') throw new Error(`${LABEL_MUTATION_UNSUPPORTED}: ${step.name}() on an edge`);
-  if (!LABEL_CARDINALITY.mutable) throw new Error(`${LABEL_MUTATION_UNSUPPORTED}: ${step.name}()`);
+  // The EDGE refusal is no longer here: it is a fact about Gremlin rather than about this route, so it
+  // is a `verify` Pass above the routing switch (`ir/write-args.ts`'s `verifyLabelMutationTarget`) and
+  // survives this file's deletion. Keeping a copy would be two authorities for one message.
+  // `LABEL_CARDINALITY.mutable` is a hardcoded `true` — the residue of the withdrawn `LabelCardinality`
+  // — so the sibling check it guarded was dead and went with it.
 
   // These are SIDE-EFFECT steps: they mutate and pass the SAME traverser on, so a read tail is
   // the norm rather than the exception (`addLabel("employee").labels().fold()`). The element is

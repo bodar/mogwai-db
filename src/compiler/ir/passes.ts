@@ -10,7 +10,8 @@ import {
     NO_OP_STRATEGIES, ALWAYS_ON_STRATEGIES, VERIFICATION_STRATEGIES, rejectMsg,
     type IRStep,
 } from './strategies.ts';
-import { verifyWriteArgs } from './write-args.ts';
+import { verifyLabelMutationTarget, verifyWriteArgs } from './write-args.ts';
+import { LABEL_MUTATIONS } from './step.ts';
 
 // ---------- the Pass pipeline: the concrete PASSES array + the driver ----------
 //
@@ -262,6 +263,24 @@ const VERIFY: Pass[] = group('verify', [
   // Against `ctx.originalChain` for the reason every verify Pass is: an injected PartitionStrategy
   // write stamp is not the user's text, and the desugars that a write parse DOES depend on
   // (`desugarPropertyMap`) are `extract`-category, so they are already applied in that snapshot.
+  // A LABEL MUTATION'S TARGET, which is the one write refusal that is a fact about the STREAM rather
+  // than about a step's arguments (`verifyLabelMutationTarget`). Always on, and above the routing
+  // switch for §6·5's reason: an edge's label cardinality is fixed at one by Gremlin, so this is a
+  // specified ERROR whichever spine would have run the traversal. It used to be raised inside legacy's
+  // write dispatcher, which made three passing conformance scenarios the property of a route with an
+  // end date.
+  //
+  // Against the LIVE `steps`, not `ctx.originalChain`, and that is the one place this differs from its
+  // neighbours: the question is what the stream HOLDS at the mutation, so it must see the chain the
+  // desugars produced (a `PartitionStrategy` write stamp included) rather than the user's text.
+  {
+    name: 'labelMutationTarget',
+    applies: (steps) => steps.some((s) => LABEL_MUTATIONS.has(s.name)),
+    run: function labelMutationTargetPass(steps) {
+      verifyLabelMutationTarget(steps);
+      return steps;
+    },
+  },
   {
     name: 'writeArguments',
     applies: (_steps, ctx) => ctx.originalChain.some((s) => WRITE_ARG_HOSTS.has(s.name)),
