@@ -305,9 +305,12 @@ describe('repeat / path SQL', () => {
     }
   });
 
-  test('repeat requires an exit modulator; emit()/until() run unbounded; sequential repeats chain', () => {
-    // bare repeat() has no termination AND no output semantics → reject
-    expect(() => compile('g.V().repeat(__.out())', {})).toThrow('repeat() requires times(), until(), or emit()');
+  test('repeat with no modulator is EMPTY, not an error; emit()/until() run unbounded; sequential repeats chain', () => {
+    // A bare repeat() emits nothing — RepeatEndStep finds no until and no emit, so it re-adds the
+    // traverser and returns nothing, forever. That is the ANSWER, not a refusal: upstream verifies
+    // repeat() only for a missing BODY (StandardVerificationStrategy.java:83-85).
+    if (relirOff) expect(() => compile('g.V().repeat(__.out())', {})).toThrow('repeat() requires times(), until(), or emit()');
+    else expect(run(seededStore(), 'g.V().repeat(__.out())')).toEqual([]);
     // unbounded emit() now compiles — no artificial depth cap; it terminates at the
     // natural fixpoint (frontier exhaustion) on an acyclic body.
     // The RelIR walk now claims this, so the assertions are the SHARED contract — a recursive CTE
@@ -670,10 +673,16 @@ describe('repeat / path SQL', () => {
 
   test('until() defers the combinations not yet built', () => {
     expect(() => compile('g.V(1).repeat(__.out()).until(__.has("name","x")).times(3)', {})).toThrow('until() together with times() not yet supported');
-    // `repeat()` with NEITHER modulator answers the empty result in TinkerPop rather than raising
-    // (`RepeatEndStep` re-loops to exhaustion and `processTraverser` returns `EmptyTraverser`), so
-    // this throw is a DEFERRAL, not the specified behaviour. The recursive walk declines it for now.
-    expect(() => compile('g.V(1).repeat(__.out())', {})).toThrow('repeat() requires times(), until(), or emit()');
+  });
+
+  relOnly('a no-modulator repeat PRUNES to an empty relation instead of walking', () => {
+    // Nothing can leave the walk, so evaluating it is pure cost. The walk is still BUILT — that is
+    // what proves the body lowers, carries no effects and changes no shape — and then discarded, the
+    // substitution Calcite spells as PruneEmptyRules.
+    const p = read('g.V(1).repeat(__.out())');
+    expect(p.spine).toBe('rel');
+    expect(p.sql).not.toContain('WITH RECURSIVE');
+    expect(p.sql).toContain('1 = 0');
   });
 
   // ---------- bare emit() through the recursive walk ----------

@@ -62,7 +62,24 @@ is `GROUP BY id, SUM(bulk)` per hop, i.e. the RLE collapse the `bulk` channel ex
 
 **That collapse is an AGGREGATE, and SQLite forbids an aggregate in a recursive term.** It is the
 same wall as a per-iteration barrier — `src/rel/recursive.ts`'s `BARRIER_IN_TERM` refuses the exact
-node — seen from the COST side rather than the legality side. So the recursive regime cannot
+node — seen from the COST side rather than the legality side.
+
+> **TinkerPop refuses the same family, for an unrelated reason — independent corroboration of the
+> split, found while closing §8.6.** `StandardVerificationStrategy` throws on a `ReducingBarrierStep`
+> or `SupplyingBarrierStep` sitting directly in a `repeat()`'s global child:
+> *"The parent of a reducing/supplying barrier can not be repeat()-step"*
+> (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/verification/StandardVerificationStrategy.java:78-81`).
+> So upstream rules out `repeat(__.out().count())` on SEMANTIC grounds, having nothing to do with
+> SQLite, while we rule out the same shape because a recursive term cannot hold the node. Two
+> independent derivations reaching one boundary is the strongest evidence this plan has that the
+> boundary is real rather than an artefact of our substrate.
+>
+> ⚠️ **The sets are not identical, and the difference is exactly why the BOUNDED regime exists.**
+> Upstream's check names only REDUCING/SUPPLYING barriers, so a FILTERING barrier — `limit()`,
+> `order()`, `dedup()` — stays legal in a body, and `g.V().repeat(__.both().limit(1)).times(2)` is a
+> corpus scenario expecting an answer. `BARRIER_IN_TERM` refuses those too (SQLite accepts them and
+> applies them to the WHOLE walk, which is silently not what the author wrote), which is precisely the
+> population the IR unroll takes. So the recursive regime cannot
 collapse, at any depth, ever; and an unrolled phase is an ordinary relation that collapses like any
 other movement, which `ir/analyze.ts`'s `collapseSafe` already decides for a flat chain (it returns
 `false` on sight of a `repeat`, and after the unroll there is no `repeat` to see).
@@ -686,7 +703,28 @@ moved `src/compiler/rel/`.
      by necessity rather than convention. Legacy also captures `withSack`'s second operator
      (`frontend.ts:362`) and never reads it, so a declared merge operator is silently ignored there;
      RelIR declines it (`sack.ts:69`).
-   - Next: `repeat()` with NEITHER modulator (below), then §8 items 7 and 8.
+   - ✅ **LANDED — `repeat()` with NEITHER modulator is the EMPTY result, not an error.** Nothing can
+     leave such a walk: `RepeatEndStep` increments the counter, finds no `until`, re-adds the
+     traverser, finds no `emit` and returns nothing, while `processTraverser` answers `EmptyTraverser`
+     at the head. It is a LEGAL traversal — upstream verifies `repeat()` only for a missing BODY
+     (*"prevents silly stuff like `g.V().emit()`"*, `StandardVerificationStrategy.java:83-85`) and
+     imposes no modulator requirement — so both spines' *"repeat() requires times(), until(), or
+     emit()"* was a refusal of something specified.
+     **EMPTY IS NOT "no output":** `repeat(__.out()).count()` is `0`, because `count()` is a reducing
+     barrier with a seed, so this yields an empty ELEMENT relation the rest of the chain folds over
+     rather than a short circuit. The walk is still BUILT and then DISCARDED — building it is what
+     proves the body lowers, carries no effects and changes no shape, and the emptiness argument holds
+     only for a body with nothing observable in it. Replacing a provably empty relation rather than
+     evaluating it is Calcite's `PruneEmptyRules`; it is NOT the depth cap the root `CLAUDE.md`
+     forbids, because a cap truncates a PRODUCTIVE traversal and changes its answer while this changes
+     no answer at all — only whether a query that provably returns nothing spins to prove it.
+   - **Found here, not fixed: an unbounded `both()` body declines on SHAPE, at every modulator.** It
+     lowers to two directional arms, so the term holds TWO `SelfRef`s and `recursiveViolation` refuses
+     it ("exactly once"). The single-term spelling exists — one self-reference joined with a
+     disjunctive condition (`e.src = w.id OR e.tgt = w.id`) — so this is a lowering gap rather than a
+     wall, and it is the largest remaining one in the walk: every unbounded `both()` traversal is on
+     the legacy route because of it.
+   - Next: §8 items 7 and 8.
    - Not a cell but noted where it was found: **`repeat()` with NEITHER modulator is specified as
      the EMPTY result**, not an error — `RepeatEndStep` re-loops to exhaustion and `processTraverser`
      answers `EmptyTraverser` throughout. Both spines currently raise *"repeat() requires times(),

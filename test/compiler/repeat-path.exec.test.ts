@@ -375,6 +375,16 @@ relOnly('emit(pred) doubles under until-before/emit-after, exactly as the bare f
     .toEqual(['lop', 'lop', 'lop', 'lop', 'ripple', 'ripple']);
 });
 
+relOnly('repeat() with NEITHER modulator is the empty result, and the chain folds over it', () => {
+  const store = seededStore();
+  // Nothing ever leaves the loop, so the traversal is empty…
+  expect(run(store, 'g.V(1).repeat(__.out())')).toEqual([]);
+  expect(uNames(store, 'g.V().repeat(__.out())')).toEqual([]);
+  // …but EMPTY IS NOT "no output". count() is a reducing barrier with a seed, so it answers 0 over
+  // the empty stream. This is why the fold must produce an empty RELATION and never short-circuit.
+  expect((run(store, 'g.V(1).repeat(__.out()).count()') as any[]).map((r) => r.v)).toEqual([0]);
+});
+
 // ---------- a sack folded through the walk, and carried state read from a child body ----------
 //
 // TinkerPop evaluates a child traversal on a SPLIT of the whole traverser at bulk 1

@@ -40,7 +40,9 @@ const binary = (op: Extract<Expr, { kind: 'binary' }>['op'], left: Expr, right: 
 const negated = (inner: Expr): Expr => binary('is not', inner, compilerInt(1));
 /** SQLite has no boolean literal; a degenerate set folds to a constant comparison rather than to a
  *  bare `0`, so the expression still reads as a predicate wherever it is spliced. */
-const CONSTANT = { true: binary('=', compilerInt(1), compilerInt(1)), false: binary('=', compilerInt(1), compilerInt(0)) };
+/** The two constant predicates, spelled once. A lowering that has PROVEN an outcome says so with
+ *  these rather than inventing its own always-false expression at each site. */
+export const CONSTANT = { true: binary('=', compilerInt(1), compilerInt(1)), false: binary('=', compilerInt(1), compilerInt(0)) };
 
 const COMPARISON: Readonly<Record<string, Extract<Expr, { kind: 'binary' }>['op']>> =
   { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };

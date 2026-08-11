@@ -8,6 +8,7 @@ import type { AliasMap } from '../plan/alias.ts';
 import type { Elem } from '../plan/plan.ts';
 import { and, carriedCols, elementCols, meta, notProduced, or, typeOf, type Minter } from './build.ts';
 import type { ChildSeam, Subject } from './child.ts';
+import { CONSTANT } from './predicate.ts';
 import type { RelFraming } from './framing.ts';
 
 /** "Every row the walk holds" — an output condition that needs no filter, distinct from the absence
@@ -61,12 +62,6 @@ export function repeatWalk(
   const emit = named('emit');
 
   if (!repeat || named('times')) return null;
-  // A walk with NEITHER modulator never returns anything: `RepeatEndStep` re-loops until the body is
-  // unproductive and `processTraverser` answers `EmptyTraverser` throughout, so the specified answer
-  // is the EMPTY result. Neither spine gives it — both raise "repeat() requires times(), until(), or
-  // emit()" — so this decline preserves a known-wrong deferral rather than a working route, and
-  // closing it is tracked in §8 rather than folded in here.
-  if (!until && !emit) return null;
   if ((repeat.args ?? []).length !== 1 || repeat.loopName) return null;
   if (until && (until.args ?? []).length !== 1) return null;
   if (emit && (emit.args ?? []).length > 1) return null;
@@ -199,6 +194,38 @@ export function repeatWalk(
   // The lowering and checker share one authority for SQLite's recursive-term laws. Calling it also
   // constructs the memoized step, so `termValid` reports any fold-level decline above.
   if (recursiveViolation(walk) || !termValid) return null;
+
+  /**
+   * A WALK WITH NEITHER MODULATOR EMITS NOTHING, so the walk itself is dead code.
+   *
+   * `RepeatEndStep` increments the counter, finds no `until`, re-adds the traverser, finds no `emit`
+   * and returns nothing; `processTraverser` answers `EmptyTraverser` at the head. Traversers circulate
+   * until the body is unproductive and not one of them ever leaves. It is a LEGAL traversal — upstream
+   * verifies `repeat()` only for a missing BODY ("prevents silly stuff like `g.V().emit()`",
+   * `StandardVerificationStrategy.java:83-85`) and imposes no modulator requirement — so answering it
+   * is closing a legality gap, not adding a special case.
+   *
+   * ⚠️ **EMPTY IS NOT "no output": the rest of the chain still runs over an empty stream.**
+   * `repeat(__.out()).count()` is `0`, because `count()` is a reducing barrier with a seed. So this
+   * yields an empty ELEMENT relation for the fold to continue over, never a short circuit.
+   *
+   * The walk above is built and then DISCARDED, and that is the point: constructing it is what proves
+   * the body lowers through our own fold, carries no effects and changes no shape — and the emptiness
+   * argument holds only for a body with nothing observable in it. A body with effects is refused by
+   * `termValid` before reaching here, so the traversal it stands for genuinely has no other outcome.
+   *
+   * Replacing a provably empty relation with an empty one, rather than evaluating it, is Calcite's
+   * `PruneEmptyRules` (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/rules/PruneEmptyRules.java`).
+   * It is NOT the depth cap the root `CLAUDE.md` forbids: a cap truncates a PRODUCTIVE traversal and
+   * changes its answer, while this changes no answer at all — only whether a query that provably
+   * returns nothing spins to prove it. On a cyclic body that difference is observable as termination,
+   * and terminating is the better half of it in a Durable Object with a per-request limit.
+   */
+  if (!until && !emit) return {
+    rel: make.filter({ id: fresh('wn'), input, channels: input.channels, type: input.type, pred: CONSTANT.false }),
+    framing: { kind: 'elements', elem },
+    aliases,
+  };
 
   const arm = (tag: string, pred: Expr): Rel =>
     make.filter({ id: fresh(tag), input: walk, channels: carried, type: walkType, pred });
