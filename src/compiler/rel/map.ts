@@ -127,7 +127,89 @@ const ORD_COL = 'go';
  */
 export function groupBarrier(
   input: Rel, host: ChildHost, step: IRStep, bulked: boolean, child: ChildSeam, fresh: Minter,
-): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } | null {
+): GroupedMap | null {
+  const rows = groupRows(input, host, step, bulked, child, fresh);
+  return rows && (rows.done ?? groupMap(rows.rel, rows.recipe, fresh));
+}
+
+/** A grouped relation folded into one map value, plus what the framing layer must be told about each
+ *  side. `groupBarrier`'s answer, and `groupMap`'s. */
+export interface GroupedMap { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf }
+
+/**
+ * THE PRE-AGGREGATE ROWS of a grouping — one row per contributing traverser, carrying its KEY and its
+ * value CONTRIBUTION — plus the recipe that turns them into a map. `null` declines.
+ *
+ * The split exists because a KEYED `group("a")`/`groupCount("a")` is a SIDE EFFECT: the map it fills is
+ * read back at a `cap("a")`, and a label two chain positions fill holds BOTH sites' contributions
+ * (`registerIfAbsent` + `GroupBiOperator`). So the grouping cannot happen where the step is — it happens
+ * over the UNION of every site's rows, at the read, which is where the reference puts every collecting
+ * reduction (`SideEffectCapStep.generateFinalResult`). That is `collection.ts`'s thesis applied to the
+ * keyed forms, and this seam is what makes it expressible.
+ *
+ * It costs the barrier form nothing: `groupBarrier` is `groupMap(groupRows(…))`, because the code was
+ * already in this order — project the key and the member, fence, drop the unproductive domain, and only
+ * THEN aggregate.
+ *
+ * ⚠️ **`recipe` is DATA and not a closure, and that is the load-bearing part.** Two sites on one label may
+ * carry different `by()`s, and what the aggregation does depends on facts the SITE decided — whether the
+ * key is a rowid to expand at the entry, whether the member column holds a projected `{t,v}` node or a
+ * rowid, whether the value `by()` owes a productivity drop. A closure cannot be COMPARED, so a second
+ * site could be aggregated by the first site's recipe and answer plausibly wrong rows. As data, the
+ * accumulation can refuse a disagreement (`sameGroupRecipe`).
+ */
+export interface GroupRows {
+  readonly rel: Rel;
+  readonly recipe: GroupRecipe;
+  /** The `groupReduced` arm's finished answer. Its value side is a JOIN whose child rows POOL per group,
+   *  so there is no `(key, contribution)` row to union and no recipe that could describe one — it is
+   *  already a map, and a keyed caller must decline it rather than pretend it is a member relation. */
+  readonly done?: GroupedMap;
+}
+
+/**
+ * HOW A GROUPING'S ROWS BECOME A MAP — every fact the aggregation needs, as comparable data.
+ *
+ * Structural equality over this IS the question "may these two sites share one grouping?", which is why
+ * every field is a primitive or a small tagged value and none is a relation or a function.
+ */
+export interface GroupRecipe {
+  /** `groupCount` reduces the group to a traverser COUNT; `group` COLLECTS its members. */
+  readonly counting: boolean;
+  /** The key is a ROWID of this element kind, to be expanded into a node at the ENTRY — once per
+   *  surviving group rather than once per row. `undefined` when the key column already holds a node. */
+  readonly keyElem: Elem | undefined;
+  /** What the member column holds: a projected self-describing node, or a rowid this host expands. */
+  readonly member: { readonly kind: 'node' } | { readonly kind: 'rowid'; readonly host: ChildHost } | undefined;
+  /** `by(__.tail())` / an anonymous child value: the group's value is ONE member, extracted from the
+   *  collected array's end, rather than the array itself. */
+  readonly single: boolean;
+  /** The value `by()` owes a productivity drop, applied as the aggregate's own `FILTER (WHERE …)` so the
+   *  GROUP survives with an empty list rather than the key vanishing. */
+  readonly memberDrop: boolean;
+  /** The bulk channel's column where the count must weigh by multiplicity, else `undefined`. */
+  readonly bulkCol: string | undefined;
+  /** The step whose `productivityFilter` policy the drop reads — carried so the recipe stays data the
+   *  aggregation can act on without re-deriving `ProductiveByStrategy`. Two sites of one label are two
+   *  positions of one traversal, so they cannot disagree about the strategy. */
+  readonly step: IRStep;
+}
+
+/** May two sites' rows be grouped together? Structural over everything the aggregation reads, and it
+ *  deliberately does NOT compare `step` — that is the strategy carrier, and one traversal has one. */
+export const sameGroupRecipe = (a: GroupRecipe, b: GroupRecipe): boolean =>
+  a.counting === b.counting && a.keyElem === b.keyElem && a.single === b.single
+  && a.memberDrop === b.memberDrop && a.bulkCol === b.bulkCol
+  && a.member?.kind === b.member?.kind
+  && (a.member?.kind !== 'rowid' || (b.member as { host: ChildHost }).host.kind === a.member.host.kind);
+
+/** The columns a grouping's rows carry — what a UNION of several sites must narrow to. */
+export const groupRowCols = (recipe: GroupRecipe): readonly string[] =>
+  [KEY_COL, ...(recipe.counting ? [] : [MEMBER_COL, ORD_COL]), ...(recipe.bulkCol ? [recipe.bulkCol] : [])];
+
+export function groupRows(
+  input: Rel, host: ChildHost, step: IRStep, bulked: boolean, child: ChildSeam, fresh: Minter,
+): GroupRows | null {
   if (step.optionArms) return null;
   if (step.name !== 'groupCount' && step.name !== 'group') return null;
   // A single STRING argument is a side-effect LABEL, and the grouping it names is built exactly the
@@ -189,8 +271,12 @@ export function groupBarrier(
   // expression would be a plausible-looking wrong value rather than a decline.
   if (valueBy?.key.kind === 'child' && !lastOnly) {
     const terminal = valueBy.key.body.at(-1)?.name;
-    if (terminal === 'count' || (terminal !== undefined && isReducer(terminal)))
-      return groupReduced(input, host, step, bys[0], valueBy.key.body, bulked, child, fresh);
+    if (terminal === 'count' || (terminal !== undefined && isReducer(terminal))) {
+      const pooled = groupReduced(input, host, step, bys[0], valueBy.key.body, bulked, child, fresh);
+      // A POOLED value is already a map, and there is no `(key, contribution)` row behind it — see
+      // `GroupRows.done`. The `rel`/`recipe` are unreachable and stated only so the shape stays total.
+      return pooled && { rel: pooled.rel, recipe: POOLED_RECIPE(step), done: pooled };
+    }
   }
   const member = valueBy && !lastOnly ? byNode(valueBy, host, fresh, child) : undefined;
   if (valueBy && !lastOnly && !member) return null;
@@ -292,6 +378,34 @@ export function groupBarrier(
   const rows = domainDrop
     ? make.filter({ id: fresh('gf'), input: keyed, channels: keyed.channels, type: keyed.type, pred: domainDrop })
     : keyed;
+  return {
+    rel: rows,
+    recipe: {
+      counting: !collecting,
+      keyElem: elementKey?.elem,
+      member: collecting ? (member || host.kind === 'scalar' ? { kind: 'node' } : { kind: 'rowid', host }) : undefined,
+      single: lastOnly || valueBy?.key.kind === 'child',
+      memberDrop: !!member,
+      bulkCol: bulked && bulk ? bulk.col : undefined,
+      step,
+    },
+  };
+}
+
+/** A pooled-value grouping's recipe — never read, because `GroupRows.done` carries the finished map. It
+ *  exists so `GroupRows` stays a total shape rather than growing an optional `recipe`. */
+const POOLED_RECIPE = (step: IRStep): GroupRecipe =>
+  ({ counting: false, keyElem: undefined, member: undefined, single: false, memberDrop: false, bulkCol: undefined, step });
+
+/**
+ * A GROUPING'S ROWS, AGGREGATED INTO ONE MAP — the second half of `groupBarrier`, and the whole of what a
+ * `cap("a")` runs over the UNION of a keyed label's sites.
+ *
+ * Everything it needs about the rows is in `recipe`; everything it needs about their VALUES is already in
+ * the columns. That is what lets N sites share one call.
+ */
+export function groupMap(rows: Rel, recipe: GroupRecipe, fresh: Minter): GroupedMap {
+  const { counting, keyElem, bulkCol } = recipe;
   // THE VALUE. `groupCount()` reduces the group to a traverser COUNT — `SUM(bulk)` where the stream
   // carries a multiplicity, `COUNT(*)` where it cannot, identical while bulk ≡ 1 and correct after a
   // fan-out. A wrapped value `by()` (property/token/identity) and the default `group()` COLLECT members.
@@ -302,13 +416,70 @@ export function groupBarrier(
   // inside one collected traverser's buffer, so their order is fully observable, and `json_group_array`
   // takes rows in whatever order SQLite scanned. The emission order where the chain carries one, the
   // rowid otherwise — a total order either way, which is what `mise run test:perturbed` exists to check.
-  const collected = member || host.kind === 'scalar'
+  // ⚠️ Built ONLY for the collecting arm, and that is a correctness point rather than a saving: a
+  // `groupCount()`'s rows carry no member column at all, so every expression below names a column that is
+  // not there. It used to be computed unconditionally and discarded, which was harmless only because the
+  // member expression happened to be derivable from the HOST — and the host is exactly what a recipe
+  // shared by N sites cannot reach.
+  const value: Expr = counting
+    ? (bulkCol
+      ? { kind: 'agg', fn: 'sum', args: [col(rows.id, bulkCol)] }
+      : { kind: 'agg', fn: 'count', args: [compilerInt(1)] })
+    : collectedValue(rows, recipe, fresh);
+  const productive = make.aggregate({
+    id: fresh('gb'), input: rows,
+    channels: [], type: typeOf(meta(KEY_COL, 'json', true), meta(VAL_COL, counting ? 'int' : 'json')),
+    groupBy: [col(rows.id, KEY_COL)],
+    aggs: [[VAL_COL, value]],
+  });
+
+  // A COUNT is a Gremlin `long`, and the tag is what makes the wire agree with legacy's `countBuffer`
+  // (an explicit Int64) rather than letting magnitude inference pick Int for a small count. A COLLECTED
+  // group needs no envelope added: a collecting value is already a typed list node, while the child
+  // assignment arm extracts the child's typed scalar node unchanged.
+  const entry: Entry = {
+    // The KEY NODE is built HERE for an element-identity key — once per surviving group, off the rowid
+    // the grouping actually used. That is the same rowids-until-the-root rule the element-membered list
+    // follows, one container along.
+    key: keyElem
+      ? elementNode(col(productive.id, KEY_COL), keyElem, fresh)
+      : col(productive.id, KEY_COL),
+    val: counting ? typedNode(col(productive.id, VAL_COL), compilerText('long')) : col(productive.id, VAL_COL),
+    // AN ELEMENT KEY SAYS SO, and that is what keeps the SIDE READS honest. The blob holds a
+    // `{t:'vertex', v:{…}}` node, which the typed framer walks correctly at any depth — but a
+    // `select(Column.keys).unfold()` would decode it into the SCALAR vocabulary, whose framer cannot
+    // frame an element and emitted the payload as a JSON STRING. `sideList`/`entrySide` decline an
+    // `elem` side, so declaring it is the difference between a wrong answer and a deferral.
+    keyOf: keyElem ? { kind: 'elem', elem: keyElem } : { kind: 'scalar' },
+    valOf: { kind: 'scalar' },
+  };
+  return {
+    // Ordered by the KEY, which is legacy's choice too ("we emit rows ORDER BY the key"). A map's entry
+    // order is not TinkerPop's to dictate, so it is ours to state — and stating it is what stops the
+    // two spines differing by whatever the grouping happened to produce.
+    rel: mapOfGroups(productive, entry, col(productive.id, KEY_COL), fresh),
+    keyOf: entry.keyOf,
+    valOf: entry.valOf,
+  };
+}
+
+/**
+ * THE COLLECTING ARM'S VALUE — the group's members as one typed list node, or the single member a
+ * `tail()`/anonymous-child value extracts from it.
+ *
+ * Its own function because it is the half of the aggregation that reads the MEMBER column, and a
+ * `groupCount()` has none: naming those columns unconditionally worked only while the member expression
+ * could be re-derived from the HOST, which is the one thing a recipe shared by N sites cannot reach.
+ */
+function collectedValue(rows: Rel, recipe: GroupRecipe, fresh: Minter): Expr {
+  const { member, single, memberDrop: dropMembers, step } = recipe;
+  const collected = member?.kind === 'node'
     // A projected VALUE is already a self-describing `{t,v}` node (`byNode` builds it from the row the
     // value came from), so it is written back as it is — and so is a SCALAR host's own traverser, whose
     // `by()`-less member is that same node. `json()` around it for the list module's own reason: without
     // it `json_group_array` re-encodes the envelope as a JSON STRING.
     ? jsonOf(col(rows.id, MEMBER_COL))
-    : jsonOf(rowidMember(host, col(rows.id, MEMBER_COL), fresh));
+    : jsonOf(rowidMember((member as { readonly host: ChildHost }).host, col(rows.id, MEMBER_COL), fresh));
   // THE VALUE'S PRODUCTIVITY DROPS THE MEMBER, NOT THE TRAVERSER AND NOT THE GROUP — and getting that
   // wrong has three distinguishable answers, which is why the reference is quoted rather than reasoned
   // from. `g.V().group().by("name").by("age")` over the modern graph: `ripple` and `lop` have no `age`,
@@ -322,13 +493,13 @@ export function groupBarrier(
   // turns both off, and then a genuinely null value IS a member.
   // A `tail()` value drops nothing: the traverser IS the member, so there is no `by()` that could have
   // been unproductive — the drop belongs to a PROJECTED value only.
-  const memberDrop = member ? productivityFilter(step, col(rows.id, MEMBER_COL)) : undefined;
+  const memberDrop = dropMembers ? productivityFilter(step, col(rows.id, MEMBER_COL)) : undefined;
   const memberAggregate: Expr = {
     kind: 'agg', fn: 'json_group_array', args: [collected],
     orderBy: [{ expr: col(rows.id, ORD_COL), dir: 'asc' }],
     ...(memberDrop ? { filter: memberDrop } : {}),
   };
-  const groupedValue: Expr = lastOnly || valueBy?.key.kind === 'child'
+  const groupedValue: Expr = single
     // ONE aggregate pass over the grouped block: order the typed `{t,v}` nodes by encounter, collect
     // them as JSON (so the envelope is embedded rather than stringified), then select the last one.
     // The child expression itself already yields only its first value for one parent traverser.
@@ -338,45 +509,7 @@ export function groupBarrier(
         entries: [['t', compilerText('list')], ['v', memberAggregate]],
         binary: false,
       };
-  const count: Expr = bulked && bulk
-    ? { kind: 'agg', fn: 'sum', args: [col(rows.id, bulk.col)] }
-    : { kind: 'agg', fn: 'count', args: [compilerInt(1)] };
-  const value = step.name === 'group' ? groupedValue : count;
-  const productive = make.aggregate({
-    id: fresh('gb'), input: rows,
-    channels: [], type: typeOf(meta(KEY_COL, 'json', true), meta(VAL_COL, step.name === 'group' ? 'json' : 'int')),
-    groupBy: [col(rows.id, KEY_COL)],
-    aggs: [[VAL_COL, value]],
-  });
-
-  // A COUNT is a Gremlin `long`, and the tag is what makes the wire agree with legacy's `countBuffer`
-  // (an explicit Int64) rather than letting magnitude inference pick Int for a small count. A COLLECTED
-  // group needs no envelope added: a collecting value is already a typed list node, while the child
-  // assignment arm extracts the child's typed scalar node unchanged.
-  const entry: Entry = {
-    // The KEY NODE is built HERE for an element-identity key — once per surviving group, off the rowid
-    // the grouping actually used. That is the same rowids-until-the-root rule the element-membered list
-    // follows, one container along.
-    key: elementKey
-      ? elementNode(col(productive.id, KEY_COL), elementKey.elem, fresh)
-      : col(productive.id, KEY_COL),
-    val: step.name === 'group' ? col(productive.id, VAL_COL) : typedNode(col(productive.id, VAL_COL), compilerText('long')),
-    // AN ELEMENT KEY SAYS SO, and that is what keeps the SIDE READS honest. The blob holds a
-    // `{t:'vertex', v:{…}}` node, which the typed framer walks correctly at any depth — but a
-    // `select(Column.keys).unfold()` would decode it into the SCALAR vocabulary, whose framer cannot
-    // frame an element and emitted the payload as a JSON STRING. `sideList`/`entrySide` decline an
-    // `elem` side, so declaring it is the difference between a wrong answer and a deferral.
-    keyOf: elementKey ? { kind: 'elem', elem: elementKey.elem } : { kind: 'scalar' },
-    valOf: { kind: 'scalar' },
-  };
-  return {
-    // Ordered by the KEY, which is legacy's choice too ("we emit rows ORDER BY the key"). A map's entry
-    // order is not TinkerPop's to dictate, so it is ours to state — and stating it is what stops the
-    // two spines differing by whatever the grouping happened to produce.
-    rel: mapOfGroups(productive, entry, col(productive.id, KEY_COL), fresh),
-    keyOf: entry.keyOf,
-    valOf: entry.valOf,
-  };
+  return groupedValue;
 }
 
 /**
