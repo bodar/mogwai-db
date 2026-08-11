@@ -544,7 +544,7 @@ route's 944 traversals). Two of these were WRONG ANSWERS rather than gaps and bo
 one of them (§12).
 
 🚧 **WHAT IS LEFT — re-measured 2026-08-11 with the route off: 29 of 246 corpus WRITE traversals
-blocked** (the table below is the older scenario-ranked view; both are kept because they count
+blocked, and 27 after `8357a92`** (the table below is the older scenario-ranked view; both are kept because they count
 different units and the plan ranks by scenario). Method, and it is the rule not a convenience: the
 longest lowering PREFIX per traversal, blame the step AFTER it, never break at the first decline — a
 write step absorbs a cluster and declines as a bare prefix. Grouped by CAUSE rather than by step name,
@@ -552,7 +552,7 @@ because Phase 1's own lesson is that a read step holds a write family:
 
 | cause | traversals | note |
 |---|---|---|
-| `property(k, <traversal>)` with a multi-row value | 6 | the item below; **the largest single cause** |
+| `property(k, <traversal>)` with a multi-row value | 6 → 3 | ⚠️ the 6 was MIS-GROUPED: only 3 are the traversal-valued item. Two were `property(null)`/`property(set, null)` (landed, `8357a92`) and one is a meta-property run. **Of the 3, two have a provably ONE-ROW value** (`property('k', __.…sum())`) and are the natural first increment — the reference collects with `applyAll`, so a multi-row value is a different case with its own guard. |
 | a map-valued `inject`/`union` feeding `mergeV`/`mergeE` | 7 | ⚠️ blocked at the SOURCE — this is the MAP SHAPE, a READ, exactly the `labels()` lesson again. Not write work. |
 | computed / runtime LABEL | ~6 | the item below |
 | `with()` on a write | 2 | unranked |
@@ -567,7 +567,7 @@ because Phase 1's own lesson is that a read step holds a write family:
 | 5 | **`T.id` on `mergeV`/`mergeE`** — the onCreate-inheritance scenarios. `elementIdGuard` exists; the `Insert` column plumbing does not. | S | no |
 | 5 | **Runtime / computed LABEL** — `addV(constant(…))`, `addV(__.select('a').label())`, and the `addLabel`/`dropLabel` collection forms. `ElementHelper.validateLabel` is three PURE predicates, so all three are a GUARD BINDING and not a decline: one statement instead of O(rows) round-trips. ⚠️ **The message set depends on ARITY** — `addV(single)` gives the three `Label can not be …` messages; `addV(a, b)` IS a Collection and `AddVertexStep.resolveLabelCollection` (`.../map/AddVertexStep.java:165-182`) raises FOUR others BEFORE `validateLabel` runs. Build: `internLabels` from `string[]` to EXPRESSIONS, a rooted single-row label through the seam, an ALIAS-read label, and the arity-chosen guards. | M | **yes** — the same generalization serves a computed property KEY and edge label |
 | 2 | **A meta-property under an UNDECLARED cardinality** — the `set` arm PATCHES rather than inserts, an `UPDATE` this route does not emit. | S | no |
-| 5 | **Singletons** — `addE` after `addE` in one chain, `addInE`, `property(null)`, `property(set, null)`. | S each | no |
+| 5 | **Singletons** — `addE` after `addE` in one chain, `addInE`, ~~`property(null)`, `property(set, null)`~~. ✅ **The two null-property forms LANDED (`8357a92`)** and were not write work at all: a null map is handled by the DSL, not by a step (`property(Map)` is guarded `if (value != null)`, `GraphTraversal.java:4122-4133`; the cardinality overload says *"Just return the input if you pass a null"*, `ibid.:4089-4091`), so it is the same no-op an EMPTY map already was and `desugarPropertyMap` was the whole fix. ⚠️ ARITY is what separates it from a real write of a null VALUE — `property('k', null)` has one more argument and still writes — so a set-membership test on the argument could not tell them apart. | S each | no |
 
 ⚠️ **`property(k, __.trav)` IS NO LONGER "NEW SUBSTRATE" — the seam it wanted EXISTS.** It needs the
 child body applied to the whole owners relation at once carrying the owner key, which is
