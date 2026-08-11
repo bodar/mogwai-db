@@ -104,7 +104,16 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   if (position !== 'legacy') {
     const viaRel = compileViaRel(
       {
-        collapse: engine.fastPaths.movementCollapse,
+        // **THE RAW STRATEGY SWITCH, NOT THE CHAIN VERDICT** (§8 item 8b). `engine.fastPaths` has
+        // `collapseSafe && !demandsEncounter` folded into it by `collapseSafeFastPaths`, and handing
+        // RelIR that did not make it conservative — it switched OFF a decision RelIR already makes
+        // correctly per NODE, of the channels carried there (`groupableChannels`) and of the suffix
+        // that must read the multiplicity (`ir/bulk.ts`). A chain-global boolean cannot say "safe
+        // here, unsafe there", so folding it in refused a collapse at every hop of any chain whose
+        // LATER shape it disliked. What crosses now is what this value is named for: whether the
+        // caller ASKED for the collapse strategy. `collapseSafe` stays behind for legacy, which has
+        // no per-position answer to fall back on.
+        collapse: request.fastPaths.movementCollapse,
         propertySeek: engine.fastPaths.propertySeek,
         labelRegime: engine.labelRegime,
         // The registry is an app-scope DEPENDENCY and stops here: this is the boundary that holds

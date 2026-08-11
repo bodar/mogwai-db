@@ -9,6 +9,7 @@ import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { createAppScope } from '../src/scopes.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { PER_ROW, STATIC } from '../src/sql/kernel/render.ts';
+import { rowMultiset } from './support/multiset.ts';
 
 /**
  * THE RelIR SPINE — routing, coverage and the per-traversal differential (§10·4).
@@ -27,37 +28,42 @@ import { PER_ROW, STATIC } from '../src/sql/kernel/render.ts';
 const store = seededStore();
 
 /**
- * TWO SPINES' RAW ROWS, COMPARED AS ANSWERS RATHER THAN AS COLUMN LISTS.
+ * TWO SPINES' ROWS, COMPARED AS A TRAVERSER MULTISET — the only comparison that holds across a
+ * collapse, and `test/support/multiset.ts`'s rule applied one layer lower.
  *
- * **A missing `bulk` column IS `bulk: 1`** — that is what the wire framer does with an uncollapsed row,
- * and it is the ordinary case for most traversals on either spine. What the two spines legitimately
- * disagree about is whether they SPELL a constant-1 one: RelIR projects the column only where a
- * collapse actually happened (`Tail.bulked`, the positional answer), while legacy projects it off its
- * chain-global `movementCollapse` flag. Comparing the presence of that column compares a lowering
- * detail, not a result.
+ * That module compares FRAMED results (`weigh`, keyed by GraphBinary bytes); these assertions compare
+ * raw SQL rows, so the same fact has to be stated over a row. **A collapsed row IS its own multiset:**
+ * one row carrying `bulk: 3` and three rows carrying `bulk: 1` denote the same three traversers, and
+ * which spelling a spine emits is a lowering decision. RelIR now decides it per POSITION — it collapses
+ * at a hop whose carried state survives a merge and whose suffix reads the multiplicity — while legacy
+ * decides it once for the whole chain, so the two legitimately disagree about the SPELLING while
+ * agreeing about the answer. `g.V().as("a").out().as("b")` is the worked case: the label is bound AFTER
+ * the hop, on a frontier of distinct ids where it is well-defined per row (§7.2 of the repeat
+ * two-regimes plan), so RelIR emits `(v3, 3)` where legacy emits `v3` three times.
  *
- * It normalizes the ABSENCE only, never the VALUE, which is what keeps the teeth: this file
- * deliberately exercises the trimmed-bulk slices (`g.V().both().order().by('name').limit(2)` and
- * friends), where a boundary row's multiplicity is trimmed to 2 and asserting it against a 1 must
- * still fail.
+ * Summing bulk per distinct value is not a weakening — it is what a traverser multiset IS (root
+ * `CLAUDE.md`: "Traversers are multisets"). The teeth are intact and this file is where that matters
+ * most: it deliberately exercises the trimmed-bulk slices
+ * (`g.V().both().order().by('name').limit(2)`), where a boundary row's multiplicity is trimmed and a
+ * total of 2 traversers against 3 still fails. What it stops asserting is the ROW COUNT, which §7.5 of
+ * that plan says outright is not the gate: *"`n` (the row count) legitimately moves under a collapse
+ * and is deliberately NOT gated; `ms` is what the answer gate reads."*
  *
- * `bulk` is spelled FIRST so the key position is the same whichever spine supplied the row — the
- * spread overwrites a present value without moving the key — which is what lets `rowsVia` keep
- * comparing rows as JSON strings.
+ * A row with no `bulk` column weighs 1 — that is what the wire framer does with an uncollapsed row.
+ * The rule itself is `test/support/multiset.ts`'s `rowMultiset`, shared with the other tests that
+ * compare rows rather than framed results.
  */
-const bulkDefaulted = (rows: readonly any[]) => rows.map((row) => ({ bulk: 1, ...row }));
-
 const rowsVia = (gremlin: string, spine: 'rel' | 'legacy') => {
   const plan = read(gremlin, { spine });
   expect(plan.spine).toBe(spine === 'rel' ? 'rel' : 'legacy');
-  return bulkDefaulted(store.query(plan.sql, plan.binds)).map((row) => JSON.stringify(row)).sort();
+  return rowMultiset(store.query(plan.sql, plan.binds));
 };
 
 const sameRows = (
   rel: { readonly sql: string; readonly binds: readonly any[] },
   legacy: { readonly sql: string; readonly binds: readonly any[] },
-) => expect(bulkDefaulted(store.query(rel.sql, rel.binds as any[])))
-  .toEqual(bulkDefaulted(store.query(legacy.sql, legacy.binds as any[])));
+) => expect(rowMultiset(store.query(rel.sql, rel.binds as any[])))
+  .toEqual(rowMultiset(store.query(legacy.sql, legacy.binds as any[])));
 
 /** Every shape the lowering covers today. Growing coverage means growing this list. */
 const COVERED = [
@@ -471,7 +477,7 @@ describe('the RelIR spine', () => {
       // that has to keep holding after legacy is gone. So: where legacy answers, the two must agree
       // row for row; where it declines, RelIR must still route and still produce SQL we can ship.
       // Same shape as the `option(Merge.outV/inV)` shed below, which is where this pattern started.
-      let baseline: string[] | null = null;
+      let baseline: readonly string[] | null = null;
       try { baseline = rowsVia(gremlin, 'legacy'); } catch { baseline = null; }
       if (baseline === null) return;
       const legacyPlan = read(gremlin, { spine: 'legacy' });

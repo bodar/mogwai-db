@@ -5,6 +5,7 @@ import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
 import { bagOf, read, run, runWith, seededStore } from '../support/harness.ts';
+import { traverserCount } from '../support/multiset.ts';
 
 // ---------- execution semantics against a seeded store ----------
 
@@ -388,7 +389,13 @@ describe('the alias comparison is shape-uniform', () => {
   // Every shape's rows are the same 6 traversers' worth of a→b pairs, so the property under test is
   // stated as a PARTITION rather than a value table: eq and neq must split the unfiltered rows, on
   // every shape, without anyone having to say what the rows contain.
-  const count = (q: string) => (run(store, q) as any[]).length;
+  // TRAVERSERS, not rows. A partition law is about cardinality of the traverser stream, and a row is
+  // not a traverser: RelIR collapses convergent walks per POSITION now, so the unfiltered chain (whose
+  // two aliases are dead and retracted) comes back RLE-encoded as 3 rows carrying 12 traversers while
+  // each `where()` half keeps its labels live, cannot collapse, and comes back as 12 rows. Counting
+  // rows made that read as 3 != 12 — a broken law where the law holds exactly. §7.5 of the repeat
+  // two-regimes plan: the row count legitimately moves under a collapse and is not the answer.
+  const count = (q: string) => traverserCount(run(store, q) as any[]);
 
   test('eq and neq partition the rows on every shape that carries the labels', () => {
     for (const tail of [

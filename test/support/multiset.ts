@@ -37,3 +37,41 @@ export function weigh(framed: readonly Framed[]): ReadonlyMap<string, bigint> {
 /** The multiset as a stable string — sorted `value*totalBulk` pairs. What a digest hashes. */
 export const multisetKey = (framed: readonly Framed[]): string =>
   [...weigh(framed)].map(([hex, bulk]) => `${hex}*${bulk}`).sort().join('|');
+
+// ---------- the same fact one layer lower: a RAW SQL ROW set ----------
+//
+// `weigh` compares FRAMED results, keyed by GraphBinary bytes. Several compiler tests compare the rows
+// a plan returns BEFORE framing — either across the two spines or against a law — and they need the
+// identical rule, because a row is not a traverser: a collapsed row carries `bulk: N` and denotes N of
+// them. §7.5 of `docs/2026-08-09-repeat-two-regimes-plan.md` states the consequence directly — *"`n`
+// (the row count) legitimately moves under a collapse and is deliberately NOT gated; `ms` is what the
+// answer gate reads"* — so a test that counts ROWS is asserting a lowering decision, not an answer.
+//
+// It lives here for the reason the header already gives: two callers, so it belongs to neither. RelIR
+// now decides the collapse per POSITION, which makes the spelling differ between spines far more often
+// than it used to, and every such difference reads as a broken test until the comparison is stated in
+// traversers.
+
+/** A raw row's traverser weight. NO `bulk` column means ONE traverser — what the framer does with an
+ *  uncollapsed row, and the ordinary case for most plans on either spine. */
+export const rowBulk = (row: { readonly bulk?: number | bigint }): bigint =>
+  row.bulk === undefined ? 1n : BigInt(row.bulk);
+
+/** How many TRAVERSERS a raw row set denotes — the count a law about cardinality means. */
+export const traverserCount = (rows: readonly { readonly bulk?: number | bigint }[]): number =>
+  Number(rows.reduce((total, row) => total + rowBulk(row), 0n));
+
+/** A raw row set as a traverser multiset: sorted `value*totalBulk`, with `bulk` excluded from the
+ *  value so the same traversers compare equal however the plan spelled them. Summing per distinct
+ *  value is not a weakening — it is what a multiset IS (root `CLAUDE.md`: "Traversers are
+ *  multisets") — and it keeps every real multiplicity under assertion, which is what the
+ *  trimmed-bulk slices depend on: a total of 2 against 3 still fails. */
+export const rowMultiset = (rows: readonly any[]): readonly string[] => {
+  const weighed = new Map<string, bigint>();
+  for (const row of rows) {
+    const { bulk: _bulk, ...value } = row as { readonly bulk?: number | bigint };
+    const key = JSON.stringify(value);
+    weighed.set(key, (weighed.get(key) ?? 0n) + rowBulk(row));
+  }
+  return [...weighed].map(([key, total]) => `${key}*${total}`).sort();
+};

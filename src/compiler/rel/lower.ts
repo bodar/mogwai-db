@@ -138,6 +138,28 @@ type Tail = ChainRead & {
   readonly effects?: readonly Binding[];
 };
 
+/**
+ * THE FOLD RE-ENTERED OVER A BODY rather than over the root chain, and the one thing that changes is
+ * that a collapse is OFF.
+ *
+ * A collapse is legal at a hop only if every consumer behind it reads the multiplicity, and
+ * `bulkObservedFrom` answers that by walking the `steps` it was given to their END. For the root chain
+ * that end is the wire, where an `elements` result RLEs `(v, bulk)` onto it. **For a BODY it is not:**
+ * the arm of a `union`, an `option()` arm, a `where()` child or a recursive term all continue into an
+ * enclosing context the body cannot see, and reaching the end of the body proves nothing about it. The
+ * witness was `g.V().union(__.values("name"), __.out())` — the `out()` arm collapsed because the arm's
+ * own suffix ended in an element leaf, then the enclosing VARIANT framing dropped the `bulk` column and
+ * the traversers with it. A wrong answer at the wire, on a widening that had nothing to do with unions.
+ *
+ * So: one named narrowing at every body re-entry, rather than a per-site judgement. It costs collapse
+ * opportunities inside bodies and costs nothing that was working — before the decision became
+ * positional, no body ever collapsed, because a chain containing a `union`/`choose`/`repeat` was never
+ * collapse-safe at all. Admitting them back is a later increment, and the thing it needs is the
+ * enclosing suffix, not a relaxation here. `framed` carries the fail-closed backstop for anything this
+ * misses.
+ */
+const inBody = (ctx: ChainCtx): ChainCtx => (ctx.collapse ? { ...ctx, collapse: false } : ctx);
+
 /** A body that CANNOT be unproductive, as an expression — the claim `ChildValue.present` wants where
  *  the answer is "always", since its absence means "cannot say" and the two must stay distinguishable.
  *  A constant true; SQLite folds it and the emitter never sees a branch on it. */
@@ -308,7 +330,7 @@ function correlatedExists(
   // A correlated hop threads NO carried state — an EXISTS asks whether a row is there, never in what
   // order or how many times — so the child starts from the bulk channel `movement` gave it and any
   // order the body mints is the body's own.
-  const tail = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body, 1, false, ctx, fresh, NO_ALIASES);
+  const tail = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body, 1, false, inBody(ctx), fresh, NO_ALIASES);
   if (!tail) return null;
   // A NUMERIC REDUCER OVER AN EMPTY CHILD IS THE ONE PLACE SQL AND GREMLIN DISAGREE ABOUT EXISTENCE,
   // so it fails closed. `sum`/`min`/`max`/`mean` over zero rows return ONE row holding NULL in SQL,
@@ -1945,7 +1967,7 @@ function scalarTail(
     if (step.name === 'union') {
       const merged = unionArms(step, rel, out, bulked, ctx, fresh, labels);
       if (!merged) return null;
-      return continueAs(merged.rel, merged.framing, steps, at + 1, bulked || ctx.collapse, ctx, fresh, labels);
+      return continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
 
     // `group()`/`groupCount()` over a VALUE stream — the barrier at its second host, and it is the SAME
@@ -3120,11 +3142,33 @@ const NO_SERVICES: ReadonlyMap<string, Service> = new Map();
  * WEIGHTS by bulk (a `fold()` that replicates members, say), that arm owes this projection a column
  * and the `false` beside it becomes a real claim rather than a formality.
  */
+/**
+ * DOES THIS RESULT STILL HOLD A MULTIPLICITY — the fold's `bulked` AND a channel to read it from.
+ *
+ * Both halves are needed and neither implies the other. `bulked` is the fold's claim that a collapse
+ * happened upstream; the CHANNEL is whether the relation still carries the column, and a global barrier
+ * DROPS it (`CHANNEL_BARRIER_POLICY`, `src/channels.ts`) because the barrier has already consumed the
+ * multiset — `count()` summed it, `fold()` collected it. So `bulked` goes STALE at every reducer, and
+ * reading it alone declined `g.V().out().values('age').sum()`: the collapse was real, the reducer
+ * weighted by it correctly, and the scalar result it produced stands for exactly one traverser. Asking
+ * the relation is what keeps the flag from outliving the thing it describes.
+ */
+const carriesMultiplicity = (chain: Tail): boolean =>
+  chain.bulked && chain.rel.channels.some((channel) => channel.role === 'bulk');
+
 const framed = (chain: Tail, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null => {
   const framing = chain.framing;
+  // THE FAIL-CLOSED BACKSTOP, and it should never fire. `bulkObservedFrom` refuses a collapse in front
+  // of a chain that retypes away from `elements`, and `inBody` refuses one inside a body whose enclosing
+  // framing it cannot see — so a multiplicity arriving at an arm that has no column to put it in means
+  // one of those two answered wrongly. Declining hands the traversal to the spine that still answers it;
+  // projecting anyway would silently drop N−1 traversers per row, which is the one failure class no
+  // instrument here catches (a plausible row set, short). This is the guard that makes the completeness
+  // of `inBody`'s call sites a tractability question rather than a correctness one.
+  if (carriesMultiplicity(chain) && framing.kind !== 'elements' && framing.kind !== 'discard') return null;
   switch (framing.kind) {
     case 'elements': return {
-      rel: elementPayload(chain.rel, framing.elem, { bulk: chain.bulked }, fresh),
+      rel: elementPayload(chain.rel, framing.elem, { bulk: carriesMultiplicity(chain) }, fresh),
       shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },
     };
     case 'scalar': return scalarPayload(chain.rel, framing, fresh);
@@ -3525,11 +3569,14 @@ function elementTail(
         ? unionArms(step, rel, framing, bulked, ctx, fresh, labels)
         : chooseArms(step, rel, elem, framing, bulked, ctx, fresh, labels);
       if (!merged) return null;
-      // `bulked` after a merge is deliberately CONSERVATIVE: an arm may have collapsed and the arm
-      // lowering does not report it back, so a following slice takes the cumulative-`SUM(bulk)` form.
-      // At bulk 1 that is the same answer as the plain slice, so the cost is SQL shape and never
-      // correctness — the same trade the movement loop already makes.
-      return continueAs(merged.rel, merged.framing, steps, at + 1, bulked || ctx.collapse, ctx, fresh, labels);
+      // `bulked` after a merge is the value that ENTERED it, and it no longer needs the `|| ctx.collapse`
+      // conservatism it used to carry. That existed because "an arm may have collapsed and the arm
+      // lowering does not report it back" — true while an arm inherited the collapse switch, and false
+      // now that `inBody` turns it off for every body: no arm can mint a multiplicity, so the merged
+      // rows stand for exactly what the input rows stood for. Keeping the disjunction once the switch
+      // stopped implying the chain verdict would make EVERY merge bulked, which is not merely the
+      // heavier slice form — it trips `framed`'s backstop and declines the traversal.
+      return continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
     if (step.name === 'repeat') {
       const walked = repeatWalk(step, rel, elem, childSeam(ctx, fresh), fresh, labels);
@@ -3988,7 +4035,7 @@ function unionArms(
 
   const arms: Tail[] = [];
   for (const body of bodies) {
-    const arm = continueAs(input, framing, body!, 0, bulked, ctx, fresh, labels);
+    const arm = continueAs(input, framing, body!, 0, bulked, inBody(ctx), fresh, labels);
     if (!arm) return null;
     arms.push(arm);
   }
@@ -4328,7 +4375,7 @@ function chooseOptions(
   for (const { arm, ordinal } of gated) {
     const body = seam.body(arm.nested, 'child');
     if (!body?.length) return null;
-    const lowered = continueAs(gate(takes(ordinal)), framing, body, 0, bulked, ctx, fresh, labels);
+    const lowered = continueAs(gate(takes(ordinal)), framing, body, 0, bulked, inBody(ctx), fresh, labels);
     if (!lowered) return null;
     built.push(lowered);
   }
@@ -4372,9 +4419,9 @@ function chooseArms(
     pred: negated ? { kind: 'unary', op: 'not', arg: pred } : pred,
   });
 
-  const armThen = continueAs(guarded(false), framing, then, 0, bulked, ctx, fresh, labels);
+  const armThen = continueAs(guarded(false), framing, then, 0, bulked, inBody(ctx), fresh, labels);
   // The else arm over ZERO steps is `identity` on the complement — see above.
-  const armElse = continueAs(guarded(true), framing, otherwise ?? [], 0, bulked, ctx, fresh, labels);
+  const armElse = continueAs(guarded(true), framing, otherwise ?? [], 0, bulked, inBody(ctx), fresh, labels);
   if (!armThen || !armElse) return null;
   return mergeArms([armThen, armElse], input.channels, labels, fresh);
 }
@@ -4472,7 +4519,19 @@ const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   // recursive term (`BARRIER_IN_TERM`, src/rel/recursive.ts). So no caller of this seam can reach a
   // step that would answer differently for a bulked row. Admitting a per-iteration barrier here
   // would break that coincidence, and that is the increment that must pass `bulked` through.
-  chain: (input, framing, body, aliases) => continueAs(input, framing, body, 0, false, ctx, fresh, aliases),
+  //
+  // **`collapse: false` IS THE SAME FACT FROM THE OTHER SIDE, and it is now load-bearing.** This arm's
+  // one caller is `walk.ts`'s recursive TERM, and a collapse mints exactly the node a term may not
+  // hold: `coalesce` is a grouped `Aggregate`, which SQLite refuses as *"recursive aggregate queries
+  // not supported"* — §1a of `docs/2026-08-09-repeat-two-regimes-plan.md`, the measurement that split
+  // the two regimes in the first place. It cost nothing while the chain verdict was the gate (a chain
+  // containing `repeat` was never collapse-safe, so `ctx.collapse` was already false here); with the
+  // decision positional the switch is on, and without this narrowing every unbounded `repeat()` would
+  // lower a term the checker then refuses — i.e. the whole §8 item 6 walk declining, on a widening
+  // that has nothing to do with it. A term's inability to collapse is not a limitation to route
+  // around: it is the reason the BOUNDED regime unrolls into phases instead.
+  chain: (input, framing, body, aliases) =>
+    continueAs(input, framing, body, 0, false, inBody(ctx), fresh, aliases),
   body: (nested, scope) => (scope === 'child'
     ? bodyOf(nested, ctx.params, ctx.sideEffects)
     : rootedSteps(nested, ctx.params, ctx.sideEffects)),
@@ -4644,7 +4703,7 @@ function childRows(
   // and since an unresolvable `select()` is now the EMPTY RESULT it would pool ZERO rows and answer an
   // empty map. §6·6's rule with the sharpest witness yet — check what a seam HANDS OVER, because the
   // combination of two correct rules made one of them silently produce the other's answer.
-  const tail = continueAs(seeded, { kind: 'elements', elem }, body, 0, false, ctx, fresh, aliases);
+  const tail = continueAs(seeded, { kind: 'elements', elem }, body, 0, false, inBody(ctx), fresh, aliases);
   // A body with EFFECTS is not a read, and one that lost the origin (a barrier inside it) has nothing
   // to group by — both are declines rather than answers that would silently pool the wrong rows.
   if (!tail || tail.effects?.length || !originOf(tail.rel.channels)) return null;
@@ -4822,7 +4881,7 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   // so bare `__.count()` and `__.label().count()` fall through to the expression arm and decline.
   const child = movement(body[0]!, { correlated: host.id }, host.elem, fresh);
   if (child) {
-    const tail = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body, 1, false, ctx, fresh, NO_ALIASES);
+    const tail = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body, 1, false, inBody(ctx), fresh, NO_ALIASES);
     if (!tail || tail.framing.kind !== 'scalar'
       || (tail.framing.result !== 'count' && tail.framing.result !== 'number')) return null;
     // …AND THE RELATION MUST ACTUALLY HAVE COLLAPSED, which the framing marker does NOT say.
