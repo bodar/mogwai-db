@@ -543,12 +543,26 @@ moved into a `verify` Pass · `inject()` left the dispatcher (it is not a write;
 route's 944 traversals). Two of these were WRONG ANSWERS rather than gaps and both spines agreed about
 one of them (§12).
 
-🚧 **WHAT IS LEFT — 30 scenarios, measured 2026-08-08 with the route off**, ranked by cost per
-scenario. (The doc previously said 47; the landings above plus multi-label-only moved it.)
+🚧 **WHAT IS LEFT — re-measured 2026-08-11 with the route off: 29 of 246 corpus WRITE traversals
+blocked** (the table below is the older scenario-ranked view; both are kept because they count
+different units and the plan ranks by scenario). Method, and it is the rule not a convenience: the
+longest lowering PREFIX per traversal, blame the step AFTER it, never break at the first decline — a
+write step absorbs a cluster and declines as a bare prefix. Grouped by CAUSE rather than by step name,
+because Phase 1's own lesson is that a read step holds a write family:
+
+| cause | traversals | note |
+|---|---|---|
+| `property(k, <traversal>)` with a multi-row value | 6 | the item below; **the largest single cause** |
+| a map-valued `inject`/`union` feeding `mergeV`/`mergeE` | 7 | ⚠️ blocked at the SOURCE — this is the MAP SHAPE, a READ, exactly the `labels()` lesson again. Not write work. |
+| computed / runtime LABEL | ~6 | the item below |
+| `with()` on a write | 2 | unranked |
+| singletons (`select`, `where`, `option`, `cap`, `properties`, `repeat`, `mergeE`) | ~8 | one reason each |
+
+(The doc previously said 47, then 30; the landings above plus multi-label-only plus `f1d22a4` moved it.)
 
 | n | Item | Size | Compounds |
 |---|---|---|---|
-| 3 | **Label mutation on an EDGE** — `addLabel`/`dropLabel`/`dropLabels` on `g.E()`. A pure SYNTACTIC refusal: TinkerPop fixes edge label cardinality at exactly one, so unlike the immutable-graph cases this needs NO `LabelCardinality` in the Pass tier. Straight into `verify` with no new input. | XS | no |
+| ~~3~~ | ✅ **LANDED (`f1d22a4`) — Label mutation on an EDGE.** `verifyLabelMutationTarget`, a `verify` Pass in `ir/write-args.ts`; legacy's copy deleted rather than left beside it. **It was deletion SAFETY, not a gain** — all three scenarios passed already, but only because legacy's dispatcher raised on the way past. ⚠️ It did NOT cost "no new input": it is the one write refusal that is a fact about the STREAM rather than a step's arguments, so it needed `elementKindAt` (`ir/step.ts`) — a small total walk of the movement vocabulary whose THIRD answer, `undefined`/cannot-say, is the load-bearing one. A prefix it cannot type (branch, re-entry, child host) is left to the lowerings, because a verifier must never narrow what they may attempt. Deliberately NOT a shape annotation. Also deleted the dead `!LABEL_CARDINALITY.mutable` sibling (that constant is a hardcoded `true`, residue of the withdrawn `LabelCardinality`) — it could not have moved anyway, since it reads a graph CAPABILITY where this reads the language. | XS | no |
 | 10 | **`property(k, <traversal>)` with a possibly-multi-row VALUE.** Rules off `AddPropertyStep` (`.../sideEffect/AddPropertyStep.java:105-199`), none guessable: 0 results → NO mutation (never a NULL write); >1 under `single` → *"Single-cardinality property requires exactly one value, but traversal produced N results"* (a GUARD BINDING); >1 under `list`/`set` → each written. The single-argument MAP form is a third case (`mapForm`). | M | **yes** |
 | 5 | **`T.id` on `mergeV`/`mergeE`** — the onCreate-inheritance scenarios. `elementIdGuard` exists; the `Insert` column plumbing does not. | S | no |
 | 5 | **Runtime / computed LABEL** — `addV(constant(…))`, `addV(__.select('a').label())`, and the `addLabel`/`dropLabel` collection forms. `ElementHelper.validateLabel` is three PURE predicates, so all three are a GUARD BINDING and not a decline: one statement instead of O(rows) round-trips. ⚠️ **The message set depends on ARITY** — `addV(single)` gives the three `Label can not be …` messages; `addV(a, b)` IS a Collection and `AddVertexStep.resolveLabelCollection` (`.../map/AddVertexStep.java:165-182`) raises FOUR others BEFORE `validateLabel` runs. Build: `internLabels` from `string[]` to EXPRESSIONS, a rooted single-row label through the seam, an ALIAS-read label, and the arity-chosen guards. | M | **yes** — the same generalization serves a computed property KEY and edge label |
