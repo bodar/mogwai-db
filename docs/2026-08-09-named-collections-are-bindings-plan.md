@@ -1,7 +1,8 @@
 # A NAMED COLLECTION IS A BOUND RELATION, REDUCED AT THE READ
 
-_Status: **Phases 1, 2, 3a, 5, 6 and 7 LANDED — 7 in full.** Open: **4** (13, now the largest item),
-**3b**, **2b**, **§8**. Numbers re-validated 2026-08-11 against `l3-state.json` +
+_Status: **Phases 1, 2, 3a, 5, 6 and 7 LANDED (7 in full); Phase 4's SUBSTRATE landed and its remaining
+scenarios are each blocked in another feature.** Open: **3b**, **2b**, **§8**, and the three named
+downstream gaps under Phase 4. Numbers re-validated 2026-08-11 against `l3-state.json` +
 `scenarios.tsv`; absolute L3 floors are deliberately not quoted (they move for unrelated reasons — read the
 instruments). **Read this before touching `src/compiler/rel/collection.ts`.**_
 
@@ -53,6 +54,21 @@ not a gap** — RelIR declined and legacy mis-executed.
   And `continueAs`'s list arm DROPPED `framing.set`, turning every set that re-entered through the
   dispatcher back into a list — a wrong wire CLASS, since GraphBinary spells List and Set differently.
 
+- **4 — a keyed grouping is MEMBER ROWS, so N sites merge PER KEY** (`groupRows`/`groupMap`, `map.ts`;
+  the `grouped` `Members` arm). `group("a")`/`groupCount("a")` are `SideEffectBarrierStep`s — the map is
+  read back at the `cap`, so it cannot be built where the step is, and a stored map has already
+  discarded which rows came from where. Same argument as `aggregate`, one container along. The merge is
+  then Phase 2's machinery unchanged: a `UNION ALL` of `(key, contribution)` rows reduced once.
+  ⚠️ **It moved NEITHER L3 nor the census, and that is the finding, not a disappointment.** Every
+  scenario the merge would answer is blocked further along its own chain (see below), so
+  `test/L4-addendum/group-multi-site.feature` is the only place it is asserted at all — which is
+  `legality-not-corpus-defines-support` applied exactly.
+  ✅ The `reduced` arm SURVIVED, and its status changed: it is not transitional after all. A POOLED value
+  (`by(<reducing traversal>)`) has no `(key, contribution)` row behind it — the members' child rows pool
+  and the barrier reduces the pool once — so it is single-site BY CONSTRUCTION. That is what "this shape
+  genuinely has no member relation" looks like, and deleting the arm cost a scenario before the census
+  caught it.
+
 ---
 
 ## Phase 7, in full — the closed one worth reading before re-opening any of it
@@ -102,59 +118,20 @@ the traversal. That is a WIRE question — nothing carries a client-supplied sid
 
 ## 🚧 What is LEFT
 
-### Phase 4 — the keyed forms join the mechanism. **The largest open item, and the cut is now measured.**
+### Phase 4's residue — three DOWNSTREAM gaps, none of them the collection's
 
-The plan used to say "13 named-group/groupCount scenarios that no spine holds" as if one restructure took
-them. **It does not, and the ranking matters** (`docs/2026-08-01-relir-build-plan.md`'s cut rule): the 13
-are blocked by SIX different things, and Phase 4 owns three of them. Measured 2026-08-11 from
-`l3-telemetry.summary.json`, by what each failure actually reports:
+The substrate landed (above). What is left of the "13 scenarios" is a list of OTHER features, and the
+ranking is the point — **do not come back here looking for collection work**:
 
-| blocker | scenarios | whose |
+| gap | scenarios | what it is |
 |---|---|---|
-| MULTI-SITE keyed group (a label two positions fill) | 1 | **Phase 4** |
-| `repeat(groupCount("m")…)` / `repeat(group("a")…)` bodies | 4 | **Phase 4's**, transitively — an unrolled body IS N sites, exactly the argument Phase 2 gave `aggregate` |
-| a declared policy on a keyed label (`withSideEffect("a", <map>).V().group("a")`) | 1 | **Phase 4** — `GroupSideEffectStep` registers `HashMapSupplier` + `GroupBiOperator`, so the declared map is the seed and the merge is per key |
-| `count(Scope.local)` over a MAP (`select("a").count(local)`) | 3 | the LIST/MAP local-reducer vocabulary |
-| `local(group…)` with a non-identity body (`.select("a").count(local)` inside) | 2 | the same, plus the child seam |
+| `select(Column.keys)` over an ELEMENT-keyed map | 1 + unblocks the splice | `entrySide`/`sideList` decline an `elem` side, deliberately: the blob holds a `{t:'vertex', v:{…}}` node and the SCALAR framer would emit it as a JSON string (`map.ts`'s own comment) |
+| `count(Scope.local)` over a MAP | 3 | the list/map local-reducer vocabulary — `select("a").count(local)` counts ENTRIES |
+| `repeat(groupCount("m")…)` bodies | 4 | the unroll's admitted-body set. An unrolled body IS N sites, which now WORKS, so this is the same discharge Phase 2 gave `aggregate` — admit the keyed forms and measure |
+| a declared policy on a keyed label | 1 | a seeded grouping accumulates INTO the declared map (`GroupBiOperator` merges maps). `registerGrouping` declines rather than dropping the seed |
 | `union`/`choose` arms, `barrier()` mid-chain, `subgraph`/`tree` | rest | their own features |
 
-#### The mechanism, derived from the code rather than sketched
-
-Store keyed member rows plus the reducer; run the grouping at the `cap`. `registerMap` disappears into
-`registerCollection`, and multi-site falls out. **`map.ts` is already shaped for it** — `groupBarrier`
-computes `projected → keyed (materialize) → rows (domain filter)` and only THEN aggregates, so the split
-is at an existing seam:
-
-```
-groupRows(input, host, step, bulked, child, fresh) → { rel, spec }   // stops after the domain filter
-groupMap(rel, spec, fresh)                        → { rel, keyOf, valOf }
-groupBarrier(...)                                  = groupMap(...groupRows(...))
-```
-
-A `rows` relation carries `(gk, gt?, go?, <bulk>?)`, which is a member relation in exactly the sense
-`Collection.sites` already means — so the keyed form registers one and `reduce()` unions them and calls
-`groupMap` ONCE. Both arms work through it: `groupCount`'s `SUM(bulk)`/`COUNT(*)` and `group`'s
-`json_group_array(… ORDER BY go)` are each correct over the union, and ordering the union by
-`(site ordinal, go)` is the member order Phase 2 already pinned.
-
-⚠️ **`spec` must be DATA, not a closure, and that is the one real design constraint.** Two sites on one
-label may carry different `by()`s, and what `groupMap` does depends on facts the site decided:
-`elementKey` (the key is a rowid to expand at the entry), whether `MEMBER_COL` holds a projected `{t,v}`
-node or a rowid to expand, `lastOnly`, whether the value `by()` owes a productivity drop, the bulk
-column. A closure cannot be compared, so a second site could silently be aggregated by the FIRST site's
-recipe — a wrong answer, and the one this restructure could most easily introduce. Comparable `spec`
-data + a decline on disagreement is the fail-closed form.
-
-⚠️ **A group's VALUE reducer is not the collection's merge operator.** Keep them apart: the member is
-`(key, value-contribution)` and the group reduction runs over the union. The declared-policy case above is
-the same statement from the other side — `registerMap` DECLINES a declared policy today rather than
-dropping the seed, and lifting that decline means seeding the grouping, not folding the map.
-
-⚠️ **The reducing-value arm (`groupReduced`) stays single-site.** Its value side is a JOIN whose rows are
-pooled per group, so there is no `(key, contribution)` member row to union; it declines rather than being
-folded in.
-
-#### One admission that is READY and deliberately NOT landed, because alone it is a WRONG ANSWER
+#### The one admission that is READY, and has now been tried and reverted TWICE
 
 A KEYED `group("a")`/`groupCount("a")` **is a stream identity** — `GroupSideEffectStep` and
 `GroupCountSideEffectStep` both extend `SideEffectBarrierStep`, whose `processAllStarts` calls
@@ -162,14 +139,22 @@ A KEYED `group("a")`/`groupCount("a")` **is a stream identity** — `GroupSideEf
 (`vendor/tinkerpop/gremlin-core/.../step/sideEffect/SideEffectBarrierStep.java:49-57`), which is
 `AggregateStep`'s contract exactly. So `local(groupCount("a"))` IS `groupCount("a")` and belongs in
 `isStreamIdentity` (`ir/strategies.ts`) beside `aggregate`, gated on the LABEL — a bare
-`group()`/`groupCount()` is a `ReducingBarrierStep` that replaces the stream, so `local(group().by(…))` is
-emphatically not its body.
+`group()`/`groupCount()` is a `ReducingBarrierStep` that replaces the stream, so `local(group().by(…))`
+is emphatically not its body. The change is six lines and it is written out in the git history of
+2026-08-11.
 
-**Tried 2026-08-11 and reverted, and the reason is the whole point of doing Phase 4 first:** on its own it
-fixes ZERO scenarios (the other `local(group…)` bodies contain a `select`/`count(local)`, which are not
-identities) and it turns the multi-site scenario from a clean DEFERRAL into a wrong answer — RelIR declines
-at the second `registerMap` and legacy's last-write-wins then answers `{marko:3, …}` where the corpus asks
-for `{marko:6, …}` (`GroupCount.feature:205-217`). Land it WITH the multi-site support, never before.
+**Reverted twice, and each time for a different blocker — record the SECOND one, because the first is
+gone.** Attempt 1: multi-site keyed groups did not exist, so RelIR declined at the second registration
+and legacy's last-write-wins answered a plausible half. Attempt 2 (after the substrate landed): the
+scenario continues `…cap("a").select(Column.keys).unfold().both().local(groupCount("a")).cap("a")`, and
+RelIR declines at `select(Column.keys)` over an ELEMENT-keyed map — so the chain still reaches legacy,
+which still answers one site. Both times the splice turned a clean DEFERRAL into a wrong answer and the
+census caught it (`ran` +1 with no answer-change flag, which is the one transition that gate cannot see
+— check the `spine` column when `ran` rises).
+
+⚠️ **So the order is fixed: element-keyed `select(Column.keys)` FIRST, then the admission.** On its own
+the admission still fixes zero scenarios — the other `local(group…)` bodies contain a `select`/
+`count(local)`, which are not identities.
 
 ### Phase 3b — mixed member SHAPES through the variant
 

@@ -47,12 +47,12 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
   Phase 3 step 4.
 - `docs/2026-08-09-named-collections-are-bindings-plan.md` — `aggregate("a")` RETAINS a relation under a
   name; `cap("a")` reduces it, which is why N sites are a UNION of relations rather than N−1 list
-  concatenations. **Phases 1/2/3a/5/6 LANDED, and so is 7's fold** — multi-site accumulation works, a site
-  is a `snapshot` Binding so a collection survives a mutating chain, and a declared merge policy
-  (`withSideEffect(k, seed, Operator)` — ONE object with `withSack`'s) is a seeded LEFT FOLD, a `Recursive`
-  walk over the ordered members rather than a per-operator SQL aggregate. Open, largest first: the keyed
-  `group("a")`/`groupCount("a")` unification (which is also what lifts the last two `ctx.mutating`
-  declines), then the BULK operator pair `addAll`/`assign`. Read it before touching `collection.ts`
+  concatenations. **Phases 1/2/3a/4/5/6/7 have all LANDED** — multi-site accumulation, a site as a
+  `snapshot` Binding, a declared merge policy (`withSideEffect(k, seed, Operator)` — ONE object with
+  `withSack`'s) as a seeded LEFT FOLD, and a keyed `group("a")`/`groupCount("a")` as `(key, contribution)`
+  MEMBER ROWS so N sites merge per key. What is LEFT is mostly NOT collection work: read the plan's
+  "Phase 4's residue" table before assuming otherwise, and read "Phase 7, in full" before re-opening any
+  of the merge policy. Read it before touching `collection.ts`
 - `docs/2026-07-25-wire-and-storage-facts.md` — Map.Entry wire framing + the `MapStream` model
 - `docs/2026-07-28-property-based-testing-l5.md` — L5's oracle design space + the two oracles built.
   Its "architectural lesson" section is CORRECTED by the shape doc below — the boundary is the anchor
