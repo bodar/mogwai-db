@@ -417,6 +417,12 @@ There are TWO collapse analyses in this compiler, and they disagree:
 | `collapseSafe` | `src/compiler/ir/analyze.ts` | ONE boolean for the WHOLE chain | movement/filter prefix + a reducer/`groupCount` terminal |
 | `suffixBulkSafe` / `bulkPlan` | `src/compiler/steps/tail/bulk.ts` | legacy's `repeat()`-specific suffix rule | the above **plus** `as(labels)`/`select(labels)` under a `count()` terminal |
 
+> **Both rows are now historical, and the second is GONE** — `bulk.ts` was deleted at §8 item 7, so
+> there has been ONE authority since. What §8 item 8 finishes is the surviving row's SHAPE: the
+> chain-global boolean, which folds two independent questions together. The positional half now lives
+> in `src/compiler/ir/bulk.ts` (§8 item 8a) — same concept name at the layer that owns it, deliberately,
+> since it is the one answer both spines ask.
+
 Legacy's repeat bulk path routes AROUND the general analysis: it collapses the walk's own hops
 itself, then hands a `(id, bulk)` frontier to the generic tail with `movementCollapse` FORCED ON.
 That is why `g.V().repeat(__.out()).times(5).as("a").out("writtenBy").as("b").select("a","b").count()`
@@ -794,6 +800,50 @@ moved `src/compiler/rel/`.
    than §7.1 implies — three of its five refusal families (`otherV`'s `fromV`, `sack`, `path`) are
    already answered per-position by `CHANNEL_GROUP_POLICY`, leaving only *bulk-unaware row readers*
    (a slice or `sample()` that reads rows where it must read traversers).
+
+   **SPLIT INTO THREE, because the authority must EXIST before it can be flipped.** The measurement
+   that forced the split: `compiler.ts:107` hands RelIR `engine.fastPaths.movementCollapse`, i.e.
+   legacy's chain verdict ANDed into `ctx.collapse`, and RelIR's per-node gate ANDs it again. So a
+   chain-global `false` does not merely make RelIR conservative — it switches off a decision RelIR
+   would already make correctly per node. Flipping that in one change is a wide widening with no
+   authority to catch what it widens past.
+
+   - 8a. ✅ **LANDED (`ea51e9b`) — `src/compiler/ir/bulk.ts`, the SUFFIX question as its own authority.**
+     `bulkObservedFrom(steps, from)`, ANDed into the movement gate as a third conjunct, plus the
+     group/reducer terminals moved out of `analyze.ts` and `isPlainOrder` moved to `ir/step.ts` (three
+     scans hinge on it now). Behaviour-neutral by construction — the chain verdict still gates
+     `ctx.collapse`, so the conjunct can only narrow, and the verdict's admitted population already
+     satisfies it. Measured at the recorded baselines: L3 1787 RelIR / 1697 legacy, census 1233.
+     **The finding that makes this conjunct CORRECTNESS and not tractability, and which §7.4 item 1's
+     "bulk-unaware row readers" understates:** only the `elements` framing arm carries `bulk` to the
+     wire (`lower.ts`'s `framed`). Scalar, list, map, mapEntry, record, path, property and variant all
+     DROP it, so a collapse in front of a chain that retypes to a scalar and then ends answers N
+     traversers as one row. Reaching the end of a chain is a question (`framedAsElements`), not an
+     assumption; the scan's default verdict is `reads-rows`, so unlearned vocabulary costs a collapse
+     OPPORTUNITY and never an answer.
+     Also landed here because the widening needs it: **the fold learns that a `dedup()` which lowered
+     reset the multiplicity.** Every arm `rowOp` admits projects `bulk` as the literal 1
+     (`DedupGlobalStep.filter` calls `setBulk(1L)` before it looks at a `by()`), and `dedupBy`'s own
+     comment already predicted this relaxation. Leaving `bulked` conservative costs "the heavier slice
+     form and never a wrong answer" only while nothing collapses in front of a dedup; after 8b a stale
+     flag sends the following slice to `bulkSlice`, which DECLINES with no emission order — lost
+     coverage, not a slower plan.
+   - 8b. **NEXT — flip the authority: RelIR stops reading the chain verdict.** `compiler.ts` passes the
+     raw strategy switch, and `collapseSafe` becomes legacy-local. This is where the widening actually
+     fires; the gates are the census answer-change gate on BOTH spines, the cut, the L3 floors and an
+     L3 wall-clock in its normal band (a cost wall here reads as a hang — §1a). Two shapes already
+     pinned as admitted-here/refused-by-the-verdict measure it:
+     `g.V().out().order().by('name').limit(2).count()` and `g.V().out().dedup().limit(2)`.
+     ⚠️ **Watch the element leaf's `bulk` column.** `framed` projects it on `{bulk: collapse}`, so a
+     raw-switch `collapse` would project one for every element leaf whether or not anything collapsed,
+     re-recording SQL byte ratchets broadly for no behaviour. The positional answer is already in hand
+     — the fold's `bulked` — so pass THAT, not the switch.
+   - 8c. **Then admit the remaining vocabulary, one name with one argument.** `select` first (a
+     single-label select re-frames to the element an alias holds and looks bulk-transparent, but
+     whether `selectKeys` carries the channel has not been measured), then `otherV`, then the
+     unordered bulked slice — which is a genuine new capability rather than an admission, since
+     `sliceOp` declines a bulked relation with no emission order and a deterministic window order
+     would let it answer.
 
 ### What to do when an increment goes red
 
