@@ -16,8 +16,8 @@ relir	symbol	materializeElementDrivers	4	Phase 2.6 — Insert.source IS a read p
 relir	symbol	WritePlan	15	Phase 2.6 — a write is Plan.bindings, not a private run(store)
 relir	symbol	TailAcc	13	Phase 4.2 — the block assembler (§5) is where fusion happens instead
 relir	symbol	globalRowOps	10	Phase 4.1 — the row-algebraic half of the 11 dispatch tables
-relir	symbol	runFastPath	14	Phase 4.4 §4.7 — a fast path becomes a plan rewrite
-relir	symbol	appliesWhen	9	Phase 4.4 §4.7 — the recognition-vs-support split; "no rewrite fired" replaces it
+relir	symbol	runFastPath	12	Phase 4.4 §4.7 — a fast path becomes a plan rewrite
+relir	symbol	appliesWhen	8	Phase 4.4 §4.7 — the recognition-vs-support split; "no rewrite fired" replaces it
 relir	pattern	continueLowering\(lowerGlobalCount\(s\), at \+ 1\)	7	the five-copy count adapter (analytics §3); lowerGlobalCount itself stays
 relir	pattern	\['where', aliasCompareRows\]	4	the four-copy where adapter (analytics §3); aliasCompareRows itself stays
 relir-own	symbol	PriorResult	0	deleted by §3.0 (3057e89) — this row keeps it dead

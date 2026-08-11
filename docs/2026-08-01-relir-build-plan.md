@@ -189,7 +189,7 @@ would be a throw out of a lowering whose contract is `null`, and legacy would ne
 - 🚧 **`flatten` (§4.2)** *(Phase 3)* — join flattening / decorrelation into the P1 envelope. Deletes
   `expandRepeatBody`. Most of it dissolved into the legality ANALYSIS (Phase 3 step 2a).
 - ⛔ **`unroll` (§4.3)** — **WITHDRAWN**, restore point `9e0e307`. `repeat()` is a two-regime family;
-  `docs/2026-08-09-repeat-two-regimes-plan.md` is its plan. `src/rel/mint.ts` keeps `minter` alone, for `seek`.
+  `docs/archive/2026-08-09-repeat-two-regimes-plan.md` is its plan. `src/rel/mint.ts` keeps `minter` alone, for `seek`.
 - 🚧 **`recognize` (§4.7)** *(Phase 4)* — the fast paths as plan rewrites, so a fast-path decline can be lifted.
 
 **Declared is not wired.** Only `name` has a production caller today; the rest are built-and-tested (or
@@ -756,9 +756,19 @@ divergence stays visible; what is gone is the obligation to make legacy agree.
 - **Read a decline's REASON, not its date** — two group-barrier declines had stopped being true before
   anyone removed them.
 
-### 🔴 Phase 3 — `repeat()` — THE GATE
+### 🚧 Phase 3 — `repeat()` — THE GATE
 
 The one family whose absence disqualifies the server, so deletion waits on it and on nothing else.
+
+**Status 2026-08-11: the SUBSTRATE is landed, the COVERAGE is not, and the gap is not what it looks
+like.** Both regimes are on trunk (step 3 for the unbounded walk, step 4's IR unroll for the bounded
+cell) and the two-regime plan that decided the split is archived. Measured by compiling the corpus: **135
+`repeat` traversals, 33 answered by RelIR, 102 declining.** ⚠️ **79 of those declines are BOUNDED, which
+reads like the unroll's admitted-body gate is the blocker — it is not:** relaxing that gate to the
+deny-list moves 33 → 43, because the other 69 are blocked by steps the SPLICED chain cannot lower
+(`select`, `local`, `group`, the map shape). So most of the repeat gap is the ordinary Phase 2 coverage
+gap wearing a `repeat` costume, and Phase 2's family ranking is the one to work from. Step 4 carries the
+genuinely repeat-shaped residue.
 
 **0. ✅ Checker hardening — PREREQS, not follow-ups — DONE.** ⚠️ These sat in §10·6 under "orthogonal to the
 phases" *while being labelled Phase 3 prereqs* — a prereq of the gate is not orthogonal to the gate, and filing
@@ -886,30 +896,73 @@ boundary, so the correlated scalars `flatten` produces are admitted rather than 
 because SQLite has no `LATERAL`, so a fan-out body inside a recursive term cannot be correlated at all. Read
 its header before concluding a body is inexpressible.
 
-**3. Route `repeat()`'s body through ordinary lowering** — the step ITSELF, and the majority route. Per P4, 72
-of the 125 corpus `repeat()`s have a NON-barrier body and need nothing beyond `Recursive`, already in the closed
-node set (`Recursive.step` is a function; seed/step channels identical, §3.3).
+**3. ✅ LANDED — route `repeat()`'s body through ordinary lowering.** `src/compiler/rel/walk.ts`, built
+cell by cell: the dispatch hook declining everything, then predicate `until` at either position, bare
+`emit()` and then `emit(pred)` at all FOUR modulator positions, a sack folded through the walk, and
+`repeat()` with NEITHER modulator as the specified EMPTY result rather than an error. The body re-enters
+the ORDINARY fold over the walk's `SelfRef` (the seam's `chain` arm), so it is not a second lowering.
+⚠️ The `Recursive` node was already in the closed set, but three things the walk needed were not and each
+cost a measurement: the `loops` CHANNEL role (a plain header column is projected away at the first hop);
+a SHARED walk must be ONE CTE (`binds` asked `containsSelfRef`, but a `Recursive` BINDS its own name, so
+every walk looked unbindable — the question is FREE reference); and a term is a COMPOUND, so the
+loop-counter bump DISTRIBUTES over its arms. See step 4 for what is left.
 
-**4. ➡️ MOVED — `repeat()` is a TWO-REGIME family, and the plan for it is
-`docs/2026-08-09-repeat-two-regimes-plan.md`.** That doc is APPROVED and supersedes this section; read it
-first for anything `repeat()`-shaped.
+**4. ✅ LANDED — `repeat()` is a TWO-REGIME family, and BOTH regimes are on trunk.** The plan was
+`docs/archive/2026-08-09-repeat-two-regimes-plan.md`, now **archived**: its decision is implemented, its
+§7 (the collapse authority) is closed, and every item in its shipping list landed. **This section is the
+live index for anything `repeat()`-shaped from here.** Read the archived doc for the measured facts —
+they are not re-derivable by reading code — and in particular its §7.2, whose chain-global collapse
+relaxation is **REFUTED**.
 
-The decision in one line: `Recursive` wherever the walk is unbounded or its body holds no per-iteration
-barrier; the IR-level unroll (`unrollFixedRepeat`, `ir/strategies.ts`) for a bounded `times(n)` whose body
-holds one; a clear refusal for unbounded-AND-barrier, which is not expressible in single-pass SQL.
-**Neither regime alone is sufficient and neither insufficiency shrinks with effort** — unroll cannot express
-an unbounded walk, and SQLite's recursive term cannot express a per-iteration barrier. §4.3's Rel-level
-`unroll` is WITHDRAWN (restore point `9e0e307`): the IR unroll produces a FLAT chain, so the whole lowering
-handles it uniformly and every future step family is inherited free.
+The decision in one line: `Recursive` wherever the walk is unbounded; the IR-level unroll
+(`unrollFixedRepeat`, `ir/strategies.ts`) for a bounded `times(n)`; a clear refusal for
+unbounded-AND-barrier, which is not expressible in single-pass SQL. **Neither regime alone is sufficient
+and neither insufficiency shrinks with effort** — unroll cannot express an unbounded walk, and SQLite's
+recursive term can express neither a per-iteration barrier nor the RLE collapse. §4.3's Rel-level
+`unroll` is WITHDRAWN (restore point `9e0e307`): the IR unroll produces a FLAT chain, so the whole
+lowering handles it uniformly and every future step family is inherited free.
 
-Landed so far: the body is normalized before splicing, `UNROLLABLE_BARRIERS` covers `dedup` + the slice
-family + `order`, and a text ceiling is in place. L3 1763 → 1775 (RelIR) and 1681 → 1692 (legacy). What is
-left, in order: the `Recursive` regime (step 3 — the gate), the differential over the cell where both
-regimes are legal, and one more barrier name at a time.
+⚠️ **The old partition here — "125 = 72 `Recursive` + 48 IR unroll + 5 wall" — is SUPERSEDED, and the
+correction matters more than the numbers.** It counted what each ROUTE would cover if reached; measured
+2026-08-11 by actually compiling the corpus: **135 corpus `repeat` traversals, 33 answered by RelIR, 102
+declining (79 bounded, 23 unbounded).** The "5 wall" claim is also gone — the walk covers `until` and
+`emit` at all four modulator positions including `emit(pred)`, which is new capability on BOTH spines
+(legacy throws *"until() together with emit() not yet supported"* for every one).
 
-🔴 **The 5 `until()`/`emit()` barrier bodies hit the P3 wall and are not expressible in ANY lowering.** That
-deviation needs accepting, not engineering. The three routes partition the family: **125 = 72 `Recursive` + 48
-IR-level unroll + 5 wall.**
+**What is LEFT, measured rather than argued — and the first line is the one that matters:**
+
+- ⚠️ **The bounded declines are NOT mostly the unroll's gate.** 79 of 135 decline while bounded, which
+  reads like the allow-list is the blocker; it is not. Relaxing `unrollableBodyStep` to the deny-list the
+  archived §3.3 proposes (exactly `loops()`, a named `repeat('a',…)`, `emit()`, `until()`) moves RelIR
+  routing **33 → 43 only**, because the other 69 are blocked by steps the SPLICED chain still cannot
+  lower — `select`, `local`, `group`, the map shape. So the repeat gap is mostly the ORDINARY coverage
+  gap wearing a `repeat` costume, and the ranking to trust is Phase 2's families, not this one.
+- **§3.3, the deny-list conversion — +10 traversals, and one subset is blocked.** The transformation's
+  validity is a property of `repeat`, not of the body's step names, so the allow-list is the accidental
+  model. But the SIDE-EFFECT subset (`group('a')`, `aggregate`) needs an argument about accumulation
+  ACROSS phases that the landed stateless names do not supply, and it is separately blocked on
+  `docs/2026-08-09-named-collections-are-bindings-plan.md` (9 of 13 multi-site aggregate scenarios fail
+  on BOTH spines today). Land the deny-list for the stateless half; leave the side-effect half to that plan.
+- **§3.5 — a parameterised `times($x)` should PREFER the walk.** Unrolling forces a parameter to a
+  compile-time value, the ONE early-reduction exception the root `CLAUDE.md` names, and the walk keeps it
+  a bind. So a parameterised `times` should claim the unroll only when no other regime can express the body.
+- **§6's last cell — an unbounded body whose UNION is not the TOP node.** `repeat(__.bothE().inV())` and
+  `repeat(__.bothE().otherV())` decline on shape: the term is `project(join(union(arm₁, arm₂), …))`, and a
+  projection over a compound takes a derived table, which is `circular reference`.
+  `repeat(__.outE().inV())` already walks because it has ONE arm. The fix is the same distribution one
+  level further — through a JOIN, which is Calcite's `JoinUnionTransposeRule` beside the
+  `ProjectSetOpTransposeRule` already applied — and it must NOT be shortcut with a disjunctive single-arm
+  join `ON (e.src = w.id OR e.tgt = w.id)`, which matches a SELF-LOOP once where `both()` must yield the
+  vertex twice. That failure is silent (a plausible row set, short by one row per self-loop) where the
+  derived table fails loudly. ⚠️ **~0 corpus reach** — real capability, but no scenario measures it, so it
+  ranks below anything with a number.
+- **The collapse follow-up, from the archived §8 item 8c: the UNORDERED bulked slice.**
+  `bulkObservedFrom` refuses a collapse in front of an unordered slice because `bulkSlice` has no
+  position to accumulate along, so `g.V().both().both().limit(2)` enumerates a fan-out it could trim.
+  Minting a deterministic window order would let it answer, at the cost of choosing WHICH traversers an
+  unordered `limit` returns — legal (TinkerPop specifies only membership) but it moves an answer digest,
+  so it needs the census re-recorded with that argument. It is the only item here that trades a pinned
+  answer, which is why it is last.
 
 **THE MEASUREMENT — a THIRD switch position. It gates the CUT, not this phase, so build it FIRST.**
 `MOGWAI_RELIR` has two positions (`src/compiler/options/spine.ts`) and NEITHER answers *what does deleting

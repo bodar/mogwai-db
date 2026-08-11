@@ -117,7 +117,7 @@ function verdictOf(step: IRStep, scan: BulkScan): BulkVerdict {
  *
  * Asked by the RelIR movement fold of the suffix behind the hop it is about to collapse, and by
  * `computeCollapseSafe` of the whole chain so that the two cannot drift — one authority, per §7 of
- * `docs/2026-08-09-repeat-two-regimes-plan.md`.
+ * `docs/archive/2026-08-09-repeat-two-regimes-plan.md`.
  *
  * Reaching the END of the chain is not automatically safe and that is the finding this module records:
  * only the `elements` framing arm carries `bulk` onto the wire (as the RLE count `execute.ts` frames),

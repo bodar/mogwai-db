@@ -1481,7 +1481,7 @@ export function rewriteWhereEndLabels(steps: IRStep[], params: Record<string, an
 //
 // TWO provable no-op removals, and together they are what makes collapse-safety a property of the
 // state a position actually CARRIES rather than of the whole chain (§7 of
-// `docs/2026-08-09-repeat-two-regimes-plan.md`).
+// `docs/archive/2026-08-09-repeat-two-regimes-plan.md`).
 //
 // The problem they solve: `g.V().repeat(__.out()).times(5).as("a").out("writtenBy").as("b")
 // .select("a","b").count()` is 24 309 134 024 traversers over the grateful graph, and it answers

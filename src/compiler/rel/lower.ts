@@ -4523,7 +4523,7 @@ const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   // **`collapse: false` IS THE SAME FACT FROM THE OTHER SIDE, and it is now load-bearing.** This arm's
   // one caller is `walk.ts`'s recursive TERM, and a collapse mints exactly the node a term may not
   // hold: `coalesce` is a grouped `Aggregate`, which SQLite refuses as *"recursive aggregate queries
-  // not supported"* — §1a of `docs/2026-08-09-repeat-two-regimes-plan.md`, the measurement that split
+  // not supported"* — §1a of `docs/archive/2026-08-09-repeat-two-regimes-plan.md`, the measurement that split
   // the two regimes in the first place. It cost nothing while the chain verdict was the gate (a chain
   // containing `repeat` was never collapse-safe, so `ctx.collapse` was already false here); with the
   // decision positional the switch is on, and without this narrowing every unbounded `repeat()` would

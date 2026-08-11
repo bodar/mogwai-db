@@ -21,7 +21,7 @@ import type { Framed } from '../../src/execute.ts';
  * (`hex[i]*bulk`, sorted) under a comment claiming it "denotes the traverser MULTISET, exactly what
  * oracle.ts's `weigh()` compares". It did not: `{a, b, b, b}` emitted as four bulk-1 rows and the same
  * multiset emitted as `(a,1),(b,3)` hash differently, so the answer-change gate — the one instrument
- * §7.5 of `docs/2026-08-09-repeat-two-regimes-plan.md` names as THE gate for collapse work — reported a
+ * §7.5 of `docs/archive/2026-08-09-repeat-two-regimes-plan.md` names as THE gate for collapse work — reported a
  * changed answer for every traversal that merely started collapsing. Two readings of one fact, and the
  * wrong one was load-bearing.
  */
@@ -43,7 +43,7 @@ export const multisetKey = (framed: readonly Framed[]): string =>
 // `weigh` compares FRAMED results, keyed by GraphBinary bytes. Several compiler tests compare the rows
 // a plan returns BEFORE framing — either across the two spines or against a law — and they need the
 // identical rule, because a row is not a traverser: a collapsed row carries `bulk: N` and denotes N of
-// them. §7.5 of `docs/2026-08-09-repeat-two-regimes-plan.md` states the consequence directly — *"`n`
+// them. §7.5 of `docs/archive/2026-08-09-repeat-two-regimes-plan.md` states the consequence directly — *"`n`
 // (the row count) legitimately moves under a collapse and is deliberately NOT gated; `ms` is what the
 // answer gate reads"* — so a test that counts ROWS is asserting a lowering decision, not an answer.
 //

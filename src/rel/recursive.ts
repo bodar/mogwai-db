@@ -19,7 +19,7 @@ import { containsSelfRef, exprChildren, exprRels, forEachRel, recursiveStep, rel
  * throws, and `rel-sweep` reports a violation whose cause is a rule spelled twice.
  *
  * Every law below is SQLite's, measured at bun:sqlite 3.53.0, and none of them moves with effort —
- * see `docs/2026-08-09-repeat-two-regimes-plan.md` §6 for the measurements.
+ * see `docs/archive/2026-08-09-repeat-two-regimes-plan.md` §6 for the measurements.
  */
 
 /**
@@ -58,7 +58,7 @@ import { containsSelfRef, exprChildren, exprRels, forEachRel, recursiveStep, rel
  * recursive term in ANY lowering, so the only correct answer is a clear refusal — an accepted
  * wrong answer is the one outcome no instrument in this repo can see. It is also the whole reason
  * `repeat()` has TWO regimes: the bodies this table refuses are exactly the ones the IR UNROLL
- * takes (`docs/2026-08-09-repeat-two-regimes-plan.md` §1).
+ * takes (`docs/archive/2026-08-09-repeat-two-regimes-plan.md` §1).
  *
  * The SELF-REFERENCE count keeps the descending walk, because P2 measured that a correlated scalar
  * subquery MAY reference the walk's alias — so a reference inside one is a real reference and must
@@ -137,7 +137,7 @@ export function recursiveViolation(node: Extract<Rel, { readonly kind: 'recursiv
    * ⚠️ **A TERM IS A COMPOUND, so every law below is a question about an ARM.** SQLite reads
    * `seed UNION ALL arm₁ UNION ALL arm₂` as one recursive term PER ARM: each must reference the walk
    * exactly once, and the same two arms behind a derived table are `circular reference` (measured,
-   * §6 of `docs/2026-08-09-repeat-two-regimes-plan.md`). Asking the questions of the whole step
+   * §6 of `docs/archive/2026-08-09-repeat-two-regimes-plan.md`). Asking the questions of the whole step
    * instead is what refused every multi-arm body — `both()`/`bothE()`/`bothV()` are two `HOPS`
    * entries unioned, so a walk over one holds two references in what is really two terms.
    *

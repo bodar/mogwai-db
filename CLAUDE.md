@@ -32,17 +32,19 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
   and the one environment whose egress lets this project build. `session-start.sh` prints it into a
   web session's context (`SessionStart` stdout IS context) and nothing else loads it, so a local
   session doesn't pay for facts it cannot observe. Add web-session facts THERE, not here
-- `docs/2026-08-09-repeat-two-regimes-plan.md` — `repeat()` is TWO lowerings chosen by a total function
-  on ONE axis: **bounded** (a compile-time `times(n)`) → the IR unroll, because only PHASES can carry
-  both a per-iteration barrier and the RLE collapse; **unbounded** → `Recursive`; unbounded+barrier →
-  a clear refusal. APPROVED, and it SUPERSEDES the RelIR build plan's Phase 3 step 4. Its §1a carries
-  the measurement that AMENDED the approved table (a recursive term cannot hold an aggregate, so a
-  walk cannot collapse a multiset — and the corpus asks for 2.5×10¹⁵ traversers over 808 vertices),
-  and its **§7 is the blocking precondition**: this compiler has TWO collapse authorities
-  (`ir/analyze.ts`'s chain-global `collapseSafe` and `steps/tail/bulk.ts`'s more permissive
-  repeat-specific `suffixBulkSafe`), the bounded cell cannot move until they are ONE, and the answer
-  is per-POSITION — which is how TinkerPop (`Traverser.equals` per traverser class) and Calcite
-  (`RelMetadataQuery` per node) both already model it
+- `docs/archive/2026-08-09-repeat-two-regimes-plan.md` — ✅ **LANDED AND ARCHIVED (2026-08-11).** `repeat()` is
+  TWO lowerings chosen by a total function on ONE axis: **bounded** (a compile-time `times(n)`) → the IR
+  unroll, because only PHASES can carry both a per-iteration barrier and the RLE collapse; **unbounded**
+  → `Recursive`; unbounded+barrier → a clear refusal. Both regimes are live and every item in its
+  shipping list is on trunk. Read it for the MEASURED FACTS, which is the whole reason it is kept: a
+  recursive term cannot hold an aggregate (so a walk cannot collapse a multiset, while the corpus asks
+  for 2.5×10¹⁵ traversers over 808 vertices); the arm laws for a compound term; and its §7 — the
+  collapse authority is ONE and POSITIONAL, per node from `CHANNEL_GROUP_POLICY` and per suffix from
+  `src/compiler/ir/bulk.ts`, which is how TinkerPop (`Traverser.equals` per traverser class, plus
+  `LazyBarrierStrategy` deciding per POSITION where bulking may be introduced) and Calcite
+  (`RelMetadataQuery` per node, `SqlSplittableAggFunction` per function) both model it. Its
+  chain-global relaxation stays REFUTED — do not retry it. Residue moved to the RelIR build plan's
+  Phase 3 step 4.
 - `docs/2026-08-09-named-collections-are-bindings-plan.md` — `aggregate("a")` RETAINS a relation under a
   name; `cap("a")` reduces it. APPROVED, not started. Supersedes `collection.ts`'s "registered twice →
   decline" and the `ctx.mutating` decline beside it, and carries the measurement that 9 of 13

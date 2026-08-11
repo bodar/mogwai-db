@@ -1,10 +1,29 @@
 # `repeat()` — the two-regime plan
 
-**Status: APPROVED 2026-08-09.** This supersedes the RelIR build plan's Phase 3 step 4
-(`docs/2026-08-01-relir-build-plan.md`), whose §4.3 Rel-level `unroll` is WITHDRAWN. Read this doc
-first for anything `repeat()`-shaped; read the build plan for everything else.
+**Status: ✅ LANDED AND ARCHIVED 2026-08-11.** The decision in §1 is fully implemented on trunk, §7
+(the collapse authority) is closed, and every item in §8's shipping list is landed. It superseded the
+RelIR build plan's Phase 3 step 4, whose §4.3 Rel-level `unroll` is WITHDRAWN (restore point
+`9e0e307`); that section is now the pointer BACK here, and it carries the residue below.
 
-**This doc is the index for the work.** Findings go HERE, not into `docs/outstanding-work.md`.
+**Read this for the MEASURED FACTS, which is why it is kept rather than deleted.** They cost real
+experiments and none is re-derivable by reading code: §1a (a recursive term cannot hold an aggregate,
+so a walk cannot collapse a multiset — and `map/Count.feature` asks for 2.5×10¹⁵ traversers over 808
+vertices); §6 (the arm laws for a compound term, and the disjunctive-join shortcut that is WRONG
+because it loses a self-loop); §7.2 (the chain-global collapse relaxation, **REFUTED — do not
+retry**); §7.3 (both references model collapse-safety per position, with the paths).
+
+**What is NOT here any more: the work list.** Three residues were open when this was archived, all
+measured on 2026-08-11 and all moved to the RelIR build plan's Phase 3 step 4, which is the live index
+for anything `repeat()`-shaped from now on:
+
+| residue | was | measured upside |
+|---|---|---|
+| §3.3 — the unroll's admitted body set becomes a DENY-list | allow-list of movement + `has` + argued barriers | **+10 corpus traversals.** NOT the +79 the raw bounded-decline count suggests: 79 of 135 corpus `repeat`s decline while bounded, but 69 of those are blocked by steps the SPLICED chain still cannot lower, so relaxing the gate does not reach them. Its side-effect subset (`group('a')`/`aggregate`) is separately blocked on `docs/2026-08-09-named-collections-are-bindings-plan.md` — accumulation ACROSS phases is not the stateless argument the landed names use |
+| §3.5 — a parameterised `times($x)` should PREFER the walk | unbuilt | the unroll forces the one early parameter reduction the root `CLAUDE.md` names; the walk keeps it a bind |
+| §6's last cell — an unbounded body whose UNION is not the top node (`repeat(__.bothE().inV())`) | declines on shape | ~0 corpus reach. Needs the same distribution through a JOIN (Calcite's `JoinUnionTransposeRule`); `repeat(__.outE().inV())` already walks because it has one arm |
+
+⚠️ **Everything below is the record as written during the work, including its own corrections.** Where a
+section says "NEXT" or "what is left", read it as history — the table above is the live answer.
 
 ---
 

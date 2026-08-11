@@ -200,7 +200,7 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
 // `CHANNEL_GROUP_POLICY`), and "will the multiplicity be read" is a property of a SUFFIX
 // (`ir/bulk.ts`'s `bulkObservedFrom`). Folding both into one boolean for the whole chain is
 // what makes this refuse a collapse at a hop where nothing but `bulk` is carried — see §7.2/§7.3
-// of `docs/2026-08-09-repeat-two-regimes-plan.md`, and `ir/bulk.ts`'s header for the two
+// of `docs/archive/2026-08-09-repeat-two-regimes-plan.md`, and `ir/bulk.ts`'s header for the two
 // references that both model it positionally. The vocabularies below are imported from there
 // rather than spelled again here, so the two answers cannot drift while both exist.
 const COLLAPSE_REDUCERS = REDUCERS;
