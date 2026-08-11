@@ -47,11 +47,12 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
   Phase 3 step 4.
 - `docs/2026-08-09-named-collections-are-bindings-plan.md` — `aggregate("a")` RETAINS a relation under a
   name; `cap("a")` reduces it, which is why N sites are a UNION of relations rather than N−1 list
-  concatenations. **Phases 1/2/3a/5/6 LANDED** — multi-site accumulation works, and a site is a `snapshot`
-  Binding so a collection survives a mutating chain. Open, largest first: the merge POLICY
-  (`withSideEffect(k, seed, Operator)`, which shares its object with `withSack`), then the keyed
-  `group("a")`/`groupCount("a")` unification, which is also what lifts the last two `ctx.mutating`
-  declines. Read it before touching `collection.ts`
+  concatenations. **Phases 1/2/3a/5/6 LANDED, and so is 7's fold** — multi-site accumulation works, a site
+  is a `snapshot` Binding so a collection survives a mutating chain, and a declared merge policy
+  (`withSideEffect(k, seed, Operator)` — ONE object with `withSack`'s) is a seeded LEFT FOLD, a `Recursive`
+  walk over the ordered members rather than a per-operator SQL aggregate. Open, largest first: the keyed
+  `group("a")`/`groupCount("a")` unification (which is also what lifts the last two `ctx.mutating`
+  declines), then the BULK operator pair `addAll`/`assign`. Read it before touching `collection.ts`
 - `docs/2026-07-25-wire-and-storage-facts.md` — Map.Entry wire framing + the `MapStream` model
 - `docs/2026-07-28-property-based-testing-l5.md` — L5's oracle design space + the two oracles built.
   Its "architectural lesson" section is CORRECTED by the shape doc below — the boundary is the anchor

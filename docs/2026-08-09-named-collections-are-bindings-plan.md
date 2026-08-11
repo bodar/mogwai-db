@@ -1,9 +1,9 @@
 # A NAMED COLLECTION IS A BOUND RELATION, REDUCED AT THE READ
 
-_Status: **Phases 1, 2, 3a, 5 and 6 LANDED.** Open: **7** (the largest item, 29 scenarios), **4** (13),
-**3b**, **2b**, **§8**. Numbers re-validated 2026-08-11 against `l3-state.json` + `scenarios.tsv`; absolute
-L3 floors are deliberately not quoted (they move for unrelated reasons — read the instruments). **Read this
-before touching `src/compiler/rel/collection.ts`.**_
+_Status: **Phases 1, 2, 3a, 5, 6 and 7's fold LANDED.** Open: **7's BULK pair** (`addAll`/`assign`, 4
+scenarios), **4** (13), **3b**, **2b**, **§8**. Numbers re-validated 2026-08-11 against `l3-state.json` +
+`scenarios.tsv`; absolute L3 floors are deliberately not quoted (they move for unrelated reasons — read the
+instruments). **Read this before touching `src/compiler/rel/collection.ts`.**_
 
 ## The thesis
 
@@ -39,50 +39,67 @@ not a gap** — RelIR declined and legacy mis-executed.
   wrong against the reference: a side effect lives on the ROOT traversal (`AggregateStep.java:57`).
 - **6 — a site is a `snapshot` Binding**, so a collection survives a mutating chain. Deleted two of the four
   `ctx.mutating` declines; two remain, for the keyed forms only (see Phase 4).
+- **7's FOLD — a merge policy is a seeded LEFT FOLD** (`src/compiler/rel/operator.ts` + `seededFold`).
+  `sum`/`minus`/`mult`/`div`/`min`/`max`/`and`/`or` all lower as ONE `Recursive` walk over the ordered
+  member relation, **+20 L3**. The `ROW_NUMBER` that turns "the members in order" into "the member at
+  position n" is computed OUTSIDE the walk and joined in — a term may hold no window function, and the
+  join is what opens the nested SELECT that makes it legal. Three things fell out rather than needing
+  arms: an unreached collection answers the SEED (the walk's seed row IS the last row), a multi-site
+  label folds over the `UNION` with the seed spent once, and `local(aggregate(…))` agrees with the
+  global form for every member-by-member operator. ⚠️ **The NULL rules came from the reference, not
+  the fixture** — every corpus scenario drops its unproductive members first, so only a
+  `ProductiveByStrategy` traversal reaches them.
+  ✅ **It also discharged a THIRD plan's item and one latent defect.** `SackSpec` and the policy are
+  now ONE object (`MergePolicy` — a seed `Arg` plus an operator, which is how TinkerPop registers
+  both); the value+`initType` pair it replaced could not carry the seed's wire-parameter NAME, so
+  `withSack($x)` inlined where the bind rule says it binds. And a `Recursive` rewrite used to defer its
+  TERM into the returned closure, so `name`'s binding push landed after `plan()` had copied the list —
+  a `Ref` in the term with no binding in the plan (`src/rel/walk.ts`, `mapRelChildren`). Reachable from
+  ANY term holding a shared subtree; this was simply the first one built.
 
 ---
 
 ## 🚧 What is LEFT
 
-### Phase 7 — the merge POLICY: seed + `Operator`. **The largest item: 29 scenarios.**
+### Phase 7's remainder — the BULK pair `addAll`/`assign`. **4 scenarios.**
 
-Measured 2026-08-11: **23** `withSideEffect(name, seed, Operator)` scenarios that NO spine holds, plus **6**
-`withSack(seed, Operator)` scenarios that take the same policy object — disjoint from Phase 4. Delete the
-`reducers.has(label)` decline (`collection.ts:164`, `:262`).
+The fold LANDED (see above); what is left is the other branch of the very line the fold's design came from.
+`AggregateStep.processAllStarts` (`:131-151`) reads the registered operator and splits:
 
-**Verified at the pin, so the design is not guesswork** — `sideEffect/Aggregate.feature:279-563` over
-`gmodern`'s ages (29, 27, 32, 35):
+```java
+final boolean bulkReducingOperator = getReducer(k) == Operator.addAll || getReducer(k) == Operator.assign;
+if (bulkReducingOperator) sideEffects.add(k, bulkSet);   // the site's WHOLE BulkSet, as one value
+else                      bulkSet.forEach(p -> sideEffects.add(k, p));   // member by member
+```
 
-| declaration | expected | so the reduction is |
-|---|---|---|
-| `("a", 1, Operator.sum)` | `124` | `1+29+27+32+35` |
-| `("a", 123, Operator.minus)` | `0` | `123-29-27-32-35` |
-| `("a", 2, Operator.mult)` | `1753920` | `2*29*27*32*35` |
-| `("a", 876960, Operator.div)` | `1` | `876960/29/27/32/35` |
-| `("a", 1, Operator.min)` / `("a", 100, Operator.min)` | `1` / `27` | extremum including the seed |
-| `("a", …, Operator.addAll)` / a `Set` seed | a list / a deduped list | the list fold, seed first |
+So a bulk operator's lowering is a question about the member RELATION, which is why it is not the fold:
 
-**It is ONE mechanism, and picking nine aggregates would be the mistake.**
-`DefaultTraversalSideEffects.add` is `set(k, getReducer(k).apply(get(k), v))` — a LEFT FOLD over the members
-in order, seeded. So the lowering is a `Recursive` walk over the ordered member relation with one
-operator-dependent expression: `make.recursive`, nothing new.
+- **`addAll` is the SEED AS SITE 0.** `Operator.addAll(seedCollection, siteBulkSet)` appends, so the answer
+  is the seed's items followed by site 1's members, then site 2's — which is exactly `Collection.sites` with
+  one more site in front. `make.values` over the seed's `members` (each already an `Arg` carrying its own
+  type — `collectionArg`), unioned by the machinery Phase 2 built. **A `Set` seed additionally DEDUPS**
+  (`Aggregate.feature:279-563`), which is the one place `foldScalars`' multiset licence is revoked.
+- **`assign` needs the SITE'S GRANULARITY, and the IR erases it.** Global and local differ here and only
+  here: `g.withSideEffect("a",[1i,2i,3i],Operator.assign).V().aggregate("a").by("age").cap("a")` is the
+  whole member list `[29,27,32,35]`, while the `local(aggregate(…))` form after an `order().by("age")` is
+  `[35]` — the LAST traverser's one-member set, because a `LocalStep` makes every traverser its own
+  barrier. Our `inlineIdentityHostBody` pass (`ir/strategies.ts`) SPLICES `local(aggregate("a"))` into the
+  flat chain and deletes the wrapper, which is correct for all eight fold operators and wrong for this one.
+  ⚠️ **So the work is in the PASS, not in `collection.ts`: the pass that erases `local` must record what
+  it erased** (a per-traverser granularity on the spliced step), and `registerCollection` reads it. Marking
+  it there rather than re-deriving it at the lowering is the same move `Arg.name` is — a fact the erasing
+  step owns. Until it lands, `assign` declines by name.
 
-⚠️ **`SUM`/`MIN`/`MAX` would cover four operators and silently MIS-ANSWER two.** `mult` and `div` have no SQL
-aggregate, and rewriting `div` as `seed / PRODUCT(members)` is NOT equivalent under INTEGER division — it
-happens to agree on this fixture and would not in general. A left fold is exact by construction, which is the
-difference between a right answer and a lucky one. The member ORDER it needs is the one Phase 2 already
-pinned (site ordinal, then that site's encounter), so nothing new decides it.
+`BULK_OPS` (`src/compiler/rel/operator.ts`) is where the pair is named, so both refusals read off one set.
 
-A non-`addAll` operator's result is a SCALAR, not a list, so `reduce()` gains a second framing answer — which
-is what keeping `Members` and `MergePolicy` as separate fields is for. `merge` was deliberately left off
-`Collection` in Phase 1: with the decline standing it had exactly one possible value, and a single-valued
-field claims a capability the decline beside it refuses.
-
-**Work, in order:** widen `sideEffectReducers` from `ReadonlySet<string>` to a map of `{seed, operator}` (the
-front end already finds the form and throws the payload away — its own comment says it widens "when a merge
-policy lands, one place") · thread it as `ChainCtx` already threads the set · add `MergePolicy` to
-`Collection` · make `reduce()` dispatch list-fold vs recursive-fold. Then `withSack`'s identical decline
-takes the same object.
+⚠️ **The `withSack(seed, Operator)` scenarios this plan used to bundle in here are NOT this work, and the
+policy object was never what blocked them.** Measured 2026-08-11 at the pin: all of
+`sideEffect/Sack.feature:294`, `:306`, `:321`, `:347` carry a `barrier()` or `barrier(Barrier.normSack)`, and
+two also carry `withBulk(false)`. The declared operator is what decides how two traversers' sacks combine
+when a BARRIER merges them — a `CHANNEL_MERGE_POLICY` answer (`src/channels.ts` says `identical` today) plus
+a `normSack` step, neither of which the shared `MergePolicy` supplies. They now READ the same object
+(`seedSack` takes it), and `seedSack`'s decline on `spec.operator !== undefined` stays until the channel
+core has a third merge answer. Do not re-file them under this phase.
 
 ### Phase 4 — `group("a")`/`groupCount("a")` join the mechanism. **13 scenarios.**
 
@@ -188,8 +205,10 @@ member relations is the correct lowering and no interleave-by-encounter is requi
    read.
 3. **The `by()` projection is correlated and STAYS at the write site.** Only the FOLD moves. Moving the
    projection would evaluate `by(__.outE("created").count())` against the wrong traverser.
-4. **A `Set` seed dedups and a non-`addAll` operator merges member-by-member** — both Phase 7. Until it
-   lands the `reducers` decline must stay, or a declared seed is silently dropped.
+4. **A `Set` seed DEDUPS** — the one place a collection's multiset licence is revoked, and still unbuilt.
+   The decline is by OPERATOR now (`BULK_OPS`), not by label, so the seed can no longer be silently
+   dropped for the eight that fold; keep `addAll` refused until the seed's SET-ness is honoured, because a
+   list-shaped answer to a `Set` seed is the wrong answer rather than an approximate one.
 5. **A rooted body is correlated to NOTHING.** Registering inside one and reading outside is fine, and so is
    the reverse (side effects are root-global). What is NOT fine is a rooted body whose member relation
    references the outer chain's rows — `checkPlan`'s scope check catches it and must keep catching it.
