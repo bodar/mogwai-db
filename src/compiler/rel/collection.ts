@@ -176,7 +176,7 @@ function labelOf(step: IRStep): string | null {
  */
 export function registerCollection(
   step: IRStep, input: Rel, host: ChildHost, framing: RelFraming, collections: Collections,
-  reducers: ReadonlyMap<string, MergePolicy>, child: ChildSeam, fresh: Minter, mutating: boolean,
+  policies: ReadonlyMap<string, MergePolicy>, child: ChildSeam, fresh: Minter, mutating: boolean,
 ): readonly Binding[] | null {
   const label = labelOf(step);
   if (label === null) return null;
@@ -188,12 +188,21 @@ export function registerCollection(
   // spend. `COLLECTION_OPS` is that one authority (`operator.ts`), which is why `assign` is refused
   // here by name rather than by a shape check three functions away.
   //
-  // `reducers` is a separate map from the constant registry, and it has to be: the front end skips
-  // the reducer form when building that registry (its value is not a constant to substitute), so
-  // before `sideEffectReducers` existed this fact was not visible at all — the label read as fresh.
-  // A fact the front end drops is one no lowering can either fold or decline on.
-  const merge = reducers.get(label);
-  if (merge && !(merge.operator !== undefined && COLLECTION_OPS.has(merge.operator))) return null;
+  // `policies` is a separate map from the constant registry, and it has to be: a consumer of that
+  // registry wants a value it can SUBSTITUTE and a policy has none to give. It reports BOTH
+  // declaration forms, though, and that is not a widening for tidiness — a bare
+  // `withSideEffect("a", {"alice"})` on a label an `aggregate` also fills is a policy too, because
+  // `registerIfAbsent` keeps that supplier and lets this step fill in the missing reducer
+  // (`DefaultTraversalSideEffects.java:110-119`). Reading only the reducer form dropped that seed and
+  // answered a plausible list.
+  //
+  // **The DEFAULT operator is THIS STEP's fact, which is why it is applied here.** `AggregateStep`'s
+  // constructor registers `(BulkSetSupplier, Operator.addAll)` (`AggregateStep.java:57`); `group("a")`
+  // registers its own. So the front end reports the declaration and the step that consumes it says
+  // what a missing operator means — one place per step, rather than a default baked into the parse.
+  const declared = policies.get(label);
+  const merge = declared && { ...declared, operator: declared.operator ?? ADD_ALL };
+  if (merge && !COLLECTION_OPS.has(merge.operator)) return null;
   const bys = modulations(step, 1, child);
   if (!bys) return null;
   const encounter = input.channels.find((channel) => channel.role === 'encounter');
@@ -299,10 +308,14 @@ const honouring = (sites: readonly Site[], from: ScalarType, to: ScalarType, fre
  */
 export function registerMap(
   step: IRStep, built: FramedRel, collections: Collections,
-  reducers: ReadonlyMap<string, MergePolicy>,
+  policies: ReadonlyMap<string, MergePolicy>,
 ): boolean {
   const label = labelOf(step);
-  if (label === null || collections.has(label) || reducers.has(label)) return false;
+  // A DECLARED policy on a keyed label is a seeded map merge — `GroupSideEffectStep` registers
+  // `(HashMapSupplier, Operator.addAll)` and `registerIfAbsent` keeps a declared supplier, so the
+  // grouping accumulates INTO the declared map. Nothing here builds that, and registering anyway would
+  // drop the seed silently, so it declines. Phase 4's keyed unification is where it lands.
+  if (label === null || collections.has(label) || policies.has(label)) return false;
   collections.set(label, {
     sites: [{ rel: built.rel, order: [] }],
     of: { kind: 'reduced', framing: built.framing },
@@ -411,12 +424,54 @@ export function reduce(collection: Collection, fresh: Minter): FramedRel | null 
   const seeded = collection.merge?.operator === ADD_ALL ? seedAsSite(rowed, fresh) : rowed;
   if (!seeded) return null;
   const { sites, of, merge } = seeded;
-  const { rel, order } = sites.length === 1 ? sites[0]! : accumulated(sites, memberCols(of), fresh);
+  const accumulation = sites.length === 1 ? sites[0]! : accumulated(sites, memberCols(of), fresh);
   // Every other DECLARED policy replaces the fold outright: the members combine into the seed by the
   // operator, and the answer is a SCALAR rather than a list.
-  if (merge && merge.operator !== ADD_ALL) return seededFold(rel, order, of, merge, fresh);
-  if (of.kind === 'elements') return listed(foldElements(rel, of.elem, { order }, fresh));
-  return listed(foldScalars(rel, { type: of.type, productiveNull: of.productiveNull, order }, fresh));
+  if (merge && merge.operator !== ADD_ALL)
+    return seededFold(accumulation.rel, accumulation.order, of, merge, fresh);
+  // A SET seed makes `addAll` DEDUP, and it also makes the answer a Set on the wire.
+  const setSeeded = merge?.seed.value instanceof Set;
+  const { rel, order } = setSeeded ? firstOccurrences(accumulation, memberCols(of), fresh) : accumulation;
+  const folded = of.kind === 'elements'
+    ? listed(foldElements(rel, of.elem, { order }, fresh))
+    : listed(foldScalars(rel, { type: of.type, productiveNull: of.productiveNull, order }, fresh));
+  return setSeeded ? { ...folded, framing: { ...folded.framing, set: true } } : folded;
+}
+
+/**
+ * THE FIRST OCCURRENCE OF EACH DISTINCT MEMBER — what a `Set`-seeded `addAll` leaves behind.
+ *
+ * `addAll(a, b)` is `a.addAll(b)` (`Operator.java:178-196`), so when the seed is a `Set` the collection
+ * IS that set and every later contribution is offered to `Set.add`: a member equal to one already there
+ * changes nothing, and a `LinkedHashSet` keeps the position of the FIRST one. That is the one place a
+ * collection's multiset licence is revoked — `BulkSet` bumps a repeat's count, a `Set` drops it.
+ *
+ * It is a KEYED dedup rather than `Distinct`, and the algebra's own comment says why (`rel.ts`,
+ * `distinct`): whole-row `SELECT DISTINCT` cannot express it, because the rows carry the site ordinal and
+ * the encounter that ORDER them and those differ for every duplicate. `Window(row_number PARTITION BY
+ * <member>)` + `Filter(rn = 1)` is the shape, and partitioning by the member's columns rather than by `v`
+ * alone is what keeps a typed `1` and a `"1"` two members.
+ */
+function firstOccurrences(site: Site, cols: readonly string[], fresh: Minter): Site {
+  const kept = 'sq';
+  const ranked = make.window({
+    id: fresh('sk'), input: site.rel, channels: [],
+    type: typeOf(...site.rel.type.cols, meta(kept, 'int')),
+    specs: [[kept, {
+      kind: 'window-expr', fn: 'row_number', args: [],
+      spec: {
+        partitionBy: cols.map((name) => col(site.rel.id, name)),
+        orderBy: site.order.map((name) => ({ expr: col(site.rel.id, name), dir: 'asc' as const })),
+      },
+    }]],
+  });
+  return {
+    rel: make.filter({
+      id: fresh('sx'), input: ranked, channels: [], type: ranked.type,
+      pred: eq(col(ranked.id, kept), compilerInt(1)),
+    }),
+    order: site.order,
+  };
 }
 
 /**
@@ -429,15 +484,15 @@ export function reduce(collection: Collection, fresh: Minter): FramedRel | null 
  * types — the seed goes through `accumulate` exactly as a second `aggregate("a")` position does, so a
  * String seed beside Integer members MEETS at a per-value type rather than mis-tagging either side.
  *
- * ⚠️ **A `Set` seed DEDUPS** (`Aggregate.feature:279-563`), which is the one place a collection's multiset
- * licence is revoked and the one thing this does not do — so it declines rather than answering a list.
+ * A `Set` seed is the same prepend — a JS `Set` still carries its items as `members` — and the DEDUP it
+ * additionally implies belongs at the read, over every site's members at once (`firstOccurrences`).
  */
 function seedAsSite({ sites, of, merge }: RowMembered, fresh: Minter): RowMembered | null {
   // Only a collection LITERAL carries per-item `Arg`s. A bound list PARAMETER is ONE oversized value
   // with no members to spell as rows, and a SCALAR seed is `Operator.addAll`'s own
   // IllegalArgumentException ("Objects must be both of Map or Collection") rather than a list to prepend.
   const items = merge?.seed.members;
-  if (!items || merge!.seed.value instanceof Set) return null;
+  if (!items) return null;
   // An EMPTY seed adds nothing, and `Values` has no empty form — so it is the absence of a site, not a
   // site of no rows.
   if (!items.length) return { sites, of, merge };
@@ -645,8 +700,12 @@ function accumulated(sites: readonly Site[], cols: readonly string[], fresh: Min
 
 /** A fold's `{rel, of}` as the framed relation `cap()` hands to `continueAs`. One place, so the two
  *  folds cannot describe themselves differently. */
-const listed = (folded: { readonly rel: Rel; readonly of: ListOf }): FramedRel =>
+const listed = (folded: { readonly rel: Rel; readonly of: ListOf }): ListedRel =>
   ({ rel: folded.rel, framing: { kind: 'list', of: folded.of } });
+
+/** `listed`'s result, with its framing NARROWED to the list arm — so a caller may add the `set` marker
+ *  without widening it back to the whole union first. */
+type ListedRel = { readonly rel: Rel; readonly framing: Extract<RelFraming, { readonly kind: 'list' }> };
 
 /**
  * `cap("a")` — the named collection, REDUCED, or `null` to decline.

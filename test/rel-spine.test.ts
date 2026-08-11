@@ -2079,10 +2079,32 @@ describe('the RelIR spine', () => {
     // and a `local(aggregate(…))` one, and the IR splice erases which it was (`COLLECTION_OPS`).
     expect(read('g.withSideEffect("a", [1i,2i], Operator.assign).V().aggregate("a").by("age").cap("a")', { spine: 'rel' }).spine)
       .toBe('legacy');
-    // A `Set` seed DEDUPS, which is the one place a collection's multiset licence is revoked — and the
-    // one thing `seedAsSite` does not do, so it declines rather than answering a list.
-    expect(read('g.withSideEffect("a", {1i,2i}, Operator.addAll).V().aggregate("a").by("age").cap("a")', { spine: 'rel' }).spine)
-      .toBe('legacy');
+    // A `Set` seed DEDUPS — `addAll(a, b)` is `a.addAll(b)`, so when `a` is a Set every later
+    // contribution is offered to `Set.add` and a repeat changes nothing. The one place a collection's
+    // multiset licence is revoked, and it also makes the answer a SET on the wire (GraphBinary spells
+    // the two differently, so a dropped marker is a wrong CLASS rather than a cosmetic difference).
+    const setSeeded = 'g.withSideEffect("a", {"marko"}).V().both().values("name").aggregate("a").cap("a")';
+    expect(read(setSeeded, { spine: 'rel' }).spine).toBe('rel');
+    expect(exec(seededStore(), undefined, undefined, 'rel').buffers(setSeeded, {}, {})[0]![0], 'GraphBinary Set')
+      .toBe(0x0b);
+    // `both()` walks every edge from both ends, so `marko` arrives several times over — deduped to one,
+    // and the seed's own `marko` is not doubled either. (The client deserializes a GraphBinary Set to a
+    // JS `Set`, which is itself the marker having crossed.)
+    expect([...(await decodeAll(exec(seededStore(), undefined, undefined, 'rel').buffers(setSeeded, {}, {})))[0]!].sort())
+      .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+    // ⚠️ **A CONSTANT `withSideEffect` on an AGGREGATED label is a policy too, and reading only the
+    // reducer form was a wrong answer.** `registerIfAbsent` keeps whichever supplier was registered
+    // first and fills in the missing reducer from the step, and `AggregateStep`'s constructor registers
+    // `Operator.addAll` (`AggregateStep.java:57`) — so this is seed `{"alice"}` merged by `addAll`,
+    // which is `Aggregate.feature:171-180`'s deduped `s[alice,marko,vadas,lop,josh,ripple,peter]`.
+    const constantSet = 'g.withSideEffect("a", {"alice"}).V().both().values("name").local(__.aggregate("a")).cap("a")';
+    expect(read(constantSet, { spine: 'rel' }).spine).toBe('rel');
+    expect([...(await decodeAll(exec(seededStore(), undefined, undefined, 'rel').buffers(constantSet, {}, {})))[0]!].sort())
+      .toEqual(['alice', 'josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+    // A SCALAR constant on an aggregated label is NOT that: `addAll(1, bulkSet)` is the reference's own
+    // IllegalArgumentException ("Objects must be both of Map or Collection"), so it declines rather than
+    // answering the members and pretending the seed was not there.
+    expect(read('g.withSideEffect("a", 1).V().aggregate("a").by("age").cap("a")', { spine: 'rel' }).spine).toBe('legacy');
     // An ELEMENT-membered collection declines too — `Operator.sum` over a Vertex is a
     // ClassCastException in the reference, so there is no fold to build.
     expect(read('g.withSideEffect("a", 1, Operator.sum).V().aggregate("a").cap("a")', { spine: 'rel' }).spine).toBe('legacy');

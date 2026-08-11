@@ -269,7 +269,7 @@ interface ChainCtx extends FilterCtx {
   /** The `withSideEffect(name, constant)` registry the FRONT END extracted. See `Lowering`. */
   readonly sideEffects: Map<string, any>;
   /** The merge POLICY declared with the REDUCER form of `withSideEffect`, by label. See `Lowering`. */
-  readonly sideEffectReducers: ReadonlyMap<string, MergePolicy>;
+  readonly sideEffectPolicies: ReadonlyMap<string, MergePolicy>;
   /** The services this chain names, resolved at the DI boundary. See `Lowering.services`. */
   readonly services: ReadonlyMap<string, Service>;
   /** `withSack(seed[, Operator.x])`'s policy, or `null`. See `Lowering.sack`. */
@@ -1993,7 +1993,7 @@ function scalarTail(
         // keyed forms hold `(key, value-contribution)` MEMBER rows and run `groupBarrier` at the
         // `cap`, they take the aggregate sites' binding unchanged.
         if (ctx.mutating) return null;
-        if (!registerMap(step, { rel: grouped.rel, framing }, ctx.collections, ctx.sideEffectReducers)) return null;
+        if (!registerMap(step, { rel: grouped.rel, framing }, ctx.collections, ctx.sideEffectPolicies)) return null;
         continue;
       }
       return continueAs(grouped.rel, framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
@@ -2348,7 +2348,7 @@ function scalarTail(
     // reason: a shape works wherever it is legal, not wherever a host was taught it. The members of a
     // scalar collection are the VALUES, keeping their per-row type.
     if (step.name === 'aggregate') {
-      const snapshot = registerCollection(step, rel, host, out, ctx.collections, ctx.sideEffectReducers,
+      const snapshot = registerCollection(step, rel, host, out, ctx.collections, ctx.sideEffectPolicies,
         childSeam(ctx, fresh), fresh, ctx.mutating);
       if (!snapshot) return null;
       // The element tail's rule, at the value tail: a snapshot is an execution step and belongs in
@@ -2883,7 +2883,7 @@ function mapTail(
  * the two facts stay where they are owned.
  */
 const namedElsewhere = (ctx: ChainCtx) => (label: string): boolean =>
-  ctx.sideEffects.has(label) || ctx.sideEffectReducers.has(label) || ctx.collections.has(label);
+  ctx.sideEffects.has(label) || ctx.sideEffectPolicies.has(label) || ctx.collections.has(label);
 
 /** The two payload columns a Map.Entry relation carries — `framingCols` names the same pair, and
  *  `map.ts`'s `ENTRY` names them for the framer. Stated here as `ColMeta` because `renumber` rebuilds
@@ -3040,7 +3040,7 @@ export interface Lowering {
    * `aggregate(name)` registered as though the label were fresh and silently dropped both the seed and
    * the operator. `withSack`'s policy travels the same way and for the same reason.
    */
-  readonly sideEffectReducers?: ReadonlyMap<string, MergePolicy>;
+  readonly sideEffectPolicies?: ReadonlyMap<string, MergePolicy>;
   /**
    * THE NAMED-COLLECTION REGISTRY a rooted sub-chain SHARES with the chain around it — see
    * `ChainCtx.collections`, which this becomes.
@@ -3068,7 +3068,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   propertySeek: opts.propertySeek ?? true,
   labelRegime: opts.labelRegime ?? 'single',
   sideEffects: opts.sideEffects ?? NO_SIDE_EFFECTS,
-  sideEffectReducers: opts.sideEffectReducers ?? NO_SIDE_EFFECT_REDUCERS,
+  sideEffectPolicies: opts.sideEffectPolicies ?? NO_SIDE_EFFECT_POLICIES,
   services: opts.services ?? NO_SERVICES,
   sack: opts.sack ?? null,
   // A FRESH registry unless a caller hands one down. `rootedRead` is the caller that does, and it
@@ -3082,7 +3082,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
 const NO_SIDE_EFFECTS: Map<string, any> = new Map();
 
 /** No reducer-form `withSideEffect` declared. */
-const NO_SIDE_EFFECT_REDUCERS: ReadonlyMap<string, MergePolicy> = new Map();
+const NO_SIDE_EFFECT_POLICIES: ReadonlyMap<string, MergePolicy> = new Map();
 
 /** No services resolved — an instrument or a test lowering without a registry. Every `call()` then
  *  declines, which is the same answer an unregistered name gets. */
@@ -3307,7 +3307,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  *   pass walk them is the general fix if a case ever needs it.)
  */
 function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Tail | null {
-  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectReducers, services, sack, collections } = settle(opts);
+  const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections } = settle(opts);
   // EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step.
   // `analyzeChain` is the same authority the legacy source seeds from, so the two cannot disagree
   // about which chains have an order to take a window from. A chain that demands one and reaches a
@@ -3318,7 +3318,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   const ordered = facts.demandsEncounter;
   const tracksPath = facts.tracksPath;
   const ctx: ChainCtx = {
-    params, correlatedChildren, collapse, ordered, tracksPath, labelRegime, sideEffects, sideEffectReducers, services, sack,
+    params, correlatedChildren, collapse, ordered, tracksPath, labelRegime, sideEffects, sideEffectPolicies, services, sack,
     collections,
     mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),
   };
@@ -3625,7 +3625,7 @@ function elementTail(
         // keyed forms hold `(key, value-contribution)` MEMBER rows and run `groupBarrier` at the
         // `cap`, they take the aggregate sites' binding unchanged.
         if (ctx.mutating) return null;
-        if (!registerMap(step, { rel: grouped.rel, framing }, ctx.collections, ctx.sideEffectReducers)) return null;
+        if (!registerMap(step, { rel: grouped.rel, framing }, ctx.collections, ctx.sideEffectPolicies)) return null;
         continue;
       }
       return continueAs(grouped.rel, framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
@@ -3650,7 +3650,7 @@ function elementTail(
     if (step.name === 'aggregate') {
       if (pathCarried(rel)) return null;
       const snapshot = registerCollection(step, rel, elementHost(rel, elem, labels), { kind: 'elements', elem },
-        ctx.collections, ctx.sideEffectReducers, childSeam(ctx, fresh), fresh, ctx.mutating);
+        ctx.collections, ctx.sideEffectPolicies, childSeam(ctx, fresh), fresh, ctx.mutating);
       if (!snapshot) return null;
       // A SNAPSHOT IS AN EXECUTION STEP, so it enters the effect sequence HERE — before whatever the
       // rest of the chain writes, which is the whole point of taking it. Same prepend a write step
@@ -3807,7 +3807,12 @@ function continueAs(
 ): Tail | null {
   switch (framing.kind) {
     case 'elements': return elementTail(rel, framing.elem, steps, from, bulked, ctx, fresh, labels);
-    case 'list': return listTail(rel, framing.of, steps, from, ctx, fresh, labels);
+    // ⚠️ The SET marker crosses. It is a fact about the value's HISTORY (`listTail`'s `set`), not about
+    // the step that reads it, so a dispatcher that dropped it turned every set arriving here back into
+    // a list — a wrong wire CLASS, since GraphBinary spells the two differently. Reachable the moment
+    // anything but the four deduping list ops produces one: `cap("a")` over a `Set`-seeded collection is
+    // the first.
+    case 'list': return listTail(rel, framing.of, steps, from, ctx, fresh, labels, !!framing.set);
     case 'path': return pathTail(rel, framing.of, framing.scalars, steps, from, ctx, fresh, labels);
     // A value's multiplicity is the traverser's, so `bulked` carries.
     case 'scalar': return scalarTail(rel, framing, steps, from, bulked, ctx, fresh, labels);
@@ -4733,7 +4738,7 @@ function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter): Roo
     // the chain around it, so it declined for want of a fact the compile already held. §6·6's
     // lesson at a second seam — coverage must measure what the algebra can express, never what the
     // caller remembered to pass.
-    services: ctx.services, sack: ctx.sack, sideEffectReducers: ctx.sideEffectReducers, collections: ctx.collections,
+    services: ctx.services, sack: ctx.sack, sideEffectPolicies: ctx.sideEffectPolicies, collections: ctx.collections,
   }, fresh);
   if (!chain) return null;
   return chain.effects ? { rel: chain.rel, framing: chain.framing, effects: chain.effects } : { rel: chain.rel, framing: chain.framing };

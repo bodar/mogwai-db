@@ -49,7 +49,7 @@ export interface RelRequest {
    *  front end skips the reducer form when building that map (there is no constant to substitute), so
    *  without this the lowering cannot tell a seeded, operator-merged collection from a fresh one —
    *  and a fact a lowering cannot SEE is one it can neither fold nor decline on. */
-  readonly sideEffectReducers: ReadonlyMap<string, MergePolicy>;
+  readonly sideEffectPolicies: ReadonlyMap<string, MergePolicy>;
 }
 
 /**
@@ -129,7 +129,7 @@ export function compileViaRel(
     propertySeek: request.propertySeek,
     services: request.services,
     sack: request.sack,
-    sideEffectReducers: request.sideEffectReducers,
+    sideEffectPolicies: request.sideEffectPolicies,
     // NOT a strategy switch either — a `withSideEffect(k, <literal>)` is a compile-time CONSTANT the
     // front-end already extracted, and the write parse has always taken it. What used to happen is
     // that `compiler.ts` refused to OFFER this route at all when one was declared, so the whole

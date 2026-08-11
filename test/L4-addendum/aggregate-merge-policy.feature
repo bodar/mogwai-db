@@ -121,6 +121,32 @@ Feature: mogwai addendum — a declared merge policy composes with everything a 
 
   @SpineRel
   @gap:aggregate-merge-policy
+  Scenario: g_withSideEffectXa_setXmarkoXX_V_both_valuesXnameX_aggregateXaX_capXaX
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSideEffect("a", {"marko"}).V().both().values("name").aggregate("a").cap("a")
+      """
+    # A CONSTANT `withSideEffect` on an aggregated label is a merge policy too, with the operator
+    # `AggregateStep`'s own constructor registers: `registerIfAbsent` keeps whichever SUPPLIER was
+    # registered first and fills in only a MISSING reducer
+    # (DefaultTraversalSideEffects.java:110-119), and AggregateStep registers
+    # `(BulkSetSupplier, Operator.addAll)` (AggregateStep.java:57). So the seed is `{"marko"}` and the
+    # merge is `addAll` — no `Operator` written anywhere in the traversal.
+    #
+    # The seed being a SET is what revokes the collection's multiset licence: `addAll(a, b)` is
+    # `a.addAll(b)`, so every contribution is offered to `Set.add` and a repeat changes nothing.
+    # `both()` reaches every name several times over and `marko` is also the seed's own item, so a
+    # LIST answer here would have twelve members. The official corpus covers the inline-`{…}` shape at
+    # `Aggregate.feature:171-180`; what it does not cover is a set seed at a GLOBAL barrier (its two
+    # are both `local(aggregate(…))`), which is this.
+    When iterated to list
+    Then the result should be unordered
+      | result                                     |
+      | s[marko,vadas,lop,josh,ripple,peter]       |
+
+  @SpineRel
+  @gap:aggregate-merge-policy
   Scenario: g_withSideEffectXa_emptyList_addAllX_V_aggregateXaX_byXageX_capXaX_unfold
     Given the modern graph
     And the traversal of

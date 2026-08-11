@@ -1,4 +1,4 @@
-import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEffects, extractSourceOptions, sideEffectReducers as extractSideEffectReducers } from '../gremlin/frontend.ts';
+import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEffects, extractSourceOptions, sideEffectPolicies as extractSideEffectPolicies } from '../gremlin/frontend.ts';
 import { type TypeNode } from '../gremlin/types.ts';
 import { runPasses } from './ir/passes.ts';
 import { LoweringEngine, collapseSafeFastPaths } from './engine/engine.ts';
@@ -53,7 +53,7 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   // The reducer form's LABELS, which `extractSideEffects` deliberately leaves out of the constant
   // registry — a settled value the lowering declines on, exactly as `sackInit` is (§6·6: a fact the
   // route drops is indistinguishable from a lowering that cannot express it, in every counter).
-  const sideEffectReducers = extractSideEffectReducers(tree, params);
+  const sideEffectPolicies = extractSideEffectPolicies(tree, params);
   const { steps, discard } = runPasses(stepChain(tree, params, paramTypes), extractStrategies(tree, params), params, sideEffects);
   if (steps.length === 0) throw new Error('empty traversal');
 
@@ -119,7 +119,7 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
         // it, so it resolves the names and hands the lowering the settled services.
         services: servicesNamedBy(steps, request.params, engine.registry),
         sack: sackInit,
-        sideEffectReducers,
+        sideEffectPolicies: sideEffectPolicies,
       },
       steps, request.params, sideEffects,
     );

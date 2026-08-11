@@ -1,5 +1,5 @@
 {
-  "passing": 1809,
+  "passing": 1810,
   "total": 2260,
   "passed": [
     "InjectX1dX_andXerror_errorX",
@@ -1599,6 +1599,7 @@
     "g_withSideEffectXa_label_knows_out_marko_in_vadasX_mergeEXselectXaXX",
     "g_withSideEffectXa_markoX_addV_propertyXname_selectXaXX_name",
     "g_withSideEffectXa_nameX_addV_propertyXselectXaX_markoX_name",
+    "g_withSideEffectXa_set_inlineX_V_both_name_localXaggregateXaXX_capXaX",
     "g_withSideEffectXa_testX_V_hasLabelXsoftwareX_propertyXtemp_selectXaXX_valueMapXname_tempX",
     "g_withSideEffectXa_true_andX_V_constantXfalseX_aggregateXaX_capXaX",
     "g_withSideEffectXa_true_andX_V_constantXfalseX_localXaggregateX_aXX_capXaX",
@@ -2226,7 +2227,6 @@
     "g_withSideEffectXa_josh_peterX_VX1X_outXcreatedX_inXcreatedX_name_whereXwithinXaXX",
     "g_withSideEffectXa_setX_V_both_name_localXaggregateX_aXX_capXaX",
     "g_withSideEffectXa_setX_V_both_name_localXaggregateXaXX_capXaX",
-    "g_withSideEffectXa_set_inlineX_V_both_name_localXaggregateXaXX_capXaX",
     "g_withSideEffectXb_bX_VXaX_addEXknowsX_toXbX_propertyXweight_0_5X",
     "g_withSideEffectXc_created_YX_withSideEffectXm_matchedX_mergeEXlabel_knows_out_marko_in_vadasX_optionXonCreate_selectXcXX_optionXonMatch_sideEffectXpropertiesXweightX_dropX_selectXmXX_exists",
     "g_withSideEffectXc_label_person_name_markoX_withSideEffectXm_age_19X_mergeVXselectXcXX_optionXonMatch_sideEffectXpropertiesXageX_dropX_selectXmXX_option",

@@ -407,55 +407,68 @@ export function extractSourceOptions(tree: any, params: Record<string, any>): Ma
  *  withSideEffect values are compile-time constants (a map/list/scalar literal or a bound
  *  param), so a later select(key) resolves to the constant directly. The reducer form
  *  withSideEffect(key, seed, BiFunction) is NOT a constant and stays out of this map —
- *  `sideEffectReducers` below is the companion fact, and it is a SEPARATE map rather than a
- *  sentinel in this one precisely because a consumer of this registry wants a value it can
- *  substitute, and there is none. */
+ *  a consumer of THIS registry wants a value it can substitute, and there is none.
+ *  `sideEffectPolicies` below reports both forms, because the seed and the operator are a
+ *  different question from the substitutable value and every label has an answer to it. */
 export function extractSideEffects(tree: any, params: Record<string, any>): Map<string, any> {
   const out = new Map<string, any>();
   for (const w of descendants(tree, 'TraversalSourceSelfMethod_withSideEffectContext')) {
-    if (descendants(w, 'TraversalBiFunctionContext').length) continue; // reducer form → sideEffectReducers
-    const keyNode = descendants(w, 'StringLiteralContext')[0];
-    const valNode = descendants(w, 'GenericLiteralContext')[0];
-    if (!keyNode || !valNode) continue;
-    const ks: Arg[] = [], vs: Arg[] = [];
-    walkArgs(keyNode, ks, params);
-    walkArgs(valNode, vs, params);
-    if (typeof ks[0]?.value === 'string') out.set(ks[0].value, vs[0].value);
+    if (descendants(w, 'TraversalBiFunctionContext').length) continue; // reducer form → sideEffectPolicies
+    const declared = sideEffectDeclaration(w, params);
+    if (declared) out.set(declared.key, declared.policy.seed.value);
   }
   return out;
 }
 
 /**
- * The MERGE POLICY each `withSideEffect(key, seed, Operator.x)` declares, by label.
+ * The MERGE POLICY each `withSideEffect(key, …)` declares, by label — from EITHER form.
  *
- * A FACT THE FRONT END WAS DROPPING, and the drop was silent. `extractSideEffects` skips this form
- * because its value is not a constant to substitute — correct — but skipping it left the compiler
- * unable to tell a seeded, operator-merged collection from a fresh one, and a lowering that cannot
- * SEE a fact cannot decline on it. It is the same move `withSack`'s seed made, and it now travels as
- * the same object: this used to be a bare SET of labels, because with the decline standing nothing
- * could USE the seed, and handing over a value no consumer may act on invites exactly the silent
- * half-support the set existed to end. The lowering folds the policy now, so the fact travels whole.
+ * A FACT THE FRONT END WAS DROPPING, and the drop was silent. `extractSideEffects` skips the reducer
+ * form because its value is not a constant to substitute — correct — but skipping it left the compiler
+ * unable to tell a seeded, operator-merged collection from a fresh one, and a lowering that cannot SEE
+ * a fact cannot decline on it. It is the same move `withSack`'s seed made, and it travels as the same
+ * object.
  *
- * The front-end stays a thin translator either way: this reports what the traversal DECLARED, and
- * what to do about it is entirely the compiler's.
+ * ⚠️ **The CONSTANT form declares a policy too, and reading only the reducer form was a WRONG ANSWER
+ * rather than a missing feature.** `registerIfAbsent` keeps whichever SUPPLIER was registered first and
+ * fills in a missing REDUCER from the step
+ * (`vendor/tinkerpop/gremlin-core/.../util/DefaultTraversalSideEffects.java:110-119`), and
+ * `AggregateStep`'s constructor registers `(BulkSetSupplier, Operator.addAll)` (`AggregateStep.java:57`)
+ * — so `withSideEffect("a", {"alice"}).V()…aggregate("a")…cap("a")` is seed `{"alice"}` merged by
+ * `addAll`, which is `Aggregate.feature:171-180`'s deduped `s[alice,marko,…]`. Reporting only the
+ * reducer form dropped that seed AND its set-ness and answered a duplicated list.
+ *
+ * So `operator` is left ABSENT for the constant form rather than defaulted here: which default applies
+ * is the CONSUMING STEP's fact (`aggregate` says `addAll`, `group` says its own), exactly as
+ * `registerIfAbsent` models it, and a front end that picked one would be answering a compiler question.
+ *
+ * The front-end stays a thin translator either way: this reports what the traversal DECLARED, and what
+ * to do about it is entirely the compiler's.
  */
-export function sideEffectReducers(tree: any, params: Record<string, any>): ReadonlyMap<string, MergePolicy> {
+export function sideEffectPolicies(tree: any, params: Record<string, any>): ReadonlyMap<string, MergePolicy> {
   const out = new Map<string, MergePolicy>();
   for (const w of descendants(tree, 'TraversalSourceSelfMethod_withSideEffectContext')) {
-    if (!descendants(w, 'TraversalBiFunctionContext').length) continue;
-    const keyNode = descendants(w, 'StringLiteralContext')[0];
-    const seedNode = descendants(w, 'GenericLiteralContext')[0];
-    if (!keyNode || !seedNode) continue;
-    const ks: Arg[] = [], seed: Arg[] = [];
-    walkArgs(keyNode, ks, params);
-    walkArgs(seedNode, seed, params);
-    // A COLLECTION seed is ONE `Arg` carrying a JS array/Set (`collectionArg`), not N flattened ones,
-    // so the seed is `seed[0]` whatever its shape — and a scalar-only consumer declines on it through
-    // `constLit`, which has no literal form for a collection.
-    if (typeof ks[0]?.value === 'string' && seed.length)
-      out.set(ks[0].value, { seed: seed[0]!, operator: operatorNamed(w) });
+    const declared = sideEffectDeclaration(w, params);
+    if (declared) out.set(declared.key, declared.policy);
   }
   return out;
+}
+
+/** ONE `withSideEffect(key, seed[, Operator.x])` node, read once — the key and the policy it declares.
+ *  Shared by the two registries above so they cannot disagree about which node counts or about what its
+ *  seed is; a COLLECTION seed is ONE `Arg` carrying a JS array/Set (`collectionArg`), never N flattened
+ *  ones, so the seed is `args[0]` whatever its shape. */
+function sideEffectDeclaration(
+  node: any, params: Record<string, any>,
+): { readonly key: string; readonly policy: MergePolicy } | null {
+  const keyNode = descendants(node, 'StringLiteralContext')[0];
+  const seedNode = descendants(node, 'GenericLiteralContext')[0];
+  if (!keyNode || !seedNode) return null;
+  const keys: Arg[] = [], seed: Arg[] = [];
+  walkArgs(keyNode, keys, params);
+  walkArgs(seedNode, seed, params);
+  if (typeof keys[0]?.value !== 'string' || !seed.length) return null;
+  return { key: keys[0].value, policy: { seed: seed[0]!, operator: operatorNamed(node) } };
 }
 
 /** Pull a step context's arguments out as `Arg[]` — each a value + its canonical type + its
