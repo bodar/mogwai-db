@@ -400,13 +400,13 @@ unroll should only claim it when no other regime can.
 
 ## 7. THE COLLAPSE AUTHORITY — one, not two (the big change)
 
-**Status: items 2 and 3 LANDED on trunk (`c75469c`); items 1 and 4 not started.** That is enough to
-discharge the bounded cell's precondition — the identity the general analysis refused is now deleted
-before it sees it — so §8's increments can proceed while the per-position rewrite (item 1) and
-`bulk.ts`'s deletion (item 4) remain open. The original framing follows, still accurate about the
-finding. Scope of what is LEFT is large and the
-direction is not in doubt — both references model it the way this section proposes, and neither
-models it the way we do today.**
+**Status: ✅ ALL FOUR ITEMS LANDED. Item 2 and 3 at `c75469c`, item 4 (`bulk.ts` deleted) at §8 item 7,
+item 1 (the per-position answer) across §8 items 8a–8c — `ea51e9b`, `6e8a3f2`, `7d3b100`, `1e278c7`.**
+There is ONE collapse authority and its shape is positional, which is what this section set out to do.
+The original framing follows because it is still the right account of the FINDING, and its §7.2
+refutation is still the reason a chain-global relaxation must never be retried; what has changed is
+that the chain-global form is no longer in RelIR's path at all. Both references model it per position
+and both are cited where the code makes the decision (`ir/bulk.ts`).
 
 ### 7.1 The finding
 
@@ -417,11 +417,18 @@ There are TWO collapse analyses in this compiler, and they disagree:
 | `collapseSafe` | `src/compiler/ir/analyze.ts` | ONE boolean for the WHOLE chain | movement/filter prefix + a reducer/`groupCount` terminal |
 | `suffixBulkSafe` / `bulkPlan` | `src/compiler/steps/tail/bulk.ts` | legacy's `repeat()`-specific suffix rule | the above **plus** `as(labels)`/`select(labels)` under a `count()` terminal |
 
-> **Both rows are now historical, and the second is GONE** — `bulk.ts` was deleted at §8 item 7, so
-> there has been ONE authority since. What §8 item 8 finishes is the surviving row's SHAPE: the
-> chain-global boolean, which folds two independent questions together. The positional half now lives
-> in `src/compiler/ir/bulk.ts` (§8 item 8a) — same concept name at the layer that owns it, deliberately,
-> since it is the one answer both spines ask.
+> **✅ BOTH ROWS ARE HISTORY, AND §7 IS CLOSED.** `bulk.ts` went at §8 item 7, so there has been ONE
+> authority since; §8 item 8 then fixed the surviving row's SHAPE, which was the real defect — a
+> chain-global boolean folding two independent questions together. Where they live now:
+>
+> | the question | who answers it | shape |
+> |---|---|---|
+> | may these rows MERGE here? | `channels.ts`'s `CHANNEL_GROUP_POLICY` (`groupableChannels`) | per NODE, off the channels carried there |
+> | will the multiplicity be READ? | `src/compiler/ir/bulk.ts`'s `bulkObservedFrom` | per POSITION, over the suffix |
+> | is a collapse safe for this whole chain? | `analyze.ts`'s `legacyCollapseSafe` | LEGACY'S GATE ONLY — dies with that route |
+>
+> The concept keeps its name at the layer that owns it (`ir/bulk.ts`), deliberately: it is the one
+> answer both spines are spelled from while both exist.
 
 Legacy's repeat bulk path routes AROUND the general analysis: it collapses the walk's own hops
 itself, then hands a `(id, bulk)` frontier to the generic tail with `movementCollapse` FORCED ON.
@@ -492,11 +499,24 @@ the channels carried AT that node — `ctx.collapse && !encounterOf(rel.channels
 answers it. The chain-global boolean is the LEGACY shape, and `collapseSafe` is the last place a
 whole-chain answer stands in for a per-position one.
 
+> ✅ **DONE, and the gate now reads with a third conjunct that was the missing half:**
+> `ctx.collapse && !encounterOf(…) && groupableChannels(…) && bulkObservedFrom(steps, at + 1)`.
+> "One side" was right about the MERGE question and silent about the other one — whether the
+> multiplicity a merge creates is ever READ — which a channel cannot state because it is a property of
+> the suffix. The finding that made it correctness rather than tractability: **only the `elements`
+> framing arm carries `bulk` to the wire**, so a collapse in front of a chain that retypes to a scalar
+> and ends answers N traversers as one row. See §8 items 8a–8c for the three defects that surfaced
+> while flipping the authority, each of which outlives this section.
+
 ### 7.4 What lands
 
-1. **Make the per-position answer the only one.** A collapse is legal at a node when every channel
-   carried there has a defined answer under grouping — which `groupableChannels` already decides.
-   `collapseSafe` stops being a chain verdict and becomes, at most, a seeding hint.
+1. ✅ **LANDED (§8 items 8a–8c) — the per-position answer is the only one RelIR has.** A collapse is
+   legal at a node when every channel carried there has a defined answer under grouping
+   (`groupableChannels`) AND the suffix reads the multiplicity (`ir/bulk.ts`'s `bulkObservedFrom`) —
+   the second conjunct is the part this item under-specified, and §8 item 8a records why it is
+   correctness. `collapseSafe` became neither a chain verdict nor a seeding hint but
+   `legacyCollapseSafe`, a gate belonging to the one route with no positional answer; it left
+   `ChainFacts` entirely, since a field on a shared record implied a fact both spines read.
 2. ✅ **LANDED (`c75469c`) — an alias that nothing reads is not carried.** `retractUnreadAlias`, a
    `simplify` Pass. This is `PathRetractionStrategy`, which we listed as a no-op while performing none
    of it; it now genuinely fires and `withoutStrategies` genuinely suppresses it.
@@ -871,12 +891,36 @@ moved `src/compiler/rel/`.
      `bulkObservedFrom` admits it (a dedup resets the multiplicity), but a slice after a fan-out makes
      `demandsEncounter` true, so the source seeds the emission order and the hop is refused by the
      mutual-exclusion conjunct instead. The pin asserts the predicate, which is what it measures.
-   - 8c. **Then admit the remaining vocabulary, one name with one argument.** `select` first (a
-     single-label select re-frames to the element an alias holds and looks bulk-transparent, but
-     whether `selectKeys` carries the channel has not been measured), then `otherV`, then the
-     unordered bulked slice — which is a genuine new capability rather than an admission, since
-     `sliceOp` declines a bulked relation with no emission order and a deterministic window order
-     would let it answer.
+   - 8c. ✅ **LANDED (`1e278c7`) — collapse-safety stops being a chain FACT, which closes §7.4 item 1.**
+     `ChainFacts` held what BOTH spines read, and `collapseSafe` had stopped being one of those: RelIR
+     reads `tracksPath`/`demandsEncounter` to seed its channels and answers collapse-safety per
+     position, so the field implied a shared concern that no longer existed and made RelIR compute a
+     verdict it discarded on every compile. It is now `legacyCollapseSafe(steps)`, whose single caller
+     is legacy's `collapseSafeFastPaths`. The encounter mutual-exclusion moved INSIDE it (it is part of
+     what collapse-safety means, not a second condition a call site restates); `branch.ts`'s synthetic
+     `collapseSafe: false` arm field is gone; and **`compiler.ts` no longer calls `analyzeChain` at
+     all** — the lint gate found that, and it is evidence rather than tidy-up, since the compile entry
+     point was running a whole-chain analysis solely to feed a legacy flag.
+     It also states the DELETION as a location rather than a comment: when the legacy route goes,
+     `legacyCollapseSafe` + `collapseSafeFastPaths` + the `COLLAPSE_*` vocabularies go with it and
+     `ir/bulk.ts` survives as the one authority.
+     ⚠️ **MEASURED, AND IT DECIDES WHAT NOT TO BUILD: the remaining admission candidates are worth
+     nothing.** `otherV` downstream of a collapse and a single-label `select` are each genuinely
+     bulk-transparent — `readProjection` carries `source.channels` through (`alias.ts:217-222`), which
+     is the measurement `ir/bulk.ts`'s header asked for — and admitting either takes the corpus from
+     50 collapsing plans to 50. `select`'s valuable case was already gone: `retractUnobservedSelect`
+     deletes a `select` under a `count()` terminal, so the shape that would have benefited never
+     reaches the predicate. A missing collapse is a plan-quality question and never a wrong answer, so
+     corpus reach IS the right measure of value here (unlike coverage, where absence is not a licence
+     to skip) — and building these would be gold-plating in its exact sense: a perf optimization for
+     queries nobody runs. **The unordered bulked slice is the one candidate with real value left**, and
+     it is a CAPABILITY rather than an admission: `bulkObservedFrom` refuses a collapse in front of an
+     unordered slice because `bulkSlice` has no position to accumulate along, so
+     `g.V().both().both().limit(2)` enumerates a fan-out it could trim. Minting a deterministic window
+     order (by id) would let it answer, at the cost of choosing WHICH traversers an unordered `limit`
+     returns — legal, since TinkerPop specifies only membership there, but it changes an answer digest
+     and so needs the census re-recorded with that argument, exactly as §8 item 4's `range()` scenario
+     did. Not started, and correctly LAST: it is the only piece here that trades a pinned answer.
 
 ### What to do when an increment goes red
 
