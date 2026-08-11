@@ -1,7 +1,7 @@
 # A NAMED COLLECTION IS A BOUND RELATION, REDUCED AT THE READ
 
-_Status: **Phases 1, 2, 3a, 5, 6 and 7's fold LANDED.** Open: **7's BULK pair** (`addAll`/`assign`, 4
-scenarios), **4** (13), **3b**, **2b**, **§8**. Numbers re-validated 2026-08-11 against `l3-state.json` +
+_Status: **Phases 1, 2, 3a, 5, 6 and 7 LANDED except `assign`.** Open: **4** (13), **`assign` + the `Set`
+seed**, **3b**, **2b**, **§8**. Numbers re-validated 2026-08-11 against `l3-state.json` +
 `scenarios.tsv`; absolute L3 floors are deliberately not quoted (they move for unrelated reasons — read the
 instruments). **Read this before touching `src/compiler/rel/collection.ts`.**_
 
@@ -39,9 +39,12 @@ not a gap** — RelIR declined and legacy mis-executed.
   wrong against the reference: a side effect lives on the ROOT traversal (`AggregateStep.java:57`).
 - **6 — a site is a `snapshot` Binding**, so a collection survives a mutating chain. Deleted two of the four
   `ctx.mutating` declines; two remain, for the keyed forms only (see Phase 4).
-- **7's FOLD — a merge policy is a seeded LEFT FOLD** (`src/compiler/rel/operator.ts` + `seededFold`).
+- **7 — a merge policy is a seeded LEFT FOLD, and `addAll` is the SEED AS A SITE**
+  (`src/compiler/rel/operator.ts` + `seededFold`/`seedAsSite`).
   `sum`/`minus`/`mult`/`div`/`min`/`max`/`and`/`or` all lower as ONE `Recursive` walk over the ordered
-  member relation, **+20 L3**. The `ROW_NUMBER` that turns "the members in order" into "the member at
+  member relation, and `addAll` prepends the seed's items as one more site — **+22 L3 together**, plus
+  `test/L4-addendum/aggregate-merge-policy.feature` for the six compositions the corpus never asks (it
+  covers exactly one shape per operator). The `ROW_NUMBER` that turns "the members in order" into "the member at
   position n" is computed OUTSIDE the walk and joined in — a term may hold no window function, and the
   join is what opens the nested SELECT that makes it legal. Three things fell out rather than needing
   arms: an unreached collection answers the SEED (the walk's seed row IS the last row), a multi-site
@@ -61,9 +64,10 @@ not a gap** — RelIR declined and legacy mis-executed.
 
 ## 🚧 What is LEFT
 
-### Phase 7's remainder — the BULK pair `addAll`/`assign`. **4 scenarios.**
+### Phase 7's remainder — `assign`, and the `Set` seed. **2 scenarios + a silent wrong answer.**
 
-The fold LANDED (see above); what is left is the other branch of the very line the fold's design came from.
+The fold and `addAll` LANDED (see above). What is left is the branch of the line the fold's design came
+from that no expression and no site list can answer.
 `AggregateStep.processAllStarts` (`:131-151`) reads the registered operator and splits:
 
 ```java
@@ -74,11 +78,22 @@ else                      bulkSet.forEach(p -> sideEffects.add(k, p));   // memb
 
 So a bulk operator's lowering is a question about the member RELATION, which is why it is not the fold:
 
-- **`addAll` is the SEED AS SITE 0.** `Operator.addAll(seedCollection, siteBulkSet)` appends, so the answer
-  is the seed's items followed by site 1's members, then site 2's — which is exactly `Collection.sites` with
-  one more site in front. `make.values` over the seed's `members` (each already an `Arg` carrying its own
-  type — `collectionArg`), unioned by the machinery Phase 2 built. **A `Set` seed additionally DEDUPS**
-  (`Aggregate.feature:279-563`), which is the one place `foldScalars`' multiset licence is revoked.
+- **`addAll` is the SEED AS SITE 0 — LANDED** (`seedAsSite`). It went through `accumulate`, so nothing new
+  decided the order and nothing new merged the types.
+- **A `Set` seed DEDUPS and still declines.** Two shapes want it and they arrive by DIFFERENT routes:
+  `withSideEffect("a", {1i,2i}, Operator.addAll)` through the policy map, and — measured, and currently a
+  SILENT WRONG ANSWER on the RelIR route — `withSideEffect("a", {"alice"})` through the CONSTANT registry.
+  That second one is the interesting half: `registerIfAbsent` keeps the SUPPLIER whoever registered first
+  gave it and lets `AggregateStep` fill in the REDUCER
+  (`DefaultTraversalSideEffects.java:110-119`), so **a constant `withSideEffect` on a label an `aggregate`
+  also fills IS a merge policy with the default operator `addAll`** — which we drop entirely today.
+  Verified 2026-08-11: `g.withSideEffect("a", {"alice"}).V().both().values("name").local(aggregate("a"))
+  .cap("a")` answers a 12-member duplicated list where `Aggregate.feature:171-180` asks for
+  `s[alice,marko,vadas,lop,josh,ripple,peter]`. `SideEffect.feature:79-94` is the same shape with `{}`.
+  So the work is: read the policy from EITHER registry (one function, mirroring `registerIfAbsent`
+  exactly), and honour the seed's SET-ness with a `Distinct` over the member union plus the `set: true`
+  framing marker. ⚠️ A scalar constant on an aggregated label is NOT this — `addAll(1, bulkSet)` is the
+  reference's own IllegalArgumentException, so it stays a decline.
 - **`assign` needs the SITE'S GRANULARITY, and the IR erases it.** Global and local differ here and only
   here: `g.withSideEffect("a",[1i,2i,3i],Operator.assign).V().aggregate("a").by("age").cap("a")` is the
   whole member list `[29,27,32,35]`, while the `local(aggregate(…))` form after an `order().by("age")` is
@@ -206,9 +221,11 @@ member relations is the correct lowering and no interleave-by-encounter is requi
 3. **The `by()` projection is correlated and STAYS at the write site.** Only the FOLD moves. Moving the
    projection would evaluate `by(__.outE("created").count())` against the wrong traverser.
 4. **A `Set` seed DEDUPS** — the one place a collection's multiset licence is revoked, and still unbuilt.
-   The decline is by OPERATOR now (`BULK_OPS`), not by label, so the seed can no longer be silently
-   dropped for the eight that fold; keep `addAll` refused until the seed's SET-ness is honoured, because a
-   list-shaped answer to a `Set` seed is the wrong answer rather than an approximate one.
+   The decline is by OPERATOR now (`COLLECTION_OPS`), not by label, so a seed can no longer be silently
+   dropped for the operators that DO fold; keep the `Set` shape refused until its dedup is honoured,
+   because a list-shaped answer to a `Set` seed is the wrong answer rather than an approximate one. ⚠️ And
+   the CONSTANT registry reaches the same shape without naming an operator at all — see Phase 7's
+   remainder; that path is a wrong answer TODAY.
 5. **A rooted body is correlated to NOTHING.** Registering inside one and reading outside is fine, and so is
    the reverse (side effects are root-global). What is NOT fine is a rooted body whose member relation
    references the outer chain's rows — `checkPlan`'s scope check catches it and must keep catching it.
