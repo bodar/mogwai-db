@@ -63,6 +63,10 @@ not a gap** — RelIR declined and legacy mis-executed.
   scenario the merge would answer is blocked further along its own chain (see below), so
   `test/L4-addendum/group-multi-site.feature` is the only place it is asserted at all — which is
   `legality-not-corpus-defines-support` applied exactly.
+  ✅ **Then the repeat UNROLL admitted them, and that is where the L3 came from: +6.** `aggregate` and
+  the keyed groupings joined `UNROLLABLE_BARRIERS` on the argument this plan supplies — n phases ARE n
+  registration sites, so nothing has to cross a phase boundary. Note the shape of the win: the substrate
+  moved nothing, and the PASS that could then use it moved six.
   ✅ The `reduced` arm SURVIVED, and its status changed: it is not transitional after all. A POOLED value
   (`by(<reducing traversal>)`) has no `(key, contribution)` row behind it — the members' child rows pool
   and the barrier reduces the pool once — so it is single-site BY CONSTRUCTION. That is what "this shape
@@ -127,8 +131,9 @@ ranking is the point — **do not come back here looking for collection work**:
 |---|---|---|
 | `select(Column.keys)` over an ELEMENT-keyed map | 1 + unblocks the splice | `entrySide`/`sideList` decline an `elem` side, deliberately: the blob holds a `{t:'vertex', v:{…}}` node and the SCALAR framer would emit it as a JSON string (`map.ts`'s own comment) |
 | `count(Scope.local)` over a MAP | 3 | the list/map local-reducer vocabulary — `select("a").count(local)` counts ENTRIES |
-| `repeat(groupCount("m")…)` bodies | 4 | the unroll's admitted-body set. An unrolled body IS N sites, which now WORKS, so this is the same discharge Phase 2 gave `aggregate` — admit the keyed forms and measure |
+| ~~`repeat(groupCount("m")…)` bodies~~ | ~~4~~ | ✅ **LANDED** — `aggregate` and the keyed groupings joined `UNROLLABLE_BARRIERS`, because n phases ARE n sites. **+6 L3**, and it shed 2 scenarios on LEGACY (the unroll is a Pass, so legacy gets the phases and its last-write-wins answers half the multiset — §6·1 allows it, and three exec tests are `relOnly` naming the shed) |
 | a declared policy on a keyed label | 1 | a seeded grouping accumulates INTO the declared map (`GroupBiOperator` merges maps). `registerGrouping` declines rather than dropping the seed |
+| the L4 pins for the merge itself | — | `test/L4-addendum/group-multi-site.feature`, because the corpus's one multi-site scenario is unreachable |
 | `union`/`choose` arms, `barrier()` mid-chain, `subgraph`/`tree` | rest | their own features |
 
 #### The one admission that is READY, and has now been tried and reverted TWICE
