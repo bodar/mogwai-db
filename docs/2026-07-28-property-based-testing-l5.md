@@ -1,47 +1,278 @@
-# L5 property testing
+# Property-based testing (L5) — design rationale
 
-L5 measures composition that no fixed corpus can enumerate. Current commands and mechanics live in
-`test/L5-properties/README.md`; this document records the test architecture.
+Landed 2026-07-28. Current mechanics + how to run it: `test/L5-properties/README.md` (that file is
+deliberately current-state only). This one holds the *why*, the design space we did not build, and the
+architectural lessons the work produced.
 
-## Independent generators and oracles
+## The problem L5 exists to solve
 
-The generator is a hand-written Gremlin shape lattice, not a reflection of compiler dispatch. The
-grammar admits syntactically valid nonsense; compiler dispatch would define validity as current
-support and hide valid-but-unsupported traversals. The lattice must retain distinctions such as
-vertex versus edge and a collection's member shape. `table.test.ts` guards every generated chain by
-parsing and chaining it.
+L1–L4 all assert things about traversals **someone wrote down** — a fixed corpus, a snapshot, a
+Gherkin scenario. `test/CLAUDE.md` states the goal those cannot measure: the **ceiling**, "generic
+lowering that composes the full nested Gremlin grammar at any valid depth/combination". A rising L3
+count is a *side effect* of ceiling work, never a measurement of it: 2,297 scenarios sample the
+compositions TinkerPop's authors happened to write, and say nothing about depth-4 nestings nobody
+wrote.
 
-The generator lives in `test/L5-properties/shape.ts`; fast-path declarations live in
-`src/compiler/options/fast-paths.ts`; laws and capability signatures live beside the generator.
-Keep these authorities independent: the generator states legal Gremlin composition, while the
-compiler states what it currently lowers.
+A generator samples the composition space instead of enumerating a corpus, so it measures composition
+directly. That is the whole argument for the level.
 
-Three complementary oracles are required:
+Second, narrower motive: `FastPathConfig`'s six switches each promise "Disabling routes through the
+generic path — result-equivalent", and `FastPath.equivalentWhen` makes that a *required field*. The
+field was enforced non-empty; the claim behind it had never been checked. **No test had ever executed
+the compiler's generic lowering path.** That turned out to matter — see the findings below.
 
-- **Fast-path differential:** enabled and disabled fast paths must produce the same result. The
-  generic path is the semantic authority, so disagreement is a defect.
-- **Metamorphic laws:** equivalent traversals, such as movement expansions or filter partitions,
-  must agree in generated contexts. These detect defects shared by both differential sides.
-- **Capability discipline:** generated work may return rows or a declared deferral, but never a raw
-  compiler or SQLite failure. This is the fail-closed contract exercised compositionally.
+## The oracle design space
 
-No one oracle subsumes the others. A differential cannot see a defect both implementations share;
-a metamorphic law cannot establish every concrete value; a capability test cannot establish a result.
+A generator is easy; the oracle is the hard part. Four designs were considered, all of which avoid a
+reference implementation. Three are built.
 
-## Ratchets and reproduction
+| | Oracle | Cost | Covers | Status |
+|---|---|---|---|---|
+| 1 | **Fast-path differential** — `run(q, on) ≡ run(q, off)` | lowest | the six optimized lowerings | **built** |
+| 2 | **Transparent-wrapper equivalence** — if `q` yields rows so must `local(q)` / `union(q)` / `filter(__.identity())`-wrapped `q` | low | the silent-`[]` class CLAUDE.md flags twice | **built** — folded into 3 (same comparison, same harness) |
+| 3 | **Metamorphic laws** — `out(l) ≡ outE(l).inV()`, `count() ≡ fold().count(local)`, `where(b) ⊎ where(not(b)) = identity` | medium | semantics BOTH lowerings share | **built** (`laws.ts`, `metamorphic.test.ts`) |
+| 4 | **Fail-closed discipline** — every outcome is rows or a *clear deferral*, never a raw `TypeError`/SQLite error | low | the guardrail's own claim | not built |
 
-The gate has no acceptance list of known failures. Known signatures carry a diagnosis and stale
-entries fail once they stop reproducing. Record one root cause rather than every generated spelling.
+Differential-vs-TinkerPop (a real JVM reference) was rejected: it is the gold oracle and needs a JVM
+in CI, for a fraction more coverage than 1–4 give combined.
 
-The normal test derives its seed from `HEAD`, prints it, and accepts `L5_SEED` for reproduction.
-Thus a commit has the same generated corpus locally and in CI, while successive commits explore
-new inputs. Deeper random sweeps may vary independently, but must print a replayable seed.
+**Why 1 first.** It is self-oracling. `options/fast-paths.ts` declares the generic path the *semantic
+authority*, so a disagreement is by definition a defect on the optimized side — no expected-value
+table, no reference, nothing to maintain. It also happened to cover the code with the least prior
+coverage, since nothing had ever run the generic path.
 
-## Use
+**Why 3 mattered most, and what it found.** It is the only oracle that can see a defect the two
+lowerings share, and it justified itself on its first deep run: two silent wrong answers the
+differential is structurally blind to — `otherV()` miscounting under live path tracking, and a
+non-terminal `fold()` after `dedup()` folding the un-deduplicated multiset. Both were carried as
+`knownBroken` entries on their laws (same discipline as `known.ts`: a tracked bug, never an
+acceptable exception) and **both are now FIXED** — `knownBroken` is empty, and the `otherV()` half
+went with `POSITION_MOVEMENTS` gaining `OTHER_V` (`tail/path.ts`). Re-probed 2026-08-01.
 
-When adding a fast path, a route gate, or shape-sensitive lowering, add or strengthen the relevant
-property first. Treat a new signature as a diagnosis task, not an exclusion to normalize away.
+Two design points worth keeping. **A law is instantiated over a GENERATED prefix** — `out(l) ≡
+outE(l).inV()` as a fixed pair is one assertion; over a few hundred generated vertex-shaped contexts it
+is a claim about composition, and shrinking then reduces a break to the smallest context that causes
+it (both findings shrank to three-step prefixes). **Gating differs from the differential**: there, one
+side throwing IS a defect, because a fast path must not change what is supported; here it only means
+the law is not evaluable, so it is counted and reported, split by whether the PREFIX or the law's own
+FORM was unsupported — the latter being the more interesting signal.
 
-When extending the lattice, first trace the corresponding TinkerPop step's input/output contract in
-the vendored core. Add a parse-and-chain witness for the new transition and at least one law or
-capability expectation that could fail if the compiler silently accepts the wrong shape.
+Oracle 4 (fail-closed discipline) **is now BUILT — twice over, from two directions** (corrected
+2026-07-29): `test/census/` separates `crashed` from `deferred` over the whole corpus and gates the
+count from growing, and `test/L5-properties/capability.test.ts` + `capability-baseline.ts` permit
+executions and *declared* deferrals over generated compositions while failing on any new raw failure.
+The census covers what somebody wrote down; the capability ratchet covers what the lattice can compose.
+
+## The blind spot — and why it is structural
+
+The differential compares the two lowerings *against each other*. It can therefore only see a
+**disagreement**. A defect present in both, or one whose two halves cancel, is invisible to it by
+construction. This is not a gap to patch; it is what the design is.
+
+Four such defects were found this way. The first two were found by hand while diagnosing the
+differential's output; the last two by oracle 3, which exists precisely to find them. **All four are
+now fixed** — re-probed 2026-08-01, one traversal each, and the outcome is recorded per entry below
+rather than as a blanket note, because the value of the list is the FAILURE MODE each one names.
+They also all cited `outstanding-work` item 0, which no longer exists (its number was retired when
+it landed), so the citations are dropped rather than repointed:
+
+- **Non-productive `by(key)` was not applied at `order()`.** `g.V().order().by('age')` returned all
+  six modern-graph vertices; TinkerPop returns four (the two software vertices have no `age`). Both
+  configs agreed. Fixed.
+- **An unproductive `sum()`/`min()`/`max()`/`mean()` body in a filter position still keeps the
+  traverser.** `g.V().where(__.out().values('age').sum())` returned all six; TinkerPop returns one.
+  Both configs agreed. **Fixed** — it answers 1.
+- **`otherV()` miscounts while path tracking is live** — `g.V().out().simplePath().bothE('created')
+  .otherV()` disagreed with `.both('created')`, though the `simplePath()` is provably a no-op there.
+  **Fixed** — the two agree; `POSITION_MOVEMENTS` includes `OTHER_V`.
+- **A non-terminal `fold()` after `dedup()` folds the un-deduplicated multiset** — `dedup()` gave 4,
+  `dedup().fold().unfold()` 6. **Fixed** — they agree on every prefix probed (`V()`, `out()`,
+  `both()`).
+
+Worse than invisible: the first of the four **cancelled** one of the differential's own findings on the
+traversal that surfaced it, so the corresponding L3 scenario *passed for entirely the wrong reason*
+while its `@WithProductiveByStrategy` twin failed. Two compensating bugs read as conformance.
+
+That is the case for oracle 3, and it paid out: a metamorphic law compares against a *law*, not
+against another implementation, so shared defects have nowhere to hide.
+
+## Why the shape lattice is hand-written
+
+Gremlin's *string* grammar is far looser than Gremlin's *typing*: `chainedTraversal: traversalMethod
+(DOT traversalMethod)*` admits `count().out()`. Generating from `Gremlin.g4` would spend its budget on
+syntax noise. The real constraint is `Traversal<S,E>` — a step's legality depends on the **shape** of
+the stream it applies to — so the generator is a state machine, state = shape, transition = step.
+
+The compiler already encodes that lattice (a `Stream` union with a per-shape dispatch `Map` each).
+Reflecting the generator's table out of those Maps was considered and **rejected**: validity would
+then be *defined* as "what the compiler already supports", so a generated traversal could never be a
+valid-but-unsupported one — and those are precisely the ceiling findings worth having. The table is
+therefore an independent statement of Gremlin's typing, guarded behaviourally instead
+(`table.test.ts`: every generated traversal must parse and chain, L1's bar applied to permutations).
+
+The cost of independence is that the table can be *wrong*, and twice was — each time by letting one
+shape stand for two things (`element` covering vertex and edge, so it emitted `E().bothE()`; `list`
+not recording what it was a list *of*, so it emitted `fold().sum(local)` over vertices). Both were
+caught by the parse-and-chain guard, which is why that guard exists.
+
+## Why the ratchet runs the opposite way from L3's
+
+| | L3 (`l3-state.json`) | L5 (`known.ts`) |
+|---|---|---|
+| Shape | a **count** floor | an **exclusion list** |
+| Direction | ratchets **up** | ratchets **down**, to empty |
+| Gate | count ≥ floor, no named regression | zero *unexplained* divergences — a fixed bar |
+| Maintenance | machine-updated | hand-edited, diagnosis required |
+
+There is no L5 number to improve; the bar is a constant zero, and the only thing that moves is how
+much is exempted from it. An exemption is a reviewed edit to a committed file, not a regenerated
+artifact — and it is always a bug we have not fixed, never an acceptable divergence, because the
+generic path is the authority. A stale-entry test fails if a `KNOWN` entry stops reproducing, so a fix
+cannot leave dead weight behind.
+
+Entries are **one per root cause, not per traversal**: the first sweep's 22 divergent traversals fell
+into 17 signature groups that reduced to four causes. Recording signatures would have written 17
+near-identical entries and buried the fact that a couple of lines in one file explained most of them.
+
+## Seeds: why a fixed one is a dead instrument, and the scheme that replaces it
+
+**First, the invariant this whole section is subordinate to: CI runs exactly what a developer runs.**
+`ci → test → L5` with no CI-specific seed, sample size or skip. L5 now derives its seed from `HEAD`,
+so the same commit draws the same corpus on a laptop and a runner while each commit explores a new
+one. Any scheme that makes those two builds behave differently is rejected on that ground alone.
+
+A fixed seed buys determinism and costs the entire point of the level. **Seed 42 + `numRuns: 300` is a
+deterministic generated corpus** — the same 300 traversals every run, on every machine. Under it L5 is
+a regression gate over generated inputs, not an explorer; after the first run it discovers nothing new
+on its own. Its only standing value is holding the equivalence property over inputs no human curated,
+plus re-checking the whole L1 corpus through the generic path.
+
+The original argument for fixing it was sound but drew the wrong conclusion: *a property test that
+flakes is a property test people disable.* True — and the inference "therefore pin the seed" throws out
+discovery to buy stability. **The fix is to make a fresh seed non-flaky, not to stop drawing one.**
+
+**The landed scheme: a HEAD-derived seed plus a witness ratchet, inside the standard build.** Every
+run of `mise run test` — laptop or runner, same task, no branching on `$CI` — derives a seed from the
+commit, PRINTS it, and gates the outcome against the committed witness lists rather than against
+"did anything fail":
+
+- **The seed changes per commit and is printed.** `L5 generated: 300 traversals @ seed 81423
+  (HEAD-derived; L5_SEED=81423 to reproduce)`. Reproduction is one env var, which is the whole
+  poor-man's solution and is non-negotiable regardless of how clever the rest gets.
+- **The gate is NEW signatures only.** A raw failure already recorded in `capability-baseline.ts`
+  (with its diagnosis) is drawn, counted and reported — it does not fail the build. A signature not in
+  any ratchet fails it. So the build is green on a novel seed that only re-finds tracked defects, and
+  red exactly when the seed found something nobody has diagnosed.
+- **That is what makes rotation safe.** The flake objection assumes a fresh seed means a fresh
+  failure; with the ratchet consulted, a fresh seed means fresh *coverage*, and only genuinely new
+  information stops the build.
+
+Two properties fall out that a scheduled run could never have. Discovery becomes **unmissable rather
+than remembered** — it happens on the build everyone already runs, so there is no step to skip after
+touching a fast path. And a new signature arrives **attached to the change that exposed it**, at the
+moment its author has the context to diagnose it, instead of in a report someone reads later.
+
+The cost is honest and worth stating: the ratchets become load-bearing at build time, so an entry
+without a diagnosis silences a real finding on every future run. Both files already say exactly that,
+and both already have stale-entry checks — this scheme is what those checks were written for.
+
+**Reproducibility of a red build.** The printed seed makes any failure re-runnable verbatim
+(`L5_SEED=81423 mise run L5`), so "it failed on CI and I can't reproduce it" is not a failure mode
+here — and because CI and local run the same task with the same draw rule, a runner failure reproduces
+on a laptop by construction rather than by luck.
+
+**Draw rule — settled.** Two candidates were considered:
+
+| | Per-run `$RANDOM` | Derived from `HEAD` |
+|---|---|---|
+| Discovery | every run, maximal | every commit |
+| Re-running the SAME commit | a different corpus | identical — retry-stable |
+| A red build | reproduces via the printed seed | reproduces by checking out the commit |
+
+`HEAD`-derived is the better fit for the "CI runs what you run" invariant: the same commit gives the
+same corpus everywhere, so CI cannot fail on a draw the author's identical local run never made, and a
+flaky-looking retry is impossible. Per-run `$RANDOM` finds more per unit time and suits `L5-random`,
+which is the deep sweep and not the gate.
+
+## What it found (the case for the level)
+
+First run: 22 divergent traversals, 17 signature groups, **four root causes** — every one of them a
+real defect, two of them silent wrong answers. Fixing them took L3 from 1,479 to 1,494 (+15, −0).
+
+1. Infix-composed predicates (`P1.or(P2)`, `TextP…and(…)`, `negate()`) were **flattened by the
+   front-end** into sibling args, so the connective was lost before the compiler saw the chain and the
+   second operand was silently dropped. Front-end fix; +11 L3 on its own.
+2. 3-arg `has(LABEL,k,v)` inside any predicate body evaluated to constant FALSE (and constant TRUE
+   under `not()`) — the inline leaf destructured two args regardless of arity.
+3. `predicateInlining` was **not disable-safe**: a predicate body ending in a reducer/projection was
+   lowerable only by the fast path, so disabling it *narrowed* support — the contract inverted. Plus a
+   bogus `and()/or() needs at least two branches` guard that made the inline path narrower than the
+   path it accelerates.
+4. `bulkRepeatCount` seeded its frontier with `COUNT(*)` — rows, not traversers. The path forces
+   `movementCollapse` on, so a movement prefix arrives already collapsed and `E().outV()` hands the
+   seed one row with `bulk=3`; the input multiset was flattened.
+   `g.E().outV().repeat(__.both("knows")).times(2).count()` gave 4 where 10 is correct — **a wrong
+   answer in the default (production) config**.
+
+Each is pinned in an L4 `.feature`, so the ceiling finding became floor.
+
+## Architectural lesson: the anchor rule (superseded framing — see the shape doc)
+
+**This section originally drew the wrong lesson from its own evidence.** It is corrected here rather
+than deleted, because the coarse version got cited. The authority on the boundary is
+`docs/2026-07-28-shape-vocabulary-architecture.md` §6.
+
+The history. Non-productive `by(key)` at `order()` was first implemented as a `decoration` **Pass**
+injecting `has(key)` before the order — one central place, all four of `order()`'s lowering routes
+inheriting it. It broke all six non-element `order().by(key)` forms (list, map, group, record, scalar,
+path), because `has(key)` means nothing on any of them.
+
+What this section used to conclude — *"an IR Pass may rewrite what is decidable from the chain;
+anything needing the stream's shape belongs in the lowering"* — is **too wide, and refuted by two
+correct Passes in the file I was editing.** `injectSubgraphRec` and `injectPartitionRec` inject
+shape-specifically from the IR and are right to: they anchor on `VERTEX_PRODUCERS`/`EDGE_PRODUCERS`
+(`ir/strategies.ts:201-203`), step names whose output shape is fixed **by the name alone**. `order()`'s
+output shape is its input shape, so it had no such anchor. The failure was not missing information —
+it was an **unchecked shape claim**.
+
+Two facts I had wrong, both from the shape doc. "The IR has no shape" is not a law: `PassContext`
+(`ir/pass.ts:39-55`) has no shape field *and no `ChainFacts` field*, and `analyze()` runs **after**
+`runPasses()` — it is a property of a struct definition. And `child-shape.ts` already holds a
+syntax-only shape **propagation** engine (pure `Step[]` reasoning, no Query or schema); what it cannot
+do is manufacture an entry shape.
+
+So the rule to apply is the shape doc's, which subsumes this section:
+
+> **Shape may be an annotation a Pass CONSULTS and may decline on. It must never be a representation
+> a Pass CONSTRUCTS or lowering CONSUMES. Sharing across shapes is by registration into a Map, never a
+> widening fallback chain.**
+
+And the reason not to simply add the field, which is the sharper half: **a fail-closed lowering
+throws; a declining decoration Pass is silent.** A shape-guarded Pass hitting `unknown` silently
+reproduces the original wrong answer — and L5's differential cannot see it, because both configs
+decline identically. The loud variant is no better: throwing when element-ness is unprovable would
+reject every non-element `order().by(key)` form that works today, violating "never reject a valid input
+to keep scope small". Both failure modes argue for the anchor rule as a **type-level prohibition**
+(shape doc §8 step 5) rather than a documented convention — this repo has the receipt for the
+difference in `FastPath.equivalentWhen`, a required field whose claim had never been checked.
+
+Keep the proportion in view: of 36 diagnosed defects, exactly **one** was missing shape information —
+this revert — and it argues against shape-in-the-IR rather than for it (shape doc §5).
+
+What survives unchanged is the *mechanical* conclusion, which was never the contested part: the way to
+avoid N divergent copies in the lowering is one representation-neutral predicate builder each site
+feeds its own key expression — `orderProductivityFilter` (`steps/tail/modulation.ts`), sharing
+`classifyBy` with the sort terms so the filter and the `ORDER BY` cannot disagree about which `by()`s
+project a key. `dedup().by()` had reached that independently; this generalised its one line.
+
+And the contrast still holds for `alwaysProductiveFilterIsNoOp` (a `simplify` Pass): "does this body
+always produce a traverser" is decidable from the chain alone — no shape claim, anchored or otherwise —
+so it *is* correctly a Pass, and being one is what makes `predicateInlining` disable-safe there, since
+neither lowering ever sees the removed step.
+
+## Open
+
+`docs/outstanding-work.md` tracks the remaining compiler and oracle work. The L5 discovery process is
+no longer open: the former support divergences were fixed, regression-promoted to L4, and the standard
+build now derives and prints its seed. `L5-random` remains the larger, deliberately random sweep;
+its high-depth table integrity failure is tracked separately as item 0e.

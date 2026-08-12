@@ -1,45 +1,358 @@
-# Query-plan stability
+# Query-plan stability — the 516× we are leaving on the floor
 
-Generated SQL must not depend on SQLite guessing the wrong join order on skewed graph data. This is
-correctness under Durable Object request budgets, not an optional micro-optimization.
+> **STATUS: §3·2 HAS LANDED; §3·1 AND §4 HAVE NOT.** Measured 2026-08-07 on trunk at `41c897d`,
+> `bun:sqlite` 3.53.0, in-memory, synthetic graphs; the platform half re-measured on real workerd via
+> `test/cf-probe/`. Method at the bottom (§7).
+>
+> Landed: the order fence (`Join.ordered` → SQLite `CROSS JOIN`), the driving property seek
+> (`src/rel/passes/seek.ts`, switched by `propertySeek`), and §4·1's split of `sql-hygiene`'s answer
+> comparison. RelIR spine only — §5.
+>
+> **Still open, and both are the reason this document stays:** §3·1's stats schedule (the
+> `PRAGMA optimize` call sites — after a bulk load, on the alarm — none of which exist yet), and §4's
+> plan-stability GATE, which is what would stop this regressing. Until §4 exists, the fix is asserted
+> by two L2 access-path assertions and by nothing that would notice a graph growing.
 
-## Rule
+A single-vertex lookup plus one hop — the most common shape in the language —
+takes **9.8 seconds** on a 20 000-vertex graph. After 0.5 ms of `PRAGMA optimize` it takes
+**19 ms**. Nothing in the suite sees this, because every fixture is small enough that the wrong plan
+is free.
 
-When a correlated property predicate is selective, drive the query from the selective property
-relation and join back to elements, rather than hoping the planner starts there. The relational
-meaning must stay identical: preserve multiplicity with `DISTINCT` where a list-cardinality property
-can supply duplicate matching rows, and retain the original predicate as semantic authority.
+This was found while measuring something else (`docs/2026-08-07-graphql-front-end-plan.md`'s
+placement question). It is much bigger than what it was found under.
 
-This is a RelIR physical rewrite (`seek`), not a second lowering or a hand-written SQL special case.
-It must be optional and differential-tested: disabling it may change an access path, never supported
-semantics, cardinality, or observable order unless an ordering contract explicitly permits it.
+---
 
-## Verification
+## 1. The measurement
 
-Use a representative large/skewed fixture and reduce `EXPLAIN QUERY PLAN` to stable index decisions;
-do not snapshot SQL text or planner aliases. Test both rewrite positions for equal results and add a
-performance ceiling only where it represents a request-budget safety boundary. Re-measure after
-SQLite/workerd changes rather than treating an old plan as a permanent planner fact.
+`g.V().has('person','name','marko8').out('knows').values('name')`, warm, ms/op:
 
-Do not solve this with unbounded `ANALYZE`/statistics assumptions: production graph distributions
-and Durable Object lifecycle make that a complement to, not a substitute for, a robust access path.
+| vertices | no stats | after `PRAGMA optimize` | speedup |
+|---|---|---|---|
+| 6 (modern) | 0.6 | 0.6 | 1.0× |
+| 4 000 | 364 | 3.5 | **105×** |
+| 20 000 | **9 842** | **19** | **516×** |
 
-## Platform and evidence anchors
+The long chain behaves identically (9 937 → 21 ms, 463×). Two other shapes are untouched
+(`group` 19.2 → 18.5, `valueMap` page 11.0 → 11.0, both 1.0×) — so this is a plan decision on
+specific shapes, not a warm-cache artefact.
 
-`Join.ordered` is the relational order fence; SQLite emits it as `CROSS JOIN ... ON ...`, whose
-left side stays the outer loop. The lowering owns this because it knows which side is the traverser
-frontier. `src/rel/passes/seek.ts` recognizes the algebraic form rather than a list of Gremlin steps,
-so new source predicates do not silently miss the optimization.
+Scaling of the bad plan is **superlinear**: 5× the data, 27× the time. The good plan is roughly
+linear (3.5 → 19 ms). So the gap widens with graph size, and the DO's request budget is a hard wall
+somewhere before 20 000 vertices.
 
-The necessary indexes are defined in `src/storage.ts`; `test/support/sql-core.ts` reduces
-`EXPLAIN QUERY PLAN` to stable access-path decisions. On the DO runtime, statistics may be gathered,
-but bounded `analysis_limit` is not authorized. Therefore post-load or alarm-time statistics are a
-possible complement, never the mechanism that keeps first-request plans safe.
+`PRAGMA analysis_limit=400; PRAGMA optimize;` cost **0.5 ms** on the 20 000-vertex graph.
 
-## Research direction
+## 2. What the planner actually does
 
-Maintain a bulk-loaded, skewed fixture large enough to expose a bad join order. For canonical point
-lookup, movement, property projection, and ordered-page shapes, compare results and reduced plans
-with and without statistics. Investigate any plan that scans a property/label relation when a
-selective frontier exists. Re-measure on workerd after SQLite changes; emit SQL is an implementation
-detail, the access path and request budget are the contract.
+The compiled SQL for that traversal (elided for width — full text reproducible via §7):
+
+```sql
+SELECT … FROM edges rme16
+  INNER JOIN nodes rn ON ((rme16.src = rn.id) AND rme16.label IN (SELECT … FROM labels …))
+  INNER JOIN vertex_properties rp24 ON ((rp24.node = rme16.tgt) AND rp24.key IN ('name'))
+WHERE (rn.id IN (SELECT rvl6.node FROM vertex_labels rvl6 WHERE rvl6.label IN (…'person'…))
+   AND EXISTS (SELECT 1 FROM vertex_properties rp10
+               WHERE rp10.node = rn.id AND rp10.key = 'name' AND rp10.value = 'marko8'))
+```
+
+**Without stats** the outer loop is the projection's property table:
+
+```
+SEARCH rp24 USING INDEX vp_key_value (key=?)          ← every 'name' property in the graph
+SEARCH rme16 USING COVERING INDEX e_in (tgt=? AND label=? AND src=?)
+…
+SEARCH rp10 EXISTS USING INDEX vp_node_key (node=? AND key=?)   ← the selective filter, applied LAST
+```
+
+It walks all 20 000 `name` rows, does an edge lookup for each, and only then asks whether the vertex
+was `marko8`.
+
+**With stats** it inverts:
+
+```
+SEARCH rn USING INTEGER PRIMARY KEY (rowid=?)
+SEARCH rme16 USING COVERING INDEX e_out (src=? AND label=?)
+SEARCH rp24 USING INDEX vp_node_key (node=? AND key=?)
+SCAN rvl6                                              ← still a scan
+```
+
+The indexes were never missing. `e_out(src,label,tgt)`, `e_in(tgt,label,src)`,
+`vp_key_value(key,value)` and `vp_node_key(node,key)` all exist (`src/storage.ts:89-99`). What is
+missing is any reason for SQLite to believe one of them is selective.
+
+**And the defect is the join ORDER, not which indexes are reachable.** That distinction decides the
+whole fix and is easy to get backwards, so §3·2 establishes it by measurement before proposing
+anything.
+
+## 3. Two fixes, and they are not alternatives
+
+### 3·1 Give the planner stats — available on the platform, but not boundable there
+
+`ANALYZE` and nothing else is the wrong tool for a live DO — it is a full scan of every index. The
+bounded form is:
+
+```sql
+PRAGMA analysis_limit=400;   -- bound each index sample; near-constant cost, approximate stats
+PRAGMA optimize;             -- run ANALYZE only where stats are missing or stale
+```
+
+`sqlite_stat1` is an ordinary table, so it persists in DO storage: the cost is paid once and every
+later request in that object's lifetime benefits, across hibernations.
+
+**What a Durable Object actually permits, measured** (`test/cf-probe/`, a throwaway `wrangler dev`
+worker running real workerd — the method recorded in the build plan §10·5, and the only authority,
+since `src/cf-limits.ts` is a Bun-side model of limits we already know about and cannot see a
+platform *authorizer*):
+
+| statement | outcome on DO SQLite |
+|---|---|
+| `PRAGMA analysis_limit=400` | **refused** — `not authorized: SQLITE_AUTH` |
+| `PRAGMA analysis_limit` (read) | **refused** — same |
+| `PRAGMA optimize` | accepted; populates `sqlite_stat1` |
+| `PRAGMA optimize(0x10002)` | accepted |
+| `ANALYZE` / `ANALYZE <table>` | accepted |
+| `SELECT … FROM sqlite_stat1` | accepted; the table appears in `PRAGMA table_list` |
+
+So stats **can** be gathered in production and **cannot** be bounded there. That is not a detail:
+the 0.5 ms figure above is what `analysis_limit=400` buys, and without it `PRAGMA optimize` is a full
+`ANALYZE` of every index whose stats are stale — cost proportional to the graph, on the DO's serial
+request budget. The refusal is the platform's authorizer, the same one that refuses
+`PRAGMA writable_schema` and dropping a DO's own bookkeeping table; it is not a dialect gap that a
+runtime bump would close.
+
+**Consequence for the ordering of this work: §3·2 is the load-bearing half, not the complement.**
+
+**When to run it, given that:**
+
+- **After a bulk load / `io().read()`** — the one moment cardinalities change wholesale, and exactly
+  where a graph goes from "no stats" to "wrong plan forever". This is also the one moment where an
+  unbounded `ANALYZE` is affordable, because the load already dominates.
+- **On the DO alarm**, or after N writes since the last run — with the threshold set against an
+  UNBOUNDED cost, which is stricter than the 0.5 ms number would suggest.
+- **Never per request.**
+
+### 3·2 Stop depending on the guess
+
+We generate this SQL. The traversal fixes the order its steps run in; the emitted SQL throws that
+away and asks SQLite to re-derive it from cardinality guesses. On a graph with no `sqlite_stat1`
+those guesses are wrong in the worst direction, and the post-`optimize` plan shows they are not
+reliably right even with stats (it still `SCAN`s `vertex_labels`).
+
+**Four ways of stating the intent were measured. Three do nothing.** All on the §7 graph at
+N = 4 000, no stats, against a 1 492 ms baseline:
+
+| form | ms/op | reaches `vp_key_value(key=?, value=?)` |
+|---|---|---|
+| correlated `EXISTS` in the `WHERE` (today) | 1 492 | no |
+| `IN (SELECT node FROM vertex_properties WHERE key=? AND value=?)` | 1 493 | **yes** |
+| the property seek as the leading table of a plain inner join | 1 488 | **yes** |
+| `WITH seek AS MATERIALIZED (…)` as the source CTE | 1 478 | **yes** |
+| **`CROSS JOIN … ON …`** | **0.3** | **yes** |
+
+Three of them make the selective index *reachable* and change nothing, because reachability was
+never the problem: SQLite reorders the terms of a `FROM` freely regardless of textual order, and put
+the same table in the outer loop every time. Even a `MATERIALIZED` CTE — an optimization fence for
+the *subquery* — does not pin where its result lands in the join order.
+
+**`CROSS JOIN` is SQLite's documented order fence and the only one that works here.** In SQLite it is
+not a cartesian product: `A CROSS JOIN B ON p` means exactly `A INNER JOIN B ON p` with the tables to
+the left of the keyword kept in the outer loop. Same rows (verified), and the parser accepts the
+`ON`.
+
+So the fix is two statements of what the traversal already says, both of which we know at compile
+time and neither of which is a guess:
+
+- **A hop is "for each traverser I have, find its edges".** The incoming frontier is the join's LEFT
+  side and `edges` is probed. Today it is the other way round — `edges` on the left, free to reorder
+  — copied from the legacy spine on the reasoning that it kept "the access path the covering indexes
+  were built for". Measured, that is backwards: with the order free SQLite picks `e_in` and scans the
+  whole edge table to hop off one vertex. Pinned, it seeks `e_out(src,label)`. The covering indexes
+  were never in question; which of them the planner reaches for was.
+- **A `values()`/`properties()` join is a probe, not a scan.** Same fence, so the stream drives
+  `vp_node_key(node,key)` instead of the planner leading with `vp_key_value(key=?)` — every `name`
+  row in the graph — and rediscovering the traverser afterwards.
+
+**And a `has(key, value)` at the source is a SEEK, which today can only be checked.** A bare `V()` is
+the whole table and the `has` is usually the only selective thing the traversal says about it, but as
+an `EXISTS` in the `WHERE` there is no way to *drive from* it. Making it a relation — seek
+`vp_key_value(key, value)`, take the owners, probe the element scan by rowid — starts the traversal at
+one vertex instead of at 4 000. Two properties make that safe rather than clever:
+
+- **`DISTINCT` is load-bearing.** A `Cardinality.list` key may hold the same value twice on one
+  element, and a traverser must not be duplicated by the way we chose to *find* it.
+- **It narrows and never decides.** The `has` stays in the fold as an ordinary clause, so the seek can
+  only change which rows SQLite visits, never which rows survive. An access-path change that is
+  structurally incapable of changing a result is a different risk class from one that is merely
+  believed correct.
+
+Measured, cumulative, N = 4 000, no stats:
+
+| | no stats | with stats |
+|---|---|---|
+| today | 1 492 ms | 6.6 ms |
+| + order fence | 6.2 ms | 6.6 ms |
+| + source seek | **0.3 ms** | 0.5 ms |
+
+The second row is the point of the exercise and the third is a bonus: **after the fence the plan is
+the same with and without `sqlite_stat1`**. That is what "plan-stable by construction" means, and it
+is worth more than the ms — it is what makes a young graph, i.e. every graph on its first requests,
+behave like a warm one.
+
+**The cost, stated honestly.** Pinning the order gives up the cases where the planner's reordering
+would have been better. Measured, on the same graph:
+
+- `g.V().out('knows').has('name','marko8')` — the counter-shape, where the selective filter is at the
+  END and pipeline order looks wrong: **9.0 ms free, 4.9 ms fenced**. The fence still wins.
+- `g.V().values('name')` — an unfiltered whole-graph projection: **1.4 ms free, 2.1 ms fenced**. A
+  ~1.5× loss, because the free plan reads `vp_key_value(key=?)` directly and skips `nodes` entirely.
+
+That second one is a real regression and the trade is deliberate: a bounded constant factor on
+unfiltered projections against a superlinear cliff on filtered lookups. It also points at the next
+piece rather than at a reason to hesitate — `nodes` contributes nothing to `g.V().values('name')` but
+an existence check the FK already guarantees, so eliminating that join recovers it and is a separate,
+larger win.
+
+### 3·3 Where each half belongs in the code
+
+The two halves are different KINDS of change and must not share a home.
+
+- **The order fence is a property of the join**, not a rewrite: `Join` gains `ordered`, meaning "the
+  left side is the outer loop", set by the lowering because which side is the traverser stream is
+  what the lowering knows. It is the one place the algebra states a fact about execution rather than
+  about rows, so it is worth naming as such — only an `inner` join may carry it (a `left` join's
+  order is fixed by its semantics, a `cross` join has no `ON` to reorder around) and both the factory
+  and `check.ts` refuse otherwise. Nothing about it is optional or disable-able, because it changes
+  no rows.
+- **The source seek is a physical REWRITE and belongs in `src/rel/passes/`** — a sibling to `fuse`,
+  not a case inside it: `fuse` is declared for *semantic* collapses across adjacent nodes, and this
+  is the opposite, same algebra stated physically. That is Calcite's logical/physical rule split
+  (`vendor/calcite`, at the pin).
+
+  Recognising it on the ALGEBRA (`Filter(Scan nodes, … EXISTS(props key=k, value=v) …)`) rather than
+  on the step chain is what keeps it from drifting. A step-chain recogniser needs its own list of
+  which step names are source-position filters, which is a second copy of what `sourceFilter`
+  accepts — add a filter step and forget the list and the seek silently stops firing; add a
+  non-filter to it and the answer is wrong. The algebra shape has no such list.
+
+  It is additionally gated by a `FastPath` switch, `propertySeek`. Not because it is a fast path in
+  the dispatch sense — it has no `tryLower` and so is declared in `GATE_ONLY_FAST_PATHS` beside
+  `repeatBodyExpansion` — but because that is what puts it under **L5's differential**. The switch is
+  read at the call site rather than inside the pass, so the pass stays a total function of its input
+  and a configuration cannot change coverage.
+
+  `FAST_PATH_NAMES` derives from `DEFAULT_FAST_PATHS`, so the flag enters the per-switch sweep by
+  existing; the equivalence it owes is stronger than a differential usually gets, because the rewrite
+  REUSES the predicate rather than restating it. What the sweep is really watching is the `DISTINCT`
+  — a `Cardinality.list` key holding one value twice would multiply a traverser through the seek and
+  not through the filter — and, as telemetry, the emission-order changes of §4·1.
+
+  **It is the first switch that selects a physical ACCESS PATH**, which is normally the mark of
+  something RelIR declines rather than implements (the FTS contrast in `compileViaRel`). The
+  difference is that this one changes no algebra at all: the predicate it lifts stays exactly where it
+  was, so both positions decide the surviving rows with one expression and there is no second
+  semantics to keep in step.
+
+A generated-SQL engine that needs the planner to guess correctly has given away the advantage of
+generating SQL.
+
+## 4. Why nothing caught it
+
+`accessPaths` already exists (`test/support/sql-core.ts:69`) and already does the right thing —
+it reduces `EXPLAIN QUERY PLAN` to the index decisions, dropping aliases and CTE-materialization
+noise. It is used by `test/rel-l2-equivalence.test.ts` to prove the two spines pick the same paths.
+
+**The assertion machinery is there; the fixture size that would make it meaningful is not.** On the
+6-vertex modern graph the bad plan and the good plan both take 0.6 ms, and `accessPaths` will happily
+record `SEARCH vp_key_value (key=?)` as the expected answer — because at that size it *is* a fine
+answer. Equivalence between two spines is orthogonal to whether either one is any good.
+
+So the gate this wants is not a new mechanism, it is the existing one pointed at a graph big enough
+to have an opinion:
+
+- a fixture of a few thousand vertices (bulk-loaded, so it costs milliseconds to build);
+- `accessPaths` assertions on a handful of canonical shapes — point lookup, 1-hop, label scan,
+  ordered page — asserting the *seek* is present and no full `SCAN` of a property or label table is;
+- **run with and without stats, and assert the two agree.** Plan STABILITY is the property, and it is
+  a stronger and cheaper assertion than any single plan: it does not need a table of blessed access
+  paths that goes stale, and it fails on exactly the defect this document is about.
+
+That last point is what makes it a real gate rather than a snapshot: a plan that is only correct
+after `ANALYZE` is a plan that is wrong on every young graph — and per §3·1, `ANALYZE` is the
+expensive unbounded form on the runtime we ship to.
+
+**Note for whoever writes it:** the existing L2 SQL assertions spell the *current* join order
+(`FROM edges … INNER JOIN r0 …`, two of them today). Those are semantic-equivalence snapshots, not
+byte-identity ones (`test/CLAUDE.md`), so they get updated with the change — but they are the reason
+to land the fence before more arms are written against the unfenced shape, not after.
+
+### 4·1 What pinning the order costs the instruments
+
+Two gates move, and both are worth stating up front because each one first presents as a regression.
+
+**`scripts/sql-hygiene.ts` — 53 traversals change emission order.** The gate compares RelIR ≡ legacy
+framed answers, and it did so ORDER-SENSITIVELY. Pinning the join order changes which rows come back
+first on 53 corpus traversals. Measured, and the measurement is the whole argument:
+
+- every one is **multiset-identical** — same traversers, different sequence;
+- **both** spines' orders are stable under `MOGWAI_REVERSE_UNORDERED=1`, so neither was passing by
+  luck and this is not the class `test:perturbed` exists for;
+- none of the 53 calls `order()`, so neither order is the specified one. Traversers are a multiset.
+
+So the gate was asserting a fact with no standing, and the fix is to give it the standing the census
+already gives the identical fact: **which rows gates, what order is telemetry**. `comparable` returns
+both renderings, the multiset comparison fails the build, and the order difference is counted and
+printed as `N spine emission-order difference(s) — telemetry, never gates` — deliberately the same
+sentence the census prints, because it is the same claim. An order the language DOES specify is an
+`ORDER BY` in the emitted SQL and survives any plan change; if it ever diverged, the rows would
+diverge with it and the multiset gate catches that.
+
+**The per-family `bytes` ratchet rises**, because the seek adds a driving subquery to the statement:
+`has` 1 571 → 2 418, `values` 2 075 → 2 632, five others ~+155 each. `binds` and `bound` do NOT move,
+which is the signature that matters — the seek's key and value inline as typed literals and spend
+none of the 100-parameter budget. Re-bank with `mise run sql-hygiene-record`; the reason belongs in
+the commit message, which is what the ratchet is for.
+
+## 5. Scope: RelIR only
+
+The fix lands on the RelIR spine and the legacy spine is left alone. Legacy is a route with an end
+date (build plan §6·1), so the value of a plan fix there is bounded by how long it survives, and
+every change to it is a change to code scheduled for deletion. The census remains spine-differential
+either way, so a divergence between the two positions is visible rather than silent.
+
+## 6. Priority against the other levers
+
+This was found while benchmarking compile time, on the theory that moving compilation to the edge is
+a throughput lever. It is one — `docs/2026-08-07-edge-compilation-plan.md` — but it is clearly third:
+
+| lever | magnitude |
+|---|---|
+| plan stability (this doc) | ~9 800 ms → ~19 ms on a mid-size graph |
+| edge-side compile | ~4 ms fixed, moved off the DO's serial budget |
+| ANTLR cold start | ~45 ms, once per isolate |
+
+The first is a correctness-shaped problem wearing performance clothing: a 9.8-second traversal does
+not return slowly, it exceeds the request budget and fails. Nothing in the other two is worth tuning
+while this is outstanding.
+
+## 7. Method
+
+Synthetic graph: N `person` vertices (`name`, `age`), N `software` vertices (`name`, `lang`), 4
+`knows` edges and 1 `created` edge per person, landed via `loadBulk` into
+`new GraphStore(new BunSqlite(':memory:'))`. Queries run through `test/support/executor.ts`'s
+`exec(store).framed(...)`, warmed then timed over 3–40 iterations depending on cost. Plans read with
+`EXPLAIN QUERY PLAN` over the compiled `Compiled.sql` / `Compiled.binds`. `PRAGMA optimize` timed
+separately from the queries it affects.
+
+§3·2's form comparison uses the same graph generated directly in SQL rather than through `loadBulk`,
+so that the identical rows can be replayed on both runtimes; at N = 4 000 that is 8 000 vertices and
+20 000 edges, which is why its baseline (1 492 ms) is not the 364 ms of §1's "4 000" row. Ratios, not
+absolutes, are what carry between the two.
+
+Benchmark scripts were throwaway and are not in the tree; everything above reproduces from the
+description in this section plus `src/storage.ts`'s schema.
+
+Numbers are `bun:sqlite` 3.53.0. DO SQLite is 3.47.0. §3·1's permission table was measured on real
+workerd through `test/cf-probe/` (`wrangler dev`, a Durable Object executing each statement and
+reporting per statement); no TIMING in this document has been reproduced on workerd, and the
+platform-side cost of an unbounded `PRAGMA optimize` is the one number §3·1 still wants.
