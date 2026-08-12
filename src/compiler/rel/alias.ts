@@ -282,7 +282,7 @@ export function aliasProjection(
   if (!entry) return null;
   // Pop.all is always the whole history. Pop.mixed unwraps exactly one binding and otherwise returns
   // that same list; a linear history with a known count therefore needs no runtime shape guess.
-  const list = pop === 'all' || (pop === 'mixed' && entry.binds !== 1);
+  const list = pop === 'all' || (pop === 'mixed' && entry.binds !== undefined && entry.binds !== 1);
   if (list) {
     const of = historyListOf(entry);
     // The scope-value reader has no relation minter because it only projects expressions into an
@@ -294,6 +294,10 @@ export function aliasProjection(
       payload: [[meta('list', 'json', true), historyList(col(rel.id, entry.col), of, fresh)]],
     };
   }
+  // A dynamically bound history can hold either one entry (the scalar result) or several (the
+  // list result). Treating it as either arm would silently change the wire shape, so leave it for
+  // the scalar/list Variant lowering rather than guessing from the current SQL row.
+  if (pop === 'mixed' && entry.binds === undefined) return null;
   const end: 'first' | 'last' = pop === 'first' ? 'first' : 'last';
   const vtype = 'vtype';
   const read = readOf(entry, vtype);
