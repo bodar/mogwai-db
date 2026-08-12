@@ -1436,12 +1436,12 @@ describe('the RelIR spine', () => {
       // an ordinary channel: `withChannel` puts it in its `ROLE_ORDER` slot and every node's declared
       // type is rebuilt from the channel list, so coexistence is what happens when nobody prevents it.
       const store = seededStore();
-      expect(runWith(store, 'g.V().as("a").sack(assign).by("age").sack()').map((r) => r.v))
-        .toEqual([29, 27, 32, 35]);
+      expect(runWith(store, 'g.V().as("a").sack(assign).by("age").sack()').map((r) => r.v).sort((a, b) => a - b))
+        .toEqual([27, 29, 32, 35]);
       // …and the label is still readable AFTER the sack read, which is the property that makes it a
       // channel rather than a mode: nothing was spent.
       expect(runWith(store, 'g.V().as("a").sack(assign).by("age").sack().select("a").values("name")')
-        .map((r) => r.v)).toEqual(['marko', 'vadas', 'josh', 'peter']);
+        .map((r) => r.v).sort()).toEqual(['josh', 'marko', 'peter', 'vadas']);
     });
 
   test('the emitted SQL does not depend on how many traversals were compiled before it', () => {

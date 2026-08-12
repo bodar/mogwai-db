@@ -102,6 +102,13 @@ describe('V()/E() after a scalar — mid-traversal re-source (Stage 4)', () => {
   executeQuery(store, "g.addV('person').property('name','marko').property('age',29)", {});
   executeQuery(store, "g.addV('software').property('name','lop')", {});
 
+  test('mints source-id encounter order after a barrier re-sources the graph', async () => {
+    // `count()` emits a new traverser and therefore spends the source's old encounter. The following
+    // GraphStep starts a fresh graph iterator, whose rowid order is the deterministic sequence a
+    // downstream slice must read.
+    expect(await decodeAll(executeQuery(store, "g.V().count().V().limit(1).values('name')", {})))
+      .toEqual(['marko']);
+  });
 
 
 });

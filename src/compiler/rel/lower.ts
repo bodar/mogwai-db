@@ -899,12 +899,17 @@ function reSource(
     });
   })();
   const arrivingEncounter = encounterOf(parent.channels);
-  // A non-start GraphStep must preserve its parent's traversal order. A later slice cannot be
-  // answered honestly if it was never represented on the parent relation.
-  if (ctx.ordered && !arrivingEncounter) return null;
-  const channels = parent.channels;
+  // A re-source with no arriving position is the one position-minting case: GraphStep's iterator
+  // visits the scanned elements in rowid order, so its id is the deterministic base sequence.
+  // Mint AFTER the cross join rather than pretending the parent carried it: the Join contract only
+  // preserves channels from its left input, while Project is the sole node allowed to declare one.
+  // In a child scope this repeats the source sequence per parent, which is exactly what the later
+  // per-origin window reads; a root chain that needs order has already seeded its source position.
+  const channels = !arrivingEncounter && ctx.ordered
+    ? withChannel(parent.channels, ENCOUNTER)
+    : parent.channels;
   const crossed = make.join({
-    id: fresh('j'), left: parent, right: ids, join: 'cross', channels,
+    id: fresh('j'), left: parent, right: ids, join: 'cross', channels: parent.channels,
     type: typeOf(...parent.type.cols, ...ids.type.cols),
   });
   const project = (): Rel => make.project({
