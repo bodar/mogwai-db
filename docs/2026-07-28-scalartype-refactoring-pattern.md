@@ -53,11 +53,20 @@ a `CanonicalType` against a `Set<ValueType>` (`853a416`).
 **1. Totality replaces optionality.** One union, three cases the compiler forces you to handle. The
 "forgot a channel" class does not survive it, because there is no second channel to forget.
 
-**2. The unknown is a member, not an absence.** A JS client cannot distinguish a UUID from a
-string, so a bound param genuinely has no type. Naming that keeps the model total — and turns the
-variant into an audit trail: `unknown` is reachable ONLY from the JS-client seam, so if the client
-is ever fixed the variant becomes unreachable and deletable. An absent field can never tell you
-that.
+**2. The unknown is a member, not an absence.** Naming the "no statically-known type" case keeps
+the model total — an absent field could not carry the next distinction.
+
+> **Correction, 2026-08-12.** This property originally claimed `unknown` is *reachable ONLY from the
+> JS-client seam*, and therefore "deletable if the client is fixed". That is FALSE and was refuted by
+> `refs.ts UNKNOWN` (45 `src` references): `unknown` is the compiler's BOTTOM, produced at ~30 lowering
+> sites — a `sack()` value, an untyped `group()`/`select()` key, a transform's output, a value read
+> with no `vtype` channel, a lattice join over disagreeing arms. Fixing a client would not remove any
+> of those. The JS-client seam is the one *inbound* source of a genuinely type-lost value — a UUID the
+> JS GLV sends as a bare string, JS having no UUID wrapper class (a datetime does not lose type: JS has
+> `Date` → GraphBinary DATETIME; and the `UUID(...)`/`datetime(...)` literal constructors carry the
+> type too) — not the only source of the variant. The corrected authority is the `ScalarType` comment
+> in `render.ts`. The pattern point still stands: a member beats an absent field precisely because it
+> *can* be reasoned about like this.
 
 **3. Compile-time property, free physical encoding.** The type is uniformly KNOWN either way;
 whether it rides bare, as a sibling column, or in a `{t,v}` envelope inside a JSON blob stays a

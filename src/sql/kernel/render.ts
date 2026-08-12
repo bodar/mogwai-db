@@ -126,10 +126,19 @@ export type { ValueType };
 // this area is a barrier propagating `as` and dropping `vtype`. One total union with three
 // cases the compiler FORCES you to handle removes the class.
 //
-// `unknown` is reachable ONLY from the JS-client seam (a JS client cannot distinguish a UUID
-// from a string, so a bound param genuinely has no type). It is an UNKNOWN type, not an
-// ABSENT one — naming it keeps the model total. If the client is ever fixed, the variant
-// becomes unreachable and deletable.
+// `unknown` is a TYPE, not an absence — naming it keeps the model total (an absent field could
+// not carry the next distinction). It means "no statically-known type; infer from the JS runtime
+// value at framing", and it is the compiler's BOTTOM: produced wherever lowering has no static
+// type to give — a `sack()` value, an untyped `group()`/`select()` key, a transform's output, a
+// stored value read with no `vtype` channel, a lattice join over arms that disagree. So it is NOT
+// a wire-only variant, and fixing any one client would not delete it.
+//
+// Inference is LOSSLESS for the storage-class-determined types (string/int/double). It is lossy
+// only where a value's Gremlin type is not recoverable from its JS form AND was never declared —
+// the canonical case being a UUID the JS GLV puts on the wire as a bare string (JS has no UUID
+// wrapper class). A datetime does NOT reach here (JS has `Date`, tagged as GraphBinary DATETIME),
+// and a typed-client bind or the `UUID(...)`/`datetime(...)` literal constructors carry the type
+// too — so the genuine inbound loss is specifically a JS-untypeable value, not "any untyped param".
 //
 // This is a COMPILE-TIME property; the physical encoding stays a per-site choice, and the
 // CARRIER union below is that choice made TOTAL rather than left to prose. Conflating the type
