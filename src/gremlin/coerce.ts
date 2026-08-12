@@ -3,6 +3,36 @@ import { type ValueType } from '../sql/kernel/render.ts';
 import { isDtArg, isGTypeArg, isNested, parseIsoMs, stepChain, type Step } from './frontend.ts';
 import { flatType, type CanonicalType } from './types.ts';
 
+/**
+ * NOT LEARNED YET, raised from inside the fold — the front-end twin of the compiler's `Deferral`.
+ *
+ * Its own class rather than a bare `Error` for the reason `ValueParseError` is: the fold raises TWO
+ * facts through one channel, and only the class tells them apart (§6·5). A caller whose contract is
+ * `null` catches THIS and declines; a `ValueParseError` is the answer and travels on.
+ */
+/**
+ * A COERCION'S OWN REFUSAL — the traversal's ANSWER is an error, not a lowering that gave up.
+ *
+ * `asNumber('1,000')` must RAISE (TinkerPop's exact wording), and SQL cannot raise at all, so the
+ * parse happens here at compile time and the throw travels out through the lowering. That makes it
+ * indistinguishable, to an INSTRUMENT, from the one thing a lowering may never do — throw for
+ * vocabulary it has not learned (`rel-sweep`'s whole subject). The class is the discriminator: a
+ * sweep skips it, a user still sees the message unchanged.
+ */
+export class CoercionDeferral extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CoercionDeferral';
+  }
+}
+
+export class ValueParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ValueParseError';
+  }
+}
+
 // ---------- scalar value coercion (asBool / asNumber / asDate + date arithmetic) ----------
 //
 // The compile-time const-fold helpers (over inject() literals) and the runtime SQL
@@ -26,7 +56,7 @@ export function asBoolConst(v: any): boolean {
     if (s === 'true') return true;
     if (s === 'false') return false;
   }
-  throw new Error(`Can't parse ${v === null || v === undefined ? 'null' : v} as Boolean.`);
+  throw new ValueParseError(`Can't parse ${v === null || v === undefined ? 'null' : v} as Boolean.`);
 }
 
 // asNumber(GType.X): GType token → framing tag + integer range (for overflow) / real
@@ -59,7 +89,7 @@ export function numericSpec(arg: any): (typeof NUMERIC_GTYPES[string] & { name: 
   const name = isGTypeArg(arg) ? arg.gtype : null;
   if (name === null) return null;
   const spec = NUMERIC_GTYPES[name];
-  if (!spec) throw new Error(`asNumber() requires a numeric type token, got ${name.toUpperCase()}`);
+  if (!spec) throw new ValueParseError(`asNumber() requires a numeric type token, got ${name.toUpperCase()}`);
   return { ...spec, name };
 }
 
@@ -72,12 +102,12 @@ export function asNumberConst(v: any, spec: NonNullable<ReturnType<typeof numeri
   else if (typeof v === 'bigint') n = Number(v);
   // Number('') / Number('  ') are 0, not NaN — reject blank strings explicitly so they
   // raise the parse error like any other non-numeric string rather than becoming 0.
-  else if (typeof v === 'string') { n = v.trim() === '' ? NaN : Number(v); if (Number.isNaN(n)) throw new Error(`Can't parse string '${v}' as number.`); }
-  else throw new Error(`Can't parse type ${v === null || v === undefined ? 'null' : cap(typeof v)} as number.`);
+  else if (typeof v === 'string') { n = v.trim() === '' ? NaN : Number(v); if (Number.isNaN(n)) throw new ValueParseError(`Can't parse string '${v}' as number.`); }
+  else throw new ValueParseError(`Can't parse type ${v === null || v === undefined ? 'null' : cap(typeof v)} as number.`);
   if (spec.int) {
     n = Math.trunc(n);
     if (spec.min !== undefined && (n < spec.min || n > spec.max!))
-      throw new Error(`Can't convert number of type ${Number.isInteger(v) ? 'Integer' : 'Double'} to ${spec.disp} due to overflow.`);
+      throw new ValueParseError(`Can't convert number of type ${Number.isInteger(v) ? 'Integer' : 'Double'} to ${spec.disp} due to overflow.`);
   }
   return n;
 }
@@ -105,12 +135,12 @@ export function asNumberBare(v: any, subtype: string | null): { val: any; as: Va
   }
   if (typeof v === 'string') {
     const t = v.trim();
-    if (t === '' || Number.isNaN(Number(t))) throw new Error(`Can't parse string '${v}' as number.`);
+    if (t === '' || Number.isNaN(Number(t))) throw new ValueParseError(`Can't parse string '${v}' as number.`);
     // int vs double is decided by the STRING's form (a '.'/'e'/'E' → floating point),
     // like AsNumberStep — NOT by whether the value is whole ("5.0" is double, not int).
     return { val: Number(t), as: /[.eE]/.test(t) ? 'double' : 'int' };
   }
-  throw new Error(`Can't parse type ${v === null || v === undefined ? 'null' : cap(typeof v)} as number.`);
+  throw new ValueParseError(`Can't parse type ${v === null || v === undefined ? 'null' : cap(typeof v)} as number.`);
 }
 
 // ---------- date casts (asDate / dateAdd / dateDiff) ----------
@@ -126,7 +156,7 @@ const DT_MS: Record<string, number> = { second: 1000, minute: 60000, hour: 36000
 export function dtFactor(arg: any): number {
   const u = isDtArg(arg) ? arg.dt : null;
   const f = u ? DT_MS[u] : undefined;
-  if (!f) throw new Error(`dateAdd() requires a DT unit (second/minute/hour/day), got ${u ?? arg}`);
+  if (!f) throw new ValueParseError(`dateAdd() requires a DT unit (second/minute/hour/day), got ${u ?? arg}`);
   return f;
 }
 
@@ -137,16 +167,16 @@ export function dtFactor(arg: any): number {
 export function asDateConst(v: any, subtype: string | null): number {
   if (typeof v === 'number') {
     if (subtype === 'float' || subtype === 'double' || subtype === 'bigdecimal' || !Number.isInteger(v))
-      throw new Error(`Can't parse ${v} as a Date: a floating-point epoch is not allowed.`);
+      throw new ValueParseError(`Can't parse ${v} as a Date: a floating-point epoch is not allowed.`);
     return v;
   }
   if (typeof v === 'bigint') return Number(v);
   if (typeof v === 'string') {
     const ms = parseIsoMs(v); // UTC-normalized so Bun and the DO agree on the instant
-    if (Number.isNaN(ms)) throw new Error(`Can't parse '${v}' as an ISO-8601 Date.`);
+    if (Number.isNaN(ms)) throw new ValueParseError(`Can't parse '${v}' as an ISO-8601 Date.`);
     return ms;
   }
-  throw new Error(`Can't parse ${v === null || v === undefined ? 'null' : cap(typeof v)} as a Date.`);
+  throw new ValueParseError(`Can't parse ${v === null || v === undefined ? 'null' : cap(typeof v)} as a Date.`);
 }
 
 /** dateDiff's other operand in millis (result = self − other). A datetime literal
@@ -160,9 +190,9 @@ export function dateDiffOtherMs(arg: any, params: Record<string, any>): number {
       const c = inner[0].args[0]?.value;
       return c === null || c === undefined ? 0 : Number(c);
     }
-    throw new Error('dateDiff(): only a datetime literal or constant(datetime) argument is supported');
+    throw new ValueParseError('dateDiff(): only a datetime literal or constant(datetime) argument is supported');
   }
-  throw new Error('dateDiff() requires a datetime literal or constant(datetime) argument');
+  throw new ValueParseError('dateDiff() requires a datetime literal or constant(datetime) argument');
 }
 
 /** Whether dateDiff's nested operand is the constant form the fused transform can fold
@@ -277,7 +307,10 @@ export function foldConstantCoercions(steps: readonly Step[], vals: any[]): { at
           vals[i] = out.val;
           if (uniform === undefined) uniform = out.as;
           else if (uniform !== out.as)
-            throw new Error('asNumber() over a stream of mixed numeric subtypes not yet supported');
+            // NOT LEARNED YET, so it is a `Deferral` rather than the traversal's own error: an
+            // instrument that treats every throw out of the fold as a contract violation would
+            // otherwise read this as one (§6·5 — two facts, one message, and the class is which).
+            throw new CoercionDeferral('asNumber() over a stream of mixed numeric subtypes not yet supported');
         }
         as = uniform;
       }

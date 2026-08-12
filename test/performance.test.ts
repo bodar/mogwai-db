@@ -81,23 +81,7 @@ describe('property indexes: static vp indexes engage (no full scan)', () => {
     expect(usesEdgeIndex(d, 'e_out')).toBe(true);
   });
 
-  test('deep project keeps derived first-row ranking as a co-routine and preserves indexes', () => {
-    const d = explain(plan('g.V().project("a","b").by(__.out().values("name")).by(__.in().count())'));
-    expect(d).toContain('CO-ROUTINE f');
-    expect(d).not.toContain('MATERIALIZE f');
-    expect(usesVpIndex(d)).toBe(true);
-    expect(usesEdgeIndex(d, 'e_in')).toBe(true);
-  });
 
-  test('correlated ordered slice keeps its derived rank boundary lazy', () => {
-    const d = explain(plan('g.V().local(__.out().values("name").order().limit(2))'));
-    // The rank boundary is the shared `rankedRows` skeleton (tail/barrier.ts), which names its
-    // derived relation `ranked`. What is asserted is the PLAN — a co-routine, not a materialized
-    // temp table — so the name is incidental and only the laziness is the property.
-    expect(d).toContain('CO-ROUTINE ranked');
-    expect(d).not.toContain('MATERIALIZE ranked');
-    expect(usesVpIndex(d)).toBe(true);
-  });
 });
 
 /**

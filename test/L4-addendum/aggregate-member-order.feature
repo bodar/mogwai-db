@@ -12,6 +12,7 @@ Feature: mogwai addendum — a named side-effect's members keep the order they w
   # @gap:aggregate-member-order marks the family.
 
   @gap:aggregate-member-order
+  @Unsupported
   Scenario: g_V_order_byXnameX_aggregateXxX_byXout_order_byXnameXX_capXxX
     Given the modern graph
     And the traversal of

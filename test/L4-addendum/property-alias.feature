@@ -1,6 +1,7 @@
 Feature: mogwai addendum — property aliases
 
   @gap:property-alias
+  @Unsupported
   Scenario: g_E_properties_as_select_byXkeyX
     Given the modern graph
     And the traversal of
@@ -13,6 +14,7 @@ Feature: mogwai addendum — property aliases
       | weight |
 
   @gap:property-alias
+  @Unsupported
   Scenario: g_E_properties_as_select_byXvalueX
     Given the modern graph
     And the traversal of
@@ -25,6 +27,7 @@ Feature: mogwai addendum — property aliases
         | d[0.4].d |
 
   @gap:property-alias
+  @Unsupported
   Scenario: g_E_properties_as_select_pop_all_unfold_value
     Given the modern graph
     And the traversal of
@@ -37,6 +40,7 @@ Feature: mogwai addendum — property aliases
       | d[0.4].d |
 
   @gap:property-alias
+  @Unsupported
   Scenario: g_E_properties_as_select_pop_mixed_unfold_value
     Given the modern graph
     And the traversal of

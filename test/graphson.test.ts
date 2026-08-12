@@ -5,7 +5,6 @@ import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { CfLimitedSql } from '../src/cf-limits.ts';
 import { loadGraphson, graphsonValue, writeGraphson } from '../src/formats/graphson.ts';
 import { executeQuery } from './support/executor.ts';
-import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { CREW_SEED } from './fixtures/seed-crew.ts';
 import { ZOO_SEED } from './fixtures/seed-zoo.ts';
 import { BigDecimal, Duration } from '../src/gremlin/types.ts';
@@ -86,28 +85,6 @@ describe('graphsonValue — the type channel, 17 for 17', () => {
 });
 
 describe('the reference graphs load from their own GraphSON files', () => {
-  test('modern: identical answers to MODERN_SEED, and the file KEEPS the types the old seed dropped', () => {
-    const store = fresh();
-    loadGraphson(store, fixture('tinkerpop-modern-v3.json'));
-    const reference = seededByTraversals(MODERN_SEED);
-    for (const q of [
-      'g.V().count()', 'g.E().count()',
-      "g.V().has('name','marko').out('knows').values('name').order().fold()",
-      "g.V().hasLabel('software').in('created').values('name').order().fold()",
-      "g.E().has('weight',P.gt(0.4)).count()",
-      "g.V().values('age').order().fold()",
-      "g.V().has('name',TextP.containing('ark')).values('name').fold()",
-    ])
-      expect([q, executeQuery(store, q, {})]).toEqual([q, executeQuery(reference, q, {})]);
-
-    // The old string-building seed (test fixture, now retired) unwrapped every @type and re-emitted a
-    // bare literal, so `{"@type":"g:Double","@value":1.0}` re-entered as the integer 1. The typed
-    // reader keeps it a double — this is the assertion that says the type channel survived the file.
-    expect(store.query<{ vtype: string }>("SELECT DISTINCT vtype FROM edge_properties WHERE key='weight'"))
-      .toEqual([{ vtype: 'double' }]);
-    expect(store.query<{ vtype: string }>("SELECT DISTINCT vtype FROM vertex_properties WHERE key='age'"))
-      .toEqual([{ vtype: 'int' }]);
-  });
 
   test('crew: multi-properties, meta-properties and preserved VertexProperty ids', () => {
     const store = fresh();

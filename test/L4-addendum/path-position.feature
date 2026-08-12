@@ -6,6 +6,7 @@ Feature: mogwai addendum — path() position scoping and per-position children
   # @gap:path-position marks the family for a possible gremlin-test PR.
 
   @gap:path-position
+  @Unsupported
   Scenario: g_V_asXaX_out_asXbX_out_asXcX_path_fromXbX_toXcX_byXnameX
     Given the modern graph
     And the traversal of
@@ -53,6 +54,7 @@ Feature: mogwai addendum — path() position scoping and per-position children
       | p[PETER,LOP] |
 
   @gap:path-position
+  @Unsupported
   Scenario: g_V_out_path_byXout_countX
     Given the modern graph
     And the traversal of
@@ -70,6 +72,7 @@ Feature: mogwai addendum — path() position scoping and per-position children
       | p[d[1].i,d[0].i] |
 
   @gap:path-position
+  @Unsupported
   Scenario: g_V_out_path_byXchooseXhasLabelXpersonX_constantXPX_constantXSXXX
     Given the modern graph
     And the traversal of
@@ -87,6 +90,7 @@ Feature: mogwai addendum — path() position scoping and per-position children
       | p[P,S] |
 
   @gap:path-position
+  @Unsupported
   Scenario: g_V_out_path_byXcoalesceXvaluesXlangX_constantXnoneXXX
     Given the modern graph
     And the traversal of
@@ -104,6 +108,7 @@ Feature: mogwai addendum — path() position scoping and per-position children
       | p[none,java] |
 
   @gap:path-position
+  @Unsupported
   Scenario: g_V_out_path_byXchooseXout_constantXhasOutX_constantXleafXXX
     Given the modern graph
     And the traversal of
@@ -121,6 +126,7 @@ Feature: mogwai addendum — path() position scoping and per-position children
       | p[hasOut,leaf] |
 
   @gap:path-position
+  @Unsupported
   Scenario: g_V_out_path_byXcoalesceXchooseXhasLabelXpersonX_constantXPX_constantXSWXX_constantXnoneXXX
     Given the modern graph
     And the traversal of
@@ -138,6 +144,7 @@ Feature: mogwai addendum — path() position scoping and per-position children
       | p[P,SW] |
 
   @gap:path-position
+  @Unsupported
   Scenario: g_V_out_path_byXchooseXhasLabelXpersonX_coalesceXvaluesXlangX_constantXnoLangXX_constantXSWXXX
     Given the modern graph
     And the traversal of
@@ -155,6 +162,7 @@ Feature: mogwai addendum — path() position scoping and per-position children
       | p[noLang,SW] |
 
   @gap:path-position
+  @Unsupported
   Scenario: g_V_out_out_path_byXnameX_from_to_count
     Given the modern graph
     And the traversal of

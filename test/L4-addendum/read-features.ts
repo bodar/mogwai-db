@@ -25,7 +25,6 @@
 // old reader: an unmapped step must never read as a passing scenario.
 
 import { readdirSync, readFileSync } from 'node:fs';
-import type { Spine } from '../../src/sql/kernel/render.ts';
 // Deep paths into the submodule's install, and they are deliberately the built entry points each
 // package's own `main`/`exports` names: `@cucumber/gherkin` has no `exports` map (so `dist/src`) and
 // `@cucumber/messages` publishes dual builds (so the ESM one).
@@ -51,10 +50,18 @@ export interface Scenario {
   /** `Then the traversal will raise an error [with message <containing|starting|ending> text of "…"]`.
    *  Upstream compares case-INSENSITIVELY, and so do we. `null` text = any error will do. */
   error: { comparison: 'containing' | 'starting' | 'ending'; text: string } | null;
+  /** `@Unsupported` — the compiler does not lower this traversal yet.
+   *
+   *  The scenario is KEPT, not deleted, and that is the whole point of the tag: each one encodes a
+   *  reference-derived expectation that took work to establish, and deleting it would burn that to
+   *  make a build green. What it asserts instead is the fail-closed contract — the traversal must
+   *  REFUSE, never answer something plausible — and the day the shape lands the refusal stops and the
+   *  tag comes off. The count is printed on every run so the population stays visible rather than
+   *  becoming a quiet exclusion list. */
+  unsupported: boolean;
   /** `@RelIR` — this scenario's ANSWER needs the RelIR spine and the legacy one refuses it. Not a
    *  skip: it says the two routes DIVERGE and which way round, so `test:legacy-spine` can assert the
    *  refusal instead of reading a deliberate improvement as a regression. */
-  relirOnly: boolean;
   /** `@SpineRel` / `@SpineLegacy` — PIN this scenario's spine, ignoring the ambient switch.
    *
    *  A THIRD way for the two routes to diverge, and the one `@RelIR` cannot express: legacy neither
@@ -71,7 +78,6 @@ export interface Scenario {
    *
    *  Both directions exist because a legacy-pinned scenario costs nothing to support and the one-sided
    *  version would be a vocabulary that has to be widened the first time it is needed. */
-  pinSpine: Spine | null;
   expected: string[];
   /** `And the graph should return N for count of "<traversal>"` — upstream's own Then-step for
    *  asserting GRAPH STATE after a write, the only thing that can catch a write that ran and left the
@@ -99,8 +105,7 @@ function toScenario(feature: string, name: string, tags: readonly string[], step
   const s: Scenario = {
     feature, name, graph: 'empty', initializer: null, gremlin: '',
     assertion: 'unordered', count: null, error: null, expected: [], graphChecks: [],
-    relirOnly: tags.includes('@RelIR'),
-    pinSpine: tags.includes('@SpineRel') ? 'rel' : tags.includes('@SpineLegacy') ? 'legacy' : null,
+    unsupported: tags.includes('@Unsupported'),
   };
   // The routing the official runner does (`feature-steps.js`): a @MultiLabel scenario's EMPTY graph
   // is the multi-label source, not the plain one. Mirrored so a scenario can be copied in with its

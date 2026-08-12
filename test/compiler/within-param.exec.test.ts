@@ -15,8 +15,8 @@ import { exec } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 
 const store = seededStore();
-const onRel = (g: string, p: Record<string, any> = {}) => { const c = compile(g, p, { spine: 'rel' }); return c.kind === 'read' ? c.spine : c.kind; };
-const plan = (g: string, p: Record<string, any> = {}) => compile(g, p, { spine: 'rel' }) as any;
+const onRel = (g: string, p: Record<string, any> = {}) => { const c = compile(g, p); return c.kind === 'read' ? c.spine : c.kind; };
+const plan = (g: string, p: Record<string, any> = {}) => compile(g, p) as any;
 const vals = async (g: string, p: Record<string, any> = {}) => {
   const out: string[] = [];
   for (const b of exec(store).buffers(g, p, {})) out.push(String(await decode(b)));

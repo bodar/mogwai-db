@@ -24,11 +24,8 @@
 //      failure surfaces as a throw anyway, so one pass yields both halves.
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { compile } from '../../src/compiler/compiler.ts';
-import type { Spine } from '../../src/sql/kernel/render.ts';
 import type { Framed } from '../../src/execute.ts';
 import { exec } from '../support/executor.ts';
-import { standardRegistry } from '../../src/services/standard.ts';
 import { isNondeterministic, isWrite, seeded } from '../support/graph.ts';
 import { multisetKey } from '../support/multiset.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
@@ -58,23 +55,12 @@ export const EXECUTES: ReadonlySet<Status> = new Set<Status>(['ran', 'nondet']);
 export interface Row {
   readonly query: string;
   readonly status: Status;
-  /** WHICH LOWERING would compile this — the RelIR migration's COVERAGE counter (§10·4 of
-   *  docs/2026-08-01-relir-build-plan.md), one of its two ratchets.
-   *
-   *  Measured with the RelIR route FORCED ON, never with the ambient `MOGWAI_RELIR` switch, so the
-   *  column records what the new spine CAN do rather than which position the process happens to be
-   *  in. Otherwise the differential's off position would re-record the artifact as all-legacy and
-   *  the ratchet would measure the switch instead of the migration. */
-  readonly spine: Spine;
   /** Rows emitted, and distinct traverser values among them. Redundant with `ms` (equal multisets
    *  have equal counts) but kept so a diff is readable without decoding a hash. */
   readonly n?: number;
   readonly d?: number;
   /** GATES. The weighed traverser multiset — sorted, so JS Map insertion order cannot leak in. */
   readonly ms?: string;
-  /** The pinned legacy position's status and (when digestible) weighed multiset. */
-  readonly lstatus?: Status;
-  readonly lms?: string;
   /** TELEMETRY, never gates. Emission order, isolated so it can be reported without failing a run:
    *  TinkerPop constrains order only as far as the traversal establishes it, so a bare traversal has
    *  no guaranteed order at all. 356 of these move under a planner perturbation; gating on it
@@ -101,38 +87,6 @@ const FOREIGN_ORIGIN: readonly RegExp[] = [
   /\bconstraint failed\b/i,                               // SQLite integrity
   /\bno such (?:column|table)\b/i,                        // SQLite name resolution
 ];
-
-/**
- * Which spine would compile this traversal, with the RelIR route forced on.
- *
- * A separate compile rather than a channel out of the executor, and deliberately: the question is
- * about COMPILATION, so asking the compiler directly is both the honest form and the one that keeps
- * an instrument's needs out of the data plane. A traversal that does not compile at all routes
- * nowhere, so it reads `legacy` — the same answer as an uncovered one, which is correct: neither is
- * coverage the migration has banked.
- */
-function spineOf(query: string): Spine {
-  try {
-    // THE REGISTRY IS NOT OPTIONAL HERE, and omitting it broke this column for every `call()`.
-    // Rule 2 in this module's own header says the census runs through the EXECUTOR precisely
-    // because `compile(q, {})` resolves no registry and turns all twelve `call()` traversals into
-    // false "unknown service" deferrals — and this compile, the one place a bare `compile()`
-    // survived, was doing exactly that. The throw was caught into `legacy`, so every `call()`
-    // traversal reported as uncovered no matter which spine actually answered it.
-    //
-    // It went unnoticed while the answer happened to be right: `call()` WAS legacy-only. Migrating
-    // `--list` to the `rel` arm is what made it observably wrong — the traversal executes on RelIR
-    // (the `status`/`ms` columns, which DO go through the executor, are unchanged and correct)
-    // while this column still said `legacy`. The coverage ratchet was reading a constant.
-    //
-    // `standardRegistry` is what `exec()` binds by default, so the compile now asks the same
-    // question the two execution positions answer.
-    const plan = compile(query, {}, { spine: 'rel', registry: standardRegistry });
-    return plan.kind === 'write' ? 'legacy' : plan.spine;
-  } catch {
-    return 'legacy';
-  }
-}
 
 /** Normalize a throw message to what is stable across refactors.
  *
@@ -193,9 +147,9 @@ function digest(framed: readonly Framed[]): Pick<Row, 'n' | 'd' | 'ms' | 'ord'> 
 
 type Position = Pick<Row, 'status' | 'n' | 'd' | 'ms' | 'ord' | 'message'>;
 
-function runPosition(query: string, spine: Spine, store: ReturnType<typeof seeded>): Position {
+function runPosition(query: string, store: ReturnType<typeof seeded>): Position {
   try {
-    const framed = exec(store, undefined, undefined, spine).framed(query, {});
+    const framed = exec(store).framed(query, {});
     return isNondeterministic(query)
       ? { status: 'nondet', n: framed.length }
       : { status: 'ran', ...digest(framed) };
@@ -204,17 +158,12 @@ function runPosition(query: string, spine: Spine, store: ReturnType<typeof seede
   }
 }
 
-/** Run the whole corpus in both pinned spine positions. Reads share one store (probe-verified: no
- *  read mutates it, and fresh-per-traversal gives byte-identical results for twice the wall clock);
- *  each write gets its own store PER POSITION, or one position would see the other's mutation. */
+/** Run the whole corpus. Reads share one store (probe-verified: no read mutates it, and
+ *  fresh-per-traversal gives byte-identical results for twice the wall clock); each write gets its
+ *  own store, or one traversal would see another's mutation. */
 export function runCensus(corpus: readonly string[]): Row[] {
   const shared = seeded(MODERN_SEED);
-  return corpus.map((query) => {
-    const spine = spineOf(query);
-    const rel = runPosition(query, 'rel', isWrite(query) ? seeded(MODERN_SEED) : shared);
-    const legacy = runPosition(query, 'legacy', isWrite(query) ? seeded(MODERN_SEED) : shared);
-    return { query, spine, ...rel, lstatus: legacy.status, lms: legacy.ms };
-  });
+  return corpus.map((query) => ({ query, ...runPosition(query, isWrite(query) ? seeded(MODERN_SEED) : shared) }));
 }
 
 // ---------- the artifact ----------
@@ -236,8 +185,8 @@ const HEADER = [
   '# `spine` is the RelIR migration COVERAGE ratchet: a traversal may move legacy -> rel, never back.',
 ].join('\n');
 
-const GOLDEN_COLS = 'status\tspine\tn\td\tms\tord\tlstatus\tlms\tquery';
-const DEFERRAL_COLS = 'status\tspine\tmessage\tquery';
+const GOLDEN_COLS = 'status\tn\td\tms\tord\tquery';
+const DEFERRAL_COLS = 'status\tmessage\tquery';
 
 const byQuery = (a: Row, b: Row) => (a.query < b.query ? -1 : a.query > b.query ? 1 : 0);
 
@@ -246,10 +195,10 @@ export function serialize(rows: readonly Row[]): { goldens: string; deferrals: s
   const threw = rows.filter((r) => !EXECUTES.has(r.status)).sort(byQuery);
   return {
     goldens: [HEADER, GOLDEN_COLS,
-      ...executed.map((r) => [r.status, r.spine, r.n ?? '', r.d ?? '', r.ms ?? '', r.ord ?? '', r.lstatus ?? '', r.lms ?? '', r.query].join('\t')),
+      ...executed.map((r) => [r.status, r.n ?? '', r.d ?? '', r.ms ?? '', r.ord ?? '', r.query].join('\t')),
     ].join('\n') + '\n',
     deferrals: [HEADER, DEFERRAL_COLS,
-      ...threw.map((r) => [r.status, r.spine, r.message ?? '', r.query].join('\t')),
+      ...threw.map((r) => [r.status, r.message ?? '', r.query].join('\t')),
     ].join('\n') + '\n',
   };
 }
@@ -261,12 +210,11 @@ function parseTsv(text: string): Row[] {
   return lines.map((line) => {
     const f = line.split('\t');
     return golden
-      ? { status: f[0] as Status, spine: f[1] as Spine, n: f[2] ? Number(f[2]) : undefined, d: f[3] ? Number(f[3]) : undefined,
-          ms: f[4] || undefined, ord: f[5] || undefined,
-          lstatus: (f[6] || undefined) as Status | undefined, lms: f[7] || undefined,
+      ? { status: f[0] as Status, n: f[1] ? Number(f[1]) : undefined, d: f[2] ? Number(f[2]) : undefined,
+          ms: f[3] || undefined, ord: f[4] || undefined,
           // `query` LAST and taken with `slice`, because a corpus traversal can contain a tab.
-          query: f.slice(8).join('\t') }
-      : { status: f[0] as Status, spine: f[1] as Spine, message: f[2], query: f.slice(3).join('\t') };
+          query: f.slice(5).join('\t') }
+      : { status: f[0] as Status, message: f[1], query: f.slice(2).join('\t') };
   });
 }
 

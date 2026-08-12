@@ -19,6 +19,7 @@ Feature: mogwai addendum — scalar-stream re-entry
       | d[35].i |
 
   @gap:scalar-position
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXnameX_mapXtoUpperX
     Given the modern graph
     And the traversal of
@@ -34,6 +35,7 @@ Feature: mogwai addendum — scalar-stream re-entry
       | PETER |
 
   @gap:scalar-position
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXageX_mapXcountX
     Given the modern graph
     And the traversal of
@@ -49,6 +51,7 @@ Feature: mogwai addendum — scalar-stream re-entry
       | d[1].l |
 
   @gap:scalar-position
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXageX_chooseXidentityX_optionXbetween_youngX_optionXnone_oldX
     Given the modern graph
     And the traversal of
@@ -79,6 +82,7 @@ Feature: mogwai addendum — scalar-stream re-entry
       | d[70.0].d |
 
   @gap:scalar-position
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXageX_coalesceXisXgtX30XX_constantX0XX
     Given the modern graph
     And the traversal of
@@ -121,6 +125,7 @@ Feature: mogwai addendum — scalar-stream re-entry
   # extremes. (`coalesce`/`optional` do NOT extend `BranchStep`, which is why their per-traverser
   # arms are right — see docs/2026-08-01-branch-arm-barrier-scope-plan.md §1.)
   @gap:scalar-position
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXageX_unionXminX_maxX
     Given the modern graph
     And the traversal of
@@ -136,6 +141,7 @@ Feature: mogwai addendum — scalar-stream re-entry
   # The same fact with a cardinality-mixing pair: `min()` collapses to one row while `constant()`
   # is fed every start, so batching is visible in the ROW COUNT and not only in the values.
   @gap:scalar-position
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXageX_unionXminX_constantX
     Given the modern graph
     And the traversal of
@@ -155,6 +161,7 @@ Feature: mogwai addendum — scalar-stream re-entry
   # labels — `select("x")` after one drops it, exactly as the reference does, while the
   # cardinality-preserving arm keeps its own.
   @gap:scalar-position
+  @Unsupported
   Scenario: g_V_asXxX_valuesXageX_unionXminX_identityX_selectXxX_count
     Given the modern graph
     And the traversal of
@@ -196,6 +203,7 @@ Feature: mogwai addendum — scalar-stream re-entry
   # vertices → count 6 per input. The value is discarded by the re-source (GraphStep isStart
   # =false), exactly as at the tail.
   @gap:scalar-position
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXageX_mapXV_countX
     Given the modern graph
     And the traversal of
@@ -213,6 +221,7 @@ Feature: mogwai addendum — scalar-stream re-entry
   # Slice: a re-source arm ending in a projection yields the projected values per input (one
   # input here, V(1) = marko), flat-mapped.
   @gap:scalar-position
+  @Unsupported
   Scenario: g_VX1X_valuesXageX_flatMapXV_hasLabelXpersonX_valuesXnameXX
     Given the modern graph
     And the traversal of
@@ -232,6 +241,7 @@ Feature: mogwai addendum — scalar-stream re-entry
   # A count() tail is shape-agnostic over the variant and keeps the assertion deterministic:
   # one input (V(1), age 29) → 1 scalar 'x' + 6 vertices = 7.
   @gap:scalar-position
+  @Unsupported
   Scenario: g_VX1X_valuesXageX_unionXconstantXxX_VX_count
     Given the modern graph
     And the traversal of
@@ -247,6 +257,7 @@ Feature: mogwai addendum — scalar-stream re-entry
   # arm) → a VariantStream, ordinal-gated first-productive. is(gt 100) never fires for age 29,
   # so the input falls to V() → 6 vertices; count() over the variant = 6.
   @gap:scalar-position
+  @Unsupported
   Scenario: g_VX1X_valuesXageX_coalesceXisXgtX100XX_VX_count
     Given the modern graph
     And the traversal of
@@ -261,6 +272,7 @@ Feature: mogwai addendum — scalar-stream re-entry
   # Slice: optional() over a scalar with an element arm → a VariantStream (arm rows where
   # productive, else the value restored). V() is productive → 6 vertices; count() = 6.
   @gap:scalar-position
+  @Unsupported
   Scenario: g_VX1X_valuesXageX_optionalXVX_count
     Given the modern graph
     And the traversal of
@@ -275,6 +287,7 @@ Feature: mogwai addendum — scalar-stream re-entry
   # Slice: optional() with a SCALAR filter arm restores the dropped inputs → identity over the
   # values (gt 30 pass through the arm; 27/29 miss and are restored).
   @gap:scalar-position
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXageX_optionalXisXgtX30XXX
     Given the modern graph
     And the traversal of
@@ -305,6 +318,7 @@ Feature: mogwai addendum — scalar-stream re-entry
       | d[35].i |
 
   @gap:scalar-position
+  @Unsupported
   Scenario: g_injectXstrX_splitX_X
     Given an empty graph
     And the traversal of
@@ -317,6 +331,7 @@ Feature: mogwai addendum — scalar-stream re-entry
       | l[a,b,c] |
 
   @gap:scalar-position
+  @Unsupported
   Scenario: g_injectX0X_V_count
     Given the modern graph
     And the traversal of

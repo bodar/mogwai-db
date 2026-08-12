@@ -10,6 +10,7 @@ Feature: mogwai addendum — map() take-first over a fan-out arm (canonical emis
   # @gap:map-take-first marks the family for a possible gremlin-test PR.
 
   @gap:map-take-first
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXageX_mapXunionXconstantXloX_constantXhiXXX
     Given the modern graph
     And the traversal of
@@ -25,6 +26,7 @@ Feature: mogwai addendum — map() take-first over a fan-out arm (canonical emis
       | lo |
 
   @gap:map-take-first
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXageX_mapXchooseXisXgtX30XX_constantXoldX_constantXyoungXXX
     Given the modern graph
     And the traversal of
@@ -40,6 +42,7 @@ Feature: mogwai addendum — map() take-first over a fan-out arm (canonical emis
       | old |
 
   @gap:map-take-first
+  @Unsupported
   Scenario: g_V1_valuesXageX_mapXV_valuesXnameXX
     Given the modern graph
     And the traversal of

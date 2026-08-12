@@ -56,6 +56,7 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
   # The canonical driver (map/Unfold.feature g_V_valueMap_unfold_mapXselectXkeysXX): each
   # vertex's valueMap is exploded to its entries, then select(keys) reads each entry's key.
   @gap:map-unfold
+  @Unsupported
   Scenario: g_V_valueMap_unfold_mapXselectXkeysXX
     Given the modern graph
     And the traversal of
@@ -111,6 +112,7 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
   # A stored map property, retyped by is(typeOf(MAP)), frames whole (terminal) and its
   # followers (count(local)/select(values)/unfold) reuse the blob substrate.
   @gap:map-unfold
+  @Unsupported
   Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX
     Given the mapdata graph
     And the traversal of
@@ -123,6 +125,7 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
       | m[{"a":"d[1].i","b":"d[2].i","c":"d[3].i"}] |
 
   @gap:map-unfold
+  @Unsupported
   Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX_countXlocalX
     Given the mapdata graph
     And the traversal of
@@ -135,6 +138,7 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
       | d[3].l |
 
   @gap:map-unfold
+  @Unsupported
   Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX_selectXvaluesX
     Given the mapdata graph
     And the traversal of
@@ -147,6 +151,7 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
       | l[d[1].i,d[2].i,d[3].i] |
 
   @gap:map-unfold
+  @Unsupported
   Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX_selectXkeysX
     Given the mapdata graph
     And the traversal of
@@ -160,6 +165,7 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
 
   # unfold() explodes the stored map into per-entry size-1 MAPs.
   @gap:map-unfold
+  @Unsupported
   Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX_unfold
     Given the mapdata graph
     And the traversal of
@@ -175,6 +181,7 @@ Feature: mogwai addendum — Map.Entry relational unfold (is(typeOf(MAP)) family
 
   # unfold().select(keys) reads each entry's key.
   @gap:map-unfold
+  @Unsupported
   Scenario: g_V_valuesXmX_isXtypeOfXGType_MAPXX_unfold_selectXkeysX
     Given the mapdata graph
     And the traversal of

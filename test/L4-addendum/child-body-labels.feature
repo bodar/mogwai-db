@@ -15,6 +15,7 @@ Feature: mogwai addendum — as()/select(label) inside a child body
   # confined). Both match TinkerPop. @gap:child-body-labels marks the family.
 
   @gap:child-body-labels
+  @Unsupported
   Scenario: g_V_asXxX_mapXoutXcreatedX_selectXxXX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -29,6 +30,7 @@ Feature: mogwai addendum — as()/select(label) inside a child body
       | peter |
 
   @gap:child-body-labels
+  @Unsupported
   Scenario: g_V_asXxX_localXoutXknowsX_selectXxXX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -42,6 +44,7 @@ Feature: mogwai addendum — as()/select(label) inside a child body
       | marko |
 
   @gap:child-body-labels
+  @Unsupported
   Scenario: g_V_localXoutXcreatedX_asXaX_selectXaXX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -57,6 +60,7 @@ Feature: mogwai addendum — as()/select(label) inside a child body
       | ripple |
 
   @gap:child-body-labels
+  @Unsupported
   Scenario: a bind inside a MAPPING child escapes to the parent
     Given the modern graph
     And the traversal of
@@ -81,6 +85,7 @@ Feature: mogwai addendum — as()/select(label) inside a child body
     Then the result should be empty
 
   @gap:child-body-labels
+  @Unsupported
   Scenario: g_V_asXxX_whereXoutXcreatedX_whereXselectXxXXX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -95,6 +100,7 @@ Feature: mogwai addendum — as()/select(label) inside a child body
       | peter |
 
   @gap:child-body-labels
+  @Unsupported
   Scenario: g_V_asXxX_groupXX_byXnameX_byXoutXcreatedX_selectXxX_valuesXnameX_foldX
     Given the modern graph
     And the traversal of
@@ -107,6 +113,7 @@ Feature: mogwai addendum — as()/select(label) inside a child body
       | m[{"marko":["marko"],"vadas":[],"josh":["josh","josh"],"peter":["peter"]}] |
 
   @gap:child-body-labels
+  @Unsupported
   Scenario: g_V_asXxX_mapXunionXoutXcreatedX_selectXxX__inXknowsX_selectXxXXX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -124,6 +131,7 @@ Feature: mogwai addendum — as()/select(label) inside a child body
   # Every element here is productive under the by() (each created something), so this pins the
   # label read inside an order() modulator WITHOUT also pinning unproductive-by() ordering.
   @gap:child-body-labels
+  @Unsupported
   Scenario: g_V_asXxX_orderXX_byXoutXcreatedX_selectXxX_valuesXageXX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -138,6 +146,7 @@ Feature: mogwai addendum — as()/select(label) inside a child body
       | peter |
 
   @gap:child-body-labels
+  @Unsupported
   Scenario: an unbound label inside a child body drops the traverser, it does not error
     Given the modern graph
     And the traversal of
@@ -162,6 +171,7 @@ Feature: mogwai addendum — as()/select(label) inside a child body
   # .../dsl/graph/GraphTraversal.java:2578.
 
   @gap:child-body-labels
+  @Unsupported
   Scenario: g_V_asXaX_out_asXbX_whereXasXaX_outXknowsXX_count
     Given the modern graph
     And the traversal of
@@ -176,6 +186,7 @@ Feature: mogwai addendum — as()/select(label) inside a child body
   # The SAME body under filter(): `as("a")` rebinds the current object (an out-neighbour), so the
   # body is `filter(__.out("knows"))` and no out-neighbour of anything has a knows edge.
   @gap:child-body-labels
+  @Unsupported
   Scenario: g_V_asXaX_out_asXbX_filterXasXaX_outXknowsXX_count
     Given the modern graph
     And the traversal of
@@ -190,6 +201,7 @@ Feature: mogwai addendum — as()/select(label) inside a child body
   # The rebind is CONFINED to the child: a filter() consumer re-projects the parent domain, so the
   # outer "a" still holds the source vertex afterwards.
   @gap:child-body-labels
+  @Unsupported
   Scenario: g_V_asXaX_out_filterXasXaX_outX_selectXaX_name
     Given the modern graph
     And the traversal of

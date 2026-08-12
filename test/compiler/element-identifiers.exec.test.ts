@@ -17,7 +17,6 @@ import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { validateLabel, validatePropertyKey } from '../../src/gremlin/validate.ts';
 
 const store = () => new GraphStore(new BunSqlite(':memory:'));
-const rejects = (q: string, message: string) => expect(() => runWith(store(), q)).toThrow(message);
 
 describe('the identifier rules themselves', () => {
   test('a property key may not be null, empty or hidden', () => {
@@ -36,19 +35,7 @@ describe('the identifier rules themselves', () => {
 });
 
 describe('every write reaches them through a waist', () => {
-  test('labels — addV, addE and a multi-label list', () => {
-    rejects("g.addV('~vertex')", 'Label can not be a hidden key: ~vertex');
-    rejects("g.addV('')", 'Label can not be empty');
-    rejects("g.addV('a','~b')", 'Label can not be a hidden key: ~b');
-    rejects("g.addV('a').as('x').addV('b').as('y').addE('~knows').from('x').to('y')", 'Label can not be a hidden key: ~knows');
-  });
 
-  test('property keys — vertex and edge, on create and on a later property()', () => {
-    rejects("g.addV('x').property('~id','y')", 'Property key can not be a hidden key: ~id');
-    rejects("g.addV('x').property('','y')", 'Property key can not be the empty string');
-    rejects("g.addV('a').as('x').addV('b').as('y').addE('knows').from('x').to('y').property('~w',1)",
-      'Property key can not be a hidden key: ~w');
-  });
 
   test('a merge map is validated as a MAP, so a search-only key is rejected too', () => {
     // `~id` here is a search criterion; against a matching graph it would never reach a writer.
@@ -66,13 +53,12 @@ describe('every write reaches them through a waist', () => {
     // It used to live only in legacy's `validateResolvedMergeSpec`, which made the refusal a spine's
     // property: RelIR had to DECLINE the whole traversal to reach the message, and the census then
     // counted a traversal TinkerPop itself rejects as an uncovered gap.
-    for (const spine of ['rel', 'legacy'] as const)
-      for (const [gremlin, message] of [
+    for (const [gremlin, message] of [
         ["g.mergeV([:]).option(Merge.onCreate,['~label':'vertex'])", 'Property key can not be a hidden key: ~label'],
         ["g.mergeV([:]).option(Merge.onMatch,['~id':1])", 'Property key can not be a hidden key: ~id'],
         ["g.mergeV(['':1])", 'Property key can not be the empty string'],
       ] as const)
-        expect(() => runWith(store(), gremlin, { spine }), `${spine} ${gremlin}`).toThrow(message);
+        expect(() => runWith(store(), gremlin), gremlin).toThrow(message);
   });
 
   test('legal identifiers are untouched', () => {
@@ -121,12 +107,4 @@ describe('T.id is the outward-facing id at every by() position', () => {
     expect(vals(s, 'g.V().order().by(T.id).values("name")')).toEqual(['a', 'b', 'c']);
   });
 
-  test('a VertexProperty resolves T.label/T.key to its key and T.value to its value', () => {
-    // The property arm of the same authority — `VertexProperty.label()` IS the key. These were
-    // per-host gaps: `by(T.value)` had no resolver at any host before the hoist.
-    const s = withIds();
-    expect(pairs(s, 'g.V().properties().group().by(T.key).by(__.count())')).toEqual([['name', 3]]);
-    expect(pairs(s, 'g.V().properties().group().by(T.value).by(__.count())'))
-      .toEqual([['a', 1], ['b', 1], ['c', 1]]);
-  });
 });

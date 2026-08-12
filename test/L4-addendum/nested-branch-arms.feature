@@ -8,6 +8,7 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
   # marks the family for a possible gremlin-test PR.
 
   @gap:nested-branch
+  @Unsupported
   Scenario: g_V_out_chooseXhasLabelXpersonX_coalesceXvaluesXnameX_constantXxXX_constantXzXX
     Given the modern graph
     And the traversal of
@@ -25,6 +26,7 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
       | z |
 
   @gap:nested-branch
+  @Unsupported
   Scenario: g_V_out_coalesceXchooseXhasLabelXpersonX_valuesXnameX_constantXSWXX_constantXnoneXX
     Given the modern graph
     And the traversal of
@@ -69,6 +71,7 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
   # feeds compileVariantArm). Counts are terminal so the assertions stay row-order-independent.
 
   @gap:nested-branch
+  @Unsupported
   Scenario: g_V_hasXname_markoX_unionXout__chooseXhasLabelXpersonX_constantXPX_constantXSXX_count
     Given the modern graph
     And the traversal of
@@ -81,6 +84,7 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
       | d[4].l |
 
   @gap:nested-branch
+  @Unsupported
   Scenario: g_V_out_chooseXhasLabelXpersonX_out__coalesceXvaluesXlangX_constantXSWXX_count
     Given the modern graph
     And the traversal of
@@ -93,6 +97,7 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
       | d[6].l |
 
   @gap:nested-branch
+  @Unsupported
   Scenario: g_V_groupXbyXTlabelX_byXcoalesceXvaluesXlangX_constantXnaXXX
     Given the modern graph
     And the traversal of
@@ -108,6 +113,7 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
   # inside the generic child scope used by map()/local()/flatMap().
 
   @gap:nested-branch
+  @Unsupported
   Scenario: g_V_mapXchooseXvaluesXageX_optionXbetweenX26_30X_valuesXnameXX_optionXnone_constantXunknownXX
     Given the modern graph
     And the traversal of

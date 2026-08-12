@@ -1,12 +1,10 @@
 import { parseGremlin, stepChain, extractStrategies, extractSack, extractSideEffects, extractSourceOptions, sideEffectPolicies as extractSideEffectPolicies } from '../gremlin/frontend.ts';
 import { type TypeNode } from '../gremlin/types.ts';
 import { runPasses } from './ir/passes.ts';
-import { LoweringEngine, collapseSafeFastPaths } from './engine/engine.ts';
-import { routeWrite } from './steps/write/write.ts';
 import { type Executable } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
+import { labelRegime } from '../api.ts';
 import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './options/fast-paths.ts';
-import { LegacyRouteRequired, legacyReachable, resolveSpine } from './options/spine.ts';
 import { compileViaRel, loweringOptions } from './rel/spine.ts';
 import { segmentPlan } from './rel/segment.ts';
 import { createAppScope, createRequestScope } from '../scopes.ts';
@@ -58,100 +56,60 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   const { steps, discard } = runPasses(stepChain(tree, params, paramTypes), extractStrategies(tree, params), params, sideEffects);
   if (steps.length === 0) throw new Error('empty traversal');
 
-  // The DI scopes: an app scope (from options, or a default one for callers that pass loose
-  // fields / nothing), the REQUEST scope this traversal fixes (its bound params, its federation
-  // hop depth, its g.with(...) source options — all inherited by every nested sub-compile), and
-  // this compile's own Query. The lowering Engine (the
-  // dependency object that replaced the free-function dispatcher barrel) is built HERE from the
-  // scope, with movementCollapse gated to this chain's result-safety, and drives read AND write;
-  // it rides its own Query (`scope.q`) so every step family reaches lowering + deps through the
-  // stream without any parameter threading. The write path only ever mints fresh child engines
-  // off it (buildPrefixFresh / compileReadCompiled), so building it before the write check is safe.
+  // The DI scopes: an app scope (from options, or a default one for callers that pass loose fields /
+  // nothing) and the REQUEST scope this traversal fixes — its bound params, its federation hop depth,
+  // its `g.with(...)` source options, all inherited by every nested sub-compile.
   const app = options?.app ?? createAppScope({ registry: resolveRegistry(options), fastPaths: resolveFastPaths(options) });
   const request = createRequestScope(app, {
     params, federationDepth: resolveFederationDepth(options), sourceOptions: extractSourceOptions(tree, params),
   });
-  const engine = new LoweringEngine(request, { fastPaths: collapseSafeFastPaths(request.fastPaths, steps) });
 
-  // THE SPINE ROUTE (§6·1). A chain the RelIR lowering covers end-to-end compiles there; anything
-  // else — a step it has not learned, a write it cannot express, a sack — falls through to the legacy
-  // spine WHOLE. Never mixed inside one traversal, which is what keeps RelIR a real algebra rather
-  // than a wrapper around opaque SQL. `MOGWAI_RELIR=0` (or `options.spine`) is the differential's
-  // off position, and it and this branch are both deleted when the legacy spine is.
-  //
-  // **`withSideEffect` USED TO BE A ROUTE-LEVEL REFUSAL HERE, AND THAT MADE A HAND-OVER LOOK LIKE A
-  // GAP.** `sideEffects.size === 0` meant a traversal declaring one was never OFFERED to the lowering,
-  // so `mergeV(__.select(c))` and `property(k, __.select(c))` counted as uncovered vocabulary when what
-  // was actually missing is that the seam had not been handed a map the front-end already held (§6·6).
-  // Coverage must measure what the algebra can EXPRESS, never what the router remembered to ask.
-  // The steps that genuinely need a named-collection substrate (`aggregate`/`store`/`cap`, and the
-  // reducer form of `withSideEffect`, which the front-end leaves unregistered) decline inside the
-  // lowering like any other unlearned step — which is where a decline belongs.
-  //
-  // **THERE IS NO ROUTE-LEVEL GATE LEFT.** The last one was `!sackInit` — a traversal declaring a
-  // `withSack()` was never OFFERED to this route, whatever else was in it — and it is gone with the
-  // sack lowering (plan §10 Phase 2). The seed now travels as a settled VALUE like
-  // `labelCardinality`: `src/compiler/rel/sack.ts` mints the channel `src/channels.ts` already
-  // modelled, and a seed or a merge operator that route cannot express declines INSIDE the lowering
-  // like any other unlearned step. That is the whole content of §6·6's lesson at the routing switch:
-  // a gate here reads identically to a missing lowering in every counter the migration owns.
-  //
-  // **THE THIRD POSITION MEASURES THE CUT.** `rel-only` tries RelIR exactly as `rel` does and then
-  // RAISES instead of falling through, so an L3 run against it counts what deleting the legacy route
-  // would cost. `rel` and `legacy` cannot answer that — both may fall back, so the `legacySpine` floor
-  // proves only *routed ≥ all-legacy*. See options/spine.ts and plan §Phase 3.
-  const position = resolveSpine(options);
-  if (position !== 'legacy') {
-    const relRequest = {
-        // **THE RAW STRATEGY SWITCH, NOT THE CHAIN VERDICT** (§8 item 8b). `engine.fastPaths` has
-        // `collapseSafe && !demandsEncounter` folded into it by `collapseSafeFastPaths`, and handing
-        // RelIR that did not make it conservative — it switched OFF a decision RelIR already makes
-        // correctly per NODE, of the channels carried there (`groupableChannels`) and of the suffix
-        // that must read the multiplicity (`ir/bulk.ts`). A chain-global boolean cannot say "safe
-        // here, unsafe there", so folding it in refused a collapse at every hop of any chain whose
-        // LATER shape it disliked. What crosses now is what this value is named for: whether the
-        // caller ASKED for the collapse strategy. `collapseSafe` stays behind for legacy, which has
-        // no per-position answer to fall back on.
-        collapse: request.fastPaths.movementCollapse,
-        propertySeek: engine.fastPaths.propertySeek,
-        labelRegime: engine.labelRegime,
-        // The registry is an app-scope DEPENDENCY and stops here: this is the boundary that holds
-        // it, so it resolves the names and hands the lowering the settled services.
-        services: servicesNamedBy(steps, request.params, engine.registry),
-        sack: sackInit,
-        sideEffectPolicies: sideEffectPolicies,
-    } as const;
+  // WHAT THE LOWERING GETS FROM THE REQUEST, and the whole of it: two strategy switches, the label
+  // regime the source options declared, the services this chain names (resolved HERE — the registry is
+  // an ambient capability and stops at this boundary), and the two settled policies the front end
+  // extracted. Everything is a VALUE; nothing ambient crosses.
+  const relRequest = {
+    collapse: request.fastPaths.movementCollapse,
+    propertySeek: request.fastPaths.propertySeek,
+    labelRegime: labelRegime(request.sourceOptions),
+    services: servicesNamedBy(steps, request.params, request.registry),
+    sack: sackInit,
+    sideEffectPolicies,
+  } as const;
 
-    // A BARRIER `call()` IS ASKED FIRST, because it is not a lowering question. Its rows arrive on a
-    // Promise, so the traversal is a PLAN OF SEGMENTS rather than one statement, and `lowerToRel`
-    // would decline it — correctly, since there is nothing to lower at compile time — which would
-    // read as uncovered vocabulary. What the fold cannot express and what the executor has not yet
-    // fetched are different facts, and only this one has a boundary to build (§6·6).
-    const segment = segmentPlan(steps, {
-      services: relRequest.services, params: request.params, federationDepth: request.federationDepth,
-      lowering: loweringOptions(relRequest, request.params, sideEffects),
-    });
-    if (segment) return segment;
+  // A BARRIER `call()` IS ASKED FIRST, because it is not a lowering question. Its rows arrive on a
+  // Promise, so the traversal is a PLAN OF SEGMENTS rather than one statement, and `lowerToRel` would
+  // decline it — correctly, since there is nothing to lower at compile time — which would read as
+  // uncovered vocabulary. What the algebra cannot express and what the executor has not yet fetched
+  // are different facts, and only this one has a boundary to build.
+  const segment = segmentPlan(steps, {
+    services: relRequest.services, params: request.params, federationDepth: request.federationDepth,
+    lowering: loweringOptions(relRequest, request.params, sideEffects),
+  });
+  if (segment) return segment;
 
-    const viaRel = compileViaRel(relRequest, steps, request.params, sideEffects);
-    if (viaRel) return { kind: 'sql', compiled: discard ? applyDiscard(viaRel) : viaRel };
+  const compiled = compileViaRel(relRequest, steps, request.params, sideEffects);
+  // A DECLINE IS NOW THE ANSWER, not a route change. While two spines existed a `null` here meant
+  // "the other one owns this"; with one spine it means the compiler cannot lower this traversal, and
+  // saying so plainly is the only honest thing left to do with it. It is an ordinary query failure —
+  // returned to the client on the trailer, not logged as an incident (root CLAUDE.md).
+  if (!compiled) throw new UnsupportedTraversal(gremlin);
+  return { kind: 'sql', compiled: discard ? applyDiscard(compiled) : compiled };
+}
+
+/**
+ * A traversal the compiler cannot lower to SQL — a step, or a COMBINATION of steps, that has no
+ * lowering yet.
+ *
+ * Its own class rather than a bare `Error` so a caller can tell an unsupported query from a broken
+ * one: this is the user's traversal being outside what we compile, which is a deferral, while
+ * anything else escaping a compile is a defect. Same distinction the Pass tier draws with `Deferral`.
+ */
+export class UnsupportedTraversal extends Error {
+  constructor(readonly gremlin: string) {
+    super(`this traversal is not supported yet: no lowering covers ${gremlin}`);
+    this.name = 'UnsupportedTraversal';
   }
-  if (!legacyReachable(position)) throw new LegacyRouteRequired();
-
-  const write = routeWrite(engine, steps, params, sackInit ?? undefined, sideEffects);
-  if (write) return { kind: 'sql', compiled: discard ? applyDiscard(write) : write };
-
-  const read = engine.compileRead(steps, request.params, sackInit ?? undefined);
-  if (read.kind === 'segment') {
-    // A discard trailing a federated source (g.call(...).iterate()) applies to the RESUMED leaf,
-    // so wrap resume rather than the segment itself (which carries no shape).
-    if (!discard) return read;
-    return { ...read, resume: (foreign, headRows) => {
-      const p = read.resume(foreign, headRows);
-      return p.kind === 'sql' ? { kind: 'sql', compiled: applyDiscard(p.compiled) } : p;
-    } };
-  }
-  return { kind: 'sql', compiled: discard ? applyDiscard(read) : read };
 }
 
 export function compile(gremlin: string, params: Record<string, any>, options?: CompileOptions, paramTypes: Record<string, TypeNode> = {}): Executable {

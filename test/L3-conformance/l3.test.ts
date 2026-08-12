@@ -33,8 +33,7 @@ import { buildConformanceApp } from './conformance-server.ts';
 import { installInMemoryTransport, type InMemoryTransport } from '../support/in-memory-transport.ts';
 import { runFeatures, GLV } from '../support/cucumber.ts';
 import { L3_TAGS, isExcludedScenario } from './tags.ts';
-import { ambientPosition, ambientSpine } from '../../src/compiler/options/spine.ts';
-import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readState, writeState, stateOf, delta, formatDelta, formatSpineGap, partitionLegacyRegressions, unionPassing, expectedErrorSubstrings } from './telemetry.ts';
+import { telemetryPath, readTelemetry, summarize, collectScenarios, formatReport, readState, writeState, delta, formatDelta, expectedErrorSubstrings } from './telemetry.ts';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 // A GLOB, not a bare directory: cucumber 13 (the submodule's runner since the master bump)
@@ -98,17 +97,6 @@ beforeAll(async () => {
 afterAll(() => transport?.restore());
 
 test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBinary', async () => {
-  // Read the process position ONCE and carry it through every state operation: crossing sections is
-  // the failure mode, because one configuration must never gate on or rewrite the other's floor.
-  const spine = ambientSpine();
-  // ⚠️ THE THIRD POSITION IS A MEASUREMENT, NOT A RATCHET (plan §Phase 3, options/spine.ts).
-  // `rel-only` runs the RelIR route with the legacy fallback FORBIDDEN, so this run's failures are
-  // exactly the scenarios legacy is still carrying — the cost of deleting the route. It compares
-  // against the `rel` floor because that floor IS the routed configuration, which makes `regressed`
-  // the answer we came for. It must not gate and must not record: gating would pin a number that is
-  // meant to fall to zero, and recording would overwrite the routed floor with the un-fallen-back
-  // one, silently lowering the ratchet the migration is held to.
-  const measuringTheCut = ambientPosition() === 'rel-only';
   const report = join(tmpdir(), `mogwai-l3-${process.pid}.json`);
   // The `json` formatter is cucumber's OWN output and stays the measurement: `collectScenarios`
   // reads its shape, and the committed floor was recorded from it. Only how cucumber is DRIVEN
@@ -156,11 +144,8 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
     throw new Error(`count mismatch: parsed ${passing} but cucumber summary says ${reported}. Summary:\n${out.slice(-400)}`);
   }
 
-  const recordedRel = readState(STATE, 'rel');
-  const recordedLegacy = readState(STATE, 'legacy');
-  const prev = spine === 'rel' ? recordedRel : recordedLegacy;
-  const spineLabel = measuringTheCut ? 'RelIR ONLY — measuring the cut' : spine === 'rel' ? 'RelIR spine' : 'legacy spine';
-  console.log(`L3 conformance [${spineLabel}]: ${passing}/${total} scenarios pass (last recorded ${prev.passing})`);
+  const prev = readState(STATE);
+  console.log(`L3 conformance: ${passing}/${total} scenarios pass (last recorded ${prev.passing})`);
 
   // Per-scenario delta vs the committed last-known run. The passing SET in l3-state.json
   // names exactly what changed — GAINS (fixes) and REGRESSIONS (a scenario that passed
@@ -172,40 +157,12 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
   const deltaText = formatDelta(d);
   if (deltaText) console.log(deltaText);
 
-  // The live side uses this run while the other side uses its last recorded section — the same value
-  // `writeState` would record, through the same function, so the printed gap cannot drift from the
-  // floor that gets committed.
-  const current = stateOf(rows);
-  // The two-floor gap is a statement about the DIFFERENTIAL and says nothing under `rel-only`,
-  // whose comparison is this run against the routed floor — printed by `formatDelta` above.
-  const gapText = measuringTheCut ? '' : formatSpineGap(
-    spine === 'rel' ? current : recordedRel,
-    spine === 'legacy' ? current : recordedLegacy,
-    spine,
-  );
-  if (gapText) console.log(gapText);
-
-  if (measuringTheCut) {
-    // ⚠️ FAIL CLOSED ON AN EMPTY RUN, and this is the defect the instrument's FIRST run had.
-    // Upstream's own graph-snapshot reads (`getVertices`/`getEdges`/`getVertexProperties`,
-    // `vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/world.js:147-180`) are HARNESS,
-    // not measurement — and they route to legacy, so `rel-only` raises inside them and cucumber dies
-    // before a single scenario runs. The instrument then read "0 scenarios lost", which is the worst
-    // answer a measurement can give: indistinguishable from success and pointing the wrong way.
-    // A zero-scenario run is a BROKEN run, never a clean one.
-    if (total === 0) {
-      throw new Error('L3 [rel-only] ran ZERO scenarios — the cut is UNMEASURED, not zero. cucumber aborted, '
-        + 'almost certainly inside world.js\'s graph-snapshot reads, which take the legacy route and therefore '
-        + 'raise under this position. Land those shapes on RelIR (plan §Phase 2 gap 4 — element-keyed side '
-        + `reads) and this instrument starts reporting.\n--- cucumber stdout ---\n${out.slice(-2000)}`);
-    }
-    console.log(`\nL3 THE CUT: deleting the legacy route today costs ${d.regressed.length} scenario(s) — `
-      + `${passing}/${total} on RelIR alone vs ${prev.passing} routed.`);
-    console.log(d.regressed.length
-      ? `Each is a traversal RelIR declines and legacy answers:\n${d.regressed.map((r) => `  - ${r.name}`).join('\n')}`
-      : 'Nothing. On L3, the legacy route is already carrying zero scenarios.');
-    console.log('Rank by FAMILY with `mise run rel-blockers`; ⚠️ read every name through §6·6 first — '
-      + 'a shape the algebra expresses but nothing HANDS it reads identically to a missing lowering.');
+  // A ZERO-SCENARIO RUN IS A BROKEN RUN, never a clean one. Cucumber dying before the first scenario
+  // — an aborted `BeforeAll`, a transport that never swapped — reports as "nothing failed", which is
+  // the worst answer a measurement can give: indistinguishable from success.
+  if (total === 0) {
+    throw new Error('L3 ran ZERO scenarios — the suite is UNMEASURED, not green. cucumber aborted '
+      + `before the first scenario.\n--- cucumber stdout ---\n${out.slice(-2000)}`);
   }
 
   // The systematic-gap view (deferral buckets + failing-step frequency), joined from the
@@ -221,67 +178,39 @@ test('L3 conformance ratchet — official TinkerPop cucumber suite over GraphBin
   writeFileSync(artifact, JSON.stringify({ ...sum, scenarios: rows }, null, 2) + '\n');
   console.log(`L3 telemetry summary → ${artifact}`);
 
-  // ── THE GATES, and they are ASYMMETRIC by design (§6·1) ──────────────────────────────────────
+  // ── THE GATE — a hard ratchet ────────────────────────────────────────────────────────────────
   //
-  // The RelIR floor is a hard ratchet: no scenario may regress (named in the delta above) and the
-  // count never falls.
-  //
-  // The LEGACY floor is not, because legacy is a route with an end date. A RelIR increment that
-  // re-expresses a shape legacy only half-supported may cost legacy a scenario, and that trade is
-  // fine — gaining five and losing five on a spine scheduled for deletion is progress, not a
-  // regression. So the legacy side gates on the UNION: legacy may shed anything the RelIR floor
-  // holds, and may not lose a name no spine holds. Two assertions that fail differently on purpose
-  // (the second also catches a name that left SCOPE, which `delta` cannot see).
-  //
-  // …and `rel-only` gates on NOTHING. Its regressions are the measurement itself, so asserting on
-  // them would make the instrument fail by definition until Phase 4 — the one shape of test that
-  // teaches everyone to ignore it.
-  const shed = spine === 'legacy' ? partitionLegacyRegressions(d.regressed, recordedRel) : undefined;
-  if (shed?.shed.length) {
-    console.log(`L3 [legacy spine] shed ${shed.shed.length} scenario(s) the RelIR floor holds — ` +
-      `legal (§6·1), lowers the legacy floor:\n${shed.shed.map((r) => `  - ${r.name}`).join('\n')}`);
-  }
-  if (measuringTheCut) return;
-  expect(shed ? shed.uncompensated : d.regressed).toHaveLength(0);
-  if (spine === 'rel') {
-    expect(passing).toBeGreaterThanOrEqual(prev.passing);
-  } else {
-    const before = unionPassing(recordedRel, recordedLegacy).size;
-    const after = unionPassing(recordedRel, current).size;
-    if (after !== before) console.log(`L3 union floor: ${before} → ${after} distinct scenario names`);
-    expect(after).toBeGreaterThanOrEqual(before);
-  }
+  // No scenario may regress (each is named in the delta above) and the count never falls. The
+  // regression set is STRICTER than the count: a net-positive run that silently breaks a
+  // previously-green scenario still fails here, which the count alone would hide.
+  expect(d.regressed).toHaveLength(0);
+  expect(passing).toBeGreaterThanOrEqual(prev.passing);
 
-  // Clean local run: record the current run as the selected spine's last-known state. CI never
-  // rewrites (no push-back loop) — it only reports the delta.
+  // Clean local run: record it as the last-known state. CI never rewrites (no push-back loop) — it
+  // only reports the delta.
   const changed = d.gained.length > 0 || d.regressed.length > 0 || rows.length !== prev.total;
-  if (changed) {
-    if (process.env.CI) {
-      if (d.gained.length || shed?.shed.length) {
-        const prose = spine === 'rel' ? ' (+ README + feature-support-matrix)' : '';
-        const move = d.gained.length ? `ahead by +${d.gained.length}` : `shed ${shed!.shed.length}`;
-        console.log(`L3 [${spineLabel}] ${move} — run locally to record l3-state.json${prose}, then commit (CI does not rewrite them).`);
-      }
-    } else {
-      writeState(STATE, rows, spine);
-      const bump = passing !== prev.passing ? `${prev.passing} → ${passing}` : `+${d.gained.length}/-${d.regressed.length}`;
-      console.log(`L3 state [${spineLabel}] recorded (${bump}). Commit test/L3-conformance/l3-state.json.`);
-    }
+  if (changed && process.env.CI) {
+    if (d.gained.length)
+      console.log(`L3 ahead by +${d.gained.length} — run locally to record l3-state.json `
+        + '(+ README + feature-support-matrix), then commit (CI does not rewrite them).');
+  } else if (changed) {
+    writeState(STATE, rows);
+    const bump = passing !== prev.passing ? `${prev.passing} → ${passing}` : `+${d.gained.length}/-${d.regressed.length}`;
+    console.log(`L3 state recorded (${bump}). Commit test/L3-conformance/l3-state.json.`);
   }
-  // THE PROSE SYNC IS UNCONDITIONAL on a clean local RelIR run, and that is the fix for a merge
-  // hazard rather than belt-and-braces. It used to fire only when the recorded count MOVED, which is
+  // THE PROSE SYNC IS UNCONDITIONAL on a clean local run, and that is the fix for a merge hazard
+  // rather than belt-and-braces. It used to fire only when the recorded count MOVED, which is
   // precisely the case a rebase erases: git merges two agents' `passed` insertions cleanly, so the
   // floor grows while nothing in this run "changed" relative to the merged file — and README kept
   // quoting the pre-merge number with every gate green. `syncCountFiles` writes only when the file
-  // disagrees, so asking every run costs a read and cannot loop. A LEGACY run must never touch the
-  // prose: it records its own floor, and the number these files quote is the default configuration's.
-  if (spine === 'rel' && !process.env.CI) {
+  // disagrees, so asking every run costs a read and cannot loop.
+  if (!process.env.CI) {
     // …and the STORED count self-heals for the same reason. Nothing computes with it (`readState`
     // derives the floor from `passed`), but it is what a human reads out of the file, and a merge can
     // leave it one behind. Re-recording the run is the repair, and it is the run's own rows either way.
     const stored = (JSON.parse(readFileSync(STATE, 'utf8')) as { passing?: number }).passing;
     if (stored !== passing) {
-      writeState(STATE, rows, spine);
+      writeState(STATE, rows);
       console.log(`L3 stored count repaired ${stored} → ${passing} (a merge had left it behind).`);
     }
     const synced = syncCountFiles(passing);

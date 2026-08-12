@@ -21,14 +21,14 @@
   fine for a fast inner loop on one already-type-checked file, never as the gate. `mise run L1`..`L5`
   run one level each; `mise run ci` is the full gate.
 - **`mise run ci` ALREADY CONTAINS the ladder, the census and the static gates — do not invoke them
-  beside it.** `ci` depends on `check`, `lint`, `arch`, `binds`, `deletion`, `rel-sweep`, `test` and
+  beside it.** `ci` depends on `check`, `lint`, `arch`, `binds`, `sql-hygiene`, `rel-sweep`, `test` and
   `build`, and `test` is a bare `bun test` over all 71 files, so **L1–L5 and `test/census` are inside
   it**. A separate `mise run rel-sweep` / `census` / `lint` / `arch` / `binds` after a green `ci` re-runs
   what just passed AND re-pays its own `depends` (submodule, install, `check`). The single-level tasks
   exist for the inner loop — before `ci`, not after it.
-  Only four things are genuinely outside: the three ENV-switch runs (`test:legacy-spine`,
-  `test:cf-limits`, `test:perturbed` — a different RUN of the same suite, so they cannot be folded in)
-  and a post-commit `mise run L5`, whose seed derives from `HEAD`. `test:perturbed` is worth a run only
+  Only three things are genuinely outside: the two ENV-switch runs (`test:cf-limits`,
+  `test:perturbed` — a different RUN of the same suite, so they cannot be folded in) and a post-commit
+  `mise run L5`, whose seed derives from `HEAD`. `test:perturbed` is worth a run only
   when the change touches ORDER; it is an instrument at a known 4, and running it on a change with no
   ordering surface reports nothing.
 - **"Did my change slow the build?" is answered by `[test] Finished in`, NOT by CI wall-clock.**
@@ -47,23 +47,19 @@
 
 - **L1** (`test/L1-corpus/`) — 2,298 canonical traversals; parse+chain must stay **100%**.
 - **L2** (`test/L2-sql/`) — the compile-to-SQL contract, split by step family.
-- **L3** (`test/L3-conformance/`) — the official cucumber suite over GraphBinary, **ratcheted**:
-  one committed `l3-state.json` holds TWO floors. The top level is the default/RelIR-on floor and
-  `legacySpine` is the legacy floor; each configuration records only its own section, and a legacy run
-  never rewrites the prose conformance count. Their scenario-name set difference (not merely the count
-  subtraction) is the migration metric. **The two floors GATE ASYMMETRICALLY, on purpose** (RelIR plan
-  §6·1): the RelIR floor is a hard ratchet, while the legacy floor may shed any name the RelIR floor
-  holds and fails only on a name NO spine holds — the union of the two `passed` sets is the real floor.
-  Legacy is a route with an end date; a RelIR increment that costs legacy five scenarios and gains five
-  is progress, and the gate must not be the thing that forbids it. Telemetry is always on. Runbook:
-  `README-cucumber.md`.
+- **L3** (`test/L3-conformance/`) — the official cucumber suite over GraphBinary, **ratcheted**: one
+  committed `l3-state.json` holds the floor, and it is a HARD ratchet (no scenario may regress, the
+  count never falls). A clean local run rewrites it; CI never does. ⚠️ **The floor was re-baselined
+  1819 → 1360 when the second spine was deleted** — that drop is the legacy route's coverage leaving,
+  recorded deliberately and in one commit; anything below 1360 since is a regression. Telemetry is
+  always on. Runbook: `README-cucumber.md`.
   - **L3 is the floor, not the goal.** The count measures documented scenarios that pass; it does
     NOT measure how much of the grammar composes. The goal is the *ceiling* — generic lowering that
     composes the full nested Gremlin grammar at any valid depth/combination. A one-off fix that
     passes exactly the scenario L3 names raises the floor by one; extending the generic seam raises
     the ceiling and the floor follows for free. So read a rising L3 count as a *side effect* of the
     right work, never as the target — and don't chase a scenario with a special-case (see the
-    seam directive in `src/compiler/steps/CLAUDE.md`).
+    seam directive in `src/compiler/CLAUDE.md`).
   - **`passed[]` legitimately contains repeated names — this is NOT a ratchet bug (we have
     diagnosed it twice; do not "fix" it a third time).** TinkerPop ships distinct scenarios that
     normalize to the same name (e.g. the `g_V_bothE_properties_dedup_hasKeyXweightX_hasValueXltX0d3XX_value`
@@ -71,7 +67,12 @@
     different feature/graph fixtures, same generated name). So `passing` counts scenarios, not
     unique names: `len(passed) > len(set(passed))` is expected and the count is correct.
 - **L4** (`test/L4-addendum/`) — our Gherkin addendum for gaps the official corpus misses; gate =
-  all pass. Add a scenario by dropping it in a `.feature` — no code change. Read by cucumber's REAL
+  all pass. ⚠️ **`@Unsupported` marks a scenario the compiler does not lower yet** — 149 of them, all
+  from the single-spine cut. The scenario is KEPT rather than deleted, because each encodes a
+  reference-derived expectation that took work to establish; what it asserts is the fail-closed half
+  (it must REFUSE, never answer plausibly), and the day the shape lands the refusal stops and the test
+  fails LOUDLY as the prompt to drop the tag. The refusal may come from the traversal or from a graph
+  CHECK — both mean "not evaluable end to end yet". Add a scenario by dropping it in a `.feature` — no code change. Read by cucumber's REAL
   parser compiled to pickles (`read-features.ts`), so `Background`/`Scenario Outline` work; the
   RUNNER is ours because upstream's `Given('the traversal of')` ignores the docstring and looks the
   scenario NAME up in a pre-generated map, which our names are not in. Each scenario is its own
@@ -103,21 +104,15 @@
 asserts correctness; a behaviour-preserving refactor's success criterion is a number that does NOT
 move, which — with the ladder alone — is indistinguishable from a refactor that quietly turned
 fail-closed deferrals into wrong answers. Two committed TSVs record what the engine DOES with all
-2,298 corpus traversals (`goldens.tsv` 1,425 executing + a result digest; `deferrals.tsv` 873
-throwing + the message). `mise run census`; re-record with `mise run census-record`.
+2,395 corpus traversals (`goldens.tsv` 1,263 executing + a result digest; `deferrals.tsv` the rest,
+each with its message). `mise run census`; re-record with `mise run census-record`.
 
-Seven gates: the artifact covers exactly the corpus · no traversal stops executing · **no executing
-traversal changes its answer in either pinned spine position** (the regression nothing else can
-see) · the legacy position loses nothing the RelIR position holds (the UNION is the floor — a shed
-shape is legal and prints; losing the LAST spine fails at gate 2, because the RelIR position carries
-the legacy fallback) · no clean deferral becomes a crash · **the
-RelIR spine covers at least as much as the baseline** (the `spine` column — the migration's coverage
-ratchet, §10·4 of the RelIR build plan) · a coverage floor. The census is spine-differential by
-construction, independent of the ambient switch. Runbook + the status vocabulary:
-`test/census/README.md`.
+Four gates: the artifact covers exactly the corpus · no traversal stops executing · **no executing
+traversal changes its answer** (the regression nothing else can see) · no clean deferral becomes a
+crash — plus a coverage floor. Runbook + the status vocabulary: `test/census/README.md`.
 
 **It deliberately does NOT auto-record.** L3 rewrites its state on a clean local run and that is
-safe there because its artifact is a monotone floor. The census is a two-way baseline whose most
+safe there because its artifact is a monotone floor. The census is a baseline whose most
 dangerous transition is *still runs, different answer* — an auto-record would launder exactly the
 regression it exists to catch. Re-recording is a command, and a re-record with no reason in the
 commit message is indistinguishable from the regression it hides.
@@ -126,10 +121,8 @@ commit message is indistinguishable from the regression it hides.
 answer-change gate compares traversals that ran in BOTH artifacts, so a traversal that previously
 threw has no prior answer to differ from — it simply appears, and every gate passes. That is not
 hypothetical: it happened twice in one session, both times from admitting a step to an IR Pass
-(`isStreamIdentity`), where RelIR still declined further along the chain and LEGACY then answered
-half a multiset. **So when `ran` RISES, read the new rows and their `spine` column.** A new
-`spine=rel` row is coverage; a new `spine=legacy` row is a traversal we have just started answering
-through the route with the known defects, and it needs the same scrutiny as an answer change.
+(`isStreamIdentity`) whose lowering then answered half a multiset. **So when `ran` RISES, read the
+new rows** — a newly executing traversal needs the same scrutiny as a changed answer.
 
 **⚠️ `goldens.tsv` and `deferrals.tsv` are ONE artifact in two files.** `census-record` writes both,
 so reverting one with `git checkout --` leaves the pair inconsistent and the next run fails at gate 1

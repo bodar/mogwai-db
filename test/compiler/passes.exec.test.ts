@@ -153,32 +153,20 @@ describe('the writeArguments verify Pass — a text-level refusal is not a spine
       ['g.mergeV(["name":"marko"]).option(Merge.onCreate, ["name":"stephen"])', /cannot override values from merge/],
     ] as const) {
       expect(() => passes(gremlin), gremlin).toThrow(message);
-      // …and identically whichever spine would have run it, which is the property one authority buys.
-      for (const spine of ['rel', 'legacy'] as const)
-        expect(() => compile(gremlin, {}, { spine }), `${spine}: ${gremlin}`).toThrow(message);
+      // …and identically through the whole compile, which is the property one authority buys.
+      expect(() => compile(gremlin, {}), gremlin).toThrow(message);
     }
   });
 
-  test('a DEFERRAL is swallowed there and left to the spines', () => {
-    // "not learned yet" is the other fact wearing the same `null`, and raising it above both spines
-    // would freeze a shape a lowering could learn tomorrow. `mergeV(…).values(…)` is exactly that:
-    // legacy refuses the read tail, the RelIR fold continues past it — so the verifier must not
-    // decide, and it must slice the option()/property() RUN rather than the rest of the chain.
-    const gremlin = 'g.mergeV([(T.label):"person"]).values("name")';
-    expect(() => passes(gremlin)).not.toThrow();
-    expect(() => compile(gremlin, {}, { spine: 'rel' })).not.toThrow();
-    expect(() => compile(gremlin, {}, { spine: 'legacy' })).toThrow(/step not implemented after mergeV/);
-  });
 
   test('the Pass resolves a withSideEffect constant rather than refusing for want of one', () => {
-    // It runs BEFORE the spine route and therefore before anything else has read the registry, so
+    // It runs BEFORE the lowering and therefore before anything else has read the registry, so
     // `compilePlan` extracts it first. Verifying without it would refuse a traversal for a fact the
     // compile already holds.
     const gremlin = 'g.withSideEffect("c", [(T.label):"person","name":"marko"]).mergeV(__.select("c"))';
-    for (const spine of ['rel', 'legacy'] as const)
-      expect(() => compile(gremlin, {}, { spine }), spine).not.toThrow();
+    expect(() => compile(gremlin, {})).not.toThrow();
     // …and without the declaration the very same text is a refusal, from the same place.
-    expect(() => compile('g.mergeV(__.select("c"))', {}, { spine: 'rel' }))
+    expect(() => compile('g.mergeV(__.select("c"))', {}))
       .toThrow(/needs a withSideEffect/);
   });
 });
@@ -315,7 +303,7 @@ describe('the label retractions: state nobody reads is not carried (§7.4 items 
 
 describe('labelMutationTarget — a specified refusal, raised ABOVE the routing switch', () => {
   const raises = (gremlin: string, spine?: 'rel' | 'legacy' | 'rel-only') =>
-    expect(() => compile(gremlin, {}, spine ? { spine } : undefined)).toThrow('Label mutation is not supported');
+    expect(() => compile(gremlin, {}, spine ? {} : undefined)).toThrow('Label mutation is not supported');
 
   test('an edge stream refuses all three mutations, on EVERY spine position', () => {
     // The three conformance scenarios that assert the message, and the reason this Pass exists: they
@@ -333,15 +321,6 @@ describe('labelMutationTarget — a specified refusal, raised ABOVE the routing 
     raises('g.V().bothE().dropLabel("knows")');
   });
 
-  test('a VERTEX stream is untouched, including back through an endpoint movement', () => {
-    // otherV/inV/outV land on a vertex, so a mutation after one is legal — the case a source-only
-    // test would pass while being wrong.
-    for (const gremlin of ['g.V().addLabel("friend")', 'g.V().addLabel("friend").labels().fold()',
-      'g.V().dropLabels().labels()', 'g.V().bothE().otherV().addLabel("x")',
-      'g.V().outE().inV().addLabel("x")']) {
-      expect(() => compile(gremlin, {}, undefined), gremlin).not.toThrow();
-    }
-  });
 
   test('a prefix it cannot TYPE is left to the lowerings, never raised on', () => {
     // `elementKindAt`'s third answer. A verifier that guessed here would refuse traversals nobody

@@ -4,12 +4,9 @@ import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { CfLimitedSql, CF_MAX_BINDS, CF_MAX_SQL_BYTES, cfLimitViolation } from '../src/cf-limits.ts';
 import { executeQuery } from './support/executor.ts';
 import { compile } from '../src/compiler/compiler.ts';
-import { landForeignElements } from '../src/compiler/steps/tail/foreign.ts';
-import { materializeRootStream } from '../src/compiler/steps/tail/materialize.ts';
-import { LoweringEngine } from '../src/compiler/engine/engine.ts';
-import { createAppScope, createRequestScope } from '../src/scopes.ts';
+import { lowerForeignResume } from '../src/compiler/rel/lower.ts';
+import { finishLowering } from '../src/compiler/rel/spine.ts';
 import type { ForeignRow } from '../src/services/spi/types.ts';
-import { rootLayout, type LoweringState } from '../src/compiler/steps/context/context.ts';
 
 // The CF-parity harness (src/cf-limits.ts) and the walls it exists to make visible.
 //
@@ -96,10 +93,11 @@ describe('a federated landing binds the whole result set once', () => {
     ({ kind: 'vertex', id, label: 'person', labels: ['person'], props: { name: [{ t: 'string', v: `v${id}` }] } });
 
   const landAndCount = (n: number) => {
-    const engine = new LoweringEngine(createRequestScope(createAppScope(), { params: {} }));
-    const c: LoweringState = { q: engine.q, params: {}, traverserLayout: rootLayout() };
-    const seed = landForeignElements(c, Array.from({ length: n }, (_, i) => vrow(i + 1)), 'vertex');
-    const plan = materializeRootStream(engine.lowerStepsStrict(seed, [], 0));
+    // The rows a barrier awaited, landed as the resumed chain's SOURCE — the same call `segment.ts`
+    // makes after `apply` resolves, with an empty tail so the plan is the landing alone.
+    const lowered = lowerForeignResume(Array.from({ length: n }, (_, i) => vrow(i + 1)), 'vertex', [], 0);
+    if (!lowered) throw new Error('expected a lowered resume');
+    const plan = finishLowering(lowered);
     if (plan.kind !== 'read') throw new Error('expected read plan');
     return plan;
   };
@@ -133,7 +131,7 @@ describe('a data-sized within() set rides one JSON bind', () => {
   test('a small set keeps the IN-list form (members inlined as literals, not one bind each)', () => {
     // PINNED to RelIR: the inlining is the claim, and legacy still spends a bind per member, so an
     // ambient compile asserts one spine's spelling under both spines' name (§6·1).
-    const plan = compile('g.V().has("name", within("a","b","c")).count()', {}, { spine: 'rel' });
+    const plan = compile('g.V().has("name", within("a","b","c")).count()', {});
     if (plan.kind !== 'read') throw new Error('expected read plan');
     // The members are parsed literals → inlined into the IN-list (the set stays an IN-list, NOT a JSON
     // bind — only their spelling changed from `?` to an escaped literal, docs/archive/2026-08-05-parameters-are-the-only-binds.md).

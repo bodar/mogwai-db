@@ -20,7 +20,6 @@ import {
     PATH_FAMILY, NUMERIC_REDUCERS, REDUCERS,
 } from '../../src/compiler/ir/step.ts';
 import { COLLAPSE_MOVES } from '../../src/compiler/ir/bulk.ts';
-import { POSITION_MOVEMENTS } from '../../src/compiler/steps/tail/path.ts';
 
 const sorted = (s: ReadonlySet<string>) => [...s].sort();
 
@@ -63,12 +62,6 @@ describe('the derived movement sets still differ on otherV exactly as before', (
     expect(sorted(unionOf(VERTEX_MOVES, EDGE_MOVES, ENDPOINT_MOVES))).toEqual(NINE);
   });
 
-  test('POSITION_MOVEMENTS: the nine PLUS otherV', () => {
-    // The opposite membership from COLLAPSE_MOVES, and for the opposite reason: a path position
-    // must record the vertex a bothE().otherV() reached, not the edge it came from.
-    expect(sorted(POSITION_MOVEMENTS)).toEqual([...NINE, 'otherV'].sort());
-    expect(POSITION_MOVEMENTS.has('otherV')).toBe(true);
-  });
 
   test('VERTEX_PRODUCERS: V + vertex + endpoint + otherV, no edge steps', () => {
     const derived = unionOf(VERTEX_SOURCE, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V);

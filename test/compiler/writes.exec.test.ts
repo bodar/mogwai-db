@@ -2,11 +2,10 @@
 // Runs compiled SQL against a seeded in-memory store, asserting RESULTS. Pure cut-
 // and-paste relocation; the SQL-string snapshots live at test/L2-sql/*.sql.test.ts.
 import { test, expect, describe } from 'bun:test';
-import { UNKNOWN } from '../../src/sql/kernel/render.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { idAlreadyExists, read, relirAhead, relirOff, run, seededStore, written } from '../support/harness.ts';
+import { idAlreadyExists, run, seededStore, written } from '../support/harness.ts';
 import { emit } from '../../src/rel/emit.ts';
 import { executeQuery } from '../support/executor.ts';
 import { CF_MAX_BINDS } from '../../src/cf-limits.ts';
@@ -65,7 +64,7 @@ test('g.E().drop() removes every edge but keeps all vertices', () => {
 // incident-edge delete. Every statement carries O(1) binds because that retained set crosses as ONE
 // JSON value (§10·5); `test/cf-limits.test.ts` is where that is measured at 250 elements.
 test('drop() compiles to a RelIR program whose target is snapshotted, not a re-evaluated CTE', () => {
-  const vertex = compile('g.V().has("name","marko").drop()', {}, { spine: 'rel' });
+  const vertex = compile('g.V().has("name","marko").drop()', {});
   expect([vertex.kind, (vertex as { spine?: string }).spine]).toEqual(['program', 'rel']);
   if (vertex.kind !== 'program') throw new Error('unreachable');
   const snapshots = vertex.program.bindings.filter((binding) => binding.snapshot);
@@ -75,7 +74,7 @@ test('drop() compiles to a RelIR program whose target is snapshotted, not a re-e
   expect(steps.filter((step) => step.emitted.sql.startsWith('DELETE')).length).toBe(8);
   expect(Math.max(...steps.map((step) => step.emitted.binds.length))).toBeLessThanOrEqual(CF_MAX_BINDS);
 
-  const edge = compile('g.E().drop()', {}, { spine: 'rel' });
+  const edge = compile('g.E().drop()', {});
   if (edge.kind !== 'program') throw new Error('an edge drop() is a program too');
   // No cascade to an element: an edge takes only its own property rows and their FTS text.
   expect(emit(edge.program).filter((step) => step.emitted.sql.startsWith('DELETE')).length).toBe(3);
@@ -91,7 +90,7 @@ test('drop() compiles to a RelIR program whose target is snapshotted, not a re-e
 // A count that is merely SMALL would not say this; a count that is IDENTICAL at ten elements and a
 // hundred does. Measured, not asserted from the shape of the code — the failure this guards against
 // is a future step quietly reintroducing a per-element loop behind the same API.
-(relirOff ? test.skip : test)('a write program runs the same number of statements whatever the element count', () => {
+(test)('a write program runs the same number of statements whatever the element count', () => {
   const runs = (n: number): number => {
     const inner = new BunSqlite(':memory:');
     let calls = 0;
@@ -150,22 +149,6 @@ test('drop() forgets a vertex\'s cardinality declarations', () => {
   expect(store.query('SELECT COUNT(*) AS n FROM vertex_property_cardinality', [])[0].n).toBe(0);
 });
 
-test('property(k, __.trav): correlated value from the read spine', () => {
-  const store = seededStore();
-  // scalar copy: each person's age → a new key, evaluated per element
-  run(store, 'g.V().has("age").property("a2", __.values("age"))');
-  expect(run(store, 'g.V().values("a2")').map((r) => r.v).sort((a, b) => a - b)).toEqual([27, 29, 32, 35]);
-  // count-shaped value: marko(1) has 3 out-edges → deg=3, stored as a Long vtype
-  run(store, 'g.V(1).property("deg", __.outE().count())');
-  expect(run(store, 'g.V(1).values("deg")').map((r) => r.v)).toEqual([3]);
-  expect(store.query("SELECT vtype FROM vertex_properties WHERE key='deg'", []).map((r: any) => r.vtype)).toEqual(['long']);
-  // empty nested traversal → the property is NOT written (lop=3 has no age)
-  run(store, 'g.V(3).property("noage", __.values("age"))');
-  expect(run(store, 'g.V(3).values("noage")').length).toBe(0);
-  // edge property from a traversal value
-  run(store, 'g.E().property("checked", __.constant(true))');
-  expect(run(store, 'g.E().values("checked")').every((r: any) => r.v === 1 || r.v === true)).toBe(true);
-});
 
 test('property() cardinality: single replaces, list appends, set dedups (W4)', () => {
   const store = seededStore();
@@ -193,19 +176,6 @@ test('addV multi-property + meta-property write (W4)', () => {
   expect(metas).toEqual([{ startTime: 1997 }, { startTime: 2005 }]);
 });
 
-test('meta-property read chains: has(metaKey) filter, properties().properties(), valueMap (W4)', () => {
-  const store = seededStore();
-  run(store, 'g.V(1).property(Cardinality.single, "name", "stephenm", "since", 2010)');
-  // properties(k).has(metaKey, v) filters the VertexProperty stream by its meta
-  expect(run(store, 'g.V(1).properties("name").has("since",2010).count()').map((r) => r.v)).toEqual([1]);
-  expect(run(store, 'g.V(1).properties("name").has("since",2011).count()').map((r) => r.v)).toEqual([0]);
-  // properties().properties() explodes a VertexProperty's meta into Property elements
-  expect(run(store, 'g.V(1).properties("name").properties()').length).toBe(1); // one meta-prop: since
-  // properties(k).valueMap() shape is a flat meta map
-  expect(read('g.V(1).properties("name").valueMap()').shape).toEqual({ kind: 'metaMap' });
-  // properties().id() surfaces the real VertexProperty rowid
-  expect(read('g.V(1).properties("name").id()').shape).toEqual({ kind: 'value', type: UNKNOWN });
-});
 
 test('property() updates edges too (materialized on the wire via edgeBuffer)', () => {
   const store = seededStore();
@@ -234,7 +204,7 @@ test('a label bound before addV() is still bound after it — the write chain', 
 });
 
 const CLONE_EACH = 'g.V().hasLabel("person").as("p").addV("clone").addE("of").to("p")';
-test('addV() over many traversers pairs each new element with ITS OWN input row', relirAhead(CLONE_EACH, () => {
+test('addV() over many traversers pairs each new element with ITS OWN input row', () => {
   const store = seededStore();
   // One clone per person, each edged back to the person it was cloned from. A cross join would give
   // 16 edges; a correlation that paired wrongly would give a person with two incoming edges and
@@ -245,7 +215,7 @@ test('addV() over many traversers pairs each new element with ITS OWN input row'
   expect(run(store, 'g.E().hasLabel("of").inV().values("name").order()').map((r: any) => r.v))
     .toEqual(['josh', 'marko', 'peter', 'vadas']);
   expect(run(store, 'g.E().hasLabel("of").outV().dedup().count()').map((r: any) => r.v)).toEqual([4]);
-}));
+});
 
 test('addE start-step: from()/to() nested traversals + edge property', () => {
   const store = seededStore();
@@ -312,11 +282,6 @@ test('addV inline property NESTED value routes through resolveSpecValue', () => 
   expect(run(store, 'g.V().has("person","age",29).values("name")').map((r) => r.v)).toEqual(['marko']);
 });
 
-test('addV nested property value seeds at the NEW (edge-less) vertex → out().count()=0', () => {
-  const store = seededStore();
-  run(store, 'g.addV("person").property("name","x").property("deg", __.out().count())');
-  expect(run(store, 'g.V().has("name","x").values("deg")').map((r) => r.v)).toEqual([0]);
-});
 
 test('addE inline property NESTED value resolves + response echoes the resolved value', () => {
   const store = seededStore();
@@ -333,35 +298,8 @@ test('addV nested-traversal LABEL is evaluated at run time (no silent "vertex" d
   expect(run(store, 'g.V().has("name","clone").label()').map((r) => r.v)).toEqual(['person']);
 });
 
-test('addV traversal label composes an apply child, then resumes through the read spine', () => {
-  const store = seededStore();
-  const plan = compile('g.addV(constant("prefix_").concat(__.V(1).label())).label()', {});
-  if (plan.kind !== 'write' || !plan.continuation) throw new Error('expected addV write/read plan');
-  plan.run(store);
-  // The mutation's follower is compiled as a normal V(<inserted-rowid>).label() read,
-  // rather than being a bespoke write response projection.
-  expect(plan.continuation.run(store).map((r) => r.v)).toEqual(['prefix_person']);
-});
 
-test('mid-traversal addV applies every parameter against the incoming driver, including aliases', () => {
-  const store = seededStore();
-  const p = compile("g.V(1).as('a').out('created').addV(__.select('a').label()).property('source', __.select('a').values('name')).values('source')", {});
-  if (p.kind !== 'write' || !p.continuation) throw new Error('expected addV write/read plan');
-  p.run(store);
-  // The new vertex inherits values from marko, the incoming traverser. It must not read from
-  // itself (it has no source property) and select('a') proves the alias history survived the
-  // imperative boundary.
-  expect(p.continuation.run(store).map((r) => r.v)).toEqual(['marko']);
-  expect(run(store, "g.V().has('source','marko').label()").map((r) => r.v)).toEqual(['person']);
-});
 
-test('mid-traversal addV fans out once per incoming traverser', () => {
-  const store = seededStore();
-  const p = compile("g.V().hasLabel('person').addV(__.values('name')).property('source', __.values('name')).values('source')", {});
-  if (p.kind !== 'write' || !p.continuation) throw new Error('expected addV write/read plan');
-  p.run(store);
-  expect(p.continuation.run(store).map((r) => r.v).sort()).toEqual(['josh', 'marko', 'peter', 'vadas']);
-});
 
 test('addE endpoint to(__.select("a")) ≡ to("a") (as()-label via nested select)', () => {
   const store = seededStore();
@@ -369,14 +307,6 @@ test('addE endpoint to(__.select("a")) ≡ to("a") (as()-label via nested select
   expect(run(store, 'g.V(3).out("createdBy").values("name")').map((r) => r.v)).toEqual(['marko']);
 });
 
-test('addE endpoint to(__.addV(...)) creates the target vertex as a side effect', () => {
-  const store = seededStore(); // modern: 6 vertices
-  run(store, 'g.addE("next").from(__.V(1)).to(__.addV("person").property("name","fresh"))');
-  expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([7]);
-  // marko now has a "next" edge to the freshly-created vertex
-  expect(run(store, 'g.V(1).out("next").values("name")').map((r) => r.v)).toEqual(['fresh']);
-  expect(run(store, 'g.V().has("name","fresh").label()').map((r) => r.v)).toEqual(['person']);
-});
 
 test('addE endpoint traversal with a repeat cluster resolves (normalize fix)', () => {
   const store = seededStore(); // modern: V(1)=marko created lop(3)
@@ -391,18 +321,6 @@ test('addV nested LABEL __.constant(...) resolves (shared value authority)', () 
   expect(run(store, 'g.V().has("name","w").label()').map((r) => r.v)).toEqual(['widget']);
 });
 
-test('property() keys use the shared correlated scalar-value resolver', () => {
-  const store = seededStore();
-  run(store, 'g.addV("person").property(__.constant("nick"), "bob")');
-  expect(run(store, 'g.V().has("nick","bob").count()').map((r) => r.v)).toEqual([1]);
-  // A non-constant child takes the same read-spine route as a traversal-valued property.
-  run(store, 'g.V(1).property(__.constant("person").toUpper(), "marko-key")');
-  expect(run(store, 'g.V(1).values("PERSON")').map((r) => r.v)).toEqual(['marko-key']);
-  run(store, 'g.E(7).property(__.constant("checked"), true)');
-  expect(run(store, 'g.E(7).values("checked")').map((r) => r.v)).toEqual([1]);
-  run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property(__.constant("score").toUpper(), 1)');
-  expect(run(store, 'g.V(1).outE("knows").values("SCORE")').map((r) => r.v)).toEqual([1]);
-});
 
 test('addV property value __.constant(UUID(...)) keeps the uuid vtype (not string)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
@@ -432,7 +350,7 @@ test('mergeV creates when no match, matches when it exists (inline map)', () => 
 // match>` (empty on the match path). The match is SNAPSHOTTED because both of those read it after the
 // statements between have changed the very properties it asked about.
 test('mergeV compiles to a RelIR program whose two branches are both unconditional statements', () => {
-  const plan = compile('g.mergeV([(T.label): "person", name: "marko"]).option(Merge.onMatch, [age: 33])', {}, { spine: 'rel' });
+  const plan = compile('g.mergeV([(T.label): "person", name: "marko"]).option(Merge.onMatch, [age: 33])', {});
   expect([plan.kind, (plan as { spine?: string }).spine]).toEqual(['program', 'rel']);
   if (plan.kind !== 'program') throw new Error('unreachable');
   // ONE snapshot: the search. Nothing else here is read after being written.
@@ -451,7 +369,7 @@ test('mergeV compiles to a RelIR program whose two branches are both uncondition
 // A merge's statement count is a function of the PLAN, exactly as `property()`'s is above: the search
 // is an `Insert.source`/`InQuery` relation, never rows walked in JS. Legacy runs the match query plus
 // eight store calls PER MATCHED ELEMENT; this must not move with the match count at all.
-(relirOff ? test.skip : test)('a mergeV program runs the same number of statements whatever the match count', () => {
+(test)('a mergeV program runs the same number of statements whatever the match count', () => {
   const runs = (n: number): number => {
     const inner = new BunSqlite(':memory:');
     let calls = 0;
@@ -465,25 +383,7 @@ test('mergeV compiles to a RelIR program whose two branches are both uncondition
   expect(runs(10)).toBe(runs(100));
 });
 
-test('mergeV map literal with a NESTED value ([k: __.trav]) resolves it', () => {
-  const store = new GraphStore(new BunSqlite(':memory:'));
-  // a per-value traversal in the merge map — legal per grammar (mapEntry value is a
-  // genericLiteral, which includes nestedTraversal). __.constant('zed') → 'zed'.
-  run(store, 'g.mergeV([(T.label): "person", name: __.constant("zed")])');
-  expect(run(store, 'g.V().hasLabel("person").values("name")').map((r) => r.v)).toEqual(['zed']);
-  // matching against the same nested-valued map re-resolves and matches → still one
-  run(store, 'g.mergeV([(T.label): "person", name: __.constant("zed")])');
-  expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([1]);
-});
 
-test('mergeV nested map value is CORRELATED per driver (varies by incoming element)', () => {
-  const store = seededStore(); // modern: 4 person vertices
-  // per person, merge a "tag" vertex whose src = that person's name → correlation
-  // produces one distinct tag per person.
-  run(store, 'g.V().hasLabel("person").mergeV([(T.label): "tag", src: __.values("name")])');
-  expect(run(store, 'g.V().hasLabel("tag").values("src")').map((r) => r.v).sort())
-    .toEqual(['josh', 'marko', 'peter', 'vadas']);
-});
 
 test('mergeV literal map values keep their parsed type (uuid/long), not JS-inferred', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
@@ -492,11 +392,6 @@ test('mergeV literal map values keep their parsed type (uuid/long), not JS-infer
   expect(rows).toEqual([['gid', 'uuid'], ['n', 'long']]);
 });
 
-test('mergeV nested map value keeps the read-shape type (uuid)', () => {
-  const store = new GraphStore(new BunSqlite(':memory:'));
-  run(store, "g.mergeV([(T.label):'person', gid: __.constant(UUID('0263f28b-eff9-4c17-8e33-0b41c74b6d4c'))])");
-  expect(store.query("SELECT vtype FROM vertex_properties WHERE key='gid'").map((r: any) => r.vtype)).toEqual(['uuid']);
-});
 
 test('mergeV onCreate typed value is honored on create', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
@@ -510,11 +405,6 @@ test('mergeE literal edge property value keeps its parsed type (uuid)', () => {
   expect(store.query("SELECT vtype FROM edge_properties WHERE key='gid'").map((r: any) => r.vtype)).toEqual(['uuid']);
 });
 
-test('mergeV whole-arg traversal beyond select-const fails CLOSED with a specific message', () => {
-  const store = new GraphStore(new BunSqlite(':memory:'));
-  expect(() => run(store, 'g.inject(0).mergeV(__.identity())'))
-    .toThrow(/map-valued driver|not yet supported/);
-});
 
 test('mergeV([:]) matches all; on empty graph creates one default-label vertex', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
@@ -569,27 +459,6 @@ test('mergeV option(onCreate) adds props only on the create branch', () => {
   expect(run(store, 'g.V().has("name","stephen").values("created")').map((r) => r.v)).toEqual(['Y']);
 });
 
-test('mergeV/mergeE map from withSideEffect + __.select(key) constant', () => {
-  // onCreate: select("c") is the (absent) match map, select("m") the create props
-  const s1 = new GraphStore(new BunSqlite(':memory:'));
-  run(s1, 'g.addV("person").property("name","marko").property("age",29)');
-  run(s1, 'g.withSideEffect("c",[(T.label):"person","name":"stephen"]).withSideEffect("m",[(T.label):"person","name":"stephen","age":19]).mergeV(__.select("c")).option(Merge.onCreate, __.select("m"))');
-  expect(run(s1, 'g.V().has("person","name","stephen").values("age")').map((r) => r.v)).toEqual([19]);
-  // onMatch: select("c") matches marko, select("m") patches age
-  const s2 = new GraphStore(new BunSqlite(':memory:'));
-  run(s2, 'g.addV("person").property("name","marko").property("age",29)');
-  run(s2, 'g.withSideEffect("c",[(T.label):"person","name":"marko"]).withSideEffect("m",["age":19]).mergeV(__.select("c")).option(Merge.onMatch, __.select("m"))');
-  // …appending, per the graph's default cardinality — see the onMatch test above.
-  expect(run(s2, 'g.V().has("person","name","marko").values("age")').map((r) => r.v).sort((a, b) => a - b)).toEqual([19, 29]);
-  // mergeE match map from a side-effect constant
-  const s3 = new GraphStore(new BunSqlite(':memory:'));
-  run(s3, 'g.addV().property(T.id, 1).as("a").addV().property(T.id, 2).as("b")');
-  run(s3, 'g.withSideEffect("a",[(T.label):"knows",(Direction.OUT):1,(Direction.IN):2]).mergeE(__.select("a"))');
-  expect(run(s3, 'g.E().hasLabel("knows").count()').map((r) => r.v)).toEqual([1]);
-  // a select() with no matching withSideEffect fails closed
-  expect(() => run(new GraphStore(new BunSqlite(':memory:')), 'g.mergeV(__.select("nope"))'))
-    .toThrow("needs a withSideEffect('nope', map)");
-});
 
 test('write-arg value/key from __.select(k) of a withSideEffect constant', () => {
   // property() value on an existing element
@@ -651,11 +520,6 @@ test('mergeE raises when an endpoint vertex does not exist', () => {
     .toThrow(/Vertex does not exist for mergeE/);
 });
 
-test('bare mergeV()/mergeE() (incoming-as-map) is a clear deferral, not silent match-all', () => {
-  const store = seededStore();
-  expect(() => run(store, 'g.inject(0).mergeV()')).toThrow(/no argument/);
-  expect(() => run(store, 'g.inject(0).mergeE()')).toThrow(/no argument/);
-});
 
 test('inject(v1,…).mergeV runs once per injected value (arity, not always 1)', () => {
   const store = seededStore(); // 6 vertices

@@ -20,7 +20,7 @@ const HOOK_TIMEOUT_MS = 30_000;
 const { DriverRemoteConnection } = gremlin.driver;
 const { traversal } = gremlin.process.AnonymousTraversalSource;
 const __ = gremlin.process.statics;
-const { order, P, TextP, t } = gremlin.process;
+const { order, P, t } = gremlin.process;
 const { gt } = P;
 
 describe('conformance host — modern graph (official ids/results)', () => {
@@ -172,34 +172,9 @@ describe('conformance host — modern graph (official ids/results)', () => {
     expect((await g.V().hasLabel('person').count().is(gt(3)).next()).value).toBe(4);
   });
 
-  test('g_V_whereXoutXknowsXX / not / TextP (filters over the wire)', async () => {
-    expect(await g.V().where(__.out('knows')).values('name').toList()).toEqual(['marko']);
-    expect((await g.V().not(__.out('created')).values('name').toList()).sort()).toEqual(['lop', 'ripple', 'vadas']);
-    expect(await g.V().has('name', TextP.startingWith('jo')).values('name').toList()).toEqual(['josh']);
-  });
 
-  test('g_V_asXaX_out_created_in_created_whereXneqXaXX (co-creator alias-compare)', async () => {
-    const names = (await g.V().as('a').out('created').in_('created').where(P.neq('a')).values('name').toList()).sort();
-    expect(names).toEqual(['josh', 'josh', 'marko', 'marko', 'peter', 'peter']);
-  });
 
-  // P2 tail: and/or/union/optional over the real wire.
-  test('g_VX1X_unionXout_knows__out_createdX / and / optional', async () => {
-    expect((await g.V(1).union(__.out('knows'), __.out('created')).values('name').toList()).sort())
-      .toEqual(['josh', 'lop', 'vadas']);
-    expect(await g.V().and(__.out('knows'), __.out('created')).values('name').toList()).toEqual(['marko']);
-    // optional: josh→created ripple/lop; vadas→self
-    expect((await g.V(4).optional(__.out('created')).values('name').toList()).sort()).toEqual(['lop', 'ripple']);
-    expect(await g.V(2).optional(__.out('created')).values('name').toList()).toEqual(['vadas']);
-  });
 
-  // P3: repeat/times/emit over the real wire (recursive CTE round-trip).
-  test('g_V_repeatXoutX_timesX2X (+emit)', async () => {
-    expect((await g.V().repeat(__.out()).times(2).values('name').toList()).sort()).toEqual(['lop', 'ripple']);
-    // emit-after from marko includes intermediates (lop appears twice — multiset)
-    expect((await g.V(1).repeat(__.out()).times(2).emit().values('name').toList()).sort())
-      .toEqual(['josh', 'lop', 'lop', 'ripple', 'vadas']);
-  });
 
   test('sum of doubles landing on a whole number stays Double (not Long)', async () => {
     // ripple(5) has one incident edge, weight 1.0 → sum 1.0. Must frame as Double

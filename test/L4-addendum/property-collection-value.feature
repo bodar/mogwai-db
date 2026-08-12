@@ -94,6 +94,7 @@ Feature: mogwai addendum — a COLLECTION property value stores as one typed tre
   # because that is the case where two values of one key each carry their own meta, so a route that
   # attached meta to the wrong row is visible.
   @gap:property-collection-value
+  @Unsupported
   Scenario: g_addV_property_list_with_meta_keeps_meta_per_value
     Given the empty graph
     And the traversal of

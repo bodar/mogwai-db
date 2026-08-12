@@ -54,8 +54,8 @@ export function isWrite(q: string): boolean {
   // where the RelIR position happily created six SELF-LOOPS. Every later traversal saw a cyclic
   // graph, and a cyclic `repeat()` without `simplePath()` is infinite per the spec, so the suite
   // hung rather than failed. A misclassified write does not corrupt one row; it corrupts the fixture.
-  for (const spine of ['rel', 'legacy'] as const) {
-    try { if (compile(q, {}, { spine }).kind !== 'read') return true; } catch { /* no answer from this spine */ }
+  {
+    try { if (compile(q, {}).kind !== 'read') return true; } catch { /* no answer from this spine */ }
   }
   return false;
 }

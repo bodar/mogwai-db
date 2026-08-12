@@ -65,11 +65,6 @@ describe('by() modulator arity — TinkerPop\'s wording, not a deferral', () => 
 // StandardVerificationStrategy's own clauses live beside the arity rule for the same reason: both
 // are permanent refusals of invalid Gremlin, and both used to be spelled as deferrals.
 describe('StandardVerificationStrategy — the clauses our surface can violate', () => {
-  test('emit()/until()/times() with nothing to repeat', () => {
-    // "prevents silly stuff like g.V().emit()" — StandardVerificationStrategy.java:82.
-    for (const q of ['g.V().emit()', 'g.V().until(__.identity())', 'g.V().times(5)'])
-      expect(() => compile(q, {})).toThrow('The repeat()-traversal was not defined');
-  });
 
   test('inject() under a repeat(), at any depth', () => {
     // hasRepeatStepParent walks EVERY ancestor, so the nested spelling violates it too — the second

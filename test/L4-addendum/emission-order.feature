@@ -68,6 +68,7 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
   # josh(4): out={lop,ripple} (arm 0), in={marko} (arm 1); limit(2) is the two out-neighbours, never
   # marko. Guards the branch-merge encounter re-mint.
   @gap:emission-order
+  @Unsupported
   Scenario: g_V4_unionXout_inX_limitX2X_name
     Given the modern graph
     And the traversal of
@@ -96,6 +97,7 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
   # The ELEMENT-list branch of the same root builder: its members expand to full payloads, which is
   # a different projection from the scalar-list branch below but the same dropped ORDER BY.
   @gap:emission-order
+  @Unsupported
   Scenario: g_V_orderXbyXnameXX_localXoutXcreatedX_foldX
     Given the modern graph
     And the traversal of
@@ -113,6 +115,7 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
       | l[] |
 
   @gap:emission-order
+  @Unsupported
   Scenario: g_V_orderXbyXnameXX_localXoutXcreatedX_valuesXnameX_foldX
     Given the modern graph
     And the traversal of
@@ -181,6 +184,7 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
       | p[v[marko],v[josh]] |
 
   @gap:emission-order
+  @Unsupported
   Scenario: g_E_identity_whereXvaluesXweightXX_path_limitX2X
     Given the modern graph
     And the traversal of

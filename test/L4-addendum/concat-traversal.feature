@@ -28,6 +28,7 @@ Feature: mogwai addendum — concat(<traversal>) is the TraversalUtil.apply chil
   # prepare() has ALREADY added the split traverser. So `next()` returns the traverser's own value
   # and the literals are never reached. Hence "aa"/"bb", not "ac"/"bc". Upstream de-special-cased
   # this on purpose (CHANGELOG: "use TraversalUtil.apply on it as with any other child traversals").
+  @Unsupported
   Scenario: g_injectXa_bX_concatXinjectXcXX_doubles_the_traverser
     Given the empty graph
     And the traversal of
@@ -41,6 +42,7 @@ Feature: mogwai addendum — concat(<traversal>) is the TraversalUtil.apply chil
       | bb |
 
   # Same rule with a LIST literal: still the traverser's own value, so "aa" and never "a[b,c]".
+  @Unsupported
   Scenario: g_injectXaX_concatXinjectXlistXX_doubles_the_traverser
     Given the empty graph
     And the traversal of
@@ -55,6 +57,7 @@ Feature: mogwai addendum — concat(<traversal>) is the TraversalUtil.apply chil
   # A label-carried child: select("a") re-roots on the alias bound earlier in the SAME traverser,
   # so each person gets THEIR OWN name appended. The pre-fix answer was "Mr." four times over
   # (one distinct value); the correct answer is four distinct values.
+  @Unsupported
   Scenario: g_V_valuesXnameX_asXaX_constantXMrX_concatXselectXaXX
     Given the modern graph
     And the traversal of
@@ -72,6 +75,7 @@ Feature: mogwai addendum — concat(<traversal>) is the TraversalUtil.apply chil
   # A string concat() and a traversal concat() are SEPARATE steps (the grammar's two productions are
   # mutually exclusive — `concat(" x ", __.select("a"))` is a parse error), so they chain. The
   # pre-fix answer kept the trailing space and never appended lang: "lop uses ".
+  @Unsupported
   Scenario: g_V_asXaX_valuesXnameX_concatX_usesX_concatXselectXaXvaluesXlangXX
     Given the modern graph
     And the traversal of
@@ -87,6 +91,7 @@ Feature: mogwai addendum — concat(<traversal>) is the TraversalUtil.apply chil
   # Composes inside a map() body while a path is tracked: both labels resolve against the SAME
   # traverser. The two 2-hop paths are marko->josh->lop and marko->josh->ripple, so this is
   # marko+lop and marko+ripple. Pre-fix it collapsed to "marko" twice (one distinct value).
+  @Unsupported
   Scenario: g_withPath_V_asXaX_out_out_asXbX_mapXselectXaX_concatXselectXbXXX
     Given the modern graph
     And the traversal of
@@ -101,6 +106,7 @@ Feature: mogwai addendum — concat(<traversal>) is the TraversalUtil.apply chil
 
   # A constant() child is the simplest resolvable body, and it must NOT filter: every one of the six
   # vertices keeps its traverser (the LEFT JOIN), so this is a per-value suffix over the whole stream.
+  @Unsupported
   Scenario: g_V_valuesXnameX_concatXconstantXXXX
     Given the modern graph
     And the traversal of
@@ -119,6 +125,7 @@ Feature: mogwai addendum — concat(<traversal>) is the TraversalUtil.apply chil
 
   # Multiple traversal arguments concatenate in ARGUMENT order (ConcatStep.map appends each child's
   # result in order), one resolved value each.
+  @Unsupported
   Scenario: g_V_valuesXnameX_concatXconstantXXX_constantXYXX
     Given the modern graph
     And the traversal of

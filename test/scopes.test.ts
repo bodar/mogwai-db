@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import { createAppScope, createRequestScope } from '../src/scopes.ts';
 import { DEFAULT_FAST_PATHS } from '../src/compiler/options/fast-paths.ts';
 import { EMPTY_REGISTRY, createRegistry } from '../src/services/spi/registry.ts';
-import { LoweringEngine } from '../src/compiler/engine/engine.ts';
 
 // The DI scopes (src/scopes.ts) separate compiler DEPENDENCIES from per-query state. A
 // compiler scope is a CHILD of an app scope and must expose the app scope's entries by DIRECT
@@ -53,28 +52,5 @@ describe('DI scopes', () => {
     expect(app.registry).toBe(first);   // and resolves once, not per read
   });
 
-  test('a nested sub-compile INHERITS the whole request — only the Query is fresh', () => {
-    // What the request tier is for, and why there is no compile tier under it: the per-compile
-    // state (a fresh CTE namespace) is the ENGINE's, and everything else is inherited. Before the
-    // tier existed, each nested compile restated params/federationDepth and silently reset
-    // sourceOptions to an empty Map.
-    const sourceOptions = new Map([['~mogwai.test', true]]);
-    const request = createRequestScope(createAppScope(), { params: { x: 1 }, federationDepth: 3, sourceOptions });
-    const a = new LoweringEngine(request);
-    const b = new LoweringEngine(request);
-    expect(a.q).not.toBe(b.q);                    // independent CTE namespaces
-    expect(a.registry).toBe(b.registry);          // same shared app-scope dependency
-    expect(b.federationDepth).toBe(3);            // inherited, not restated
-    expect(a.params).toEqual({ x: 1 });
-  });
 
-  test('params is the one request entry a sub-compile may override', () => {
-    // inject() seeds its own source and lowers against an empty param table; everything else it
-    // must still inherit. An ABSENT override inherits rather than resetting to {}.
-    const request = createRequestScope(createAppScope(), { params: { x: 1 }, federationDepth: 3 });
-    const overridden = new LoweringEngine(request, { params: {} });
-    expect(overridden.params).toEqual({});
-    expect(overridden.federationDepth).toBe(3);
-    expect(new LoweringEngine(request).params).toEqual({ x: 1 });
-  });
 });

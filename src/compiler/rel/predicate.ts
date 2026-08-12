@@ -77,7 +77,12 @@ const STATIC_ORDERING_DECLINE = new Set(['datetime', 'duration']);
  * → `castBound`). This is why RelIR now COVERS these operands rather than declining them to legacy.
  */
 const operand = (value: unknown, type: TypeNode | null = null, paramName: string | null = null): Expr | null => {
-  if (typeof value === 'string' || typeof value === 'number') return constLit(arg(value, type, paramName));
+  // A BOOLEAN is 1/0, which is how it is STORED — `storedValue` writes the same encoding
+  // (`gremlin/types.ts`, and `GraphStore` coerces at the bind seam because DO SQLite refuses a
+  // boolean bind outright). So `has('active', true)` is an ordinary integer comparison and needs no
+  // vocabulary of its own; excluding it here was the whole of the gap.
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')
+    return constLit(arg(value, type, paramName));
   if (isExactTail(value)) return paramName != null ? param(value, paramName) : compilerText(String(value));
   return null;
 };

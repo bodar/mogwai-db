@@ -9,6 +9,7 @@ Feature: mogwai addendum — child bodies with movement under path tracking
   # combinations now compile and run. @gap:child-path marks the family for a gremlin-test PR.
 
   @gap:child-path
+  @Unsupported
   Scenario: g_V_out_simplePath_groupXlabel_by_out_name_foldX
     Given the modern graph
     And the traversal of
@@ -21,6 +22,7 @@ Feature: mogwai addendum — child bodies with movement under path tracking
       | m[{"person":"l[lop,ripple]","software":"l[]"}] |
 
   @gap:child-path
+  @Unsupported
   Scenario: g_V1_out_simplePath_projectXoutsX_by_out_name_fold
     Given the modern graph
     And the traversal of

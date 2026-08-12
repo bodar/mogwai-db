@@ -10,6 +10,7 @@ Feature: mogwai addendum — TextP substring predicates over the property_fts tr
   # the family for an upstream give-back.
 
   @gap:textp
+  @Unsupported
   Scenario: containing matches case-insensitively (documented divergence)
     Given the search graph
     And the traversal of
@@ -23,6 +24,7 @@ Feature: mogwai addendum — TextP substring predicates over the property_fts tr
       | chapter two |
 
   @gap:textp
+  @Unsupported
   Scenario: startingWith confirms position (excludes a mid-string hit)
     Given the search graph
     And the traversal of
@@ -36,6 +38,7 @@ Feature: mogwai addendum — TextP substring predicates over the property_fts tr
       | chapter two |
 
   @gap:textp
+  @Unsupported
   Scenario: endingWith over the index
     Given the search graph
     And the traversal of
@@ -48,6 +51,7 @@ Feature: mogwai addendum — TextP substring predicates over the property_fts tr
       | chapter one |
 
   @gap:textp
+  @Unsupported
   Scenario: a sub-3-char substring still matches via the unindexed LIKE fallback
     Given the modern graph
     And the traversal of

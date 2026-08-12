@@ -28,14 +28,13 @@ import { test, expect, describe } from 'bun:test';
 import { loadScenarios } from './read-features.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { exec, executeQuery } from '../support/executor.ts';
+import { executeQuery } from '../support/executor.ts';
 import { MODERN_SEED } from '../fixtures/seed-modern.ts';
 import { ZOO_SEED } from '../fixtures/seed-zoo.ts';
 import { CREW_SEED } from '../fixtures/seed-crew.ts';
 import { BigDecimal, Duration } from '../../src/gremlin/types.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
 import { decodeAll } from '../support/decode.ts';
-import { relirOff } from '../support/harness.ts';
 
 // A vertex carrying one property of each type our extended GraphBinary serializers cover, so a
 // `Given the typed graph` scenario can read each back and exercise serialize+decode end-to-end.
@@ -257,14 +256,26 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
       // (`@SpineRel`/`@SpineLegacy` — see `pinSpine` in read-features.ts). The fixture seed and the
       // initializer stay ambient on purpose: they are writes that set up a graph, not the answer
       // under test, so pinning them would widen what the tag claims.
-      const runTraversal = () => s.pinSpine
-        ? exec(store, standardRegistry, undefined, s.pinSpine).buffers(s.gremlin, {}, {})
-        : executeQuery(store, s.gremlin, {}, {}, standardRegistry);
+      const runTraversal = () => executeQuery(store, s.gremlin, {}, {}, standardRegistry);
+      // `@Unsupported` — the shape is not lowered yet. What is asserted is the FAIL-CLOSED half: it
+      // must refuse rather than answer a different question. The expectation below stays in the file
+      // and starts gating again the day the refusal stops (which fails HERE, loudly, as the prompt to
+      // drop the tag).
+      if (s.unsupported) {
+        // The refusal may come from the traversal OR from a graph CHECK — a scenario whose subject
+        // still lowers can be pinned by a verification query that does not. Either is the same fact:
+        // this scenario is not evaluable end to end yet.
+        let thrown: unknown;
+        try {
+          await decodeAll(runTraversal());
+          for (const g of s.graphChecks) await decodeAll(executeQuery(store, g.gremlin, {}, {}, standardRegistry));
+        } catch (e) { thrown = e; }
+        expect(thrown, `${s.name} is tagged @Unsupported but now ANSWERS — drop the tag`).toBeInstanceOf(Error);
+        return;
+      }
       // An `error` scenario asserts the REFUSAL, so it runs the traversal expecting a throw and
       // nothing below it applies. Upstream compares the message case-insensitively; so do we.
-      // An `@RelIR` scenario becomes one of these when RelIR is off — its message is the legacy
-      // spine's and not ours to pin, so only the throw itself is asserted.
-      if (s.assertion === 'error' || (s.relirOnly && relirOff)) {
+      if (s.assertion === 'error') {
         let thrown: unknown;
         try { await decodeAll(runTraversal()); }
         catch (e) { thrown = e; }

@@ -12,6 +12,7 @@
 @gap:where-under-otherv-context
 Feature: Step - where() under otherV() context
 
+  @Unsupported
   Scenario: g_V_outE_whereXhasXweight_gtX0_2XXX_otherV_name
     Given the modern graph
     And the traversal of
@@ -27,6 +28,7 @@ Feature: Step - where() under otherV() context
       | josh |
       | ripple |
 
+  @Unsupported
   Scenario: g_V_outE_whereXhasXweight_gtX1XXX_otherV_name
     Given the modern graph
     And the traversal of
@@ -36,6 +38,7 @@ Feature: Step - where() under otherV() context
     When iterated to list
     Then the result should be empty
 
+  @Unsupported
   Scenario: g_V_outE_whereXinVXhasXname_joshXXX_otherV_name
     Given the modern graph
     And the traversal of

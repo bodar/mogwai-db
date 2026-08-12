@@ -17,6 +17,7 @@ Feature: mogwai addendum — a group VALUE body's barrier observes the whole par
   # @gap:group-value-partition-barrier marks the family.
 
   @gap:group-value-partition-barrier
+  @Unsupported
   Scenario: g_V_group_byXlabelX_byXname_order_byXdescX_foldX
     Given the modern graph
     And the traversal of
@@ -32,6 +33,7 @@ Feature: mogwai addendum — a group VALUE body's barrier observes the whole par
       | m[{"person":["vadas","peter","marko","josh"],"software":["ripple","lop"]}] |
 
   @gap:group-value-partition-barrier
+  @Unsupported
   Scenario: g_V_group_byXlabelX_byXname_order_foldX
     Given the modern graph
     And the traversal of

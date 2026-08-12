@@ -1,9 +1,13 @@
 # src/compiler — architecture
 
-_Scope: `src/compiler/**`. The lowering surface it dispatches to is `src/compiler/steps/CLAUDE.md`; the SQL
-kernel is `src/sql/CLAUDE.md`. Root `CLAUDE.md` holds cross-cutting rules._
+_Scope: `src/compiler/**`. The algebra it lowers to is `src/rel/` (`docs/2026-08-01-relir-build-plan.md`);
+the SQL kernel is `src/sql/CLAUDE.md`. Root `CLAUDE.md` holds cross-cutting rules._
 
-`compile()` = `parse → runPasses → analyze → dispatch`. Detailed rationale (both landed, archived):
+`compile()` = `parse → runPasses → analyze → lower to RelIR → emit`. **There is ONE lowering.** The
+second spine — `steps/`, `engine/`, the routing switch, `MOGWAI_RELIR` — is deleted; a traversal the
+lowering does not cover raises `UnsupportedTraversal` rather than falling through to anything.
+
+Detailed rationale (both landed, archived):
 `docs/archive/2026-07-24-unified-rewrite-passes-plan.md` and
 `docs/archive/2026-07-23-directory-restructure-plan.md`.
 
@@ -17,7 +21,7 @@ archived doc); the names below are the whole vocabulary.
 |---|---|---|---|
 | `Pass` (`ir/pass.ts`) | rewrites the chain, or verifies and throws | annotates, selects SQL | `TraversalStrategy` |
 | `ChainFacts` (`ir/analyze.ts`) | annotates the chain | rewrites | `TraverserRequirement` aggregation |
-| `FastPath` (`options/fast-paths.ts`) | lowers a recognized sub-shape to **specialized** SQL | is the semantic authority | `ProviderOptimizationStrategy` |
+| `FastPath` (`options/fast-paths.ts`) | a switch the lowering reads (collapse, property seek) | is the semantic authority | `ProviderOptimizationStrategy` |
 
 Naming anything new in here follows the layered vocabulary in the root `CLAUDE.md` (**Naming**) —
 these three names are that rule applied: the roles are compiler concepts, so they take compiler words,
@@ -30,20 +34,20 @@ while what they operate on keeps TinkerPop's.
   < verify`. Add a Pass; never grow a switch or do index arithmetic in a step compiler. Whole-chain
   facts (path/encounter/collapse-safety) are `analyzeChain()` annotations, not rewrites.
 - **Dependencies vs state are separate — do not conflate.** Ambient capabilities (registry,
-  fastPaths, federationDepth, the lowering engine, the store source) are DI, grouped by lifecycle
-  into `AppScope`/`RequestScope` (`src/scopes.ts`). `LoweringState` is PURE per-query state (q/params/
-  traverserLayout/sideEffects). Never put a dependency on `LoweringState` or thread it through signatures — add a
-  scope field + an `Engine` accessor instead.
-  **There are TWO scopes, not three, and the missing one is deliberate:** what a single compile owns
-  (its fresh CTE `Query`, and inject()'s empty-param-table override) is per-compile STATE, held by
-  the one-per-compile `LoweringEngine`. A compile scope only duplicated `q` into DI. Rationale:
+  fastPaths, federationDepth, the federation source) are DI, grouped by lifecycle into
+  `AppScope`/`RequestScope` (`src/scopes.ts`); what a LOWERING receives is the settled VALUE the
+  dependency produced, never the dependency (`RelRequest`). **There are TWO scopes, not three, and
+  the missing one is deliberate:** what a single compile owns — its relation-id minter, its plan — is
+  per-compile STATE, threaded explicitly. A compile scope only duplicated it into DI. Rationale:
   `docs/archive/2026-07-31-di-scopes-and-services-plan.md`.
-- **One engine, families are free functions.** The `LoweringEngine` (`engine/engine.ts`) holds the
-  recursive surface; step families reach it via `engineOf(stream)` and import only the leaf
-  interface `engine/deps.ts`. This one-way DAG (deps ◂ families ◂ engine ◂ compiler) is what keeps
-  the imports cycle-free — a per-concern compiler *object* was evaluated and rejected as net churn.
-- **Fast paths are opt-in, never the semantic authority.** Each is one `FastPath` object in
-  `options/fast-paths.ts`, fired family-locally. A specialized lowering qualifies ONLY if disabling
-  it compiles the same traversal generically, recognition-failure falls through (never throws), and
-  a committed enabled≡disabled equivalence test exists. No new fast path without that test + perf
-  evidence in the same change.
+- **The lowering is a fold over `Step[]`, not an object graph.** `src/compiler/rel/lower.ts` is the
+  fold; the shape-aware payload builders beside it (`element.ts`, `list.ts`, `map.ts`, `record.ts`,
+  `path.ts`, `foreign.ts`, …) are pure functions it calls. What a lowering gets from the request is a
+  RECORD of settled values (`RelRequest`, `rel/spine.ts`) — never an ambient capability, and never a
+  recursive dispatcher to reach back through.
+- **Fast paths are opt-in, never the semantic authority.** Two survive the single-spine cut and both
+  are switches the lowering READS rather than a second lowering: `movementCollapse` (the grouped
+  `SUM(bulk)` movement) and `propertySeek` (`src/rel/passes/seek.ts`, a physical rewrite over the
+  finished algebra). Either position must compile the same traversal — turning one off may change the
+  PLAN, never whether there is one — and L5's per-switch sweep is what checks that claim. No new
+  switch without its differential + perf evidence in the same change.

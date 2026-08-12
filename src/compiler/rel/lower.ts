@@ -26,10 +26,10 @@ import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
 import { childSteps, normalize } from '../ir/passes.ts';
 import { containsTextSearch, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
-import { foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
+import { CoercionDeferral, foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
-  and, byEncounter, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, labelArgsAllStrings,
-  labelIds, meta, minter, NODE_COLS, notProduced, or, PROPERTIES, renumber, storedValue, typeOf, withMergedVtype, type Minter,
+    and, byEncounter, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, labelArgsAllStrings,
+    labelIds, meta, minter, NODE_COLS, notProduced, or, PROPERTIES, renumber, storedValue, typeOf, withMergedVtype, type Minter,
 } from './build.ts';
 import { bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
@@ -2479,11 +2479,19 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
   // and it is why a `CAST` here would answer `1` for `'1,000'` and epoch 0 for an invalid date (§11:
   // a required error became a plausible value). So the fold is REUSED, not re-expressed: it mutates
   // the value array in place and hands back the first ordinary step plus the framing tag it
-  // established. A value that does not parse THROWS from in there, and this module's contract is
-  // `null` — so it is caught, and the legacy spine raises the message it owns.
+  // established.
+  //
+  // ⚠️ **A PARSE FAILURE PROPAGATES — it is the ANSWER, not a decline** (§6·5's permanent `null`). The
+  // throw used to be caught here because the other spine owned the message; with one spine, swallowing
+  // it would turn *"Can't parse string '1,000' as number."* into a generic "not supported", which is a
+  // required error becoming the wrong error. The module's `null` contract still means "not learned
+  // yet"; this is not that.
   const vals = [...args];
   let folded: { at: number; as?: string };
-  try { folded = foldConstantCoercions(steps as IRStep[], vals); } catch { return null; }
+  // A `CoercionDeferral` is vocabulary the fold has not learned, so it DECLINES like any other; a
+  // `ValueParseError` is the traversal's answer and travels on.
+  try { folded = foldConstantCoercions(steps as IRStep[], vals); }
+  catch (error) { if (error instanceof CoercionDeferral) return null; throw error; }
 
   // The type each row inlines under: a coercion fold (`asNumber`/`asBool`/…) has already retyped the
   // whole stream, so its uniform `as` wins; absent a fold, the value keeps the arg's declared subtype.

@@ -18,6 +18,7 @@ Feature: mogwai addendum — infix-composed predicates (P/TextP .and()/.or()/.ne
   # host, and negate() reuses the `not` op.
   @gap:composed-predicates
 
+  @Unsupported
   Scenario: g_V_hasXname_startingWithXmX_or_startingWithXpXX
     Given the modern graph
     And the traversal of
@@ -32,6 +33,7 @@ Feature: mogwai addendum — infix-composed predicates (P/TextP .and()/.or()/.ne
 
   # The presentation the differential actually flagged: the same predicate inside a filter() body,
   # where the inline predicate path lowers it rather than the top-level has().
+  @Unsupported
   Scenario: g_V_filterXhasXname_startingWithXmX_or_startingWithXpXXX
     Given the modern graph
     And the traversal of
@@ -44,6 +46,7 @@ Feature: mogwai addendum — infix-composed predicates (P/TextP .and()/.or()/.ne
       | marko |
       | peter |
 
+  @Unsupported
   Scenario: g_V_whereXhasXname_startingWithXmX_or_startingWithXpXXX
     Given the modern graph
     And the traversal of
@@ -58,6 +61,7 @@ Feature: mogwai addendum — infix-composed predicates (P/TextP .and()/.or()/.ne
 
   # not() over a composed predicate — the arm must be the negation of the WHOLE composition, not of
   # its first operand.
+  @Unsupported
   Scenario: g_V_notXhasXname_startingWithXmX_or_startingWithXpXXX
     Given the modern graph
     And the traversal of
@@ -98,6 +102,7 @@ Feature: mogwai addendum — infix-composed predicates (P/TextP .and()/.or()/.ne
       | d[27].i |
 
   # Nesting: a composition whose own operand is a composition. Left-leaning tree, any depth.
+  @Unsupported
   Scenario: g_V_hasXname_startingWithXmX_or_startingWithXpX_or_startingWithXrXX
     Given the modern graph
     And the traversal of

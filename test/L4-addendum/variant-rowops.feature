@@ -9,6 +9,7 @@ Feature: mogwai addendum — shape-agnostic row-ops over a variant stream
   # stay deterministic regardless of row order.
 
   @gap:variant-position
+  @Unsupported
   Scenario: g_V_hasXname_markoX_unionXvaluesXnameX_outX_count
     Given the modern graph
     And the traversal of
@@ -21,6 +22,7 @@ Feature: mogwai addendum — shape-agnostic row-ops over a variant stream
       | d[4].l |
 
   @gap:variant-position
+  @Unsupported
   Scenario: g_V_hasXname_markoX_unionXvaluesXnameX_outX_limitX2X_count
     Given the modern graph
     And the traversal of
@@ -33,6 +35,7 @@ Feature: mogwai addendum — shape-agnostic row-ops over a variant stream
       | d[2].l |
 
   @gap:variant-position
+  @Unsupported
   Scenario: g_V_hasXname_markoX_unionXvaluesXnameX_outX_skipX1X_count
     Given the modern graph
     And the traversal of
@@ -45,6 +48,7 @@ Feature: mogwai addendum — shape-agnostic row-ops over a variant stream
       | d[3].l |
 
   @gap:variant-position
+  @Unsupported
   Scenario: g_V_hasXname_markoX_unionXvaluesXnameX_outX_rangeX1_3X_count
     Given the modern graph
     And the traversal of
@@ -104,6 +108,7 @@ Feature: mogwai addendum — shape-agnostic row-ops over a variant stream
       | v[marko] |
 
   @gap:variant-position
+  @Unsupported
   Scenario: g_VX1X_unionXvaluesXnameX_identityX_limitX1X
     Given the modern graph
     And the traversal of
@@ -116,6 +121,7 @@ Feature: mogwai addendum — shape-agnostic row-ops over a variant stream
       | marko |
 
   @gap:variant-position
+  @Unsupported
   Scenario: g_VX1X_unionXvaluesXnameX_identityX_skipX1X
     Given the modern graph
     And the traversal of

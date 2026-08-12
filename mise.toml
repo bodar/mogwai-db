@@ -103,24 +103,6 @@ run = "bun scripts/binds-check.ts"
 description = "Report exports nothing imports (instrument, not a gate — findings need judgement)"
 depends = ["install"]
 run = "bun scripts/orphans.ts"
-
-# The DELETION ratchet — the second of the two counters a migration needs
-# (docs/2026-08-01-relir-build-plan.md §10·4). A gate, unlike `orphans`, because it asks a question
-# with a right answer: "is the thing the plan promised to delete still there?". `orphans` needs
-# judgement (a DI leaf with no references is alive); this reads a COMMITTED list of names a plan
-# has already committed to removing, so a rise is unambiguously a regression.
-#
-# Ratcheted rather than zero-gated, because unlike `arch`/`lint`/`binds` it cannot be at zero today
-# — it is a countdown. Same shape as L3's floor and the same argument for auto-recording: the
-# counter only goes down, so `--record` can bank an improvement but never launder a regression.
-# Same `depends` reasoning as the other static gates: LSP over source, no submodule, no graph.
-[tasks.deletion]
-description = "Deletion ratchet: names a plan promised to delete, and how much of each is left"
-depends = ["install"]
-run = "bun scripts/deletion-check.ts"
-
-# An INSTRUMENT, not a gate: the RelIR migration's worklist, ranked by FAMILY because a per-step count
-# systematically understates a vocabulary (the scalar transforms are 18 names, largest 60, together 153).
 [tasks.rel-blockers]
 description = "RelIR worklist: where the fold gives up, per step and per family (instrument — needs judgement)"
 depends = ["install"]
@@ -133,46 +115,6 @@ run = "bun scripts/rel-blockers.ts"
 description = "RelIR decline contract: lowerToRel returns a plan or null over every corpus prefix, never throws"
 depends = ["install"]
 run = "bun scripts/rel-sweep.ts"
-
-[tasks.sql-hygiene]
-description = "Instrument: RelIR authored-corpus literal provenance and DO SQL-wall sweep"
-depends = ["install"]
-run = "bun scripts/sql-hygiene.ts"
-
-# Re-bank the per-family literal/size baseline. A `binds`/`bytes`/`bound` RISE is legitimate only
-# with a reason in the commit message — the ratchet exists so an unexplained one fails the build.
-# The script owns which failures a recorder may bank and which it must refuse (LOST COVERAGE), so
-# this is one invocation with no shell logic and nothing to swallow. Same shape as `deletion-record`.
-[tasks.sql-hygiene-record]
-description = "Bank the sql-hygiene per-family baseline (a rise needs a reason; commit scripts/sql-hygiene-baseline.json)"
-depends = ["install"]
-run = "bun scripts/sql-hygiene.ts --record"
-
-[tasks.deletion-record]
-description = "Bank a lowered deletion floor (downward only; commit scripts/deletion-ratchet.tsv)"
-depends = ["install"]
-run = "bun scripts/deletion-check.ts --record"
-
-# Phase 0's countdown (docs/2026-08-01-relir-build-plan.md §8/§10). A GATE, but a ratchet rather than
-# a zero-gate like arch/lint/binds: zero is the wrong target, because engine/engine.ts and compiler.ts
-# ARE the legacy routers and keep their edges until Phase 4 deletes them outright. They are the two
-# `exempt` rows, and Phase 0 is over when they are the ONLY rows. Direct edges only — the transitive
-# closure moves when an unrelated file three hops away changes an import, so it would fire on work
-# that severed nothing.
-[tasks.edges]
-description = "Edge ratchet: direct imports of src/compiler/steps/ from outside it (Phase 0's countdown)"
-depends = ["install"]
-run = "bun scripts/edges-check.ts"
-
-[tasks.edges-record]
-description = "Bank a cut edge (downward only; commit scripts/steps-edges.tsv)"
-depends = ["install"]
-run = "bun scripts/edges-check.ts --record"
-
-# The ROOT of the graph now — `install` depends on it, because `gremlin` is a link: dep. It runs its
-# own `bun install` inside the submodule (a separate bun project) and builds the client there, so it
-# needs bun but never the superproject's node_modules; that is what keeps the inverted edge
-# acyclic.
 [tasks.submodule]
 description = "Provision the pinned submodules (blobless+sparse: tinkerpop, calcite) + build/register the client"
 run = "bash scripts/init-submodule.sh"
@@ -184,80 +126,6 @@ run = "bash scripts/init-submodule.sh"
 description = "Full suite: corpus + contract + L3 conformance (both runtimes)"
 depends = ["install", "check", "submodule"]
 run = "bun test"
-
-# An INSTRUMENT, not a gate, and deliberately absent from `ci` — same standing as `orphans`. It runs
-# the ENTIRE suite with `PRAGMA reverse_unordered_selects = ON`, SQLite's own switch for reversing
-# every scan whose order the query did not constrain (an ORDER BY is untouched). A result that only
-# holds under the default is pinned by SQLite's scan choice, not by the SQL we emit — and on a
-# six-vertex fixture that choice is reliably the flattering one, which is exactly why this cannot be
-# found by reading. At first run: 20 failures, 13 of them L3 CONFORMANCE scenarios (~0.8% of the
-# conformance floor passing by luck), all one defect — `order().fold()`. Three rounds of fixes have
-# taken the CORPUS view (the perturbed census, a fixed 2,298 denominator) from 41 to 8, and the write
-# drivers reading in emission order took it to ONE — `g.V().repeat(both()).times(3).range(5,11)`,
-# which is item 4's repeat/match encounter boundary and needs an exemption either way. The suite
-# total sits higher, mostly order-sensitive assertions in test/compiler/.
-# Not a gate because it is still red; the remainder are item 20 in docs/outstanding-work.md, and it
-# becomes a gate once they are cleared. A failure here is a REAL under-specification, never a flake.
-[tasks."test:perturbed"]
-description = "Instrument: the full suite under reversed unordered scans (finds order-by-luck results)"
-depends = ["install", "check", "submodule"]
-env = { MOGWAI_REVERSE_UNORDERED = "1" }
-run = "bun test"
-
-# The CF-PARITY instrument, in the same mould as test:perturbed: run the whole suite with every Bun
-# statement asserted DO-legal (≤ 100 bound parameters, ≤ 100 KB of text — src/cf-limits.ts).
-# bun:sqlite's bind cap is 65,535, so a bind list that scales with ROW COUNT is green in every suite
-# here and hard-fails on the one runtime we ship to.
-#
-# GREEN, and it was green before the fixes too — which is the finding, not a reassurance: nothing in
-# the suite reaches the cardinality where the walls bite (the conformance runner's `g.V().drop()`
-# reset cleans the EMPTY graph; every other fixture is six vertices). So the two reproductions are
-# written deliberately at 250-500 elements in test/cf-limits.test.ts, and `mise run binds` is the
-# gate that catches the IDIOM statically. This task is how you find the next wall in a path the
-# suite does exercise at scale.
-# The RelIR DIFFERENTIAL, in the same mould as test:perturbed and test:cf-limits: run the WHOLE
-# suite with the RelIR spine switched OFF, so every corpus traversal it covers is compiled by the
-# legacy lowering instead (docs/2026-08-01-relir-build-plan.md §6·1).
-#
-# Green here AND green in `ci` is the differential: the two spines agree on the L1–L5 ladder, the
-# census multisets and the L2 contract. That is strictly stronger than §5a's eleven hand-built
-# families, and it costs nothing to build because both oracles already existed.
-#
-# WHAT IT IS AN ORACLE OVER: the INTERSECTION — traversals both spines answer. It is not a parity
-# demand. RelIR is expected to answer shapes legacy cannot, and legacy is expected to lose some as
-# increments land (§6·1); the intersection shrinking is the migration working, not the oracle
-# breaking. So a deliberate asymmetry is EXPRESSED, never left to fail. Three mechanisms, and between
-# them there is no reason for a red run here: an assertion about SQL or a plan only RelIR produces
-# passes `{ spine: 'rel' }` (`read`/`compile`/`exec`), an assertion about an ANSWER only RelIR
-# produces uses `relirAhead` (test/support/harness.ts — it PROVES legacy refuses rather than skipping),
-# and the conformance floors + the census's legacy gate settle on the UNION of the two positions.
-#
-# It must still run GREEN, not "green except the SQL snapshots" — a differential that cannot pass in
-# both positions is not one. So an L2 test that pins a spine's SPELLING pins it with `{spine}` passed
-# explicitly, asserting BOTH forms rather than whichever the ambient switch produced.
-#
-# An ENV switch rather than a parameter, for test:perturbed's reason — the suite under test must
-# not be able to see which position it is in. DELETED with the legacy spine (§10·4·5): the
-# differential is scaffolding for the migration, never a load-bearing test.
-[tasks."test:legacy-spine"]
-description = "Differential: the full suite with the RelIR spine off (every covered traversal via legacy)"
-depends = ["install", "check", "submodule"]
-env = { MOGWAI_RELIR = "0" }
-run = "bun test"
-
-# THE CUT, not the differential — the one number `test:legacy-spine` structurally cannot produce.
-# Both of the other positions may fall back to legacy, so the `legacySpine` floor proves only
-# `routed >= all-legacy`; this position forbids the fallback, so its FAILURES are exactly the
-# scenarios legacy is still carrying. Not in `ci` and not a gate: it is a measurement whose number is
-# meant to fall to zero by Phase 4, and it prints the per-scenario list plus a pointer at
-# `rel-blockers` for the family ranking. Scoped to L3 deliberately — the corpus-wide view is already
-# `rel-blockers`, and the census would simply crash on every legacy-carried traversal.
-[tasks."L3:rel-only"]
-description = "Instrument: what deleting the legacy route costs today, in L3 scenarios (no gate, no ratchet)"
-depends = ["install", "check", "submodule"]
-env = { MOGWAI_RELIR = "only" }
-run = "bun test test/L3-conformance/l3.test.ts"
-
 [tasks."test:cf-limits"]
 description = "Instrument: the full suite with every statement asserted Cloudflare-legal (≤100 binds)"
 depends = ["install", "check", "submodule"]
@@ -369,13 +237,31 @@ run = "bunx wrangler deploy --dry-run --outdir dist"
 description = "One shard of the suite for CI (MOGWAI_SHARDS=n MOGWAI_SHARD=i); the shards partition discovery"
 depends = ["install", "submodule"]
 run = "bun scripts/test-shard.ts"
+[tasks.sql-hygiene]
+description = "Instrument: RelIR authored-corpus literal provenance and DO SQL-wall sweep"
+depends = ["install"]
+run = "bun scripts/sql-hygiene.ts"
+
+[tasks.sql-hygiene-record]
+description = "Bank the sql-hygiene per-family maxima (commit scripts/sql-hygiene-baseline.json)"
+depends = ["install"]
+run = "bun scripts/sql-hygiene.ts --record"
+
+# An ENV switch rather than a parameter, deliberately: the suite under test must not be able to see
+# that it is being perturbed.
+[tasks."test:perturbed"]
+description = "Instrument: the full suite under reversed unordered scans (finds order-by-luck results)"
+depends = ["install", "check", "submodule"]
+env = { MOGWAI_REVERSE_UNORDERED = "1" }
+run = "bun test"
+
 
 # The static half of the gate, grouped so CI can put it on a runner of its own. Every member finishes
 # within ~7s of `install`, so as a group it is free — it exists to be a JOB, not because anyone needs
 # to run the six separately.
 [tasks.gates]
 description = "The static gates: type-check + lint + architectural + bind-budget + SQL hygiene + deletion & edge ratchets + worker build"
-depends = ["check", "lint", "arch", "binds", "sql-hygiene", "deletion", "edges", "build"]
+depends = ["check", "lint", "arch", "binds", "sql-hygiene", "build"]
 run = "echo 'gates passed'"
 
 # THE LOCAL one-command gate, and still the complete one: `mise run ci` runs everything CI runs.

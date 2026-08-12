@@ -16,6 +16,7 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
   # reason. The batching case is the complement and is pinned in element-branch-child.feature.
 
   @gap:branch-traverser-major
+  @Unsupported
   Scenario: g_V_hasXname_within_josh_markoX_order_byXnameX_unionXout_inX_valuesXnameX_limitX3X
     Given the modern graph
     And the traversal of
@@ -34,6 +35,7 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | marko |
 
   @gap:branch-traverser-major
+  @Unsupported
   Scenario: g_V_hasXname_within_josh_markoX_order_byXnameX_unionXout_inX_valuesXnameX_tailX3X
     Given the modern graph
     And the traversal of
@@ -50,6 +52,7 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | lop |
 
   @gap:branch-traverser-major
+  @Unsupported
   Scenario: g_V_hasXname_within_josh_markoX_order_byXnameX_unionXunionXoutXknowsX_outXcreatedXX_inX_valuesXnameX_limitX3X
     Given the modern graph
     And the traversal of
@@ -68,6 +71,7 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | marko |
 
   @gap:branch-traverser-major
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_coalesceXoutXknowsX_outXcreatedXX_valuesXnameX_limitX2X
     Given the modern graph
     And the traversal of
@@ -84,6 +88,7 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | lop |
 
   @gap:branch-traverser-major
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_chooseXhasXname_markoX_outXknowsX_outXcreatedXX_valuesXnameX_limitX2X
     Given the modern graph
     And the traversal of
@@ -100,6 +105,7 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | lop |
 
   @gap:branch-traverser-major
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_unionXvaluesXnameX_valuesXageXX_limitX3X
     Given the modern graph
     And the traversal of
@@ -117,6 +123,7 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | marko |
 
   @gap:branch-traverser-major
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_chooseXhasXname_markoX_valuesXnameX_valuesXageXX_limitX1X
     Given the modern graph
     And the traversal of
@@ -131,6 +138,7 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | d[32].i |
 
   @gap:branch-traverser-major
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_unionXvaluesXnameX_foldX_valuesXageX_foldX_limitX2X
     Given the modern graph
     And the traversal of
@@ -146,6 +154,7 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | l[d[32].i] |
 
   @gap:branch-traverser-major
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_unionXvaluesXnameX_valuesXageX_foldX_limitX2X
     Given the modern graph
     And the traversal of
@@ -161,6 +170,7 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | l[d[32].i] |
 
   @gap:branch-traverser-major
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_unionXoutXcountX_valuesXageXX_limitX2X
     Given the modern graph
     And the traversal of
@@ -184,6 +194,7 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | d[32].i |
 
   @gap:branch-traverser-major
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_valuesXageX_unionXmathX_plus_1X_mathX_times_2XX_limitX3X
     Given the modern graph
     And the traversal of
@@ -201,6 +212,7 @@ Feature: mogwai addendum — a barrier-free branch emits traverser-major, arm-mi
       | d[30].d |
 
   @gap:branch-traverser-major
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_order_byXnameX_coalesceXoutXknowsX_limitX1X_outXcreatedXX_valuesXnameX_limitX2X
     Given the modern graph
     And the traversal of

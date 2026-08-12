@@ -21,6 +21,7 @@ Feature: mogwai addendum — a child scope does not inherit the parent chain's e
   # @gap:child-scope-entering-vertex marks the family.
 
   @gap:child-scope-entering-vertex
+  @Unsupported
   Scenario: g_V_hasLabelXpersonX_whereXoutE_unionXidentity_identityXX_outE_otherV
     Given the modern graph
     And the traversal of
@@ -40,6 +41,7 @@ Feature: mogwai addendum — a child scope does not inherit the parent chain's e
       | v[lop] |
 
   @gap:child-scope-entering-vertex
+  @Unsupported
   Scenario: g_V_hasXname_within_marko_rippleX_localXbothEXcreatedX_limitX1XX_otherV_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -77,6 +79,7 @@ Feature: mogwai addendum — a child scope does not inherit the parent chain's e
   # out-edge" does not depend on which. That is the same care the `limit(1)` scenario above takes.
 
   @gap:child-scope-entering-vertex
+  @Unsupported
   Scenario: g_V_whereXoutE_order_byXweightX_otherVX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -91,6 +94,7 @@ Feature: mogwai addendum — a child scope does not inherit the parent chain's e
       | peter |
 
   @gap:child-scope-entering-vertex
+  @Unsupported
   Scenario: g_V_whereXoutE_rangeX0_2X_otherVX_valuesXnameX
     Given the modern graph
     And the traversal of
@@ -105,6 +109,7 @@ Feature: mogwai addendum — a child scope does not inherit the parent chain's e
       | peter |
 
   @gap:child-scope-entering-vertex
+  @Unsupported
   Scenario: g_V_whereXbothE_order_otherV_hasLabelXpersonXX_valuesXnameX
     Given the modern graph
     And the traversal of

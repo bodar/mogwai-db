@@ -21,7 +21,6 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
 
 - `src/sql/CLAUDE.md` — the `q` SQL kernel
 - `src/compiler/CLAUDE.md` — IR passes, the DI object model, fast paths
-- `src/compiler/steps/CLAUDE.md` — the lowering surface + child seam
 - `src/services/CLAUDE.md` — `call()` + Service Registry + full-text search
 - `test/CLAUDE.md` — the L1–L5 conformance ladder (L5 = property-based; everything tracks
   tinkerpop `origin/master`, the old version split is gone)
@@ -117,7 +116,6 @@ free upgrade.
 | `mise run arch` (`scripts/arch-check.ts`) | no Pass reaches `ChainFacts`/fast paths | **CI gate**, at zero |
 | `mise run lint` (`scripts/lint.ts`) | unused locals/params/value-position type imports | **CI gate**, at zero |
 | `mise run binds` (`scripts/binds-check.ts`) | no bind list sized by ROW COUNT outside `RowBatch` | **CI gate**, at zero |
-| `mise run edges` (`scripts/edges-check.ts`) | direct imports of `src/compiler/steps/` from outside it | **CI gate**, a RATCHET |
 | `mise run orphans` (`scripts/orphans.ts`) | exports nothing imports | instrument — findings need judgement |
 | `scripts/lsp.ts` | the shared session library — build new tools on it | library |
 
@@ -176,16 +174,6 @@ every `placeholders(…)` call inside a function that also chunks (enclosing ext
 NOT try to decide whether an arbitrary `binds` array is bounded — that is dataflow over every
 `store.query` call, and `store.query(plan.sql, plan.binds)` is unbounded to any local analysis and
 perfectly correct. What is decidable is the IDIOM, and the idiom is what produced both walls.
-
-**`mise run edges`** (`scripts/edges-check.ts`) is the fourth, and the only one that is a RATCHET rather
-than a zero-gate: it counts DIRECT imports of `src/compiler/steps/` from outside it, per file, with the
-symbols named, against floors in `scripts/steps-edges.tsv` that may only be re-recorded downward
-(`mise run edges-record`). Zero is the wrong target — `engine/engine.ts` and `compiler.ts` ARE the legacy
-routers and are declared `exempt`, so **the criterion is that they become the only rows**. It exists because
-coverage gates the legacy ROUTE while the import graph gates the CODE, and only the second decides how much
-a deletion actually removes (`docs/2026-08-01-relir-build-plan.md` §8). Direct edges only: a transitive
-closure moves when an unrelated file three hops away changes an import, so it would fire on work that
-severed nothing.
 
 One INSTRUMENT, deliberately not a gate, because its answer needs judgement:
 **`mise run orphans`** (`scripts/orphans.ts`) reports exports nothing imports, split into
@@ -274,7 +262,14 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
   `patches/upstream/`, never in `docs/`.** Bun applies only what `package.json`'s
   `patchedDependencies` names, so `upstream/` nested inside is inert. `patches/upstream/README.md`
   indexes each payload, its target project, and its submission state.
-- **Test via `mise run test`, NOT bare `bun test`** (bare skips `tsc --noEmit` + the submodule). See
+- **One spine.** The legacy compiler (`src/compiler/steps/`, `src/compiler/engine/`), its routing
+switch and the whole differential harness (`MOGWAI_RELIR`, `test:legacy-spine`, the two-floor L3
+ratchet, the census's legacy columns) are DELETED. A traversal the RelIR lowering does not cover
+raises `UnsupportedTraversal` — a clear query failure, never a fallback. The L3 floor was re-baselined
+1819 → 1360 in that commit; the RelIR build plan (`docs/2026-08-01-relir-build-plan.md`) is now a
+record of how it was done plus the coverage that is left.
+
+**Test via `mise run test`, NOT bare `bun test`** (bare skips `tsc --noEmit` + the submodule). See
   `test/CLAUDE.md`. Build graph: `submodule ─▶ install ─▶ {check, test, build} ─▶ ci`; CI just runs
   `mise run ci`. **`install` depends on `submodule` and that edge is load-bearing** — `gremlin` is a
   `link:` dep resolving to the submodule-built client, so `bun install` FAILS (rather than falling

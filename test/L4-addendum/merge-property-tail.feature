@@ -9,6 +9,7 @@ Feature: mogwai addendum — a property() tail after mergeV/mergeE
   # form; the created branch, the mergeE host and a correlated traversal value are unpinned upstream.
 
   @gap:merge-property-tail
+  @Unsupported
   Scenario: g_mergeVXlabel_person_name_markoX_propertyXname_vadas_acl_publicX_matched
     Given the empty graph
     And the graph initializer of
@@ -43,6 +44,7 @@ Feature: mogwai addendum — a property() tail after mergeV/mergeE
 
   # The tail's value resolves at the MERGED element, not at the incoming driver.
   @gap:merge-property-tail
+  @Unsupported
   Scenario: g_V_mergeVXlabel_person_name_markoX_propertyXdeg_bothE_countX
     Given the modern graph
     And the traversal of
@@ -68,6 +70,7 @@ Feature: mogwai addendum — a property() tail after mergeV/mergeE
   # An edge property has neither cardinality nor meta, so both are refusals in a mergeE tail — the
   # same rule the inline addE/property() path enforces, reached through the same guard.
   @gap:merge-property-tail
+  @Unsupported
   Scenario: g_mergeE_propertyXlist_weightX_is_refused
     Given the modern graph
     And the traversal of

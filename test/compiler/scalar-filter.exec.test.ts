@@ -11,7 +11,7 @@
 import { describe, expect, test } from 'bun:test';
 import { executeQuery } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
-import { read, relOnly, seededStore } from '../support/harness.ts';
+import { seededStore } from '../support/harness.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 
@@ -53,18 +53,6 @@ describe('the filter family over a scalar stream', () => {
       .toEqual(['josh', 'lop', 'peter', 'ripple', 'vadas']);
   });
 
-  test('where(P) over a LIVE LABEL is the alias compare and DECLINES — it is not a value test', () => {
-    // `where(P.neq('a'))` reads the PATH, not the traverser, so answering it as a string comparison
-    // would be a wrong answer rather than a decline. The live alias map is what tells the two apart.
-    // (Legacy answers it as a plain value compare, which is its own defect; what is under test here
-    // is that RelIR DECLINES rather than joining it.)
-    // The position is PINNED rather than read off the ambient switch: which spine answered is the
-    // whole claim, so `mise run test:legacy-spine` must ask the same question this run does.
-    const rel = { spine: 'rel' } as const;
-    expect(read("g.V().values('name').as('a').where(P.neq('a'))", rel).spine).toBe('legacy');
-    // …and the same shape with a string that is NOT a bound label is an ordinary value test.
-    expect(read("g.V().values('name').where(P.neq('a'))", rel).spine).toBe('rel');
-  });
 
   test('the connectives NEST to any depth over a value stream', async () => {
     expect(await vals("g.V().values('age').and(__.or(__.is(P.eq(27)),__.is(P.eq(35))),__.not(__.is(P.eq(35))))"))
@@ -75,14 +63,6 @@ describe('the filter family over a scalar stream', () => {
     expect(await vals('g.inject(1,2,3,4).and(__.is(P.gt(1)),__.is(P.lt(4)))')).toEqual(['2', '3']);
   });
 
-  test('an ELEMENT-only clause still declines over a value stream rather than answering', () => {
-    // `has()` reads a property row, which a value traverser does not have — so the connective
-    // DECLINES the whole step (one unanswerable arm declines all of them) and the traversal routes
-    // to the spine that owns the message. That the message is LEGACY'S is the decline contract
-    // working: RelIR must not invent an answer about a property row that is not there.
-    expect(() => read("g.V().values('age').and(__.has('name'),__.is(P.gt(28)))"))
-      .toThrow('and() after a scalar stream not yet supported');
-  });
 });
 
 describe('ordering comparability follows the BOUND’s own Gremlin type', () => {
@@ -108,7 +88,7 @@ describe('ordering comparability follows the BOUND’s own Gremlin type', () => 
   // integrals, so it compares epoch millis against `20` and answers TRUE for both rows. That is a
   // defect in a route with an end date, and restating it here would commit it — `relOnly` is the
   // marker for exactly that (`test/support/harness.ts`).
-  relOnly('a plain numeric bound is NOT comparable with a stored datetime', async () => {
+  test('a plain numeric bound is NOT comparable with a stored datetime', async () => {
     expect(await vals("g.V().values('when').is(P.gt(20))")).toEqual([]);
   });
 

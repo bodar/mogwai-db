@@ -31,8 +31,8 @@
 import { BulkLoader, type BulkEdge, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
 import {
-  BigDecimal, Duration, exactInteger, gremlinTypeOf, valueNodeFromStored,
-  type CanonicalType, type MapEntryType, type TypeNode, type ValueNode,
+    BigDecimal, Duration, exactInteger, gremlinTypeOf, valueNodeFromStored,
+    type CanonicalType, type MapEntryType, type TypeNode, type ValueNode,
 } from '../gremlin/types.ts';
 import { keysetPages } from '../rowbatch.ts';
 import { groupByOwner, rowsForOwners } from './drain.ts';

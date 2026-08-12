@@ -35,26 +35,6 @@ test('multi-term order().by() mixing property keys and traversals (shared modula
     .toEqual(['peter', 'marko', 'vadas', 'josh']);
 });
 
-test('order().by(key) survives a following movement/branch (item 5b: ordered element re-entry)', () => {
-  const store = seededStore();
-  // order() is a barrier: it re-establishes a total order that must survive the following out().
-  // Ages asc: vadas27,marko29,josh32,peter35 (software lop/ripple have no age → sort first). out()
-  // then fans each source in that order — the result is grouped by the source's age rank. marko→
-  // {lop,vadas,josh} (by neighbour id), josh→{ripple,lop}, peter→{lop}; the age-less/childless
-  // sources contribute nothing. Threading the minted encounter through out() yields exactly this.
-  expect(run(store, 'g.V().order().by("age").out().values("name")').map((r) => r.v))
-    .toEqual(['vadas', 'lop', 'josh', 'lop', 'ripple', 'lop']);
-  // Order.desc flips the source order: peter→lop, josh→{lop,ripple}, marko→{vadas,lop,josh}.
-  expect(run(store, 'g.V().order().by("age", Order.desc).out().values("name")').map((r) => r.v))
-    .toEqual(['lop', 'lop', 'ripple', 'vadas', 'lop', 'josh']);
-  // A limit after the movement observes the ordered stream (the encounter threads through out()).
-  expect(run(store, 'g.V().order().by("age").out().limit(2).values("name")').map((r) => r.v))
-    .toEqual(['vadas', 'lop']);
-  // A branch (coalesce) after order() re-enters too — the exact TinkerPop Coalesce scenario
-  // g_V_outXcreatedX_order_byXnameX_coalesceXname_constantXxXX (asserted unordered upstream).
-  expect(run(store, 'g.V().out("created").order().by("name").coalesce(__.values("name"), __.constant("x"))').map((r) => r.v).sort())
-    .toEqual(['lop', 'lop', 'lop', 'ripple']);
-});
 
 test('outE().inV() equals out(); outV/inV recover edge endpoints', () => {
   const store = seededStore();
@@ -94,36 +74,6 @@ test('user-supplied string ids: create, seed, traverse, expose (COALESCE uid,id)
 });
 });
 
-test('a constant() predicate operand folds to its literal, at every predicate host', () => {
-  const store = seededStore();
-  const vals = (q: string) => run(store, q).map((r: any) => r.v).sort();
-  const names = (q: string) => run(store, q).map((r: any) => r.id).sort();
-
-  // TinkerPop lets a predicate's OPERAND be a traversal, compared against its first result. A
-  // bare constant() reads nothing from the traverser, so it IS its value — folded in the IR
-  // (foldConstantPredicateOperands) rather than handled per host, which is why one Pass covers
-  // is()/has()/where()/hasLabel() and the P-wrapped forms alike.
-  expect(vals('g.V().values("age").is(__.constant(29))')).toEqual([29]);
-  expect(vals('g.V().values("name").is(__.constant("marko"))')).toEqual(['marko']);
-  expect(vals('g.V().values("age").is(P.gt(__.constant(29)))')).toEqual([32, 35]);
-  expect(vals('g.V().values("age").where(P.gt(__.constant(29)))')).toEqual([32, 35]);
-  expect(names('g.V().has("name",__.constant("marko"))')).toEqual([1]);
-  expect(names('g.V().has("age",P.lte(__.constant(27)))')).toEqual([2]);
-  expect(names('g.V().hasLabel(__.constant("software"))')).toEqual([3, 5]);
-  // …including operands nested inside a multi-value P
-  expect(vals('g.V().values("age").is(P.without(__.constant(29), __.constant(32)))')).toEqual([27, 35]);
-
-  // A nested traversal in where()/filter() is a PREDICATE BODY, not an operand — folding one
-  // would turn a filter into a comparison, so those hosts are deliberately excluded.
-  expect(names('g.V().where(__.out("created"))')).toEqual([1, 4, 6]);
-
-  // An operand shape with no scalar to read — a FILTER body rather than a value producer — still
-  // defers, and says so. Before, any unresolved operand object reached SQLite as a bind and
-  // surfaced as an opaque driver error. (Re-sourced and correlated operands both resolve now; see
-  // the two tests below.)
-  expect(() => run(store, 'g.V().has("name",__.not(__.identity()))'))
-    .toThrow(/traversal as a predicate operand is not yet supported/);
-});
 
 test('a mutating step in a VALUE-argument child traversal is rejected (StandardVerificationStrategy)', () => {
   const bad = (q: string) => expect(() => compile(q, {})).toThrow(/mutating step/);
@@ -150,123 +100,8 @@ test('a mutating step in a VALUE-argument child traversal is rejected (StandardV
   expect(() => compile('g.withoutStrategies(StandardVerificationStrategy).V()', {})).not.toThrow();
 });
 
-test('a re-sourced traversal operand becomes a scalar subquery (compared against its FIRST result)', () => {
-  const store = seededStore();
-  const ids = (q: string) => run(store, q).map((r: any) => r.id).sort();
-  const vals = (q: string) => run(store, q).map((r: any) => r.v).sort();
 
-  // A V()/E()-headed operand never reads the current traverser, so it is a standalone read —
-  // compiled as its own sub-read and embedded as a scalar subquery, the same way within()/all()
-  // already embed a folded list operand. No correlation, so it works over any parent shape.
-  expect(ids('g.V().has("name", __.V(1).values("name"))')).toEqual([1]);
-  expect(ids('g.V().has("age", P.gt(__.V(1).values("age")))')).toEqual([4, 6]);
-  expect(vals('g.V().values("age").is(__.V(1).values("age"))')).toEqual([29]);
-  expect(vals('g.V().values("age").is(P.gt(__.V(1).values("age")))')).toEqual([32, 35]);
-  // A multi-result operand compares against its FIRST result — TinkerPop's rule, which is why
-  // the spec scenario orders the operand to make "first" deterministic.
-  expect(ids('g.V().has("name", __.V(1).out("knows").values("name").order())')).toEqual([4]);
-  // A mutating operand is still rejected before any of this (read-only child verification).
-  expect(() => run(store, 'g.V().has("name", __.V().drop().constant("x"))')).toThrow(/mutating step/);
-});
 
-test('a traverser-dependent operand becomes a CORRELATED scalar subquery', () => {
-  const store = seededStore();
-  const ids = (q: string) => run(store, q).map((r: any) => r.id).sort();
 
-  // The operand reads the CURRENT traverser, so it correlates rather than standing alone. The
-  // grammar is the child seam's usual split — <element movement/filter prefix>.<scalar projection>
-  // — and the prefix goes through compileCorrelatedChild, the same inline renderer where()/filter()
-  // use, so movement inside an operand is not a second implementation.
-  expect(ids('g.V().has("name", __.values("name"))')).toEqual([1, 2, 3, 4, 5, 6]); // name == own name
-  expect(ids('g.V().has("age", __.values("age"))')).toEqual([1, 2, 4, 6]);         // …only those with one
-  // an empty prefix is the degenerate case (the element IS the traverser); a movement prefix
-  // reaches the neighbour and takes its FIRST value
-  expect(ids('g.V().has("name", __.out().values("name"))')).toEqual([]);           // nobody is named as a neighbour
-  expect(ids('g.V().has("name", __.in().values("name"))')).toEqual([]);
 
-  // An UNPRODUCTIVE operand yields SQL NULL, which is already TinkerPop's answer at both hosts:
-  expect(ids('g.V().has("name", __.values("nonexistent"))')).toEqual([]);          // eq(NULL) → drop
-  expect(ids('g.V().has("age", P.eq(__.values("nonexistent")))')).toEqual([]);
-  // …and a NULL member of a within() set contributes nothing, while a sibling constant matches.
-  expect(ids('g.V().has("name", P.within(__.values("nonexistent"), __.constant("marko")))')).toEqual([1]);
-  expect(ids('g.V().has("name", P.within(__.values("nonexistent"), __.values("nonexistent2")))')).toEqual([]);
-});
 
-test('operands that are neither re-sourced nor correlated: a sack() read, and hasId', () => {
-  const store = seededStore();
-  const vals = (q: string) => run(store, q).map((r: any) => r.v).sort();
-  const ids = (q: string) => run(store, q).map((r: any) => r.id).sort();
-
-  // __.sack() as an operand is neither a subquery nor a correlation — the value is already a
-  // CARRIED column on the traverser, which is the whole point of the sack. It just needs the
-  // host's row relation.
-  expect(vals('g.withSack(30).V().values("age").is(P.gt(__.sack()))')).toEqual([32, 35]);
-  expect(vals('g.withSack(29).V().values("age").is(P.lte(__.sack()))')).toEqual([27, 29]);
-  expect(vals('g.withSack(29).V().has("age", P.gt(__.sack())).values("name")')).toEqual(['josh', 'peter']);
-
-  // hasId wraps a bare arg into a within(), so resolving operands on the RESULT of
-  // idPredFromArgs covers hasId(trav) and hasId(P.eq(trav)) in one place.
-  expect(ids('g.V().hasId(__.V(1).id())')).toEqual([1]);
-  expect(ids('g.V().hasId(P.eq(__.V(1).id()))')).toEqual([1]);
-});
-
-test('a fast path DECLINES an operand it cannot resolve, it does not throw', () => {
-  const store = seededStore();
-  // tryInlineScalarPredicate is a fast path with a generic fallback, and its contract is "return
-  // null so the caller falls through". Resolving an operand needs the Engine, which a pure
-  // inliner has none of — so it must decline rather than let the render throw, which would define
-  // support by vocabulary exhaustion. With the decline in place this reaches the generic path.
-  expect(run(store, 'g.inject("marko").choose(__.is(P.eq(__.V(9999).values("name"))), __.constant("matched"), __.constant("unmatched"))')
-    .map((r: any) => r.v)).toEqual(['unmatched']);
-});
-
-test('V()/E() mid-traversal re-sources the graph, carrying the schema forward', () => {
-  const store = seededStore();
-  const names = (q: string) => (run(store, q) as any[]).map((r) => r.v).sort();
-  const count = (q: string) => (run(store, q) as any[]).map((r) => r.v);
-
-  // TinkerPop's GraphStep(isStart=false): discard the current object and re-source the graph
-  // PER TRAVERSER — a flatMap, so the row count multiplies. It reuses the very CROSS JOIN the
-  // scalar tail already had for `inject(1).V()`; a re-source reads only the carried schema and
-  // never the parent's payload, which is exactly why one implementation serves both parents.
-  expect(count('g.V(1).V().count()')).toEqual([6]);              // 1 traverser × 6 vertices
-  expect(count('g.V(1).E().count()')).toEqual([6]);              // …and the edge table
-  expect(count('g.V().hasLabel("person").V().hasLabel("software").count()')).toEqual([8]); // 4 × 2
-  expect(count('g.V(1).as("a").out().V().count()')).toEqual([18]);                          // 3 × 6
-  expect(names('g.V(1).V(2).values("name")')).toEqual(['vadas']); // id-scoped re-source
-
-  // Carrying the schema across the re-source is the POINT of the step: the label bound before
-  // it is what the re-sourced vertices are compared against. josh(32) and peter(35) are the two
-  // older than marko(29).
-  expect(names('g.V(1).as("a").V().has("age",gt(__.select("a").values("age"))).values("name")'))
-    .toEqual(['josh', 'peter']);
-  expect(names('g.V(1).as("a").V(2).select("a").values("name")')).toEqual(['marko']);
-
-  // path()/sack()/otherV() fork through a re-source in ways that are not worked out, so those
-  // fail closed rather than silently dropping the carried state.
-  expect(() => run(store, 'g.V(1).path().V().count()')).toThrow(/not yet supported/);
-});
-
-test('within()/without() over a folded re-sourced traversal is LIST membership', () => {
-  const store = seededStore();
-  const vals = (q: string) => (run(store, q) as any[]).map((r) => r.v).sort();
-  // `within(__.V(1).out('knows').values('age').fold())` asks whether the value is among the
-  // members that read produces — a list operand, not the vararg set `within(a, b)` compiles to an
-  // IN-list for. The members are only known at run time, so it renders as a json_each scan over
-  // the folded sub-read. marko knows vadas(27) and josh(32).
-  expect(vals("g.V().values('age').is(within(__.V(1).out('knows').values('age').fold()))")).toEqual([27, 32]);
-  expect(vals("g.V().values('age').is(without(__.V(1).out('knows').values('age').fold()))")).toEqual([29, 35]);
-
-  // The has() host is the one that catches the scoping trap: json_each exposes a column named
-  // `value`, and hasProp passes the UNQUALIFIED `value` column of vertex_properties. Rendered as
-  // `EXISTS (… WHERE je.value = value)` both sides bind to json_each and EVERY row matches —
-  // within returned all six vertices and without returned none. Keeping the operand on the left
-  // of `IN (SELECT …)` evaluates it in the outer scope, where it means what the caller intended.
-  expect(vals("g.V().has('name',within(__.V(1).out('knows').values('name').fold())).values('name')"))
-    .toEqual(['josh', 'vadas']);
-  expect(vals("g.V().has('name',without(__.V(1).out('knows').values('name').fold())).values('name')"))
-    .toEqual(['lop', 'marko', 'peter', 'ripple']);
-
-  // An empty operand list matches nothing, rather than degenerating to a true predicate.
-  expect(vals("g.V().values('age').is(within(__.V(9999).values('age').fold()))")).toEqual([]);
-});

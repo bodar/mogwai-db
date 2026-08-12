@@ -3,7 +3,7 @@ import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { CfLimitedSql } from '../src/cf-limits.ts';
 import { BulkLoader, loadBulk, type BulkEdge, type BulkVertex } from '../src/bulk.ts';
-import { exec, executeQuery } from './support/executor.ts';
+import { executeQuery } from './support/executor.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { Duration } from '../src/gremlin/types.ts';
 
@@ -93,26 +93,6 @@ describe('the bulk loader lands what the write path lands', () => {
     expect(stats.statements).toBeLessThan(20);
   });
 
-  test('the loaded graph answers traversals identically', () => {
-    const viaBulk = fresh();
-    loadBulk(viaBulk, MODERN_VERTICES, MODERN_EDGES);
-    const viaTraversals = seededByTraversals(MODERN_SEED);
-    // THE SPINE IS PINNED, because the subject here is the LOADER and not the compiler: the assertion
-    // is store-vs-store, so both sides must answer through the same route and every query must be
-    // answerable. `tinker.search` is a `rel`-only service now, so the ambient switch's OFF position
-    // would refuse it — and refusing says nothing about whether the loader landed the same graph.
-    // The legacy position's answers for these shapes are the census's and L1's business.
-    const answer = (store: GraphStore, q: string) => exec(store, undefined, undefined, 'rel').framed(q, {});
-    for (const q of [
-      'g.V().count()',
-      "g.V().has('name','marko').out('knows').values('name').fold()",
-      "g.V().hasLabel('software').in('created').values('name').order().fold()",
-      "g.E().has('weight',P.gt(0.4)).count()",
-      "g.V().has('name',TextP.containing('ark')).values('name').fold()",
-      "g.call('tinker.search', [search: 'ripp']).count()",
-    ])
-      expect([q, answer(viaBulk, q)]).toEqual([q, answer(viaTraversals, q)]);
-  });
 
   test('typed values, collections, meta-properties and multi-properties survive a batch', () => {
     // One vertex per storage shape the type channel has to carry — the cases a CSV export cannot

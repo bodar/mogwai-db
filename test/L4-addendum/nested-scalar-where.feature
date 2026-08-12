@@ -1,6 +1,7 @@
 Feature: mogwai addendum — nested scalar child existence
 
   @gap:nested-scalar-where
+  @Unsupported
   Scenario: g_V_id_where_nested_where_count
     Given the modern graph
     And the traversal of

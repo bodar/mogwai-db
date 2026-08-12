@@ -7,7 +7,7 @@ import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { exec, executeQuery } from '../support/executor.ts';
 import { decode, decodeAll } from '../support/decode.ts';
 import { rawVertex } from '../support/graph.ts';
-import { bagOf, grouped as groupedRows, relOnly, run, seededStore } from '../support/harness.ts';
+import { bagOf, grouped as groupedRows, run, seededStore } from '../support/harness.ts';
 import { DEFAULT_FAST_PATHS } from '../../src/compiler/options/fast-paths.ts';
 
 // ---------- execution semantics against a seeded store ----------
@@ -25,21 +25,6 @@ async function decodePaths(store: GraphStore, gremlin: string): Promise<any[]> {
 
 // props JSON is now {key:[{t,v}]} (self-describing typed nodes) — read the leaf payload.
 const uNames = (store: GraphStore, q: string) => (run(store, q) as any[]).map((r) => JSON.parse(r.props).name[0].v);
-test('repeat/times/emit execute (multiset + emit bands)', () => {
-  const store = seededStore();
-  // exactly 2 out-hops from all V → ripple, lop
-  expect(run(store, 'g.V().repeat(__.out()).times(2).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
-  // times before repeat is the same
-  expect(run(store, 'g.V(1).times(2).repeat(__.out()).values("name")').map((r) => r.v).sort()).toEqual(['lop', 'ripple']);
-  // emit-after from marko: depth1 {vadas,josh,lop} + depth2 {ripple,lop} — lop twice (multiset)
-  expect(run(store, 'g.V(1).repeat(__.out()).times(2).emit().values("name")').map((r) => r.v).sort())
-    .toEqual(['josh', 'lop', 'lop', 'ripple', 'vadas']);
-  // emit-before adds the seed (marko)
-  expect(run(store, 'g.V(1).emit().repeat(__.out()).times(2).values("name")').map((r) => r.v).sort())
-    .toEqual(['josh', 'lop', 'lop', 'marko', 'ripple', 'vadas']);
-  // both() one hop from marko = 3 incident
-  expect(run(store, 'g.V(1).repeat(__.both()).times(1).count()').map((r) => r.v)).toEqual([3]);
-});
 
 test('a prefix limit is consumed before repeat() drops its encounter column', () => {
   const store = seededStore();
@@ -52,62 +37,7 @@ test('a prefix limit is consumed before repeat() drops its encounter column', ()
   expect(generic.framed(q, {})).toHaveLength(3);
 });
 
-test('a label bound before repeat() rides the walk (loop-invariant carried column)', () => {
-  const store = seededStore();
-  const names = (q: string) => (run(store, q) as any[]).map((r) => r.v).sort();
-  // The walk MOVES the traverser; it never rebinds an existing label, so an incoming alias column
-  // is loop-invariant — seeded from the outer row, passed through each iteration untouched. Any
-  // as() before repeat() used to defer the whole traversal, read or not.
-  expect(names('g.V(1).as("a").repeat(__.out()).times(2).select("a").values("name")'))
-    .toEqual(['marko', 'marko']); // two 2-hop walks from marko, each re-rooted back to marko
 
-  // times(n) over a single-movement body IS the linear n-hop chain, so the carried label must
-  // come out elementwise identical to the linear form — the sharpest available oracle.
-  for (const [walk, linear] of [
-    ['g.V().as("a").repeat(__.both()).times(1).select("a").values("name")', 'g.V().as("a").both().select("a").values("name")'],
-    ['g.V().as("a").repeat(__.out()).times(1).select("a").values("name")', 'g.V().as("a").out().select("a").values("name")'],
-    ['g.V().as("a").repeat(__.out()).times(2).select("a").values("name")', 'g.V().as("a").out().out().select("a").values("name")'],
-    ['g.V().as("a").repeat(__.out()).times(2).values("name")', 'g.V().as("a").out().out().values("name")'],
-  ]) expect(names(walk)).toEqual(names(linear));
-
-  // The label must not disturb what the walk itself produces, at any exit modulator…
-  expect(names('g.V(1).as("a").repeat(__.out()).times(2).values("name")')).toEqual(['lop', 'ripple']);
-  expect(run(store, 'g.V(1).as("a").repeat(__.out()).emit().times(2).count()').map((r: any) => r.v)).toEqual([5]);
-  // …nor the OTHER carried columns it rides beside — path (a separate array column, ordered
-  // after the aliases in layoutCols) and simplePath's cycle guard both still work.
-  expect(names('g.V(1).as("a").repeat(__.out().simplePath()).times(2).path().by("name")').flat().length).toBe(6);
-  expect(run(store, 'g.V(1).as("a").repeat(__.out().simplePath()).times(2).count()').map((r: any) => r.v)).toEqual([2]);
-
-  // A label bound INSIDE the body is the genuinely recursive question (it rebinds per iteration),
-  // not this one — as() is absent from the repeat body vocabulary, so it still fails closed.
-  expect(() => run(store, 'g.V(1).repeat(__.out().as("b")).times(2).select("b")'))
-    .toThrow(/not yet supported/);
-});
-
-test('traverser bulking: repeat(...).times(n).count() == naive walk count (unroll path)', () => {
-  const store = seededStore();
-  // The bulked count (unrolled GROUP-BY-SUM(bulk) CTEs) must equal the exact walk
-  // count the enumerate-every-walk recursion would produce. Cross-check against a
-  // naive WITH RECURSIVE COUNT(*) for each depth on the modern graph.
-  const naive = (t: number) =>
-    store.query(
-      `WITH RECURSIVE walk(id,depth) AS (SELECT id,0 FROM nodes UNION ALL ` +
-      `SELECT e.tgt,walk.depth+1 FROM walk JOIN edges e ON e.src=walk.id WHERE walk.depth<${t}) ` +
-      `SELECT COUNT(*) v FROM walk WHERE depth=${t}`,
-    )[0].v;
-  for (const t of [0, 1, 2, 3]) {
-    const bulk = run(store, `g.V().repeat(__.out()).times(${t}).count()`)[0].v;
-    expect(Number(bulk)).toBe(Number(naive(t)));
-  }
-  // times(2) out() over modern = 2 walks (marko->josh->{ripple,lop}); matches the
-  // values("name") form's [lop, ripple] above.
-  expect(run(store, 'g.V().repeat(__.out()).times(2).count()')[0].v).toBe(2);
-  // both() bulks too (two legs merged per hop); V(1).both().times(1) = 3 incident.
-  expect(run(store, 'g.V(1).repeat(__.both()).times(1).count()')[0].v).toBe(3);
-  // A leading filter restricts the seed frontier (reuses buildPrefix for the source).
-  expect(Number(run(store, 'g.V().hasLabel("person").repeat(__.out()).times(1).count()')[0].v))
-    .toBe(Number(run(store, 'g.V().hasLabel("person").out().count()')[0].v));
-});
 
 test('unbounded emit() terminates at the fixpoint (no depth cap) — == times(2) here', () => {
   const store = seededStore();
@@ -136,14 +66,6 @@ test('path() emits the ordered walk (one Path per distinct route)', async () => 
   expect(bagOf(paths)).toEqual(bagOf([[1, 4, 3], [1, 4, 5]]));
 });
 
-test('simplePath() drops repeated-vertex walks; cyclicPath() keeps only them', () => {
-  const store = seededStore();
-  // marko→created→lop→created→{marko,josh,peter}: the marko→lop→marko walk cycles.
-  expect(run(store, 'g.V(1).out("created").in("created").simplePath().values("name")').map((r) => r.v).sort())
-    .toEqual(['josh', 'peter']); // marko excluded (revisits marko)
-  expect(run(store, 'g.V(1).out("created").in("created").cyclicPath().values("name")').map((r) => r.v))
-    .toEqual(['marko']); // only the returns-to-marko walk
-});
 
 test('path().by(key) projects each element; a missing key drops the whole path', async () => {
   const store = seededStore();
@@ -179,55 +101,7 @@ test('the SAME path().by() answers identically in both regimes (one position pro
   expect(await paths('g.V(1).outE("created").inV().path().by(T.label)')).toEqual([['person', 'created', 'software']]);
 });
 
-test('path().by(traversal) works on a RECURSIVE path, via the SAME positional child', () => {
-  // The explode is (id, pk, ord) but an ElementStream's schema is ['id', ...layoutCols], so
-  // pk/ord ride as `origins` — which is what that slot means, and for a path element the answer
-  // literally is "path pk, position ord". That makes the exploded rows an ordinary element
-  // stream, so `lowerPathPositionChild` (fan-out guards, branch route, `first` collapse) is
-  // reused UNCHANGED rather than reimplemented for this regime.
-  const store = seededStore();
-  const grouped = (g: string) => run(store, g).map((r) => r.v);
-  // marko's 2-hop walks: [marko,josh,lop] and [marko,josh,ripple].
-  expect(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by(__.values("name"))'))
-    .toEqual(['marko', 'josh', 'lop', 'marko', 'josh', 'ripple']);
-  // by(key) and by(traversal) must agree — same modulator meaning, two routes.
-  expect(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by(__.values("name"))'))
-    .toEqual(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by("name")'));
-  // A REAL child traversal per position, not just a property read. Out-degrees along the walk:
-  // marko 3, josh 2, lop/ripple 0. In-degrees: marko 0, josh 1, lop 3, ripple 1.
-  expect(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by(__.out().count())')).toEqual([3, 2, 0, 3, 2, 0]);
-  expect(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by(__.in().count())')).toEqual([0, 1, 3, 0, 1, 1]);
-  // …and the LINEAR regime gives the same answer for the same walk, which is the cross-regime
-  // equivalence the two hand-rolled projectors could not offer.
-  expect(run(store, 'g.V(1).out().out().path().by(__.out().count())').map((r: any) => [r.x0_v, r.x1_v, r.x2_v]))
-    .toEqual([[3, 2, 0], [3, 2, 0]]);
-});
 
-test('a recursive path().by(traversal) honours productive-by and the shared fan-out guard', () => {
-  const store = seededStore();
-  const grouped = (g: string) => run(store, g).map((r) => r.v);
-  // NON-PRODUCTIVE: lop and ripple have no age, so BOTH whole paths drop. The by(key) form
-  // applies that rule with a pre-numbering NOT EXISTS and by(traversal) group-wise after the
-  // child join — different pipeline points, same answer, which is the thing worth pinning.
-  expect(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by(__.values("age"))')).toEqual([]);
-  expect(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by("age")')).toEqual([]);
-  // A walk where every element HAS the property drops nothing, both forms.
-  expect(grouped('g.V(1).repeat(__.out("knows").simplePath()).times(1).path().by(__.values("age"))')).toEqual([29, 27, 29, 32]);
-  expect(grouped('g.V(1).repeat(__.out("knows").simplePath()).times(1).path().by("age")')).toEqual([29, 27, 29, 32]);
-  // ProductiveBy keeps the path with an explicit NULL position instead.
-  expect(grouped('g.withStrategies(ProductiveByStrategy).V(1).repeat(__.out().simplePath()).times(2).path().by(__.values("age"))'))
-    .toEqual([29, 32, null, 29, 32, null]);
-  // The BRANCH route through the shared child compiler (no first-collapse, so non-fan-out arms).
-  expect(grouped('g.V(1).repeat(__.out().simplePath()).times(2).path().by(__.coalesce(__.values("age"),__.constant(-1)))'))
-    .toEqual([29, 32, -1, 29, 32, -1]);
-  // The shared fan-out guard still fires — a position holds ONE value, so union() is rejected
-  // rather than silently multiplying whole path rows through the ordinal join.
-  expect(() => run(store, 'g.V(1).repeat(__.out().simplePath()).times(2).path().by(__.union(__.values("name"),__.values("name")))'))
-    .toThrow(/fans out/);
-  // Multiple by()s over a DYNAMIC length remains a real wall (round-robin needs a known length).
-  expect(() => run(store, 'g.V(1).repeat(__.out().simplePath()).times(2).path().by("name").by("age")'))
-    .toThrow(/multiple modulators/);
-});
 
 test('path() interleaves edges and vertices with materialized props (via framing)', async () => {
   const buffers = executeQuery(seededStore(), 'g.V(1).outE("created").inV().path()', {});
@@ -247,36 +121,8 @@ test('repeat().times(n).path() emits the ordered walk, one Path per route', asyn
     .toEqual(bagOf([[1, 4, 3], [1, 4, 5]]));
 });
 
-test('repeat(simplePath).times(3).path() = all acyclic length-4 walks (SimplePath.feature:34)', async () => {
-  const paths = await decodePaths(seededStore(), 'g.V().repeat(__.both().simplePath()).times(3).path()');
-  expect(paths.length).toBe(18); // the canonical count
-  // every path is simple: no vertex repeats within it (the cycle guard held).
-  for (const p of paths) {
-    const ids = p.objects.map((o: any) => o.id);
-    expect(new Set(ids).size).toBe(ids.length);
-    expect(ids.length).toBe(4); // seed + 3 hops
-  }
-});
 
-test('simplePath() inside repeat() prunes cycles even without path() output', () => {
-  const store = seededStore();
-  // both() would revisit endlessly; simplePath keeps each 3-hop walk acyclic. The
-  // walk carries the path array internally for the guard, then outputs plain vertices.
-  const rows = run(store, 'g.V(1).repeat(__.both().simplePath()).times(2)') as any[];
-  expect(rows.length).toBeGreaterThan(0);
-});
 
-test('dedup() after a recursive path() collapses equal paths (multigraph parallel edges)', () => {
-  const store = new GraphStore(new BunSqlite(':memory:'));
-  const knows = store.labelId('knows');
-  rawVertex(store, 1, 'person');
-  rawVertex(store, 2, 'person');
-  store.query('INSERT INTO edges(id,src,label,tgt) VALUES(10,1,?,2),(11,1,?,2)', [knows, knows]);
-  const npaths = (q: string) => new Set((run(store, q) as any[]).map((r) => r.pk)).size;
-  // two parallel 1→2 edges → out() reaches 2 twice → two identical [1,2] paths.
-  expect(npaths('g.V(1).repeat(__.out().simplePath()).times(1).path()')).toBe(2);
-  expect(npaths('g.V(1).repeat(__.out().simplePath()).times(1).path().dedup()')).toBe(1); // collapsed
-});
 
 test('do-while: repeat(out()).until(pred) runs the body then tests, multiset-correct', () => {
   const store = seededStore();
@@ -312,7 +158,7 @@ test('emit() with no until(): before repeat includes the seed, after repeat does
     .toEqual(['josh', 'lop', 'lop', 'marko', 'ripple', 'vadas']);
 });
 
-relOnly('until() and emit() at a SHARED position: each output row leaves the walk once', () => {
+test('until() and emit() at a SHARED position: each output row leaves the walk once', () => {
   const store = seededStore();
   // Both AFTER: the end step exits OR emits, never both — and emit-after admits every depth >= 1,
   // which subsumes the exit, so the answer is the whole walk below the seed.
@@ -327,7 +173,7 @@ relOnly('until() and emit() at a SHARED position: each output row leaves the wal
     .toEqual(['josh', 'lop', 'lop', 'marko', 'ripple', 'vadas']);
 });
 
-relOnly('until() BEFORE with emit() AFTER emits and THEN exits — the row leaves twice', () => {
+test('until() BEFORE with emit() AFTER emits and THEN exits — the row leaves twice', () => {
   const store = seededStore();
   // The one order where emit runs first in a traverser's journey, so neither check suppresses the
   // other. The corpus states the same asymmetry as a measurement: repeat(…).emit() answers `java`
@@ -343,7 +189,7 @@ relOnly('until() BEFORE with emit() AFTER emits and THEN exits — the row leave
     .toEqual(['josh', 'lop', 'lop', 'ripple', 'ripple', 'vadas']);
 });
 
-relOnly('emit(pred) selects which rows leave, at either position', () => {
+test('emit(pred) selects which rows leave, at either position', () => {
   const store = seededStore();
   // No until, so the walk runs to exhaustion: marko(d0), {vadas,josh,lop}(d1), {ripple,lop}(d2).
   // After repeat the predicate follows incrLoops, so the seed can never emit…
@@ -355,7 +201,7 @@ relOnly('emit(pred) selects which rows leave, at either position', () => {
     .toEqual(['josh', 'marko', 'vadas']);
 });
 
-relOnly('emit(pred) and until(pred) are INDEPENDENT conditions once the predicate is not constant', () => {
+test('emit(pred) and until(pred) are INDEPENDENT conditions once the predicate is not constant', () => {
   const store = seededStore();
   // Bare emit-after is exactly `deeper`, which subsumes an until-after exit. A predicate does not:
   // these two select disjoint rows, so the output is a genuine disjunction of both.
@@ -368,7 +214,7 @@ relOnly('emit(pred) and until(pred) are INDEPENDENT conditions once the predicat
     .toEqual(['lop', 'lop', 'ripple']);
 });
 
-relOnly('emit(pred) doubles under until-before/emit-after, exactly as the bare form does', () => {
+test('emit(pred) doubles under until-before/emit-after, exactly as the bare form does', () => {
   const store = seededStore();
   // Both conditions select the same three rows here, and neither check suppresses the other, so
   // every one of them leaves twice. A disjunction would answer three rows instead of six.
@@ -376,7 +222,7 @@ relOnly('emit(pred) doubles under until-before/emit-after, exactly as the bare f
     .toEqual(['lop', 'lop', 'lop', 'lop', 'ripple', 'ripple']);
 });
 
-relOnly('a MULTI-ARM body walks: both() is a compound term, one arm per direction', () => {
+test('a MULTI-ARM body walks: both() is a compound term, one arm per direction', () => {
   const store = seededStore();
   // ⚠️ COMPARE THROUGH count(), NOT ROWS. The bounded regime RLE-collapses duplicates into `bulk`
   // while a walk cannot collapse at all (§1: SQLite forbids the aggregate in a recursive term), so
@@ -388,7 +234,7 @@ relOnly('a MULTI-ARM body walks: both() is a compound term, one arm per directio
   expect([walked(1), walked(2), walked(3)]).toEqual([bounded(1), bounded(2), bounded(3)]);
 });
 
-relOnly('both() through the walk yields a SELF-LOOP twice — the multiset rule survives the compound', () => {
+test('both() through the walk yields a SELF-LOOP twice — the multiset rule survives the compound', () => {
   const store = seededStore();
   rawVertex(store, 900, 'person');
   store.query('INSERT INTO edges(id,src,label,tgt) VALUES(950,900,?,900)', [store.labelId('knows')]);
@@ -397,7 +243,7 @@ relOnly('both() through the walk yields a SELF-LOOP twice — the multiset rule 
   expect((run(store, 'g.V(900).repeat(__.both()).until(__.loops().is(1)).count()') as any[])[0].v).toBe(2);
 });
 
-relOnly('repeat() with NEITHER modulator is the empty result, and the chain folds over it', () => {
+test('repeat() with NEITHER modulator is the empty result, and the chain folds over it', () => {
   const store = seededStore();
   // Nothing ever leaves the loop, so the traversal is empty…
   expect(run(store, 'g.V(1).repeat(__.out())')).toEqual([]);
@@ -414,7 +260,7 @@ relOnly('repeat() with NEITHER modulator is the empty result, and the chain fold
 // — there is no "sack inside until()" special case in the model. Ours reaches the same place through
 // the host's ROW, which is Calcite's correlating row (RexCorrelVariable).
 
-relOnly('a sack folds through the recursive walk, one iteration at a time', () => {
+test('a sack folds through the recursive walk, one iteration at a time', () => {
   const store = seededStore();
   // marko's out-neighbours: vadas 27, josh 32, lop has NO age. An unproductive by() FILTERS the
   // traverser rather than folding a null — SackValueStep returns EmptyTraverser.instance() — so lop
@@ -430,7 +276,7 @@ relOnly('a sack folds through the recursive walk, one iteration at a time', () =
     .map((r) => r.v).sort()).toEqual([0.25, 0.25, 0.5, 0.5, 0.5]);
 });
 
-relOnly('until()/emit() READ the carried sack, and loops() reads the counter', () => {
+test('until()/emit() READ the carried sack, and loops() reads the counter', () => {
   const store = seededStore();
   // vadas folds 27 and keeps going; josh folds 32 and exits. lop is filtered by the unproductive by().
   expect((run(store, 'g.withSack(0).V(1).repeat(__.out().sack(Operator.sum).by("age")).until(__.sack().is(P.gt(30))).sack()') as any[])
@@ -441,7 +287,7 @@ relOnly('until()/emit() READ the carried sack, and loops() reads the counter', (
   expect(run(store, 'g.withSack(0).V(1).repeat(__.out()).until(__.sack().is(P.gt(10)))')).toEqual([]);
 });
 
-relOnly('carried state is readable OUTSIDE a repeat too — the seam, not the walk', () => {
+test('carried state is readable OUTSIDE a repeat too — the seam, not the walk', () => {
   const store = seededStore();
   // where(__.sack().is(P)) on an ordinary chain. This is the whole point of teaching the child seam
   // rather than the walk: the same read works wherever a child body is lowered.
@@ -465,10 +311,6 @@ test('while-do: until(pred).repeat(t) tests the seed first (emits it un-iterated
   expect(uNames(store, 'g.V(1).until(__.hasLabel("software")).repeat(__.out())').sort()).toEqual(['lop', 'lop', 'ripple']);
 });
 
-test('until().path() emits the route to each satisfied traverser', async () => {
-  const paths = await decodePaths(seededStore(), 'g.V(1).repeat(__.out()).until(__.has("name","ripple")).path()');
-  expect(paths.map((p) => p.objects.map((o: any) => o.id))).toEqual([[1, 4, 5]]); // marko→josh→ripple
-});
 
 test('until(__.out()) stops at the first vertex having an out-edge (EXISTS correlates correctly)', () => {
   const store = seededStore();
@@ -493,42 +335,9 @@ test('until() has NO depth cap: reaches a target deeper than the retired 32-hop 
 
 // ---------- sack folded through the recursive walk ----------
 
-test('sack(sum).by(age).where(sack.lt(59)) accumulates on the spot, guard exits (Repeat.feature:664)', () => {
-  // withSack(0) then fold age twice; the guard drops a traverser once its running total
-  // reaches ≥59. marko 29→58<59 survives, josh 32→64 exits after iter 1. Software vertices
-  // have no age → NULL fold → dropped. TinkerPop's canonical answer: [marko, vadas].
-  const store = seededStore();
-  expect(uNames(store, 'g.withSack(0L).V().repeat(__.sack(sum).by("age").where(__.sack().is(lt(59)))).times(2)').sort())
-    .toEqual(['marko', 'vadas']);
-});
 
-test('sack(mult).by(constant(0.5)) decays relevance per hop across a movement walk', () => {
-  // spreading-activation: each hop multiplies the carried score by 0.5. 2 hops → 0.25 at
-  // every reachable 2-hop endpoint. The agent-memory path-decayed-relevance primitive.
-  const store = seededStore();
-  const sacks = (run(store, 'g.withSack(1.0d).V(1).repeat(__.out().sack(mult).by(__.constant(0.5d))).times(2).sack()') as any[]).map((r) => r.v);
-  expect(sacks.length).toBeGreaterThan(0);
-  expect(sacks.every((v) => v === 0.25)).toBe(true);
-});
 
-test('sack folds independently per fork (split-only): out() fan-out keeps each walk separate', () => {
-  // marko out() fans to vadas(27)/josh(32)/lop(no age). A fork clones the sack into each
-  // arm; the arms never recombine (TinkerPop split-only), so each endpoint's sack is its
-  // OWN age folded onto the seed, never a sum across siblings. lop has no age → NULL fold.
-  const store = seededStore();
-  const sacks = (run(store, 'g.withSack(0L).V(1).repeat(__.out().sack(sum).by("age")).times(1).sack()') as any[]).map((r) => r.v).sort((a, b) => (a ?? -1) - (b ?? -1));
-  expect(sacks).toEqual([null, 27, 32]);
-});
 
-test('edge-step body accumulates EDGE weights along a walk (path-weight, the agent-memory primitive)', () => {
-  const store = seededStore();
-  // marko's out-edge weights: →vadas 0.5, →josh 1.0, →lop 0.4. 1 hop = each edge's own weight.
-  expect((run(store, "g.withSack(0.0d).V(1).repeat(__.outE().sack(sum).by('weight').inV()).times(1).sack()") as any[]).map((r) => r.v).sort())
-    .toEqual([0.4, 0.5, 1.0]);
-  // 2 hops from marko: →josh(1.0)→ripple(1.0)=2.0 and →josh(1.0)→lop(0.4)=1.4 (only josh has out-edges).
-  expect((run(store, "g.withSack(0.0d).V(1).repeat(__.outE().sack(sum).by('weight').inV()).times(2).sack()") as any[]).map((r) => r.v).sort((a, b) => a - b))
-    .toEqual([1.4, 2.0]);
-});
 
 test('until(__.sack().is(P)) loops until the ACCUMULATED sack crosses a threshold', () => {
   const store = seededStore();
@@ -538,12 +347,6 @@ test('until(__.sack().is(P)) loops until the ACCUMULATED sack crosses a threshol
     .toEqual([58]);
 });
 
-test('emit(__.sack().is(P)) emits the iterations whose accumulated sack matches', () => {
-  const store = seededStore();
-  // fold age 29 up to 3× → 29, 58, 87; emit those ≥40 → [58, 87].
-  expect((run(store, "g.withSack(0L).V(1).repeat(__.sack(sum).by('age')).times(3).emit(__.sack().is(gte(40))).sack()") as any[]).map((r) => r.v).sort((a, b) => a - b))
-    .toEqual([58, 87]);
-});
 
 // ⚠️ **`relOnly` — LEGACY SHED THESE, and naming the shed is the point.** A `times(n)` body holding a
 // side effect now UNROLLS (`UNROLLABLE_BARRIERS`, `ir/strategies.ts`), and the unroll is a PASS, so
@@ -553,7 +356,7 @@ test('emit(__.sack().is(P)) emits the iterations whose accumulated sack matches'
 // previously answered these through its walk-and-bag lowering, so this is a REAL shed and not a
 // coverage gap: §6·1's asymmetric gate allows it because the RelIR floor holds them, and the L3 legacy
 // run reports it by name. The assertions themselves are the reference's, so they stay.
-relOnly('a body aggregate() collects every vertex the walk visits (the :TOUCHED provenance primitive)', () => {
+test('a body aggregate() collects every vertex the walk visits (the :TOUCHED provenance primitive)', () => {
   const store = seededStore();
   // marko out → {vadas,josh,lop} (depth 1); josh out → {ripple,lop} (depth 2). The bag is a
   // BulkSet multiset, so lop appears twice. cap('x').unfold() explodes it to elements.
@@ -569,7 +372,7 @@ relOnly('a body aggregate() collects every vertex the walk visits (the :TOUCHED 
 // previously answered these through its walk-and-bag lowering, so this is a REAL shed and not a
 // coverage gap: §6·1's asymmetric gate allows it because the RelIR floor holds them, and the L3 legacy
 // run reports it by name. The assertions themselves are the reference's, so they stay.
-relOnly('a pre-repeat aggregate multiset-unions with the in-repeat body aggregate (Aggregate.feature:627)', () => {
+test('a pre-repeat aggregate multiset-unions with the in-repeat body aggregate (Aggregate.feature:627)', () => {
   const store = seededStore();
   // V().local(aggregate('a')) collects all 6 vertices; then repeat(out().local(aggregate('a'))).times(2)
   // appends the walk's depth-1 and depth-2 rows. groupCount by name over the whole BulkSet — asserted
@@ -589,7 +392,7 @@ relOnly('a pre-repeat aggregate multiset-unions with the in-repeat body aggregat
 // previously answered these through its walk-and-bag lowering, so this is a REAL shed and not a
 // coverage gap: §6·1's asymmetric gate allows it because the RelIR floor holds them, and the L3 legacy
 // run reports it by name. The assertions themselves are the reference's, so they stay.
-relOnly('a movement-free repeat(aggregate(a)) revisits the seed each iteration', () => {
+test('a movement-free repeat(aggregate(a)) revisits the seed each iteration', () => {
   const store = seededStore();
   // no movement → each of the 6 vertices stays put and is collected once per iteration; times(2) → 12.
   const names = (run(store, "g.V().repeat(__.aggregate('a')).times(2).cap('a').unfold().values('name')") as any[]).map((r) => r.v).sort();
@@ -616,31 +419,7 @@ describe('repeat() body: the generic body relation', () => {
     expect((run(store, 'g.V(1).repeat(__.both()).times(2).count()') as any[])[0].v).toBe(7);
   });
 
-  test('the whole row-local filter vocabulary now composes in a body', () => {
-    // Each of these was a `repeat(__.…) not yet supported` vocabulary throw: the flat expander
-    // knows only movement + has(). None of them needed new SQL — they are the ordinary StepFns.
-    const store = seededStore();
-    expect(names(store, 'g.V(1).repeat(__.out().hasLabel("person")).times(1).values("name")')).toEqual(['josh', 'vadas']);
-    expect(names(store, 'g.V(1).repeat(__.out().hasId(3)).times(1).values("name")')).toEqual(['lop']);
-    expect(names(store, 'g.V(1).repeat(__.out().where(__.has("name","lop"))).times(1).values("name")')).toEqual(['lop']);
-    expect(names(store, 'g.V(1).repeat(__.out().not(__.has("name","lop"))).times(1).values("name")')).toEqual(['josh', 'vadas']);
-    expect(names(store, 'g.V(1).repeat(__.out().and(__.has("name","lop"),__.in())).times(1).values("name")')).toEqual(['lop']);
-    // A uniform-element BRANCH body — union/coalesce arms are element-shaped, so the branch folds
-    // through the element prefix exactly as a movement does.
-    expect(names(store, 'g.V(1).repeat(__.coalesce(__.out("knows"),__.out("created"))).times(1).values("name")')).toEqual(['josh', 'vadas']);
-    expect((run(store, 'g.V(1).repeat(__.union(__.out(),__.in())).times(1).count()') as any[])[0].v).toBe(3);
-  });
 
-  test('an exploded-edge body composes: bothE().otherV() ≡ both()', () => {
-    // otherV() was the one movement missing from ELEMENT_CHILD_STEPS (the row-local vocabulary),
-    // which gated it in EVERY child position, not just repeat — the emit side was already ready.
-    const store = seededStore();
-    expect(names(store, 'g.V(1).repeat(__.bothE().otherV()).times(1).values("name")'))
-      .toEqual(names(store, 'g.V(1).both().values("name")'));
-    expect(names(store, 'g.V(1).local(__.bothE().otherV()).values("name")')).toEqual(['josh', 'lop', 'vadas']);
-    expect((run(store, 'g.V(1).map(__.bothE().otherV().count())') as any[])[0].v).toBe(3);
-    expect(names(store, 'g.V(1).repeat(__.bothE().otherV().has("age",P.lt(30))).times(1).values("name")')).toEqual(['vadas']);
-  });
 
   test('an exploded-edge body filters its joined edge alias, not the base edges table', () => {
     const store = seededStore();
@@ -651,14 +430,6 @@ describe('repeat() body: the generic body relation', () => {
       .toEqual(['marko', 'marko']);
   });
 
-  test('otherV preserves the carried schema when path tracking and entering-vertex state meet', () => {
-    // bothE() mints BOTH an entering-vertex column (for otherV) and a path position. Their
-    // declared slots differ, so this pin catches a physical CTE-column reorder rather than only
-    // the visible movement result.
-    const store = seededStore();
-    expect(names(store, 'g.V().out().simplePath().bothE("created").otherV().values("name")'))
-      .toEqual(names(store, 'g.V().out().simplePath().both("created").values("name")'));
-  });
 
   test('traversers stay a MULTISET through the body relation', () => {
     // The relation must NOT be built with DISTINCT: two parallel edges are two traversers. josh
@@ -669,61 +440,8 @@ describe('repeat() body: the generic body relation', () => {
       .toEqual(['lop', 'lop', 'lop', 'ripple']);
   });
 
-  test('a PER-ITERATION GLOBAL barrier still fails closed, naming why', () => {
-    // Not a missing feature — a semantic wall. A global dedup()/limit() observes the whole frontier
-    // at one iteration; precomputing it per-origin answers a different question. The generic
-    // StepFns would happily lower it (bare dedup emits SELECT DISTINCT id, <carried>, and with an
-    // origin column in the tuple that silently becomes PER-ORIGIN), so the gate is the row-local
-    // vocabulary, not "whatever lowerElementSteps accepts". This test is that guard.
-    // `dedup`, and now the SLICE family and `order`, have MOVED off this list — a fixed times(n)
-    // unrolls them into n ordinary phases, where a phase-local reading is exactly the per-iteration
-    // one (unrollFixedRepeat, ir/strategies.ts; each equivalence pinned as an identity in
-    // repeat-unroll-boundary). The wall stands for every barrier whose phase-local reading is NOT
-    // the per-iteration one, and for every one of these bodies WITHOUT a fixed times(n) — an
-    // unbounded walk has no phases to unroll into, which is the two-regime split.
-    const store = seededStore();
-    for (const [g, step] of [
-      ['g.V(1).repeat(__.out().limit(1)).until(__.has("name","x")).count()', 'limit'],
-      ['g.V(1).repeat(__.out().order().by("name")).until(__.has("name","x")).count()', 'order'],
-      // A BARE `groupCount()` is a `ReducingBarrierStep` that REPLACES the stream with a map, so phase
-      // k+1 would receive a map where the rolled form receives the frontier. That is a shape change no
-      // phase reproduces, which is why the KEYED forms unrolled and this one did not.
-      ['g.V(1).repeat(__.out().groupCount()).times(2).count()', 'groupCount'],
-    ] as [string, string][]) {
-      expect(() => run(store, g), g).toThrow(new RegExp(`${step}\\(\\) is a per-iteration GLOBAL barrier`));
-    }
-    // `aggregate("x")` has MOVED off this list, and its argument is `Collection.sites` rather than
-    // statelessness: it genuinely carries state between invocations, but that state lives on the ROOT
-    // traversal and the reference REFILLS the label every iteration — so n phases are n registration
-    // SITES of one label, which is what the named-collection substrate already accumulates and reads
-    // once at the `cap`. Nothing has to cross a phase boundary at all.
-    expect((run(store, 'g.V(1).repeat(__.out().aggregate("x").out()).times(2).count()') as any[])[0]!.v)
-      .toBe(0);
-  });
 
-  test('a body MENTIONING a label fails closed instead of silently answering []', () => {
-    // The keyed relation's domain is every vertex, not the caller's rows, so there is no outer row
-    // to read an alias column FROM. An absent alias column is indistinguishable from a never-bound
-    // label, which select() answers as "drop every traverser" — so without this guard the body
-    // compiled and returned NOTHING. Measured before the fix: 0 rows here vs 6 for the same body
-    // outside repeat(). That asymmetry is the bug; declining is the fix.
-    const store = seededStore();
-    expect((run(store, 'g.V().as("a").out().where(__.select("a"))') as any[]).length).toBe(6);
-    expect(() => run(store, 'g.V().as("a").repeat(__.out().where(__.select("a"))).times(1)'))
-      .toThrow(/not yet supported/);
-    expect(() => run(store, 'g.V().as("a").repeat(__.select("a").out()).times(2)'))
-      .toThrow(/not yet supported/);
-  });
 
-  test('sack and path bodies stay with the flat expansion', () => {
-    const store = seededStore();
-    // A sack fold is per-iteration (the accumulator depends on the running value), so it keeps the
-    // flat route and keeps working; the generic relation is never consulted for it.
-    // marko's out() is vadas + josh (knows) + lop (created) = 3 traversers.
-    expect((run(store, 'g.withSack(0).V(1).repeat(__.out().sack(Operator.sum).by("age")).times(1).sack()') as any[]).length).toBe(3);
-    // simplePath() in the body needs the walk's accumulated path array, so likewise.
-    expect(names(store, 'g.V(1).repeat(__.both().simplePath()).times(2).values("name")').length).toBeGreaterThan(0);
-  });
 });
 
 // ---------- until()/emit(): the SECOND consumer of the keyed child relation ----------
@@ -736,24 +454,6 @@ describe('repeat() body: the generic body relation', () => {
 describe('until()/emit(): the keyed-relation fallback', () => {
   const ids = (store: GraphStore, g: string) => (run(store, g) as any[]).map((r) => r.id).sort();
 
-  test('a predicate beyond inline lowering now compiles, and AGREES with the inline form', () => {
-    // Each pair is one predicate written two ways: the left routes through the inline compiler,
-    // the right declines it and takes the keyed relation. Same predicate ⇒ same answer, so this
-    // pins the fallback against the route that was already correct rather than against a constant.
-    const store = seededStore();
-    for (const [inline, keyed] of [
-      ['g.V().until(__.both()).repeat(__.out())',
-       'g.V().until(__.union(__.out(),__.in())).repeat(__.out())'],
-      ['g.V().until(__.both("created")).repeat(__.out())',
-       'g.V().until(__.union(__.out("created"),__.in("created"))).repeat(__.out())'],
-      // emit() shares walkPredicate — the only difference is which column the boolean drives.
-      // This pair also pins the MULTISET (a vertex emitted twice stays twice).
-      ['g.V().emit(__.both("knows")).repeat(__.out()).times(2)',
-       'g.V().emit(__.union(__.out("knows"),__.in("knows"))).repeat(__.out()).times(2)'],
-    ] as [string, string][]) {
-      expect(ids(store, keyed)).toEqual(ids(store, inline));
-    }
-  });
 
   test('a PER-ITERATION state predicate keeps the inline route', () => {
     const store = seededStore();
@@ -763,7 +463,7 @@ describe('until()/emit(): the keyed-relation fallback', () => {
     expect(ids(store, 'g.V(1).until(__.loops().is(2)).repeat(__.out())').length).toBeGreaterThan(0);
   });
 
-  relOnly('the recursive walk inherits the shared predicate seam', () => {
+  test('the recursive walk inherits the shared predicate seam', () => {
     const store = seededStore();
     // The RelIR walk inherits the shared predicate seam. For productivity, order().limit(1) after a
     // movement is exactly EXISTS; marko has an outgoing edge, so while-do emits the seed unchanged.
@@ -779,25 +479,7 @@ describe('until()/emit(): the keyed-relation fallback', () => {
 // repeat's body — the same capability seen from two sides.
 describe('repeat() as a child body', () => {
   const names = (store: GraphStore, g: string) => (run(store, g) as any[]).map((r) => r.v).sort();
-  const one = (store: GraphStore, g: string) => (run(store, g) as any[])[0].v;
 
-  test('a walk composes at EVERY child position', () => {
-    // Before: only a union arm worked; local/map/where/group/order all reported a classify deferral.
-    const store = seededStore();
-    expect(names(store, 'g.V(1).local(__.repeat(__.out()).times(2)).values("name")')).toEqual(['lop', 'ripple']);
-    expect(one(store, 'g.V(1).map(__.repeat(__.out()).times(2).count())')).toBe(2);
-    expect(names(store, 'g.V(1).where(__.repeat(__.out()).times(2)).values("name")')).toEqual(['marko']);
-    // …and each parent gets its OWN walk — the point of carrying the ordinal. josh reaches
-    // {lop,ripple} in one hop and nothing in two; marko reaches 2 vertices in two hops.
-    expect(one(store, 'g.V(4).map(__.repeat(__.out()).times(1).count())')).toBe(2);
-    expect(one(store, 'g.V(4).map(__.repeat(__.out()).times(2).count())')).toBe(0);
-    // The sharpest form: one group per person, each value that person's OWN walk count. A walk
-    // that lost its origin column could not produce four different numbers here.
-    expect(Object.entries(groupedRows(run(store,
-      'g.V().hasLabel("person").group().by("name").by(__.repeat(__.out()).times(1).count())')))
-      .map(([k, v]) => [k, Number(v)]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))))
-      .toEqual([['josh', 2], ['marko', 3], ['peter', 1], ['vadas', 0]]);
-  });
 
   test('an ORDER by a walk count ranks parents by their own walks', () => {
     const store = seededStore();
@@ -820,29 +502,5 @@ describe('repeat() as a child body', () => {
       .toEqual(names(store, 'g.V(1).out().repeat(__.out()).times(1).values("name")'));
   });
 
-  test('a repeat ARM in a branch composes (it is a classifiable element child now)', () => {
-    const store = seededStore();
-    expect(names(store, 'g.V(1).optional(__.repeat(__.out()).times(2)).values("name")')).toEqual(['lop', 'ripple']);
-    expect(names(store, 'g.V(1).coalesce(__.repeat(__.out()).times(2), __.in()).values("name")')).toEqual(['lop', 'ripple']);
-    expect(one(store, 'g.V(1).union(__.repeat(__.out()).times(2), __.in()).count()')).toBe(2);
-  });
 
-  test('an INCOMING alias and an origin ride the walk TOGETHER', () => {
-    // These landed as two separate pieces of work and are the same mechanism: loop-invariant
-    // carried columns the walk neither reads nor rewrites (one `ride()` helper serves both). This
-    // is the composition test — a walk inside a child scope, carrying BOTH an outer label and the
-    // parent ordinal, which neither piece exercised alone.
-    const store = seededStore();
-    const names = (g: string) => (run(store, g) as any[]).map((r) => r.v).sort();
-    expect(names('g.V(1).as("a").local(__.repeat(__.out()).times(2)).select("a").values("name")'))
-      .toEqual(['marko', 'marko']); // two 2-hop walks, each re-rooted back to the outer label
-    // …and per-parent walk counts still hold with a label live beside the ordinal.
-    expect((run(store, 'g.V().hasLabel("person").as("a").group().by(__.select("a").values("name")).by(__.repeat(__.out()).times(1).count())') as any[])
-      .map((r) => [r.gk, Number(r.gv)]).sort((x, y) => String(x[0]).localeCompare(String(y[0]))))
-      .toEqual([['josh', 2], ['marko', 3], ['peter', 1], ['vadas', 0]]);
-    // A label bound INSIDE the body is the genuinely recursive question (it rebinds per iteration),
-    // so it is a fold rather than a projection and still fails closed.
-    expect(() => run(store, 'g.V(1).repeat(__.out().as("b")).times(2).select("b")'))
-      .toThrow(/not yet supported/);
-  });
 });

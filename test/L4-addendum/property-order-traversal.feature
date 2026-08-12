@@ -1,6 +1,7 @@
 Feature: mogwai addendum — property order by traversal
 
   @gap:property-order-traversal
+  @Unsupported
   Scenario: g_V_person_properties_name_order_by_value
     Given the modern graph
     And the traversal of
@@ -16,6 +17,7 @@ Feature: mogwai addendum — property order by traversal
       | vadas  |
 
   @gap:property-order-traversal
+  @Unsupported
   Scenario: g_V_person_properties_age_order_by_value_desc
     Given the modern graph
     And the traversal of

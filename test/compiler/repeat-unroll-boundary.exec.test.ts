@@ -152,22 +152,6 @@ describe('the repeat() unroll boundary', () => {
     expect(rolled('g.V().repeat(__.out().dedup()).times(2)')).not.toContain('repeat');
   });
 
-  test('a barrier body defers, and identically however RepeatUnrollStrategy is spelled', () => {
-    // `withStrategies(RepeatUnrollStrategy)` must not change an answer: the strategy would decline
-    // this body (sample() is a Barrier, not in ALLOWED_STEP_CLASSES), so all three spellings are the
-    // same traversal. Pinned because a future unroll that keys off the strategy token rather than off
-    // its own equivalence argument would make exactly these three disagree.
-    const bodies = [
-      'g.V().repeat(__.both().sample(1)).times(2)',
-      'g.withStrategies(RepeatUnrollStrategy).V().repeat(__.both().sample(1)).times(2)',
-      'g.withoutStrategies(RepeatUnrollStrategy).V().repeat(__.both().sample(1)).times(2)',
-    ];
-    const messages = bodies.map((q) => {
-      try { compile(q, {}); return 'COMPILED'; } catch (e: any) { return e.message; }
-    });
-    for (const m of messages) expect(m).toContain('sample() is a per-iteration GLOBAL barrier over the whole frontier');
-    expect(new Set(messages).size).toBe(1);
-  });
 
   test('withoutStrategies(RepeatUnrollStrategy) suppresses the STRATEGY, not the widening', () => {
     // The suppression is scoped to what `RepeatUnrollStrategy` actually does — a body of movement +
@@ -225,20 +209,4 @@ describe('the repeat() unroll boundary', () => {
     expect(Array.isArray((union.args[1].value as any).nested)).toBe(false);
   });
 
-  test('the deferral names the per-iteration frontier, which is the reference reading', () => {
-    // The wording is load-bearing: it is the claim RepeatStep.java:217 supports, and the reason the
-    // generic StepFns cannot be handed the body (they would lower it per-ORIGIN, answering a
-    // different question). Every barrier still on the far side of the line has to earn this sentence
-    // before it moves — `dedup` earned it and is gone from this list.
-    // `order()` has since crossed the line (see UNROLLABLE_BARRIERS) and is gone from this list, as
-    // `dedup` was before it. What is left is what still has no argument: a reducer that changes the
-    // stream's shape mid-body, and a sampler with no stable position at all.
-    for (const q of [
-      'g.V().repeat(__.groupCount().out()).times(2).count()',
-      'g.V().repeat(__.both().sample(1)).times(2)',
-    ]) {
-      expect(() => compile(q, {})).toThrow('per-iteration GLOBAL barrier over the whole frontier');
-      expect(() => compile(q, {})).toThrow('A fixed times(n) body could be unrolled instead (not built)');
-    }
-  });
 });

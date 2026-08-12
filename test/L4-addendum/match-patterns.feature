@@ -8,6 +8,7 @@ Feature: mogwai addendum — match() pattern shapes
   # josh-created->lop(3),ripple(5); peter(6)-created->lop(3).
 
   @gap:match-patterns
+  @Unsupported
   Scenario: a repeat() body inside a match pattern
     # The two-hop frontier from marko: knows->josh->{lop,ripple} and created->lop (no out-edges).
     # Same answer as the explicit out().out() spelling below — a recursive body carries its own
@@ -24,6 +25,7 @@ Feature: mogwai addendum — match() pattern shapes
       | m[{"a":"marko","b":"ripple"}] |
 
   @gap:match-patterns
+  @Unsupported
   Scenario: the same two hops spelled without repeat, as the oracle
     Given the modern graph
     And the traversal of
@@ -37,6 +39,7 @@ Feature: mogwai addendum — match() pattern shapes
       | m[{"a":"marko","b":"ripple"}] |
 
   @gap:match-patterns
+  @Unsupported
   Scenario: every pattern start already bound before the match (no root variable)
     # marko out-degree 3; the in-degree of each of marko's neighbours: vadas 1, josh 1, lop 3.
     # So the shared 'c' constrains to the pair whose counts agree — marko(3)/lop(3).
@@ -51,6 +54,7 @@ Feature: mogwai addendum — match() pattern shapes
       | m[{"a":"marko","b":"lop"}] |
 
   @gap:match-patterns
+  @Unsupported
   Scenario: a not() argument filters the binding table and binds nothing
     # marko's out-neighbours are vadas, josh (knows) and lop (created); excluding the created edge
     # leaves the two knows pairs. Only a and b come back — a filter introduces no variable.
@@ -66,6 +70,7 @@ Feature: mogwai addendum — match() pattern shapes
       | m[{"a":"marko","b":"josh"}] |
 
   @gap:match-patterns
+  @Unsupported
   Scenario: a where(label, predicate) argument comparing two bound variables
     Given the modern graph
     And the traversal of
@@ -77,6 +82,7 @@ Feature: mogwai addendum — match() pattern shapes
       | result |
 
   @gap:match-patterns
+  @Unsupported
   Scenario: a where(traversal) argument reading a sibling argument's variable
     # marko-created->lop, and lop has 3 in-edges, so the existence check keeps the pair.
     Given the modern graph
@@ -93,6 +99,7 @@ Feature: mogwai addendum — match() pattern shapes
       | m[{"a":"peter","b":"lop"}] |
 
   @gap:match-patterns
+  @Unsupported
   Scenario: a filter written before the pattern that binds the variable it reads
     # The scheduler defers a filter until every variable it reads is bound, so argument ORDER
     # does not change the answer — the conjunction is solved as a set.

@@ -21,11 +21,11 @@ import { decodeAll } from '../support/decode.ts';
 
 const store = new GraphStore(new BunSqlite(':memory:'));
 /** 'rel' iff the traversal lowers on the RelIR spine rather than declining to legacy. */
-const onRel = (g: string) => { const p = compile(g, {}, { spine: 'rel' }); return p.kind === 'read' ? p.spine : 'legacy'; };
+const onRel = (g: string) => { const p = compile(g, {}); return p.kind === 'read' ? p.spine : 'legacy'; };
 // FORCE the RelIR spine for the answer: this pins RelIR's CORRECT result, and legacy's wrong lexical
 // answer is documented in the header, not asserted — so the file is `test:legacy-spine`-safe (ambient
 // `executeQuery` would run these on legacy under MOGWAI_RELIR=0 and hit the very bug it documents).
-const relExec = exec(store, undefined, undefined, 'rel');
+const relExec = exec(store);
 const vals = async (g: string) =>
   (await decodeAll(relExec.buffers(g, {}, {}))).map((x: any) => x?.constructor ? `${x.constructor.name}:${x.toString()}` : String(x));
 

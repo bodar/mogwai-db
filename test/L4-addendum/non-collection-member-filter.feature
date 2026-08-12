@@ -5,6 +5,7 @@ Feature: mogwai addendum — collection member filters are false on a non-collec
   # collection from a vacuous-truth implementation that could keep the row when the predicate does
   # not match. TinkerPop's NoneStep returns false for every non-collection host.
   @gap:non-collection-member-filter
+  @Unsupported
   Scenario: g_injectX7X_noneXeqX8XX
     Given the empty graph
     And the traversal of

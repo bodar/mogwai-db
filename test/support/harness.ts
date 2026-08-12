@@ -13,9 +13,7 @@
 // test/serializers.test.ts (deserialize a buffer through a serializer) and `read` in
 // test/L3-conformance/glv-compat.ts (a bound `deserializeValue`) are unrelated functions that
 // merely share a name.
-import { expect, test } from 'bun:test';
 import { compile, type CompileOptions } from '../../src/compiler/compiler.ts';
-import { ambientSpine } from '../../src/compiler/options/spine.ts';
 import { runProgram } from '../../src/program.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
@@ -53,16 +51,6 @@ export const runWith = (store: GraphStore, q: string, options?: CompileOptions) 
 export const run = (store: GraphStore, q: string) => runWith(store, q, undefined);
 
 /**
- * IS THE RELIR SPINE OFF — the differential's other position (`mise run test:legacy-spine`).
- *
- * Read it directly ONLY for a property about the PLAN rather than the ANSWER — the statement-count
- * pin is the one case: both spines return the same rows, and what differs is that legacy spends a
- * statement per element. For a divergence in the ANSWER, use `relirAhead` below; a bare `test.skip`
- * there is the form that lets the dangerous case through.
- */
-export const relirOff = ambientSpine() === 'legacy';
-
-/**
  * THE "id is taken" REFUSAL — `Graph.Exceptions.vertexWithIdAlreadyExists` /
  * `edgeWithIdAlreadyExists` (`structure/Graph.java:1364,1368`), verbatim, and the SAME on both spines.
  *
@@ -75,57 +63,6 @@ export const relirOff = ambientSpine() === 'legacy';
  */
 export const idAlreadyExists = (kind: 'Vertex' | 'Edge', id: string | number): string =>
   `${kind} with id already exists: ${id}`;
-
-/**
- * A TRAVERSAL RELIR ANSWERS AND THE LEGACY SPINE REFUSES — declared, and PROVEN in both positions.
- *
- * The RelIR route is allowed to be ahead: `mise run ci` does not include the differential, and the
- * census's spine column ratchets one way, both so that a capability legacy lacks is never a reason
- * to cripple its replacement. What the differential still has to be told is WHICH WAY ROUND a given
- * divergence goes, or it reads a deliberate improvement as a regression.
- *
- * A bare `test.skip` under `relirOff` would say that — and would say it equally well if the two
- * spines both answered and answered DIFFERENTLY, which is not an improvement but a defect. So this
- * does not skip. With RelIR off it asserts the traversal THROWS, which turns "legacy refuses this"
- * from an assumption into the thing the differential run proves. The day legacy learns the shape,
- * this fails and the caller deletes it — which is the correct end for a marker whose whole content
- * is a gap.
- *
- * `body` runs only on the RelIR side; `gremlin` is the traversal whose refusal is the claim.
- *
- * `options` are the COMPILE options the refusal needs to be about the right thing. A traversal that
- * names a `call()` service refuses for two different reasons without a registry — "unknown service"
- * rather than "legacy does not serve this one" — and a proof of the wrong refusal is not a proof.
- */
-/**
- * A CLAIM ABOUT THE RELIR SPINE — SKIPPED in the legacy position, never restated there.
- *
- * **Legacy is a route with an END DATE (§6·1) and is allowed to DRIFT.** Once RelIR owns a shape,
- * what that shape's DESCRIPTOR looks like on the other spine is not a fact worth committing: the
- * assertion and the route are deleted together in Phase 4. Re-stating legacy's answer beside RelIR's
- * — a `{spine:'legacy'}` pin, a `relirOff ? … : …` branch — is work that must be done once per
- * increment and thrown away exactly once, and it accumulated to roughly a dozen sites in one session
- * before anyone named it. So it gets a NAME rather than a convention, because a convention is what
- * drifted back.
- *
- * `test.skip` and not a silent pass: a skipped test is visible in the legacy run's output, so "this
- * claim is RelIR's" stays readable rather than looking like coverage that is quietly absent.
- *
- * TWO things still belong per-spine, and neither is a descriptor:
- *
- * - a divergence in the ANSWER where legacy is right and RelIR declines — that is a claim about
- *   CORRECTNESS, and the decline is what keeps the user's answer right (`relirAhead` is its mirror);
- * - a property of the PLAN that is legacy's own subject, asserted in a test that says so.
- */
-export const relOnly = (name: string, body: () => void | Promise<void>): void => {
-  (relirOff ? test.skip : test)(name, body);
-};
-
-export const relirAhead = (gremlin: string, body: () => void | Promise<void>, options?: CompileOptions) =>
-  async (): Promise<void> => {
-    if (!relirOff) return body();
-    expect(() => runWith(seededStore(), gremlin, options)).toThrow();
-  };
 
 // A write-response echo carries each prop value as a self-describing {t,v} typed node (so the wire
 // frames it exactly). Tests that assert the written VALUES, not their types, unwrap to plain values.

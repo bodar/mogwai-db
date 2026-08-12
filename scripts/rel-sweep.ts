@@ -38,16 +38,17 @@
 import { extractStrategies, parseGremlin, stepChain } from '../src/gremlin/frontend.ts';
 import { runPasses } from '../src/compiler/ir/passes.ts';
 import { verifyWriteArgs } from '../src/compiler/ir/write-args.ts';
-
-/** No `withSideEffect` declared — the sweep parses the corpus text alone. */
-const NO_SIDE_EFFECTS = new Map<string, any>();
 import type { IRStep } from '../src/compiler/ir/step.ts';
+import { ValueParseError } from '../src/gremlin/coerce.ts';
 import { lowerToRel } from '../src/compiler/rel/lower.ts';
 import { DO_BIND_CAP } from '../src/rel/check.ts';
 import { emit, emitRelational } from '../src/rel/emit.ts';
 import { retained, type Plan } from '../src/rel/plan.ts';
 import { render } from '../src/sql/kernel/q.ts';
 import { cfLimitViolation } from '../src/cf-limits.ts';
+
+/** No `withSideEffect` declared — the sweep parses the corpus text alone. */
+const NO_SIDE_EFFECTS = new Map<string, any>();
 
 const CORPUS = (await Bun.file(new URL('../test/L1-corpus/corpus.txt', import.meta.url)).text())
   .split('\n').filter(Boolean);
@@ -183,6 +184,11 @@ function sweepOne(chain: IRStep[], collapse: boolean, correlatedChildren: boolea
       if (violation && !accounting.has(violation)) accounting.set(violation, at());
     }
   } catch (error) {
+    // A COERCION'S PARSE REFUSAL IS THE TRAVERSAL'S ANSWER, not a decline the lowering owes. It
+    // raises by design (SQL cannot raise, so `asNumber('1,000')` is parsed at compile time), and this
+    // sweep's whole subject is the OTHER kind of throw — a lowering giving up on vocabulary instead of
+    // returning `null`. Without the distinction every such literal reads as a contract violation.
+    if (error instanceof ValueParseError) return;
     // One entry per MESSAGE, with the first chain that produced it — the same "one entry per root
     // cause" discipline L5's `known.ts` uses, because one dropped channel shows up on hundreds of
     // prefixes and a per-prefix list would bury the count.

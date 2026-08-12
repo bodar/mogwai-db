@@ -29,7 +29,6 @@ import { join } from 'node:path';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import type { GraphManager, GraphInfo } from '../../src/manager.ts';
 import type { RemoteExecutor } from '../../src/api.ts';
-import type { Spine } from '../../src/sql/kernel/render.ts';
 import { isExcludedScenario } from './tags.ts';
 
 export interface QueryRecord {
@@ -321,18 +320,13 @@ export interface L3State {
 /** The top level deliberately remains the default/RelIR-on floor: it is the conformance number
  *  quoted by the README and feature-support matrix, and nesting it would rewrite a 126 KB committed
  *  artifact for no semantic gain. Only the legacy floor lives in its own section. */
-export interface L3StateFile extends L3State {
-  legacySpine?: L3State;
-}
+export type L3StateFile = L3State;
 
 const STATE_COMMENT =
-  'L3 conformance last-known runs: the top-level passing/failing scenario sets are the default ' +
-  '(RelIR-on) floor; `legacySpine` is the legacy floor. Each configuration replaces only its own ' +
-  'section on a clean local run (CI never rewrites). The two gate ASYMMETRICALLY: the RelIR floor ' +
-  'fails on any regression or a lower count; the legacy floor may only lose scenarios the RelIR ' +
-  'floor holds, and fails on a name no spine holds (the union of the two `passed` sets is the real ' +
-  'floor). `passing` = passed.length in each section. Commit this file with every bump. Never ' +
-  'hand-edit either `passed` to hide a regression.';
+  'L3 conformance last-known run: the passing/failing scenario sets are the floor. A clean local ' +
+  'run rewrites it (CI never does). It is a hard ratchet — the run fails on any scenario that ' +
+  'regresses and on a lower count. `passing` = passed.length. Commit this file with every bump. ' +
+  'Never hand-edit `passed` to hide a regression.';
 
 const EMPTY_STATE = (): L3State => ({ passing: 0, total: 0, passed: [], failed: [] });
 
@@ -357,9 +351,8 @@ function parseStateFile(file: string): L3StateFile {
  * `passed.length`, so reading it any other way was two authorities on one fact. The field stays in the
  * file — it is what a human reads — but nothing computes with it.
  */
-export function readState(file: string, spine: Spine): L3State {
-  const state = parseStateFile(file);
-  const s = spine === 'rel' ? state : state.legacySpine;
+export function readState(file: string): L3State {
+  const s = parseStateFile(file);
   if (!s) return EMPTY_STATE();
   // **A NAME THAT IS NO LONGER MEASURED CANNOT BE A REGRESSION.** When a scenario joins
   // `EXCLUDED_SCENARIOS` — a capability we have DECLARED we do not have — it leaves the live report's
@@ -383,83 +376,17 @@ export function stateOf(rows: ScenarioRow[]): L3State {
   return { passing: passed.length, total: rows.length, passed, failed };
 }
 
-export function writeState(file: string, rows: ScenarioRow[], spine: Spine): void {
+export function writeState(file: string, rows: ScenarioRow[]): void {
   const next = stateOf(rows);
   const state = parseStateFile(file);
-  // Read-modify-write is the load-bearing rule: a clean L3 run rewrites its state, so replacing the
-  // other spine's passed[] would silently lower that floor and turn the ratchet into a way to erase
-  // the gate. The one shared explanation remains top-level; legacySpine never gets its own copy.
-  if (spine === 'rel') Object.assign(state, next);
-  else state.legacySpine = next;
+  Object.assign(state, next);
   state._comment = STATE_COMMENT;
   writeFileSync(file, JSON.stringify(state, null, 2) + '\n');
 }
 
-/** The two-floor difference: scenarios only ONE spine answers. `relOnly` is the honest measure of
- *  what turning the switch off would lose, which no counter reports today; a non-empty `legacyOnly`
- *  is RelIR being BEHIND on those names — allowed (§6·1) but worth seeing, and invisible to a
- *  subtraction of the two counts. `relOnly` is EXPECTED to grow (that is the migration); `legacyOnly`
- *  is what must reach zero before the legacy spine can be deleted. */
-export function spineGap(rel: L3State, legacy: L3State): { relOnly: string[]; legacyOnly: string[] } {
-  const relNames = new Set(rel.passed);
-  const legacyNames = new Set(legacy.passed);
-  return {
-    relOnly: [...relNames].filter((name) => !legacyNames.has(name)).sort(),
-    legacyOnly: [...legacyNames].filter((name) => !relNames.has(name)).sort(),
-  };
-}
 
-/**
- * THE COVERAGE FLOOR IS THE UNION, NOT EITHER SPINE — the migration's one conformance invariant.
- *
- * A scenario is supported if EITHER spine answers it, so the set that may never shrink is the union
- * of the two floors. Neither floor is a ratchet on its own: RelIR gaining a shape legacy cannot
- * express is the migration working, and holding legacy to RelIR's bar buys parity with a route that
- * has an end date (§6·1). What is NOT allowed is losing a name outright — legacy shedding something
- * nothing else holds.
- *
- * A NAME set, deliberately, not the two `passing` counts: repeated scenario names (see
- * test/CLAUDE.md) make the counts unaddable, and a union has to be taken over identities.
- */
-export function unionPassing(rel: L3State, legacy: L3State): Set<string> {
-  return new Set([...rel.passed, ...legacy.passed]);
-}
 
-/**
- * Split a LEGACY floor's regressions into the compensated and the real.
- *
- * `shed` — legacy stopped answering something the RelIR floor holds. Legal, recorded, and the
- * expected shape of a RelIR increment that re-expresses a shape legacy only half-supported. It
- * lowers the legacy floor, which is why it prints.
- *
- * `uncompensated` — legacy stopped answering something NO spine holds. That is support lost, and
- * the only legacy regression that is a regression at all.
- */
-export function partitionLegacyRegressions(
-  regressed: ScenarioRow[],
-  rel: L3State,
-): { shed: ScenarioRow[]; uncompensated: ScenarioRow[] } {
-  const held = new Set(rel.passed);
-  return {
-    shed: regressed.filter((r) => held.has(r.name)),
-    uncompensated: regressed.filter((r) => !held.has(r.name)),
-  };
-}
 
-/** Compact migration summary. The provenance names which side is live because the other side is
- *  necessarily the last recorded run; large name sets stay in the committed state file. */
-export function formatSpineGap(rel: L3State, legacy: L3State, spine: Spine): string {
-  if (legacy.passing === 0) return '';
-  const gap = spineGap(rel, legacy);
-  const provenance = spine === 'rel'
-    ? 'RelIR=this run, legacy=last recorded run'
-    : 'RelIR=last recorded run, legacy=this run';
-  const detail = (label: string, names: string[]): string => names.length <= 12
-    ? `${label}: ${names.length ? names.join(', ') : 'none'}`
-    : `${label}: ${names.length} names (see l3-state.json)`;
-  return `L3 spine gap [${provenance}]: ${gap.relOnly.length} RelIR-only, ${gap.legacyOnly.length} legacy-only\n` +
-    `${detail('RelIR-only', gap.relOnly)}; ${detail('legacy-only', gap.legacyOnly)}`;
-}
 
 export interface L3Delta {
   /** Passed now, was not passing in committed state (fixes that landed). */

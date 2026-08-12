@@ -285,8 +285,11 @@ function ioContract(getOrigin: () => string) {
       try {
         await g('src').addV('person').property('name', 'marko').property('age', 29).iterate();
         await g('src').addV('person').property('name', 'vadas').property('age', 27).iterate();
-        await g('src').V().has('name', 'marko').as('a').V().has('name', 'vadas')
-          .addE('knows').from_('a').property('weight', 0.5).iterate();
+        // A nested `to()` rather than a mid-chain `V()` re-source: the edge is the same, and the
+        // re-source is a separate gap (tracked in rel-spine's DECLINED list) that this test is not
+        // about — its subject is the io round trip.
+        await g('src').V().has('name', 'marko').as('a')
+          .addE('knows').to(__.V().has('name', 'vadas')).from_('a').property('weight', 0.5).iterate();
 
         await g('src').io(`${stamp}/dump.json`).write().iterate();
         await g('json').io(`${stamp}/dump.json`).read().iterate();
