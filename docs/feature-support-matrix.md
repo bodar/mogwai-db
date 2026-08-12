@@ -57,8 +57,10 @@ all ✅ in every position a predicate is accepted. ❌ `outside`. `between` is `
 `(lo,hi)`.
 
 **Text predicates (`TextP`)** — `containing`, `startingWith`, `endingWith`, and their negations ✅
-wherever a predicate is accepted. Matching is case-insensitive under SQLite `LIKE`; `regex` is 🚫 —
-SQLite has no regex operator and DO SQLite has no UDFs, so it fails closed rather than filtering in JS.
+wherever a predicate is accepted. Matching is case-insensitive under SQLite `LIKE`; a literal term of
+three or more characters over a stored property uses the `property_fts` trigram access path, while the
+generic typed/escaped predicate remains the semantic authority. `regex` is 🚫 — SQLite has no regex
+operator and DO SQLite has no UDFs, so it fails closed rather than filtering in JS.
 
 ## 3. Projections & element data
 

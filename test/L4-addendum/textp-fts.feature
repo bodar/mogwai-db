@@ -1,11 +1,13 @@
 Feature: mogwai addendum — TextP substring predicates
 
-  # containing/startingWith/endingWith over a stored property use the generic typed LIKE predicate.
+  # containing/startingWith/endingWith and their negations over a stored property use a
+  # property_fts trigram access path for literal terms of three or more characters. The generic
+  # typed LIKE predicate stays above the physical rewrite as the semantic authority.
   # These scenarios pin two mogwai characteristics the official corpus does not cover:
   #   1. Matching is CASE-INSENSITIVE (a documented divergence from TinkerPop's case-sensitive
   #      String.contains), and
   #   2. an anchored op (startingWith) confirms POSITION, excluding a mid-string hit.
-  # A <3-char term is the same correct LIKE check — never fail-closed.
+  # A <3-char term is the same correct generic LIKE check — never fail-closed.
 
   Scenario: containing matches case-insensitively (documented divergence)
     Given the search graph
