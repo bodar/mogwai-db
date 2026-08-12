@@ -50,6 +50,11 @@ const COVERED = [
   "g.V().has('name',TextP.containing('ark'))", "g.V().has('name',TextP.startingWith('mar'))",
   "g.V().has('name',TextP.endingWith('as'))", "g.V().has('name',TextP.notContaining('ark'))",
   "g.V().has('name',TextP.startingWith('m').or(TextP.startingWith('p')))",
+  // A non-start GraphStep CROSS JOINs its incoming traversers with the graph while carrying aliases.
+  // The scalar child form exercises the same operation through the framing dispatcher rather than a
+  // second source loop.
+  "g.V().has('name','marko').as('a').V().has('name','vadas')",
+  "g.V().hasLabel('person').values('age').map(__.V().count())",
   // THE SHAPE BOUNDARY: both of these retype element -> scalar, so they exercise the framing
   // bridge's second stream kind rather than one more step in the same one.
   'g.V().count()', 'g.E().count()', "g.V().hasLabel('person').count()", "g.V().has('age',P.gt(29)).count()",
@@ -418,10 +423,6 @@ const DECLINED = [
   // `select(label).by(key)` as a CHILD BODY — the by() modulator over an alias read, inside a host.
   // The `select(label).values(key)` spelling of the same thing is covered; this one is not.
   'g.V().as("a").out("knows").map(__.select("a").by("name"))',
-  // A MID-CHAIN `V()` RE-SOURCE — the traverser is discarded and the chain re-roots on the whole
-  // graph, carrying its aliases across. Its own piece of work rather than a missing step: a source
-  // arm reached from a tail position.
-  "g.V().has('name','marko').as('a').V().has('name','vadas').addE('knows').from('a')",
   "g.V().has('name',P.within(__.V().values('name').fold()))", // a run-time member list, not a set
   "g.V().has('name',null)",           // a null value: not a literal this route can compare
   // The per-traverser hosts' own declines, each a CARDINALITY the correlated scalar cannot honour.
@@ -457,6 +458,17 @@ describe('the RelIR spine', () => {
       expect(() => compile(gremlin, {}), gremlin).toThrow(UnsupportedTraversal);
     });
   }
+
+  test('a re-source carries an alias into a following write', async () => {
+    // `GraphStep` splits the incoming traverser, rather than creating a fresh one: `from('a')`
+    // therefore still names marko after the current object was replaced by vadas. Counting the
+    // graph before and after checks the semantic carriage, not merely that the program compiled.
+    const graph = seededStore();
+    const count = async () => Number((await decodeAll(exec(graph).buffers("g.E().hasLabel('knows').count()", {}, {})))[0]);
+    const before = await count();
+    await decodeAll(exec(graph).buffers("g.V().has('name','marko').as('a').V().has('name','vadas').addE('knows').from('a')", {}, {}));
+    expect(await count()).toBe(before + 1);
+  });
 
 
   test('a withSideEffect CONSTANT is resolved by the write parse, not refused by the router', async () => {

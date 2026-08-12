@@ -203,7 +203,6 @@ Feature: mogwai addendum — scalar-stream re-entry
   # vertices → count 6 per input. The value is discarded by the re-source (GraphStep isStart
   # =false), exactly as at the tail.
   @gap:scalar-position
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXageX_mapXV_countX
     Given the modern graph
     And the traversal of
@@ -331,7 +330,6 @@ Feature: mogwai addendum — scalar-stream re-entry
       | l[a,b,c] |
 
   @gap:scalar-position
-  @Unsupported
   Scenario: g_injectX0X_V_count
     Given the modern graph
     And the traversal of

@@ -851,6 +851,74 @@ function elementScan(step: IRStep, fresh: Minter): { scan: Rel; pred?: Expr; ele
 }
 
 /**
+ * A non-start `V()` / `E()` — GraphStep's re-source operation.
+ *
+ * `GraphStep.processNextStart()` takes one incoming traverser, opens the graph iterator, and emits
+ * `head.split(element, this)` for every element
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/GraphStep.java:193-221`).
+ * Thus this is a CROSS JOIN, not a replacement scan: the arriving traverser's carried columns
+ * (notably aliases and bulk) survive, while its current object is replaced by the scanned element.
+ *
+ * A path/sack/fromV is state whose transition through that split has not yet been given a framing
+ * contract. An already-live encounter is re-minted from the composite parent/child position, then
+ * replaced by the ONE encounter slot; there are never two competing carried positions. Where no
+ * position arrives but this chain needs one, it is seeded from the new element id like a source scan.
+ */
+function reSource(
+  step: IRStep, input: Rel, framing: RelFraming, ctx: ChainCtx, fresh: Minter,
+): { rel: Rel; elem: Elem } | null {
+  if ((step.name !== 'V' && step.name !== 'E') || step.modulators?.length || step.optionArms) return null;
+  if (framing.kind === 'path' || input.channels.some((channel) =>
+    channel.role === 'path' || channel.role === 'sack' || channel.role === 'fromV')) return null;
+  const seeded = elementScan(step, fresh);
+  if (!seeded) return null;
+  const source = seeded.pred
+    ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred: seeded.pred })
+    : seeded.scan;
+  // Only the new id crosses the join. Keeping the source row's physical columns would collide with
+  // an element input's `id`/`uid` columns before the payload replacement below.
+  const ids = make.project({
+    id: fresh('rs'), input: source, channels: [], type: typeOf(meta('sid', 'int')),
+    exprs: [['sid', col(source.id, 'id')]],
+  });
+  const arrivingEncounter = encounterOf(input.channels);
+  const channels = arrivingEncounter ? input.channels : ctx.ordered ? withChannel(input.channels, ENCOUNTER) : input.channels;
+  const crossed = make.join({
+    id: fresh('j'), left: input, right: ids, join: 'cross', channels,
+    type: typeOf(...input.type.cols, ...ids.type.cols),
+  });
+  const project = (): Rel => make.project({
+      id: fresh('c'), input: crossed, channels, type: typeOf(...elementCols(channels)),
+      exprs: [
+        ['id', col(crossed.id, 'sid')],
+        ...channels.map((channel) => [channel.col,
+          channel.role === 'encounter' ? col(crossed.id, 'sid') : col(crossed.id, channel.col),
+        ] as const),
+      ],
+    });
+  if (!arrivingEncounter) return { elem: seeded.elem, rel: project() };
+  // Parent outer iteration then source rowid is the iterator order GraphStep realizes. `renumber`
+  // consumes those temporary keys and leaves a single total encounter column on the result.
+  const carried = channels.filter((channel) => channel.role !== 'encounter');
+  const staged = make.project({
+    id: fresh('c'), input: crossed, channels: [],
+    type: typeOf(meta('id', 'int'), ...carriedCols(carried), meta('parent_encounter', 'int'), meta('source_id', 'int')),
+    exprs: [
+      ['id', col(crossed.id, 'sid')],
+      ...carried.map((channel) => [channel.col, col(crossed.id, channel.col)] as const),
+      ['parent_encounter', col(crossed.id, arrivingEncounter.col)], ['source_id', col(crossed.id, 'sid')],
+    ],
+  });
+  return {
+    elem: seeded.elem,
+    rel: renumber(staged, [
+      { expr: col(staged.id, 'parent_encounter'), dir: 'asc' },
+      { expr: col(staged.id, 'source_id'), dir: 'asc' },
+    ], elementCols(channels), channels, fresh),
+  };
+}
+
+/**
  * MOVEMENT — the graph algebra proper, as a join over `edges` and a re-projection.
  *
  * Six adjacency steps plus the three endpoint reads, each one direction table entry: which edge
@@ -1919,6 +1987,10 @@ function scalarTail(
 
   for (let at = from; at < steps.length; at++) {
     const step = steps[at];
+    if (step.name === 'V' || step.name === 'E') {
+      const reSourced = reSource(step, rel, out, ctx, fresh);
+      return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, at + 1, bulked, ctx, fresh, labels);
+    }
     const args = argValues(step);
     if (step.optionArms) return null;
     // The blanket modulator decline exempts the two steps that HOST a `by()` here; each reads it
@@ -1965,6 +2037,11 @@ function scalarTail(
       const selected = selectKeys(step, rel, labels, childSeam(ctx, fresh), fresh, { framing: out, named: namedElsewhere(ctx) });
       if (!selected) return null;
       return continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
+    }
+
+    if (PER_TRAVERSER_HOSTS.has(step.name)) {
+      if (out.kind !== 'scalar') return null;
+      return perTraverserChild(step, rel, out, steps, at, bulked, ctx, fresh, labels);
     }
 
     if (step.name === 'union') {
@@ -3619,6 +3696,10 @@ function elementTail(
   let at = from;
   for (; at < steps.length; at++) {
     const step = steps[at];
+    if (step.name === 'V' || step.name === 'E') {
+      const reSourced = reSource(step, rel, { kind: 'elements', elem }, ctx, fresh);
+      return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, at + 1, bulked, ctx, fresh, labels);
+    }
     const moved: { rel: Rel; elem: Elem } | null = movement(step, { rel }, elem, fresh);
     if (moved) {
       // The mutual exclusion is read off the RELATION (see `coalesce`): a movement under a live
@@ -3676,7 +3757,7 @@ function elementTail(
     }
     // THE PER-TRAVERSER CHILD HOSTS — one lowering, three cardinality policies (`perTraverserChild`).
     if (PER_TRAVERSER_HOSTS.has(step.name))
-      return perTraverserChild(step, rel, elem, steps, at, bulked, ctx, fresh, labels);
+      return perTraverserChild(step, rel, { kind: 'elements', elem }, steps, at, bulked, ctx, fresh, labels);
     if (step.name === 'union' || step.name === 'choose') {
       const framing = { kind: 'elements', elem } as const;
       const merged = step.name === 'union'
@@ -3920,6 +4001,15 @@ function continueAs(
   rel: Rel, framing: RelFraming, steps: readonly IRStep[], from: number,
   bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | null {
+  // A re-source changes the payload to an element but is legal from every ordinary traverser shape.
+  // Keeping it at the ONE framing dispatcher is what makes a scalar child body (`__.V().count()`),
+  // an element tail (`…as('a').V()`), and a branch arm share one GraphStep lowering instead of each
+  // growing an almost-identical source loop.
+  const next = steps[from];
+  if (next?.name === 'V' || next?.name === 'E') {
+    const reSourced = reSource(next, rel, framing, ctx, fresh);
+    return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, from + 1, bulked, ctx, fresh, labels);
+  }
   switch (framing.kind) {
     case 'elements': return elementTail(rel, framing.elem, steps, from, bulked, ctx, fresh, labels);
     case 'detached': return detachedTail(rel, framing.elem, steps, from, ctx, fresh);
@@ -4720,7 +4810,7 @@ function collapsedToOneRow(rel: Rel): boolean {
  * child, which `correlatedExists` fails closed on for the same reason) declines here too.
  */
 function perTraverserChild(
-  step: IRStep, rel: Rel, elem: Elem, steps: readonly IRStep[], at: number,
+  step: IRStep, rel: Rel, framing: Extract<RelFraming, { readonly kind: 'elements' } | { readonly kind: 'scalar' }>, steps: readonly IRStep[], at: number,
   bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | null {
   if (step.modulators?.length || step.optionArms) return null;
@@ -4729,7 +4819,14 @@ function perTraverserChild(
   const body = bodyOf(nested.nested, ctx.params);
   if (!body?.length) return null;
 
-  const produced = scalarChild(body, elementHost(rel, elem, labels), ctx, fresh);
+  const host: ChildHost = framing.kind === 'elements'
+    ? elementHost(rel, framing.elem, labels)
+    : {
+      kind: 'scalar', value: col(rel.id, 'v'), row: { rel, aliases: labels },
+      ...(rel.type.cols.some((column) => column.name === 'vtype') ? { vtype: col(rel.id, 'vtype') }
+        : framing.type.kind === 'static' ? { vtype: compilerText(framing.type.type) } : {}),
+    };
+  const produced = scalarChild(body, host, ctx, fresh);
   if (!produced) return null;
   // THE POLICY, and it is the whole difference between the three steps: `local`/`flatMap` emit EVERY
   // result, so a correlated scalar is their answer only where the body had exactly ONE to give, while
@@ -4946,6 +5043,23 @@ function rerootedHost(step: IRStep, host: ChildHost, fresh: Minter): Extract<Chi
 function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fresh: Minter): ChildValue | null {
   if (!body.length) return null;
   const first = body[0]!;
+
+  // A GraphStep inside a per-traverser child still splits each host traverser, but a reducing tail
+  // has one answer independent of which host triggered it. Lower that source chain once as an
+  // ordinary rooted read and embed its one-row result as the correlated scalar value. This is the
+  // `map(__.V().count())` half of re-sourcing; fan-out `flatMap(__.V()…)` needs the general child
+  // rejoin and remains that substrate's responsibility rather than abusing a scalar subquery's
+  // arbitrary-first-row behaviour.
+  if (first.name === 'V' || first.name === 'E') {
+    const rooted = rootedRead(body, ctx, fresh);
+    if (!rooted || rooted.effects || rooted.framing.kind !== 'scalar' || rooted.framing.result !== 'count'
+      || !collapsedToOneRow(rooted.rel)) return null;
+    const scalar = make.project({
+      id: fresh('rc'), input: rooted.rel, channels: [], type: typeOf(meta('v', 'any', true)),
+      exprs: [['v', col(rooted.rel.id, 'v')]],
+    });
+    return { expr: { kind: 'scalar', plan: scalar }, framing: rooted.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' };
+  }
 
   // THE RECORD ARM — `by(__.project('a','b')…)`, one traverser in and one MAP out.
   //
