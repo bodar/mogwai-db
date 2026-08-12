@@ -273,7 +273,7 @@ export function listMemberOp(
     // `literal: false` — a member is a value inside a JSON document, not a compile-time literal the
     // constant-folding arms could evaluate, so the folded transforms (`asBool`, bare `asNumber`)
     // decline here exactly as they do over a column.
-    const tx = transformExpr(step, memberPayload(of, members), false);
+    const tx = transformExpr(step, memberPayload(of, members), false, fresh);
     if (!tx) return null;
     // A REWRITE reads the payload and writes a BARE member: the recorded type no longer describes the
     // new value (`length()` makes it an integer outright), so re-tagging it would frame the RESULT as

@@ -1,9 +1,12 @@
 import { compilerInt, compilerNull, compilerText, lit, type Expr } from '../../rel/expr.ts';
+import * as make from '../../rel/factory.ts';
 import { isNested, argValues } from '../../gremlin/frontend.ts';
 import { JAVA_WHITESPACE } from '../plan/plan.ts';
 import { dtFactor, numericSpec } from '../../gremlin/coerce.ts';
 import { STATIC, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/step.ts';
+import { meta, typeOf, type Minter } from './build.ts';
+import { recursiveViolation } from '../../rel/recursive.ts';
 
 /**
  * THE SCALAR TRANSFORM VOCABULARY — `v -> v'`, as RelIR expressions.
@@ -31,9 +34,9 @@ import type { IRStep } from '../ir/step.ts';
  *
  * ## What declines, each for its own reason
  *
- * - **`reverse`** — SQLite has no `REVERSE`, so legacy emits a correlated RECURSIVE CTE inside an
- *   expression. RelIR has `Recursive` as a RELATION, not as a scalar subquery over the current row, so
- *   this is a genuine node-set question (§7) rather than unfinished work. Declining is the honest state.
+ * - **`reverse`** is a correlated recursive relation rather than a scalar function (SQLite has no
+ *   `REVERSE`). The scalar-expression form embeds that relation, so it remains one value in / one
+ *   value out at this seam; the list form is a separate list-order operation.
  * - **`concat` with a traversal argument** — a per-traverser CHILD value, so the step is a row boundary
  *   rather than a value transform. It belongs to whichever seam grows the correlated child.
  * - **bare `asNumber()`** — the output subtype is the INPUT literal's declared type, which the front end
@@ -172,7 +175,7 @@ export const REL_TRANSFORMS: ReadonlySet<string> = new Set([
  * semantic fact about this family, not a shortcut; a LIST stream's local transform is a different
  * lowering entirely and never reaches here.
  */
-export function transformExpr(step: IRStep, v: Expr, literal: boolean): Transformed | null {
+export function transformExpr(step: IRStep, v: Expr, literal: boolean, fresh: Minter): Transformed | null {
   const args = argValues(step);
 
   // OVER A COMPILE-TIME LITERAL, THE CAST SUBFAMILY IS NOT A SQL CAST AT ALL — it is a parse that must
@@ -197,6 +200,51 @@ export function transformExpr(step: IRStep, v: Expr, literal: boolean): Transfor
     // in the one direction the differential cannot forgive. Match the spine being replaced; a semantic
     // improvement to the tag is a separate change on both sides.
     return expr && { expr };
+  }
+
+  if (step.name === 'reverse') {
+    // `ReverseStep` is identity for non-strings and null, and reverses a string character-by-
+    // character (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/
+    // traversal/step/map/ReverseStep.java:49-65`). SQLite has no reverse scalar function, but its
+    // recursive CTE is exactly the loop the reference spells: peel the first character and prepend it
+    // to the accumulator. The seed is CORRELATED to `v`, which `Expr.scalar` renders in the outer row's
+    // scope; a RelIR recursive node is therefore the same SQL shape as legacy's scalar `WITH RECURSIVE`,
+    // not a graph walk or a new cross-row operation.
+    const cols = typeOf(meta('s', 'any', true), meta('r', 'text', true));
+    const id = fresh('rev');
+    const reversed = make.recursive({
+      id, name: `rv_${id}`, channels: [], type: cols, cols: cols.cols.map((column) => column.name),
+      seed: make.values({ id: fresh('rvs'), channels: [], type: cols, rows: [[v, compilerText('')]] }),
+      step: (self) => {
+        const pending = make.filter({
+          id: fresh('rvf'), input: self, channels: [], type: cols,
+          pred: { kind: 'binary', op: '!=', left: { kind: 'col', rel: self.id, name: 's' }, right: compilerText('') },
+        });
+        return make.project({
+          id: fresh('rvp'), input: pending, channels: [], type: cols,
+          exprs: [
+            ['s', { kind: 'call', fn: 'substr', args: [{ kind: 'col', rel: pending.id, name: 's' }, compilerInt(2)] }],
+            ['r', { kind: 'binary', op: '||', left: { kind: 'call', fn: 'substr', args: [{ kind: 'col', rel: pending.id, name: 's' }, compilerInt(1), compilerInt(1)] }, right: { kind: 'col', rel: pending.id, name: 'r' } }],
+          ],
+        });
+      },
+    });
+    if (recursiveViolation(reversed)) return null;
+    const done = make.filter({
+      id: fresh('rvd'), input: reversed, channels: [], type: cols,
+      pred: { kind: 'binary', op: '=', left: { kind: 'col', rel: reversed.id, name: 's' }, right: compilerText('') },
+    });
+    const result = make.project({
+      id: fresh('rvr'), input: done, channels: [], type: typeOf(meta('v', 'any', true)),
+      exprs: [['v', { kind: 'col', rel: done.id, name: 'r' }]],
+    });
+    return {
+      expr: {
+        kind: 'case',
+        whens: [[{ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [v] }, right: compilerText('text') }, { kind: 'scalar', plan: result }]],
+        else: v,
+      },
+    };
   }
 
   if (step.name === 'asNumber') {

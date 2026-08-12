@@ -55,6 +55,9 @@ const COVERED = [
   // second source loop.
   "g.V().has('name','marko').as('a').V().has('name','vadas')",
   "g.V().hasLabel('person').values('age').map(__.V().count())",
+  // SQLite has no reverse scalar function, so the transform is a correlated Recursive relation
+  // embedded as one scalar expression. Non-string and null values are ReverseStep identities.
+  "g.V().values('name').reverse()", 'g.inject("abc").reverse()', 'g.inject(3).reverse()', 'g.inject(null).reverse()',
   // THE SHAPE BOUNDARY: both of these retype element -> scalar, so they exercise the framing
   // bridge's second stream kind rather than one more step in the same one.
   'g.V().count()', 'g.E().count()', "g.V().hasLabel('person').count()", "g.V().has('age',P.gt(29)).count()",
@@ -468,6 +471,15 @@ describe('the RelIR spine', () => {
     const before = await count();
     await decodeAll(exec(graph).buffers("g.V().has('name','marko').as('a').V().has('name','vadas').addE('knows').from('a')", {}, {}));
     expect(await count()).toBe(before + 1);
+
+    // A scalar source has an implicit bulk of one. GraphStep makes it explicit before the cross
+    // join, so `both()` may take the collapse path and `count()` still sees every traverser.
+    expect(await decodeAll(exec(seededStore()).buffers('g.inject(0).V().both().count()', {}, {})))
+      .toEqual([12]);
+    // The outer inject position is also real order: GraphStep exhausts its graph iterator for the
+    // first injected traverser before moving to the second, so this limit takes ids 1 and 2.
+    expect(await decodeAll(exec(seededStore()).buffers('g.inject(0,1).V().limit(2).id()', {}, {})))
+      .toEqual([1, 2]);
   });
 
 

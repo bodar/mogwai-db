@@ -881,11 +881,31 @@ function reSource(
     id: fresh('rs'), input: source, channels: [], type: typeOf(meta('sid', 'int')),
     exprs: [['sid', col(source.id, 'id')]],
   });
-  const arrivingEncounter = encounterOf(input.channels);
-  const channels = arrivingEncounter ? input.channels : ctx.ordered ? withChannel(input.channels, ENCOUNTER) : input.channels;
+  // GraphStep splits one incoming traverser into element traversers. A scalar parent represents
+  // one implicitly, whereas an element relation must carry it explicitly so a later movement can
+  // collapse correctly. Promote it *before* the join: inventing the channel on the join result is
+  // neither side's contract and leaves an Aggregate with no input bulk to sum.
+  const parent = input.channels.some((channel) => channel.role === 'bulk') ? input : (() => {
+    const channels = withChannel(input.channels, BULK[0]!);
+    const payload = input.type.cols.filter((column) => !input.channels.some((channel) => channel.col === column.name));
+    return make.project({
+      id: fresh('rp'), input, channels, type: typeOf(...payload, ...carriedCols(channels)),
+      exprs: [
+        ...payload.map((column) => [column.name, col(input.id, column.name)] as const),
+        ...channels.map((channel) => [channel.col,
+          channel.role === 'bulk' ? compilerInt(1) : col(input.id, channel.col),
+        ] as const),
+      ],
+    });
+  })();
+  const arrivingEncounter = encounterOf(parent.channels);
+  // A non-start GraphStep must preserve its parent's traversal order. A later slice cannot be
+  // answered honestly if it was never represented on the parent relation.
+  if (ctx.ordered && !arrivingEncounter) return null;
+  const channels = parent.channels;
   const crossed = make.join({
-    id: fresh('j'), left: input, right: ids, join: 'cross', channels,
-    type: typeOf(...input.type.cols, ...ids.type.cols),
+    id: fresh('j'), left: parent, right: ids, join: 'cross', channels,
+    type: typeOf(...parent.type.cols, ...ids.type.cols),
   });
   const project = (): Rel => make.project({
       id: fresh('c'), input: crossed, channels, type: typeOf(...elementCols(channels)),
@@ -2165,7 +2185,7 @@ function scalarTail(
       // `seed.kind === 'values'` IS "the value is a compile-time literal": an `inject()` source is the
       // only one, and it is the population legacy constant-folds. Read off the SEED rather than the
       // current relation, because a preceding transform does not stop a value being literal-derived.
-      const tx = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values');
+      const tx = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values', fresh);
       if (!tx) return null;
       // EVERY transform drops the per-row `vtype` column, not only the casts: `toUpper()` leaves a
       // value the stored row no longer describes and `length()` turns it into an integer outright, so
@@ -2534,7 +2554,7 @@ const exactTailConst = (a: Arg | undefined): { expr: Expr; tag: string } | null 
   return { expr: a!.name != null ? param(v, a!.name) : compilerText(String(v)), tag };
 };
 
-function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; framing: RelFraming; at: number } | null {
+function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter): { rel: Rel; framing: RelFraming; at: number } | null {
   const step = steps[0]!;
   if (step.modulators?.length || step.optionArms) return null;
   const args = argValues(step);
@@ -2622,10 +2642,16 @@ function injectSource(steps: readonly IRStep[], fresh: Minter): { rel: Rel; fram
   const cells: Expr[][] = perRowType
     ? (rows as Expr[]).map((row, i) => [row, declared[i] ? compilerText(declared[i]!) : compilerNull()])
     : (rows as Expr[]).map((row) => [row]);
+  // Values order is TinkerPop's inject traversal order. Carry it before a later GraphStep expands
+  // each input traverser; minting a position only after the cross join would lose that nesting.
+  const channels = ordered ? withChannel([], ENCOUNTER) : [];
+  const positioned = ordered ? cells.map((row, i) => [...row, compilerInt(i + 1)]) : cells;
   return {
     rel: make.values({
-      id: fresh('inj'), rows: cells, channels: [],
-      type: perRowType ? typeOf(meta('v', 'any', true), meta('vt', 'text', true)) : typeOf(meta('v', 'any', true)),
+      id: fresh('inj'), rows: positioned, channels,
+      type: perRowType
+        ? typeOf(meta('v', 'any', true), meta('vt', 'text', true), ...carriedCols(channels))
+        : typeOf(meta('v', 'any', true), ...carriedCols(channels)),
     }),
     framing: {
       kind: 'scalar',
@@ -3508,7 +3534,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
       const withSack = sacked(listed.rel);
       return withSack && listTail(withSack, (listed.framing as { readonly of: ListOf }).of, steps, 1, ctx, fresh);
     }
-    const injected = injectSource(steps, fresh);
+    const injected = injectSource(steps, ordered, fresh);
     if (!injected) return null;
     const withSack = sacked(injected.rel);
     return withSack && scalarTail(withSack, injected.framing, steps, injected.at, false, ctx, fresh);
@@ -5318,7 +5344,7 @@ function valueRun(
       continue;
     }
     if (!REL_TRANSFORMS.has(step.name)) return null;
-    const transformed = transformExpr(step, value, false);
+    const transformed = transformExpr(step, value, false, fresh);
     if (!transformed) return null;
     value = transformed.expr;
     type = transformed.type ?? UNKNOWN;

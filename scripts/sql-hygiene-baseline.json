@@ -194,7 +194,7 @@
   "fold": {
     "binds": 4,
     "bytes": 1016,
-    "compiler": 7,
+    "compiler": 9,
     "bound": 2
   },
   "format": {
@@ -418,6 +418,12 @@
     "bytes": 1513,
     "compiler": 29,
     "bound": 2
+  },
+  "reverse": {
+    "binds": 0,
+    "bytes": 703,
+    "compiler": 12,
+    "bound": 0
   },
   "rTrim": {
     "binds": 0,
