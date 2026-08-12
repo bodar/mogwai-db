@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. Notes list **only what does not work**; no note means the whole step works. Anything
 unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,379<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,384<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -140,7 +140,8 @@ lists/sets/maps. Scalar type rides PER ROW, so a heterogeneous stream frames eac
 | `format(template)`, `concat`, `substring`, `length`, `toUpper`, `toLower`, `trim`/`lTrim`/`rTrim`, `replace` | ✅ | |
 | `asString`, `asBool`, `asDate`, `dateAdd`, `dateDiff` | ✅ | a literal that cannot parse RAISES the reference's message, at compile time |
 | `asNumber` | 🟡 | ❌ over a stream of mixed numeric subtypes |
-| `reverse`, `split` | ❌ | |
+| `reverse` | 🟡 | ✅ scalar strings; null and non-string scalars are identities. ❌ collection-order reversal |
+| `split` | ❌ | |
 
 🔴 Four documented deviations, not defects: host-language typing in Java/.NET; 128-bit arithmetic
 declines; int64 overflow raises natively; 32-bit float arithmetic is not expressible (SQLite REAL is
