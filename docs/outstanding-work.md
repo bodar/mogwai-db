@@ -1,38 +1,37 @@
 # Outstanding work
 
-The de-duplicated index of open work across the `docs/` corpus. **Each item sets the scene — what,
-why, where to start — not a spec.** The linked doc holds the rationale; the picking agent does the
-validation and design. Live per-step capability: `feature-support-matrix.md`.
+The de-duplicated index of open work. **Each item sets the scene — what, why, where to start — not a
+spec.** The linked doc holds the rationale; the picking agent does the validation and design. Live
+per-step capability: `feature-support-matrix.md`.
 
-**This file records what is LEFT.** What landed is in `git log` and `docs/archive/`; a paragraph
-about finished work cannot be picked up, so it does not belong here. A refresh that lands items
-should make this file SHORTER.
+**This file records what is LEFT.** What landed is in `git log` and `docs/archive/`; a paragraph about
+finished work cannot be picked up, so it does not belong here. A refresh that lands items should make
+this file SHORTER.
 
-**Refreshed** 2026-08-01 · **L3 1686 / 2267** (`l3-state.json`; fewer UNIQUE names than that — the
-collision is expected, see won't-do) · census **0 `crashed`, 4 `nondet`**, perturbed census **4** ·
-`known.ts` **2 entries** — repeat's two body routes disagree on a positional window (within-spec, the
-oracle's blind spot), and `predicateInlining`, where the generic path THROWS on a child body the fast
-path answers ·
-`capability-baseline.ts` **1 entry** · L5 `L5-random` plus fixed seeds 5/11/27/91/143 at
-`L5_RUNS=3000`: **36 pass / 0 fail on every run** (35).
+**Refreshed** 2026-08-12, the day the second spine was deleted · **L3 1360 / 2260** · census **1259
+ran, 753 deferred, 4 nondet, 0 crashed** · L5 `known.ts` **0 entries** · L4 **149 `@Unsupported`**.
 
-Item numbers are stable IDs; landed items are DELETED and their numbers not reused, because code
-cites them. **A deletion must sweep its citations** — item 0 was deleted with four left standing and
-the sweep became an item of its own.
+**Three worklists hold the coverage this index does not enumerate, and all three FAIL LOUDLY when a
+shape lands** — check them before filing anything as untracked:
+`test/rel-spine.test.ts`'s `DECLINED` list, `test/L4-addendum`'s `@Unsupported` scenarios, and L5's
+`LAW UNEVALUABLE` report.
+
+Item numbers are stable IDs; landed items are DELETED and their numbers not reused, because code cites
+them. **A deletion must sweep its citations.**
 
 > **Verify an item's premise before picking it — this index has been stale in BOTH directions.** A
 > 10-line probe that compiles the traversal and greps the SQL is usually enough. If it is partly
 > landed, rewrite the line; don't close it silently.
 
 **Ordering — floor vs ceiling.** L3 is the floor; the ceiling is generic lowering that composes the
-full nested grammar at any depth (`src/compiler/steps/CLAUDE.md`). P1 raises the ceiling — each item
-unblocks a *family*; one-off step impls are matrix-fill, lower.
+full nested grammar at any depth. P1 raises the ceiling — each item unblocks a *family*; one-off step
+impls are matrix-fill, lower.
 
 ---
 
 ## P1 — ceiling-raising generic-substrate lifts
 
-### 🔴 A REAL LOSES A DIGIT CROSSING INTO JSON — both spines, everywhere a collection carries one
+### 🔴 A REAL LOSES A DIGIT CROSSING INTO JSON — everywhere a collection carries one
 
 SQLite writes a REAL into JSON with 15 significant digits, so any double needing 17 comes back short:
 `g.inject(1).math("1/3").fold()` frames `0.333333333333333` on BOTH spines where the value is
@@ -121,7 +120,7 @@ of gravity is ceiling, not correctness.
    inside `filter()` is an ordinary rebind (TinkerPop routes by variable location in `where()` and
    only where()), and `choose().option(Pick.none, …)` with an unproductive choice takes the none arm,
    as we do.
-   Start `steps/tail/{child-shape,child,scalar-arm}.ts`. **Three invariants:** the ONE arm triage is
+   Start `src/compiler/rel/child.ts`. **Three invariants:** the ONE arm triage is
    `classifyBranchArms` (two documented exceptions); a renderer that cannot carry alias columns must
    DECLINE, not answer; and a `first`-cardinality consumer may skip the encounter ranking only on a
    PROOF that the body cannot fan out, never because the stream happens to carry no encounter.
@@ -161,15 +160,6 @@ of gravity is ceiling, not correctness.
    `is` (mechanical), 5 `unfold` (correctly per-shape forever). **`tail`/`sample` are NOT here — the
    shared op exists and their residual is item 4's missing encounter.** **Medium.**
 
-29. **The 17 `carried-state × barrier` deferral sites still each re-derive their answer**, though the
-   TABLE they can cite exists: `BARRIER_ROLE_POLICY` (`context/context.ts`) is total over
-   `keyof TraverserLayout` beside the merge table, in four distinct policies —
-   `consumed`/`empty`/`drop`/`keep` — and `barrierLayout` is checked against it role by role in
-   `test/channel-contracts.test.ts`, because a `drop` role appears in the literal as its own ABSENCE
-   and so table and code could disagree by omission in either direction.
-   Fold a citation into whichever site is next touched. **Do not "finish" this by mechanically
-   rewriting all 17**: some defer for a reason the table does not capture. *Low.*
-
 37. **Two RelIR passes are declared, built, tested — and reachable from no route. There is no
    pipeline that orders them.** `src/rel/passes/` holds `fuse`, `prune` and `name`; `name` has a
    production caller (`compiler/rel/lower.ts`), `fuse`/`prune` do not. The
@@ -188,8 +178,8 @@ of gravity is ceiling, not correctness.
      header saying what belongs and what does not, so a file-only reader sees the no-op is intentional.
    **DESIGN DECIDED (see §4), BUILD deferred to Phase 3.** The pipeline object is NOT built now — an ordered
    container with one real occupant is the very organic-growth trap to avoid. Instead §4 fixes the design
-   (the `RelPass`/`PlanPass` split, the `perRel` lift, the `SequenceProgram`-style fold, run-order, `RelPass`
-   vs the legacy `Pass`, `fuse` as a no-op), because `flatten`/`unroll`/`prune`-remainder are one coupled
+   (the `RelPass`/`PlanPass` split, the `perRel` lift, the `SequenceProgram`-style fold, run-order, and
+   `fuse` as a no-op), because `flatten`/`unroll`/`prune`-remainder are one coupled
    Phase-3 body that this object will order — so it is built WITH them, dropping into a named home.
    *Mechanically Low; the deliverable was the decision, now recorded in §4.*
    → [relir-build-plan](./2026-08-01-relir-build-plan.md) §4
@@ -342,32 +332,22 @@ of gravity is ceiling, not correctness.
    `ON CONFLICT`, while `Insert`/`Update`/`Delete` emit both and `runProgram` executes them.
    [relir-build-plan](./2026-08-01-relir-build-plan.md) §1 states the gate — re-run P5/P5b under DO
    SQLite — and §7 lists it as the response to the DO-only-wall risk, so it is currently a risk whose
-   response is a sentence. Method exists and is cheap: the throwaway `wrangler dev` DO from §10·5,
+   response is a sentence. Method exists and is cheap: a throwaway `wrangler dev` DO,
    harness `test/cloudflare.test.ts`, about a minute per probe.
-   **A second, unrelated wall the same instrument cannot see, found while probing this:** legacy
-   compiles `g.inject(v1…v101)` to **101 binds** and a Durable Object refuses at 100. No corpus
-   traversal injects that many (measured: the widest corpus `inject` is ~20 args), so `test:cf-limits`
-   never runs it. **NON-ISSUE on the RelIR side:** a literal `inject`/set inlines as 0-bind typed
-   literals regardless of size (`constLit`), so `g.inject(v1…v101)` is 0 binds and DO-legal with nothing
-   to convert (`test/rel-spine.test.ts` pins this). The `land` pass that once folded it into one JSON
-   bind was DELETED 2026-08-06 (item 37) — it handled an invented scenario and, worse, converted a
-   0-bind literal set into a 1-bind one. The only real >100-bind case is 100+ distinct PARAMETERS in one
-   statement, which fails closed by design. Legacy still hits the wall, but legacy is the spine this
-   migration deletes, so its answer is deletion, not a fix.
-   *Low, and it is a PREREQUISITE for Phase 2 rather than one of its exit criteria.*
+   ⚠️ **A wide literal `inject` is NOT a bind wall, and the instrument cannot see why.** A literal
+   `inject`/set inlines as 0-bind typed literals regardless of size (`constLit`), so
+   `g.inject(v1…v101)` is 0 binds and DO-legal (`test/rel-spine.test.ts` pins it). The only real
+   >100-bind case is 100+ distinct PARAMETERS in one statement, which fails closed by design.
+   *Low.*
 
 1. **List members frame as bare values, not elements.** `AliasEntry` does not record the member shape,
    so a path/element-list label cannot frame its members as vertices. *Low-Med.*
 
-31. **A MIXED `inject()` FLATTENS its list arguments — a live wrong answer, not a deferral.**
-   `g.inject(["a","b"],"c")` yields three traversers where the reference yields two (the list, then
-   the string): `seedInject` (`steps/write/inject.ts`) takes the all-arrays path only when EVERY
-   argument is an array, and otherwise falls to `flattenListArgs`. The single-argument spelling
-   `g.inject(["a","b"])` is correct, so the defect is exactly the mixed call. Its own code comment
-   names the blocker — "until ScalarStream gains a per-row shape/type discriminant" — which is the
-   VariantStream question, so this is not a local fix. It is what still fails
-   `g_injectXListXa_bXcX_concat_XdX` now that `concat()` over a list correctly refuses. *Med — one
-   scenario, but a wrong answer, and it shares its substrate with item 1.*
+31. **A MIXED `inject()` DECLINES.** `g.inject(["a","b"],"c")` should yield two traversers (the list,
+   then the string) and instead refuses. The blocker is the one its old code comment named — a scalar
+   stream needs a per-row shape discriminant, which is the variant-stream question — so this is not a
+   local fix. It fails `g_injectXListXa_bXcX_concat_XdX`. *Low — one scenario, fail-closed, and it
+   shares its substrate with item 1.*
 
 4. **Encounter minting — the one missing primitive, and it owns three residuals.** A bare re-source
    `V()`/`E()` arm carries no `encounter`, so `armFansOut`/`positionArmFansOut` fail closed; minting
@@ -394,7 +374,7 @@ of gravity is ceiling, not correctness.
    exist.** *Low-Med.* **Do NOT add a `'column'` arm to `ByClass`** — recorded won't-do.
 
 34b. **`fold()` cannot carry `as()`/path/branch state into a list value — the ONE shape the alias
-   comparison still cannot reach.** `aliasCompareTest` + `aliasCompareRows` (`context/context.ts`,
+   comparison still cannot reach.** the alias-compare readers (`src/compiler/rel/alias.ts`,
    `tail/barrier.ts`) made the comparison shape-uniform across element, record, scalar, variant,
    property and path; `list` is not a gap in that seam at all — the traversal never gets there,
    because `g.V().as('a').out().as('b').fold()` refuses first. So this is a FOLD question (what a
@@ -446,7 +426,7 @@ of gravity is ceiling, not correctness.
 7. **`match()` generic patterns.** What remains is STRUCTURAL, not shape: a pattern not starting with
    `as()` (6), 0-root-variable patterns (3), `or`/`not`/nested-match, a LIST-shaped end var, and
    `where(var,P)` on a scalar-bound var — **this half LANDED**: a value-shaped label now compares as
-   its value (`AliasOperand`, `context/context.ts`); what is left of it is only the MIXED
+   its value (`AliasOperand`); what is left of it is only the MIXED
    element-vs-value comparison, which fails closed on purpose. **Medium.**
    → [conformance-structural-bets](./2026-07-12-conformance-structural-bets.md)
 
@@ -538,10 +518,18 @@ of gravity is ceiling, not correctness.
     `0x2b`. Two of the 14 are OURS, not upstream's: `g_V_out_tree_isXtypeOfXGType_TREEXX_count` and
     `g_V_whereXtree_isXtypeOfXGType_TREEXXX_values_name` already probe `GType.TREE` re-entry. **Medium.**
 
-25. **Unimplemented-step matrix-fill, with L3 counts.** `subgraph()` 6 · `branch()` 5 · `discard()` 4 ·
-    `sideEffect()` 4 · `sample()` 3 · `index()` 2 (14) · `with()` 2 (13) · `asString()` 2 · `fail()` 2 ·
-    `hasNot()` 1. Separately **`select(Pop.mixed).by(…)` is 5** — not a missing step but an
-    unimplemented `Pop` mode. *Low each; listed so the counts are not re-derived every sweep.*
+25. **THE STEPS WITH NO LOWERING AT ALL — the biggest bucket, and the one the second spine was hiding.**
+    Each throws `UnsupportedTraversal`, so every one is fail-closed rather than wrong; the matrix marks
+    them ❌ and `mise run rel-blockers` ranks the families. As families rather than a step list, because
+    they share substrate and land together:
+    - **the whole `TextP` family** (`containing`/`startingWith`/`endingWith` + negations) and `hasId`,
+      `hasKey`, `hasValue` — predicate hosts, and the largest single block of conformance;
+    - **per-traverser mapping** — `map(__.…)`, `flatMap`, `local(__.…)`, `sideEffect(__.…)`;
+    - **the non-`union` branch arms** — `coalesce`, `optional`, `branch`, and the SINGLE-arm `union(q)`;
+    - **path predicates and shapes** — `simplePath`, `cyclicPath`, `tree`, `subgraph`;
+    - **movement** — `otherV`; **re-source** — mid-traversal `V()`/`E()` (`…as('a').V()`);
+    - **odds and ends** — `index`, `reverse`, `split`, `propertyMap`, `coin`, `match`.
+    *Rank by `rel-blockers`, not by this order. Each is ordinary lowering work with a known seam.*
 
 ---
 
@@ -561,7 +549,7 @@ Each fails closed. Do only when a concrete scenario demands it.
   retypes the carried path from linear `cols` to its own recursive accumulator while the parent still
   DECLARES the position columns. It emitted malformed SQL (`rel.c.p0` was `undefined` and spliced an
   empty string) and was the one fail-closed VIOLATION here; `layoutProjection`
-  (`steps/context/context.ts`) now refuses to project a carried column the relation does not declare,
+  now refuses to project a carried column the relation does not declare,
   so it throws naming the channel. **Do not fix by declining at the repeat** — measured, the same
   condition holds for `local(__.repeat(…))` and `where(__.repeat(…))` under `simplePath()` and BOTH
   execute correctly, so a guard there regresses two working shapes. The fix is for a child body to
@@ -625,20 +613,11 @@ All → [phased-roadmap](./2026-07-11-phased-roadmap-plan.md) unless noted.
 typed `throw` deferrals and prose, so a marker grep finds nothing and proves nothing — read the
 deferral clusters in 5c instead.
 
-- **`staleEntries` (`test/L5-properties/known.ts`) has NO SPINE AWARENESS, and the gap is currently
-  LATENT rather than fixed.** A fast path belonging to one lowering cannot diverge in the other's
-  position, so a RelIR-only entry is reported STALE under `mise run test:legacy-spine` — "unreachable
-  here" read as "fixed, delete it", i.e. the check tells you to delete a valid entry. It bit once (a
-  `propertySeek` entry, since removed because the underlying bug was fixed), and no current entry is
-  spine-specific, so nothing reproduces it today. A `KnownDivergence.spine?` field was written and then
-  deliberately NOT kept — machinery with no consumer — so what remains is this note. If you add a
-  spine-specific entry, add the field with it. The whole problem disappears with legacy.
-
 - **A FAST PATH THAT IS *MORE CORRECT* THAN ITS GENERIC FALLBACK IS NEVER A FAST-PATH DEFECT** — it is
   a generic-path defect the fast path is HIDING, and its blast radius is the DEFAULT config, not the
   ratchet. Recorded because getting this backwards cost real time: the `propertySeek` entry was filed
   as a disable-path curiosity with "production is correct" written next to it, when the truth was a
-  wrong answer in BOTH spine positions under the default config (SQLite drops an `OFFSET` when the
+  wrong answer under the default config (SQLite drops an `OFFSET` when the
   block has a single-table `FROM` and a positive correlated `EXISTS` in its `WHERE`; `propertySeek`
   masked it by lifting the `EXISTS` into a join). The evidence was already in hand — the accelerated
   path answering correctly *inverts* `FastPathConfig`'s promise that the generic path is the semantic
