@@ -4,7 +4,7 @@ import type { Rel } from '../rel.ts';
  * `fuse` — the reserved home for SEMANTIC algebraic rewrites on the RelIR tree, and a NO-OP TODAY BY
  * DESIGN. Not unfinished: adjacent-node collapses that genuinely simplify the ALGEBRA belong here, and
  * until one earns its place there is nothing to do. It stays wired as identity so the pipeline has the
- * slot (build-plan §4.4) and a reader of this FILE — not the plan — sees the emptiness is intentional.
+ * slot (build-plan §4) and a reader of this FILE — not the plan — sees the emptiness is intentional.
  *
  * BELONGS HERE (unbuilt; add a case only once it buys something the block assembler cannot):
  *   - `Distinct(Distinct x)` collapses to `Distinct x`.

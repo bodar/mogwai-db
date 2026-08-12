@@ -35,7 +35,7 @@ import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts
  * Every write step here takes the INCOMING TRAVERSERS as a relation and makes it an `Insert.source`:
  * one statement writes N rows, so the statement count is a function of the PLAN — 7 store calls for
  * `g.V().hasLabel('person').property(single,'seen',1)` whether the stream holds ten elements or a
- * hundred. The only rows that ever cross into JS are a `snapshot`'s, as ONE JSON value (§10·5).
+ * hundred. The only rows that ever cross into JS are a `snapshot`'s, as ONE JSON value (§6·2).
  *
  * The legacy write path is the contrast and it is what §8 deletes: it reads its target elements into
  * JS and walks them, so its count is a function of the ROW COUNT — 8 store calls per element for the
@@ -48,7 +48,7 @@ import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts
  * would run against a graph its own earlier statement had already changed and silently leave
  * vertices standing. Every target here is therefore a `snapshot` binding (`src/rel/plan.ts`): taken
  * ONCE, retained by the executor, and read by every later statement as one JSON bind exploded by
- * `json_each` — which is also §10·5's rule, so a drop of 10,000 vertices is O(1) binds rather than
+ * `json_each` — which is also §6·2's rule, so a drop of 10,000 vertices is O(1) binds rather than
  * the 100-parameter wall the legacy path needs `RowBatch` to dodge. `checkPlan` proves the discipline
  * rather than trusting it: a plain CTE read by two steps of a program with effects is a THROW.
  *
@@ -89,7 +89,7 @@ const idsOf = (rel: Rel, fresh: Minter): Rel =>
 
 /** `DELETE FROM <table> WHERE <owner> IN <retained ids>` — the cascade's only statement shape, and
  *  `InQuery` over a `Ref` is what makes the retained rows a RELATION the predicate joins against
- *  rather than a placeholder list sized by the data (§10·5). */
+ *  rather than a placeholder list sized by the data (§6·2). */
 function deleteOwnedBy(spec: keyof typeof OWNED_BY, owners: Rel, fresh: Minter): Stmt {
   const { table, owner, cols } = OWNED_BY[spec];
   const target = make.scan({ id: fresh('t'), table, alias: fresh('wt'), channels: [], type: typeOf(...cols) });
@@ -302,7 +302,7 @@ export interface PropertyRemoval {
  * "is it already present" comparison — and a form that differed between them would silently append a
  * duplicate instead of matching.
  *
- * §10·5 is unaffected: the blob goes INTO the table, and this statement's `RETURNING` projects ids
+ * §6·2 is unaffected: the blob goes INTO the table, and this statement's `RETURNING` projects ids
  * only, so nothing untransportable is retained.
  */
 const storedExpr = (write: PropertySet): Expr =>
@@ -780,7 +780,7 @@ function namedLabelIds(names: readonly string[], fresh: Minter): Rel {
 /**
  * A run of `property()` STEPS → what this route can write, or `null` for "legacy owns it".
  *
- * **The parse is legacy's own** (`parseProperty`), which is §10·8's rule applied where it bites
+ * **The parse is legacy's own** (`parseProperty`), which is §6·6's rule applied where it bites
  * hardest: the cardinality position, the `T`-token form, a `__.select(<withSideEffect const>)` key
  * and the per-argument type channel are four things a second parser would have four chances to get
  * differently, and one of them (the sideEffect-constant VALUE) had already drifted between two
@@ -818,7 +818,7 @@ export function propertyWrites(steps: readonly IRStep[], elem: Elem, child: Chil
  * ONE PARSED SPEC → what this route can WRITE, or `null` for a value the compile-time form does not
  * carry the answer for (the list is in `propertyWrites`' own contract above).
  *
- * The spec is legacy's parse whichever host asked (§10·8): `parseProperty` for a `property()` STEP,
+ * The spec is legacy's parse whichever host asked (§6·6): `parseProperty` for a `property()` STEP,
  * a merge map's entries for a `mergeV` arm. Putting the EXPRESSIBILITY question in one place is what
  * stops the two hosts admitting different values: a value one host wrote through a scalar bind while
  * the other wrapped it in `jsonb(…)` would be two encodings of one property, and only one of them
@@ -1662,7 +1662,7 @@ function rootedVertices(steps: readonly IRStep[], child: ChildSeam, fresh: Minte
  * SYNTHESIZED STEPS, deliberately: writing the criteria as the steps they are and sending them through
  * the seam is the only spelling under which the merge's search and `has()`'s answer cannot drift apart.
  * It also means the search inherits whatever `has` learns next — the vtype-aware compare it already
- * has, the FTS arm §4.7 lifts. `args` is the whole of an `IRStep` these two steps read; the passes have
+ * has, the FTS arm §4 lifts. `args` is the whole of an `IRStep` these two steps read; the passes have
  * already run on the chain this belongs to, so re-running them over a synthesized fragment would ask a
  * question about a traversal nobody wrote.
  */

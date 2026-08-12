@@ -55,7 +55,7 @@ import { optionArms, type OptionArm } from '../ir/option-map.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
 
 /**
- * THE SECOND LOWERING — `Step[] -> RelIR` (§10·4 of `docs/2026-08-01-relir-build-plan.md`).
+ * THE SECOND LOWERING — `Step[] -> RelIR` (§6·1 of `docs/2026-08-01-relir-build-plan.md`).
  *
  * The legacy spine (`LoweringEngine`) builds SQL into an append-only `Query`, so the query never
  * exists as data and every optimization has to happen before or during lowering. This module is the
@@ -63,7 +63,7 @@ import { MUTATING_STEPS } from '../ir/strategies.ts';
  * to a `Plan` and takes the RelIR route end-to-end; anything else returns `null` and the legacy
  * spine handles it whole. **Never mixed inside one traversal** — that is what keeps RelIR a real
  * algebra rather than a wrapper, and it is why there is no opaque escape node and never will be
- * (§10·4: "not as a bridge, not temporarily, not behind a flag").
+ * (§6·1: "not as a bridge, not temporarily, not behind a flag").
  *
  * `null` is therefore the ONLY decline, and it must stay cheap and total: a step this module has
  * not learned yet is not an error, it is coverage that has not been written. What it must never do
@@ -78,7 +78,7 @@ import { MUTATING_STEPS } from '../ir/strategies.ts';
  * **The PAYLOAD PROJECTION is a different thing and is on its way IN, not permanently out.** Today
  * `spine.ts` hands the relation to legacy's materializer, which composes the payload SELECT — so the
  * element payload, the list/map blob reads and their `Shape` choice are still built outside the algebra.
- * §10·10 of the build plan corrects that: `materialize.ts` produces SQL, so it is a query producer and
+ * §6·3 of the build plan corrects that: `materialize.ts` produces SQL, so it is a query producer and
  * therefore this layer's work, and `Shape` is the boundary. `list.ts` and `map.ts` already do it the
  * intended way for their two shapes; the element payload is the keystone that is left.
  */
@@ -95,7 +95,7 @@ import { MUTATING_STEPS } from '../ir/strategies.ts';
 export interface RelLowering {
   readonly plan: Plan;
   /**
-   * THE WHOLE FRAMING CONTRACT — §10·10 reached, and the reason this is a `Shape` and not a `RelFraming`.
+   * THE WHOLE FRAMING CONTRACT — §6·3 reached, and the reason this is a `Shape` and not a `RelFraming`.
    *
    * The plan's result relation IS the rows `execute.ts` frames: its columns are the wire columns, its row
    * order is the wire's, and there is nothing left to compose over it. So what the spine hands on is the
@@ -645,7 +645,7 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
     // `has(label, key, value-or-predicate)` — which is the label constraint AND the property one,
     // exactly as `HasStep` composes them — and a `T`-TOKEN key, which asks about the element's own
     // id or label rather than about a property row. Each was a separate decline; each is a
-    // composition of clauses this module already builds, which is why they arrive together (§10·8).
+    // composition of clauses this module already builds, which is why they arrive together (§6·6).
     if (args.length === 3) {
       // The KEY must be a parsed string; the LABEL may be a string parameter (`hasLabelClause` binds
       // it), so only the key is guarded here.
@@ -709,7 +709,7 @@ function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, f
   const elem = subject.elem;
   // A substring `TextP` over a STORED property is `ftsSubstringPredicate`'s, and taking it here
   // would swap a trigram-index seek for a base-table LIKE scan — a regression the census cannot
-  // see, reported by the coverage number as progress. §4.7 lifts this.
+  // see, reported by the coverage number as progress. §4 lifts this.
   if (containsTextSearch(val)) return null;
 
   const { table, owner } = PROPERTIES[elem];
@@ -2260,13 +2260,13 @@ function scalarTail(
         // a `MIN()`/`MAX()` over a cast key: returning the raw storage extremum would round a >2^53
         // long through a JS number and lose the low bits, where the stored decimal TEXT is exact.
         // Ranking also makes zero rows emit NOTHING (`ReducingBarrierStep` supplies no seed for
-        // min/max, §10·12·1) rather than the one NULL row a `MIN()` aggregate emits. The `vt` column
+        // min/max, §92·1) rather than the one NULL row a `MIN()` aggregate emits. The `vt` column
         // is the winner's own GREMLIN vtype (`int`/`long`/`string`, from the per-row column or the
         // source's static tag), which the `result:'number'` framer reads through `vtypeToValueType`
         // so a text-carried long frames as a `long` — the vocabulary `values()` frames on. Only the
         // UNKNOWN case (a heterogeneous stream, no vtype) falls back to `typeof`, whose storage-class
         // value the framer routes to `sumBuffer`; there neither spine can raise the reference's
-        // cross-type error, so this matches legacy — the documented divergence (§13n).
+        // cross-type error, so this matches legacy — the documented divergence (§6·7n).
         const staticVt = out.kind === 'scalar' ? staticTypeOf(out.type) : undefined;
         const vtypeExpr = carries('vtype') ? col(rel.id, 'vtype')
           : staticVt ? compilerText(staticVt) : undefined;
@@ -2313,7 +2313,7 @@ function scalarTail(
       const bulk = rel.channels.find((channel) => channel.role === 'bulk');
       const staticSumVt = out.kind === 'scalar' ? staticTypeOf(out.type) : undefined;
       if (step.name === 'sum' && staticSumVt && isLongSumClass(staticSumVt)) {
-        // §13g·5 rows 1–2. A `sum` over a known `long`/`bigint` class must INCLUDE a value carried as
+        // §6·7 rows 1–2. A `sum` over a known `long`/`bigint` class must INCLUDE a value carried as
         // decimal TEXT past 2^53, which the storage-class eligibility guard silently EXCLUDED
         // (`typeof = 'text'` ∉ arithmetic) — answering `1` for `inject(9007199254740993L, 1L).sum()`.
         // Casting every value through `storedCompareOn` for the KNOWN class admits the text-carried one
@@ -2615,7 +2615,7 @@ function listTail(
   let labels = aliases;
   // A SET marker rides THROUGH the loop rather than being decided at its end, because the answer is a
   // fact about the value's history: `select(Column.keys)` produced a set, a slice or a member filter
-  // leaves it one, and a member REWRITE does not (§10·6). It was previously only ever set by the last
+  // leaves it one, and a member REWRITE does not (§3.3). It was previously only ever set by the last
   // step of a chain (`listSetOp`'s four deduping ops), so the state had nowhere to live.
   let set = isSet;
   // The sub-read lowerer is INJECTED rather than imported, which is what keeps the module DAG a DAG
@@ -3138,7 +3138,7 @@ const NO_SERVICES: ReadonlyMap<string, Service> = new Map();
  * swallowed.
  */
 /**
- * THE PAYLOAD PROJECTION, APPLIED — the fold's last act, and the §10·10 boundary in one function.
+ * THE PAYLOAD PROJECTION, APPLIED — the fold's last act, and the §6·3 boundary in one function.
  *
  * A `RelFraming` arm that this route projects for itself becomes a `wire` result whose relation IS the
  * rows `execute.ts` frames; an arm still built by legacy's materializer passes through as `stream`. It runs
@@ -4120,7 +4120,7 @@ function recordTail(
  * machinery of their own: an arm body over the current traverser IS the ordinary fold started at that
  * relation, so `__.out('knows')` inside a `union` is the same movement it is outside one. The input
  * node is then referenced once per arm, and a node referenced more than once is a DAG share — so
- * `name` decides whether the parent becomes a CTE (§4.6) rather than each arm recomputing it.
+ * `name` decides whether the parent becomes a CTE (§4) rather than each arm recomputing it.
  *
  * Traversers are a multiset, so the merge is `UNION ALL` and only `dedup()` collapses.
  *

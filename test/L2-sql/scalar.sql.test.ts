@@ -91,7 +91,7 @@ describe('scalar-parent / projection SQL', () => {
     // construction primitives (`qMathOps` / `relMathOps`). A spine that disagreed about
     // `log`→`LN`, `cbrt`'s sign split or `signum`'s three-way CASE would be a second
     // implementation of a non-derivable fact — the failure mode §12 names and that no per-spine
-    // assertion could see. Spelling is deliberately NOT pinned (§5a); each `toContain` is a
+    // assertion could see. Spelling is deliberately NOT pinned (§5); each `toContain` is a
     // semantic claim about what the formula compiled TO.
     {
       // `_` resolves through the by() modulator; result always tagged Double.

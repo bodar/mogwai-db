@@ -43,7 +43,7 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
       const gt = read('g.V().values("age").is(P.gt(30))');
       expect(gt.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
       // is(gt) folds through the vtype-aware compareKey (numeric-correct for the exact tail). The two
-      // spines put the operator in different places since the comparability fix (§13a) — legacy after
+      // spines put the operator in different places since the comparability fix (§6·7a) — legacy after
       // the compare-key `END`, RelIR inside each type-space arm so a cross-type compare is FALSE
       // rather than SQLite's storage order — so what is asserted is that the comparison is vtype-aware
       // AT ALL. A raw `value > ?` matches neither alternative.
@@ -110,7 +110,7 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     expect(run(store, 'g.V().not(__.out().id()).values("name")').map((r) => r.v).sort())
       .toEqual(['lop', 'ripple', 'vadas']);
     // A CORRELATED EXISTS over the child's rows, either way. The assertion is the SHAPE, not the
-    // spelling (§5a): legacy's gate projects a literal `1` while RelIR projects the child's own value
+    // spelling (§5): legacy's gate projects a literal `1` while RelIR projects the child's own value
     // as `one`, and the traversal moved between the two the day `id()` joined the RelIR tail. Pinning
     // the projection would have been pinning which spine answered.
     expect(read('g.V().filter(__.out().id()).count()').sql).toMatch(/EXISTS \(SELECT[^]*FROM edges/);
@@ -118,9 +118,9 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
 
 
 
-  // `has()` is RelIR-routed (§10·4), so these two run on BOTH spines. What is asserted is the
+  // `has()` is RelIR-routed (§6·1), so these two run on BOTH spines. What is asserted is the
   // SEMANTIC distinction each test is about, not the spelling the spines legitimately differ over —
-  // and since the comparability fix (§13a) they differ MORE than parenthesisation:
+  // and since the comparability fix (§6·7a) they differ MORE than parenthesisation:
   //
   //  - legacy applies the operator to the whole vtype-aware compare key: `(CASE … END) >= ?`.
   //  - RelIR pushes the operator INSIDE each type-space arm, because a cross-type comparison must be

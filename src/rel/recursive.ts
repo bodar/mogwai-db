@@ -39,7 +39,7 @@ import { containsSelfRef, exprChildren, exprRels, forEachRel, recursiveStep, rel
  * | `LIMIT` → accepted as a **WHOLE-CTE cap** | its own SELECT's, honoured |
  * | `ORDER BY` → accepted, whole-CTE | its own SELECT's, honoured |
  *
- * ⚠️ **The right column is why this walk must NOT descend.** `flatten` (§4.2) decorrelates into
+ * ⚠️ **The right column is why this walk must NOT descend.** `flatten` (§4) decorrelates into
  * exactly these correlated scalars — P2 lists them as legal-but-refused-today — so a law that
  * fires inside one would refuse the shapes Phase 3 is built to produce. Refusing a legal input to
  * keep a check simple is the failure mode the root CLAUDE.md names by hand.

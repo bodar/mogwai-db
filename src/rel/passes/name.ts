@@ -6,7 +6,7 @@ import { exprRels, forEachExpr, freeRelIds, hasFreeSelfRef, relChildren, relExpr
 /**
  * Decide which DAG vertices deserve a named boundary, and REWRITE them into `Plan` bindings.
  *
- * This is §4.6, and a binding is now the only naming mechanism: the pass used to return a side
+ * This is §4, and a binding is now the only naming mechanism: the pass used to return a side
  * table the emitter consulted, which meant "is this node a CTE?" was a question asked of a map
  * carried beside the plan rather than of the plan. A binding plus a `Ref` says the same thing IN
  * the algebra, and says it identically for a relation and for a statement's retained rows (§3.0).
@@ -50,7 +50,7 @@ export function name(root: Rel): Plan {
    * fail, because a same-named relation elsewhere in the statement would silently capture it. So the
    * admission rule is the free-reference test, not the occurrence count.
    *
-   * That is also why the test lives in `walk.ts`: `flatten` (§4.2) decides what it must DECORRELATE
+   * That is also why the test lives in `walk.ts`: `flatten` (§4) decides what it must DECORRELATE
    * with exactly this fact, and two implementations of "is this subtree self-contained" is two
    * chances to get it wrong.
    *

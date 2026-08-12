@@ -11,7 +11,7 @@
 // SQL text, and so does DO) while a big inlined statement is a fresh parse that evicts it.
 //
 // **But chunking is not the rule for new code — ONE JSON BIND is, read or write**
-// (docs/2026-08-01-relir-build-plan.md §10·5), and not for performance reasons: a read cannot chunk
+// (docs/2026-08-01-relir-build-plan.md §6·2), and not for performance reasons: a read cannot chunk
 // at all, a chunked write cannot be a relation the algebra joins against, and one value makes the
 // bind budget a provable property instead of an idiom to grep for. Performance only agrees: measured
 // 2026-08-02 on both runtimes, chunking is ~1.7× faster than a single `json_each(?)` statement on

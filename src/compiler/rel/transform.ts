@@ -11,7 +11,7 @@ import type { IRStep } from '../ir/step.ts';
  * The third vocabulary module, after `predicate.ts` (`P`/`TextP`) and `modulator.ts` (`by()`), and
  * chosen the same way: the blocker table (`mise run rel-blockers`) ranked this family third at **153
  * traversals over EIGHTEEN step names**, largest member `asNumber` at 60. No per-step count could show
- * that, and no per-step increment would have paid for the parse — which is §10·8's whole argument.
+ * that, and no per-step increment would have paid for the parse — which is §6·6's whole argument.
  *
  * They are one lowering because they ask one question: an expression over the traverser's value, plus
  * (for the casts only) a change to the FRAMING type. Nothing else about the relation moves — no

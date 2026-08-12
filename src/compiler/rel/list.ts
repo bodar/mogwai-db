@@ -540,7 +540,7 @@ export function listRetype(
 
     // **`sum` over a KNOWN exact-tail class must admit its decimal-TEXT members.** The eligibility
     // guard is a storage-class test, so a `long`/`bigint` past 2^53 has `typeof = 'text'` ∉ arithmetic
-    // and was silently EXCLUDED — the row-level defect §13g·5 records, reachable here through exactly
+    // and was silently EXCLUDED — the row-level defect §6·7 records, reachable here through exactly
     // the same shape (`inject(9007199254740993L, 1L).fold().sum(Scope.local)` answered 1). Casting
     // through `storedCompareOn` for the known class admits it exactly, and `sumTower` keeps the class
     // and rides a >2^53 result as exact TEXT so the int64 survives the JS-number read.
@@ -1067,7 +1067,7 @@ export function collectionRetype(rel: Rel, vtype: string, kind: 'list' | 'set', 
 }
 
 /**
- * THE LIST PAYLOAD — one row's `list` column, projected to the JSON the framing layer reads (§10·10).
+ * THE LIST PAYLOAD — one row's `list` column, projected to the JSON the framing layer reads (§6·3).
  *
  * `null` declines, as everywhere in this module. Two encodings are served and each is what legacy's
  * `materializeListRoot` builds for it:

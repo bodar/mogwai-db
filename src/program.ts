@@ -6,7 +6,7 @@ import type { Binding, Plan } from './rel/plan.ts';
 export interface RowSource { query<T = any>(sql: string, binds?: readonly unknown[]): T[]; }
 
 /**
- * RUN A RELIR PROGRAM — the binding executor (§3.0/§10·2 of the RelIR build plan).
+ * RUN A RELIR PROGRAM — the binding executor (§3.0/§9 of the RelIR build plan).
  *
  * It walks `Plan.bindings` in order: a `Rel` binding is already a CTE in the SQL of every step
  * after it, and a `Stmt` binding is a step whose `RETURNING` rows are RETAINED, so that every later

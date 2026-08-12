@@ -11,7 +11,7 @@ import {
 /**
  * THE ELEMENT PAYLOAD — an id-relation projected to the tuple a vertex or an edge is ON THE WIRE.
  *
- * The keystone of §10·10, and the decision that section records: `materialize.ts` BUILDS SQL, so by
+ * The keystone of §6·3, and the decision that section records: `materialize.ts` BUILDS SQL, so by
  * decision #3 it is a query producer and therefore the algebra's. What is genuinely not the algebra's
  * is the layer after it — `execute.ts`'s framers, which take ROWS plus a `Shape` and yield GraphBinary
  * with no SQL anywhere. **`Shape` is the boundary**, and this module is what moves the last SQL-producing
@@ -19,7 +19,7 @@ import {
  *
  * Before this, every covered element traversal — most of the corpus RelIR answers — ended with legacy's
  * `lowerSteps` composing the payload SELECT over RelIR's relation, which meant RelIR did not produce the
- * whole query and §5a's equivalence gate did not read as it claimed. It also meant the next arm of the
+ * whole query and §5's equivalence gate did not read as it claimed. It also meant the next arm of the
  * map family was blocked by a `throw` inside the code §8 deletes, i.e. by the migration running backwards.
  *
  * ## What the tuple is, and why it is FIXED
@@ -32,7 +32,7 @@ import {
  * below is the same ANSWER as its legacy twin — the id is `COALESCE(uid, id)`, a vertex's label is ALL of
  * its labels ordered by label id, an edge's endpoints are EXTERNAL ids, a property bag is insertion-ordered
  * and its values are self-describing `{t,v}` nodes — and where the SQL differs it differs only in
- * spelling, which is what §5a's gate admits.
+ * spelling, which is what §5's gate admits.
  *
  * ## The one place it is deliberately MORE correct than its twin
  *

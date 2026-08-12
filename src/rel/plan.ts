@@ -10,7 +10,7 @@ import { isStmt, type Stmt } from './stmt.ts';
  * One concept, one node:
  *
  * - a binding whose node is a `Rel`, referenced more than once → a **CTE**. That is the `name`
- *   pass's decision (§4.6), now a property OF THE PLAN rather than a map carried beside it.
+ *   pass's decision (§4), now a property OF THE PLAN rather than a map carried beside it.
  * - a binding whose node is a `Stmt` → a **statement boundary**. The executor runs it, retains its
  *   `RETURNING` rows, and the same `Ref` resolves to them.
  * - a binding whose node is a `Rel` and which is marked `snapshot` → a **read boundary**: it runs as
@@ -22,7 +22,7 @@ import { isStmt, type Stmt } from './stmt.ts';
  * **effects are legal only at a binding**, which is what makes a write in a read position
  * (`union(__.addV(), __.V())`) plan composition instead of a driver.
  *
- * The executor lives OUTSIDE `src/rel/` (§10·2). RelIR supplies `Ref`, this shape, and the passes.
+ * The executor lives OUTSIDE `src/rel/` (§9). RelIR supplies `Ref`, this shape, and the passes.
  */
 export interface Binding {
   readonly name: string;

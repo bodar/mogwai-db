@@ -22,7 +22,7 @@ export type AliasShape = 'vertex' | 'edge' | 'value' | 'list' | 'map' | 'propert
 /** The `k` tag each shape rides under. EXPORTED because it is DATA rather than emission: the RelIR
  *  spine writes the same history entries (`src/compiler/rel/alias.ts`) and a second copy of these
  *  numbers would be a second chance for the two encodings to drift apart silently — the same reason
- *  `STORAGE_CLASS`/`JAVA_WHITESPACE` are shared rather than re-derived (build plan §10·8). */
+ *  `STORAGE_CLASS`/`JAVA_WHITESPACE` are shared rather than re-derived (build plan §6·6). */
 export const SHAPE_K: Record<AliasShape, number> = { vertex: 0, edge: 1, value: 2, list: 3, map: 4, property: 5 };
 const K_SHAPE: Record<number, AliasShape> = { 0: 'vertex', 1: 'edge', 2: 'value', 3: 'list', 4: 'map', 5: 'property' };
 
@@ -114,7 +114,7 @@ export const aliasPresent = (col: Expression): Expression =>
 // made it look like legacy's object model, which it never was: `rel/alias.ts` builds and reads the
 // same entries, and its own header records why ("the shared type stays because select() re-entry
 // still needs the same entry shape the legacy host reads"). The build plan's Phase 0 proposed giving
-// `rel/` its own alias types instead; that predates §10·10 removing the TraverserLayout bridge, and
+// `rel/` its own alias types instead; that predates §6·3 removing the TraverserLayout bridge, and
 // it would have bought a second encoding to keep in step. One home, no bridge.
 
 /** Bound as() labels: label → its carried column (a0, a1, … — user strings never

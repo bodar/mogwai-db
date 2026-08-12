@@ -313,7 +313,7 @@ describe('RelIR', () => {
   // The OTHER direction, and it is the one that would have blocked Phase 3: the barrier laws are
   // laws of the recursive SELECT, not of every SELECT beneath it. Measured legal on bun:sqlite —
   // a correlated scalar carrying COUNT(*) inside a recursive term runs and returns the right
-  // per-row value. `flatten` (§4.2) decorrelates into exactly this shape, per P2, so a law that
+  // per-row value. `flatten` (§4) decorrelates into exactly this shape, per P2, so a law that
   // fired inside a subquery would refuse the shapes Phase 3 exists to produce.
   // The same defect one layer up from P3's, and reachable by a LOWERING rather than by the engine:
   // every row differs in a row-unique column, so the operator collapses nothing. Same arity, same

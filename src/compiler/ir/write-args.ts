@@ -406,7 +406,7 @@ function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null,
  * THE MERGE MAPS — the merge argument, its `option()` arms and the `property()` tail after them,
  * normalized against their roles and cross-validated.
  *
- * Exported because the RelIR write route needs the identical parse (§10·8, and the same argument
+ * Exported because the RelIR write route needs the identical parse (§6·6, and the same argument
  * `parseProperty` already carries): the role-dependent token rules, the `validateNoOverrides` check,
  * `Cardinality.x(v)` beating an enclosing option default, and the per-argument type channel are five
  * things a second parser would have five chances to get differently — and one of them had already

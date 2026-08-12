@@ -32,7 +32,7 @@ import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject 
  * compiler-side state, and it is the SAME `AliasEntry`/`AliasMap` the framing layer's
  * `TraverserLayout` declares. Sharing the type used to be load-bearing at the SEAM: `spine.ts` handed
  * the map straight over rather than translating one representation into another, and `alias` was the one
- * channel role whose framing form was a NAME map rather than a column. §10·10 retired that seam — the
+ * channel role whose framing form was a NAME map rather than a column. §6·3 retired that seam — the
  * payload projection is the algebra's now, so nothing crosses — and the map is read only HERE, by the
  * `as()`/`select()` vocabulary that builds it. The shared type stays because `select()` re-entry still
  * needs the same entry shape the legacy host reads; it is no longer a claim about a boundary.
@@ -62,7 +62,7 @@ import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject 
  * are the same DECLINE on this route — the distinction only buys a better message, which is the spine
  * that owns messages' business.
  */
-/** MODULE-PRIVATE again since §10·10: its one external reader was `lowerToRel`, pruning the map before
+/** MODULE-PRIVATE again since §6·3: its one external reader was `lowerToRel`, pruning the map before
  *  handing it to `spine.ts`'s `TraverserLayout` bridge. With the payload projection inside the algebra
  *  there is no bridge and no map to hand over, so the two readers left are both here. */
 export const liveAliases = (aliases: AliasMap, rel: Rel): AliasMap =>
@@ -108,7 +108,7 @@ export const aliasListAt = (column: Expr, end: 'first' | 'last'): Expr =>
  * SHAPE-PRESERVING on purpose, and that is what makes one implementation serve the element, scalar
  * and list hosts: the payload columns pass through untouched and only the alias channels change.
  * Which is also why it is the same rule at every position in a chain — `as()` after a movement, after
- * a `values()`, after a `fold()` is one lowering, not three (§10·8: land the vocabulary).
+ * a `values()`, after a `fold()` is one lowering, not three (§6·6: land the vocabulary).
  *
  * A NEW label mints a channel through `withChannel`, so the column lands in `ROLE_ORDER` and the
  * declared type is rebuilt from the channel list rather than appended to — an alias sorts BEFORE

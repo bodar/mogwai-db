@@ -19,7 +19,7 @@
  * whose largest member blocks 60 traversals and which together block 153, and no per-step table can
  * show that. They are also one lowering — a transform is an expression over the traverser's value plus,
  * for the `as*` casts, a framing retype — so landing the family is barely more work than landing its
- * largest member. That is the whole argument for ranking by family (§10·7/§10·8): a family closes
+ * largest member. That is the whole argument for ranking by family (§6·6/§6·6): a family closes
  * cleanly, a step leaves a ragged edge, and the ragged edge is what makes the NEXT increment expensive.
  *
  * A step that is in no family below is listed separately rather than silently dropped — the residue is

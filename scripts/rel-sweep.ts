@@ -2,7 +2,7 @@
 /**
  * THE DECLINE-CONTRACT GATE — `lowerToRel` returns a plan or `null`, and NEVER throws.
  *
- * That contract is the whole reason the dual spine is safe (§10·4): a covered chain routes RelIR, an
+ * That contract is the whole reason the dual spine is safe (§6·1): a covered chain routes RelIR, an
  * uncovered one declines and the legacy spine answers it exactly as it does today. A THROW from the
  * lowering is neither — it is the new spine raising an error on a traversal the old one compiles
  * fine, which is a support REGRESSION rather than a deferral. Nothing else in the suite can see it,

@@ -14,7 +14,7 @@ import { DurableObject } from 'cloudflare:workers';
  *
  * This takes arbitrary SQL over HTTP. That must never be reachable from the shipped Worker, so it is
  * its own entry point with its own `wrangler.jsonc`, started by a test and killed by it — never
- * deployed, never imported by `src/`. The method is the one recorded in the build plan (§10·5): a
+ * deployed, never imported by `src/`. The method is the one recorded in the build plan (§6·2): a
  * throwaway `wrangler dev` worker with its own DO measures production SQLite for real in about a
  * second, and any future "X is legal/faster on the platform" claim goes through here before it
  * becomes a rule.

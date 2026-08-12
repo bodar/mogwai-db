@@ -1,7 +1,7 @@
 import type { GraphStore } from '../../src/storage.ts';
 
 /**
- * The two mechanical halves of the RelIR equivalence gate (§5a of
+ * The two mechanical halves of the RelIR equivalence gate (§5 of
  * `docs/2026-08-01-relir-build-plan.md`): **same results, same access path, never spelling.**
  *
  * They live in `test/support/` rather than beside one test because the gate is declared for
@@ -18,7 +18,7 @@ import type { GraphStore } from '../../src/storage.ts';
  * maps, typed envelopes). RelIR sits BELOW that framing — §2 keeps shape out of the algebra
  * entirely — so the core is the part a hand-built plan is answerable for, and taking it by
  * structure rather than by hand is what stops the gate degrading into a transcription of the
- * emitter's own output — which is exactly what an earlier "gate" was, and why §5a's two properties
+ * emitter's own output — which is exactly what an earlier "gate" was, and why §5's two properties
  * (same results, same access path) replaced byte-identity.
  *
  * Returns `undefined` for a plan with no CTE chain (nothing to isolate) or a `WITH RECURSIVE` one
@@ -62,8 +62,8 @@ export function relationalCore(sql: string): string | undefined {
  *
  * Object names are dropped and CTE-materialization lines (`CO-ROUTINE`, `MATERIALIZE`, and the
  * scan OF a materialized CTE) are excluded, for one reason each: an alias is spelling, and
- * CTE-versus-inline is the `Name` pass's declared decision (§4.6), so neither is a change of
- * access path. What survives is exactly what §5a is protecting — which index SQLite chose, whether
+ * CTE-versus-inline is the `Name` pass's declared decision (§4), so neither is a change of
+ * access path. What survives is exactly what §5 is protecting — which index SQLite chose, whether
  * it scanned or searched, and every sort or dedup it had to materialize a B-tree for.
  */
 export function accessPaths(store: GraphStore, sql: string, binds: readonly any[]): readonly string[] {

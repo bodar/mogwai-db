@@ -65,7 +65,7 @@ export interface Scenario {
   /** `@SpineRel` / `@SpineLegacy` — PIN this scenario's spine, ignoring the ambient switch.
    *
    *  A THIRD way for the two routes to diverge, and the one `@RelIR` cannot express: legacy neither
-   *  refuses nor agrees, it ANSWERS DIFFERENTLY — and by §14's decision (legacy is what §8 deletes)
+   *  refuses nor agrees, it ANSWERS DIFFERENTLY — and by §6·1's decision (legacy is what §8 deletes)
    *  that difference is accepted rather than fixed. `@RelIR` asserts a THROW under
    *  `test:legacy-spine`, which is simply false here, and a bare skip would stop asserting the
    *  scenario in one configuration for no reason: the answer under test is not a property of the

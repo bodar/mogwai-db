@@ -54,7 +54,7 @@ export type AppScope =
   & Dependency<'io', IoStore>
   /** THIS graph's rows. Per-graph by lifetime, and per-graph is what app scope means here.
    *
-   *  The plan (§4.5) preferred the request tier to keep a store out of COMPILE-time reach; that
+   *  The plan (§4) preferred the request tier to keep a store out of COMPILE-time reach; that
    *  premise held only while the engine took an `AppScope` directly. It now takes a `RequestScope`
    *  and publishes a hand-picked `Engine` interface, so compile-time code cannot reach ANY scope
    *  object — the tier no longer decides the visibility, the Engine interface does, and an

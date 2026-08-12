@@ -250,7 +250,7 @@ export function rewriteRels(plan: Rel, f: (mapped: Rel, original: Rel) => Rel): 
  * A subtree with a free reference is not a self-contained relation: hoisting it to a named CTE moves
  * it out of the scope its `Col`s resolve in, and the reference silently becomes either an error or,
  * worse, a same-named relation elsewhere in the statement. `name` uses it to decide what may be
- * bound; `flatten` (§4.2) needs the same fact to decide what it must decorrelate, which is why it is
+ * bound; `flatten` (§4) needs the same fact to decide what it must decorrelate, which is why it is
  * here rather than private to a pass.
  *
  * A `SelfRef` defines nothing and names its walk positionally, so it is not a free reference.

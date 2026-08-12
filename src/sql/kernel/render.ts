@@ -350,7 +350,7 @@ export type Shape =
   | { kind: 'discard' };
 
 /** Which lowering produced a compile. There are two only while the RelIR migration runs, and
- *  `legacy` is scheduled for deletion with the spine it names (§10·4 — the dual spine is a harness
+ *  `legacy` is scheduled for deletion with the spine it names (§6·1 — the dual spine is a harness
  *  with an end date). It is a compile FACT, not a flag: the coverage ratchet reads it, and so does
  *  anyone asking why a traversal's SQL looks the way it does. */
 export type Spine = 'legacy' | 'rel';

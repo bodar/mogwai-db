@@ -260,7 +260,7 @@ export const storedCompare = (rel: RelId, vtype = 'vtype') => storedCompareOn(co
  * path.** Coverage measures whether the new spine can express a traversal, not whether it should
  * take it from a specialized lowering — silently swapping a trigram-index seek for a base-table
  * LIKE scan would be a performance regression the census cannot see and the coverage number would
- * report as progress. §4.7 is where the fast paths become plan rewrites; until then this predicate
+ * report as progress. §4 is where the fast paths become plan rewrites; until then this predicate
  * is how a site says "that one is still the legacy spine's".
  *
  * Deliberately NOT conditional on the `ftsSubstringPredicate` flag: the lowering is a function of

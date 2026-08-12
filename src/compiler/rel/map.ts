@@ -21,8 +21,8 @@ import { isReducer, reducerAggregate } from './reducer.ts';
  * The eighth vocabulary module on `build.ts`, and deliberately the LIST module's twin: a list is one
  * JSONB `list` column per row and a map is one JSONB `map` column, so both are ordinary values that
  * flow through the same relations and reach the wire through this module's own `mapPayload` exactly as a
- * list reaches it through `listPayload` (§10·9 — a shape is a value plus a framing arm, never a delegated
- * step; §10·10 — that arm is a PROJECTION the algebra builds, not a call into legacy's materializer).
+ * list reaches it through `listPayload` (§6·3 — a shape is a value plus a framing arm, never a delegated
+ * step; §6·3 — that arm is a PROJECTION the algebra builds, not a call into legacy's materializer).
  *
  * ## Calcite's decomposition, which is two ordinary nodes
  *
@@ -327,7 +327,7 @@ export function groupRows(
   // a plain `Project` into the aggregate's own block, so `gk` becomes the expression again in the SELECT
   // and the GROUP BY. Measured against legacy, which CTEs its key: 3 copies of the property subquery
   // against legacy's 1, and 6 against 4 for a label key. With the fence the key is computed once, which
-  // is §5a's access-path half of the equivalence gate and not a cosmetic preference.
+  // is §5's access-path half of the equivalence gate and not a cosmetic preference.
   const keyed = make.materialize({ id: fresh('gm'), input: projected, channels: projected.channels, type: projected.type });
   // TinkerPop drops an unproductive key rather than grouping under null — UNLESS `ProductiveByStrategy`
   // asked for the null-keeping behaviour, which is why this asks `productivityFilter` rather than
@@ -1139,7 +1139,7 @@ export function mapKey(input: Rel, key: string, valOf: MapOf, fresh: Minter): Re
 }
 
 /**
- * THE MAP PAYLOAD — one row's `map` column as the JSON the framing layer reads (§10·10), or `null` to
+ * THE MAP PAYLOAD — one row's `map` column as the JSON the framing layer reads (§6·3), or `null` to
  * decline.
  *
  * The blob is ALREADY the frameable tree: `[[keyNode, valNode], …]` with self-describing `{t,v}` scalar

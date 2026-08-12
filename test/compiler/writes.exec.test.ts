@@ -62,7 +62,7 @@ test('g.E().drop() removes every edge but keeps all vertices', () => {
 // the ids the graph had BEFORE any of them ran — the property `g.V().out().drop()` above depends on,
 // and one a CTE could not have, since a CTE reading `edges` is a different question after the
 // incident-edge delete. Every statement carries O(1) binds because that retained set crosses as ONE
-// JSON value (§10·5); `test/cf-limits.test.ts` is where that is measured at 250 elements.
+// JSON value (§6·2); `test/cf-limits.test.ts` is where that is measured at 250 elements.
 test('drop() compiles to a RelIR program whose target is snapshotted, not a re-evaluated CTE', () => {
   const vertex = compile('g.V().has("name","marko").drop()', {});
   expect([vertex.kind, (vertex as { spine?: string }).spine]).toEqual(['program', 'rel']);
@@ -85,7 +85,7 @@ test('drop() compiles to a RelIR program whose target is snapshotted, not a re-e
 // The legacy write path reads its target elements into JS and walks them, so its statement count is
 // a function of the ROW COUNT. A RelIR program's is a function of the PLAN: the elements are an
 // `Insert.source`, one statement writes N rows, and the only rows that cross into JS are a
-// snapshot's — as ONE JSON value, which is §10·5's rule.
+// snapshot's — as ONE JSON value, which is §6·2's rule.
 //
 // A count that is merely SMALL would not say this; a count that is IDENTICAL at ten elements and a
 // hundred does. Measured, not asserted from the shape of the code — the failure this guards against
@@ -361,7 +361,7 @@ test('mergeV compiles to a RelIR program whose two branches are both uncondition
   // a predicate rather than by which statements were assembled.
   expect(steps.some((step) => /INSERT INTO nodes/.test(step.emitted.sql))).toBe(true);
   expect(steps.some((step) => /INSERT INTO vertex_properties/.test(step.emitted.sql))).toBe(true);
-  // Same platform budget every write program is held to — the search crosses as ONE JSON value (§10·5),
+  // Same platform budget every write program is held to — the search crosses as ONE JSON value (§6·2),
   // so no statement's bind count is a function of how many elements the search matched.
   expect(Math.max(...steps.map((step) => step.emitted.binds.length))).toBeLessThanOrEqual(CF_MAX_BINDS);
 });

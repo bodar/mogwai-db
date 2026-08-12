@@ -11,7 +11,7 @@ import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { PER_ROW, STATIC } from '../src/sql/kernel/render.ts';
 
 /**
- * THE RelIR SPINE — routing, coverage and the per-traversal differential (§10·4).
+ * THE RelIR SPINE — routing, coverage and the per-traversal differential (§6·1).
  *
  * The corpus-wide differential is `mise run test:legacy-spine` (the whole suite with the switch
  * off) and the coverage ratchet is the census `spine` column. This file holds the three things
@@ -234,7 +234,7 @@ const COVERED = [
   "g.inject(['a']).merge(__.constant('b').fold())",
   // A rooted SUB-READ operand: the members are only known at RUN TIME, so the operand is a relation —
   // lowered by the SAME fold into the same algebra and read through a `Scalar` expression. No opaque
-  // escape node (§10·4), and if the inner chain is not covered the decline propagates outward.
+  // escape node (§6·1), and if the inner chain is not covered the decline propagates outward.
   "g.inject(['a','b']).merge(__.V().values('name').fold())",
   "g.V().values('age').fold().merge(__.V().values('age').fold())",
   "g.V().values('name').fold().intersect(__.V().values('name').fold())",
@@ -1207,7 +1207,7 @@ describe('the RelIR spine', () => {
     //    collapse upstream has made bulk anything but 1 — `both().both()` is that. A weighted min would
     //    still be the min, which is why the pair is asserted together against legacy. Compare the VALUE
     //    (`v`), not the whole row: `min`/`max` now project the winner's own GREMLIN vtype (`int`) where
-    //    legacy projects a storage class (`integer`) — same answer, different internal spelling (§10·4:
+    //    legacy projects a storage class (`integer`) — same answer, different internal spelling (§6·1:
     //    assert semantics, not route), and the value is what bulk weighting is about.
     for (const gremlin of ["g.V().both().both().values('age').sum()", "g.V().both().both().values('age').mean()",
       "g.V().both().both().values('age').min()", "g.V().both().both().values('age').max()"]) {
@@ -1233,7 +1233,7 @@ describe('the RelIR spine', () => {
   });
 
   test('min/max compare in type space and frame the winner\'s own vtype (rel ahead of legacy)', () => {
-    // §13g·5. min/max ORDER within a Gremlin TYPE SPACE, not by SQLite storage class, and return the
+    // §6·7. min/max ORDER within a Gremlin TYPE SPACE, not by SQLite storage class, and return the
     // ORIGINAL extremal row's value + its own Gremlin vtype (an argmin/argmax). The covered cases still
     // agree with legacy on the VALUE; they diverge on the `vt` spelling (Gremlin `int`/`string` vs a
     // storage class), which the framer reads through the same `values()` path so a text-carried long
@@ -1243,7 +1243,7 @@ describe('the RelIR spine', () => {
     expect(val("g.V().values('age').max()")).toEqual([{ v: 35, vt: 'int' }]);
     expect(val("g.V().values('name').max()")).toEqual([{ v: 'vadas', vt: 'string' }]);
 
-    // THE §13g·5 rows the storage-class order gets WRONG: a `long` past 2^53 rides as decimal TEXT, so
+    // THE §6·7 rows the storage-class order gets WRONG: a `long` past 2^53 rides as decimal TEXT, so
     // `MIN`/`MAX` by storage class (INTEGER before TEXT) pick the wrong element AND frame it as text.
     // Type-space comparison + returning the original row fixes both, and RelIR is AHEAD of legacy here
     // (legacy still answers `10`/`"-9007…"` with a storage-class vt), pinned in both directions.
@@ -1252,7 +1252,7 @@ describe('the RelIR spine', () => {
     // Legacy is the wrong one — min picks 10 (INTEGER sorts before TEXT), not the numerically smaller long.
 
     // min/max over an EMPTY stream emit NOTHING (`ReducingBarrierStep` supplies no seed for them,
-    // §10·12·1), where a raw `MIN()` aggregate would emit one NULL row.
+    // §92·1), where a raw `MIN()` aggregate would emit one NULL row.
     expect(val("g.V().hasLabel('nope').values('age').min()")).toEqual([]);
   });
 

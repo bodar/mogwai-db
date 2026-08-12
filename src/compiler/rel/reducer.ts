@@ -56,7 +56,7 @@ export const isLongSumClass = (vt: string): vt is 'long' | 'bigint' => LONG_SUM_
  *
  * The narrower/wider INTEGER classes (`byte`+`1` → `short` promotion, `Sum.feature`'s `d[128].s`) are a
  * separate increment: they are not tagged at the `inject` source today, and tagging them is a both-spine
- * framing-vocabulary change with its own census reap (see §13g·4 in the build plan).
+ * framing-vocabulary change with its own census reap (see §6·7·4 in the build plan).
  */
 export function sumTower(sum: Expr, inputClass: 'long' | 'bigint'): { value: Expr; type: Expr } {
   const value: Expr = {

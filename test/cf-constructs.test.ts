@@ -13,7 +13,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
  * **`src/cf-limits.ts` cannot cover this and is not meant to.** That seam asserts the two limits a Bun
  * statement can be measured against (≤ 100 bound parameters, ≤ 100 KB of text). Whether a CONSTRUCT is
  * accepted at all is not countable from Bun — the only authority is workerd, so this boots a throwaway
- * `wrangler dev` worker with its own Durable Object (`test/cf-probe/`, the method recorded in §10·5)
+ * `wrangler dev` worker with its own Durable Object (`test/cf-probe/`, the method recorded in §6·2)
  * and asks it. The two instruments are complementary: cf-limits sees a size wall, this sees a
  * vocabulary wall, and neither sees the other's.
  *
@@ -150,7 +150,7 @@ describe('the write constructs, measured on DO SQLite', () => {
   });
 
   test('DELETE … WHERE id IN (SELECT …) is accepted — the membership predicate drop() lowers to', async () => {
-    // §10·6: a Delete has no `using`; membership is an ordinary subquery predicate in `where`. This is
+    // §3.3: a Delete has no `using`; membership is an ordinary subquery predicate in `where`. This is
     // that shape, and it is the one a vertex-drop cascade depends on.
     const outcome = last(await probe('delete-in-query', [...SCHEMA,
       { sql: "INSERT INTO n (k, v) VALUES ('a', 1), ('b', 2), ('c', 3)" },

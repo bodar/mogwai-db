@@ -15,7 +15,7 @@ import type { ChildSeam } from './child.ts';
 /**
  * THE PATH CHANNEL — where the traverser has BEEN, as one carried column.
  *
- * The ninth vocabulary module on `build.ts`, and the reap of §10·10: the seam that could declare no
+ * The ninth vocabulary module on `build.ts`, and the reap of §6·3: the seam that could declare no
  * translation for the `path` role is gone, so the channel core's oldest unbuilt role finally has a
  * producer. The core could always hold a path (`CHANNEL_MERGE_POLICY.path`, `CHANNEL_GROUP_POLICY.path`
  * were both declared and unreachable); what was missing was somewhere for it to go.
@@ -55,7 +55,7 @@ import type { ChildSeam } from './child.ts';
  * the same per-member buffers). That is not a shortcut, it is what the reference corpus says: TinkerPop's
  * `path().by('name').combine(['dave'])` answers `l[marko,josh,dave]`, so a Path re-enters the collection
  * vocabulary as an ordinary list and every set op, `reverse()`, `unfold()` and local reducer composes over
- * it with no path-specific lowering (§10·9 — a shape is a value plus a framing arm). It is exactly the
+ * it with no path-specific lowering (§6·3 — a shape is a value plus a framing arm). It is exactly the
  * standing `set` already has on the list arm, one level up: same member substrate, different wire form.
  *
  * ## Fail closed: an unappended position is a WRONG path
@@ -230,7 +230,7 @@ export function pathPositions(
    * So this is legacy's own boundary, stated in this route's vocabulary — `linearScalarList` coerces a path
    * to a list only when `positions.every(p => p.render === 'value')`. A MIXED `by().by('name')` is false for
    * the same reason it is there: alternate positions are still elements. It goes away when a list can hold
-   * an ELEMENT member (§10·10's remaining list arm), not before.
+   * an ELEMENT member (§6·3's remaining list arm), not before.
    */
   const scalars = parsed.length > 0 && !parsed.some((modulation) => modulation.key.kind === 'identity');
   if (!hasNonIdentity || step.productiveBy === true) return { rel: projection, of: TYPED_MEMBERS, scalars };
