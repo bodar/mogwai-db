@@ -5,6 +5,7 @@ import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
 import { emit, emitRelational } from '../../rel/emit.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import { seek } from '../../rel/passes/seek.ts';
+import { fts } from '../../rel/passes/fts.ts';
 import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -2996,6 +2997,8 @@ export interface Lowering {
    *  finished algebra, so unlike every other flag here it changes no lowering decision — which is
    *  why it is read once, at the pass, rather than threaded into the fold. */
   readonly propertySeek?: boolean;
+  /** May the physical TextP FTS rewrite drive a bare element scan? */
+  readonly ftsSubstringPredicate?: boolean;
   /**
    * The GRAPH's declared vertex-label cardinality — a CAPABILITY, not a strategy, which is why it is
    * here rather than being read from a store at lowering time.
@@ -3078,6 +3081,7 @@ const settle = (opts: Lowering): Required<Lowering> => ({
   collapse: opts.collapse ?? true,
   correlatedChildren: opts.correlatedChildren ?? true,
   propertySeek: opts.propertySeek ?? true,
+  ftsSubstringPredicate: opts.ftsSubstringPredicate ?? true,
   labelRegime: opts.labelRegime ?? 'single',
   sideEffects: opts.sideEffects ?? NO_SIDE_EFFECTS,
   sideEffectPolicies: opts.sideEffectPolicies ?? NO_SIDE_EFFECT_POLICIES,
@@ -3248,7 +3252,7 @@ const scalarPayload = (
   };
 };
 
-const lowered = (chain: Tail, propertySeek: boolean, fresh: Minter): RelLowering | null => {
+const lowered = (chain: Tail, propertySeek: boolean, ftsSubstringPredicate: boolean, fresh: Minter): RelLowering | null => {
   const wire = framed(chain, fresh);
   // A shape whose payload projection is not built yet is COVERAGE WE DO NOT HAVE, so it declines exactly as
   // an unlearned step does. It must not throw: legacy answers these, and `rel-sweep` is the gate that
@@ -3261,7 +3265,8 @@ const lowered = (chain: Tail, propertySeek: boolean, fresh: Minter): RelLowering
   // special case for this one. The switch is read HERE and not inside the pass: a pass is a total
   // function of its input, and a pass that consulted a config would be one more place a
   // configuration could change coverage rather than only performance.
-  const named = nameBindings(propertySeek ? seek(wire.rel) : wire.rel);
+  const physical = ftsSubstringPredicate ? fts(wire.rel) : wire.rel;
+  const named = nameBindings(propertySeek ? seek(physical) : physical);
   // EFFECTS FIRST, then whatever CTEs the result still needs — `checkPlan` proves a `Ref` resolves
   // only backwards, so the order the executor runs IS the order the checker walked. `name` is called
   // on the result alone because a write step has already named its own target's shared nodes; the
@@ -3307,7 +3312,7 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
   const fresh = minter();
   const settled = settle(opts);
   const chain = lowerChain(steps, settled, fresh);
-  return chain && lowered(chain, settled.propertySeek, fresh);
+  return chain && lowered(chain, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
 }
 
 /**
@@ -3343,7 +3348,7 @@ export function lowerForeignResume(
   // rejoin the relation is the same landed shape a source-form call produces.
   const seed = rejoin ? foreignRejoin(landed, elem, rejoin.values, rejoin.injection, fresh) : landed;
   const chain = detachedTail(seed, elem, steps, from, ctx, fresh);
-  return chain && lowered(chain, settled.propertySeek, fresh);
+  return chain && lowered(chain, settled.propertySeek, settled.ftsSubstringPredicate, fresh);
 }
 
 /**

@@ -71,6 +71,7 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   const relRequest = {
     collapse: request.fastPaths.movementCollapse,
     propertySeek: request.fastPaths.propertySeek,
+    ftsSubstringPredicate: request.fastPaths.ftsSubstringPredicate,
     labelRegime: labelRegime(request.sourceOptions),
     services: servicesNamedBy(steps, request.params, request.registry),
     sack: sackInit,

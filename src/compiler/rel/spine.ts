@@ -34,6 +34,7 @@ export interface RelRequest {
    *  `EXISTS` in front of the scan it filters. A physical rewrite over the finished algebra rather
    *  than a lowering choice, which is why it arrives here as a flag and is applied by a pass. */
   readonly propertySeek: boolean;
+  readonly ftsSubstringPredicate: boolean;
   /** How a `T.label` ENTRY renders (`valueMap(true)`, `elementMap()`) — decided ONLY by an explicit
    *  `with("multilabel")`/`with("singlelabel")`, since storage no longer has a regime to inherit
    *  from (§api.ts). It crosses as its own settled value rather than being re-derived inside the
@@ -141,6 +142,7 @@ export function loweringOptions(
     // cardinality changes is the ANSWER, not whether there is one.
     labelRegime: request.labelRegime,
     propertySeek: request.propertySeek,
+    ftsSubstringPredicate: request.ftsSubstringPredicate,
     services: request.services,
     sack: request.sack,
     sideEffectPolicies: request.sideEffectPolicies,

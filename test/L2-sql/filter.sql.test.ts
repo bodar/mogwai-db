@@ -41,6 +41,16 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
       expect(p.binds).toEqual(['ark']);
       expect(p.sql).toContain('replace(');
     }
+
+    // The FTS path is a physical rewrite: it narrows from property_fts but leaves the generic
+    // correlated EXISTS as the semantic check. Turning it off therefore changes the access path,
+    // never the accepted traversal or its predicate spelling.
+    const indexed = read('g.V().has("name",TextP.containing("ark")).values("name")');
+    const generic = read('g.V().has("name",TextP.containing("ark")).values("name")', {
+      fastPaths: { ftsSubstringPredicate: false },
+    });
+    expect(indexed.sql).toContain('property_fts');
+    expect(generic.sql).not.toContain('property_fts');
   });
 
   // `P.typeOf` is RelIR-routed on both `is` and `has`, so the CONTRACT is asserted once per spine —
