@@ -1,18 +1,32 @@
 # Wire and storage facts
 
-These are durable protocol and representation constraints.
+Durable GraphBinary and payload-model facts. This is not a capability plan; see the feature
+matrix for support.
 
 ## Map entries
 
-GraphBinary has no distinct `Map.Entry` type. An entry returned by `unfold()` frames as an ordinary
-one-entry MAP; clients cannot distinguish it from a genuine map of size one. Preserve that rule at
-the wire boundary, including typed numeric values inside the entry.
+A server-side `Map.Entry` has no GraphBinary v4 data type. It crosses a GLV as a normal
+size-one `MAP`, indistinguishable from a genuine one-entry map. Frame map-entry rows with the
+existing map helpers in `src/execute.ts`; never invent an entry wire tag. The pinned TinkerPop
+reference confirms this through `MapEntrySerializer` and the GLV assertion harness.
+
+This distinction matters: a terminal group map follows the ordinary map framing route, while an
+entry produced by `unfold()` must frame one map per entry row.
 
 ## Map values
 
-A map stream is one whole-map value per relation row, represented as an ordered JSON pair array. It
-is not an entry relation. Convert it to entry rows only for `unfold()` or root framing.
+`MapStream` is one JSON map value per row, encoded as ordered `[[keyNode, valueNode], ...]`
+pairs. It is not an entry relation. Keep that blob through the compiler; convert it to entry rows
+only for `unfold()` or root materialization. Turning every map into rows earlier loses the value /
+entry distinction and leaks a wire decision into lowering.
 
-Scalar map members always use self-describing `{t,v}` nodes. Elements and lists retain their own
-representations. This is the one encoding shared by every map producer and decoder; do not add a
-bare-scalar variant merely to save a JSON wrapper at a barrier.
+Scalar map sides are always self-describing `{t, v}` nodes. This is required for heterogeneous
+map keys and values to round-trip through one reader. Elements and lists use their own payload
+forms; do not force them into a scalar envelope. Every map producer must build this common form.
+
+## Framing modes
+
+The value framer has exactly two type authorities: a static type for a homogeneous column or a
+per-row type column. Keep them mutually exclusive in code and preserve the per-row tag across a
+barrier, merge, or re-entry. If this representation is touched, prefer a discriminated union over
+optional flags; the invariant is more important than the spelling.

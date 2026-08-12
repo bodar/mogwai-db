@@ -4,6 +4,24 @@
 Multi-site accumulation, root scope, snapshots, keyed groups, and merge policies have
 landed. Do not rebuild a collection at its registration site.
 
+This is a relational distinction, not an implementation preference. A registration is one site in
+the traversal; reduction there loses the relation needed to merge another site, preserve a `by()`
+body's correlation, or observe a later mutation boundary. A named collection is therefore a
+`Binding` with member relations; a `cap` consumes those relations once.
+
+## Model
+
+- Sites remain distinct in chain order and combine with `UNION ALL` at the read. Multiset behaviour
+  is preserved until an explicit reducer chooses otherwise.
+- A relation binding marked `snapshot` records the value at that point. This is required because a
+  CTE is recomputed by a later statement and may otherwise see mutations it must not.
+- Keyed grouping retains `(key, contribution)` member rows. It does not retain a prebuilt map:
+  multiple sites then merge per key with the same reduction machinery.
+- A declared side-effect policy is a seeded left fold. It specifies how members combine, not how
+  they are framed. Keep merge policy and member representation separate.
+- Side effects are root-global. A rooted body may register/read them, but its retained relation may
+  not capture an outer correlated row.
+
 ## Open substrate
 
 - **Keyed declared policies.** A seeded `group("a")`/`groupCount("a")` must merge into
@@ -26,13 +44,12 @@ landed. Do not rebuild a collection at its registration site.
 
 ## Invariants
 
-- Sites remain separate until the read, then combine with `UNION ALL`.
 - A `by()` body stays correlated to its registration site; only reduction moves.
 - A whole-relation encoding decision sees members from every site.
-- Side effects are root-global. A rooted body may not retain a relation that references
-  an outer chain.
 - Merge policy combines members; member framing represents them. Keep those concerns
   separate.
+- A direct `cap().unfold()` cancellation is an optimization, never a licence to discard ordering.
+  The member relation has an encounter channel, but only an ordered reduction establishes list order.
 
 Reference anchors: `vendor/tinkerpop/gremlin-core/.../AggregateStep.java`,
 `SideEffectBarrierStep.java`, `DefaultTraversalSideEffects.java`, and `BulkSet.java` at
