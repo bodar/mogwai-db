@@ -7,10 +7,6 @@ the SQL kernel is `src/sql/CLAUDE.md`. Root `CLAUDE.md` holds cross-cutting rule
 second spine — `steps/`, `engine/`, the routing switch, `MOGWAI_RELIR` — is deleted; a traversal the
 lowering does not cover raises `UnsupportedTraversal` rather than falling through to anything.
 
-Detailed rationale (both landed, archived):
-`docs/archive/2026-07-24-unified-rewrite-passes-plan.md` and
-`docs/archive/2026-07-23-directory-restructure-plan.md`.
-
 ## Three roles, named plainly
 
 Pre-lowering work splits three ways, and each has exactly one verb. Earlier comments numbered these
@@ -38,8 +34,7 @@ while what they operate on keeps TinkerPop's.
   `AppScope`/`RequestScope` (`src/scopes.ts`); what a LOWERING receives is the settled VALUE the
   dependency produced, never the dependency (`RelRequest`). **There are TWO scopes, not three, and
   the missing one is deliberate:** what a single compile owns — its relation-id minter, its plan — is
-  per-compile STATE, threaded explicitly. A compile scope only duplicated it into DI. Rationale:
-  `docs/archive/2026-07-31-di-scopes-and-services-plan.md`.
+  per-compile STATE, threaded explicitly. A compile scope only duplicated it into DI.
 - **The lowering is a fold over `Step[]`, not an object graph.** `src/compiler/rel/lower.ts` is the
   fold; the shape-aware payload builders beside it (`element.ts`, `list.ts`, `map.ts`, `record.ts`,
   `path.ts`, `foreign.ts`, …) are pure functions it calls. What a lowering gets from the request is a

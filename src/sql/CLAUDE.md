@@ -1,6 +1,6 @@
 # src/sql — the `q` kernel
 
-_Scope: `src/sql/**`. Design: `docs/2026-07-12-q-kernel-sql-builder.md`._
+_Scope: `src/sql/**`._
 
 The compiler builds all SQL through a template-first `q` kernel + typed `Relation` handles
 (`kernel/q.ts` + `schema.ts`). Every step module builds through the kernel.
@@ -33,5 +33,4 @@ The compiler builds all SQL through a template-first `q` kernel + typed `Relatio
   the outer row; only a FROM-clause derived table doesn't. So the only shape needing flat
   accumulation is a body that FANS OUT inside a recursive term, which `expandRepeatBody` handles as
   a fast path with a generic body relation behind it. Everything else provisions as a keyed relation
-  + a join. Evidence: `docs/archive/2026-07-27-hand-rolled-sql-audit.md` ("the one structural finding",
-  retracted).
+  + a join.

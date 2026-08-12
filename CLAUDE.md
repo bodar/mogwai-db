@@ -49,9 +49,9 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
   concatenations. **Phases 1/2/3a/4/5/6/7 have all LANDED** — multi-site accumulation, a site as a
   `snapshot` Binding, a declared merge policy (`withSideEffect(k, seed, Operator)` — ONE object with
   `withSack`'s) as a seeded LEFT FOLD, and a keyed `group("a")`/`groupCount("a")` as `(key, contribution)`
-  MEMBER ROWS so N sites merge per key. What is LEFT is mostly NOT collection work: read the plan's
-  "Phase 4's residue" table before assuming otherwise, and read "Phase 7, in full" before re-opening any
-  of the merge policy. Read it before touching `collection.ts`
+  MEMBER ROWS so N sites merge per key. Its remaining work is mixed member shapes, keyed declared
+  policies, and safe member re-entry; downstream step gaps remain owned by their own substrates.
+  Read it before touching `collection.ts`
 - `docs/2026-07-25-wire-and-storage-facts.md` — Map.Entry wire framing + the `MapStream` model
 - `docs/2026-07-28-property-based-testing-l5.md` — L5's oracle design space + the two oracles built.
   Its "architectural lesson" section is CORRECTED by the shape doc below — the boundary is the anchor
@@ -60,12 +60,6 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
   layer: which duplication is load-bearing, which is an unfinished consolidation, and the refined
   bright line (a Pass may CONSULT shape; it may never CONSTRUCT it). Refutes three cross-layer
   refactors — read before proposing one
-- `docs/2026-07-28-scalartype-refactoring-pattern.md` — `ScalarType` as the reusable template for a
-  vocabulary cleanup (N optionals → one total union; coarse views DERIVED; pair with a named
-  preserving rebuild + a runtime contract), and the ordered list of what it fits next
-- `docs/2026-07-29-tinkerpop-core-engine-alignment.md` — the naming authority behind the **Naming**
-  section below: the full layered vocabulary, every rename that landed (with the three the code
-  refuted), the four TinkerPop patterns we refuse, and what a large LSP-driven rename cannot see
 
 ## Naming
 
@@ -90,8 +84,7 @@ interpreter with an open Java step hierarchy; we are a staged compiler with a SQ
   12 references as at 1,200): does it say what the thing *is*, and can it be confused with something
   else?
 
-Full vocabulary table, the worked cases, and the four TinkerPop patterns we deliberately refuse:
-`docs/2026-07-29-tinkerpop-core-engine-alignment.md`.
+The code and this vocabulary are the authority; historical rename campaigns are not design guidance.
 
 ## Tooling
 
@@ -187,7 +180,7 @@ keyed to its OLD path. It moves FILES only — TypeScript's "Move to file" refac
 not exposed by our server (measured: `codeActionProvider.codeActionKinds` has no `refactor.*` kind).
 **The arch check** is why a Pass `run` containing real logic is a `function name(...)` declaration and
 not an arrow: `prepareCallHierarchy` returns NOTHING for an arrow assigned to an object-literal
-property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-tooling-plan.md`.
+property.
 
 ## Working rules
 
@@ -257,7 +250,7 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
   collision conflates two different configuration sets and one valid query permanently breaks
   another — in a DO, for every later request the isolate serves. Not upstream yet, so a bump
   re-exposes it; `package.json` also pins `overrides.antlr4ng` so only ONE copy exists to patch.
-  `test/L1-corpus/parser-state.test.ts` fails if the patch goes missing. Detail: `docs/outstanding-work.md` 0f.
+  `test/L1-corpus/parser-state.test.ts` fails if the patch goes missing.
 - **`patches/` is bun's patch dir and the ONLY one — everything we owe someone else's repo lives in
   `patches/upstream/`, never in `docs/`.** Bun applies only what `package.json`'s
   `patchedDependencies` names, so `upstream/` nested inside is inert. `patches/upstream/README.md`
@@ -265,9 +258,8 @@ property. Remaining work + the measured capability limits: `docs/2026-07-30-lsp-
 - **One spine.** The legacy compiler (`src/compiler/steps/`, `src/compiler/engine/`), its routing
 switch and the whole differential harness (`MOGWAI_RELIR`, `test:legacy-spine`, the two-floor L3
 ratchet, the census's legacy columns) are DELETED. A traversal the RelIR lowering does not cover
-raises `UnsupportedTraversal` — a clear query failure, never a fallback. The L3 floor was re-baselined
-1819 → 1360 in that commit; the RelIR build plan (`docs/2026-08-01-relir-build-plan.md`) is now a
-record of how it was done plus the coverage that is left.
+raises `UnsupportedTraversal` — a clear query failure, never a fallback. The RelIR plan records the
+remaining cross-cutting substrate.
 
 **Test via `mise run test`, NOT bare `bun test`** (bare skips `tsc --noEmit` + the submodule). See
   `test/CLAUDE.md`. Build graph: `submodule ─▶ install ─▶ {check, test, build} ─▶ ci`; CI just runs
@@ -344,9 +336,7 @@ record of how it was done plus the coverage that is left.
   SLOWER on DO) — a tiebreaker, and a reminder that picking the form the DEV runtime prefers is the
   error `cf-limits.ts` exists to prevent. `src/rowbatch.ts` remains the LEGACY write path's mechanism
   and is correct until that path is migrated; it is not the pattern to copy into new code, and it
-  shrinks to whatever JSON cannot carry. Reasons, numbers, method and the unmeasured ceilings:
-  `docs/2026-08-01-relir-build-plan.md` §10·5. Cap detail:
-  `docs/archive/2026-07-31-bulk-transfer-and-io-substrate-plan.md`.
+  shrinks to whatever JSON cannot carry.
 - Storage runtimes meet at the sync **`Sql` interface** (`src/storage.ts`): `bun:sqlite` (dev) and
   DO `ctx.storage.sql` (prod). Compiler + frame tier are storage-agnostic; the HTTP edge never
   touches a store. **Bind-type gotcha:** DO SQLite throws on `boolean`/`bigint` binds — `GraphStore`
