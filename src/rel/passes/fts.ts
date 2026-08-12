@@ -47,9 +47,13 @@ function ftsOwners(term: Expr, element: RelId, properties: { readonly owner: str
   const free = all.filter((e) => !corr.includes(e));
   const key = literalEq(free, props.id, 'key');
   const pattern = likePattern(free, props.id);
-  // A negative TextP is `… LIKE … IS NOT 1`. The index can find matching rows, not the owners
-  // that have *some non-matching value*, so it must stay on the generic EXISTS path.
-  if (key == null || pattern == null || hasNegativeText(free) || literalTerm(pattern).length < 3) return null;
+  if (key == null || pattern == null || literalTerm(pattern).length < 3) return null;
+  if (hasNegativeText(free)) return negativeOwners(props, properties, key, pattern, mint);
+  return positiveOwners(properties, key, pattern, mint);
+}
+
+/** Positive TextP can start directly from matching FTS rows. */
+function positiveOwners(properties: { readonly ownerElem: 'node' | 'edge' }, key: string, pattern: Expr, mint: Minter): Rel {
   const scan = make.scan({ id: mint.id('fs'), table: 'property_fts', alias: mint.alias('rfs'), channels: [], type: FTS_TYPE });
   const pred = andAll([
     eq(col(scan.id, 'owner_elem'), compilerText(properties.ownerElem)), eq(col(scan.id, 'pk'), compilerText(key)),
@@ -59,6 +63,41 @@ function ftsOwners(term: Expr, element: RelId, properties: { readonly owner: str
   const filtered = make.filter({ id: mint.id('ff'), input: scan, channels: [], type: scan.type, pred });
   const owners = make.project({ id: mint.id('fp'), input: filtered, channels: [], type: { cols: [{ name: 'sid', type: 'int', nullable: false }] }, exprs: [['sid', col(filtered.id, 'owner')]] });
   return make.distinct({ id: mint.id('fd'), input: owners, channels: [], type: owners.type });
+}
+
+/**
+ * Negative TextP has existential property semantics: a multi-property owner survives when ANY
+ * value does not match, not only when NONE match. FTS is positive-only, so the complementary
+ * access path begins at keyed property rows and anti-probes the matching FTS entry for each typed
+ * string. A non-string (or legacy untagged) row is deliberately retained as a candidate — it may
+ * satisfy the negative predicate — and the untouched generic EXISTS still makes the final decision.
+ *
+ * This is a physical narrowing, never an alternate meaning: a missing/stale index merely leaves
+ * more candidates, while it cannot remove an actual negative match.
+ */
+function negativeOwners(
+  props: Extract<Rel, { readonly kind: 'scan' }>, properties: { readonly owner: string; readonly ownerElem: 'node' | 'edge' },
+  key: string, pattern: Expr, mint: Minter,
+): Rel {
+  // `hasPropertyClause` needs only owner/key/value/vtype and intentionally leaves the physical
+  // property rowid out of its local schema. This pass joins FTS by `pid`, so its independent scan
+  // declares that real storage column explicitly rather than pretending the generic probe carried it.
+  const rows = make.scan({ id: mint.id('ns'), table: props.table, alias: mint.alias('rns'), channels: [],
+    type: { cols: [{ name: 'id', type: 'int', nullable: false }, ...props.type.cols] } });
+  const fts = make.scan({ id: mint.id('nfs'), table: 'property_fts', alias: mint.alias('rnfs'), channels: [], type: FTS_TYPE });
+  const matchingFts = make.filter({ id: mint.id('nff'), input: fts, channels: [], type: fts.type, pred: andAll([
+    eq(col(fts.id, 'owner_elem'), compilerText(properties.ownerElem)),
+    eq(col(fts.id, 'pid'), col(rows.id, 'id')), eq(col(fts.id, 'pk'), compilerText(key)),
+    eq(col(fts.id, 'kind'), compilerText('value')),
+    { kind: 'call', fn: 'like', args: [pattern, col(fts.id, 'text'), compilerText('\\')] },
+  ]) });
+  const probe = make.project({ id: mint.id('nfp'), input: matchingFts, channels: [], type: { cols: [{ name: 'one', type: 'int', nullable: false }] }, exprs: [['one', compilerText('1')] ] });
+  const candidates = make.filter({ id: mint.id('nf'), input: rows, channels: [], type: rows.type, pred: andAll([
+    eq(col(rows.id, 'key'), compilerText(key)),
+    { kind: 'binary', op: 'or', left: { kind: 'binary', op: 'is not', left: col(rows.id, 'vtype'), right: compilerText('string') }, right: { kind: 'exists', plan: probe, negated: true } },
+  ]) });
+  const owners = make.project({ id: mint.id('np'), input: candidates, channels: [], type: { cols: [{ name: 'sid', type: 'int', nullable: false }] }, exprs: [['sid', col(candidates.id, properties.owner)]] });
+  return make.distinct({ id: mint.id('nd'), input: owners, channels: [], type: owners.type });
 }
 
 const eq = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: '=', left, right });

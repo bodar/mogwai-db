@@ -51,6 +51,17 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     });
     expect(indexed.sql).toContain('property_fts');
     expect(generic.sql).not.toContain('property_fts');
+
+    // Negative TextP is existential over a key's property instances. Its FTS path therefore starts
+    // at keyed property rows and anti-probes matching typed-string index entries, rather than
+    // incorrectly subtracting whole owners that also have a non-matching value.
+    const negIndexed = read('g.V().has("name",TextP.notContaining("ark")).values("name")');
+    const negGeneric = read('g.V().has("name",TextP.notContaining("ark")).values("name")', {
+      fastPaths: { ftsSubstringPredicate: false },
+    });
+    expect(negIndexed.sql).toContain('property_fts');
+    expect(negIndexed.sql).toContain('IS NOT');
+    expect(negGeneric.sql).not.toContain('property_fts');
   });
 
   // `P.typeOf` is RelIR-routed on both `is` and `has`, so the CONTRACT is asserted once per spine —
