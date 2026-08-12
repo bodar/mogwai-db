@@ -899,10 +899,17 @@ describe('the RelIR spine', () => {
     // on the read gap above, on both `addV` and `addE`.
     expect(compile('g.addV(__.V().has("name","marko").label())', {}, { spine: 'rel' }).kind).toBe('program');
 
-    // `id()` is DELIBERATELY still declined — the same `byExpr` arm serves it, but adding it made
-    // `g.E().id()` answer the same multiset in a different order, and shipping an unexplained change
-    // to an order-bearing surface is how an order-fragile answer gets banked as a baseline.
-    expect(compile('g.V().id()', {}, { spine: 'rel' })).not.toMatchObject({ spine: 'rel' });
+    // `id()` RIDES THE SAME ARM. It was held back only while a differential existed: `g.E().id()`
+    // answers the same MULTISET in a different ORDER from legacy, and nothing pins that order (no
+    // `order()`, no slice), so the comparison below is by multiset. Determinism — the property that
+    // actually matters for an unordered answer — is `test:perturbed`'s to assert, not this test's.
+    const sorted = (rows: readonly unknown[]): unknown[] => [...rows].sort((a, b) => String(a).localeCompare(String(b)));
+    for (const gremlin of ['g.V().id()', 'g.E().id()', 'g.V().id().count()', 'g.V().hasLabel("person").id()']) {
+      expect(read(gremlin, { spine: 'rel' }).spine, gremlin).toBe('rel');
+      const via = (spine: 'rel' | 'legacy') =>
+        decodeAll(exec(seededStore(), undefined, undefined, spine).buffers(gremlin, {}, {}));
+      expect(sorted(await via('rel')), gremlin).toEqual(sorted(await via('legacy')));
+    }
   });
 
   test('labels() is label()\'s FLAT-MAP twin, and a zero-label vertex contributes no rows', async () => {

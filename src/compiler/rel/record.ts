@@ -241,6 +241,10 @@ function fieldNode(read: FieldRead, field: RecordField, fresh: Minter): Expr | n
     // unreachable rather than a gap — stated so the switch stays TOTAL, which is what makes the next
     // framing arm a compile error here instead of a silent fallthrough.
     case 'variant': return null;
+    // A DETACHED element cannot be a field for the reason `framingCols` already declines it: its
+    // payload is the landed tuple rather than an `id` to build a node from, and a barrier's rows exist
+    // only after the segment boundary, so no expression in this plan can name them.
+    case 'detached': return null;
     case 'elements': return elementNode(own('id'), framing.elem, fresh);
     case 'scalar': {
       // The tag rides where the type does: a numeric reducer's is the aggregate's runtime `typeof` in

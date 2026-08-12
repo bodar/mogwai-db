@@ -3,7 +3,7 @@ import { PER_ROW } from '../../../sql/kernel/render.ts';
 import { type Elem } from '../../plan/plan.ts';
 import { argValues } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
-import type { ForeignRow, InjectionKind } from '../../../services/spi/types.ts';
+import type { BarrierInput, ForeignRow, InjectionKind } from '../../../services/spi/types.ts';
 import {
     layoutCols, layoutProjection, type LoweringState,
 } from '../context/context.ts';
@@ -152,7 +152,7 @@ function foreignMatchExpr(inj: InjectionKind, p: Relation): Expression {
 export function resumeMidBarrier(
   c: LoweringState,
   foreign: readonly ForeignRow[],
-  headRows: readonly ForeignRow[],
+  headRows: readonly BarrierInput[],
   elem: Elem,
   injection: InjectionKind | undefined,
 ): ForeignStream {

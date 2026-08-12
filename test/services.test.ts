@@ -233,21 +233,25 @@ describe('call() routing (seedCall)', () => {
     if (plan.kind === 'segment') expect(plan.head).toBeNull();
   });
 
-  test('compilePlan() on a MID-TRAVERSAL barrier yields a segment with a per-parent head (o + injVal)', () => {
+  test('compilePlan() on a MID-TRAVERSAL barrier yields a segment whose head reads the INJECTED VALUE', () => {
     const federate: Service = {
       name: 'mogwai.graph.federate', type: 'barrier', describeParams: () => ({}),
       resolve: () => ({ kind: 'barrier', apply: async () => [] }),
     };
     const reg = createRegistry([federate]);
+    // PINNED to the RelIR spine: the head's shape is a per-spine SPELLING, and legacy's is the element
+    // payload this replaces. A test that asserts one spine's form says which one (§6·1's harness rule).
     const plan = compilePlan(
-      'g.V().call("mogwai.graph.federate", ["graph":"crew"], __.values("name"))', {}, { registry: () => reg });
+      'g.V().call("mogwai.graph.federate", ["graph":"crew"], __.values("name"))', {}, { registry: () => reg, spine: 'rel' });
     expect(plan.kind).toBe('segment');
     if (plan.kind === 'segment') {
       expect(plan.head).not.toBeNull();
-      // The head projects the rejoin ordinal `o` and the per-parent injected value `injVal`
-      // alongside the ordinary element payload, so readSegmentHead can drain them.
-      expect(plan.head!.sql).toContain(' AS o');
-      expect(plan.head!.sql).toContain('injVal');
+      // The head is the prefix ENDING IN THE INJECTION READ — one scalar row per parent, carrying the
+      // one field a barrier consumes (`BarrierInput.injectedValue`). It is deliberately NOT the parent
+      // element: materializing an id, a label set and a property bag to reach one value was work whose
+      // only consumer discarded it.
+      expect(plan.head!.shape.kind).toBe('value');
+      expect(plan.head!.sql).toContain(' AS v');
     }
   });
 

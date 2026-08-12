@@ -102,7 +102,24 @@ export type { ForeignRow } from '../../api.ts';
  *  hop's federation depth off the `CallSite` that `resolve` already receives. */
 export type Contribution =
   | { readonly kind: 'rel'; buildRel(site: RelCallSite): RelContribution | null }
-  | { readonly kind: 'barrier'; apply(rows: readonly ForeignRow[]): Promise<ForeignRow[]> };
+  | { readonly kind: 'barrier'; apply(rows: readonly BarrierInput[]): Promise<ForeignRow[]> };
+
+/**
+ * WHAT A MID-TRAVERSAL BARRIER'S HEAD HANDS ITS `apply` — one row per parent traverser, carrying the
+ * value this call injects into the sub-traversal it runs elsewhere.
+ *
+ * It is NOT a `ForeignRow`, and the distinction was worth naming: a foreign row is a DETACHED element
+ * that came back from somewhere else, while these are THIS graph's parents on the way out. Typing the
+ * input as a foreign row made the head compile a whole element payload — id, label set, property bag —
+ * of which every barrier service reads exactly one field. A source-form call has no parents at all and
+ * passes none.
+ */
+export interface BarrierInput {
+  /** The per-parent scalar the call injects: `values(k)`, `id()` or `label()` over the parent, as
+   *  `injectionKindOf` classified it. Absent when the call names no injection (the sub-traversal is a
+   *  constant), which is the case the rejoin answers with a cross join. */
+  readonly injectedValue?: unknown;
+}
 
 // ---------- the `rel` arm: the same contribution, lowered into the RelIR fold ----------
 //

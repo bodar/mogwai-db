@@ -36,6 +36,14 @@ import type { VariantArm } from './variant.ts';
  */
 export type RelFraming =
   | { readonly kind: 'elements'; readonly elem: Elem }
+  /** A DETACHED element — a barrier `call()`'s awaited rows, landed by `foreign.ts`. The wire shape is
+   *  an ordinary vertex/edge (the framers cannot tell, and must not), but the relation is ALREADY the
+   *  payload rather than a stream of rowids to project one from: a detached reference has no row in
+   *  this graph to read `COALESCE(uid, id)`, a label set or a property bag off. That is the whole
+   *  difference from `elements`, and it is why this is its own arm instead of a flag — every consumer
+   *  that would rebuild the payload has to say what it does with one, and for most of them the answer
+   *  is that live adjacency over a detached element does not exist. */
+  | { readonly kind: 'detached'; readonly elem: Elem }
   /** `productiveNull` says a NULL result is a REAL value rather than the framer's signal to emit
    *  nothing. It is the `ProductiveByStrategy` fact, and it reaches here from the LIST whose members
    *  a local reducer collapsed: nothing was dropped, so an all-null collection reduces to a null
@@ -192,6 +200,9 @@ export function framingCols(framing: RelFraming): readonly ColMeta[] | null {
     // A VARIANT has no fixed payload — its columns depend on which arms it declares, and a record
     // field needs a shape it can name in advance. Declining keeps `project().by(<mixed branch>)` an
     // honest gap rather than a field whose width varies by row.
-    case 'variant': case 'property': case 'discard': return null;
+    // A DETACHED element is not a field either: its payload is the whole landed tuple rather than the
+    // `id` an element field carries, and nothing correlates back to it — a barrier's rows exist only
+    // after the segment boundary, so no expression inside one plan can name them.
+    case 'detached': case 'variant': case 'property': case 'discard': return null;
   }
 }

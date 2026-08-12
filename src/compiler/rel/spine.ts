@@ -5,7 +5,7 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { LabelRegime } from '../../api.ts';
 import type { Service } from '../../services/spi/types.ts';
 import type { MergePolicy } from '../../gremlin/frontend.ts';
-import { lowerToRel } from './lower.ts';
+import { lowerToRel, type Lowering, type RelLowering } from './lower.ts';
 
 /**
  * What the RelIR route needs from the enclosing REQUEST — and the whole of it.
@@ -117,7 +117,21 @@ export function compileViaRel(
   // So the capability is no longer switched. `predicateInlining` still selects between legacy's two
   // forms for every traversal legacy owns, which is what it is for, and L5's own
   // `predicateInlining is equivalent to its generic fallback` case still exercises it.
-  const lowered = lowerToRel(steps, {
+  const lowered = lowerToRel(steps, loweringOptions(request, params, sideEffects));
+  if (!lowered) return null;
+  return finishLowering(lowered);
+}
+
+/**
+ * THE SETTLED VALUES A LOWERING RUNS UNDER, as one object — built here because a traversal has TWO
+ * halves whenever a barrier splits it, and both must run under the same ones. A resume that re-derived
+ * them (`segment.ts`) could compile the tail of a chain with a different collapse strategy or a
+ * different label regime from its head, which is a wrong answer no gate would name.
+ */
+export function loweringOptions(
+  request: RelRequest, params: Record<string, any>, sideEffects: Map<string, any>,
+): Lowering {
+  return {
     params,
     collapse: request.collapse,
     correlatedChildren: true,
@@ -137,9 +151,20 @@ export function compileViaRel(
     // (§6·6). The REDUCER form (`withSideEffect(k, seed, BiFunction)`) is left unregistered by the
     // front-end, so a `select(k)` over one finds no constant and declines exactly as before.
     sideEffects,
-  });
-  if (!lowered) return null;
+  };
+}
 
+/**
+ * A LOWERED PLAN, rendered — the half of the route that is about crossing OUT of the algebra rather
+ * than about which traversal was covered.
+ *
+ * Split from the router because there are two ways into it and only one of them starts from a step
+ * chain: the ordinary compile above, and a barrier's RESUME (`segment.ts`), which lowers the rest of
+ * a chain over rows that arrived on a Promise. Both owe the identical crossing — emit the program,
+ * render the result, decide read vs program — and a second copy of it is a second bind-ordering
+ * authority, which is the thing §5 exists to keep singular.
+ */
+export function finishLowering(lowered: RelLowering): Compiled | Program {
   const { effects, result: relational } = emitProgram(lowered.plan);
 
   // A DISCARD leaves through its own door, and the reason is that there is nothing to read: `drop()`'s

@@ -30,7 +30,7 @@ import { materializeRootStream } from '../steps/tail/materialize.ts';
 import { compileFromVariant } from '../steps/tail/variant.ts';
 import { compileFromForeign, landForeignElements, resumeMidBarrier } from '../steps/tail/foreign.ts';
 import type { SegmentPlan } from '../segment.ts';
-import type { ForeignRow } from '../../services/spi/types.ts';
+import type { BarrierInput, ForeignRow } from '../../services/spi/types.ts';
 import type { RequestScope } from '../../scopes.ts';
 import type { ElementReadDriver, Engine } from './deps.ts';
 import { labelRegime, type LabelRegime } from '../../api.ts';
@@ -485,7 +485,7 @@ export class LoweringEngine implements Engine {
       head: bp.head,
       params: bp.params,
       apply: bp.apply,
-      resume: (foreign: ForeignRow[], headRows: readonly ForeignRow[]) => {
+      resume: (foreign: ForeignRow[], headRows: readonly BarrierInput[]) => {
         const eng = this.child(bp.boundParams, bp.restSteps);
         const carry: LoweringState = { q: eng.q, params: bp.boundParams, traverserLayout: rootLayout() };
         const elem = foreign[0]?.kind === 'edge' ? 'edge' : bp.parent.elem;

@@ -7,7 +7,8 @@ import { type Executable } from '../sql/kernel/render.ts';
 import { type Plan } from './segment.ts';
 import { resolveFastPaths, resolveRegistry, resolveFederationDepth, type CompileOptions } from './options/fast-paths.ts';
 import { LegacyRouteRequired, legacyReachable, resolveSpine } from './options/spine.ts';
-import { compileViaRel } from './rel/spine.ts';
+import { compileViaRel, loweringOptions } from './rel/spine.ts';
+import { segmentPlan } from './rel/segment.ts';
 import { createAppScope, createRequestScope } from '../scopes.ts';
 import { servicesNamedBy } from '../services/params/call-params.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
@@ -101,8 +102,7 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
   // proves only *routed ≥ all-legacy*. See options/spine.ts and plan §Phase 3.
   const position = resolveSpine(options);
   if (position !== 'legacy') {
-    const viaRel = compileViaRel(
-      {
+    const relRequest = {
         // **THE RAW STRATEGY SWITCH, NOT THE CHAIN VERDICT** (§8 item 8b). `engine.fastPaths` has
         // `collapseSafe && !demandsEncounter` folded into it by `collapseSafeFastPaths`, and handing
         // RelIR that did not make it conservative — it switched OFF a decision RelIR already makes
@@ -120,9 +120,20 @@ export function compilePlan(gremlin: string, params: Record<string, any>, option
         services: servicesNamedBy(steps, request.params, engine.registry),
         sack: sackInit,
         sideEffectPolicies: sideEffectPolicies,
-      },
-      steps, request.params, sideEffects,
-    );
+    } as const;
+
+    // A BARRIER `call()` IS ASKED FIRST, because it is not a lowering question. Its rows arrive on a
+    // Promise, so the traversal is a PLAN OF SEGMENTS rather than one statement, and `lowerToRel`
+    // would decline it — correctly, since there is nothing to lower at compile time — which would
+    // read as uncovered vocabulary. What the fold cannot express and what the executor has not yet
+    // fetched are different facts, and only this one has a boundary to build (§6·6).
+    const segment = segmentPlan(steps, {
+      services: relRequest.services, params: request.params, federationDepth: request.federationDepth,
+      lowering: loweringOptions(relRequest, request.params, sideEffects),
+    });
+    if (segment) return segment;
+
+    const viaRel = compileViaRel(relRequest, steps, request.params, sideEffects);
     if (viaRel) return { kind: 'sql', compiled: discard ? applyDiscard(viaRel) : viaRel };
   }
   if (!legacyReachable(position)) throw new LegacyRouteRequired();

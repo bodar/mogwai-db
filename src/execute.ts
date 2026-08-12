@@ -1,4 +1,5 @@
 import type { Executor as ExecutorApi, ForeignRow } from './api.ts';
+import type { BarrierInput } from './services/spi/types.ts';
 import { DEFAULT_VERTEX_LABEL } from './api.ts';
 import { compilePlan, hasTypedMembers, perRowColumn, perRowColumnOf, staticTypeOf, type Compiled, type ElemShape, type Executable, type FastPathConfig, type GroupKey, type GroupVal, type ListOf, type MapEntry, type MapOf, type PathPos, type ScalarType, type ValueType } from './compiler/compiler.ts';
 import type { FederationSource, Plan } from './compiler/segment.ts';
@@ -836,8 +837,12 @@ export class Executor implements ExecutorApi {
   /** Read a barrier segment's HEAD into the barrier's input rows (mid-traversal parent
    *  projection, 6b — a source-form barrier has a null head and never calls this). Synchronous:
    *  the row array is fully drained before any barrier await (no cursor across an await). */
-  private readSegmentHead(head: Compiled): ForeignRow[] {
+  private readSegmentHead(head: Compiled): BarrierInput[] {
     const rows = this.store.query(head.sql, head.binds) as any[];
+    // A SCALAR head is the injected VALUE itself, one row per parent — everything a barrier reads of
+    // its input (`BarrierInput`). The element-shaped arms below are the legacy route's head, which
+    // materialized the whole parent tuple to reach the same one field.
+    if (head.shape.kind === 'value') return rows.map((r) => ({ injectedValue: r.v }));
     // The mid-traversal head projects `o` (rejoin ordinal) and `injVal` (the per-parent injected
     // scalar) alongside the ordinary element payload; both free-ride outside the Shape (read here,
     // not framed). `injVal` is absent on a source-form head (which never reaches this method).

@@ -23,7 +23,7 @@ import { isColumnArg, isNested, isPred, isTokenArg, stepChain, argValues, arg, t
 import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
 import type { IRStep } from '../ir/strategies.ts';
-import { analyzeChain } from '../ir/analyze.ts';
+import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
 import { childSteps, normalize } from '../ir/passes.ts';
 import { containsTextSearch, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
@@ -42,6 +42,9 @@ import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabe
 import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapPayload, mapSide, mapSize, unfoldMap } from './map.ts';
 import { edgeEndpoint, elementPayload } from './element.ts';
+import { foreignLabelValue, foreignRejoin, foreignRelation, foreignValues } from './foreign.ts';
+import type { ForeignRow } from '../../api.ts';
+import type { InjectionKind } from '../../services/spi/types.ts';
 import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seedPath } from './path.ts';
 import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
@@ -1589,24 +1592,28 @@ function terminal(
   //
   // A LABEL is always a string, so a STATIC tag is honest here.
   //
-  // **`id()` is DELIBERATELY NOT here, and the reason is measured rather than cautious.** The same arm
-  // serves it in `byExpr` and adding it was one more token, but `g.E().id()` then answers
-  // `[7,9,11,12,8,10]` where legacy answers `[7,8,9,10,11,12]` — the same multiset in a different
-  // order. Nothing pins that order (no `order()`, no slice), so neither is wrong and the census counts
-  // `ord` as telemetry — but it is an observable change to an order-bearing surface that I could not
-  // explain, and shipping a behaviour I cannot account for is how an order-fragile answer gets banked
-  // as a baseline. It wants its own change, with `test:perturbed` run against it.
-  if (step.name === 'label') {
+  // `id()` RIDES THE SAME ARM, and what used to hold it back was a comparison that no longer has a
+  // second side. `g.E().id()` answers `[7,9,11,12,8,10]` here against legacy's `[7,8,9,10,11,12]` — the
+  // same multiset in a different order, with nothing pinning either (no `order()`, no slice), so
+  // neither was wrong and the census counts `ord` as telemetry. It was deferred while a differential
+  // existed, because an unexplained order change on an order-bearing surface is how a fragile answer
+  // gets banked as a baseline. With one spine the question is simply whether the order is DETERMINISTIC,
+  // which `test:perturbed` is the instrument for.
+  //
+  // A LABEL is always a string, so a STATIC tag is honest; an id is whatever it was STORED as (a `uid`
+  // string or a rowid int), so it carries no tag and the framer infers per value.
+  if (step.name === 'label' || step.name === 'id') {
     if (args.length) return null;
-    const projected = byExpr({ key: { kind: 'token', token: 'label' } }, elementHost(input, elem, aliases), fresh);
+    const token = step.name === 'label' ? 'label' : 'id';
+    const projected = byExpr({ key: { kind: 'token', token } }, elementHost(input, elem, aliases), fresh);
     if (!projected) return null;
     return {
       rel: make.project({
         id: fresh('tok'), input, channels: input.channels,
-        type: typeOf(meta('v', 'text'), ...carriedCols(input.channels)),
+        type: typeOf(meta('v', step.name === 'label' ? 'text' : 'any'), ...carriedCols(input.channels)),
         exprs: [['v', projected], ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
       }),
-      framing: { kind: 'scalar', type: STATIC('string') },
+      framing: { kind: 'scalar', type: step.name === 'label' ? STATIC('string') : UNKNOWN },
     };
   }
 
@@ -3174,6 +3181,14 @@ const framed = (chain: Tail, fresh: Minter): { readonly rel: Rel; readonly shape
       rel: elementPayload(chain.rel, framing.elem, { bulk: carriesMultiplicity(chain) }, fresh),
       shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },
     };
+    // A DETACHED element is already ITS OWN payload (`foreign.ts` lands the tuple), so the projection is
+    // the identity and the `Shape` is the ordinary one — the byte framers cannot tell a federated vertex
+    // from a local one and must not, since the wire has no such distinction. Building the payload the
+    // `elements` way would join THIS graph's `nodes` on an id that belongs to another one.
+    case 'detached': return {
+      rel: chain.rel,
+      shape: framing.elem === 'edge' ? { kind: 'edge' } : { kind: 'vertex' },
+    };
     case 'scalar': return scalarPayload(chain.rel, framing, fresh);
     case 'list': return listPayload(chain.rel, framing.of, !!framing.set, fresh);
     case 'path': return pathPayload(chain.rel, framing.of, fresh);
@@ -3293,6 +3308,42 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
 }
 
 /**
+ * THE RESUMED CHAIN — everything after a barrier `call()`, lowered over the rows it awaited.
+ *
+ * A barrier service answers on a Promise, so the executor drives the plan in segments: run the head,
+ * await `apply`, then come back HERE with the rows. This is `lowerToRel`'s twin for that second half —
+ * the same fold, the same context, the same budget — differing in exactly one thing: the seed is a
+ * LANDED relation (`foreign.ts`) rather than a source step, because the rows are data the compiler now
+ * holds and no `Scan` can produce them.
+ *
+ * It is a separate entry point rather than a `call()` arm inside `lowerChain` because the two run at
+ * different TIMES. `lowerChain` runs before anything executes and cannot know what a sibling graph will
+ * return; this runs after the await, when the answer is a value. Threading that through the source
+ * dispatch would mean a fold arm whose input is not the traversal.
+ */
+export function lowerForeignResume(
+  rows: readonly ForeignRow[], elem: Elem, steps: readonly IRStep[], from: number, opts: Lowering = {},
+  rejoin?: { readonly values: readonly unknown[]; readonly injection: InjectionKind | undefined },
+): RelLowering | null {
+  const fresh = minter();
+  const settled = settle(opts);
+  const { ctx, facts } = chainCtxOf(steps.slice(from), settled);
+  // A landed relation carries no channels — the rows crossed a segment boundary as detached
+  // references, so nothing survived to seed a bulk, an encounter or a path from. A resumed chain that
+  // DEMANDS one therefore declines rather than compiling a plan with the column silently missing,
+  // which is the same rule the fold applies to a source it cannot seed (§12, order and determinism).
+  if (facts.demandsEncounter || facts.tracksPath) return null;
+  const landed = foreignRelation(rows, elem, fresh);
+  // A MID-traversal barrier's pool is per-CALL, not per-parent: the sibling ran once over the distinct
+  // injected values, so the rows have to be scattered back over the parents that asked before anything
+  // reads them. Doing it here rather than in the tail is what keeps the tail one vocabulary — after the
+  // rejoin the relation is the same landed shape a source-form call produces.
+  const seed = rejoin ? foreignRejoin(landed, elem, rejoin.values, rejoin.injection, fresh) : landed;
+  const chain = detachedTail(seed, elem, steps, from, ctx, fresh);
+  return chain && lowered(chain, settled.propertySeek, fresh);
+}
+
+/**
  * THE CHAIN, lowered to a bare RELATION — the same fold, minus the naming and the budget.
  *
  * The split exists so a chain can be lowered INSIDE another one. A rooted sub-read used as a VALUE
@@ -3308,22 +3359,36 @@ export function lowerToRel(steps: readonly IRStep[], opts: Lowering = {}): RelLo
  *   `name` does not walk expression subplans — it renders correctly, just inlined twice. Making the
  *   pass walk them is the general fix if a case ever needs it.)
  */
-function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Tail | null {
+/**
+ * THE CHAIN CONTEXT — the settled options plus the chain-global facts, in one place because two
+ * entry points build one: the ordinary source fold below, and the RESUMED fold a barrier `call()`
+ * continues into (`lowerForeignResume`). Deriving the facts twice is how the two would drift on the
+ * one question that has no local answer.
+ *
+ * EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step. A
+ * chain that demands one and reaches a step this route cannot thread it through declines WHOLE:
+ * silently omitting the channel would not defer, it would pick a different window from the same
+ * multiset — right arity, plausible rows, and a census that structurally cannot see it (`ord` is
+ * telemetry, `ms` is the gate).
+ */
+function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; facts: ChainFacts } {
   const { params, collapse, correlatedChildren, labelRegime, sideEffects, sideEffectPolicies, services, sack, collections } = settle(opts);
-  // EMISSION ORDER is a chain-global fact, decided once and threaded — never re-derived per step.
-  // `analyzeChain` is the same authority the legacy source seeds from, so the two cannot disagree
-  // about which chains have an order to take a window from. A chain that demands one and reaches a
-  // step this route cannot thread it through declines WHOLE: silently omitting the channel would
-  // not defer, it would pick a different window from the same multiset — right arity, plausible
-  // rows, and a census that structurally cannot see it (`ord` is telemetry, `ms` is the gate).
   const facts = analyzeChain(steps as IRStep[]);
+  return {
+    facts,
+    ctx: {
+      params, correlatedChildren, collapse, ordered: facts.demandsEncounter, tracksPath: facts.tracksPath,
+      labelRegime, sideEffects, sideEffectPolicies, services, sack, collections,
+      mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),
+    },
+  };
+}
+
+function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Tail | null {
+  const { ctx, facts } = chainCtxOf(steps, opts);
+  const { params } = ctx;
   const ordered = facts.demandsEncounter;
   const tracksPath = facts.tracksPath;
-  const ctx: ChainCtx = {
-    params, correlatedChildren, collapse, ordered, tracksPath, labelRegime, sideEffects, sideEffectPolicies, services, sack,
-    collections,
-    mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),
-  };
   const orderedChannels = ordered ? withChannel(BULK, ENCOUNTER) : BULK;
   const seedChannels = tracksPath ? withChannel(orderedChannels, PATH_CHANNEL) : orderedChannels;
   const first = steps[0];
@@ -3497,6 +3562,44 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
  * purpose: a `dedup` resets the multiplicity to 1 and this does not learn that, which costs the
  * heavier slice form and never a wrong answer.
  */
+/**
+ * THE DETACHED TAIL — what a barrier's landed elements support, which is every read that the landed
+ * columns already answer and nothing else.
+ *
+ * `id()`, `label()` and `values(k…)` read the tuple `foreign.ts` landed; each hands off to
+ * `scalarTail`, so everything AFTER them composes exactly as it does over a local element's value — a
+ * federated `values('name').order()` is the ordinary scalar fold, not a second vocabulary.
+ *
+ * Everything else DECLINES, and that is TinkerPop's rule rather than a coverage gap: a detached
+ * element carries no live adjacency, so `out()`/`properties()`/`has()` have no table to reach. The
+ * honest answer is to refuse — joining this graph's `nodes` on an id that belongs to another one
+ * would return a plausible, wrong row set. The traversal that wants those steps pushes them INTO the
+ * sub-traversal the barrier runs on the far side, where the elements are attached.
+ */
+function detachedTail(
+  seed: Rel, elem: Elem, steps: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
+): Tail | null {
+  const step = steps[from];
+  if (!step) return { rel: seed, framing: { kind: 'detached', elem }, bulked: false, aliases: NO_ALIASES };
+  if (step.name === 'id' || step.name === 'label') {
+    const value = step.name === 'id' ? col(seed.id, 'id') : foreignLabelValue(seed, elem);
+    const rel = make.project({
+      id: fresh('fgs'), input: seed, channels: [], type: typeOf(meta('v', 'any', true)), exprs: [['v', value]],
+    });
+    // An id frames as whatever it was STORED as (a `uid` string or a rowid int), so it carries no static
+    // tag and infers per value; a label is always a string.
+    return scalarTail(rel, { kind: 'scalar', type: step.name === 'label' ? STATIC('string') : UNKNOWN }, steps, from + 1, false, ctx, fresh);
+  }
+  if (step.name === 'values') {
+    const keys = argValues(step).filter((key): key is string => typeof key === 'string');
+    if (keys.length !== step.args.length) return null;
+    return scalarTail(
+      foreignValues(seed, elem, keys, fresh), { kind: 'scalar', type: PER_ROW('vtype') }, steps, from + 1, false, ctx, fresh,
+    );
+  }
+  return null;
+}
+
 function elementTail(
   seed: Rel, elem0: Elem, steps: readonly IRStep[], from: number, bulked0: boolean,
   ctx: ChainCtx, fresh: Minter, aliases: AliasMap,
@@ -3811,6 +3914,7 @@ function continueAs(
 ): Tail | null {
   switch (framing.kind) {
     case 'elements': return elementTail(rel, framing.elem, steps, from, bulked, ctx, fresh, labels);
+    case 'detached': return detachedTail(rel, framing.elem, steps, from, ctx, fresh);
     // ⚠️ The SET marker crosses. It is a fact about the value's HISTORY (`listTail`'s `set`), not about
     // the step that reads it, so a dispatcher that dropped it turned every set arriving here back into
     // a list — a wrong wire CLASS, since GraphBinary spells the two differently. Reachable the moment
@@ -4476,7 +4580,12 @@ const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
               // be re-tagged onto the outer payload, which is expressible and unbuilt — so declining
               // hands it to the spine that answers rather than double-tagging the rows.
               : left.kind === 'variant' ? false
-                : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
+                // A DETACHED arm would be a branch INSIDE a resumed chain, whose rows are a landed
+                // constant relation rather than a stream this plan can re-read. Nothing produces one
+                // (the detached tail admits three reads and no branch), so declining keeps the switch
+                // total rather than merging two relations that are not the same width.
+                : left.kind === 'detached' ? false
+                  : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
 
 const sameColumns = (left: readonly ColMeta[], right: readonly ColMeta[]): boolean =>
   left.length === right.length && left.every((column, i) => column.name === right[i]!.name);

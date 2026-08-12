@@ -320,7 +320,11 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
       .toEqual(['josh', 'marko', 'peter']);
     expect(run(store, 'g.V().not(__.out().id()).values("name")').map((r) => r.v).sort())
       .toEqual(['lop', 'ripple', 'vadas']);
-    expect(read('g.V().filter(__.out().id()).count()').sql).toContain('EXISTS (SELECT 1');
+    // A CORRELATED EXISTS over the child's rows, either way. The assertion is the SHAPE, not the
+    // spelling (§5a): legacy's gate projects a literal `1` while RelIR projects the child's own value
+    // as `one`, and the traversal moved between the two the day `id()` joined the RelIR tail. Pinning
+    // the projection would have been pinning which spine answered.
+    expect(read('g.V().filter(__.out().id()).count()').sql).toMatch(/EXISTS \(SELECT[^]*FROM edges/);
   });
 
   test('where child order is per-parent and precedes range/limit before EXISTS', () => {

@@ -5,6 +5,7 @@ import { gqlMatchSteps } from '../../gremlin/gql.ts';
 import { mapEntryType } from '../../gremlin/types.ts';
 import { type IRStep } from './step.ts';
 import { IO_SERVICE_NAME } from '../../services/spi/types.ts';
+import { injectedValues, isInjectionMarker } from './injection.ts';
 import { PATH_FAMILY, REDUCERS, VERTEX_MOVES, ENDPOINT_MOVES, OTHER_V, EDGE_MOVES, VERTEX_SOURCE, EDGE_SOURCE, unionOf, isLocalScope } from './step.ts';
 
 // IRStep moved to ir/step.ts (it is needed by both halves of ir/). Re-exported here so the
@@ -709,6 +710,41 @@ export function foldConstantPredicateOperands(steps: IRStep[], params: Record<st
       const folded = foldPredOperands(a, params);
       if (folded !== a) { changed = true; return arg(folded, argObj.type, argObj.name); }
       return argObj;
+    });
+    return changed ? { ...s, args } : s;
+  });
+}
+
+/**
+ * THE FEDERATED INJECTION MARKER, substituted — `has(k, T.value)` becomes `has(k, within(<the
+ * distinct injected values>))` on a sibling hop that supplied them.
+ *
+ * A mid-traversal `call(federate, …, __.values(k))` runs the sub-traversal ONCE over the distinct
+ * parent values (a SPARQL bound-join) rather than once per parent, and `T.value` is where the user
+ * marked the operand those values stand in for. `federate.ts` supplies them under a reserved params
+ * key, so the substitution is a pure function of the chain and its params — which is exactly what a
+ * `Pass` is, and why it belongs HERE rather than in a lowering.
+ *
+ * It used to live inside one spine's `has()` compiler, which made it that spine's private trick: the
+ * other route saw a marker it had no rule for and declined a traversal whose meaning was fully
+ * settled before either of them ran. A rewrite above the routing switch cannot be learned twice or
+ * disagreed about (§6·5 — a fact about the traversal's own text belongs to the Pass tier).
+ *
+ * Zero-cost for every ordinary query: no injection key, no rewrite. A marker with NO values supplied
+ * is left alone deliberately — it then reaches the lowerings as the inert token it is and yields no
+ * match, rather than being silently reinterpreted as some other operand.
+ */
+export function substituteInjectionMarker(steps: IRStep[], params: Record<string, any>): IRStep[] {
+  const values = injectedValues(params);
+  if (!values) return steps;
+  const within = { op: 'within', operands: values.map((v) => arg(v)) };
+  return steps.map((s) => {
+    const slots = VALUE_OPERAND_SLOTS[s.name]?.(s.args ?? []) ?? [];
+    let changed = false;
+    const args = (s.args ?? []).map((argObj, i) => {
+      if (!slots.includes(i) || !isInjectionMarker(argObj.value)) return argObj;
+      changed = true;
+      return arg(within);
     });
     return changed ? { ...s, args } : s;
   });

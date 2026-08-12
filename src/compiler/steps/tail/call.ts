@@ -2,7 +2,7 @@ import { isNested, argValues } from '../../../gremlin/frontend.ts';
 import { type IRStep } from '../../ir/strategies.ts';
 import { type LoweringResult, suspendLowering } from '../context/stream.ts';
 import { type ElementStream } from '../context/context.ts';
-import { type ServiceRegistry, type CallSite, type Contribution, type ForeignRow, type CallParams, type InjectionKind } from '../../../services/spi/types.ts';
+import { type ServiceRegistry, type CallSite, type Contribution, type ForeignRow, type CallParams, type InjectionKind, type BarrierInput } from '../../../services/spi/types.ts';
 import { parseCallSpec, injectionKindOf } from '../../../services/params/call-params.ts';
 import { type ChildFrame, type ChildFrameStack } from './child-shape.ts';
 import { buildCallHead } from './call-head.ts';
@@ -33,7 +33,7 @@ export interface BarrierPoint {
   readonly kind: 'barrier-point';
   readonly serviceName: string;
   readonly params: CallParams;
-  readonly apply: (rows: readonly ForeignRow[]) => Promise<ForeignRow[]>;
+  readonly apply: (rows: readonly BarrierInput[]) => Promise<ForeignRow[]>;
   /** The chain steps AFTER this call() — resumed against the landed foreign stream. */
   readonly restSteps: IRStep[];
   /** Where restSteps begins in the original chain (the index the resumer lowers from). */
@@ -56,7 +56,7 @@ export interface MidBarrierPoint {
   readonly serviceName: string;
   readonly params: CallParams;
   readonly head: Compiled;
-  readonly apply: (rows: readonly ForeignRow[]) => Promise<ForeignRow[]>;
+  readonly apply: (rows: readonly BarrierInput[]) => Promise<ForeignRow[]>;
   readonly injection?: InjectionKind;
   readonly frame: ChildFrame;
   readonly parent: ElementStream;
