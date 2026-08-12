@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. Notes list **only what does not work**; no note means the whole step works. Anything
 unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,360<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,370<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -56,9 +56,9 @@ unsupported throws a clear error and never mis-executes.
 all ✅ in every position a predicate is accepted. ❌ `outside`. `between` is `[lo,hi)`, `inside` is
 `(lo,hi)`.
 
-**Text predicates (`TextP`)** — ❌ the whole family (`containing`, `startingWith`, `endingWith`, and
-their negations). 🚫 `regex` — SQLite has no regex operator and DO SQLite has no UDFs, so it fails
-closed rather than filtering in JS.
+**Text predicates (`TextP`)** — `containing`, `startingWith`, `endingWith`, and their negations ✅
+wherever a predicate is accepted. Matching is case-insensitive under SQLite `LIKE`; `regex` is 🚫 —
+SQLite has no regex operator and DO SQLite has no UDFs, so it fails closed rather than filtering in JS.
 
 ## 3. Projections & element data
 

@@ -1,13 +1,11 @@
-Feature: mogwai addendum — TextP substring predicates over the property_fts trigram index
+Feature: mogwai addendum — TextP substring predicates
 
-  # containing/startingWith/endingWith with a >=3-char term over a stored property are served
-  # by the property_fts trigram index (a fast path over the generic LIKE, result-equivalent).
+  # containing/startingWith/endingWith over a stored property use the generic typed LIKE predicate.
   # These scenarios pin two mogwai characteristics the official corpus does not cover:
   #   1. Matching is CASE-INSENSITIVE (a documented divergence from TinkerPop's case-sensitive
-  #      String.contains — it is what lets the trigram index serve LIKE), and
+  #      String.contains), and
   #   2. an anchored op (startingWith) confirms POSITION, excluding a mid-string hit.
-  # A <3-char term stays a (correct, unindexed) LIKE scan — never fail-closed. @gap:textp marks
-  # the family for an upstream give-back.
+  # A <3-char term is the same correct LIKE check — never fail-closed.
 
   Scenario: containing matches case-insensitively (documented divergence)
     Given the search graph
@@ -33,7 +31,7 @@ Feature: mogwai addendum — TextP substring predicates over the property_fts tr
       | chapter one |
       | chapter two |
 
-  Scenario: endingWith over the index
+  Scenario: endingWith
     Given the search graph
     And the traversal of
       """

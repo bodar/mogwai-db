@@ -373,8 +373,7 @@ not its date.
 something is untracked): `test/rel-spine.test.ts`'s `DECLINED` list, `test/L4-addendum`'s
 `@Unsupported` scenarios, and L5's `LAW UNEVALUABLE` report.
 
-Current leaders: the TextP family (`containing`/`startingWith` — the whole family, not just the trigram
-fast path), mid-chain `V()` re-source, the scalar-transform tail, branch (`choose`/`union`, including
+Current leaders: mid-chain `V()` re-source, the scalar-transform tail, branch (`choose`/`union`, including
 the single-arm form), row ops (`order`/`dedup`, the ELEMENT-list and `Column`-keyed forms), aliases
 (`select`, dominated by `Pop.all`/`Pop.mixed` history reads), the rest of the map shape, side effects,
 then `local`, `match`, `where`, the `path` tails.
