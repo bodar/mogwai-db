@@ -83,21 +83,15 @@ for (const line of (await Bun.file(new URL('../test/L1-corpus/scenarios.tsv', im
 }
 
 const L3_STATE = await Bun.file(new URL('../test/L3-conformance/l3-state.json', import.meta.url)).json();
+/** ANSWERED = the conformance floor: the scenarios that pass today. */
+const ANSWERED: ReadonlySet<string> = new Set<string>(L3_STATE.passed);
 /**
- * ANSWERED = the UNION of the two floors, because the question is "does ANY route answer it", and
- * that union is already the project's own definition of the real floor (`test/CLAUDE.md`, the
- * asymmetric gate). A name the default position holds is answered whether RelIR or the legacy
- * fallback produced it — which is exactly the fact that makes lowering it cut-closing rather than a
- * gain.
- */
-const ANSWERED: ReadonlySet<string> = new Set<string>([...L3_STATE.passed, ...L3_STATE.legacySpine.passed]);
-/**
- * RUN = every name either floor has an opinion about. A scenario in NEITHER set is not a failure —
- * L3 never ran it (a skipped tag, or an upstream scenario newer than the last recorded run), and
+ * RUN = every name the floor has an opinion about. A scenario in NEITHER set is not a failure — L3
+ * never ran it (a skipped tag, or an upstream scenario newer than the last recorded run), and
  * counting it as a gain would invent an upside the suite cannot confirm.
  */
 const RUN: ReadonlySet<string> = new Set<string>([
-  ...L3_STATE.passed, ...L3_STATE.failed, ...L3_STATE.legacySpine.passed, ...L3_STATE.legacySpine.failed,
+  ...L3_STATE.passed, ...L3_STATE.failed,
 ]);
 
 /** The three populations a blocked traversal falls into, plus the scenarios that would newly have a
