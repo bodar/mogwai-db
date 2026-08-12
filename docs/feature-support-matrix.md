@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. Notes list **only what does not work**; no note means the whole step works. Anything
 unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,384<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,387<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -71,7 +71,7 @@ operator and DO SQLite has no UDFs, so it fails closed rather than filtering in 
 | `properties()`, `key()`, `value()`, `element()` | ✅ | |
 | `propertyMap()` | ❌ | |
 | `project(k…).by(…)` | ✅ | an unproductive `by()` OMITS its key, as the reference does |
-| `select(label…)`, `select(Column.keys/values)` | ✅ | ❌ `Pop.all`/`Pop.mixed` history reads; `select(label).by(key)` as a child body |
+| `select(label…)`, `select(Column.keys/values)` | ✅ | `Pop.all` and a non-singleton linear `Pop.mixed` re-enter homogeneous scalar/element/nested-list histories as ordinary typed lists. ❌ dynamic-shape `Pop.mixed`; `select(label).by(key)` as a child body |
 | `constant(v)` | ✅ | |
 
 ## 4. Aggregation & barriers
