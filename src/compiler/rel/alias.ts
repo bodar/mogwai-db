@@ -4,11 +4,11 @@ import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../r
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta } from '../../rel/types.ts';
-import { PER_ROW, STATIC, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
+import { PER_ROW, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, withMemberType, type ListOf, type ScalarType } from '../../sql/kernel/render.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { Elem } from '../plan/plan.ts';
 import { aliasScalarTypeOf, withShape, type AliasEntry, type AliasMap } from '../plan/alias.ts';
-import { carriedCols, meta, payloadCols, typeOf, type Minter } from './build.ts';
+import { carriedCols, collectedOf, meta, payloadCols, typeOf, type Minter } from './build.ts';
 import type { RelFraming } from './framing.ts';
 import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject } from './history.ts';
 
@@ -194,6 +194,41 @@ const scalarTypeOfAlias = (entry: AliasEntry, vtype: string): ScalarType =>
     : entry.scalarType?.kind === 'perRow' ? PER_ROW(vtype)
       : { kind: 'unknown' };
 
+/** A Pop that returns a history LIST has the same member descriptor as the binding it reads, except
+ * that a per-row scalar tag now rides inside each `{t,v}` member rather than a relation column. */
+const historyListOf = (entry: AliasEntry): ListOf | null => {
+  if (entry.shapes.size !== 1) return null;
+  const [shape] = entry.shapes;
+  switch (shape) {
+    case 'vertex': case 'edge': return { kind: 'elem', elem: shape };
+    case 'value': {
+      const type = entry.scalarType ?? { kind: 'unknown' } as ScalarType;
+      return withMemberType(SCALAR_MEMBERS, type.kind === 'perRow' ? PER_ROW_ENVELOPE : type);
+    }
+    case 'list': return entry.listOf ? { kind: 'list', of: entry.listOf } : null;
+    default: return null;
+  }
+};
+
+/** The whole alias history as one ordinary list value. The history encoding is already ordered and
+ * tagged, so this is not a second collection representation: it projects the existing entries into
+ * the list vocabulary's member encodings. In particular a per-row scalar keeps its type envelope;
+ * stripping `t` here would make a BigInt/Date selected with Pop.all frame as a plain number/string. */
+const historyList = (history: Expr, of: ListOf, fresh: Minter): Expr => {
+  const members = make.explode({
+    id: fresh('am'), expr: history, channels: [], as: { value: 'av', ord: 'ao', type: 'at' },
+    type: typeOf(meta('av', 'any', true), meta('ao', 'int'), meta('at', 'text', true)),
+  });
+  const entry = col(members.id, 'av');
+  const value = { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.v')] } as Expr;
+  const node: Expr = of.kind === 'scalar' && of.type.kind === 'perRow'
+    ? { kind: 'json-object', binary: true, entries: [
+      ['t', { kind: 'call', fn: 'json_extract', args: [entry, compilerText('$.t')] }], ['v', value],
+    ] }
+    : of.kind === 'list' ? { kind: 'call', fn: 'json', args: [value] } : value;
+  return collectedOf(members, node, [{ expr: col(members.id, 'ao'), dir: 'asc' }], 'list', fresh);
+};
+
 /** The presence predicate one label OWES, or `undefined` where it can never be false. A STATICALLY
  *  bound label is present on every row that reached here, so the guard is emitted only for one first
  *  bound inside a branch arm or a repeat body — same SQL as legacy in both cases, and one fewer clause
@@ -234,20 +269,31 @@ export function readProjection(
  * columns a shape needs — the by() host reads the identical answer `select()` does, which is what
  * `Scoping.getScopeValue` says it is reading.
  *
- * `null` for every shape `select()` itself declines: a `Pop.all`/`mixed` LIST result, a mixed-shape
- * history, a map/property binding, and a label this relation no longer physically carries.
+ * `null` for a mixed-shape history, a map/property binding, or a label this relation no longer
+ * physically carries. A list-valued Pop reuses the ordinary list vocabulary rather than preserving a
+ * special alias result shape.
  */
 export function aliasProjection(
-  rel: Rel, aliases: AliasMap, label: string, pop: Pop,
+  rel: Rel, aliases: AliasMap, label: string, pop: Pop, fresh?: Minter,
 ): { readonly entry: AliasEntry; readonly read: AliasRead; readonly payload: readonly (readonly [ColMeta, Expr])[] } | null {
   // Asked of the RELATION, so a label a barrier consumed reads as unbound — which is the same
   // DECLINE as a label never bound, and correct for both (TinkerPop drops every traverser either way).
   const entry = liveAliases(aliases, rel).get(label);
   if (!entry) return null;
-  // `mixed` over a once-bound label IS that lone entry (TinkerPop's "singleton unwrapped, else
-  // List"), decided by the compile-time binding count; every other `all`/`mixed` is a LIST value and
-  // is a further arm's business.
-  if (pop === 'all' || (pop === 'mixed' && entry.binds !== 1)) return null;
+  // Pop.all is always the whole history. Pop.mixed unwraps exactly one binding and otherwise returns
+  // that same list; a linear history with a known count therefore needs no runtime shape guess.
+  const list = pop === 'all' || (pop === 'mixed' && entry.binds !== 1);
+  if (list) {
+    const of = historyListOf(entry);
+    // The scope-value reader has no relation minter because it only projects expressions into an
+    // existing caller node. A Pop list is a correlated relation, so it belongs to select() until
+    // that reader grows the same ownership; declining here preserves its prior contract.
+    if (!of || !fresh) return null;
+    return {
+      entry, read: { kind: 'list', of },
+      payload: [[meta('list', 'json', true), historyList(col(rel.id, entry.col), of, fresh)]],
+    };
+  }
   const end: 'first' | 'last' = pop === 'first' ? 'first' : 'last';
   const vtype = 'vtype';
   const read = readOf(entry, vtype);
@@ -294,4 +340,3 @@ export function selectSpec(step: IRStep): { readonly labels: readonly string[]; 
   if (!labels.length || pops.length + labels.length !== args.length) return null;
   return { labels, pop: (pops[0]?.pop ?? 'last') as Pop };
 }
-

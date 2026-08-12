@@ -444,10 +444,10 @@
     "bound": 0
   },
   "select": {
-    "binds": 2,
+    "binds": 3,
     "bytes": 3442,
     "compiler": 44,
-    "bound": 1
+    "bound": 2
   },
   "skip": {
     "binds": 0,

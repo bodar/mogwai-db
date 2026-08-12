@@ -278,6 +278,9 @@ const COVERED = [
   // Both are answer-identical and both are pinned in `test/L2-sql/scalar.sql.test.ts`.
   "g.V().as('a').out().select('a').by(__.out().count())",
   'g.V().as("a").out().as("a").select(Pop.first,"a")', 'g.V().as("a").out().as("a").select(Pop.last,"a")',
+  // A multi-bound label's history is an ordinary LIST: Pop.all always returns it, and Pop.mixed
+  // does too once the linear binding count proves it is not a singleton.
+  'g.V().as("a").out().as("a").select(Pop.all,"a")', 'g.V().as("a").out().as("a").select(Pop.mixed,"a")',
   // …over a VALUE stream, where the label's own `t` field is the only place a per-row `vtype` COLUMN
   // can survive becoming JSON — which is what keeps the comparison numeric after the round trip.
   'g.V().values("age").as("a").select("a")', 'g.V().values("age").as("a").select("a").is(P.gt(30))',
@@ -370,7 +373,6 @@ const COVERED = [
  */
 const DECLINED = [
   "g.V().bothE().otherV()",           // otherV reads the entering vertex — carried state not modelled
-  "g.V().as('a').out().as('a').select(Pop.all,'a')", // Pop.all is the history as a LIST value
   // `g.V().out().select('a')` LEFT this list: a label bound nowhere is the EMPTY RESULT rather than a
   // decline (`Select.feature:578-596` pins `g.V().select("a")` as empty and its `count()` as `0`), and
   // RelIR now expresses that as the `Filter(false)` §3.3 names. The remaining guard is the one where
@@ -480,6 +482,16 @@ describe('the RelIR spine', () => {
     // first injected traverser before moving to the second, so this limit takes ids 1 and 2.
     expect(await decodeAll(exec(seededStore()).buffers('g.inject(0,1).V().limit(2).id()', {}, {})))
       .toEqual([1, 2]);
+  });
+
+  test('Pop.all and a non-singleton Pop.mixed re-enter as typed lists', async () => {
+    // `as()` stores a history entry, not a second representation of the value. Pop.all projects
+    // every entry through the list member encoding; Pop.mixed has the same list answer once its
+    // linear binding count is known to exceed one.
+    for (const pop of ['all', 'mixed']) {
+      const gremlin = `g.inject("a").as("x").concat("b").as("x").select(Pop.${pop},"x")`;
+      expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toEqual([['a', 'ab']]);
+    }
   });
 
 

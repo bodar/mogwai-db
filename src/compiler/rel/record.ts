@@ -429,7 +429,7 @@ export function selectKeys(
   const bound: string[] = [];
 
   for (const [index, label] of spec.labels.entries()) {
-    const projected = aliasProjection(rel, aliases, label, spec.pop);
+    const projected = aliasProjection(rel, aliases, label, spec.pop, fresh);
     if (!projected) return null;
     const payload = new Map(projected.payload.map(([column, expr]) => [column.name, expr] as const));
     if (aliasGuard(rel, projected.entry)) bound.push(projected.entry.col);
