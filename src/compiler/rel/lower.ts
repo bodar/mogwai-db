@@ -25,7 +25,7 @@ import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
 import { childSteps, normalize } from '../ir/passes.ts';
-import { containsTextSearch, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
+import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, labelArgsAllStrings,
@@ -707,11 +707,6 @@ function hasLabelClause(labelArgs: readonly Arg[], subject: ElementSubject, fres
  */
 function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null): Expr | null {
   const elem = subject.elem;
-  // A substring `TextP` over a STORED property is `ftsSubstringPredicate`'s, and taking it here
-  // would swap a trigram-index seek for a base-table LIKE scan — a regression the census cannot
-  // see, reported by the coverage number as progress. §4 lifts this.
-  if (containsTextSearch(val)) return null;
-
   const { table, owner } = PROPERTIES[elem];
   const props = make.scan({
     id: fresh('vp'), table, alias: fresh('rp'), channels: [],
@@ -751,7 +746,7 @@ function hasTokenClause(token: string, val: unknown, subject: ElementSubject, fr
   const elem = subject.elem;
   const name = token.toLowerCase();
   if (name !== 'label' && name !== 'id') return null;
-  if (val === undefined || containsTextSearch(val)) return null;
+  if (val === undefined) return null;
 
   if (name === 'id') {
     const cols = elem === 'edge' ? EDGE_COLS : NODE_COLS;

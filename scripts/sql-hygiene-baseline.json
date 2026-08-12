@@ -187,8 +187,8 @@
   },
   "filter": {
     "binds": 4,
-    "bytes": 1239,
-    "compiler": 15,
+    "bytes": 1879,
+    "compiler": 63,
     "bound": 4
   },
   "fold": {

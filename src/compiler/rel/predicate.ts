@@ -252,40 +252,47 @@ export const storedCompareOn = (vtype: Expr) => (subject: Expr): Expr => {
  *  how one of them silently stops matching the other. */
 export const storedCompare = (rel: RelId, vtype = 'vtype') => storedCompareOn(col(rel, vtype));
 
-/**
- * Does this predicate contain a `TextP` SUBSTRING op — the shape `ftsSubstringPredicate` claims?
- *
- * A caller that has a `property_fts` route available must DECLINE such a predicate rather than
- * lower it here, and the rule it serves is general: **the RelIR route may not silently drop a fast
- * path.** Coverage measures whether the new spine can express a traversal, not whether it should
- * take it from a specialized lowering — silently swapping a trigram-index seek for a base-table
- * LIKE scan would be a performance regression the census cannot see and the coverage number would
- * report as progress. §4 is where the fast paths become plan rewrites; until then this predicate
- * is how a site says "that one is still the legacy spine's".
- *
- * Deliberately NOT conditional on the `ftsSubstringPredicate` flag: the lowering is a function of
- * the CHAIN alone, and making spine choice read the fast-path config would couple two decisions
- * that must stay independent.
- */
-export function containsTextSearch(pred: unknown): boolean {
-  if (!isPred(pred)) return false;
-  if (likePattern(pred.op, '') !== null) return true;
-  return pred.operands.some((o) => containsTextSearch(o.value));
-}
-
-/** `TextP` -> a LIKE pattern with the user's metacharacters escaped. `null` for an op that is not
- *  a supported `TextP` (`regex`, `typeOf`), which then declines with everything else. */
-function likePattern(op: string, value: unknown): { pattern: string; negated: boolean } | null {
-  // TOTAL over every op, not just the three plus their negations: `containsTextSearch` asks this of
-  // an arbitrary predicate, and `P.not(…)` starts with `not` while having no fourth character.
-  // `plan.ts`'s copy is reached only after every other op has been handled, so it never sees one.
+/** `TextP` -> a LIKE pattern with the user's metacharacters escaped. A wire parameter stays a
+ * parameter through the pattern; interpolating its current value here would silently make it a
+ * compiler constant. */
+function likePattern(op: string, operand: Arg): { pattern: Expr; negated: boolean; nullOperand: boolean } | null {
+  // TOTAL over every op, including `P.not(…)`, whose name starts with `not` but is not a TextP op.
   const negated = op.startsWith('not') && op.length > 3;
   const base = negated ? op[3].toLowerCase() + op.slice(4) : op;
-  const escaped = String(value).replace(/[\\%_]/g, (c) => '\\' + c);
-  if (base === 'startingWith') return { pattern: `${escaped}%`, negated };
-  if (base === 'endingWith') return { pattern: `%${escaped}`, negated };
-  if (base === 'containing') return { pattern: `%${escaped}%`, negated };
+  if (base !== 'startingWith' && base !== 'endingWith' && base !== 'containing') return null;
+  // TextP is P<String>. Do not let SQLite stringify a number (`123` would otherwise satisfy
+  // containing('2')); null is the separately-defined Text.isNull case.
+  if (operand.value !== null && typeof operand.value !== 'string') return null;
+  if (operand.value === null) return { pattern: compilerText(''), negated, nullOperand: true };
+  const raw = operand.name == null ? compilerText(operand.value) : param(operand.value, operand.name);
+  const escaped: Expr = { kind: 'call', fn: 'replace', args: [
+    { kind: 'call', fn: 'replace', args: [
+      { kind: 'call', fn: 'replace', args: [raw, compilerText('\\'), compilerText('\\\\')] },
+      compilerText('%'), compilerText('\\%'),
+    ] },
+    compilerText('_'), compilerText('\\_'),
+  ] };
+  const join = (...parts: readonly Expr[]): Expr => parts.reduce((left, right) => binary('||', left, right));
+  if (base === 'startingWith') return { pattern: join(escaped, compilerText('%')), negated, nullOperand: false };
+  if (base === 'endingWith') return { pattern: join(compilerText('%'), escaped), negated, nullOperand: false };
+  if (base === 'containing') return { pattern: join(compilerText('%'), escaped, compilerText('%')), negated, nullOperand: false };
   return null;
+}
+
+/** SQLite LIKE coerces non-text storage classes, while TextP accepts a String (or null) only. A
+ * raw property without its vtype uses its storage class as the same fallback `typeOf` uses. */
+function textSubject(subject: Expr, type: SubjectType): Expr {
+  if (type.kind === 'static') {
+    const canonical = normalizeTypeName(type.type);
+    return canonical === 'string' || type.type.toLowerCase() === 'null' ? CONSTANT.true : CONSTANT.false;
+  }
+  const storage = { kind: 'call', fn: 'typeof', args: [subject] } as const;
+  const raw = binary('or', binary('=', storage, compilerText('text')), binary('is', subject, compilerNull()));
+  if (type.kind === 'unknown') return raw;
+  return binary('or',
+    { kind: 'in-list', expr: type.vtype, values: [compilerText('string'), compilerText('null')] },
+    binary('and', binary('is', type.vtype, compilerNull()), raw),
+  );
 }
 
 /**
@@ -434,15 +441,18 @@ export function predicateExpr(
     return loCmp && hiCmp ? binary('and', loCmp, hiCmp) : null;
   }
 
-  const like = likePattern(op, operands[0]?.value);
+  const like = operands.length === 1 ? likePattern(op, operands[0]) : null;
   if (like) {
     // SQLite's `like(pattern, subject, escape)` FUNCTION, not the infix operator, because the
     // operator's ESCAPE clause is not an expression the algebra has a node for — and adding one
     // for a single op would widen the closed node set (§7) to say something the function already
     // says. Nothing is lost: SQLite disables its LIKE index optimization whenever ESCAPE is
     // present, which the legacy operator form always is, so both spellings are a residual filter.
-    const call: Expr = { kind: 'call', fn: 'like', args: [compilerText(like.pattern), subject, compilerText('\\')] };
-    return like.negated ? negated(call) : call;
+    const call: Expr = like.nullOperand ? CONSTANT.false
+      : { kind: 'call', fn: 'like', args: [like.pattern, subject, compilerText('\\')] };
+    // The type gate stays outside the negative form: null is a legal String reference and the
+    // negative TextP variants return true for it, but a non-String is not a TextP match at all.
+    return binary('and', textSubject(subject, type), like.negated ? negated(call) : call);
   }
 
   if (op === 'typeOf') return operands.length === 1 ? typeOfExpr(subject, operands[0].value, type) : null;

@@ -25,6 +25,24 @@ const carries = (plan: { sql: string; binds: readonly unknown[] }, v: string | n
 
 describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
 
+  test('TextP is typed, escaped, and preserves a wire parameter in its LIKE pattern', () => {
+    const store = seededStore();
+    expect(run(store, 'g.V().has("name",TextP.containing("ark")).values("name")').map((r) => r.v)).toEqual(['marko']);
+    expect(run(store, 'g.V().has("name",TextP.notEndingWith("as")).values("name")').map((r) => r.v).sort())
+      .toEqual(['josh', 'lop', 'marko', 'peter', 'ripple']);
+    // SQLite would coerce 123 to text and match '2'; TextP is P<String>, so it must not.
+    expect(run(store, 'g.inject(123).is(TextP.containing("2"))')).toEqual([]);
+    // Text.isNull is false and its negative variants negate that result.
+    expect(run(store, 'g.inject(null).is(TextP.notContaining("x"))').map((r) => r.v)).toEqual([null]);
+
+    const p = compile('g.V().has("name",TextP.containing($term))', { $term: 'ark' });
+    expect(p.kind).toBe('read');
+    if (p.kind === 'read') {
+      expect(p.binds).toEqual(['ark']);
+      expect(p.sql).toContain('replace(');
+    }
+  });
+
   // `P.typeOf` is RelIR-routed on both `is` and `has`, so the CONTRACT is asserted once per spine —
   // three resolution modes, and the point of each is which evidence it reads, not how it spells it.
   // A canonical type name and a storage class are compiler-authored CONSTANTS: legacy binds them, RelIR

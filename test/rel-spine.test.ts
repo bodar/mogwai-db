@@ -45,6 +45,11 @@ const COVERED = [
   "g.V().has('name',P.within('marko','josh'))", "g.V().has('name',P.without('marko'))",
   "g.V().has('name',P.within())", "g.V().has('age',P.between(20,30))", "g.V().has('age',P.inside(20,35))",
   "g.V().has('age',P.gt(20).and(P.lt(30)))", "g.V().has('age',P.not(P.gt(30)))", "g.E().has('weight',P.gte(0.5))",
+  // TextP is the same predicate vocabulary at a stored-property host: positive, negative and
+  // composed forms all retain the property row's vtype rather than asking SQLite to stringify it.
+  "g.V().has('name',TextP.containing('ark'))", "g.V().has('name',TextP.startingWith('mar'))",
+  "g.V().has('name',TextP.endingWith('as'))", "g.V().has('name',TextP.notContaining('ark'))",
+  "g.V().has('name',TextP.startingWith('m').or(TextP.startingWith('p')))",
   // THE SHAPE BOUNDARY: both of these retype element -> scalar, so they exercise the framing
   // bridge's second stream kind rather than one more step in the same one.
   'g.V().count()', 'g.E().count()', "g.V().hasLabel('person').count()", "g.V().has('age',P.gt(29)).count()",
@@ -410,7 +415,6 @@ const DECLINED = [
   // it — the members' child rows pool and the barrier reduces the pool once — so a SECOND site has
   // nothing to union onto it, and the label declines rather than keeping one site's finished map.
   'g.V().group("a").by(T.label).by(__.outE().values("weight").sum()).out().group("a").by(T.label).by(__.outE().values("weight").sum()).cap("a")',
-  "g.V().has('name',TextP.containing('ark'))",  // ftsSubstringPredicate's — see below
   // `select(label).by(key)` as a CHILD BODY — the by() modulator over an alias read, inside a host.
   // The `select(label).values(key)` spelling of the same thing is covered; this one is not.
   'g.V().as("a").out("knows").map(__.select("a").by("name"))',
