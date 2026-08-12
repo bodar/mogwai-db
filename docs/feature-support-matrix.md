@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. Notes list **only what does not work**; no note means the whole step works. Anything
 unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,370<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,379<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -19,7 +19,7 @@ unsupported throws a clear error and never mis-executes.
 
 | Step | | Notes |
 |---|:--:|---|
-| `V()`/`V(id…)`, `E()`/`E(id…)` | ✅ | numeric rowid or string `uid`. ❌ mid-traversal `V()`/`E()` re-source (`…as('a').V()`) |
+| `V()`/`V(id…)`, `E()`/`E(id…)` | ✅ | numeric rowid or string `uid`; a mid-traversal re-source (`…as('a').V()`) splits each incoming traverser over the selected graph elements, preserving aliases and one canonical encounter order. ❌ after `path()`/`sack()`/`otherV()`; a fan-out `flatMap`/`local` child body still awaits the per-parent rejoin substrate |
 | `out`/`in`/`both`, `outE`/`inE`/`bothE`, `outV`/`inV`/`bothV` | ✅ | index-only covering-index hops; convergent walks auto-collapse |
 | `otherV` | ❌ | |
 | `inject(…)` | ✅ | ❌ appending a list onto an existing scalar stream |
