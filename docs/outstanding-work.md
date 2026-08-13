@@ -31,12 +31,11 @@ per-step support; closed work belongs in git history or `docs/archive/`.
 - **Operations:** a real Cloudflare deployment, graph authentication, transaction/session
   semantics, and GraphSON response encoding.
 - **Query-plan performance.** The join-order fence and source seek made filtered lookups
-  plan-stable without stats (RelIR plan §1 P4). Two follow-ons remain, both optimizations
-  now rather than correctness fixes: a `PRAGMA optimize` schedule to gather the stats DO
-  allows but cannot bound (after a bulk load / `io().read()`, on the DO alarm or after N
-  writes; never per request), and a plan-stability gate — `accessPaths` over a
-  few-thousand-vertex fixture, run with and without stats and asserting they agree, as the
-  regression guard for the fence and seek.
+  plan-stable without stats (RelIR plan §1 P4), and `test/plan-stability.test.ts` guards it
+  (graph-sized access paths identical with and without stats over a 4000-vertex fixture). One
+  follow-on remains, an optimization now rather than a correctness fix: a `PRAGMA optimize`
+  schedule to gather the stats DO allows but cannot bound — after a bulk load / `io().read()`,
+  on the DO alarm or after N writes; never per request.
 
 ## Maintenance
 

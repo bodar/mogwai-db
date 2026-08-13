@@ -41,8 +41,9 @@ Facts about the platform, not preferences.
   gated `propertySeek`, `GATE_ONLY_FAST_PATHS`). Both are physical statements of a fact the traversal
   fixed, changing no rows, so the plan is **stable without stats**: a mid-size graph's 1-hop filtered
   lookup went ~9.8 s (planner guessing, superlinear) → ~19 ms, identical with and without
-  `sqlite_stat1`. ⚠️ Benchmarks must `ANALYZE` or they measure the wrong plan. Gathering stats on a
-  schedule and a plan-stability gate are follow-on optimizations, tracked in `docs/outstanding-work.md`.
+  `sqlite_stat1`. ⚠️ Benchmarks must `ANALYZE` or they measure the wrong plan. `test/plan-stability.test.ts`
+  gates the stability (graph-sized access paths identical with and without stats); a `PRAGMA optimize`
+  schedule to also gather stats is a follow-on, tracked in `docs/outstanding-work.md`.
 - **P5 — the write envelope.** Legal: CTE→`INSERT … SELECT … RETURNING`; multi-row `INSERT …
   RETURNING`; `INSERT … ON CONFLICT DO UPDATE … RETURNING`; `UPDATE … FROM (subquery)`; `DELETE …
   WHERE … IN (SELECT)`. Illegal: the Postgres-style data-modifying CTE. So a write chain is a SEQUENCE
