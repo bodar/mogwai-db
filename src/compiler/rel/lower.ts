@@ -4400,6 +4400,19 @@ function propertyTail(
     return grouped && continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, from + 1, false, ctx, fresh, NO_ALIASES);
   }
 
+  // A CORRELATED FILTER over a property traverser — `where`/`filter`/`not`/`and`/`or`, the SAME
+  // `sourceFilter` vocabulary the element and scalar hosts use, reachable now that a property is a
+  // `Subject`. It PRESERVES the shape (a filter drops property rows, never retypes them), so it recurses
+  // like a row op. `is` is deliberately NOT in `SCALAR_FILTER_HOSTS` — a property has no single value to
+  // compare, so a value predicate declines rather than answering off the wrong column.
+  if (SCALAR_FILTER_HOSTS.has(step.name)) {
+    const subject: Subject = { kind: 'property', id: propertyRowId(rel), ownerElem: elem, rel };
+    const clause = sourceFilter(step, subject, fresh, ctx);
+    return clause && propertyTail(
+      make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause }),
+      elem, steps, from + 1, bulked, ctx, fresh, labels);
+  }
+
   // THE BRANCH FAMILY over a PROPERTY stream — the same `branchArms` the element and value tails call,
   // because an arm body over a property traverser is the ordinary fold re-entered at the property
   // framing (`key()`/`value()`/`element()` retype it, the row ops and filters preserve it). `union`

@@ -94,6 +94,13 @@ const COVERED = [
   'g.V().properties().union(__.key(), __.value())', 'g.V().properties().union(__.value(), __.constant("x"))',
   'g.V().properties().choose(__.key().is("name"), __.value(), __.key())',
   'g.V().properties().coalesce(__.key(), __.value())',
+  // A CORRELATED FILTER over a property stream — `where`/`filter`/`not`/`and`/`or` fold their body
+  // through the property `Subject` and PRESERVE the shape. `is` still declines (a property has no single
+  // value), which `SCALAR_FILTER_HOSTS` excludes.
+  'g.V().properties().where(__.value().is(P.gt(30))).value()',
+  'g.V().properties().filter(__.value().is(P.gt(30))).key()',
+  'g.V().properties().not(__.key().is("name")).key().dedup()',
+  'g.V().properties().and(__.key().is("age"), __.value().is(P.gt(30))).value()',
   // `constant(c)` is the ONE shape-independent retype (`constantRetype`) — it ignores the traverser and
   // emits a literal, so it composes over EVERY tail: element, scalar, list, property and map. The list/
   // property/map tails had no caller for it before, so these declined for want of a caller, not algebra.
