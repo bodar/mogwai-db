@@ -278,7 +278,17 @@ it cannot SEE. **Whenever a seam re-enters the fold, check what it HANDS OVER be
 the algebra cannot express.**
 
 ⚠️ **THE GUARD WRITTEN BEFORE THE ARM is the cheapest form of this error, and it reads identically to a
-missing lowering.** Three LIST member ops were filed as unexpressible and every one was UNREACHABLE:
+missing lowering. It has now been found four times; assume there are more.** The tell is a blanket
+decline sitting in front of an arm that reads the very thing the blanket refuses:
+
+- `BY_READERS` was a five-name subset of `BY_HOSTS` while its own comment claimed to BE the
+  intersection, so the blanket modulator decline refused every `group().by(…)` over a value stream.
+- `groupRows`' `!bys[0]` test asked "was a `by()` written" when it meant "does this name the traverser",
+  so `group().by()` never reached the cheap ROWID key its own comment describes and
+  `group().by('name').by()` never reached the collect-the-elements arm.
+- and the three list member ops below.
+
+Three LIST member ops were filed as unexpressible and every one was UNREACHABLE:
 `listMemberOp`'s blanket `step.modulators?.length` guard ran in front of an `order` arm that read a
 comparator correctly (and whose own `!child && modulators` check was therefore dead code); `dedup(Scope.local)`
 declined for EVERY input because the SCOPE TOKEN is an argument, so a bare `argValues(step).length` was 1
