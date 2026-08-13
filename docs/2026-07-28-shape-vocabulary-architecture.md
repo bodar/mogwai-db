@@ -1,14 +1,11 @@
 # Shape vocabularies across the layers — what to unify, what to finish, what to leave alone
 
-**Status: design session, 2026-07-28. No code landed.** Seven agents (three research sweeps, four
-architects including a designated skeptic) against `fa6c0aa`. Every claim below is cited to a
-`file:line` or a measurement; the ones that decide the recommendation were re-verified by hand and
-are marked **[verified]**. Read this before proposing a cross-layer shape refactor — three of the
-obvious ones are already refuted here, one of them by prior art in this repo.
+Read this before proposing a cross-layer shape refactor — three of the obvious ones are refuted
+here, one of them by prior art in this repo. Claims cite a `file:line` or a measurement; the ones
+that decide the recommendation are marked **[verified]** (re-checked by hand).
 
-**Names here predate the 2026-07-29 rename** (`Carry`/`Carried` → `LoweringState`/
-`TraverserLayout`, `PStep` → `IRStep`, and the whole `carry*` family). The measurements below are
-dated and left as they were taken; decode them with the rename map in
+Names here predate the `Carry`/`Carried` → `LoweringState`/`TraverserLayout`, `PStep` → `IRStep`
+rename (the whole `carry*` family) — decode with the rename map in
 [tinkerpop-core-engine-alignment](./2026-07-29-tinkerpop-core-engine-alignment.md).
 
 ## The question that framed it
@@ -36,7 +33,7 @@ Every shape vocabulary answers exactly one of three questions, and nothing in th
 the P-vs-W mismatch** — two physical encodings of one logical value get two `Shape`s but one
 `Stream`, or the reverse.
 
-This is the same category error `docs/archive/2026-07-25-type-channel-unification.md:80` already recorded:
+Same category error `docs/archive/2026-07-25-type-channel-unification.md:80` already recorded:
 *"Uniform typing is a compile-time property; the physical encoding stays free. Conflating those two
 is what caused the dead end."* `ScalarType` (`render.ts:120`) is the only vocabulary in the codebase
 that got the separation right, and it is the template for everything worth doing below.
@@ -119,11 +116,11 @@ presence* (`{vertex:…}` vs `{edge:…}`, `execute.ts:518,521`) with no type at
 
 ## 4. Not organic growth — three unfinished consolidations
 
-The designs already exist, are already written down, and are already right. What failed three times
-is *finishing* them; in each case the first consumer was converted and the rest kept a local alias
-or a hand-written copy so their call sites would not move.
+The designs already exist, are written down, and are right. What failed three times is *finishing*
+them: in each case the first consumer was converted and the rest kept a local alias or a hand-written
+copy so their call sites would not move.
 
-1. **`ScalarType`** — landed for `ScalarStream` and `Shape.value`. Still on the old raw `as?:
+1. **`ScalarType`** — converted for `ScalarStream` and `Shape.value`. Still on the old raw `as?:
    ValueType`: `ListOf.scalar`, `Shape.variant`, `Shape.list`, `Shape.jsonbList`, `VariantStream`,
    `AliasEntry`, and `TypeCtx` (`plan.ts:152`, whose own comments call it "Mode 1/2/3" — the
    two-optionals-plus-implicit-third pattern verbatim). `MapEntry{sub:'value'}` (`render.ts:39`)
@@ -134,15 +131,15 @@ or a hand-written copy so their call sites would not move.
 2. **`VALUETYPE_TO_CANONICAL`** — its comment (`types.ts:150-153`) says it replaced three
    hand-written copies. It missed `execute.ts:355` (`VTYPE_TO_VALUETYPE`, a 14-entry verbatim
    duplicate) **[verified]**, and `write.ts:66`/`plan.ts:144` survive as pure renames.
-3. **`streamPayloadCols`** — landed for the child-seam rejoin; the element arm (`['id']`) and scalar
-   arm are re-derived by hand at ~22 sites. The `result === 'number' → ['v','vt']` implication alone
-   is rewritten in **8** places. The element payload column list exists in **5** independent
+3. **`streamPayloadCols`** — converted for the child-seam rejoin; the element arm (`['id']`) and
+   scalar arm are re-derived by hand at ~22 sites. The `result === 'number' → ['v','vt']` implication
+   alone is rewritten in **8** places. The element payload column list exists in **5** independent
    derivations (`stream.ts:269`, `stream.ts:301`, `group.ts:89`, `select.ts:106` and `:127`,
    `execute.ts:271`), agreeing by convention.
 
 ## 5. The decisive evidence: what actually generates bugs
 
-36 defects with a written diagnosis (docs + 68 commit bodies, 2026-07-25 → 07-28):
+36 defects with a written diagnosis (docs + 68 commit bodies):
 
 | Category | n | share |
 |---|---|---|
@@ -180,9 +177,8 @@ is one grep"* (`82f1d68`); the rooted-union widening (`56a8a6f`); `asNumber` as 
 The wins were all **reachability** fixes: change a guard from "I have a parse tree" to "I have a
 body"; spell a `json_each` explode as an `ElementStream` by putting `(pk, ord)` in the `origins`
 slot that already means that; make an optional field a total union. One genuine cross-file
-vocabulary unification *did* land and kill a bug class — `ScalarType`, 31 files, 4 commits. So the
-lesson is not "refactors fail here." It is: **the burden on a structural proposal is a measurement,
-not a design.**
+vocabulary unification *did* land and kill a bug class — `ScalarType`, 31 files. So the lesson is not
+"refactors fail here." It is: **the burden on a structural proposal is a measurement, not a design.**
 
 ## 6. The bright line for shape in the IR
 
@@ -250,14 +246,14 @@ criterion: `PARTITION BY …, p.c.v`. Three classes follow — row-algebraic (on
 current-object (needs a named authority generalising `foldMember`, `barrier.ts:54`, allowed to
 return `null`), and shape-interpreting (per-shape forever, correctly).
 
-**CORRECTION (2026-08-04): "shape-interpreting" is TWO classes, and treating it as one drew the RelIR
-migration's boundary in the wrong place.** A shape's PAYLOAD PROJECTION composes SQL (`materialize.ts`'s
-`materializeRoot` is `readCompiled(query, tail, shape)`), so it is a query producer and belongs to whatever
-layer owns query production — RelIR, by that migration's decision #3. Its BYTE FRAMING (`(rows, Shape) →
-Buffer[]`, `execute.ts`) contains no SQL and is the part that is genuinely per-shape forever. `Shape` is
-the boundary between them and already exists. See §10·10 of `docs/2026-08-01-relir-build-plan.md`; both
-halves are still per-shape, so the classification above is unchanged for every purpose except *who owns
-which*.
+**CORRECTION: "shape-interpreting" is TWO classes, and treating it as one drew the RelIR migration's
+boundary in the wrong place.** A shape's PAYLOAD PROJECTION composes SQL (`materialize.ts`'s
+`materializeRoot` is `readCompiled(query, tail, shape)`), so it is a query producer and belongs to
+whatever layer owns query production — RelIR, by that migration's decision #3. Its BYTE FRAMING
+(`(rows, Shape) → Buffer[]`, `execute.ts`) contains no SQL and is the part that is genuinely
+per-shape forever. `Shape` is the boundary between them and already exists. See §10·10 of
+`docs/2026-08-01-relir-build-plan.md`; both halves are still per-shape, so the classification above
+is unchanged for every purpose except *who owns which*.
 
 One live mis-execution risk to design against: a naive list `dedup()` over blob equality is unsound,
 because `foldMember` makes the typed-`{t,v}` vs bare member encoding a **runtime, per-relation**
@@ -267,96 +263,80 @@ decision — two logically equal lists from different producers can be different
 
 **0 — Two oracles first. ✅ LANDED as ONE instrument (`test/census/`).** The L5 *differential* is
 structurally blind to refactor regressions: it compares two lowerings, so a defect in both is
-invisible. Oracle 2 (metamorphic laws, `fa6c0aa`, `laws.ts`) mitigates a different axis — 19
-semantic identities, not "this traversal returns what it returned yesterday" — so it does not
-substitute. And 873 of 2,298 corpus traversals do not execute: a 38% surface no oracle touches,
-where every silent-`[]` defect in the record has lived.
+invisible. Oracle 2 (metamorphic laws, `laws.ts`) mitigates a different axis — 19 semantic
+identities, not "this traversal returns what it returned yesterday" — so it does not substitute. And
+873 of 2,298 corpus traversals do not execute: a 38% surface no oracle touches, where every
+silent-`[]` defect in the record has lived.
 
-P1 and P2 were specified as two artifacts; they shipped as one, because **executing a traversal
-surfaces its compile failure anyway**, so one pass yields both halves for 11s instead of 17.5s and
-strictly more information — the transition that matters most (*used to fail closed, now returns
-rows*) is only visible when both facts live in one record. Measured at the baseline: 1,425 `ran`,
-475 `deferred`, 381 `unbound`, **17 `crashed`**. Determinism was the gate on the whole approach and
-was verified over 7 runs including separate processes, plus a `reverse_unordered_selects` planner
-perturbation. Two corrections the probe forced:
-- **Sorting the outer multiset is NOT order-immune.** When `fold()`/`cap()`/`group()` collapses a
+P1 and P2 were specified as two artifacts; they ship as one, because **executing a traversal
+surfaces its compile failure anyway**, so one pass yields both halves (11s vs 17.5s) and strictly
+more information — the transition that matters most (*used to fail closed, now returns rows*) is only
+visible when both facts live in one record. Baseline: 1,425 `ran`, 475 `deferred`, 381 `unbound`,
+**17 `crashed`**. Determinism was the gate on the whole approach, verified over 7 runs including
+separate processes plus a `reverse_unordered_selects` planner perturbation. Two corrections the probe
+forced:
+- ⚠️ **Sorting the outer multiset is NOT order-immune.** When `fold()`/`cap()`/`group()` collapses a
   stream to one traverser, member order lives *inside* its GraphBinary buffer — 50 traversals are
-  order-sensitive this way. `ms` gates; `ord` is telemetry (356 move under perturbation, so gating
-  it guarantees a suite that flaps on a Bun bump).
-- **A bare `compile()` is the wrong instrument** — it resolves no service registry, so all 12
+  order-sensitive this way. `ms` gates; `ord` is telemetry (356 move under perturbation, so gating it
+  guarantees a suite that flaps on a Bun bump).
+- ⚠️ **A bare `compile()` is the wrong instrument** — it resolves no service registry, so all 12
   `call()` traversals would have been committed as false deferrals.
 
-Both gates were verified against a *real* injected regression, not a doctored artifact: an
-artifact edit can only simulate a gain, never a loss.
+Both gates were verified against a *real* injected regression, not a doctored artifact: an artifact
+edit can only simulate a gain, never a loss.
 
-**1 — Free deletions. ✅ LANDED** (`19f5b34`, `283453e`, `4c5ce5c`). All four, each verified by the
-census not moving from 1425/475/381/17:
-- `ValueType = Exclude<CanonicalType,'list'|'map'|'set'>`; all five adapter names deleted. Owning
-  it in `gremlin/types.ts` also broke the latent `types.ts → render.ts → storage.ts → types.ts`
-  cycle. One care point: a naive `vt as ValueType` in `vtypeToValueType` would let a stored
-  `'list'` reach `frameValue`, fall off its deliberately non-exhaustive switch and return
-  `undefined` as a `Buffer` — a corrupt frame with no throw. Guarded with `isCollectionType` +
-  `hasSerializer`.
+**1 — Free deletions. ✅ LANDED.** All four, each verified by the census not moving from
+1425/475/381/17:
+- `ValueType = Exclude<CanonicalType,'list'|'map'|'set'>`; all five adapter names deleted. Owning it
+  in `gremlin/types.ts` also broke the latent `types.ts → render.ts → storage.ts → types.ts` cycle.
+  ⚠️ One care point: a naive `vt as ValueType` in `vtypeToValueType` would let a stored `'list'`
+  reach `frameValue`, fall off its deliberately non-exhaustive switch and return `undefined` as a
+  `Buffer` — a corrupt frame with no throw. Guarded with `isCollectionType` + `hasSerializer`.
 - `Shape{kind:'count'}` deleted, scoped to the Shape arm — `ScalarStream.result === 'count'` is
   separable, and all five of its producers already pass `'long'`, which is *why* the arm was
   redundant.
 - Element kind unified to `'vertex'|'edge'`, `ElemShape = Elem | 'property'`. 13 of the 17 bridge
   ternaries were then identities and are gone; the 4 survivors are genuine narrowings.
-  **The persisted `property_fts.owner_elem` seam held** — minted only by `sqlElem()`, pinned by a
-  test written *before* the rename, because that failure mode (pre-existing rows say `node`, new
-  code queries `vertex`, every TextP predicate returns `[]` with no error) is invisible to the
-  census, which seeds a fresh graph each run.
+  ⚠️ **The persisted `property_fts.owner_elem` seam held** — minted only by `sqlElem()`, pinned by a
+  test written *before* the rename, because that failure mode (pre-existing rows say `node`, new code
+  queries `vertex`, every TextP predicate returns `[]` with no error) is invisible to the census,
+  which seeds a fresh graph each run.
 
-Two defects fixed in passing: `outV()`'s deferral read "not a node", and `group.ts`'s element-key
-path silently collapsed `ElemShape`'s `'property'` arm to a vertex rather than failing closed.
+**2 — Make `Carried` total.** The largest measured category (33%), still firing (`repeat()` emitting
+`1 AS bulk` without declaring it). The role-merging authority is **`mergeLayouts`**
+(`steps/context/context.ts:269`; `carryThrough` too); the live work is deployment + the ONE assertion
+extension, tracked as item 18 in [outstanding-work](./outstanding-work.md). The seven non-alias roles
+are merged ad hoc across four merge builders, the child rejoin, the keyed relation and the recursive
+term. `carriedWith` (the total, role-naming helper) has 31 call sites against **109 hand-written
+`...carried` spreads** **[verified]**, concentrated in `steps/tail/`. Convert the spreads so each
+survivor must *say* what it drops; extend `assertStreamColumns` to check declared roles against
+present columns.
 
-**2 — Make `Carried` total.** The largest measured category (33%), still firing (`4cefade`,
-2026-07-28: `repeat()` emitting `1 AS bulk` without declaring it).
-
-> **STALE as of 2026-07-29 — the construction is DONE; what remains is deployment.** This section said
-> the designated authority "does not exist, defined nowhere in `src/` **[verified]**". It exists as
-> **`mergeLayouts`** (`steps/context/context.ts:269`) — the name changed in the 2026-07-29 rename, so
-> the original grep was correct about `mergeCarried` and wrong about the concept. `carryThrough` exists
-> too. The live work is the remaining deployment + the ONE assertion extension, tracked as item 18 in
-> [outstanding-work](./outstanding-work.md); read it there rather than re-deriving from this paragraph.
-> Note also that `mergeLayouts` deliberately has one caller — `steps/tail/variant.ts` documents why a
-> child-scoped arm cannot satisfy its rigid-role assertion. **Do not weaken that assertion to make a
-> call type-check.**
-
-The seven non-alias roles are merged ad hoc across four merge builders, the
-child rejoin, the keyed relation and the recursive term. `carriedWith` (the total, role-naming
-helper) has 31 call sites against **109 hand-written `...carried` spreads** **[verified]**,
-concentrated in `steps/tail/`. Convert the spreads so each survivor must *say* what it drops; extend
-`assertStreamColumns` to check declared roles against present columns.
+⚠️ **`mergeLayouts` deliberately has one caller** — `steps/tail/variant.ts` documents why a
+child-scoped arm cannot satisfy its rigid-role assertion. **Do not weaken that assertion to make a
+call type-check.**
 
 **3 — The matrix ratchet. ✅ BUILT** (`test/L5-properties/capability.test.ts` +
-`capability-baseline.ts`, 2026-07-29). It is oracle #4 from the L5 design doc, which still lists it as
-unbuilt. For every `(shape, transition)`, synthesize a witness and classify: compiles / throws a
-**declared** deferral / **anything else fails the gate**. That third case checks the fail-closed claim
-itself for the first time. Ratchet discipline copied from `known.ts`. **Still open, and now cheap
-because the ratchet exists:** generate the per-step shape strip into `feature-support-matrix.md`, whose
-legend claims a ✅ step works *"anywhere in a traversal"* — which item 5c falsifies for ~35 steps.
-Keep the L5 lattice independent (`shape.ts:11-18`); reflecting it out of the dispatch maps would
-define validity as "what we already support".
+`capability-baseline.ts`). For every `(shape, transition)`, synthesize a witness and classify:
+compiles / throws a **declared** deferral / **anything else fails the gate**. That third case checks
+the fail-closed claim itself for the first time. Ratchet discipline copied from `known.ts`. **Still
+open, and now cheap because the ratchet exists:** generate the per-step shape strip into
+`feature-support-matrix.md`, whose legend claims a ✅ step works *"anywhere in a traversal"* — which
+item 5c falsifies for ~35 steps. ⚠️ Keep the L5 lattice independent (`shape.ts:11-18`); reflecting it
+out of the dispatch maps would define validity as "what we already support".
 
-**4 — Name the cardinality axis, then share row-ops** (§7). Only after naming it. **The axis is now
-NAMED** (`RelationalCardinality` / `cardinalityOf`, `steps/context/stream.ts`) and has exactly one
+**4 — Name the cardinality axis, then share row-ops** (§7). Only after naming it. The axis is
+**NAMED** (`RelationalCardinality` / `cardinalityOf`, `steps/context/stream.ts`) with exactly one
 consumer, so the gate is open and the sharing is the live work — tracked as item 17 in
 [outstanding-work](./outstanding-work.md), where the matrix is measured at 55/100 gaps. The
-variant/record `ORDER BY` half landed (`variantSlice` passes `orderByEncounter: true`); **pinning each
-newly-deterministic result in an L4 `.feature` did NOT** — a shipped semantic still unspecified.
+variant/record `ORDER BY` half is done (`variantSlice` passes `orderByEncounter: true`); ⚠️ **pinning
+each newly-deterministic result in an L4 `.feature` is NOT** — a shipped semantic still unspecified.
 
 **5 — The IR-shape question as an experiment, not a design. ✅ RAN, and the answer is NO — do not
 re-propose it.** `shape-annotation.test.ts` measured **56.8% ⊤ against a 10% kill criterion**, so the
 classifiers stay in `steps/`. The committed-in-advance kill criterion did its job; §9 records this as
-settled. Original design, for the record: a **test-only** oracle (~150 lines,
-zero `src/` changes) reusing the existing classifiers, over L1 + L5's generated set, reporting
-soundness (must be 0) and ⊤-rate, with the kill criterion committed *before* the run. Under ~10% ⊤ →
-hoisting the classifiers into `ir/` is viable (nearly free: `ir/` imports nothing from `steps/`
-today, and the only obstacles are one 16-name `Set` and ~35 lines of frame types; the precedent is
-`ALWAYS_PRODUCTIVE_TERMINAL`, `ir/productivity.ts:5-13`). Above → kill it and record the number.
-Independently: add the anchor rule as a **type-level** prohibition on shape-dependent Passes — ship
-only the half the compiler enforces, because this repo already has the receipt where
+settled. ⚠️ Independently: add the anchor rule as a **type-level** prohibition on shape-dependent
+Passes — ship only the half the compiler enforces, because this repo already has the receipt where
 `FastPath.equivalentWhen` was made a required non-empty string and *"the claim behind it had never
 been checked."*
 
@@ -387,8 +367,5 @@ been checked."*
   current instrumentation, "behaviour preserved" is indistinguishable from "20 deferrals quietly
   became wrong answers". If we are not willing to build P1 and P2, we should not do step 2 — or any
   of the others.
-- The ⊤-rate in step 5 is **unmeasured**. The prior is that it will be higher than expected
-  (`call()`'s shape comes from the registry, which is not on `PassContext`; `match()`/`repeat()` are
-  already opaque in `analyze()`), which would kill the idea — a fine outcome.
 - `outstanding-work.md` item 5c's *count* and *family split* should be re-filed against the
   measurement in §7, but the index is left unchanged here pending that decision.
