@@ -1,8 +1,7 @@
 # A GraphQL front end — design and build plan
 
-> **STATUS: PLAN. Nothing below has landed.** Written 2026-08-07 against trunk at `41c897d`,
-> tinkerpop submodule at the current pin. Every capability claim in §2 is a **probe result**; the
-> method is at the bottom (§10). The one dependency this needs is approved (§7·4).
+**A PLAN — nothing here has landed.** Every capability claim in §2 is a **probe result** (method: §10).
+The one dependency is approved (§7·4).
 
 The question this answers: *how well does GraphQL map onto a graph database, and if it maps well,
 what is the natural layer to attach it to — Gremlin, the RelIR, or SQLite?*
@@ -111,11 +110,10 @@ Read that list against §1·1. GraphQL needs `project`, `select`, `valueMap`, `e
 order** — the map shape, aliases, the property shape, row ops and the list shape are five of the top
 seven families, and together they are precisely *a selection set with per-level arguments*.
 
-This is not a coincidence to remark on and move past. A selection set with per-level arguments IS the
-relational shape the fold exists to express — nested projection with per-level filter, order and
-slice, which is `rel2sql`'s home ground (`vendor/calcite`). GraphQL is not asking for a feature the
-engine lacks a concept for; it is asking for the concepts the fold is furthest through designing and
-has not finished lowering.
+Not a coincidence: a selection set with per-level arguments IS the relational shape the fold exists to
+express — nested projection with per-level filter, order and slice, `rel2sql`'s home ground
+(`vendor/calcite`). GraphQL asks not for a concept the engine lacks but for the concepts the fold is
+furthest through designing and has not finished lowering.
 
 ### 2·2 The one item that is not a family
 
@@ -173,7 +171,7 @@ That is a handful of `GROUP BY` queries over the existing schema (`src/storage.t
 one graph, so reflection is per-graph, cheap, and can be cached against a write counter.
 
 **Build it as a service, not a special case.** `src/services/` + the registry already exist and
-`call()` is now a first-class source (`9c5d11f`). `call('schema')` makes the reflected schema
+`call()` is a first-class source. `call('schema')` makes the reflected schema
 reachable *from Gremlin* as well as from the GraphQL endpoint, and gives the GraphQL layer no private
 back door into storage. Introspection then falls out for free — GraphQL introspection is just this
 schema, served in GraphQL's own shape.
@@ -344,9 +342,9 @@ long tail no hand-written corpus reaches.
 the SDL our reflector generated. A one-assertion test that validates the entire schema layer, and the
 thing every GraphQL client tool depends on.
 
-### 7·4 The dependency decision — **APPROVED (Dan, 2026-08-07)**
+### 7·4 The dependency decision — **APPROVED**
 
-`graphql` (graphql-js) as a RUNTIME dependency, `graphql-http` as dev-only. Recorded here because the
+`graphql` (graphql-js) as a RUNTIME dependency, `graphql-http` as dev-only. Recorded because the
 no-new-dependencies rule makes the approval, not the choice, the thing that needs writing down.
 graphql-js is MIT with zero runtime dependencies of its own.
 
