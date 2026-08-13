@@ -47,6 +47,29 @@ describe('match() SQL', () => {
     expect(p.sql).toMatch(/WHERE[^]*rn\.id/);
   });
 
+  // A no-end pattern (`as('d').has(…)`) binds nothing — it re-roots at the alias and FILTERS, so it
+  // adds no column and only narrows the table.
+  test('constraint pattern → a re-rooted filter, no new binding', () => {
+    const p = read('g.V().match(__.as("d").in("knows").as("a"), __.as("d").has("name","vadas"))');
+    // Only d and a are declared (the has() pattern binds nothing).
+    expect(p.sql).toContain("json_array('d'");
+    expect(p.sql).toContain("json_array('a'");
+    expect(p.sql).not.toContain("json_array('c'");
+    // The has() lands as a property existence filter, not a join that widens the row.
+    expect(p.sql).toContain("'vadas'");
+  });
+
+  // A per-row SCALAR end (`values('name').as('b')`) binds a VALUE, not an element — one row per
+  // property value, each carrying b as a stored scalar. (A reducing `count()` end declines: its
+  // per-origin 0-default needs the scalar-child seam, a later phase.)
+  test('per-row scalar end binds a value; reducing end declines', () => {
+    const store = seededStore();
+    const rows = run(store, 'g.V().match(__.as("a").out("knows").values("name").as("b"))') as any[];
+    // marko knows vadas + josh → two (a,b) bindings; nobody else has a knows edge.
+    expect(rows.length).toBe(2);
+    expect(() => read('g.V().match(__.as("a").out("knows").count().as("b")).select("b")')).toThrow(/not supported/);
+  });
+
   // A non-terminal match leaves the pattern variables on the stream as alias channels for a downstream
   // select() to read, rather than materializing the map early.
   test('non-terminal select over match reads the alias channels', () => {

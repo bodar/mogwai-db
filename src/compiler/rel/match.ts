@@ -9,7 +9,8 @@ import type { IRStep } from '../ir/step.ts';
 import { eq, type Minter } from './build.ts';
 import type { ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
-import { aliasIdAt, bindAliases, liveAliases } from './alias.ts';
+import { aliasIdAt, aliasValueAt, bindAliases, liveAliases } from './alias.ts';
+import type { TraverserObject } from './history.ts';
 import { selectKeys } from './record.ts';
 
 /**
@@ -48,30 +49,52 @@ import { selectKeys } from './record.ts';
  */
 
 /** One pattern, classified by how it rejoins the binding table. `start`/`end` are alias labels; `body`
- *  is the movement/filter chain BETWEEN the anchoring `as()`s. A `constraint` has no end — its body
- *  only narrows `start`. A `filter` head (`where`/`not`/`and`/`or`) is a later phase. */
+ *  is the movement/filter chain after the anchoring `as(start)`. A `binding` ends `as(end)` and WIDENS
+ *  the table (a new column) or, when `end` is already bound, CONSTRAINS it (a back edge). A
+ *  `constraint` has no `as(end)` — TinkerPop appends a `MatchEndStep` with a null key that only passes
+ *  the traverser through, so the pattern survives iff its body PRODUCES: an existence filter on
+ *  `start`, binding nothing (`as('d').has('name','vadas')`). A `filter` head (`where`/`not`/`and`/`or`)
+ *  is a later phase. */
 type Pattern =
-  | { readonly kind: 'binding'; readonly start: string; readonly body: readonly IRStep[]; readonly end: string };
+  | { readonly kind: 'binding'; readonly start: string; readonly body: readonly IRStep[]; readonly end: string }
+  | { readonly kind: 'constraint'; readonly start: string; readonly body: readonly IRStep[] };
 
-/** Parse a match argument into a `Pattern`, or `null` to decline the whole step (fail closed). P0
- *  admits only the anchored binding shape `as(start).<body>.as(end)`; the constraint/filter/connective
- *  shapes are the next phases and DECLINE here rather than being mis-lowered. */
+/** The adjacency steps — a body containing one FANS the traverser OUT. A no-end constraint whose body
+ *  is FILTER-ONLY (none of these) is a pure narrowing of `start` and folds as one re-rooted filter; a
+ *  MOVING no-end body is an existence check (a semi-join), which is a later phase. `where`/`and`/`or`/
+ *  `not` are absent because they are filters, not movements — they never fan out. */
+const MOVEMENTS: ReadonlySet<string> = new Set([
+  'out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'otherV', 'V', 'E', 'values', 'properties', 'label', 'id',
+]);
+
+/** Parse a match argument into a `Pattern`, or `null` to decline the whole step (fail closed). Admits
+ *  the anchored `as(start).<body>[.as(end)]` shapes; the FILTER/connective heads
+ *  (`where`/`not`/`and`/`or`) are a later phase and DECLINE here rather than being mis-lowered. */
 function classify(a: unknown, params: Record<string, any>): Pattern | null {
   if (!isNested(a)) return null;
   const chain = stepChain((a as { nested: unknown }).nested, params) as IRStep[];
   if (chain.length < 2) return null;
   const head = chain[0]!;
-  const tail = chain[chain.length - 1]!;
-  if (head.name !== 'as' || tail.name !== 'as') return null;
   const starts = asLabelsOf(head);
-  const ends = asLabelsOf(tail);
-  // A single label at each anchor is the shape `MatchStartStep`/`MatchEndStep` model; `as('a','b')`
-  // as an anchor is a front-end shape this has not seen, so decline rather than guess which is meant.
-  if (starts.length !== 1 || ends.length !== 1) return null;
-  const body = chain.slice(1, -1);
-  // The body must not itself re-anchor (a nested `as()` inside a pattern is not P0's shape).
+  // A single start label is the shape `MatchStartStep` models; `as('a','b')` as an anchor is a
+  // front-end shape this has not seen, so decline rather than guess which variable is meant.
+  if (head.name !== 'as' || starts.length !== 1) return null;
+  const start = starts[0]!;
+
+  const tail = chain[chain.length - 1]!;
+  const ends = tail.name === 'as' ? asLabelsOf(tail) : [];
+  // A trailing `as()` with several labels is likewise an unseen shape.
+  if (tail.name === 'as' && ends.length !== 1) return null;
+  const hasEnd = ends.length === 1;
+  const body = hasEnd ? chain.slice(1, -1) : chain.slice(1);
+  // The body must not itself re-anchor (an intra-pattern `as()` is a later phase).
   if (body.some((s) => s.name === 'as')) return null;
-  return { kind: 'binding', start: starts[0]!, body, end: ends[0]! };
+  if (hasEnd) return { kind: 'binding', start, body, end: ends[0]! };
+  // A no-end constraint folds as a re-rooted FILTER, so its body must not move (a moving no-end body
+  // is an existence semi-join, a later phase) and must be non-empty (a bare `as('a')` binds `a` at the
+  // root and is not a pattern).
+  if (!body.length || body.some((s) => MOVEMENTS.has(s.name))) return null;
+  return { kind: 'constraint', start, body };
 }
 
 /** The root label — TinkerPop's `computeStartLabel`: a start that is never an end. The incoming
@@ -81,7 +104,7 @@ function classify(a: unknown, params: Record<string, any>): Pattern | null {
  *  an anchor because the incoming traverser is bound to it. */
 function rootLabel(patterns: readonly Pattern[]): string | null {
   const starts = patterns.map((p) => p.start);
-  const ends = new Set(patterns.map((p) => p.end));
+  const ends = new Set(patterns.flatMap((p) => (p.kind === 'binding' ? [p.end] : [])));
   return starts.find((s) => !ends.has(s)) ?? starts[0] ?? null;
 }
 
@@ -90,18 +113,42 @@ function rootLabel(patterns: readonly Pattern[]): string | null {
 const syn = (host: IRStep, name: string, values: unknown[] = []): IRStep =>
   ({ name, args: values.map((v) => arg(v)), ctx: host.ctx });
 
+/** What a pattern body PRODUCED as the thing its `as(end)` binds or constrains: an ELEMENT (a movement
+ *  end, addressed by rowid) or a SCALAR VALUE (`count()`/`values()`/`select(key)` end, addressed by the
+ *  `v` column and its `vtype` tag). `value` is the expression a back edge compares against the stored
+ *  binding; `bind` is the `TraverserObject` `bindAliases` widens the alias channels with. A list/map/
+ *  record end returns `null` — a later phase. */
+function producedObject(rel: Rel, framing: RelFraming): { readonly value: Expr; readonly kind: 'element' | 'value'; readonly bind: TraverserObject } | null {
+  if (framing.kind === 'elements') {
+    const id = col(rel.id, 'id');
+    return { value: id, kind: 'element', bind: { kind: 'element', elem: framing.elem, id } };
+  }
+  if (framing.kind === 'scalar') {
+    // A REDUCING BARRIER end (`count()`/`sum()`/…, `result` 'count'|'number') declines: its value is a
+    // reduction that must be computed ONCE PER ORIGIN with a 0/empty default (a correlated scalar
+    // child), and folding it inline drops the empty origins instead — a wrong answer, not a decline.
+    // That is the scalar-child seam's job and a later phase. A PER-ROW value (`values('name')`,
+    // `select(key)`) has no such marker and binds directly.
+    if (framing.result === 'count' || framing.result === 'number') return null;
+    const value = col(rel.id, 'v');
+    const vtype = rel.type.cols.some((c) => c.name === 'vtype') ? col(rel.id, 'vtype') : undefined;
+    return { value, kind: 'value', bind: { kind: 'value', value, type: framing.type, ...(vtype ? { vtype } : {}) } };
+  }
+  return null;
+}
+
 /**
- * Lower a `match()` step over the current element stream. `terminal` says the match is the LAST step
- * of its chain — if so the bindings MAP is projected (TinkerPop emits it; a downstream `select` would
- * otherwise read the alias channels directly). Returns `null` to decline (⇒ `UnsupportedTraversal`).
+ * Lower a `match()` step over the current element stream. It ALWAYS emits the bindings MAP — the
+ * traverser TinkerPop's `MatchStep` produces — so it composes the same whether a `select`/`limit`/
+ * `identity` follows or not. Returns `null` to decline (⇒ `UnsupportedTraversal`).
  *
- * The result carries the live `aliases` alongside the framed relation, because a NON-terminal match
- * hands the pattern variables on to the downstream `select`/`dedup`/`where` as alias channels — a
- * `FramedRel` alone would drop the label→column map they resolve against.
+ * The result carries the live `aliases` alongside the framed relation, so a downstream `select(k)` can
+ * read a pattern variable off the record's alias channel — a `FramedRel` alone would drop the
+ * label→column map it resolves against.
  */
 export function lowerMatch(
   step: IRStep, seed: Rel, elem: Elem, aliases: AliasMap,
-  terminal: boolean, params: Record<string, any>, child: ChildSeam, fresh: Minter,
+  params: Record<string, any>, child: ChildSeam, fresh: Minter,
 ): (FramedRel & { readonly aliases: AliasMap }) | null {
   // A modulator/option arm on `match` is a front-end shape this has not seen; decline.
   if (step.modulators?.length || step.optionArms) return null;
@@ -124,6 +171,10 @@ export function lowerMatch(
   if (!rootBound) return null;
   let rel = rootBound.rel;
   let labels = rootBound.aliases;
+  // The binding table's CURRENT framing — threaded rather than a bare `elem`, because a scalar-valued
+  // end (`count().as('c')`) leaves the payload a scalar, and the NEXT pattern's re-root must dispatch
+  // through the right tail (scalarTail handles a leading `select` re-root exactly as elementTail does).
+  let framing: RelFraming = { kind: 'elements', elem };
   const bound = new Set<string>([...liveAliases(aliases, seed).keys(), root]);
 
   // READINESS SCHEDULING — greedy, correctness-only (order is unobservable). A binding pattern is
@@ -134,45 +185,66 @@ export function lowerMatch(
     const i = pending.findIndex((p) => bound.has(p.start));
     if (i < 0) return null; // no ready pattern — a cyclic/unsolvable binding dependency. Fail closed.
     const p = pending.splice(i, 1)[0]!;
-
     // Re-root at the pattern's start alias, then run the body through the ONE fold. The result relation
     // carries every prior alias channel (movements keep channels) plus a payload at the body's end.
-    const chainSteps: IRStep[] = [syn(step, 'select', [p.start]), ...p.body];
-    const ran = child.chain(rel, { kind: 'elements', elem } as RelFraming, chainSteps, labels);
+    const rooted: IRStep[] = [syn(step, 'select', [p.start]), ...p.body];
+    const ran = child.chain(rel, framing, rooted, labels);
     if (!ran) return null;
-    // The body must end on an ELEMENT for P0 (a scalar/count end is a later phase). Anything else
-    // declines rather than being bound as the wrong shape.
-    if (ran.framing.kind !== 'elements') return null;
-    const producedId: Expr = col(ran.rel.id, 'id');
 
+    if (p.kind === 'constraint') {
+      // A NO-END pattern with a FILTER-ONLY body binds nothing and only NARROWS `start`: `classify`
+      // guaranteed the body does not move, so `child.chain` is a pure filter of the binding table
+      // (same alias channels, no fan-out) and its result relation IS the constrained table.
+      if (ran.framing.kind !== 'elements') return null;
+      rel = ran.rel;
+      labels = ran.aliases;
+      framing = ran.framing;
+      continue;
+    }
+
+    // The produced traverser is either an ELEMENT (a movement end) or a SCALAR (`count()`/`values()`/
+    // `select(key)` end). Either binds its label or, when the end is already bound, constrains it — the
+    // element by rowid, the scalar by value. A list/map/record end is a later phase.
+    const object = producedObject(ran.rel, ran.framing);
+    if (!object) return null;
     if (bound.has(p.end)) {
-      // BACK EDGE — the end names an already-bound variable, so the produced element must EQUAL it.
-      // A `Filter` equality against the stored rowid, which is what turns a cyclic pattern into a
-      // narrowing of the table rather than a widening (`MatchEndStep`: `traverser.equals(path.get(end))`).
+      // BACK EDGE — the end names an already-bound variable, so the produced object must EQUAL it. A
+      // `Filter` equality turns a cyclic pattern into a narrowing of the table rather than a widening
+      // (`MatchEndStep`: `traverser.equals(path.get(end))`). Element ends compare rowids; scalar ends
+      // compare stored values.
       const entry = liveAliases(ran.aliases, ran.rel).get(p.end);
       if (!entry) return null;
-      const constraint = eq(producedId, aliasIdAt(col(ran.rel.id, entry.col), 'last'));
-      rel = make.filter({ id: fresh('mf'), input: ran.rel, channels: ran.rel.channels, type: ran.rel.type, pred: constraint });
+      const held = object.kind === 'element'
+        ? aliasIdAt(col(ran.rel.id, entry.col), 'last')
+        : aliasValueAt(col(ran.rel.id, entry.col), 'last');
+      rel = make.filter({ id: fresh('mf'), input: ran.rel, channels: ran.rel.channels, type: ran.rel.type, pred: eq(object.value, held) });
       labels = ran.aliases;
     } else {
       // BINDING — the end is fresh, so widen the alias channels with it. `bindAliases` on the produced
-      // element is the same act `as('b')` performs anywhere.
-      const bindEnd = bindAliases(syn(step, 'as', [p.end]), ran.rel, ran.aliases, { kind: 'element', elem: ran.framing.elem, id: producedId }, fresh);
+      // object is the same act `as('b')` performs anywhere, element or value alike.
+      const bindEnd = bindAliases(syn(step, 'as', [p.end]), ran.rel, ran.aliases, object.bind, fresh);
       if (!bindEnd) return null;
       rel = bindEnd.rel;
       labels = bindEnd.aliases;
       bound.add(p.end);
     }
-    elem = ran.framing.elem;
+    framing = ran.framing;
   }
 
-  // The BINDINGS MAP over every declared label — `startLabels ∪ endLabels`, in first-mention order —
-  // built by the same `selectKeys` a `select(labels)` uses. When the match is terminal this IS the
-  // result; when it is not, a downstream `select`/`dedup`/`where` reads the alias channels instead and
-  // this projection is what carries the shape a bare-terminal consumer would read.
+  // match ALWAYS emits the BINDINGS MAP over every declared label — `startLabels ∪ endLabels`, in
+  // first-mention order — because that is the traverser TinkerPop's `MatchStep` produces
+  // (`getBindings` → `traverser.split(bindings)`), NOT the last pattern's payload. A following
+  // `identity()`/`limit()` must see the map, and a `select(k)` re-enters a field or reads the alias
+  // channel the record still carries (`recordTail`). Built by the same `selectKeys` a terminal
+  // `select(labels)` uses; `framing` above is otherwise unused now that the map is unconditional.
   const declared: string[] = [];
-  for (const p of patterns) for (const l of [p.start, p.end]) if (!declared.includes(l)) declared.push(l);
-  if (!terminal) return { rel, framing: { kind: 'elements', elem }, aliases: labels };
+  for (const p of patterns)
+    for (const l of p.kind === 'binding' ? [p.start, p.end] : [p.start])
+      if (!declared.includes(l)) declared.push(l);
+  // A 0- or 1-variable pattern's bindings map is NOT a `select()`: `select('a')` yields the VALUE, not
+  // the `{a: …}` one-key map TinkerPop emits (a `project('a').by(select('a'))`, as `gql.ts` builds).
+  // Decline rather than emit the bare value — fail closed against a wrong answer; a later phase.
+  if (declared.length < 2) return null;
   const bindings = selectKeys(syn(step, 'select', declared), rel, labels, child, fresh);
   return bindings && { ...bindings, aliases: labels };
 }

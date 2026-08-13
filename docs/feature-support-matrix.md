@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. Notes list **only what does not work**; no note means the whole step works. Anything
 unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,509<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,516<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -127,10 +127,15 @@ the whole step vocabulary at any depth (`src/compiler/rel/match.ts`,
 scheduling so argument ORDER is unobservable, a BACK EDGE (`as(y)` re-using a bound variable →
 an equality constraint), the zero-root CYCLE, the terminal bindings MAP, and a downstream
 `select`/`select(…).by(…)`. The GQL match-STRING form (`g.match("MATCH (a)-[:knows]->(b)")`) rides on
-this via its desugar (`src/gremlin/gql.ts`). ❌ (fail closed, each a named next phase in the plan doc):
-a FILTER argument (`where`/`not`/`and`/`or`), a `where('a', P.op('b'))` two-variable predicate, a
-SCALAR-valued end (`count()`/`values()`/`select()` as the end), a single-node constraint pattern with
-no end, a nested `match` inside a pattern, `dedup(labels)`, and `match()` on an edge stream.
+this via its desugar (`src/gremlin/gql.ts`). Also ✅: a NO-END constraint pattern with a filter-only
+body (`as('d').has('name','vadas')` — narrows `d`, binds nothing) and a per-row SCALAR end
+(`values('name').as('b')`, `select(key).as('b')` — binds a value; scalar back-edges compare values).
+The bindings MAP is emitted UNCONDITIONALLY (a following `identity`/`limit`/`select` sees the map, per
+`MatchStep.getBindings`). ❌ (fail closed, each a named next phase in the plan doc): a FILTER argument
+(`where`/`not`/`and`/`or`), a `where('a', P.op('b'))` two-variable predicate, a REDUCING-barrier end
+(`count()`/`sum()` as the end — needs the per-origin scalar-child seam), a MOVING no-end pattern (an
+existence semi-join), a 0/1-variable bindings map, a nested `match` inside a pattern, `dedup(labels)`,
+and `match()` on an edge stream.
 
 `shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ❌ — the OLAP family,
 **not yet** rather than never: designed as `call()` services with the four step names as desugar

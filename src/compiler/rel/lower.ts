@@ -4047,7 +4047,7 @@ function elementTail(
     // ONE dispatcher exactly like `select`. See `match.ts` and `docs/2026-08-13-match-relir-lowering-plan.md`.
     if (step.name === 'match') {
       if (pathCarried(rel)) return null;
-      const matched = lowerMatch(step, rel, elem, labels, at + 1 === steps.length, ctx.params, childSeam(ctx, fresh), fresh);
+      const matched = lowerMatch(step, rel, elem, labels, ctx.params, childSeam(ctx, fresh), fresh);
       if (!matched) return null;
       return continueAs(matched.rel, matched.framing, steps, at + 1, false, ctx, fresh, matched.aliases);
     }

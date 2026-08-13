@@ -78,6 +78,19 @@ lowerMatch(step, inputRel, inputAliases):
   emit: if match is TERMINAL → project the bindings MAP over `labels`   # else leave alias cols for downstream
 ```
 
+**match ALWAYS emits the bindings MAP, terminal or not** — a lesson paid for once. An early version
+returned the last scheduled pattern's own framing when a step followed the match, on the theory that a
+downstream `select` reads the alias channels and the payload is vestigial. Two failures: (1) a
+scalar-valued end left the payload a `v` column while the returned framing claimed `elements`, so a
+following `limit`/`identity` read a rowid the row lacked — a fail-closed THROW that `rel-sweep` caught
+(the decline contract: a lowering must DECLINE, never throw); (2) even once the framing tracked the
+real payload, `…values('name').as('b')).identity()` emitted the bare `b` value where TinkerPop emits
+`{a,b}` — a wrong answer the *census* caught, because `MatchStep.getBindings` splits the traverser to
+the bindings map unconditionally. So match projects the map every time (`recordTail` then serves the
+`select`/`identity`/`limit`/`count` that follow, and `select(k)` re-enters a field or reads the alias
+channel). A 0/1-variable map is NOT a `select` (`select('a')` is the value, not `{a:…}`) and declines
+for now — the `project('a').by(select('a'))` shape `gql.ts` builds is a later phase.
+
 Every mechanism named is already built: `bindAliases` (alias.ts:119), the leading-`as`→`select`
 re-root + trailing-bound-`as`→`where(eq)` rewrite (`rewriteWhereVariables`/`rewriteStartLabel`,
 `strategies.ts:1479` — today it fires for match FILTER args; we extend it / apply it to BINDING
@@ -110,9 +123,16 @@ landing order of one engine, not a support matrix.
   `match(Traversal)` and had been dead-ending on the missing lowering. L3 1480 → 1509 (+29), and 29
   corpus traversals moved deferral → golden (verified correct before banking). The scalar-end grateful
   scenarios wait on P1.
-- **P1 — constraints & scalar ends.** Single-node constraint pattern (`as(d).has(name,vadas)` — a
-  pattern with no `as(end)`), scalar-valued ends (`count().as(c)`, `values(name).as(b)`,
-  `select(name).as(b)`), cross-pattern scalar equality. Reaps the `count`/`values`/`valueMap` scenarios.
+- **P1 — constraints & per-row scalar ends. ✅ LANDED 2026-08-13.** A no-end constraint pattern
+  (`as('d').has('name','vadas')`) folds as a re-rooted FILTER through `child.chain` (`classify` gates
+  it to a non-moving body — a moving no-end body is an existence semi-join, deferred to P2). A per-row
+  SCALAR end (`values('name').as('b')`, `select(key).as('b')`) binds a VALUE via `bindAliases`'s value
+  form, with scalar back-edges comparing stored values. L3 1509 → 1515. **A REDUCING-barrier end
+  (`count()`/`sum()`, `framing.result` 'count'/'number') DECLINES** — its per-origin 0/empty default
+  needs a correlated scalar child, and folding it inline drops empty origins (a wrong answer, caught
+  before it shipped). That is **P1c**, next: route a reducing-barrier end through `child.scalar`
+  (reaps `a_knows_count_b`, the shared-`c` count pair 143, `name_performances_count` 535, the
+  `count_isXgtX` pair 548).
 - **P2 — filter legs.** `where('a', P.neq('c'))` theta-join; `not(as(a)…as(b))` anti; `where(as(c).<moving body>)`.
 - **P3 — connectives & nesting.** `and(…)` binding group; `or(…)` → UNION of branches; nested `match`
   in a pattern; top-level `not(match(…).where(…).select(…))`.
