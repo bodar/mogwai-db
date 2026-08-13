@@ -480,16 +480,23 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
     `ROW_NUMBER` after the merge, general over every framing. (Calcite: a plain `Union` carries no
     collation — `RelMdCollation` guarantees order only for `EnumerableMergeUnion` — so the order is
     IMPOSED via a window, `SqlStdOperatorTable.ROW_NUMBER`.)
-  - **SLICE demand** (`ctx.ordered && ctx.sliced`) — STILL DECLINES, and is the remaining substrate. A
-    positional `limit/range/skip/tail` reads the fan-out to pick a SUBSET, and `BranchStep`
-    `standardAlgorithm` pins that subset: barrier-free arms are TRAVERSER-major, arm-minor
-    (`[parent position, arm_idx, arm_encounter]`); an arm holding a BATCHED barrier
-    (`hasBarrier`/`armBatches`, union/choose only) is ARM-major (`[arm_idx, parent position,
-    arm_encounter]`); `coalesce`/`optional` (`FlatMapStep`) are always traverser-major. The parent
-    position must ride each arm UNCHANGED through its hops — the `branchOrder` channel (already in the
-    channel core: `identical` merge, `empty` barrier, `undefined` group), minted from the input's
-    `encounter`, works where `origin` (a rowid) cannot (a scalar parent, and position ≠ id under
-    `order().by(k)`). ⚠️ Cost: the slice subset moves an answer digest → re-record the census.
+  - **SLICE demand** (`ctx.ordered && ctx.sliced`) — the TRAVERSER-major half LANDED (`mintTraverserMajor`,
+    `sliceableBranch`). A positional `limit/range/skip/tail` reads the fan-out to pick a SUBSET, and
+    `BranchStep.standardAlgorithm` pins it: barrier-free arms are TRAVERSER-major, arm-minor
+    (`[parent position, arm_idx, arm_encounter]` — realised as the within-(parent,arm) PAYLOAD tie,
+    which the slices, falling on traverser boundaries, never observe); `coalesce`/`optional`
+    (`FlatMapStep`) are always traverser-major. The parent position rides each arm UNCHANGED through its
+    hops as the `branchOrder` channel (already in the channel core: `identical` merge, `empty` barrier,
+    `undefined` group), minted from the input's `encounter` (`augmentParent`) — which works where
+    `origin`, a rowid, cannot (a scalar parent, and position ≠ id under `order().by(k)`) — plus a
+    per-arm `arm_idx` `branchOrder` channel, re-minted into a fresh `encounter` after the ordinary
+    `mergeArms` (element/scalar/list/map/variant merge unchanged; the key is orthogonal). Nine
+    `branch-traverser-major`/`emission-order` scenarios pass. 🚧 What is LEFT, each fail-closed today:
+    **ARM-major** (a union/choose with a batched-barrier arm — `hasBarrier`/`armBatches` — needs the
+    batched arm run over the WHOLE input, a separate lowering); a **NESTED** branch inside a sliced arm
+    (needs a key STACK, not one `bord_p`); a **scoped-fold arm** (`union(values('name').fold(), …)` — the
+    per-origin fold's grouping empties `branchOrder` since its group policy is `undefined`; the parent is
+    the group key, so `MIN(bord_p)` would carry it, but that is a channel-core change).
 - **`recognize` (§4) — the fast paths as plan rewrites,** so a fast-path decline can be lifted.
 
 **Guard-binding family** — a shared mechanism (a GRAPH-dependent refusal → `Binding.guard`, §6·5):
@@ -569,9 +576,9 @@ pattern this whole stage kept finding:
   scalar, list, property, map — rather than two copies plus three gaps.
   ✅ **`fold()`/collect after a `union`/`choose`/`coalesce` — LANDED** (`withFanoutOrder`,
   `g.V().coalesce(__.values('name'), __.constant('x')).fold()`): a COLLECT demand takes any
-  deterministic fan-out order (see §10's mint bullet). What is LEFT is the SLICE demand — a
-  `limit/range/skip/tail` after a branch still declines (`ctx.sliced`) until the traverser-major /
-  arm-major key lands. Common pattern, real L3.
+  deterministic fan-out order (see §10's mint bullet). The SLICE demand's TRAVERSER-major half also
+  landed (barrier-free branches + `coalesce`); what is LEFT is the ARM-major / nested / scoped-fold-arm
+  residue (see the SLICE bullet). Common pattern, real L3.
 - **the SCALAR and RECORD tails declaring a `RowShape`.** They call `orderRows` from their own loops, so
   neither gets `dedup`'s identity rule; the map and list tails are not in it at all.
 - ✅ **a set op over an ELEMENT-member list — LANDED.** `listSetOp` admits an element-membered self+operand
@@ -581,14 +588,11 @@ pattern this whole stage kept finding:
   cannot carry). The corpus names only the ERROR forms (`combine(__.V())` — a non-folded stream is not
   iterable), so this is pure combinatorial completeness (0 L3).
 
-⚠️ **A merge over a SLICE-demanded position still declines** — where `ctx.sliced` says a downstream
-`limit/range/skip/tail` reads the fan-out's emission order to pick a SUBSET, `union`/`choose`/`coalesce`
-decline rather than let a whole-row order pick a WRONG subset (`branch-traverser-major.feature` pins the
-reference's subset). The POSITIONLESS and COLLECT halves landed for all three callers (see §10's mint
-bullet). The SLICE half waits on the traverser-major / arm-major key: `[parent position, arm_idx,
-arm_encounter]` for a barrier-free `BranchStep`, `[arm_idx, parent position, arm_encounter]` for one
-with a batched-barrier arm, `[parent position, arm_encounter]` for `coalesce` (`FlatMapStep`, always
-per-traverser). The `branchOrder` channel is the parent-position carrier.
+✅ **The SLICE-demanded TRAVERSER-major merge LANDED** (`mintTraverserMajor`) — a barrier-free
+`union`/`choose` and every `coalesce` present the reference's traverser-major subset via the
+`branchOrder` parent-position carrier (see §10's mint bullet for the mechanism and the residue). What
+still DECLINES, fail-closed: the ARM-major key (a union/choose with a batched-barrier arm), a NESTED
+branch inside a sliced arm (needs a key stack), and a scoped-fold arm (its grouping empties the key).
 
 ⚠️ **Where a refusal is arithmetic over the INPUT's row count, a host that cannot count statically needs a
 GUARD, not a decline.** `addV` proves single-row at COMPILE time (a literal `Values`); an `addE` mid-chain
