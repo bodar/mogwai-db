@@ -10,7 +10,7 @@ import { storedCompareOn } from './predicate.ts';
 import { aliasProjection, readFraming, type Pop } from './alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import { elementNode } from './element.ts';
-import { propertyNode } from './property.ts';
+import { propertyNode, propertyReadOf } from './property.ts';
 
 /**
  * `by()` AS ONE VOCABULARY — the modulator seam.
@@ -66,7 +66,7 @@ import { propertyNode } from './property.ts';
 type ByKey =
   | { readonly kind: 'identity' }
   | { readonly kind: 'property'; readonly key: string }
-  | { readonly kind: 'token'; readonly token: 'id' | 'label' }
+  | { readonly kind: 'token'; readonly token: TokenKey }
   /** `by(__.select(label))` — an ALIAS read, not a correlated child. Spelled as a nested traversal and
    *  therefore parsed as one, but the answer is a column on the host's own row rather than a subquery
    *  over the traverser, so it is its own projection kind. Recognized HERE so every by() host gains it
@@ -82,9 +82,19 @@ export interface Modulation {
 }
 
 const ORDERS = new Set(['asc', 'desc', 'shuffle']);
-/** The two `T` tokens that name a value a `by()` can project. `T.key`/`T.value` are a PROPERTY
- *  element's, not an element's, so they are absent here rather than guessed at. */
-const TOKENS: Readonly<Record<string, 'id' | 'label'>> = { id: 'id', label: 'label' };
+
+/** The `T` tokens that name a value a `by()` can project.
+ *
+ *  ⚠️ **A token is legal per HOST, not per grammar, and the split is TinkerPop's:** `T.id`/`T.label` are
+ *  an ELEMENT's and `T.key`/`T.value` are a PROPERTY's, so each host's arm answers exactly its own two
+ *  and DECLINES the other pair. Parsing all four here rather than one pair is what lets a property host
+ *  gain them without a second parse; the decline lives where the host is known, which is the only place
+ *  it can be right. */
+type TokenKey = 'id' | 'label' | 'key' | 'value';
+const TOKENS: Readonly<Record<string, TokenKey>> = { id: 'id', label: 'label', key: 'key', value: 'value' };
+
+/** The two tokens a PROPERTY traverser answers — `Property.key()` and `Property.value()`. */
+const PROPERTY_TOKENS = new Set<TokenKey>(['key', 'value']);
 
 /**
  * Parse a host step's absorbed `by()` modulators, or `null` to decline.
@@ -230,17 +240,31 @@ export function byExpr(
   // declines rather than picking a field.
   if (host.kind === 'record') return null;
 
-  // A PROPERTY's three projections are `key()`, `value()` and `element()`, which are STEPS and therefore
-  // reached through the child arm above. What is left here is the vocabulary an ELEMENT has and a
-  // property does not: a bare `by()` over one is the VertexProperty itself (not a comparable value),
-  // `by('x')` would be a meta-property read, and `T.key`/`T.value` are deliberately absent from `TOKENS`
-  // because they are a property's tokens and not an element's. All three decline rather than being
-  // answered off the wrong row.
-  if (host.kind === 'property') return null;
+  if (host.kind === 'property') {
+    // `T.key` / `T.value` — a property's OWN two tokens, read off the stored row through the one
+    // authority for that row's columns (`propertyReadOf`, `property.ts`), so a key read here and a
+    // `key()` STEP cannot disagree. The value takes the ordering wrapper from its own `vtype` for the
+    // reason every stored value does: an exact number carried as decimal TEXT would otherwise sort
+    // lexically and after every numeric row.
+    if (key.kind === 'token' && PROPERTY_TOKENS.has(key.token)) {
+      const read = propertyReadOf(host.id, host.ownerElem, key.token === 'key' ? 'key' : 'value', fresh);
+      return ordering && key.token === 'value'
+        ? storedCompareOn(propertyReadOf(host.id, host.ownerElem, 'vtype', fresh))(read)
+        : read;
+    }
+    // What is left is the vocabulary an ELEMENT has and a property does not: a bare `by()` over one is
+    // the VertexProperty itself (not a comparable value), `by('x')` would be a meta-property read, and
+    // `element()` is a STEP and therefore the child arm's. All three decline rather than being answered
+    // off the wrong row.
+    return null;
+  }
 
   if (key.kind === 'identity') return host.id;
 
   if (key.kind === 'token') {
+    // `T.key`/`T.value` are a PROPERTY's tokens, not an element's — an element has no key and no value —
+    // so they decline here rather than being answered off the wrong row.
+    if (PROPERTY_TOKENS.has(key.token)) return null;
     // `T.id` is the EXTERNAL id — `COALESCE(uid, id)`, the same projection every materialization uses,
     // so a `by(T.id)` groups on the id a client would see and not on the rowid behind it.
     const table = host.elem === 'edge' ? 'edges' : 'nodes';
@@ -457,6 +481,15 @@ export function byNode(modulation: Modulation, host: ChildHost, fresh: Minter, c
     // `g.V().properties().group()` groups by the property's own JSON rather than by an integer — a
     // correct answer at a plan cost, which is the honest trade while the rowid spelling needs a
     // `MapOf` that can name a property side.
+    // `T.key` is always a string; `T.value` carries the stored row's own `vtype`, so the node is TAGGED
+    // rather than left to value inference — which is the only thing that keeps a datetime from framing as
+    // a long (§6·7: what arrives is CARRIED until something naturally changes it).
+    if (key.kind === 'token' && PROPERTY_TOKENS.has(key.token)) {
+      const value = byExpr(modulation, host, fresh);
+      return value && typedNode(value, key.token === 'key'
+        ? compilerText('string')
+        : propertyReadOf(host.id, host.ownerElem, 'vtype', fresh));
+    }
     if (key.kind !== 'identity') return null;
     return propertyNode(host.id, host.ownerElem, fresh);
   }
@@ -589,11 +622,20 @@ export function byField(
     const value = byExpr(modulation, host, fresh);
     if (!value) return null;
     // A `T` token is ALWAYS present, so a token field is never absent — `orderProductivity` says the
-    // same thing for the same reason. A LABEL is a string; an external id is whatever
-    // `COALESCE(uid, id)` yields, so it stays unknown and the framer infers.
+    // same thing for the same reason. A LABEL and a property KEY are strings; an external id is whatever
+    // `COALESCE(uid, id)` yields, so it stays unknown and the framer infers. A property's `T.value` is
+    // the one token with a STORED type, so it projects its `vtype` beside the value exactly as a property
+    // FIELD does below — a field that dropped the tag would frame a datetime as a long.
+    if (host.kind === 'property' && key.token === 'value') {
+      return {
+        exprs: [['v', value], ['vtype', propertyReadOf(host.id, host.ownerElem, 'vtype', fresh)]],
+        framing: { kind: 'scalar', type: PER_ROW('vtype') },
+        optional: false,
+      };
+    }
     return {
       exprs: [['v', value]],
-      framing: { kind: 'scalar', type: key.token === 'label' ? STATIC('string') : UNKNOWN },
+      framing: { kind: 'scalar', type: key.token === 'label' || key.token === 'key' ? STATIC('string') : UNKNOWN },
       optional: false,
     };
   }

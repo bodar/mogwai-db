@@ -1,7 +1,6 @@
 Feature: mogwai addendum — property stream ordering
 
   @gap:property-order
-  @Unsupported
   Scenario: g_V_properties_order_byXkey_descX_key
     Given the modern graph
     And the traversal of

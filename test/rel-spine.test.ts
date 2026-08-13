@@ -89,6 +89,13 @@ const COVERED = [
   "g.V().properties().hasKey('age')", "g.V().properties().hasKey(null,'age').value()", 'g.V().properties().hasKey(null)',
   'g.V().properties().hasValue(P.gt(30))', "g.V().properties().hasValue(null,'josh').value()",
   "g.V().bothE().properties().dedup().hasKey('weight').hasValue(P.lt(0.3)).value()",
+  // A PROPERTY's own `by()` TOKENS and its two Element-only retypes — both legal per HOST, not per
+  // grammar, so an element declines `T.key` (asserted in DECLINED) and an edge `Property` declines
+  // `id()`/`label()` because it is not an Element at all.
+  'g.V().properties().order().by(T.key, Order.desc).key()', 'g.V().properties().order().by(T.value)',
+  'g.V().properties().dedup().by(T.key)', 'g.V().bothE().properties().dedup().by(value).count()',
+  'g.V().properties().group().by(T.key)',
+  'g.V().properties().id()', 'g.V().properties().label()', 'g.V().properties().order().id()',
   // `inject()` — a SCALAR source, and the largest single blocker measured over the corpus: 387 of
   // the 2,298 traversals begin with one. Its relation has NO channels: an injected row is one
   // traverser by construction, so there is no multiplicity to carry and nothing has established an
@@ -437,6 +444,11 @@ const DECLINED = [
   "g.inject(['a','b']).reverse()",    // on a list `reverse` reverses ORDER, not each member
   "g.V().values('age').is(P.typeOf(GType.MAP))", // a MAP retype needs the map shape, not a decode
   'g.V().has(T.label,null)',          // a null label VALUE: legacy owns what that means
+  // A `T` TOKEN IS LEGAL PER HOST, NOT PER GRAMMAR. All four parse; each host answers its OWN pair and
+  // declines the other, because answering off the wrong row is the plausible-wrong-answer class.
+  'g.V().order().by(T.key)',          // an element has no key
+  'g.E().properties().id()',          // an edge `Property` is not an Element — no id, no label
+  'g.E().properties().label()',
   "g.inject('a').inject('b')",        // a second inject is a UNION with the first, not a source
   'g.inject(1,2).order(Scope.local)', // LOCAL scope: a per-traverser sort of a LIST, a different arm
   // A reducing child VALUE reduces over the GROUP rather than per traverser, and RelIR now expresses

@@ -223,6 +223,22 @@ export function propertyKey(input: Rel, fresh: Minter): { rel: Rel; framing: Rel
   };
 }
 
+/** `id()` — a VertexProperty's OWN id, which for us IS the stored rowid (the same thing `propertyPayload`
+ *  frames as `vpid`, and the same thing `propertyOrderTerms` sorts a VertexProperty by). A `long` on the
+ *  wire, so a STATIC tag is honest: this is a rowid, never a user-supplied `uid` — `vertex_properties` has
+ *  no such column, which is why there is no `COALESCE` here and there is one for an element. Reached only
+ *  for a VERTEX owner: an edge `Property` is not an Element and has no id to give. */
+export function propertyId(input: Rel, fresh: Minter): { rel: Rel; framing: RelFraming } {
+  return {
+    rel: make.project({
+      id: fresh('pi'), input, channels: input.channels,
+      type: typeOf(meta('v', 'int'), ...carriedCols(input.channels)),
+      exprs: [['v', col(input.id, PROP('id'))], ...carryThrough(input)],
+    }),
+    framing: { kind: 'scalar', type: STATIC('long') },
+  };
+}
+
 /** `value()` — the property's VALUE, typed PER ROW off the stored `vtype`. One compile-time tag would
  *  be a lie for an untyped property key, which is `values()`'s reasoning and the same channel. */
 export function propertyValue(input: Rel, fresh: Minter): { rel: Rel; framing: RelFraming } {

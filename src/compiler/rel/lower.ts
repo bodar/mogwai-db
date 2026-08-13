@@ -17,7 +17,7 @@ import { meetScalarTypes, memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticT
 import type { Elem } from '../plan/plan.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordNode, recordOf, recordPayload, selectKeys } from './record.ts';
-import { propertyElement, propertyHasClause, propertyIdentityKey, propertyKey, propertyOrderTerms, propertyPayload, propertyReadOf, propertyRelation, propertyRowId, propertyValue } from './property.ts';
+import { propertyElement, propertyHasClause, propertyId, propertyIdentityKey, propertyKey, propertyOrderTerms, propertyPayload, propertyReadOf, propertyRelation, propertyRowId, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
 import { isColumnArg, isNested, isPred, isTokenArg, stepChain, argValues, arg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
@@ -4293,14 +4293,21 @@ function propertyTail(
     return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: dropped.bindings, bulked: false };
   }
   const retyped = step.name === 'key' ? propertyKey(rel, fresh)
-    : step.name === 'value' ? propertyValue(rel, fresh)
-      : step.name === 'element' ? propertyElement(rel, elem, fresh)
+    // `VertexProperty.label()` IS its key — `return this.key();`
+    // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/VertexProperty.java:79-81`)
+    // — so it is the same projection and not a second one. An edge `Property` is NOT an Element and has
+    // neither a label nor an id, so both decline there rather than answering off the stored row: upstream
+    // would raise a ClassCastException, and a plausible answer to an invalid traversal is worse.
+    : step.name === 'label' && elem === 'vertex' ? propertyKey(rel, fresh)
+      : step.name === 'id' && elem === 'vertex' ? propertyId(rel, fresh)
+        : step.name === 'value' ? propertyValue(rel, fresh)
+          : step.name === 'element' ? propertyElement(rel, elem, fresh)
         // `count()` is shape-agnostic and needs no property-specific arm: `countExpr` reads the BULK
         // CHANNEL, and `properties()` carries the parent's channels through its join — so a
         // bulk-collapsed parent's properties sum their multiplicity rather than counting rows, which
         // is the same answer for the same reason it is on an element relation.
-        : step.name === 'count' ? countTail(rel, fresh)
-          : null;
+            : step.name === 'count' ? countTail(rel, fresh)
+              : null;
   if (!retyped) return null;
   return continueAs(retyped.rel, retyped.framing, steps, from + 1, false, ctx, fresh, labels);
 }
