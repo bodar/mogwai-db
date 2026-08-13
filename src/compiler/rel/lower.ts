@@ -26,6 +26,7 @@ import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
 import { childSteps, normalize } from '../ir/passes.ts';
+import { alwaysProduces } from '../ir/productivity.ts';
 import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
@@ -504,12 +505,39 @@ function valuePredicate(
  * the relation, not the labels live on it — and the alias reader declines rather than guessing when
  * it finds none, which is what it already did with no row at all.
  */
-const childHostOf = (subject: Subject): ChildHost => {
-  const row = { row: { rel: subject.rel, aliases: NO_ALIASES } };
+const childHostOf = (subject: Subject, aliases: AliasMap = NO_ALIASES): ChildHost => {
+  const row = { row: { rel: subject.rel, aliases } };
   return subject.kind === 'element'
     ? { kind: 'element', id: subject.id, elem: subject.elem, ...row }
     : { kind: 'scalar', value: subject.value, ...(subject.vtype ? { vtype: subject.vtype } : {}), ...row };
 };
+
+/**
+ * THE TRAVERSER AS A BRANCH SUBJECT, derived from the FRAMING rather than from the caller's shape.
+ *
+ * It exists because `chooseArms` took an `elem` and therefore could only ever be called from the element
+ * fold — so `g.V().values('age').choose(__.is(P.gt(29)), …)` read as a missing lowering when the only
+ * thing missing was a way to say "the traverser here is a value". A condition body reads the traverser's
+ * own value, which is exactly a `Subject`, and the two shapes that have one are ELEMENT and SCALAR;
+ * everything else declines honestly (a condition over a map or a list is a question about its members,
+ * not about it).
+ *
+ * The scalar arm reproduces `scalarTail`'s `subjectType` and must keep agreeing with it: a per-row
+ * `vtype` column outranks the compile-time tag, because it is the only thing that separates a `datetime`
+ * from a `long`.
+ */
+function branchSubject(rel: Rel, framing: RelFraming): Subject | null {
+  if (framing.kind === 'elements') return { kind: 'element', id: col(rel.id, 'id'), rel, elem: framing.elem };
+  if (framing.kind !== 'scalar') return null;
+  const vtype = rel.type.cols.some((column) => column.name === 'vtype') ? col(rel.id, 'vtype') : undefined;
+  return {
+    kind: 'scalar', value: col(rel.id, 'v'), rel,
+    type: vtype ? { kind: 'perRow', vtype }
+      : framing.type.kind === 'static' ? { kind: 'static', type: framing.type.type, text: framing.type.text }
+        : SUBJECT_UNKNOWN,
+    ...(vtype ? { vtype } : {}),
+  };
+}
 
 /** The subject of a clause that reads an ELEMENT — a property row, a label row, an id. Named because
  *  three clause builders take it and each would otherwise re-state the narrowing in its signature. */
@@ -2199,8 +2227,12 @@ function scalarTail(
       return perTraverserChild(step, rel, out, steps, at, bulked, ctx, fresh, labels);
     }
 
-    if (step.name === 'union') {
-      const merged = unionArms(step, rel, out, bulked, ctx, fresh, labels);
+    // THE BRANCH FAMILY, over a VALUE stream — the same three builders the element fold calls, because
+    // `branchSubject` derives the condition's subject from the FRAMING. Only `union` was here, and only
+    // because it needs no subject at all; `choose` took an `elem` and so could not be reached from a
+    // value stream at all, which read as a missing branch lowering rather than a missing caller (§6·6).
+    if (BRANCH_HOSTS.has(step.name)) {
+      const merged = branchArms(step, rel, out, bulked, ctx, fresh, labels);
       if (!merged) return null;
       return continueAs(merged.rel, merged.framing, steps, at + 1, bulked, ctx, fresh, labels);
     }
@@ -3947,11 +3979,9 @@ function elementTail(
     // THE PER-TRAVERSER CHILD HOSTS — one lowering, three cardinality policies (`perTraverserChild`).
     if (PER_TRAVERSER_HOSTS.has(step.name))
       return perTraverserChild(step, rel, { kind: 'elements', elem }, steps, at, bulked, ctx, fresh, labels);
-    if (step.name === 'union' || step.name === 'choose') {
+    if (BRANCH_HOSTS.has(step.name)) {
       const framing = { kind: 'elements', elem } as const;
-      const merged = step.name === 'union'
-        ? unionArms(step, rel, framing, bulked, ctx, fresh, labels)
-        : chooseArms(step, rel, elem, framing, bulked, ctx, fresh, labels);
+      const merged = branchArms(step, rel, framing, bulked, ctx, fresh, labels);
       if (!merged) return null;
       // `bulked` after a merge is the value that ENTERED it, and it no longer needs the `|| ctx.collapse`
       // conservatism it used to carry. That existed because "an arm may have collapsed and the arm
@@ -4438,6 +4468,23 @@ function recordTail(
  *   raw column names collide and the merge owes each arm a projection remapping onto a canonical
  *   column. That is the alias half of the merge contract and it is a further increment.
  */
+/** The three steps that MERGE arms over the same input. One set and one dispatcher, so a tail gains all
+ *  three at once — the asymmetry this replaces was `union` in the scalar fold and `union`+`choose` in the
+ *  element one, with `coalesce` in neither. */
+const BRANCH_HOSTS: ReadonlySet<string> = new Set(['union', 'choose', 'coalesce']);
+
+/** Which arm-merging builder a step wants. Total over `BRANCH_HOSTS`, so a member added there without a
+ *  builder is a compile error rather than a silent decline. */
+function branchArms(
+  step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): FramedRel | null {
+  return step.name === 'union' ? unionArms(step, input, framing, bulked, ctx, fresh, labels)
+    : step.name === 'choose' ? chooseArms(step, input, framing, bulked, ctx, fresh, labels)
+      : step.name === 'coalesce' ? coalesceArms(step, input, framing, bulked, ctx, fresh, labels)
+        : null;
+}
+
 function unionArms(
   step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
@@ -4673,10 +4720,12 @@ function mergeArms(
  * rather than conflating the two — which is why this reads `present` and never tests the value.
  */
 function chooseOptions(
-  step: IRStep, input: Rel, elem: Elem, framing: RelFraming, bulked: boolean,
+  step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): FramedRel | null {
   if (step.modulators?.length) return null;
+  const subject = branchSubject(input, framing);
+  if (!subject) return null;
   const seam = childSeam(ctx, fresh);
   const arms = optionArms(step, (nested) => seam.body(nested, 'child'));
   if (!arms) return null;
@@ -4684,8 +4733,7 @@ function chooseOptions(
   if (!isNested(choiceArg)) return null; // a `T` token choice is the next form, not this one
   const choiceBody = seam.body(choiceArg.nested, 'child');
   if (!choiceBody?.length) return null;
-  const host = elementHost(input, elem, labels);
-  const produced = seam.scalar(choiceBody, host);
+  const produced = seam.scalar(choiceBody, childHostOf(subject, labels));
   // A choice that cannot report its own productivity cannot serve the two `Pick` arms, and cannot be
   // told apart from a productive NULL — decline rather than answer one of them for the other.
   if (!produced || !produced.present) return null;
@@ -4714,7 +4762,9 @@ function chooseOptions(
   });
   const scoped = make.materialize({ id: fresh('om'), input: projected, channels: projected.channels, type: projected.type });
   const choice = { expr: col(scoped.id, CHOICE), present: col(scoped.id, PRESENT), vtype: produced.vtype && col(scoped.id, 'ovtype') };
-  const subject: SubjectType = choice.vtype ? { kind: 'perRow', vtype: choice.vtype }
+  // THE CHOICE's own type, not the traverser's: the option KEYS are compared against the projected
+  // choice, so this is the `SubjectType` of that column and is unrelated to `subject` above.
+  const choiceType: SubjectType = choice.vtype ? { kind: 'perRow', vtype: choice.vtype }
     : produced.framing.kind === 'scalar' && produced.framing.type.kind === 'static'
       ? { kind: 'static', type: produced.framing.type.type, text: produced.framing.type.text }
       : SUBJECT_UNKNOWN;
@@ -4753,7 +4803,7 @@ function chooseOptions(
     ? [[{ kind: 'unary', op: 'not', arg: choice.present }, compilerInt(UNPRODUCTIVE)]]
     : [];
   for (const [at, arm] of keyed.entries()) {
-    const pred = predicateExpr(choice.expr, arm.key, subject, null, null, fresh);
+    const pred = predicateExpr(choice.expr, arm.key, choiceType, null, null, fresh);
     if (!pred) return null;
     whens.push([pred, compilerInt(at)]);
   }
@@ -4819,20 +4869,87 @@ function chooseOptions(
   return mergeArms(built, input.channels, labels, fresh);
 }
 
+/**
+ * `coalesce(a1, …, an)` — UNION with PRIORITY, and expressible as one because "priority" is a per-input
+ * PREDICATE the child seam already builds.
+ *
+ * `CoalesceStep.flatMap` walks its arms in order and returns the FIRST whose `hasNext()` is true, with
+ * all of that arm's results. So arm k contributes exactly the input rows for which arms 1…k−1 produced
+ * NOTHING — which is `childPredicate(body, subject, …, negated)` per earlier arm, conjoined, applied to
+ * arm k's INPUT rather than to its output. Filtering the input rather than the arm is what makes it a
+ * composition instead of new machinery: each arm is then the ordinary fold over its own gated input and
+ * `mergeArms` merges them, variant shapes included, exactly as `union` and `choose` already do.
+ *
+ * ⚠️ The guards go on the INPUT because that is where the row is: an arm's output has been reprojected
+ * to the arm's shape, so the incoming id a correlated `NOT EXISTS` needs is no longer there to name.
+ *
+ * Cost is n(n−1)/2 correlated existence subqueries, which is the shape of the question and not an
+ * artifact — "did the earlier arm produce anything" has to be asked once per earlier arm.
+ */
+function coalesceArms(
+  step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
+  ctx: ChainCtx, fresh: Minter, labels: AliasMap,
+): FramedRel | null {
+  if (step.modulators?.length || step.optionArms) return null;
+  // A merge RE-MINTS the emission order, so a carried position declines here for `unionArms`' reason.
+  if (encounterOf(input.channels)) return null;
+  const subject = branchSubject(input, framing);
+  if (!subject) return null;
+  const args = argValues(step);
+  if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
+  const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
+  if (bodies.some((body) => !body?.length)) return null;
+
+  const arms: Tail[] = [];
+  let exhausted: Expr | undefined;
+  for (const [at, body] of bodies.entries()) {
+    const domain = exhausted
+      ? make.filter({ id: fresh('coa'), input, channels: input.channels, type: input.type, pred: exhausted })
+      : input;
+    const arm = continueAs(domain, framing, body!, 0, bulked, inBody(ctx), fresh, labels);
+    if (!arm) return null;
+    arms.push(arm);
+    // The LAST arm owes no guard for anyone, so it is not asked for one — a body whose non-production
+    // this route cannot express still coalesces when it is last, which is the common `constant(x)`
+    // fallback.
+    if (at === bodies.length - 1) continue;
+    // A BODY THAT ALWAYS PRODUCES exhausts the coalesce, and saying so is not an optimization: the
+    // common `coalesce(__.values('name'), __.constant('x'))` shape has a `constant()` FALLBACK, and a
+    // `constant()` in a non-final position means no later arm can ever fire. `childPredicate` cannot
+    // answer "this body produces nothing" for a body that ignores its input, so `alwaysProduces`
+    // (`ir/productivity.ts`, the same authority the filter-no-op Pass reads) supplies the constant.
+    const empty = alwaysProduces(body!) ? CONSTANT.false : childPredicate(body!, subject, fresh, ctx, true);
+    if (!empty) return null;
+    exhausted = and(exhausted, empty);
+  }
+  return mergeArms(arms, input.channels, labels, fresh);
+}
+
 function chooseArms(
-  step: IRStep, input: Rel, elem: Elem, framing: RelFraming, bulked: boolean,
+  step: IRStep, input: Rel, framing: RelFraming, bulked: boolean,
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): FramedRel | null {
   if (step.modulators?.length) return null;
-  if (step.optionArms) return chooseOptions(step, input, elem, framing, bulked, ctx, fresh, labels);
+  if (step.optionArms) return chooseOptions(step, input, framing, bulked, ctx, fresh, labels);
   if (encounterOf(input.channels)) return null;
+  const subject = branchSubject(input, framing);
+  if (!subject) return null;
   const args = argValues(step);
-  if (args.length < 2 || args.length > 3 || args.some((arg) => !isNested(arg))) return null;
-  const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
-  const [condition, then, otherwise] = bodies;
+  if (args.length < 2 || args.length > 3) return null;
+  // THE CONDITION MAY BE A BARE PREDICATE, not only a body: `choose(P.eq(29), __.constant('matched'))`
+  // is `ChooseStep(new IsStep(P), …)` — TinkerPop's own `choose(Predicate, …)` overload wraps it — so
+  // spelling it as a one-step `is` body reuses `bodyPredicate` rather than adding a second predicate
+  // path. Declining it made the whole `choose(P, …)` overload look like a missing branch lowering.
+  const [choice, ...rest] = step.args ?? [];
+  if (!choice || rest.some((arg) => !isNested(arg.value))) return null;
+  const condition = isNested(choice.value)
+    ? bodyOf(choice.value.nested, ctx.params)
+    : isPred(choice.value) ? [{ name: 'is', args: [choice] } as IRStep] : null;
+  const bodies = rest.map((arg) => bodyOf((arg.value as { readonly nested: unknown }).nested, ctx.params));
+  const [then, otherwise] = bodies;
   if (!condition?.length || !then?.length) return null;
 
-  const pred = bodyPredicate(condition, { kind: 'element', id: col(input.id, 'id'), rel: input, elem }, fresh, ctx);
+  const pred = bodyPredicate(condition, subject, fresh, ctx);
   if (!pred) return null;
   const guarded = (negated: boolean): Rel => make.filter({
     id: fresh('cg'), input, channels: input.channels, type: input.type,

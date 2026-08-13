@@ -68,7 +68,22 @@ function isImpure(steps: readonly Step[], params: Record<string, any>): boolean 
 export function bodyAlwaysProduces(nested: any, params: Record<string, any>): boolean {
   if (!isNested(nested)) return false;
   const body = stepChain(nested.nested, params);
+  return alwaysProduces(body) && !isImpure(body, params);
+}
+
+/**
+ * PRODUCTIVITY ALONE, over an already-normalized body — the half of `bodyAlwaysProduces` that is not
+ * about purity.
+ *
+ * The two are separate because their consumers need different things. Removing a filter step needs BOTH
+ * (a skipped side effect is a wrong answer even when the filter cannot reject), while asking "can a
+ * later `coalesce` arm ever fire" needs only the first: an arm that always produces exhausts the
+ * coalesce whether or not it also writes something. Conflating them would have made the purity gate
+ * silently narrow a branch lowering.
+ *
+ * Decided by the LAST step alone, which is why `count()` qualifies and `count().is(P.gt(0))` does not.
+ */
+export function alwaysProduces(body: readonly { readonly name: string }[]): boolean {
   const last = body.at(-1);
-  if (!last || !ALWAYS_PRODUCTIVE_TERMINAL.has(last.name)) return false;
-  return !isImpure(body, params);
+  return !!last && ALWAYS_PRODUCTIVE_TERMINAL.has(last.name);
 }

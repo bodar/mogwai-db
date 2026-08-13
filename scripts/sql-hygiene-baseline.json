@@ -89,6 +89,12 @@
     "compiler": 72,
     "bound": 0
   },
+  "coalesce": {
+    "binds": 0,
+    "bytes": 1352,
+    "compiler": 8,
+    "bound": 0
+  },
   "combine": {
     "binds": 1,
     "bytes": 2871,

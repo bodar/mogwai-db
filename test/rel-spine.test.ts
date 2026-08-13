@@ -113,6 +113,15 @@ const COVERED = [
   "g.V().fold().order(local).by(T.label)", "g.V().fold().order(local).by(__.values('age'))",
   'g.V().fold().dedup(local)', 'g.V().fold().range(local, 0, 2)',
   "g.V().fold().order(local).by('age').unfold().values('name')",
+  // THE BRANCH FAMILY as one dispatcher over three builders, at BOTH per-row shapes: `coalesce` is a
+  // UNION WITH PRIORITY (each arm's input gated on the earlier arms producing nothing), and `choose`
+  // reaches a value stream now that its condition's subject comes from the FRAMING.
+  "g.V().coalesce(__.out('knows'), __.out('created'))", "g.V().coalesce(__.out('foo'), __.out('bar'))",
+  "g.V().coalesce(__.out('likes'), __.out('knows'), __.out('created')).groupCount().by('name')",
+  "g.V().values('name').coalesce(__.constant('a'), __.constant('b'))",
+  "g.V().hasLabel('person').values('age').choose(__.is(P.gt(29)), __.constant('older'), __.constant('younger'))",
+  "g.V().hasLabel('person').values('age').choose(P.eq(29), __.constant('matched'))",
+  "g.V().hasLabel('person').values('age').choose(P.eq(29), __.constant('matched'), __.constant('other'))",
   // `inject()` — a SCALAR source, and the largest single blocker measured over the corpus: 387 of
   // the 2,298 traversals begin with one. Its relation has NO channels: an injected row is one
   // traverser by construction, so there is no multiplicity to carry and nothing has established an

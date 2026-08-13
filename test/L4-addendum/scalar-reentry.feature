@@ -82,7 +82,6 @@ Feature: mogwai addendum — scalar-stream re-entry
       | d[70.0].d |
 
   @gap:scalar-position
-  @Unsupported
   Scenario: g_V_hasLabelXpersonX_valuesXageX_coalesceXisXgtX30XX_constantX0XX
     Given the modern graph
     And the traversal of
