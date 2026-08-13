@@ -118,6 +118,7 @@ ran	4	4	aae743ee948490ca	4cf4602edcf6d56d	g.V().choose(__.values("age")). option
 ran	6	6	82edff78aabb0165	fae5c78840bd81da	g.V().choose(__.values("age")). option(P.between(26, 30), __.values("name")). option(Pick.none, __.values("name"))
 ran	6	5	af580b40c07f30a0	33da4e4f47e0c07c	g.V().choose(__.values("age")). option(P.between(26, 30), __.values("name")). option(Pick.none, __.values("name")). option(Pick.none, __.identity()). option(Pick.none, __.fail()). option(Pick.unproductive, __.label()). option(Pick.unproductive, __.identity()). option(Pick.unproductive, __.fail())
 ran	6	5	af580b40c07f30a0	33da4e4f47e0c07c	g.V().choose(__.values("age")). option(P.between(26, 30), __.values("name")). option(Pick.none, __.values("name")). option(Pick.unproductive, __.label())
+ran	6	6	82edff78aabb0165	fae5c78840bd81da	g.V().choose(__.values("age"), __.values("name"))
 ran	4	4	27729c79d0b3e0d1	f1d0bdec0d37f464	g.V().choose(__.values("name")). option(P.neq("y"), __.values("age")). option(Pick.none, __.constant("x"))
 ran	3	2	5bcee4de885a5283	0f4dec57707550b5	g.V().choose(values('age').is(lte(30)),out().order().by('name').limit(1),out().order().by('name').limit(2))
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().coalesce(__.out("foo"), __.out("bar"))

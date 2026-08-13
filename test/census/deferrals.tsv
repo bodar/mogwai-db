@@ -108,7 +108,6 @@ unbound	Unbound parameter 'xx1'	g.V().choose(__.out().count()). option(xx1, __.v
 unbound	Unbound parameter 'xx1'	g.V().choose(__.out().count()). option(xx1, __.values("name")). option(xx2, __.values("age")). option(Pick.none, __.discard())
 unbound	Unbound parameter 'xx0'	g.V().choose(__.outE().count()). option(xx0, __.constant("none")). option(Pick.none, __.constant("some"))
 unbound	Unbound parameter 'xx1'	g.V().choose(__.outE().count().is(xx1), __.as("a"), __.as("b")). choose(__.select("a"), __.select("a"), __.select("b"))
-deferred	this traversal is not supported yet: no lowering covers g.V().choose(__.values("age"), __.values("name"))	g.V().choose(__.values("age"), __.values("name"))
 deferred	this traversal is not supported yet: no lowering covers g.V().choose(has(T.label, "person"),values("age").groupCount("a"), values("name").groupCount("b")).cap("a", "b").unfold()	g.V().choose(has(T.label, "person"),values("age").groupCount("a"), values("name").groupCount("b")).cap("a", "b").unfold()
 deferred	this traversal is not supported yet: no lowering covers g.V().choose(values('age').is(lte(30)),local(out().order().by('name').limit(1)),local(out().order().by('name').limit(2)))	g.V().choose(values('age').is(lte(30)),local(out().order().by('name').limit(1)),local(out().order().by('name').limit(2)))
 deferred	this traversal is not supported yet: no lowering covers g.V().coalesce(__.outE("knows"), __.outE("created")).otherV().path().by("name").by(T.label)	g.V().coalesce(__.outE("knows"), __.outE("created")).otherV().path().by("name").by(T.label)

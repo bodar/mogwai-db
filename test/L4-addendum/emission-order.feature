@@ -184,7 +184,6 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
       | p[v[marko],v[josh]] |
 
   @gap:emission-order
-  @Unsupported
   Scenario: g_E_identity_whereXvaluesXweightXX_path_limitX2X
     Given the modern graph
     And the traversal of

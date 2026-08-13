@@ -386,10 +386,35 @@ function bodyPredicate(
   let clause: Expr | undefined;
   for (const step of body) {
     const filter = sourceFilter(step, subject, fresh, ctx);
-    if (!filter) return correlatedExists(body, subject, fresh, ctx, false) ?? valuePredicate(body, subject, fresh, ctx, false);
+    if (!filter) return correlatedExists(body, subject, fresh, ctx, false)
+      ?? valuePredicate(body, subject, fresh, ctx, false)
+      ?? projectionProductive(body, subject, fresh, ctx);
     clause = and(clause, filter);
   }
   return clause ?? null;
+}
+
+/**
+ * A body that PROJECTS a scalar and is asked only whether it PRODUCED one — `where(__.values('name'))`,
+ * and the non-final arm of `coalesce(__.values('name'), __.constant('x'))`.
+ *
+ * The seam already computes exactly this: `scalarChild(...).present` is "did this projection yield a
+ * value for the host row" — a property EXISTS, a token's ALWAYS — so productivity is that column and
+ * needs no second machinery. It is the productivity question `correlatedExists` (a movement head) and
+ * `valuePredicate` (a projection THEN `.is()`) both LEAVE: a bare projection produces iff its value is
+ * present, which is a different question from its value's nullness only for a property (a stored value
+ * is never null) and identical for a token (always).
+ *
+ * Declines where the seam CANNOT SAY (`present` undefined) rather than guessing — a projection whose
+ * absence is not cheaply expressible (a numeric reducer's NULL, which is also its all-null answer) must
+ * not be read as unproductive. A FALLBACK, so every body the two above answer keeps the SQL it has.
+ */
+function projectionProductive(
+  body: readonly IRStep[], subject: Subject, fresh: Minter, ctx: ChainCtx,
+): Expr | null {
+  const produced = scalarChild(body, childHostOf(subject), ctx, fresh);
+  if (!produced?.present) return null;
+  return produced.present === ALWAYS_PRODUCTIVE ? CONSTANT.true : produced.present;
 }
 
 /**

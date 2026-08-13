@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. Notes list **only what does not work**; no note means the whole step works. Anything
 unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,478<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,479<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -44,7 +44,7 @@ unsupported throws a clear error and never mis-executes.
 | `has(T.id,…)`, `hasId` | ❌ | |
 | `hasKey`, `hasValue` | ✅ | one `HasContainer` on `T.key`/`T.value`; single arg is `eq`, several a `within`, and a NULL member is inert (an all-null set matches nothing). The value compares through the row's own `vtype`, so an exact number carried as decimal TEXT compares numerically |
 | `is(P)` | ✅ | a `constant()` operand folds to its literal; an operand TRAVERSAL compiles to a value compared against its FIRST result, re-sourced or correlated. An unproductive operand is SQL NULL — it drops the traverser for `eq` and contributes nothing to a `within` set. ❌ after `path()`; an operand with no scalar to read; a correlated operand at a scalar-parent host |
-| `where(__.…)`, `not`, `filter(__.…)` | ✅ | single- and multi-hop, edge-typed hops, alias-rooted `where(__.as('x')…)`, label reads at any depth, per-parent `order().by(key)` before a slice. ❌ ordered children using traversal-valued `by()` |
+| `where(__.…)`, `not`, `filter(__.…)` | ✅ | single- and multi-hop, edge-typed hops, alias-rooted `where(__.as('x')…)`, label reads at any depth, per-parent `order().by(key)` before a slice, and a bare value-projection body (`where(__.values('name'))` — keeps a traverser iff the projection produces). ❌ ordered children using traversal-valued `by()` |
 | `where(P)` / `where('a',P)` | 🟡 | value-compare over a scalar stream and alias-column compare work. ❌ some `where(P.op)` forms, `by(key)` on an edge-typed label, `where('a',P)` over a scalar |
 | `and`, `or` | ✅ | infix on STEPS and on PREDICATES (`P.gt(20).and(P.lt(30))`, `P.gt(30).negate()`), to any depth. ❌ `filter(rawPredicate)` |
 | `dedup()`, `dedup(labels)` | ✅ | bare, `by(key/T.id/T.label/scalar traversal)`, label tuples; over a PROPERTY row the identity is per owner kind — a `VertexProperty` by id, an edge `Property` by key+value, so equal values collapse ACROSS their edges. ❌ bare `dedup()` after `as()`/path tracking; more than one `by()`; `dedup().by(value)` over a property |
@@ -92,7 +92,7 @@ semantics commitment (JS `RegExp` ≠ Java `Pattern`) rather than on engineering
 |---|:--:|---|
 | `union(a, b…)` | 🟡 | two or more arms ✅, over an ordered input or with an arm-local `order()`/`limit()` (a union is UNORDERED, so the position is dropped). ❌ the SINGLE-arm form; a union whose emission order a downstream slice/collect READS (`union(…).limit(n)`, `.fold()`, `.cap()` — needs the arm-blocked fan-out order, not yet minted) |
 | `choose(pred, a, b)`, `choose(P, a[, b])`, `choose(…).option(…)`, `choose(T.x).option(…)` | ✅ | over ELEMENT and SCALAR streams alike — the condition's subject comes from the framing. A bare `P` is TinkerPop's own `choose(Predicate, …)` overload; a single-arm form passes unmatched traversers through; a `T`-token choice is always productive, so the implicit `Pick.unproductive` arm is provably dead. The boolean form composes over an ordered input or arm-local `order()`/`limit()` (a `choose` is UNORDERED, so the position is dropped). ❌ where a downstream slice/collect READS the fan-out emission order (needs the arm-blocked mint); over a PROPERTY stream |
-| `coalesce` | ✅ | UNION WITH PRIORITY: arm k takes the traversers for which arms 1…k−1 produced nothing. A body that always produces (`constant`/`count`/`fold`) exhausts it. ❌ where an emission order is already carried |
+| `coalesce` | ✅ | UNION WITH PRIORITY: arm k takes the traversers for which arms 1…k−1 produced nothing. A non-final arm may be a bare value projection (`coalesce(__.values('name'), __.constant('x'))` — it produces iff the property exists) as well as a movement. A body that always produces (`constant`/`count`/`fold`) exhausts it. ❌ where an emission order is already carried |
 | `optional`, `branch`, `map(__.…)`, `flatMap`, `sideEffect(__.…)` | ❌ | |
 | `local(__.…)` | ❌ | |
 

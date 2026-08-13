@@ -118,6 +118,12 @@ const COVERED = [
   "g.V().coalesce(__.out('knows'), __.out('created'))", "g.V().coalesce(__.out('foo'), __.out('bar'))",
   "g.V().coalesce(__.out('likes'), __.out('knows'), __.out('created')).groupCount().by('name')",
   "g.V().values('name').coalesce(__.constant('a'), __.constant('b'))",
+  // A bare value-projection arm/condition: its productivity is `scalarChild(...).present` — a property
+  // EXISTS — so `coalesce`/`choose`/`where` take a `values(k)`-headed body as a producing gate.
+  "g.V().coalesce(__.values('name'), __.constant('x'))",
+  "g.V().coalesce(__.values('lang'), __.values('name'))",
+  "g.V().where(__.values('name'))", "g.V().not(__.values('lang'))",
+  "g.V().choose(__.values('age'), __.values('name'))",
   "g.V().hasLabel('person').values('age').choose(__.is(P.gt(29)), __.constant('older'), __.constant('younger'))",
   "g.V().hasLabel('person').values('age').choose(P.eq(29), __.constant('matched'))",
   "g.V().hasLabel('person').values('age').choose(P.eq(29), __.constant('matched'), __.constant('other'))",

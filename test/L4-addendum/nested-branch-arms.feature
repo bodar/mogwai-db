@@ -8,7 +8,6 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
   # marks the family for a possible gremlin-test PR.
 
   @gap:nested-branch
-  @Unsupported
   Scenario: g_V_out_chooseXhasLabelXpersonX_coalesceXvaluesXnameX_constantXxXX_constantXzXX
     Given the modern graph
     And the traversal of
