@@ -61,9 +61,10 @@ graphs, per-tenant SaaS graphs, agent memory, personal projects. One Durable
 Object = one graph, so isolation is free and idle graphs cost essentially nothing.
 
 **Poor fit:** one enormous graph or heavy analytics. A DO caps at ~10 GB of
-SQLite, execution is single-threaded per graph, and there are no OLAP graph
-algorithms. Shard-one-logical-graph or PageRank-at-scale is Neptune/TigerGraph's
-job, not this.
+SQLite, execution is single-threaded per graph, and the OLAP algorithm layer
+isn't built yet (it's intended, and designed as compiled set-based passes rather
+than a second engine). Shard-one-logical-graph or PageRank-at-scale is
+Neptune/TigerGraph's job, not this.
 
 The tick column is an honest **self-rating**: ✅✅ = a real edge · ✅ = on par ·
 ❌ = a weak spot for now. Other columns show where each database sits.
@@ -75,11 +76,12 @@ The tick column is an honest **self-rating**: ✅✅ = a real edge · ✅ = on p
 | Scale-to-zero | ✅✅ ~$0 idle | no | no | no | no |
 | Cheap per-tenant fleets | ✅✅ free | costly | costly | costly | costly |
 | Single-graph scale | ❌ ~10 GB | ~unbounded | ~unbounded | large | large |
-| OLAP | ❌ none | strong | weak | strong | strong |
+| OLAP | ❌ not yet | strong | weak | strong | strong |
 | Maturity | ❌ **pre-alpha** | GA | GA | GA | GA |
 
 Real edges: **idle cost, per-tenant isolation, v4 currency**. Honest concessions:
-**scale ceiling, OLAP, and — for now — maturity**.
+**the scale ceiling** (structural — one DO, one thread, ~10 GB) and — for now —
+**maturity and OLAP**.
 
 ## Agent-driven by design
 

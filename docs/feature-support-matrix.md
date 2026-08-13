@@ -11,7 +11,7 @@ unsupported throws a clear error and never mis-executes.
 | ✅ | Supported, at any depth. |
 | 🟡 | Partial — the note says what is missing. |
 | ❌ | Not yet. Throws `UnsupportedTraversal`. |
-| 🚫 | Out of scope — a deliberate non-goal. |
+| 🚫 | Out of scope — we will not build it. **Not** a backlog item; §15 is the whole list, and §16 holds what is merely unbuilt. |
 
 ---
 
@@ -59,8 +59,11 @@ all ✅ in every position a predicate is accepted. ❌ `outside`. `between` is `
 **Text predicates (`TextP`)** — `containing`, `startingWith`, `endingWith`, and their negations ✅
 wherever a predicate is accepted. Matching is case-insensitive under SQLite `LIKE`; a literal term of
 three or more characters over a stored property uses the `property_fts` trigram access path, while the
-generic typed/escaped predicate remains the semantic authority. `regex` is 🚫 — SQLite has no regex
-operator and DO SQLite has no UDFs, so it fails closed rather than filtering in JS.
+generic typed/escaped predicate remains the semantic authority. `regex` ❌ **not yet** — SQLite has no
+regex operator and DO SQLite has no UDFs, so today it fails closed rather than filtering in JS. It is
+INTENDED, not a locked non-goal: the shape is a batched barrier behind a trigram prefilter, gated on a
+semantics commitment (JS `RegExp` ≠ Java `Pattern`) rather than on engineering —
+`docs/2026-08-12-regex-as-a-barrier-research.md`.
 
 ## 3. Projections & element data
 
@@ -117,7 +120,9 @@ per-request limit is the backstop.
 
 ## 8. Pattern matching
 
-`match(…)` ❌. `shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ❌ — the OLAP family.
+`match(…)` ❌. `shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ❌ — the OLAP family,
+**not yet** rather than never: designed as `call()` services with the four step names as desugar
+Passes (`docs/2026-07-24-graph-algorithms-plan.md`), so the compute stays set-based SQL.
 
 ## 9. Lists & collections
 
@@ -183,7 +188,23 @@ Element ids are integer rowids, externally `COALESCE(uid, id)`.
 
 ## 15. Locked non-goals (🚫)
 
-- **OLAP / `GraphComputer`** — `shortestPath`, `pageRank`, `peerPressure`, `connectedComponent`.
-- **`regex`** — no SQLite operator, no UDFs on DO; filtering in JS would break "compile to SQL".
+Two entries, and the list is short on purpose: a 🚫 means **we will not build this**, never "we have
+not got to it".
+
 - **`store(k)`** — gone from the language upstream.
 - **Row-at-a-time interpretation** — the failure mode this project exists to avoid.
+
+## 16. Not yet — INTENDED, unscheduled (❌)
+
+Neither of these is a wall. Both have a design doc, both are unscheduled, and both fail closed with a
+clear deferral until they land — so a query never gets a silently narrower answer in the meantime.
+
+- **OLAP / graph algorithms** — `pageRank`, `peerPressure`, `connectedComponent`, `shortestPath`.
+  Designed as `call()` services (the GDS-shaped superset surface) with the four native step names as
+  thin desugar Passes to the same services, so there is one implementation and the compute stays
+  set-based SQL — host-driven iteration, never a row-at-a-time interpreter.
+  **`docs/2026-07-24-graph-algorithms-plan.md`.**
+- **`regex`** — no SQLite operator and no UDFs on DO, so it cannot be an inline predicate. The shape is
+  a batched barrier (already the mechanism `federate`/`io` use) behind a trigram prefilter over the
+  existing `property_fts` index. The blocker is a SEMANTICS commitment — JS `RegExp` is not Java
+  `Pattern` — not the engineering. **`docs/2026-08-12-regex-as-a-barrier-research.md`.**

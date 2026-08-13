@@ -31,8 +31,13 @@ paths:
   so the assertion lives in `test/multilabel-wire.test.ts` and decodes with the client's reader.
 - **`iterate()` = trailing `.discard()`** — strip it, execute, return no values.
 - **DO SQLite has no user-defined functions, and we do NOT filter in JS.** Anything SQL can't
-  express (`regex`/`typeOf`) fails closed with a deferral (root CLAUDE.md decision #3). Text SQL
-  *can* express (`containing`/`startingWith`/`endingWith`) stays in SQL (`LIKE`).
+  express fails closed with a deferral (root CLAUDE.md decision #3). Text SQL *can* express
+  (`containing`/`startingWith`/`endingWith`) stays in SQL (`LIKE`). **`regex` is the only member of
+  that class left** — and it is INTENDED work, not a permanent wall
+  (`docs/2026-08-12-regex-as-a-barrier-research.md`: a batched barrier behind a trigram prefilter,
+  gated on a semantics commitment, not on engineering). ⚠️ **`typeOf` is NOT in the class** — it
+  lowers as a per-row `vtype` comparison with a storage-class fallback (`typeOfExpr`,
+  `compiler/rel/predicate.ts`) and `is(typeOf(GType.LIST))` even retypes the stream.
 - **A `Map.Entry` frames as a size-1 MAP** on GraphBinary v4 (no dedicated DataType) — every GLV
   decodes it as an ordinary size-1 `MAP` (`0x0a`), indistinguishable from a genuine single-key map,
   and this is by design: TINKERPOP-3104 ("make `unfold()` on Maps consistent") closed **Won't Do**

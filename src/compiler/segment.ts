@@ -34,9 +34,12 @@ export interface FederationSource {
 }
 
 /** A compile suspended at a barrier call(). `head` is a COMPLETE, ordinary Compiled — the
- *  barrier's INPUT rows (each parent traverser's id + ordinal for a mid-traversal call), run and
- *  drained like any read — or `null` for a source-form g.call(...) that has no local input (apply
- *  then runs over an empty input). `apply` is the service's apply, already closed over this call's
+ *  barrier's INPUT rows, run and drained like any read — or `null` for a source-form g.call(...) that
+ *  has no local input (apply then runs over an empty input). For a mid-traversal call the head is the
+ *  prefix ENDING IN THE INJECTION READ, so it projects the injected VALUE and not the parent element:
+ *  a barrier reads exactly one field of its input (`BarrierInput` is `{injectedValue?}`), and
+ *  materializing each parent's id, label set and property bag to reach it was work whose only consumer
+ *  threw it away. `apply` is the service's apply, already closed over this call's
  *  params, its hop depth, and the service's own app-scope dependencies (the FederationSource among
  *  them) — so it takes only the rows. `resume` turns the barrier's
  *  awaited output into the next Plan (synchronously — the only await is `apply`). Nothing here is
@@ -47,9 +50,11 @@ export interface SegmentPlan {
   readonly apply: (rows: readonly BarrierInput[]) => Promise<ForeignRow[]>;
   readonly params: CallParams;
   /** Turn the barrier's awaited OUTPUT (`foreign`) into the next Plan. `headRows` is the drained
-   *  head INPUT (empty for a source-form call) — a mid-traversal rejoin needs it to reconstruct the
-   *  parent domain (per-parent identity + carried path/as) and JOIN the ordinal-stamped foreign rows
-   *  back onto it; a source-form resume ignores it. */
+   *  head INPUT (empty for a source-form call) — a mid-traversal rejoin needs the VALUE each parent
+   *  asked with, to scatter the returned pool back over the parents by a real SQL JOIN on that value
+   *  (so N parents sharing a value each get the whole matching set, and a parent matching nothing
+   *  yields no row); a source-form resume ignores it. Nothing else about a parent survives the
+   *  boundary: `path()`/`as()` across a barrier is unsupported, not carried. */
   readonly resume: (foreign: ForeignRow[], headRows: readonly BarrierInput[]) => Plan;
 }
 

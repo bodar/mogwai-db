@@ -34,8 +34,8 @@ export type InjectionKind =
  *  mid-traversal form (V().call(...)). `injectionTraversal` is the raw (un-lowered) nested-
  *  traversal AST of a mid-traversal call's per-parent injection arg (the third positional arg);
  *  undefined for a source-form call or a mid call with no injection (a constant sub-traversal —
- *  the service runs once, the degenerate collapse). Kept un-lowered so lowerCall can classify it
- *  (→ InjectionKind) and push it against the correct ChildFrameStack. */
+ *  the service runs once, the degenerate collapse). Kept un-lowered so `midSegment` can classify it
+ *  (→ InjectionKind via `injectionKindOf`) and take the read VERBATIM as the head's last step. */
 export interface CallSpec {
   readonly serviceName: string;
   readonly params: CallParams;
@@ -50,8 +50,9 @@ export interface CallSpec {
  *  Distinct from `CallSpec` above, and the pair is the parse/lower split: a `CallSpec` is what the
  *  step TEXT parsed to, before registry lookup; a `CallSite` is what the resolved service is handed
  *  to contribute. A superset the resolver reads selectively — a source service (--list,
- *  tinker.search) ignores `parent`/`scope`; a per-parent service (tinker.degree.centrality) requires
- *  them (lowerCall pushes the child scope BEFORE building, so `parent` is already the pushed seed).
+ *  tinker.search) ignores `host`/`child`; a per-parent service (tinker.degree.centrality) requires
+ *  them and THROWS without them, since a `streaming` service at a source position is invalid Gremlin
+ *  rather than a shape some other route answers (§6·5).
  *
  *  It was `ServiceCallCtx`, which borrowed TinkerPop's `ServiceCallContext` — a different thing
  *  ({traversal, step} + generateTraverser/split, for barrier services building their own
@@ -123,16 +124,12 @@ export interface BarrierInput {
 
 // ---------- the `rel` arm: the same contribution, lowered into the RelIR fold ----------
 //
-// `stream` and `rel` are the SAME contribution expressed for the two spines, and a service implements
-// exactly ONE of them — never both, which would be the duplicated lowering `steps/CLAUDE.md` forbids
-// outright. The discriminant is what routes: a `rel` service makes LEGACY's call route decline, a
-// `stream` service makes RELIR's call step decline (the ordinary "not learned yet" `null`, needing no
-// special case on either side). So services migrate one at a time, each its own green commit, and the
-// `stream` arm is deleted with legacy's call route when none is left.
+// `rel` is the ONE inline contribution — there is one spine, so there is one arm. The transitional
+// `stream` arm and legacy's call route went together, exactly as §6·1 demands of a harness.
 //
-// `barrier` is untouched by either: it contributes no lowering at all — its rows arrive from an
-// awaited sibling and `apply` runs at EXECUTION time, in the executor's segment loop. Federation and
-// io are spine-independent already, and the planned iterative graph algorithms
+// `barrier` is the other arm and contributes no lowering at all: its rows arrive from an awaited
+// sibling, so `apply` runs at EXECUTION time, in the executor's segment loop. `federate` and `io` are
+// both barriers, and the intended iterative graph algorithms
 // (`docs/2026-07-24-graph-algorithms-plan.md`) are barrier contributions for the same reason.
 
 /**
@@ -166,14 +163,12 @@ export type RelContribution =
 export interface RelCallSite extends CallSite {
   readonly fresh: Minter;
   /**
-   * The enclosing traverser and the child seam — present ONLY for a mid-traversal `call()`, which is
-   * the `StreamCallSite.parent`/`scope` pair expressed for this spine.
+   * The enclosing traverser and the child seam — present ONLY for a mid-traversal `call()`.
    *
-   * A `streaming` service needs both and a `start` service ignores both, which is the same asymmetry
-   * `StreamCallSite` has. What is different is what they ARE: legacy hands over a `ChildParent` plus
-   * a `ChildFrameStack` — its own per-traverser scope machinery — where this is the host row and the
-   * ONE child seam (§6·6), so a service asks the identical question every `by()` body asks and gets
-   * the identical answer.
+   * A `streaming` service needs both and a `start` service ignores both. What they ARE is the point:
+   * the host ROW plus the ONE child seam (§6·6) — not per-traverser scope machinery of the service's
+   * own — so a service asks the identical question every `by()` body asks and gets the identical
+   * answer. That is why `tinker.degree.centrality` is a body of two IR steps and no substrate.
    */
   readonly host?: ChildHost;
   readonly child?: ChildSeam;
