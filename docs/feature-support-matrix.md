@@ -122,7 +122,7 @@ per-request limit is the backstop.
 
 | Step | | Notes |
 |---|:--:|---|
-| `fold()`, `unfold()`, `order(Scope.local)`, `dedup(Scope.local)`, `range(local)`, `all`/`any`/`none` | ✅ | `order(local)` takes a comparator `by(asc/desc)`; `dedup(local)` keeps the FIRST occurrence per value and keys on the member's value AND its type tag, so a Byte(1) and an Integer(1) stay apart. ❌ `dedup(local)` with a label tuple or a `by()` projection |
+| `fold()`, `unfold()`, `order(Scope.local)`, `dedup(Scope.local)`, `range(local)`, `all`/`any`/`none` | ✅ | `order(local)` takes a comparator `by(asc/desc)`, and over an ELEMENT-member list any element projection (`by(k)`, `by(T.label)`, `by(<body>)`) — an unproductive one DROPS the member; `dedup(local)` keeps the FIRST occurrence per value and keys on the member's value AND its type tag, so a Byte(1) and an Integer(1) stay apart. Member admission is per ARM: the value-reading ops (string transforms, `all`/`any`/`none`) stay scalar-member only. ❌ `dedup(local)` with a label tuple or a `by()` projection; PROPERTY-member and NESTED-list member lists |
 | `combine`, `conjoin`, `difference`, `disjunct`, `intersect`, `product`, `merge` | ✅ | ❌ a set-op over an arm-merged (`union`) list |
 | `index()` | ❌ | |
 

@@ -405,9 +405,15 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   `fold([:], Operator.addAll)`** and the **`merge`** map-operand. A non-string (`T`-token) key and a
   map feeding `mergeV`/`mergeE` (7 write traversals — ⚠️ not write work) decline whole and belong to
   the write substrate.
-- **A list whose members may be ELEMENTS.** Unlocks the ELEMENT-list forms of `order`/`dedup`, the
-  map-family residue (`with(tokens, ids)`, the `by(__.unfold())` that pairs with them, `order(Scope.local)`
-  over map entries), and the `set` framing marker's list tail.
+- **A list whose members may be ELEMENTS.** LANDED for the ops that do not read a member as a VALUE:
+  member admission is now PER ARM rather than one `isBareList` door, so the local slices and
+  `order`/`dedup` serve an element list while a string transform and a member predicate still decline (a
+  rowid is not a string). An element member IS a `ChildHost`, so `by(k)`/`by(T.label)`/`by(<body>)` cost
+  nothing new, and an unproductive `by()` drops the member (`Order.feature:281-289`). ⚠️ Its compare key
+  and identity are the SAME two per-type facts the property `RowShape` states — `GremlinValueComparator`
+  compares an Element by id, `ElementHelper` hashes it by id. 🚧 What is LEFT: the map-family residue
+  (`with(tokens, ids)`, the `by(__.unfold())` that pairs with them, `order(Scope.local)` over map
+  entries), and a PROPERTY-member or NESTED-list member list in the same arms.
 - **`RowShape` — a per-row shape as a first-class row participant.** The row-algebraic ops are ONE engine
   now (`orderRows`, `rowOp`, `dedupOn` in `compiler/rel/lower.ts`), parameterised by what a shape owes it:
   the `by()` host, the deterministic tie-break, the IDENTITY columns, and whether that identity names the
