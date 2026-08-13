@@ -468,8 +468,15 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   once where `both()` must yield the vertex twice, and it fails SILENTLY.
 - **Mint one deterministic window order over a whole fan-out.** Unlocks the UNORDERED bulked slice
   (`g.V().both().both().limit(2)` — `bulkSlice` has no position to accumulate along, so a collapse is
-  refused in front of it). ⚠️ Cost: choosing WHICH traversers an unordered `limit` returns is legal
-  (TinkerPop specifies only membership) but moves an answer digest → re-record the census with that argument.
+  refused in front of it) AND the demanded-order branch merge (below). ⚠️ Cost: choosing WHICH
+  traversers an unordered `limit` returns is legal (TinkerPop specifies only membership) but moves an
+  answer digest → re-record the census with that argument. The ARM-BLOCKED order a `union`/`choose`
+  (`BranchStep`) presents is `[arm_ordinal, arm-local position, tie]` and its within-arm tie is per
+  SHAPE (element → id); `coalesce` is per-traverser (`[parent position, tie]`) instead. The
+  POSITIONLESS half already landed: a `union` over an ordered input, or with an arm-local
+  `order()/limit()`, drops the spent order and merges (`dropEncounter`, `unionArms`) — correct because
+  a union is unordered — and declines only when `ctx.ordered` says a downstream slice/collect reads
+  the fan-out order (which is what this mint would supply).
 - **`recognize` (§4) — the fast paths as plan rewrites,** so a fast-path decline can be lifted.
 
 **Guard-binding family** — a shared mechanism (a GRAPH-dependent refusal → `Binding.guard`, §6·5):
@@ -544,10 +551,13 @@ pattern this whole stage kept finding:
   left is the rowid comparison — the same two per-type facts (`GremlinValueComparator`/`ElementHelper`)
   the property `RowShape` and the element-member `order`/`dedup` already state.
 
-⚠️ **A merge DECLINES where a position is CARRIED** — `union`/`choose`/`coalesce` all re-mint the emission
-order, so `g.V().out().order().by('name').coalesce(…)` declines today. That is §10's "mint one
-deterministic window order over a whole fan-out" seen from the branch side, and it is now three callers
-rather than one.
+⚠️ **A merge over a DEMANDED position still declines** — where `ctx.ordered` says a downstream
+slice/collect reads the fan-out's emission order, `union`/`choose`/`coalesce` decline rather than let a
+bare `LIMIT` read incidental `UNION ALL` byte order. That is §10's "mint one deterministic window order
+over a whole fan-out" seen from the branch side. The POSITIONLESS half landed for `union` (it drops the
+spent order and merges — a union is unordered); `choose`/`coalesce` still carry the old
+`encounterOf(input.channels)` guard and are the next two callers, and the demanded-order half of all
+three waits on the arm-blocked/per-traverser mint.
 
 ⚠️ **Where a refusal is arithmetic over the INPUT's row count, a host that cannot count statically needs a
 GUARD, not a decline.** `addV` proves single-row at COMPILE time (a literal `Values`); an `addE` mid-chain
