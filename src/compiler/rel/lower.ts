@@ -263,6 +263,11 @@ interface ChainCtx extends FilterCtx {
    *  position channel exactly where the source would have, and a step-local re-derivation would be a
    *  second authority on a fact the source already decided. */
   readonly ordered: boolean;
+  /** Does a POSITIONAL slice read the emission order downstream (`ChainFacts.demandsSlice`)? A
+   *  branch merge mints one deterministic fan-out order for a COLLECT/write demand, but DECLINES
+   *  when a slice reads its fan-out — a slice pins the reference's traverser-major/arm-major subset,
+   *  which this spine does not mint yet. Threaded, not re-derived, for the reason `ordered` is. */
+  readonly sliced: boolean;
   /** The GRAPH's declared vertex-label cardinality, which decides what a creation with no label of
    *  its own gets. Threaded for the reason `ordered` is: it is settled before a step is lowered, so a
    *  step that asked the store instead would be asking at the wrong time. */
@@ -1645,6 +1650,52 @@ const dropEncounter = (rel: Rel, fresh: Minter): Rel => {
 /** The channel list a positionless merge declares — the input's, minus any emission order (`dropEncounter`). */
 const withoutEncounter = (channels: Channels): Channels =>
   channels.filter((channel) => channel.role !== 'encounter');
+
+/**
+ * MINT ONE DETERMINISTIC WINDOW ORDER OVER A WHOLE FAN-OUT (§10) — the demanded-order half of the
+ * branch merge for a COLLECTING/write demand, and the reason `union`/`choose`/`coalesce` no longer
+ * decline outright under `ctx.ordered`.
+ *
+ * The positionless merge has already produced the right ROWS (`mergeArms`, over arms whose own
+ * arm-local positions were dropped — a fresh unordered stream, `dropEncounter`). What a downstream
+ * `fold`/`cap`/`group` demands on top is a COLUMN to collect by, and this mints it: a `ROW_NUMBER`
+ * over the merged relation's OWN columns, taken as one deterministic total order.
+ *
+ * Ordering by every merged column — not by an arm ordinal + within-arm position — is deliberate. A
+ * branch is UNORDERED at the source (every `Union`/`Choose`/`Coalesce.feature` scenario asserts it,
+ * and `BranchStep`'s arm-drain order is impl-defined — no corpus scenario pins a branch FOLD's member
+ * order, only membership), so for a collect ANY deterministic realization is legal; the census answer
+ * digest moves and is re-recorded. Two rows equal in every column are INDISTINGUISHABLE traversers,
+ * so a tie among them is unobservable — which is what makes the whole-row key deterministic under
+ * `mise run test:perturbed` without a hand-supplied per-shape tie. It is also fully general: element,
+ * scalar (post-meet, with its `vtype` column), list, map and VARIANT merges all present columns to
+ * order by, so one helper serves all three mergers and every framing they produce.
+ *
+ * ⚠️ **This is NOT enough for a positional SLICE** (`limit`/`range`/`skip`/`tail`), which reads the
+ * fan-out's order to pick a SUBSET: `BranchStep.standardAlgorithm` is traverser-major/arm-minor
+ * (barrier-free) or arm-major (a batched-barrier arm), and a slice on a traverser boundary pins that
+ * exact subset (`branch-traverser-major.feature`). A whole-row key picks a DIFFERENT subset — a wrong
+ * ANSWER, not a reorder — so `branchResult` DECLINES a sliced fan-out (`ctx.sliced`) until the
+ * traverser-major key is minted. The collect case has no such pin, which is why it ships first.
+ *
+ * A no-op check is unnecessary — `branchResult` only wraps a positionless merge, so `renumber` mints.
+ */
+const withFanoutOrder = (merged: FramedRel, fresh: Minter): FramedRel => {
+  const rel = merged.rel;
+  const cols = [...rel.type.cols, meta('encounter', 'int')];
+  const channels = withChannel(rel.channels, ENCOUNTER);
+  const terms = rel.type.cols.map((column) => ({ expr: col(rel.id, column.name), dir: 'asc' as const }));
+  return { ...merged, rel: renumber(rel, terms, cols, channels, fresh) };
+};
+
+/**
+ * The one place the three branch mergers turn a positionless merge into the value they return, so the
+ * emission-order policy lives once. Positionless demand (`!ctx.ordered`) → the merge as-is. A
+ * COLLECT/write demand → mint a deterministic fan-out order. A SLICE demand → decline (see
+ * `withFanoutOrder`'s ⚠️). A failed merge stays `null`.
+ */
+const branchResult = (merged: FramedRel | null, ctx: ChainCtx, fresh: Minter): FramedRel | null =>
+  !merged ? null : !ctx.ordered ? merged : ctx.sliced ? null : withFanoutOrder(merged, fresh);
 
 /**
  * The convergent-walk COLLAPSE: `SELECT id, SUM(bulk) … GROUP BY id`, so the frontier stays bounded
@@ -3743,7 +3794,7 @@ function chainCtxOf(steps: readonly IRStep[], opts: Lowering): { ctx: ChainCtx; 
   return {
     facts,
     ctx: {
-      params, correlatedChildren, collapse, ordered: facts.demandsEncounter, tracksPath: facts.tracksPath,
+      params, correlatedChildren, collapse, ordered: facts.demandsEncounter, sliced: facts.demandsSlice, tracksPath: facts.tracksPath,
       labelRegime, sideEffects, sideEffectPolicies, services, sack, collections,
       mutating: steps.some((step) => MUTATING_STEPS.has(step.name)),
     },
@@ -4639,17 +4690,10 @@ function unionArms(
   // A `union` is a fresh UNORDERED stream (`BranchStep` drains arm-by-arm and every scenario of
   // `Union.feature` asserts unordered), so a position the input carried OR an arm minted inside itself
   // does NOT survive the merge — dropping it is what lets an ordered/limited arm merge rather than
-  // decline on a channel its sibling has not got. But where a downstream positional/collecting consumer
-  // READS the fan-out's emission order (`ctx.ordered`, the chain-global demand), the merge would have to
-  // present a DETERMINISTIC arm-blocked order for that slice to be stable — which this route does not
-  // MINT yet — so it declines there rather than let a bare `LIMIT` read incidental `UNION ALL` byte
-  // order (the perturbed-unstable `@Unsupported` emission-order scenarios, e.g.
-  // `g.V(4).union(out, in).limit(2)`). This is strictly more permissive than the old
-  // `encounterOf(input.channels)` guard: a demand always mints an encounter on the source, so every
-  // chain that guard refused this one still refuses, and the ADDED cases are exactly the positionless
-  // unions (`g.V().order().by(k).union(out, in)`) whose dropped order is unobservable.
-  if (ctx.ordered) return null;
-
+  // decline on a channel its sibling has not got. Where a downstream positional/collecting consumer
+  // READS the fan-out's emission order (`ctx.ordered`, the chain-global demand), the merge MINTS one
+  // deterministic order over the whole fan-out after the fact (`withFanoutOrder`, §10) rather than
+  // declining — the positionless rows are the same either way.
   const args = argValues(step);
   if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
   const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
@@ -4661,7 +4705,7 @@ function unionArms(
     if (!arm) return null;
     arms.push({ ...arm, rel: dropEncounter(arm.rel, fresh) });
   }
-  return mergeArms(arms, withoutEncounter(input.channels), labels, fresh);
+  return branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, fresh), ctx, fresh);
 }
 
 /**
@@ -5054,10 +5098,9 @@ function coalesceArms(
   if (step.modulators?.length || step.optionArms) return null;
   // `coalesce` is UNORDERED in the corpus (every `Coalesce.feature` scenario), and a TERMINAL coalesce's
   // per-traverser order is unobserved anyway (no root demand orders the wire). So the same rule as
-  // `union` holds: the incoming/arm-local position does not survive the merge and is dropped, unless a
-  // downstream slice/collect READS the fan-out order (`ctx.ordered`), where the per-traverser mint this
-  // route does not build yet is required. See `unionArms`.
-  if (ctx.ordered) return null;
+  // `union` holds: the incoming/arm-local position does not survive the merge and is dropped; a
+  // downstream slice/collect that READS the fan-out order (`ctx.ordered`) gets one minted over the
+  // whole fan-out after the merge (`withFanoutOrder`, §10). See `unionArms`.
   const subject = branchSubject(input, framing);
   if (!subject) return null;
   const args = argValues(step);
@@ -5087,7 +5130,7 @@ function coalesceArms(
     if (!empty) return null;
     exhausted = and(exhausted, empty);
   }
-  return mergeArms(arms, withoutEncounter(input.channels), labels, fresh);
+  return branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, fresh), ctx, fresh);
 }
 
 function chooseArms(
@@ -5098,9 +5141,8 @@ function chooseArms(
   if (step.optionArms) return chooseOptions(step, input, framing, bulked, ctx, fresh, labels);
   // A `choose` is a `BranchStep` like `union` — arm-blocked and UNORDERED (`Choose.feature` asserts
   // every scenario unordered) — so the same rule holds: the incoming position does not survive the
-  // merge and is dropped, unless a downstream slice/collect READS the fan-out order (`ctx.ordered`),
-  // where the arm-blocked mint this route does not build yet is required. See `unionArms`.
-  if (ctx.ordered) return null;
+  // merge and is dropped; a downstream slice/collect that READS the fan-out order (`ctx.ordered`) gets
+  // one minted over the whole fan-out after the merge (`withFanoutOrder`, §10). See `unionArms`.
   const subject = branchSubject(input, framing);
   if (!subject) return null;
   const args = argValues(step);
@@ -5132,7 +5174,7 @@ function chooseArms(
   // Drop the spent position from each arm (an arm-local `order()`/`limit()`), as `union` does — a
   // `choose` is unordered, so the merged stream carries none.
   const dropped = [armThen, armElse].map((arm) => ({ ...arm, rel: dropEncounter(arm.rel, fresh) }));
-  return mergeArms(dropped, withoutEncounter(input.channels), labels, fresh);
+  return branchResult(mergeArms(dropped, withoutEncounter(input.channels), labels, fresh), ctx, fresh);
 }
 
 /** Do two framings describe the same stream? A shape mismatch between arms is a variant stream, which

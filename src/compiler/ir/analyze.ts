@@ -26,6 +26,14 @@ export interface ChainFacts {
   readonly tracksPath: boolean;
   /** was demandsEncounterOrder  → seedSource: seed + thread the emission-order encounter? */
   readonly demandsEncounter: boolean;
+  /** Does a POSITIONAL slice (limit/range/skip/tail at global scope) read the emission order? A
+   *  branch merge whose fan-out is read by a slice must present the reference's TRAVERSER-major /
+   *  arm-major subset — a key this spine does not mint yet — so the branch DECLINES there rather
+   *  than let a deterministic-but-different order pick a wrong subset (a wrong ANSWER, not a
+   *  reorder — the `branch-traverser-major.feature` pins). A COLLECT/write demand (fold/cap/group)
+   *  takes any deterministic order, since TinkerPop's own branch emission order is impl-defined and
+   *  no corpus scenario pins a branch fold's member order. See `withFanoutOrder` (lower.ts). */
+  readonly demandsSlice: boolean;
 }
 
 /** Steps that need the linear path threaded through the fold: the source vertex becomes path
@@ -252,5 +260,6 @@ export function analyzeChain(steps: IRStep[]): ChainFacts {
   return {
     tracksPath: steps.some((s) => PATH_STEPS.has(s.name)),
     demandsEncounter: computeDemandsEncounter(steps),
+    demandsSlice: steps.some((s) => POSITIONAL_CONSUMERS.has(s.name) && !isLocalScope(s)),
   };
 }
