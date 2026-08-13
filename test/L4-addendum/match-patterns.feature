@@ -68,7 +68,6 @@ Feature: mogwai addendum — match() pattern shapes
       | m[{"a":"marko","b":"josh"}] |
 
   @gap:match-patterns
-  @Unsupported
   Scenario: a where(label, predicate) argument comparing two bound variables
     Given the modern graph
     And the traversal of
@@ -97,7 +96,6 @@ Feature: mogwai addendum — match() pattern shapes
       | m[{"a":"peter","b":"lop"}] |
 
   @gap:match-patterns
-  @Unsupported
   Scenario: a filter written before the pattern that binds the variable it reads
     # The scheduler defers a filter until every variable it reads is bound, so argument ORDER
     # does not change the answer — the conjunction is solved as a set.

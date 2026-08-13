@@ -137,7 +137,18 @@ landing order of one engine, not a support matrix.
   (`V().as('a').out().as('b').match(…)`), the root is NOT rebound — rebinding it to the incoming
   traverser corrupted the pre-bound value (`a_out_count_c__b_in_count_c` was the witness). L3 1516 →
   1518. Still ❌: a filter-AFTER-reduce end (`count().is(P.gt(10)).as('b')`) and a `fold()` (list) end.
-- **P2 — filter legs.** `where('a', P.neq('c'))` theta-join; `not(as(a)…as(b))` anti; `where(as(c).<moving body>)`.
+- **P2 — filter legs.** **P2a LANDED 2026-08-13:** an inline `where('a', P.eq/neq('c'))` leg is a
+  two-variable THETA clause between bound ELEMENT aliases — a `Filter` comparing two rowids, binding
+  nothing, reads both keys (`readsOf`). Reaps the inline-where-leg scenarios (580 grateful, 253's where
+  arm). ⚠️ **Still open, and it is the SUBSTRATE piece:** the TRAVERSAL legs `not(as('a')…as('b'))` /
+  `where(as('c').<moving body>)` need a correlated `[NOT] EXISTS` / SEMI-ANTI JOIN with MULTI-COLUMN
+  correlation — the leg body references SEVERAL outer aliases (`not(as('a').out().as('b'))` correlates
+  on a AND b), which `correlatedExists` (single correlation, `body[0]` a movement) cannot express.
+  Calcite's exact mapping (`SubQueryRemoveRule`, `JoinRelType` SEMI/ANTI); `src/rel/emit.ts:404`
+  already RENDERS semi/anti as `[NOT] EXISTS`, but nothing CONSTRUCTS those nodes — match's legs are
+  the first constructor. Also `where('a', P.neq('c'))` as a step AFTER the match (scenario 95) is a
+  downstream `where(key,P)` over the record stream, a separate `where('a',P)` gap. `where('a',P)` over
+  SCALAR aliases and non-eq/neq ops also await.
 - **P3 — connectives & nesting.** `and(…)` binding group; `or(…)` → UNION of branches; nested `match`
   in a pattern; top-level `not(match(…).where(…).select(…))`.
 - **P4 — modulated bodies & downstream collectors.** `outE.order.by.limit.inV`, `repeat.times`, `map(mean)`

@@ -1,4 +1,4 @@
-import { arg, isNested, stepChain } from '../../gremlin/frontend.ts';
+import { arg, isNested, isPred, stepChain } from '../../gremlin/frontend.ts';
 import { col, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -58,7 +58,14 @@ import { selectKeys } from './record.ts';
  *  is a later phase. */
 type Pattern =
   | { readonly kind: 'binding'; readonly start: string; readonly body: readonly IRStep[]; readonly end: string }
-  | { readonly kind: 'constraint'; readonly start: string; readonly body: readonly IRStep[] };
+  | { readonly kind: 'constraint'; readonly start: string; readonly body: readonly IRStep[] }
+  /** `where('a', P.eq/neq('b'))` — TinkerPop's `WherePredicateStep`, a THETA clause between two
+   *  ALREADY-BOUND variables (no sub-traversal, no join). It binds nothing and reads both keys. */
+  | { readonly kind: 'wpred'; readonly startKey: string; readonly op: 'eq' | 'neq'; readonly otherKey: string };
+
+/** The alias labels a pattern READS — all must be bound before it is ready to run. */
+const readsOf = (p: Pattern): readonly string[] =>
+  p.kind === 'wpred' ? [p.startKey, p.otherKey] : [p.start];
 
 /** The adjacency steps — a body containing one FANS the traverser OUT. A no-end constraint whose body
  *  is FILTER-ONLY (none of these) is a pure narrowing of `start` and folds as one re-rooted filter; a
@@ -80,6 +87,17 @@ const REDUCING_ENDS: ReadonlySet<string> = new Set(['count', 'sum', 'mean', 'min
 function classify(a: unknown, params: Record<string, any>): Pattern | null {
   if (!isNested(a)) return null;
   const chain = stepChain((a as { nested: unknown }).nested, params) as IRStep[];
+  // `where('a', P.eq/neq('b'))` — a two-variable THETA clause. One step, a label key and a predicate
+  // whose single operand is another label. Only `eq`/`neq` (element identity) here; the other ops over
+  // two element aliases are not meaningful and other where-forms are a later phase.
+  if (chain.length === 1 && chain[0]!.name === 'where') {
+    const wargs = chain[0]!.args ?? [];
+    const pred = wargs[1]?.value;
+    if (wargs.length === 2 && typeof wargs[0]!.value === 'string' && isPred(pred)
+      && (pred.op === 'eq' || pred.op === 'neq') && pred.operands.length === 1 && typeof pred.operands[0]!.value === 'string')
+      return { kind: 'wpred', startKey: wargs[0]!.value, op: pred.op, otherKey: pred.operands[0]!.value };
+    return null;
+  }
   if (chain.length < 2) return null;
   const head = chain[0]!;
   const starts = asLabelsOf(head);
@@ -110,7 +128,7 @@ function classify(a: unknown, params: Record<string, any>): Pattern | null {
  *  `a_created_b__b_0created_a`), fall back to the first start label; the readiness loop then still has
  *  an anchor because the incoming traverser is bound to it. */
 function rootLabel(patterns: readonly Pattern[]): string | null {
-  const starts = patterns.map((p) => p.start);
+  const starts = patterns.flatMap((p) => (p.kind === 'wpred' ? [] : [p.start]));
   const ends = new Set(patterns.flatMap((p) => (p.kind === 'binding' ? [p.end] : [])));
   return starts.find((s) => !ends.has(s)) ?? starts[0] ?? null;
 }
@@ -198,9 +216,22 @@ export function lowerMatch(
   // never satisfy (an unreachable start) is an UNMATCHABLE pattern and declines the whole step.
   const pending = [...patterns];
   while (pending.length) {
-    const i = pending.findIndex((p) => bound.has(p.start));
+    const i = pending.findIndex((p) => readsOf(p).every((l) => bound.has(l)));
     if (i < 0) return null; // no ready pattern — a cyclic/unsolvable binding dependency. Fail closed.
     const p = pending.splice(i, 1)[0]!;
+
+    if (p.kind === 'wpred') {
+      // A two-variable THETA clause between already-bound ELEMENT aliases: compare rowids. `eq` keeps
+      // rows where they are the SAME element, `neq` where they differ (`WherePredicateStep` over two
+      // path values). Both must be elements; a scalar-alias compare is a later phase.
+      const projA = aliasProjection(rel, labels, p.startKey, 'last', fresh);
+      const projB = aliasProjection(rel, labels, p.otherKey, 'last', fresh);
+      if (!projA || !projB || projA.read.kind !== 'element' || projB.read.kind !== 'element') return null;
+      const same = eq(aliasIdAt(col(rel.id, projA.entry.col), 'last'), aliasIdAt(col(rel.id, projB.entry.col), 'last'));
+      const clause: Expr = p.op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same };
+      rel = make.filter({ id: fresh('mw'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
+      continue;
+    }
 
     // A REDUCING-barrier end (`as('a').out().count().as('c')`) binds a per-origin reduction with a
     // 0/empty default — the scalar-child seam, rooted at the start alias, NOT the row fold (which
@@ -279,9 +310,9 @@ export function lowerMatch(
   // channel the record still carries (`recordTail`). Built by the same `selectKeys` a terminal
   // `select(labels)` uses; `framing` above is otherwise unused now that the map is unconditional.
   const declared: string[] = [];
-  for (const p of patterns)
-    for (const l of p.kind === 'binding' ? [p.start, p.end] : [p.start])
-      if (!declared.includes(l)) declared.push(l);
+  const declaredOf = (p: Pattern): readonly string[] =>
+    p.kind === 'binding' ? [p.start, p.end] : p.kind === 'constraint' ? [p.start] : [];
+  for (const p of patterns) for (const l of declaredOf(p)) if (!declared.includes(l)) declared.push(l);
   // A 0- or 1-variable pattern's bindings map is NOT a `select()`: `select('a')` yields the VALUE, not
   // the `{a: …}` one-key map TinkerPop emits (a `project('a').by(select('a'))`, as `gql.ts` builds).
   // Decline rather than emit the bare value — fail closed against a wrong answer; a later phase.

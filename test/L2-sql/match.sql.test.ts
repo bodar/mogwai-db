@@ -89,6 +89,15 @@ describe('match() SQL', () => {
     expect(rows.length).toBe(1);
   });
 
+  // An inline `where('a', P.neq('c'))` leg is a two-variable THETA clause between bound aliases — a
+  // Filter comparing two rowids, binding nothing.
+  test('where(key, P.neq(key)) leg compares two bound aliases', () => {
+    const store = seededStore();
+    const rows = run(store, 'g.V().match(__.where("a", P.neq("c")), __.as("a").out("created").as("b"), __.as("b").in("created").as("c")).select("a", "c")') as any[];
+    // The a≠c co-creators of a shared project — 6 ordered pairs among {marko,josh,peter} over lop.
+    expect(rows.length).toBe(6);
+  });
+
   // A non-terminal match leaves the pattern variables on the stream as alias channels for a downstream
   // select() to read, rather than materializing the map early.
   test('non-terminal select over match reads the alias channels', () => {
