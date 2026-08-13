@@ -257,7 +257,13 @@ export interface HostRow { readonly rel: Rel; readonly aliases: AliasMap; }
  */
 export type Subject =
   | { readonly kind: 'element'; readonly id: Expr; readonly label?: Expr; readonly rel: Rel; readonly elem: Elem }
-  | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly rel: Rel; readonly type: SubjectType };
+  | { readonly kind: 'scalar'; readonly value: Expr; readonly vtype?: Expr; readonly rel: Rel; readonly type: SubjectType }
+  /** A PROPERTY traverser as a filter/branch subject — the third traverser shape a correlated body can
+   *  be rooted at, mirroring the `property` `ChildHost`. It carries no `value`/`type`: a property is not
+   *  a scalar, so a value predicate (`is`) declines on it and a body-over-property folds through the
+   *  property host (`key()`/`value()`/`element()` retype it). `ownerElem` distinguishes the owners the
+   *  same way the host does. Correlated by the stored row's own rowid (`id`). */
+  | { readonly kind: 'property'; readonly id: Expr; readonly ownerElem: Elem; readonly rel: Rel };
 
 /**
  * A ROOTED chain, lowered — the relation plus what it holds and what it ran first.

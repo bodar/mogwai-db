@@ -87,10 +87,18 @@ const COVERED = [
   'g.V().properties().limit(2)', 'g.V().properties().range(1,3).value()',
   "g.V().properties().hasKey('age')", "g.V().properties().hasKey(null,'age').value()", 'g.V().properties().hasKey(null)',
   'g.V().properties().hasValue(P.gt(30))', "g.V().properties().hasValue(null,'josh').value()",
-  // `union` over a PROPERTY stream — `branchArms` re-entered at the property framing, so the arms
-  // (`key()`/`value()`) retype through `propertyTail` and merge. `union` needs no condition, which is
-  // why it composes here while `choose`/`coalesce` await a property `branchSubject`.
-  'g.V().properties().union(__.key(), __.value())',
+  // THE WHOLE BRANCH FAMILY over a PROPERTY stream — `branchArms` re-entered at the property framing, so
+  // the arms (`key()`/`value()`/`constant()`) retype through `propertyTail` and merge. `union` needs no
+  // condition; `choose`/`coalesce` fold their condition/arm bodies through a property `branchSubject`
+  // (`branchSubject` now answers the property framing), so all three compose.
+  'g.V().properties().union(__.key(), __.value())', 'g.V().properties().union(__.value(), __.constant("x"))',
+  'g.V().properties().choose(__.key().is("name"), __.value(), __.key())',
+  'g.V().properties().coalesce(__.key(), __.value())',
+  // `constant(c)` is the ONE shape-independent retype (`constantRetype`) — it ignores the traverser and
+  // emits a literal, so it composes over EVERY tail: element, scalar, list, property and map. The list/
+  // property/map tails had no caller for it before, so these declined for want of a caller, not algebra.
+  'g.V().fold().constant("x")', 'g.V().properties().constant("x")', 'g.V().group().by("name").constant("x")',
+  'g.V().fold().constant(1).math("_+1")',
   "g.V().bothE().properties().dedup().hasKey('weight').hasValue(P.lt(0.3)).value()",
   // A PROPERTY's own `by()` TOKENS and its two Element-only retypes — both legal per HOST, not per
   // grammar, so an element declines `T.key` (asserted in DECLINED) and an edge `Property` declines

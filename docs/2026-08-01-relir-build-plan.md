@@ -542,10 +542,15 @@ reads), side effects, then `local`, `match`, `where`, the `path` tails.
 
 🚧 **The next callers, named because each is now a SINGLE missing caller rather than missing algebra** — the
 pattern this whole stage kept finding:
-- **a branch/host arm on the PROPERTY tail.** `propertyTail` serves the row ops, its two filters, the
-  retypes, `group` and now `union`; `choose`/`coalesce`/`project`/`select`/`where` over a property stream
-  still decline for want of a `branchSubject`/host at the call site — a property `Subject` is the piece,
-  and it is a per-row message choice the way the scalar `is()` self is.
+- **the branch family over the PROPERTY tail — the BRANCH half LANDED.** `Subject` grew a third
+  `property` variant (mirroring the `property` `ChildHost`), `branchSubject` answers the property framing,
+  and `childHostOf` maps it — so `union`/`choose`/`coalesce` all fold their condition/arm bodies through a
+  property host and compose. What is LEFT on this tail is `project`/`select`/`where`, which do not route
+  through `branchArms`: they need a call-site in `propertyTail` (the host is already built). Also note the
+  pre-existing `coalesce`-exhaustion-over-scalar gap (`coalesce(__.identity(), __.identity())` declines on
+  ANY scalar, property included) — orthogonal to the branch subject, in the guard machinery.
+  **`constant` is now a SINGLE shared retype** (`constantRetype`) reached from every tail — element,
+  scalar, list, property, map — rather than two copies plus three gaps.
 - **the SCALAR and RECORD tails declaring a `RowShape`.** They call `orderRows` from their own loops, so
   neither gets `dedup`'s identity rule; the map and list tails are not in it at all.
 - ✅ **a set op over an ELEMENT-member list — LANDED.** `listSetOp` admits an element-membered self+operand

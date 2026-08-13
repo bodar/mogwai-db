@@ -530,9 +530,11 @@ function valuePredicate(
  */
 const childHostOf = (subject: Subject, aliases: AliasMap = NO_ALIASES): ChildHost => {
   const row = { row: { rel: subject.rel, aliases } };
-  return subject.kind === 'element'
-    ? { kind: 'element', id: subject.id, elem: subject.elem, ...row }
-    : { kind: 'scalar', value: subject.value, ...(subject.vtype ? { vtype: subject.vtype } : {}), ...row };
+  switch (subject.kind) {
+    case 'element': return { kind: 'element', id: subject.id, elem: subject.elem, ...row };
+    case 'property': return { kind: 'property', id: subject.id, ownerElem: subject.ownerElem, ...row };
+    case 'scalar': return { kind: 'scalar', value: subject.value, ...(subject.vtype ? { vtype: subject.vtype } : {}), ...row };
+  }
 };
 
 /**
@@ -551,6 +553,12 @@ const childHostOf = (subject: Subject, aliases: AliasMap = NO_ALIASES): ChildHos
  */
 function branchSubject(rel: Rel, framing: RelFraming): Subject | null {
   if (framing.kind === 'elements') return { kind: 'element', id: col(rel.id, 'id'), rel, elem: framing.elem };
+  // A PROPERTY traverser is a branch/filter subject too — correlated by the stored row's own rowid, the
+  // same address the property `RowShape` and `ChildHost` use. This is what lets `choose`/`coalesce`/
+  // `where` over `properties()` fold their condition/arm bodies through the property host, exactly as
+  // `union` already does (a `union` needs no subject; these do). A value predicate (`is`) still declines
+  // — a property is not a scalar — which `sourceFilter` handles by narrowing.
+  if (framing.kind === 'property') return { kind: 'property', id: propertyRowId(rel), ownerElem: framing.ownerElem, rel };
   if (framing.kind !== 'scalar') return null;
   const vtype = rel.type.cols.some((column) => column.name === 'vtype') ? col(rel.id, 'vtype') : undefined;
   return {
@@ -1694,6 +1702,35 @@ const countTail = (input: Rel, fresh: Minter): { rel: Rel; framing: RelFraming }
 });
 
 /**
+ * `constant(c)` — the ONE genuinely SHAPE-INDEPENDENT retype: it IGNORES the traverser entirely and
+ * emits a literal per input row, so it turns ANY stream — element, scalar, property, list, map — into a
+ * scalar one. Every tail that reaches a `constant` routes here rather than re-deriving the projection
+ * (the element and scalar tails once each carried a byte-identical copy, and the list/property/map tails
+ * had none, so `g.V().fold().constant('x')` and `properties().coalesce(__.value(), __.constant('x'))`
+ * declined for want of a caller, not an algebra). The channels ride through untouched — a constant
+ * changes the VALUE, not the traverser.
+ *
+ * UNKNOWN for an untyped constant, never a tag inferred from the JS value: a compile-time tag would be a
+ * claim the argument's declared type does not support. An EXACT TAIL (a long past 2^53, a bigdecimal) is
+ * the exception — its declared type IS known, so it frames `STATIC(type, text)` and a following ordering
+ * compare can cast it.
+ */
+function constantRetype(input: Rel, step: IRStep, fresh: Minter): FramedRel | null {
+  if ((step.args ?? []).length !== 1 || step.modulators?.length || step.optionArms) return null;
+  const literal = constLit(step.args[0]);
+  const tail = literal ? null : exactTailConst(step.args[0]);
+  if (!literal && !tail) return null;
+  return {
+    rel: make.project({
+      id: fresh('ct'), input, channels: input.channels,
+      type: typeOf(meta('v', 'any', true), ...carriedCols(input.channels)),
+      exprs: [['v', literal ?? tail!.expr], ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
+    }),
+    framing: { kind: 'scalar', type: tail ? STATIC(tail.tag as never, true) : UNKNOWN },
+  };
+}
+
+/**
  * A TERMINAL that retypes the element relation into another shape — the SHAPE BOUNDARY, and the
  * substrate every scalar-valued step then rides on.
  *
@@ -1760,28 +1797,10 @@ function terminal(
     return { rel: mapped.rel, framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf } };
   }
 
-  // `constant(c)` REPLACES the traverser's value with a literal, which over an element stream is a
-  // shape boundary like `values()` and `count()` — the element is gone and a value is in its place.
-  // The channels ride through untouched: a constant changes the VALUE, not the traverser.
-  if (step.name === 'constant') {
-    const [, extra] = args;
-    if (extra !== undefined) return null;
-    const literal = constLit(step.args[0]);
-    const tail = literal ? null : exactTailConst(step.args[0]);
-    if (!literal && !tail) return null;
-    return {
-      rel: make.project({
-        id: fresh('ct'), input, channels: input.channels,
-        type: typeOf(meta('v', 'any', true), ...carriedCols(input.channels)),
-        exprs: [['v', literal ?? tail!.expr], ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
-      }),
-      // UNKNOWN for an untyped constant, not a tag inferred from the JS value: a compile-time tag would
-      // be a claim the argument's declared type does not support. An
-      // EXACT TAIL is the exception — its declared type IS known, so it frames STATIC(type, text) so a
-      // following ordering compare can cast it (C1).
-      framing: { kind: 'scalar', type: tail ? STATIC(tail.tag as never, true) : UNKNOWN },
-    };
-  }
+  // `constant(c)` REPLACES the traverser's value with a literal — a shape boundary like `values()` and
+  // `count()`, the element gone and a value in its place. The projection is `constantRetype`'s, shared
+  // with every other tail because a constant is shape-independent.
+  if (step.name === 'constant') return constantRetype(input, step, fresh);
 
   if (step.name === 'properties') {
     // The PROPERTY twin of `values()` below — same join, stopped at the property row instead of
@@ -2389,21 +2408,13 @@ function scalarTail(
     }
 
     // `constant(c)` over a value stream is the same replacement as over an element one, minus the shape
-    // change — and it DROPS the per-row `vtype`, for the reason every transform does: the stored type
-    // no longer describes the value that is there now.
+    // change — `constantRetype` DROPS the per-row `vtype` (it projects only `v` plus channels), for the
+    // reason every transform does: the stored type no longer describes the value that is there now.
     if (step.name === 'constant') {
-      const [, extra] = args;
-      if (extra !== undefined) return null;
-      const literal = constLit(step.args[0]);
-      const tail = literal ? null : exactTailConst(step.args[0]);
-      if (!literal && !tail) return null;
-      const carried = rel.channels;
-      rel = make.project({
-        id: fresh('ct'), input: rel, channels: carried,
-        type: typeOf(meta('v', 'any', true), ...carriedCols(carried)),
-        exprs: [['v', literal ?? tail!.expr], ...carried.map((channel) => [channel.col, col(rel.id, channel.col)] as const)],
-      });
-      out = { kind: 'scalar', type: tail ? STATIC(tail.tag as never, true) : UNKNOWN };
+      const c = constantRetype(rel, step, fresh);
+      if (!c) return null;
+      rel = c.rel;
+      out = c.framing;
       continue;
     }
 
@@ -2953,6 +2964,14 @@ function listTail(
       continue;
     }
 
+    // `constant(c)` DISCARDS the list and emits a literal — the shape-independent retype, shared with
+    // every tail, so `g.V().fold().constant('x')` composes rather than declining for want of a caller.
+    if (step.name === 'constant') {
+      const c = constantRetype(rel, step, fresh);
+      if (!c) return null;
+      return continueAs(c.rel, c.framing, steps, at + 1, false, ctx, fresh, labels);
+    }
+
     // A `select()` over a LIST traverser is the same read as anywhere else — the label decides the
     // shape and `selectTail` decides the loop, so a label holding an element re-enters `elementTail`
     // from here exactly as it does from the scalar tail.
@@ -3162,6 +3181,14 @@ function mapTail(
       if (args.length) return null;
       const counted = countTail(rel, fresh);
       return scalarTail(counted.rel, counted.framing, steps, at + 1, false, ctx, fresh, labels);
+    }
+
+    // `constant(c)` DISCARDS the map and emits a literal — the shape-independent retype, shared with
+    // every tail, so `g.V().group().by(k).constant('x')` composes rather than declining.
+    if (step.name === 'constant') {
+      const c = constantRetype(rel, step, fresh);
+      if (!c) return null;
+      return continueAs(c.rel, c.framing, steps, at + 1, false, ctx, fresh, labels);
     }
 
     const column = selectedColumn(step);
@@ -4365,11 +4392,18 @@ function propertyTail(
   // THE BRANCH FAMILY over a PROPERTY stream — the same `branchArms` the element and value tails call,
   // because an arm body over a property traverser is the ordinary fold re-entered at the property
   // framing (`key()`/`value()`/`element()` retype it, the row ops and filters preserve it). `union`
-  // needs no condition and so composes here immediately; `choose`/`coalesce` decline inside `branchArms`
-  // until `branchSubject` learns the property shape (a `values(k)` self is a per-row message choice).
+  // needs no condition; `choose` and `coalesce` fold their condition/arm bodies through a property
+  // `branchSubject` (`branchSubject` now answers the property framing), so all three compose here.
   if (BRANCH_HOSTS.has(step.name)) {
     const merged = branchArms(step, rel, { kind: 'property', ownerElem: elem }, bulked, ctx, fresh, labels);
     return merged && continueAs(merged.rel, merged.framing, steps, from + 1, bulked, ctx, fresh, labels);
+  }
+
+  // `constant(c)` DISCARDS the property and emits a literal — the shape-independent retype, shared with
+  // every tail. The common `coalesce(__.value(), __.constant('x'))` fallback needs it here.
+  if (step.name === 'constant') {
+    const c = constantRetype(rel, step, fresh);
+    return c && continueAs(c.rel, c.framing, steps, from + 1, false, ctx, fresh, labels);
   }
 
   if (step.modulators?.length || step.optionArms || (step.args ?? []).length) return null;
