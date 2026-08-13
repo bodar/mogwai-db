@@ -59,25 +59,8 @@ export interface Scenario {
    *  tag comes off. The count is printed on every run so the population stays visible rather than
    *  becoming a quiet exclusion list. */
   unsupported: boolean;
-  /** `@RelIR` — this scenario's ANSWER needs the RelIR spine and the legacy one refuses it. Not a
-   *  skip: it says the two routes DIVERGE and which way round, so `test:legacy-spine` can assert the
-   *  refusal instead of reading a deliberate improvement as a regression. */
-  /** `@SpineRel` / `@SpineLegacy` — PIN this scenario's spine, ignoring the ambient switch.
-   *
-   *  A THIRD way for the two routes to diverge, and the one `@RelIR` cannot express: legacy neither
-   *  refuses nor agrees, it ANSWERS DIFFERENTLY — and by §6·1's decision (legacy is what §8 deletes)
-   *  that difference is accepted rather than fixed. `@RelIR` asserts a THROW under
-   *  `test:legacy-spine`, which is simply false here, and a bare skip would stop asserting the
-   *  scenario in one configuration for no reason: the answer under test is not a property of the
-   *  ambient switch at all.
-   *
-   *  So pin it, which is `mise.toml`'s existing rule for an L2 test that pins a spine's SPELLING —
-   *  "asserting BOTH forms rather than whichever the ambient switch produced" — applied to an
-   *  end-to-end scenario. The assertion then runs identically in both configurations. Legacy's actual
-   *  answer is not lost: the census records it per corpus traversal in its `lms` column.
-   *
-   *  Both directions exist because a legacy-pinned scenario costs nothing to support and the one-sided
-   *  version would be a vocabulary that has to be widened the first time it is needed. */
+  /** The `| result |` table, one entry per row, compared against what the traversal produced per the
+   *  scenario's `assertion` (see the table in l4.test.ts). */
   expected: string[];
   /** `And the graph should return N for count of "<traversal>"` — upstream's own Then-step for
    *  asserting GRAPH STATE after a write, the only thing that can catch a write that ran and left the

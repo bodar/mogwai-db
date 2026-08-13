@@ -13,8 +13,8 @@ Feature: mogwai addendum — a COLLECTION property value stores as one typed tre
   # appended. That comparison reads the value column, so it has to spell the value exactly as the
   # insert did — a form that differed between the two would silently duplicate.
 
-  # Read BACK through the traversal, because `has(key, <collection>)` is a pre-existing gap on BOTH
-  # spines (a collection reaches the bind layer raw and it refuses) — so a graph-check using it would
+  # Read BACK through the traversal, because `has(key, <collection>)` is a pre-existing gap
+  # (a collection reaches the bind layer raw and it refuses) — so a graph-check using it would
   # assert nothing about this change and fail for an unrelated reason.
   @gap:property-collection-value
   Scenario: g_addV_property_list_value_round_trips_as_a_list

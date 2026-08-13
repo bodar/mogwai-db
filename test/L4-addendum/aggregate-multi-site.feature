@@ -16,7 +16,6 @@ Feature: mogwai addendum — a label filled at several chain positions holds eve
   # A collection is a MULTISET: `BulkSet` bumps a repeated member's count in place rather than
   # dropping it (BulkSet.java:131), so a vertex contributed by two sites appears twice.
 
-  @SpineRel
   @gap:aggregate-multi-site
   Scenario: g_V_hasLabelXpersonX_aggregateXaX_outXcreatedX_aggregateXaX_capXaX_unfold
     Given the modern graph
@@ -39,7 +38,6 @@ Feature: mogwai addendum — a label filled at several chain positions holds eve
       | v[ripple] |
       | v[lop] |
 
-  @SpineRel
   @gap:aggregate-multi-site
   Scenario: g_V_hasXname_markoX_aggregateXaX_byXnameX_outXknowsX_aggregateXaX_byXageX_capXaX
     Given the modern graph
@@ -57,7 +55,6 @@ Feature: mogwai addendum — a label filled at several chain positions holds eve
       | result |
       | l[marko,d[27].i,d[32].i] |
 
-  @SpineRel
   @gap:aggregate-multi-site
   Scenario: g_V_hasXname_markoX_aggregateXaX_byXnameX_outXknowsX_aggregateXaX_byXageX_capXaX_unfold
     Given the modern graph
@@ -74,7 +71,6 @@ Feature: mogwai addendum — a label filled at several chain positions holds eve
       | d[27].i |
       | d[32].i |
 
-  @SpineRel
   @gap:aggregate-multi-site
   Scenario: g_unionXV_aggregateXxX__V_hasLabelXsoftwareX_aggregateXxXX_capXxX_unfold_dedup_countXlocalX
     Given the modern graph
@@ -91,7 +87,6 @@ Feature: mogwai addendum — a label filled at several chain positions holds eve
       | result |
       | d[6].l |
 
-  @SpineRel
   @gap:aggregate-multi-site
   Scenario: g_V_hasLabelXpersonX_aggregateXaX_byXnameX_aggregateXaX_byXageX_capXaX_unfold
     Given the modern graph

@@ -2,18 +2,15 @@ Feature: mogwai addendum — a merge emits its INPUT crossed with what it merged
 
   # `mergeV` runs once per incoming traverser and emits everything its search found each time, so a
   # stream of N incoming traversers over a search matching M elements is N×M traversers. Upstream states that as a
-  # loop; the RelIR route states it as a CROSS JOIN, which is the same answer and needs no branch.
+  # loop; the RelIR lowering states it as a CROSS JOIN, which is the same answer and needs no branch.
   # `MergeVertex.feature`'s `g_V_mergeVXemptyX_two_exist` pins the COUNT (4 over two vertices) and
   # nothing else — not the ORDER of those four, and not that a read may follow the merge at all.
   #
-  # Both of those are what this file adds, and the second is a capability the legacy spine does not
-  # have: it parses everything after `mergeV()` as the merge's own `option()`/`property()` cluster and
-  # refuses any other step. So the read-tail scenarios carry @RelIR — with RelIR off they assert that
-  # refusal rather than being skipped, which is what keeps the divergence a declared fact instead of an
-  # assumption.
+  # Both of those are what this file adds, and the second — a read that FOLLOWS the merge — works
+  # because `mergeV()` produces an ordinary element relation, so a step after it composes like any
+  # other rather than being parsed as the merge's own `option()`/`property()` cluster.
 
   @gap:merge-input-cross
-  @RelIR
   Scenario: g_V_mergeVXemptyX_values_is_the_input_crossed_with_the_matches
     Given the empty graph
     And the graph initializer of
@@ -39,7 +36,6 @@ Feature: mogwai addendum — a merge emits its INPUT crossed with what it merged
   # slice is exactly the consumer that would silently take a different window if the position were
   # minted from a scan's incidental order instead of stated.
   @gap:merge-input-cross
-  @RelIR
   Scenario: g_V_mergeVXemptyX_limit_takes_the_first_traversers_matches
     Given the empty graph
     And the graph initializer of
@@ -73,11 +69,9 @@ Feature: mogwai addendum — a merge emits its INPUT crossed with what it merged
     And the graph should return 0 for count of "g.V().hasLabel(\"vertex\")"
     And the graph should return 1 for count of "g.V()"
 
-  # And the read tail folds over whatever the merge emitted, matched or created — the property the
-  # legacy route cannot express at all, and the reason the merge's result is an ordinary element
-  # relation rather than a write response.
+  # And the read tail folds over whatever the merge emitted, matched or created — which is why the
+  # merge's result is an ordinary element relation rather than a write response.
   @gap:merge-input-cross
-  @RelIR
   Scenario: g_mergeV_count_folds_over_the_merged_element
     Given the empty graph
     And the graph initializer of

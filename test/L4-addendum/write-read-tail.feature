@@ -64,7 +64,7 @@ Feature: mogwai addendum — a read tail after an element-preserving write
   # element relation, so a barrier after it is the barrier that was already built. TinkerPop's answer
   # is the count, and the refusal was ours; a pin that records our own limitation moves the day the
   # limitation goes.
-  @gap:write-read-tail @RelIR
+  @gap:write-read-tail
   Scenario: g_V_propertyXtempX_count_over_many
     Given the modern graph
     And the traversal of
@@ -78,9 +78,9 @@ Feature: mogwai addendum — a read tail after an element-preserving write
 
   # A MUTATING tail is the SAME question once a write is a program: `property()` hands its traversers
   # back and `addV()` creates one vertex per traverser, so the two compose the way any two steps do.
-  # This scenario recorded the legacy write driver's inability to re-enter itself — a refusal that was
-  # ours, not TinkerPop's, and so one that moves when the limitation goes.
-  @gap:write-read-tail @RelIR
+  # This scenario recorded an earlier write driver's inability to re-enter itself — a refusal that was
+  # ours, not TinkerPop's, and moved when that limitation went.
+  @gap:write-read-tail
   Scenario: g_V_propertyXtempX_addV
     Given the modern graph
     And the traversal of

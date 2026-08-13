@@ -10,7 +10,6 @@ Feature: mogwai addendum — a named collection in a program with EFFECTS is the
   # `aggregate()` ran, not the set the graph holds afterwards.
   # @gap:aggregate-snapshot-write marks the family.
 
-  @SpineRel
   @gap:aggregate-snapshot-write
   Scenario: g_V_hasLabelXsoftwareX_aggregateXaX_addVXsoftwareX_capXaX_unfold_count
     Given the empty graph
@@ -30,7 +29,6 @@ Feature: mogwai addendum — a named collection in a program with EFFECTS is the
       | result |
       | d[2].l |
 
-  @SpineRel
   @gap:aggregate-snapshot-write
   Scenario: g_V_valuesXnameX_aggregateXaX_addVXpersonX_capXaX_unfold
     Given the empty graph
@@ -50,7 +48,6 @@ Feature: mogwai addendum — a named collection in a program with EFFECTS is the
       | marko |
       | vadas |
 
-  @SpineRel
   @gap:aggregate-snapshot-write
   Scenario: g_V_hasLabelXpersonX_aggregateXaX_outXcreatedX_drop_capXaX_unfold_count
     Given the modern graph

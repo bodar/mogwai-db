@@ -18,14 +18,9 @@ Feature: mogwai addendum — a keyed grouping filled at several chain positions 
   # gap. So these are the only place the merge is asserted at all. @gap:group-multi-site marks it.
   #
   # A `groupCount` site beside a `group` site is NOT one grouping and must be REFUSED rather than
-  # answered by picking one site's recipe — but that refusal is RelIR's alone (legacy answers, wrongly),
-  # so it is pinned in `test/rel-spine.test.ts` where a decline can be asserted directly.
-  #
-  # ⚠️ These are @SpineRel and NOT @RelIR. @RelIR asserts the legacy route REFUSES; legacy does not
-  # refuse a second site, it ANSWERS — keeping one site's map and silently discarding the other. That is
-  # §8 of docs/2026-08-09-named-collections-are-bindings-plan.md, a wrong answer rather than a decline.
+  # answered by picking one site's recipe; the compiler raises `UnsupportedTraversal`, pinned in
+  # `test/rel-spine.test.ts` where the throw can be asserted directly.
 
-  @SpineRel
   @gap:group-multi-site
   Scenario: g_V_groupCountXaX_byXnameX_out_groupCountXaX_byXnameX_capXaX
     Given the modern graph
@@ -42,7 +37,6 @@ Feature: mogwai addendum — a keyed grouping filled at several chain positions 
       | result |
       | m[{"marko":"d[1].l", "vadas":"d[2].l", "lop":"d[4].l", "josh":"d[2].l", "ripple":"d[2].l", "peter":"d[1].l"}] |
 
-  @SpineRel
   @gap:group-multi-site
   Scenario: g_V_groupXaX_byXnameX_out_groupXaX_byXnameX_capXaX
     Given the modern graph
@@ -59,7 +53,6 @@ Feature: mogwai addendum — a keyed grouping filled at several chain positions 
       | result |
       | m[{"marko":"l[v[marko]]", "vadas":"l[v[vadas],v[vadas]]", "lop":"l[v[lop],v[lop],v[lop],v[lop]]", "josh":"l[v[josh],v[josh]]", "ripple":"l[v[ripple],v[ripple]]", "peter":"l[v[peter]]"}] |
 
-  @SpineRel
   @gap:group-multi-site
   Scenario: g_V_groupCountXaX_byXlabelX_out_groupCountXaX_byXlabelX_capXaX
     Given the modern graph

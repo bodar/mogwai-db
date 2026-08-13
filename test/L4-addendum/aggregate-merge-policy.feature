@@ -23,12 +23,7 @@ Feature: mogwai addendum — a declared merge policy composes with everything a 
   #   * `cap("a")` continuing into a list tail (`unfold()`), which only `addAll` can do.
   #
   # @gap:aggregate-merge-policy marks the family for a possible gremlin-test PR.
-  #
-  # ⚠️ These are @SpineRel and NOT @RelIR. @RelIR asserts the legacy route REFUSES; legacy does not
-  # refuse a declared policy, it ANSWERS — dropping the seed and the operator and returning the plain
-  # member list. That is a wrong answer, not a decline, and §8 of the named-collections plan owns it.
 
-  @SpineRel
   @gap:aggregate-merge-policy
   Scenario: g_withSideEffectXa_0_sumX_V_aggregateXaX_byXageX_aggregateXaX_byXageX_capXaX
     Given the modern graph
@@ -44,7 +39,6 @@ Feature: mogwai addendum — a declared merge policy composes with everything a 
       | result   |
       | d[246].i |
 
-  @SpineRel
   @gap:aggregate-merge-policy
   Scenario: g_withSideEffectXa_7_minX_V_limitX0X_aggregateXaX_byXageX_capXaX
     Given the modern graph
@@ -61,7 +55,6 @@ Feature: mogwai addendum — a declared merge policy composes with everything a 
       | result |
       | d[7].i |
 
-  @SpineRel
   @gap:aggregate-merge-policy
   Scenario: g_withSideEffectXa_0_sumX_V_aggregateXaX_byXoutEXcreatedX_countXX_capXaX
     Given the modern graph
@@ -78,7 +71,6 @@ Feature: mogwai addendum — a declared merge policy composes with everything a 
       | result |
       | d[4].l |
 
-  @SpineRel
   @gap:aggregate-merge-policy
   Scenario: g_withSideEffectXa_zzz_minX_V_valuesXnameX_aggregateXaX_capXaX
     Given the modern graph
@@ -95,7 +87,6 @@ Feature: mogwai addendum — a declared merge policy composes with everything a 
       | result |
       | josh   |
 
-  @SpineRel
   @gap:aggregate-merge-policy
   Scenario: g_withSideEffectXa_x_1_addAllX_V_valuesXnameX_aggregateXaX_capXaX_unfold
     Given the modern graph
@@ -119,7 +110,6 @@ Feature: mogwai addendum — a declared merge policy composes with everything a 
       | ripple |
       | peter  |
 
-  @SpineRel
   @gap:aggregate-merge-policy
   Scenario: g_withSideEffectXa_setXmarkoXX_V_both_valuesXnameX_aggregateXaX_capXaX
     Given the modern graph
@@ -145,7 +135,6 @@ Feature: mogwai addendum — a declared merge policy composes with everything a 
       | result                                     |
       | s[marko,vadas,lop,josh,ripple,peter]       |
 
-  @SpineRel
   @gap:aggregate-merge-policy
   Scenario: g_withSideEffectXa_emptyList_addAllX_V_aggregateXaX_byXageX_capXaX_unfold
     Given the modern graph

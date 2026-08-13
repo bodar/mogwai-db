@@ -83,8 +83,8 @@ Feature: mogwai addendum — groupCount() is a MAP VALUE, and its key keeps its 
     Then the result should have a count of 1
 
   # `hasNot(key)` — the elements carrying NO property under the key. Written for this file's own
-  # graph-check and then found to be MISSING from both spines, which is why it has its own scenarios:
-  # a step the corpus mentions once and neither lowering implemented.
+  # graph-check and then found to be MISSING at the time, which is why it has its own scenarios: a
+  # step the corpus mentions once and no lowering then implemented.
   @gap:map-shape-group-count
   Scenario: g_V_hasNotXageX_keeps_only_the_elements_without_it
     Given the modern graph

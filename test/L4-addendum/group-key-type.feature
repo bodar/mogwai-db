@@ -6,13 +6,13 @@ Feature: mogwai addendum — a GROUP KEY keeps the stored property's type
   # VALUES were right and the entry COUNT was right, which is what kept it out of every assertion.
   #
   # It stayed invisible for a different reason worth recording: `GroupKey.scalar` declared its type
-  # OPTIONAL and the legacy producer simply omitted it. An omission reads as "no opinion" rather than
+  # OPTIONAL and a producer simply omitted it. An omission reads as "no opinion" rather than
   # as "framed wrong", so nothing — not a reviewer, not the compiler — could tell the two apart. The
   # field is now REQUIRED, and this was the first defect that surfaced.
   #
-  # `gkt` is the column name RelIR's own barrier already uses, and `propTypeFor` is the sibling read
-  # `order().by(key)` and `aggregate().by(key)` spend, so the two spines cannot describe one key
-  # differently. Grouping spans (value, type) for the reason `dedup()` does: equal values of
+  # `gkt` is the column name the barrier already uses, and `propTypeFor` is the sibling read
+  # `order().by(key)` and `aggregate().by(key)` spend, so a grouped key's type is described the same
+  # way its ordering and aggregation keys are. Grouping spans (value, type) for the reason `dedup()` does: equal values of
   # different stored types are distinct Gremlin keys.
   #
   # @gap:group-key-type marks the family.

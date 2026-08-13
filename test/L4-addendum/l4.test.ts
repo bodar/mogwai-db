@@ -237,12 +237,6 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
   const scenarios = loadScenarios();
   test('the addendum is non-empty', () => expect(scenarios.length).toBeGreaterThan(0));
 
-  // The differential's OFF position runs the same suite through the legacy spine, so a scenario whose
-  // answer only that spine's replacement can give is not a failure there — it is the divergence the
-  // tag declares. It is not SKIPPED there either: the declared divergence is "RelIR answers this and
-  // the legacy spine refuses it", and both halves are checkable, so with RelIR off the scenario
-  // asserts the REFUSAL. A skip would say the same thing right up until the two spines started both
-  // answering and answering differently, which is not a divergence to declare but a defect.
   for (const s of scenarios) {
     test(`[${s.graph}] ${s.name}`, async () => {
       if (!(s.graph in GRAPHS)) throw new Error(`unknown graph '${s.graph}' (add its fixture to GRAPHS)`);
@@ -252,10 +246,8 @@ describe('L4 addendum — mogwai gap scenarios (real end-to-end over GraphBinary
       // A scenario's own `graph initializer` runs after the fixture seed and before its traversal,
       // exactly as upstream orders them.
       if (s.initializer) executeQuery(store, s.initializer, {}, {}, standardRegistry);
-      // The scenario's OWN traversal, with its spine pinned when the scenario asked for one
-      // (`@SpineRel`/`@SpineLegacy` — see `pinSpine` in read-features.ts). The fixture seed and the
-      // initializer stay ambient on purpose: they are writes that set up a graph, not the answer
-      // under test, so pinning them would widen what the tag claims.
+      // The scenario's OWN traversal — the answer under test. The fixture seed and the initializer
+      // above are writes that set up the graph, not part of what the scenario asserts.
       const runTraversal = () => executeQuery(store, s.gremlin, {}, {}, standardRegistry);
       // `@Unsupported` — the shape is not lowered yet. What is asserted is the FAIL-CLOSED half: it
       // must refuse rather than answer a different question. The expectation below stays in the file

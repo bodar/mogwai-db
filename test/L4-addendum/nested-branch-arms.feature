@@ -138,8 +138,8 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
   # the work index filed this as "a real wrong answer"; it is the reference's answer. Verified against
   # vendor/tinkerpop/gremlin-core/.../step/branch/BranchStep.java:155-162, 206-220.
   @gap:nested-branch-arms
-  # AN UNPRODUCTIVE CHOICE IS NOT `Pick.none`, and this scenario asserted that it was — it was written
-  # against the only spine there was, and that spine routes both cases to the one fallthrough.
+  # AN UNPRODUCTIVE CHOICE IS NOT `Pick.none`, and this scenario once asserted that it was — written
+  # against an earlier lowering that routed both cases to one fallthrough.
   # `values("lang")` yields NOTHING for a person, so the choice is `Pick.unproductive`
   # (`BranchStep.applyCurrentTraverser`: `product.isProductive() ? product.get() : Pick.unproductive`),
   # and `ChooseStep`'s private constructor has installed an IDENTITY traversal for that token
@@ -149,13 +149,10 @@ Feature: mogwai addendum — nested branch arms (a branch inside a branch arm)
   # `Choose.feature:371-387` expects `v[lop]`/`v[ripple]`, not the `Pick.none` body — so this is our
   # addendum agreeing with the reference rather than a new claim.
   #
-  # `@SpineRel` because the two spines ANSWER this one differently rather than one refusing it, so
-  # `@RelIR` (which asserts a refusal with RelIR off) would be the wrong declaration. Legacy's scalar
-  # CASE projector has a single fallthrough and routes the unproductive inputs into it; closing that
-  # was tried and REVERTED, because declining the CASE hands the shape to a `map()`-child position
-  # neither spine lowers, so the union floor would have LOST a shape rather than corrected one
-  # (§6·1). Legacy sheds this; the scenario states the answer the surviving spine gives.
-  @SpineRel
+  # ⚠️ Do NOT try to force the unproductive input to `Pick.none` by declining the CASE: that was tried
+  # and REVERTED, because declining hands the shape to a `map()`-child position the lowering does not
+  # cover, so the union floor would LOSE a shape rather than correct one (§6·1). The scenario states
+  # the reference's answer, which the compiler gives directly.
   Scenario: g_V_chooseXvaluesXlangXX_optionXjavaX_optionXnoneX
     Given the modern graph
     And the traversal of

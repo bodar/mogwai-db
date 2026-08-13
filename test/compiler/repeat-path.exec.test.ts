@@ -55,11 +55,10 @@ test('path() emits the ordered walk (one Path per distinct route)', async () => 
   const store = seededStore();
   // marko(1)→josh(4)→{lop(3),ripple(5)} — two length-3 paths, in traversal order.
   //
-  // Asserted on the DECODED Paths rather than on the SQL row, and that is the point: the two spines
-  // spell the row differently and both are right — legacy projects a column per position
-  // (`x0_id`/`x1_id`/…), RelIR one JSONB array of positions — so a test reading either one was
-  // asserting the ROUTE. What this test means to assert is the WALK, which is what a framed Path
-  // holds whichever route answered (`written()` in test/support/harness.ts, same lesson).
+  // Asserted on the DECODED Paths rather than on the SQL row, and that is the point: RelIR spells a
+  // Path as one JSONB array of positions, so a test reading that row shape would be asserting the
+  // ENCODING. What this test means to assert is the WALK, which is what a framed Path holds
+  // (`written()` in test/support/harness.ts, same lesson).
   const paths = (await decodePaths(store, 'g.V(1).out().out().path()')).map((p: any) => p.objects.map((o: any) => o.id));
   // Two distinct routes and nothing asking for an order between them: the assertion is the SET of
   // walks, which is what "one Path per distinct route" means.
@@ -348,14 +347,9 @@ test('until(__.sack().is(P)) loops until the ACCUMULATED sack crosses a threshol
 });
 
 
-// ⚠️ **`relOnly` — LEGACY SHED THESE, and naming the shed is the point.** A `times(n)` body holding a
-// side effect now UNROLLS (`UNROLLABLE_BARRIERS`, `ir/strategies.ts`), and the unroll is a PASS, so
-// legacy receives the n phases too — where its `steps/prefix/sideeffect.ts` last-write-wins keeps ONE
-// registration of a twice-filled label and answers half the multiset (§8 of
-// docs/2026-08-09-named-collections-are-bindings-plan.md, a wrong answer rather than a decline). Legacy
-// previously answered these through its walk-and-bag lowering, so this is a REAL shed and not a
-// coverage gap: §6·1's asymmetric gate allows it because the RelIR floor holds them, and the L3 legacy
-// run reports it by name. The assertions themselves are the reference's, so they stay.
+// A `times(n)` body holding a side effect UNROLLS (`UNROLLABLE_BARRIERS`, `ir/strategies.ts`), so
+// accumulation ACROSS phases works: each phase is a SITE and the sites multiset-union at the `cap`
+// (docs/2026-08-09-named-collections-are-bindings-plan.md). The assertions are the reference's.
 test('a body aggregate() collects every vertex the walk visits (the :TOUCHED provenance primitive)', () => {
   const store = seededStore();
   // marko out → {vadas,josh,lop} (depth 1); josh out → {ripple,lop} (depth 2). The bag is a
@@ -364,34 +358,23 @@ test('a body aggregate() collects every vertex the walk visits (the :TOUCHED pro
   expect(names).toEqual(['josh', 'lop', 'lop', 'ripple', 'vadas']);
 });
 
-// ⚠️ **`relOnly` — LEGACY SHED THESE, and naming the shed is the point.** A `times(n)` body holding a
-// side effect now UNROLLS (`UNROLLABLE_BARRIERS`, `ir/strategies.ts`), and the unroll is a PASS, so
-// legacy receives the n phases too — where its `steps/prefix/sideeffect.ts` last-write-wins keeps ONE
-// registration of a twice-filled label and answers half the multiset (§8 of
-// docs/2026-08-09-named-collections-are-bindings-plan.md, a wrong answer rather than a decline). Legacy
-// previously answered these through its walk-and-bag lowering, so this is a REAL shed and not a
-// coverage gap: §6·1's asymmetric gate allows it because the RelIR floor holds them, and the L3 legacy
-// run reports it by name. The assertions themselves are the reference's, so they stay.
+// A `times(n)` body holding a side effect UNROLLS (`UNROLLABLE_BARRIERS`, `ir/strategies.ts`), so
+// accumulation ACROSS phases works: each phase is a SITE and the sites multiset-union at the `cap`
+// (docs/2026-08-09-named-collections-are-bindings-plan.md). The assertions are the reference's.
 test('a pre-repeat aggregate multiset-unions with the in-repeat body aggregate (Aggregate.feature:627)', () => {
   const store = seededStore();
   // V().local(aggregate('a')) collects all 6 vertices; then repeat(out().local(aggregate('a'))).times(2)
   // appends the walk's depth-1 and depth-2 rows. groupCount by name over the whole BulkSet — asserted
   // on the raw gk/gv rows (the wire-framed Map is verified equivalent by the L3 conformance run).
-  // Read through `grouped`, which sees legacy's `(gk, gv)` rows AND RelIR's framed map alike — the
-  // route moved when a `times(n)` body holding a side effect started UNROLLING, and an assertion that
-  // named one spine's row shape would have read as a semantics regression rather than a route change.
+  // Read through `grouped`, which decodes the framed Map to its logical entries, so the assertion is
+  // on the values rather than the row spelling.
   const rows = run(store, `g.V().local(__.aggregate('a')).repeat(__.out().local(__.aggregate('a'))).times(2).cap('a').unfold().values('name').groupCount()`);
   expect(groupedRows(rows)).toEqual({ marko: 1, vadas: 2, josh: 2, lop: 5, ripple: 3, peter: 1 });
 });
 
-// ⚠️ **`relOnly` — LEGACY SHED THESE, and naming the shed is the point.** A `times(n)` body holding a
-// side effect now UNROLLS (`UNROLLABLE_BARRIERS`, `ir/strategies.ts`), and the unroll is a PASS, so
-// legacy receives the n phases too — where its `steps/prefix/sideeffect.ts` last-write-wins keeps ONE
-// registration of a twice-filled label and answers half the multiset (§8 of
-// docs/2026-08-09-named-collections-are-bindings-plan.md, a wrong answer rather than a decline). Legacy
-// previously answered these through its walk-and-bag lowering, so this is a REAL shed and not a
-// coverage gap: §6·1's asymmetric gate allows it because the RelIR floor holds them, and the L3 legacy
-// run reports it by name. The assertions themselves are the reference's, so they stay.
+// A `times(n)` body holding a side effect UNROLLS (`UNROLLABLE_BARRIERS`, `ir/strategies.ts`), so
+// accumulation ACROSS phases works: each phase is a SITE and the sites multiset-union at the `cap`
+// (docs/2026-08-09-named-collections-are-bindings-plan.md). The assertions are the reference's.
 test('a movement-free repeat(aggregate(a)) revisits the seed each iteration', () => {
   const store = seededStore();
   // no movement → each of the 6 vertices stays put and is collected once per iteration; times(2) → 12.

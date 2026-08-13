@@ -12,7 +12,8 @@ already had a word for it (`Binding`).
 
 Folding at the `aggregate` is defensible for ONE site and does not survive contact with a second: `Map` keeps
 the last entry, so the first site's members are silently discarded. **That was a wrong ANSWER, not a gap** —
-RelIR declined and legacy mis-executed.
+which is why the reduction moved to the cap, and why a shape the fold cannot serve declines
+(`UnsupportedTraversal`) rather than folding at the first site and dropping the rest.
 
 ---
 
@@ -36,9 +37,6 @@ Learnings from that substrate, worth not re-deriving:
   (`Aggregate.feature:743-763`).
 - ✅ **The substrate moved nothing; the PASS that then used it moved +6 L3.** Watch the shape of that win — a
   compounding lesson, not a headline for the merge machinery itself.
-- ✅ **The keyed-grouping merge shed 2 scenarios on LEGACY** (the unroll is a Pass, so legacy gets the phases
-  and its last-write-wins answers half the multiset — §6·1 allows it; three exec tests are `relOnly` naming
-  the shed).
 - ✅ **The `reduced` arm is NOT transitional — do not delete it.** A POOLED value (`by(<reducing traversal>)`)
   has no `(key, contribution)` row behind it (child rows pool, barrier reduces once), so it is single-site BY
   CONSTRUCTION. Deleting it cost a scenario before the census caught it.
@@ -127,12 +125,12 @@ extend `SideEffectBarrierStep`, whose `processAllStarts` re-adds the traverser u
 is a `ReducingBarrierStep` that replaces the stream. Six lines.
 
 Reverted TWICE, each time for a DIFFERENT blocker — record the SECOND, the first is gone. (1) multi-site keyed
-groups did not exist, so RelIR declined at the second registration and legacy's last-write-wins answered a
-plausible half. (2, after the substrate landed) the scenario continues
-`…cap("a").select(Column.keys).unfold().both().local(groupCount("a")).cap("a")` and RelIR declines at
-`select(Column.keys)` over an ELEMENT-keyed map, so the chain still reaches legacy, which answers one site.
-Both times the splice turned a clean DEFERRAL into a wrong answer, caught only by the census (`ran` +1 with no
-answer-change flag — the one transition the gate structurally cannot see, now in `test/CLAUDE.md`).
+groups did not exist, so the lowering declined at the second registration. (2, after the substrate landed) the
+scenario continues `…cap("a").select(Column.keys).unfold().both().local(groupCount("a")).cap("a")` and the
+lowering declines at `select(Column.keys)` over an ELEMENT-keyed map, so the whole chain declines. Both times
+the hazard was that admitting the splice let the chain lower FURTHER and answer a plausible half instead of
+declining cleanly — a clean DEFERRAL turning into a wrong answer, the one transition no gate structurally sees
+(`ran` +1 with no answer-change flag; now in `test/CLAUDE.md`) and only the census caught it.
 
 ⚠️ **So the order is fixed: element-keyed `select(Column.keys)` FIRST, then the admission.** On its own the
 admission fixes zero scenarios — the other `local(group…)` bodies contain a `select`/`count(local)`, which are
@@ -140,9 +138,8 @@ not identities.
 
 **`union()` declines when the stream carries an encounter channel** (`unionArms`' `encounterOf` guard). Any
 chain ending in a collecting consumer demands an encounter, so `g.V().union(__.aggregate("a"), …).cap("a")`
-declines at the UNION, not the collection — branch-arm sites otherwise work. (Legacy throws *"cap('a')
-references an undefined side-effect"*.) This is a precondition for §8's `union()` luck-pass and why no
-union-arm scenario is in the L4 feature.
+declines at the UNION, not the collection — branch-arm sites otherwise work. This is the `union()` row in the
+capstone table above, and why no union-arm scenario is in the L4 feature.
 
 **`count(Scope.local)` — the local-reducer vocabulary.** Over a MAP, `select("a").count(local)` counts ENTRIES
 (3 scenarios). Over an ELEMENT-membered list it declines (over a scalar-membered one it lowers), so an element
@@ -180,24 +177,23 @@ not) · a `cap("a").unfold().path()` tail · one mixed-shape pair (Phase 3b). No
 
 **Owned by their own features:** `union`/`choose` arms, `barrier()` mid-chain, `subgraph`/`tree`.
 
-### Capstone — blocked on all the above
+### Capstone — the shapes still not covered
 
-**§8 — legacy's silent overwrite, and it is NOT unblocked.** `steps/prefix/sideeffect.ts`'s last-write-wins is
-a silent wrong answer the project forbids outright. Making it a refusal was tried and reverted: it costs three
-L3 scenarios and a census row that NO spine then holds. §8's real precondition is "RelIR holds every shape
-legacy currently luck-passes", four independent features away:
+**The silent-overwrite problem is discharged by the single-spine cut.** The wrong answer this was once a
+capstone over — a last-write-wins that answered a plausible half of a multi-site label — is gone with the
+second spine it lived in. A multi-site shape the lowering does not cover now raises `UnsupportedTraversal`, the
+fail-closed answer, not a quiet wrong one. What is LEFT is COVERAGE: the shapes below still decline, each
+blocked in a DIFFERENT substrate four features away.
 
-| the luck-pass shape | why RelIR declines it |
+| shape | why the lowering declines it |
 |---|---|
 | `…local(aggregate("a")).outE().inV().simplePath()…` | `simplePath()` |
 | `…local(aggregate("a")).bothE().sample(1).otherV()…` | `sample()` |
 | `…local(aggregate("a")).union(__.out(), __.in()).local(aggregate("a"))…` | `union()` on an encounter channel (above) |
 | `…by(__.outE("created").count())…by(__.inE("created").values("weight").sum())…` | the `by(<reducer>)` type gap |
 
-Until then the L4 scenarios pin their spine with `@SpineRel` rather than `@RelIR` (`@RelIR` asserts legacy
-REFUSES; legacy does not refuse, it answers wrongly). Making that tag honest is the same work — as is pinning
-the merge itself (`test/L4-addendum/group-multi-site.feature`), since the corpus's one multi-site scenario is
-unreachable.
+So `test/L4-addendum/group-multi-site.feature` is where the keyed merge is asserted at all: the corpus's one
+multi-site scenario is unreachable until the element-keyed `select(Column.keys)` above lands.
 
 ---
 
@@ -235,8 +231,8 @@ member relations is the correct lowering and no interleave-by-encounter is requi
 5. **A rooted body is correlated to NOTHING.** Registering inside one and reading outside is fine, and so is
    the reverse (side effects are root-global). What is NOT fine is a rooted body whose member relation
    references the outer chain's rows — `checkPlan`'s scope check catches it and must keep catching it.
-6. **`checkPlan` THROWS rather than declines**, so any binding mistake is RelIR erroring where legacy answers.
-   `mise run rel-sweep` is the instrument that finds it; it must stay at 0.
+6. **`checkPlan` THROWS rather than declines**, so a binding mistake surfaces as a hard error, never a quiet
+   wrong answer. `mise run rel-sweep` is the instrument that finds it; it must stay at 0.
 7. **Chain-position `union`/`choose` arms already share the map**, so both arms registering one label
    ACCUMULATE. That is the reference's answer, and a behaviour change from the old decline — no corpus
    scenario, so it lives in L4.

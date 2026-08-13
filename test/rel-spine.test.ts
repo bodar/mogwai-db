@@ -11,17 +11,16 @@ import { MODERN_SEED } from './fixtures/seed-modern.ts';
 import { PER_ROW, STATIC } from '../src/sql/kernel/render.ts';
 
 /**
- * THE RelIR SPINE — routing, coverage and the per-traversal differential (§6·1).
+ * THE RelIR SPINE — coverage and the fail-closed boundary.
  *
- * The corpus-wide differential is `mise run test:legacy-spine` (the whole suite with the switch
- * off) and the coverage ratchet is the census `spine` column. This file holds the three things
- * neither of those can state directly:
+ * There is ONE spine: the legacy route and its corpus-wide differential are gone, so this file pins
+ * the boundary directly rather than as a divergence between two routes.
  *
- *   1. a covered traversal actually ROUTES to RelIR, so a lowering that silently stopped firing is
- *      a failure here rather than a coverage number nobody read;
- *   2. the two spines return the SAME ROWS for it, asserted side by side at the traversal level;
- *   3. an UNCOVERED shape declines rather than throwing — the decline is the contract that keeps
- *      "not learned yet" from becoming a support regression.
+ *   1. COVERED — every shape the lowering handles compiles to a DO-legal plan, so a lowering that
+ *      silently stopped firing is a failure HERE rather than a coverage number nobody read;
+ *   2. DECLINED — an UNCOVERED shape raises `UnsupportedTraversal` rather than mis-answering, which
+ *      is the fail-closed contract that keeps "not learned yet" from becoming a plausible wrong
+ *      answer. Growing coverage moves a shape from DECLINED to COVERED.
  */
 
 const store = seededStore();
@@ -661,11 +660,10 @@ describe('the RelIR spine', () => {
 
 
 
-  // RelIR is AHEAD here, and the assertion says so rather than relying on the ambient switch (§6·1):
-  // legacy REFUSES a nested `addE` label outright ("nested-traversal label not supported") where the
-  // reference resolves a ConstantTraversal to its literal. `addV` has no such gap, so this is the one
-  // host where the fold changes an ANSWER rather than only a route.
-  test('addE folds a ConstantTraversal label where legacy refuses', () => {
+  // `addE` folds a ConstantTraversal label to its literal — a nested `addE(__.constant("knows"))`
+  // resolves the reference's ConstantTraversal and names the edge "knows" (`addV` folds it the same
+  // way).
+  test('addE folds a ConstantTraversal label to its literal', () => {
       const store = new GraphStore(new BunSqlite(':memory:'));
       const write = (gremlin: string) => exec(store).buffers(gremlin, {});
       for (const person of ['a', 'b']) write(`g.addV("${person}")`);

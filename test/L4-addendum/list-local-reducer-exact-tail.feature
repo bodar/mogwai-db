@@ -7,11 +7,11 @@ Feature: mogwai addendum — a LOCAL reducer orders by the member's own TYPE, no
   # list's member type was spelled in a second, lossier vocabulary than a row's — so `max(Scope.local)`
   # took a raw SQL `MAX()` over the payload and compared LEXICOGRAPHICALLY.
   #
-  # Measured on BOTH spines before the fix: over [9007199254740993, 10007199254740993] the local
-  # `max` answered the SMALLER value and `min` the larger, while the GLOBAL `max()` on the same values
-  # answered correctly — one step name, two engines, and only one of them had ever been fixed. The
-  # differential could not see it (§12: agreement between the two spines is evidence of a shared
-  # cause, not of correctness) and no ladder assertion named the family.
+  # Measured before the fix: over [9007199254740993, 10007199254740993] the local `max` answered the
+  # SMALLER value and `min` the larger, while the GLOBAL `max()` on the same values answered correctly
+  # — one step name, two reducer engines, and only one of them had ever been fixed. A
+  # cross-implementation differential could not catch it (both shared the cause; agreement is evidence
+  # of a shared cause, not of correctness) and no ladder assertion named the family.
   #
   # `sum(Scope.local)` had the other half of the same defect from the other direction: the eligibility
   # guard is a STORAGE-CLASS test, so a decimal-TEXT long is not `integer`/`real` and was silently
