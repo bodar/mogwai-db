@@ -245,6 +245,15 @@ the CLASS is what tells them apart — a caller whose contract is `null` cannot 
 ⚠️ Without the classes, `rel-sweep` (whose whole subject is "a lowering threw instead of declining")
 reads every unparseable literal as a contract violation.
 
+⚠️ **A SHAPE the traversal cannot have is an ANSWER, not a gap — but only where the shape is CERTAIN.**
+The list functions (`combine`/`intersect`/`difference`/`disjunct`/`merge`/`product`/`conjoin`) are the
+worked example: one upstream interface, `ListFunction`, holds all six messages parameterised by the step
+NAME, so they are one authority in `compiler/rel/list.ts` rather than seven copies. What the case teaches
+beyond the coverage is the LIMIT: a SCALAR self is deliberately left declining, because "can't be null"
+versus "can only take an array or an Iterable" is a PER-ROW choice there — **raising the WRONG error is
+worse than declining**, and the shapes that can never be null (element, map, record, property) are exactly
+the ones where the message is certain.
+
 Two more rules on refusals:
 
 - ⚠️ **A verifier must never narrow what the lowering may attempt.** Slicing a read tail after a merge
