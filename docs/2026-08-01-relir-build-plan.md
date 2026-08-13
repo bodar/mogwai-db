@@ -527,10 +527,22 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
 - **Plan-size wart** — `byNode`'s property arm nests the collection CASE inside itself; one commit.
 
 Families still largely open (rank live via `rel-blockers`): the scalar-transform tail, branch (the
-option-keyed `choose(<projection>).option(k, arm)` forms — the arm-merging half is now ONE dispatcher over
-three builders at both per-row shapes, `BRANCH_HOSTS`/`branchArms`), row ops (`Column`-keyed and the
-`path()` tails), aliases (`select`, dominated by `Pop.all`/`Pop.mixed` history reads), side effects, then
-`local`, `match`, `where`, the `path` tails.
+SOURCE-position `g.union(a, b)` and the option-keyed `choose(<projection>).option(k, arm)` where the
+choice is a body rather than a `T` token — the arm-merging half is now ONE dispatcher over three builders
+at both per-row shapes, `BRANCH_HOSTS`/`branchArms`, and a token choice is `tokenChoice`), row ops
+(`Column`-keyed and the `path()` tails), aliases (`select`, dominated by `Pop.all`/`Pop.mixed` history
+reads), side effects, then `local`, `match`, `where`, the `path` tails.
+
+🚧 **The next three, named because each is now a SINGLE missing caller rather than missing algebra** — the
+pattern this whole stage kept finding:
+- **a branch/host arm on the PROPERTY tail.** `propertyTail` serves the row ops, its two filters, the
+  retypes and `group`; `choose`/`union`/`coalesce`/`project`/`select`/`where` over a property stream all
+  decline for want of a framing + host at the call site, both of which `propertyRowShape` already builds.
+- **the SCALAR and RECORD tails declaring a `RowShape`.** They call `orderRows` from their own loops, so
+  neither gets `dedup`'s identity rule; the map and list tails are not in it at all.
+- **a set op over an ELEMENT-member list.** The operand check now raises before the self gate, so what is
+  left is the rowid comparison — the same two per-type facts (`GremlinValueComparator`/`ElementHelper`)
+  the property `RowShape` and the element-member `order`/`dedup` already state.
 
 ⚠️ **A merge DECLINES where a position is CARRIED** — `union`/`choose`/`coalesce` all re-mint the emission
 order, so `g.V().out().order().by('name').coalesce(…)` declines today. That is §10's "mint one
