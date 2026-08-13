@@ -354,10 +354,16 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
 
 **Substrate — each unlocks several families, do these first:**
 
-- **The map shape (a READ).** The largest multiplier: it is the SOURCE blocking a map-valued
-  `inject`/`union` feeding `mergeV`/`mergeE` (7 write traversals — ⚠️ not write work), the map-family
-  residue below, and part of the repeat gap. Build the VALUE with RelIR nodes plus its `RelFraming` arm
-  (§6·3).
+- **The map shape (a READ).** The map-value SOURCE is now built: `g.inject([k:v, …])` seeds a
+  map-valued traverser (`mapLiteralBlob`/`injectMap`, `compiler/rel/{map,lower}.ts`), so the whole
+  re-enterable tail already built for `group()`/`valueMap()` works over a literal. It reuses
+  `valueNodeOf` — the one authority for the stored `{t,v}` tree — so the blob is a compile-time typed
+  literal (zero binds). What is LEFT of the multiplier: the map-valued **`union`** source, and the
+  corpus TAILS that gate the actual `.feature` cases — **multi-key `select(k1,k2,…)`** over a map (a
+  sub-map projection, `SelectStep.processNextStart` — filters the traverser if any key is absent),
+  **seeded `fold([:], Operator.addAll)`**, and the **`merge`** map-operand. A non-string (`T`-token)
+  key and a map feeding `mergeV`/`mergeE` (7 write traversals — ⚠️ not write work) decline whole and
+  belong to the write substrate.
 - **A list whose members may be ELEMENTS.** Unlocks the ELEMENT-list forms of `order`/`dedup`, the
   map-family residue (`with(tokens, ids)`, the `by(__.unfold())` that pairs with them, `order(Scope.local)`
   over map entries), and the `set` framing marker's list tail.
