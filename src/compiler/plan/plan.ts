@@ -1,6 +1,5 @@
 import { flattenListArgs, gtypeName, isNested, arg, collectionMembers, type Pred } from '../../gremlin/frontend.ts';
 import { q, list, values, empty, value, raw, jsonExtract, type Expression, type Relation } from '../../sql/kernel/q.ts';
-import type { FastPath } from '../options/fast-paths.ts';
 import { normalizeTypeName, STORAGE_CLASS, BigDecimal, Duration, coerceBindValue } from '../../gremlin/types.ts';
 import { nodes, edges, labels, vertexLabels, vertexProperties, edgeProperties } from '../../sql/schema.ts';
 import type { LabelRegime } from '../../api.ts';
@@ -499,58 +498,6 @@ function likePattern(op: string, value: unknown): { pat: string; neg: boolean } 
   return null;
 }
 
-// ---------- FTS-backed substring predicate (ftsSubstringPredicate fast path) ----------
-//
-// A POSITIVE substring predicate (containing/startingWith/endingWith) with a >= 3-char
-// literal term over a STORED property routes through the property_fts trigram index instead
-// of a base-table LIKE scan. The generic LIKE (propHasFor's fall-through) stays
-// the semantic authority + equivalence fallback (ftsSubstringPredicate:false, or a term
-// too short / a computed-scalar context). See docs/archive/2026-07-20-call-service-registry-plan.md
-// "Substring rule (final)". NEGATED ops (not*) stay on LIKE: the trigram index finds values
-// that MATCH, not the "exists a value that does NOT match" the ANY-match negation needs.
-
-const TRIGRAM_FLOOR = 3;
-
-/** Whether an FTS rewrite applies to this predicate: a positive containing/startingWith/
- *  endingWith with a string literal term of >= 3 chars. Returns the pieces the EXISTS needs:
- *  the MATCH phrase (FTS query syntax — a literal phrase, internal `"` doubled) that
- *  prefilters via the index, and the LIKE pattern that confirms position for the anchored
- *  ops. null → not eligible (caller uses the generic LIKE). */
-function ftsSubstringMatch(pred: any): { matchPhrase: string; likePat: string } | null {
-  if (!pred || typeof pred !== 'object' || !('op' in pred)) return null;
-  const op = (pred as Pred).op;
-  if (op !== 'containing' && op !== 'startingWith' && op !== 'endingWith') return null;
-  const term = (pred as Pred).operands[0]?.value;
-  if (typeof term !== 'string' || term.length < TRIGRAM_FLOOR) return null;
-  const lp = likePattern(op, term)!;   // never null for these three ops
-  // The MATCH arg is FTS query syntax (AND/OR/*/"/^ are operators), so wrap the term as a
-  // literal phrase and double any internal `"`. It still substring-matches on a trigram index
-  // even when the term is an operator word. Do NOT reuse LIKE's %/_/\ escaping here.
-  return { matchPhrase: `"${term.replace(/"/g, '""')}"`, likePat: lp.pat };
-}
-
-/** An FTS-backed ANY-match EXISTS for a stored-property substring predicate: the owning
- *  element has a property `key` whose VALUE (kind='value') matches. MATCH is the index
- *  prefilter; the LIKE re-confirms position (so startingWith 'mar' excludes 'embarko'). */
-function ftsSubstringExists(ownerElem: 'node' | 'edge', ownerIdExpr: Expression, key: string, m: { matchPhrase: string; likePat: string }): Expression {
-  return q`EXISTS(SELECT 1 FROM property_fts WHERE owner_elem=${value(ownerElem)} AND owner=${ownerIdExpr} AND pk=${value(key)} AND kind=${value('value')} AND text MATCH ${value(m.matchPhrase)} AND text LIKE ${value(m.likePat)} escape ${value('\\')})`;
-}
-
-/** The ftsSubstringPredicate fast path. Recognition (ftsSubstringMatch: a >=3-char positive
- *  substring op) and the enable flag are consolidated here in appliesWhen — the boolean no longer
- *  threads through hasProp/propHasFor. tryLower emits the property_fts trigram EXISTS
- *  (result-equivalent to the generic LIKE, which stays the fallback + semantic authority). Fires at
- *  the has() choke point (the one site with a fastPaths config in scope); every other has-prop
- *  caller uses the generic LIKE. */
-export const FtsSubstringFastPath: FastPath<[ScalarCtx, string, any], Expression> = {
-  name: 'ftsSubstringPredicate',
-  equivalentWhen: 'test/L5-properties/differential.test.ts — the fast-path differential; has(k, >=3-char substring) via property_fts vs. the LIKE fallback, both sides generated either side of the 3-char boundary',
-  appliesWhen: (ctx, scalarCtx, _key, pred) =>
-    ctx.enabled.ftsSubstringPredicate && (scalarCtx.elem === 'vertex' || scalarCtx.elem === 'edge') && ftsSubstringMatch(pred) !== null,
-  tryLower: (_ctx, scalarCtx, key, pred) =>
-    ftsSubstringExists(sqlElem(scalarCtx.elem as Elem), scalarCtx.idExpr, key, ftsSubstringMatch(pred)!),
-};
-
 /**
  * The `LIMIT/OFFSET` suffix of a GLOBAL slice — the ONE rendering, for every shape's row op, the
  * element prefix and the projection accumulator alike. `sliceOf` (ir/step.ts) owns the arithmetic;
@@ -913,9 +860,9 @@ export const propSortKeyFor = (idExpr: Expression, elem: Elem, key: string): Exp
   propRead(idExpr, elem, key, (s) => compareKey(s.value, s.vtype));
 
 /** Does ANY value under `key` satisfy `pred` (undefined → the key exists at all)? EXISTS over
- *  the normalized table → multi-property has() semantics. The generic LIKE path is the semantic
- *  authority; the ftsSubstringPredicate fast path (FtsSubstringFastPath) is applied one level
- *  up, at the has() choke point, and only replaces this when it fires. */
+ *  the normalized table → multi-property has() semantics. This generic LIKE path is the semantic
+ *  authority; the `ftsSubstringPredicate` trigram rewrite happens over the FINISHED algebra
+ *  (`src/rel/passes/fts.ts`) and only replaces this where it fires. */
 export const propHasFor = (idExpr: Expression, elem: Elem, key: string, pred: any): Expression => {
   const s = propSource(elem);
   const base = q`SELECT 1 FROM ${s.table} WHERE ${s.owner}=${idExpr} AND ${s.key}=${value(key)}`;
