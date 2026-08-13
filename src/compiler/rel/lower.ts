@@ -4362,6 +4362,16 @@ function propertyTail(
     return grouped && continueAs(grouped.rel, { kind: 'map', keyOf: grouped.keyOf, valOf: grouped.valOf }, steps, from + 1, false, ctx, fresh, NO_ALIASES);
   }
 
+  // THE BRANCH FAMILY over a PROPERTY stream — the same `branchArms` the element and value tails call,
+  // because an arm body over a property traverser is the ordinary fold re-entered at the property
+  // framing (`key()`/`value()`/`element()` retype it, the row ops and filters preserve it). `union`
+  // needs no condition and so composes here immediately; `choose`/`coalesce` decline inside `branchArms`
+  // until `branchSubject` learns the property shape (a `values(k)` self is a per-row message choice).
+  if (BRANCH_HOSTS.has(step.name)) {
+    const merged = branchArms(step, rel, { kind: 'property', ownerElem: elem }, bulked, ctx, fresh, labels);
+    return merged && continueAs(merged.rel, merged.framing, steps, from + 1, bulked, ctx, fresh, labels);
+  }
+
   if (step.modulators?.length || step.optionArms || (step.args ?? []).length) return null;
   // `drop()` over a property stream removes the property ROWS and leaves the elements standing.
   // TERMINAL by the grammar, asserted for `elementDrop`'s reason: a step after it would read a stream

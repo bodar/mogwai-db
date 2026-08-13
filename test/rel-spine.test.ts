@@ -87,6 +87,10 @@ const COVERED = [
   'g.V().properties().limit(2)', 'g.V().properties().range(1,3).value()',
   "g.V().properties().hasKey('age')", "g.V().properties().hasKey(null,'age').value()", 'g.V().properties().hasKey(null)',
   'g.V().properties().hasValue(P.gt(30))', "g.V().properties().hasValue(null,'josh').value()",
+  // `union` over a PROPERTY stream — `branchArms` re-entered at the property framing, so the arms
+  // (`key()`/`value()`) retype through `propertyTail` and merge. `union` needs no condition, which is
+  // why it composes here while `choose`/`coalesce` await a property `branchSubject`.
+  'g.V().properties().union(__.key(), __.value())',
   "g.V().bothE().properties().dedup().hasKey('weight').hasValue(P.lt(0.3)).value()",
   // A PROPERTY's own `by()` TOKENS and its two Element-only retypes — both legal per HOST, not per
   // grammar, so an element declines `T.key` (asserted in DECLINED) and an edge `Property` declines
