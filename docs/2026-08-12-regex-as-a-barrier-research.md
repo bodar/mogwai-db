@@ -1,19 +1,27 @@
-# Regex as a barrier service — research note, NOT a commitment
+# Regex as a barrier service — INTENDED, not scheduled
 
-**Status: exploratory, 2026-08-12. No code change, no plan, no scheduled work.** This is a design
-sketch of ONE way the platform's regex wall *could* be loosened if we ever chose to, written down so
-the reasoning isn't lost. It is deliberately **not** in `docs/outstanding-work.md`: nothing here is
-scheduled, and the current decision (regex fails closed, never JS-filtered) stands until explicitly
-revisited. Read this as "if we ever wanted to, here is the shape and here is what it would cost",
-not as "we should".
+**Status: intended future work. Reviewed 2026-08-13 against the RelIR spine; no code change yet, no
+date.** `regex` is **no longer a locked non-goal** — the intention is to implement it. What is still
+open is the SEMANTICS COMMITMENT below (§"The two real costs", item 1), which is a product decision
+and the only thing standing in the way; the engineering is reuse of machinery that has since shipped.
+Not in `docs/outstanding-work.md` because nothing is scheduled, and until it lands the behaviour is
+unchanged: `regex` fails closed with a deferral and is never JS-filtered.
+
+⚠️ **Reviewed against the single-spine cut.** Everything below held up, and two things got STRONGER —
+see "What the RelIR spine changed". The grammar spelling is `TextP.regex(…)` (`Gremlin.g4:1327`), not
+`P.regex`.
 
 ## The wall today, and why it exists
 
 DO SQLite has no user-defined functions, and the project does not filter in JS
-(`.claude/rules/wire-protocol.md`; root decision #3). So anything SQL cannot express — `regex`,
-`typeOf` — **fails closed with a deferral** rather than being evaluated row-at-a-time in the app
-tier. `containing`/`startingWith`/`endingWith` stay in SQL as `LIKE`; `regex` does not, and stays
-deferred.
+(`.claude/rules/wire-protocol.md`; root decision #3). So anything SQL cannot express **fails closed
+with a deferral** rather than being evaluated row-at-a-time in the app tier.
+`containing`/`startingWith`/`endingWith` stay in SQL as `LIKE`; `regex` does not, and stays deferred.
+
+⚠️ **`typeOf` is no longer in that set** — it was when this note was written. It lowers as a per-row
+`vtype` comparison with a storage-class fallback (`typeOfExpr`, `compiler/rel/predicate.ts`), and
+`is(typeOf(GType.LIST))` even RETYPES the stream. So `regex` is now the ONLY member of the
+"SQL cannot express it" class, which is what makes it worth a note of its own.
 
 The wall's real justification is **not** "we can't run regex efficiently outside SQLite." It is that
 row-at-a-time JS interpretation of a traversal is the failure mode this project exists to avoid, and
@@ -73,9 +81,10 @@ contains the blast radius but does not shrink it.
 ## The piece that makes it actually good: trigram prefilter
 
 The `property_fts` FTS5 **trigram** index already backs `tinker.search` and the `TextP` substring
-predicates (`src/services/CLAUDE.md`; the `ftsSubstringPredicate` fast path in
-`src/compiler/plan/plan.ts` + `src/compiler/options/fast-paths.ts`). Almost every real regex carries a
-required literal run (`^SKU-\d+` must contain `SKU-`). So:
+predicates (`src/services/CLAUDE.md`; the live rewrite is `src/rel/passes/fts.ts`, applied over the
+finished algebra in `lowered` and gated by the `ftsSubstringPredicate` flag from
+`src/compiler/options/fast-paths.ts`). Almost every real regex carries a required literal run
+(`^SKU-\d+` must contain `SKU-`). So:
 
 ```
 extract mandatory literal substrings from the regex (AST walk)
@@ -90,6 +99,37 @@ Trigram Index* / Google Code Search; `grep -P` over a trigram store). It turns t
 in the tree — the barrier and the trigram index. **This variant, not the bare barrier, is the one
 worth remembering.** A regex with no extractable literal (`^.{3}\d$`) has no prefilter and degrades to
 the full-scan case honestly — which is a fine place to keep failing closed.
+
+## What the RelIR spine changed (reviewed 2026-08-13)
+
+The single-spine cut deleted the legacy route this note was written against. Every mechanism it leans
+on survived, and two of them got materially better for this purpose:
+
+- **The barrier boundary moved into the algebra and is now the ordinary fold on both sides.**
+  `compiler/rel/segment.ts` decides only WHERE the boundary is; the head is a plain compile of the
+  prefix and the resume is `lowerForeignResume` — "the same tail vocabulary, seeded from a landed
+  relation instead of a scan". So a regex barrier inherits the whole tail vocabulary rather than a
+  hand-written continuation.
+- **A DATA-SIZED row set already crosses the boundary as ONE JSON bind** exploded by `json_each`
+  (`compiler/rel/foreign.ts`, §6·2). This is the piece the note was missing and it is the crux: a
+  regex barrier's SURVIVOR SET is data-sized by definition, and a `VALUES (?,?,…)` re-injection would
+  hit the DO's 100-bind wall (measured: a 26-row federated hop was a hard DO failure in exactly that
+  form, invisible on Bun at 65 535). The mechanism to re-inject survivors already exists and is
+  already proven against the platform cap.
+- **A resume CANNOT decline** — an unsupported step after a barrier RAISES, naming the step
+  (`rel/segment.ts` `resumed`). A regex barrier therefore cannot silently answer a narrower question
+  downstream, which is precisely the failure mode option (2) below has.
+- **The head projects only what the barrier reads.** `BarrierInput` is `{injectedValue?}`, so a head
+  compiles the one value its barrier consumes rather than a whole element payload. A regex barrier
+  wants exactly one column (the candidate string) plus its owner id, which is that shape.
+
+⚠️ **One correction the new machinery forces.** `foreignRelation` lands DETACHED elements, and a
+detached element has NO live adjacency (`detachedTail` serves `id`/`label`/`values` and declines
+everything else). A regex barrier's survivors are LOCAL elements, so it must NOT land them as foreign
+rows — it must re-inject the surviving IDS and let the next segment scan this graph's own tables, which
+is what §"The observation" already says (`within(<ids>)`). The right shape for that today is RelIR's
+own retained-binding concept (§3.0 of the build plan: a `Ref` resolving to retained rows as one JSON
+bind), not the federate return path. Getting this backwards would trade live adjacency for a snapshot.
 
 ## The two real costs — both must be paid deliberately, not stumbled into
 
@@ -116,6 +156,7 @@ the full-scan case honestly — which is a fine place to keep failing closed.
 - Any framing that treats this as a **performance** unlock. The barrier + trigram makes it *tractable
   and contained*; the thing standing between us and shipping it is the semantics commitment, which is
   not a perf question.
+- ⚠️ **Landing survivors as DETACHED rows.** They are local elements; see the correction above.
 
 ## If it were ever picked up
 
@@ -129,8 +170,13 @@ decision itself is the gate, and it is a product/correctness call, not an engine
 
 | Claim | Location |
 |---|---|
-| Regex fails closed, never JS-filtered | `.claude/rules/wire-protocol.md`; root `CLAUDE.md` decision #3 |
+| Regex fails closed, never JS-filtered (today) | `.claude/rules/wire-protocol.md`; root `CLAUDE.md` decision #3 |
+| `regex` is the ONLY "SQL cannot express" predicate left | `typeOfExpr`, `src/compiler/rel/predicate.ts` |
 | Barrier model is generic, not federate-specific | `src/compiler/segment.ts:9-14`, `:43` |
 | Bound-join re-injection (`within` over distinct set) | `src/compiler/ir/injection.ts:11-14`, `:22`; `src/services/catalog/federate.ts:81-82` |
 | One batched hop, scatter in SQL `resume` | `src/services/catalog/federate.ts:68-83` |
-| Trigram index + substring fast path | `src/services/CLAUDE.md`; `src/compiler/plan/plan.ts` (`ftsSubstringPredicate`); `src/compiler/options/fast-paths.ts` |
+| Trigram index + substring fast path | `src/services/CLAUDE.md`; **`src/rel/passes/fts.ts`** (the live physical rewrite over the finished algebra, gated `ftsSubstringPredicate`); `src/compiler/options/fast-paths.ts` |
+| Barrier boundary + resume on the RelIR route | `src/compiler/rel/segment.ts` |
+| A data-sized row set crosses as ONE JSON bind | `src/compiler/rel/foreign.ts` (`foreignRelation`) |
+| A detached element has no live adjacency | `detachedTail` in `src/compiler/rel/lower.ts` |
+| Retained binding / `Ref` (the survivor-set shape) | `docs/2026-08-01-relir-build-plan.md` §3.0 |
