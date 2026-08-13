@@ -96,6 +96,15 @@ const COVERED = [
   'g.V().properties().dedup().by(T.key)', 'g.V().bothE().properties().dedup().by(value).count()',
   'g.V().properties().group().by(T.key)',
   'g.V().properties().id()', 'g.V().properties().label()', 'g.V().properties().order().id()',
+  // A LIST's own member ops, all three of which were unreachable rather than unbuilt: the blanket
+  // modulator guard declined `order(Scope.local).by(desc)` whose whole content is the comparator, the
+  // scope TOKEN counted as an argument and declined every `dedup(Scope.local)`, and `reverse()` had no
+  // arm because its meaning on a list is a different operation rather than a per-member transform.
+  "g.V().values('age').fold().order(local).by(desc)", "g.V().values('name').fold().order(local).by()",
+  "g.V().values('age').fold().dedup(local)", "g.inject(['a','a']).dedup(Scope.local)",
+  "g.V().out().in().values('name').fold().dedup(Scope.local).unfold()",
+  "g.inject(['a','b']).reverse()", "g.V().values('age').fold().order(local).by(desc).reverse()",
+  "g.V().values('name').fold().reverse().unfold()",
   // `inject()` — a SCALAR source, and the largest single blocker measured over the corpus: 387 of
   // the 2,298 traversals begin with one. Its relation has NO channels: an injected row is one
   // traverser by construction, so there is no multiplicity to carry and nothing has established an
@@ -440,8 +449,6 @@ const DECLINED = [
   // the one that still holds — an ELEMENT list's members are ROWIDS, so every member op declines
   // (`isBareList`): a question about the element is the child seam's, not the list module's.
   'g.V().fold().order(Scope.local)',
-  "g.inject(['a','a']).dedup(Scope.local)",   // a member dedup keeps the FIRST occurrence per value
-  "g.inject(['a','b']).reverse()",    // on a list `reverse` reverses ORDER, not each member
   "g.V().values('age').is(P.typeOf(GType.MAP))", // a MAP retype needs the map shape, not a decode
   'g.V().has(T.label,null)',          // a null label VALUE: legacy owns what that means
   // A `T` TOKEN IS LEGAL PER HOST, NOT PER GRAMMAR. All four parse; each host answers its OWN pair and

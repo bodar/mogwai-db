@@ -2940,8 +2940,10 @@ function listTail(
       items = member.of;
       if (member.rewrites) set = false;
       // `dedup(Scope.local)` MAKES a set where the input was a list — `DedupLocalStep` yields a
-      // `LinkedHashSet` — so the marker is raised here as well as dropped by a rewrite.
-      if (member.set) set = true;
+      // `LinkedHashSet` — and `reverse()` UNMAKES one (`ReverseStep` returns a `List`), so an arm that
+      // decides the marker states it and the field is authoritative when present. A rewrite drops it for
+      // its own reason: new member values are not the distinct results of anything.
+      if (member.set !== undefined) set = member.set;
       continue;
     }
 

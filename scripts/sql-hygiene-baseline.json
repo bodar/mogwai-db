@@ -445,8 +445,8 @@
   },
   "reverse": {
     "binds": 0,
-    "bytes": 703,
-    "compiler": 12,
+    "bytes": 1590,
+    "compiler": 35,
     "bound": 0
   },
   "rTrim": {

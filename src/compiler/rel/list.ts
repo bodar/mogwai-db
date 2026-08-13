@@ -250,6 +250,14 @@ const memberPredicate = (member: Expr, pred: unknown): Expr | null => {
   return predicateExpr(member, pred, SUBJECT_UNKNOWN);
 };
 
+/** The member ops that HOST a `by()`, so the blanket modulator decline must exempt exactly these two —
+ *  `order(Scope.local)` takes a COMPARATOR and `dedup(Scope.local)` a projection. Named for `BY_READERS`'
+ *  reason (`lower.ts`): the blanket guard was written before either arm could read a modulator and then
+ *  kept declining `order(Scope.local).by(desc)` — a form whose whole content is the comparator, and whose
+ *  arm below had been able to answer it all along. A host added to an arm without being added here
+ *  silently loses its modulator, which is the failure mode the modulator seam exists to end. */
+const LOCAL_BY_HOSTS: ReadonlySet<string> = new Set(['order', 'dedup']);
+
 /**
  * A list op that KEEPS the list shape, or `null` to decline.
  *
@@ -260,7 +268,7 @@ const memberPredicate = (member: Expr, pred: unknown): Expr | null => {
 export function listMemberOp(
   step: IRStep, input: Rel, of: ListOf, fresh: Minter, child?: ChildSeam,
 ): { readonly rel: Rel; readonly of: ListOf; readonly rewrites?: boolean; readonly set?: boolean } | null {
-  if (step.modulators?.length || step.optionArms || !isBareList(of)) return null;
+  if ((step.modulators?.length && !LOCAL_BY_HOSTS.has(step.name)) || step.optionArms || !isBareList(of)) return null;
   const rel = fenced(input, fresh);
   const list = col(rel.id, LIST_COL);
 
@@ -284,6 +292,29 @@ export function listMemberOp(
     return { rel: withList(rel, listOfMembers(members, tx.expr, [memberOrder(members)], fresh), fresh), of: BARE_LIST, rewrites: true };
   }
 
+  // `reverse()` ON A LIST REVERSES ORDER, not each member, and it takes NO `Scope`: `ReverseStep.map`
+  // dispatches on the TRAVERSER'S TYPE — a `String` reverses its characters, an `Iterable` becomes
+  // `Collections.reverse(asList(items))`, anything else passes through
+  // (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/ReverseStep.java`).
+  // That is why it is here rather than in `STRING_LOCAL_TX`, whose members are the transforms a list maps
+  // over its members — this one is a different operation on a list, not the same one applied per member.
+  //
+  // Re-aggregating in DESCENDING position order IS the reversal: the members keep their own values and
+  // types (so this is not a rewrite), and a later explode renumbers from the new array, which is what
+  // makes a following slice read the reversed positions rather than the original ones.
+  if (step.name === 'reverse') {
+    if (isLocalScope(step) || argValues(step).length) return null;
+    const members = membersOf(list, fresh);
+    return {
+      rel: withList(rel, listOfMembers(members, memberNode(of, members), [memberOrder(members, 'desc')], fresh), fresh),
+      of,
+      // A reversed SET is a LIST on the wire — `ReverseStep` builds `itemsAsList` and returns it, so the
+      // "these are the distinct results of a set operation" marker has stopped being true of the answer
+      // even though every member survived.
+      set: false,
+    };
+  }
+
   // A LOCAL slice takes a window of the MEMBERS, in position order — and `tail(Scope.local, n)` takes
   // it from the far end, which is the same direction flag the row slice uses. The members keep their
   // original positions (the re-aggregate orders by `mo`), so a slice of a slice composes.
@@ -297,21 +328,44 @@ export function listMemberOp(
     // type, so it infers one from its storage class — the same answer the wire would reach.
     const payload = memberPayload(of, members);
     if (step.name === 'dedup') {
+      // ⚠️ THE SCOPE TOKEN IS AN ARGUMENT, so a bare argument COUNT declined the only form this arm
+      // serves. `dedup(Scope.local)` carries `{scope:'local'}` in `args` — the very thing `isLocalScope`
+      // just read — so `argValues(step).length` was 1 for EVERY traversal reaching here and everything
+      // below was unreachable. What it must refuse is a LABEL tuple (`dedup('a','b')`), a path-distinct
+      // question this module cannot answer, and a string argument is what names one.
+      if (step.modulators?.length || argValues(step).some((a) => typeof a === 'string')) return null;
       // FIRST OCCURRENCE WINS and the surviving order is the original one — `DedupLocalStep` builds a
-      // `LinkedHashSet`, so it is insertion order over distinct values. `min(mo)` per distinct payload
-      // is that, in one aggregate: the earliest position each value appeared at.
-      if (step.modulators?.length || argValues(step).length) return null;
-      const distinct = make.aggregate({
-        id: fresh('md'), input: members, channels: [],
-        type: typeOf(meta(MEMBER.value, 'any', true), meta(MEMBER.ord, 'int')),
-        groupBy: [payload],
-        aggs: [[MEMBER.value, { kind: 'agg', fn: 'min', args: [col(members.id, MEMBER.value)] }],
-          [MEMBER.ord, { kind: 'agg', fn: 'min', args: [col(members.id, MEMBER.ord)] }]],
+      // `LinkedHashSet`, so it is insertion order over distinct values.
+      //
+      // A RANKED WINDOW, not a grouped aggregate, and for `dedupOn`'s reason one level up: the survivor
+      // is ONE member and every column must be ITS values — an `Aggregate` can produce `MIN(mo)` but not
+      // "the value belonging to the row that had it". The aggregate form here also could not have been
+      // right, because it named only two of the three member columns: a TYPED list's member is a value
+      // AND a tag, and `memberNode` reads the tag.
+      //
+      // ⚠️ THE KEY IS THE PAYLOAD **AND** THE TAG, which is the same lesson the property identity key
+      // records: `{t:'byte',v:1}` and `{t:'int',v:1}` share a payload and are `Byte(1)` and `Integer(1)`
+      // — not equal in Java, so not one member. A bare list has no tag and the payload is the whole key.
+      const tag = memberVtype(of, members);
+      const rank = 'mdr';
+      const ranked = make.window({
+        id: fresh('mdw'), input: members, channels: [], type: typeOf(...members.type.cols, meta(rank, 'int')),
+        specs: [[rank, {
+          kind: 'window-expr', fn: 'row_number', args: [],
+          spec: {
+            partitionBy: tag ? [payload, tag] : [payload],
+            orderBy: [{ expr: col(members.id, MEMBER.ord), dir: 'asc' }],
+          },
+        }]],
+      });
+      const survivors = make.filter({
+        id: fresh('mdf'), input: ranked, channels: [], type: ranked.type,
+        pred: { kind: 'binary', op: '=', left: col(ranked.id, rank), right: compilerInt(1) },
       });
       // A DEDUPED list is a SET on the wire (`DedupLocalStep` yields a `LinkedHashSet`), which is the
       // same marker `listSetOp`'s four deduping ops carry — and `listTail` now threads it.
       return {
-        rel: withList(rel, listOfMembers(distinct, memberNode(of, distinct), [{ expr: col(distinct.id, MEMBER.ord), dir: 'asc' }], fresh), fresh),
+        rel: withList(rel, listOfMembers(survivors, memberNode(of, survivors), [{ expr: col(survivors.id, MEMBER.ord), dir: 'asc' }], fresh), fresh),
         of, set: true,
       };
     }
