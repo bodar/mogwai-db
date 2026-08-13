@@ -255,9 +255,8 @@ test('addE sets its own uid via property(T.id)', () => {
 
 test('custom vertex and edge ids fail at the shared identity boundary', () => {
   const store = seededStore();
-  // `idAlreadyExists` and not a literal: `run()` takes the AMBIENT spine, and the two spines word this
-  // refusal differently on purpose (RelIR raises the reference's sentence, legacy its own until it is
-  // deleted). A hardcoded message here passes `mise run ci` and fails `mise run test:legacy-spine`.
+  // `idAlreadyExists` and not a literal: the refusal message is the reference's own sentence, built in
+  // one place, so the assertion matches that matcher rather than duplicating the string here.
   expect(() => run(store, 'g.addV().property(T.id, 1)')).toThrow(idAlreadyExists('Vertex', 1));
   run(store, 'g.addV().property(T.id, "marko")');
   expect(() => run(store, 'g.addV().property(T.id, "marko")')).toThrow(idAlreadyExists('Vertex', 'marko'));
