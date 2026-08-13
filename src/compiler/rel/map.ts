@@ -1178,6 +1178,59 @@ export function mapKey(input: Rel, key: string, valOf: MapOf, fresh: Minter): Re
 }
 
 /**
+ * `select(k1, k2, …)` over a MAP traverser — a SUB-MAP of the named keys, or `null` to decline.
+ *
+ * `SelectStep.processNextStart` (≥2 keys,
+ * `vendor/tinkerpop/gremlin-core/.../step/map/SelectStep.java:66-89`) builds a `LinkedHashMap` in
+ * select-key ORDER, reading each key from the traverser's own Map first
+ * (`Scoping.getScopeValue:121` — `containsKey`, so a PRESENT-NULL key is kept). A key absent from the
+ * map — and, the caller having declined a live-alias key for `mapKey`'s reason, absent everywhere —
+ * makes the WHOLE traverser drop (`bindings.size() != selectKeysSet.size()` → `EmptyTraverser`).
+ *
+ * So it is the barrier's own pairs array rebuilt: one matched pair per key, in select order, each the
+ * source map's `[keyNode, valNode]` WHOLE — behind an all-keys-present filter. Keys are bounded by the
+ * QUERY TEXT (a fixed list), so the sub-map is a fixed-size `json_array`, never a data-sized bind. The
+ * values keep their nodes, so `valOf` carries through and `keyOf` stays scalar (the keys are strings).
+ */
+export function mapSelect(
+  input: Rel, keys: readonly string[], valOf: MapOf, fresh: Minter,
+): { readonly rel: Rel; readonly keyOf: MapOf; readonly valOf: MapOf } | null {
+  const rel = fenced(input, fresh);
+  const map = col(rel.id, MAP_COL);
+  const matching = (pairs: Rel, key: string): Expr =>
+    eq({ kind: 'call', fn: 'json_extract', args: [col(pairs.id, PAIR.value), compilerText('$[0].v')] }, compilerText(key));
+  // PRESENCE, per key — the traverser survives only if EVERY key is in the map, because a `select` over
+  // a map FILTERS on a missing key rather than binding a null entry (the `EmptyTraverser` above).
+  const present = keys.map((key): Expr => {
+    const pairs = pairsOf(map, fresh);
+    return {
+      kind: 'exists', negated: false,
+      plan: make.project({
+        id: fresh('sp'), channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]],
+        input: make.filter({ id: fresh('sf'), input: pairs, channels: [], type: pairs.type, pred: matching(pairs, key) }),
+      }),
+    };
+  });
+  const kept = make.filter({
+    id: fresh('sg'), input: rel, channels: rel.channels, type: rel.type,
+    pred: present.reduce((a, b) => and(a, b)),
+  });
+  // THE SUB-MAP — the matched pair per key, in SELECT order. `firstOf` picks the one matching pair (a
+  // key is unique within a map), read in the inner FILTER's scope for `firstOf`'s own reason.
+  const keptMap = col(kept.id, MAP_COL);
+  const pairs = keys.map((key): Expr => {
+    const p = pairsOf(keptMap, fresh);
+    const matched = make.filter({ id: fresh('sm'), input: p, channels: [], type: p.type, pred: matching(p, key) });
+    return jsonOf(firstOf(matched, col(matched.id, PAIR.value), col(matched.id, PAIR.ord), fresh));
+  });
+  const blob: Expr = { kind: 'call', fn: 'jsonb', args: [{ kind: 'json-array', items: pairs, binary: false }] };
+  return {
+    rel: withPayload(kept, [[MAP_COL, blob]], [meta(MAP_COL, 'json', true)], fresh),
+    keyOf: { kind: 'scalar' }, valOf,
+  };
+}
+
+/**
  * THE MAP PAYLOAD — one row's `map` column as the JSON the framing layer reads (§6·3), or `null` to
  * decline.
  *

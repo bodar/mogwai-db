@@ -374,6 +374,11 @@ const COVERED = [
   'g.inject([a:1,b:2]).count(Scope.local)', 'g.inject([a:1,b:2]).select("a")',
   'g.inject([a:1,b:2]).select(Column.keys)', 'g.inject([a:1,b:2]).select(Column.values)',
   'g.inject([a:1,b:2]).unfold()', 'g.inject([a:1],[b:2]).count()',
+  // MULTI-KEY `select(k1,k2,…)` over a map — a SUB-MAP projection in select order, filtered when a key
+  // is absent (`SelectStep` → `EmptyTraverser`). A present-null key is KEPT (`Scoping.getScopeValue`
+  // reads `containsKey`), which the corpus case pins.
+  'g.inject([name:"marko",age:null]).select("name","age")', 'g.inject([a:1,b:2,c:3]).select("a","c")',
+  'g.inject([a:1,b:2]).select("b","a")', 'g.inject([a:1,b:2]).select("a","b").unfold()',
 ];
 
 /**

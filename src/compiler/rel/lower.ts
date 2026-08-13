@@ -41,7 +41,7 @@ import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
-import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapSide, mapSize, unfoldMap } from './map.ts';
+import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { edgeEndpoint, elementPayload } from './element.ts';
 import { foreignLabelValue, foreignRejoin, foreignRelation, foreignValues } from './foreign.ts';
 import type { ForeignRow } from '../../api.ts';
@@ -2996,10 +2996,21 @@ function mapTail(
     // one that resolves. An alias the relation no longer carries is not live and does not block.
     if (step.name === 'select') {
       const key = selectedKey(step);
-      if (key === null || liveAliases(labels, rel).has(key)) return null;
-      const keyed = mapKey(rel, key, valOf, fresh);
-      if (!keyed) return null;
-      return scalarTail(keyed, { kind: 'scalar', type: PER_ROW('vtype') }, steps, at + 1, false, ctx, fresh, labels);
+      if (key !== null) {
+        if (liveAliases(labels, rel).has(key)) return null;
+        const keyed = mapKey(rel, key, valOf, fresh);
+        if (!keyed) return null;
+        return scalarTail(keyed, { kind: 'scalar', type: PER_ROW('vtype') }, steps, at + 1, false, ctx, fresh, labels);
+      }
+      // MULTI-KEY `select(k1, k2, …)` is a SUB-MAP projection. A key that also names a LIVE alias
+      // declines to the alias vocabulary for the single-key rule's reason (the map/label fallthrough is
+      // one COALESCE of two sources); a `Column` read was `selectedColumn`'s above, and a modulated
+      // select never reaches here (the loop head refuses one).
+      const spec = selectSpec(step);
+      if (!spec || spec.labels.length < 2) return null;
+      if (spec.labels.some((k) => liveAliases(labels, rel).has(k))) return null;
+      const selected = mapSelect(rel, spec.labels, valOf, fresh);
+      return selected && continueAs(selected.rel, { kind: 'map', keyOf: selected.keyOf, valOf: selected.valOf }, steps, at + 1, false, ctx, fresh, labels);
     }
 
     if (step.name === 'unfold') {
