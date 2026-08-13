@@ -128,6 +128,11 @@ const COVERED = [
   'g.V().group().by()', "g.V().group().by('name').by()", 'g.V().groupCount().by()',
   'g.V().properties().group().by()', "g.V().values('name').groupCount().by()", "g.V().values('age').group().by()",
   "g.V().values('name').groupCount().by(__.constant(1))",
+  // A `T` TOKEN as the `choose()` CHOICE — no child body at all, so it needed carriage rather than a
+  // projection: `byExpr` already knows every host's tokens, and a token is ALWAYS present, which is the
+  // claim that proves the `Pick.unproductive` arm dead.
+  "g.V().choose(T.label).option('person', __.out('knows')).option(Pick.none, __.identity())",
+  "g.V().choose(T.label).option('blah', __.out('knows')).option('bleep', __.out('created')).option(Pick.none, __.discard()).values('name')",
   // `inject()` — a SCALAR source, and the largest single blocker measured over the corpus: 387 of
   // the 2,298 traversals begin with one. Its relation has NO channels: an injected row is one
   // traverser by construction, so there is no multiplicity to carry and nothing has established an

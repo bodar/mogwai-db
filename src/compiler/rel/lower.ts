@@ -4485,6 +4485,28 @@ function recordTail(
  *   raw column names collide and the merge owes each arm a projection remapping onto a canonical
  *   column. That is the alias half of the merge contract and it is a further increment.
  */
+/**
+ * A `T` TOKEN as a `choose()` CHOICE — the `ChildValue` a token projection amounts to.
+ *
+ * `byExpr` already knows every host's tokens (an element's `id`/`label`, a property's `key`/`value`), so
+ * this is carriage and not a second projection: the only things it adds are the two facts a `ChildValue`
+ * carries beyond the expression. `yields: 'one'` because a token is single-valued by construction, and
+ * `present: ALWAYS_PRODUCTIVE` because a token cannot be absent — which is the claim `chooseOptions`
+ * reads to prove the `Pick.unproductive` arm dead rather than emitting a shape the traversal never has.
+ */
+function tokenChoice(token: string, subject: Subject, fresh: Minter): ChildValue | null {
+  const modulation: Modulation = { key: { kind: 'token', token: token.toLowerCase() as 'id' | 'label' | 'key' | 'value' } };
+  const expr = byExpr(modulation, childHostOf(subject), fresh);
+  if (!expr) return null;
+  // A LABEL and a property KEY are strings; an external id is whatever `COALESCE(uid, id)` yields, so it
+  // stays UNKNOWN and the framer infers — the same split `byField` draws for the same tokens.
+  const named = token.toLowerCase();
+  return {
+    expr, yields: 'one', present: ALWAYS_PRODUCTIVE,
+    framing: { kind: 'scalar', type: named === 'label' || named === 'key' ? STATIC('string') : UNKNOWN },
+  };
+}
+
 /** The traverser shapes that are NEVER a collection and NEVER null — so a list function over one raises
  *  with certainty. `list` and `path` ARE iterable (a path coerces to its element sequence); `scalar` is
  *  the per-row case above; `variant`/`discard` cannot say. */
@@ -4757,10 +4779,16 @@ function chooseOptions(
   const arms = optionArms(step, (nested) => seam.body(nested, 'child'));
   if (!arms) return null;
   const choiceArg = step.args?.[0]?.value;
-  if (!isNested(choiceArg)) return null; // a `T` token choice is the next form, not this one
-  const choiceBody = seam.body(choiceArg.nested, 'child');
-  if (!choiceBody?.length) return null;
-  const produced = seam.scalar(choiceBody, childHostOf(subject, labels));
+  const host = childHostOf(subject, labels);
+  // A `T` TOKEN CHOICE — `choose(T.label).option('person', …)`. It needs no child body at all: the token
+  // is one projection off the host, which is `byExpr`'s own vocabulary, and a `T` token is ALWAYS present
+  // (`orderProductivity` says the same thing for the same reason), so the `Pick.unproductive` arm is
+  // provably dead and `canBeUnproductive` below reads that off the claim rather than being told.
+  const produced = isTokenArg(choiceArg)
+    ? tokenChoice(choiceArg.token, subject, fresh)
+    : isNested(choiceArg)
+      ? ((body) => (body?.length ? seam.scalar(body, host) : null))(seam.body(choiceArg.nested, 'child'))
+      : null;
   // A choice that cannot report its own productivity cannot serve the two `Pick` arms, and cannot be
   // told apart from a productive NULL — decline rather than answer one of them for the other.
   if (!produced || !produced.present) return null;
