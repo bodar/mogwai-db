@@ -122,7 +122,7 @@ per-request limit is the backstop.
 
 | Step | | Notes |
 |---|:--:|---|
-| `fold()`, `unfold()`, `order(Scope.local)`, `range(local)`, `all`/`any`/`none` | ✅ | |
+| `fold()`, `unfold()`, `order(Scope.local)`, `dedup(Scope.local)`, `range(local)`, `all`/`any`/`none` | ✅ | `order(local)` takes a comparator `by(asc/desc)`; `dedup(local)` keeps the FIRST occurrence per value and keys on the member's value AND its type tag, so a Byte(1) and an Integer(1) stay apart. ❌ `dedup(local)` with a label tuple or a `by()` projection |
 | `combine`, `conjoin`, `difference`, `disjunct`, `intersect`, `product`, `merge` | ✅ | ❌ a set-op over an arm-merged (`union`) list |
 | `index()` | ❌ | |
 
@@ -140,7 +140,7 @@ lists/sets/maps. Scalar type rides PER ROW, so a heterogeneous stream frames eac
 | `format(template)`, `concat`, `substring`, `length`, `toUpper`, `toLower`, `trim`/`lTrim`/`rTrim`, `replace` | ✅ | |
 | `asString`, `asBool`, `asDate`, `dateAdd`, `dateDiff` | ✅ | a literal that cannot parse RAISES the reference's message, at compile time |
 | `asNumber` | 🟡 | ❌ over a stream of mixed numeric subtypes |
-| `reverse` | 🟡 | ✅ scalar strings; null and non-string scalars are identities. ❌ collection-order reversal |
+| `reverse` | ✅ | dispatches on the TRAVERSER's type, as `ReverseStep.map` does: a string reverses its characters, a LIST or a path reverses member ORDER (and stops being a `set`), and any other scalar is an identity |
 | `split` | ❌ | |
 
 🔴 Four documented deviations, not defects: host-language typing in Java/.NET; 128-bit arithmetic

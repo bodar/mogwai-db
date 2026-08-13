@@ -277,6 +277,18 @@ because nothing is even asking: a fact the FRONT END drops**, so a lowering cann
 it cannot SEE. **Whenever a seam re-enters the fold, check what it HANDS OVER before concluding what
 the algebra cannot express.**
 
+⚠️ **THE GUARD WRITTEN BEFORE THE ARM is the cheapest form of this error, and it reads identically to a
+missing lowering.** Three LIST member ops were filed as unexpressible and every one was UNREACHABLE:
+`listMemberOp`'s blanket `step.modulators?.length` guard ran in front of an `order` arm that read a
+comparator correctly (and whose own `!child && modulators` check was therefore dead code); `dedup(Scope.local)`
+declined for EVERY input because the SCOPE TOKEN is an argument, so a bare `argValues(step).length` was 1
+on the very form `isLocalScope` had just recognised; and `path().by(k).reverse()` was already wired
+through `PATH_LIST_OPS` and waiting on the same guard. **Reaching an arm is also how you find out it was
+wrong** — the `dedup` one declared two columns while emitting three and keyed on a payload without its
+type tag, neither of which any test could see while nothing could call it. ⚠️ So when a blanket guard and
+a specific check disagree, the specific one is dead: **grep for the arm before believing the family
+table.**
+
 ⚠️ **The measured case of that mirror, and the one that shows how it HIDES: `walkArgs` dropped a NULL
 where a string was allowed.** The grammar spells one as a bare `K_NULL` TOKEN inside
 `stringNullableLiteral`/`stringNullableArgument` (`Gremlin.g4:1738-1741`) rather than through the
@@ -471,7 +483,10 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   is a DIFFERENT question, measured wrong: `values('name').fold()` is `typed` while every member is bare at
   run time.
 - **The `set` framing marker** survives `range(local)`/`all`/`any`/`none`, dropped only by
-  `order(local)`/`unfold()` — a state-threading change through the list tail's follower loop.
+  `order(local)`/`unfold()` — a state-threading change through the list tail's follower loop. The
+  THREADING is now in place: an arm that decides the marker returns it and `listTail` treats the field as
+  authoritative-when-present, so `reverse()` unmaking a set (`ReverseStep` returns a `List`) is stated
+  rather than inferred. 🚧 `order(local)` still does not drop it.
 - **`AliasEntry.binds`** must not increment on a rebind at the SAME path position (a wrong `Pop.mixed` wire
   type today) — needs head-position tracking on the RelIR `AliasEntry`.
 - **`memberTypeTag` returns a NULL tag unresolved** for a wrapped member whose `t` is null (what
