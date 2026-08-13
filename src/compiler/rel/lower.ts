@@ -11,7 +11,7 @@ import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { exprChildren, forEachRel } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
-import { assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
+import { armBatches, assertsGType, collectionAssert, isLocalScope, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
 import { bulkObservedFrom } from '../ir/bulk.ts';
 import { meetScalarTypes, memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
 import type { Elem } from '../plan/plan.ts';
@@ -1696,6 +1696,110 @@ const withFanoutOrder = (merged: FramedRel, fresh: Minter): FramedRel => {
  */
 const branchResult = (merged: FramedRel | null, ctx: ChainCtx, fresh: Minter): FramedRel | null =>
   !merged ? null : !ctx.ordered ? merged : ctx.sliced ? null : withFanoutOrder(merged, fresh);
+
+/**
+ * THE FAN-OUT SORT KEY, carried past the merge as two `branchOrder` channels (the role the channel core
+ * declares for exactly this — `identical` merge so every arm agrees on it structurally, `empty` at a
+ * barrier so a batched arm's per-parent key correctly vanishes, `undefined` group). `BORD_PARENT` is
+ * the FROZEN parent position: minted from the branch input's `encounter` and riding each arm UNCHANGED
+ * through its hops (a hop copies a carried channel to its children — `crossFanout`), so all of one
+ * traverser's descendants sort together, which is what makes the merge TRAVERSER-major. `BORD_ARM` is
+ * the arm ordinal. `renumber` reads `[BORD_PARENT, BORD_ARM, payload…]` into a fresh `encounter` and the
+ * pair is dropped — the SLICE half of §10's fan-out mint (`branch-traverser-major.feature`).
+ */
+const BORD_PARENT: Channel = { col: 'bord_p', role: 'branchOrder' };
+const BORD_ARM: Channel = { col: 'bord_a', role: 'branchOrder' };
+
+/** Does a SLICE-demanded branch take the traverser-major lowering here? Only when the input carries no
+ *  branchOrder key already: a branch NESTED inside another's sliced arm would freeze a SECOND parent
+ *  position, and the reference's stacked order (`branch-traverser-major.feature`'s nested scenario)
+ *  needs a KEY STACK this single-level mint does not build — so the inner branch declines cleanly
+ *  rather than dup the channel (which throws) or mis-order. */
+const sliceableBranch = (ctx: ChainCtx, input: Rel): boolean =>
+  ctx.ordered && ctx.sliced
+  // A branch whose input carries NO position has nothing to freeze as the traverser-major key — a
+  // global barrier upstream (`g.V().count().as(x).union(…).limit(…)`) dropped the encounter — so the
+  // slice declines rather than reference a `bord_p` that was never minted.
+  && input.channels.some((channel) => channel.role === 'encounter')
+  && !input.channels.some((channel) => channel.role === 'branchOrder');
+
+/** Freeze the branch input's emission position into a `branchOrder` channel so it survives each arm's
+ *  hops as the traverser-major major key. A no-op where the input carries no position (nothing to
+ *  freeze — the caller only reaches this under `ctx.ordered`, so the input always has one). */
+const augmentParent = (input: Rel, fresh: Minter): Rel => {
+  const enc = encounterOf(input.channels);
+  if (!enc) return input;
+  const channels = withChannel(input.channels, BORD_PARENT);
+  const payload = payloadCols(input);
+  return make.project({
+    id: fresh('bp'), input, channels, type: typeOf(...payload, ...carriedCols(channels)),
+    exprs: [
+      ...payload.map((column) => [column.name, col(input.id, column.name)] as const),
+      ...channels.map((channel) => [channel.col,
+        channel.col === BORD_PARENT.col ? col(input.id, enc.col) : col(input.id, channel.col)] as const),
+    ],
+  });
+};
+
+/** Tag one arm with its ordinal (a `BORD_ARM` channel = `k`) and drop its arm-local emission order —
+ *  the within-(parent, arm) tie is taken from the payload at the re-mint, which every shape has and
+ *  which the slices pinned in `branch-traverser-major.feature` never observe (they fall on traverser
+ *  boundaries). */
+const tagArm = (rel: Rel, k: number, fresh: Minter): Rel => {
+  const dropped = dropEncounter(rel, fresh);
+  const channels = withChannel(dropped.channels, BORD_ARM);
+  const payload = payloadCols(dropped);
+  return make.project({
+    id: fresh('ba'), input: dropped, channels, type: typeOf(...payload, ...carriedCols(channels)),
+    exprs: [
+      ...payload.map((column) => [column.name, col(dropped.id, column.name)] as const),
+      ...channels.map((channel) => [channel.col,
+        channel.col === BORD_ARM.col ? compilerInt(k) : col(dropped.id, channel.col)] as const),
+    ],
+  });
+};
+
+/**
+ * THE TRAVERSER-MAJOR MERGE — a branch whose fan-out is read by a downstream positional SLICE
+ * (`ctx.sliced`). Each arm was lowered from `augmentParent(input)`, so it carries `BORD_PARENT` (its
+ * traverser's frozen position). This tags each with its ordinal, merges through the ordinary
+ * `mergeArms` (which reconciles shape, scalar-meet and variant exactly as the positionless path does —
+ * the sort key is orthogonal, carried as rigid channels), then re-mints `encounter` as a `ROW_NUMBER`
+ * over `[BORD_PARENT, BORD_ARM, payload…]` and drops the two key channels.
+ *
+ * This is `BranchStep.standardAlgorithm`'s barrier-free order — `applyCurrentTraverser` injects ONE
+ * start, drains every arm for it, then the next start (traverser-major, arm-minor)
+ * (`vendor/tinkerpop/gremlin-core/.../branch/BranchStep.java:120-152`) — and `coalesce`/`optional`'s,
+ * which are `FlatMapStep`s that reset per traverser
+ * (`vendor/tinkerpop/gremlin-core/.../branch/CoalesceStep.java:38`). The ARM-major order a `union`/
+ * `choose` with a BATCHED-barrier arm (`hasBarrier`/`armBatches`) presents is a separate lowering: the
+ * batched arm must run over the whole input, which this spine does not build, so the caller declines it
+ * rather than reach here. (Calcite: a plain `Union` carries no collation — `RelMdCollation` — so the
+ * order is IMPOSED as a window, `SqlStdOperatorTable.ROW_NUMBER`.)
+ */
+const mintTraverserMajor = (arms: readonly Tail[], source: Rel, labels: AliasMap, fresh: Minter): FramedRel | null => {
+  const tagged = arms.map((arm, k) => ({ ...arm, rel: tagArm(arm.rel, k, fresh) }));
+  const base = withChannel(withoutEncounter(source.channels), BORD_ARM);
+  const merged = mergeArms(tagged, base, labels, fresh);
+  if (!merged) return null;
+  const rel = merged.rel;
+  // FAIL CLOSED if an arm dropped the sort key: a BATCHED barrier inside an arm empties `branchOrder`
+  // (`CHANNEL_BARRIER_POLICY`), so a `union`/`choose` with a batched arm (already gated by `armBatches`)
+  // and a `coalesce`/`optional` arm whose scoped barrier still collapses the key both arrive here
+  // without `bord_p`/`bord_a`. Re-minting over a column not in scope is a THROW, not a decline — so
+  // this checks rather than assumes (`rel-sweep` caught `union(name.fold, …)` and a count-before-union).
+  if (![BORD_PARENT.col, BORD_ARM.col].every((c) => rel.channels.some((channel) => channel.col === c))) return null;
+  const kept = rel.channels.filter((channel) => channel.role !== 'branchOrder');
+  const outChannels = withChannel(kept, ENCOUNTER);
+  const payload = payloadCols(rel);
+  const outCols = [...payload, ...carriedCols(outChannels)];
+  const terms = [
+    { expr: col(rel.id, BORD_PARENT.col), dir: 'asc' as const },
+    { expr: col(rel.id, BORD_ARM.col), dir: 'asc' as const },
+    ...payload.map((column) => ({ expr: col(rel.id, column.name), dir: 'asc' as const })),
+  ];
+  return { ...merged, rel: renumber(rel, terms, outCols, outChannels, fresh) };
+};
 
 /**
  * The convergent-walk COLLAPSE: `SELECT id, SUM(bulk) … GROUP BY id`, so the frontier stays bounded
@@ -4699,13 +4803,23 @@ function unionArms(
   const bodies = args.map((arg) => bodyOf((arg as { readonly nested: unknown }).nested, ctx.params));
   if (bodies.some((body) => !body?.length)) return null;
 
+  const slice = sliceableBranch(ctx, input);
+  // A `union` is a `BranchStep`: barrier-free it is TRAVERSER-major (`applyCurrentTraverser` injects
+  // one start), but an arm holding a BATCHED barrier sets `hasBarrier` and makes it ARM-major over the
+  // whole input (`BranchStep.java:120-152`). The arm-major lowering — the batched arm running over the
+  // whole input — is not built, so a SLICE-demanded union with a batched arm declines rather than
+  // present a traverser-major subset the reference does not. (`armBatches`, `ir/step.ts`.)
+  if (slice && bodies.some((body) => armBatches(body!))) return null;
+  const source = slice ? augmentParent(input, fresh) : input;
   const arms: Tail[] = [];
   for (const body of bodies) {
-    const arm = continueAs(input, framing, body!, 0, bulked, inBody(ctx), fresh, labels);
+    const arm = continueAs(source, framing, body!, 0, bulked, inBody(ctx), fresh, labels);
     if (!arm) return null;
-    arms.push({ ...arm, rel: dropEncounter(arm.rel, fresh) });
+    arms.push(slice ? arm : { ...arm, rel: dropEncounter(arm.rel, fresh) });
   }
-  return branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, fresh), ctx, fresh);
+  return slice
+    ? mintTraverserMajor(arms, source, labels, fresh)
+    : branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, fresh), ctx, fresh);
 }
 
 /**
@@ -5096,12 +5210,15 @@ function coalesceArms(
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): FramedRel | null {
   if (step.modulators?.length || step.optionArms) return null;
-  // `coalesce` is UNORDERED in the corpus (every `Coalesce.feature` scenario), and a TERMINAL coalesce's
-  // per-traverser order is unobserved anyway (no root demand orders the wire). So the same rule as
-  // `union` holds: the incoming/arm-local position does not survive the merge and is dropped; a
-  // downstream slice/collect that READS the fan-out order (`ctx.ordered`) gets one minted over the
-  // whole fan-out after the merge (`withFanoutOrder`, §10). See `unionArms`.
-  const subject = branchSubject(input, framing);
+  // `coalesce` is a `FlatMapStep` (`CoalesceStep.java:38`), so it resets PER TRAVERSER and is always
+  // traverser-major, arm-minor — never batched. Under a SLICE demand (`ctx.sliced`) that fixes the
+  // subset a downstream `limit`/`tail` takes (`branch-traverser-major.feature`), so the arms lower
+  // from `augmentParent(input)` — freezing the parent position as the major sort key — and merge
+  // through `mintTraverserMajor`. A COLLECT demand takes any deterministic order (`withFanoutOrder`);
+  // a positionless one drops the order (`dropEncounter`). See `unionArms`.
+  const slice = sliceableBranch(ctx, input);
+  const source = slice ? augmentParent(input, fresh) : input;
+  const subject = branchSubject(source, framing);
   if (!subject) return null;
   const args = argValues(step);
   if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
@@ -5112,11 +5229,13 @@ function coalesceArms(
   let exhausted: Expr | undefined;
   for (const [at, body] of bodies.entries()) {
     const domain = exhausted
-      ? make.filter({ id: fresh('coa'), input, channels: input.channels, type: input.type, pred: exhausted })
-      : input;
+      ? make.filter({ id: fresh('coa'), input: source, channels: source.channels, type: source.type, pred: exhausted })
+      : source;
     const arm = continueAs(domain, framing, body!, 0, bulked, inBody(ctx), fresh, labels);
     if (!arm) return null;
-    arms.push({ ...arm, rel: dropEncounter(arm.rel, fresh) });
+    // The slice path keeps each arm's within-arm order for `mintTraverserMajor` to consume; every
+    // other path drops it, as a fresh unordered stream carries none.
+    arms.push(slice ? arm : { ...arm, rel: dropEncounter(arm.rel, fresh) });
     // The LAST arm owes no guard for anyone, so it is not asked for one — a body whose non-production
     // this route cannot express still coalesces when it is last, which is the common `constant(x)`
     // fallback.
@@ -5130,7 +5249,9 @@ function coalesceArms(
     if (!empty) return null;
     exhausted = and(exhausted, empty);
   }
-  return branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, fresh), ctx, fresh);
+  return slice
+    ? mintTraverserMajor(arms, source, labels, fresh)
+    : branchResult(mergeArms(arms, withoutEncounter(input.channels), labels, fresh), ctx, fresh);
 }
 
 function chooseArms(
@@ -5139,12 +5260,11 @@ function chooseArms(
 ): FramedRel | null {
   if (step.modulators?.length) return null;
   if (step.optionArms) return chooseOptions(step, input, framing, bulked, ctx, fresh, labels);
-  // A `choose` is a `BranchStep` like `union` — arm-blocked and UNORDERED (`Choose.feature` asserts
-  // every scenario unordered) — so the same rule holds: the incoming position does not survive the
-  // merge and is dropped; a downstream slice/collect that READS the fan-out order (`ctx.ordered`) gets
-  // one minted over the whole fan-out after the merge (`withFanoutOrder`, §10). See `unionArms`.
-  const subject = branchSubject(input, framing);
-  if (!subject) return null;
+  // A `choose` is a `BranchStep` like `union` — barrier-free it is TRAVERSER-major, a batched-barrier
+  // arm makes it ARM-major (`BranchStep.java`). Only the ARM bodies decide `hasBarrier` (the condition
+  // is a per-traverser predicate, not an option), so a SLICE with a batched then/else arm declines
+  // (arm-major not built); otherwise the arms lower from `augmentParent(input)` and merge through
+  // `mintTraverserMajor`, else the fan-out order is minted for a collect / dropped. See `unionArms`.
   const args = argValues(step);
   if (args.length < 2 || args.length > 3) return null;
   // THE CONDITION MAY BE A BARE PREDICATE, not only a body: `choose(P.eq(29), __.constant('matched'))`
@@ -5160,10 +5280,16 @@ function chooseArms(
   const [then, otherwise] = bodies;
   if (!condition?.length || !then?.length) return null;
 
+  const slice = sliceableBranch(ctx, input);
+  if (slice && [then, otherwise ?? []].some((body) => armBatches(body!))) return null;
+  const source = slice ? augmentParent(input, fresh) : input;
+  const subject = branchSubject(source, framing);
+  if (!subject) return null;
+
   const pred = bodyPredicate(condition, subject, fresh, ctx);
   if (!pred) return null;
   const guarded = (negated: boolean): Rel => make.filter({
-    id: fresh('cg'), input, channels: input.channels, type: input.type,
+    id: fresh('cg'), input: source, channels: source.channels, type: source.type,
     pred: negated ? { kind: 'unary', op: 'not', arg: pred } : pred,
   });
 
@@ -5171,9 +5297,11 @@ function chooseArms(
   // The else arm over ZERO steps is `identity` on the complement — see above.
   const armElse = continueAs(guarded(true), framing, otherwise ?? [], 0, bulked, inBody(ctx), fresh, labels);
   if (!armThen || !armElse) return null;
+  const arms = [armThen, armElse];
+  if (slice) return mintTraverserMajor(arms, source, labels, fresh);
   // Drop the spent position from each arm (an arm-local `order()`/`limit()`), as `union` does — a
   // `choose` is unordered, so the merged stream carries none.
-  const dropped = [armThen, armElse].map((arm) => ({ ...arm, rel: dropEncounter(arm.rel, fresh) }));
+  const dropped = arms.map((arm) => ({ ...arm, rel: dropEncounter(arm.rel, fresh) }));
   return branchResult(mergeArms(dropped, withoutEncounter(input.channels), labels, fresh), ctx, fresh);
 }
 
