@@ -193,10 +193,10 @@ doing while `call()` is mid-migration onto the `rel` arm, not retrofitting after
 
 ## 6. Priority against the other outstanding work
 
-Not the most urgent thing in the tree. `docs/2026-08-07-query-plan-stability.md` describes a 1-hop
-lookup taking 9.8 s on a 20 000-vertex graph because SQLite has no statistics — a traversal that
-exceeds the request budget and fails, **a correctness problem wearing performance clothing**, and it
-comes first.
+Not the most urgent thing in the tree, but no longer blocked: the thing that came first — a 1-hop
+lookup taking 9.8 s on a 20 000-vertex graph because SQLite had no statistics, a traversal that
+exceeded the request budget and failed, **a correctness problem wearing performance clothing** — has
+landed (RelIR plan §1 P4). Edge-side compile is now the next throughput lever.
 
 Different KINDS of problem: plan stability is a bug (a specific wrong decision, with a fix and a
 number). This is architectural — no single request is broken, and the §1 constraint does not go away
@@ -263,8 +263,8 @@ Timings from throwaway benchmark scripts, not committed. Synthetic graph: N `per
 `loadBulk` into `new GraphStore(new BunSqlite(':memory:'))`. Queries run through
 `test/support/executor.ts`, each warmed then timed over 20–200 iterations by cost.
 `parseGremlin`/`compilePlan`/`framed` timed separately, so exec+frame is the residual
-(`total − compile`). Every graph `ANALYZE`d — see `docs/2026-08-07-query-plan-stability.md` for why
-that qualifier is load-bearing and what an unanalyzed run wrongly shows. The store-touch gate (§2·1)
+(`total − compile`). Every graph `ANALYZE`d — see RelIR plan §1 P4 for why that qualifier is
+load-bearing (an unanalyzed graph gives a superlinear plan). The store-touch gate (§2·1)
 wraps `store.query` with a counter and calls `compilePlan` alone, outside any executor.
 
 All numbers `bun:sqlite` 3.53.0 in one process. **Nothing here has been reproduced on workerd**, and

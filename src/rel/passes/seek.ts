@@ -41,8 +41,8 @@ import { exprRels, forEachExpr, mapRelExprs, rewrite, rewriteExpr } from '../wal
  * traversal says about it, but as a correlated `EXISTS` in the `WHERE` there is no way to drive from
  * it — SQLite can only ask it once it already has a candidate row. Lifting it in front seeks
  * `vp_key_value(key, value)` and probes the element scan by rowid: on a 4 000-vertex graph, starting
- * at one vertex instead of at 4 000 (measured 6.2 ms → 0.3 ms, with the join order already pinned;
- * `docs/2026-08-07-query-plan-stability.md` §3·2).
+ * at one vertex instead of at 4 000 (measured 6.2 ms → 0.3 ms, with the join order already pinned).
+ * The platform reason the plan must not lean on stats instead is `relir-build-plan` §1 P4.
  *
  * Three properties make it safe rather than clever:
  *

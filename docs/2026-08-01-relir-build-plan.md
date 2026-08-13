@@ -30,6 +30,19 @@ Facts about the platform, not preferences.
   inert, `LIMIT`/`ORDER BY` cap the whole CTE, `UNION` dedups the whole walk (breaking the multiset
   rule). Nor can a term COLLAPSE: `GROUP BY id, SUM(bulk)` is an aggregate. Do not re-propose
   re-lowering. This is what forces `repeat()`'s two regimes (§9).
+- **P4 — statistics are gatherable but not boundable, so the plan may not depend on them.** DO SQLite
+  accepts `PRAGMA optimize`/`ANALYZE` (they populate `sqlite_stat1`, which persists across
+  hibernations) but **refuses `PRAGMA analysis_limit` with `SQLITE_AUTH`** — the same authorizer that
+  refuses `writable_schema`, not a dialect gap a runtime bump closes. So an unbounded `ANALYZE` is
+  O(graph) on the DO's serial request budget and cannot be capped there. This is why the lowering pins
+  the access path at compile time from what the traversal already states — a join-order fence
+  (`Join.ordered`, the LEFT side is the outer loop; only an `inner` join may carry it) and a source
+  seek that lifts a `has(k,v)`'s correlated `EXISTS` into a driven `DISTINCT` join (`src/rel/passes/seek.ts`,
+  gated `propertySeek`, `GATE_ONLY_FAST_PATHS`). Both are physical statements of a fact the traversal
+  fixed, changing no rows, so the plan is **stable without stats**: a mid-size graph's 1-hop filtered
+  lookup went ~9.8 s (planner guessing, superlinear) → ~19 ms, identical with and without
+  `sqlite_stat1`. ⚠️ Benchmarks must `ANALYZE` or they measure the wrong plan. Gathering stats on a
+  schedule and a plan-stability gate are follow-on optimizations, tracked in `docs/outstanding-work.md`.
 - **P5 — the write envelope.** Legal: CTE→`INSERT … SELECT … RETURNING`; multi-row `INSERT …
   RETURNING`; `INSERT … ON CONFLICT DO UPDATE … RETURNING`; `UPDATE … FROM (subquery)`; `DELETE …
   WHERE … IN (SELECT)`. Illegal: the Postgres-style data-modifying CTE. So a write chain is a SEQUENCE

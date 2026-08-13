@@ -445,12 +445,11 @@ cross-DO federation is not it); persisted queries; a declarative SDL-with-direct
   is fine or the compare-and-swap is needed. Measure it as occupancy, against graph size, since the
   two ends of that range plausibly disagree.
 
-**Two findings from the probes run for §5 are bigger than this document**, and both have their own
-plan: a point-lookup-plus-1-hop on a 20 000-vertex graph takes 9.8 s because SQLite has no statistics
-and inverts the join order (`docs/2026-08-07-query-plan-stability.md`), and compilation turns out to
-touch the store zero times, which makes the whole request path splittable
-(`docs/2026-08-07-edge-compilation-plan.md`). Neither is a prerequisite here. The first is a
-prerequisite for caring about performance at all.
+**Two findings from the probes run for §5 are bigger than this document.** A point-lookup-plus-1-hop
+on a 20 000-vertex graph took 9.8 s because SQLite had no statistics and inverted the join order —
+since fixed by the plan-stability work (RelIR plan §1 P4). And compilation turns out to touch the
+store zero times, which makes the whole request path splittable
+(`docs/2026-08-07-edge-compilation-plan.md`). Neither is a prerequisite here.
 
 ---
 
@@ -465,7 +464,7 @@ locations were read at the pin and are cited inline.
 
 Related: `docs/archive/2026-07-28-match-string-frontend-design.md` (the precedent front end),
 `docs/2026-08-01-relir-build-plan.md` (where Phase 0 lands, and whose worklist it shares),
-`docs/2026-08-07-query-plan-stability.md` and `docs/2026-08-07-edge-compilation-plan.md` (the two
-findings §5's probes turned up, each now its own plan),
+`docs/2026-08-07-edge-compilation-plan.md` (a finding §5's probes turned up; the plan-stability
+finding has since landed, RelIR plan §1 P4),
 `docs/2026-07-28-property-based-testing-l5.md` (the differential-oracle pattern Phase 3 reuses),
 `docs/2026-07-17-agent-memory-vision.md` (the consumer that most wants this surface).

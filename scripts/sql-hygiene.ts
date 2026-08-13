@@ -65,7 +65,7 @@ const canon = (value: any): any =>
  * changes its answer" and reports emission-order change as telemetry that never gates; this script
  * measured the same axis and gated on it, which was the two instruments disagreeing about the
  * standing of one fact rather than a stricter check. Measured when the RelIR spine's join order was
- * pinned (`docs/2026-08-07-query-plan-stability.md` §3·2): 53 corpus traversals reordered, every one
+ * pinned (the fence in `relir-build-plan` §1 P4): 53 corpus traversals reordered, every one
  * of them multiset-identical, and BOTH spines' orders stable under `MOGWAI_REVERSE_UNORDERED=1` —
  * so neither was passing by luck, and neither was more correct.
  *
