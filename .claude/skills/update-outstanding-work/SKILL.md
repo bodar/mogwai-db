@@ -143,11 +143,10 @@ picks an item validates it against code then.
 
 ### 3. Audit technical debt / generic-substrate (subagent, `general-purpose`)
 
-Point it at `src/compiler/`, `src/compiler/steps/`, `src/sql/`, `src/execute.ts` and
-`src/compiler/steps/tail/materialize.ts` (read the nested `CLAUDE.md`s first). Also hand it
-`docs/2026-07-28-shape-vocabulary-architecture.md`, which **refutes three cross-layer refactors** and
-states the bright line (*a Pass may CONSULT shape; it may never CONSTRUCT it*) — tell it not to
-re-propose those. Ask specifically for **places the
+Point it at `src/compiler/`, `src/compiler/rel/`, `src/rel/`, `src/sql/` and `src/execute.ts` (read
+the nested `CLAUDE.md`s first). Also hand it `src/compiler/CLAUDE.md`, whose bright line **refutes the
+cross-layer shape refactors** and states the rule (*a Pass may CONSULT shape; it may never CONSTRUCT
+it*) — tell it not to re-propose those. Ask specifically for **places the
 substrate/lowering could be made more generic** — steps hand-rolling similar SQL that could route
 through a shared seam, fast-paths duplicating the general path, shapes special-cased where a generic
 mechanism exists — plus hard `throw` deferrals and TODO/FIXME. **Expect zero TODO/FIXME markers**:

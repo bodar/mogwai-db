@@ -46,3 +46,26 @@ while what they operate on keeps TinkerPop's.
   finished algebra). Either position must compile the same traversal — turning one off may change the
   PLAN, never whether there is one — and L5's per-switch sweep is what checks that claim. No new
   switch without its differential + perf evidence in the same change.
+- **Shape is CONSULTED, never CONSTRUCTED — the bright line.** Shape may be an annotation a Pass reads
+  and may DECLINE on; it must never be a representation a Pass CONSTRUCTS or a lowering CONSUMES, and
+  sharing across shapes is registration into a Map, never a widening fallback chain. This is a
+  prohibition rather than a convention because of an asymmetry: a fail-closed lowering THROWS, but a
+  declining decoration Pass is SILENT — a shape-guarded Pass that hits an unknown shape silently
+  reproduces the original wrong answer, and L5's differential cannot see it (both configs decline
+  identically). `elementKindAt` (`ir/step.ts`) is the shape of a correct consulter: it answers
+  `vertex`/`edge`/**cannot-say**, the third answer is load-bearing, and it must not grow into a shape
+  annotation. The only shape-specific rewrites that are correct anchor on
+  `VERTEX_PRODUCERS`/`EDGE_PRODUCERS` (`ir/strategies.ts`) — step names whose output shape is fixed by
+  the name alone; `order()`'s output shape is its input's, which is why injecting `has(key)` for a
+  non-productive `by(key)` from a Pass broke every non-element `order().by(key)` form.
+  **Do not re-propose, each refuted by measurement not argument:** (1) adding a shape field to the IR —
+  ran as an experiment (`test/L5-properties/shape-annotation.test.ts`), far above its committed 10%
+  kill bar, so the classifiers stay in the lowering; (2) a designed cross-layer shape *type* — targets
+  ~6% of diagnosed defects while structurally blind to the 33% carried-field-at-a-barrier class, which
+  is killed instead by channel obligations (`src/rel/obligations.ts`, `CHANNEL_GROUP_POLICY`); (3) a
+  typed core IR — already LAW in `docs/2026-08-01-relir-build-plan.md` §2 (shape never enters the
+  `src/rel/` node set). The shape vocabularies themselves landed as that plan's §6·3 three-layer
+  boundary (row algebra → payload projection → byte framing). **The burden on any structural proposal
+  here is a measurement, not a design sketch** — forward-reasoned "this needs a new substrate" has been
+  falsified about a dozen times; the wins were reachability fixes and one measured vocabulary
+  unification (`ScalarType`).

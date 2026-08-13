@@ -11,8 +11,8 @@ per-step support; closed work belongs in git history or `docs/archive/`.
   [the RelIR build plan](./2026-08-01-relir-build-plan.md).
 - **Value carriage and framing.** Preserve exact scalar types through JSON-backed
   collections, member variants, maps, aliases, paths, and format adapters. This also
-  covers meta-property value typing. Start with
-  [the shape vocabulary architecture](./2026-07-28-shape-vocabulary-architecture.md).
+  covers meta-property value typing. The rules are the RelIR plan §6·7; the live gaps
+  are its §10. See [the RelIR build plan](./2026-08-01-relir-build-plan.md).
 - **Set-based writes.** Replace the remaining row-at-a-time write driver with relational
   `Insert`/`Update`/`Delete` programs, then add the read tails and write forms that depend
   on it. See [the RelIR plan](./2026-08-01-relir-build-plan.md).

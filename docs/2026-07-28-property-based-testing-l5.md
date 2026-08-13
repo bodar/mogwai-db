@@ -199,11 +199,11 @@ two of them silent wrong answers. Each is pinned in an L4 `.feature`, so the cei
    `g.E().outV().repeat(__.both("knows")).times(2).count()` gave 4 where 10 is correct — **a wrong answer
    in the default (production) config**.
 
-## Architectural lesson: the anchor rule (superseded framing — see the shape doc)
+## Architectural lesson: the anchor rule (superseded framing — see the bright line)
 
 **This section originally drew the wrong lesson from its own evidence.** It is corrected here rather than
-deleted, because the coarse version got cited. The authority on the boundary is
-`docs/2026-07-28-shape-vocabulary-architecture.md` §6.
+deleted, because the coarse version got cited. The durable authority on the boundary is the bright line
+in `src/compiler/CLAUDE.md`.
 
 The case: non-productive `by(key)` at `order()`, implemented as a `decoration` **Pass** injecting `has(key)`
 before the order — one central place, all four of `order()`'s lowering routes inheriting it. It broke all
@@ -217,13 +217,11 @@ IR and are right to: they anchor on `VERTEX_PRODUCERS`/`EDGE_PRODUCERS` (`ir/str
 names whose output shape is fixed **by the name alone**. `order()`'s output shape is its input shape, so it
 had no such anchor. The failure was not missing information — it was an **unchecked shape claim**.
 
-Two adjacent facts, both from the shape doc. "The IR has no shape" is not a law: `PassContext`
-(`ir/pass.ts:39-55`) has no shape field *and no `ChainFacts` field*, and `analyze()` runs **after**
-`runPasses()` — it is a property of a struct definition. And `child-shape.ts` already holds a syntax-only
-shape **propagation** engine (pure `Step[]` reasoning, no Query or schema); what it cannot do is
-manufacture an entry shape.
+One adjacent fact: "the IR has no shape" is not a law but a property of a struct definition —
+`PassContext` (`ir/pass.ts`) has no shape field *and no `ChainFacts` field* by construction, and
+`ChainFacts` (`ir/analyze.ts`) annotates the chain without rewriting it.
 
-So the rule to apply is the shape doc's, which subsumes this section:
+So the rule to apply is the bright line, which subsumes this section:
 
 > **Shape may be an annotation a Pass CONSULTS and may decline on. It must never be a representation a
 > Pass CONSTRUCTS or lowering CONSUMES. Sharing across shapes is by registration into a Map, never a
@@ -234,12 +232,13 @@ declining decoration Pass is silent.** A shape-guarded Pass hitting `unknown` si
 original wrong answer — and L5's differential cannot see it, because both configs decline identically. The
 loud variant is no better: throwing when element-ness is unprovable would reject every non-element
 `order().by(key)` form that works today, violating "never reject a valid input to keep scope small". Both
-failure modes argue for the anchor rule as a **type-level prohibition** (shape doc §8 step 5) rather than a
-documented convention — this repo has the receipt for the difference in `FastPath.equivalentWhen`, a
-required field whose claim had never been checked.
+failure modes argue for the anchor rule as a **type-level prohibition** rather than a documented
+convention — this repo has the receipt for the difference in `FastPath.equivalentWhen`, a required
+field whose claim had never been checked.
 
 Keep the proportion in view: of 36 diagnosed defects, exactly **one** was missing shape information — this
-revert — and it argues against shape-in-the-IR rather than for it (shape doc §5).
+revert — and it argues against shape-in-the-IR rather than for it (`src/compiler/CLAUDE.md`, the base
+rate).
 
 What survives unchanged is the *mechanical* conclusion, never the contested part: the way to avoid N
 divergent copies in the lowering is one representation-neutral predicate builder each site feeds its own

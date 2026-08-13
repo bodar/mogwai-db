@@ -165,7 +165,7 @@ export type ElementKind = 'vertex' | 'edge';
  * Everything outside the vocabulary below — a branch, a re-entry, a `select`, a child host — answers
  * `undefined`, and the caller leaves such a chain to the lowering.
  *
- * It is not a shape ANNOTATION and must not grow into one: `docs/2026-07-28-shape-vocabulary-architecture.md`
+ * It is not a shape ANNOTATION and must not grow into one: `src/compiler/CLAUDE.md` (the bright line)
  * draws the line that a Pass may CONSULT shape and never CONSTRUCT it, and the reason this stays a local
  * question is that its one caller needs a single fact (vertex or edge) about a single position, where a
  * shape vocabulary carries member encodings, key/value sides and framings it has no business inventing.

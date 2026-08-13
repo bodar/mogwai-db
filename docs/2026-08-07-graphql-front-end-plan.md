@@ -166,8 +166,8 @@ where a flat step chain looks like an information detour. But everything that ma
 element lives at or above the IR: `COALESCE(uid, id)` external ids, label interning, typed property
 values (`vtype`), property-shape polymorphism, the canonical emission order. A front end that
 constructs relational nodes directly has to reproduce all of it, and would be the second producer of
-a vocabulary that has exactly one (`docs/2026-07-28-shape-vocabulary-architecture.md`: a layer may
-CONSULT shape, never CONSTRUCT it). RelIR is where the §2 work lands — it is not the entry point.
+a vocabulary that has exactly one (`src/compiler/CLAUDE.md`, the bright line: a Pass may CONSULT
+shape, never CONSTRUCT it). RelIR is where the §2 work lands — it is not the entry point.
 
 **Why not SQL.** Reimplements the compiler. Nothing to weigh.
 
