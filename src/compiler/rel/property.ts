@@ -4,6 +4,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId } from '../../rel/types.ts';
 import { and, byEncounter, carriedCols, eq, jsonOf, meta, PROPERTIES, storedValueOn, typeOf, type Minter } from './build.ts';
 import { PER_ROW, STATIC } from '../../sql/kernel/render.ts';
+import { storedCompareOn } from './predicate.ts';
 import type { RelFraming } from './framing.ts';
 import type { Elem } from '../plan/plan.ts';
 
@@ -111,6 +112,49 @@ export function propertyPayload(input: Rel, elem: Elem, fresh: Minter): Rel {
     id: fresh('ppl'), input: ordered, channels: [], type: typeOf(...payload.map(([column]) => column)),
     exprs: payload.map(([column, expression]) => [column.name, expression] as const),
   });
+}
+
+// ---------- a property traverser's NATURAL ORDER and its IDENTITY ----------
+//
+// Both questions are answered by the OWNER KIND, and it is the same two-way split for both, because
+// upstream draws it once: a `VertexProperty` IS an `Element` and a `Property` is not.
+//
+// - ORDER. `GremlinValueComparator` dispatches per type
+//   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:166-175`):
+//   `Type.VertexProperty` takes the `elementComparator` — `Comparator.comparing(Element::id, this)` —
+//   while `Type.Property` takes the `propertyComparator`, "sort first by key, then by value".
+// - IDENTITY. `ElementHelper.hashCode(Element)` is `element.id().hashCode()`, and
+//   `ElementHelper.hashCode(Property)` is `key().hashCode() + value().hashCode()`
+//   (`.../structure/util/ElementHelper.java`); `areEqual(Property, Object)` compares key and value and
+//   deliberately does NOT look at the owning element. So `g.V().bothE().properties().dedup().count()`
+//   is 4 on the modern graph and not 6 — the two `0.4` weights and the two `1.0` weights collapse
+//   ACROSS their edges (`gremlin-test/.../features/filter/Dedup.feature:283-292`).
+//
+// A term list rather than one expression, and that is the whole reason these are not `byExpr` arms: an
+// edge `Property`'s order is TWO terms and its identity THREE columns, which a single projection cannot
+// state. They are here because the `p_` prefix is this module's private business.
+
+/** A property traverser's natural sort key(s), in term order — `GremlinValueComparator`'s per-type
+ *  comparator, spelled over the join's own columns. */
+export function propertyOrderTerms(props: Rel, ownerElem: Elem): readonly Expr[] {
+  const own = (name: string): Expr => col(props.id, PROP(name));
+  // A VertexProperty sorts by its id, which for us IS the stored rowid — the same thing `id()` frames.
+  if (ownerElem === 'vertex') return [own('id')];
+  // An edge Property sorts by KEY then VALUE, and the value goes through the one compare authority so a
+  // number carried as decimal TEXT sorts numerically (the reason `order().by('age')` spends it too).
+  return [own('key'), storedCompareOn(own('vtype'))(storedValueOn(own('value'), own('vtype')))];
+}
+
+/** A property traverser's IDENTITY columns — what a bare `dedup()` groups by. */
+export function propertyIdentityKey(props: Rel, ownerElem: Elem): readonly Expr[] {
+  const own = (name: string): Expr => col(props.id, PROP(name));
+  if (ownerElem === 'vertex') return [own('id')];
+  // `vtype` IS part of the key and not decoration: Java's `Integer(1).equals(Double(1.0))` is false,
+  // while SQLite compares INTEGER 1 and REAL 1.0 as EQUAL — so a key of value alone would merge two
+  // properties upstream keeps apart. ⚠️ A row whose `vtype` is NULL (the raw-insert path documented in
+  // `src/storage.ts`) therefore stands apart from a typed row holding the same value; that is the
+  // fail-closed direction, and every property written through the write channel carries one.
+  return [own('key'), storedValueOn(own('value'), own('vtype')), own('vtype')];
 }
 
 // ---------- re-entering a property stream: key() / value() / element() ----------

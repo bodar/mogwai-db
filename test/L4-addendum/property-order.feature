@@ -25,7 +25,6 @@ Feature: mogwai addendum — property stream ordering
       | age |
 
   @gap:property-order
-  @Unsupported
   Scenario: g_E_properties_order_byXdescX_value
     Given the modern graph
     And the traversal of

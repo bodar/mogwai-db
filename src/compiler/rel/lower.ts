@@ -17,7 +17,7 @@ import { meetScalarTypes, memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticT
 import type { Elem } from '../plan/plan.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordNode, recordOf, recordPayload, selectKeys } from './record.ts';
-import { propertyElement, propertyKey, propertyPayload, propertyReadOf, propertyRelation, propertyRowId, propertyValue } from './property.ts';
+import { propertyElement, propertyIdentityKey, propertyKey, propertyOrderTerms, propertyPayload, propertyReadOf, propertyRelation, propertyRowId, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
 import { isColumnArg, isNested, isPred, isTokenArg, stepChain, argValues, arg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
@@ -30,7 +30,7 @@ import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } fro
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
     and, byEncounter, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, labelArgsAllStrings,
-    labelIds, meta, minter, NODE_COLS, notProduced, or, PROPERTIES, renumber, storedValue, typeOf, withMergedVtype, type Minter,
+    labelIds, meta, minter, NODE_COLS, notProduced, or, payloadCols, PROPERTIES, renumber, storedValue, typeOf, withMergedVtype, type Minter,
 } from './build.ts';
 import { bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
@@ -1175,6 +1175,11 @@ const paramOf = (step: IRStep): { limitParam?: string | null; offsetParam?: stri
  *  handlers over one `reprojectRows`. */
 const SLICE_STEPS = new Set(['limit', 'skip', 'range', 'tail', 'sample']);
 
+/** THE STEPS `rowOp` SERVES — every one of them PRESERVES the shape, which is why a tail whose other
+ *  arms are retypes must route them FIRST and then recurse. Declared rather than inferred so a new
+ *  row-algebraic op reaches every shape at once instead of only the tail whose author remembered it. */
+const ROW_OPS: ReadonlySet<string> = new Set(['identity', 'barrier', 'order', 'dedup', ...SLICE_STEPS]);
+
 /** The three steps that apply a CHILD BODY once per traverser. One set rather than three names at the
  *  dispatch, because what separates them is a policy inside the lowering and not which loop owns
  *  them — `perTraverserChild` is where that policy is written down. */
@@ -1330,11 +1335,56 @@ function bulkSlice(
   });
 }
 
-function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, ctx: ChainCtx, fresh: Minter, aliases: AliasMap): Rel | null {
+/**
+ * WHAT A PER-ROW SHAPE OWES the shape-agnostic row-algebraic ops — the whole of what `rowOp` needs to
+ * know about the payload it is slicing, ordering and deduping.
+ *
+ * There are exactly three questions, and every one of them is a fact TinkerPop states per TYPE rather
+ * than per step: which traverser a `by()` reads (`host`), what breaks a tie deterministically when
+ * `order()` has to MINT a position (`tie`), and what makes two traversers THE SAME ONE (`identity`).
+ * `natural` is the fourth only because two shapes answer their own order with a term LIST — see
+ * `naturalSort`.
+ *
+ * Growing this record is how a shape becomes a first-class row participant. It is deliberately NOT the
+ * union of its callers' needs: a shape that cannot answer one of these declines the op, it does not get
+ * a special case inside `rowOp` (§6·6 — the seam must not become the union of its consumers).
+ */
+type RowShape = {
+  readonly host: ChildHost;
+  readonly tie: (input: Rel) => Expr;
+  readonly identity: (input: Rel) => readonly Expr[];
+  /** True when `identity` NAMES THE WHOLE PAYLOAD, so a bare `dedup()` may use the cheap set forms
+   *  (`Distinct` / a grouped aggregate) instead of a ranked window. An element relation's payload IS its
+   *  id; a property relation's is six columns of which the identity is one or three. */
+  readonly identifiedByPayload: boolean;
+  readonly natural?: (input: Rel) => readonly Expr[];
+};
+
+/** The ELEMENT shape — `id` is at once the payload, the identity and the tie-break. */
+const elementRowShape = (input: Rel, elem: Elem, aliases: AliasMap): RowShape => ({
+  host: elementHost(input, elem, aliases),
+  tie: (rel) => col(rel.id, 'id'),
+  identity: (rel) => [col(rel.id, 'id')],
+  identifiedByPayload: true,
+});
+
+/** The PROPERTY shape. Both its order and its identity split on the owner kind, and both citations live
+ *  in `property.ts` — a `VertexProperty` IS an `Element` (compared and hashed by id) while an edge
+ *  `Property` is compared and hashed by KEY and VALUE. */
+const propertyRowShape = (input: Rel, elem: Elem, aliases: AliasMap): RowShape => ({
+  host: { kind: 'property', id: propertyRowId(input), ownerElem: elem, row: { rel: input, aliases } },
+  // The property row's own rowid: deterministic for both owner kinds, even where it is not the identity.
+  tie: propertyRowId,
+  identity: (rel) => propertyIdentityKey(rel, elem),
+  identifiedByPayload: false,
+  natural: (rel) => propertyOrderTerms(rel, elem),
+});
+
+function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean, ctx: ChainCtx, fresh: Minter): Rel | null {
   if (step.optionArms) return null;
   if (!BY_READERS.has(step.name) && step.modulators?.length) return null;
   if (step.name === 'identity' || step.name === 'barrier') return (step.args ?? []).length ? null : input;
-  if (step.name === 'order') return elementOrder(step, input, elem, ctx, fresh, aliases);
+  if (step.name === 'order') return orderRows(step, input, shape.host, ctx, fresh, shape);
   const sliced = sliceOp(step, input, bulked, fresh);
   if (sliced) return sliced;
   if (step.name === 'dedup' && pathCarried(input)) return null;
@@ -1354,7 +1404,14 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, ctx: Chain
   const ordered = !!encounterOf(input.channels);
   const bys = modulations(step, 1, childSeam(ctx, fresh));
   if (!bys) return null;
-  if (bys[0]) return dedupBy(step, bys[0], input, elem, ctx, fresh, aliases);
+  if (bys[0]) return dedupBy(step, bys[0], input, shape, ctx, fresh);
+
+  // A SHAPE WHOSE IDENTITY IS NOT ITS PAYLOAD takes the ranked window instead of the set forms below.
+  // The two arms after this one both project the group key and discard everything else, which is exact
+  // where the payload IS the key (an element `id`) and would erase five columns of a property row. The
+  // window keeps ONE member's payload whole, which is what "the first occurrence survives" means when a
+  // traverser is more than its identity — the honest lowering this comment block predicted.
+  if (!shape.identifiedByPayload) return dedupOn(shape.identity(input), input, shape, fresh);
 
   // `dedup()` RESETS the multiplicity: the survivor stands for itself, not for the sum of the
   // duplicates it replaced.
@@ -1393,22 +1450,53 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, ctx: Chain
   }
   return make.aggregate({
     id: fresh('dd'), input, channels: input.channels, type: typeOf(...elementCols(input.channels)),
-    groupBy: [col(input.id, 'id')],
+    groupBy: shape.identity(input),
     aggs: reductions,
   });
 }
 
 /**
- * `dedup().by(<projection>)` over an ELEMENT relation — the first host to take a real `by()`.
- *
- * It is a `Window` + `Filter`, not a grouped aggregate, and the difference is the reason: the survivor
- * is the one traverser with the LOWEST id per key, and every other column must be ITS values — an
- * `Aggregate` can produce `MIN(id)` but not "the encounter belonging to the row that had it". That is
- * what a ranked window says and an aggregate cannot, so this is the shape legacy emits too.
+ * `dedup().by(<projection>)` — the projection read off the shape's own host, then handed to `dedupOn`.
  *
  * PRODUCTIVITY is the vocabulary's, not this host's: TinkerPop drops a traverser whose `by()` yielded
  * nothing (`DedupGlobalStep.filter` → `product.isProductive()`), and `ProductiveByStrategy` turns that
  * off. `productivityFilter` returns the predicate or `undefined`, so the rule cannot be forgotten here.
+ */
+function dedupBy(
+  step: IRStep, modulation: Modulation, input: Rel, shape: RowShape, ctx: ChainCtx, fresh: Minter,
+): Rel | null {
+  // A comparator on `dedup()` is not a form Gremlin has — `DedupGlobalStep` is not a comparator host —
+  // so an `Order` in its `by()` is a chain `verifyByModulatorArity` never sees. Decline rather than
+  // silently ignoring it.
+  if (modulation.order !== undefined) return null;
+  const key = byExpr(modulation, shape.host, fresh, false, childSeam(ctx, fresh));
+  if (!key) return null;
+  const productive = productivityFilter(step, key);
+  const domain = productive
+    ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: productive })
+    : input;
+  return dedupOn([key], domain, shape, fresh);
+}
+
+/**
+ * A DEDUP ON AN ARBITRARY KEY — `Window` + `Filter`, not a grouped aggregate, and the difference is the
+ * reason: the survivor is ONE traverser and every other column must be ITS values — an `Aggregate` can
+ * produce `MIN(id)` but not "the encounter belonging to the row that had it". That is what a ranked
+ * window says and an aggregate cannot, so this is the shape legacy emits too.
+ *
+ * It serves both callers a `by()` and a shape whose IDENTITY is not its payload can have (`rowOp`), and
+ * that is not a convenience: the two differ only in which expressions partition, so a second copy would
+ * be a second chance to get the survivor rule wrong.
+ *
+ * WHICH traverser survives is the EMISSION-ORDER question, not an id question. TinkerPop keeps the
+ * FIRST occurrence, so the rank orders by the carried position where there is one and falls back to the
+ * shape's own tie-break where there is not — which is the only order a positionless relation has, and
+ * the one legacy uses there too (`ORDER BY <orderSql>, p.id`). Ranking by id alone was right only while
+ * nothing could mint a position: `g.V().order().by('name',desc).dedup().by('age')` then kept the
+ * lowest-id member of each age instead of the first in the sorted stream — the same rows, a different
+ * member, which the census's multiset digest DID see (it is a different set) but no assertion in the
+ * ladder named. The tie-break is always the LAST term, so the rank is DETERMINISTIC rather than merely
+ * ordered — the property `mise run test:perturbed` checks.
  *
  * **`bulk` RESETS to 1, which is the reference's rule and NOT the spelling legacy uses.** TinkerPop's
  * `DedupGlobalStep.filter` calls `traverser.setBulk(1L)` unconditionally — before it even looks at the
@@ -1420,40 +1508,25 @@ function rowOp(step: IRStep, input: Rel, elem: Elem, bulked: boolean, ctx: Chain
  * emits no `GROUP BY` on either spine. So this is not a divergence to reconcile; it is the form that
  * stays correct if that safety rule is ever relaxed, at no cost today.
  */
-function dedupBy(
-  step: IRStep, modulation: Modulation, input: Rel, elem: Elem, ctx: ChainCtx, fresh: Minter, aliases: AliasMap,
+function dedupOn(
+  keys: readonly Expr[], domain: Rel, shape: RowShape, fresh: Minter,
 ): Rel | null {
-  // A comparator on `dedup()` is not a form Gremlin has — `DedupGlobalStep` is not a comparator host —
-  // so an `Order` in its `by()` is a chain `verifyByModulatorArity` never sees. Decline rather than
-  // silently ignoring it.
-  if (modulation.order !== undefined) return null;
-  const key = byExpr(modulation, elementHost(input, elem, aliases), fresh, false, childSeam(ctx, fresh));
-  if (!key) return null;
-
-  const productive = productivityFilter(step, key);
-  const domain = productive
-    ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: productive })
-    : input;
-  const cols = elementCols(input.channels);
-  // WHICH traverser survives is the EMISSION-ORDER question, not an id question. TinkerPop keeps the
-  // FIRST occurrence, so the rank orders by the carried position where there is one and falls back to
-  // the element id where there is not — which is the only order a positionless relation has, and the
-  // one legacy uses there too (`ORDER BY <orderSql>, p.id`). Ranking by id alone was right only while
-  // nothing could mint a position: `g.V().order().by('name',desc).dedup().by('age')` then kept the
-  // lowest-id member of each age instead of the first in the sorted stream — the same rows, a
-  // different member, which the census's multiset digest DID see (it is a different set) but no
-  // assertion in the ladder named.
+  // The PAYLOAD survives whole, which is what makes this form serve a traverser that is more than its
+  // identity: only `bulk` is rewritten.
+  const cols = [...payloadCols(domain), ...carriedCols(domain.channels)];
   const position = encounterOf(domain.channels);
   const ranked = make.window({
-    id: fresh('dw'), input: domain, channels: domain.channels, type: typeOf(...cols, meta('rn', 'int')),
+    // A `Window` may only EXTEND its input (§3.5), so its declared type is the INPUT's columns IN THE
+    // INPUT'S ORDER plus the rank — NOT `cols`. The two differ for a property relation, whose join
+    // declares the element side's channels BETWEEN the two payload halves; the projection below is where
+    // the canonical payload-then-channels layout (`build.ts`) is restored.
+    id: fresh('dw'), input: domain, channels: domain.channels, type: typeOf(...domain.type.cols, meta('rn', 'int')),
     specs: [['rn', {
       kind: 'window-expr', fn: 'row_number', args: [],
-      // The element id is always the last term, so the rank is DETERMINISTIC rather than merely
-      // ordered — the property `mise run test:perturbed` checks.
       spec: {
-        partitionBy: [key],
+        partitionBy: keys,
         orderBy: [...(position ? [{ expr: col(domain.id, position.col), dir: 'asc' as const }] : []),
-          { expr: col(domain.id, 'id'), dir: 'asc' as const }],
+          { expr: shape.tie(domain), dir: 'asc' as const }],
       },
     }]],
   });
@@ -1462,7 +1535,7 @@ function dedupBy(
     pred: eq(col(ranked.id, 'rn'), compilerInt(1)),
   });
   return make.project({
-    id: fresh('dk'), input: survivors, channels: input.channels, type: typeOf(...cols),
+    id: fresh('dk'), input: survivors, channels: domain.channels, type: typeOf(...cols),
     exprs: cols.map((column) => [column.name,
       column.name === 'bulk' ? compilerInt(1) : col(survivors.id, column.name)] as const),
   });
@@ -1475,41 +1548,6 @@ const remintOrder = (rel: Rel, encounter: Channel, fresh: Minter): Rel => renumb
   [{ expr: col(rel.id, encounter.col), dir: 'asc' }, { expr: col(rel.id, 'id'), dir: 'asc' }],
   elementCols(rel.channels), rel.channels, fresh,
 );
-
-/**
- * ELEMENT `order()` — a MINT of the emission-order channel, and the step the model change was for.
- *
- * There is no new machinery, which is the point: an element relation's order IS the `encounter`
- * channel, and the element materialization already emits `ORDER BY p.encounter` whenever that
- * channel is live — so the whole of `order()` is "renumber by the sort key", the same `renumber` the
- * fan-out re-mint and scalar `order()` already share. `analyzeChain` reports `demandsEncounter`
- * FALSE for these chains (legacy folds the order into the framing clause and needs no channel at
- * all), so the source seeded nothing and this MINTS one — the case a chain-global boolean threaded
- * from the source structurally could not express.
- *
- * Two tie-breaks, and which applies is semantic rather than incidental. Re-minting over a carried
- * position tie-breaks on THAT position, which is what makes the sort STABLE (legacy's
- * `partitionedOrder` says the same). Minting from nothing has no arriving position to be stable
- * against, so it tie-breaks on the element id — deterministic rather than "whichever row SQLite
- * produced first", which is the defect `mise run test:perturbed` exists to find.
- *
- * **NOT a `Sort` of the core relation with the framing on top:** a JOIN's output order is
- * unspecified, so the framing join may return sorted rows in any order — and on a six-vertex
- * fixture it will reliably return the flattering one, which no assertion in the ladder would catch.
- * Minting the channel is what makes the order survive the join, and it is also what makes `order()`
- * COMPOSE: a fold into the framing `ORDER BY` can only happen once, at the end.
- */
-function elementOrder(step: IRStep, input: Rel, elem: Elem, ctx: ChainCtx, fresh: Minter, aliases: AliasMap): Rel | null {
-  const sort = sortTerms(step, elementHost(input, elem, aliases), ctx, fresh);
-  if (!sort) return null;
-  const domain = sort.drop
-    ? make.filter({ id: fresh('f'), input, channels: input.channels, type: input.type, pred: sort.drop })
-    : input;
-  const carried = encounterOf(domain.channels);
-  const channels = carried ? domain.channels : withChannel(domain.channels, ENCOUNTER);
-  const tie = col(domain.id, carried ? carried.col : 'id');
-  return renumber(domain, [...sort.terms, { expr: tie, dir: 'asc' }], elementCols(channels), channels, fresh);
-}
 
 /**
  * The convergent-walk COLLAPSE: `SELECT id, SUM(bulk) … GROUP BY id`, so the frontier stays bounded
@@ -1952,6 +1990,81 @@ function sortTerms(
 }
 
 /**
+ * `order()` OVER ROWS — the ONE engine every per-row tail routes through, element, scalar, record and
+ * property alike. It was three near-identical copies (an element arm, a scalar arm, a record arm) whose
+ * only real differences are the two parameters below; a fourth copy for the property stream is what
+ * made consolidating it the cheaper move.
+ *
+ * The rule it holds is the one all three copies stated in their own words: **a sort SUPERSEDES the
+ * arriving emission order, so the position must be RE-MINTED and not merely re-sorted.** A later slice
+ * reads the channel, and taking its window from the stale seed returns the right multiset from the
+ * wrong place. Where no position is carried this MINTS one — the case a chain-global boolean threaded
+ * from the source structurally could not express — because an order that is not a column cannot survive
+ * a relation boundary, and minting it is also what makes `order()` COMPOSE (a fold into the framing
+ * `ORDER BY` can only happen once, at the end).
+ *
+ * Re-minting tie-breaks on the ARRIVING position, which is what makes the sort STABLE (legacy's
+ * `partitionedOrder` says the same). Minting fresh has nothing to be stable against, so `tie` is the
+ * payload's own deterministic last resort — the element rowid, the property rowid — and `undefined`
+ * where equal keys are genuinely interchangeable (a value stream). Determinism, not mere ordering, is
+ * the property `mise run test:perturbed` exists to check.
+ *
+ * The rebuilt columns are `payloadCols` + the channels rather than any shape's own list, which is what
+ * lets a property relation (six payload columns) through the same door as an element one (`id`).
+ *
+ * **NOT a `Sort` of the core relation with the framing on top:** a JOIN's output order is unspecified,
+ * so the framing join may return sorted rows in any order — and on a six-vertex fixture it will reliably
+ * return the flattering one, which no assertion in the ladder would catch. Minting the channel is what
+ * makes the order survive the join. `analyzeChain` reports `demandsEncounter` FALSE for these chains, so
+ * the source seeded nothing and this MINTS one — the case a chain-global boolean threaded from the
+ * source structurally could not express.
+ *
+ * `natural` is the host's own answer for an identity `by()`, and it exists because for two shapes the
+ * natural order is NOT one expression: an edge `Property` compares by key THEN value
+ * (`GremlinValueComparator`, cited in `property.ts`), which no single `byExpr` can state.
+ */
+function orderRows(
+  step: IRStep, rel: Rel, host: ChildHost, ctx: ChainCtx, fresh: Minter,
+  opts: { readonly tie?: (input: Rel) => Expr; readonly natural?: (input: Rel) => readonly Expr[] } = {},
+): Rel | null {
+  const sort = naturalSort(step, rel, ctx, fresh, opts.natural) ?? sortTerms(step, host, ctx, fresh);
+  if (!sort) return null;
+  const domain = sort.drop
+    ? make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: sort.drop })
+    : rel;
+  const carried = encounterOf(domain.channels);
+  const channels = carried ? domain.channels : withChannel(domain.channels, ENCOUNTER);
+  const tie = carried ? col(domain.id, carried.col) : opts.tie?.(domain);
+  return renumber(
+    domain,
+    tie ? [...sort.terms, { expr: tie, dir: 'asc' }] : sort.terms,
+    [...payloadCols(domain), ...carriedCols(channels)],
+    channels, fresh,
+  );
+}
+
+/**
+ * THE TRAVERSER'S OWN ORDER, for a host that answers it as a TERM LIST — or `null` when this `order()`
+ * is not asking for it, which sends the caller back to the single-expression `sortTerms`.
+ *
+ * Two spellings ask for it and no others: no `by()` at all, and a `by()` that names only a DIRECTION.
+ * `by(desc)` reverses EVERY term, because it is one comparator over the whole traverser rather than a
+ * per-column flag. `shuffle` is deliberately not answered here — `RANDOM()` is `sortTerms`' own arm and
+ * has no subject at all.
+ */
+function naturalSort(
+  step: IRStep, rel: Rel, ctx: ChainCtx, fresh: Minter, natural?: (input: Rel) => readonly Expr[],
+): { readonly terms: readonly SortTerm[]; readonly drop?: Expr } | null {
+  if (!natural || isLocalScope(step) || (step.args ?? []).length) return null;
+  const bys = modulations(step, 1, childSeam(ctx, fresh));
+  if (!bys) return null;
+  const only = bys[0];
+  if (only && (only.key.kind !== 'identity' || only.order === 'shuffle')) return null;
+  const dir = only?.order === 'desc' ? 'desc' : 'asc';
+  return { terms: natural(rel).map((expr) => ({ expr, dir })) };
+}
+
+/**
  * THE SCALAR TAIL — the vocabulary above a one-value-per-row relation, wherever that relation came
  * from. `values()`/`count()` retyping an element stream and `inject()` seeding one both land here,
  * which is why it is a function and not two inline folds.
@@ -2145,37 +2258,12 @@ function scalarTail(
       continue;
     }
 
+    // `orderRows` owns the whole rule (re-mint, productivity drop, stability). No `tie`: equal keys over
+    // a VALUE stream are interchangeable, so the sort terms are the whole order.
     if (step.name === 'order') {
-      const sort = sortTerms(step, host, ctx, fresh);
-      if (!sort) return null;
-      const { terms } = sort;
-      // A value's `by()` is identity-only (a value has no properties), so `drop` is never owed here —
-      // applying it anyway keeps the rule in ONE place rather than in each host's head.
-      if (sort.drop) rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: sort.drop });
-      // A sort SUPERSEDES the arriving emission order, so where one is carried the positions must be
-      // re-minted and not merely re-sorted: a later slice reads the channel, and taking its window
-      // from the stale seed would return the right multiset from the wrong place. Legacy says the
-      // same thing with its own window projection (`partitionedOrder`), tie-broken on the old
-      // encounter — which is what makes the sort STABLE, so that is the second term here too.
-      // A sort MINTS the emission order where none is carried and RE-MINTS where one is, which is the
-      // same rule the element host follows and for the same reason: an order that is not a column
-      // cannot survive a relation boundary. Legacy's answer without one is `ROW_NUMBER() OVER ()` plus
-      // `COUNT(*) OVER ()` reading a CTE's incidental scan order — which is what `tail()` after a
-      // scalar `order()` needs, and which is only right while SQLite happens to preserve it. A column
-      // is the honest form, and it is what makes the position COMPOSE: a following `tail` reads the
-      // order backwards, a slice takes its window from it, and the root reports it.
-      //
-      // Re-minting tie-breaks on the ARRIVING position (which is what makes the sort STABLE, legacy's
-      // `partitionedOrder`); minting fresh has nothing to be stable against, and equal keys over a
-      // value stream are interchangeable, so the terms are the whole order.
-      const encounter = encounterOf(rel.channels);
-      const channels = encounter ? rel.channels : withChannel(rel.channels, ENCOUNTER);
-      rel = renumber(
-        rel,
-        encounter ? [...terms, { expr: col(rel.id, encounter.col), dir: 'asc' }] : terms,
-        encounter ? rel.type.cols : [...rel.type.cols, meta(ENCOUNTER.col, 'int')],
-        channels, fresh,
-      );
+      const ordered = orderRows(step, rel, host, ctx, fresh);
+      if (!ordered) return null;
+      rel = ordered;
       continue;
     }
 
@@ -4039,7 +4127,7 @@ function elementTail(
       const dropped = elementDrop(rel, elem, fresh);
       return { rel: dropped.result, framing: { kind: 'discard' }, aliases: NO_ALIASES, effects: dropped.bindings, bulked: false };
     }
-    const row = rowOp(step, rel, elem, bulked, ctx, fresh, labels);
+    const row = rowOp(step, rel, elementRowShape(rel, elem, labels), bulked, ctx, fresh);
     if (!row) break;
     // A `dedup()` THAT LOWERED RESET THE MULTIPLICITY, and the fold learns it. Every arm `rowOp`
     // admits projects `bulk` as the literal 1 — the unordered `Distinct`, the ordered
@@ -4133,8 +4221,13 @@ function continueAs(
  * hands the relation plus its new framing straight back to `continueAs` and whichever loop owns that
  * shape takes the rest of the chain. That is why this loop is four lines and not a second fold.
  *
- * Anything else DECLINES. A filter or a slice over a property stream is expressible and is simply
- * not built yet; declining hands it to legacy rather than dropping the property silently.
+ * THE ROW-ALGEBRAIC OPS COME FIRST and are the SHARED ones: a property stream is a per-row traverser
+ * like any other, so `order()`, `dedup()` and the slices route through `rowOp` with a property
+ * `RowShape` rather than through property-specific arms. Both of that shape's answers split on the OWNER
+ * KIND, which is upstream's own line — a `VertexProperty` IS an `Element` and an edge `Property` is not
+ * — and both citations live in `property.ts`. They keep the shape, so they recurse rather than retyping.
+ *
+ * Anything else DECLINES.
  */
 function propertyTail(
   rel: Rel, elem: Elem, steps: readonly IRStep[], from: number,
@@ -4142,6 +4235,14 @@ function propertyTail(
 ): Tail | null {
   if (from === steps.length) return { rel, framing: { kind: 'property', ownerElem: elem }, aliases: labels, bulked: false };
   const step = steps[from]!;
+
+  if (ROW_OPS.has(step.name)) {
+    const row = rowOp(step, rel, propertyRowShape(rel, elem, labels), bulked, ctx, fresh);
+    // A `dedup()` that lowered RESET the multiplicity — `dedupOn` projects `bulk` as the literal 1 — so
+    // the fold learns it, for `elementTail`'s reason: a stale `bulked` sends a following slice to
+    // `bulkSlice`, which declines without an emission order.
+    return row && propertyTail(row, elem, steps, from + 1, step.name === 'dedup' ? false : bulked, ctx, fresh, labels);
+  }
 
   // THE GROUP BARRIER, over a property stream. It needs nothing property-specific: `groupBarrier` asks
   // its host for a key and a member, and a property host answers both — the three projections a `by()`
@@ -4235,20 +4336,9 @@ function recordTail(
     }
 
     if (step.name === 'order') {
-      const sort = sortTerms(step, host, ctx, fresh);
-      if (!sort) return null;
-      if (sort.drop) rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: sort.drop });
-      // A sort SUPERSEDES the arriving order and must RE-MINT the position, for the scalar tail's
-      // reason: a later slice reads the channel, and taking its window from the stale seed returns the
-      // right multiset from the wrong place.
-      const encounter = encounterOf(rel.channels);
-      const channels = encounter ? rel.channels : withChannel(rel.channels, ENCOUNTER);
-      rel = renumber(
-        rel,
-        encounter ? [...sort.terms, { expr: col(rel.id, encounter.col), dir: 'asc' }] : sort.terms,
-        encounter ? rel.type.cols : [...rel.type.cols, meta(ENCOUNTER.col, 'int')],
-        channels, fresh,
-      );
+      const ordered = orderRows(step, rel, host, ctx, fresh);
+      if (!ordered) return null;
+      rel = ordered;
       continue;
     }
 

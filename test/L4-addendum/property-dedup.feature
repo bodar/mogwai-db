@@ -1,7 +1,6 @@
 Feature: mogwai addendum — property stream deduplication
 
   @gap:property-dedup
-  @Unsupported
   Scenario: g_V_both_properties_dedup_count
     Given the modern graph
     And the traversal of
