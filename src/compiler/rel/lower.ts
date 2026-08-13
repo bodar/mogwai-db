@@ -42,7 +42,7 @@ import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
-import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
+import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { edgeEndpoint, elementPayload } from './element.ts';
 import { foreignLabelValue, foreignRejoin, foreignRelation, foreignValues } from './foreign.ts';
@@ -4236,6 +4236,16 @@ function continueAs(
     const reSourced = reSource(next, rel, framing, ctx, fresh);
     return reSourced && elementTail(reSourced.rel, reSourced.elem, steps, from + 1, bulked, ctx, fresh, labels);
   }
+  // A LIST FUNCTION OVER A TRAVERSER THAT IS NOT A COLLECTION is the traversal's own ANSWER — an error —
+  // and this is the one dispatcher that knows both the step and the shape, which is why the check is here
+  // rather than in each tail. `ListFunction.convertTraverserToCollection` raises for anything
+  // `asCollection` cannot convert, and every shape below can never be null, so the message is CERTAIN.
+  //
+  // ⚠️ A SCALAR self is deliberately absent: there the choice between "can't be null" and "can only take
+  // an array or an Iterable" is a PER-ROW question, and answering one for a value that may be either
+  // would raise the WRONG error. It keeps declining until the null-ness is a compile-time fact.
+  if (next && LIST_FUNCTIONS.has(next.name) && NON_ITERABLE_SELF.has(framing.kind))
+    nonIterableTraverser(next, gremlinSelfName(framing));
   switch (framing.kind) {
     case 'elements': return elementTail(rel, framing.elem, steps, from, bulked, ctx, fresh, labels);
     case 'detached': return detachedTail(rel, framing.elem, steps, from, ctx, fresh);
@@ -4475,6 +4485,16 @@ function recordTail(
  *   raw column names collide and the merge owes each arm a projection remapping onto a canonical
  *   column. That is the alias half of the merge contract and it is a further increment.
  */
+/** The traverser shapes that are NEVER a collection and NEVER null — so a list function over one raises
+ *  with certainty. `list` and `path` ARE iterable (a path coerces to its element sequence); `scalar` is
+ *  the per-row case above; `variant`/`discard` cannot say. */
+const NON_ITERABLE_SELF: ReadonlySet<RelFraming['kind']> = new Set(['elements', 'detached', 'map', 'mapEntry', 'record', 'property']);
+
+/** What the offending traverser IS, for the `encountered %s` tail. */
+const gremlinSelfName = (framing: RelFraming): string =>
+  framing.kind === 'elements' || framing.kind === 'detached' ? framing.elem
+    : framing.kind === 'property' ? 'property' : 'map';
+
 /** The three steps that MERGE arms over the same input. One set and one dispatcher, so a tail gains all
  *  three at once — the asymmetry this replaces was `union` in the scalar fold and `union`+`choose` in the
  *  element one, with `coalesce` in neither. */

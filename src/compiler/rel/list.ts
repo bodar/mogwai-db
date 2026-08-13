@@ -8,8 +8,10 @@ import { isNested, isPred, argValues } from '../../gremlin/frontend.ts';
 import { isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
+import type { RelFraming } from './framing.ts';
 import { byEncounter, carriedCols, coalesce, collectedOf, EMPTY_ARRAY, fenced, jsonOf, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
+import { ValueParseError } from '../../gremlin/coerce.ts';
 import { byExpr, modulations, orderProductivity } from './modulator.ts';
 import { elementObject } from './element.ts';
 import type { Elem } from '../plan/plan.ts';
@@ -919,6 +921,47 @@ const SET_RESULT = new Set(['intersect', 'difference', 'disjunct', 'merge']);
 const OPERAND = { value: 'ov', ord: 'oo' } as const;
 
 /**
+ * THE LIST-FUNCTION STEPS and their SHAPE ERRORS — the traversal's ANSWER is an error, so these RAISE
+ * (§6·5's `ValueParseError` channel) rather than declining.
+ *
+ * Every one of them implements `ListFunction`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/util/ListFunction.java`),
+ * which is where all six messages live and why they are parameterised by the step NAME rather than
+ * written out five times: `asCollection` returns null for anything that is not an array or an `Iterable`,
+ * and each of the three converters raises its own pair. SQL cannot raise, and the shape is a COMPILE-TIME
+ * fact for every case below, so the throw happens here and travels out through the lowering — exactly
+ * `asNumber('1,000')`'s route.
+ *
+ * ⚠️ **Only where the shape is statically CERTAIN.** A SCALAR self is a per-row question — `items` being
+ * null selects `nullTraverser` and anything else selects `nonIterableTraverser`, and picking one for a
+ * value that may be either would answer with the WRONG ERROR. So the scalar self keeps declining; an
+ * ELEMENT / MAP / RECORD / PROPERTY traverser can never be null, which is what makes its message certain.
+ */
+export const LIST_FUNCTIONS: ReadonlySet<string> = new Set([...SET_OPS, 'conjoin']);
+
+/** `%s step can only take an array or an Iterable type for incoming traversers, encountered %s` — the
+ *  SELF is not a collection. The trailing class is Java's and the corpus matches on the prefix, so the
+ *  Gremlin type name goes there instead of inventing a Java one. */
+export const nonIterableTraverser = (step: IRStep, encountered: string): never => {
+  throw new ValueParseError(
+    `${step.name} step can only take an array or an Iterable type for incoming traversers, encountered ${encountered}`);
+};
+
+/** The operand's two, from `convertArgumentToCollection` (a literal) and `convertTraversalToCollection`
+ *  (a traversal). Which pair applies is decided by the ARGUMENT's own form, which is why this takes it. */
+export const nonIterableArgument = (step: IRStep, arg: unknown, encountered: string | null): never => {
+  const traversal = isNested(arg);
+  if (encountered === null) {
+    throw new ValueParseError(traversal
+      ? `Provided traversal argument for ${step.name} step must yield an iterable type, not null`
+      : `Argument provided for ${step.name} step can't be null.`);
+  }
+  throw new ValueParseError(traversal
+    ? `Provided traversal argument for ${step.name} step must yield an iterable type, encountered ${encountered}`
+    : `${step.name} step can only take an array or an Iterable as an argument, encountered ${encountered}`);
+};
+
+/**
  * A set-op OPERAND as a list expression, or `null` to decline — three forms, one question.
  *
  * A literal ARRAY and `constant(c).fold()` are both COMPILE-TIME lists (the second a one-member one,
@@ -934,11 +977,17 @@ const OPERAND = { value: 'ov', ord: 'oo' } as const;
  * its statements are `Plan` bindings the operand expression cannot carry, so splicing only the
  * relation would drop the write and leave a `Ref` naming a binding that was never made.
  */
-function operandList(arg: unknown, child: ChildSeam): { readonly expr: Expr; readonly of: ListOf } | null {
+function operandList(step: IRStep, arg: unknown, child: ChildSeam): { readonly expr: Expr; readonly of: ListOf } | null {
   const literal = (members: readonly unknown[]) =>
     ({ expr: { kind: 'call', fn: 'jsonb', args: [lit(JSON.stringify(members), 'text')] } as Expr, of: BARE_LIST });
   if (Array.isArray(arg)) return literal(arg);
-  if (!isNested(arg)) return null;
+  // A LITERAL THAT IS NOT A COLLECTION is the reference's own error and not a shape we have yet to learn:
+  // `asCollection` returns null for it and `convertArgumentToCollection` raises. `null` is its own message,
+  // which is why `nonIterableArgument` takes the type separately rather than deriving it from the value.
+  if (!isNested(arg)) {
+    if (arg === undefined) return null;
+    return nonIterableArgument(step, arg, arg === null ? null : gremlinTypeOfValue(arg));
+  }
   const inner = child.body((arg as { readonly nested: unknown }).nested, 'child');
   if (!inner?.length) return null;
   if (inner.length === 2 && inner[0]?.name === 'constant' && inner[1]?.name === 'fold') {
@@ -946,19 +995,60 @@ function operandList(arg: unknown, child: ChildSeam): { readonly expr: Expr; rea
     if (extra !== undefined || value === undefined) return null;
     return literal([value]);
   }
+  // A BARE `constant(v)` operand — no `fold()` — YIELDS v, and a value is not iterable. Same compile-time
+  // fact as the folded form one line up and the same authority answers it; `constant(null)` takes the
+  // `not null` wording, which is why the type is passed as `null` rather than derived.
+  if (inner.length === 1 && inner[0]!.name === 'constant') {
+    const [value, extra] = argValues(inner[0]!);
+    if (extra !== undefined || value === undefined || Array.isArray(value)) return null;
+    return nonIterableArgument(step, arg, value === null ? null : gremlinTypeOfValue(value));
+  }
   const read = child.rooted(inner);
-  if (!read || read.effects?.length || read.framing.kind !== 'list') return null;
+  // A DECLINING operand stays a decline — we cannot type what did not lower, and §6·5's fail-open rule
+  // applies exactly here. A LOWERED operand whose framing is not a list IS the reference's error: the
+  // traversal yielded a value that is not iterable, and we know which one.
+  if (!read || read.effects?.length) return null;
+  if (read.framing.kind !== 'list') {
+    const yielded = gremlinTypeOfFraming(read.framing);
+    return yielded === null ? null : nonIterableArgument(step, arg, yielded);
+  }
   return { expr: { kind: 'scalar', plan: read.rel }, of: read.framing.of };
 }
+
+/** A LITERAL's Gremlin type name, for the `encountered %s` tail. Java prints a class there and the corpus
+ *  matches on the prefix, so naming the Gremlin type is both checkable and more useful to a client than a
+ *  Java class we do not have. */
+const gremlinTypeOfValue = (value: unknown): string =>
+  typeof value === 'string' ? 'string'
+    : typeof value === 'boolean' ? 'boolean'
+      : typeof value === 'bigint' ? 'long'
+        : typeof value === 'number' ? (Number.isInteger(value) ? 'integer' : 'double')
+          : value instanceof Map ? 'map' : 'object';
+
+/** What a lowered operand YIELDED, as a Gremlin type name — or `null` where the framing cannot say, which
+ *  fails open rather than naming a type the answer does not have. A `path` is deliberately absent: it
+ *  coerces to its element sequence and IS iterable, so it never reaches here. */
+const gremlinTypeOfFraming = (framing: RelFraming): string | null =>
+  framing.kind === 'elements' || framing.kind === 'detached' ? framing.elem
+    : framing.kind === 'scalar' ? (framing.type.kind === 'static' ? framing.type.type : 'object')
+      : framing.kind === 'map' || framing.kind === 'mapEntry' ? 'map'
+        : framing.kind === 'property' ? 'property'
+          : framing.kind === 'record' ? 'map'
+            : null;
 
 export function listSetOp(
   step: IRStep, input: Rel, of: ListOf, terminal: boolean, child: ChildSeam, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf; readonly set?: boolean } | null {
-  if (step.modulators?.length || step.optionArms || !SET_OPS.has(step.name) || !isBareList(of)) return null;
+  if (step.modulators?.length || step.optionArms || !SET_OPS.has(step.name)) return null;
   const [arg, extra] = argValues(step);
   if (extra !== undefined) return null;
-  const resolved = operandList(arg, child);
-  if (!resolved || !isBareList(resolved.of)) return null;
+  // ⚠️ THE OPERAND IS RESOLVED BEFORE THE SELF'S MEMBER ENCODING IS GATED, and the order is the whole
+  // difference between an ERROR and a decline: a non-iterable operand is the traversal's own answer
+  // whatever the self's members are, so testing `isBareList(of)` first turned every element-member list's
+  // `combine(2)` into a silent decline. The self gate stays — an element-member set op is a rowid
+  // comparison nobody has built yet — but it stays AFTER the thing that raises.
+  const resolved = operandList(step, arg, child);
+  if (!resolved || !isBareList(resolved.of) || !isBareList(of)) return null;
   const rel = fenced(input, fresh);
 
   // BOTH SIDES IN ONE VOCABULARY: bare payloads. A typed list's members MAY be `{t,v}` envelopes, and
