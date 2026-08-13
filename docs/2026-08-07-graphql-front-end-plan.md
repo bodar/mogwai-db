@@ -3,23 +3,30 @@
 **A PLAN — nothing here has landed.** Every capability claim in §2 is a **probe result** (method: §10).
 The one dependency is approved (§7·4).
 
-The question this answers: *how well does GraphQL map onto a graph database, and if it maps well,
-what is the natural layer to attach it to — Gremlin, the RelIR, or SQLite?*
+**What this answers.** A mogwai graph is driven the normal way, over Gremlin. This doc is about the
+*other* caller: a client that speaks only GraphQL, pointed at that same graph. The question is **which
+of GraphQL's own features that client gets, which it does not, and why** — and, where the answer is
+"not yet", the layer to build it (the IR — §3).
 
-Short answer: **it maps well on shape and badly on traversal**, the natural layer is **the IR**, and
-the work is dominated not by GraphQL but by gaps GraphQL merely forces. Which is the good outcome:
-those gaps are the **top families of the RelIR fold's own worklist** (§2), so one build closes the
-GraphQL requirement and moves the engine's main line at the same time.
+It is deliberately NOT about what Gremlin can do that GraphQL cannot. A GraphQL client never asks for a
+traversal, a `path()` or a `sack()`, so "GraphQL can't express them" is not a gap — it is the surface
+working as designed. The only features that count here are the ones in GraphQL's own spec.
+
+**Short answer:** most of the GraphQL surface maps directly (§1·1); the features that need help
+(deep/recursive relationships, aggregation — §1·2) are the ones every GraphQL-over-a-database product
+solves the same way, with a directive or a schema convention. And the engine work they require is the
+**top of the RelIR fold's own worklist** (§2), so serving GraphQL and advancing the engine's main line
+are a single build.
 
 ---
 
-## 1. How well does GraphQL map?
+## 1. The GraphQL feature surface — which features a GraphQL client gets
 
 GraphQL is not a graph query language. It is a **hierarchical field-selection language over a typed
-schema**: the *schema* is a graph, but every *query* is a tree, of statically-known finite depth.
-That single property decides everything below.
+schema**: the *schema* is a graph, but every *query* is a tree of statically-known finite depth.
+That one property decides which features serve cleanly and which need help.
 
-### 1·1 What maps cleanly
+### 1·1 Features that work
 
 | GraphQL | Gremlin / IR |
 |---|---|
@@ -33,23 +40,35 @@ That single property decides everything below.
 | `orderBy` | `order().by(k, asc\|desc)` |
 | `filter` args | `has(k, P.…)` |
 | `__typename` | `label()` |
+| `@skip` / `@include` | resolved at translation — the field is kept or dropped |
+| Interfaces / unions | `hasLabel()` type dispatch; per-type fields from the inline fragment |
+| Introspection (`__schema`, `__type`) | the reflected schema (§4), served in GraphQL's own shape |
 | Variables | the params map → **binds** (see §6) |
 | Mutations | `addV` / `addE` / `property` / `drop` / `mergeV` |
 
 The selection-set → `project()/by()` correspondence is not an analogy. It is a structural identity:
 both are "for each traverser, produce a named tuple whose fields are computed by sub-traversals."
 
-### 1·2 What does not map
+### 1·2 Features that need a convention or an escape hatch — and why
 
-- **Recursion / transitive closure.** The wall. GraphQL query depth is literal and finite; there is
-  no `repeat()`, no variable-length path, no shortest-path, no fixpoint. *Every* real implementation
-  bolts on a non-standard directive (Dgraph `@recurse`, Neo4j `@cypher`). We must too (§8, Phase 4).
-- **Path semantics** — `path()`, `simplePath()`, `sack()`, side effects, barriers, `bulk`. No
-  vocabulary at all. Not reachable from a selection set; only from an escape hatch.
-- **Aggregation / grouping.** Not native. Needs bespoke schema fields (`personAggregate { count }`)
-  or a directive.
-- **Arbitrary predicates.** Only what the schema's args expose. That is a *feature* — it is the
-  authorization story — but it means GraphQL can never be the only surface.
+Each of these is a GraphQL feature (or the standard GraphQL-over-a-database extension of one), not a
+Gremlin capability GraphQL happens to lack:
+
+- **Deep / recursive relationships.** GraphQL query depth is literal and finite — no native transitive
+  closure, variable-length path, or "to any depth". This is the one place every product extends the
+  language, with a non-standard directive (Dgraph `@recurse`, Neo4j `@cypher`). We do the same:
+  `@recurse(depth:)` → `repeat().times()` (§8, Phase 4). It works, but only through the documented
+  extension, never from a bare selection set.
+- **Aggregation / grouping.** GraphQL has no native `count` / `sum` / `group`. Products expose it as
+  schema convention — aggregate fields (`personAggregate { count }`) or a directive — lowering to our
+  `group` / `groupCount`. A schema-shape decision, not an engine gap.
+- **Filtering beyond the schema's arguments.** A client can filter only on the args the schema
+  declares; there is no arbitrary-predicate syntax. That is a **feature** — it is the authorization
+  boundary — but it is why GraphQL is a *complementary* surface, never the only one a graph needs.
+
+Gremlin's own traversal power — `path()`, `sack()`, barriers, side effects, arbitrary walks — sits
+outside all of this. No GraphQL client asks for it, so it is not a missing GraphQL feature, just not
+part of the surface. That separation is the whole reason to run both against one graph.
 
 ### 1·3 The prior art's one lesson
 
