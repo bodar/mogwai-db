@@ -554,10 +554,12 @@ pattern this whole stage kept finding:
 ⚠️ **A merge over a DEMANDED position still declines** — where `ctx.ordered` says a downstream
 slice/collect reads the fan-out's emission order, `union`/`choose`/`coalesce` decline rather than let a
 bare `LIMIT` read incidental `UNION ALL` byte order. That is §10's "mint one deterministic window order
-over a whole fan-out" seen from the branch side. The POSITIONLESS half landed for `union` (it drops the
-spent order and merges — a union is unordered); `choose`/`coalesce` still carry the old
-`encounterOf(input.channels)` guard and are the next two callers, and the demanded-order half of all
-three waits on the arm-blocked/per-traverser mint.
+over a whole fan-out" seen from the branch side. The POSITIONLESS half landed for `union` AND the boolean `choose` (both `BranchStep`s: they drop the
+spent order and merge — arm-blocked and unordered); `coalesce` still carries the old
+`encounterOf(input.channels)` guard and is the last caller — and its correct treatment DIFFERS
+(`CoalesceStep` is a flatMap, per-traverser order, so each arm already carries the parent position
+uniquely — KEEP it, do not drop). The demanded-order half of all three (a downstream slice/collect over
+the fan-out) waits on the arm-blocked/per-traverser mint.
 
 ⚠️ **Where a refusal is arithmetic over the INPUT's row count, a host that cannot count statically needs a
 GUARD, not a decline.** `addV` proves single-row at COMPILE time (a literal `Values`); an `addE` mid-chain
