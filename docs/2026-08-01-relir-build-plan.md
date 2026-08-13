@@ -277,6 +277,20 @@ because nothing is even asking: a fact the FRONT END drops**, so a lowering cann
 it cannot SEE. **Whenever a seam re-enters the fold, check what it HANDS OVER before concluding what
 the algebra cannot express.**
 
+⚠️ **The measured case of that mirror, and the one that shows how it HIDES: `walkArgs` dropped a NULL
+where a string was allowed.** The grammar spells one as a bare `K_NULL` TOKEN inside
+`stringNullableLiteral`/`stringNullableArgument` (`Gremlin.g4:1738-1741`) rather than through the
+`nullLiteral` rule, so an unrecognised terminal fell off the end of the recursion and the argument
+VANISHED. `hasKey(null)` arrived as `hasKey()`. What makes it the worse mirror is that four steps then
+answered CORRECTLY BY LUCK — a null is genuinely inert in a positive set, so `hasLabel(null,'person')`,
+`values('name','age',null)` and `concat(null,'b')` were right for a reason nothing had written down,
+while `has(null,'k')` silently became the PRESENCE test `has('k')` and was empty only because the
+fixture has no such key. **The repair is never "restore the drop"; it is to carry the fact and make each
+site STATE the rule**, which is what `propertyKeyArgs`/`labelSetArgs` (`compiler/rel/build.ts`) are: a
+null member is INERT beside a real one, and an ALL-NULL set matches NOTHING rather than collapsing to
+the absent set that means EVERYTHING. `values(null)` is the empty result; `values()` is every property.
+No corpus scenario exercises the all-null form, so nothing but the argument above would have found it.
+
 ### §6·7 — a scalar row's TYPE rides PER ROW; a static tag is an OPTIMIZATION, never the carrier
 
 **THE RULE: what arrives on the wire is CARRIED until something naturally changes it** — never
@@ -382,6 +396,25 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
 - **A list whose members may be ELEMENTS.** Unlocks the ELEMENT-list forms of `order`/`dedup`, the
   map-family residue (`with(tokens, ids)`, the `by(__.unfold())` that pairs with them, `order(Scope.local)`
   over map entries), and the `set` framing marker's list tail.
+- **`RowShape` — a per-row shape as a first-class row participant.** The row-algebraic ops are ONE engine
+  now (`orderRows`, `rowOp`, `dedupOn` in `compiler/rel/lower.ts`), parameterised by what a shape owes it:
+  the `by()` host, the deterministic tie-break, the IDENTITY columns, and whether that identity names the
+  whole payload. The property stream was wired through it (`propertyRowShape`), which is what removed the
+  fourth copy of `order()` rather than adding one. ⚠️ Two facts a new shape must supply and cannot guess,
+  both per TYPE and both cited in `compiler/rel/property.ts`: **`GremlinValueComparator` dispatches the
+  NATURAL ORDER per type** — a `VertexProperty` by id, an edge `Property` by KEY then VALUE, so an
+  identity `by()` is a term LIST and not one expression (`naturalSort` exists for exactly that) — and
+  **`ElementHelper` hashes an Element by id and a Property by key+value, ignoring the owning element**, so
+  `g.V().bothE().properties().dedup()` collapses equal weights ACROSS edges. 🚧 What is LEFT: the SCALAR
+  and RECORD tails still call `orderRows` from their own loops rather than declaring a `RowShape` (so
+  neither gets `dedup`'s identity rule), and the MAP/LIST tails are not in it at all.
+- **The property stream's remaining vocabulary.** Its row ops and its two filters
+  (`hasKey`/`hasValue`, via `propertyHasClause` + `valueSet`) are in; 🚧 what is left is the `by()`
+  vocabulary (`T.key`/`T.value` are absent from `TOKENS` in `modulator.ts`, so `order().by(T.key)` and
+  `dedup().by(value)` decline), the `id()`/`label()` retypes off a property row (a `VertexProperty`'s
+  `label()` IS its key), `where(<body>)` over a property host, and META-properties
+  (`properties().properties()`, `has(k,v)` over a VertexProperty — a different row, deliberately not
+  answered off this one).
 - **The child seam consumer + `origin` naming a rowid-less parent.** `ChildSeam.rows`+`origin` EXISTS; the
   CONSUMER is what is left. Unlocks the group-scoped reducer (`count()` with a non-empty body, and a SCALAR
   host — the empty pool is PER-REDUCER and decides INNER vs LEFT: `CountGlobalStep` seeds 0 and keeps its

@@ -42,12 +42,12 @@ unsupported throws a clear error and never mis-executes.
 |---|:--:|---|
 | `hasLabel`, `has(k)`, `has(k,v)`, `has(k,P)`, `has(label,k,v)`, `has(T.label,…)` | ✅ | every arity, in every position including inside a predicate body |
 | `has(T.id,…)`, `hasId` | ❌ | |
-| `hasKey`, `hasValue` | ❌ | |
+| `hasKey`, `hasValue` | ✅ | one `HasContainer` on `T.key`/`T.value`; single arg is `eq`, several a `within`, and a NULL member is inert (an all-null set matches nothing). The value compares through the row's own `vtype`, so an exact number carried as decimal TEXT compares numerically |
 | `is(P)` | ✅ | a `constant()` operand folds to its literal; an operand TRAVERSAL compiles to a value compared against its FIRST result, re-sourced or correlated. An unproductive operand is SQL NULL — it drops the traverser for `eq` and contributes nothing to a `within` set. ❌ after `path()`; an operand with no scalar to read; a correlated operand at a scalar-parent host |
 | `where(__.…)`, `not`, `filter(__.…)` | ✅ | single- and multi-hop, edge-typed hops, alias-rooted `where(__.as('x')…)`, label reads at any depth, per-parent `order().by(key)` before a slice. ❌ ordered children using traversal-valued `by()` |
 | `where(P)` / `where('a',P)` | 🟡 | value-compare over a scalar stream and alias-column compare work. ❌ some `where(P.op)` forms, `by(key)` on an edge-typed label, `where('a',P)` over a scalar |
 | `and`, `or` | ✅ | infix on STEPS and on PREDICATES (`P.gt(20).and(P.lt(30))`, `P.gt(30).negate()`), to any depth. ❌ `filter(rawPredicate)` |
-| `dedup()`, `dedup(labels)` | ✅ | bare, `by(key/T.id/T.label/scalar traversal)`, label tuples. ❌ bare `dedup()` after `as()`/path tracking; more than one `by()` |
+| `dedup()`, `dedup(labels)` | ✅ | bare, `by(key/T.id/T.label/scalar traversal)`, label tuples; over a PROPERTY row the identity is per owner kind — a `VertexProperty` by id, an edge `Property` by key+value, so equal values collapse ACROSS their edges. ❌ bare `dedup()` after `as()`/path tracking; more than one `by()`; `dedup().by(value)` over a property |
 | `identity()`, `sample(n)` | ✅ | |
 | `coin(p)`, `simplePath`, `cyclicPath` | ❌ | |
 | `typeOf(GType)` over a stored property | ✅ | every canonical type, incl. `bigdecimal`/`char`/`duration` |
@@ -66,9 +66,9 @@ operator and DO SQLite has no UDFs, so it fails closed rather than filtering in 
 
 | Step | | Notes |
 |---|:--:|---|
-| `values(k…)`, `label()`, `labels()`, `id()` | ✅ | `values()` reads EVERY key |
+| `values(k…)`, `label()`, `labels()`, `id()` | ✅ | `values()` reads EVERY key; `values(null)` reads NONE — a null key never matches, so it is inert beside a real key and an all-null set is the empty result rather than "every" |
 | `valueMap()`, `valueMap(true)`, `elementMap()` | ✅ | token rendering follows `with("multilabel")`/`with("singlelabel")`. ❌ selective token subsets (`with(tokens, ids)`) |
-| `properties()`, `key()`, `value()`, `element()` | ✅ | |
+| `properties()`, `key()`, `value()`, `element()` | ✅ | ❌ `id()`/`label()` off a property row; META-properties (`properties().properties()`, `has(k,v)` over a VertexProperty) |
 | `propertyMap()` | ❌ | |
 | `project(k…).by(…)` | ✅ | an unproductive `by()` OMITS its key, as the reference does |
 | `select(label…)`, `select(Column.keys/values)` | ✅ | `Pop.all` and a non-singleton linear `Pop.mixed` re-enter homogeneous scalar/element/nested-list histories as ordinary typed lists. ❌ dynamic-shape `Pop.mixed`; `select(label).by(key)` as a child body |
@@ -81,7 +81,7 @@ operator and DO SQLite has no UDFs, so it fails closed rather than filtering in 
 | `count()`, `sum`, `min`, `max`, `mean`, `fold()`, `unfold()` | ✅ | a reducer over ZERO rows follows the reference per step: `fold`/`group` seed (`[]`/`{}`), `sum`/`min`/`max` emit nothing |
 | `group().by().by()`, `groupCount()` | ✅ | ❌ a group-scoped `count()` with a non-empty body; a SCALAR host |
 | `barrier()` | ✅ | ❌ `barrier(Barrier.normSack)` |
-| `order().by(…)`, `range`, `limit`, `tail`, `skip` | ✅ | deterministic, not merely ordered. ❌ ELEMENT-list and `Column`-keyed order forms |
+| `order().by(…)`, `range`, `limit`, `tail`, `skip` | ✅ | deterministic, not merely ordered, over ELEMENT, SCALAR, RECORD and PROPERTY rows through one engine. A property's own order is per owner kind — a `VertexProperty` by id, an edge `Property` by key then value — and `by(desc)` reverses every term. ❌ ELEMENT-list and `Column`-keyed order forms; `order().by(T.key/T.value)` over a property |
 
 ## 5. Branching
 
