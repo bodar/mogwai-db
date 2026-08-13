@@ -18,11 +18,10 @@ describe('call / search service SQL', () => {
   test('a call() scalar body is a correlated VALUE, compared in place', () => {
     const store = seededStore();
     const withReg: CompileOptions = { registry: standardRegistry };
-    // `tinker.degree.centrality` is a `rel` contribution now, so LEGACY refuses it outright and this
-    // is RelIR's answer absolutely rather than a differential (§6·1). What it asserts is the SHAPE of
-    // that answer: a `streaming` service contributes a per-parent VALUE, and a body that projects a
+    // `tinker.degree.centrality` is a `rel` contribution, so this asserts the SHAPE of the answer
+    // absolutely. A `streaming` service contributes a per-parent VALUE, and a body that projects a
     // value and then tests it is a COMPARISON — so there is no EXISTS, no pushed child ordinal and no
-    // LEFT JOIN rejoin, which is what legacy's scoped-count seam needed to ask the same question.
+    // LEFT JOIN rejoin.
     const wsql = read('g.V().where(call("tinker.degree.centrality").is(3))', { ...withReg }).sql;
     expect(wsql).not.toContain('EXISTS');
     expect(wsql).not.toContain('LEFT JOIN');
@@ -39,33 +38,28 @@ describe('call / search service SQL', () => {
     expect(JSON.parse(grouped[0]!.map).map(([k, v]: [any, any]) => [k.v, v.v.map((n: any) => n.v)])).toEqual([
       [0, ['marko', 'peter']], [1, ['vadas', 'josh', 'ripple']], [3, ['lop']],
     ]);
-    // A `start` position for a `streaming` service is invalid Gremlin, and once legacy stopped
-    // serving this service there is nobody else to raise it — so the check is a THROW, not a decline
-    // (§6·5, "the answer is an ERROR").
+    // A `start` position for a `streaming` service is invalid Gremlin, so the check is a THROW, not a
+    // decline (§6·5, "the answer is an ERROR").
     expect(() => read('g.call("tinker.degree.centrality")', withReg))
       .toThrow(/must be called mid-traversal on vertices/);
   });
 
   test('tinker.search: a source PropertyStream backed by the property_fts trigram index', () => {
     const store = seededStore();
-    // THE SPINE IS PINNED: `tinker.search` contributes `kind: 'rel'`, and a service implements
-    // `stream` XOR `rel` — two implementations of one service is the duplicated lowering
-    // `steps/CLAUDE.md` forbids. So this asserts the spine that HAS a lowering rather than whichever
-    // the ambient `MOGWAI_RELIR` switch picks; unpinned, the differential's OFF position would run it
-    // against a spine that correctly refuses. The refusal itself is asserted in `services.test.ts`.
+    // `tinker.search` contributes `kind: 'rel'`, and a service implements `stream` XOR `rel` — two
+    // implementations of one service is the duplicated lowering `steps/CLAUDE.md` forbids. The refusal
+    // itself is asserted in `services.test.ts`.
     const withReg: CompileOptions = { registry: standardRegistry };
     // g.call("tinker.search",{search:"mar"}).element() → the matched properties' owner vertices.
     // The SQL selects from property_fts (kind='value', a case-insensitive LIKE %term%) and joins
     // back to vertex_properties + nodes + labels for the full PropertyStream payload.
     const sql = read('g.call("tinker.search", ["search": "mar"]).element()', withReg).sql;
     expect(sql).toContain('property_fts');
-    // A substring match with the user's metacharacters escaped — asserted for MEANING, because the
-    // two spines spell it differently and both are right. Legacy emits the infix `LIKE … ESCAPE`;
-    // the RelIR spine emits SQLite's `like(pattern, subject, escape)` FUNCTION, because the closed
-    // node set (§7) has no ESCAPE-clause node and the function says the same thing. `predicate.ts`
-    // uses that same form for every TextP substring op. The ESCAPE is asserted as "an escape is
-    // SUPPLIED" — legacy's `ESCAPE` keyword, or `like()`'s third argument — rather than by matching a
-    // backslash literal, which differs between the two renderings and says nothing extra.
+    // A substring match with the user's metacharacters escaped — asserted for MEANING. The lowering
+    // emits SQLite's `like(pattern, subject, escape)` FUNCTION, because the closed node set (§7) has
+    // no ESCAPE-clause node and the function says the same thing. `predicate.ts` uses that same form
+    // for every TextP substring op. The ESCAPE is asserted as "an escape is SUPPLIED" — `like()`'s
+    // third argument — rather than by matching a backslash literal, which says nothing extra.
     expect(sql.includes('LIKE') || sql.includes('like(')).toBe(true);
     expect(/ESCAPE|like\([^)]*,[^)]*,[^)]*\)/.test(sql)).toBe(true);
     // element() walks each matched property to its owner (marko), reusing the propertyElement tail.

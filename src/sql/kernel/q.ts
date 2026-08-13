@@ -137,10 +137,10 @@ export const identifier = (name: string): Text => raw(quote(name));
  *
  * For text the COMPILER chose, never for data. The distinction is a platform one rather than a
  * stylistic one: a Durable Object caps a statement at 100 BOUND PARAMETERS, so spending one on a
- * constant the compiler wrote is spending a scarce resource on nothing — and it is what made the
- * RelIR spelling of one `as()` cost four binds against legacy's one (`jsonb_object(?, ?, ?, p.id)`
+ * constant the compiler wrote is spending a scarce resource on nothing — and it is what made one
+ * `as()` cost four binds instead of one (`jsonb_object(?, ?, ?, p.id)`
  * versus `jsonb_object('k', ?, 'v', p.id)`), which at four labels in a chain is the difference
- * between a plan the routing seam admits and one it declines.
+ * between a plan the platform cap admits and one it rejects.
  *
  * A value from the QUERY or the STORE is `value()` and must stay one: inlining data would make the
  * statement text a function of the data, which defeats both the statement cache and the 100 KB text

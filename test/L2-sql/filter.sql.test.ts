@@ -15,9 +15,9 @@ import { read, run, seededStore } from '../support/harness.ts';
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
 
 // A predicate operand is a CONSTANT when it is a parsed literal (inlined as an escaped SQL literal) and
-// BINDS only when it is a wire parameter (docs/archive/2026-08-05-parameters-are-the-only-binds.md). Legacy
-// still binds every operand, so a cross-spine snapshot asserts the value is PRESENT either way: in the
-// bind list, or in the SQL text (a string `'v'`-quoted, a number as a bare token not glued to a word).
+// BINDS only when it is a wire parameter (docs/archive/2026-08-05-parameters-are-the-only-binds.md). So a
+// snapshot asserts the value is PRESENT either way: in the bind list, or in the SQL text (a string
+// `'v'`-quoted, a number as a bare token not glued to a word).
 const carries = (plan: { sql: string; binds: readonly unknown[] }, v: string | number): boolean =>
   plan.binds.includes(v) || (typeof v === 'string'
     ? plan.sql.includes(`'${v}'`)
@@ -64,30 +64,28 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     expect(negGeneric.sql).not.toContain('property_fts');
   });
 
-  // `P.typeOf` is RelIR-routed on both `is` and `has`, so the CONTRACT is asserted once per spine —
-  // three resolution modes, and the point of each is which evidence it reads, not how it spells it.
-  // A canonical type name and a storage class are compiler-authored CONSTANTS: legacy binds them, RelIR
-  // inlines them as escaped literals (the parameter-budget rule). The module-level `carries` asserts the
-  // value is present either way, so the contract — that both pieces of evidence appear — holds across the
-  // spelling.
+  // `P.typeOf` on both `is` and `has` asserts the CONTRACT — three resolution modes, and the point of
+  // each is which evidence it reads, not how it spells it. A canonical type name and a storage class are
+  // compiler-authored CONSTANTS, inlined as escaped literals (the parameter-budget rule). The
+  // module-level `carries` asserts the value is present either way, so the contract — that both pieces
+  // of evidence appear — holds across the spelling.
   {
   }
 
 
-  // `values().is()` and `count().is()` are RelIR-routed, so both run on BOTH spines. Each spine's
-  // own spelling is pinned where it is the point of the test; everything else is asserted as the
-  // SEMANTIC fact, which is what a snapshot is allowed to hold (test/CLAUDE.md).
+  // `values().is()` and `count().is()`: the spelling is pinned where it is the point of the test;
+  // everything else is asserted as the SEMANTIC fact, which is what a snapshot is allowed to hold
+  // (test/CLAUDE.md).
   {
     test(`is(P) folds a predicate onto the projected scalar`, () => {
       const gt = read('g.V().values("age").is(P.gt(30))');
       expect(gt.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
-      // is(gt) folds through the vtype-aware compareKey (numeric-correct for the exact tail). The two
-      // spines put the operator in different places since the comparability fix (§6·7a) — legacy after
-      // the compare-key `END`, RelIR inside each type-space arm so a cross-type compare is FALSE
-      // rather than SQLite's storage order — so what is asserted is that the comparison is vtype-aware
-      // AT ALL. A raw `value > ?` matches neither alternative.
+      // is(gt) folds through the vtype-aware compareKey (numeric-correct for the exact tail). The
+      // operator sits INSIDE each type-space arm so a cross-type compare is FALSE rather than SQLite's
+      // storage order — so what is asserted is that the comparison is vtype-aware AT ALL. A raw
+      // `value > ?` matches neither alternative.
       expect(gt.sql).toMatch(/(END\)? > (?:\?|\d+)|CAST\([^)]+ AS (INT|REAL)\) > (?:\?|\d+))/);
-      expect(carries(gt, 30)).toBe(true);   // bound on legacy, inlined on rel
+      expect(carries(gt, 30)).toBe(true);   // inlined as a literal
       // bare literal → equality, with no compareKey (equality on canonical text is exact)
       const eq = read('g.V().values("age").is(29)');
       expect(eq.sql).toMatch(/\bv = (?:\?|29)/);
@@ -102,16 +100,15 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
   }
 
   test('a run of range is() stays inside the DO bind cap on both spines', () => {
-    // RelIR binds query operands but emits its fixed type vocabulary as escaped compiler text. Fusing
-    // the filter into its input's block used to make bind growth quadratic in
-    // the projection's size, because a WHERE cannot name a select alias so each `is` re-inlined the
-    // whole projection; a `Materialize` boundary before the filters lands the same CTE-then-filter
-    // shape legacy emits. This pins that the growth is LINEAR and bounded, since the failure mode
-    // is a plan that fails closed above 100 binds where legacy answers.
+    // The lowering binds query operands but emits its fixed type vocabulary as escaped compiler text.
+    // Fusing the filter into its input's block used to make bind growth quadratic in the projection's
+    // size, because a WHERE cannot name a select alias so each `is` re-inlined the whole projection;
+    // a `Materialize` boundary before the filters lands a CTE-then-filter shape. This pins that the
+    // growth is LINEAR and bounded, since the failure mode is a plan that fails closed above 100 binds.
     const many = 'g.V().values("age").is(P.gt(1)).is(P.lt(9)).is(P.gte(2)).is(P.neq(5)).is(P.gt(0))';
     expect(read(many).binds.length).toBeLessThan(60);
-    // The RelIR spelling is no longer charged once per static type name: five predicates retain only
-    // their query values, not their repeated comparison vocabulary.
+    // The spelling is not charged once per static type name: five predicates retain only their query
+    // values, not their repeated comparison vocabulary.
     expect(read(many).binds.length).toBeLessThan(20);
   });
 
@@ -121,17 +118,16 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
 
 
   test('where(__.movement) → a correlated EXISTS with no seed relation — rel spine', () => {
-    // RelIR compares the edge column to the OUTER id directly, where legacy seeds the child with
-    // `(SELECT n.id AS id) p` — a projection with no input, which the algebra has no node for and
-    // does not need. One derived table fewer, and no new node kind (§7's bar: the seam CAN express
-    // the shape).
+    // The lowering compares the edge column to the OUTER id directly, rather than seeding the child
+    // with `(SELECT n.id AS id) p` — a projection with no input, which the algebra has no node for and
+    // does not need. No new node kind (§7's bar: the seam CAN express the shape).
     const w = read('g.V().where(__.out("knows")).values("name")');
     // The probe projects the CHILD'S OWN first column rather than a literal: an EXISTS does not care
     // what the value is, but a body ending in an aggregate does — projecting `1` there leaves a block
     // with a HAVING and no aggregate in its select list, which SQLite refuses.
     expect(w.sql).toMatch(/EXISTS \(SELECT \w+\.tgt AS one FROM edges \w+ WHERE \(\(\w+\.src = \w+\.id\) AND \w+\.label IN/);
-    // `NOT EXISTS`, not legacy's `NOT COALESCE(EXISTS(…), 0)`: an EXISTS is never NULL, so the
-    // COALESCE guards nothing.
+    // `NOT EXISTS`, not `NOT COALESCE(EXISTS(…), 0)`: an EXISTS is never NULL, so the COALESCE guards
+    // nothing.
     const n = read('g.V().not(__.out("created")).values("name")');
     expect(n.sql).toContain('NOT EXISTS (');
     expect(n.sql).not.toContain('COALESCE((EXISTS');
@@ -148,30 +144,25 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
       .toEqual(['josh', 'marko', 'peter']);
     expect(run(store, 'g.V().not(__.out().id()).values("name")').map((r) => r.v).sort())
       .toEqual(['lop', 'ripple', 'vadas']);
-    // A CORRELATED EXISTS over the child's rows, either way. The assertion is the SHAPE, not the
-    // spelling (§5): legacy's gate projects a literal `1` while RelIR projects the child's own value
-    // as `one`, and the traversal moved between the two the day `id()` joined the RelIR tail. Pinning
-    // the projection would have been pinning which spine answered.
+    // A CORRELATED EXISTS over the child's rows. The assertion is the SHAPE, not the spelling (§5):
+    // the gate projects the child's own value as `one`. Pinning the projection would pin an alias the
+    // lowering is free to choose.
     expect(read('g.V().filter(__.out().id()).count()').sql).toMatch(/EXISTS \(SELECT[^]*FROM edges/);
   });
 
 
 
-  // `has()` is RelIR-routed (§6·1), so these two run on BOTH spines. What is asserted is the
-  // SEMANTIC distinction each test is about, not the spelling the spines legitimately differ over —
-  // and since the comparability fix (§6·7a) they differ MORE than parenthesisation:
-  //
-  //  - legacy applies the operator to the whole vtype-aware compare key: `(CASE … END) >= ?`.
-  //  - RelIR pushes the operator INSIDE each type-space arm, because a cross-type comparison must be
-  //    FALSE rather than SQLite's storage order (`GremlinValueComparator`: comparability is confined
-  //    to one type space) — `CASE WHEN vtype IN (<ints>) THEN CAST(v AS INT) >= ? WHEN vtype IN
-  //    (<reals>) THEN CAST(v AS REAL) >= ? ELSE <false> END`.
+  // `has()` — what is asserted is the SEMANTIC distinction each test is about, not the exact spelling.
+  // Since the comparability fix (§6·7a) the lowering pushes the operator INSIDE each type-space arm,
+  // because a cross-type comparison must be FALSE rather than SQLite's storage order
+  // (`GremlinValueComparator`: comparability is confined to one type space) — `CASE WHEN vtype IN
+  // (<ints>) THEN CAST(v AS INT) >= ? WHEN vtype IN (<reals>) THEN CAST(v AS REAL) >= ? ELSE <false>
+  // END`.
   //
   // So `compared` accepts either: the operator applied to a compare-key `END`, or applied to a CAST
-  // inside one. Both spellings are "the ordering comparison happened, vtype-aware"; neither pins a
-  // spine's shape, and a RAW `value >= ?` with no vtype CASE anywhere still fails both alternatives.
-  // The operand is `?` on legacy, an inlined numeric literal on rel — either is "the ordering comparison,
-  // vtype-aware"; a RAW `value >= <x>` with no vtype CASE anywhere still fails both alternatives.
+  // inside one. Both spellings are "the ordering comparison happened, vtype-aware"; a RAW `value >= ?`
+  // with no vtype CASE anywhere still fails both alternatives. The operand may be a `?` or an inlined
+  // numeric literal — either is "the ordering comparison, vtype-aware".
   const compared = (op: string) => {
     const o = op.replace(/[><=]/g, (c) => '\\' + c);
     return new RegExp(`(END\\)? ${o} (?:\\?|-?\\d+(?:\\.\\d+)?)|CAST\\([^)]+ AS (INT|REAL)\\) ${o} (?:\\?|-?\\d+(?:\\.\\d+)?))`);
@@ -192,17 +183,17 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     });
 
     test(`dedup().by() is a ranked window over the projected key`, () => {
-      // The MODULATOR SEAM's first element host. Both spines emit the same SHAPE and must: the
-      // survivor is the LOWEST-id row per key, which is a `ROW_NUMBER() … = 1` and not a `GROUP BY`,
-      // because every other column has to be that row's and an aggregate cannot say which row a
-      // `MIN(id)` came from. Matched on the window, not on either spine's aliases.
+      // The MODULATOR SEAM's first element host. The SHAPE is forced: the survivor is the LOWEST-id
+      // row per key, which is a `ROW_NUMBER() … = 1` and not a `GROUP BY`, because every other column
+      // has to be that row's and an aggregate cannot say which row a `MIN(id)` came from. Matched on
+      // the window, not on the lowering's aliases.
       const byKey = read('g.V().dedup().by("name")').sql;
       expect(byKey).toMatch(/ROW_NUMBER\(\) OVER \(PARTITION BY[^]*ORDER BY \w+\.id/i);
       expect(byKey).toMatch(/\bFROM vertex_properties\b/);
       // …and the PRODUCTIVITY rule: TinkerPop's default `by()` drops a traverser it yielded nothing
       // for, so the key is tested for NULL. `ProductiveByStrategy` is the position that does not.
-      // The NULL is a BIND on the RelIR side and inline on the legacy one — §3.2 makes every `Lit` a
-      // bind so the plan can PROVE its budget, and `x IS NOT ?` with a null bind is the same operator.
+      // The NULL is a BIND — §3.2 makes every `Lit` a bind so the plan can PROVE its budget, and
+      // `x IS NOT ?` with a null bind is the same operator as `IS NOT NULL`.
       const nullTest = /IS NOT (NULL|\?)/i;
       expect(byKey).toMatch(nullTest);
       expect(read('g.withStrategies(ProductiveByStrategy).V().dedup().by("name")').sql)
@@ -216,7 +207,7 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
 
   // The parameter budget must not depend on WHERE a `$x` sits: a wire parameter binds whether it is a
   // bare `has` value or nested in a predicate/set, while a parsed literal inlines either way
-  // (docs/archive/2026-08-05-parameters-are-the-only-binds.md). RelIR-only — the operand seam is the RelIR one.
+  // (docs/archive/2026-08-05-parameters-are-the-only-binds.md).
   test('a wire parameter binds whether bare or nested; a literal inlines either way', () => {
     const b = (g: string, params: Record<string, unknown> = {}) => {
       const p = compile(g, params);

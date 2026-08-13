@@ -23,17 +23,14 @@ import { read, run, runWith, seededStore } from '../support/harness.ts';
 // pins instead of restating 60 characters of CASE. min/max range over text too (TinkerPop 4
 // Strings are Comparable); sum/mean are numeric-only.
 
-// A transform pin's semantic fact is WHICH SQLite function wraps the traverser's value — legacy names a
-// CTE column (`p.v`), RelIR inlines the projection it fused into the same SELECT, and the assertion must
-// survive both (test/CLAUDE.md: snapshots assert semantic equivalence, not byte identity).
+// A transform pin's semantic fact is WHICH SQLite function wraps the traverser's value — the lowering
+// inlines the projection it fused into the same SELECT, and the assertion must survive that spelling
+// (test/CLAUDE.md: snapshots assert semantic equivalence, not byte identity).
 
-// A one-value inject const-folds its seed to a COMPILE-TIME CONSTANT, now inlined as a typed SQL literal
+// A one-value inject const-folds its seed to a COMPILE-TIME CONSTANT, inlined as a typed SQL literal
 // rather than a bound `?` (the parameter-budget win: a constant the compiler holds spends none of the
 // DO's 100 binds — docs/archive/2026-08-05-parameters-are-the-only-binds.md). So a const-fold test asserts the
 // inlined VALUE here instead of on `.binds`: `1`/`0` for a boolean, epoch-millis for a date, and so on.
-// PINNED to the RelIR spine, because inlining the folded constant IS the claim: legacy still binds it,
-// so an ambient read asserts the new spine's spelling under the old spine's name and goes red in the
-// differential's off position (§6·1 — the asymmetry is expressed, never left to fail).
 
 describe('scalar-parent / projection SQL', () => {
 
@@ -85,14 +82,12 @@ describe('scalar-parent / projection SQL', () => {
 
 
   test('math("<formula>") compiles to one Double scalar; leaves coerced to REAL — on BOTH spines', () => {
-    // EVERY ASSERTION HERE RUNS TWICE, and that is what the ops record buys. The lexer, the
-    // precedence climb, the function NAME set and the three expansions that are SQL FACTS rather
-    // than operator names live once in `src/gremlin/math.ts`; each spine supplies only the
-    // construction primitives (`qMathOps` / `relMathOps`). A spine that disagreed about
-    // `log`→`LN`, `cbrt`'s sign split or `signum`'s three-way CASE would be a second
-    // implementation of a non-derivable fact — the failure mode §12 names and that no per-spine
-    // assertion could see. Spelling is deliberately NOT pinned (§5); each `toContain` is a
-    // semantic claim about what the formula compiled TO.
+    // The lexer, the precedence climb, the function NAME set and the three expansions that are SQL
+    // FACTS rather than operator names live once in `src/gremlin/math.ts`; the lowering supplies only
+    // the construction primitives (`relMathOps`). `log`→`LN`, `cbrt`'s sign split and `signum`'s
+    // three-way CASE are non-derivable facts, which is why they live in one place. Spelling is
+    // deliberately NOT pinned (§5); each `toContain` is a semantic claim about what the formula
+    // compiled TO.
     {
       // `_` resolves through the by() modulator; result always tagged Double.
       const p = read('g.V().math("_+_").by("age")');
@@ -158,10 +153,9 @@ describe('scalar-parent / projection SQL', () => {
    * `select(keys…)` AT EVERY ARITY — ONE lowering, and the RECORD substrate is what made the
    * multi-label form cost nothing beyond the arity difference.
    *
-   * Row-for-row comparison is not the assertion here and cannot be: the two spines spell a record
-   * differently (prefixed columns vs one map value), and a property `by()` carries the label's stored
-   * `vtype` beside the value on this spine and not on legacy. So these assert the ANSWER, decoded, and
-   * against the reference where the two spines disagree about it.
+   * Row-for-row spelling is not the assertion here: a property `by()` carries the label's stored
+   * `vtype` beside the value. So these assert the ANSWER, decoded, and against the reference's
+   * semantics.
    */
   test('select() at every arity is one lowering — RelIR', () => {
     const store = seededStore();
@@ -195,8 +189,8 @@ describe('scalar-parent / projection SQL', () => {
       .map(entries)).toEqual([[['a', 'marko'], ['b', 'vadas']], [['a', 'marko'], ['b', 'josh']]]);
 
     // AN UNPRODUCTIVE by() DROPS THE TRAVERSER, which is `select()`'s rule and the exact OPPOSITE of
-    // `project()`'s (which omits the key and keeps it). Legacy has the two the wrong way round; the
-    // reference expects FOUR rows, without lop and ripple (Select.feature:844-847).
+    // `project()`'s (which omits the key and keeps it). The reference expects FOUR rows, without lop
+    // and ripple (Select.feature:844-847).
     expect((runWith(store, 'g.V().as("a","n").select("a","n").by("age").by("name")') as any[])
       .map(entries)).toEqual([
         [['a', 29], ['n', 'marko']], [['a', 27], ['n', 'vadas']],

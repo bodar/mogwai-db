@@ -364,7 +364,7 @@ export interface Compiled {
  * statement and this is several — and beside `WritePlan` rather than replacing it because the two
  * say opposite things about where the traversal machine lives: a `WritePlan` is a JS closure that
  * walks drivers and calls the store, while this is DATA the algebra produced and one executor runs.
- * `WritePlan` is on §8's deletion list; this is what replaces it.
+ * `WritePlan` is the older write-closure path; this is what replaces it.
  *
  * `shape` is the framing contract exactly as a read's is, so the wire layer needs no write vocabulary.
  */

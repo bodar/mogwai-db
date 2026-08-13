@@ -26,19 +26,18 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     expect(read('g.V().or(__.out("knows"), __.in("created"))').sql).toMatch(/WHERE \(EXISTS \(.*\) OR EXISTS \(/s);
     // A SINGLE arm is legal Gremlin — `and(t)`/`or(t)` is just "t must produce". ZERO arms declines
     // here (the only way an empty connective reaches a lowering is an infix marker the Pass tier
-    // should have rewritten) and the legacy route still throws for it.
+    // should have rewritten).
     expect(read('g.V().and(__.out("knows"))').sql).toContain('EXISTS (');
     expect(read('g.V().or(__.out("knows"))').sql).toContain('EXISTS (');
   });
 
   test('infix .and()/.or() connectors split a predicate body (where/choose/until)', () => {
     // where(has().and().has()) → ((p0) AND (p1)). A Pass canonicalizes TinkerPop's `ConnectiveStrategy`
-    // into the nested form, so both spines see one shape and neither lowering knows the infix rule.
+    // into the nested form, so the lowering never sees the infix rule.
     const a = read('g.V().where(__.has("name","x").and().has("age",P.gt(1)))');
     expect(a.sql).toContain(' AND ');
     // NO BINDS: `'name'`, `'x'` and `1` are PARSED LITERALS, and a literal inlines as a typed SQL
-    // literal on this route — a `?` serves a user PARAMETER and nothing else. The legacy spelling
-    // bound all four, which is the position that is being deleted rather than a fact to restate.
+    // literal — a `?` serves a user PARAMETER and nothing else.
     expect(a.binds).toEqual([]);
     // or() → (p0 OR p1); OR binds looser so mixed a.and().b.or().c groups as ((a AND b) OR c)
     expect(read('g.V().where(__.has("name","x").or().has("age",P.gt(1)))').sql).toMatch(/EXISTS \(.*\) OR EXISTS \(/s);

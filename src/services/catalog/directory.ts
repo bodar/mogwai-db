@@ -24,7 +24,7 @@ import type { AppScope } from '../../scopes.ts';
  *  An EMPTY list declines (`null`) rather than emitting `Values([])`, which §3.3 records as
  *  unrepresentable: it rendered as invalid SQL that only failed at the database. The algebra's empty
  *  relation is a `Filter(false)` over something, and here there is nothing to be over. Reachable via
- *  `--list` with a `service` filter matching nothing, so it declines to legacy rather than guessing. */
+ *  `--list` with a `service` filter matching nothing, so it declines rather than guessing. */
 function scalarStrings(site: RelCallSite, rows: string[]): RelContribution | null {
   if (!rows.length) return null;
   return {

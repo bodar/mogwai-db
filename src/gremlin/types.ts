@@ -223,10 +223,9 @@ const CANONICAL = new Set<string>([
  * those, and it is why it exists.
  *
  * It lives HERE, beside `normalizeTypeName`/`CANONICAL`/`ALIASES`, because it is the same vocabulary
- * asked a different question — and because two lowerings now need it (the legacy `typeOfSql` and the
- * RelIR predicate module). A copy in each is how one of them stops matching the other; a type added to
- * `CANONICAL` without a storage class is a compile error here, which is the point of the exhaustive
- * `Record`.
+ * asked a different question, and the RelIR predicate module reads it from here. A copy elsewhere is
+ * how it stops matching the authority; a type added to `CANONICAL` without a storage class is a
+ * compile error here, which is the point of the exhaustive `Record`.
  */
 export const STORAGE_CLASS: Readonly<Record<CanonicalType, string | null>> = {
   string: 'text',
@@ -243,7 +242,7 @@ export const STORAGE_CLASS: Readonly<Record<CanonicalType, string | null>> = {
  *
  * Two sets because the question differs: `sum`/`mean` do ARITHMETIC and only numbers qualify, while
  * `min`/`max` do ORDERING and Gremlin's `Comparable` admits strings too. That asymmetry is semantics,
- * not an oversight, and it is the thing a re-derived copy gets wrong — which is why both lowerings read
+ * not an oversight, and it is the thing a re-derived copy gets wrong — which is why the lowering reads
  * it from here (`STORAGE_CLASS`'s neighbours: the same SQLite-class vocabulary, a third question).
  */
 export const REDUCER_CLASSES = {

@@ -6,7 +6,7 @@ import type { ChildHost, ChildSeam, ChildValue } from '../../compiler/rel/child.
 // ---------- the call() service seam ----------
 //
 // call() is the extensibility point: a Service registers into a ServiceRegistry and
-// contributes to the compile. A PURE service ('stream' Contribution) lowers to SQL
+// contributes to the compile. A PURE service ('rel' Contribution) lowers to SQL
 // inline — the only kind Phases 1-5 implement, so the whole compile→lower→materialize
 // pipeline stays synchronous. The 'barrier' variant is the async/federated shape
 // (Phase 6); it lives in the type NOW so the seam is provably additive, but its executor
@@ -68,18 +68,16 @@ export interface CallSite {
 }
 
 /**
- * **`CallSite` IS THE WHOLE CONTRACT `resolve` NEEDS, and the spine-specific half is BUILD's.**
+ * **`CallSite` IS THE WHOLE CONTRACT `resolve` NEEDS, and the build-specific half is `RelCallSite`'s.**
  *
- * It used to carry `q: Query` outright, which made it legacy-shaped: a `Query` is the q-kernel's CTE
- * accumulator, so a RelIR service could not be handed one — it composes an algebra that RelIR names
- * and renders once, and holding a `Query` would mean building SQL beside the plan rather than inside
- * it (the second bind-ordering authority §5 exists to prevent).
+ * It used to carry `q: Query` outright — a `Query` is the q-kernel's CTE accumulator, so a service
+ * that composes an algebra RelIR names and renders once cannot be handed one; holding a `Query` would
+ * mean building SQL beside the plan rather than inside it (the second bind-ordering authority §5
+ * exists to prevent).
  *
  * Measured against the services: `resolve` reads only params and the hop depth — every catalog
  * service either ignores its site entirely or reads `params`/`federationDepth`. `RelCallSite` below
- * is the one remaining extension, for a contribution that BUILDS. `StreamCallSite` was the other and
- * is gone with the `stream` arm: it typed the SPI on legacy's `Stream`/`ChildParent`/`ChildFrameStack`
- * and was the last direct import of `src/compiler/steps/` from outside it (§10 Phase 0).
+ * is the one extension, for a contribution that BUILDS.
  */
 
 /** ForeignRow lives in the outer API surface (src/api.ts) — it's a leaf data type on the
@@ -92,10 +90,9 @@ export type { ForeignRow } from '../../api.ts';
  *  instead `apply` runs at EXECUTION time (the one await in the executor's segment loop) and returns
  *  the foreign rows the executor lands + resumes from.
  *
- *  **A THIRD arm, `stream`, is DELETED.** It was the legacy spine's inline contribution, and the
- *  transitional pair existed so services could migrate ONE AT A TIME — a `rel` service made legacy's
- *  call route decline, a `stream` service made RelIR's decline. All three pure services are `rel`
- *  now, so the arm and legacy's stream call route go together, exactly as §6·1 demands of a harness.
+ *  **A former third arm, `stream`, is DELETED.** It was the retired lowering's inline contribution,
+ *  kept transiently only so services could migrate to `rel` one at a time. All three pure services
+ *  are `rel` now.
  *
  *  `apply` takes ONLY the drained input rows (empty for a source-form call) — the one value that
  *  is genuinely per-execution. Everything it used to take positionally now arrives where it
@@ -122,14 +119,15 @@ export interface BarrierInput {
   readonly injectedValue?: unknown;
 }
 
-// ---------- the `rel` arm: the same contribution, lowered into the RelIR fold ----------
+// ---------- the `rel` arm: a contribution lowered into the RelIR fold ----------
 //
-// `rel` is the ONE inline contribution — there is one spine, so there is one arm. The transitional
-// `stream` arm and legacy's call route went together, exactly as §6·1 demands of a harness.
+// A pure service contributes a `rel` contribution: it lowers into the RelIR plan and the fold takes
+// over. A service implements exactly ONE arm — never both, which would be a duplicated lowering. An
+// unlearned contribution declines with the ordinary "not learned yet" `null`.
 //
-// `barrier` is the other arm and contributes no lowering at all: its rows arrive from an awaited
-// sibling, so `apply` runs at EXECUTION time, in the executor's segment loop. `federate` and `io` are
-// both barriers, and the intended iterative graph algorithms
+// `barrier` is different: it contributes no lowering at all — its rows arrive from an awaited sibling
+// and `apply` runs at EXECUTION time, in the executor's segment loop. Federation and io contribute no
+// lowering either, and the planned iterative graph algorithms
 // (`docs/2026-07-24-graph-algorithms-plan.md`) are barrier contributions for the same reason.
 
 /**
@@ -156,7 +154,7 @@ export type RelContribution =
  *  minter, which is the only thing a producer cannot reach on its own (`make` is an ordinary module
  *  import, so there is nothing to inject but `fresh`; `injectSource(steps, fresh)` is the same shape).
  *
- *  `q` is absent and its absence is the point: a `Query` is legacy's CTE accumulator, and a `rel`
+ *  `q` is absent and its absence is the point: a `Query` is the q-kernel's CTE accumulator, and a `rel`
  *  service composes an algebra that RelIR names and renders once. A service holding a `Query` would
  *  be building SQL beside the plan rather than inside it — the second bind-ordering authority §5
  *  exists to prevent. */

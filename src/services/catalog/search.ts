@@ -87,8 +87,8 @@ function searchProperties(site: RelCallSite, ownerElem: Elem, pattern: string, e
         // THE EMPTY RELATION, spelled as the algebra spells one: a `Filter(false)` over something
         // (§3.3). `Values([])` is unrepresentable — it rendered as invalid SQL that only failed at the
         // database — and here there IS something to be over, so meta-property search yields no rows
-        // rather than declining. Declining would be wrong now: legacy refuses a `rel` contribution, so
-        // a decline leaves NOTHING answering a shape that used to return empty.
+        // rather than declining. Declining would be wrong: a decline raises `UnsupportedTraversal`,
+        // leaving NOTHING answering a shape that should return empty.
         ? eq(compilerInt(0), compilerInt(1))
         : { kind: 'call', fn: 'like', args: [compilerText(pattern), col(fts.id, 'text'), compilerText('\\')] },
     ),
@@ -106,10 +106,6 @@ export const searchService: Service = {
     buildRel: (c) => {
       const scope = ownerScopeOf(c.params);
       const pattern = searchPattern(c.params);
-      // VertexProperty (meta-property) search is empty on the reference graphs — a static, documented
-      // gap. It DECLINES rather than building an empty relation: the algebra's empty relation is a
-      // `Filter(false)` over something, and legacy already answers this shape, so handing it over is
-      // both cheaper and honest (§3.3's reasoning, the same one `--list` declines an empty list for).
       // VertexProperty (meta-property) search is empty on the reference graphs — a static, documented
       // gap — so it yields the EMPTY relation rather than declining. See `searchProperties`.
       if (scope === 'vertexproperty') return searchProperties(c, 'vertex', pattern, true);

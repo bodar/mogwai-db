@@ -8,12 +8,12 @@
 //
 // What is SHAREABLE is the split into literal and token parts, and only that — unlike
 // `math()`, a template part carries no non-derivable SQL fact, so the shared form is a
-// plain part list rather than an ops record. Each spine then resolves the tokens in its
-// own object model and concatenates in its own algebra.
+// plain part list rather than an ops record. The consumer then resolves the tokens in
+// its own object model and concatenates in its own algebra.
 //
 // It lives here for the reason `validate.ts` and `coerce.ts` do: the PATTERN is
-// TinkerPop's, not a lowering's, and re-deriving it is how the two spines came to
-// disagree about the escape (below).
+// TinkerPop's, not a lowering's, and re-deriving it is how the hand-rolled copies came
+// to disagree about the escape (below).
 
 /** One piece of a parsed template. A `token` names a variable; the reference resolves
  *  `_` through the `by()` ring and anything else as a property-then-scope-key read. */

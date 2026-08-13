@@ -268,11 +268,11 @@ const CONST_COERCIONS = new Set(['asBool', 'asNumber', 'asDate', 'dateAdd', 'dat
  *
  * **The fold IS the parse, and the parse RAISES TinkerPop's exact messages** (`Can't parse string
  * '1,000' as number.`, the per-type overflow wording). SQL cannot raise either, which is why this
- * happens at compile time on BOTH spines and why it is one function rather than two: a second
- * implementation is a second chance to get an overflow boundary or a date format wrong.
+ * happens at compile time and why it is one function: a second implementation is a second chance to
+ * get an overflow boundary or a date format wrong.
  *
  * It MUTATES `vals`, and a caller whose contract is `null` must catch — a value that does not parse
- * throws from here, and that throw belongs to whichever spine owns the message.
+ * throws from here, and that throw belongs to the caller that owns the message.
  *
  * Typed on `Step`, not the compiler's `IRStep`: the fold reads `name` and `args` only, so it stays
  * on the front-end side of the boundary with the coercion semantics it is made of.

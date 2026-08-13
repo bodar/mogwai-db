@@ -37,28 +37,21 @@ describe('group / properties SQL', () => {
   test('P3 Stage C2: count()/is(typeOf(MAP)) re-enter a group value', () => {
     // A BARRIER EMITS ONE TRAVERSER, so a global `count()` after `group()` is 1 and only
     // `count(Scope.local)` is the map's SIZE (`GroupStep extends ReducingBarrierStep<S, Map<K,V>>`,
-    // gremlin-core `step/map/GroupStep.java:51`). Legacy answers the LOCAL reading under the GLOBAL
-    // name — `COUNT(DISTINCT gk)` — which makes the two spellings indistinguishable and contradicts
-    // its own `fold().count()`; RelIR counts the map traversers. `sql-hygiene`'s `RELIR_AHEAD` row
-    // carries the witness. The assertion is per-spine because the two answers are both PINNED here,
-    // not because either is unsettled.
+    // gremlin-core `step/map/GroupStep.java:51`). The lowering counts the map traversers.
     const c = read('g.V().group().by(T.label).count()');
     expect(c.shape).toEqual({ kind: 'value', type: STATIC('long') });
     expect(c.sql).toContain('count(*)');
     expect(run(seededStore(), 'g.V().group().by(T.label).count()')).toEqual([{ v: 1 }]);
     // count(Scope.local) on a Map = its size, same value
     expect(read('g.V().group().by(T.label).count(Scope.local)').shape).toEqual({ kind: 'value', type: STATIC('long') });
-    // is(typeOf(MAP)) is IDENTITY — a group IS a Map — and the two spines say so through their own
-    // whole-map shape (legacy's `group`, RelIR's `mapValue`), framing the same bytes.
+    // is(typeOf(MAP)) is IDENTITY — a group IS a Map — expressed through the whole-map `mapValue` shape.
     expect(read('g.V().groupCount().by(T.label).is(typeOf(GType.MAP))').shape.kind).toBe('mapValue');
     // A NON-MATCHING typeOf is the EMPTY RESULT, not an error: `Set.feature:38-43` pins
-    // `g.V().values("age").is(P.typeOf(GType.SET))` as "the result should be empty". Legacy refuses
-    // the traversal instead, which is a decline RelIR no longer needs.
+    // `g.V().values("age").is(P.typeOf(GType.SET))` as "the result should be empty".
     expect(run(seededStore(), 'g.V().groupCount().by(T.label).is(typeOf(GType.LIST))')).toEqual([]);
-    // A BARE `group()` KEYS BY THE ELEMENT ITSELF, which RelIR now expresses — the key is the ROWID in
-    // the `GROUP BY` and `elementNode` builds the entry off it, once per surviving group. Legacy has no
-    // element-key group at all and refuses. So `count()` after one is 1 on RelIR (the barrier's single
-    // map traverser) and a refusal on legacy.
+    // A BARE `group()` KEYS BY THE ELEMENT ITSELF — the key is the ROWID in the `GROUP BY` and
+    // `elementNode` builds the entry off it, once per surviving group. So `count()` after one is 1
+    // (the barrier's single map traverser).
     expect(run(seededStore(), 'g.V().group().count()')).toEqual([{ v: 1 }]);
   });
 
@@ -71,10 +64,9 @@ describe('group / properties SQL', () => {
       .toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } });
     // scalar key + scalar-reducer value
     expect(read('g.V().group().by(T.label).by(__.count()).unfold()').shape.kind).toBe('mapEntry');
-    // scalar key + a COLLECTED value, and the two spines DECLARE it differently while framing the
-    // same bytes: legacy names the value side a list of scalars, RelIR names it one self-describing
-    // scalar node — a wrapped property `by()` collects `{t,v}` nodes into a single `{t:'list',v:[…]}`
-    // node, so the value side genuinely is one node there. Both frame `{person:[…], software:[…]}`.
+    // scalar key + a COLLECTED value, named as one self-describing scalar node: a wrapped property
+    // `by()` collects `{t,v}` nodes into a single `{t:'list',v:[…]}` node, so the value side genuinely
+    // is one node. Frames `{person:[…], software:[…]}`.
     const sl = read("g.V().group().by(T.label).by('name').unfold()");
     expect(sl.shape).toEqual({ kind: 'mapEntry', keyOf: { kind: 'scalar' },
       valOf: { kind: 'scalar' } });
@@ -98,7 +90,7 @@ describe('group / properties SQL', () => {
       .toEqual([new Map([['name', ['lop']], ['lang', ['java']]]), new Map([['name', ['ripple']], ['lang', ['java']]])]);
     // AN EDGE's value is FLAT, and the corpus pins it decisively though indirectly:
     // `integrated/SubgraphStrategy.feature:713-724` asserts `outE().valueMap().select(Column.values).
-    // unfold()` yields `d[5].i`, which it could not if the value side were `[5]`. Legacy wraps it.
+    // unfold()` yields `d[5].i`, which it could not if the value side were `[5]`.
     expect(await dec("g.E().hasLabel('knows').valueMap()"))
       .toEqual([new Map([['weight', 0.5]]), new Map([['weight', 1]])]);
     // A key SUBSET filters in SQL, and a key the element does not carry is simply absent — not null.
@@ -117,8 +109,7 @@ describe('group / properties SQL', () => {
 
     // AND IT COMPOSES WITH THE MAP LOOP, which is the whole point of building the producer onto the
     // same shape: the sides, the size and the entries all work over a `valueMap()` unchanged.
-    // The map's SIZE. Legacy has no map-local reducer at all ("count(Scope.local) requires a
-    // preceding list-producing step"), so this is RelIR ahead rather than a shared claim.
+    // The map's SIZE, via a map-local reducer.
     expect(await dec("g.V().hasLabel('software').valueMap().count(Scope.local)")).toEqual([2, 2]);
     expect(await dec("g.V().has('name','lop').valueMap().select(Column.values)")).toEqual([[['lop'], ['java']]]);
     expect(await dec("g.V().has('name','lop').valueMap().unfold().select(Column.keys)")).toEqual(['name', 'lang']);
@@ -132,17 +123,14 @@ describe('group / properties SQL', () => {
     // `Scoping.getScopeValue` asks `object instanceof Map && containsKey(key)` FIRST and only then the
     // side effects and the path labels (gremlin-core `step/Scoping.java:119-135`), and
     // `Select.feature:758-769` pins the resolution end to end
-    // (`elementMap("name").as("a")…select("a").select("name")` → `marko`). Legacy answers EMPTY for a
-    // key that IS in the map, so this is RelIR ahead and the assertion is per-spine.
+    // (`elementMap("name").as("a")…select("a").select("name")` → `marko`).
     expect(await dec("g.V().has('name','lop').valueMap().select('name')")).toEqual([['lop']]);
     // `containsKey`, not "the value is not null": an ABSENT key drops the traverser (`SelectOneStep`'s
     // `ifProductive` emits nothing), so the two software vertices are gone rather than null.
     expect(await dec("g.V().valueMap().select('age')")).toEqual([[29], [27], [32], [35]]);
-    // A key in NEITHER the map nor the labels is the empty result on both spines.
+    // A key in NEITHER the map nor the labels is the empty result.
     expect(await dec("g.V().valueMap().select('nope')")).toEqual([]);
-    // A groupCount map is a scope too — the key is a grouping VALUE, not a property name. Legacy
-    // refuses this one outright rather than answering empty, which is the same gap wearing its other
-    // face ("select() on a map value requires Column.keys or Column.values").
+    // A groupCount map is a scope too — the key is a grouping VALUE, not a property name.
     expect(await dec("g.V().groupCount().by('name').select('marko')")).toEqual([1]);
   });
 
@@ -162,7 +150,7 @@ describe('group / properties SQL', () => {
 
     // `count(Scope.local)` is the map's SIZE — `json_array_length` over the pairs array, no explode.
     expect(await dec("g.V().groupCount().by('name').count(Scope.local)")).toEqual([6]);
-    // RelIR reads the SIZE off the pairs array; legacy re-counts the grouped rows.
+    // The SIZE is read off the pairs array.
     expect(read("g.V().groupCount().by('name').count(Scope.local)").sql)
       .toContain('json_array_length');
 
@@ -177,8 +165,7 @@ describe('group / properties SQL', () => {
       .toEqual([1, 1, 1, 1, 1, 1]);
 
     // A BARRIER emits ONE traverser, so the whole global row vocabulary applies to that one row:
-    // `count()` is 1 (legacy answers the LOCAL reading — see the `RELIR_AHEAD` row in `sql-hygiene`),
-    // and a slice takes the map or nothing.
+    // `count()` is 1, and a slice takes the map or nothing.
     expect(await dec("g.V().groupCount().by('name').count()")).toEqual([1]);
     expect(await dec("g.V().groupCount().by('name').limit(0)")).toEqual([]);
   });
@@ -218,18 +205,17 @@ describe('group / properties SQL', () => {
   });
 
   test('properties() joins the property table into a property shape', () => {
-    // Asserted as MEANING rather than spelling, because the RelIR spine now answers this and picks
-    // its own aliases (`rpr3`/`rn` vs legacy's `vp`/`n`). Per test/CLAUDE.md a snapshot asserts
-    // semantic equivalence, not byte-identity. The name used to say "expands props via json_each",
-    // which was true before properties were normalized out of a JSONB blob into their own table.
+    // Asserted as MEANING rather than spelling, because the lowering picks its own aliases
+    // (`rpr3`/`rn`). Per test/CLAUDE.md a snapshot asserts semantic equivalence, not byte-identity.
+    // The name used to say "expands props via json_each", which was true before properties were
+    // normalized out of a JSONB blob into their own table.
     const p = read('g.V().properties()');
     expect(p.sql).toMatch(/INNER JOIN vertex_properties \w+ ON|JOIN vertex_properties \w+ ON/);
     expect(p.sql).toMatch(/\bnode\b\s*=/);
     expect(p.shape).toEqual({ kind: 'property' });
 
-    // The key filter is an extra JOIN condition either way. What DIFFERS is where the keys live, and
-    // the difference is the parameter budget: a key written in the traversal text is a parsed
-    // LITERAL, i.e. a constant the compiler already holds, so RelIR inlines it as a typed SQL
+    // The key filter is an extra JOIN condition. A key written in the traversal text is a parsed
+    // LITERAL, i.e. a constant the compiler already holds, so the lowering inlines it as a typed SQL
     // literal and spends none of the DO's 100 parameters on it. A bind serves a user PARAMETER and
     // nothing else (root CLAUDE.md). The `properties` family's hygiene baseline records the result
     // directly: binds=0, bound=0.
@@ -239,9 +225,9 @@ describe('group / properties SQL', () => {
   });
 
   test('properties() follow-ons: key/value/count/element project the right column', () => {
-    // Column MEANING, not the alias: the RelIR spine answers these now and names its own relations.
-    // `key()` reads the property table's `key`, `value()` its `value` — whatever each side calls the
-    // relation it reads them from.
+    // Column MEANING, not the alias: the lowering names its own relations. `key()` reads the property
+    // table's `key`, `value()` its `value` — whatever the lowering calls the relation it reads them
+    // from.
     expect(read('g.V().properties().key()').sql).toMatch(/\.(key|pk) AS v/);
     expect(read('g.V().properties().value()').sql).toMatch(/\.(value|pv)\b|AS pv\b/);
     expect(read('g.V().properties().count()').shape).toEqual({ kind: 'value', type: STATIC('long') });
@@ -279,9 +265,8 @@ describe('group / properties SQL', () => {
   test('a sack is an ordinary carried CHANNEL — RelIR', () => {
     const store = seededStore();
     const rel = {} as const;
-    // THE WHOLE RUN FUSES. Legacy spends a CTE per sack step because each one re-projects the layout
-    // by hand; here the seed, the fold and the read are three `Project`s over one relation, and the
-    // block assembler puts them in one SELECT. So the assertion worth making is that the SEED is a
+    // THE WHOLE RUN FUSES: the seed, the fold and the read are three `Project`s over one relation, and
+    // the block assembler puts them in one SELECT. So the assertion worth making is that the SEED is a
     // compile-time constant inlined into the fold, not that a named relation carries it.
     const p = read('g.withSack(0.0d).V().sack(sum).by("age").sack()', rel);
     expect(p.kind).toBe('read');
@@ -293,8 +278,7 @@ describe('group / properties SQL', () => {
     expect(read('g.withSack(2).V().sack(div).by(__.constant(4.0d)).sack()', rel).sql).toContain('CAST(2 AS REAL) / 4.0');
     // `assign` needs no prior value, so it MINTS the channel where no `withSack()` seeded one.
     expect(runWith(store, 'g.V().sack(assign).by("age").sack()', rel).map((r) => r.v)).toEqual([29, 27, 32, 35]);
-    // The by() is the ordinary modulator seam, so a CHILD body works here the day it works anywhere —
-    // legacy's `sackByValue` refuses a nested traversal outright.
+    // The by() is the ordinary modulator seam, so a CHILD body works here the day it works anywhere.
     expect(runWith(store, 'g.withSack(0).V().sack(assign).by(__.outE().count()).sack()', rel).map((r) => r.v).sort())
       .toEqual([0, 0, 0, 1, 2, 3]);
     // A `by()` that yields nothing DROPS the traverser — the vocabulary's rule, not this host's.
@@ -312,14 +296,11 @@ describe('group / properties SQL', () => {
   // ---------- upstream's own GRAPH-SNAPSHOT reads: an ELEMENT-KEYED / RECORD-KEYED side read ----------
   //
   // These two are `getEdges`/`getVertexProperties` from the cucumber harness's `BeforeAll`
-  // (`vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/world.js:157-190`), verbatim. They are
-  // the reason `mise run L3:rel-only` could not report at all: they took the legacy route, so under the
-  // `rel-only` position the harness died before a scenario ran.
+  // (`vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/world.js:157-190`), verbatim.
   //
-  // On RelIR a `project()` key is the RECORD shape collapsed to a map VALUE — the boundary `record.ts`
+  // A `project()` key is the RECORD shape collapsed to a map VALUE — the boundary `record.ts`
   // always named — so the group key is one `{t:'map', v:[[k,node],…]}` column and the shape is the
-  // ordinary `mapValue`. The claims below are RelIR's; legacy's composite-key columns (`k0_v`…) are a
-  // descriptor of a route with an end date and are deliberately not restated (see `relOnly`).
+  // ordinary `mapValue`.
   test('group().by(__.project) — a RECORD-keyed group over an edge stream (upstream getEdges)', () => {
     const gremlin = 'g.E().group().by(__.project("o","l","i").by(__.outV().values("name")).by(__.label()).by(__.inV().values("name"))).by(__.tail())';
     const p = read(gremlin);

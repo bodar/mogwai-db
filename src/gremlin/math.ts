@@ -13,16 +13,15 @@
 //
 // ## Why an OPS RECORD and not an AST (§6·4)
 //
-// This file is a PARSE plus a table of non-derivable SQL facts, and the two spines
-// need the parse but construct different things — legacy composes a `q` kernel
-// `Expression`, RelIR composes a `Rel` `Expr`. The obvious separation is an AST
-// (`parseMath(formula): MathNode`, each spine folding it) and it is the WRONG one
-// here: three of the twenty `FN` entries are SQL facts rather than operator names.
-// `log` is exp4j's NATURAL log and maps to `LN` while SQLite's own `log()` is
-// log10; `cbrt` splits on sign because `POW` domain-errors to NULL on a negative
-// base with a fractional exponent, and a real cube root of a negative is defined;
-// `signum` is a three-way `CASE`. An AST whose nodes are `{fn: 'cbrt'}` makes each
-// spine re-derive that expansion — a non-derivable fact re-implemented, which is a
+// This file is a PARSE plus a table of non-derivable SQL facts. A consumer needs the
+// parse but constructs its own thing — RelIR composes a `Rel` `Expr`. The obvious
+// separation is an AST (`parseMath(formula): MathNode`, the consumer folding it) and
+// it is the WRONG one here: three of the twenty `FN` entries are SQL facts rather than
+// operator names. `log` is exp4j's NATURAL log and maps to `LN` while SQLite's own
+// `log()` is log10; `cbrt` splits on sign because `POW` domain-errors to NULL on a
+// negative base with a fractional exponent, and a real cube root of a negative is
+// defined; `signum` is a three-way `CASE`. An AST whose nodes are `{fn: 'cbrt'}` pushes
+// that expansion onto the consumer — a non-derivable fact re-implemented, which is a
 // second chance to get it wrong and no test names the difference.
 //
 // So the layer supplies only PRIMITIVES and `FN` stays ONE table. The `conditional`

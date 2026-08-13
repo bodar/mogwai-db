@@ -35,22 +35,19 @@
  * Without it the instrument ranks the wrong work while looking precise, which is worse than a coarse
  * number honestly labelled.
  *
- * ## The blocked count is THREE populations, and "does legacy COMPILE it" is the wrong split
+ * ## The blocked count is THREE populations, split by the CONFORMANCE RESULT
  *
- * A blocked traversal is one of: one some route already ANSWERS (migrating it closes the cut and the
- * answer is already known-correct), one NOBODY answers (lowering it is an outright L3 gain), or one no
- * L3 scenario runs at all (out of the suite's scope — it says nothing either way).
+ * A blocked traversal falls into one of three populations, joined to the committed L3 floors: its
+ * scenarios already PASS today (`answered`), some scenario it names still FAILS (`open` — lowering
+ * its family is an outright L3 gain), or no L3 scenario scores it at all (`unscored` — out of the
+ * suite's scope, so it says nothing either way).
  *
- * ⚠️ **The earlier split asked `compilePlan(q, {}, {spine:'legacy'})` whether legacy COMPILES the
- * traversal, and that is a different question from whether legacy ANSWERS it.** Measured
- * 2026-08-09: every one of the eleven `aggregate` rows it reported as "a real gap the route answers"
- * is a traversal legacy compiles and silently MIS-answers — `register` keeps the last entry of a
- * `Map`, so a label filled at two chain positions discards the first site's members
- * (`src/compiler/steps/prefix/sideeffect.ts:163-164`). A family that ranking called cut-only was
- * worth ~9 L3 outright. So the split here is the CONFORMANCE RESULT, joined through
- * `test/L1-corpus/scenarios.tsv` — the scenario a traversal came from — against the two floors in
- * `test/L3-conformance/l3-state.json`. It is committed data, so this stays submodule-free and
- * needs no run.
+ * ⚠️ **The split is the CONFORMANCE RESULT, not whether the traversal merely COMPILES** — those are
+ * different questions, and a chain can compile and still silently MIS-answer, so counting "compiles"
+ * as already-covered overstates coverage (measured 2026-08-09: a family a compile-based split
+ * treated as already-covered was worth ~9 L3 outright). It is joined through `test/L1-corpus/scenarios.tsv` —
+ * the scenario a traversal came from — against the two floors in `test/L3-conformance/l3-state.json`.
+ * It is committed data, so this stays submodule-free and needs no run.
  *
  * The `L3` column is the number to rank an increment by: the scenarios that would newly have a
  * chance of passing, counted per scenario rather than per traversal because that is the unit the
@@ -101,10 +98,10 @@ function verdictOf(query: string): Verdict {
   const named = (SCENARIOS.get(query) ?? []).filter((name) => RUN.has(name));
   if (!named.length) return { population: 'unscored', gain: 0 };
   const failing = named.filter((name) => !ANSWERED.has(name));
-  // ALL of a traversal's scored scenarios must be answered before it counts as cut-only. One traversal
-  // is routinely shared across graph fixtures, and a route that answers it over `gmodern` but not over
-  // `gcrew` has not answered it — that partial case is upside, and filing it as cut-closing is the
-  // understatement this split exists to remove.
+  // ALL of a traversal's scored scenarios must pass before it counts as answered. One traversal is
+  // routinely shared across graph fixtures, and answering it over `gmodern` but not over `gcrew` has
+  // not answered it — that partial case is upside, and filing it as answered is the understatement
+  // this split exists to remove.
   return { population: failing.length ? 'open' : 'answered', gain: failing.length };
 }
 
@@ -239,8 +236,8 @@ for (const query of CORPUS) {
   blockedAt.set(name, tally);
   // The POSITION is half the answer: the same step name at the source and mid-chain are two different
   // increments (a one-row `Values` input versus the traverser stream), and a list that omitted it
-  // would hide the split it exists to show. The POPULATION is the other half — a traversal no route
-  // answers is a different increment from one that only needs migrating.
+  // would hide the split it exists to show. The POPULATION is the other half — a traversal whose
+  // scenarios already pass is a different increment from one no scenario answers yet.
   if (name === wanted) blockedTraversals.push(`  ${verdict.population.padEnd(8)} [${longest}/${steps.length}] ${query}`);
 }
 

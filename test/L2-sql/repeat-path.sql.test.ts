@@ -24,17 +24,15 @@ describe('repeat / path SQL', () => {
 
 
   test('emit(predicate) carries an emit column tested per row (same engine as until)', () => {
-    // emit-after: the seed is never emitted; each recursive row is tested. The RelIR walk claims
-    // this one, and the two spines say it differently — legacy carries a materialized `emit` column,
-    // RelIR filters the walk on its `loops` channel — so the assertions follow the route rather than
-    // pinning the spelling of a route this query no longer takes.
+    // emit-after: the seed is never emitted; each recursive row is tested. The walk filters on its
+    // `loops` channel, so the assertions follow that spelling.
     const after = read('g.V(1).repeat(__.out()).emit(__.has("name","josh"))');
           expect(after.sql).toMatch(/w\d+\.lp0 > 0/);             // seed not emitted under emit-after
       expect(after.sql).toMatch(/EXISTS \(SELECT 1 AS one FROM vertex_properties/); // has() predicate
     
     // emit-before with a COMPOSITE predicate: a correlated property test OR a per-traverser state
-    // read. Both spines combine them through their ordinary infix machinery — no bespoke until/emit
-    // parser — so the assertion is the OR, and each spine spells its own two operands.
+    // read. They combine through the ordinary infix machinery — no bespoke until/emit parser — so the
+    // assertion is the OR.
     const before = read('g.V(1).emit(__.has("name","marko").or().loops().is(2)).repeat(__.out())');
     expect(before.sql).toMatch(/\) OR \(/);                    // has() OR loops()
           expect(before.sql).toMatch(/EXISTS \(SELECT 1 AS one FROM vertex_properties/);
@@ -114,7 +112,7 @@ describe('repeat / path SQL', () => {
 
     // Correctness: groupCount() per vertex sums to the full traverser total (each of 12 ids gets
     // its multiplicity), and values('w').sum() = w·(total) with w=2. All computed in ms.
-    // `grouped` reads legacy's `(gk, gv)` rows and RelIR's framed Map through one public-result view.
+    // `grouped` reads the framed Map through one public-result view.
     const gc = Object.fromEntries(Object.entries(
       grouped(run(store, 'g.V().repeat(__.both()).times(8).groupCount().by(T.id)')),
     ).map(([k, v]) => [k, Number(v)]));
@@ -170,8 +168,8 @@ describe('repeat / path SQL', () => {
 
   test('until(loops().is(n)) tests the depth counter, not an element', () => {
     const p = read('g.V(1).repeat(__.out()).until(__.loops().is(2))');
-    // `loops()` is a read of CARRIED STATE, so each spine names its own counter: legacy's
-    // materialized `depth`, RelIR's `loops` channel. Both compare it to the literal 2.
+    // `loops()` is a read of CARRIED STATE, named by the walk's `loops` channel and compared to the
+    // literal 2.
     expect(p.sql).toMatch(/w\d+\.lp0 = 2/);
   });
 
@@ -306,8 +304,8 @@ describe('repeat / path SQL', () => {
 
   test('the BOUNDED spellings UNROLL instead — n phases, n sites, one union at the cap', () => {
     // The other half of the pair above, so the regime split is asserted rather than implied. An
-    // unrolled body has no walk at all, which is why none of legacy's markers can appear — and it is
-    // the PASS that does it, so this holds whichever route the phases then take.
+    // unrolled body has no walk at all, which is why no recursive markers appear — and it is the PASS
+    // that does it, so this holds whichever route the phases then take.
     for (const gremlin of [
       "g.V(1).repeat(__.out().aggregate('x')).times(2).cap('x')",
       "g.V().local(__.aggregate('a')).repeat(__.out().local(__.aggregate('a'))).times(2).cap('a')",

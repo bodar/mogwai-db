@@ -15,9 +15,9 @@ import { read } from '../support/harness.ts';
 describe('movement / edge sources SQL', () => {
 
 
-  // Movement is RelIR-routed (§6·1). What both spines must agree on is the DIRECTION table — which
-  // edge column matches the incoming id and which one the outgoing id comes from — so that is what
-  // is asserted, once per spine, rather than either one's aliases.
+  // Movement is RelIR-routed. What matters is the DIRECTION table — which edge column matches the
+  // incoming id and which one the outgoing id comes from — so that is what is asserted, rather than
+  // the lowering's aliases.
   {
     test(`outE/inE go vertex→edge; outV/inV go edge→vertex`, () => {
       const oe = read('g.V(1).outE("knows")');

@@ -29,7 +29,7 @@ function directionOf(params: Record<string, unknown>): 'out' | 'in' | 'both' {
 
 /** The body the seam lowers — a movement in `direction`, then `count()`. Written as IR rather than
  *  parsed from Gremlin text because that is what it IS: the service is not quoting a traversal, it is
- *  naming two steps. `scopedMovementCount` (legacy) synthesised the identical pair. */
+ *  naming two steps. */
 const degreeBody = (direction: 'out' | 'in' | 'both'): readonly IRStep[] =>
   [{ name: direction, args: [] }, { name: 'count', args: [] }] as unknown as readonly IRStep[];
 
@@ -41,8 +41,8 @@ export const degreeCentralityService: Service = {
     kind: 'rel',
     buildRel: (site: RelCallSite): RelContribution | null => {
       // THE POSITION CHECK IS A THROW, NOT A DECLINE — §6·5's "the answer is an ERROR". A `start`
-      // position for a `streaming` service is not a shape some other spine answers; it is invalid
-      // Gremlin, and once legacy no longer serves this service there is nobody else to raise it.
+      // position for a `streaming` service is not a shape to decline; it is invalid Gremlin, and the
+      // compiler is the only thing that can raise it.
       if (!site.host || !site.child)
         throw new Error('tinker.degree.centrality must be called mid-traversal on vertices (e.g. g.V().call(...))');
       if (site.host.kind !== 'element')

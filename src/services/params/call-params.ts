@@ -160,7 +160,7 @@ export function parseCallSpec(step: IRStep, params: Record<string, any>): CallSp
 // so that stays there.
 //
 // An unregistered name resolves to nothing rather than throwing: the lowering then declines and
-// legacy raises `unknown service`, which is its message to own.
+// the compiler raises `unknown service`, which is its message to own.
 
 /** Every service name this chain's `call()` steps refer to, resolved against the registry. Uses
  *  `parseCallSpec` rather than re-reading `args[0]`, so the bare-`g.call()`-means-`--list` default
@@ -199,8 +199,8 @@ export function servicesNamedBy(
  * **This walk is §6·6's lesson stated one layer up, and its absence cost a real decline.** Scanning
  * only the top-level chain meant `where(__.call(dc).is(3))` and `group().by(__.call(dc))` reached a
  * lowering that had never been HANDED the service, so the fold declined and every counter read it as
- * a gap in what the algebra can EXPRESS. It was measuring the router's memory instead — the same
- * defect, in the same function, that `rel-blockers` once had.
+ * a gap in what the algebra can EXPRESS. It was measuring what had been handed over, not what the
+ * algebra can express — the same defect, in the same function, that `rel-blockers` once had.
  */
 function* nestedArgs(step: IRStep): Generator<any> {
   const walk = function* (value: unknown): Generator<any> {

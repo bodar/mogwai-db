@@ -26,19 +26,19 @@ const json = Bun.argv.includes('--json');
 const record = Bun.argv.includes('--record');
 const expected = JSON.parse(await Bun.file(new URL('./sql-hygiene-baseline.json', import.meta.url)).text()) as Record<string, Metric>;
 /**
- * RelIR is intentionally ahead of the legacy SQL in these cases. Each witness is asserted by the
- * vendored reference corpus under the pinned TinkerPop revision; do not add a row without one.
+ * Each witness is asserted by the vendored reference corpus under the pinned TinkerPop revision; do
+ * not add a row without one.
  */
 
 interface Metric { binds: number; bytes: number; compiler: number; bound: number; }
 const maxima = new Map<string, Metric>();
 const failures: string[] = [];
-/** Traversals where the two spines return the SAME rows in a different order — telemetry, never a
- *  gate, exactly as the census treats the same fact. A number worth watching move, so it is printed
- *  on a green run too (the summary line below). */
+/** Vestigial telemetry: the differential it once fed is gone, so nothing populates it and the summary
+ *  line's count is always 0. Emission order was reported there, never gated — exactly as the census
+ *  treats the same fact. */
 const reordered: string[] = [];
-/** Queries where the two spines frame DIFFERENT rows. Recorded, never gated — see the comparison
- *  site for why this stopped being a failure. */
+/** Vestigial telemetry: the differential it once fed is gone, so nothing populates it and the summary
+ *  line's count is always 0. */
 const diverged: string[] = [];
 let admitted = 0;
 let statements = 0;
@@ -52,26 +52,14 @@ const canon = (value: any): any =>
   : typeof value === 'bigint' ? ['bigint', value.toString()]
   : Number.isNaN(value) ? ['nan'] : value;
 /**
- * A framed answer as TWO comparisons, because the two spines agreeing on WHICH traversers come back
- * and agreeing on the ORDER they come back in are different claims with different standing.
+ * Vestigial telemetry from the retired differential — the `value`/`multiset` comparison it described
+ * no longer runs, so `reordered`/`diverged` stay empty.
  *
- * `value` is the ordered rendering; `multiset` is the same rows sorted, so it is blind to order and
- * to nothing else. Only the multiset GATES. A traversal that does not call `order()` has no
- * specified emission order — traversers are a multiset (root `CLAUDE.md`) — so two spines emitting
- * the same rows in different orders are both right, and failing the build on it would make any plan
- * change to either spine a build break.
- *
- * **This is the census's rule, not a new one.** `test/census/` gates on "no executing traversal
- * changes its answer" and reports emission-order change as telemetry that never gates; this script
- * measured the same axis and gated on it, which was the two instruments disagreeing about the
- * standing of one fact rather than a stricter check. Measured when the RelIR spine's join order was
- * pinned (the fence in `relir-build-plan` §1 P4): 53 corpus traversals reordered, every one
- * of them multiset-identical, and BOTH spines' orders stable under `MOGWAI_REVERSE_UNORDERED=1` —
- * so neither was passing by luck, and neither was more correct.
- *
- * What this does NOT concede: an order the language DOES specify is `order()`'s, which is an
- * `ORDER BY` in the emitted SQL and therefore survives any plan change. If that ever diverges
- * between spines the rows themselves diverge with it, and the multiset gate below catches it.
+ * The durable facts it rested on still hold: a traversal that does not call `order()` has no
+ * specified emission order — traversers are a multiset (root `CLAUDE.md`) — so emission order is
+ * telemetry that never gates, exactly as `test/census/` treats it (it gates on "no executing
+ * traversal changes its answer" and reports emission-order change as telemetry). The order `order()`
+ * DOES specify is an `ORDER BY` in the emitted SQL and therefore survives any plan change.
  */
 
 const countExpr = (expr: Expr, counts: { compiler: number; bound: number }): void =>

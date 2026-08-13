@@ -810,16 +810,16 @@ function parsePredicate(node: any, params: Record<string, any>): Pred {
   // (`P.within('a','b')`) and a single collection (`P.within(['a','b'])` / `P.within($list)`), and a
   // single collection stays ONE operand — `extractArgs` already produced it as a collection `Arg`
   // (`.members` for a literal `[…]`, a raw array `value` + `.name` for a bound list-PARAM). HOW that
-  // collection lowers is a per-SPINE decision, not a translation fact: the RelIR predicate spreads a
+  // collection lowers is a LOWERING decision, not a translation fact: the RelIR predicate spreads a
   // literal to an inline IN-list and crosses a PARAMETER as ONE `jsonb(?)` bind exploded by `json_each`
-  // (the parameter stays a bind, its data never enters the statement text); legacy spreads to member
-  // operands. Each consumer calls `collectionMembers`; varargs pass straight through.
+  // (the parameter stays a bind, its data never enters the statement text). The consumer calls
+  // `collectionMembers`; varargs pass straight through.
   return { op: m![1], operands: extractArgs(node, params) };
 }
 
 /** A set/range collection operand's members as `Arg`s — its `.members` for a literal `[…]`, or its raw
- *  array `value` mapped to TYPED nameless `Arg`s for a bound list-PARAM (`within($list)`). The per-spine
- *  predicate consumers (RelIR `predicateExpr`, legacy `predicateSql`) call this to SPREAD a
+ *  array `value` mapped to TYPED nameless `Arg`s for a bound list-PARAM (`within($list)`). The RelIR
+ *  predicate consumer (`predicateExpr`) calls this to SPREAD a
  *  within/without/between/inside collection into member operands; `parsePredicate` stays faithful so the
  *  spread is the consumer's choice, not a front-end lowering. */
 export const collectionMembers = (a: Arg): Arg[] =>

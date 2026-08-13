@@ -2,11 +2,11 @@
 /**
  * THE DECLINE-CONTRACT GATE — `lowerToRel` returns a plan or `null`, and NEVER throws.
  *
- * That contract is the whole reason the dual spine is safe (§6·1): a covered chain routes RelIR, an
- * uncovered one declines and the legacy spine answers it exactly as it does today. A THROW from the
- * lowering is neither — it is the new spine raising an error on a traversal the old one compiles
- * fine, which is a support REGRESSION rather than a deferral. Nothing else in the suite can see it,
- * because `compileViaRel` is only reached along paths the router already thinks are covered.
+ * That contract is what keeps the failure mode clean: a covered chain lowers, an uncovered one
+ * DECLINES by returning `null` and the compiler raises `UnsupportedTraversal` — a clear query
+ * failure. A THROW from the lowering is neither — it is the lowering erroring on a traversal instead
+ * of cleanly declining it, a bug rather than a deferral. Nothing else in the suite reliably catches
+ * it, because the lowering runs only on chains already presumed covered.
  *
  * ## Why a sweep rather than tests
  *
@@ -16,7 +16,7 @@
  *   - a `collapse` requested on a chain that also demands an emission order built a plan whose
  *     declared type promised a position column the projection had dropped (2026-08-02);
  *   - a post-movement `Filter` naming `BULK` rather than passing its input's channels through dropped
- *     the position under `demandsEncounter` — RelIR threw where legacy answered (2026-08-03).
+ *     the position under `demandsEncounter` — the lowering threw instead of returning a valid plan (2026-08-03).
  *
  * Neither is reachable by writing a test for the step, because neither step is wrong. So the sweep
  * enumerates the product of every corpus PREFIX with every configuration the compiler can hand the
@@ -131,12 +131,12 @@ let emitted = 0;
  * can count one `Lit` the block fuses in twice as one (measured in the algebra: 91 occurrences
  * rendering as 181 binds), or sum a repeated parameter the render dedups to a single reused `?N`. A
  * seam that admitted on such an estimate would meet the wall on a different number, and the refusal
- * would then arrive past the point where another route could have been chosen — the fail-closed
- * violation the routing switch cannot absorb.
+ * would then arrive at render time, past the admission decision — a fail-closed violation surfacing
+ * after the plan was already accepted.
  *
  * `renderedSteps` therefore renders and asks the real list, so the property swept here is the one that
  * matters: **a plan the seam ADMITTED renders within the platform cap.** It is what makes the wall
- * unreachable from the routing decision rather than merely unlikely.
+ * unreachable from an admitted plan rather than merely unlikely.
  *
  * The divergence is real and reachable, which is why this is swept rather than assumed: measured
  * over every corpus prefix before the fix, 50 distinct prefixes rendered MORE binds than were
@@ -158,7 +158,7 @@ const renderedSteps = (plan: Plan) =>
  * Sweep ONE configuration, recording both properties above.
  *
  * A PREFIX the verify Pass would reject is skipped, because `lowerToRel` never sees one in
- * production: `compilePlan` runs `verifyWriteArgs` over the whole chain BEFORE the spine route, so a
+ * production: `compilePlan` runs `verifyWriteArgs` over the whole chain BEFORE lowering, so a
  * text-level refusal is the traversal's answer and the lowering is never asked (§6·5). Truncation is
  * what makes this reachable here and only here — `mergeE([… Merge.outV …])` sliced before its
  * `option(Merge.outV, …)` is a chain nobody wrote, and refusing it is CORRECT for that text. Without
