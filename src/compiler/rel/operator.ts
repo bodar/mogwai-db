@@ -7,8 +7,8 @@ import { compilerNull, type Expr } from '../../rel/expr.ts';
  * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Operator.java`).
  * Every place a traversal declares one — `withSideEffect(k, seed, Operator.x)`, `withSack(seed,
  * Operator.x)`, `sack(Operator.x).by(v)` — folds it the same way, so the EXPRESSION belongs in one
- * module. This is §6·4's split applied a second time: the operator SET is data both spines agree on
- * (`SACK_OPS`, `ir/step.ts`), and the SQL is emission, owned by whichever layer emits it.
+ * module. This is §6·4's split applied a second time: the operator SET is data (`SACK_OPS`,
+ * `ir/step.ts`) and the SQL is emission, owned by the layer that emits it.
  *
  * ## The two categories, and why the distinction is not cosmetic
  *

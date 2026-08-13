@@ -1,6 +1,6 @@
 // ---------- dependency scopes (DI lifecycles) ----------
 //
-// The compiler's dependencies are separated from per-query STATE (LoweringState, compiler/steps/context.ts)
+// The compiler's dependencies are separated from per-compile STATE (threaded explicitly, not a scope)
 // and grouped by LIFECYCLE into named scopes. Downstream code depends ONLY on the scope
 // INTERFACES below (`Dependency<K,V>` contracts) — never on the LazyMap backing them, so the
 // DI mechanism stays hidden and swappable (a test can build a scope and override one entry).
@@ -15,9 +15,8 @@
 //                     why a nested compile no longer restates any of it.
 // There is deliberately NO compile-scope tier. What one compile owns and a sibling compile must
 // not share — its fresh CTE-accumulator Query, and (for inject() alone) an override of the bound
-// param table — is per-compile STATE, and the object that already holds and publishes it is the
-// LoweringEngine (`compiler/engine`), one per compile, built from a RequestScope. Making it a
-// third scope duplicated `q` between the scope and the LoweringState that already carries it.
+// param table — is per-compile STATE, threaded explicitly through the lowering rather than held in
+// DI. Making it a third scope only duplicated that state into the container.
 //
 // LazyMaps are cheap: create as many as there are lifecycles.
 

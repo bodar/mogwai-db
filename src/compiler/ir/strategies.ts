@@ -222,7 +222,7 @@ const EDGE_PRODUCERS = unionOf(EDGE_SOURCE, EDGE_MOVES);
 /** Movement explosion (SubgraphStrategy edge criterion only). To filter the traversed
  *  EDGE, a vertex→vertex hop must first land on the edge: out→outE.inV, in→inE.outV,
  *  both→bothE.otherV — the same rewrite TinkerPop performs when an edgeCriterion is set.
- *  (otherV needs the entering-vertex context; see the trackFromV note in steps/child.ts.) */
+ *  (otherV needs the entering-vertex context.) */
 const EXPLODE_EDGE: Record<string, string> = { out: 'outE', in: 'inE', both: 'bothE' };
 const EXPLODE_FARV: Record<string, string> = { out: 'inV', in: 'outV', both: 'otherV' };
 /** Edge-traversal steps EdgeLabelVerificationStrategy guards (a bare, unlabelled one
@@ -449,8 +449,8 @@ function isPropertyMapForm(s: IRStep): boolean {
  *  consequence rather than an error — `g.addV("person").property(null)` and
  *  `g.addV("foo").property(set, null)` each yield ONE vertex with NO properties
  *  (`gremlin-test .../features/map/AddVertex.feature`, `g_addV_propertyXnullX` /
- *  `g_addV_propertyXset_nullX`). Both passed only through the legacy write route before this, so
- *  covering them here is what makes them survive that route's deletion.
+ *  `g_addV_propertyXset_nullX`). Both were handled only inside the write lowering before this, so
+ *  desugaring the map form here is what keeps them working.
  *
  *  Runs in `extract`, before decoration, for the same reason desugarMatchString does: a map VALUE
  *  may be a nested traversal (`[k: __.trav]` is legal — `mapEntry : mapKey COLON genericLiteral`
@@ -725,10 +725,10 @@ export function foldConstantPredicateOperands(steps: IRStep[], params: Record<st
  * key, so the substitution is a pure function of the chain and its params — which is exactly what a
  * `Pass` is, and why it belongs HERE rather than in a lowering.
  *
- * It used to live inside one spine's `has()` compiler, which made it that spine's private trick: the
- * other route saw a marker it had no rule for and declined a traversal whose meaning was fully
- * settled before either of them ran. A rewrite above the routing switch cannot be learned twice or
- * disagreed about (§6·5 — a fact about the traversal's own text belongs to the Pass tier).
+ * It used to live inside a `has()` compiler, which made it a lowering-private trick: a marker whose
+ * meaning was fully settled before lowering was left for a single lowering to resolve. As a rewrite
+ * above the lowering it cannot be learned twice or disagreed about (§6·5 — a fact about the
+ * traversal's own text belongs to the Pass tier).
  *
  * Zero-cost for every ordinary query: no injection key, no rewrite. A marker with NO values supplied
  * is left alone deliberately — it then reaches the lowerings as the inert token it is and yields no
@@ -1573,18 +1573,15 @@ export function rewriteWhereEndLabels(steps: IRStep[], params: Record<string, an
 // `docs/archive/2026-08-09-repeat-two-regimes-plan.md`).
 //
 // The problem they solve: `g.V().repeat(__.out()).times(5).as("a").out("writtenBy").as("b")
-// .select("a","b").count()` is 24 309 134 024 traversers over the grateful graph, and it answers
-// today only because legacy's repeat-specific bulk path admitted `as`/`select` under a `count()`
-// through a SUFFIX rule of its own. Widening the unroll (§1a) splices the `repeat` away, that route
-// stops firing, and the chain-global `collapseSafe` refuses the collapse on sight of the `as()` — so
-// the plan enumerates. Relaxing `collapseSafe` to admit the pair was tried and REFUTED: 52 executing
-// traversals changed their answer, because the question is POSITIONAL (legacy bound its labels AFTER
-// the collapse, on a frontier of distinct ids) and a chain verdict cannot say "safe here, unsafe
-// there".
+// .select("a","b").count()` is 24 309 134 024 traversers over the grateful graph, so it answers only
+// if the movement collapses. Left in place, the `as()` makes the chain-global `collapseSafe` refuse
+// the collapse on sight, and the plan enumerates. Relaxing `collapseSafe` to admit the pair was tried
+// and REFUTED: 52 executing traversals changed their answer, because the question is POSITIONAL — a
+// label bound AFTER the collapse sits on a frontier of distinct ids — and a chain verdict cannot say
+// "safe here, unsafe there".
 //
-// So neither pass relaxes anything. They DELETE the identity, and the per-position checks that
-// already exist on both spines — `isBulkOnly` (steps/prefix/movement.ts) and
-// `groupableChannels`/`CHANNEL_GROUP_POLICY` (src/channels.ts), the latter re-checked as a law by
+// So neither pass relaxes anything. They DELETE the identity, and the per-position checks —
+// `groupableChannels`/`CHANNEL_GROUP_POLICY` (src/channels.ts), re-checked as a law by
 // `src/rel/obligations.ts` — then admit the collapse as strict as they are today.
 
 /** A `select('a','b')` and nothing more: bare label strings, no `by()`, no Pop, no option arms. A

@@ -33,9 +33,7 @@ export interface Step { readonly binding?: string; readonly result: boolean; rea
  * RelIR is normalized — one operator per node — while SQL's `SELECT` is a COMPOSITION of operators
  * with fixed slots. Converting between those two shapes is this module's whole job: walk down from a
  * node filling slots, and open a nested `SELECT` only when the slot you need is already occupied.
- * That is why `Project(Filter(Join))` is ONE statement rather than three derived tables, and it is
- * what will delete `TailAcc` — the accumulator that exists only because the legacy lowering has
- * nowhere to fuse.
+ * That is why `Project(Filter(Join))` is ONE statement rather than three derived tables.
  *
  * Prior art, same algorithm and same reason —
  * `vendor/calcite/core/src/main/java/org/apache/calcite/rel/rel2sql/SqlImplementor.java:2167`
@@ -148,8 +146,7 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
       // A json object's KEYS are compile-time strings in the node, not `Expr`s — so they render as
       // LITERALS, never as binds. `value(key)` here spent one of the platform's 100 parameters per
       // key: a `{t,v}` member node cost two and one `as()` cost two, which is a plan the seam declines
-      // for a constant the compiler itself wrote. Legacy always inlined them; this is the two spines
-      // agreeing on the cheap spelling rather than RelIR paying for the same SQL.
+      // for a constant the compiler itself wrote.
       case 'json-object': return q`${raw(e.binary ? 'jsonb_object' : 'json_object')}(${list(e.entries.flatMap(([key, val]) => [textLiteral(key), self(val)]))})`;
       case 'json-array': return q`${raw(e.binary ? 'jsonb_array' : 'json_array')}(${list(e.items.map(self))})`;
       case 'scalar': return q`(${renderRel(e.plan, scope)})`;
@@ -343,8 +340,8 @@ function assembler(bindings: ReadonlyMap<string, Binding>) {
         // its subject — and where the subject is a minted position that expression is a whole
         // `ROW_NUMBER()` over a correlated compare key. Measured on
         // `g.V().order().by("age").range(1,3).values("name")`: the key spelled THREE times and 30
-        // binds against legacy's 5, so a second `order()` in one chain would approach the DO cap and
-        // fail closed where legacy answers. Naming the column costs one nested SELECT.
+        // binds, so a second `order()` in one chain would approach the DO cap and fail closed.
+        // Naming the column costs one nested SELECT.
         const b = inputBlock(r.input, outer, NEEDS_SUBQUERY.sort);
         return { ...b, orderBy: r.terms.map((term) => sortTerm(term, b.scope)), scope: withRel(b.scope, r.id, outMap(b)) };
       }

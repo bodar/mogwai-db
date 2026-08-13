@@ -458,7 +458,7 @@ function projectedMembers(
  * site's members at once, which is what makes the member encoding uniform (`list.ts:769-789`).
  *
  * A cap emits a single fresh traverser, so what comes back carries NO channels: both folds are
- * `Aggregate`s with `channels: []`, which is the same thing legacy spells as `dropLayoutAtBarrier`.
+ * `Aggregate`s with `channels: []`, which is what drops the layout at the barrier.
  * Everything after it is the ordinary list tail — `unfold()`, `count(local)`, a local reducer, a
  * member op — with nothing to know about side effects.
  *

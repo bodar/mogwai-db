@@ -2,14 +2,14 @@
 // chainTracksPath / demandsEncounterOrder / chainCollapseSafe scans, plus the POSITIONAL collapse
 // answer that replaced the third of those as a chain fact (src/compiler/ir/bulk.ts).
 //
-// Three groups, and the split between them is the subject: `ChainFacts` holds what BOTH spines read;
-// `legacyCollapseSafe` is the whole-chain collapse verdict, now legacy's alone; `bulkObservedFrom` is
-// the suffix question RelIR asks at each hop instead. The invariant that outlives all of it is that
-// they cannot disagree about what a plain order() does, which is why `isPlainOrder` has one home.
+// Three groups: `ChainFacts` holds the whole-chain facts the lowering reads; `chainCollapseSafe` is
+// the whole-chain collapse verdict; `bulkObservedFrom` is the suffix question asked at each hop
+// instead. The invariant that outlives all of it is that they cannot disagree about what a plain
+// order() does, which is why `isPlainOrder` has one home.
 import { test, expect, describe } from 'bun:test';
 import { parseGremlin, stepChain } from '../../src/gremlin/frontend.ts';
 import { normalize } from '../../src/compiler/ir/passes.ts';
-import { analyzeChain, legacyCollapseSafe } from '../../src/compiler/ir/analyze.ts';
+import { analyzeChain, chainCollapseSafe } from '../../src/compiler/ir/analyze.ts';
 import { bulkObservedFrom } from '../../src/compiler/ir/bulk.ts';
 
 /** Parse + normalize (so order().by() has its .bys folded, exactly as the compiler sees it),
@@ -21,12 +21,12 @@ import { bulkObservedFrom } from '../../src/compiler/ir/bulk.ts';
  *  already dropped and these pins would describe a chain no compile produces. */
 const facts = (gremlin: string) => analyzeChain(normalize(stepChain(parseGremlin(gremlin), {}), {}, undefined, false).steps);
 
-/** LEGACY's chain-global collapse verdict. No longer a `ChainFacts` field — RelIR answers the same
- *  question per position (`bulkObservedFrom` below, plus `groupableChannels` at the node), so the
- *  whole-chain form belongs to the one route with no positional answer. These pins are unchanged in
- *  MEANING: what they describe is now explicitly legacy's gate rather than a fact about the chain. */
+/** The chain-global collapse verdict. No longer a `ChainFacts` field — the positional answer
+ *  (`bulkObservedFrom` below, plus `groupableChannels` at the node) answers the same question per
+ *  position, so the whole-chain form is its own separate gate. These pins describe that whole-chain
+ *  gate rather than a fact about the chain. */
 const collapseSafe = (gremlin: string) =>
-  legacyCollapseSafe(normalize(stepChain(parseGremlin(gremlin), {}), {}, undefined, false).steps);
+  chainCollapseSafe(normalize(stepChain(parseGremlin(gremlin), {}), {}, undefined, false).steps);
 
 describe('ChainFacts.tracksPath', () => {
   test('true iff a top-level path-family step is present', () => {
@@ -76,7 +76,7 @@ describe('ChainFacts.demandsEncounter', () => {
   });
 });
 
-describe('legacyCollapseSafe — the chain-global verdict, legacy\'s alone', () => {
+describe('chainCollapseSafe — the chain-global verdict', () => {
   test('true for a reducer-terminal pure movement/filter chain', () => {
     expect(collapseSafe('g.V().out().out().count()')).toBe(true);
     expect(collapseSafe('g.V().hasLabel("person").out("knows").count()')).toBe(true);
@@ -204,7 +204,7 @@ describe('demandsEncounter and the collapse answers agree on a plain order() (sh
   // demandsEncounter is EXACTLY the order() after which a post-order slice is bulk-safe. A keyed
   // order() before a limit → demandsEncounter false; the same chain terminating in a reducer stays
   // collapse-safe. If the predicates ever drift, one of these flips. There are THREE consumers of
-  // it now (this scan, `legacyCollapseSafe`, and `bulkObservedFrom`'s `sawOrder`), which is why it
+  // it now (this scan, `chainCollapseSafe`, and `bulkObservedFrom`'s `sawOrder`), which is why it
   // moved to `ir/step.ts` rather than staying private to this module.
   test('keyed order() clears encounter demand', () => {
     const f = facts('g.V().out().order().by("name").limit(2)');

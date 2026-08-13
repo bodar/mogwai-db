@@ -284,8 +284,7 @@ export class Query {
  *
  *  It is NOT inherently correlated: correlation comes from whatever the CALLER seeds the
  *  fold with (an expression referencing an outer row). "Nest, don't name" and "seed from
- *  an outer row" are separable; the correlated inline child (`steps/tail/correlated.ts`)
- *  is the two composed.
+ *  an outer row" are separable; the correlated inline child is the two composed.
  *
  *  Nesting means there is no shared `WITH` to hang a recursive term on, and no standalone
  *  render — both fail closed rather than emitting something malformed. A caller that wants

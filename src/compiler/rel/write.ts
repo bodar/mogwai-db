@@ -30,16 +30,14 @@ import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts
  * place: a write consumes the relation the read fold already produced, so there is no second prefix
  * builder and nothing opaque handed across a seam.
  *
- * ## THE INPUT IS A RELATION, and the difference is measurable
+ * ## THE INPUT IS A RELATION
  *
  * Every write step here takes the INCOMING TRAVERSERS as a relation and makes it an `Insert.source`:
  * one statement writes N rows, so the statement count is a function of the PLAN — 7 store calls for
  * `g.V().hasLabel('person').property(single,'seen',1)` whether the stream holds ten elements or a
- * hundred. The only rows that ever cross into JS are a `snapshot`'s, as ONE JSON value (§6·2).
- *
- * The legacy write path is the contrast and it is what §8 deletes: it reads its target elements into
- * JS and walks them, so its count is a function of the ROW COUNT — 8 store calls per element for the
- * same traversal, 801 over a hundred vertices.
+ * hundred. The only rows that ever cross into JS are a `snapshot`'s, as ONE JSON value (§6·2). A
+ * row-at-a-time write, by contrast, would make the count a function of the ROW COUNT — 8 store calls
+ * per element, 801 over a hundred vertices.
  *
  * ## The pre-mutation snapshot is the whole design
  *
@@ -48,8 +46,8 @@ import { DEFAULT_VERTEX_CARDINALITY, type VertexCardinality } from '../../api.ts
  * would run against a graph its own earlier statement had already changed and silently leave
  * vertices standing. Every target here is therefore a `snapshot` binding (`src/rel/plan.ts`): taken
  * ONCE, retained by the executor, and read by every later statement as one JSON bind exploded by
- * `json_each` — which is also §6·2's rule, so a drop of 10,000 vertices is O(1) binds rather than
- * the 100-parameter wall the legacy path needs `RowBatch` to dodge. `checkPlan` proves the discipline
+ * `json_each` — which is also §6·2's rule, so a drop of 10,000 vertices is O(1) binds rather than a
+ * 100-parameter wall. `checkPlan` proves the discipline
  * rather than trusting it: a plain CTE read by two steps of a program with effects is a THROW.
  *
  * ## Why the cascade is a list of statements and not a foreign key
@@ -183,13 +181,12 @@ export function elementDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
  * `drop()` over a PROPERTY stream — `g.V().properties().drop()` removes the properties and leaves
  * every element standing. There is no cascade: a property owns nothing but its index text.
  *
- * **Both element kinds delete BY THE PROPERTY ROW'S OWN id**, and that is the one place this differs
- * from legacy rather than re-expressing it. Legacy's property stream nulls `vpid` on an edge — correct
- * for the WIRE, since a Gremlin edge `Property` has no identity — and its delete then addresses edge
- * properties by the `(edge, key)` PAIR, through a `VALUES` list chunked by row count. That is a bind
- * list sized by DATA, which is exactly the shape `mise run binds` exists to keep out and which a
- * compiled plan cannot chunk at all (§6·2). The physical row has an id either way, so addressing it is
- * both simpler and O(plan size): one statement, one `InQuery` against the retained rows.
+ * **Both element kinds delete BY THE PROPERTY ROW'S OWN id.** A Gremlin edge `Property` has no
+ * identity of its own on the WIRE, so the alternative would address edge properties by the
+ * `(edge, key)` PAIR, through a `VALUES` list chunked by row count. That is a bind list sized by DATA,
+ * which is exactly the shape `mise run binds` exists to keep out and which a compiled plan cannot
+ * chunk at all (§6·2). The physical row has an id either way, so addressing it is both simpler and
+ * O(plan size): one statement, one `InQuery` against the retained rows.
  *
  * The FTS sweep is `dropStaleIndex` unchanged — it already deletes by `pid`, which is that same row id.
  */
@@ -225,21 +222,21 @@ export function propertyDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
  * It is `drop()`'s twin and it is where the write wedge stops being one shape: a delete needs only
  * the target's identity, while this needs the target's identity AND hands the SAME traversers back,
  * so its result is an element relation the fold keeps folding. That is what makes
- * `g.V(1).property('k','v').values('k')` plan composition rather than legacy's
- * `elementTailContinuation`, and it is the reason `property()` is a step of the ordinary loop.
+ * `g.V(1).property('k','v').values('k')` plan composition, and it is the reason `property()` is a
+ * step of the ordinary loop.
  *
  * ## What is expressible, and why the rest DECLINES rather than approximating
  *
  * A LITERAL scalar value is: its stored form, its `vtype` and the FTS text it indexes as are all
  * decided at compile time, so the index rows are an `INSERT … SELECT` over the property insert's own
- * `RETURNING` — the walk that produces them is `propertyFtsEntries`, shared with the legacy path
+ * `RETURNING` — the walk that produces them is `propertyFtsEntries`, the one authority for it,
  * because a re-derived index is a SILENT divergence (`fts-index.ts` measured 9,023 rows against
  * 8,936). A COLLECTION value is expressible too and by the same route — it stores as a
  * self-describing typed `{t,v}` tree, so the only difference is that its JSON text crosses as
  * `jsonb(<text>)` and its index walk emits one row per nested leaf, both of which the shared waists
  * already do. A traversal value, a meta-property and a `T` token key each need something the
- * compile-time value does not have, and every one of them is a decline: legacy answers them today, and
- * answering a different question is the failure mode the routing switch cannot absorb.
+ * compile-time value does not have, so each raises `UnsupportedTraversal` rather than answering a
+ * different question — the failure mode a fail-closed compiler must never fall into.
  *
  * **`null` is expressible and is not a write at all** — it is TinkerPop's property REMOVAL rule, a
  * delete wearing a write's spelling, which is why `PropertyWrite` is a union rather than a record with
@@ -526,8 +523,7 @@ type Guarder = (node: Rel, guard: Guard) => void;
  *
  * The result is the snapshot re-projected as an element relation, which is the whole reason this
  * step needs no continuation machinery: `property()` is element-PRESERVING, so what comes after it
- * is the ordinary element tail over the ids it already holds. Legacy needs
- * `elementTailContinuation` for exactly this and it is the second traversal machine §8 deletes.
+ * is the ordinary element tail over the ids it already holds.
  *
  * The snapshot carries the element's CHANNELS as well as its id, so an emission order survives the
  * write — and only the channels JSON can carry losslessly, which is why an alias history (a JSONB
@@ -568,10 +564,10 @@ export function elementProperty(target: Rel, elem: Elem, writes: readonly Proper
  * differently or to admit a mixed collection at one host and refuse it at another.
  *
  * A name is a bare string, a compile-time `constant(...)` (a string or a list), or a collection as
- * the SOLE argument. Declined: a nested traversal that does not fold to a constant (a per-row label,
- * which legacy resolves at run time), and a collection MIXED with other arguments — TinkerPop rejects
- * that outright (`DropLabel.feature` asserts an error "containing text of `Collection`"), so it is an
- * error legacy raises rather than a write this route may silently reinterpret.
+ * the SOLE argument. Declined: a nested traversal that does not fold to a constant (a per-row label),
+ * and a collection MIXED with other arguments — TinkerPop rejects that outright (`DropLabel.feature`
+ * asserts an error "containing text of `Collection`"), so it is an error to raise rather than a write
+ * this route may silently reinterpret.
  *
  * `dropLabels()` is deliberately NOT a caller: it takes no arguments and means every label, which is
  * an absent list rather than an empty one.
@@ -601,15 +597,14 @@ function mutationLabelNames(
  * passes the SAME vertices through. It is `internLabels`' creation pairing applied to rows that
  * already exist rather than freshly-inserted ones, plus `elementProperty`'s snapshot-then-pass-through.
  *
- * The REFUSALS decline here rather than throw, and the two are not the same choice: `lowerToRel` must
- * never throw (the `rel-sweep` decline-contract gate), so a genuine error is legacy's to raise while
- * its route lives — declining hands the traversal to legacy, which throws the message the conformance
- * suite matches (`"Label mutation is not supported"`). Declined:
+ * The REFUSALS decline (return `null`) rather than throw: `lowerToRel` must never throw (the
+ * `rel-sweep` decline-contract gate), so a form it cannot cover surfaces as `UnsupportedTraversal`
+ * rather than being mis-executed. Declined:
  *
  * - an EDGE (edge label cardinality is fixed at ONE by spec — `AddLabel.feature` `g_E_addLabelXfriendX`);
  * - an immutable graph (`labelCardinality.mutable === false` — `g_V_addLabelXemployeeX_single_label_graph`);
  * - a collection argument mixed with others (TinkerPop rejects it), or a nested traversal that is not
- *   a compile-time `constant(...)` (a per-row label value legacy resolves at run time).
+ *   a compile-time `constant(...)` (a per-row label value).
  *
  * `addLabel` needs no post-mutation count guard: every MUTABLE cardinality has `max = Infinity`, so a
  * label added to a vertex can never overstep it. (`dropLabels`, which can fall BELOW `min`, is the case
@@ -737,8 +732,8 @@ export function elementDropLabel(
   // `null` NAMES means EVERY label, and that reading belongs to `dropLabels()` ALONE — the branch is
   // on the step, never on the resolver's answer. `mutationLabelNames` also returns `null`, and there
   // it means DECLINE; conflating the two made `dropLabel(constant(["a","b"]), constant("c"))` — a
-  // mixed collection TinkerPop rejects — silently drop every label the vertex had instead of routing
-  // to the spine that raises it.
+  // mixed collection TinkerPop rejects — silently drop every label the vertex had instead of
+  // declining it as unsupported.
   const names = all ? null : mutationLabelNames(step, sideEffects, params);
   if (!all && !names?.length) return null;
 
@@ -778,21 +773,20 @@ function namedLabelIds(names: readonly string[], fresh: Minter): Rel {
 
 
 /**
- * A run of `property()` STEPS → what this route can write, or `null` for "legacy owns it".
+ * A run of `property()` STEPS → what this route can write, or `null` for a form it does not cover.
  *
- * **The parse is legacy's own** (`parseProperty`), which is §6·6's rule applied where it bites
+ * **The parse is `parseProperty`'s**, the one authority, which is §6·6's rule applied where it bites
  * hardest: the cardinality position, the `T`-token form, a `__.select(<withSideEffect const>)` key
  * and the per-argument type channel are four things a second parser would have four chances to get
- * differently, and one of them (the sideEffect-constant VALUE) had already drifted between two
- * copies inside legacy before they were merged. What is re-expressed here is the EMISSION, nothing
- * else.
+ * differently, and one of them (the sideEffect-constant VALUE) had once drifted between two copies
+ * before they were merged. What is re-expressed here is the EMISSION, nothing else.
  *
  * What declines, each because the compile-time value does not carry what the answer needs:
  *
  * - a **nested traversal** key or value — its rows are known only at run time, so neither the stored
  *   value nor its index text exists yet.
- * - a **meta-property**, and a **`T` token** key (an id/label write on an existing element, which
- *   legacy refuses with a message it owns).
+ * - a **meta-property**, and a **`T` token** key (an id/label write on an existing element, which is
+ *   an unsupported form).
  * - an **edge** carrying a cardinality or meta at all, which TinkerPop's `Property` has neither of.
  */
 export function propertyWrites(steps: readonly IRStep[], elem: Elem, child: ChildSeam): readonly PropertyWrite[] | null {
@@ -801,7 +795,7 @@ export function propertyWrites(steps: readonly IRStep[], elem: Elem, child: Chil
     if (step.modulators?.length || step.optionArms) return null;
     let parsed: ParsedProperty;
     // A `Deferral` is "not learned yet" and DECLINES; anything else has already been raised by the
-    // `writeArguments` verify Pass, above the routing switch, so it cannot arrive here (§6·5). The
+    // `writeArguments` verify Pass, which runs earlier, so it cannot arrive here (§6·5). The
     // narrowed catch is the point: the blanket one swallowed a text-level ERROR too, and the census
     // then counted a REFUSED traversal as an uncovered gap forever.
     try { parsed = parseProperty(step, child.sideEffects, child.params); }
@@ -818,7 +812,7 @@ export function propertyWrites(steps: readonly IRStep[], elem: Elem, child: Chil
  * ONE PARSED SPEC → what this route can WRITE, or `null` for a value the compile-time form does not
  * carry the answer for (the list is in `propertyWrites`' own contract above).
  *
- * The spec is legacy's parse whichever host asked (§6·6): `parseProperty` for a `property()` STEP,
+ * The spec is the shared parse whichever host asked (§6·6): `parseProperty` for a `property()` STEP,
  * a merge map's entries for a `mergeV` arm. Putting the EXPRESSIBILITY question in one place is what
  * stops the two hosts admitting different values: a value one host wrote through a scalar bind while
  * the other wrapped it in `jsonb(…)` would be two encodings of one property, and only one of them
@@ -842,7 +836,7 @@ function writeOf(spec: PropSpec, elem: Elem, child: ChildSeam): PropertyWrite | 
   const value = folded ? folded.value : spec.value;
   const vtype = folded ? folded.vtype : spec.vtype;
   const typeNode = folded ? folded.typeNode : spec.typeNode;
-  // The key waist, shared: an invalid key is an ERROR legacy raises, never a silently skipped write.
+  // The key waist, shared: an invalid key is an ERROR the validator raises, never a silently skipped write.
   try { validatePropertyKey(spec.key); } catch { return null; }
   // TinkerPop's null-VALUE rule, and the reason the return type is a union: a null value REMOVES every
   // property under the key. `undefined` is a different thing — an absent argument, which this route has
@@ -1047,11 +1041,9 @@ export function effectScope(fresh: Minter): { readonly bindings: Binding[]; read
  *
  * **The message is the REFERENCE's, and this comment used to say it was LEGACY's — which was both the
  * wrong authority and, as it turned out, the wrong string.** `Graph.java:1364,1368` says
- * *"Vertex with id already exists: %s"*; both spines said *"vertex id already exists: 7"*. A spine may
- * never take its wording from the other one: legacy is a route with an end date, so a borrowed string
- * dies with the file, and correctness here must not be contingent on a route being deleted. Legacy
- * still spells its own version (`steps/write/write.ts`) and keeps it until it goes — where the two
- * disagree it is legacy that is wrong, which §6·1 makes a legal and recorded state.
+ * *"Vertex with id already exists: %s"*; the code once said *"vertex id already exists: 7"*. The
+ * wording must come from the reference, never be borrowed from elsewhere: a borrowed string has no
+ * checkable provenance, and correctness here must not be contingent on it.
  *
  * It survived because the comment ASSERTED the provenance confidently enough to be quoted instead of
  * checked. A comment claiming "the reference's, verbatim" is not evidence; the vendored file is.
@@ -1090,7 +1082,7 @@ const writeInputChannels = (input: Rel): Channels =>
  *  `input` is what decides HOW MANY, and its two callers are the whole story: a `Values` row at
  *  the source (`g.addV(…)` is one vertex), the traverser relation mid-chain (`g.V().addV(…)` is one
  *  per vertex). A label that is a nested traversal or an invalid one declines — the label validator is
- *  the shared waist, and a name it refuses is an ERROR legacy raises, not a write this route may
+ *  the shared waist, and a name it refuses is an ERROR, not a write this route may
  *  silently skip. */
 export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IRStep[], ordered: boolean, child: ChildSeam, fresh: Minter): Effects | null {
   if (step.modulators?.length || step.optionArms) return null;
@@ -1106,8 +1098,8 @@ export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IR
   // ONE ROW ONLY for a supplied id, and the refusal is arithmetic rather than caution: N input rows
   // would insert N vertices carrying the SAME public id, so the second collides on a UNIQUE the guard
   // is not the authority for. Upstream reaches the same place by a different route — it loops, and its
-  // second iteration raises `id already exists` — so a decline here and a raise there agree about the
-  // traversal being wrong; they disagree only about which spine says so, which the census records.
+  // second iteration raises `id already exists` — so a decline here and the reference's raise agree
+  // that the traversal is wrong; they differ only in how it is reported.
   if (tokens.id !== null && !(input.kind === 'values' && input.rows.length === 1)) return null;
   // A MID-CHAIN input is SNAPSHOTTED, and this one is not about a later statement: `INSERT INTO
   // nodes … SELECT … FROM nodes` reads the table it is writing, which SQLite does not promise to
@@ -1135,8 +1127,8 @@ export function elementAddV(input: Rel, step: IRStep, propertySteps: readonly IR
  * run rather than a second parse — which is what keeps the `T`-token rules in one place while the
  * two hosts emit differently.
  *
- * A meta run on a token declines: `property(T.id, 1, 'k', 'v')` is meaningless and legacy raises for
- * it, so the spine that owns the message is the one to say so.
+ * A meta run on a token declines: `property(T.id, 1, 'k', 'v')` is meaningless and the reference
+ * raises for it, so this route declines it as unsupported.
  */
 function creationTokens(
   steps: readonly IRStep[], child: ChildSeam,
@@ -1200,8 +1192,8 @@ function constLabelArg(value: unknown, child: ChildSeam): unknown {
  * what made it look like a runtime one was that this seam had not been handed the value.
  *
  * The COUNT rule is the other half, and it is a DECLINE rather than a throw: `assertLabelCount` raises
- * a message the conformance suite matches on, and that refusal is the reference's own answer, so the
- * spine that owns the message must be the one to raise it (write-path trap 3).
+ * a message the conformance suite matches on, and that refusal is the reference's own answer, so it is
+ * declined here rather than mis-executed (write-path trap 3).
  *
  * Deduped as a SET before counting, exactly as `insertVertex` does — `addV('a','a')` is one label, so
  * it must not fail a `max: 1` graph.
@@ -1296,21 +1288,19 @@ interface RuntimeLabel {
 }
 
 /**
- * THE VALIDITY OF A LABEL NOBODY WILL SEE UNTIL EXECUTION — as guard bindings, which is where RelIR
- * beats the row-at-a-time route rather than merely matching it.
+ * THE VALIDITY OF A LABEL NOBODY WILL SEE UNTIL EXECUTION — as guard bindings, which run once over
+ * the whole set rather than row by row.
  *
  * `ElementHelper.validateLabel` is three PURE PREDICATES over the value — null, empty, hidden
  * (`Graph.Hidden.HIDDEN_PREFIX` is `~`) — with no graph access and no traverser state, so all three
- * are expressible in SQL. Legacy evaluates the body per row in JS and validates the first bad one it
- * reaches; these run once, over the whole set, BEFORE anything is written. One statement each,
- * O(plan size), and the message is the one our shared `validateLabel` owns so both spines agree.
+ * are expressible in SQL. These run once, over the whole set, BEFORE anything is written — one
+ * statement each, O(plan size) — and the message is the one our shared `validateLabel` owns.
  *
  * **The NON-STRING case is deliberately absent, and that is agreement rather than an omission.** The
- * reference casts `(String)` and would raise; our shared `validateLabel` COERCES (`String(label)`), so
- * legacy answers with the stringified value — and `labels.name` is TEXT, so SQLite's affinity coerces
- * identically here. Raising on RelIR only would be a spine divergence invented by this function. The
- * coercion itself is a real deviation from the reference, and it is shared code's to fix, not this
- * seam's (plan §Phase 1).
+ * reference casts `(String)` and would raise; our shared `validateLabel` COERCES (`String(label)`) —
+ * and `labels.name` is TEXT, so SQLite's affinity coerces identically here. Raising here would be a
+ * divergence invented by this function. The coercion itself is a real deviation from the reference,
+ * and it is shared code's to fix, not this seam's (plan §Phase 1).
  */
 /**
  * `TraversalUtil.apply`'s refusal when a body yields NO value — the reference's own sentence
@@ -1330,11 +1320,10 @@ function labelGuards(label: RuntimeLabel, guard: Guarder, fresh: Minter): void {
   // stored label is not.
   const asText: Expr = { kind: 'cast', arg: label.expr, to: 'text' };
   const produced: Expr = { kind: 'exists', plan: label.plan, negated: false };
-  // **EVERY MESSAGE HERE IS THE REFERENCE'S, and none of them is legacy's.** A spine may never take a
-  // string from the other spine: legacy is a route with an end date, so a message borrowed from it dies
-  // with the file, and RelIR's correctness must not be contingent on a route being deleted. Where the
-  // two disagree it is legacy that is wrong — `Element.Exceptions` (`structure/Element.java:212-222`)
-  // owns the three `Label can not be …` sentences, and `TraversalUtil.apply`
+  // **EVERY MESSAGE HERE IS THE REFERENCE'S.** A message must come from the reference, never be
+  // borrowed from elsewhere — a borrowed string has no checkable provenance, and correctness must not
+  // depend on it. `Element.Exceptions` (`structure/Element.java:212-222`) owns the three
+  // `Label can not be …` sentences, and `TraversalUtil.apply`
   // (`process/traversal/util/TraversalUtil.java:41-53`) owns the absent-value one.
   //
   // **AN ABSENT BODY AND A NULL VALUE ARE DIFFERENT ERRORS, AND THEY ARE DISTINGUISHABLE.** A scalar
@@ -1362,9 +1351,8 @@ function labelGuards(label: RuntimeLabel, guard: Guarder, fresh: Minter): void {
 }
 
 /** A creation's input rows: the identity plus the emission order, and nothing else — `addV` reads no
- *  other column of what it is inserting from. The ORDER is the one argument worth keeping from the
- *  legacy write path: a write assigns ids as it goes and those ids are OBSERVABLE, so which row it
- *  sees first is part of the answer. */
+ *  other column of what it is inserting from. The ORDER is load-bearing: a write assigns ids as it
+ *  goes and those ids are OBSERVABLE, so which row it sees first is part of the answer. */
 function orderedInput(input: Rel, fresh: Minter): { readonly bindings: readonly Binding[]; readonly result: Rel } {
   return inputRows(input, writeInputCols(input), fresh);
 }
@@ -1421,7 +1409,7 @@ type Endpoint =
    *  label's history holds the element, so the endpoint is its last entry's rowid. */
   | { readonly kind: 'alias'; readonly label: string }
   /** A ROOTED sub-read (`to(__.V(2))`, `from(V().has(…))`) — a relation, read through a scalar
-   *  subquery. Legacy takes its FIRST row, so this takes one row of the same relation. */
+   *  subquery. `next()` takes the FIRST row, so this takes one row of the same relation. */
   | { readonly kind: 'read'; readonly rel: Rel }
   /** A PUBLIC ID naming an existing vertex — `mergeE`'s only extra form, because a merge map states
    *  its endpoints by id where `from()`/`to()` state them by label or traversal. Whether the vertex
@@ -1439,8 +1427,8 @@ function endpointExpr(end: Endpoint, over: Rel, aliases: AliasMap, fresh: Minter
     return { kind: 'scalar', plan: only };
   }
   const entry = aliases.get(end.label);
-  // An UNBOUND label is a runtime error legacy raises with a message it owns ("unknown as() label"),
-  // so it declines here rather than becoming a NULL endpoint — a silently unproductive write.
+  // An UNBOUND label is a runtime error ("unknown as() label"), so it declines here rather than
+  // becoming a NULL endpoint — a silently unproductive write.
   if (!entry) return null;
   return aliasIdAt(col(over.id, entry.col), 'last');
 }
@@ -1757,10 +1745,10 @@ function positioned(created: Rel, fresh: Minter): Rel {
  * must be carried, so one step per name rather than one step listing them, which is ANY), and a
  * property entry is `has(key, value)` — an ANY-value `EXISTS` over the normalized table, which is
  * already what `has` means. So the search is built by handing those steps back to the READ FOLD
- * (`matching`, over the child seam) instead of by writing a second predicate vocabulary. Legacy's
- * `commonMergeConds` is those same three clauses spelled a second time, and it is the copy this route
- * does not make — every improvement to `has` (the FTS arm, a vtype-aware compare) serves the merge for
- * free, and a divergence between "what mergeV searches for" and "what has() finds" is not expressible.
+ * (`matching`, over the child seam) instead of by writing a second predicate vocabulary. That second
+ * copy of the three clauses is the one this route does not make — every improvement to `has` (the FTS
+ * arm, a vtype-aware compare) serves the merge for free, and a divergence between "what mergeV
+ * searches for" and "what has() finds" is not expressible.
  *
  * ## WHAT THE INPUT CONTRIBUTES IS A COUNT
  *
@@ -1813,8 +1801,8 @@ export function elementMergeV(
   // what `g_mergeVXlabel_person_name_markoX_optionXonMatch_label_emptyX` asserts.
   //
   // The refusals are `addLabel`'s and are asked HERE, before anything is built: a nested label declines
-  // above, an immutable graph declines (legacy raises `Label mutation is not supported`), and an
-  // invalid name is an ERROR rather than a write to skip. No count guard is owed — every MUTABLE
+  // above, an immutable graph declines, and an invalid name is an ERROR rather than a write to skip.
+  // No count guard is owed — every MUTABLE
   // cardinality has `max = Infinity`, so appending can never overstep it.
   const appended = [...new Set(((onMatch?.label as string[] | null) ?? []))];
   try { for (const name of appended) validateLabel(name); } catch { return null; }
@@ -1928,13 +1916,13 @@ export function elementMergeV(
  *
  * ## WHAT DECLINES, and why each is not a wrong answer
  *
- * - **no label anywhere** and **more than one** — `mergeE cannot create an edge without a label` /
- *   `an edge takes exactly one label` are raised by the spine that owns them.
+ * - **no label anywhere** and **more than one** — declined; the reference raises
+ *   `mergeE cannot create an edge without a label` / `an edge takes exactly one label`.
  * - **`T.id`** — an edge with a supplied public id; the guard mechanism now exists for it, the
  *   `Insert` column plumbing does not.
  * - **an incoming endpoint over a non-VERTEX stream, or at the source** — there is no traverser to
- *   be an endpoint. `MergeEdgeStep` raises `Out Vertex not specified in onCreate`; legacy raises it
- *   too, one step earlier, so declining hands over the message rather than inventing a second.
+ *   be an endpoint. `MergeEdgeStep` raises `Out Vertex not specified in onCreate`, so declining
+ *   defers to that message rather than inventing a second.
  * - **a cardinality or meta on an edge property** — TinkerPop's edge `Property` has neither, and
  *   `writeOf` is the one place that says so.
  */
@@ -1964,7 +1952,7 @@ export function elementMergeE(
   // or a label that exists ONLY on `option(onCreate, …)` narrows NOTHING — reading the union here made
   // `mergeE([(T.label):'knows']).option(onCreate, [(OUT):1,(IN):2])` search for a 1→2 edge where the
   // reference searches every `knows` edge, and then CREATE a duplicate whenever one existed elsewhere.
-  // A wrong answer, and one no scenario named: both spines agreed, so only the reference could see it.
+  // A wrong answer, and one no scenario named: only the reference could see it.
   const matchOut = endpointSlot(match.outV, maps.outV, child, fresh);
   const matchIn = endpointSlot(match.inV, maps.inV, child, fresh);
   if (matchOut === null || matchIn === null) return null;
@@ -2132,8 +2120,8 @@ export function elementMergeE(
  * - **a `Merge.outV`/`Merge.inV` TOKEN is a reference to `option(Merge.outV, …)`, not to the
  *   incoming traverser** (`resolveVertex`, gremlin-core .../step/map/MergeEdgeStep.java:231-251).
  *   The option is guaranteed present — `mergeMaps` raises otherwise, from the verify Pass — so the
- *   token simply redirects to it. Reading it as "the current traverser" is what both spines used to
- *   do, and it is a wrong ANSWER wherever the option names a different vertex; `option(outV,
+ *   token simply redirects to it. Reading it as "the current traverser" was the earlier reading, and
+ *   it is a wrong ANSWER wherever the option names a different vertex; `option(outV,
  *   select("x")).option(inV, select("y"))` over two aliased vertices is exactly that traversal.
  *
  * The option's own value goes through `endpointOf`, so an alias, a rooted read and a public id all

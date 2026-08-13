@@ -11,15 +11,10 @@
 // semantic authority, so a difference is always a defect in the optimized lowering (or in a layer
 // beneath both).
 //
-// ****  EMPTY IS THE INTENDED STATE. THE LIST IS NOT EMPTY — see the entries below.  ****
-//
-// (This line claimed emptiness while an entry already sat below it; a header that describes a state
-// the file has left is worse than no header, because it is read as a summary. One entry remains:
-// `predicateInlining`, a genuine contract defect — the generic path THROWS on a child body the fast
-// path answers (a slice-then-values existence test the legacy child lowering cannot express).
+// ****  EMPTY IS THE INTENDED STATE, and the list is currently empty (see the footer for why).  ****
 //
 // The `propertySeek` entry that sat here was NOT a fast-path defect at all — it was a wrong ANSWER
-// present in BOTH spine positions (this oracle's own blind spot), which `propertySeek` merely masked
+// present in BOTH positions the differential compares (this oracle's own blind spot), which `propertySeek` merely masked
 // by lifting a `has()`'s `EXISTS` into a join. Root cause: SQLite silently drops an `OFFSET` when the
 // offset's block has a single-table `FROM` and a positive correlated `EXISTS` in its `WHERE`, so the
 // whole `where(…)`/`has(…)`-then-`skip`/`range` family answered wrong under the DEFAULT config. Fixed

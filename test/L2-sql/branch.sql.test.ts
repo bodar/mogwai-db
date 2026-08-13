@@ -44,7 +44,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     const mixed = read('g.V().where(__.hasLabel("person").and().out("created").or().hasLabel("software"))');
     expect(mixed.sql).toMatch(/\(\(.*AND.*\).*OR.*\)/s);
     // choose() infix predicate now routes through the same split (movement conjunct →
-    // correlated EXISTS), then the arms fold — D2 support-definer removed.
+    // correlated EXISTS), then the arms fold.
     const c = read('g.V().choose(__.hasLabel("person").and().out("created"), __.out("knows"), __.identity())');
     expect(c.sql).toContain('UNION ALL');
     expect(c.shape).toEqual({ kind: 'vertex' });

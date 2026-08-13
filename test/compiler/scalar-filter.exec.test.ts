@@ -84,10 +84,9 @@ describe('ordering comparability follows the BOUND’s own Gremlin type', () => 
     expect(await vals("g.V().values('age').is(P.gt(datetime('2020-01-01T00:00:00Z')))")).toEqual([]);
   });
 
-  // RELIR'S CLAIM, not legacy's: legacy's `compareKey` casts a stored `datetime` with the plain
-  // integrals, so it compares epoch millis against `20` and answers TRUE for both rows. That is a
-  // defect in a route with an end date, and restating it here would commit it — `relOnly` is the
-  // marker for exactly that (`test/support/harness.ts`).
+  // The correct answer is []: a plain numeric bound is NOT comparable with a stored datetime. A cast
+  // that compared the stored epoch millis against `20` would wrongly pass both rows — the defect this
+  // pins against.
   test('a plain numeric bound is NOT comparable with a stored datetime', async () => {
     expect(await vals("g.V().values('when').is(P.gt(20))")).toEqual([]);
   });

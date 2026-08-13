@@ -82,10 +82,11 @@ export const EDGE_SOURCE: ReadonlySet<string> = new Set(['E']);
 /** The path-family steps: they thread a path AND host from()/to() scoping modulators. */
 export const PATH_FAMILY: ReadonlySet<string> = new Set(['path', 'simplePath', 'cyclicPath']);
 
-/** The `Operator` tokens a `sack()` may fold with — TinkerPop's `Operator` enum, minus the ones no
- *  spine expresses (`and`/`or`/`addAll`/`sumLong`). DATA both spines must agree on, so it lives here
- *  beside the other step-name vocabularies rather than in either lowering: the SQL for each operator
- *  is emission and belongs to whichever layer emits it (§6·4's split, applied to a set of six). */
+/** The `Operator` tokens a `sack()` may fold with — TinkerPop's `Operator` enum, minus the ones the
+ *  lowering does not express (`and`/`or`/`addAll`/`sumLong`). DATA the lowering and its emission layer
+ *  must agree on, so it lives here beside the other step-name vocabularies rather than inside the
+ *  lowering: the SQL for each operator is emission and belongs to whichever layer emits it (§6·4's
+ *  split, applied to a set of six). */
 export const SACK_OPS: ReadonlySet<string> = new Set(['assign', 'sum', 'minus', 'mult', 'div', 'min', 'max']);
 
 /** The numeric reducers — every one a bulk-aware SQL aggregate over a scalar stream. */
@@ -117,8 +118,7 @@ export type ScalarReducer = 'count' | NumericReducer;
  *  `BranchStep`, so their arms genuinely are per-traverser and our lowering of them is right).
  *
  *  It lives HERE, in the IR's step vocabulary, and not beside its first consumer, because the
- *  branch-arm gate belongs in an `ir/` verify Pass — and `ir/` must not import from `steps/`.
- *  `child-shape.ts` re-exports it so no existing importer moved. */
+ *  branch-arm gate belongs in an `ir/` verify Pass, which runs before lowering. */
 export const GLOBAL_BARRIER_STEPS: ReadonlySet<string> = new Set([
   'dedup', 'order', 'limit', 'range', 'skip', 'tail', 'sample', 'barrier',
   'group', 'groupCount', 'aggregate', 'local', 'fold', ...REDUCERS,
@@ -398,13 +398,12 @@ export function collectionAssert(step: IRStep): 'list' | 'set' | 'map' | null {
 
 // ---------- the SHAPE-LOCAL vocabularies: what a step name means over one VALUE ----------
 //
-// The four below arrived here from the legacy emission files that happened to be their first
-// consumer (`tail/coerce.ts`, `tail/list.ts`, `tail/path.ts`). Each is a step-name vocabulary and
-// nothing else — no `Stream`, no `LoweringState`, no SQL — so keeping them beside an emitter did
-// two bad things at once: it pinned every RelIR importer to the whole legacy closure for the sake
-// of a Set of strings (build plan §8's edge inventory), and it hid them from the "derive with a
-// named difference, never merge" rule this module exists to enforce. Read them against the bases
-// above, not against the file each used to live in.
+// The four below used to live beside the emission code that first consumed them. Each is a step-name
+// vocabulary and nothing else — no stream, no lowering state, no SQL — so keeping them beside an
+// emitter did two bad things at once: it pinned every importer to a whole emission closure for the
+// sake of a Set of strings, and it hid them from the "derive with a named difference, never merge"
+// rule this module exists to enforce. Read them against the bases above, not against the file each
+// used to live in.
 
 /** The syntax-only scalar transform vocabulary — the step names whose meaning is "reshape this one
  *  scalar value", emitted by `scalarTx` (`plan/plan.ts`). Membership is decided by SYNTAX alone,

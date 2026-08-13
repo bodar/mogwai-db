@@ -23,7 +23,7 @@ import { recursiveViolation } from '../../rel/recursive.ts';
  * The two rules are the other vocabularies', unchanged: it DECLINES rather than throwing, and it never
  * answers a different question.
  *
- * ## What is shared with legacy rather than re-derived
+ * ## What is shared rather than re-derived
  *
  * `numericSpec`, `dtFactor` and `JAVA_WHITESPACE` are imported. They are DATA and pure computation —
  * a GType's numeric range, a DT unit's millisecond factor, Java's 24 whitespace code points — not SQL,
@@ -40,9 +40,9 @@ import { recursiveViolation } from '../../rel/recursive.ts';
  * - **`concat` with a traversal argument** — a per-traverser CHILD value, so the step is a row boundary
  *   rather than a value transform. It belongs to whichever seam grows the correlated child.
  * - **bare `asNumber()`** — the output subtype is the INPUT literal's declared type, which the front end
- *   has already flattened away; legacy throws, and only its constant-folding path can answer at all.
+ *   has already flattened away; only a constant-folding path can answer it at all, so this declines.
  * - **`asBool`** — TinkerPop's parse errors (`Can't parse 'x' as Boolean.`) cannot be raised from SQL,
- *   so legacy evaluates it at COMPILE time over an inject literal. That is a fold over a `Values` node,
+ *   so it must be evaluated at COMPILE time over an inject literal. That is a fold over a `Values` node,
  *   not an expression over a column, and it is a different increment.
  * - **`dateDiff`/`dateAdd` with anything but a literal operand** — the same correlated-child question.
  */
@@ -54,8 +54,8 @@ import { recursiveViolation } from '../../rel/recursive.ts';
  * recorded as `string` still leaves a value the stored row no longer describes, and `length()` turns it
  * into an integer outright. So the caller always drops the column; `type` says whether anything
  * definite replaces it. Absent means `UNKNOWN`, which frames by per-VALUE inference and is the honest
- * floor — and is exactly what legacy produces for the string family (verified against its shape, not
- * assumed: `g.V().values('name').toUpper()` frames `unknown` there too, `asString()` included).
+ * floor — and is the right answer for the string family: `g.V().values('name').toUpper()` frames
+ * `unknown`, `asString()` included.
  */
 export interface Transformed {
   readonly expr: Expr;
@@ -128,8 +128,8 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[]) => E
   },
   concat: (v, args) => {
     // A traversal argument is a per-traverser child value (`TraversalUtil.apply`), which makes the step
-    // a row boundary rather than a value transform. Legacy's caller resolves it and substitutes the
-    // Expression; there is no caller doing that here, so decline rather than drop the argument.
+    // a row boundary rather than a value transform. There is no caller resolving it to an Expression
+    // here, so decline rather than drop the argument.
     if (args.some(isNested)) return null;
     // A NULL ARGUMENT IS SKIPPED, and the reference says so in its own comment: "all null values are
     // skipped during appending, as StringBuilder will otherwise append 'null' as a string"
@@ -157,9 +157,9 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[]) => E
 };
 
 /** The transforms whose CONSTANT form raises a TinkerPop parse/overflow error SQL cannot express, so
- *  over a compile-time literal they are legacy's fold and not this module's cast. See `transformExpr`.
+ *  over a compile-time literal they are a fold and not this module's cast. See `transformExpr`.
  *
- *  `dateAdd`/`dateDiff` are deliberately NOT here even though legacy folds them too, and the difference
+ *  `dateAdd`/`dateDiff` are deliberately NOT here, and the difference
  *  is the reason: their fold is an OPTIMIZATION (one bind instead of a literal plus an offset), not a
  *  semantic requirement — the arithmetic answers identically, verified row-for-row. Constant folding is
  *  a `Pass` over `Values` + `Lit` (§4), and declining because that pass is unwritten is exactly the
@@ -168,7 +168,7 @@ const CONSTANT_FOLDED = new Set(['asNumber', 'asDate', 'asBool']);
 
 /** Every name in this family, whether or not it is covered — the set a fold checks membership in
  *  BEFORE asking for a lowering, so an unlowerable member ends the transform run rather than falling
- *  through to some other arm's interpretation of it. Mirrors legacy's `SCALAR_TRANSFORMS`. */
+ *  through to some other arm's interpretation of it. */
 export const REL_TRANSFORMS: ReadonlySet<string> = new Set([
   ...Object.keys(VALUE_TX), 'asNumber', 'asDate', 'dateAdd', 'dateDiff', 'reverse', 'asBool',
 ]);
@@ -177,7 +177,7 @@ export const REL_TRANSFORMS: ReadonlySet<string> = new Set([
  * A scalar transform over `v`, or `null` to decline.
  *
  * `Scope.local` is deliberately NOT checked: a scalar IS a one-element list, so per-element and
- * per-list are the same question and the token is a no-op — which is what legacy does too. That is a
+ * per-list are the same question and the token is a no-op. That is a
  * semantic fact about this family, not a shortcut; a LIST stream's local transform is a different
  * lowering entirely and never reaches here.
  */
@@ -188,12 +188,11 @@ export function transformExpr(step: IRStep, v: Expr, literal: boolean, fresh: Mi
   // RAISE, and SQL cannot raise. TinkerPop requires `Can't parse string '1,000' as number.` and
   // `Can't convert number of type Integer to Byte due to overflow.`; a SQLite `CAST` answers `1` and
   // `300` instead, so lowering it here turns a REQUIRED ERROR into a plausible value — the worst
-  // direction the "never answer a different question" rule has. Legacy folds these at compile time for
-  // exactly this reason (`asNumberConst`/`asDateConst`/`asBoolConst`), so declining hands it a
-  // traversal it answers correctly.
+  // direction the "never answer a different question" rule has. The correct handling is a compile-time
+  // fold (`asNumberConst`/`asDateConst`/`asBoolConst`), so this declines rather than lower a cast.
   //
-  // Found by L3, not by the differential: six official scenarios assert the ERROR, and comparing rows
-  // against legacy cannot see a missing throw. The string transforms are unaffected — `toUpper()` of a
+  // Found by L3: six official scenarios assert the ERROR, and comparing result rows cannot see a missing
+  // throw. The string transforms are unaffected — `toUpper()` of a
   // literal has no parse to fail — so the decline is the cast subfamily and not the family.
   if (literal && CONSTANT_FOLDED.has(step.name)) return null;
 
@@ -201,10 +200,9 @@ export function transformExpr(step: IRStep, v: Expr, literal: boolean, fresh: Mi
   if (pure) {
     const expr = pure(v, args);
     // No static type, `asString` included. That looks wrong for a `CAST(… AS TEXT)` and is not: the
-    // framing `UNKNOWN` infers per VALUE, which for a text value is `string` anyway, so both spines
-    // frame it identically — and CLAIMING a type here where legacy claims none would be a divergence
-    // in the one direction the differential cannot forgive. Match the spine being replaced; a semantic
-    // improvement to the tag is a separate change on both sides.
+    // framing `UNKNOWN` infers per VALUE, which for a text value is `string` anyway, so it frames
+    // correctly — and CLAIMING a type here where none is warranted would be the worse error. A
+    // semantic improvement to the tag is a separate change.
     return expr && { expr };
   }
 
@@ -214,7 +212,7 @@ export function transformExpr(step: IRStep, v: Expr, literal: boolean, fresh: Mi
     // traversal/step/map/ReverseStep.java:49-65`). SQLite has no reverse scalar function, but its
     // recursive CTE is exactly the loop the reference spells: peel the first character and prepend it
     // to the accumulator. The seed is CORRELATED to `v`, which `Expr.scalar` renders in the outer row's
-    // scope; a RelIR recursive node is therefore the same SQL shape as legacy's scalar `WITH RECURSIVE`,
+    // scope; a RelIR recursive node is therefore an ordinary scalar `WITH RECURSIVE`,
     // not a graph walk or a new cross-row operation.
     const cols = typeOf(meta('s', 'any', true), meta('r', 'text', true));
     const id = fresh('rev');
@@ -254,12 +252,12 @@ export function transformExpr(step: IRStep, v: Expr, literal: boolean, fresh: Mi
   }
 
   if (step.name === 'asNumber') {
-    // `numericSpec` THROWS for a non-numeric token (`asNumber(GType.VERTEX)`), which is a real error
-    // legacy owns — so it is caught into a decline and the legacy spine raises the identical message.
+    // `numericSpec` THROWS for a non-numeric token (`asNumber(GType.VERTEX)`), which is a real error —
+    // so it is caught into a decline (a miss raised as `UnsupportedTraversal`) rather than thrown here.
     let spec;
     try { spec = numericSpec(args[0]); } catch { return null; }
     // Bare `asNumber()` needs the INPUT literal's declared subtype, which the front end flattened
-    // away; only legacy's constant-folding path can answer it.
+    // away; only a constant-folding path can answer it.
     if (!spec) return null;
     // A `bigdecimal` target keeps its exact TEXT carrier — casting would be the lossy answer.
     const expr = spec.as === 'bigdecimal' ? v : { kind: 'cast', arg: v, to: spec.int ? 'int' : 'real' } as Expr;
@@ -290,9 +288,9 @@ export function transformExpr(step: IRStep, v: Expr, literal: boolean, fresh: Mi
   }
 
   if (step.name === 'dateDiff') {
-    // Only a datetime LITERAL operand: the `constant(…)` nested form is legacy's to fold (it parses a
-    // child chain, which a pure expression module has no business doing), and any other nested body is
-    // the correlated-child seam's.
+    // Only a datetime LITERAL operand: the `constant(…)` nested form is a constant-folding pass's to
+    // handle (it parses a child chain, which a pure expression module has no business doing), and any
+    // other nested body is the correlated-child seam's.
     if (typeof args[0] !== 'number') return null;
     return { expr: { kind: 'binary', op: '-', left: v, right: int(args[0]) }, type: STATIC('long') };
   }

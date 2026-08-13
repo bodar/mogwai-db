@@ -99,7 +99,7 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
     });
   }
 
-  test('a run of range is() stays inside the DO bind cap on both spines', () => {
+  test('a run of range is() stays inside the DO bind cap', () => {
     // The lowering binds query operands but emits its fixed type vocabulary as escaped compiler text.
     // Fusing the filter into its input's block used to make bind growth quadratic in the projection's
     // size, because a WHERE cannot name a select alias so each `is` re-inlined the whole projection;

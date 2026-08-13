@@ -19,7 +19,7 @@ import type { RelFraming } from './framing.ts';
  *
  * ## The wire vocabulary already exists, and reusing it is the point
  *
- * `Shape{kind:'variant'}` and the `vk` discriminant are legacy's, and `execute.ts` frames them today:
+ * `Shape{kind:'variant'}` and the `vk` discriminant already exist, and `execute.ts` frames them today:
  * `0` null, `1` scalar, `2` vertex, `3` edge, `4` list. So this adds no wire concept — it teaches the
  * ALGEBRA to produce rows the framer has always been able to read, which is what §6·3 means by a
  * shape being a value plus a framing arm.
@@ -28,15 +28,15 @@ import type { RelFraming } from './framing.ts';
  *
  * An element arm carries its ROWID in `rid` and nothing else. The expansion into `id`/`label`/`props`
  * happens once, at the root (`variantPayload`), so a branch whose element rows are filtered or sliced
- * away never computes a property bag for them. Legacy reaches the same place with two `LEFT JOIN`s
- * gated on the tag; correlated reads say it without the gating, because a subquery over a rowid the
- * other arm did not set is NULL and a `vk` the framer does not read never asks.
+ * away never computes a property bag for them. Correlated reads reach it without any tag-gating,
+ * because a subquery over a rowid the other arm did not set is NULL and a `vk` the framer does not
+ * read never asks.
  *
  * ## What this deliberately does NOT do
  *
- * A variant is TERMINAL here. `compileFromVariant` on the legacy side answers a handful of steps over
- * one (a `count`, a slice, an alias compare); each is expressible and none is written, so a step after
- * a variant DECLINES rather than being silently dropped — `continueAs`'s map arm, for the same reason.
+ * A variant is TERMINAL here. A handful of steps over one (a `count`, a slice, an alias compare) are
+ * expressible and none is written, so a step after a variant DECLINES rather than being silently
+ * dropped — `continueAs`'s map arm, for the same reason.
  */
 
 /** One arm's shape, and the `vk` tag that names it on the wire. A tag is a property of the arm's
@@ -105,11 +105,11 @@ export const variantHasList = (arms: readonly VariantArm[]): boolean => arms.som
  * always, the element triple where some arm is an element, `src`/`tgt` where one is an edge, and
  * `list` where one is a list.
  *
- * The SCALAR arm is declared even where no arm produced one, matching legacy — the framer reads
+ * The SCALAR arm is declared even where no arm produced one — the framer reads
  * `staticTypeOf(scalar.type)` and a missing arm would make a `vk=1` row throw rather than infer. A
  * per-row scalar tag is the one thing the wire vocabulary is short of (`VariantShapeArm.scalar` takes
  * a whole `ScalarType`, but the framer reads only its static tag), so arms whose types disagree frame
- * `UNKNOWN` and infer per value — the same answer legacy gives, and the extension point §6·7 names.
+ * `UNKNOWN` and infer per value — the extension point §6·7 names.
  */
 export function variantPayload(
   rel: Rel, arms: readonly VariantArm[], fresh: Minter,

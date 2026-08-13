@@ -17,8 +17,7 @@ import { read, run, runWith, seededStore } from '../support/harness.ts';
 // A few snapshot tests also pin the RESULT shape of the SQL they assert, so they run
 // it against a seeded store. (The full execution-semantics suite is compiler.test.ts.)
 
-// Every GLOBAL numeric reducer renders `numericReducerAggregate`'s eligibility guard
-// (src/compiler/steps/tail/barrier.ts) — the one reducer policy, and the same text the
+// Every GLOBAL numeric reducer goes through the one reducer-eligibility policy — the same text the
 // group-scoped reducers already emit. Named here so an assertion below says WHICH reducer it
 // pins instead of restating 60 characters of CASE. min/max range over text too (TinkerPop 4
 // Strings are Comparable); sum/mean are numeric-only.
@@ -81,7 +80,7 @@ describe('scalar-parent / projection SQL', () => {
 
 
 
-  test('math("<formula>") compiles to one Double scalar; leaves coerced to REAL — on BOTH spines', () => {
+  test('math("<formula>") compiles to one Double scalar; leaves coerced to REAL', () => {
     // The lexer, the precedence climb, the function NAME set and the three expansions that are SQL
     // FACTS rather than operator names live once in `src/gremlin/math.ts`; the lowering supplies only
     // the construction primitives (`relMathOps`). `log`→`LN`, `cbrt`'s sign split and `signum`'s

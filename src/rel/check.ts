@@ -11,14 +11,14 @@ import { EXCLUDED } from './types.ts';
 export const DO_BIND_CAP = 100;
 
 /**
- * THE ONE FAILURE A CALLER MAY ANSWER BY CHOOSING THE OTHER ROUTE.
+ * THE ONE FAILURE A CALLER MAY ANSWER BY DECLINING.
  *
  * Every other violation the checker or the emitter raises is a BUG in whatever built the plan, and
  * must escape (§11 — a `catch` that swallowed them would turn the failure `rel-sweep` exists to see
- * into a silent decline). The bind budget is different: a traversal legacy answers must not become a
- * compile error because this route spells its predicate more expensively, so the cap is a COVERAGE
- * question. A distinct class is what lets `lowerToRel` decline on exactly that and nothing else,
- * without matching on a message.
+ * into a silent decline). The bind budget is different: a traversal we could otherwise answer must
+ * not become a hard failure because the lowering spells its predicate more expensively, so the cap
+ * is a COVERAGE question. A distinct class is what lets `lowerToRel` decline on exactly that and
+ * nothing else, without matching on a message.
  */
 export class BindBudgetExceeded extends Error {
   constructor(readonly count: number) {

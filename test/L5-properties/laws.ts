@@ -107,7 +107,7 @@ export const LAWS: readonly Law[] = [
   },
   {
     name: 'fold().unfold() = q', on: 'vertex',
-    why: 'The documented retype round-trip (steps/CLAUDE.md): collecting to a list and re-emitting restores the stream, so the whole fold/unfold substrate must be multiset-faithful.',
+    why: 'The documented retype round-trip: collecting to a list and re-emitting restores the stream, so the whole fold/unfold substrate must be multiset-faithful.',
     lhs: (p) => p, rhs: (p) => `${p}.fold().unfold()`,
   },
 

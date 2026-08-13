@@ -32,9 +32,8 @@ import { transformExpr } from './transform.ts';
  * Every list op is the same shape: `json_each` the list, do something per member, put it back. The
  * "something" is a vocabulary this project already has — `transform.ts` applied to a member,
  * `predicate.ts` over a member, `reducer.ts` over a member — which is why the frame is what was
- * missing and not the operations. Legacy says the same thing (`list.ts` calls `scalarTx` per
- * member); the difference is that there it is four hand-written correlated subqueries and here it is
- * `membersOf` + `listOfMembers`.
+ * missing and not the operations. Here that frame is `membersOf` + `listOfMembers`, one home instead
+ * of a hand-written correlated subquery per op.
  *
  * **A member op is a CORRELATED SCALAR SUBQUERY, never a relation-level explode**, and that matters
  * for a reason the SQL makes obvious: the list is ONE traverser, so exploding it at relation level
@@ -45,9 +44,9 @@ import { transformExpr } from './transform.ts';
  * ## What this module does NOT do
  *
  * `null` is the only decline, as in every vocabulary module here. In particular a string transform
- * WITHOUT `Scope.local` is a permanent type error on a collection and legacy raises TinkerPop's own
- * message for it (`The toUpper() step can only take string as argument`) — so this declines and lets
- * the spine that owns the message raise it, rather than inventing a second one.
+ * WITHOUT `Scope.local` is a permanent type error on a collection — TinkerPop's own message is `The
+ * toUpper() step can only take string as argument` — so this declines rather than inventing an answer
+ * of its own.
  *
  * BOTH scalar member encodings are served: a BARE list, and a SELF-DESCRIBING one whose members may
  * be `{t,v}` nodes (what `fold()` over a per-row-typed stream produces). `memberPayload`/`memberNode`
@@ -82,8 +81,7 @@ const memberOrder = (members: Rel, dir: 'asc' | 'desc' = 'asc'): SortTerm =>
   ({ expr: col(members.id, MEMBER.ord), dir });
 
 /**
- * THE TWO WAYS TO READ A MEMBER, and which one an op needs is decided by what it does with it —
- * legacy's `memberValue`/`memberNode`, same rule, the algebra's vocabulary.
+ * THE TWO WAYS TO READ A MEMBER, and which one an op needs is decided by what it does with it.
  *
  * A `typed` list's members are self-describing `{t,v}` nodes IF the producer wrapped them (a fold
  * whose members are all storage-class-determined stays bare, uniformly per list), so the unwrap is
@@ -124,8 +122,7 @@ const memberNode = (of: ListOf, members: Rel): Expr => {
 
 /** A member's own TYPE tag, for a reader that keeps the per-member type rather than the value —
  *  `unfold()` over a typed list, whose members frame by their own `vtype`. A bare member has no tag
- *  recorded, so its type is INFERRED from the storage class, which is what the wire would do anyway
- *  and what legacy's `inferVtypeSql` spells. */
+ *  recorded, so its type is INFERRED from the storage class, which is what the wire would do anyway. */
 const memberVtype = (of: ListOf, members: Rel): Expr | undefined => {
   if (!isTypedList(of)) return undefined;
   return {
@@ -157,10 +154,10 @@ const memberTypeTag = (of: ListOf, members: Rel): Expr => {
  *
  * Without it a member compares by SQLite STORAGE CLASS, and a value carried as decimal TEXT because
  * it does not fit one (a long past 2^53, a bigint, a bigdecimal, a duration) compares
- * LEXICOGRAPHICALLY. Measured before this existed, on BOTH spines:
+ * LEXICOGRAPHICALLY. Measured before this existed:
  * `inject(9007199254740993L, 10007199254740993L).fold().max(Scope.local)` answered the SMALLER value
  * and `min(Scope.local)` the larger, while the global `max()` — which already had this authority —
- * answered correctly. One step name, two engines, and only one of them had been fixed.
+ * answered correctly.
  */
 const memberCompareKey = (of: ListOf, members: Rel): Expr => {
   const value = col(members.id, MEMBER.value);
@@ -202,7 +199,7 @@ const withList = (rel: Rel, list: Expr, fresh: Minter): Rel => make.project({
 
 /** An UNTAGGED list of scalars — what a member REWRITE always produces, since a transformed member
  *  is a native value the stored type no longer describes, so the output is framed by per-value
- *  inference (legacy's `retypedList`). Note this is the `unknown` member type and NOT "no type":
+ *  inference. Note this is the `unknown` member type and NOT "no type":
  *  a rewrite that KNOWS the result class says so with `withMemberType(of, STATIC(…))`. */
 export const BARE_LIST: ListOf = SCALAR_MEMBERS;
 
@@ -214,8 +211,8 @@ const isTypedList = hasTypedMembers;
 export const isBareList = (of: ListOf): boolean => of.kind === 'scalar';
 
 /**
- * A bare member's canonical Gremlin type, inferred from its SQLite storage class — legacy's
- * `inferVtypeSql`, re-expressed. It is the same inference the wire would apply to an untagged value,
+ * A bare member's canonical Gremlin type, inferred from its SQLite storage class. It is the same
+ * inference the wire would apply to an untagged value,
  * so naming it here is not a second policy: it is what lets a MIXED list (some members wrapped, some
  * bare, which is exactly what `typed` means) hand every member a type without a second channel.
  */
@@ -237,13 +234,11 @@ export const inferredVtype = (value: Expr): Expr => ({
 });
 
 /**
- * ONE member predicate for `all`/`any`/`none`, null-aware — the same rule legacy's `memberPredicate`
- * encodes, and it must be stated here too because the two spines render predicates in different
- * vocabularies (`Expression` vs `Expr`) while the SEMANTIC rule is one.
+ * ONE member predicate for `all`/`any`/`none`, null-aware.
  *
  * `P.eq(null)`/`P.neq(null)` cannot go through the ordinary predicate builder: SQL's `= NULL` is
  * NULL, so a null member would never satisfy an `eq(null)`. TinkerPop compares with
- * `Objects.equals`. Getting this wrong on the legacy side answered `IS NULL` for EVERY `eq` — see
+ * `Objects.equals`. Getting this wrong answered `IS NULL` for EVERY `eq` — see
  * `test/L4-addendum/list-member-predicate.feature`.
  */
 const memberPredicate = (member: Expr, pred: unknown): Expr | null => {
@@ -285,8 +280,8 @@ export function listMemberOp(
   const list = col(rel.id, LIST_COL);
 
   // A STRING transform maps over the members — and only with `Scope.local`. Its global spelling is a
-  // permanent type error on a collection (a list is not a string) which legacy raises TinkerPop's own
-  // message for, so declining hands it the message rather than inventing a second one.
+  // permanent type error on a collection (a list is not a string) — TinkerPop's own message — so this
+  // declines rather than inventing a second one.
   if (STRING_LOCAL_TX.has(step.name)) {
     // A member read AS A VALUE: an element member is a ROWID, so the transform would rewrite the id.
     if (!isLocalScope(step) || !isBareList(of)) return null;
@@ -298,7 +293,7 @@ export function listMemberOp(
     if (!tx) return null;
     // A REWRITE reads the payload and writes a BARE member: the recorded type no longer describes the
     // new value (`length()` makes it an integer outright), so re-tagging it would frame the RESULT as
-    // the INPUT's type. Legacy's `retypedList` says the same.
+    // the INPUT's type.
     // `rewrites` is what a SET marker cannot survive: the members are new values, so "these are the
     // distinct results of a set operation" has stopped being true of them. A slice and a whole-traverser
     // filter both leave the members alone and keep it.
@@ -626,7 +621,7 @@ export function listRetype(
       // FENCED, and that is the whole point of naming it: without a materialization boundary the
       // block assembler fuses the two projections into one SELECT and re-inlines `w` at both reads,
       // which is the duplication this shape exists to avoid (measured: 3,024 bytes fused, 1,747
-      // fenced, for the same plan). Legacy reaches the same place with a `derived` subquery.
+      // fenced, for the same plan).
       const held = fenced(withPayload(rel, [['w', picked]], [meta('w', 'any', true)], fresh), fresh);
       return {
         rel: withPayload(held,
@@ -740,7 +735,7 @@ export function unfoldList(
  * `jsonbList` arm (109 of the family's remaining blockers all stop here).
  *
  * The barrier itself is one `Aggregate`; what makes it an increment is the MEMBER ENCODING, and that
- * decision is legacy's `foldMember` re-expressed rather than re-decided:
+ * decision has two cases:
  *
  * - **no per-row type** (an `inject` source, a transformed value) — the storage class already
  *   determines every member, so the list is BARE and carries the stream's compile-time tag.
@@ -758,10 +753,10 @@ export function unfoldList(
  * as decimal TEXT — fall out of every fold, which is why a `max(Scope.local)` over such a list
  * compared lexicographically and answered the smaller value.
  *
- * "About the whole list" is a WINDOW here, not legacy's second alias over the same relation:
- * `MAX(<is this row lossy>) OVER ()` is 1 iff any row is. Legacy notes that a window "cannot nest
- * inside the json_group_array aggregate" and reaches for `EXISTS` over a second alias instead — true
- * of one SELECT, and not a constraint on a normalized IR: the window is its own node, so the
+ * "About the whole list" is a WINDOW here: `MAX(<is this row lossy>) OVER ()` is 1 iff any row is. A
+ * window "cannot nest inside the json_group_array aggregate" and the naive spelling reaches for
+ * `EXISTS` over a second alias instead — true of one SELECT, and not a constraint on a normalized IR:
+ * the window is its own node, so the
  * aggregate reads a COLUMN and the assembler opens the nested SELECT that makes it legal (it already
  * refuses to fuse an `Aggregate` over a windowed block). The alternative — an `Exists` whose subplan
  * SHARES the aggregate's input — is what the algebra actually refuses: the `name` pass does not walk
@@ -773,8 +768,8 @@ export function unfoldList(
  * multi-site named collection names two (the SITE, then that site's encounter), because the
  * reference appends one whole site's `BulkSet` after the previous one's
  * (`AggregateStep.processAllStarts` → `Operator.addAll`). Naming columns rather than one encounter
- * is what lets both be the same fold. With none the list keeps incidental row order, which is what
- * legacy does and what `analyzeChain` guarantees cannot matter for a `fold` (a COLLECTING consumer,
+ * is what lets both be the same fold. With none the list keeps incidental row order, which
+ * `analyzeChain` guarantees cannot matter for a `fold` (a COLLECTING consumer,
  * so a chain that reaches one always demands an encounter).
  */
 export function foldScalars(
@@ -831,7 +826,7 @@ export function foldScalars(
  *
  * It is also why there is no type question here and a long one in `foldScalars`: every member of an
  * element list IS an element, so `of` says it once and no member needs a tag. `{kind:'elem'}` was
- * already the `ListOf` arm legacy produced and the framer already read (`listItemBuffers`,
+ * already a `ListOf` arm the framer read (`listItemBuffers`,
  * `execute.ts`); this is the increment that first PRODUCES one on this spine, which is exactly what
  * `listPayloadExpr`'s decline comment said it was waiting for.
  *
@@ -860,7 +855,7 @@ export function foldElements(
 }
 
 /** The three storage-class-determined types: a member of one of these needs no envelope, because the
- *  wire would infer exactly that type from the value itself. Legacy's `LOSSLESS_VTYPES`. */
+ *  wire would infer exactly that type from the value itself. */
 const LOSSLESS_VTYPES = ['string', 'double', 'int'] as const;
 
 const LOSSY_COL = 'lossy';
@@ -902,14 +897,14 @@ const withLossyFlag = (input: Rel, vtype: Expr, fresh: Minter): Rel => make.wind
  * was the previous increment.
  *
  * **The OPERAND crosses the seam as ONE VALUE** — `jsonb('[…]')`, a single bind for the whole array —
- * which is the root rule about a set sized by DATA rather than by query text, and which legacy
- * already spells this way. A TRAVERSAL operand (`merge(__.V().values('name').fold())`) is a child
- * read and declines; a `Map` operand is a permanent type error whose message legacy owns.
+ * which is the root rule about a set sized by DATA rather than by query text. A TRAVERSAL operand
+ * (`merge(__.V().values('name').fold())`) is a child read and declines; a `Map` operand is a permanent
+ * type error.
  *
  * **A typed self side is projected to PAYLOADS first**, because the operand is always bare: comparing
  * `{"t":"int","v":5}` against `5` would never match, and emitting a mix of both encodings inside one
  * result list is the corruption the uniform-per-list rule exists to prevent. So a typed self makes
- * the result BARE, which is what legacy's `retypedList` says too.
+ * the result BARE.
  */
 const SET_OPS = new Set(['combine', 'intersect', 'difference', 'disjunct', 'merge', 'product']);
 
@@ -965,14 +960,14 @@ export const nonIterableArgument = (step: IRStep, arg: unknown, encountered: str
  * A set-op OPERAND as a list expression, or `null` to decline — three forms, one question.
  *
  * A literal ARRAY and `constant(c).fold()` are both COMPILE-TIME lists (the second a one-member one,
- * which is the same fact rather than a special case, and exactly how legacy resolves it). A rooted
+ * which is the same fact rather than a special case). A rooted
  * SUB-READ is a relation: its members are only known at run time, so it is lowered by the same fold
  * and read through a `Scalar` expression — no escape node, and if the inner chain is not covered the
  * decline propagates outward, which is the contract one level down.
  *
  * The ADMISSION RULE over the seam's answer is this module's, not the seam's (§6·6): an operand must
- * be LIST-framed, because legacy shares one rule between the set-op operands and the predicate ones
- * (`foldedListSubquery`) and the two cannot be allowed to disagree about which traversals qualify — a
+ * be LIST-framed, because the set-op operands and the predicate ones share one rule and the two cannot
+ * be allowed to disagree about which traversals qualify — a
  * scalar-valued sub-read is not a collection. An operand with EFFECTS is refused for a harder reason:
  * its statements are `Plan` bindings the operand expression cannot carry, so splicing only the
  * relation would drop the write and leave a `Ref` naming a binding that was never made.
@@ -1053,10 +1048,9 @@ export function listSetOp(
 
   // BOTH SIDES IN ONE VOCABULARY: bare payloads. A typed list's members MAY be `{t,v}` envelopes, and
   // comparing an envelope against a bare value never matches — so either side that might carry one is
-  // re-emitted as its payloads first, through the same member frame every other op uses. Legacy only
-  // does this to the SELF side, which happens to work because its sub-read operands are all
-  // storage-class-determined on the reference graph; doing it to both is the same code and correct for
-  // an operand that is not.
+  // re-emitted as its payloads first, through the same member frame every other op uses. Applying it
+  // to BOTH sides (not only self) is the same code and stays correct for an operand whose members are
+  // not all storage-class-determined.
   const payloads = (listExpr: Expr, items: ListOf): Expr => {
     if (!isTypedList(items)) return listExpr;
     const members = membersOf(listExpr, fresh);
@@ -1105,10 +1099,10 @@ export function listSetOp(
    *
    * A set has no member order, so the order is ours to choose, and choosing it is the point.
    * `Distinct` over `UNION ALL` is §3.3's declared collapse of SQL's distinct `UNION`, but the two
-   * differ in an artifact: SQLite implements `UNION` by SORTING, so legacy's set results come out in
-   * storage-class order (`null`, numbers, then text) BY ACCIDENT while a `SELECT DISTINCT` leaves it to
-   * a temp b-tree. Naming the order makes it deterministic by design AND identical to the answer
-   * legacy gives today — the alternative was inheriting a dedup implementation detail as a contract.
+   * differ in an artifact: SQLite implements `UNION` by SORTING, so a `UNION`-based set result comes
+   * out in storage-class order (`null`, numbers, then text) BY ACCIDENT while a `SELECT DISTINCT`
+   * leaves it to a temp b-tree. Naming the order makes it deterministic by design — the alternative
+   * was inheriting a dedup implementation detail as a contract.
    */
   const setOf = (rows: Rel): Rel => {
     const deduped = make.distinct({ id: fresh('sd'), input: rows, channels: [], type: rows.type });
@@ -1157,7 +1151,7 @@ export function listSetOp(
         return setOf(union(valuesOf(mine, MEMBER.value), valuesOf(membersOf(operand, fresh), MEMBER.value)));
       // CARTESIAN product → a list of PAIR-lists, so the result's members are lists and no further
       // member op reads it (`isBareList` names the scalar encodings only). The second `json_each`
-      // takes the first as its INPUT, which is exactly the cross join legacy writes.
+      // takes the first as its INPUT, which is exactly a cross join.
       case 'product': {
         const paired = make.explode({
           id: fresh('px'), input: mine, expr: operand, channels: [], as: OPERAND,
@@ -1184,7 +1178,7 @@ export function listSetOp(
   // `foldScalars` spends, not on the compile-time `typed` flag. Measured by trying the compile-time
   // gate: `values('name').fold()` is `typed` while every member is bare at run time, so it wrapped
   // members that needed no envelope, changed the bytes of the common case and broke the
-  // uniform-only-when-needed rule (6 differentials). The runtime test has to span BOTH sides, which
+  // uniform-only-when-needed rule (6 failures). The runtime test has to span BOTH sides, which
   // is the part that does not exist yet: `withLossyFlag` asks it of one relation.
   //
   // One piece of it IS worth keeping and is not here: `memberTypeTag` returns a NULL tag unresolved
@@ -1229,7 +1223,7 @@ function unfoldNested(rel: Rel, of: ListOf & { readonly kind: 'list' }, fresh: M
  * §11's trap in its original form: lowered as a predicate it returns the right ROWS framed as the
  * wrong SHAPE. What it actually means is "keep the rows whose stored value IS a collection, and treat
  * that value as the traverser" — so it needs a per-row stored `vtype` (a computed scalar has no stored
- * collection, and legacy's generic `is()` static-folds that case), and the members are the stored
+ * collection), and the members are the stored
  * collection's own self-describing `{t,v}` tree, i.e. a TYPED list.
  *
  * A SET differs only in the framing marker: the member substrate is shared, which is exactly why
@@ -1255,13 +1249,12 @@ export function collectionRetype(rel: Rel, vtype: string, kind: 'list' | 'set', 
 /**
  * THE LIST PAYLOAD — one row's `list` column, projected to the JSON the framing layer reads (§6·3).
  *
- * `null` declines, as everywhere in this module. Two encodings are served and each is what legacy's
- * `materializeListRoot` builds for it:
+ * `null` declines, as everywhere in this module. Two encodings are served:
  *
  * - a SCALAR-membered list (bare, typed, or a set) is already frameable and rides out as `json(list)` —
  *   the relational column is JSONB, and `json()` is what turns it into the text the framer parses;
  * - a NESTED list is REBUILT one level at a time, because the raw inner values are arrays whose JSON
- *   subtype does not survive the enclosing aggregate. That is legacy's `nestedListResult` and it recurses
+ *   subtype does not survive the enclosing aggregate. It recurses
  *   through the same member frame every other op in this module uses — `Explode` with no input, i.e. a
  *   correlated `FROM json_each(…)`, which is what makes a per-member computation a scalar subquery rather
  *   than a row multiplication.
@@ -1269,7 +1262,7 @@ export function collectionRetype(rel: Rel, vtype: string, kind: 'list' | 'set', 
  * An ELEMENT-membered list is REBUILT the same way a nested one is, and for the same reason: the members
  * are ROWIDS (what `foldElements` collected) and the wire wants public payload objects, so each one is
  * expanded here — at the ROOT, once per surviving member — rather than inside the barrier that made the
- * list. Legacy's `elementListResult`, and the framer contract is `listItemBuffers`' own comment: element
+ * list. The framer contract is `listItemBuffers`' own comment: element
  * items arrive as `{id,label,props[,src,tgt]}` objects, rowids already expanded in SQL. That is
  * `elementObject` and NOT `elementNode` — a `{t,v}` envelope here would be a level the `of.kind === 'elem'`
  * framer does not unwrap, and `of` has already said every member is an element.
@@ -1304,9 +1297,8 @@ function listPayloadExpr(list: Expr, of: ListOf, fresh: Minter): Expr | null {
 }
 
 /** The list relation as WIRE ROWS: one `list` column per traverser, in emission order, plus the `Shape`
- *  that says how to frame each member. Legacy's arm ORDER is preserved deliberately — a nested list is
- *  framed as a `jsonbList` whatever `set` says, because a set OF LISTS has no distinct wire form and
- *  `materializeListRoot` decides it the same way. */
+ *  that says how to frame each member. The arm ORDER is deliberate — a nested list is
+ *  framed as a `jsonbList` whatever `set` says, because a set OF LISTS has no distinct wire form. */
 export function listPayload(rel: Rel, of: ListOf, set: boolean, fresh: Minter): { readonly rel: Rel; readonly shape: Shape } | null {
   const ordered = byEncounter(rel, fresh);
   const payload = listPayloadExpr(col(ordered.id, LIST_COL), of, fresh);

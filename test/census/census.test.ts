@@ -5,9 +5,9 @@
 import { test, expect, describe } from 'bun:test';
 import { EXECUTES, loadCorpus, readBaseline, runCensus, type Row } from './census.ts';
 
-/** Measured 1,263 with one spine (it was 1,425 while the legacy route still answered its 342). The
- *  floor sits below it so ordinary progress does not trip it, while a change that guts executability
- *  does — without this, a run where everything throws would pass every other gate vacuously. */
+/** Measured 1,263 on the one spine. The floor sits below it so ordinary progress does not trip it,
+ *  while a change that guts executability does — without this, a run where everything throws would
+ *  pass every other gate vacuously. */
 const COVERAGE_FLOOR = 1_200;
 
 const show = (r: Row | undefined): string =>

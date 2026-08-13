@@ -129,8 +129,8 @@ describe('a data-sized within() set rides one JSON bind', () => {
   }, ROW_SCALE_TIMEOUT_MS);
 
   test('a small set keeps the IN-list form (members inlined as literals, not one bind each)', () => {
-    // PINNED to RelIR: the inlining is the claim, and legacy still spends a bind per member, so an
-    // ambient compile asserts one spine's spelling under both spines' name (§6·1).
+    // The inlining is the claim: the members are parsed literals, so they inline into the IN-list
+    // rather than each taking a bind.
     const plan = compile('g.V().has("name", within("a","b","c")).count()', {});
     if (plan.kind !== 'read') throw new Error('expected read plan');
     // The members are parsed literals → inlined into the IN-list (the set stays an IN-list, NOT a JSON

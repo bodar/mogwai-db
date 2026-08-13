@@ -9,28 +9,28 @@ import type { IRStep } from './strategies.ts';
 import { elementKindAt, LABEL_MUTATIONS } from './step.ts';
 
 /**
- * WHAT A WRITE STEP'S ARGUMENTS MEAN — the ONE authority, above the routing switch (§6·5).
+ * WHAT A WRITE STEP'S ARGUMENTS MEAN — the ONE authority, above the lowering (§6·5).
  *
  * `property(k, v)`, an `addV` label run, a `mergeV`/`mergeE` map and its `option()` arms are all
- * PARSED here and nowhere else. Both spines call these functions, and so does the `verifyWrite`
- * Pass that runs before either of them is chosen — which is the whole reason the module exists
- * separately from the write compilers that used to host it:
+ * PARSED here and nowhere else. The lowering calls these functions, and so does the `verifyWrite`
+ * Pass that runs before it — which is the whole reason the module exists separately from the write
+ * lowering that consumes it:
  *
- * - **A refusal on the traversal's own TEXT is not a spine's business.** `property()` with an odd
- *   number of meta arguments, a merge map keyed `T.key`, an `option()` whose selector is not
+ * - **A refusal on the traversal's own TEXT is not the lowering's business.** `property()` with an
+ *   odd number of meta arguments, a merge map keyed `T.key`, an `option()` whose selector is not
  *   `Merge.onCreate`/`onMatch`, a label that is not a legal identifier — every one of those is an
- *   ERROR, the same error whichever spine would have run the traversal. Raised from a `verify` Pass
- *   they are the answer once; raised from inside a lowering whose contract is `null` they became
- *   `catch { return null }` at every write site, and the census then counted a REFUSED traversal as
- *   an uncovered gap forever. That is what made the coverage counter unable to reach 100%.
+ *   ERROR, the same error however the traversal is lowered. Raised from a `verify` Pass they are the
+ *   answer once; raised from inside a lowering whose contract is `null` they became
+ *   `catch { return null }` at every write site, where a definite ERROR is indistinguishable from a
+ *   traversal no lowering covers.
  * - **A second parser is a second chance to disagree.** The cardinality position, the `T`-token
  *   forms, a `__.select(<withSideEffect const>)` key, `validateNoOverrides`, `Cardinality.x(v)`
  *   beating an enclosing `option()` default, and the per-argument type channel had already drifted
- *   between two copies inside the legacy file before they were merged. What each route re-expresses
- *   is the EMISSION; nothing here is re-expressed anywhere.
- * - **It survives legacy's deletion.** These functions used to live inside the legacy write
- *   interpreter, which Phase 2.6 removes. What Phase 2.6 deletes is the imperative closure around
- *   the parse, never the parse.
+ *   between two copies before they were merged. What the lowering re-expresses is the EMISSION;
+ *   nothing here is re-expressed anywhere.
+ * - **It is separate from the write lowering.** These functions are the parse, not the imperative
+ *   closure around it; the write lowering that consumes them is a different module and owns only the
+ *   EMISSION.
  *
  * PURE: no `Engine`, no `GraphStore`, no SQL. A value that can only be known against the GRAPH
  * (`mergeV`'s `T.id` availability, a label mutation under an immutable cardinality) is deliberately
@@ -87,14 +87,13 @@ export function constFromNested(nested: any, sideEffects: Map<string, any> | und
  * A refusal that means **"not learned yet"**, as opposed to **"the answer is an ERROR"** (§6·5).
  *
  * Both used to be a plain `Error` and both arrived at a lowering as `catch { return null }`, which
- * conflated them where it mattered most: a traversal TinkerPop itself rejects counted as an
- * uncovered gap in the coverage census, forever — so the counter could not reach 100% and the
- * migration's exit criterion was unreachable BY CONSTRUCTION.
+ * conflated them where it mattered most: a traversal TinkerPop itself rejects would read as a
+ * traversal no lowering covers rather than as the ERROR it is.
  *
  * Separating them needs a distinguishable throw and nothing else. `verifyWriteArgs` (a `verify`
- * Pass, above the routing switch) re-raises a plain `Error` — one authority, one message, whichever
- * spine would have run the traversal — and swallows a `Deferral`, leaving it to the spines: RelIR
- * declines to `null` and legacy raises the same message it always did.
+ * Pass, above the lowering) re-raises a plain `Error` — one authority, one message, however the
+ * traversal is lowered — and swallows a `Deferral`, leaving it to the lowering, which declines to
+ * `null`.
  *
  * The distinction is about WHO OWES THE ANSWER, not about severity. "`mergeV()` with no argument"
  * is a `Deferral` because a lowering could learn it tomorrow; "`option()` selector must be
@@ -299,10 +298,9 @@ function validateMergeKey(role: MergeRole, k: any, v: any, kind: ReturnType<type
   // A STATIC string key is decidable from the TEXT, so `MergeElementStep.validate`'s
   // `ElementHelper.validateProperty` call (gremlin-core
   // `.../step/map/MergeElementStep.java:278,314-316`) belongs HERE — in the shared parse, which the
-  // `writeArguments` verify Pass runs above both spines (§6·5). It used to live only in legacy's
-  // route (`validateResolvedMergeSpec`), so `g.mergeV([:]).option(onCreate, ['~label':'vertex'])`
-  // was a REFUSAL one spine owned, and RelIR had to decline the whole traversal to reach it.
-  // A NESTED key is not decidable here and stays legacy's per-driver check.
+  // `writeArguments` verify Pass runs above the lowering (§6·5). Running it here makes
+  // `g.mergeV([:]).option(onCreate, ['~label':'vertex'])` a refusal answered once rather than only
+  // deep in a per-driver check. A NESTED key is not decidable here and stays that per-driver check.
   if (kind === 'prop') { if (typeof k === 'string') validatePropertyKey(k); return; }
   const token = kind === 'label' ? 'T.label' : kind === 'id' ? 'T.id' : kind === 'outV' ? 'Direction.OUT' : 'Direction.IN';
   if (role.kind === 'onMatch') {
@@ -406,11 +404,11 @@ function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null,
  * THE MERGE MAPS — the merge argument, its `option()` arms and the `property()` tail after them,
  * normalized against their roles and cross-validated.
  *
- * Exported because the RelIR write route needs the identical parse (§6·6, and the same argument
+ * Exported because the write lowering needs the identical parse (§6·6, and the same argument
  * `parseProperty` already carries): the role-dependent token rules, the `validateNoOverrides` check,
  * `Cardinality.x(v)` beating an enclosing option default, and the per-argument type channel are five
  * things a second parser would have five chances to get differently — and one of them had already
- * drifted between two copies inside this file. What the other route re-expresses is the EMISSION.
+ * drifted between two copies inside this file. What the lowering re-expresses is the EMISSION.
  *
  * `validateNoOverrides` runs STATICALLY, before anything else — TinkerPop's
  * `validateStaticNoOverrides`, which is why the corpus expects a contradicting onCreate to raise even
@@ -424,9 +422,9 @@ function normalizeMergeMap(role: MergeRole, raw: any, typeNode: TypeNode | null,
  * which is what makes a meta-property or a declared cardinality work in that position without either
  * merge lowering knowing they exist.
  *
- * This absorbed `parseMergeOptions`, which was on §8's deletion list and could not honestly reach zero
- * once the parse became SHARED: what Phase 2.6 deletes is the imperative closure around it, never the
- * parse, so the name had to become this one rather than linger as a target nothing could remove.
+ * This absorbed `parseMergeOptions` once the parse became SHARED: what the write lowering owns is the
+ * imperative closure around the parse, never the parse itself, so the shared parse lives here under
+ * this name.
  */
 export interface MergeMaps {
   readonly match: MergeSpec;
@@ -439,14 +437,12 @@ export interface MergeMaps {
    * **A `Merge.outV` in the merge map does NOT mean "the incoming traverser".** It means "look at
    * `option(Merge.outV, …)`", and `MergeEdgeStep.resolveVertex`
    * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeEdgeStep.java:231-251`)
-   * throws `option(outV) must be specified if it is used for OUT` when the option is absent. Both
-   * spines used to substitute the current traverser instead — the same wrong answer on both, which
-   * is why no differential could see it and why the corpus could not either: every scenario that
-   * uses the token also supplies the option.
+   * throws `option(outV) must be specified if it is used for OUT` when the option is absent. The
+   * compiler used to substitute the current traverser instead — a wrong answer the corpus could not
+   * catch either: every scenario that uses the token also supplies the option.
    *
-   * Left RAW rather than resolved, because the two spines resolve it differently and neither belongs
-   * in a parse: the value is a nested traversal evaluated AT the incoming traverser, so it is an
-   * alias read on one side and a correlated child on the other.
+   * Left RAW rather than resolved, because resolving it does not belong in a parse: the value is a
+   * nested traversal evaluated AT the incoming traverser.
    */
   readonly outV?: unknown;
   readonly inV?: unknown;
@@ -491,8 +487,8 @@ export function mergeMaps(
 
   if (onCreate) validateNoOverrides(match, onCreate);
   // THE TOKEN REQUIRES ITS OPTION, and the check is decidable from the TEXT — so it belongs here and
-  // therefore fires from the `writeArguments` verify Pass, above both spines (§6·5). `resolveVertex`
-  // raises it per traverser; raising it once, before either spine is chosen, is the same answer.
+  // therefore fires from the `writeArguments` verify Pass, above the lowering (§6·5). `resolveVertex`
+  // raises it per traverser; raising it once, before the lowering, is the same answer.
   requireEndpointOption(match, onCreate, outV, 'outV');
   requireEndpointOption(match, onCreate, inV, 'inV');
   return { match, onCreate, onMatch, tail, ...(outV === undefined ? {} : { outV }), ...(inV === undefined ? {} : { inV }) };
@@ -533,23 +529,22 @@ export function labelNames(v: any, sole: boolean, step: string): string[] {
 
 
 /**
- * THE WRITE-ARGUMENT VERIFIER — a `verify` Pass's body, run ABOVE the routing switch (§6·5).
+ * THE WRITE-ARGUMENT VERIFIER — a `verify` Pass's body, run ABOVE the lowering (§6·5).
  *
  * It parses every write step's arguments and throws away the result. That is the whole mechanism:
  * the parse is the authority on what a write step's text MEANS, so running it early turns a
- * text-level refusal into the traversal's ANSWER — once, from one place, whichever spine would
- * have run it — instead of a `catch { return null }` at each write site that the census then read
- * as uncovered vocabulary.
+ * text-level refusal into the traversal's ANSWER — once, from one place, however the traversal is
+ * lowered — instead of a `catch { return null }` at each write site that would read as uncovered
+ * vocabulary.
  *
- * A `Deferral` is swallowed here on purpose: "not learned yet" is the spines' business, and raising
+ * A `Deferral` is swallowed here on purpose: "not learned yet" is the lowering's business, and raising
  * it above them would freeze a shape a lowering could learn tomorrow.
  *
  * **The `mergeV`/`mergeE` slice is the RUN of `option()`/`property()` steps, not the rest of the
- * chain.** Legacy hands `mergeMaps` everything after the merge and lets `parsePropertyTail` refuse
- * whatever is not a `property()` — which is legacy's own "step not implemented after mergeV()"
- * deferral, and slicing the same way here would raise it for `mergeV(…).values('name')`, a
- * traversal the RelIR fold continues past perfectly well. A verifier must never narrow what the
- * lowerings may attempt.
+ * chain.** Handing `mergeMaps` everything after the merge and letting `parsePropertyTail` refuse
+ * whatever is not a `property()` — a "step not implemented after mergeV()" deferral — would raise it
+ * for `mergeV(…).values('name')`, a traversal the fold continues past perfectly well. A verifier
+ * must never narrow what the lowering may attempt.
  *
  * It does NOT recurse into nested bodies. Each is normalized through this same pipeline when its
  * host lowers it, with that call site's own parameters and side-effect registry — so a nested
@@ -571,7 +566,7 @@ export function verifyWriteArgs(steps: readonly IRStep[], params: Record<string,
 }
 
 /**
- * A LABEL MUTATION ON AN EDGE IS A SPECIFIED REFUSAL, and it belongs above the routing switch.
+ * A LABEL MUTATION ON AN EDGE IS A SPECIFIED REFUSAL, and it belongs above the lowering.
  *
  * TinkerPop fixes an edge's label cardinality at exactly one and immutable, so `addLabel`,
  * `dropLabel` and `dropLabels` on an edge stream are errors rather than gaps — the conformance suite
@@ -579,16 +574,14 @@ export function verifyWriteArgs(steps: readonly IRStep[], params: Record<string,
  * `g_E_dropLabels_labels`, each *"the traversal will raise an error with message containing text of
  * 'Label mutation is not supported'"*, `gremlin-test .../features/sideEffect/{AddLabel,DropLabel}.feature`).
  *
- * **It lived in `steps/write/write.ts` and that made three passing scenarios the property of a route
- * with an end date.** They pass today on BOTH spines only because RelIR declines the shape and legacy's
- * write dispatcher raises on the way past; deleting that dispatcher would have deleted the answer. This
- * is §6·5 and the "legacy must not be the authority" rule in one: an ERROR is never a capability, so it
- * is owed by whichever spine runs the traversal, which means it is owed above both.
+ * **It used to be raised inside the write lowering, which made three passing scenarios the property
+ * of that lowering** — deleting it would have deleted the answer. This is §6·5: an ERROR is never a
+ * capability, so it is owed above the lowering, not inside it.
  *
  * ⚠️ **It is the STREAM's element kind, not an argument** — the one write refusal here that is — so it
  * asks `elementKindAt`, whose third answer is `undefined`. A chain whose prefix this cannot type
- * (a branch, a re-entry, a child host) is left to the lowerings rather than raised on: a verifier must
- * never narrow what the lowerings may attempt, and never raise on a traversal it has not understood.
+ * (a branch, a re-entry, a child host) is left to the lowering rather than raised on: a verifier must
+ * never narrow what the lowering may attempt, and never raise on a traversal it has not understood.
  * The immutable-graph sibling refusal does NOT move with it and could not: it reads a graph capability,
  * while this is a fact about Gremlin.
  */

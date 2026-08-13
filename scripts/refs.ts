@@ -18,7 +18,7 @@
  * Resolution is `workspace/symbol`, which is FUZZY — a query for `compile` returns 75 hits
  * including `compileAddV`. So an exact name match is the default and `--fuzzy` opts out. A name
  * that resolves to several declarations (an interface method and its implementation, the ordinary
- * case in this codebase — `lowerSteps` is on `engine/deps.ts` and `engine/engine.ts`) is NOT an
+ * case in this codebase) is NOT an
  * error: each declaration is reported with its own references, because they are genuinely different
  * questions and picking one silently would answer the wrong one.
  *

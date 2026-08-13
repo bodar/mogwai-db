@@ -10,9 +10,9 @@
 import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 
-/** The traverser's value, in whichever spelling the answering spine used. A single-field RECORD is
- *  legacy's `e0_v` column and RelIR's one-entry `map` blob; both are the same one value, and reading
- *  only one of them turns a route move into a test failure that says nothing. */
+/** The traverser's value, in whichever spelling the lowering used. A single-field RECORD is either an
+ *  `e0_v` column or a one-entry `map` blob; both are the same one value, and reading only one of them
+ *  turns a lowering change into a test failure that says nothing. */
 /** Traversers are a MULTISET. Two spellings of the same question agree row for row only when
  *  something upstream fixes an emission order; where neither does, comparing sorted is the honest
  *  assertion (a stronger one here would be pinning an order SQLite chose — see the perturbation

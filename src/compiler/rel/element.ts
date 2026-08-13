@@ -17,27 +17,23 @@ import {
  * with no SQL anywhere. **`Shape` is the boundary**, and this module is what moves the last SQL-producing
  * step to the correct side of it.
  *
- * Before this, every covered element traversal — most of the corpus RelIR answers — ended with legacy's
- * `lowerSteps` composing the payload SELECT over RelIR's relation, which meant RelIR did not produce the
- * whole query and §5's equivalence gate did not read as it claimed. It also meant the next arm of the
- * map family was blocked by a `throw` inside the code §8 deletes, i.e. by the migration running backwards.
+ * This module composes the element payload SELECT over RelIR's relation IN THE ALGEBRA, so RelIR
+ * produces the whole query and §5's equivalence gate reads as it claims.
  *
  * ## What the tuple is, and why it is FIXED
  *
  * `id`, `label`, (`src`, `tgt` for an edge), `props` — plus `bulk` where a collapse carried a
- * multiplicity out. Legacy's `elementPayload`/`elementPayloadObject` (`plan/plan.ts`) are the same tuple
- * built from a `ScalarCtx`, and the comment above them is the history: it was spelled out by hand at
- * fourteen sites and two of them had already drifted to internal rowids for an edge's endpoints. So the
+ * multiplicity out. This tuple was previously spelled out by hand at fourteen sites, and two of them
+ * had already drifted to internal rowids for an edge's endpoints. So the
  * one thing this module must not do is become a fifteenth spelling with its own opinions. Every field
- * below is the same ANSWER as its legacy twin — the id is `COALESCE(uid, id)`, a vertex's label is ALL of
+ * below is the correct ANSWER — the id is `COALESCE(uid, id)`, a vertex's label is ALL of
  * its labels ordered by label id, an edge's endpoints are EXTERNAL ids, a property bag is insertion-ordered
- * and its values are self-describing `{t,v}` nodes — and where the SQL differs it differs only in
- * spelling, which is what §5's gate admits.
+ * and its values are self-describing `{t,v}` nodes.
  *
- * ## The one place it is deliberately MORE correct than its twin
+ * ## The one place it is deliberately MORE robust than the naive spelling
  *
- * A property bag's entry order is insertion order, and legacy states it as an ORDER BY on a SUBQUERY that
- * an enclosing aggregate then consumes:
+ * A property bag's entry order is insertion order, and the naive spelling states it as an ORDER BY on a
+ * SUBQUERY that an enclosing aggregate then consumes:
  *
  * ```sql
  * SELECT json_group_object(key, json(vs)) FROM (SELECT … GROUP BY key ORDER BY MIN(id))
@@ -50,8 +46,8 @@ import {
  * ships in the read path, so this is the same capability applied to the object form). Same answer,
  * stated where nothing can drop it.
  *
- * The bind-free empties (`json_object()` / `json_array()` rather than the `'{}'` / `'[]'` literals legacy
- * inlines) and the emission-order `Sort` are `build.ts`'s, because every payload arm needs both.
+ * The bind-free empties (`json_object()` / `json_array()`) and the emission-order `Sort` are
+ * `build.ts`'s, because every payload arm needs both.
  */
 
 /** `labels`, as the algebra sees it. Declared per use rather than shared, because two scans of one
@@ -124,7 +120,7 @@ export function edgeEndpoint(edgeRowid: Expr, end: 'src' | 'tgt', fresh: Minter)
 }
 
 /**
- * An edge endpoint's OUTWARD-FACING id — `extIdOf`'s twin, and the field two of legacy's fourteen
+ * An edge endpoint's OUTWARD-FACING id — `extIdOf`'s twin, and the field two of the fourteen
  * hand-rolled payloads got wrong before the tuple had one authority. An endpoint column holds a rowid;
  * what a client sees is `COALESCE(uid, id)`, which is also what the write path returns for the same edge,
  * so projecting the rowid here would make the read and the write disagree about one element.
@@ -167,9 +163,8 @@ function vertexProps(node: Expr, fresh: Minter): Expr {
     ],
   });
   // `json()` AROUND THE INNER ARRAY IS LOAD-BEARING: a JSON value crossing the derived-table boundary
-  // loses SQLite's json subtype, so `json_group_object` would quote the whole array as a STRING. Legacy
-  // carries the identical wrapper for the identical reason, and the first attempt at the edge bag
-  // reshaped every edge's properties by omitting it.
+  // loses SQLite's json subtype, so `json_group_object` would quote the whole array as a STRING. The
+  // first attempt at the edge bag reshaped every edge's properties by omitting it.
   const bag = make.aggregate({
     id: fresh('wpb'), input: perKey, channels: [], type: typeOf(meta('props', 'json', true)),
     groupBy: [],
@@ -219,7 +214,7 @@ function edgeProps(edge: Expr, fresh: Minter): Expr {
  *
  * `json()` around each field for the reason the column form does NOT need it: inside `json_object` a
  * value that is itself JSON must carry the subtype or it is quoted as a string, and a subtype does not
- * survive a subquery boundary. Legacy's `elementPayloadObject` carries the identical wrappers.
+ * survive a subquery boundary.
  */
 export function elementNode(rowid: Expr, elem: Elem, fresh: Minter): Expr {
   return correlatedElement(rowid, elem, fresh,
@@ -313,7 +308,7 @@ export function elementPayload(input: Rel, elem: Elem, opts: { readonly bulk: bo
   const ordered = byEncounter(joined, fresh);
   const rowid = col(ordered.id, ROW('id'));
   const bulk = opts.bulk ? ordered.channels.find((channel) => channel.role === 'bulk') : undefined;
-  // The tuple, in legacy's own order — id, label, (src, tgt), props, then bulk. The framer reads rows by
+  // The tuple, in the established order — id, label, (src, tgt), props, then bulk. The framer reads rows by
   // NAME, so the order is parity rather than contract; keeping it is what makes a wire diff readable.
   const payload: readonly (readonly [ColMeta, Expr])[] = [
     [meta('id', 'any'), coalesce(col(ordered.id, ROW('uid')), rowid)],
@@ -339,9 +334,8 @@ export function elementPayload(input: Rel, elem: Elem, opts: { readonly bulk: bo
  * AN ELEMENT'S WIRE TUPLE, correlated on a ROWID rather than read off a joined row.
  *
  * `elementPayload`'s twin for a caller that holds an id and no relation to join against — the VARIANT
- * merge, whose rows are a tagged union and whose element rows carry only `rid`. Legacy expands that
- * with two `LEFT JOIN`s gated on the tag (`materializeVariantRoot`); correlated reads say the same
- * thing without the gating, because a subquery that matches nothing is NULL and a `vk` the framer
+ * merge, whose rows are a tagged union and whose element rows carry only `rid`. Correlated reads expand
+ * that without any tag-gating, because a subquery that matches nothing is NULL and a `vk` the framer
  * does not read never asks.
  *
  * It is a third caller of the SAME expressions rather than a third spelling of the tuple: the id is

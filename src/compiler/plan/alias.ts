@@ -110,17 +110,16 @@ export const aliasPresent = (col: Expression): Expression =>
 // second spelling of either is a second chance for the two to drift, and here they would drift
 // SILENTLY, since a wrong compile-time summary produces valid SQL against a correct encoding.
 //
-// It used to live in `steps/context/context.ts`, beside `LoweringState` and `TraverserLayout`. That
-// made it look like legacy's object model, which it never was: `rel/alias.ts` builds and reads the
-// same entries, and its own header records why ("the shared type stays because select() re-entry
-// still needs the same entry shape the legacy host reads"). The build plan's Phase 0 proposed giving
+// It used to live beside the lowering's object model, which it never really belonged to: `rel/alias.ts`
+// builds and reads the same entries, and its own header records why ("the shared type stays because
+// select() re-entry still needs the same entry shape the lowering reads"). The build plan's Phase 0 proposed giving
 // `rel/` its own alias types instead; that predates §6·3 removing the TraverserLayout bridge, and
 // it would have bought a second encoding to keep in step. One home, no bridge.
 
 /** Bound as() labels: label → its carried column (a0, a1, … — user strings never
  *  enter SQL identifiers) + the SET of shapes the label has held across its bindings
  *  (a label's history can be heterogeneous, e.g. [vertex, string]). The column holds
- *  a JSONB history array (see src/compiler/steps/context/alias.ts); `shapes` is the compile-time
+ *  a JSONB history array; `shapes` is the compile-time
  *  summary a consumer uses to decide framing (homogeneous element → fast concrete
  *  path; heterogeneous/list → variant). */
 export type AliasEntry = {

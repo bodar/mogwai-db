@@ -27,7 +27,7 @@ import { REDUCER_CLASSES } from '../../gremlin/types.ts';
  * 3. **THE RESULT'S TYPE IS DYNAMIC.** `sum` of integers is an integer and of reals a real, so the
  *    framing reads a second column — `typeof(<the aggregate>)` — rather than a compile-time tag. `mean`
  *    is the exception: it is forced REAL, because integer division would silently answer 2 for the mean
- *    of 1 and 4. It is forced with a `Cast` and not legacy's `* 1.0`; the cast states the required
+ *    of 1 and 4. It is forced with a `Cast` rather than a `* 1.0`; the cast states the required
  *    storage class directly rather than relying on a spelling-level numeric token.
  */
 
@@ -38,9 +38,9 @@ export const isReducer = (name: string): name is Reducer => REL_REDUCERS.has(nam
 const agg = (fn: AggFn, arg: Expr): Expr => ({ kind: 'agg', fn, args: [arg] });
 const call = (fn: string, arg: Expr): Expr => ({ kind: 'call', fn, args: [arg] });
 
-/** 2^53 - 1: the widest a JS number (thus a plain SQLite read) holds exactly. EXPORTED because the
- *  legacy spine's list reducer needs the same boundary and a second copy of the constant is a second
- *  chance for the two to disagree about where the exact tail begins. */
+/** 2^53 - 1: the widest a JS number (thus a plain SQLite read) holds exactly. EXPORTED so any other
+ *  reducer that needs the same boundary shares this one constant — a second copy is a second chance
+ *  for the two to disagree about where the exact tail begins. */
 export const SAFE_INT = 9007199254740991;
 const LONG_SUM_CLASSES: ReadonlySet<string> = new Set(['long', 'bigint']);
 export const isLongSumClass = (vt: string): vt is 'long' | 'bigint' => LONG_SUM_CLASSES.has(vt);
@@ -55,7 +55,7 @@ export const isLongSumClass = (vt: string): vt is 'long' | 'bigint' => LONG_SUM_
  * `long`/`bigint` arm reads a number OR a decimal string through `BigInt`, so the two forms frame the same.
  *
  * The narrower/wider INTEGER classes (`byte`+`1` → `short` promotion, `Sum.feature`'s `d[128].s`) are a
- * separate increment: they are not tagged at the `inject` source today, and tagging them is a both-spine
+ * separate increment: they are not tagged at the `inject` source today, and tagging them is a
  * framing-vocabulary change with its own census reap (see §6·7·4 in the build plan).
  */
 export function sumTower(sum: Expr, inputClass: 'long' | 'bigint'): { value: Expr; type: Expr } {
@@ -94,7 +94,7 @@ export function reducerAggregate(value: Expr, reducer: Reducer, bulk?: Expr): { 
     const numerator = bulk ? agg('sum', { kind: 'binary', op: '*', left: arg, right: bulk }) : agg('sum', arg);
     if (!bulk) return { value: agg('avg', arg), type: compilerText('real') };
     const denominator = agg('sum', { kind: 'case', whens: [[{ kind: 'binary', op: 'is not', left: arg, right: compilerNull() }, bulk]] });
-    // A `Cast` and NOT legacy's `* 1.0`: it declares the required REAL arithmetic rather than relying
+    // A `Cast` and NOT a `* 1.0`: it declares the required REAL arithmetic rather than relying
     // on a spelling-level token. Measured: the mean of the reference graph's ages was 30 rather than
     // 30.75 without it.
     return {

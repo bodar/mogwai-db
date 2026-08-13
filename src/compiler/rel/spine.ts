@@ -10,15 +10,8 @@ import { lowerToRel, type Lowering, type RelLowering } from './lower.ts';
 /**
  * What the RelIR route needs from the enclosing REQUEST — and the whole of it.
  *
- * This used to be the legacy `Engine` (`engine/deps.ts`), which was never right: `Engine` is the
- * recursive-lowering surface plus its ambient dependencies, and this route recurses into nothing —
- * it reads TWO settled values and lowers an algebra. Taking the whole interface made RelIR look
- * like it depended on legacy's engine, and it made `engine/deps.ts` (which types that interface on
- * legacy's `Stream`/`LoweringState`/`TraverserLayout`) reachable from a non-legacy caller, so the
- * import graph could not tell the two spines apart.
- *
- * Named for what it is rather than for the scope object it happens to be built from: whatever
- * survives Phase 4 will supply these two values, and it will not be an `Engine`.
+ * This route recurses into nothing — it reads TWO settled values and lowers an algebra. It is named
+ * for what it is rather than for the scope object it happens to be built from.
  */
 export interface RelRequest {
   /** The services this chain's `call()` steps name, RESOLVED at the DI boundary
@@ -43,7 +36,7 @@ export interface RelRequest {
   /** `withSack(seed[, Operator.x])`'s policy, as the front end extracted it, or `null`. A SOURCE-level declaration
    *  settled before a compile starts, so it crosses as a settled VALUE rather than a step argument —
    *  and it is here rather than being a route GATE because a gate reads identically to a missing
-   *  lowering in every counter the migration owns (§6·6). */
+   *  lowering in every counter that tracks coverage (§6·6). */
   readonly sack: MergePolicy | null;
   /** The MERGE POLICY declared with the REDUCER form `withSideEffect(name, seed, Operator.x)`, by
    *  label. It crosses for `sack`'s reason and is a SEPARATE fact from the constant registry: the
@@ -54,25 +47,22 @@ export interface RelRequest {
 }
 
 /**
- * THE ROUTING SEAM — Gremlin in, `Compiled` out, or `null` for "the legacy spine owns this".
+ * THE COMPILE SEAM — Gremlin in, `Compiled` out, or `null` when the lowering does not cover the
+ * chain (a miss the caller raises as `UnsupportedTraversal`).
  *
  * `lower.ts` answers whether the chain is covered; this module is what makes a covered chain a
  * finished read, and the split matters because the two halves have different rules. Lowering is
  * pure and must never throw for uncovered vocabulary; this side crosses out of the algebra.
  *
- * ## THIS FILE IS SCAFFOLDING, and now it is ONLY a router (§6·1)
+ * ## The payload projection lives in the algebra
  *
- * It used to be two things: a router AND a vocabulary bridge (`layoutOf`/`LAYOUT_FIELD`, translating
- * the neutral channel core into legacy's `TraverserLayout` so that legacy's materializer could compose
- * the payload SELECT over RelIR's relation). §6·3 moved that projection into the algebra, so the
- * bridge is gone along with the alias map that only it read — and with it the wall it was: it could
- * declare no translation for the `path`, `origin` or `branchOrder` roles and THREW, which is what
- * blocked RelIR from carrying a path. The channel core could always hold one; the seam could not
- * express it. There is no longer a seam.
- *
- * What remains has one job — choose between two spines — so it dies with the second one. The name is
- * the harness's rather than the thing's, kept until the deletion lands because renaming scaffolding is
- * churn.
+ * This once did two things: routing AND a vocabulary bridge (`layoutOf`/`LAYOUT_FIELD`, translating
+ * the neutral channel core into a `TraverserLayout` so a separate materializer could compose the
+ * payload SELECT over RelIR's relation). §6·3 moved that projection into the algebra, so the bridge
+ * is gone along with the alias map that only it read — and with it the wall it was: it could declare
+ * no translation for the `path`, `origin` or `branchOrder` roles and THREW, which is what blocked
+ * RelIR from carrying a path. The channel core could always hold one; the bridge could not express
+ * it. There is no longer such a seam.
  *
  * ## The plan IS the query
  *
@@ -88,36 +78,35 @@ export interface RelRequest {
  *   anywhere — are the only per-shape code outside the algebra. That is what makes §5's equivalence gate
  *   mean what it says: the query being compared is the one RelIR produced.
  *
- * Nothing legacy enters a `Rel`, and nothing RelIR-shaped enters legacy. There is no opaque escape node
- * and never will be (§6·1: "not as a bridge, not temporarily, not behind a flag").
+ * There is no opaque escape node and never will be — not as a bridge, not temporarily, not behind a
+ * flag.
  */
 export function compileViaRel(
   request: RelRequest, steps: IRStep[], params: Record<string, any>, sideEffects: Map<string, any>,
 ): Compiled | Program | null {
   // ONE fast-path switch reaches the lowering. `movementCollapse` picks the grouped `SUM(bulk)`,
   // which is a lowering STRATEGY the algebra can state, so both positions stay expressible and the
-  // differential has two forms to compare. (The FTS case is the contrast: it selects a physical
-  // ACCESS PATH, so RelIR declines rather than implementing a side of it.)
+  // per-switch differential has two forms to compare. (The FTS case is the contrast: it selects a
+  // physical ACCESS PATH, so the lowering declines rather than implementing a side of it.)
   //
   // **`predicateInlining` USED TO GATE `correlatedChildren` HERE, AND THAT WAS A CONTRACT VIOLATION
-  // WAITING FOR A WITNESS.** The reasoning was that the switch picks legacy's correlated `EXISTS`
-  // over its materialized child-existence gate and RelIR implements only the first, so with the
-  // switch off a `where()` body should decline "exactly as an unlearned step would". That is fine
-  // only while legacy's generic path can answer whatever RelIR's correlated child can — and the
-  // moment it could not, turning a FAST PATH off removed a SUPPORT capability. `src/compiler/CLAUDE.md`
-  // forbids exactly that: a specialized lowering qualifies ONLY if disabling it compiles the same
-  // traversal generically, and recognition failure falls through rather than throwing.
+  // WAITING FOR A WITNESS.** The reasoning was that the switch picks the correlated `EXISTS` over a
+  // materialized child-existence gate and only the first was implemented, so with the switch off a
+  // `where()` body should decline "exactly as an unlearned step would". That is fine only while the
+  // generic path can answer whatever the correlated child can — and the moment it could not, turning
+  // a FAST PATH off removed a SUPPORT capability. `src/compiler/CLAUDE.md` forbids exactly that: a
+  // specialized lowering qualifies ONLY if disabling it compiles the same traversal generically, and
+  // recognition failure falls through rather than throwing.
   //
   // The witness was `g.E().where(__.outV().group().by('name'))`, found by L5 on a seed CI happened to
   // draw (the seed derives from HEAD, which is why a local run had missed it): with the switch ON the
-  // RelIR route answers 6 rows — correct, since `group()` is a barrier with a HashMap seed and
-  // therefore always yields, so every edge passes the `where()` — and with it OFF the traversal fell
-  // to legacy's generic path, which THROWS `where() traversal not supported`. An answer against a
-  // throw is not a result-equivalent pair.
+  // lowering answers 6 rows — correct, since `group()` is a barrier with a HashMap seed and therefore
+  // always yields, so every edge passes the `where()` — and with it OFF the traversal was not covered,
+  // a `UnsupportedTraversal` refusal. An answer against a refusal is not a result-equivalent pair.
   //
-  // So the capability is no longer switched. `predicateInlining` still selects between legacy's two
-  // forms for every traversal legacy owns, which is what it is for, and L5's own
-  // `predicateInlining is equivalent to its generic fallback` case still exercises it.
+  // So the capability is no longer switched. `predicateInlining` still selects between its two forms,
+  // which is what it is for, and L5's own `predicateInlining is equivalent to its generic fallback`
+  // case still exercises it.
   const lowered = lowerToRel(steps, loweringOptions(request, params, sideEffects));
   if (!lowered) return null;
   return finishLowering(lowered);
@@ -148,10 +137,10 @@ export function loweringOptions(
     sideEffectPolicies: request.sideEffectPolicies,
     // NOT a strategy switch either — a `withSideEffect(k, <literal>)` is a compile-time CONSTANT the
     // front-end already extracted, and the write parse has always taken it. What used to happen is
-    // that `compiler.ts` refused to OFFER this route at all when one was declared, so the whole
-    // `mergeV(__.select(c))` family read as an uncovered gap rather than as a value not handed over
-    // (§6·6). The REDUCER form (`withSideEffect(k, seed, BiFunction)`) is left unregistered by the
-    // front-end, so a `select(k)` over one finds no constant and declines exactly as before.
+    // that this value was not handed to the lowering when one was declared, so the whole
+    // `mergeV(__.select(c))` family read as an uncovered gap rather than as a value simply not passed
+    // through (§6·6). The REDUCER form (`withSideEffect(k, seed, BiFunction)`) is left unregistered by
+    // the front-end, so a `select(k)` over one finds no constant and declines exactly as before.
     sideEffects,
   };
 }

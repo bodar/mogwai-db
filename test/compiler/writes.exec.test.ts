@@ -55,8 +55,8 @@ test('g.E().drop() removes every edge but keeps all vertices', () => {
   expect(run(store, 'g.V().count()').map((r) => r.v)).toEqual([6]);
 });
 
-// The ROUTE, pinned — the semantics above are asserted whichever spine answers them, so nothing else
-// here would notice a drop() falling back to the legacy write closure.
+// The SHAPE, pinned — the semantics above are asserted by reading the graph back, so nothing else
+// here would notice a drop() being lowered a different way. This test pins that lowering directly.
 //
 // What the shape says: the target is a RETAINED read (`snapshot`), so the cascade's statements read
 // the ids the graph had BEFORE any of them ran — the property `g.V().out().drop()` above depends on,
@@ -82,8 +82,8 @@ test('drop() compiles to a RelIR program whose target is snapshotted, not a re-e
 
 // THE PROPERTY THE WHOLE WRITE WEDGE EXISTS FOR, asserted rather than described.
 //
-// The legacy write path reads its target elements into JS and walks them, so its statement count is
-// a function of the ROW COUNT. A RelIR program's is a function of the PLAN: the elements are an
+// A per-element write path would read its target elements into JS and walk them, making its statement
+// count a function of the ROW COUNT. A RelIR program's is a function of the PLAN: the elements are an
 // `Insert.source`, one statement writes N rows, and the only rows that cross into JS are a
 // snapshot's — as ONE JSON value, which is §6·2's rule.
 //
@@ -110,9 +110,8 @@ test('property() updates existing vertices (overwrite + new key, single cardinal
   // (api.ts, DEFAULT_VERTEX_CARDINALITY), so an undeclared write would append a second age —
   // which is the next test.
   // ONE traverser out, and it is the vertex — asserted on the WIRE rather than on whatever object
-  // the compile route happens to hand back, because the two spines produce different intermediate
-  // shapes (a legacy `WriteResult`, a RelIR read projection) and identical GraphBinary. The
-  // properties themselves are read back below, which is the assertion that survives either.
+  // the compile route happens to hand back. The properties themselves are read back below, which is
+  // the assertion that survives however the write is framed.
   expect(executeQuery(store, 'g.V(1).property(single, "age", 30).property("city", "London")').length).toBe(1);
   expect(run(store, 'g.V(1).values("age")').map((r) => r.v)).toEqual([30]);
   expect(run(store, 'g.V(1).values("city")').map((r) => r.v)).toEqual(['London']);
@@ -219,8 +218,8 @@ test('addV() over many traversers pairs each new element with ITS OWN input row'
 
 test('addE start-step: from()/to() nested traversals + edge property', () => {
   const store = seededStore();
-  // The edge's IDENTITY read back, rather than the write artifact's own object: the two spines hand
-  // back different intermediate shapes and the graph is what either of them is about.
+  // The edge's IDENTITY read back, rather than the write artifact's own object: the graph is what the
+  // traversal is about, whatever shape the write echo takes.
   run(store, 'g.addE("knows").from(__.V().has("name","marko")).to(__.V().has("name","vadas")).property("weight", 0.9)');
   expect(run(store, 'g.V().has("name","marko").outE("knows").has("weight",0.9).inV().values("name")').map((r: any) => r.v)).toEqual(['vadas']);
   expect(run(store, 'g.E().hasLabel("knows").has("weight",0.9).count()').map((r: any) => r.v)).toEqual([1]);
@@ -246,9 +245,9 @@ test('addE mid-traversal with as() alias endpoint (per incoming traverser)', () 
 test('addE sets its own uid via property(T.id)', () => {
   const store = seededStore();
   const res = run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property(T.id, "e:marko-vadas")');
-  // `written` and not `res[0].edge.id`, which is the LEGACY spelling: a RelIR program frames the
-  // created edge through the read element projection, so the echo is flat. Both carry the same public
-  // id, which is what this test means to assert.
+  // `written` and not `res[0].edge.id`: a RelIR program frames the created edge through the read
+  // element projection, so the echo is flat and carries the public id, which is what this test means
+  // to assert.
   expect(written(res[0]).id).toBe('e:marko-vadas');
   expect(run(store, 'g.E("e:marko-vadas").label()').map((r) => r.v)).toEqual(['knows']);
 });
@@ -275,8 +274,8 @@ test('addV inline property NESTED value routes through resolveSpecValue', () => 
   const store = new GraphStore(new BunSqlite(':memory:'));
   // __.constant(v) as an inline property value — evaluated at the new vertex.
   const res = run(store, 'g.addV("person").property("age", __.constant(29)).property("name", "marko")');
-  // `written` and not `res[0].vertex`: a constant value FOLDS now, so this routes to RelIR, whose echo
-  // is the flat read element projection. What the test means is what was written, which is what it reads.
+  // `written` and not `res[0].vertex`: the echo is the flat read element projection. What the test
+  // means is what was written, which is what it reads.
   expect(written(res[0])).toMatchObject({ labels: ['person'], props: { name: ['marko'], age: [29] } });
   expect(run(store, 'g.V().has("person","age",29).values("name")').map((r) => r.v)).toEqual(['marko']);
 });
@@ -286,7 +285,7 @@ test('addE inline property NESTED value resolves + response echoes the resolved 
   const store = seededStore();
   const res = run(store, 'g.addE("knows").from(__.V(1)).to(__.V(2)).property("w", __.constant(0.7))');
   // the framed response carries the resolved scalar, never a {nested} blob — read through `written`,
-  // since a folded constant routes to RelIR and its echo is flat rather than `{edge: …}`.
+  // since the echo is flat rather than `{edge: …}`.
   expect(written(res[0]).props).toEqual({ w: 0.7 });
   expect(run(store, 'g.V(1).outE("knows").values("w")').map((r) => r.v)).toEqual([0.7]);
 });
@@ -339,8 +338,8 @@ test('mergeV creates when no match, matches when it exists (inline map)', () => 
   expect(run(store, 'g.V().hasLabel("person").has("name","marko").count()').map((r) => r.v)).toEqual([1]);
 });
 
-// The ROUTE and the SHAPE, pinned — the semantics above hold whichever spine answers them, so nothing
-// else here would notice a merge falling back to the legacy write closure.
+// The SHAPE, pinned — the semantics above are asserted by reading the graph back, so nothing else
+// here would notice a merge being lowered a different way. This test pins that lowering directly.
 //
 // What the shape says is the whole design: upstream's "search, then branch on whether anything was
 // found" needs a row COUNT before the next statement can be chosen, and a program of statements over
@@ -366,8 +365,8 @@ test('mergeV compiles to a RelIR program whose two branches are both uncondition
 });
 
 // A merge's statement count is a function of the PLAN, exactly as `property()`'s is above: the search
-// is an `Insert.source`/`InQuery` relation, never rows walked in JS. Legacy runs the match query plus
-// eight store calls PER MATCHED ELEMENT; this must not move with the match count at all.
+// is an `Insert.source`/`InQuery` relation, never rows walked in JS. A per-element path would run the
+// match query plus eight store calls PER MATCHED ELEMENT; this must not move with the match count at all.
 (test)('a mergeV program runs the same number of statements whatever the match count', () => {
   const runs = (n: number): number => {
     const inner = new BunSqlite(':memory:');
@@ -480,8 +479,8 @@ test('mergeV accepts a bound Map parameter with EnumValue keys (wire path)', () 
   // mimic a GraphBinary-deserialized m[{"t[label]":"person","name":"stephen"}]
   const xx1 = new Map<any, any>([[{ typeName: 'T', elementName: 'label' }, 'person'], ['name', 'stephen']]);
   // Through the EXECUTOR rather than by asserting a plan kind: the claim is that a bound Map with
-  // EnumValue keys parses and merges, and pinning `kind === 'write'` made it also claim which spine
-  // answered — a claim that failed the day mergeV joined the RelIR route and found nothing.
+  // EnumValue keys parses and merges, and pinning `kind === 'write'` made it also claim how the merge
+  // was lowered — a claim that failed the day mergeV joined the RelIR route and found nothing.
   executeQuery(store, 'g.mergeV(xx1).option(Merge.onCreate, null)', { xx1 });
   const r = compile('g.V().hasLabel("person").has("name","stephen").count()', {});
   if (r.kind !== 'read') throw new Error('want read');
@@ -493,9 +492,8 @@ test('mergeE creates an edge between existing endpoints, then matches it', () =>
   // a NEW label between marko and josh(4)
   const c = run(store, 'g.mergeE([(T.label): "likes", (Direction.OUT): 1, (Direction.IN): 4])');
   // ONE traverser, and the edge it names asserted by READING IT BACK rather than off the write's own
-  // row: those columns are the SPINE's, not the answer's — legacy hands back a `{edge}` WriteResult
-  // and RelIR the payload projection. Both describe the same edge; only the read-back says so in a
-  // way that survives the traversal changing route, which this one just did.
+  // row: those columns are a lowering detail, not the answer. The read-back describes the edge in a
+  // way that survives however the write is framed.
   expect(c).toHaveLength(1);
   expect(run(store, 'g.V(1).outE("likes").label()').map((r) => r.v)).toEqual(['likes']);
   expect(run(store, 'g.V(1).out("likes").values("name")').map((r) => r.v)).toEqual(['josh']);

@@ -1,4 +1,4 @@
-// The element-identifier rules (src/compiler/steps/write/validate.ts) — TinkerPop's
+// The element-identifier rules — TinkerPop's
 // `ElementHelper.validateProperty`/`validateLabel` and `Graph.Hidden`, which nothing here enforced.
 //
 // The merge half of this is covered by the official corpus (`MergeVertex.feature`,
@@ -44,15 +44,14 @@ describe('every write reaches them through a waist', () => {
     expect(() => runWith(s, "g.mergeV(['~id':1])")).toThrow('Property key can not be a hidden key: ~id');
   });
 
-  test('the merge-map key rule fires from the verify PASS, so both spines raise it', () => {
+  test('the merge-map key rule fires from the verify PASS', () => {
     // `MergeElementStep.validate` calls `ElementHelper.validateProperty` on every String key of every
     // arm (gremlin-core `.../step/map/MergeElementStep.java:278,314-316`), and a STATIC key is
     // decidable from the TEXT. So it belongs in the shared parse, which the `writeArguments` verify
-    // Pass runs ABOVE the routing switch (§6·5) — not in a route.
+    // Pass runs ABOVE the lowering (§6·5) — not in a route.
     //
-    // It used to live only in legacy's `validateResolvedMergeSpec`, which made the refusal a spine's
-    // property: RelIR had to DECLINE the whole traversal to reach the message, and the census then
-    // counted a traversal TinkerPop itself rejects as an uncovered gap.
+    // When it lived inside a write lowering, reaching the message meant DECLINING the whole traversal,
+    // so the census counted a traversal TinkerPop itself rejects as an uncovered gap.
     for (const [gremlin, message] of [
         ["g.mergeV([:]).option(Merge.onCreate,['~label':'vertex'])", 'Property key can not be a hidden key: ~label'],
         ["g.mergeV([:]).option(Merge.onMatch,['~id':1])", 'Property key can not be a hidden key: ~id'],
@@ -87,8 +86,8 @@ describe('T.id is the outward-facing id at every by() position', () => {
   const vals = (s: GraphStore, q: string) => (runWith(s, q) as any[]).map((r) => r.v ?? r.id);
   /** A group() plan's rows are the raw key/value pair columns — read them as the pairs they are
    *  rather than through the wire framer, which is a different subject from the KEY resolution. */
-  // Through the harness's `grouped`, not off `gk`/`gv`: the two spines spell a group row differently
-  // by design, so reading the columns would assert the ROUTE rather than the keying this test is about.
+  // Through the harness's `grouped`, not off `gk`/`gv`: reading a group row's raw columns would assert
+  // a lowering detail rather than the keying this test is about.
   const pairs = (s: GraphStore, q: string) => Object.entries(grouped(runWith(s, q))).map(([k, v]) => [k, Number(v)]);
 
   test('group().by(T.id) keys on the user id, not the rowid', () => {

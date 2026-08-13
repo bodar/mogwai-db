@@ -5,9 +5,9 @@
 //
 // It replaces a real DEFECT: before, the faithful-vs-unwrapped split lived in the front-end, which
 // FLATTENED a param list into inline `IN ('marko','vadas')` literals — the parameter's data baked into
-// the statement text (defeating the cache, and forbidden by the data-not-in-text rule) — and declined a
-// >25-member set to legacy. Now the front-end (`parsePredicate`) is faithful and the RelIR predicate
-// (`predicateExpr` + `jsonEachInSet`) owns the lowering; a LITERAL still spreads to an inline IN-list.
+// the statement text (defeating the cache, and forbidden by the data-not-in-text rule). Now the
+// front-end (`parsePredicate`) is faithful and the RelIR predicate (`predicateExpr` + `jsonEachInSet`)
+// owns the lowering; a LITERAL still spreads to an inline IN-list.
 import { test, expect, describe } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { seededStore } from '../support/harness.ts';
@@ -37,7 +37,7 @@ describe('collection-PARAMETER within/without → one jsonb(?) bind via json_eac
     expect(await vals(g, { names: NAMES })).toEqual(['marko', 'vadas']);
   });
 
-  test('a >25-member param set stays on rel (no decline to legacy) as ONE bind', async () => {
+  test('a >25-member param set stays covered as ONE bind', async () => {
     const many = Array.from({ length: 30 }, (_, i) => 'x' + i).concat('marko');
     const g = "g.V().values('name').is(within(names))";
     expect(kindOf(g, { names: many })).toBe('read');

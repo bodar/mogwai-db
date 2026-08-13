@@ -22,13 +22,13 @@ import type { ChildSeam } from './child.ts';
  *
  * ## ONE JSONB ARRAY, not a column per position
  *
- * Legacy carries a linear path as `p0…pN` — one column per position, statically known length — and a
- * recursive one as a JSONB array, and those are TWO regimes with two readers, two `by()` projectors and
- * a documented wall between them (`movement after recursive repeat().path() not yet supported`). This
- * route carries ONE array, and that collapses the regimes into each other:
+ * A linear path could be carried as `p0…pN` — one column per position, statically known length — with
+ * a recursive one as a JSONB array, but those are TWO regimes with two readers, two `by()` projectors
+ * and a documented wall between them (`movement after recursive repeat().path() not yet supported`).
+ * This route carries ONE array, and that collapses the regimes into each other:
  *
- * - **a branch arm's shorter path is DATA, not padding.** Legacy pads to the longest arm, so a position
- *   is nullable, an element position needs a LEFT JOIN, and a `by()` over one needs a sibling presence
+ * - **a branch arm's shorter path is DATA, not padding.** The per-column form pads to the longest arm,
+ *   so a position is nullable, an element position needs a LEFT JOIN, and a `by()` over one needs a sibling presence
  *   column (`_at`) to tell "this arm never got here" from "the property is missing". With an array, a
  *   two-hop arm's path simply has two entries and a three-hop arm's has three. None of that machinery
  *   has an analogue here, which is why `union`/`choose` needed no path-specific code at all.
@@ -224,10 +224,10 @@ export function pathPositions(
    * arm cannot distinguish them — which is exactly right for FRAMING a Path and exactly wrong for RE-ENTERING
    * one as a list. The list vocabulary's member ops decode a member's `$.v` into a SCALAR stream, and the
    * scalar tail has no element arm, so `path().unfold()` over element positions would frame a vertex's
-   * payload object as a plain value: a WRONG ANSWER where legacy fails closed, which is the one failure the
-   * routing switch cannot absorb.
+   * payload object as a plain value: a WRONG ANSWER, the one thing this route must fail closed to avoid
+   * rather than produce.
    *
-   * So this is legacy's own boundary, stated in this route's vocabulary — `linearScalarList` coerces a path
+   * So this is a real boundary — `linearScalarList` coerces a path
    * to a list only when `positions.every(p => p.render === 'value')`. A MIXED `by().by('name')` is false for
    * the same reason it is there: alternate positions are still elements. It goes away when a list can hold
    * an ELEMENT member (§6·3's remaining list arm), not before.

@@ -6,15 +6,11 @@ import { PATH_FAMILY, isStreamBarrier, type IRStep } from './step.ts';
 // One authority for the two questions the label retractions turn on, and they are not the same
 // question: `as('a')` BINDS, `select('a')`/`where('a', P)`/`path().from('a')` READ. Both were
 // answered privately before — `asLabelsOf`/`matchLabelsOf` lived in `strategies.ts` for
-// `rewriteWhereEndLabels`' own use, and the read side had no whole-tree answer at all (the closest,
-// `labelsMentioned` in `steps/tail/child-shape.ts`, never inspects `.modulators`, so a
-// `by(__.select('a'))` is invisible to it).
+// `rewriteWhereEndLabels`' own use, and the read side had no whole-tree answer at all.
 //
-// This module is pure step reasoning over a `Step[]` — no streams, no SQL, no Engine — for
-// `productivity.ts`'s reason: `ir/` cannot import from `steps/` (the layering runs
-// deps ◂ families ◂ engine ◂ compiler, and Passes run before dispatch), so the read scan cannot
-// call the legacy one even where it would be right, and a second reading of the same fact is
-// exactly how the two would drift.
+// This module is pure step reasoning over a `Step[]` — no streams, no SQL, no Engine — because a
+// Pass runs before dispatch and cannot reach a lowering's helpers, and a second reading of the same
+// fact is exactly how the two would drift.
 //
 // ## The read side FAILS CLOSED, and that is a design choice with a cost
 //
@@ -65,8 +61,8 @@ export interface LabelReads {
 }
 
 /** A label reference need not BE a string argument — it can be spelled INSIDE one. `math('b + a')`
- *  names two labels in one string (`steps/tail/mapscalar.ts` resolves each against the carried
- *  aliases and throws `no such variable` when one is missing), and `format()`'s `%{a}` tokens do the
+ *  names two labels in one string (each is resolved against the carried aliases, throwing `no such
+ *  variable` when one is missing), and `format()`'s `%{a}` tokens do the
  *  same. So every string contributes its identifier tokens as well as itself: measured, treating
  *  `'b + a'` as one opaque name is what made `retractUnreadAlias` delete a label `math()` then could
  *  not find. Tokenizing over-retains (a label named `name` stays live beside any `values('name')`),

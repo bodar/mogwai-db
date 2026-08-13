@@ -25,11 +25,11 @@ import { propertyNode, propertyReadOf } from './property.ts';
  *
  * The two rules are `predicate.ts`'s, unchanged:
  *
- * - **It never throws.** A form it cannot express returns `null` and the whole traversal routes to the
- *   legacy spine, which raises the message it owns. A throw here would turn "not learned yet" into a
- *   support regression.
- * - **It never answers a DIFFERENT question.** Every arm below reproduces the legacy semantics
- *   exactly — measured against the SQL legacy emits, not inferred — or declines.
+ * - **It never throws.** A form it cannot express returns `null` and the whole traversal is not
+ *   covered (a miss the caller raises as `UnsupportedTraversal`). A throw here would turn "not learned
+ *   yet" into a support regression.
+ * - **It never answers a DIFFERENT question.** Every arm below reproduces the semantics exactly or
+ *   declines.
  *
  * ## A `by()` is TWO things sharing a spelling
  *
@@ -51,8 +51,8 @@ import { propertyNode, propertyReadOf } from './property.ts';
  *
  * TinkerPop's default `by()` DROPS a traverser it yields nothing for — `order().by('age')` over a
  * vertex with no `age` emits nothing for that vertex — and `ProductiveByStrategy` turns that off.
- * Legacy spells the difference as a `WHERE <key> IS NOT NULL` present or absent at each host; here it
- * is `productivityFilter`, so a host cannot forget it. A forgotten productivity filter is a wrong
+ * The difference is a `WHERE <key> IS NOT NULL` present or absent at each host; here it is
+ * `productivityFilter`, so a host cannot forget it. A forgotten productivity filter is a wrong
  * answer with the right arity, which is the census's blind spot when the extra rows sort last.
  */
 
@@ -192,8 +192,7 @@ export const isProductiveBy = (step: IRStep): boolean => step.productiveBy === t
  * `ordering` asks for the value wrapped in the vtype-aware compare key — the same authority the range
  * predicates and scalar `order()` use, and for the same reason: a number too large for SQLite's
  * numeric storage classes is stored as TEXT, so a raw `<` orders it lexically and after every numeric
- * row. It goes INSIDE the scalar subquery, where the property row's own `vtype` is in scope, which is
- * exactly where legacy puts it.
+ * row. It goes INSIDE the scalar subquery, where the property row's own `vtype` is in scope.
  */
 export function byExpr(
   modulation: Modulation, host: ChildHost, fresh: Minter, ordering = false, child?: ChildSeam,
@@ -220,7 +219,7 @@ export function byExpr(
     // A VALUE yields its stored scalar and, where the source recorded a per-row type, the ordering
     // wrapper reads that recorded tag rather than a column — which is what makes `as('a')` on a big
     // long still compare as a number after `select('a')`. An ELEMENT or LIST has no comparable value
-    // here: ordering by a rowid is not what `order().by(__.select('a'))` means, and legacy raises.
+    // here: ordering by a rowid is not what `order().by(__.select('a'))` means, so it declines.
     const scoped = scopeValue(key, host);
     if (!scoped || scoped.framing.kind !== 'scalar') return null;
     const [value, type] = [scoped.payload[0]![1], scoped.payload[1]?.[1]];
@@ -228,9 +227,8 @@ export function byExpr(
   }
 
   if (host.kind === 'scalar') {
-    // A value has no properties and no tokens. Legacy THROWS for both ("order().by(key/traversal) on
-    // a scalar stream not supported (no properties)"), so declining hands it the message rather than
-    // inventing a second one.
+    // A value has no properties and no tokens, so `order().by(key/traversal)` over a scalar stream is
+    // not supported (no properties); this declines rather than inventing an answer off the wrong row.
     if (key.kind !== 'identity') return null;
     return ordering && host.vtype ? storedCompareOn(host.vtype)(host.value) : host.value;
   }

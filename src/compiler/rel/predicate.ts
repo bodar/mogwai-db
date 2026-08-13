@@ -8,20 +8,18 @@ import { constLit } from './const.ts';
 /**
  * `P`/`TextP` AS RelIR EXPRESSIONS — the predicate vocabulary, re-expressed in the algebra.
  *
- * This is the RelIR counterpart of `plan.ts`'s `predicateSql`, and it is a MIGRATION rather than a
- * duplicate: the legacy one is deleted with the spine it serves. It exists as its own module
+ * This module is the predicate vocabulary, expressed in the algebra. It exists as its own module
  * because a predicate is the most reused thing in the language — `has`, `where`, `is`, `filter`,
  * `not`, an edge criterion and a `by()`-modulated comparison are all the same question asked of
  * different subjects — so the RelIR spine grows all of them at once by growing this.
  *
  * TWO RULES, both load-bearing:
  *
- * - **It never throws.** An operand or an op it cannot express returns `null`, which routes the
- *   whole traversal to the legacy spine. `predicateSql` throws (`unsupported predicate: P.x`) and
- *   is right to, because it is the only answer available at that point; here a decline is the
- *   answer, and a throw would turn "not learned yet" into a support regression.
- * - **It never answers a DIFFERENT question.** Every arm below either reproduces the legacy
- *   semantics exactly or declines. The subtle one is ordering: a property value is stored in its
+ * - **It never throws.** An operand or an op it cannot express returns `null`, declining the whole
+ *   traversal (a miss the caller raises as `UnsupportedTraversal`); a decline is the answer here,
+ *   and a throw would turn "not learned yet" into a support regression.
+ * - **It never answers a DIFFERENT question.** Every arm below either reproduces the semantics
+ *   exactly or declines. The subtle one is ordering: a property value is stored in its
  *   natural SQLite storage class where it fits, and as TEXT where it does not (a long past 2^53, a
  *   bigint, a bigdecimal, a duration), so a plain `>` orders those rows LEXICALLY and after every
  *   numeric row. `compareKey` is the per-row fix and a range comparison MUST go through it — see
@@ -63,8 +61,7 @@ const STATIC_ORDERING_DECLINE = new Set(['datetime', 'duration']);
  * `string`/`number` only, deliberately. A `bigint`, a `Duration` or a `BigDecimal` needs the
  * matching `CAST` on the BOUND side to line up with `compareKey`'s cast on the column side
  * (`plan.ts` `compareBound`), and a nested traversal needs a correlated per-traverser value that
- * no pure predicate can build. All of them decline, and the legacy spine answers them exactly as
- * it does today.
+ * no pure predicate can build. All of them decline.
  *
  * A parsed literal INLINES (a constant — the value-operand budget win), a wire PARAMETER (`paramName`,
  * the operand's `Arg.name`) BINDS. Storage class does not matter for a comparison operand — SQLite
@@ -72,9 +69,9 @@ const STATIC_ORDERING_DECLINE = new Set(['datetime', 'duration']);
  * type inlines by its value's own shape without changing any answer.
  *
  * The EXACT NUMERIC TAIL — bigint / BigDecimal / Duration — is stored as canonical decimal TEXT
- * (`storedScalar`), so it inlines as that TEXT literal (equality is TEXT=TEXT, matching legacy) or binds
+ * (`storedScalar`), so it inlines as that TEXT literal (equality is TEXT=TEXT) or binds
  * as a parameter; the ordering CAST that lines it up with `compareKey` is `ordered`'s job (`isExactTail`
- * → `castBound`). This is why RelIR now COVERS these operands rather than declining them to legacy.
+ * → `castBound`). This is why the lowering COVERS these operands.
  */
 const operand = (value: unknown, type: TypeNode | null = null, paramName: string | null = null): Expr | null => {
   // A BOOLEAN is 1/0, which is how it is STORED — `storedValue` writes the same encoding
@@ -111,8 +108,7 @@ const NUMERIC_VTYPES = [...NUMERIC_CAST_TO_INT, ...CAST_TO_REAL];
 /**
  * The vtype-aware ordering key for a stored property value: `(value, vtype) -> a correctly-ordered
  * SQLite value`. Pass it as `compare` wherever a per-row `vtype` column is in scope; omit it where
- * the subject is already a native JS type (a computed scalar), which is what the legacy
- * `typeCtx.kind !== 'perRow'` branch means.
+ * the subject is already a native JS type (a computed scalar).
  *
  * The type lists are compiler-authored vocabulary, not query data, so they render as escaped SQL
  * string literals. User operands still use `lit()` and remain bound; this preserves the plan's data
@@ -298,9 +294,8 @@ function textSubject(subject: Expr, type: SubjectType): Expr {
 /**
  * `P.typeOf(GType|"ClassName")` — a TYPE test over the subject, or `null` to decline.
  *
- * Three modes, and which one applies is entirely `SubjectType`'s answer — the same three the legacy
- * `typeOfSql` resolves, reproduced rather than reinvented (that is the migration rule, and this arm is
- * where a plausible-looking shortcut would be silently wrong for a whole type family):
+ * Three modes, and which one applies is entirely `SubjectType`'s answer (this arm is where a
+ * plausible-looking shortcut would be silently wrong for a whole type family):
  *
  * 1. **compile-time type** → CONSTANT FOLD. `count().is(P.typeOf(GType.LONG))` is `1=1` and
  *    `…(GType.STRING)` is `1=0`; neither needs to touch a row.
@@ -311,9 +306,9 @@ function textSubject(subject: Expr, type: SubjectType): Expr {
  *    cannot distinguish. False rather than declining, because that IS the answer TinkerPop's reference
  *    gives over an untyped value, and `STORAGE_CLASS`'s `null` entries are what say so.
  *
- * Declines rather than throwing on an unreadable argument, where legacy raises `typeOf() requires a
- * GType argument` / `unregistered type 'x'` — those are real errors and stay the legacy spine's to
- * raise, since a chain reaching them declines whole and gets the identical message.
+ * Declines rather than throwing on an unreadable argument: `typeOf() requires a GType argument` /
+ * `unregistered type 'x'` are real errors, and a chain reaching one declines whole and raises
+ * `UnsupportedTraversal`.
  */
 function typeOfExpr(subject: Expr, arg: unknown, type: SubjectType): Expr | null {
   const raw = gtypeName(arg)?.toLowerCase();
@@ -321,8 +316,8 @@ function typeOfExpr(subject: Expr, arg: unknown, type: SubjectType): Expr | null
   if (raw === 'null') return binary('is', subject, compilerNull());
   const canonical = normalizeTypeName(raw);
   // A recognized element/token GType (vertex/edge/path/…) is valid Gremlin but a stored property
-  // scalar is never one, so it folds to FALSE. An unrecognized NAME is an error legacy raises — which
-  // means declining here, not folding, because folding would answer a question that should have thrown.
+  // scalar is never one, so it folds to FALSE. An unrecognized NAME is a real error — which means
+  // declining here, not folding, because folding would answer a question that should have thrown.
   if (!canonical) return KNOWN_NON_VALUE.has(raw) ? CONSTANT.false : null;
 
   if (type.kind === 'static') return normalizeTypeName(type.type) === canonical ? CONSTANT.true : CONSTANT.false;
@@ -483,7 +478,7 @@ export function predicateExpr(
     // operator's ESCAPE clause is not an expression the algebra has a node for — and adding one
     // for a single op would widen the closed node set (§7) to say something the function already
     // says. Nothing is lost: SQLite disables its LIKE index optimization whenever ESCAPE is
-    // present, which the legacy operator form always is, so both spellings are a residual filter.
+    // present, which this LIKE-function form always is, so it is a residual filter either way.
     const call: Expr = like.nullOperand ? CONSTANT.false
       : { kind: 'call', fn: 'like', args: [like.pattern, subject, compilerText('\\')] };
     // The type gate stays outside the negative form: null is a legal String reference and the

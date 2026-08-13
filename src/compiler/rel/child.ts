@@ -43,10 +43,10 @@ import type { SubjectType } from './predicate.ts';
  * ## The two rules, inherited unchanged from `predicate.ts` and `modulator.ts`
  *
  * - **No answer throws.** Every arm returns `null` for a form it cannot express, and the whole
- *   traversal routes to the legacy spine, which raises the message it owns. `body()` is part of that
- *   contract and not a convenience: normalizing a nested body RE-RUNS the Pass pipeline over it, and
- *   `rewriteWhereVariables` legitimately hard-errors on a `where(__.as(l))` start variable the body's
- *   own scope never bound. A raise there is the owning spine's answer, not this route's crash.
+ *   traversal is not covered (a miss the caller raises as `UnsupportedTraversal`). `body()` is part of
+ *   that contract and not a convenience: normalizing a nested body RE-RUNS the Pass pipeline over it,
+ *   and `rewriteWhereVariables` legitimately hard-errors on a `where(__.as(l))` start variable the
+ *   body's own scope never bound. A raise there is a legitimate error, not this route's crash.
  * - **No answer answers a DIFFERENT question.** An arm reproduces the reference semantics exactly or
  *   declines.
  *
@@ -173,9 +173,9 @@ export interface ChildValue {
    * so `expr IS NULL` answers a DIFFERENT question from "the body was unproductive" and a consumer
    * that conflates them is wrong in exactly the case it was reaching for. The option-map `choose` is
    * that consumer: `Pick.none` claims a productive choice that matched no key and `Pick.unproductive`
-   * claims a choice that produced nothing, and TinkerPop routes them to different arms. Legacy
-   * computes the identical signal as its modulation `present` column, so this is carriage rather than
-   * semantics — §6·7's rule at a third seam.
+   * claims a choice that produced nothing, and TinkerPop routes them to different arms. This is the
+   * same signal a modulation's `present` column carries, so it is carriage rather than semantics —
+   * §6·7's rule at a third seam.
    *
    * ABSENT means the arm CANNOT SAY, and a consumer that needs it must then decline: an unknown
    * productivity is not "always productive". A body that is always productive says so with a true

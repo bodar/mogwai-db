@@ -20,7 +20,7 @@ describe('stream plumbing SQL (schema/CTE/derived/bulking/strategies)', () => {
 
   // The kernel owns BOTH rendering modes: `Query` names relations (`WITH c0, c1, …`),
   // `DerivedQuery` nests them (`(…) x0`, `(…) x1`). The correlated inline child
-  // (steps/tail/correlated.ts) is the nesting mode plus a seed that references an outer
+  // is the nesting mode plus a seed that references an outer
   // row — which is why the mode itself carries no traversal vocabulary and lives in q.ts.
   test('DerivedQuery nests instead of naming, shares one alias namespace, and fails closed', () => {
     const dq = new DerivedQuery();

@@ -89,8 +89,8 @@ export const withPayload = (
  * so fused into the block that COMPUTES the collection it re-inlines the whole expression. Where that
  * expression is an aggregate (a `fold()`, a `group()`'s pairs array) SQLite refuses it inside a
  * table-valued function argument outright (`misuse of aggregate function json_group_array()`): a THROW,
- * from a position where legacy answers. The block model already tracks the symmetric fact for windows
- * (`windowed`); this is the same rule one node earlier.
+ * at a position where the traversal should yield an answer. The block model already tracks the
+ * symmetric fact for windows (`windowed`); this is the same rule one node earlier.
  */
 /**
  * MEMBERS BACK INTO ONE JSONB ARRAY — `jsonb(COALESCE(json_group_array(<member> ORDER BY …), '[]'))`,
@@ -105,7 +105,7 @@ export const withPayload = (
  *   caller knows whether its member is an envelope: without it `json_group_array` re-encodes a `{t,v}`
  *   object as a JSON STRING, and the framer then sees the text `{"t":"int","v":27}` where a tagged 27
  *   belongs. It shows up as a wire byte diff and nothing else — the COUNT and the VALUES are already
- *   right, which is what makes a byte-level differential the only instrument that sees it.
+ *   right, which is what makes a byte-level comparison the only instrument that sees it.
  *
  * It had reached FOUR copies (a list's members, a group's entries, a `valueMap`'s pairs, a map side),
  * each carrying its own transcription of that warning.
@@ -169,8 +169,8 @@ export const EMPTY_ARRAY: Expr = { kind: 'json-array', items: [], binary: false 
  * THE WIRE'S ROW ORDER — a `Sort` on the carried emission-order channel, or the relation unchanged when
  * there is none.
  *
- * `rootOrder` (legacy's materializer) is the ONE place this was decided, and the comment there records
- * what its absence cost: every root that dropped the carried columns from its projection — correctly, they
+ * This is the ONE place the wire row order is decided, and the cost of its absence was measured:
+ * every root that dropped the carried columns from its projection — correctly, they
  * are internal — dropped the `ORDER BY` with them, so `order().by('name').values('name')` was stable while
  * the same prefix before `.properties()` returned whatever the scan produced. Every payload projection in
  * this route therefore sorts THROUGH this one function and then projects on top: SQL lets `ORDER BY` name a
@@ -217,7 +217,7 @@ export function or(left: Expr | undefined, right: Expr): Expr {
  * answer, which passes a traverser whose body produced nothing.
  *
  * ⚠️ **MEASURED, as a wrong answer on this route.** `g.V().not(__.values('age').is(P.eq(29)))` lost
- * `lop` and `ripple` (no `age` at all) where legacy and the reference keep them. It went unseen
+ * `lop` and `ripple` (no `age` at all) where the reference keeps them. It went unseen
  * because it is per-PREDICATE: a range comparison is already total — `predicateExpr` wraps it in a
  * `typeof` guard whose ELSE is a false literal, so `gt` was right — while `eq`/`neq`/`within` compare
  * directly and go NULL. So the positive reasoning that "productivity falls out of SQL's own null
@@ -395,8 +395,8 @@ export const storedValue = (rel: RelId): Expr => storedValueOn(col(rel, 'value')
 /**
  * A self-describing `{t,v}` member node — `json_object('t', <type>, 'v', <stored value>)`.
  *
- * The encoding `typedScalarNode` (legacy `plan.ts`) produces, re-expressed in the algebra's own
- * vocabulary because it is EMISSION rather than data. What must not diverge is the payload: a
+ * The `{t,v}` encoding, expressed in the algebra's own vocabulary because it is EMISSION rather than
+ * data. What must not diverge is the payload: a
  * collection value rides as embedded JSON, not as a JSON string, which is why it goes through
  * `storedValueOn` rather than naming the column twice.
  */
@@ -477,8 +477,8 @@ export function firstOf(rel: Rel, value: Expr, order: Expr, fresh: Minter): Expr
  * outgoing rows share one, so the old numbers no longer number the new rows), a scalar `order()`
  * renumbers by *its own sort key* (the sort SUPERSEDES the arriving order, so a later slice must take
  * its window from the new positions and not the stale seed), and a `mergeV` numbers the
- * cross-joined result, whose order is the incoming position and then the element's. Legacy has these as three
- * hand-rolled window projections; here the difference is the `terms` argument and nothing else.
+ * cross-joined result, whose order is the incoming position and then the element's. Here the
+ * difference between the three is the `terms` argument and nothing else.
  *
  * It lives HERE rather than in `lower.ts` for this file's own stated reason: a second module (`write.ts`,
  * which mints a merge's position) has to agree with the first about what "renumber" means, and a channel

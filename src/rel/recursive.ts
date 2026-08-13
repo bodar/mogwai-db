@@ -10,9 +10,9 @@ import { containsSelfRef, exprChildren, exprRels, forEachRel, recursiveStep, rel
  * `check` asks it to THROW: a plan that violates one of these laws is a bug in whatever built it
  * (§11). A LOWERING asks the same question to DECLINE: `lowerToRel` must return `null` for a
  * traversal it cannot express, and "the body I would build puts a barrier in the recursive term" is
- * exactly that — coverage this route does not have, which legacy still answers. A lowering that
- * built the node anyway would turn a decline into a throw from the position where legacy answers,
- * which is the one failure the routing switch cannot absorb.
+ * exactly that — coverage this route does not have. A lowering that built the node anyway would turn
+ * a clean decline into a checker throw — a bug that escapes, not a traversal cleanly reported
+ * unsupported.
  *
  * So the rules cannot live in the checker: a second copy in the lowering would be a copy that
  * drifts, and the drift is silent in the dangerous direction — the lowering admits, the checker

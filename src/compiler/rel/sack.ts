@@ -28,13 +28,10 @@ import { byExpr, modulations, productivityFilter } from './modulator.ts';
  * column's type. None of that was written for this; it is what the channel core is.
  *
  * So nothing here re-projects a layout, and nothing here has to ask whether a sack may coexist with
- * an alias or a path. Legacy's version does both — it hand-rolls the re-projection with a comment
- * warning that appending the column in the wrong slot silently desyncs the declared schema from the
- * physical one, and it THROWS outright on `aliases.size || path` — and its header defers sack
- * through repeat, through a barrier, through `local`, and split/merge on a fork. Every one of those
- * is a channel-obligation question, which is the class §3.5's checker answers for every channel at
- * once. That is the whole argument for this being a rewrite rather than a port: the 94 lines being
- * replaced solve problems this layer does not have.
+ * an alias or a path. Deferring a sack through repeat, through a barrier, through `local`, and
+ * splitting/merging it on a fork are all channel-obligation questions, which is the class §3.5's
+ * checker answers for every channel at once. That is why this module is small: the problems a
+ * hand-rolled sack layout would face are ones this layer does not have.
  *
  * ## What it does NOT do yet, and both are honest declines
  *
@@ -87,9 +84,7 @@ export function seedSack(rel: Rel, spec: MergePolicy, fresh: Minter): Rel | null
  * `sack(Operator.x).by(v)` — fold a value into the sack. `null` declines.
  *
  * The `by()` comes through the ordinary modulator seam, so a property key, a `T` token, an alias read
- * and a correlated child body are all available here the day they are available anywhere — which is
- * the difference from legacy, whose `sackByValue` accepts a string key and a token and refuses a
- * nested traversal outright.
+ * and a correlated child body are all available here the day they are available anywhere.
  *
  * PRODUCTIVITY is the vocabulary's: a `by()` that yields nothing DROPS the traverser, exactly as it
  * does at `order()` and `dedup()`, so the rule is asked for rather than restated.
@@ -101,8 +96,8 @@ export function sackMutate(
   if (!operator || !SACK_OPS.has(operator)) return null;
   // `assign` REPLACES, so it needs no prior value and MINTS the channel where the traversal declared
   // no `withSack()` — which is why `g.V().sack(assign).by('age').sack()` is a complete traversal.
-  // Every other operator combines with what is there and declines without it, the same rule legacy
-  // states as `sack(Operator.x) requires withSack() or a prior sack(assign)`.
+  // Every other operator combines with what is there and declines without it — the rule
+  // `sack(Operator.x) requires withSack() or a prior sack(assign)`.
   const carried = sackCarried(rel);
   if (!carried && operator !== 'assign') return null;
   // ONE `by()` — TinkerPop's own rule (`Sack step can only have one by modulator`), and a chain with
@@ -156,7 +151,7 @@ export function sackMutate(
  * The channel rides THROUGH rather than being consumed: `sack()` reads the accumulator, it does not
  * spend it, so `sack().is(P.lt(59))` inside a `repeat()` body still has one afterwards.
  *
- * `UNKNOWN` is the honest type, and it is legacy's answer too. A sack's type is the seed's until an
+ * `UNKNOWN` is the honest type. A sack's type is the seed's until an
  * operator changes it — `div` forces a REAL, `assign` takes the by()'s — so a static tag would be a
  * claim the fold cannot support past the first mutation. Carrying it properly is the §6·7 shape and
  * a separate increment; claiming it now would be the guess that section exists to end.
@@ -182,9 +177,8 @@ export const sackOperator = (step: IRStep): string | undefined =>
     ?.operator;
 
 /**
- * The fold, in the algebra — legacy's `combineSack` re-expressed rather than shared, which is §6·4's
- * split exactly: the operator SET is data both spines must agree on (`SACK_OPS`, `ir/step.ts`), the
- * SQL is emission and belongs to whichever layer emits it.
+ * The fold, in the algebra — §6·4's split exactly: the operator SET is data (`SACK_OPS`,
+ * `ir/step.ts`) and the SQL is emission, belonging to the layer that emits it.
  *
  * `div` forces REAL division because SQLite's `/` is integer division on integer operands, which is
  * the one arm where the obvious spelling answers a different question.

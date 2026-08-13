@@ -18,10 +18,8 @@ import { carriedCols, meta, typeOf, type Minter } from './build.ts';
  * ONE MODULE BECAUSE THEY ARE ONE QUESTION: a small language over the traverser's SCOPE, evaluated
  * to a single value per row, with a productivity rule that drops the traverser when a reference does
  * not resolve. `MathStep` and `FormatStep` are the same shape upstream too — both `MapStep`,
- * `ByModulating`, `TraversalParent`, `Scoping`, `PathProcessor`, both driving a `TraversalRing` — and
- * legacy's own header called them one section while giving each its own copy of the ring, the
- * resolution and the projection. What actually differs is three fields (`projectorValue`), and the
- * relation they land in is shared.
+ * `ByModulating`, `TraversalParent`, `Scoping`, `PathProcessor`, both driving a `TraversalRing`. What
+ * actually differs is three fields (`projectorValue`), and the relation they land in is shared.
  *
  * ## The resolver is the by() vocabulary, not machinery of theirs
  *
@@ -34,7 +32,7 @@ import { carriedCols, meta, typeOf, type Minter } from './build.ts';
  * ## What each keeps of its own
  *
  * `math()`'s formula is `gremlin/math.ts`'s parse plus an OPS RECORD, because three of its twenty
- * functions are non-derivable SQL facts and an AST would make each spine re-derive them (§6·4).
+ * functions are non-derivable SQL facts and an AST would make each site re-derive them (§6·4).
  * `format()`'s template is `gremlin/format.ts`'s part list, because a template part carries no such
  * fact — the shared form is as small as the shared content, in both directions.
  *
@@ -50,12 +48,11 @@ import { carriedCols, meta, typeOf, type Minter } from './build.ts';
  *
  * `TraversalRing.next()` is ROUND-ROBIN and yields NOTHING for an empty ring, in which case
  * `TraversalUtil.produce` hands back the scoped value itself — so a `by()`-less `math("a + b")` over
- * labelled VALUES is well-formed and needs no modulator at all. Legacy throws there; this answers,
- * which is §6·1's "the floor is the union" rather than a divergence to reconcile.
+ * labelled VALUES is well-formed and needs no modulator at all, and this answers it.
  */
 
 /**
- * THE `Expr` SIDE of the ops record — the EMISSION half, the twin of legacy's `qMathOps`.
+ * THE `Expr` SIDE of the ops record — the EMISSION half.
  *
  * Every leaf is a REAL because `math()` is all-double arithmetic: a variable is `CAST(… AS REAL)`
  * (which is what makes `/` real division rather than SQLite's integer division on integer operands)
@@ -123,7 +120,7 @@ export function mathValue(step: IRStep, host: ChildHost, child: ChildSeam, fresh
  *   `getNullableScopeValue(Pop.last, varName, traverser)` with a NULL traversal — so a named token
  *   takes no `by()` at all, and `COALESCE(property, scoped)` is that fallthrough exactly. Over a
  *   non-element traverser the property branch is skipped (`current instanceof Element`), which is
- *   why a VALUE host reads the scope key directly rather than declining as legacy does.
+ *   why a VALUE host reads the scope key directly.
  *
  * PRODUCTIVITY is the same one rule as `math()`'s and for a stronger reason here: the reference
  * filters on `!product.isProductive() || product.get() == null`, i.e. a productive-but-NULL token
@@ -224,7 +221,7 @@ export function projectorValue(
  * `fold()` the ordinary scalar tail with nothing to know about formulae or templates.
  *
  * The filter is owed whenever the result CAN be null. `math()` always can (an unproductive `by()`,
- * or a SQL domain error like `SQRT(-1)` — which legacy drops too). `format()` can only when it has
+ * or a SQL domain error like `SQRT(-1)`). `format()` can only when it has
  * a token at all, so a constant template emits every traverser.
  */
 export function projectorTail(

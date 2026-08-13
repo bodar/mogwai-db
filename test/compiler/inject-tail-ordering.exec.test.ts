@@ -3,10 +3,9 @@
 // its own type) and `ordered`'s static arm casts the TEXT subject to its numeric class, so the
 // comparison is NUMERIC.
 //
-// This is a CORRECTNESS fix, not only coverage: before it, rel DECLINED and the traversal ran on the
-// LEGACY spine, which compares the stored decimal TEXT LEXICALLY — a wrong answer, because
-// `'9.99' > '10.0'` is TRUE by text order (`'9' > '1'`). The two cases below that legacy gets wrong
-// (`gt(10.0)` → [], `lt(10.0)` → [9.99]) are the point of the pin.
+// This is a CORRECTNESS fix, not only coverage: a LEXICAL comparison of the stored decimal TEXT is a
+// wrong answer, because `'9.99' > '10.0'` is TRUE by text order (`'9' > '1'`). The two cases below
+// that a lexical compare gets wrong (`gt(10.0)` → [], `lt(10.0)` → [9.99]) are the point of the pin.
 //
 // The storage class is what disambiguates: `inject(9.99m)` and `asNumber(GType.BIGDECIMAL)` share the
 // tag `bigdecimal`, but the first is decimal TEXT (cast in ordering) and the second a native REAL
@@ -28,13 +27,13 @@ const relExec = exec(store);
 const vals = async (g: string) =>
   (await decodeAll(relExec.buffers(g, {}, {}))).map((x: any) => x?.constructor ? `${x.constructor.name}:${x.toString()}` : String(x));
 
-describe('inject() exact-tail ordering — numeric on rel, fixing legacy lexical compare', () => {
+describe('inject() exact-tail ordering — numeric, not lexical', () => {
   test('BigDecimal subject casts to REAL: gt/lt are numeric, not lexical', async () => {
     expect(kindOf('g.inject(9.99m).is(P.gt(9.0))')).toBe('read');
     expect(await vals('g.inject(9.99m).is(P.gt(9.0))')).toEqual(['BigDecimal:9.99']);
-    // Legacy returns [9.99] here ('9.99' > '10.0' lexically) — the wrong answer this fixes.
+    // A lexical compare returns [9.99] here ('9.99' > '10.0' lexically) — the wrong answer this fixes.
     expect(await vals('g.inject(9.99m).is(P.gt(10.0))')).toEqual([]);
-    // Legacy returns [] here ('9.99' < '10.0' is false lexically) — also wrong.
+    // A lexical compare returns [] here ('9.99' < '10.0' is false lexically) — also wrong.
     expect(await vals('g.inject(9.99m).is(P.lt(10.0))')).toEqual(['BigDecimal:9.99']);
     expect(await vals('g.inject(9.99m).is(P.between(9.0, 10.0))')).toEqual(['BigDecimal:9.99']);
   });

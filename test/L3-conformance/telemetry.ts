@@ -295,13 +295,13 @@ export function collectScenarios(cucumberJson: any[]): ScenarioRow[] {
 //
 // The count alone is blind two ways: it can't say WHICH scenario broke, and a
 // net-positive run (more gained than lost) hides a real regression. l3-state.json
-// records the exact PASSED and FAILED scenario-name lists for both spines' last
-// committed runs (plus the derived counts). Every run diffs against its section:
+// records the exact PASSED and FAILED scenario-name lists from the last committed
+// run (plus the derived counts). Every run diffs against them:
 //   - GAINS      — passed now, was NOT passing before (a fix landed).
 //   - REGRESSIONS — was passing before, fails now (something broke → FAIL the build).
 // TinkerPop has distinct scenarios that normalize to the same name, so the recorded lists retain
 // duplicates and `passing` remains the scenario count; only name-based comparisons use sets. On a
-// clean local run the selected section is rewritten (CI never rewrites). This file is the single
+// clean local run it is rewritten (CI never rewrites). This file is the single
 // ratchet source of truth — each count is `passed.length`, so there is no separate baseline file.
 
 export interface L3State {
@@ -317,9 +317,8 @@ export interface L3State {
   _comment?: string;
 }
 
-/** The top level deliberately remains the default/RelIR-on floor: it is the conformance number
- *  quoted by the README and feature-support matrix, and nesting it would rewrite a 126 KB committed
- *  artifact for no semantic gain. Only the legacy floor lives in its own section. */
+/** The file is a single floor: the conformance number quoted by the README and feature-support
+ *  matrix. */
 export type L3StateFile = L3State;
 
 const STATE_COMMENT =
@@ -367,9 +366,9 @@ export function readState(file: string): L3State {
   return { passing: passed.length, total: (s.total ?? 0) - dropped, passed, failed };
 }
 
-/** A run's scenario rows AS a floor. One function because the recorded floor and the live side of the
- *  spine gap are the same value computed from the same rows, and deriving it twice is how the two
- *  would drift. `passed` stays a scenario LIST, repeated names included — see test/CLAUDE.md. */
+/** A run's scenario rows AS a floor. One function because the recorded floor and the live run are the
+ *  same value computed from the same rows, and deriving it twice is how the two would drift. `passed`
+ *  stays a scenario LIST, repeated names included — see test/CLAUDE.md. */
 export function stateOf(rows: ScenarioRow[]): L3State {
   const passed = rows.filter((r) => r.passed).map((r) => r.name).sort();
   const failed = rows.filter((r) => !r.passed).map((r) => r.name).sort();

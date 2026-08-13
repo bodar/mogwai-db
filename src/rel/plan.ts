@@ -47,7 +47,7 @@ export interface Binding {
    * lowering has to decline for (§6·5).
    *
    * Two facts wear one `null` in a lowering: "not learned yet" and "the answer is an ERROR". A
-   * text-level error moved above both spines (the `writeArguments` verify Pass); this is the
+   * text-level error moved above the lowering (the `writeArguments` verify Pass); this is the
    * residue that CANNOT move there, because the question is about the graph's contents rather than
    * the traversal's: is this public element id still free? does this vertex exist? A Pass cannot
    * ask, and a lowering asking would need a store at compile time.
@@ -55,9 +55,8 @@ export interface Binding {
    * So the check becomes a STEP: a binding whose relation the executor runs and then tests, raising
    * `message` when the row count is the wrong one. It costs O(plan size) — one statement, not one
    * per row — and it stays inside P5, which is the same move that made the `mergeV` snapshot work.
-   * The alternative is what it replaces: DECLINING the whole traversal to the other spine, which
-   * the coverage census then counts as vocabulary this algebra cannot express. It can; it simply
-   * has to be allowed to say no.
+   * The alternative is what it replaces: DECLINING the whole traversal, which then reads as
+   * vocabulary this algebra cannot express. It can; it simply has to be allowed to say no.
    *
    * A guard is RETAINED by construction (see `retained`) — a check that is not a step of its own
    * would be folded into a CTE and never run.
@@ -73,9 +72,9 @@ export interface Binding {
  * the row it hoped was absent), `'empty'` is a MISSING referent (`Vertex does not exist for mergeE` —
  * the check fails to find the row it needs). One field, two messages, no second mechanism.
  *
- * The message is the REFERENCE's, verbatim, and it is the reason a guard exists at all: a decline
- * hands the traversal to a spine that raises this same string, so what the guard buys is the string
- * WITHOUT the decline.
+ * The message is the REFERENCE's, verbatim, and it is the reason a guard exists at all: a decline now
+ * only reports the traversal unsupported, so what the guard buys is the reference's exact string
+ * rather than a generic failure.
  */
 export interface Guard {
   readonly message: string;

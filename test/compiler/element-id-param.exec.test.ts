@@ -21,12 +21,9 @@ import { decode } from '../support/decode.ts';
 const store = seededStore();
 const kindOf = (g: string, p: Record<string, any> = {}) => compile(g, p).kind;
 const plan = (g: string, p: Record<string, any> = {}) => compile(g, p) as any;
-// PINNED TO RelIR, as `plan` above already is. This file's subject is the RelIR bind discipline —
-// "a bind serves a user PARAMETER, nothing else earns one" — so an ambient answer helper was asserting
-// that claim against whichever spine happened to be selected. In the differential's OFF position that
-// meant running legacy, which has its own defect on a collection parameter in `hasLabel` (a bind
-// mismatch, `SQLite query expected 1 values, received 2`) and made this file red for a reason it never
-// claimed anything about. The plan half and the answer half now name the same spine.
+// This file's subject is the bind discipline — "a bind serves a user PARAMETER, nothing else earns
+// one". The `vals` helper below executes the same lowering `plan` compiles, so the plan half and the
+// answer half describe one compilation, not two.
 const valsIn = async (s: ReturnType<typeof seededStore>, g: string, p: Record<string, any> = {}) => {
   const out: string[] = [];
   for (const b of exec(s).buffers(g, p, {})) out.push(String(await decode(b)));

@@ -54,8 +54,8 @@ export const itemTypeAt = (type: TypeNode | null | undefined, i: number): TypeNo
 /** A COMPILE-TIME slice/count as an inlined integer literal — the sharpest constant of all: `sliceOf`
  *  and `countArg` already READ the value to shape the plan (reject `range(2,1)`, compute `lo + limit`),
  *  so it is definitionally known here and spending it as a runtime bind is a pure contradiction. A
- *  malformed non-integer (`limit(2.5)`) keeps the bound spelling the legacy spine's error path owns,
- *  rather than throwing from `compilerInt`. */
+ *  malformed non-integer (`limit(2.5)`) keeps a bound spelling rather than throwing from `compilerInt`,
+ *  leaving the error to the path that owns it. */
 export const countLit = (n: number): Expr => Number.isSafeInteger(n) ? compilerInt(n) : lit(n, 'int');
 
 /** A SLICE bound — `limit`/`skip`'s single count — that BINDS its user parameter (`limit($x)`) or

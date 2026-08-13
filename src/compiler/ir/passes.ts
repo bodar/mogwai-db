@@ -221,7 +221,7 @@ const DECORATION: Pass[] = group('decoration', [
 // ---------- verify (assert legality against ctx.originalChain; never rewrites) ----------
 // A verify pass IGNORES its `steps` argument (the live, possibly-decorated chain) and asserts
 // against ctx.originalChain — the user's authored chain, neither folded nor injected. This is correct,
-// not legacy mimicry: a PartitionStrategy write-stamp (property(key,val) after addV) must not trip
+// not mimicry of a prior implementation: a PartitionStrategy write-stamp (property(key,val) after addV) must not trip
 // ReservedKeysVerificationStrategy, and a SubgraphStrategy out()→outE().inV() explosion must not
 // change what EdgeLabelVerification sees. verify() throws the spec's canonical message on a
 // violation; a passing traversal returns the chain unchanged.
@@ -259,19 +259,18 @@ const VERIFY: Pass[] = group('verify', [
   })),
   // A WRITE STEP'S ARGUMENTS, parsed for their errors alone (§6·5). Always on: `property(k, v, m)`
   // with an odd meta run, a merge map keyed `T.key`, an `option()` whose selector is not
-  // `Merge.onCreate`/`onMatch` — each is an ERROR whichever spine would have run the traversal, so
-  // it belongs above the routing switch and not inside a lowering whose contract is `null`. A
-  // `Deferral` ("not learned yet") is swallowed and left to the spines; see `verifyWriteArgs`.
+  // `Merge.onCreate`/`onMatch` — each is an ERROR however the traversal lowers, so it belongs above
+  // the lowering and not inside one whose contract is `null`. A `Deferral` ("not learned yet") is
+  // swallowed and left to the lowering; see `verifyWriteArgs`.
   //
   // Against `ctx.originalChain` for the reason every verify Pass is: an injected PartitionStrategy
   // write stamp is not the user's text, and the desugars that a write parse DOES depend on
   // (`desugarPropertyMap`) are `extract`-category, so they are already applied in that snapshot.
   // A LABEL MUTATION'S TARGET, which is the one write refusal that is a fact about the STREAM rather
-  // than about a step's arguments (`verifyLabelMutationTarget`). Always on, and above the routing
-  // switch for §6·5's reason: an edge's label cardinality is fixed at one by Gremlin, so this is a
-  // specified ERROR whichever spine would have run the traversal. It used to be raised inside legacy's
-  // write dispatcher, which made three passing conformance scenarios the property of a route with an
-  // end date.
+  // than about a step's arguments (`verifyLabelMutationTarget`). Always on, and above the lowering
+  // for §6·5's reason: an edge's label cardinality is fixed at one by Gremlin, so this is a
+  // specified ERROR however the traversal lowers. It used to be raised inside the write lowering,
+  // which made three passing conformance scenarios the property of that lowering.
   //
   // Against the LIVE `steps`, not `ctx.originalChain`, and that is the one place this differs from its
   // neighbours: the question is what the stream HOLDS at the mutation, so it must see the chain the
@@ -344,7 +343,7 @@ const NO_SIDE_EFFECTS: Map<string, any> = new Map();
  *  the caller must still be able to SEE that it discarded), so the terminal step is re-appended.
  *
  *  It lives beside `normalize` rather than with the child seam that grew it: parsing a nested arg
- *  into IR is IR production, and the classifier, both lowering spines and the service SPI all need
+ *  into IR is IR production, and the classifier, the lowering and the service SPI all need
  *  it without also needing a lowering. Contrast `rootedSteps` (`rel/lower.ts`), which is
  *  deliberately NOT this — a ROOTED nested body must keep its source, where this strips one. */
 export const childSteps = (nested: any, params: Record<string, any>, sideEffects?: Map<string, any>): IRStep[] => {

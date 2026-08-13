@@ -23,7 +23,7 @@ import { isReducer, reducerAggregate } from './reducer.ts';
  * JSONB `list` column per row and a map is one JSONB `map` column, so both are ordinary values that
  * flow through the same relations and reach the wire through this module's own `mapPayload` exactly as a
  * list reaches it through `listPayload` (§6·3 — a shape is a value plus a framing arm, never a delegated
- * step; §6·3 — that arm is a PROJECTION the algebra builds, not a call into legacy's materializer).
+ * step; §6·3 — that arm is a PROJECTION the algebra builds).
  *
  * ## Calcite's decomposition, which is two ordinary nodes
  *
@@ -111,8 +111,8 @@ export const ORD_COL = 'go';
  *
  * What is covered: `groupCount()` with a key `by()`, over an element or scalar stream. The value is the
  * TRAVERSER COUNT per key — `SUM(bulk)` where the stream carries a multiplicity, `COUNT(*)` where it
- * cannot, which is identical while bulk ≡ 1 and correct after a fan-out. That is legacy's own rule and
- * the reason it is a rule rather than a constant.
+ * cannot, which is identical while bulk ≡ 1 and correct after a fan-out. That is why it is a rule
+ * rather than a constant.
  *
  * `group()` is the second arm, and its VALUE is a list of the traversers themselves — `Map<K, List<V>>`,
  * `GroupStep`'s default with no value `by()`. Over an element stream that is a list of elements, and it
@@ -342,16 +342,15 @@ export function groupRows(
   });
   // FENCED, or the projection is fused straight back in and the naming buys nothing: the emitter merges
   // a plain `Project` into the aggregate's own block, so `gk` becomes the expression again in the SELECT
-  // and the GROUP BY. Measured against legacy, which CTEs its key: 3 copies of the property subquery
-  // against legacy's 1, and 6 against 4 for a label key. With the fence the key is computed once, which
-  // is §5's access-path half of the equivalence gate and not a cosmetic preference.
+  // and the GROUP BY. Without the fence the key's property subquery is copied 3 times (6 for a label
+  // key); with the fence the key is computed once, which is an access-path fact and not a cosmetic
+  // preference.
   const keyed = make.materialize({ id: fresh('gm'), input: projected, channels: projected.channels, type: projected.type });
   // TinkerPop drops an unproductive key rather than grouping under null — UNLESS `ProductiveByStrategy`
   // asked for the null-keeping behaviour, which is why this asks `productivityFilter` rather than
   // spelling the test. Hardcoding `IS NOT NULL` changed the answer for
-  // `withStrategies(ProductiveByStrategy).V().groupCount().by('age')`; the census caught it and a
-  // byte-level differential could not, because both spines were being asked the wrong question
-  // identically until one of them stopped.
+  // `withStrategies(ProductiveByStrategy).V().groupCount().by('age')`; the census caught it against the
+  // reference, which a byte-level comparison of two equally-wrong answers could not.
   //
   // BEFORE the aggregate, now that the key is a column: dropping the rows whose key is null is the same
   // answer as dropping the null GROUP, and a `WHERE` on a column beats a `HAVING` that re-inlines.
@@ -455,8 +454,8 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, fresh: Minter, order: r
     aggs: [[VAL_COL, value]],
   });
 
-  // A COUNT is a Gremlin `long`, and the tag is what makes the wire agree with legacy's `countBuffer`
-  // (an explicit Int64) rather than letting magnitude inference pick Int for a small count. A COLLECTED
+  // A COUNT is a Gremlin `long`, and the tag is what makes the wire emit an explicit Int64
+  // rather than letting magnitude inference pick Int for a small count. A COLLECTED
   // group needs no envelope added: a collecting value is already a typed list node, while the child
   // assignment arm extracts the child's typed scalar node unchanged.
   const entry: Entry = {
@@ -476,9 +475,9 @@ export function groupMap(rows: Rel, recipe: GroupRecipe, fresh: Minter, order: r
     valOf: { kind: 'scalar' },
   };
   return {
-    // Ordered by the KEY, which is legacy's choice too ("we emit rows ORDER BY the key"). A map's entry
-    // order is not TinkerPop's to dictate, so it is ours to state — and stating it is what stops the
-    // two spines differing by whatever the grouping happened to produce.
+    // Ordered by the KEY ("we emit rows ORDER BY the key"). A map's entry order is not TinkerPop's to
+    // dictate, so it is ours to state — and stating it is what makes the order deterministic rather
+    // than whatever the grouping happened to produce.
     rel: mapOfGroups(productive, entry, col(productive.id, KEY_COL), fresh),
     keyOf: entry.keyOf,
     valOf: entry.valOf,
@@ -588,11 +587,10 @@ function groupReduced(
   // `mean` DECLINES, and the reason is the BLOB rather than the reducer: SQLite writes a REAL into JSON
   // with 15 significant digits (`%!.15g`), so a map value that needs 17 comes back a digit short —
   // `map/Mean.feature:70` wants `d[0.3333333333333333].d` and the blob carries `0.333333333333333`.
-  // The defect is PROJECT-WIDE and BOTH SPINES ALREADY HAVE IT (`g.inject(1).math("1/3").fold()` is
-  // lossy on each), which is §12's rule again — their agreement is a shared cause, not correctness. It
-  // is invisible for every other reducer here because `sum`/`min`/`max` of exact inputs stay exact, and
-  // it becomes a DIVERGENCE only for a mean, where legacy computes in a ROW and this computes into the
-  // blob. Declining hands it to the spine that answers exactly; the fix is to carry an inexact real as
+  // The defect is PROJECT-WIDE — `g.inject(1).math("1/3").fold()` is lossy too — so it is a shared
+  // cause rather than a mean-specific bug (§12). It is invisible for every other reducer here because
+  // `sum`/`min`/`max` of exact inputs stay exact, and it becomes visible only for a mean computed into
+  // the blob. Declining defers it; the fix is to carry an inexact real as
   // decimal TEXT under its tag, which is the carriage the exact tail already has for a big long.
   if (reducer === 'mean') return null;
   const counting = reducer === 'count';
@@ -669,8 +667,8 @@ function groupReduced(
     // class made a mean frame as an unmapped tag and come back a digit short; `inferredVtype` is the
     // shared translation, and using it here is the same answer the framer would reach for an untagged
     // value with the big-long case still covered.
-    // A COUNT is a Gremlin `long` by declaration, which is what makes the wire agree with legacy's
-    // `countBuffer` rather than letting magnitude inference pick Int for a small count. Every other
+    // A COUNT is a Gremlin `long` by declaration, which is what makes the wire emit an explicit Int64
+    // rather than letting magnitude inference pick Int for a small count. Every other
     // reducer's result class is DYNAMIC, so its tag is inferred from the value's storage class.
     val: typedNode(col(productive.id, VAL_COL), counting ? compilerText('long') : inferredVtype(col(productive.id, VAL_COL))),
     keyOf: elementKey ? { kind: 'elem', elem: host.elem } : { kind: 'scalar' },
@@ -842,7 +840,7 @@ const NO_LABELS: AliasMap = new Map();
  * **The KEY ORDER is ours to state, and it is the insertion order** — each key at its earliest
  * property rowid, which is what the element payload's own bag does. TinkerPop hands back a
  * `LinkedHashMap` in `element.properties()` iteration order, which is a provider's business rather
- * than the spec's; stating it is what stops the two spines differing by whatever SQLite scanned.
+ * than the spec's; stating it is what makes it deterministic rather than whatever SQLite scanned.
  *
  * The token entries LEAD, in the order the reference puts them: `T.id`, `T.label`, then an edge's
  * `Direction.IN` and `Direction.OUT`, then the properties.
@@ -1053,8 +1051,8 @@ const pairSide = (pair: Expr, side: 'keys' | 'values'): Expr =>
  * ONLY side any producer here emits, deliberately: every value side is a self-describing node
  * (`elementValueMap`'s note says why), which is what keeps `valOf` at one arm instead of needing a
  * "mixed" one. An `elem` side is an expanded element node whose decode into the SCALAR vocabulary
- * would be lossy, so it declines. `MapOf`'s remaining `list` arm is LEGACY's shape vocabulary and has
- * no producer on this route; an arm for it here would be one with nothing to reach it.
+ * would be lossy, so it declines. `MapOf`'s remaining `list` arm has no producer on this route; an arm
+ * for it here would be one with nothing to reach it.
  */
 const sideList = (of: MapOf): ListOf | null => (of.kind === 'scalar' ? TYPED_MEMBERS : null);
 

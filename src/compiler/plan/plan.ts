@@ -235,8 +235,8 @@ export function scalarTx(name: string, args: any[], v: Expression): Expression |
     case 'concat': {
       // A traversal argument is semantically a per-traverser child value, not a string
       // literal — `TraversalUtil.apply(traverser, child)`, whose value this pure SQL leaf
-      // has no child relation to compute. The CALLER resolves it (lowerConcatScalar,
-      // steps/tail/mapscalar.ts) and substitutes the resulting Expression into `args`,
+      // has no child relation to compute. The CALLER resolves it (lowerConcatScalar) and
+      // substitutes the resulting Expression into `args`,
       // exactly as operandSql's Expression operands arrive pre-built. A raw `nested` tag
       // still here means no caller resolved it (the list-local per-member phase, which has
       // no parent traverser to correlate against), so fail closed rather than silently
@@ -423,9 +423,9 @@ export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = TYP
   if (pred === null || typeof pred !== 'object' || !('op' in pred)) return q`${expr} = ${operandSql(pred)}`;
   const op = (pred as Pred).op;
   // A single collection operand (`within([a,b])`/`within($list)`) spreads to member operands HERE — the
-  // faithful front-end no longer unwraps it (each spine spreads for itself). Reproduces the former
+  // faithful front-end no longer unwraps it (the lowering spreads it). Reproduces the former
   // front-end unwrap exactly (`.members` for a literal, typed nameless args for a bound list-PARAM), so
-  // legacy semantics are byte-identical to before.
+  // the semantics are byte-identical to before.
   const rawOps = (pred as Pred).operands;
   const operands = SET_RANGE_OPS.has(op) && rawOps.length === 1 && Array.isArray(rawOps[0]!.value)
     ? collectionMembers(rawOps[0]!) : rawOps;
@@ -463,7 +463,7 @@ export function predicateSql(expr: Expression, pred: any, typeCtx: TypeCtx = TYP
   }
   // within/without whose operand is ONE list-valued traversal (`within(__.V()…fold())`) rather
   // than a vararg set. The members are only known at run time, so membership is a json_each
-  // scan of the operand list, not an IN-list. Minted by the operand layer (steps/tail/operand.ts)
+  // scan of the operand list, not an IN-list. Minted by the operand layer
   // once it has resolved the traversal to a JSONB list; `within` above stays the vararg form.
   if (op === 'withinList' || op === 'withoutList') {
     // `expr IN (SELECT …)`, NOT `EXISTS (… WHERE je.value = expr)`. json_each exposes a column
@@ -589,7 +589,7 @@ export function elemCtx(n: Relation, elem: Elem): ScalarCtx {
 
 /** What a `T` token DENOTES over an element context — the one resolution, for every host.
  *
- *  `classifyBy` (steps/tail/child-shape.ts) is the one DECODE of a `by()` into a `ByClass`; this is
+ *  `classifyBy` is the one DECODE of a `by()` into a `ByClass`; this is
  *  its expression-side twin, and it lives here rather than beside it because building SQL is exactly
  *  what that classify leaf must not do. Twelve hosts wrote the same two-or-three-arm switch and threw
  *  on the rest, so `by(T.id)`/`by(T.label)` was available at some positions and a
@@ -651,7 +651,7 @@ export const extIdOf = (rowid: Expression): Expression => q`(SELECT COALESCE(uid
 // then had to be threaded through every one of them, which is the point at which a copied row-op
 // stops being a style question. So the tuple gets ONE authority.
 //
-// `elemColumns`/`recordFieldColumns`/`pathColumns` (steps/context/stream.ts) NAME these columns;
+// `elemColumns`/`recordFieldColumns`/`pathColumns` NAME these columns;
 // these build them, in the same order. Everything is derived from a `ScalarCtx` rather than a
 // Relation so the correlated positions (an as()-bound alias, a recursive walk row, a group key)
 // share it with the direct ones — `elemCtx(n, elem)` is the Relation adapter.
@@ -700,7 +700,7 @@ export function elementPayloadObject(ctx: ScalarCtx, elem: Elem): Expression {
 //
 // It sits beside `elementPayload` rather than with the PropertyStream that carries it because the
 // tuple is the shared fact and the stream is one consumer's object model — the same split that put
-// `elemColumns`/`pathColumns` in `steps/context/stream.ts` and their builders here.
+// `elemColumns`/`pathColumns` and their builders here.
 
 /** The physical payload columns of a property relation, in order. One row per
  *  VertexProperty/edge-Property instance: `vpid` the VertexProperty id (NULL for edge

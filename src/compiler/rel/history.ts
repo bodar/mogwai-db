@@ -15,10 +15,10 @@ import { SHAPE_K, elemShape, type AliasShape } from '../plan/alias.ts';
  *
  * The TAG is what makes one array hold objects of different shapes — a vertex, an edge, a scalar value with
  * its type, a folded list — so neither channel needs a per-position descriptor and a heterogeneous history is
- * not a special case. `SHAPE_K` is IMPORTED from the legacy encoding rather than restated: the tag numbers are
- * DATA, and a second copy of them is a second chance for the two spines to drift silently (§6·6 — share data
- * and pure computation, re-express only the emission). What IS re-expressed here is the emission — legacy
- * builds `q` templates, this builds `Expr` nodes.
+ * not a special case. `SHAPE_K` is IMPORTED rather than restated: the tag numbers are
+ * DATA, and a second copy of them is a second chance for the two copies to drift silently (§6·6 — share data
+ * and pure computation, re-express only the emission). What IS re-expressed here is the emission — this
+ * builds `Expr` nodes.
  */
 
 /** What one history position holds. A value carries its type through the entry's own `t` field,

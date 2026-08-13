@@ -58,20 +58,19 @@ import { optionArms, type OptionArm } from '../ir/option-map.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
 
 /**
- * THE SECOND LOWERING — `Step[] -> RelIR` (§6·1 of `docs/2026-08-01-relir-build-plan.md`).
+ * THE LOWERING — `Step[] -> RelIR`.
  *
- * The legacy spine (`LoweringEngine`) builds SQL into an append-only `Query`, so the query never
- * exists as data and every optimization has to happen before or during lowering. This module is the
- * replacement route, and it grows STEP BY STEP: a traversal whose every step is covered here lowers
- * to a `Plan` and takes the RelIR route end-to-end; anything else returns `null` and the legacy
- * spine handles it whole. **Never mixed inside one traversal** — that is what keeps RelIR a real
- * algebra rather than a wrapper, and it is why there is no opaque escape node and never will be
- * (§6·1: "not as a bridge, not temporarily, not behind a flag").
+ * The lowering grows STEP BY STEP: a traversal whose every step is covered here lowers to a `Plan`
+ * and takes the RelIR route end-to-end; a traversal it does not cover raises `UnsupportedTraversal`
+ * rather than falling through to anything. **A traversal is lowered wholly or not at all** — that is
+ * what keeps RelIR a real algebra rather than a wrapper, and it is why there is no opaque escape node
+ * and never will be (not as a bridge, not temporarily, not behind a flag).
  *
- * `null` is therefore the ONLY decline, and it must stay cheap and total: a step this module has
- * not learned yet is not an error, it is coverage that has not been written. What it must never do
- * is answer a DIFFERENT question — a partial lowering that silently drops a filter would be
- * invisible to the differential, since both spines would be asked and only one asked correctly.
+ * `null` is therefore the ONLY decline this module makes, and it must stay cheap and total: a step it
+ * has not learned yet is not an error, it is coverage that has not been written — the caller turns an
+ * uncovered traversal into a clear `UnsupportedTraversal`. What it must never do is answer a DIFFERENT
+ * question — a partial lowering that silently drops a filter would be a wrong answer, not a clean
+ * failure.
  *
  * ## What this module does NOT do
  *
@@ -79,7 +78,7 @@ import { MUTATING_STEPS } from '../ir/strategies.ts';
  * forever. So this returns a RELATION plus the `RelFraming` that says what the relation holds.
  *
  * **The PAYLOAD PROJECTION is a different thing and is on its way IN, not permanently out.** Today
- * `spine.ts` hands the relation to legacy's materializer, which composes the payload SELECT — so the
+ * `spine.ts` hands the relation to the materializer, which composes the payload SELECT — so the
  * element payload, the list/map blob reads and their `Shape` choice are still built outside the algebra.
  * §6·3 of the build plan corrects that: `materialize.ts` produces SQL, so it is a query producer and
  * therefore this layer's work, and `Shape` is the boundary. `list.ts` and `map.ts` already do it the
@@ -240,13 +239,12 @@ const encounterOf = (channels: Channels): Channel | undefined =>
  * A source-scope FILTER as a predicate over the element scan — the whole of `hasLabel`/`has` that
  * needs no predicate vocabulary.
  *
- * Written against the SCAN rather than against a projected id-relation, which is the structural
- * difference from the legacy spine and the point of the exercise: legacy gives every filter its own
- * CTE that re-joins the element table to reach a column its predecessor projected away
- * (`… FROM nodes n JOIN c1 p ON n.id=p.id WHERE EXISTS(…)`), so `has(a).has(b)` is three CTEs and
- * two redundant self-joins. Here they conjoin into ONE `WHERE` over one scan, because a filter
- * neither changes the relation's cardinality contract nor consumes a channel, and the plan is data
- * so a later step can still see the columns.
+ * Written against the SCAN rather than against a projected id-relation, and that is the point of the
+ * exercise: the naive form gives every filter its own CTE that re-joins the element table to reach a
+ * column its predecessor projected away (`… FROM nodes n JOIN c1 p ON n.id=p.id WHERE EXISTS(…)`), so
+ * `has(a).has(b)` is three CTEs and two redundant self-joins. Here they conjoin into ONE `WHERE` over
+ * one scan, because a filter neither changes the relation's cardinality contract nor consumes a
+ * channel, and the plan is data so a later step can still see the columns.
  */
 /** What a filter needs beyond the step and its subject: the bound parameters a nested body parses
  *  against, and whether the correlated-child form is this compile's to emit (see `Lowering`). */
@@ -341,9 +339,9 @@ function correlatedExists(
   // A NUMERIC REDUCER OVER AN EMPTY CHILD IS THE ONE PLACE SQL AND GREMLIN DISAGREE ABOUT EXISTENCE,
   // so it fails closed. `sum`/`min`/`max`/`mean` over zero rows return ONE row holding NULL in SQL,
   // while TinkerPop emits NO traverser — so a bare EXISTS answers "true" for a parent the reference
-  // REJECTS. Right arity, plausible rows, and the differential cannot see it because both spines are
-  // asked and only one is asked correctly, which is precisely the shape the decline contract exists
-  // to keep out. `count()` and `fold()` are NOT this: both emit a traverser for an empty child (0 and
+  // REJECTS. Right arity, plausible rows, and a wrong answer that would pass unnoticed — precisely the
+  // shape the decline contract exists to keep out. `count()` and `fold()` are NOT this: both emit a
+  // traverser for an empty child (0 and
   // the empty list), so their EXISTS is honest. Expressing the reducer case needs the aggregate's
   // own NULL-ness as the test rather than row existence; that is a further arm.
   if (tail.framing.kind === 'scalar' && tail.framing.result === 'number') return null;
@@ -351,7 +349,7 @@ function correlatedExists(
   // value is, but the BLOCK does. A body ending in a reducer is an `Aggregate`, and the assembler
   // fuses the whole run into one SELECT; projecting `1` there left a block with a `HAVING` and no
   // aggregate in its select list, which SQLite refuses outright (`HAVING clause on a non-aggregate
-  // query`) — a THROW from the position where legacy answers. Projecting the column keeps whatever
+  // query`) — a THROW from a position that must answer. Projecting the column keeps whatever
   // the block computes visible, so the aggregate query stays an aggregate query.
   //
   // A `Materialize` fence is the WRONG remedy here even though it is the right one elsewhere (§11):
@@ -360,7 +358,7 @@ function correlatedExists(
   const probeCol = tail.rel.type.cols[0];
   if (!probeCol) return null;
   const probe = make.project({ id: fresh('p'), input: tail.rel, channels: [], type: typeOf(meta('one', 'any', true)), exprs: [['one', col(tail.rel.id, probeCol.name)]] });
-  // `NOT EXISTS`, not legacy's `NOT COALESCE(EXISTS(…), 0)`: EXISTS is never NULL, so the COALESCE
+  // `NOT EXISTS`, not `NOT COALESCE(EXISTS(…), 0)`: EXISTS is never NULL, so the COALESCE
   // guards nothing here.
   return { kind: 'exists', plan: probe, negated };
 }
@@ -590,19 +588,17 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
   if (step.name === 'where' || step.name === 'filter' || step.name === 'not') {
     const [nested, extra] = args;
     if (extra !== undefined || !isNested(nested)) return null;
-    // The correlated EXISTS is `predicateInlining`'s form. With the switch OFF the legacy spine
-    // lowers a MATERIALIZED child-existence gate instead — a pushed ordinal, a LEFT JOIN and a
-    // rejoin — which is a lowering STRATEGY this route has not learned, so it declines exactly as
-    // it declines an unlearned step. That is not spine choice reading the fast-path config to dodge
-    // an optimization (the FTS rule): the flag selects between two strategies and RelIR implements
-    // one of them, so both positions stay live and L5's differential still compares two forms.
+    // The correlated EXISTS is `predicateInlining`'s form. With the switch OFF the alternative is a
+    // MATERIALIZED child-existence gate — a pushed ordinal, a LEFT JOIN and a rejoin — a lowering
+    // STRATEGY this route has not learned, so it declines exactly as it declines an unlearned step:
+    // the flag selects between two strategies and only one of them is implemented here.
     if (!ctx.correlatedChildren) return null;
     // NORMALIZING A CHILD BODY CAN RAISE, and a module whose contract is `null` must not let a throw
     // escape (§11, the rule `sliceOf` already instances). `childSteps` re-runs the Pass pipeline over
     // the body, and `rewriteWhereVariables` legitimately hard-errors on a `where(__.as(l))` start
     // variable the body's OWN scope never bound — TinkerPop errors there too. Whether that error is
-    // this traversal's answer is the spine that owns the message's business, not ours: catch, decline,
-    // and let it raise. Found by `rel-sweep` the moment `as()` made these prefixes reachable at all,
+    // this traversal's answer is not this module's business: catch, decline, and let it surface.
+    // Found by `rel-sweep` the moment `as()` made these prefixes reachable at all,
     // which is the same instrument-shaped finding as the four before it.
     const body = bodyOf(nested.nested, ctx.params);
     if (!body?.length) return null;
@@ -829,9 +825,8 @@ function hasTokenClause(token: string, val: unknown, subject: ElementSubject, fr
 }
 
 /**
- * `V(...)` / `E(...)` — the element source, and the same relation the legacy `seedSource` builds for
- * the same arguments: one row per element at bulk 1, narrowed by an id list bounded by the QUERY
- * TEXT (never by row count, so `InList` is right here and a JSON bind is not).
+ * `V(...)` / `E(...)` — the element source: one row per element at bulk 1, narrowed by an id list
+ * bounded by the QUERY TEXT (never by row count, so `InList` is right here and a JSON bind is not).
  *
  * Numeric args match the rowid and string args the user id, because the id-relation carries rowids
  * throughout and a `uid` match still projects the rowid. That asymmetry is the storage schema's,
@@ -862,7 +857,7 @@ function elementScan(step: IRStep, fresh: Minter): { scan: Rel; pred?: Expr; ele
   const inlineOne = (v: unknown): boolean => {
     if (typeof v === 'number') { inlineNums.push(v); return true; }
     if (typeof v === 'string') { inlineStrs.push(v); return true; }
-    return false; // an id that is neither declines — a hard error the legacy spine owns the message for
+    return false; // an id that is neither declines — a hard error, not a value this route can inline
   };
   for (const a of step.args) {
     if (a.name == null) {
@@ -1012,20 +1007,19 @@ const HOPS: Readonly<Record<string, readonly Hop[]>> = {
 };
 
 /** Steps whose input must already be an edge (`inV`/`outV`/`bothV`) vs a vertex. Mis-applying one
- *  is a hard error in the legacy spine; here it is a decline, so that spine keeps owning the
- *  message rather than this route inventing a second one. */
+ *  is a hard error; here it is a decline rather than this route inventing a second message. */
 const FROM_EDGE = new Set(['inV', 'outV', 'bothV']);
 
 /**
  * Where a hop starts from: an incoming id-RELATION (the ordinary case, joined) or a single
  * correlated id EXPRESSION (a child body's first hop, compared).
  *
- * The correlated form is what lets a `where()` body be lowered with no seed node at all. The legacy
- * spine writes `(SELECT n.id AS id) p` — a projection with no input, which RelIR has no node for —
- * and §7's bar says a missing node needs proof the seam cannot EXPRESS the shape. It can: compare
- * the edge column to the outer expression directly, which is one derived table FEWER than the form
- * it replaces. Both arms produce the same `(id, bulk)` shape, so every hop after the first is the
- * ordinary one and there is no second movement implementation.
+ * The correlated form is what lets a `where()` body be lowered with no seed node at all. A
+ * `(SELECT n.id AS id) p` — a projection with no input — is a shape RelIR has no node for, and §7's
+ * bar says a missing node needs proof the seam cannot EXPRESS the shape. It can: compare the edge
+ * column to the outer expression directly, which is one derived table FEWER than the alternative.
+ * Both arms produce the same `(id, bulk)` shape, so every hop after the first is the ordinary one and
+ * there is no second movement implementation.
  */
 type Frontier = { readonly rel: Rel } | { readonly correlated: Expr };
 const frontierRel = (from: Frontier): Rel | undefined => ('rel' in from ? from.rel : undefined);
@@ -1072,7 +1066,7 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
     // **THE INCOMING FRONTIER IS THE LEFT SIDE, AND THE JOIN IS `ordered`** — a hop is "for each
     // traverser I have, find its edges", so the stream drives and `edges` is probed through
     // `e_out(src,label,tgt)` / `e_in(tgt,label,src)`. This USED to be `edges` on the left and free
-    // to reorder, copied from the legacy spine "so the access path stays the one the covering
+    // to reorder, "so the access path stays the one the covering
     // indexes were built for" — measured, and it is the opposite: with the order free SQLite chose
     // `e_in` and scanned the whole edge table for a hop off ONE vertex, taking a 4 000-vertex
     // `has(name).out(knows).values(name)` to 1 492 ms. Pinned, it seeks `e_out` and takes 0.3 ms.
@@ -1126,9 +1120,9 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
  * SHAPE but a channel: a window is only a window if there is an order to take it from.
  *
  * A relation with no order still slices where the order cannot matter — after `count()`, whose one
- * row makes `LIMIT 1` and `ORDER BY … LIMIT 1` the same question. Legacy emits the bare `LIMIT`
- * there and this matches it, because emitting a sort over a single row would be a difference in
- * the plan for no difference in the answer.
+ * row makes `LIMIT 1` and `ORDER BY … LIMIT 1` the same question. It emits the bare `LIMIT` there,
+ * because emitting a sort over a single row would be a difference in the plan for no difference in
+ * the answer.
  */
 function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel | null {
   if (step.modulators?.length || step.optionArms || isLocalScope(step)) return null;
@@ -1182,8 +1176,7 @@ function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel 
   // relation backwards and the count never appears.
   //
   // It NEEDS a carried position, and that is not a limitation to work around — "last" is a question
-  // ABOUT emission order, so a relation carrying none has no last. Declining hands it to the spine
-  // that owns the message.
+  // ABOUT emission order, so a relation carrying none has no last, and the traversal declines.
   if (step.name === 'tail') {
     if (!encounter) return null;
     const last = { offset: 0, limit: countArg(step) };
@@ -1193,10 +1186,10 @@ function sliceOp(step: IRStep, input: Rel, bulked: boolean, fresh: Minter): Rel 
 
   // `sliceOf` REJECTS an illegal range (`range(2,1)`) by throwing, which is right where it is the
   // only answer available — but this module's contract is that `null` is its only decline, and a
-  // throw from here would mean the RelIR route raising an error the legacy spine has not reached
-  // yet. Declining hands the traversal to the spine that owns the message, which raises the
-  // identical one. Found by sweeping every prefix of every corpus traversal under all four switch
-  // combinations, which is the only way a decline-contract violation shows up at all.
+  // throw from here would be the lowering raising mid-fold rather than declining cleanly. Catching
+  // and declining keeps that contract. Found by sweeping every prefix of every corpus traversal
+  // under all four switch combinations, which is the only way a decline-contract violation shows up
+  // at all.
   let window;
   try { window = sliceOf(step); } catch { return null; }
   // A COLLAPSED relation's row stands for `bulk` traversers, so `LIMIT n` would take n ROWS and
@@ -1280,9 +1273,9 @@ function slice(
  * dodges it; `NOT EXISTS`, an uncorrelated `IN (SELECT …)` and a scalar `(SELECT …) > 0` do not
  * trigger it. That is why `propertySeek` — which lifts a `has()`'s `EXISTS` into a join — masked the
  * defect on the ONE traversal `known.ts` recorded, while the whole `where(…)`/`has(…)`-then-`skip`
- * family answered wrong in production under the DEFAULT config. The differential could not see it: the
- * bug is present in BOTH spine positions of those traversals, which is the blind spot L5's own header
- * names. The fence is a `MATERIALIZED` CTE between the filter and the offset (`slice`).
+ * family answered wrong in production under the DEFAULT config. A differential comparing two lowerings
+ * could not have seen it — the bug would sit identically in both — which is the blind-spot class L5's
+ * own header names. The fence is a `MATERIALIZED` CTE between the filter and the offset (`slice`).
  *
  * This decides when the fence is needed: does the offset's block FUSE a positive correlated `EXISTS`
  * onto a bare scan? It walks the block-fusing spine — `project`/`filter`/`sort`/`materialize` all fold
@@ -1328,11 +1321,11 @@ function hasPositiveExists(pred: Expr): boolean {
  * so the row covers the half-open band `[cum - bulk, cum)`; the slice keeps the rows whose band
  * intersects `[offset, offset + limit)` and re-projects `bulk` as the width of the intersection.
  *
- * Legacy hand-rolls exactly this shape in the element FRAMING projection (`buildProjection`'s
- * bulk-aware limit/range), where it can only happen once and only at the end. Here it is four
- * ordinary nodes over any relation carrying a multiplicity and a position — which is why it serves
- * the element fold and the scalar tail from one place, and why `order().limit()` composes rather
- * than being a shape the framing layer has to recognise.
+ * Done as a one-off, this shape can only live in the element FRAMING projection (a bulk-aware
+ * limit/range), where it happens once and only at the end. Here it is four ordinary nodes over any
+ * relation carrying a multiplicity and a position — which is why it serves the element fold and the
+ * scalar tail from one place, and why `order().limit()` composes rather than being a shape the
+ * framing layer has to recognise.
  *
  * The frame is explicit (`ROWS UNBOUNDED PRECEDING … CURRENT ROW`) rather than left to SQLite's
  * default: over a total order the default `RANGE` form agrees, but the emission order is only total
@@ -1441,11 +1434,9 @@ function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean, ctx: 
   // it may carry what the relation carries — and an ALIAS binding belongs to ONE of the merged rows.
   // Keeping it in the key would distinguish two traversers reaching the same element by the label they
   // bound on the way, which is a different multiset; taking an arbitrary one is the `undefined` the
-  // table names. Legacy refuses the same shape for the same reason (`dedup() after as() not yet
-  // supported (path-distinct semantics)`), so declining keeps the two spines agreeing rather than
-  // giving RelIR a capability the differential would then be red against. The honest lowering is a
-  // ranked window over the identity partition (`dedupBy`'s shape with the id as its key), which is a
-  // separate increment landing in BOTH spines.
+  // table names. So this declines rather than taking an arbitrary alias into the key (path-distinct
+  // semantics) — a clean deferral, not a wrong answer. The honest lowering is a ranked window over
+  // the identity partition (`dedupBy`'s shape with the id as its key), which is a separate increment.
   if (!groupableChannels(input.channels)) return null;
 
   const ordered = !!encounterOf(input.channels);
@@ -1482,7 +1473,7 @@ function rowOp(step: IRStep, input: Rel, shape: RowShape, bulked: boolean, ctx: 
   // stream to ONE traverser, so the list relation has no multiplicity to carry and the unfolded members
   // arrive with an emission order and no `bulk`. The declared type then said two columns while the node
   // emitted three, which the factory catches — a THROW out of a lowering whose contract is `null`, i.e.
-  // RelIR failing where legacy answers, which is the one failure the routing switch cannot absorb.
+  // a compile error where the traversal must answer.
   //
   // `groupableChannels` above has already refused every role without a defined N→1 answer, so the two
   // arms below are total over what can reach here; anything else declines rather than being averaged
@@ -1529,7 +1520,7 @@ function dedupBy(
  * A DEDUP ON AN ARBITRARY KEY — `Window` + `Filter`, not a grouped aggregate, and the difference is the
  * reason: the survivor is ONE traverser and every other column must be ITS values — an `Aggregate` can
  * produce `MIN(id)` but not "the encounter belonging to the row that had it". That is what a ranked
- * window says and an aggregate cannot, so this is the shape legacy emits too.
+ * window says and an aggregate cannot, so this is the shape emitted.
  *
  * It serves both callers a `by()` and a shape whose IDENTITY is not its payload can have (`rowOp`), and
  * that is not a convenience: the two differ only in which expressions partition, so a second copy would
@@ -1537,23 +1528,23 @@ function dedupBy(
  *
  * WHICH traverser survives is the EMISSION-ORDER question, not an id question. TinkerPop keeps the
  * FIRST occurrence, so the rank orders by the carried position where there is one and falls back to the
- * shape's own tie-break where there is not — which is the only order a positionless relation has, and
- * the one legacy uses there too (`ORDER BY <orderSql>, p.id`). Ranking by id alone was right only while
+ * shape's own tie-break where there is not — which is the only order a positionless relation has
+ * (`ORDER BY <orderSql>, p.id`). Ranking by id alone was right only while
  * nothing could mint a position: `g.V().order().by('name',desc).dedup().by('age')` then kept the
  * lowest-id member of each age instead of the first in the sorted stream — the same rows, a different
  * member, which the census's multiset digest DID see (it is a different set) but no assertion in the
  * ladder named. The tie-break is always the LAST term, so the rank is DETERMINISTIC rather than merely
  * ordered — the property `mise run test:perturbed` checks.
  *
- * **`bulk` RESETS to 1, which is the reference's rule and NOT the spelling legacy uses.** TinkerPop's
- * `DedupGlobalStep.filter` calls `traverser.setBulk(1L)` unconditionally — before it even looks at the
- * `by()` — so a survivor stands for itself whether or not a projection was given
- * (`vendor/tinkerpop/gremlin-core/.../DedupGlobalStep.java:75`). Legacy carries `p.bulk` through
- * instead, and the two are NOT observably different: `analyzeChain`'s collapse-safety rule excludes a
- * `dedup` that has modulators, so `movementCollapse` never fires upstream of one and the multiplicity
- * is provably 1 where it arrives. Checked, not assumed — `g.V().both().both().dedup().by('lang')`
- * emits no `GROUP BY` on either spine. So this is not a divergence to reconcile; it is the form that
- * stays correct if that safety rule is ever relaxed, at no cost today.
+ * **`bulk` RESETS to 1 — the reference's rule.** TinkerPop's `DedupGlobalStep.filter` calls
+ * `traverser.setBulk(1L)` unconditionally — before it even looks at the `by()` — so a survivor stands
+ * for itself whether or not a projection was given
+ * (`vendor/tinkerpop/gremlin-core/.../DedupGlobalStep.java:75`). Carrying `p.bulk` through instead
+ * would not be observably different: `analyzeChain`'s collapse-safety rule excludes a `dedup` that has
+ * modulators, so `movementCollapse` never fires upstream of one and the multiplicity is provably 1
+ * where it arrives. Checked, not assumed — `g.V().both().both().dedup().by('lang')` emits no
+ * `GROUP BY`. So resetting is the form that stays correct if that safety rule is ever relaxed, at no
+ * cost today.
  */
 function dedupOn(
   keys: readonly Expr[], domain: Rel, shape: RowShape, fresh: Minter,
@@ -1602,11 +1593,10 @@ const remintOrder = (rel: Rel, encounter: Channel, fresh: Minter): Rel => renumb
  *
  * It is the `movementCollapse` fast path, expressed IN the algebra rather than beside it — which
  * is legitimate where the FTS one was not, and the difference is worth stating. Routing a substring
- * predicate through a base-table scan would have LOST an index seek the legacy spine performs;
- * here the specialized form is a plan rewrite RelIR can state exactly, so expressing it keeps the
- * optimization AND keeps the switch meaningful: `fastPaths.movementCollapse` still selects between
- * two forms, so L5's differential still has two positions to compare on a RelIR-routed traversal.
- * Reading the flag here does NOT make spine choice depend on it — coverage is unchanged either way.
+ * predicate through a base-table scan would have LOST an index seek; here the specialized form is a
+ * plan rewrite RelIR can state exactly, so expressing it keeps the optimization AND keeps the switch
+ * meaningful: `fastPaths.movementCollapse` still selects between two forms. Reading the flag here does
+ * NOT change whether the traversal compiles — only the plan — so coverage is unchanged either way.
  *
  * `isReEncoding` (src/rel/obligations.ts) is what lets the result keep carrying `bulk`: this is a
  * re-encoding of the same traverser multiset, not a barrier.
@@ -1631,8 +1621,8 @@ const coalesce = (rel: Rel, fresh: Minter): Rel =>
  *
  * With a `bulk` channel it is `SUM(bulk)` — a collapse merged convergent walks into (row, N) pairs,
  * so counting rows would count the collapse away. Without one (an `inject()` source has no
- * multiplicity: each row is one traverser by construction) it is `COUNT(*)`, which is what legacy
- * emits there. Reading the CHANNEL rather than the step name is what keeps the two in step.
+ * multiplicity: each row is one traverser by construction) it is `COUNT(*)`. Reading the CHANNEL
+ * rather than the step name is what keeps the two forms in step.
  */
 function countExpr(input: Rel): Expr {
   const bulk = input.channels.find((channel) => channel.role === 'bulk');
@@ -1693,7 +1683,7 @@ function terminal(
   //
   // The TOKEN forms arrive as a `true` argument, because `absorbValueMapWith` (a Pass) has already
   // desugared `with(WithOptions.tokens)` and `with(tokens, all)` onto the step — one recognizer for
-  // both spellings, above both spines. A SELECTIVE subset (`with(tokens, ids)`) is deliberately left
+  // both spellings, in a Pass ahead of the lowering. A SELECTIVE subset (`with(tokens, ids)`) is deliberately left
   // in place by that pass and therefore reaches this fold as a `with` step nothing lowers, so it
   // declines rather than being silently widened to all-tokens.
   //
@@ -1735,8 +1725,8 @@ function terminal(
         type: typeOf(meta('v', 'any', true), ...carriedCols(input.channels)),
         exprs: [['v', literal ?? tail!.expr], ...input.channels.map((channel) => [channel.col, col(input.id, channel.col)] as const)],
       }),
-      // UNKNOWN for an untyped constant, not a tag inferred from the JS value: that is what legacy frames
-      // here, and a compile-time tag would be a claim the argument's declared type does not support. An
+      // UNKNOWN for an untyped constant, not a tag inferred from the JS value: a compile-time tag would
+      // be a claim the argument's declared type does not support. An
       // EXACT TAIL is the exception — its declared type IS known, so it frames STATIC(type, text) so a
       // following ordering compare can cast it (C1).
       framing: { kind: 'scalar', type: tail ? STATIC(tail.tag as never, true) : UNKNOWN },
@@ -1762,18 +1752,15 @@ function terminal(
   // it.** `byExpr`'s token arm is the authority — `COALESCE(uid, id)` for the external id, one
   // indirection into `labels` for an edge and the side table's first-interned name for a vertex —
   // and it is what `by(T.label)`, `group().by(label)` and a `label()` child body have always used.
-  // Reaching it from here is the whole change, which is `steps/CLAUDE.md`'s "cannot be HANDED" versus
-  // "cannot EXPRESS" applied to a step rather than to a substrate.
+  // Reaching it from here is the whole change — the "cannot be HANDED" versus "cannot EXPRESS"
+  // distinction applied to a step rather than to a substrate.
   //
   // A LABEL is always a string, so a STATIC tag is honest here.
   //
-  // `id()` RIDES THE SAME ARM, and what used to hold it back was a comparison that no longer has a
-  // second side. `g.E().id()` answers `[7,9,11,12,8,10]` here against legacy's `[7,8,9,10,11,12]` — the
-  // same multiset in a different order, with nothing pinning either (no `order()`, no slice), so
-  // neither was wrong and the census counts `ord` as telemetry. It was deferred while a differential
-  // existed, because an unexplained order change on an order-bearing surface is how a fragile answer
-  // gets banked as a baseline. With one spine the question is simply whether the order is DETERMINISTIC,
-  // which `test:perturbed` is the instrument for.
+  // `id()` RIDES THE SAME ARM. Its order is unpinned — `g.E().id()` can answer `[7,9,11,12,8,10]` or
+  // `[7,8,9,10,11,12]`, the same multiset in a different order, with nothing pinning either (no
+  // `order()`, no slice), so neither is wrong and the census counts `ord` as telemetry. The question
+  // is simply whether the order is DETERMINISTIC, which `test:perturbed` is the instrument for.
   //
   // A LABEL is always a string, so a STATIC tag is honest; an id is whatever it was STORED as (a `uid`
   // string or a rowid int), so it carries no tag and the framer infers per value.
@@ -1901,11 +1888,10 @@ function terminal(
  * its multiplicity — which is what makes a following `is(3)`, `count()` or `project()` the ordinary
  * scalar tail with nothing to know about services.
  *
- * A `stream` service DECLINES here (the ordinary "not learned yet" `null`, so legacy answers it and
- * services migrate one at a time), and so does an unregistered name — legacy owns `unknown service`.
- * A service's OWN throw is not caught, for the source arm's reason (§6·5): a `streaming` service
- * called at a position it cannot serve raises a message the user must see, and swallowing it would
- * hand the traversal to a spine that now refuses the service and reports something else entirely.
+ * A `stream` service DECLINES here (the ordinary "not learned yet" `null`), and so does an
+ * unregistered name (`unknown service`). A service's OWN throw is not caught, for the source arm's
+ * reason (§6·5): a `streaming` service called at a position it cannot serve raises a message the user
+ * must see, and swallowing it would replace that message with something else entirely.
  */
 function midCall(
   step: IRStep, input: Rel, elem: Elem, fresh: Minter, ctx: ChainCtx, aliases: AliasMap,
@@ -1994,10 +1980,10 @@ const BY_READERS = BY_HOSTS;
  * An `order()`'s sort terms over any host, or `null` to decline.
  *
  * Scalar `order()` IS a relation operator, and that is what separates it from the element one: over
- * values legacy emits `SELECT p.v FROM c0 p ORDER BY p.v ASC` — a `Sort` in the algebra, exactly —
- * whereas over elements it folds the order into the FRAMING projection, which is `TailAcc`'s and
- * Phase 4.2's. Same step name, two different layers, and only one of them is here today; the host
- * parameter is what will let the other one in without a second parse.
+ * values it is a `Sort` in the algebra (`SELECT p.v FROM c0 p ORDER BY p.v ASC`), whereas over
+ * elements it folds the order into the FRAMING projection, which is `TailAcc`'s and Phase 4.2's.
+ * Same step name, two different layers, and only one of them is here today; the host parameter is
+ * what will let the other one in without a second parse.
  *
  * `by()` is READ, not declined, and the whole of it lives in `modulator.ts`: which value to sort on
  * and which direction, with the ordering flag asking for the vtype-aware compare key — the same
@@ -2017,7 +2003,7 @@ function sortTerms(
   if (!bys) return null;
   const parsed: readonly Modulation[] = bys.length ? bys : [{ key: { kind: 'identity' } }];
   // `shuffle` has no subject at all — `RANDOM()` re-evaluates per row and that IS the semantics — so it
-  // is the whole order or none of it. Mixed with a real key it is a form legacy refuses too, and a
+  // is the whole order or none of it. Mixed with a real key it declines, and a
   // lowering that dropped the shuffle would silently answer a deterministic order.
   if (parsed.some((modulation) => modulation.order === 'shuffle'))
     return parsed.length === 1 ? { terms: [{ expr: { kind: 'call', fn: 'RANDOM', args: [] }, dir: 'asc' }] } : null;
@@ -2027,8 +2013,7 @@ function sortTerms(
   // `by('age')` yielded nothing is DROPPED, so `g.V().order().by('age')` is four rows on the modern
   // graph and not six. A forgotten drop is a wrong answer with the right arity, and it sorts the
   // extra rows FIRST (SQLite orders NULL low), which the census's multiset digest cannot see. With
-  // several terms each KEY term owes one, conjoined — the same thing legacy's `orderProductivityFilter`
-  // does over its whole clause list.
+  // several terms each KEY term owes one, conjoined over its whole clause list.
   const drops: Expr[] = [];
   for (const modulation of parsed) {
     const key = byExpr(modulation, host, fresh, true, childSeam(ctx, fresh));
@@ -2055,8 +2040,8 @@ function sortTerms(
  * a relation boundary, and minting it is also what makes `order()` COMPOSE (a fold into the framing
  * `ORDER BY` can only happen once, at the end).
  *
- * Re-minting tie-breaks on the ARRIVING position, which is what makes the sort STABLE (legacy's
- * `partitionedOrder` says the same). Minting fresh has nothing to be stable against, so `tie` is the
+ * Re-minting tie-breaks on the ARRIVING position, which is what makes the sort STABLE. Minting fresh
+ * has nothing to be stable against, so `tie` is the
  * payload's own deterministic last resort — the element rowid, the property rowid — and `undefined`
  * where equal keys are genuinely interchangeable (a value stream). Determinism, not mere ordering, is
  * the property `mise run test:perturbed` exists to check.
@@ -2162,11 +2147,11 @@ function scalarTail(
   // compute them (§5) — SQL has no other option, since neither a `WHERE` nor an `ORDER BY` can name
   // a select alias. So each one re-inlines the whole projection, and with the vtype-aware ordering
   // CASE in play that is ~20 binds apiece: measured 25 / 45 / 65 for one, two and three range
-  // predicates against legacy's 2 / 3 / 4, and 24 against legacy's 1 for a single `order()` (whose
-  // key inlines the value expression three times over — once per arm of the compare CASE). A fourth
-  // predicate would exceed the DO cap and fail closed where legacy answers — a support regression,
-  // not a wall worth shipping. `Materialize` is the declared remedy (§3.3, "a boundary hint … where
-  // the planner needs a fence") and lands the same CTE-then-read shape legacy emits.
+  // predicates, and 24 for a single `order()` (whose key inlines the value expression three times
+  // over — once per arm of the compare CASE). A fourth predicate would exceed the DO cap and fail
+  // closed on a traversal that must answer — a support regression, not a wall worth shipping.
+  // `Materialize` is the declared remedy (§3.3, "a boundary hint … where the planner needs a fence")
+  // and lands a CTE-then-read shape.
   //
   // Only the FIRST tail step needs the hint, and that is structural rather than lucky: a reader
   // further along sits over a node the assembler already refuses to fuse into — a `Limit`, a
@@ -2327,20 +2312,20 @@ function scalarTail(
     if (sliced) { rel = sliced; continue; }
 
     // THE SCALAR TRANSFORM FAMILY — one `Project` per transform, and the assembler fuses a run of them
-    // into one SELECT (`upper(lower(p.v))`), which is what legacy's `fuseScalarSegment` hand-rolls.
+    // into one SELECT (`upper(lower(p.v))`).
     // Membership is checked BEFORE the lowering is asked for, so an unlowerable member of the family
     // (`reverse`, `asBool`) DECLINES rather than falling through to be misread by a later arm.
     if (REL_TRANSFORMS.has(step.name)) {
       // `seed.kind === 'values'` IS "the value is a compile-time literal": an `inject()` source is the
-      // only one, and it is the population legacy constant-folds. Read off the SEED rather than the
+      // only one, and it is the population that gets constant-folded. Read off the SEED rather than the
       // current relation, because a preceding transform does not stop a value being literal-derived.
       const tx = transformExpr(step, col(rel.id, 'v'), seed.kind === 'values', fresh);
       if (!tx) return null;
       // EVERY transform drops the per-row `vtype` column, not only the casts: `toUpper()` leaves a
       // value the stored row no longer describes and `length()` turns it into an integer outright, so
       // carrying the column would reframe the RESULT as the INPUT's type. The framing type becomes
-      // whatever the transform knows, or `UNKNOWN` — which infers per value and is what legacy frames
-      // here. Dropping it also removes the vtype from `subjectType()`, so a following `is(P.gt(…))`
+      // whatever the transform knows, or `UNKNOWN` — which infers per value.
+      // Dropping it also removes the vtype from `subjectType()`, so a following `is(P.gt(…))`
       // stops asking for an ordering key the value no longer has one for, which is correct: the
       // transformed value is a native SQLite value and compares directly.
       const carried = rel.channels;
@@ -2377,15 +2362,15 @@ function scalarTail(
       // `is(typeOf(GType.LIST|SET|MAP))` is a TYPE ASSERT, not a predicate: over a scalar stream
       // carrying a stored collection it RETYPES the stream to a list or a map, so lowering it as a
       // filter would return the right rows framed as the wrong shape — a different question, which is
-      // the one thing this module may never answer. `collectionAssert` is the derived view of legacy's
+      // the one thing this module may never answer. `collectionAssert` is the derived view of the
       // ONE `typeOfAssert` decode (`child-shape.ts`), reused rather than re-recognized: five arms had
       // already drifted apart decoding this inline, and a sixth copy here would be the same mistake.
       // A TYPE ASSERT is not a predicate: `is(typeOf(LIST|SET))` RETYPES the stream to a collection, so
       // lowering it as a filter would return the right ROWS framed as the wrong SHAPE — the one thing
-      // this module may never do. `collectionAssert` is the derived view of legacy's ONE `typeOfAssert`
+      // this module may never do. `collectionAssert` is the derived view of the ONE `typeOfAssert`
       // decode, reused rather than re-recognized. A MAP retype needs the map shape, which this route
       // does not have; a stream with no per-row stored type has no stored collection at all, and
-      // legacy's generic `is()` static-folds that case.
+      // a generic `is()` static-folds that case.
       const asserted = collectionAssert(step);
       if (asserted) {
         if (asserted === 'map' || !carries('vtype')) return null;
@@ -2453,14 +2438,14 @@ function scalarTail(
       //    collapse upstream makes bulk anything but 1 — invisible on a fixture where it never is.
       //  - the survivor STANDS FOR ITSELF, not for the sum of the duplicates it replaced, so the
       //    multiplicity is dropped rather than carried: a following `count()` then reads
-      //    `COUNT(*)`, which is what legacy emits and what the traversers actually number.
+      //    `COUNT(*)`, which is what the traversers actually number.
       //
-      // The emission order goes with it for the same reason — a survivor has no one position — and
-      // that matches legacy, whose scalar dedup projects the payload alone.
+      // The emission order goes with it for the same reason — a survivor has no one position — so
+      // the scalar dedup projects the payload alone.
       //
       // A `by()` here is IDENTITY or nothing, and that is not a gap: over a value stream the only
       // projection available IS the value, so `dedup().by()` and bare `dedup()` are the same question
-      // (legacy emits the identical `SELECT DISTINCT p.v` for both). `by(key)`/`by(token)` decline
+      // (the identical `SELECT DISTINCT p.v` for both). `by(key)`/`by(token)` decline
       // through the vocabulary, which is where the "a value has no properties" rule lives.
       if (args.length || isLocalScope(step)) return null;
       const deduped = modulations(step, 1, childSeam(ctx, fresh));
@@ -2507,8 +2492,8 @@ function scalarTail(
         // source's static tag), which the `result:'number'` framer reads through `vtypeToValueType`
         // so a text-carried long frames as a `long` — the vocabulary `values()` frames on. Only the
         // UNKNOWN case (a heterogeneous stream, no vtype) falls back to `typeof`, whose storage-class
-        // value the framer routes to `sumBuffer`; there neither spine can raise the reference's
-        // cross-type error, so this matches legacy — the documented divergence (§6·7n).
+        // value the framer routes to `sumBuffer`; there the reference's cross-type error cannot be
+        // raised, so this is the documented divergence (§6·7n).
         const staticVt = out.kind === 'scalar' ? staticTypeOf(out.type) : undefined;
         const vtypeExpr = carries('vtype') ? col(rel.id, 'vtype')
           : staticVt ? compilerText(staticVt) : undefined;
@@ -2685,8 +2670,8 @@ function scalarTail(
  *
  * Two forms decline, each for a reason rather than a blanket. A COLLECTION argument
  * (`inject([1,2])`) is a LIST traverser, a different framing arm and a JSONB payload rather than a
- * scalar column. `inject()` with no arguments is the EMPTY relation, which legacy spells
- * `SELECT NULL AS v WHERE 0` and `Values` cannot express at all — §3.3 records why it refuses to
+ * scalar column. `inject()` with no arguments is the EMPTY relation (`SELECT NULL AS v WHERE 0`),
+ * which `Values` cannot express at all — §3.3 records why it refuses to
  * (`Values([])` rendered as invalid SQL that only failed at the database), and the algebra's answer
  * is a `Filter(false)` over something, which there is nothing here to be over.
  */
@@ -2709,22 +2694,22 @@ function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter)
   const args = argValues(step);
   if (!args.length) return null;
   // A COLLECTION argument here means a MIXED inject (`inject([1,2], 3)`): a list traverser and a
-  // scalar traverser in one stream, which is the VARIANT shape rather than either of them. Legacy
-  // FLATTENS it — its own comment calls that the historical representation, held until a scalar
-  // stream gains a per-row shape discriminant — and reproducing an approximation is not the same as
-  // reproducing an answer, so this declines instead.
+  // scalar traverser in one stream, which is the VARIANT shape rather than either of them. Flattening
+  // it — the historical representation, held until a scalar stream gains a per-row shape discriminant —
+  // is an approximation, and reproducing an approximation is not the same as reproducing an answer, so
+  // this declines instead.
   if (args.some((arg) => Array.isArray(arg))) return null;
 
-  // THE LEADING COERCION PREFIX IS FOLDED AT COMPILE TIME, on both spines and by the same function.
+  // THE LEADING COERCION PREFIX IS FOLDED AT COMPILE TIME.
   // `asNumber`/`asBool`/`asDate` raise TinkerPop's exact parse and overflow messages, which SQL
-  // cannot raise at all — that is why legacy folds them over a literal rather than emitting a CAST,
+  // cannot raise at all — that is why the fold happens over a literal rather than emitting a CAST,
   // and it is why a `CAST` here would answer `1` for `'1,000'` and epoch 0 for an invalid date (§11:
   // a required error became a plausible value). So the fold is REUSED, not re-expressed: it mutates
   // the value array in place and hands back the first ordinary step plus the framing tag it
   // established.
   //
   // ⚠️ **A PARSE FAILURE PROPAGATES — it is the ANSWER, not a decline** (§6·5's permanent `null`). The
-  // throw used to be caught here because the other spine owned the message; with one spine, swallowing
+  // throw used to be caught here because another route owned the message; with one spine, swallowing
   // it would turn *"Can't parse string '1,000' as number."* into a generic "not supported", which is a
   // required error becoming the wrong error. The module's `null` contract still means "not learned
   // yet"; this is not that.
@@ -2740,9 +2725,9 @@ function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter)
   const rowType = (i: number): TypeNode | null =>
     (folded.as as TypeNode | undefined) ?? (folded.at === 1 ? (step.args[i]?.type ?? null) : null);
   // THE TYPE CHANNEL (§6·7). A coercion fold retypes the whole stream, so its `as` wins outright.
-  // Absent one, each argument's DECLARED type is read on its own — `injectValueTypes`, the same
-  // authority legacy reads through its uniform view, so neither spine re-derives what a `char`, a
-  // `uuid`, a `datetime` or a long past 2^53 frames as.
+  // Absent one, each argument's DECLARED type is read on its own — `injectValueTypes`, the one
+  // authority, so what a `char`, a `uuid`, a `datetime` or a long past 2^53 frames as is not
+  // re-derived.
   //
   // Where the declared tags AGREE the stream is STATIC and costs no column, which is the common
   // case and why `static` survives as the degenerate arm. Where they DISAGREE the type rides PER
@@ -2816,8 +2801,8 @@ function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter)
  * begin here (the other 27 begin at a `fold()`), and both halves frame identically, which is why one
  * arm serves both.
  *
- * `jsonb_array(…)` is the member encoding, and it is BARE — legacy's `jsonbArrayOf` spells it
- * `jsonb(json_array(…))`, the same value. The members are query-text-bounded literals, so a bind
+ * `jsonb_array(…)` is the member encoding, and it is BARE — `jsonb(json_array(…))` spells the same
+ * value the long way. The members are query-text-bounded literals, so a bind
  * each is right here and a JSON bind is not (the root rule is about sets sized by DATA); an
  * over-budget list declines at the rendered-bind gate like anything else.
  *
@@ -2884,7 +2869,7 @@ function injectMap(step: IRStep, ordered: boolean, fresh: Minter): { rel: Rel; f
  * frame), retype to a scalar (`conjoin`, a local reducer, `count(Scope.local)`), or `unfold` into one
  * traverser per member, which hands the rest of the chain to the SCALAR tail. A global row op —
  * `limit(2)` with no `Scope.local` — slices the stream's ROWS and is the ordinary `sliceOp`, which is
- * the distinction legacy draws by composing the shared row op in front of the local one.
+ * the distinction drawn by composing the shared row op in front of the local one.
  */
 function listTail(
   seed: Rel, of: ListOf, steps: readonly IRStep[], from: number, ctx: ChainCtx, fresh: Minter,
@@ -3024,7 +3009,7 @@ function listTail(
  *
  * - **`is(typeOf(GType.PATH))` is IDENTITY** — a path IS a Path. Any other `typeOf` matches nothing, which is
  *   the empty relation, and §3.3 records the honest spelling of that as a `Filter(false)` (`Values` refuses
- *   to express empty). A real predicate declines: legacy owns the message.
+ *   to express empty). A real predicate declines.
  * - **`count()` counts PATHS**, not positions — the same `countTail` an element relation uses, shared rather
  *   than re-derived so the two cannot disagree about whether the answer is `SUM(bulk)` or `COUNT(*)`.
  * - **the slices** read the emission order the path carried through, exactly as anywhere else.
@@ -3067,8 +3052,8 @@ function pathTail(
 
     // The relation is ALREADY a list relation, so the retype is the framing arm and nothing else — but only
     // where every position is a projected SCALAR. An element position would decode through a member op into
-    // the scalar stream, which has no element arm, and legacy fails closed on exactly this boundary
-    // (`linearScalarList`). See `scalars` on `pathPositions`.
+    // the scalar stream, which has no element arm, so this fails closed on exactly that boundary.
+    // See `scalars` on `pathPositions`.
     if (PATH_LIST_OPS.has(step.name)) return scalars ? listTail(rel, of, steps, at, ctx, fresh, labels) : null;
     return null;
   }
@@ -3084,7 +3069,7 @@ function pathTail(
  * that hands the relation to whichever loop owns the shape it produced.
  *
  * - **`is(typeOf(GType.MAP))` is IDENTITY** — a map IS a Map. Any other `GType` matches nothing, which
- *   is the empty relation (§3.3's `Filter(false)`); a real predicate declines and legacy owns the message.
+ *   is the empty relation (§3.3's `Filter(false)`); a real predicate declines.
  * - **`count()` counts MAPS and `count(Scope.local)` counts ENTRIES** — the same global/local split the
  *   list vocabulary makes, sharing `countTail` so the two cannot disagree about `SUM(bulk)`.
  * - **`select(Column.keys | Column.values)`** collects one side into a list — a SET for the keys, per
@@ -3305,7 +3290,7 @@ export interface Lowering {
    * property is real; the conclusion was wrong by one step. The cardinality is request-scope DI
    * (`src/scopes.ts`), so it is settled BEFORE a compile starts — what was actually missing is that
    * this seam had not been handed it. Threading it is what makes the answer compile-time, and the
-   * label COUNT rule (`min`/`max`) then declines exactly the chains legacy raises a message for.
+   * label COUNT rule (`min`/`max`) then declines exactly the chains the reference raises a message for.
    *
    * Defaults to `ONE`, which is `createAppScope`'s own default, so an instrument or a test that
    * lowers without an engine measures the default graph rather than a regime nothing runs.
@@ -3333,8 +3318,7 @@ export interface Lowering {
    * `withSideEffect(k, v)` with a literal value is a COMPILE-TIME constant: the front-end
    * (`extractSideEffects`) reads it off the parse tree, and a later `__.select(k)` in a write's key,
    * value or merge map resolves to it with no read at all. The shared write parse
-   * (`parseProperty`/`mergeMaps`) has always taken it; this route was passing `undefined` and
-   * `compiler.ts` did not even OFFER the RelIR spine to a traversal that declared one, so the
+   * (`parseProperty`/`mergeMaps`) has always taken it; this route was passing `undefined`, so the
    * whole `mergeV(__.select(c))` family read as an uncovered gap (§6·6).
    *
    * Defaults to EMPTY, which is what a lowering with no source options has.
@@ -3370,7 +3354,7 @@ export interface Lowering {
 /**
  * The options with every default APPLIED — one authority, because two consumers now need the same
  * answer: the fold reads all four, and the wire projection reads `collapse` (a collapsed leaf carries its
- * multiplicity out as a `bulk` COLUMN, which is exactly legacy's `movementCollapse` gate). A second
+ * multiplicity out as a `bulk` COLUMN, which is exactly the `movementCollapse` gate). A second
  * `?? true` beside this one would be a second default, i.e. the kind of thing that agrees until it does not.
  */
 const settle = (opts: Lowering): Required<Lowering> => ({
@@ -3406,24 +3390,23 @@ const NO_SERVICES: ReadonlyMap<string, Service> = new Map();
  *
  * §3.6 makes the DO 100-parameter cap a property of the plan that fails closed rather than SQL that
  * only fails in production — and `check` enforces it by THROWING, which is right inside the algebra
- * and wrong at this seam: a traversal legacy answers must not become a compile error because the new
- * route spells its predicate more expensively (§11 — RelIR throwing where legacy answers is the one
- * failure mode the routing switch cannot absorb). So the budget is asked HERE, before the plan is
- * handed over, and an over-budget plan is a decline like any unlearned step.
+ * and wrong at this seam: a traversal that can be answered must not become a compile error because
+ * the route spells its predicate more expensively (§11 — the lowering throwing where a traversal must
+ * answer is the failure mode a fail-closed compiler must avoid). So the budget is asked HERE, before
+ * the plan is handed over, and an over-budget plan is a decline like any unlearned step.
  *
- * It bites at a knowable place: RelIR renders the vtype-aware compare key's class lists as binds
- * where legacy inlines them as literals, so one element `order().by(key)` is ~27 binds against
- * legacy's 2 — three in one chain would exceed the cap. Making that a decline is what keeps the wall
- * out of production; making the key cheaper is a separate increment.
+ * It bites at a knowable place: RelIR renders the vtype-aware compare key's class lists as binds, so
+ * one element `order().by(key)` is ~27 binds — three in one chain would exceed the cap. Making that a
+ * decline is what keeps the wall out of production; making the key cheaper is a separate increment.
  *
  * **The number asked must be the number the WALL measures — so there is no pre-count, only the
  * render.** Any cheap estimate diverges from what the assembler actually spells: it can count a `Lit`
  * the block fuses in twice as one (UNDER), or sum a parameter shared across CTEs once per binding
  * where the render dedups it to a single reused `?N` (OVER). Measured over every corpus prefix: 50
  * divergences, the widest 42 rendered against 31 counted. An under-estimate would admit a plan that
- * renders past 100 and refuse only at emission — past the point this seam could still choose the other
- * route; an over-estimate would decline a valid plan to legacy, which does not dedup and renders it
- * FATTER. So RENDER once and ask the real list. The render costs ~30µs against a compile and is the
+ * renders past 100 and refuse only at emission — after the point this seam could still decline
+ * cleanly; an over-estimate would wrongly decline a valid plan. So RENDER once and ask the real list.
+ * The render costs ~30µs against a compile and is the
  * only count worth checking.
  *
  * It goes through `emitRelational` + the kernel's own `render` rather than `emitQuery` (which refuses
@@ -3437,7 +3420,7 @@ const NO_SERVICES: ReadonlyMap<string, Service> = new Map();
  * THE PAYLOAD PROJECTION, APPLIED — the fold's last act, and the §6·3 boundary in one function.
  *
  * A `RelFraming` arm that this route projects for itself becomes a `wire` result whose relation IS the
- * rows `execute.ts` frames; an arm still built by legacy's materializer passes through as `stream`. It runs
+ * rows `execute.ts` frames; an arm still built by the materializer passes through as `stream`. It runs
  * HERE, between the fold and `name`, and both halves of that placement matter: after the fold, because the
  * projection drops every carried channel and no later step could read one; before `name` and the budget,
  * because the projection's own correlated subplans are part of the plan whose CTEs are chosen and whose
@@ -3475,8 +3458,8 @@ const framed = (chain: Tail, fresh: Minter): { readonly rel: Rel; readonly shape
   // THE FAIL-CLOSED BACKSTOP, and it should never fire. `bulkObservedFrom` refuses a collapse in front
   // of a chain that retypes away from `elements`, and `inBody` refuses one inside a body whose enclosing
   // framing it cannot see — so a multiplicity arriving at an arm that has no column to put it in means
-  // one of those two answered wrongly. Declining hands the traversal to the spine that still answers it;
-  // projecting anyway would silently drop N−1 traversers per row, which is the one failure class no
+  // one of those two answered wrongly. Declining is the safe response; projecting anyway would silently
+  // drop N−1 traversers per row, which is the one failure class no
   // instrument here catches (a plausible row set, short). This is the guard that makes the completeness
   // of `inBody`'s call sites a tractability question rather than a correctness one.
   if (carriesMultiplicity(chain) && framing.kind !== 'elements' && framing.kind !== 'discard') return null;
@@ -3516,13 +3499,13 @@ const framed = (chain: Tail, fresh: Minter): { readonly rel: Rel; readonly shape
  *
  * The smallest arm, and the only one whose builder lives here rather than beside its vocabulary, because
  * the scalar vocabulary IS this module (`scalarTail`). What varies is the SECOND column and which `Shape`
- * reads it, and `result` is the total answer — the same three-way legacy's `materializeScalarRoot` takes:
+ * reads it, and `result` is the total answer — a three-way split:
  *
  * - a NUMERIC REDUCER (`result: 'number'`) carries `vt`, the aggregate's own `typeof(…)`. Its storage class
  *   is DYNAMIC — a sum of integers is an integer, of reals a real — so there is no compile-time tag to
  *   give and the framing arm is `{kind: 'scalar'}`, which is the one that reads that column.
  * - a PER-ROW type names a stored `vtype` column so the framer frames each row by its own type rather
- *   than by one tag for the whole result. `perRowColumnOf` is the authority, shared with legacy.
+ *   than by one tag for the whole result. `perRowColumnOf` is the authority.
  * - anything else is one value and one static-or-unknown tag, so `v` alone.
  *
  * `productiveNull` is CARRIED, and where it comes from is the point: it is the `ProductiveByStrategy`
@@ -3552,8 +3535,8 @@ const scalarPayload = (
 const lowered = (chain: Tail, propertySeek: boolean, ftsSubstringPredicate: boolean, fresh: Minter): RelLowering | null => {
   const wire = framed(chain, fresh);
   // A shape whose payload projection is not built yet is COVERAGE WE DO NOT HAVE, so it declines exactly as
-  // an unlearned step does. It must not throw: legacy answers these, and `rel-sweep` is the gate that
-  // proves this seam never raises where the other spine has an answer.
+  // an unlearned step does. It must not throw: declining is the clean deferral, and `rel-sweep` is the
+  // gate that proves this seam never raises where it should decline.
   if (!wire) return null;
   // PHYSICAL PASSES RUN BEFORE NAMING, because naming decides CTE boundaries from the DAG's sharing
   // and a rewrite that changes the DAG after that decision would be naming a plan that no longer
@@ -3589,8 +3572,8 @@ const lowered = (chain: Tail, propertySeek: boolean, ftsSubstringPredicate: bool
   // A read is ONE statement, so the number the DO measures is exactly its rendered bind list — ask
   // that, nothing coarser. A pre-count summed per binding could only DECLINE a valid plan on an
   // over-estimate: a parameter shared across CTEs is one bind after dedup but was summed once per
-  // binding, and declining a repeated-parameter plan hands it to legacy — which does NOT dedup and
-  // renders it FATTER, failing on the DO the very plan RelIR could fit. `emitRelational` renders
+  // binding, and wrongly declining a repeated-parameter plan that RelIR could actually fit would turn
+  // a valid traversal into a failure. `emitRelational` renders
   // through `checkPlan`, whose per-binding budget guard throws `BindBudgetExceeded`; catch THAT as a
   // decline (a genuine over-budget binding is a genuine over-budget statement) exactly as the effects
   // branch does, while a real checker violation is a different class and still escapes.
@@ -3708,8 +3691,8 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   // `g.union(a, b, …)` in SOURCE position — every arm is a ROOTED chain of its own, correlated to
   // nothing, so this is NOT the chain-position `union()` with a different input. `unionArms` lowers
   // each body against the CURRENT traverser; here there is none, and each arm re-enters `lowerChain`
-  // whole. That is the same distinction legacy draws (its `sourceUnion` deliberately does not use the
-  // child-body arm triage), and it is why this is a source arm rather than a widening of that one.
+  // whole. That distinction is why `sourceUnion` deliberately does not use the child-body arm triage,
+  // and why this is a source arm rather than a widening of that one.
   //
   // What is SHARED is everything after the arms exist: `mergeArms` is parent-agnostic, which is what
   // taking a `Channels` rather than an input relation now makes explicit — a source union has no
@@ -3745,13 +3728,12 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   // `g.call(...)` AS A SOURCE. The service was resolved at the DI boundary (`servicesNamedBy`), so
   // what happens here is the part that genuinely needs the site: `resolve(site)` picks the
   // contribution for THIS call, and only a `rel` one lowers here. A `stream` service declines —
-  // the ordinary "not learned yet" null — and legacy answers it, which is what lets services
-  // migrate one at a time. A `barrier` declines too, permanently and for a different reason: its
-  // rows arrive from an awaited sibling, so there is nothing to lower at compile time at all.
+  // the ordinary "not learned yet" null. A `barrier` declines too, permanently and for a different
+  // reason: its rows arrive from an awaited sibling, so there is nothing to lower at compile time at all.
   //
   // `resolve` may THROW (a service validates its params: `tinker.search` rejects a regex or a
-  // sub-trigram term). That throw belongs to the spine that owns the message, and this module's
-  // contract is `null`, so it is caught exactly as the coercion fold's is.
+  // sub-trigram term). That throw is the user's answer, and this module's contract is `null`, so it is
+  // caught exactly as the coercion fold's is.
   if (first.name === 'call') {
     const spec = parseCallSpec(first, params);
     const service = ctx.services.get(spec.serviceName);
@@ -3763,19 +3745,17 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
     // Two facts wear a `null` in this module — "not learned yet" and "the answer is an ERROR" — and a
     // service rejecting its params is the second, permanently. `tinker.search` refuses a `regex` param
     // and a term below the trigram floor with messages the USER must see; swallowing them into a
-    // decline hands the traversal to legacy, which refuses a `rel` contribution and reports the wrong
-    // thing entirely ("this service lowers on the RelIR spine" for what is really "a term shorter than
-    // 3 characters cannot be served by the trigram index"). Legacy raised these same messages before
-    // the migration, so propagating is also what keeps the answer unchanged.
+    // decline would replace those messages with the wrong thing entirely (a generic "not supported"
+    // for what is really "a term shorter than 3 characters cannot be served by the trigram index"), so
+    // propagating them is what keeps the user's answer right.
     const contribution = service.resolve(site);
     if (contribution.kind !== 'rel') return null;
     const contributed = contribution.buildRel(site);
     if (!contributed) return null;
     // A SOURCE call contributes a RELATION. A `value` product here would be a `streaming` service
     // asked to produce rows from nothing — there is no host traverser at the head of a chain — and
-    // the service itself raises for that (it is the same "must be called mid-traversal" message
-    // legacy owns), so reaching here with one is a service ignoring its own declared type rather than
-    // a shape to interpret.
+    // the service itself raises for that (the "must be called mid-traversal" message), so reaching
+    // here with one is a service ignoring its own declared type rather than a shape to interpret.
     if (contributed.kind !== 'relation') return null;
     // Through the ONE dispatcher, so a service's shape is not a special case here. It was scalar-only
     // while `--list` was the only `rel` service; `tinker.search` contributes a PROPERTY, and a source
@@ -3824,7 +3804,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   // PHASE 1 — the source scan and the filters that fuse into its own WHERE. Kept separate from the
   // general fold below because only here is the physical row in scope: an edge's `label` is a
   // column to read rather than a membership test, and a run of filters conjoins into ONE `WHERE`
-  // over one scan instead of the legacy CTE-per-filter with its re-join.
+  // over one scan instead of a CTE-per-filter with its re-join.
   let pred = seeded.pred;
   let at = 1;
   let elem = seeded.elem;
@@ -3839,7 +3819,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   // relation the plan is driven from. Deliberately not decided here — recognising it on the ALGEBRA
   // means it cannot drift with which STEPS happen to fold into this run.
   const source = pred ? make.filter({ id: fresh('f'), input: seeded.scan, channels: [], type: seeded.scan.type, pred }) : seeded.scan;
-  // The seed of the emission order is the ROWID, exactly as the legacy source seeds it: a scan's
+  // The seed of the emission order is the ROWID: a scan's
   // natural order is the only order a bare source has, and naming it makes every later slice ask
   // the same question of the same column instead of of whatever SQLite happened to produce.
   let rel: Rel = make.project({
@@ -3865,8 +3845,8 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
  * two-way.** `terminal()` already took an element stream to a value one; `select(label)` on a label
  * holding a vertex goes the other way, and so will a mid-chain `V()`. With the loop inline there was
  * nowhere for either to land, and a step that re-roots to an element would have had to grow its own
- * movement/filter/row-op vocabulary — the second implementation `steps/CLAUDE.md` forbids. Every host
- * now re-enters ONE loop, so a step learned here is learned at every position it can occupy.
+ * movement/filter/row-op vocabulary — a second implementation of that loop, which one spine forbids.
+ * Every host now re-enters ONE loop, so a step learned here is learned at every position it can occupy.
  *
  * `bulked` — does a row stand for more than ONE traverser? Only a collapse makes that true, and a
  * slice has to know because `LIMIT n` over (element, N) rows answers a different question
@@ -3942,8 +3922,8 @@ function elementTail(
       // SQLite reached first. Naming `alias` here instead would be the widen-a-check-per-case mistake
       // `CHANNEL_GROUP_POLICY` replaced — the encounter half already reads the relation for the same
       // reason. `check` catches it either way (the obligation refuses a grouped Aggregate carrying a
-      // non-combinable role), but as a THROW where legacy answers, which is the one failure the
-      // routing switch cannot absorb: `rel-sweep` found exactly that on `V().as('a').both()`.
+      // non-combinable role), but as a THROW where the traversal must answer: `rel-sweep` found
+      // exactly that on `V().as('a').both()`.
       // THE THIRD CONDITION IS THE SUFFIX, and it is the half a channel cannot state. The two above
       // ask whether these rows may MERGE here; a collapse is also only result-equivalent while every
       // consumer BEHIND it reads the multiplicity the merge created. `bulkObservedFrom` is that
@@ -3963,9 +3943,9 @@ function elementTail(
     // list rather than passing the input's through is a chance to name a SHORTER one — and under
     // `demandsEncounter` the relation carries `bulk` AND `encounter`, so the hardcoded `BULK` dropped
     // the position its own input still declared. The factory catches it (`filter changed its carried
-    // channels`), which made a fail-closed VIOLATION rather than a wrong answer: RelIR threw where
-    // legacy answers. Found by L5 on a generated `E().limit(1).has(…).where(…)` — no corpus traversal
-    // has that prefix, so the corpus sweep could not reach it.
+    // channels`), which made a fail-closed VIOLATION rather than a wrong answer: the lowering threw
+    // where the traversal must answer. Found by L5 on a generated `E().limit(1).has(…).where(…)` — no
+    // corpus traversal has that prefix, so the corpus sweep could not reach it.
     if (clause) { rel = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause }); continue; }
     // `as()` is SHAPE-PRESERVING at every position, which is why it sits in the ordinary loop rather
     // than at a boundary: the payload passes through and only the alias channels change.
@@ -4165,7 +4145,7 @@ function elementTail(
       if (step.modulators?.length || step.optionArms) return null;
       // A sideEffect that mutates labels and passes the SAME vertices through, so the tail is the
       // ordinary fold after it. Both lowerings decline the refusal cases (edge/immutable/mixed
-      // collection) to legacy, which owns the message while its route lives.
+      // collection), which are errors rather than writes this route may make.
       const mutated = step.name === 'addLabel'
         ? elementAddLabel(rel, elem, step, ctx.sideEffects, ctx.params, fresh)
         : elementDropLabel(rel, elem, step, ctx.sideEffects, ctx.params, fresh);
@@ -4271,9 +4251,9 @@ function continueAs(
     // Nothing survives a discard, so nothing can follow one. `drop()` is a terminal step in the
     // grammar and the passes reject a chain that continues past it, so this is unreachable rather
     // than a decline — and saying so keeps the switch total.
-    // A VARIANT is TERMINAL here. Legacy answers a handful of steps over one (a `count`, a slice, an
-    // alias compare); each is expressible and none is written, so a step after a variant DECLINES
-    // rather than being silently dropped — the map arm's reasoning exactly.
+    // A VARIANT is TERMINAL here. A handful of steps over one (a `count`, a slice, an alias compare)
+    // are expressible but none is written, so a step after a variant DECLINES rather than being
+    // silently dropped — the map arm's reasoning exactly.
     case 'variant': return from === steps.length ? { rel, framing, aliases: labels, bulked: false } : null;
     case 'discard': return null;
   }
@@ -4376,8 +4356,8 @@ function propertyTail(
  * rather than declining.
  *
  * Everything else declines. A record is an ordinary per-row traverser, so filters, slices, `order()`
- * and `math()` over its fields are all expressible and simply not built yet; declining hands them to
- * the spine that answers rather than dropping the record's fields silently.
+ * and `math()` over its fields are all expressible and simply not built yet; declining is the honest
+ * answer rather than dropping the record's fields silently.
  */
 function recordTail(
   seed: Rel, fields: readonly RecordField[], steps: readonly IRStep[], from: number,
@@ -4451,8 +4431,7 @@ function recordTail(
 
     // Everything else DECLINES. A record is an ordinary per-row traverser, so `dedup()`, a local-scope
     // slice over its ENTRIES and `unfold()` to `Map.Entry` rows are all expressible and simply not
-    // built yet — declining hands them to the spine that answers rather than dropping the record's
-    // fields silently.
+    // built yet — declining is the honest answer rather than dropping the record's fields silently.
     return null;
   }
   return { rel, framing: { kind: 'record', fields }, aliases: labels, bulked: false };
@@ -4478,9 +4457,9 @@ function recordTail(
  *   and `spine.ts` has no framing translation for. Measured: 5 of the 70 branch-blocked corpus
  *   traversals demand an order, and every one of them contains other uncovered steps as well.
  * - **arms that disagree on their PAYLOAD.** A `Union` emits its arms positionally, so a scalar arm
- *   carrying a per-row `vtype` cannot merge with one that does not. Legacy NULL-pads to the widest
- *   arm; padding is a framing decision about what the absent type MEANS, so it declines here rather
- *   than being guessed at.
+ *   carrying a per-row `vtype` cannot merge with one that does not. NULL-padding to the widest arm is
+ *   a framing decision about what the absent type MEANS, so it declines here rather than being guessed
+ *   at.
  * - **an arm that BINDS a label.** Arms mint alias columns independently from the same seed, so their
  *   raw column names collide and the merge owes each arm a projection remapping onto a canonical
  *   column. That is the alias half of the merge contract and it is a further increment.
@@ -4606,7 +4585,7 @@ function meetScalarArms(arms: readonly Tail[]): ScalarType | null {
  * answer and the merge is the ordinary one. Three declines, each its own reason:
  *
  * - **fewer than two arms.** `union(t)` IS `t` — not a merge at all — and `union()` is the empty
- *   relation, which `Values` cannot express (§3.3). Both are legacy's today.
+ *   relation, which `Values` cannot express (§3.3). Both decline.
  * - **an arm with EFFECTS.** `union(__.addV(…), __.addV(…))` is plan composition (§3.0) and the
  *   arms' statements would have to be hoisted to bindings and ordered before the read that merges
  *   them. Expressible, unbuilt, and a write question rather than a branch one.
@@ -4884,7 +4863,7 @@ function chooseOptions(
   // TESTED and nothing downstream may see them: an arm body is the ordinary fold, and a `values()`
   // after one joins the property table against a relation whose declared width it computes from the
   // CHANNELS. Leaving the extra payload columns on it made that join declare six and emit nine — a
-  // factory throw, i.e. RelIR failing where legacy answers. So the gate filters on the wide relation
+  // factory throw, i.e. a compile error where the traversal must answer. So the gate filters on the wide relation
   // and projects straight back to the narrow one, and the widening never escapes this step.
   const gate = (pred: Expr): Rel => {
     const kept = make.filter({ id: fresh('og'), input: armOf, channels: armOf.channels, type: armOf.type, pred });
@@ -5056,7 +5035,7 @@ const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
               // A VARIANT arm would be a branch nested inside a branch whose inner merge already went
               // mixed. `variantMerge` flattens no nesting today — an arm's tagged rows would have to
               // be re-tagged onto the outer payload, which is expressible and unbuilt — so declining
-              // hands it to the spine that answers rather than double-tagging the rows.
+              // is the honest answer rather than double-tagging the rows.
               : left.kind === 'variant' ? false
                 // A DETACHED arm would be a branch INSIDE a resumed chain, whose rows are a landed
                 // constant relation rather than a stream this plan can re-read. Nothing produces one
@@ -5078,8 +5057,8 @@ const sameColumns = (left: readonly ColMeta[], right: readonly ColMeta[]): boole
  * is more labels on the same vertex, which is a different statement and a further increment; the fold
  * simply does not know the step and declines.
  */
-/** `addE(…)` plus the `from`/`to`/`property` cluster that belongs to it — legacy's `parseEdgeCluster`
- *  scans the same run, and the members may come in any order. */
+/** `addE(…)` plus the `from`/`to`/`property` cluster that belongs to it — the cluster is one run and
+ *  the members may come in any order. */
 function addedEdges(
   input: Rel, elem: Elem | null, steps: readonly IRStep[], at: number, aliases: AliasMap, ctx: ChainCtx, fresh: Minter,
 ): { readonly effects: Effects; readonly at: number } | null {
@@ -5124,8 +5103,8 @@ const childSeam = (ctx: ChainCtx, fresh: Minter): ChildSeam => ({
   // the two regimes in the first place. It cost nothing while the chain verdict was the gate (a chain
   // containing `repeat` was never collapse-safe, so `ctx.collapse` was already false here); with the
   // decision positional the switch is on, and without this narrowing every unbounded `repeat()` would
-  // lower a term the checker then refuses — i.e. the whole §8 item 6 walk declining, on a widening
-  // that has nothing to do with it. A term's inability to collapse is not a limitation to route
+  // lower a term the checker then refuses — i.e. the whole recursive-walk lowering declining, on a
+  // widening that has nothing to do with it. A term's inability to collapse is not a limitation to route
   // around: it is the reason the BOUNDED regime unrolls into phases instead.
   chain: (input, framing, body, aliases) =>
     continueAs(input, framing, body, 0, false, inBody(ctx), fresh, aliases),
@@ -5322,9 +5301,9 @@ function childRows(
  * this one answer rather than the union of its callers' requirements. What stays is the one thing that
  * is the seam's own: an empty chain has nothing to lower.
  *
- * NO opaque escape node is involved and none is needed (§6·1): the sub-read is lowered by the SAME
- * fold into the SAME algebra, spliced in as an ordinary relation. If the inner chain is not covered,
- * this declines and the whole traversal goes to legacy — the decline contract, one level down.
+ * NO opaque escape node is involved and none is needed: the sub-read is lowered by the SAME fold into
+ * the SAME algebra, spliced in as an ordinary relation. If the inner chain is not covered, this
+ * declines and the whole traversal is unsupported — the decline contract, one level down.
  */
 function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter): RootedRead | null {
   if (!steps.length) return null;
@@ -5343,10 +5322,9 @@ function rootedRead(steps: readonly IRStep[], ctx: ChainCtx, fresh: Minter): Roo
 }
 
 /** A nested ROOTED traversal's steps, normalized — or `null` where normalizing RAISES (a deferral
- *  the spine that owns the message will raise for itself). A rooted body goes through
- *  `normalize(stepChain(…))` and not `childSteps`, which strips a source and answers the empty chain,
- *  i.e. an endpoint that silently matched nothing. Legacy's `resolveEndpoint` reaches the same two
- *  functions, so the two routes normalize a nested endpoint identically. */
+ *  the compiler will raise for itself). A rooted body goes through `normalize(stepChain(…))` and not
+ *  `childSteps`, which strips a source and answers the empty chain, i.e. an endpoint that silently
+ *  matched nothing. */
 function rootedSteps(nested: unknown, params: Record<string, any>, sideEffects?: Map<string, any>): readonly IRStep[] | null {
   try { return normalize(stepChain(nested, params), params, sideEffects).steps as IRStep[]; } catch { return null; }
 }

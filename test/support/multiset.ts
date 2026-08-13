@@ -41,19 +41,19 @@ export const multisetKey = (framed: readonly Framed[]): string =>
 // ---------- the same fact one layer lower: a RAW SQL ROW set ----------
 //
 // `weigh` compares FRAMED results, keyed by GraphBinary bytes. Several compiler tests compare the rows
-// a plan returns BEFORE framing — either across the two spines or against a law — and they need the
-// identical rule, because a row is not a traverser: a collapsed row carries `bulk: N` and denotes N of
-// them. §7.5 of `docs/archive/2026-08-09-repeat-two-regimes-plan.md` states the consequence directly — *"`n`
-// (the row count) legitimately moves under a collapse and is deliberately NOT gated; `ms` is what the
-// answer gate reads"* — so a test that counts ROWS is asserting a lowering decision, not an answer.
+// a plan returns BEFORE framing — against a law — and they need the identical rule, because a row is
+// not a traverser: a collapsed row carries `bulk: N` and denotes N of them. §7.5 of
+// `docs/archive/2026-08-09-repeat-two-regimes-plan.md` states the consequence directly — *"`n` (the row count)
+// legitimately moves under a collapse and is deliberately NOT gated; `ms` is what the answer gate
+// reads"* — so a test that counts ROWS is asserting a lowering decision, not an answer.
 //
-// It lives here for the reason the header already gives: two callers, so it belongs to neither. RelIR
-// now decides the collapse per POSITION, which makes the spelling differ between spines far more often
-// than it used to, and every such difference reads as a broken test until the comparison is stated in
-// traversers.
+// It lives here for the reason the header already gives: two callers, so it belongs to neither. The
+// RelIR lowering decides the collapse per POSITION, which makes the row spelling differ far more often
+// than a chain-global collapse would, and every such difference reads as a broken test until the
+// comparison is stated in traversers.
 
 /** A raw row's traverser weight. NO `bulk` column means ONE traverser — what the framer does with an
- *  uncollapsed row, and the ordinary case for most plans on either spine. */
+ *  uncollapsed row, and the ordinary case for most plans. */
 export const rowBulk = (row: { readonly bulk?: number | bigint }): bigint =>
   row.bulk === undefined ? 1n : BigInt(row.bulk);
 

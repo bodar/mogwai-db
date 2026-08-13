@@ -3,12 +3,11 @@ import { isNested, stepChain, type Step } from '../../gremlin/frontend.ts';
 // ---------- productivity: does a child body ALWAYS yield a traverser? ----------
 //
 // One authority, two consumers that were each about to answer this independently:
-//   • `choose()`'s option-map classifier (steps/tail/child-shape.ts `choiceCanBeUnproductive`) —
+//   • `choose()`'s option-map classifier (`choiceCanBeUnproductive`) —
 //     is an unclaimed `Pick.unproductive` arm reachable?
 //   • the `isAlwaysProductiveFilterNoOp` Pass (ir/strategies.ts) — is this filter provably a no-op?
-// The set began as a private const in child-shape.ts; it moved here because `ir/` cannot import from
-// `steps/` (the layering runs deps ◂ families ◂ engine ◂ compiler, and Passes run before dispatch),
-// and because duplicating the reasoning below into two sets is exactly how they would drift.
+// It lives here in `ir/` as the single authority both consumers share; duplicating the reasoning
+// below into two sets is exactly how they would drift.
 //
 // This module is pure step-name reasoning over a Step[] — no streams, no SQL, no Engine.
 

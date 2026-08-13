@@ -36,9 +36,9 @@ test('properties() streams a VertexProperty per (key,value); key/value/element p
 
 test('group().by(name).by(tail) yields one vertex per name (gate #1 rows)', () => {
   const store = seededStore();
-  // ONE VERTEX PER NAME is what this test means. Counting ROWS asserted the ROUTE instead — RelIR
-  // emits one `map` blob where legacy emitted one row per key — so it reads the grouping through the
-  // harness and the id out of the element NODE the blob carries.
+  // ONE VERTEX PER NAME is what this test means. Counting ROWS asserted a lowering detail instead —
+  // the grouping emits one `map` blob rather than one row per key — so it reads the grouping through
+  // the harness and the id out of the element NODE the blob carries.
   const byName = Object.fromEntries(Object.entries(grouped(run(store, 'g.V().group().by("name").by(__.tail())')))
     .map(([k, v]) => [k, (v as { id: number }).id]));
   expect(Object.keys(byName)).toHaveLength(6);
@@ -50,9 +50,9 @@ test('group().by(name).by(tail) yields one vertex per name (gate #1 rows)', () =
 
 test('group reducers operate over the complete child row domain for each key', () => {
   const store = seededStore();
-  // Through the HARNESS, because the two spines spell a group row differently by design — legacy
-  // emits `(gk, gv)` ROWS and RelIR one `map` blob — and reading `gk`/`gv` here would be asserting the
-  // ROUTE rather than the grouping. Same move the five other gk/gv readers already made.
+  // Through the HARNESS, because reading a group row's raw `gk`/`gv` columns would assert a lowering
+  // detail (the grouping emits one `map` blob) rather than the grouping itself. Same move the five
+  // other gk/gv readers already made.
   const groupedRows = (query: string) => grouped(run(store, query));
 
   // count is total: parents with no productive child rows retain their key as zero.
@@ -79,8 +79,8 @@ test('group reducers operate over the complete child row domain for each key', (
 test('a RECORD-keyed group frames as the Map of Maps upstream reads (gate #2)', async () => {
   // Upstream's own `getEdges` graph snapshot
   // (`vendor/tinkerpop/gremlin-js/gremlin-javascript/test/cucumber/world.js:157-174`), asserted THROUGH
-  // THE WIRE rather than over columns — a `project()` key is a Map on both spines and each spells its
-  // rows differently, so the columns were asserting the ROUTE while the wire asserts the answer.
+  // THE WIRE rather than over columns — the columns were asserting a lowering detail while the wire
+  // asserts the answer.
   const store = seededStore();
   const [framed] = await decodeAll(executeQuery(store,
     'g.E().group().by(__.project("o","l","i").by(__.outV().values("name")).by(__.label()).by(__.inV().values("name"))).by(__.tail())', {}));
@@ -170,8 +170,8 @@ describe('a project()/select() child body', () => {
 // and `count` was special for no semantic reason. Now both are tried. This test asserts the
 // UNIFORMITY, not the two scenarios that happened to expose it.
 describe('group().by(<value traversal>) — reducer/projection uniformity', () => {
-  // Via the harness for the reason above: what this asserts is the GROUPING, not which spine spelled
-  // the row.
+  // Via the harness for the reason above: what this asserts is the GROUPING, not how the row was
+  // spelled.
   const groupedPairs = (store: GraphStore, g: string) =>
     Object.entries(grouped(run(store, g))).map(([k, v]) => [k, Number(v)])
       .sort((a, b) => String(a[0]).localeCompare(String(b[0])));

@@ -2,14 +2,13 @@ import { argValues, isNested, isPickArg } from '../../gremlin/frontend.ts';
 import type { IRStep } from './step.ts';
 
 /**
- * THE OPTION-MAP `choose()` DECODE — `choose(<key>).option(k, body)…`, read once for both spines.
+ * THE OPTION-MAP `choose()` DECODE — `choose(<key>).option(k, body)…`, read once.
  *
  * A total decode of one step's arguments, which is what `ir/step.ts` already holds for `sliceOf` and
  * the `typeOf` assert family (§6·4's kernel rule, and the reason Phase 0 moved those). It lives in
- * its own leaf rather than beside them for one reason: it needs a body NORMALIZER, and the two spines
- * cannot share one — legacy calls `childSteps` bare, while RelIR must go through the child seam
- * because normalizing re-runs the Pass pipeline and can legitimately RAISE where its contract is
- * `null` (§6·6). So the normalizer is a parameter, exactly as `math`'s ops record is.
+ * its own leaf rather than beside them for one reason: it needs a body NORMALIZER, supplied as a
+ * parameter — normalizing re-runs the Pass pipeline and can legitimately RAISE where the lowering's
+ * contract is `null` (§6·6). So the normalizer is a parameter, exactly as `math`'s ops record is.
  *
  * ## The two IMPLICIT arms, which are the whole difficulty
  *
@@ -28,8 +27,8 @@ import type { IRStep } from './step.ts';
  * `Pick.none` claims a productive choice that matched no key; `Pick.unproductive` claims a choice
  * that produced NOTHING. `TraversalProduct` is explicit that a productive null is a value, so the two
  * are distinguishable only where the producer reports productivity SEPARATELY from the value — which
- * is what `ChildValue.present` carries and what legacy computes as its modulation `present` column.
- * A consumer without that signal must decline the forms that need it, never guess from a NULL.
+ * is what `ChildValue.present` carries. A consumer without that signal must decline the forms that
+ * need it, never guess from a NULL.
  */
 
 /** Which arm an `option()` key selects. */
@@ -44,8 +43,8 @@ export interface OptionArm {
   readonly discard: boolean;
 }
 
-/** Normalize a nested argument to a body, or `null` where normalizing RAISES. Each spine supplies its
- *  own — see the module note for why this cannot be one shared call. */
+/** Normalize a nested argument to a body, or `null` where normalizing RAISES. The caller supplies it
+ *  — see the module note for why the normalizer is a parameter. */
 export type BodyOf = (nested: unknown) => readonly IRStep[] | null;
 
 /**

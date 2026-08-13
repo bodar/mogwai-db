@@ -35,15 +35,14 @@ import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject 
  * channel role whose framing form was a NAME map rather than a column. §6·3 retired that seam — the
  * payload projection is the algebra's now, so nothing crosses — and the map is read only HERE, by the
  * `as()`/`select()` vocabulary that builds it. The shared type stays because `select()` re-entry still
- * needs the same entry shape the legacy host reads; it is no longer a claim about a boundary.
+ * needs the same entry shape the framing layer declares; it is no longer a claim about a boundary.
  *
  * ## Decline, don't approximate
  *
  * `null` is the only decline, as everywhere on this route. Two shapes fail closed here rather than
  * being answered approximately: a MIXED-shape history (a label bound to a vertex once and a value
  * once) has no single re-entry, and a MAP-shaped or PROPERTY-shaped binding needs a framing arm this
- * route does not have. Both are shapes legacy answers, so declining hands the traversal to the spine
- * that owns the answer.
+ * route does not have. Both decline — a coverage gap, never a wrong answer.
  */
 
 /**
@@ -59,8 +58,7 @@ import { historyAppend, historySeed, objectEntry, shapeOf, type TraverserObject 
  * So every reader asks the RELATION instead of trusting the variable, and there is no per-barrier
  * clear to forget. The dropped NAMES are not remembered here: `CHANNEL_BARRIER_POLICY` calls the alias
  * role `consumed` so a later `select` can tell "a barrier ate it" from "never bound", and both answers
- * are the same DECLINE on this route — the distinction only buys a better message, which is the spine
- * that owns messages' business.
+ * are the same DECLINE on this route — the distinction only buys a better message.
  */
 /** MODULE-PRIVATE again since §6·3: its one external reader was `lowerToRel`, pruning the map before
  *  handing it to `spine.ts`'s `TraverserLayout` bridge. With the payload projection inside the algebra
@@ -98,7 +96,7 @@ export const aliasTypeAt = (column: Expr, end: 'first' | 'last'): Expr => fieldA
 
 /** The JSON a LIST label holds, back as a list payload. `json()` around it is what makes the value a
  *  collection again rather than the TEXT of one — the symptom that made `fold().as('b').select('b')
- *  .unfold()` emit a single text blob on the legacy route before it was fixed there. */
+ *  .unfold()` emit a single text blob without it. */
 export const aliasListAt = (column: Expr, end: 'first' | 'last'): Expr =>
   ({ kind: 'call', fn: 'json', args: [fieldAt(column, end, 'v')] });
 
@@ -172,9 +170,9 @@ export type AliasRead =
   | { readonly kind: 'value'; readonly type: ScalarType }
   | { readonly kind: 'list'; readonly of: ListOf };
 
-/** A single-shape history, read. A MIXED history declines: it has no single re-entry, and legacy
- *  frames it as a VARIANT stream, which is a shape this route does not produce. `map` and `property`
- *  decline for the same reason — the shape exists above RelIR and the framing arm is not there. */
+/** A single-shape history, read. A MIXED history declines: it has no single re-entry — it would be a
+ *  VARIANT stream, a shape this route does not produce. `map` and `property` decline for the same
+ *  reason — the shape exists above RelIR and the framing arm is not there. */
 const readOf = (entry: AliasEntry, vtype: string): AliasRead | null => {
   if (entry.shapes.size !== 1) return null;
   const [shape] = entry.shapes;
@@ -187,8 +185,7 @@ const readOf = (entry: AliasEntry, vtype: string): AliasRead | null => {
 };
 
 /** An alias history's scalar type, restored onto the projection that reads it. A `perRow` type names
- *  the NEW column (the entry's `t` field lands there), never the source relation's vanished one —
- *  legacy's `scalarTypeFromAlias` says the same thing and this is the algebra's spelling of it. */
+ *  the NEW column (the entry's `t` field lands there), never the source relation's vanished one. */
 const scalarTypeOfAlias = (entry: AliasEntry, vtype: string): ScalarType =>
   entry.scalarType?.kind === 'static' ? STATIC(entry.scalarType.type)
     : entry.scalarType?.kind === 'perRow' ? PER_ROW(vtype)
@@ -231,8 +228,7 @@ const historyList = (history: Expr, of: ListOf, fresh: Minter): Expr => {
 
 /** The presence predicate one label OWES, or `undefined` where it can never be false. A STATICALLY
  *  bound label is present on every row that reached here, so the guard is emitted only for one first
- *  bound inside a branch arm or a repeat body — same SQL as legacy in both cases, and one fewer clause
- *  for the fused block to re-inline. */
+ *  bound inside a branch arm or a repeat body — one fewer clause for the fused block to re-inline. */
 export const aliasGuard = (rel: Rel, entry: AliasEntry): Expr | undefined =>
   (entry.binds === undefined ? aliasPresent(col(rel.id, entry.col)) : undefined);
 

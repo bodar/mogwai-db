@@ -30,12 +30,12 @@ test('single-label select re-enters element/scalar lowering', () => {
 
 
 /**
- * A RECORD ROW as a plain object, from whichever spine produced it.
+ * A RECORD ROW as a plain object.
  *
- * The two spellings are a spine fact, not a semantic one: legacy carries a record as prefixed
- * columns (`e0_v`, `e1_id`, …) and RelIR as the one `map` JSONB column of `[[key, valueNode], …]`
- * pairs. Reading both here — rather than pinning every assertion to legacy — is what keeps these
- * VALUE assertions about values, so they survive the route moving under them.
+ * A record arrives as the one `map` JSONB column of `[[key, valueNode], …]` pairs; the fallback
+ * branch reads the older prefixed-column spelling (`e0_v`, `e1_id`, …). Reading the value out here —
+ * rather than pinning assertions to a column layout — is what keeps these VALUE assertions about
+ * values, so they survive the lowering moving under them.
  */
 const recordRow = (row: any, keys: readonly string[]): Record<string, any> => {
   if (typeof row.map === 'string') {

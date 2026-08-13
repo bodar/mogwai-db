@@ -52,14 +52,9 @@ export const run = (store: GraphStore, q: string) => runWith(store, q, undefined
 
 /**
  * THE "id is taken" REFUSAL — `Graph.Exceptions.vertexWithIdAlreadyExists` /
- * `edgeWithIdAlreadyExists` (`structure/Graph.java:1364,1368`), verbatim, and the SAME on both spines.
+ * `edgeWithIdAlreadyExists` (`structure/Graph.java:1364,1368`), verbatim.
  *
- * It is a function only so the two hosts share one spelling. It deliberately takes no `spine`: the
- * spines disagreed for a while (legacy invented a lowercased, `with`-less version and RelIR's guard
- * copied it), and the first fix here was a spine-AWARE helper that returned whichever string the
- * ambient route happened to raise. That was backwards — legacy is being deleted, so a helper teaching
- * every test to expect its wrong message is the version that OUTLIVES the route. Legacy was corrected
- * instead, at one line, and the asymmetry disappeared rather than being encoded.
+ * It is a function only so the vertex and edge hosts share one spelling of the message.
  */
 export const idAlreadyExists = (kind: 'Vertex' | 'Edge', id: string | number): string =>
   `${kind} with id already exists: ${id}`;
@@ -73,21 +68,20 @@ export const bare = (v: any): any =>
   : v;
 
 /**
- * A GROUP RESULT as a plain object — from EITHER spine.
+ * A GROUP RESULT as a plain object, from either row shape the harness may see.
  *
- * The two carry it differently and both are correct. Legacy's `GroupStream` emits one `(gk, gv)` ROW per
- * key and the wire handler folds the runs into a Map; a RelIR map relation carries ONE row with one
- * `map` column holding the `[[keyNode, valNode], …]` tree, and the map framer reads that. The framed
- * answer is the same Map either way.
+ * A group can arrive either as `(gk, gv)` ROWS that the wire handler folds into a Map, or as ONE row
+ * with a single `map` column holding the `[[keyNode, valNode], …]` tree that the map framer reads. The
+ * framed answer is the same Map either way.
  *
- * So a test that read `r.gk`/`r.gv` was asserting the ROUTE, and five did — every one of them failed the
- * moment `groupCount()` migrated, none of them because the answer had changed. What they mean to assert
- * is the grouping, so that is what this reads.
+ * So a test that read `r.gk`/`r.gv` was asserting a lowering detail, and five did — every one of them
+ * failed the moment `groupCount()` moved, none of them because the answer had changed. What they mean
+ * to assert is the grouping, so that is what this reads.
  */
-/** A legacy group's list-valued `gv` arrives as JSON TEXT while a RelIR map's value side is already a
- *  parsed array, so "the same Map either way" is only true once the text is read back. Parsed by SHAPE
- *  rather than by try/catch, because a group whose value is a genuine string (`by('name')`) must stay a
- *  string — `'["a"]'` is a collection and `'marko'` is not. */
+/** A `(gk, gv)` group's list-valued `gv` arrives as JSON TEXT while a `map` column's value side is
+ *  already a parsed array, so "the same Map either way" is only true once the text is read back. Parsed
+ *  by SHAPE rather than by try/catch, because a group whose value is a genuine string (`by('name')`)
+ *  must stay a string — `'["a"]'` is a collection and `'marko'` is not. */
 const collectionish = (v: unknown): unknown =>
   typeof v === 'string' && (v.startsWith('[') || v.startsWith('{')) ? JSON.parse(v) : v;
 
@@ -99,21 +93,21 @@ export const grouped = (rows: readonly any[]): Record<string, unknown> => {
 };
 
 /**
- * WHAT A WRITE ECHOED, as `{id, labels, props}` — from EITHER spine.
+ * WHAT A WRITE ECHOED, as `{id, labels, props}`, from either echo shape.
  *
- * The two spell the row differently and both are right. The legacy write closure returns its own
- * `{vertex: {id, labels, props}}` record; a RelIR program frames its result rows through the READ
- * element projection, so `label`/`props` arrive as exactly the JSON text `g.V()` returns and the wire
- * layer serializes the two identically — a write reaches the same payload projection a read does.
+ * A write echo can arrive either as a `{vertex: {id, labels, props}}` / `{edge: …}` record, or flat —
+ * a RelIR program frames its result rows through the READ element projection, so `label`/`props`
+ * arrive as exactly the JSON text `g.V()` returns and the wire layer serializes the two identically; a
+ * write reaches the same payload projection a read does.
  *
- * A test that asserted one spelling was asserting the ROUTE: the day the step joined the RelIR spine
- * it failed, having found no defect. What these tests mean to assert is what was WRITTEN, so that is
- * what this reads, and it reads it the same way whichever route answered.
+ * A test that asserted one spelling was asserting a lowering detail: it failed the day the step's
+ * lowering moved, having found no defect. What these tests mean to assert is what was WRITTEN, so that
+ * is what this reads, and it reads it the same way whichever shape the echo took.
  *
- * `id` is here for that same reason and arrived the same way — a `property(T.id, …)` test reached for
- * `row.edge.id`, which is the legacy spelling and nothing else. The PUBLIC id (`COALESCE(uid, id)`) is
- * as much a thing a write test means to assert as the labels are, so it belongs to the one authority
- * rather than to a `?? row` dance re-spelled per test.
+ * `id` is here for that same reason — a `property(T.id, …)` test reached for `row.edge.id`, one echo
+ * shape and nothing else. The PUBLIC id (`COALESCE(uid, id)`) is as much a thing a write test means to
+ * assert as the labels are, so it belongs to the one authority rather than to a `?? row` dance
+ * re-spelled per test.
  */
 // `props` values are `unknown` and not `unknown[]` because the two elements genuinely differ: a VERTEX
 // property is multi-valued (it has a cardinality, so each key holds a list), while an EDGE property is

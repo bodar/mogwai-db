@@ -88,8 +88,8 @@ export function propertyRelation(input: Rel, elem: Elem, keys: readonly string[]
  * THE WIRE PROJECTION for a property stream — the columns `framePropertyRow` reads, in that order.
  *
  * Deliberately SIX columns and not the seven `PROPERTY_PAYLOAD` names: the framer reads
- * `{vpid, owner, pk, pv, pvtype, pmeta}` and nothing else. `ownerLabel` exists on legacy's tuple for
- * `element()`, which rebuilds the OWNING element and therefore needs its label — a correlated
+ * `{vpid, owner, pk, pv, pvtype, pmeta}` and nothing else. `ownerLabel` is needed only by `element()`,
+ * which rebuilds the OWNING element and therefore needs its label — a correlated
  * subquery per row. Projecting it here would compute it for every property stream that never asks,
  * so it joins when `element()` lands rather than now.
  *

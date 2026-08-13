@@ -238,8 +238,7 @@ describe('call() routing (seedCall)', () => {
       resolve: () => ({ kind: 'barrier', apply: async () => [] }),
     };
     const reg = createRegistry([federate]);
-    // PINNED to the RelIR spine: the head's shape is a per-spine SPELLING, and legacy's is the element
-    // payload this replaces. A test that asserts one spine's form says which one (§6·1's harness rule).
+    // The head's shape asserted directly — see the note just below on what it is and why.
     const plan = compilePlan(
       'g.V().call("mogwai.graph.federate", ["graph":"crew"], __.values("name"))', {}, { registry: () => reg });
     expect(plan.kind).toBe('segment');
@@ -274,16 +273,9 @@ describe('--list (DirectoryService) — end to end over GraphBinary', () => {
     createDirectoryService(app), stubService('tinker.search'), stubService('tinker.degree.centrality'),
   ]);
   const store = new GraphStore(new BunSqlite(':memory:'));
-  // THE SPINE IS PINNED, because `--list` now has exactly ONE lowering. The directory contributes
-  // `kind: 'rel'`, and a service implements `stream` XOR `rel` — two implementations of one service
-  // is the duplicated lowering `steps/CLAUDE.md` forbids. So these assert the answer on the spine
-  // that HAS one, rather than on whichever the ambient `MOGWAI_RELIR` switch selects; unpinned, the
-  // differential's OFF position would run them against a spine that correctly refuses.
-  //
-  // Not a skip, and not a weakening: the refusal is the other half of the same fact and is asserted
-  // directly below. That is the convention `l4.test.ts` already states — a skip says the same thing
-  // right up until both spines answer and answer differently, which is a defect rather than a
-  // declared divergence.
+  // `--list` has exactly ONE lowering. The directory contributes `kind: 'rel'`, and a service
+  // implements `stream` XOR `rel` — two implementations of one service is a duplicated lowering the
+  // project forbids. So these assert the answer directly.
   const run = async (g: string, params: Record<string, any> = {}) =>
     decodeAll(exec(store, reg, undefined).buffers(g, params, {}));
 
@@ -346,12 +338,8 @@ describe('tinker.degree.centrality — per-vertex edge count', () => {
   const IN = { marko: 0, vadas: 1, lop: 3, josh: 1, ripple: 1, peter: 0 };
   const OUT = { marko: 3, vadas: 0, lop: 0, josh: 2, ripple: 0, peter: 1 };
 
-  // EVERY DEGREE TEST IS `` NOW, and that is the migration rather than a weakening.
-  // `tinker.degree.centrality` contributes `kind: 'rel'`, and a service implements `stream` XOR `rel`
-  // — so with the RelIR spine off there is nobody to answer, and the differential must be TOLD which
-  // way round the divergence goes or it reads the migration as a regression (§6·1). Each marker
-  // PROVES the refusal in the off position, with the registry, so "legacy refuses this" stays a
-  // measured fact and not an assumption.
+  // `tinker.degree.centrality` contributes `kind: 'rel'`, and a service implements `stream` XOR `rel`,
+  // so it has exactly one lowering. These tests assert its answer directly.
   test('g_V_callXdcX — IN degree per vertex, projected with its vertex', async () => {
       expect(await projMap('g.V().as("v").call("tinker.degree.centrality").project("vertex","degree").by(select("v")).by()'))
         .toEqual(IN);

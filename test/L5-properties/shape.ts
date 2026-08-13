@@ -4,9 +4,8 @@
 // `chainedTraversal: traversalMethod (DOT traversalMethod)*` admits `count().out()` — syntactically
 // fine, semantically nonsense — so generating from `Gremlin.g4` alone would spend its budget on
 // noise. The real constraint is `Traversal<S,E>`: a step's legality depends on the SHAPE of the
-// stream it is applied to. That is the same fact the compiler encodes as its `Stream` union
-// (element/scalar/list/record/…, src/compiler/steps/context/stream.ts) with a per-shape dispatch
-// table each (TAIL, SCALAR_TAIL, LIST_TAIL, RECORD_TAIL, …). So: state = shape, transition = step.
+// stream it is applied to. That is the same fact the compiler tracks as the stream's SHAPE
+// (element/scalar/list/record/…). So: state = shape, transition = step.
 //
 // WHY THIS TABLE IS HAND-WRITTEN AND NOT REFLECTED OUT OF THOSE DISPATCH MAPS.
 // Deriving it from the compiler's own Maps would keep it permanently in sync, and would also make
@@ -34,7 +33,7 @@ export type Shape = 'vertex' | 'edge' | 'scalar' | 'list' | 'record' | 'group' |
 /** Where a transition leaves the stream. `'inherit'` means "the shape that was folded into this
  *  list" — `unfold()` is the one step whose output shape is not a function of its input shape
  *  alone, so the walker remembers what `fold()` consumed and restores it (the
- *  `V().fold().unfold().out()` retype in steps/CLAUDE.md). */
+ *  `V().fold().unfold().out()` retype). */
 export type Target = Shape | 'inherit';
 
 /** One legal transition: a step, what it does to the shape, and (if it takes a child traversal)
@@ -119,7 +118,7 @@ function elementSteps(kind: 'vertex' | 'edge'): Transition[] {
     { name: 'and', to: self, bodies: [self, self], render: (c) => `and(${c.bodies[0]}, ${c.bodies[1]})` },
     { name: 'or', to: self, bodies: [self, self], render: (c) => `or(${c.bodies[0]}, ${c.bodies[1]})` },
 
-    // ---- branches: one arm triage, four merges (src/compiler/steps/CLAUDE.md)
+    // ---- branches: one arm triage, four merges
     { name: 'union', to: self, bodies: [self, self], bodyEnds: self, render: (c) => `union(${c.bodies[0]}, ${c.bodies[1]})` },
     { name: 'coalesce', to: self, bodies: [self, self], bodyEnds: self, render: (c) => `coalesce(${c.bodies[0]}, ${c.bodies[1]})` },
     { name: 'optional', to: self, bodies: [self], bodyEnds: self, render: (c) => `optional(${c.bodies[0]})` }, // singleHopOptional

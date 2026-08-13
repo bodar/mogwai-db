@@ -138,15 +138,15 @@ describe('ConnectiveStrategy: infix .and()/.or() folds to the step form', () => 
   });
 });
 
-describe('the writeArguments verify Pass — a text-level refusal is not a spine\'s business (§6·5)', () => {
+describe('the writeArguments verify Pass — a text-level refusal is not the lowering\'s business (§6·5)', () => {
   const passes = (gremlin: string) =>
     runPasses(stepChain(parseGremlin(gremlin), {}), EMPTY_STRATEGY_USE, {});
 
-  test('a text-level write ERROR raises from the Pass tier, above the routing switch', () => {
+  test('a text-level write ERROR raises from the Pass tier, above the lowering', () => {
     // The point is WHERE, and it is what makes the coverage counter able to reach 100%. Raised from
     // a lowering whose contract is `null` these were `catch { return null }` at every write site,
     // so the census counted a traversal TinkerPop itself REFUSES as an uncovered gap forever.
-    // Asserted against runPasses directly: no engine, no store, no spine chosen yet.
+    // Asserted against runPasses directly: no engine, no store, no lowering reached yet.
     for (const [gremlin, message] of [
       ['g.addV().property("k","v","acl")', /meta-properties must be key\/value pairs/],
       ['g.addV().property("k","v",1,"x")', /meta-property key must be a string/],
@@ -301,19 +301,17 @@ describe('the label retractions: state nobody reads is not carried (§7.4 items 
   });
 });
 
-describe('labelMutationTarget — a specified refusal, raised ABOVE the routing switch', () => {
-  const raises = (gremlin: string, spine?: 'rel' | 'legacy' | 'rel-only') =>
-    expect(() => compile(gremlin, {}, spine ? {} : undefined)).toThrow('Label mutation is not supported');
+describe('labelMutationTarget — a specified refusal, raised ABOVE the lowering', () => {
+  const raises = (gremlin: string) =>
+    expect(() => compile(gremlin, {})).toThrow('Label mutation is not supported');
 
-  test('an edge stream refuses all three mutations, on EVERY spine position', () => {
-    // The three conformance scenarios that assert the message, and the reason this Pass exists: they
-    // passed only because legacy's write DISPATCHER raised on the way past, so deleting that route
-    // would have deleted the answer. `rel-only` is the position that proves it survives — it forbids
-    // the legacy fallback, so a refusal that still fires there is one no route owns.
+  test('an edge stream refuses all three mutations', () => {
+    // The three conformance scenarios that assert the message, and the reason this Pass exists: the
+    // refusal is raised in a verify Pass, above the lowering, so it fires however (or whether) the
+    // traversal would otherwise lower — not as a side effect of a downstream step happening to throw.
     for (const gremlin of ['g.E().addLabel("friend").labels().fold()',
-      'g.E().dropLabel("knows").labels().fold()', 'g.E().dropLabels().labels()']) {
-      for (const spine of ['rel', 'legacy', 'rel-only'] as const) raises(gremlin, spine);
-    }
+      'g.E().dropLabel("knows").labels().fold()', 'g.E().dropLabels().labels()'])
+      raises(gremlin);
   });
 
   test('the target is the STREAM, not the source step — a movement to edges refuses too', () => {

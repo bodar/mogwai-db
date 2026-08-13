@@ -4,9 +4,8 @@
 // `vendor/tinkerpop` submodule, tracking `origin/master`) drive mogwai-db over GraphBinary. The
 // number of passing scenarios is THE conformance number; this test ratchets it against the last
 // committed run recorded in l3-state.json, and a clean local run re-records the state (CI never
-// rewrites it, so there is no push-back / re-trigger loop). The two floors gate DIFFERENTLY: the
-// RelIR floor is a hard ratchet, the legacy floor may only lose what the RelIR floor holds — see the
-// gates below and §6·1 of docs/2026-08-01-relir-build-plan.md.
+// rewrites it, so there is no push-back / re-trigger loop). The floor is a hard ratchet: no scenario
+// may regress and the count never falls — see the gates below.
 // Telemetry (the compact `.`/`E` progress line + the systematic-gap summary) is always on.
 //
 // ── ONE PROCESS, NO SOCKET ────────────────────────────────────────────────────────────────────────
@@ -49,9 +48,8 @@ const GLV_COMPAT = '../../../../test/L3-conformance/glv-compat.ts';
 // Provisioning marker: the corpus + upstream's generated step data. Cheaper and more honest than
 // checking for a `cucumber-js` BIN, which we no longer run.
 const STEP_DATA = join(GLV, 'test/cucumber/gremlin.js');
-// The single committed ratchet file: the default spine's last-known run at top level and the legacy
-// spine's in its own section. A clean local run rewrites only its section; the file replaces the old
-// baseline.json + l3-passing.txt pair.
+// The single committed ratchet file: the last-known run. A clean local run rewrites it; the file
+// replaces the old baseline.json + l3-passing.txt pair.
 const STATE = new URL('./l3-state.json', import.meta.url).pathname;
 // Every human-facing file that quotes the conformance number, kept in lockstep
 // with the ratchet so the prose can never drift from l3-state.json.

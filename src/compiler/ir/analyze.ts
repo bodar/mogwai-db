@@ -11,17 +11,16 @@ import { bulkGroupCollapseTerminal, COLLAPSE_FILTERS, COLLAPSE_MOVES, COLLAPSE_P
 // SAME array (the `demandsEncounterOrder` double-call), and two shared an
 // order()-neutralizes-fanout predicate that had to be kept in sync by a prose comment.
 // `analyzeChain(steps)` computes them in one place, with the shared predicate (`isPlainOrder`) defined
-// ONCE — in `ir/step.ts`, since `legacyCollapseSafe` and `ir/bulk.ts` hinge on it too.
+// ONCE — in `ir/step.ts`, since `chainCollapseSafe` and `ir/bulk.ts` hinge on it too.
 //
-// This is DATA, no behavior — an immutable record, like FastPathConfig (and unlike the
-// LoweringEngine class, which has injected deps + behavior). It is NOT a Pass (it never
+// This is DATA, no behavior — an immutable record, like FastPathConfig. It is NOT a Pass (it never
 // rewrites the chain) and NOT per-step (each field is one value for the whole chain, read
 // at one seeding site). `chainNeedsFromV`/`trackFromV` is deliberately NOT here — it is a
 // PER-SCOPE derivation (re-computed at lowerElementSteps over each child scope's own,
 // narrower step slice) and lives on `carried`, not on a chain-level record.
 
 /** Whole-chain properties derived once, before lowering. Read-only DATA (no methods); the
- *  Engine consults it instead of re-scanning. */
+ *  lowering consults it instead of re-scanning. */
 export interface ChainFacts {
   /** was chainTracksPath        → seedSource: add the p0 path column? */
   readonly tracksPath: boolean;
@@ -172,21 +171,19 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
   return false;
 }
 
-// ---------- legacyCollapseSafe — THE CHAIN-GLOBAL question, and now LEGACY'S ALONE ----------
+// ---------- chainCollapseSafe — THE CHAIN-GLOBAL collapse question, no longer a ChainFacts field ----------
 //
 // **This is not a `ChainFacts` field any more, and that is the point of §7.4 item 1's last sentence
-// ("`collapseSafe` stops being a chain verdict").** It was a whole-chain ANNOTATION while both spines
-// read it; RelIR now answers the same question per position — of the channels carried at the node
-// (`groupableChannels`) and of the suffix that must read the multiplicity (`ir/bulk.ts`) — so the only
-// consumer left is `collapseSafeFastPaths`, legacy's gate on its `MovementCollapseFastPath`. A field on
-// a shared record implied a fact both routes cared about, and made RelIR compute a verdict it discards
-// on every compile. As a function beside legacy's gate it also states the deletion: when the legacy
-// route goes, this and the `COLLAPSE_*` vocabularies go with it, and `ir/bulk.ts` is what survives.
+// ("`collapseSafe` stops being a chain verdict").** It was a whole-chain ANNOTATION once; the lowering
+// now answers the same question per position — of the channels carried at the node
+// (`groupableChannels`) and of the suffix that must read the multiplicity (`ir/bulk.ts`). A field on
+// the shared record implied the lowering needed the verdict, when the lowering answers collapse-safety
+// positionally and discarded it on every compile, so the question lives as this standalone predicate.
 //
 // `demandsEncounter` is folded in HERE rather than at the call site for the same reason the field went
 // away: the mutual exclusion (a collapse discards per-row identity, so it cannot coexist with a live
 // emission order) is part of what "is a collapse safe for this chain" MEANS, not a second condition a
-// caller has to remember. RelIR states the same law positionally, off the relation (`!encounterOf`).
+// caller has to remember. The lowering states the same law positionally, off the relation (`!encounterOf`).
 //
 // Convergent-walk collapse (SELECT id, SUM(bulk) GROUP BY id at each movement) is
 // result-equivalent ONLY when the whole chain is a linear movement/filter prefix ending in a
@@ -205,7 +202,7 @@ function computeDemandsEncounter(steps: IRStep[]): boolean {
 // rather than spelled again here, so the two answers cannot drift while both exist.
 const COLLAPSE_REDUCERS = REDUCERS;
 
-export function legacyCollapseSafe(steps: IRStep[]): boolean {
+export function chainCollapseSafe(steps: IRStep[]): boolean {
   if (computeDemandsEncounter(steps)) return false; // a live emission order and a collapse are mutually exclusive
   const n = steps.length;
   if (n < 2) return false; // need a source + ≥1 movement
@@ -245,10 +242,11 @@ export function legacyCollapseSafe(steps: IRStep[]): boolean {
   return sawMove;
 }
 
-/** One cohesive analysis of the whole chain → the chain-global facts BOTH spines read. It held a third,
- *  `collapseSafe`, until that became legacy's alone (`legacyCollapseSafe` above): a field on a shared
- *  record implied both routes cared, and RelIR discarded it on every compile. What is left is genuinely
- *  shared — RelIR seeds its `encounter` and `path` channels off exactly these two (`lowerChain`).
+/** One cohesive analysis of the whole chain → the chain-global facts the lowering reads. It held a third,
+ *  `collapseSafe`, now the standalone `chainCollapseSafe` above: a field on this record implied the
+ *  lowering needed the verdict, but the lowering answers collapse-safety positionally and discarded it
+ *  on every compile. What is left is genuinely used — RelIR seeds its `encounter` and `path` channels
+ *  off exactly these two (`lowerChain`).
  *  `isPlainOrder` still lives in `ir/step.ts` because three scans hinge on it and none may drift. */
 export function analyzeChain(steps: IRStep[]): ChainFacts {
   return {

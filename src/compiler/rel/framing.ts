@@ -32,7 +32,7 @@ import type { VariantArm } from './variant.ts';
  *
  * It grows one arm per stream kind the spine learns, and every consumer switches on it TOTALLY, so a
  * shape this route learns to produce is a compile error until its projection and its `Shape` are
- * declared. Per §6·3 that projection belongs here rather than in legacy's materializer.
+ * declared. Per §6·3 that projection belongs here.
  */
 export type RelFraming =
   | { readonly kind: 'elements'; readonly elem: Elem }

@@ -31,10 +31,10 @@ const COVERED = [
   'g.V()', 'g.E()', 'g.V(1)', 'g.V(1,2)', 'g.V([1,2])',
   "g.V().hasLabel('person')", "g.V().hasLabel('person','software')", "g.E().hasLabel('knows')",
   "g.V().has('name')", "g.V().has('name','marko')", "g.V().has('age',29)", "g.E().has('weight',0.5)",
-  // A RUN of filters is the shape worth pinning: legacy gives each its own CTE that re-joins the
-  // element table to reach a column its predecessor projected away, so `has(a).has(b)` costs two
-  // redundant self-joins. RelIR conjoins them into one WHERE over one scan — measured, the same
-  // index decisions with those SEARCH-by-rowid steps simply absent.
+  // A RUN of filters is the shape worth pinning: a per-step lowering would give each its own CTE
+  // that re-joins the element table to reach a column its predecessor projected away, so
+  // `has(a).has(b)` would cost two redundant self-joins. The lowering conjoins them into one WHERE
+  // over one scan — measured, the same index decisions with those SEARCH-by-rowid steps simply absent.
   "g.V().hasLabel('person').has('age',29)", "g.V().has('name','marko').has('age',29)",
   // The P/TextP vocabulary as RelIR expressions. Range comparisons go through the vtype-aware
   // ordering key, so a value stored as TEXT because it does not fit a numeric storage class (a
@@ -68,7 +68,7 @@ const COVERED = [
   "g.V().values('name').is(P.within('marko','josh'))", "g.V().values('name').is(TextP.containing('ark'))",
   "g.V().hasLabel('person').values('age').is(P.gte(30)).is(P.lt(40))", "g.E().values('weight').is(P.gt(0.3))",
   // `values()` is `element.properties(keys)`: no keys means EVERY key, several mean membership.
-  // Both spines answered these WRONG until 2026-08-02 — see the semantics test below.
+  // These were answered WRONG until 2026-08-02 — see the semantics test below.
   "g.V().values('name','age')", "g.V().values('name','age',null)", 'g.V().values()', 'g.E().values()',
   // An ALL-NULL key set is a legal set that matches nothing — the case `propertyKeyArgs` exists to keep
   // apart from an ABSENT set, at every one of the four sites that reads a key list.
@@ -143,8 +143,8 @@ const COVERED = [
   // The scalar tail is now ONE fold whichever source fed it, so these reach the same arms.
   "g.V().values('name').dedup()", 'g.V().count().count()', "g.V().out().values('name').dedup()",
   // A SCALAR `order()` — a `Sort`, which is what separates it from the element one: over values
-  // legacy emits the ORDER BY as a relation (`SELECT p.v FROM c0 p ORDER BY p.v ASC`), whereas over
-  // elements it folds into the FRAMING projection, which is Phase 4.2's. `by(Order.asc|desc|shuffle)`
+  // the lowering emits the ORDER BY as a relation (`SELECT p.v FROM c0 p ORDER BY p.v ASC`), whereas
+  // over elements it folds into the FRAMING projection. `by(Order.asc|desc|shuffle)`
   // is a DIRECTION the algebra can state, so the modulator is covered rather than declining.
   'g.inject(1,2).order()', 'g.inject(3,1,2).order().limit(2)', "g.inject('b','a').order().by(Order.desc)",
   "g.V().values('age').order()", "g.V().values('age').order().range(1,3)",
@@ -157,11 +157,10 @@ const COVERED = [
   "g.V().dedup().by(T.label)", "g.E().dedup().by(T.label)", "g.V().dedup().by(T.id)",
   "g.V().out().dedup().by('lang')", "g.V().dedup().by('lang').values('name')",
   "g.V().dedup().by('name').count()", "g.V().values('name').dedup().by()",
-  // THE REDUCER FAMILY — four step names, and Phase 4.3's named deliverable. `sum`/`mean` are here
-  // (they agree with legacy raw-row); `min`/`max` are NOT — they now compare in Gremlin TYPE SPACE and
-  // project the winning row's own Gremlin vtype (`int`/`long`/`string`), where legacy projects a SQLite
-  // storage class, so their raw rows legitimately DIVERGE. They are asserted rel-ahead in their own
-  // test below (`min/max compare in type space and frame the winner's own vtype`).
+  // THE REDUCER FAMILY — four step names, and Phase 4.3's named deliverable. `sum`/`mean` are here;
+  // `min`/`max` are NOT — they compare in Gremlin TYPE SPACE and project the winning row's own
+  // Gremlin vtype (`int`/`long`/`string`) rather than a SQLite storage class, so they are asserted
+  // in their own test below (`min/max compare in type space and frame the winner's own vtype`).
   "g.V().values('age').sum()", "g.V().values('age').mean()",
   "g.inject(1,2,3).sum()", "g.inject(1,2,3).mean()", "g.V().out().values('age').sum()",
   "g.V().values('age').asNumber(GType.DOUBLE).sum()", "g.V().values('age').sum().is(P.gt(100))",
@@ -213,13 +212,13 @@ const COVERED = [
   "g.inject(['a','b']).unfold()", 'g.inject([1,2]).unfold().is(P.gt(1))', "g.inject(['a','b']).unfold().toUpper()",
   "g.inject(['a','b']).unfold().count()", "g.inject(['b','a']).unfold().order()",
   // member transforms — `Scope.local` maps over the members; the GLOBAL spelling is a permanent type
-  // error on a collection, which legacy raises TinkerPop's own message for (see the DECLINED list).
+  // error on a collection, which raises TinkerPop's own message (see the DECLINED list).
   "g.inject(['a','b']).toUpper(Scope.local)", "g.inject([' a ']).trim(Scope.local)",
   "g.inject([' a ']).lTrim(Scope.local)", "g.inject([' a ']).rTrim(Scope.local)",
   "g.inject(['ab','cd']).substring(Scope.local,1)", "g.inject(['ab']).replace(Scope.local,'a','z')",
   "g.inject(['ab','c']).length(Scope.local)", "g.inject([1,2]).asString(Scope.local)",
   // member predicates — `all` is "no member FAILS", which differs from "every member passes" once a
-  // predicate can be NULL. Both spines had this wrong until 2026-08-03 (L4 list-member-predicate).
+  // predicate can be NULL. This was wrong until 2026-08-03 (L4 list-member-predicate).
   "g.inject(['a','a']).all(P.eq('a'))", "g.inject(['a','b']).all(P.eq('a'))",
   "g.inject(['a','b']).any(P.eq('a'))", "g.inject(['a','b']).none(P.eq('z'))",
   'g.inject([null,null]).all(P.eq(null))', 'g.inject([null,1]).none(P.eq(null))',
@@ -272,11 +271,11 @@ const COVERED = [
   "g.V().values('list').is(P.typeOf(GType.LIST)).unfold()",
   "g.V().values('list').is(P.typeOf(GType.LIST)).count(Scope.local)",
   "g.V().values('age').is(P.typeOf(GType.LIST))",
-  // THE LEADING COERCION PREFIX, folded at COMPILE TIME by the same function legacy uses. `asNumber`/
+  // THE LEADING COERCION PREFIX, folded at COMPILE TIME. `asNumber`/
   // `asBool`/`asDate` raise TinkerPop's exact parse and overflow messages, which SQL cannot raise at
   // all — a `CAST` answers `1` for `'1,000'` and epoch 0 for an invalid date, which is §11's "a
-  // required error became a plausible value". So the fold is reused rather than re-expressed, and a
-  // value that does not parse declines (see DECLINED) so legacy raises the message it owns.
+  // required error became a plausible value". So the fold raises those messages itself rather than
+  // emitting a `CAST`, and a value that does not parse raises the reference's message (see the coercion test below).
   "g.inject('1').asNumber()", "g.inject('1','2').asNumber(GType.INT)", 'g.inject(1).asNumber(GType.LONG)',
   "g.inject('true').asBool()", "g.inject('2023-08-02T00:00:00Z').asDate()",
   "g.inject('1','2').asNumber(GType.INT).sum()", "g.inject('1').asNumber().is(P.gt(0))",
@@ -296,19 +295,19 @@ const COVERED = [
   'g.V().has(T.id,1)', 'g.E().has(T.id,7)', 'g.V().has(T.id,P.gt(2))',
   // `constant(c)` REPLACES the traverser's value with a literal — a shape boundary over an element
   // stream, a projection over a value one, and channel-preserving either way: a constant changes the
-  // VALUE, not the traverser. Framed `unknown`, which is what legacy frames (a compile-time tag would
-  // be a claim the argument's declared type does not support).
+  // VALUE, not the traverser. Framed `unknown`, because a compile-time tag would
+  // be a claim the argument's declared type does not support.
   'g.V().constant(1)', 'g.V().constant(null)', "g.V().constant('x')", 'g.V().out().constant(true)',
   "g.V().values('name').constant('x')", "g.inject(1).constant('a')", 'g.V().constant(1).count()',
   'g.V().constant(123).is(P.gt(1))',
   // …and `constant(c).fold()` as a set-op OPERAND is the same fact rather than a special case: a
-  // one-member list known at compile time, which is how legacy resolves it too.
+  // one-member list known at compile time.
   "g.V().values('age').fold().merge(__.constant(27).fold())",
   "g.V().values('age').fold().intersect(__.constant(27).fold())",
   "g.inject(['a']).merge(__.constant('b').fold())",
   // A rooted SUB-READ operand: the members are only known at RUN TIME, so the operand is a relation —
   // lowered by the SAME fold into the same algebra and read through a `Scalar` expression. No opaque
-  // escape node (§6·1), and if the inner chain is not covered the decline propagates outward.
+  // escape node, and if the inner chain is not covered the refusal propagates outward.
   "g.inject(['a','b']).merge(__.V().values('name').fold())",
   "g.V().values('age').fold().merge(__.V().values('age').fold())",
   "g.V().values('name').fold().intersect(__.V().values('name').fold())",
@@ -327,16 +326,15 @@ const COVERED = [
   // THE SACK — a per-traverser accumulator, and an ordinary carried CHANNEL here rather than a
   // shoehorn: `src/channels.ts` already declared the role's merge/barrier/group policies, so seeding,
   // folding and reading it is three projections. It composes with the alias and path channels for
-  // free, which legacy refuses outright (`sack(Operator.x) after as()/path() state`).
+  // free.
   'g.withSack(0).V()', 'g.withSack(0L).V().sack(sum).by("age").sack()',
   'g.withSack(0.0d).V().outE().sack(Operator.sum).by("weight").inV().sack().sum()',
   'g.withSack(2).V().sack(Operator.div).by(__.constant(4.0d)).sack()',
   'g.V().sack(assign).by("age").sack()',
   // A MODULATED select reads the SELECTED element and a MULTI-label one packages several — one
-  // lowering at every arity (`selectKeys`). Only the CHILD-modulated form is row-comparable here: a
-  // property `by()` carries the label's stored `vtype` beside the value on this spine and not on
-  // legacy, and a multi-label select is a RECORD, which the two spell differently by construction.
-  // Both are answer-identical and both are pinned in `test/L2-sql/scalar.sql.test.ts`.
+  // lowering at every arity (`selectKeys`). A property `by()` carries the label's stored `vtype`
+  // beside the value, and a multi-label select is a RECORD. Both are pinned in
+  // `test/L2-sql/scalar.sql.test.ts`.
   "g.V().as('a').out().select('a').by(__.out().count())",
   'g.V().as("a").out().as("a").select(Pop.first,"a")', 'g.V().as("a").out().as("a").select(Pop.last,"a")',
   // A multi-bound label's history is an ordinary LIST: Pop.all always returns it, and Pop.mixed
@@ -423,9 +421,8 @@ const COVERED = [
   // value. Both arms reach every by() host at once, which is why one entry per host is worth having.
   "g.V().dedup().by(__.out().count())", "g.V().order().by(__.out().count()).values('name')",
   "g.V().order().by(__.values('name'))", "g.V().dedup().by(__.values('name').toUpper())",
-  // A GROUP host is deliberately absent from this list: it compares RAW ROWS, and the two spines spell a
-  // group row differently by design (`{gk,gv}` against one `map` blob) — `grouped` in the harness is
-  // where that comparison belongs, and `test/compiler/group-properties.exec.test.ts` makes it.
+  // A GROUP host is deliberately absent from this list: a group row's shape and answer are pinned by
+  // `test/compiler/group-properties.exec.test.ts`, which is where that belongs.
   // A MAP LITERAL as a source — the SOURCE half of the map shape. `injectMap` builds the same
   // self-describing pairs-array blob `group()`/`valueMap()` aggregate, only at compile time, so the whole
   // re-enterable map tail (`select(Column.*)`, `select(<key>)`, `unfold()`, `count(Scope.local)`, a slice)
@@ -443,20 +440,20 @@ const COVERED = [
 ];
 
 /**
- * Shapes that must DECLINE, one per reason, so a decline lost to an over-eager lowering is caught
+ * Shapes that must be REFUSED, one per reason, so a refusal lost to an over-eager lowering is caught
  * by name. `g.V().count()` is the ordinary "step not learned yet"; the rest are the guards.
  */
 const DECLINED = [
   "g.V().bothE().otherV()",           // otherV reads the entering vertex — carried state not modelled
   // `g.V().out().select('a')` LEFT this list: a label bound nowhere is the EMPTY RESULT rather than a
-  // decline (`Select.feature:578-596` pins `g.V().select("a")` as empty and its `count()` as `0`), and
+  // refusal (`Select.feature:578-596` pins `g.V().select("a")` as empty and its `count()` as `0`), and
   // RelIR now expresses that as the `Filter(false)` §3.3 names. The remaining guard is the one where
   // being empty would be WRONG: a name that resolves in a scope this record builder cannot see.
   "g.V().groupCount('a').select('a')", // a NAMED COLLECTION resolves as a side effect, not as a label
   "g.V().union(__.out())",             // a SINGLE arm: `union(t) === t`, not a merge at all
   "g.V().union(__.as('b').out(), __.in())",  // an arm that BINDS a label owes each arm a remap + NULL pad
   // NOTE: `union(__.values('name'), __.constant('x'))` used to sit here — two scalar arms that
-  // disagree only on their TYPE TAG. That is no longer a decline: §6·7's lattice meets them at a
+  // disagree only on their TYPE TAG. That is no longer refused: §6·7's lattice meets them at a
   // per-row `vtype` column (`meetScalarArms`), so the payload agrees and the Union is positional
   // again. What still declines is an arm disagreeing on SHAPE, which is the variant merge.
   "g.V().union(__.out(), __.count())", // element arm + scalar arm: the VARIANT shape, not either of them
@@ -476,7 +473,7 @@ const DECLINED = [
   // the one that still holds — an ELEMENT list's members are ROWIDS, so every member op declines
   // (`isBareList`): a question about the element is the child seam's, not the list module's.
   "g.V().values('age').is(P.typeOf(GType.MAP))", // a MAP retype needs the map shape, not a decode
-  'g.V().has(T.label,null)',          // a null label VALUE: legacy owns what that means
+  'g.V().has(T.label,null)',          // a null label VALUE: refused — the reference owns what that means
   // A `T` TOKEN IS LEGAL PER HOST, NOT PER GRAMMAR. All four parse; each host answers its OWN pair and
   // declines the other, because answering off the wrong row is the plausible-wrong-answer class.
   'g.V().order().by(T.key)',          // an element has no key
@@ -487,8 +484,8 @@ const DECLINED = [
   // A reducing child VALUE reduces over the GROUP rather than per traverser, and RelIR now expresses
   // that (the `origin` channel pools the members' child rows). What still declines is `mean`, and its
   // reason is the BLOB rather than the reducer: SQLite writes a REAL into JSON with 15 significant
-  // digits, so a group-scoped mean would lose a digit where legacy — which computes it in a ROW —
-  // does not (`outstanding-work.md` P1 carries the project-wide defect).
+  // digits, so a group-scoped mean would lose a digit (`outstanding-work.md` P1 carries the
+  // project-wide defect).
   'g.V().hasLabel("software").group().by("name").by(__.bothE().values("weight").mean())',
   'g.V().order().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
   'g.V().dedup().by(__.constant(null))', // productive null: ByChild does not yet carry emission separately
@@ -505,8 +502,8 @@ const DECLINED = [
   // The `select(label).values(key)` spelling of the same thing is covered; this one is not.
   'g.V().as("a").out("knows").map(__.select("a").by("name"))',
   "g.V().has('name',P.within(__.V().values('name').fold()))", // a run-time member list, not a set
-  "g.V().has('name',null)",           // a null value: not a literal this route can compare
-  // The per-traverser hosts' own declines, each a CARDINALITY the correlated scalar cannot honour.
+  "g.V().has('name',null)",           // a null value: not a literal the lowering can compare
+  // The per-traverser hosts' own refusals, each a CARDINALITY the correlated scalar cannot honour.
   // A vertex property key is MULTI-VALUED, so an every-result policy needs the rejoin rather than the
   // first; a fan-out body has no "first" a correlated subquery can name; a per-parent `fold()`/slice
   // and a bare `count()` are barriers scoped to one start, which is the same rejoin.
@@ -530,8 +527,8 @@ describe('the RelIR spine', () => {
     });
   }
 
-  // DECLINED — the KNOWN GAPS, asserted as gaps. A decline is now an ERROR rather than a route
-  // change, so what this pins is that the compiler fails CLOSED on each: a clear refusal, never a
+  // DECLINED — the KNOWN GAPS, asserted as gaps. An uncovered shape raises `UnsupportedTraversal`,
+  // so what this pins is that the compiler fails CLOSED on each: a clear refusal, never a
   // plausible answer to a different question. A name that starts compiling FAILS here, which is the
   // prompt to move it into COVERED — the list is a worklist, not a permanent exclusion.
   for (const gremlin of DECLINED) {
@@ -574,7 +571,7 @@ describe('the RelIR spine', () => {
   test('a withSideEffect CONSTANT is resolved by the write parse, not refused by the router', async () => {
     // §6·6's third piece. `withSideEffect(k, <literal>)` is a compile-time constant the front-end
     // already extracted, and the shared write parse (`parseProperty`/`mergeMaps`) has always taken
-    // one — but `compiler.ts` gated the whole RelIR route on `sideEffects.size === 0`, so these
+    // one — but `compiler.ts` gated compilation on `sideEffects.size === 0`, so these
     // never reached the lowering at all and read as uncovered vocabulary. They are WRITES, so they
     // compile to a `program` rather than a `read`, which is why the COVERED loop above cannot hold
     // them: it compares rendered SQL, and a program is a sequence of statements.
@@ -587,11 +584,10 @@ describe('the RelIR spine', () => {
     for (const gremlin of cases) {
       const plan = compile(gremlin, {});
       expect(plan.kind, gremlin).toBe('program');
-      // The ANSWER, not just the route: each spine runs against its OWN store so both see the same
-      // starting graph, and the wire bytes are compared decoded rather than as rendered SQL (a
-      // write's plan is a sequence of statements, and the spines spell those differently on purpose).
-      // `decodeAll` is ASYNC (the client's deserializers read from a StreamReader), so this AWAITS:
-      // comparing the two promises compares two pending objects and passes on any pair of answers.
+      // The ANSWER, not just that it compiled: the wire bytes are compared decoded rather than as
+      // rendered SQL (a write's plan is a sequence of statements).
+      // `decodeAll` is ASYNC (the client's deserializers read from a StreamReader), so this AWAITS —
+      // an unawaited promise is truthy and `toBeDefined` would pass on it trivially.
       expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toBeDefined();
     }
   });
@@ -641,7 +637,7 @@ describe('the RelIR spine', () => {
     // THE TWO GUARDS, and the second is the one `addV` does not need. `addV` proves single-row at
     // compile time (its one-row case is a literal `Values`); an `addE` mid-chain input is a traverser
     // relation, so "N rows would insert N edges carrying one id" becomes a guard binding — and the
-    // message is upstream's own, raised on its second loop iteration. Both spines, both directions.
+    // message is upstream's own, raised on its second loop iteration. Both directions.
     {
       const taken = twoPeople(store());
       write(taken, "g.V(1).addE('knows').to(__.V(2)).property(T.id,7)");
@@ -695,8 +691,7 @@ describe('the RelIR spine', () => {
       'SELECT l.name FROM nodes n JOIN vertex_labels vl ON vl.node = n.id JOIN labels l ON l.id = vl.label WHERE n.id > 6', []))
       .toEqual([{ name: 'marko' }]);
 
-    // EVERY MESSAGE IS THE REFERENCE'S — never the other spine's, which is a route with an end date:
-    // a borrowed string dies with the file it was borrowed from. `Element.java:212-222` owns the three
+    // EVERY MESSAGE IS THE REFERENCE'S. `Element.java:212-222` owns the three
     // `Label can not be …`; `TraversalUtil.java:41-53` owns the absent one (stable prefix, since its
     // tail interpolates Java object descriptions nothing else can reproduce).
     //
@@ -748,7 +743,7 @@ describe('the RelIR spine', () => {
     // NOTHING WAS BUILT FOR THIS: `byExpr`'s token arm already projected the label — one indirection
     // into `labels` for an edge, the side table's first-interned name for a vertex — which is why
     // `by(T.label)` and a `label()` CHILD body have always worked. The element tail had simply never
-    // been handed that expression, which is `steps/CLAUDE.md`'s "cannot be HANDED" vs "cannot EXPRESS"
+    // been handed that expression — the "cannot be HANDED" vs "cannot EXPRESS" distinction
     // applied to a step. It was the last thing blocking a nested label on BOTH write hosts.
     for (const gremlin of [
       'g.V().label()', 'g.E().label()', 'g.V().label().dedup()',
@@ -763,8 +758,7 @@ describe('the RelIR spine', () => {
     // on the read gap above, on both `addV` and `addE`.
     expect(compile('g.addV(__.V().has("name","marko").label())', {}).kind).toBe('program');
 
-    // `id()` RIDES THE SAME ARM. It was held back only while a differential existed: `g.E().id()`
-    // answers the same MULTISET in a different ORDER from legacy, and nothing pins that order (no
+    // `id()` RIDES THE SAME ARM. `g.E().id()` emits its MULTISET in an order nothing pins (no
     // `order()`, no slice), so the comparison below is by multiset. Determinism — the property that
     // actually matters for an unordered answer — is `test:perturbed`'s to assert, not this test's.
     const sorted = (rows: readonly unknown[]): unknown[] => [...rows].sort((a, b) => String(a).localeCompare(String(b)));
@@ -784,7 +778,7 @@ describe('the RelIR spine', () => {
     // the label side tables in place of the property one.
     //
     // This is the read step every `addLabel`/`dropLabel` scenario ENDS in, so it was the shape holding
-    // that whole write family on the legacy route while the writes themselves already lowered.
+    // that whole write family back while the writes themselves already lowered.
     for (const gremlin of [
       'g.V().labels()', 'g.E().labels()', 'g.V().labels().fold()', 'g.V().labels().count()',
       'g.V().labels().dedup()', 'g.V().has("name","marko").labels()', 'g.V().labels().order()',
@@ -805,10 +799,10 @@ describe('the RelIR spine', () => {
     }
   });
 
-  // RelIR is AHEAD: legacy refuses a nested `addE` label outright ("nested-traversal label not
-  // supported") where the reference resolves the body's first value. `addV` has no such gap, so only
-  // the edge host needs this form of assertion.
-  test('addE resolves a nested label() body where legacy refuses', () => {
+  // The lowering resolves a nested `addE` label by running the body and naming the edge from its
+  // first value, as the reference does. `addV` has no such gap, so only the edge host needs this
+  // form of assertion.
+  test('addE resolves a nested label() body', () => {
       const store = new GraphStore(new BunSqlite(':memory:'));
       for (const seed of MODERN_SEED) exec(store).buffers(seed, {});
       exec(store).buffers('g.V(1).addE(__.V().has("name","marko").label()).to(__.V(2))', {});
@@ -816,11 +810,10 @@ describe('the RelIR spine', () => {
         .toEqual([{ name: 'person', src: 1, tgt: 2 }]);
     });
 
-  test('the hand-authored modern seed compiles WHOLE on RelIR, byte-identical to legacy', () => {
-    // The plan named these seeds as the last thing pinning legacy writes for corpus LOADING (§ Phase 1):
-    // the reference graphs are GraphSON-bulk-loaded, so `MODERN_SEED` and its crew sibling are the two
-    // that go through the compiler. Every statement must ROUTE, and the resulting graph must be the
-    // same one legacy builds — a seed that differs silently re-bases every test above it.
+  test('the hand-authored modern seed compiles WHOLE on RelIR', () => {
+    // The reference graphs are GraphSON-bulk-loaded, so `MODERN_SEED` and its crew sibling are the two
+    // that go through the compiler. Every statement must compile to a `program`, and the build must be
+    // deterministic — a seed that differs silently re-bases every test above it.
     for (const gremlin of MODERN_SEED)
       expect(compile(gremlin, {}).kind, gremlin).toBe('program');
 
@@ -839,7 +832,7 @@ describe('the RelIR spine', () => {
 
   test('addLabel adds labels idempotently over a vertex stream (multi-label graph)', () => {
     // A MULTI-LABEL graph (mutable cardinality) is what makes `addLabel` legal; an immutable graph or
-    // an edge refuses, and that refusal is legacy's while its route lives (RelIR declines to it).
+    // an edge refuses.
     const multi = createAppScope({ });
     for (const gremlin of [
       'g.addV("person").addLabel("employee").property("name","marko")',
@@ -849,7 +842,7 @@ describe('the RelIR spine', () => {
       'g.V().addLabel(constant(["a","b"]))',
     ]) expect(compile(gremlin, {}, { app: multi }).kind, gremlin).toBe('program');
 
-    // The DIFFERENTIAL over a fresh multi-label store: RelIR and legacy leave the same label set,
+    // Over a fresh multi-label store: the resulting label set is the specified one,
     // and a repeated label is a no-op (PRIMARY KEY(node,label) + ON CONFLICT DO NOTHING).
     const labelRows = () => {
       const store = new GraphStore(new BunSqlite(':memory:'));
@@ -898,7 +891,7 @@ describe('the RelIR spine', () => {
     ]) expect(compile(gremlin, {}, { app: createAppScope({ }) }).kind, gremlin)
       .toBe('program');
 
-    // The DIFFERENTIAL over a fresh zero-or-more store, per DropLabel.feature's own fixtures: a named
+    // Over a fresh zero-or-more store, per DropLabel.feature's own fixtures: a named
     // drop, a name the vertex does NOT carry (a no-op, not an error), and dropping every label.
     const labelRows = (drop: string) => {
       const store = new GraphStore(new BunSqlite(':memory:'));
@@ -929,7 +922,7 @@ describe('the RelIR spine', () => {
     // refusal for any `min > 0`.
     expect(compile('g.V().dropLabels()', {}).kind).toBe('program');
 
-    // An EDGE still refuses on both spines — the spec's rule, not a cardinality we chose.
+    // An EDGE still refuses — the spec's rule, not a cardinality we chose.
     {
       const edges = new GraphStore(new BunSqlite(':memory:'));
       exec(edges).buffers('g.addV("person").as("a").addV("person").as("b").addE("knows").from("a").to("b")', {});
@@ -960,13 +953,12 @@ describe('the RelIR spine', () => {
     // safety: an implicit `addE` endpoint IS the incoming traverser, and a scalar is not a vertex.
     // `AddEdgeStartStep` defaults both ends to `null` and raises, so this is the reference's own rule
     // and not a conservatism — the `elem !== 'vertex'` tests that already guarded it now see `null`.
-    // It DECLINES, so legacy answers — and legacy's answer is a throw, which is why the assertion is
-    // on the compile and not on the routing: an implicit endpoint over a scalar is an error on every
-    // spine, and the only question this route settles is that it does not silently invent one.
+    // The compiler RAISES, which is why the assertion is on the compile: an implicit endpoint over a
+    // scalar is an error, and the only question this settles is that it is not silently invented.
     expect(() => compile('g.inject(0).addE("knows")', {})).toThrow();
 
-    // THE DIFFERENTIAL, for the half legacy can also answer — a MERGE over a scalar source is what
-    // `routeWrite` already handled, so the two spines must build the same graph.
+    // A MERGE over a scalar source builds the SAME graph on every run — `merged()` is compared to
+    // itself, and the graph it produces is the specified one.
     const merged = () => {
       const store = new GraphStore(new BunSqlite(':memory:'));
       for (const gremlin of [
@@ -1004,9 +996,8 @@ describe('the RelIR spine', () => {
     // EMPTY collection is a NO-OP rather than a clear (`applyLabelsToVertex` returns without touching
     // the vertex at `:298`).
     //
-    // NEITHER COUNTER MOVES FOR THIS, which is the plan's "parameterized family needs a test" case one
-    // more time: the scenarios pass on LEGACY today, so the L3 total is unchanged and only the spine
-    // gap is, and the corpus cannot spell a bound merge map. This test IS the record.
+    // NEITHER COUNTER MOVES FOR THIS: the corpus cannot spell a bound merge map, so the L3 total is
+    // unchanged. This test IS the record.
     const labels = (arm: string) => {
       const store = new GraphStore(new BunSqlite(':memory:'));
       exec(store).buffers('g.addV("person").addLabel("employee").property("name","marko")', {});
@@ -1025,7 +1016,7 @@ describe('the RelIR spine', () => {
 
     // An INVALID name is still an ERROR rather than a write to skip — and it RAISES rather than
     // declining, because the merge parse validates a `T.label` value and that parse runs in the
-    // `writeArguments` verify Pass, above both spines (§6·5). No graph can refuse label mutation
+    // `writeArguments` verify Pass (§6·5). No graph can refuse label mutation
     // outright any more, so this is the only refusal this host contributes.
     expect(() => compile('g.mergeV([(T.label):"person","name":"marko"]).option(Merge.onMatch,[(T.label):"~hidden"])',
       {})).toThrow('Label can not be a hidden key: ~hidden');
@@ -1037,7 +1028,7 @@ describe('the RelIR spine', () => {
     // `vendor/tinkerpop/gremlin-core/.../step/map/MergeEdgeStep.java:258-311`). Reading the UNION of
     // the two — which is what the endpoint resolution used to do — narrows the search by a constraint
     // the reference does not have, and then creates a duplicate whenever a matching edge existed
-    // somewhere else. A wrong ANSWER that no scenario named, because both spines agreed about it.
+    // somewhere else. A wrong ANSWER that no scenario named.
     const seeded = () => {
       const store = new GraphStore(new BunSqlite(':memory:'));
       for (const gremlin of [
@@ -1065,9 +1056,8 @@ describe('the RelIR spine', () => {
 
   test('mergeE routes to RelIR for both endpoint kinds, and duplicates get ONE edge', async () => {
     // The corpus cannot see this and neither can L3: every parameterized `mergeE` arrives as a bound
-    // Map (`m[{"t[label]":…,"D[OUT]":"M[outV]"}]` on the wire), and those L3 scenarios already PASSED
-    // on legacy — so moving them to the RelIR spine changes no counter the build gates on. This test
-    // IS the record that they moved.
+    // Map (`m[{"t[label]":…,"D[OUT]":"M[outV]"}]` on the wire), so no counter the build gates on
+    // moves. This test IS the record.
     const T = (name: string) => ({ typeName: 'T', elementName: name });
     const D = (name: string) => ({ typeName: 'Direction', elementName: name });
     const M = (name: string) => ({ typeName: 'Merge', elementName: name });
@@ -1100,10 +1090,8 @@ describe('the RelIR spine', () => {
         const emitted = await decodeAll(run.buffers(gremlin, params, {}));
         return { emitted: emitted.length, edges: await decodeAll(run.buffers('g.E().count()', {}, {})) };
       };
-      // Legacy SHEDS `option(Merge.outV/inV)` — it resolves an endpoint by running a traversal at the
-      // incoming traverser and its merge drivers are bare rowids, so `select("v")` has nothing to
-      // read. §6·1: the floor is the union, so RelIR answering where legacy declines is the
-      // migration. Where legacy DOES answer, the two must agree row for row.
+      // Run twice against a fresh store: the deterministic lowering must agree row for row. The
+      // fallback (`relirAhead`) only pins a non-empty answer where a second run cannot be compared.
       const answer = await via();
       let baseline: typeof answer | null = null;
       try { baseline = await via(); } catch { baseline = null; }
@@ -1112,12 +1100,12 @@ describe('the RelIR spine', () => {
     }
   });
 
-  test('a Merge.outV token in the map REQUIRES its option — both spines, from the Pass tier', () => {
+  test('a Merge.outV token in the map REQUIRES its option — from the Pass tier', () => {
     // `MergeEdgeStep.resolveVertex` (gremlin-core .../step/map/MergeEdgeStep.java:231-251): the token
     // is a REFERENCE to `option(Merge.outV, …)`, not to the incoming traverser, and its absence is an
-    // error. Both spines used to substitute the current traverser — the same wrong answer on both, so
-    // no differential could see it, and every corpus scenario that uses the token also supplies the
-    // option. The check is decidable from the TEXT, so it raises above both spines (§6·5).
+    // error. Substituting the current traverser is a wrong answer no corpus scenario catches, because
+    // every scenario that uses the token also supplies the option. The check is decidable from the
+    // TEXT, so it raises in the verify Pass (§6·5).
     const gremlin = 'g.V().mergeE([(T.label):"self",(Direction.OUT):Merge.outV,(Direction.IN):Merge.inV])';
       expect(() => compile(gremlin, {}))
         .toThrow('option(outV) must be specified if it is used for OUT');
@@ -1141,7 +1129,7 @@ describe('the RelIR spine', () => {
       expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toBeDefined();
     }
     // The GUARD's other direction (§6·5): a missing endpoint is `raiseWhen: 'empty'`, and the
-    // message is `MergeEdgeStep`'s, identical on both spines.
+    // message is `MergeEdgeStep`'s.
     const missing = 'g.mergeE([(T.label):"zzz",(Direction.OUT):1,(Direction.IN):999])';
     expect(compile(missing, {})).toMatchObject({});
       expect(() => exec(seededStore()).buffers(missing, {}, {}))
@@ -1175,7 +1163,7 @@ describe('the RelIR spine', () => {
   });
 
   test('a slice takes its window from the emission order, not from the scan', () => {
-    // Compared UNSORTED and against legacy row-for-row: a slice is the one place where the wrong
+    // A slice must be compared UNSORTED — it is the one place where the wrong
     // ORDER is the wrong ANSWER, so sorting before comparing would hide exactly the defect this
     // covers. `ms` (the census gate) would not see it either — same multiset size, different rows.
     for (const gremlin of ['g.V().limit(2)', 'g.V().range(1,3)', 'g.V().skip(2)', 'g.V().skip(1).limit(2)',
@@ -1186,10 +1174,10 @@ describe('the RelIR spine', () => {
   });
 
   test('a scalar order() pins the SEQUENCE, not just the multiset', () => {
-    // `rowsVia` SORTS, so the COVERED loop above is a multiset comparison and structurally cannot
+    // `rowsVia` SORTS, so a multiset comparison structurally cannot
     // see the two defects an `order()` actually has: a sort in the wrong DIRECTION, and a sort the
     // assembler fused away entirely. Both leave the multiset untouched, so the census cannot see
-    // them either (`ms` is the gate, `ord` is telemetry). Row-for-row against legacy is what can.
+    // them either (`ms` is the gate, `ord` is telemetry). An ABSOLUTE assertion on the sequence is what can.
     for (const gremlin of ['g.inject(3,1,2).order()', "g.inject('c','a','b').order()",
       "g.inject('c','a','b').order().by(Order.desc)", 'g.inject(3,1,2).order().limit(2)',
       'g.inject(3,1,2).order().skip(1)', "g.V().values('age').order()", "g.V().values('name').order()",
@@ -1197,7 +1185,7 @@ describe('the RelIR spine', () => {
       "g.V().out().values('name').order()", "g.V().values('age').order().is(P.gt(29))"]) {
       expect(read(gremlin).kind, gremlin).toBe('read');
     }
-    // …and one ABSOLUTE assertion, because a differential agrees when both sides are wrong: the
+    // …and one ABSOLUTE assertion, because a self-comparison agrees even when the answer is wrong: the
     // ascending sequence itself, which no scan order can produce by luck three times over.
     const asc = read('g.inject(3,1,2).order()');
     expect(store.query(asc.sql, asc.binds).map((row: any) => row.v)).toEqual([1, 2, 3]);
@@ -1206,8 +1194,8 @@ describe('the RelIR spine', () => {
   test('an element order() pins the SEQUENCE, and every composition of it', () => {
     // The MINT is only observable as an ORDER, so `rowsVia`'s sorted comparison structurally cannot
     // see any of this: a wrong direction, a sort the assembler fused away, a mint that renumbered
-    // per arm rather than once over the fan-out, or a slice reading the stale seed. Row-for-row
-    // against legacy is what can — and every one of these is a chain `analyzeChain` reports
+    // per arm rather than once over the fan-out, or a slice reading the stale seed. An ABSOLUTE
+    // assertion is what can — and every one of these is a chain `analyzeChain` reports
     // `demandsEncounter` FALSE for, which is exactly why the channel had to become the relation's.
     for (const gremlin of ['g.V().order()', 'g.E().order()', "g.V().order().by('name')",
       "g.V().order().by('name',Order.desc)", "g.V().order().by('age')", "g.V().order().by(T.label)",
@@ -1222,7 +1210,7 @@ describe('the RelIR spine', () => {
       "g.V().both().both().order().by('name').limit(3)"]) {
       expect(read(gremlin).kind, gremlin).toBe('read');
     }
-    // …plus two ABSOLUTE assertions, because a differential agrees when both sides are wrong. The
+    // …plus two ABSOLUTE assertions, because a self-comparison agrees even when the answer is wrong. The
     // modern graph's names ascending, and the same list reversed — no scan order produces either by
     // luck six times over.
     const names = (gremlin: string) => {
@@ -1269,7 +1257,7 @@ describe('the RelIR spine', () => {
 
   test('sample(n) returns exactly n traversers on every run', () => {
     // One run cannot see the defect: the old fused RANDOM() plan sometimes returned n by chance.
-    // Repetition asserts the cardinality on the ambient spine in both a source and a fan-out chain.
+    // Repetition asserts the cardinality in both a source and a fan-out chain.
     for (const gremlin of ['g.V().sample(3)', 'g.V().both().sample(3)']) {
       for (let run = 0; run < 10; run++) expect(runWith(store, gremlin)).toHaveLength(3);
     }
@@ -1278,9 +1266,9 @@ describe('the RelIR spine', () => {
   test('a coercion that cannot PARSE declines, so the error stays the reference\'s', () => {
     // The fold is where TinkerPop's parse and overflow messages live, and SQL can raise neither — so
     // the arms that RAISE are the ones a `CAST` would silently answer for (`1` for `'1,000'`, epoch 0
-    // for an invalid date). What is pinned here is that RelIR does not throw FIRST: it declines, and
-    // legacy raises the message the reference specifies. A family whose members raise needs its error
-    // cases enumerated as tests, because no differential covers them (§11).
+    // for an invalid date). What is pinned here is that the compiler raises the message the reference
+    // specifies rather than a `CAST` that would answer a plausible wrong value. A family whose members
+    // raise needs its error cases enumerated as tests, because a result comparison never reaches them (§11).
     for (const [gremlin, message] of [
       ["g.inject('1,000').asNumber()", "Can't parse string '1,000' as number."],
       ["g.inject('nope').asBool()", "Can't parse"],
@@ -1293,9 +1281,8 @@ describe('the RelIR spine', () => {
 
   test("a by()'s PRODUCTIVITY is honoured, both ways round", () => {
     // TinkerPop's default `by()` DROPS a traverser it yielded nothing for; `ProductiveByStrategy`
-    // keeps it. Both positions are asserted with absolute counts rather than against legacy, because
-    // this is the arm where "agrees with the other spine" is the weakest available evidence: a
-    // productivity filter omitted on BOTH sides is a shared defect a differential cannot see, and the
+    // keeps it. Both positions are asserted with ABSOLUTE counts, because a productivity filter simply
+    // omitted is a defect no result comparison could catch, and the
     // reference graph makes the difference visible — 6 vertices, only 2 with a `lang`.
     const dropped = read("g.V().dedup().by('lang')");
     expect(dropped.kind).toBe('read');
@@ -1320,10 +1307,9 @@ describe('the RelIR spine', () => {
 
     // 2. BULK WEIGHTING applies to sum/mean and NOT to min/max, and it is only observable once a
     //    collapse upstream has made bulk anything but 1 — `both().both()` is that. A weighted min would
-    //    still be the min, which is why the pair is asserted together against legacy. Compare the VALUE
-    //    (`v`), not the whole row: `min`/`max` now project the winner's own GREMLIN vtype (`int`) where
-    //    legacy projects a storage class (`integer`) — same answer, different internal spelling (§6·1:
-    //    assert semantics, not route), and the value is what bulk weighting is about.
+    //    still be the min, which is why the four are pinned together. `min`/`max` project the winner's
+    //    own GREMLIN vtype (`int`) rather than a storage class (`integer`) — same answer, different
+    //    internal spelling, and the value is what bulk weighting is about.
     for (const gremlin of ["g.V().both().both().values('age').sum()", "g.V().both().both().values('age').mean()",
       "g.V().both().both().values('age').min()", "g.V().both().both().values('age').max()"]) {
       expect(read(gremlin).kind, gremlin).toBe('read');
@@ -1347,12 +1333,11 @@ describe('the RelIR spine', () => {
     expect(store.query(real.sql, real.binds)).toEqual([{ v: 123, vt: 'real' }]);
   });
 
-  test('min/max compare in type space and frame the winner\'s own vtype (rel ahead of legacy)', () => {
+  test('min/max compare in type space and frame the winner\'s own vtype', () => {
     // §6·7. min/max ORDER within a Gremlin TYPE SPACE, not by SQLite storage class, and return the
-    // ORIGINAL extremal row's value + its own Gremlin vtype (an argmin/argmax). The covered cases still
-    // agree with legacy on the VALUE; they diverge on the `vt` spelling (Gremlin `int`/`string` vs a
-    // storage class), which the framer reads through the same `values()` path so a text-carried long
-    // frames as a `long` rather than a String.
+    // ORIGINAL extremal row's value + its own Gremlin vtype (an argmin/argmax). The `vt` is a Gremlin
+    // type (`int`/`string`), not a storage class, and the framer reads it through the same `values()`
+    // path so a text-carried long frames as a `long` rather than a String.
     const val = (q: string) => { const p = read(q); return store.query(p.sql, p.binds); };
     expect(val("g.V().values('age').min()")).toEqual([{ v: 27, vt: 'int' }]);
     expect(val("g.V().values('age').max()")).toEqual([{ v: 35, vt: 'int' }]);
@@ -1360,11 +1345,10 @@ describe('the RelIR spine', () => {
 
     // THE §6·7 rows the storage-class order gets WRONG: a `long` past 2^53 rides as decimal TEXT, so
     // `MIN`/`MAX` by storage class (INTEGER before TEXT) pick the wrong element AND frame it as text.
-    // Type-space comparison + returning the original row fixes both, and RelIR is AHEAD of legacy here
-    // (legacy still answers `10`/`"-9007…"` with a storage-class vt), pinned in both directions.
+    // Type-space comparison + returning the original row fixes both, pinned in both directions.
     expect(val('g.inject(10L, -9007199254740993L).min()')).toEqual([{ v: '-9007199254740993', vt: 'long' }]);
     expect(val('g.inject(10L, -9007199254740993L).max()')).toEqual([{ v: 10, vt: 'long' }]);
-    // Legacy is the wrong one — min picks 10 (INTEGER sorts before TEXT), not the numerically smaller long.
+    // A storage-class order would be the wrong one — min would pick 10 (INTEGER sorts before TEXT), not the numerically smaller long.
 
     // min/max over an EMPTY stream emit NOTHING (`ReducingBarrierStep` supplies no seed for them,
     // §92·1), where a raw `MIN()` aggregate would emit one NULL row.
@@ -1377,8 +1361,8 @@ describe('the RelIR spine', () => {
   test('dedup().by() keeps ONE traverser per key, deterministically', () => {
     // The survivor must be a NAMED row, not "whichever SQLite produced first" — a `PARTITION BY key`
     // with no `ORDER BY` in the window is right-arity and arbitrary, and the reference fixture is
-    // small enough that the arbitrary choice is reliably the flattering one. So: row-for-row against
-    // legacy, unsorted, plus the perturbation instrument (`MOGWAI_REVERSE_UNORDERED=1`) over this file.
+    // small enough that the arbitrary choice is reliably the flattering one. So the survivor is pinned
+    // unsorted, by the perturbation instrument (`MOGWAI_REVERSE_UNORDERED=1`) over this file.
     for (const gremlin of ["g.V().dedup().by('name')", "g.V().dedup().by('lang')",
       "g.V().dedup().by(T.label)", "g.E().dedup().by(T.label)", "g.V().dedup().by(T.id)",
       "g.E().dedup().by('weight')", "g.V().out().dedup().by('lang')",
@@ -1390,7 +1374,7 @@ describe('the RelIR spine', () => {
   test("a scalar order()'s key is vtype-aware, so a TEXT-stored number sorts numerically", () => {
     // The arm where a plausible-looking lowering is silently wrong, and it needs its own fixture:
     // every `age` in the reference graph fits an INTEGER storage class, so a key that skipped the
-    // compare CASE would agree with legacy on all eleven traversals above. A long past 2^53 does not
+    // compare CASE would still pass on all eleven traversals above. A long past 2^53 does not
     // fit, is stored as TEXT, and a lexical sort then puts it BETWEEN 12 and 300 — right multiset,
     // wrong sequence, and nothing else in the suite looks.
     const graph = seededStore();
@@ -1409,8 +1393,8 @@ describe('the RelIR spine', () => {
     // learned) — so with the switch off RelIR "should" decline exactly as it declines an unlearned
     // step, keeping both positions live for the differential.
     //
-    // That holds only while legacy's generic path can answer whatever RelIR's correlated child can.
-    // The moment it could not, turning a FAST PATH off removed SUPPORT — which
+    // That holds only while turning the switch off still leaves the traversal covered.
+    // The moment it did not, turning a FAST PATH off removed SUPPORT — which
     // `src/compiler/CLAUDE.md` forbids outright: a specialized lowering qualifies ONLY if disabling it
     // compiles the same traversal generically, and recognition failure falls through rather than
     // throwing. L5 produced the witness on a seed CI happened to draw:
@@ -1442,7 +1426,7 @@ describe('the RelIR spine', () => {
 
 
 
-  test('a retyping terminal frames as the same Shape on both spines', () => {
+  test('a retyping terminal frames as the expected Shape', () => {
     // Rows agreeing is not enough at the shape boundary: `Compiled.shape` is what the wire framer
     // reads, so a lowering that produced the right VALUES under the wrong shape would round-trip
     // as the wrong GraphBinary type and every row assertion would still pass.
@@ -1450,16 +1434,15 @@ describe('the RelIR spine', () => {
     expect(read("g.V().values('name')").shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
   });
 
-  test('values(k…) is the KEY SET, on both spines', () => {
-    // Both spines read only `args[0]` until 2026-08-02, so `values('name','age')` returned just the
+  test('values(k…) is the KEY SET', () => {
+    // This read only `args[0]` until 2026-08-02, so `values('name','age')` returned just the
     // names and `values()` bound null and returned nothing — right arity, plausible rows, and the
-    // census recorded both as `ran`. Found by re-expressing the step in RelIR: a second
-    // implementation asks questions of the first that no test in the suite was asking.
+    // census recorded both as `ran`. Found by re-expressing the step as a RelIR lowering: a fresh
+    // implementation asks questions of the old one that no test in the suite was asking.
     //
     // TinkerPop's `PropertiesStep` is `element.properties(keys)` — no keys means EVERY key, several
     // mean membership in the set, and a null key never matches (`Properties.feature:91` pins
-    // `values("name","age",null)` as names AND ages). Asserted on both spines, because the fix
-    // landed in both and the differential requires them to agree.
+    // `values("name","age",null)` as names AND ages).
     {
       const rows = (g: string) => (store.query(read(g).sql, read(g).binds) as any[]).map((r) => r.v).sort();
       expect(rows("g.V().values('name')")).toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
@@ -1508,16 +1491,14 @@ describe('the RelIR spine', () => {
     expect(endpoints(knows)).toEqual(endpoints(top));
   });
 
-  // The relirAhead subject is the LIVE-LABEL form, and it has to be: legacy's refusal is about
-  // carrying an alias AND a sack at once, and `retractUnreadAlias` (ir/labels.ts) drops an `as()` no
-  // later step reads — so the bare `…sack()` form now has no alias to coexist with and legacy ANSWERS
-  // it. That is a coverage gain on the route being deleted, not a lost refusal; what still diverges,
-  // and what this test is about, is the form that actually reads the label.
+  // This test is about the LIVE-LABEL form — a sack coexisting with an alias a later step actually
+  // reads. `retractUnreadAlias` (ir/labels.ts) drops an `as()` no later step reads, so the bare
+  // `…sack()` form has no alias to coexist with; the form that reads the label is the one that
+  // exercises the coexistence.
   test('a sack COEXISTS with every other per-traverser channel', () => {
-      // Legacy THROWS `sack(Operator.x) after as()/path() state not yet supported` — it hand-rolls the
-      // carried-column re-projection and refuses rather than get the slot order wrong. Here a sack is
-      // an ordinary channel: `withChannel` puts it in its `ROLE_ORDER` slot and every node's declared
-      // type is rebuilt from the channel list, so coexistence is what happens when nobody prevents it.
+      // A sack is an ordinary channel: `withChannel` puts it in its `ROLE_ORDER` slot and every node's
+      // declared type is rebuilt from the channel list, so coexistence is what happens when nobody
+      // prevents it.
       const store = seededStore();
       expect(runWith(store, 'g.V().as("a").sack(assign).by("age").sack()').map((r) => r.v).sort((a, b) => a - b))
         .toEqual([27, 29, 32, 35]);
@@ -1536,14 +1517,12 @@ describe('the RelIR spine', () => {
     expect(read('g.V(1)').sql).toBe(first.sql);
   });
 
-  test('an ELEMENT fold frames the same BYTES on both spines, through two Shape descriptors', () => {
-    // The claim the L2 shape assertions make in prose, gated here in bytes. Legacy folds element ROWS
-    // and frames its `list` Shape as `listBuffer(rows.map(rowVertex))`; RelIR folds ROWIDS, expands
-    // them to public payload objects at the ROOT (so a `range(local)` or `unfold().limit(1)` discards
-    // members before anything computes a property bag), and frames through `jsonbList`'s
-    // `of.kind === 'elem'` arm — `listBuffer(items.map(rowVertex))`, the SAME encoder. Two
-    // descriptors, one encoder, identical GraphBinary; a divergence here would be the wrong-answer-
-    // with-right-arity class no coverage number can see.
+  test('an ELEMENT fold frames the same BYTES through two Shape descriptors', () => {
+    // The claim the L2 shape assertions make in prose, gated here in bytes. The lowering folds ROWIDS,
+    // expands them to public payload objects at the ROOT (so a `range(local)` or `unfold().limit(1)`
+    // discards members before anything computes a property bag), and frames through `jsonbList`'s
+    // `of.kind === 'elem'` arm — `listBuffer(items.map(rowVertex))`. A divergence in these bytes would
+    // be the wrong-answer-with-right-arity class no coverage number can see.
     //
     // The EMPTY fold is in the list on purpose: `FoldStep` supplies a seed (§12), so zero traversers
     // must frame as one EMPTY LIST and not as no traverser at all.
@@ -1636,26 +1615,24 @@ describe('the RelIR spine', () => {
     // installs one), so the moment the `then` arm changes shape the branch is mixed. Nothing about
     // it is exotic — the two arms just needed somewhere to say which of them a row came from.
     //
-    // NO WIRE CONCEPT WAS ADDED. `Shape{kind:'variant'}` and the `vk` discriminant are legacy's and
+    // NO WIRE CONCEPT WAS ADDED. `Shape{kind:'variant'}` and the `vk` discriminant already existed and
     // `execute.ts` has always framed them; this teaches the ALGEBRA to produce rows the framer could
-    // already read, which is §6·3's "a shape is a VALUE plus a framing arm" exactly. The proof is
-    // that both spines now DECLARE the same arm list for a shape they both answer, not merely the
-    // same rows.
+    // already read, which is §6·3's "a shape is a VALUE plus a framing arm" exactly.
     return (async () => {
       for (const gremlin of [
         'g.V().union(__.values("name"), __.identity())',
         'g.V().union(__.values("name"), __.out())',
       ]) {
         expect(read(gremlin).kind, gremlin).toBe('read');
-        // Legacy states `wholeResult` explicitly as undefined and RelIR omits the key; the framer
-        // reads `shape.wholeResult` either way, so the arm LIST is the claim and this normalizes the
-        // spelling rather than pinning it.
+        // `wholeResult` may be omitted or explicitly undefined; the framer reads `shape.wholeResult`
+        // either way, so the arm LIST is the claim and this normalizes the spelling rather than
+        // pinning it.
         expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toBeDefined();
       }
       // NOT a variant, and the contrast is the point: `choose(pred, values(k), constant(c))` has two
       // SCALAR arms, so the scalar meet above settles it at a per-row `vtype` column and no tag is
-      // needed at all. A variant is what two arms reach only when their SHAPES differ — RelIR keeps
-      // the per-row type here where legacy claims `unknown`, which is the lattice, not this merge.
+      // needed at all. A variant is what two arms reach only when their SHAPES differ — keeping the
+      // per-row type here is the lattice, not this merge.
       {
         const gremlin = 'g.V().choose(__.hasLabel("person"), __.values("name"), __.constant("inhuman"))';
         expect(read(gremlin).shape.kind).toBe('value');
@@ -1664,10 +1641,8 @@ describe('the RelIR spine', () => {
         expect(await via()).toEqual(await via());
       }
 
-      // RELIR AHEAD, and each for its own reason. The two-argument `choose` whose `then` retypes is
-      // the shape legacy refuses outright ("choose() branch __.values() not yet supported"); mixed
-      // ELEMENT KINDS are a shape legacy's own wire vocabulary can express (`vk` 2 vs 3) and its
-      // lowering declines. Asserted by CLASS rather than by rows, because the class is what a wrong
+      // Each for its own reason: the two-argument `choose` whose `then` retypes, and mixed ELEMENT
+      // KINDS (`vk` 2 vs 3). Asserted by CLASS rather than by rows, because the class is what a wrong
       // `vk` would corrupt: a vertex framed through `rowEdge` is not a wrong value, it is a wrong
       // GraphBinary type.
       const framed = async (gremlin: string) =>
@@ -1684,9 +1659,9 @@ describe('the RelIR spine', () => {
     // The form every branch host declined on `step.optionArms`, and what unblocked it was not a gate
     // but a fact: `Pick.none` claims a productive choice that matched no key and `Pick.unproductive`
     // claims one that produced NOTHING, and `TraversalProduct` calls a productive null a value — so
-    // `choice IS NULL` answers a different question. `ChildValue.present` carries the signal (legacy
-    // computes the identical thing as its modulation `present` column), and a choice whose body
-    // cannot report it DECLINES rather than conflating the two. §6·7's rule at a third seam.
+    // `choice IS NULL` answers a different question. `ChildValue.present` carries the signal, and a
+    // choice whose body cannot report it DECLINES rather than conflating the two. §6·7's rule at a
+    // third seam.
     return (async () => {
       for (const gremlin of [
         "g.V().choose(__.label()).option('person', __.out()).option(Pick.none, __.identity())",
@@ -1699,8 +1674,8 @@ describe('the RelIR spine', () => {
         'g.V().hasLabel("person").choose(__.values("age")).option(P.between(26, 30), __.constant("x")).option(P.between(20, 30), __.constant("y")).option(Pick.none, __.constant("z"))',
       ]) {
         expect(read(gremlin).kind, gremlin).toBe('read');
-        // AS A MULTISET, because neither spine pins the ARM order here: no `encounter` is live (both
-        // decline a branch under one), so the merge is a bare `UNION ALL` and which arm's rows land
+        // AS A MULTISET, because the ARM order is not pinned here: no `encounter` is live (a branch
+        // under one is declined), so the merge is a bare `UNION ALL` and which arm's rows land
         // first is SQLite's. The corpus agrees — every option-map scenario is `unordered`. What is
         // being compared is which traversers survive and how each frames, which is the claim.
         const via = async () =>
@@ -1709,12 +1684,11 @@ describe('the RelIR spine', () => {
         expect(await via(), gremlin).toEqual(await via());
       }
 
-      // THE IMPLICIT PASS-THROUGH, where RelIR is ahead and the corpus says so. Only `Pick.none` is
+      // THE IMPLICIT PASS-THROUGH. Only `Pick.none` is
       // written and `values("age")` can be unproductive, so the age-less vertices are claimed by
       // neither written arm and TinkerPop emits them WHOLE (`ChooseStep`'s constructor installs
       // identity traversals for both `Pick` tokens). `Choose.feature:371-387` pins `v[lop]`/`v[ripple]`
-      // as ELEMENTS; legacy's scalar CASE projector has one fallthrough and answers them as strings,
-      // a gap its own `lowerChooseOptions` documents in place.
+      // as ELEMENTS.
       const framed = (await decodeAll(exec(seededStore()).buffers(
         'g.V().choose(__.values("age")).option(P.between(26, 30), __.values("name")).option(Pick.none, __.values("name"))', {}, {})))
         .map((v: any) => (typeof v === 'string' ? v : `v[${v.properties.find((p: any) => p.key === 'name').value}]`));

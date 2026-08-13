@@ -58,8 +58,8 @@ test('E()/hasLabel/count and edge values() over the edges table', () => {
 test('user-supplied string ids: create, seed, traverse, expose (COALESCE uid,id)', () => {
   const store = new GraphStore(new BunSqlite(':memory:'));
   // `runWith` for BOTH, because which artifact a write compiles to is not what this test is about —
-  // a `T.id` write is the legacy closure, a plain `addV` is a RelIR program, and the id semantics are
-  // the same either way. Asserting the kind here made this fail the day one of them moved.
+  // the id semantics are the same however the write is lowered. Asserting the kind here made this
+  // fail the day a write's lowering moved.
   const w = (q: string) => runWith(store, q);
   const r = (q: string) => runWith(store, q);
   w('g.addV("person").property(T.id,"person:marko").property("name","marko")');

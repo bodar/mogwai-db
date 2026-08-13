@@ -23,8 +23,7 @@ export type { CompileOptions, FastPathConfig } from './options/fast-paths.ts';
 //                                   internal folds AND external withStrategies decoration/
 //                                   verification — so the dispatch sees a canonical, peek-free,
 //                                   policy-honoured chain. Chain-global facts come from ir/analyze.ts.
-//   3. dispatch  (steps/*.ts)    — prefix fold (buildPrefix) + tail
-//                                   (compileTail) for reads; routeWrite for writes
+//   3. lower     (rel/lower.ts)  — fold the Step[] into the RelIR algebra (src/rel/), then emit SQL
 // This file is just the wiring. Traversal-strategy handling — parsing the withStrategies/
 // withoutStrategies specs (extractStrategies front-end) and applying them as decoration/verify
 // Passes with a fail-closed reject invariant — lives in the Pass pipeline (ir/passes.ts); the

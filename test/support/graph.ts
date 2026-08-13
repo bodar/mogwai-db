@@ -34,28 +34,27 @@ export type StoreFactory = () => GraphStore;
  *  the only authority on which chains carry effects. A traversal that fails to compile is not a
  *  write (it will throw identically however it is run).
  *
- *  **Asked as "not a read", not as "is a `WritePlan`".** There are two mutating artifacts while the
- *  RelIR migration runs — the legacy closure and a `program` — and a probe that named only the first
- *  silently let a `g.V().drop()` share the read store and empty it for every traversal after it. The
- *  question this probe is really asking is whether a shared store survives the traversal, and only
- *  `kind === 'read'` answers yes.
+ *  **Asked as "not a read", not as "is a `WritePlan`".** A mutating traversal can compile to more than
+ *  one artifact (a write closure or a `program`), and a probe that named only one silently let a
+ *  `g.V().drop()` share the read store and empty it for every traversal after it. The question this
+ *  probe is really asking is whether a shared store survives the traversal, and only `kind === 'read'`
+ *  answers yes.
  *
  *  NOTE this uses a bare `compile()`, so it sees no service registry: a `call()` traversal throws
  *  here and is reported as a non-write, which is correct (no `call()` form is a write today). Do
  *  NOT reuse this as a general "does it compile" probe — see the header on test/census/census.ts. */
 export function isWrite(q: string): boolean {
-  // ASK BOTH SPINES, and treat a throw as no answer rather than as "read" — §6·1's union rule
-  // applied to CLASSIFICATION, which the migration makes load-bearing: a traversal one spine
-  // refuses and the other executes as a write is exactly what a coverage increment creates.
+  // Treat a throw as no answer rather than as "read": a traversal that fails to compile is not a
+  // write (it throws identically however it is run), but it must not be filed as a read that shares
+  // the fixture store either.
   //
-  // It used to ask `compile(q, {})`, i.e. whichever spine the AMBIENT switch selected, and swallow
-  // the throw. The failure that found it: under `MOGWAI_RELIR=0`, `mergeE(…).option(Merge.outV, …)`
-  // threw on legacy, was filed as a READ, and the census then ran it against its SHARED store —
-  // where the RelIR position happily created six SELF-LOOPS. Every later traversal saw a cyclic
-  // graph, and a cyclic `repeat()` without `simplePath()` is infinite per the spec, so the suite
-  // hung rather than failed. A misclassified write does not corrupt one row; it corrupts the fixture.
+  // A misclassification here is expensive. `mergeE(…).option(Merge.outV, …)` once threw and was filed
+  // as a READ, and the census then ran it against its SHARED store — where the working lowering
+  // happily created six SELF-LOOPS. Every later traversal saw a cyclic graph, and a cyclic `repeat()`
+  // without `simplePath()` is infinite per the spec, so the suite hung rather than failed. A
+  // misclassified write does not corrupt one row; it corrupts the fixture.
   {
-    try { if (compile(q, {}).kind !== 'read') return true; } catch { /* no answer from this spine */ }
+    try { if (compile(q, {}).kind !== 'read') return true; } catch { /* no answer — not a read */ }
   }
   return false;
 }
