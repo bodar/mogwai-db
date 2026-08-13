@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. Notes list **only what does not work**; no note means the whole step works. Anything
 unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,480<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,509<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -120,7 +120,19 @@ per-request limit is the backstop.
 
 ## 8. Pattern matching
 
-`match(…)` ❌. `shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ❌ — the OLAP family,
+`match(p1, p2, …)` 🟡 — a BINDING TABLE threaded through the ordinary fold, so a pattern body inherits
+the whole step vocabulary at any depth (`src/compiler/rel/match.ts`,
+`docs/2026-08-13-match-relir-lowering-plan.md`). ✅ conjunctive BINDING patterns `as(x).<body>.as(y)`
+(the body is any lowered movement/filter chain — `out().out()`, edge-typed hops, etc.), readiness
+scheduling so argument ORDER is unobservable, a BACK EDGE (`as(y)` re-using a bound variable →
+an equality constraint), the zero-root CYCLE, the terminal bindings MAP, and a downstream
+`select`/`select(…).by(…)`. The GQL match-STRING form (`g.match("MATCH (a)-[:knows]->(b)")`) rides on
+this via its desugar (`src/gremlin/gql.ts`). ❌ (fail closed, each a named next phase in the plan doc):
+a FILTER argument (`where`/`not`/`and`/`or`), a `where('a', P.op('b'))` two-variable predicate, a
+SCALAR-valued end (`count()`/`values()`/`select()` as the end), a single-node constraint pattern with
+no end, a nested `match` inside a pattern, `dedup(labels)`, and `match()` on an edge stream.
+
+`shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ❌ — the OLAP family,
 **not yet** rather than never: designed as `call()` services with the four step names as desugar
 Passes (`docs/2026-07-24-graph-algorithms-plan.md`), so the compute stays set-based SQL.
 

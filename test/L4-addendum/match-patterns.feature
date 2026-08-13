@@ -25,7 +25,6 @@ Feature: mogwai addendum — match() pattern shapes
       | m[{"a":"marko","b":"ripple"}] |
 
   @gap:match-patterns
-  @Unsupported
   Scenario: the same two hops spelled without repeat, as the oracle
     Given the modern graph
     And the traversal of

@@ -17,6 +17,7 @@ import { meetScalarTypes, memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticT
 import type { Elem } from '../plan/plan.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordNode, recordOf, recordPayload, selectKeys } from './record.ts';
+import { lowerMatch } from './match.ts';
 import { propertyElement, propertyHasClause, propertyId, propertyIdentityKey, propertyKey, propertyOrderTerms, propertyPayload, propertyReadOf, propertyRelation, propertyRowId, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
@@ -4039,6 +4040,16 @@ function elementTail(
         { framing: { kind: 'elements', elem }, named: namedElsewhere(ctx) });
       if (!selected) return null;
       return continueAs(selected.rel, selected.framing, steps, at + 1, bulked, ctx, fresh, labels);
+    }
+    // `match()` — the conjunctive pattern step. It re-roots each pattern body at its start alias and
+    // folds it through the CHILD SEAM (the same fold this chain is), rejoining by binding or
+    // constraining each end. It produces a bindings-map/alias-carrying stream, so it hands back to the
+    // ONE dispatcher exactly like `select`. See `match.ts` and `docs/2026-08-13-match-relir-lowering-plan.md`.
+    if (step.name === 'match') {
+      if (pathCarried(rel)) return null;
+      const matched = lowerMatch(step, rel, elem, labels, at + 1 === steps.length, ctx.params, childSeam(ctx, fresh), fresh);
+      if (!matched) return null;
+      return continueAs(matched.rel, matched.framing, steps, at + 1, false, ctx, fresh, matched.aliases);
     }
     // THE PER-TRAVERSER CHILD HOSTS — one lowering, three cardinality policies (`perTraverserChild`).
     if (PER_TRAVERSER_HOSTS.has(step.name))
