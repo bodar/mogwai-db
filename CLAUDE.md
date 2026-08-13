@@ -52,7 +52,6 @@ connects over plain HTTP. Verified against the unmodified `gremlin` JS client at
   MEMBER ROWS so N sites merge per key. Its remaining work is mixed member shapes, keyed declared
   policies, and safe member re-entry; downstream step gaps remain owned by their own substrates.
   Read it before touching `collection.ts`
-- `docs/2026-07-25-wire-and-storage-facts.md` — Map.Entry wire framing + the `MapStream` model
 - `docs/2026-07-28-property-based-testing-l5.md` — L5's oracle design space + the two oracles built.
   Its "architectural lesson" section is CORRECTED by the bright line in `src/compiler/CLAUDE.md` — the
   boundary is the anchor rule, not "shape belongs downstream". The shape vocabularies themselves landed

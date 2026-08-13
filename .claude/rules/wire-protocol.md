@@ -33,8 +33,16 @@ paths:
 - **DO SQLite has no user-defined functions, and we do NOT filter in JS.** Anything SQL can't
   express (`regex`/`typeOf`) fails closed with a deferral (root CLAUDE.md decision #3). Text SQL
   *can* express (`containing`/`startingWith`/`endingWith`) stays in SQL (`LIKE`).
-- **A `Map.Entry` frames as a size-1 MAP** on GraphBinary v4 (no dedicated DataType) — citations in
-  `docs/2026-07-25-wire-and-storage-facts.md`.
+- **A `Map.Entry` frames as a size-1 MAP** on GraphBinary v4 (no dedicated DataType) — every GLV
+  decodes it as an ordinary size-1 `MAP` (`0x0a`), indistinguishable from a genuine single-key map,
+  and this is by design: TINKERPOP-3104 ("make `unfold()` on Maps consistent") closed **Won't Do**
+  because GLVs have no native `Map.Entry`, so a remote `unfold(Map)` returns a size-1 Map (reference
+  docs, "A Note on Maps": *returned to the application as a Map with one entry*). Java's
+  `MapEntrySerializer` is a `TransformSerializer` — direct read/write THROW; it turns the entry into a
+  1-element `HashMap` before type dispatch. We frame each entry row as a size-1 MAP via
+  `mapFromEntries`/`typedMapBuffer` (`execute.ts`); the `map` (whole map) vs `mapEntry` (one entry,
+  key and value as their own columns) split is the two framing arms in `compiler/rel/framing.ts`, and
+  the conversion to an entry happens at `unfold()`, never earlier.
 - **`count()`/`groupCount()` are Java Longs → frame as Int64 (`longSerializer`), NOT via
   `anySerializer.serialize(BigInt(v))`.** A JS `bigint` handed to `anySerializer` selects GraphBinary
   **BigInteger** (0x23), which the client decodes to a JS BigInt — but a Long (Int64, 0x02) decodes
