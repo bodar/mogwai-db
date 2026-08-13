@@ -507,10 +507,16 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   the rest.
 - **Plan-size wart** — `byNode`'s property arm nests the collection CASE inside itself; one commit.
 
-Families still largely open (rank live via `rel-blockers`): the scalar-transform tail, branch
-(`choose`/`union`, incl. the single-arm form), row ops (`order`/`dedup`, ELEMENT-list & `Column`-keyed),
-aliases (`select`, dominated by `Pop.all`/`Pop.mixed` history reads), side effects, then `local`, `match`,
-`where`, the `path` tails.
+Families still largely open (rank live via `rel-blockers`): the scalar-transform tail, branch (the
+option-keyed `choose(<projection>).option(k, arm)` forms — the arm-merging half is now ONE dispatcher over
+three builders at both per-row shapes, `BRANCH_HOSTS`/`branchArms`), row ops (`Column`-keyed and the
+`path()` tails), aliases (`select`, dominated by `Pop.all`/`Pop.mixed` history reads), side effects, then
+`local`, `match`, `where`, the `path` tails.
+
+⚠️ **A merge DECLINES where a position is CARRIED** — `union`/`choose`/`coalesce` all re-mint the emission
+order, so `g.V().out().order().by('name').coalesce(…)` declines today. That is §10's "mint one
+deterministic window order over a whole fan-out" seen from the branch side, and it is now three callers
+rather than one.
 
 ⚠️ **Where a refusal is arithmetic over the INPUT's row count, a host that cannot count statically needs a
 GUARD, not a decline.** `addV` proves single-row at COMPILE time (a literal `Values`); an `addE` mid-chain

@@ -88,8 +88,9 @@ operator and DO SQLite has no UDFs, so it fails closed rather than filtering in 
 | Step | | Notes |
 |---|:--:|---|
 | `union(a, b…)` | 🟡 | two or more arms ✅. ❌ the SINGLE-arm form |
-| `choose(pred, a, b)`, `choose(…).option(…)` | ✅ | |
-| `coalesce`, `optional`, `branch`, `map(__.…)`, `flatMap`, `sideEffect(__.…)` | ❌ | |
+| `choose(pred, a, b)`, `choose(P, a[, b])`, `choose(…).option(…)` | ✅ | over ELEMENT and SCALAR streams alike — the condition's subject comes from the framing. A bare `P` is TinkerPop's own `choose(Predicate, …)` overload; a single-arm form passes unmatched traversers through. ❌ where an emission order is already carried (a merge re-mints it) |
+| `coalesce` | ✅ | UNION WITH PRIORITY: arm k takes the traversers for which arms 1…k−1 produced nothing. A body that always produces (`constant`/`count`/`fold`) exhausts it. ❌ where an emission order is already carried |
+| `optional`, `branch`, `map(__.…)`, `flatMap`, `sideEffect(__.…)` | ❌ | |
 | `local(__.…)` | ❌ | |
 
 Heterogeneous arms merge into a **variant stream**; after the merge the shape-agnostic steps
