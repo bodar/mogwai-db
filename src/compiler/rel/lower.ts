@@ -41,7 +41,7 @@ import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
 import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, listMemberOp, listPayload, listRetype, listSetOp, unfoldList } from './list.ts';
-import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapPayload, mapSide, mapSize, unfoldMap } from './map.ts';
+import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapSide, mapSize, unfoldMap } from './map.ts';
 import { edgeEndpoint, elementPayload } from './element.ts';
 import { foreignLabelValue, foreignRejoin, foreignRelation, foreignValues } from './foreign.ts';
 import type { ForeignRow } from '../../api.ts';
@@ -2702,6 +2702,38 @@ function injectList(step: IRStep, fresh: Minter): { rel: Rel; framing: RelFramin
 }
 
 /**
+ * `g.inject([k:v, …])` — a MAP literal, which seeds one MAP traverser per argument.
+ *
+ * The map twin of `injectList`, and the SOURCE the doc's §10 names as the map shape's largest
+ * multiplier: the whole re-enterable map tail (`select(Column.*)`, `select(<key>)`, `unfold()`,
+ * `count(Scope.local)`, a slice) was already built for `group()`/`valueMap()`, so a producer for a
+ * literal unlocks all of it at once. `mapLiteralBlob` (`map.ts`) builds the pairs-array blob — the same
+ * self-describing tree those producers aggregate, only compile-time here — and DECLINES a non-string
+ * key or an unserializable value, which is why this hands back `null` on those rather than a corrupt map.
+ *
+ * MIXED arguments decline at the `every` gate: `inject([k:v], 3)` is a map traverser and a scalar
+ * traverser in one stream, the VARIANT shape rather than either, exactly as `injectList` refuses.
+ *
+ * The values ORDER is the inject traverser order, carried on the `encounter` channel where the source is
+ * ordered — `injectSource`'s rule, so a later barrier over several maps drains them in inject order.
+ */
+function injectMap(step: IRStep, ordered: boolean, fresh: Minter): { rel: Rel; framing: RelFraming } | null {
+  if (step.modulators?.length || step.optionArms || !step.args.length) return null;
+  if (!step.args.every((a) => a.value instanceof Map)) return null;
+  const blobs = step.args.map((a) => mapLiteralBlob(a.value, a.type ?? null));
+  if (blobs.some((blob) => !blob)) return null;
+  const channels = ordered ? withChannel([], ENCOUNTER) : [];
+  const rows = (blobs as Expr[]).map((blob, i) => (ordered ? [blob, compilerInt(i + 1)] : [blob]));
+  return {
+    rel: make.values({
+      id: fresh('injm'), rows, channels,
+      type: typeOf(meta(MAP_COL, 'json'), ...carriedCols(channels)),
+    }),
+    framing: { kind: 'map', keyOf: { kind: 'scalar' }, valOf: { kind: 'scalar' } },
+  };
+}
+
+/**
  * THE LIST TAIL — the vocabulary above a collection-valued relation.
  *
  * Three exits, and they are the three things a list op can do: stay a list (`list.ts`'s member
@@ -3532,6 +3564,14 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
   }
 
   if (first.name === 'inject') {
+    // A MAP literal seeds a MAP traverser, a COLLECTION literal a LIST one, an ordinary value a SCALAR
+    // one — three shapes, and the ARGUMENT decides which. A `Map` is neither an array nor a scalar, so
+    // the arms are disjoint and their order is only which decline is spelled first.
+    const mapped = injectMap(first, ordered, fresh);
+    if (mapped) {
+      const withSack = sacked(mapped.rel);
+      return withSack && continueAs(withSack, mapped.framing, steps, 1, false, ctx, fresh, NO_ALIASES);
+    }
     // A COLLECTION literal seeds a LIST traverser, an ordinary value a SCALAR one — two shapes, and
     // the argument decides which, so the list arm is asked first and declines a scalar inject.
     const listed = injectList(first, fresh);

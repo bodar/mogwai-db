@@ -6,6 +6,7 @@ import { TYPED_MEMBERS, type ListOf, type MapOf, type Shape } from '../../sql/ke
 import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/step.ts';
 import { argValues } from '../../gremlin/frontend.ts';
+import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { and, byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EDGE_COLS, eq, fenced, firstOf, jsonOf, meta, NODE_COLS, PROPERTIES, typeOf, typedNode, withPayload, type Minter } from './build.ts';
 import { inferredVtype, LIST_COL } from './list.ts';
 import { edgeLabel, elementNode, externalId, vertexLabels } from './element.ts';
@@ -703,6 +704,44 @@ function rowidMember(host: ChildHost, rowid: Expr, fresh: Minter): Expr {
  *  still gets a host; the alias arm then declines instead of guessing. */
 export const elementHost = (rel: Rel, elem: Elem, aliases?: AliasMap): ChildHost =>
   ({ kind: 'element', id: col(rel.id, 'id'), elem, ...(aliases ? { row: { rel, aliases } } : {}) });
+
+// ---------- the LITERAL producer: a `[k:v, …]` argument AS a map value ----------
+//
+// The SOURCE half of the map shape (§6·3), and the reason it is four lines: the whole re-enterable map
+// tail (`mapSize`, `mapSide`, `mapKey`, `unfoldMap`, `entrySide`) and the framing arm already existed
+// for `group()`/`valueMap()`, so a producer for a LITERAL needs nothing new — a `[k:v, …]` argument is
+// the same self-describing pairs array `[[keyNode, valNode], …]` those producers emit, only built once
+// at compile time here rather than aggregated from rows.
+//
+// **`valueNodeOf` is the one authority for that tree.** It already turns any value + `TypeNode` into the
+// stored `{t,v}` vocabulary the wire framer reads (`gremlin/types.ts`), recursively and for a map as its
+// ORDERED PAIRS — which IS the blob. Re-spelling the encoding here would be a second chance to disagree
+// with the framer about how a scalar leaf stores, the mistake the shared authority exists to prevent.
+
+/** A map LITERAL as the pairs-array blob a map-valued relation carries (`MAP_COL`), or `null` to
+ *  decline. A COMPILE-TIME constant, so it inlines as a typed literal and spends none of the parameter
+ *  budget — the bind rule's "a constant the compiler holds inlines" (root `CLAUDE.md`).
+ *
+ *  Two fail-closed guards keep the blast radius to what the framer already reads: a NON-STRING key (a
+ *  `(T.label)` token, whose node `valueNodeOf` cannot yet spell — its key comes back `{t:null, v:{token}}`)
+ *  and any value the JSON encoder cannot carry (a bigint leaf throws). Both are the "not learned yet"
+ *  `null`, so a map with one such entry declines whole rather than seeding a corrupt blob — the token
+ *  keys and exact tails arrive with the write substrate that owns `mergeV`/`mergeE`. */
+export function mapLiteralBlob(value: unknown, type: TypeNode | null): Expr | null {
+  if (!(value instanceof Map)) return null;
+  const node = valueNodeOf(value, type);
+  if (node.t !== 'map') return null;
+  // Every key must be a plain `{t:'string', v:<string>}` node: that is the only key the map tail's own
+  // reads (`mapKey` matches `$[0].v` against a string, `mapSide` collects the key nodes) can resolve
+  // today, and a `T` token or a typed key would frame from a malformed node.
+  const pairs = (node as { readonly v: readonly (readonly [ValueNode, ValueNode])[] }).v;
+  if (!pairs.every(([key]) => key.t === 'string' && typeof key.v === 'string')) return null;
+  let json: string;
+  try { json = JSON.stringify(pairs); } catch { return null; }
+  // `jsonb('…')` over the inlined text: `MAP_COL` is JSONB, exactly what `mapPayload` reads back through
+  // `json()`, so a literal map and a `group()` map reach the wire through one column and one framer.
+  return { kind: 'call', fn: 'jsonb', args: [compilerText(json)] };
+}
 
 // ---------- the PER-ROW producer: `valueMap()`, an element's properties AS a map ----------
 //

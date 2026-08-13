@@ -365,6 +365,15 @@ const COVERED = [
   // A GROUP host is deliberately absent from this list: it compares RAW ROWS, and the two spines spell a
   // group row differently by design (`{gk,gv}` against one `map` blob) — `grouped` in the harness is
   // where that comparison belongs, and `test/compiler/group-properties.exec.test.ts` makes it.
+  // A MAP LITERAL as a source — the SOURCE half of the map shape. `injectMap` builds the same
+  // self-describing pairs-array blob `group()`/`valueMap()` aggregate, only at compile time, so the whole
+  // re-enterable map tail (`select(Column.*)`, `select(<key>)`, `unfold()`, `count(Scope.local)`, a slice)
+  // works over a literal the moment the producer exists. A non-string key (a `T` token) and an
+  // unserializable value decline (the write substrate owns those).
+  'g.inject([a:"a",b:"b"])', 'g.inject([name:"marko",age:null])', 'g.inject([a:"a",b:2])',
+  'g.inject([a:1,b:2]).count(Scope.local)', 'g.inject([a:1,b:2]).select("a")',
+  'g.inject([a:1,b:2]).select(Column.keys)', 'g.inject([a:1,b:2]).select(Column.values)',
+  'g.inject([a:1,b:2]).unfold()', 'g.inject([a:1],[b:2]).count()',
 ];
 
 /**
