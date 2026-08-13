@@ -1,6 +1,13 @@
 # `match()` on the RelIR spine — build plan
 
-> **Status: PLANNED 2026-08-13.** `match()` lowering was deleted with the legacy spine
+> **Status: P0 + P1 + P1c + P2a LANDED on trunk 2026-08-13 (L3 1480 → 1521).** Binding patterns,
+> back-edge/cyclic, no-end filter constraints, per-row + reducing-barrier scalar ends, the zero-root
+> regime, the unconditional bindings map, and inline `where(key, P.eq/neq)` legs are live — and the
+> whole GQL match-STRING front end is restored (it desugars to `match(Traversal)`). **The remaining
+> work is one well-scoped SUBSTRATE piece (P2b): the TRAVERSAL filter legs (`not`/`where(<body>)`)
+> need SEMI/ANTI-JOIN construction with multi-column correlation** — see the P2 bullet. Then P3/P4.
+>
+> `match()` lowering was deleted with the legacy spine
 > (`4af061e`, `src/compiler/steps/prefix/match.ts`, 338 lines). The GQL-string front end
 > (`src/gremlin/gql.ts`, `parser/gql/`, the `desugarMatchString` Pass) SURVIVED — it produces the
 > ordinary `match()` IR — so today it desugars and then dead-ends on a `match` step nothing lowers
