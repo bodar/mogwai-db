@@ -540,16 +540,20 @@ at both per-row shapes, `BRANCH_HOSTS`/`branchArms`, and a token choice is `toke
 (`Column`-keyed and the `path()` tails), aliases (`select`, dominated by `Pop.all`/`Pop.mixed` history
 reads), side effects, then `local`, `match`, `where`, the `path` tails.
 
-🚧 **The next three, named because each is now a SINGLE missing caller rather than missing algebra** — the
+🚧 **The next callers, named because each is now a SINGLE missing caller rather than missing algebra** — the
 pattern this whole stage kept finding:
 - **a branch/host arm on the PROPERTY tail.** `propertyTail` serves the row ops, its two filters, the
-  retypes and `group`; `choose`/`union`/`coalesce`/`project`/`select`/`where` over a property stream all
-  decline for want of a framing + host at the call site, both of which `propertyRowShape` already builds.
+  retypes, `group` and now `union`; `choose`/`coalesce`/`project`/`select`/`where` over a property stream
+  still decline for want of a `branchSubject`/host at the call site — a property `Subject` is the piece,
+  and it is a per-row message choice the way the scalar `is()` self is.
 - **the SCALAR and RECORD tails declaring a `RowShape`.** They call `orderRows` from their own loops, so
   neither gets `dedup`'s identity rule; the map and list tails are not in it at all.
-- **a set op over an ELEMENT-member list.** The operand check now raises before the self gate, so what is
-  left is the rowid comparison — the same two per-type facts (`GremlinValueComparator`/`ElementHelper`)
-  the property `RowShape` and the element-member `order`/`dedup` already state.
+- ✅ **a set op over an ELEMENT-member list — LANDED.** `listSetOp` admits an element-membered self+operand
+  when both are the SAME kind, comparing by ROWID (`ElementHelper` hashes/equals an Element by id AND
+  class, so a vertex rowid never equals an edge's), and the result keeps its element `of`. A cross-kind
+  operand and element `product` decline (a mixed-element or bare-framed-rowid result the payload layer
+  cannot carry). The corpus names only the ERROR forms (`combine(__.V())` — a non-folded stream is not
+  iterable), so this is pure combinatorial completeness (0 L3).
 
 ⚠️ **A merge over a DEMANDED position still declines** — where `ctx.ordered` says a downstream
 slice/collect reads the fan-out's emission order, `union`/`choose`/`coalesce` decline rather than let a

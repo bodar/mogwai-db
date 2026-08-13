@@ -1040,10 +1040,23 @@ export function listSetOp(
   // ⚠️ THE OPERAND IS RESOLVED BEFORE THE SELF'S MEMBER ENCODING IS GATED, and the order is the whole
   // difference between an ERROR and a decline: a non-iterable operand is the traversal's own answer
   // whatever the self's members are, so testing `isBareList(of)` first turned every element-member list's
-  // `combine(2)` into a silent decline. The self gate stays — an element-member set op is a rowid
-  // comparison nobody has built yet — but it stays AFTER the thing that raises.
+  // `combine(2)` into a silent decline. The gate stays AFTER the thing that raises.
   const resolved = operandList(step, arg, child);
-  if (!resolved || !isBareList(resolved.of) || !isBareList(of)) return null;
+  if (!resolved) return null;
+  // TWO MEMBER ENCODINGS ARE ADMITTED, and the split is the SAME per-type identity fact the property
+  // `RowShape` and the element-member `order`/`dedup` already state. A BARE-scalar list compares members
+  // by their value. An ELEMENT list compares by ROWID, which IS the element's identity —
+  // `ElementHelper.hashCode(Element)` is `element.id().hashCode()`, and `areEqual` also demands the same
+  // CLASS (`(a instanceof Vertex && b instanceof Vertex) || …`, `ElementHelper.java:463-466`), so a
+  // vertex rowid never equals an edge's. BOTH SIDES must therefore be the same element kind: a cross-kind
+  // set op matches nothing on identity AND would produce a MIXED-element result the payload layer cannot
+  // frame (`listPayloadExpr`'s elem arm is ONE `elem`), so it declines rather than mis-answer. `product`
+  // also declines over elements — its members are PAIR-lists whose rowids would frame bare (as integers)
+  // instead of as element objects — a distinct shape, not this comparison.
+  const elemOf = of.kind === 'elem' ? of.elem : null;
+  const bothElem = elemOf !== null && resolved.of.kind === 'elem' && resolved.of.elem === elemOf;
+  if (!bothElem && !(isBareList(of) && isBareList(resolved.of))) return null;
+  if (bothElem && step.name === 'product') return null;
   const rel = fenced(input, fresh);
 
   // BOTH SIDES IN ONE VOCABULARY: bare payloads. A typed list's members MAY be `{t,v}` envelopes, and
@@ -1189,9 +1202,15 @@ export function listSetOp(
   const merged = isTypedList(of) || isTypedList(resolved.of) ? UNKNOWN
     : sameScalarType(memberTypeOf(of) ?? UNKNOWN, memberTypeOf(resolved.of) ?? UNKNOWN)
       ? memberTypeOf(of) ?? UNKNOWN : UNKNOWN;
-  const resultOf: ListOf = step.name === 'product'
-    ? { kind: 'list', of: withMemberType(BARE_LIST, merged) }
-    : withMemberType(BARE_LIST, merged);
+  // An ELEMENT-membered result keeps its members as ELEMENTS: every op admitted for `bothElem` above
+  // carries the rowids through unchanged (a set op neither transforms nor pairs a member), and both
+  // sides are the same kind, so the result is a list of that one kind — framed by `listPayloadExpr`'s
+  // elem arm exactly as the input was. The scalar `merged` meet is irrelevant to it.
+  const resultOf: ListOf = bothElem
+    ? of
+    : step.name === 'product'
+      ? { kind: 'list', of: withMemberType(BARE_LIST, merged) }
+      : withMemberType(BARE_LIST, merged);
   return { rel: result, of: resultOf, ...(SET_RESULT.has(step.name) && terminal ? { set: true } : {}) };
 }
 
