@@ -468,15 +468,28 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   once where `both()` must yield the vertex twice, and it fails SILENTLY.
 - **Mint one deterministic window order over a whole fan-out.** Unlocks the UNORDERED bulked slice
   (`g.V().both().both().limit(2)` — `bulkSlice` has no position to accumulate along, so a collapse is
-  refused in front of it) AND the demanded-order branch merge (below). ⚠️ Cost: choosing WHICH
-  traversers an unordered `limit` returns is legal (TinkerPop specifies only membership) but moves an
-  answer digest → re-record the census with that argument. The ARM-BLOCKED order a `union`/`choose`
-  (`BranchStep`) presents is `[arm_ordinal, arm-local position, tie]` and its within-arm tie is per
-  SHAPE (element → id); `coalesce` is per-traverser (`[parent position, tie]`) instead. The
-  POSITIONLESS half already landed: a `union` over an ordered input, or with an arm-local
-  `order()/limit()`, drops the spent order and merges (`dropEncounter`, `unionArms`) — correct because
-  a union is unordered — and declines only when `ctx.ordered` says a downstream slice/collect reads
-  the fan-out order (which is what this mint would supply).
+  refused in front of it) AND the demanded-order branch merge (below). Three demand levels, and the
+  first two have LANDED:
+  - **POSITIONLESS** (`!ctx.ordered`): a `union` over an ordered input, or with an arm-local
+    `order()/limit()`, drops the spent order and merges (`dropEncounter`, `unionArms`) — correct
+    because a union is unordered.
+  - **COLLECT/write demand** (`ctx.ordered && !ctx.sliced`): a `fold`/`cap`/`group` needs a COLUMN to
+    collect by but does not pin WHICH order — TinkerPop's own `BranchStep` emission order is
+    impl-defined (`vendor/tinkerpop/gremlin-core/.../branch/BranchStep.java:120-152`) and no corpus
+    scenario pins a branch fold's member order. `withFanoutOrder` (`lower.ts`) mints a whole-row
+    `ROW_NUMBER` after the merge, general over every framing. (Calcite: a plain `Union` carries no
+    collation — `RelMdCollation` guarantees order only for `EnumerableMergeUnion` — so the order is
+    IMPOSED via a window, `SqlStdOperatorTable.ROW_NUMBER`.)
+  - **SLICE demand** (`ctx.ordered && ctx.sliced`) — STILL DECLINES, and is the remaining substrate. A
+    positional `limit/range/skip/tail` reads the fan-out to pick a SUBSET, and `BranchStep`
+    `standardAlgorithm` pins that subset: barrier-free arms are TRAVERSER-major, arm-minor
+    (`[parent position, arm_idx, arm_encounter]`); an arm holding a BATCHED barrier
+    (`hasBarrier`/`armBatches`, union/choose only) is ARM-major (`[arm_idx, parent position,
+    arm_encounter]`); `coalesce`/`optional` (`FlatMapStep`) are always traverser-major. The parent
+    position must ride each arm UNCHANGED through its hops — the `branchOrder` channel (already in the
+    channel core: `identical` merge, `empty` barrier, `undefined` group), minted from the input's
+    `encounter`, works where `origin` (a rowid) cannot (a scalar parent, and position ≠ id under
+    `order().by(k)`). ⚠️ Cost: the slice subset moves an answer digest → re-record the census.
 - **`recognize` (§4) — the fast paths as plan rewrites,** so a fast-path decline can be lifted.
 
 **Guard-binding family** — a shared mechanism (a GRAPH-dependent refusal → `Binding.guard`, §6·5):
@@ -554,10 +567,11 @@ pattern this whole stage kept finding:
   a one-line dispatch (verified 2026-08-13, reverted rather than shipping the mis-frame).
   **`constant` is now a SINGLE shared retype** (`constantRetype`) reached from every tail — element,
   scalar, list, property, map — rather than two copies plus three gaps.
-  ⚠️ **Discovered, high-value, NOT yet done: `fold()`/positional collect after a `union`/`choose`/`coalesce`
-  declines** (`g.V().coalesce(__.values('name'), __.constant('x')).fold()`) — a downstream collect demands
-  the fan-out emission order (`ctx.ordered`), which is the DEMANDED-order half below waiting on the
-  "mint one deterministic window order over a whole fan-out" substrate. Common pattern, real L3.
+  ✅ **`fold()`/collect after a `union`/`choose`/`coalesce` — LANDED** (`withFanoutOrder`,
+  `g.V().coalesce(__.values('name'), __.constant('x')).fold()`): a COLLECT demand takes any
+  deterministic fan-out order (see §10's mint bullet). What is LEFT is the SLICE demand — a
+  `limit/range/skip/tail` after a branch still declines (`ctx.sliced`) until the traverser-major /
+  arm-major key lands. Common pattern, real L3.
 - **the SCALAR and RECORD tails declaring a `RowShape`.** They call `orderRows` from their own loops, so
   neither gets `dedup`'s identity rule; the map and list tails are not in it at all.
 - ✅ **a set op over an ELEMENT-member list — LANDED.** `listSetOp` admits an element-membered self+operand
@@ -567,15 +581,14 @@ pattern this whole stage kept finding:
   cannot carry). The corpus names only the ERROR forms (`combine(__.V())` — a non-folded stream is not
   iterable), so this is pure combinatorial completeness (0 L3).
 
-⚠️ **A merge over a DEMANDED position still declines** — where `ctx.ordered` says a downstream
-slice/collect reads the fan-out's emission order, `union`/`choose`/`coalesce` decline rather than let a
-bare `LIMIT` read incidental `UNION ALL` byte order. That is §10's "mint one deterministic window order
-over a whole fan-out" seen from the branch side. The POSITIONLESS half landed for all three callers — `union`, the boolean `choose`, and `coalesce`:
-each drops the spent order and merges when `ctx.ordered` is false (`Union`/`Choose`/`Coalesce.feature`
-are all unordered, and a terminal coalesce's per-traverser order is unobserved anyway — no root demand
-orders the wire). The DEMANDED-order half of all three (a downstream slice/collect over the fan-out)
-still declines and waits on the mint: arm-blocked `[arm_ordinal, arm-local position, tie]` for the two
-`BranchStep`s, per-traverser `[parent position, tie]` for `coalesce`.
+⚠️ **A merge over a SLICE-demanded position still declines** — where `ctx.sliced` says a downstream
+`limit/range/skip/tail` reads the fan-out's emission order to pick a SUBSET, `union`/`choose`/`coalesce`
+decline rather than let a whole-row order pick a WRONG subset (`branch-traverser-major.feature` pins the
+reference's subset). The POSITIONLESS and COLLECT halves landed for all three callers (see §10's mint
+bullet). The SLICE half waits on the traverser-major / arm-major key: `[parent position, arm_idx,
+arm_encounter]` for a barrier-free `BranchStep`, `[arm_idx, parent position, arm_encounter]` for one
+with a batched-barrier arm, `[parent position, arm_encounter]` for `coalesce` (`FlatMapStep`, always
+per-traverser). The `branchOrder` channel is the parent-position carrier.
 
 ⚠️ **Where a refusal is arithmetic over the INPUT's row count, a host that cannot count statically needs a
 GUARD, not a decline.** `addV` proves single-row at COMPILE time (a literal `Values`); an `addE` mid-chain
