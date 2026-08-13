@@ -329,115 +329,128 @@ suspect the shared fixture first.
 
 `Recursive` wherever the walk is unbounded; the IR-level unroll (`unrollFixedRepeat`) for a bounded
 `times(n)`; a clear refusal for unbounded-AND-barrier. **Neither regime alone is sufficient and neither
-insufficiency shrinks with effort** — unroll cannot express an unbounded walk, and P3 says a term can
-express neither a per-iteration barrier nor the collapse. Both are on trunk, along with the checker
-hardening, `prune`, the `block.ts` legality analysis, the walk (`until`/`emit`/`emit(pred)` at all four
-modulator positions, a sack folded through it, and `repeat()` with NEITHER modulator as the specified
-EMPTY result), and ONE positional collapse authority.
+insufficiency shrinks with effort** — unroll cannot express an unbounded walk, and P3 (§1) says a term
+can express neither a per-iteration barrier nor the collapse. The walk covers `until`/`emit`/`emit(pred)`
+at all four modulator positions, a sack folded through it, and `repeat()` with NEITHER modulator as the
+specified EMPTY result, under ONE positional collapse authority.
 
-The measured facts behind the split are archived at
-`docs/archive/2026-08-09-repeat-two-regimes-plan.md` — read it before re-opening any of it. Its §7.2's
-chain-global collapse relaxation is **REFUTED**; do not retry.
+Measured facts behind the split are archived at `docs/archive/2026-08-09-repeat-two-regimes-plan.md` —
+read it before re-opening any of it. ⚠️ Its §7.2 chain-global collapse relaxation is **REFUTED**; do not
+retry.
 
-🚧 What is left:
-
-- **The unroll's admitted-body gate should be a DENY-list**, of exactly `loops()`, a named
-  `repeat('a',…)`, `emit()`, `until()`. The transformation's validity is a property of `repeat`, not of
-  the body's step names, so the allow-list is the accidental model. Worth ~+10 scenarios.
-  ⚠️ Most of the `repeat` gap is NOT this: of the bounded declines, relaxing the gate moves routing
-  33 → 43 only — the rest are blocked by steps the SPLICED chain still cannot lower (`select`, `local`,
-  `group`, the map shape). **Most of the repeat gap is the ordinary coverage gap wearing a `repeat`
-  costume.**
-- **A parameterised `times($x)` should PREFER the walk**, where it stays a bind. Unrolling forces the
-  one early parameter reduction the root `CLAUDE.md` names.
-- **An unbounded body whose UNION is not the TOP node.** `repeat(__.bothE().inV())` declines on shape:
-  the term is `project(join(union(arm₁, arm₂), …))` and a projection over a compound takes a derived
-  table. The fix is distribution through a JOIN (Calcite's `JoinUnionTransposeRule`). ⚠️ It must NOT be
-  shortcut with a disjunctive single-arm join `ON (e.src = w.id OR e.tgt = w.id)`: that matches a
-  SELF-LOOP once where `both()` must yield the vertex twice, and it fails SILENTLY.
-- **The UNORDERED bulked slice.** A collapse is refused in front of an unordered slice because
-  `bulkSlice` has no position to accumulate along, so `g.V().both().both().limit(2)` enumerates a
-  fan-out it could trim. Minting a deterministic window order fixes it, at the cost of choosing WHICH
-  traversers an unordered `limit` returns — legal (TinkerPop specifies only membership) but it moves an
-  answer digest, so it needs the census re-recorded with that argument.
+🚧 Repeat residue is folded into §10's worklist in substrate order: the unbounded body whose UNION is not
+the top node (join-union distribution), the UNORDERED bulked slice, the unroll's deny-list gate, and
+`times($x)`→walk.
 
 ---
 
-## §10. What is left — coverage
+## §10. What is left — the worklist, in compounding-substrate order
 
-Rank off `mise run rel-blockers`. Re-derive it rather than trusting a printed ranking — it has rotted
-once (`blame()` read a wrapper and reported the LARGEST family as absent) — and read a decline's REASON,
-not its date.
+Rank by what a gap UNLOCKS, not by L3 gain — substrate that opens other families first, leaf gaps last.
+Re-derive the live blocker ranking from `mise run rel-blockers` (it rots — `blame()` once read a wrapper
+and reported the LARGEST family as absent; read a decline's REASON, not its date). Three worklists FAIL
+LOUDLY when a shape lands, so check them before assuming something is untracked: `test/rel-spine.test.ts`'s
+`DECLINED`, `test/L4-addendum`'s `@Unsupported`, L5's `LAW UNEVALUABLE`.
 
-**The three worklists, all of which FAIL LOUDLY when a shape lands** (check them before assuming
-something is untracked): `test/rel-spine.test.ts`'s `DECLINED` list, `test/L4-addendum`'s
-`@Unsupported` scenarios, and L5's `LAW UNEVALUABLE` report.
+**Substrate — each unlocks several families, do these first:**
 
-Current leaders: the scalar-transform tail, branch (`choose`/`union`, including
-the single-arm form), row ops (`order`/`dedup`, the ELEMENT-list and `Column`-keyed forms), aliases
-(`select`, dominated by `Pop.all`/`Pop.mixed` history reads), the rest of the map shape, side effects,
-then `local`, `match`, `where`, the `path` tails.
+- **The map shape (a READ).** The largest multiplier: it is the SOURCE blocking a map-valued
+  `inject`/`union` feeding `mergeV`/`mergeE` (7 write traversals — ⚠️ not write work), the map-family
+  residue below, and part of the repeat gap. Build the VALUE with RelIR nodes plus its `RelFraming` arm
+  (§6·3).
+- **A list whose members may be ELEMENTS.** Unlocks the ELEMENT-list forms of `order`/`dedup`, the
+  map-family residue (`with(tokens, ids)`, the `by(__.unfold())` that pairs with them, `order(Scope.local)`
+  over map entries), and the `set` framing marker's list tail.
+- **The child seam consumer + `origin` naming a rowid-less parent.** `ChildSeam.rows`+`origin` EXISTS; the
+  CONSUMER is what is left. Unlocks the group-scoped reducer (`count()` with a non-empty body, and a SCALAR
+  host — the empty pool is PER-REDUCER and decides INNER vs LEFT: `CountGlobalStep` seeds 0 and keeps its
+  key, `SumGlobalStep` does not; a scalar host needs `origin` to name a parent with no rowid) and
+  `property(k, <traversal>)` writes. ⚠️ For `property(k,<traversal>)`, two values are provably ONE-ROW (the
+  first increment); a multi-row value is a SEPARATE case (`applyAll`, `AddPropertyStep.java:105-199`): 0
+  rows → NO mutation (never a NULL write); >1 under `single` → the guard-binding message *"Single-cardinality
+  property requires exactly one value, but traversal produced N results"*; >1 under `list`/`set` → each
+  written; the single-argument MAP form is a third case.
+- **`flatten` / join-union transpose** (§4; Calcite `JoinUnionTransposeRule`). Decorrelation into the P1
+  envelope; unlocks the unbounded repeat body whose UNION is not the top node (`repeat(__.bothE().inV())` —
+  term is `project(join(union(…),…))`, and a projection over a compound needs a derived table). ⚠️ Must NOT
+  be shortcut with a disjunctive single-arm join `ON (e.src=w.id OR e.tgt=w.id)`: it matches a SELF-LOOP
+  once where `both()` must yield the vertex twice, and it fails SILENTLY.
+- **Mint one deterministic window order over a whole fan-out.** Unlocks the UNORDERED bulked slice
+  (`g.V().both().both().limit(2)` — `bulkSlice` has no position to accumulate along, so a collapse is
+  refused in front of it). ⚠️ Cost: choosing WHICH traversers an unordered `limit` returns is legal
+  (TinkerPop specifies only membership) but moves an answer digest → re-record the census with that argument.
+- **`recognize` (§4) — the fast paths as plan rewrites,** so a fast-path decline can be lifted.
 
-Named gaps, each with its blocker so it is not re-derived:
+**Guard-binding family** — a shared mechanism (a GRAPH-dependent refusal → `Binding.guard`, §6·5):
 
-| | gap | blocked on |
-|---|---|---|
-| 1 | **Set-op keeps its members' types** — `values('when').fold().merge(…)` returns raw millis | The lossy test must span BOTH sides; `withLossyFlag` asks it of one relation. ⚠️ Gating on the compile-time `typed` flag is NOT the same question and was measured wrong: `values('name').fold()` is `typed` while every member is bare at run time |
-| 2 | **`memberTypeTag` returns a NULL tag unresolved** for a wrapped member whose `t` is null (what `path().by(<transform>)` writes), where a null tag means "infer from the value" everywhere else | Nothing — inert until tags join a comparison |
-| 3 | **Map family residue** — selective token subsets (`with(tokens, ids)`), the `by(__.unfold())` that pairs with them, `order(Scope.local)` over map entries | Needs a list whose members may be ELEMENTS |
-| 4 | **Group-scoped reducer: `count()` with a non-empty body, and a SCALAR host** | The empty pool is PER-REDUCER and decides INNER vs LEFT join (`CountGlobalStep` seeds 0 and keeps its key; `SumGlobalStep` does not). A scalar host needs `origin` to name a parent with no rowid |
-| 5 | **Two `sack` declines** — `withSack(seed, Operator.x)` (a MERGE policy for the role) and `barrier(Barrier.normSack)` | Both honest |
-| 6 | **The `set` framing marker** survives `range(local)`/`all`/`any`/`none`, dropped only by `order(local)`/`unfold()` | A state-threading change through the list tail's follower loop |
-| 7 | **`AliasEntry.binds`** must not increment on a rebind at the SAME path position (a wrong `Pop.mixed` wire type today) | Head-position tracking on the RelIR `AliasEntry` |
-| 8 | **Carry an inexact REAL into JSON exactly** — SQLite's JSON *writer* uses 15 significant digits and cannot round-trip a binary64; the parser is exact | Nothing, but ⚠️ four traps below |
-| 9 | **L4 sweep** — two committed expectations encoded a since-deleted implementation's bug | Nobody has swept the rest |
-| 10 | **Plan-size wart** — `byNode`'s property arm nests the collection CASE inside itself | Nothing; one commit |
+- **Runtime / computed LABEL** (~6 writes). `ElementHelper.validateLabel` is three PURE predicates → a
+  guard binding, not a decline. ⚠️ The message set depends on ARITY — `addV(single)` gives three `Label
+  can not be …` messages; `addV(a, b)` IS a Collection and `AddVertexStep.resolveLabelCollection` raises
+  FOUR others BEFORE `validateLabel`. 🔴 Settle the three-answer coercion HERE, don't add a fourth:
+  `mergeV([(T.label): x])` coerces, `g.addV(x)` declines, `addLabel(x)` coerces — all reachable
+  (`stringArgument : stringLiteral | variable`). `validateLabel` is TYPED upstream and coerces
+  (`String(label)`), so the gap is a missing guard at the nine CALL SITES, raise per-site. ✅ The `- found:
+  %s` tail names a GREMLIN type (`CanonicalType`), the tail only.
+- **`T.id` on `mergeV`/`mergeE`** (5 writes). `elementIdGuard` exists; the `Insert` column plumbing does not.
 
-⚠️ **The exact-REAL fix (gap 8) was attempted and reverted; each trap cost a cycle.** The shape that
-works applies ONLY where precision is actually lost: `CASE WHEN CAST(printf('%.15g',v) AS REAL) = v
-THEN v ELSE json(printf('%!.17g',v)) END`. (1) It is a **JSON-ENTRY rule, not a stored-value rule** — in
-`storedValueOn` it corrupts the ROW path, so `values('weight')` becomes JSON text and a later `fold()`
-quotes it. (2) **Gate on the VTYPE, not `typeof(value)`** — the value can be a whole correlated subquery
-and the guard splices it three times (69 statement families moved). (3) **`%.17g` drops real-ness**
-(`1.0` prints `1`), while `%!.17g` always writes 17 digits so `0.2` becomes `0.20000000000000001` —
-hence the lossy-only guard. (4) SQLite's JSON subtype does not survive some `CASE` shapes; it does
-survive when `json()` is the aggregate's direct argument.
+**Parameter / repeat residue:**
 
-**Writes.** 27 of 246 corpus WRITE traversals are blocked, grouped by CAUSE rather than step name:
+- **Parameterised `times($x)` should PREFER the walk** (§9), where it stays a bind — unrolling forces the
+  early parameter reduction the root `CLAUDE.md` names.
+- **The unroll's admitted-body gate should be a DENY-list** of exactly `loops()`, a named `repeat('a',…)`,
+  `emit()`, `until()` — the transform's validity is a property of `repeat`, not the body's step names. ⚠️
+  Worth ~+10, but most bounded declines are blocked by steps the SPLICED chain still cannot lower (`select`,
+  `local`, `group`, the map shape) — most of the repeat gap is the ordinary coverage gap in a `repeat` costume.
 
-| cause | n | blocked on |
-|---|---|---|
-| **`property(k, <traversal>)`** | 3 | Nothing. **Two have a provably ONE-ROW value** — the natural first increment. ⚠️ The reference collects with `applyAll`, so a multi-row value is a SEPARATE case: 0 results → NO mutation (never a NULL write); >1 under `single` → *"Single-cardinality property requires exactly one value, but traversal produced N results"* (a guard binding); >1 under `list`/`set` → each written; the single-argument MAP form is a third case (`AddPropertyStep.java:105-199`). The seam EXISTS (`ChildSeam.rows` + `origin`); what is left is the CONSUMER |
-| a map-valued `inject`/`union` feeding `mergeV`/`mergeE` | 7 | ⚠️ blocked at the SOURCE — the MAP SHAPE, a READ. **Not write work** |
-| **runtime / computed LABEL** | ~6 | Nothing. `ElementHelper.validateLabel` is three PURE predicates, so all are a GUARD BINDING, not a decline. ⚠️ **The message set depends on ARITY** — `addV(single)` gives three `Label can not be …` messages while `addV(a, b)` IS a Collection and `AddVertexStep.resolveLabelCollection` raises FOUR others BEFORE `validateLabel` runs |
-| `T.id` on `mergeV`/`mergeE` | 5 | `elementIdGuard` exists; the `Insert` column plumbing does not |
-| a meta-property under an UNDECLARED cardinality | 2 | the `set` arm PATCHES rather than inserts — an `UPDATE` this route does not emit |
-| `with()` on a write · singletons (`addE` after `addE`, `addInE`) | ~10 | one reason each |
+**Leaf gaps — one family, no downstream unlock:**
 
-⚠️ **Where a refusal is arithmetic over the INPUT's row count, a host that cannot count statically needs
-a GUARD, not a decline.** `addV` proves single-row at COMPILE time (its one-row case is a literal
-`Values`); an `addE` mid-chain input is a traverser relation and nothing static separates `g.V(1)` from
-`g.V()`.
+- **Exact REAL → JSON.** SQLite's JSON *writer* uses 15 significant digits and cannot round-trip a binary64
+  (the parser is exact). Apply ONLY where precision is lost: `CASE WHEN CAST(printf('%.15g',v) AS REAL) = v
+  THEN v ELSE json(printf('%!.17g',v)) END`. ⚠️ Four traps, each cost a cycle: (1) a JSON-ENTRY rule, NOT a
+  stored-value rule — in `storedValueOn` it corrupts the ROW path (`values('weight')`→JSON text a later
+  `fold()` quotes); (2) gate on the VTYPE, not `typeof(value)` — the value can be a whole correlated subquery
+  spliced three times; (3) `%.17g` drops real-ness (`1.0`→`1`), `%!.17g` always writes 17 digits
+  (`0.2`→`0.20000000000000001`) — hence the lossy-only guard; (4) SQLite's JSON subtype survives only when
+  `json()` is the aggregate's direct argument.
+- **Set-op keeps its members' types** — `values('when').fold().merge(…)` returns raw millis. The lossy test
+  must span BOTH sides; `withLossyFlag` asks it of one relation. ⚠️ Gating on the compile-time `typed` flag
+  is a DIFFERENT question, measured wrong: `values('name').fold()` is `typed` while every member is bare at
+  run time.
+- **The `set` framing marker** survives `range(local)`/`all`/`any`/`none`, dropped only by
+  `order(local)`/`unfold()` — a state-threading change through the list tail's follower loop.
+- **`AliasEntry.binds`** must not increment on a rebind at the SAME path position (a wrong `Pop.mixed` wire
+  type today) — needs head-position tracking on the RelIR `AliasEntry`.
+- **`memberTypeTag` returns a NULL tag unresolved** for a wrapped member whose `t` is null (what
+  `path().by(<transform>)` writes) — inert until tags join a comparison; a null tag means "infer from the
+  value" everywhere else.
+- **Two `sack` declines** — `withSack(seed, Operator.x)` (a MERGE policy for the role) and
+  `barrier(Barrier.normSack)`. Both honest.
+- **Meta-property under an UNDECLARED cardinality** (2 writes) — the `set` arm PATCHES rather than inserts;
+  needs an `UPDATE` this route does not emit.
+- **`with()` on a write · singletons** (`addE` after `addE`, `addInE`; ~10 writes) — one reason each.
+- **L4 sweep** — two committed expectations encoded a since-deleted implementation's bug; nobody has swept
+  the rest.
+- **Plan-size wart** — `byNode`'s property arm nests the collection CASE inside itself; one commit.
 
-🔴 **One question has THREE answers today** and the computed-label work must settle it, not add a
-fourth: `mergeV([(T.label): x])` coerces, `g.addV(x)` declines, `addLabel(x)` coerces. All reachable,
-since `stringArgument : stringLiteral | variable` admits a parameter bound to a non-string.
-`validateLabel` is TYPED upstream and coerces (`String(label)`), so the gap is a missing guard at the
-CALL SITES and the raise is per-site — nine messages. ✅ Decided: the `- found: %s` tail names a GREMLIN
-type (`CanonicalType`), not a Java class, and the tail only.
+Families still largely open (rank live via `rel-blockers`): the scalar-transform tail, branch
+(`choose`/`union`, incl. the single-arm form), row ops (`order`/`dedup`, ELEMENT-list & `Column`-keyed),
+aliases (`select`, dominated by `Pop.all`/`Pop.mixed` history reads), side effects, then `local`, `match`,
+`where`, the `path` tails.
 
-⚠️ **Invariants earned here — re-breaking these costs a wrong answer.** (The rest are recorded at their
-call sites.)
+⚠️ **Where a refusal is arithmetic over the INPUT's row count, a host that cannot count statically needs a
+GUARD, not a decline.** `addV` proves single-row at COMPILE time (a literal `Values`); an `addE` mid-chain
+input is a traverser relation, and nothing static separates `g.V(1)` from `g.V()`.
 
-- **A NULL never WINS a min/max and must never be FILTERED.** `NumberHelper.max/min` return the
-  non-null side; over an all-null input they reduce to null and the barrier has seen starts, so ONE
-  null traverser is emitted. Nulls sort LAST, with an explicit `IS NULL` term (SQLite orders NULLs
-  first ascending).
-- **A map is a SCOPE, consulted BEFORE the path labels** (`Scoping.java:119-135`), and `containsKey` is
-  presence (an `EXISTS`), not "the value is not null". An unresolvable `select()` key is the EMPTY
-  RESULT, not a decline (`Select.feature:578-596`).
-- **`ChildValue.present` carries productivity beside the value** — `Pick.none` and `Pick.unproductive`
-  are distinguishable no other way, and a body that cannot report it DECLINES.
+⚠️ **Invariants earned here — re-breaking each costs a wrong answer** (the rest are at their call sites):
+
+- **A NULL never WINS a min/max and must never be FILTERED.** `NumberHelper.max/min` return the non-null
+  side; over an all-null input they reduce to null and ONE null traverser is emitted. Nulls sort LAST, with
+  an explicit `IS NULL` term (SQLite orders NULLs first ascending).
+- **A map is a SCOPE, consulted BEFORE the path labels** (`Scoping.java:119-135`); `containsKey` is presence
+  (an `EXISTS`), not "the value is not null". An unresolvable `select()` key is the EMPTY RESULT, not a
+  decline (`Select.feature:578-596`).
+- **`ChildValue.present` carries productivity beside the value** — `Pick.none` and `Pick.unproductive` are
+  distinguishable no other way, and a body that cannot report it DECLINES.
 
 ---
 
