@@ -9,7 +9,8 @@ import type { IRStep } from '../ir/step.ts';
 import { eq, type Minter } from './build.ts';
 import type { ChildSeam } from './child.ts';
 import type { FramedRel, RelFraming } from './framing.ts';
-import { aliasIdAt, aliasValueAt, bindAliases, liveAliases } from './alias.ts';
+import { aliasIdAt, aliasProjection, aliasValueAt, bindAliases, liveAliases } from './alias.ts';
+import type { ChildHost } from './child.ts';
 import type { TraverserObject } from './history.ts';
 import { selectKeys } from './record.ts';
 
@@ -66,6 +67,12 @@ type Pattern =
 const MOVEMENTS: ReadonlySet<string> = new Set([
   'out', 'in', 'both', 'outE', 'inE', 'bothE', 'outV', 'inV', 'otherV', 'V', 'E', 'values', 'properties', 'label', 'id',
 ]);
+
+/** The value-REDUCING barrier ends — a pattern like `as('a').out().count().as('c')` binds `c` to a
+ *  reduction that must be computed ONCE PER ORIGIN with a 0/empty default. That is the scalar-child
+ *  seam's job (`child.scalar`, the same correlated read `by(__.out().count())` uses), NOT the row fold,
+ *  which drops the empty origins. `fold` is absent — it ends a LIST, a later phase. */
+const REDUCING_ENDS: ReadonlySet<string> = new Set(['count', 'sum', 'mean', 'min', 'max']);
 
 /** Parse a match argument into a `Pattern`, or `null` to decline the whole step (fail closed). Admits
  *  the anchored `as(start).<body>[.as(end)]` shapes; the FILTER/connective heads
@@ -165,17 +172,26 @@ export function lowerMatch(
   const root = rootLabel(patterns);
   if (root === null) return null;
 
-  // Bind the incoming traverser to the root label, so the root pattern re-roots on its own start
-  // exactly like every other pattern. `bindAliases` mints the alias channel and appends the history.
-  const rootBound = bindAliases(syn(step, 'as', [root]), seed, aliases, { kind: 'element', elem, id: col(seed.id, 'id') }, fresh);
-  if (!rootBound) return null;
-  let rel = rootBound.rel;
-  let labels = rootBound.aliases;
+  // The variables ALREADY bound before the match (an outer `V().as('a')…`). When the root is one of
+  // them, the match runs in TinkerPop's ZERO-ROOT regime: there is nothing to seed, and rebinding the
+  // root to the incoming traverser would CORRUPT it — the payload is whatever the outer chain walked
+  // to (e.g. `b` after `V().as('a').out().as('b')`), not the root's element.
+  const incoming = new Set<string>(liveAliases(aliases, seed).keys());
+  let rel = seed;
+  let labels = aliases;
+  if (!incoming.has(root)) {
+    // Bind the incoming traverser to a FRESH root, so the root pattern re-roots on its own start
+    // exactly like every other pattern. `bindAliases` mints the alias channel and appends the history.
+    const rootBound = bindAliases(syn(step, 'as', [root]), seed, aliases, { kind: 'element', elem, id: col(seed.id, 'id') }, fresh);
+    if (!rootBound) return null;
+    rel = rootBound.rel;
+    labels = rootBound.aliases;
+  }
   // The binding table's CURRENT framing — threaded rather than a bare `elem`, because a scalar-valued
   // end (`count().as('c')`) leaves the payload a scalar, and the NEXT pattern's re-root must dispatch
   // through the right tail (scalarTail handles a leading `select` re-root exactly as elementTail does).
   let framing: RelFraming = { kind: 'elements', elem };
-  const bound = new Set<string>([...liveAliases(aliases, seed).keys(), root]);
+  const bound = new Set<string>([...incoming, root]);
 
   // READINESS SCHEDULING — greedy, correctness-only (order is unobservable). A binding pattern is
   // ready once its start is bound; when it runs, its end joins the table. A dependency the loop can
@@ -185,6 +201,31 @@ export function lowerMatch(
     const i = pending.findIndex((p) => bound.has(p.start));
     if (i < 0) return null; // no ready pattern — a cyclic/unsolvable binding dependency. Fail closed.
     const p = pending.splice(i, 1)[0]!;
+
+    // A REDUCING-barrier end (`as('a').out().count().as('c')`) binds a per-origin reduction with a
+    // 0/empty default — the scalar-child seam, rooted at the start alias, NOT the row fold (which
+    // drops empty origins). The reduction is a correlated scalar projected into the alias column; the
+    // binding row's own payload is untouched, so `framing` carries.
+    if (p.kind === 'binding' && REDUCING_ENDS.has(p.body[p.body.length - 1]?.name ?? '')) {
+      const proj = aliasProjection(rel, labels, p.start, 'last', fresh);
+      if (!proj || proj.read.kind !== 'element') return null;
+      const host: ChildHost = { kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: proj.read.elem, row: { rel, aliases: labels } };
+      const produced = child.scalar(p.body, host);
+      if (!produced || produced.framing.kind !== 'scalar') return null;
+      if (bound.has(p.end)) {
+        const entry = liveAliases(labels, rel).get(p.end);
+        if (!entry) return null;
+        rel = make.filter({ id: fresh('mf'), input: rel, channels: rel.channels, type: rel.type, pred: eq(produced.expr, aliasValueAt(col(rel.id, entry.col), 'last')) });
+      } else {
+        const bindEnd = bindAliases(syn(step, 'as', [p.end]), rel, labels, { kind: 'value', value: produced.expr, type: produced.framing.type }, fresh);
+        if (!bindEnd) return null;
+        rel = bindEnd.rel;
+        labels = bindEnd.aliases;
+        bound.add(p.end);
+      }
+      continue;
+    }
+
     // Re-root at the pattern's start alias, then run the body through the ONE fold. The result relation
     // carries every prior alias channel (movements keep channels) plus a payload at the body's end.
     const rooted: IRStep[] = [syn(step, 'select', [p.start]), ...p.body];

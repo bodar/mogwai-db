@@ -130,9 +130,13 @@ landing order of one engine, not a support matrix.
   form, with scalar back-edges comparing stored values. L3 1509 → 1515. **A REDUCING-barrier end
   (`count()`/`sum()`, `framing.result` 'count'/'number') DECLINES** — its per-origin 0/empty default
   needs a correlated scalar child, and folding it inline drops empty origins (a wrong answer, caught
-  before it shipped). That is **P1c**, next: route a reducing-barrier end through `child.scalar`
-  (reaps `a_knows_count_b`, the shared-`c` count pair 143, `name_performances_count` 535, the
-  `count_isXgtX` pair 548).
+  before it shipped). **P1c LANDED 2026-08-13:** a reducing-barrier end (`count()`/`sum`/`mean`/`min`/
+  `max`) routes through `child.scalar` rooted at the start alias (the same correlated read
+  `by(__.out().count())` uses, 0 for an empty origin); scalar back-edges compare the reduced values.
+  Landed with the **zero-root fix**: when a start variable is ALREADY bound before the match
+  (`V().as('a').out().as('b').match(…)`), the root is NOT rebound — rebinding it to the incoming
+  traverser corrupted the pre-bound value (`a_out_count_c__b_in_count_c` was the witness). L3 1516 →
+  1518. Still ❌: a filter-AFTER-reduce end (`count().is(P.gt(10)).as('b')`) and a `fold()` (list) end.
 - **P2 — filter legs.** `where('a', P.neq('c'))` theta-join; `not(as(a)…as(b))` anti; `where(as(c).<moving body>)`.
 - **P3 — connectives & nesting.** `and(…)` binding group; `or(…)` → UNION of branches; nested `match`
   in a pattern; top-level `not(match(…).where(…).select(…))`.

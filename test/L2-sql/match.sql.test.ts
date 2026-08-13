@@ -60,14 +60,33 @@ describe('match() SQL', () => {
   });
 
   // A per-row SCALAR end (`values('name').as('b')`) binds a VALUE, not an element — one row per
-  // property value, each carrying b as a stored scalar. (A reducing `count()` end declines: its
-  // per-origin 0-default needs the scalar-child seam, a later phase.)
-  test('per-row scalar end binds a value; reducing end declines', () => {
+  // property value, each carrying b as a stored scalar.
+  test('per-row scalar end binds a value', () => {
     const store = seededStore();
     const rows = run(store, 'g.V().match(__.as("a").out("knows").values("name").as("b"))') as any[];
     // marko knows vadas + josh → two (a,b) bindings; nobody else has a knows edge.
     expect(rows.length).toBe(2);
-    expect(() => read('g.V().match(__.as("a").out("knows").count().as("b")).select("b")')).toThrow(/not supported/);
+  });
+
+  // A reducing-barrier end (`count().as('b')`) binds a PER-ORIGIN reduction with a 0/empty default —
+  // through the scalar-child seam, not the row fold, so a vertex with no matching edge binds 0 rather
+  // than dropping out.
+  test('count() end binds a per-origin count (0 for empty), via the scalar-child seam', () => {
+    const store = seededStore();
+    const rows = run(store, 'g.V().match(__.as("a").out("knows").count().as("b")).select("b")') as any[];
+    // Every vertex is kept: marko's out-knows is 2, everyone else's is 0.
+    expect(rows.length).toBe(6);
+    const counts = rows.map((r: any) => Number(r.v)).sort((x, y) => x - y);
+    expect(counts).toEqual([0, 0, 0, 0, 0, 2]);
+  });
+
+  // When the match's start variables are ALREADY bound before it (`V().as('a').out().as('b').match(…)`),
+  // it runs in the zero-root regime — the root is not rebound, so the pre-bound values are preserved.
+  test('pre-bound start variables (zero-root) are not corrupted', () => {
+    const store = seededStore();
+    const rows = run(store, 'g.V().as("a").out().as("b").match(__.as("a").out().count().as("c"), __.as("b").in().count().as("c"))') as any[];
+    // Only marko(out-degree 3)/lop(in-degree 3) agree on the shared count c.
+    expect(rows.length).toBe(1);
   });
 
   // A non-terminal match leaves the pattern variables on the stream as alias channels for a downstream

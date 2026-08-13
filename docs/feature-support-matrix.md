@@ -127,10 +127,18 @@ the whole step vocabulary at any depth (`src/compiler/rel/match.ts`,
 scheduling so argument ORDER is unobservable, a BACK EDGE (`as(y)` re-using a bound variable →
 an equality constraint), the zero-root CYCLE, the terminal bindings MAP, and a downstream
 `select`/`select(…).by(…)`. The GQL match-STRING form (`g.match("MATCH (a)-[:knows]->(b)")`) rides on
-this via its desugar (`src/gremlin/gql.ts`). ❌ (fail closed, each a named next phase in the plan doc):
-a FILTER argument (`where`/`not`/`and`/`or`), a `where('a', P.op('b'))` two-variable predicate, a
-SCALAR-valued end (`count()`/`values()`/`select()` as the end), a single-node constraint pattern with
-no end, a nested `match` inside a pattern, `dedup(labels)`, and `match()` on an edge stream.
+this via its desugar (`src/gremlin/gql.ts`). Also ✅: a NO-END constraint pattern with a filter-only
+body (`as('d').has('name','vadas')` — narrows `d`, binds nothing) and a per-row SCALAR end
+(`values('name').as('b')`, `select(key).as('b')` — binds a value; scalar back-edges compare values).
+A REDUCING-barrier end (`count()`/`sum`/`mean`/`min`/`max` — `as('a').out().count().as('c')`) binds a
+PER-ORIGIN reduction (0 for an empty origin) through the scalar-child seam. Start variables ALREADY
+bound before the match (`V().as('a').out().as('b').match(…)`) run in the zero-root regime (not
+rebound). The bindings MAP is emitted UNCONDITIONALLY (a following `identity`/`limit`/`select` sees the
+map, per `MatchStep.getBindings`). ❌ (fail closed, each a named next phase in the plan doc): a FILTER
+argument (`where`/`not`/`and`/`or`), a `where('a', P.op('b'))` two-variable predicate, a
+filter-AFTER-reduce end (`count().is(P.gt(10)).as('b')`) or a `fold()` end, a MOVING no-end pattern (an
+existence semi-join), a 0/1-variable bindings map, a nested `match` inside a pattern, `dedup(labels)`,
+and `match()` on an edge stream.
 
 `shortestPath`, `pageRank`, `peerPressure`, `connectedComponent` ❌ — the OLAP family,
 **not yet** rather than never: designed as `call()` services with the four step names as desugar

@@ -38,7 +38,6 @@ Feature: mogwai addendum — match() pattern shapes
       | m[{"a":"marko","b":"ripple"}] |
 
   @gap:match-patterns
-  @Unsupported
   Scenario: every pattern start already bound before the match (no root variable)
     # marko out-degree 3; the in-degree of each of marko's neighbours: vadas 1, josh 1, lop 3.
     # So the shared 'c' constrains to the pair whose counts agree — marko(3)/lop(3).
