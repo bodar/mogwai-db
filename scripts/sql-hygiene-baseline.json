@@ -221,10 +221,22 @@
     "compiler": 67,
     "bound": 0
   },
+  "hasKey": {
+    "binds": 0,
+    "bytes": 324,
+    "compiler": 8,
+    "bound": 0
+  },
   "hasLabel": {
     "binds": 0,
     "bytes": 1062,
     "compiler": 7,
+    "bound": 0
+  },
+  "hasValue": {
+    "binds": 0,
+    "bytes": 401,
+    "compiler": 9,
     "bound": 0
   },
   "in": {
@@ -517,8 +529,8 @@
   },
   "value": {
     "binds": 0,
-    "bytes": 810,
-    "compiler": 23,
+    "bytes": 1252,
+    "compiler": 26,
     "bound": 0
   },
   "valueMap": {

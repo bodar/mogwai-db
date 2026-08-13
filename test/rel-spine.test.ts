@@ -71,6 +71,24 @@ const COVERED = [
   // `values()` is `element.properties(keys)`: no keys means EVERY key, several mean membership.
   // Both spines answered these WRONG until 2026-08-02 — see the semantics test below.
   "g.V().values('name','age')", "g.V().values('name','age',null)", 'g.V().values()', 'g.E().values()',
+  // An ALL-NULL key set is a legal set that matches nothing — the case `propertyKeyArgs` exists to keep
+  // apart from an ABSENT set, at every one of the four sites that reads a key list.
+  'g.V().values(null)', 'g.V().properties(null)', 'g.V().valueMap(null)',
+  // A NULL where a string was allowed is now CARRIED by the front end (it is a bare `K_NULL` token in the
+  // grammar, which the arg walk used to drop), so each site states what a null MEANS instead of never
+  // seeing one. All four are the corpus's own answers: a null property key is absent by construction
+  // (`Has.feature:565`), a null label matches no element or edge, and a null concat part is skipped.
+  'g.V().has(null)', "g.V().has(null, 'test-null-key')", "g.V().hasLabel(null, 'person')", 'g.V().hasLabel(null)',
+  'g.V().hasNot(null)', 'g.V().out(null)', "g.V().out(null,'knows')", "g.inject(null, 'a').concat(null, 'b')",
+  // THE PROPERTY STREAM AS A ROW PARTICIPANT — `order()`, `dedup()`, the slices and its own two filters,
+  // over BOTH owner kinds, because that is where the natural-order and identity rules differ
+  // (`propertyOrderTerms`/`propertyIdentityKey`).
+  'g.V().properties().order()', 'g.E().properties().order()', 'g.E().properties().order().by(desc).value()',
+  'g.V().properties().dedup()', 'g.V().both().properties().dedup().count()', 'g.V().bothE().properties().dedup().count()',
+  'g.V().properties().limit(2)', 'g.V().properties().range(1,3).value()',
+  "g.V().properties().hasKey('age')", "g.V().properties().hasKey(null,'age').value()", 'g.V().properties().hasKey(null)',
+  'g.V().properties().hasValue(P.gt(30))', "g.V().properties().hasValue(null,'josh').value()",
+  "g.V().bothE().properties().dedup().hasKey('weight').hasValue(P.lt(0.3)).value()",
   // `inject()` — a SCALAR source, and the largest single blocker measured over the corpus: 387 of
   // the 2,298 traversals begin with one. Its relation has NO channels: an injected row is one
   // traverser by construction, so there is no multiplicity to carry and nothing has established an
@@ -418,7 +436,6 @@ const DECLINED = [
   "g.inject(['a','a']).dedup(Scope.local)",   // a member dedup keeps the FIRST occurrence per value
   "g.inject(['a','b']).reverse()",    // on a list `reverse` reverses ORDER, not each member
   "g.V().values('age').is(P.typeOf(GType.MAP))", // a MAP retype needs the map shape, not a decode
-  'g.V().has(null)',                  // a null KEY is neither a property name nor a token
   'g.V().has(T.label,null)',          // a null label VALUE: legacy owns what that means
   "g.inject('a').inject('b')",        // a second inject is a UNION with the first, not a source
   'g.inject(1,2).order(Scope.local)', // LOCAL scope: a per-traverser sort of a LIST, a different arm
@@ -1406,6 +1423,14 @@ describe('the RelIR spine', () => {
       expect(rows("g.V().values('name','age',null)")).toEqual([27, 29, 32, 35, 'josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
       expect(rows('g.V().values()')).toEqual([27, 29, 32, 35, 'java', 'java', 'josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
       expect(rows('g.E().values()')).toEqual([0.2, 0.4, 0.4, 0.5, 1, 1]);
+      // AN ALL-NULL KEY SET IS NOT AN ABSENT ONE, and this is the assertion that keeps them apart.
+      // `values(null)` asks for one key no property has — `element.properties([null])` filters by
+      // membership, so it matches nothing — while `values()` asks for EVERY key. Both spelled `keys` as
+      // an empty list until `propertyKeyArgs` (`build.ts`) split them, and the collapse answered
+      // *every property in the graph* to a traversal that asks for none. The corpus has only the MIXED
+      // form, so nothing above this line would have seen it.
+      expect(rows('g.V().values(null)')).toEqual([]);
+      expect(rows('g.E().values(null)')).toEqual([]);
     }
   });
 

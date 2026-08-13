@@ -2,9 +2,10 @@ import { col, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId } from '../../rel/types.ts';
-import { and, byEncounter, carriedCols, eq, jsonOf, meta, PROPERTIES, storedValueOn, typeOf, type Minter } from './build.ts';
+import { and, byEncounter, carriedCols, eq, jsonOf, keyMembership, meta, PROPERTIES, storedValueOn, typeOf, type Minter } from './build.ts';
 import { PER_ROW, STATIC } from '../../sql/kernel/render.ts';
-import { storedCompareOn } from './predicate.ts';
+import { storedCompareOn, valueSet } from './predicate.ts';
+import type { Arg } from '../../gremlin/frontend.ts';
 import type { RelFraming } from './framing.ts';
 import type { Elem } from '../plan/plan.ts';
 
@@ -75,13 +76,12 @@ export function propertyJoin(input: Rel, elem: Elem, on: (props: RelId) => Expr,
   });
 }
 
-/** `properties(keys…)` off an ELEMENT relation — the join matched on the OWNER. */
-export function propertyRelation(input: Rel, elem: Elem, keys: readonly string[], fresh: Minter): Rel {
+/** `properties(keys…)` off an ELEMENT relation — the join matched on the OWNER. `keys` is `null` for
+ *  EVERY key and `[]` for a legal set that matches nothing; `keyMembership` owns that distinction. */
+export function propertyRelation(input: Rel, elem: Elem, keys: readonly string[] | null, fresh: Minter): Rel {
   const { owner } = PROPERTIES[elem];
   return propertyJoin(input, elem, (props) =>
-    and(eq(col(props, owner), col(input.id, 'id')), keys.length
-      ? { kind: 'in-list', expr: col(props, 'key'), values: keys.map((k) => compilerText(k)) }
-      : undefined), fresh);
+    and(eq(col(props, owner), col(input.id, 'id')), keyMembership(col(props, 'key'), keys)), fresh);
 }
 
 /**
@@ -112,6 +112,28 @@ export function propertyPayload(input: Rel, elem: Elem, fresh: Minter): Rel {
     id: fresh('ppl'), input: ordered, channels: [], type: typeOf(...payload.map(([column]) => column)),
     exprs: payload.map(([column, expression]) => [column.name, expression] as const),
   });
+}
+
+/**
+ * `hasKey(…)` / `hasValue(…)` — a filter on the property's own KEY or VALUE.
+ *
+ * Both are ONE `HasContainer` upstream, on `T.key` / `T.value`, so both are one predicate over one
+ * column here and the arm that differs is only WHICH column and WHAT is known about its type. The key is
+ * a string statically; the value's type is the row's own `vtype`, which is what makes
+ * `hasValue(P.lt(0.3))` compare a decimal-TEXT-carried exact number numerically rather than lexically —
+ * the same authority `has('age', gt(30))` spends on an element.
+ *
+ * The vararg-with-nulls reduction is `valueSet`'s, cited there. This is deliberately NOT the place a
+ * meta-property read lands: `has(k, v)` over a VertexProperty asks about its META-properties, a different
+ * question on a different row, and it declines rather than being answered off this one.
+ */
+export function propertyHasClause(
+  props: Rel, on: 'key' | 'value', args: readonly Arg[], fresh: Minter,
+): Expr | null {
+  const vtype = col(props.id, PROP('vtype'));
+  return on === 'key'
+    ? valueSet(col(props.id, PROP('key')), args, { kind: 'static', type: 'string' }, fresh)
+    : valueSet(storedValueOn(col(props.id, PROP('value')), vtype), args, { kind: 'perRow', vtype }, fresh);
 }
 
 // ---------- a property traverser's NATURAL ORDER and its IDENTITY ----------

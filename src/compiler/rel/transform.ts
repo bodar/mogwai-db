@@ -131,6 +131,12 @@ const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[]) => E
     // a row boundary rather than a value transform. Legacy's caller resolves it and substitutes the
     // Expression; there is no caller doing that here, so decline rather than drop the argument.
     if (args.some(isNested)) return null;
+    // A NULL ARGUMENT IS SKIPPED, and the reference says so in its own comment: "all null values are
+    // skipped during appending, as StringBuilder will otherwise append 'null' as a string"
+    // (`vendor/tinkerpop/gremlin-core/.../step/map/ConcatStep.java`, `map`). So `concat(null)` is the
+    // traverser's own value, which is what dropping the argument gives — and the all-null guard below
+    // still yields NULL for a null traverser, because it is computed over the remaining parts.
+    args = args.filter((a) => a !== null);
     if (!args.length) return v;
     const operands = args.map((a) => (typeof a === 'string' ? text(a) : typeof a === 'number' ? lit(a, 'real') : null));
     if (operands.some((o) => !o)) return null;

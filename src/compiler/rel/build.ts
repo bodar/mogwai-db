@@ -263,6 +263,54 @@ export function jsonEachSet(name: string, value: readonly unknown[], fresh: Mint
 export const JSON_NUMERIC_TYPES = ['integer', 'real'] as const;
 export const JSON_TEXT_TYPES = ['text'] as const;
 
+/**
+ * A PROPERTY-KEY ARGUMENT LIST — `properties(k…)` / `values(k…)` / `valueMap(k…)` / `elementMap(k…)`'s key
+ * positions — or `null` to decline an argument that is neither a string nor a null.
+ *
+ * TinkerPop's one rule is `element.properties(keys)`: NO keys means EVERY key, several mean MEMBERSHIP,
+ * and a NULL key never matches anything. So a null is INERT beside a real key — `Properties.feature:91`
+ * pins `values('name','age',null)` as names AND ages — but it is NOT the same as ABSENT. `values(null)`
+ * asks for a set of one key that no property has, i.e. the EMPTY result, and collapsing it to "no keys"
+ * would answer *every property* to a traversal that asks for none. **`all` is the flag that keeps those
+ * two apart**, and it is the whole reason this is one authority rather than a `filter` at each site: four
+ * call sites each spelled `keys.length ? membership : every`, which is right for three of the four
+ * inputs and silently wrong for the fourth.
+ */
+export const propertyKeyArgs = (
+  args: readonly unknown[],
+): { readonly keys: readonly string[]; readonly all: boolean } | null => {
+  const keys = args.filter((a): a is string => typeof a === 'string');
+  if (keys.length + args.filter((a) => a === null).length !== args.length) return null;
+  return { keys, all: args.length === 0 };
+};
+
+/** The key filter for a property scan, from `propertyKeyArgs`' answer: `undefined` where EVERY key
+ *  qualifies, an `InList` for a membership set, and NEVER for a legal-but-empty set — which an `InList`
+ *  cannot spell, since SQLite rejects `IN ()`. `keys` bounded by the QUERY TEXT is what makes the list
+ *  right here rather than the single-JSON-bind rule (that rule is about DATA-sized sets). */
+export const keyMembership = (key: Expr, keys: readonly string[] | null): Expr | undefined =>
+  keys === null ? undefined
+    : keys.length ? { kind: 'in-list', expr: key, values: keys.map(compilerText) }
+      : { kind: 'binary', op: '=', left: compilerInt(1), right: compilerInt(0) };
+
+/**
+ * A LABEL argument set — `hasLabel(l…)`, `out(l…)`, the label half of `has(label, k, v)` — or `null` to
+ * decline a non-label argument.
+ *
+ * `propertyKeyArgs`' twin, and the same rule for the same reason: a NULL label never matches anything, so
+ * it is INERT beside a real label (`hasLabel(null, 'person')` IS `hasLabel('person')`) while an ALL-NULL
+ * set matches NOTHING. `given` is whether the chain wrote any argument at all, which is what separates
+ * "no labels named, so every label qualifies" (`out()`) from "labels named, none of which can match"
+ * (`out(null)`) — the same distinction `propertyKeyArgs.all` draws, and the one a plain `filter(nonNull)`
+ * silently loses.
+ */
+export const labelSetArgs = (
+  args: readonly Arg[],
+): { readonly labels: readonly Arg[]; readonly given: boolean } | null => {
+  const labels = args.filter((a) => a.value !== null);
+  return labelArgsAllStrings(labels) ? { labels, given: args.length > 0 } : null;
+};
+
 /** Is every `Arg` a LABEL — an inline string, a literal list of strings, a string parameter, or a bound
  *  list of strings? Callers validate before building `labelIds`, which then trusts the values are text
  *  (labels are strings by spec; a non-string label is a decline the caller owns). */

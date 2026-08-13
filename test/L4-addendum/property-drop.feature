@@ -9,7 +9,6 @@ Feature: mogwai addendum — drop() over a property stream removes property rows
   # that the elements survive it, are unpinned upstream.
 
   @gap:property-drop
-  @Unsupported
   Scenario: g_V_propertiesXnameX_hasValue_drop
     Given the modern graph
     And the traversal of

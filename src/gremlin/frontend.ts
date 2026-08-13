@@ -505,6 +505,17 @@ function walkArgs(node: any, out: Arg[], params: Record<string, any>, paramTypes
   const emit = (v: any, t: TypeNode | null = null, name: string | null = null) => { out.push(arg(v, t, name)); };
   const cls = node.constructor.name;
   if (cls === 'StringLiteralContext') { emit(unquote(node.getText()), 'string'); return; }
+  // A NULL WHERE A STRING WAS ALLOWED — `hasKey(null)`, `values(null, 'name')`, `as(null)`. The grammar
+  // spells it as a bare `K_NULL` TOKEN inside `stringNullableLiteral`/`stringNullableArgument`
+  // (`vendor/tinkerpop/gremlin-language/src/main/antlr4/Gremlin.g4:1738-1741`), NOT as the
+  // `nullLiteral` rule the generic-literal path goes through — so the generic recursion below reached a
+  // terminal it did not recognise and DROPPED the argument. That is the failure mode the root
+  // `CLAUDE.md` calls the worse mirror of a missing lowering: nothing is even asking, because a lowering
+  // cannot decline on an argument it never sees. `hasKey(null)` arrived as `hasKey()` with an EMPTY arg
+  // list, so a positional arity was silently one short and `hasKey(null, 'age')` was indistinguishable
+  // from `hasKey('age')` (the same ANSWER there, by luck of null never matching — but by luck).
+  if ((cls === 'StringNullableLiteralContext' || cls === 'StringNullableArgumentContext')
+    && node.getText().toLowerCase() === 'null') { emit(null); return; }
   // long/bigint carry EXACT via BigInt — parseInt would truncate past 2^53 (the
   // pre-existing precision bug; see do-sqlite-bind-precision). byte/short/int fit a JS
   // number, so they stay parseInt (numeric storage class + native index usage).

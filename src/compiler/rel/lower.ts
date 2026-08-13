@@ -17,7 +17,7 @@ import { meetScalarTypes, memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticT
 import type { Elem } from '../plan/plan.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordNode, recordOf, recordPayload, selectKeys } from './record.ts';
-import { propertyElement, propertyIdentityKey, propertyKey, propertyOrderTerms, propertyPayload, propertyReadOf, propertyRelation, propertyRowId, propertyValue } from './property.ts';
+import { propertyElement, propertyHasClause, propertyIdentityKey, propertyKey, propertyOrderTerms, propertyPayload, propertyReadOf, propertyRelation, propertyRowId, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
 import { isColumnArg, isNested, isPred, isTokenArg, stepChain, argValues, arg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
@@ -26,11 +26,12 @@ import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
 import { childSteps, normalize } from '../ir/passes.ts';
-import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
+import { CONSTANT, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type SubjectType } from './predicate.ts';
 import { CoercionDeferral, foldConstantCoercions, injectValueTypes } from '../../gremlin/coerce.ts';
 import {
-    and, byEncounter, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, labelArgsAllStrings,
-    labelIds, meta, minter, NODE_COLS, notProduced, or, payloadCols, PROPERTIES, renumber, storedValue, typeOf, withMergedVtype, type Minter,
+    and, byEncounter, carriedCols, EDGE_COLS, elementCols, eq, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES,
+    keyMembership, labelIds, labelSetArgs, meta, minter, NODE_COLS, notProduced, or, payloadCols, PROPERTIES, propertyKeyArgs, renumber, storedValue,
+    typeOf, withMergedVtype, type Minter,
 } from './build.ts';
 import { bindAliases, liveAliases, selectSpec } from './alias.ts';
 import type { AliasMap } from '../plan/alias.ts';
@@ -630,6 +631,8 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
   // absence test — the two must agree about what "carries a property" means, and one builder is how.
   if (step.name === 'hasNot') {
     const element = elementSubject(subject);
+    // `hasNot(null)` is the negation of a `has(null)` that rejects everything, so it keeps everything.
+    if (element && args.length === 1 && args[0] === null) return CONSTANT.true;
     if (!element || args.length !== 1 || typeof args[0] !== 'string') return null;
     const present = hasPropertyClause(args[0], undefined, element, fresh);
     return present && { kind: 'unary', op: 'not', arg: present };
@@ -660,6 +663,12 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
     const valType = step.args[1]?.type ?? null;
     const valParam = step.args[1]?.name ?? null;
     if (isTokenArg(key)) return hasTokenClause(key.token, val, element, fresh, valType, valParam);
+    // A NULL PROPERTY KEY: no element carries a property under it, so the filter rejects everything.
+    // `element.property(null)` is absent by construction, which is why `has(null, 'test-null-key')` is
+    // the EMPTY result rather than a decline — and rather than the `has('test-null-key')` PRESENCE test
+    // it silently became while the front end dropped the null (right answer on this fixture, by luck of
+    // no vertex carrying that key).
+    if (key === null) return CONSTANT.false;
     if (typeof key !== 'string') return null;
     return hasPropertyClause(key, val, element, fresh, valType, valParam);
   }
@@ -676,10 +685,16 @@ function sourceFilter(step: IRStep, subject: Subject, fresh: Minter, ctx: ChainC
  */
 function hasLabelClause(labelArgs: readonly Arg[], subject: ElementSubject, fresh: Minter): Expr | null {
   const elem = subject.elem;
-  // A non-string label (or a bound one resolving to a non-string) is a decline the caller routes; an
-  // inline label inlines, a `$label` / `$labels` binds — all inside `labelIds`.
-  if (!labelArgs.length || !labelArgsAllStrings(labelArgs)) return null;
-  const ids = labelIds(labelArgs, fresh);
+  // A NULL LABEL IS INERT and an ALL-NULL SET MATCHES NOTHING — `labelSetArgs` owns both, and the second
+  // is why this cannot be a `filter`: `hasLabel(null)` names a label, so it must reject every element
+  // rather than fall through to "no labels named".
+  const asked = labelSetArgs(labelArgs);
+  if (!asked) return null;
+  if (asked.given && !asked.labels.length) return CONSTANT.false;
+  // An inline label inlines, a `$label` / `$labels` binds — all inside `labelIds`. An EMPTY argument list
+  // reaches here only from a marker the Pass tier should have rewritten, so it declines.
+  if (!asked.labels.length) return null;
+  const ids = labelIds(asked.labels, fresh);
   if (elem === 'edge') {
     // Direct where the column is physically present (the source scan), and a membership test on
     // the edge id where it is not (after a movement, the relation is `id` + channels). Same
@@ -994,11 +1009,15 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
 
   // A movement's arguments are edge LABELS. An inline label inlines; a `$label` / `$labels` parameter
   // binds through `labelIds`, so its data never enters the statement text. A non-string label declines.
-  const labelArgs = step.args;
-  if (labelArgs.length && !labelArgsAllStrings(labelArgs)) return null;
+  // `labelSetArgs` also settles the NULL forms: `out(null,'knows')` is `out('knows')` because a null
+  // label matches no edge, while `out(null)` NAMED a label and therefore matches none — which is a
+  // different traversal from `out()`, whose empty set means every label.
+  const asked = labelSetArgs(step.args);
+  if (!asked) return null;
+  const labelArgs = asked.labels;
   // A label restriction is meaningless on an endpoint read — the edge is already chosen — and
   // TinkerPop's inV()/outV() take no arguments at all.
-  if (labelArgs.length && FROM_EDGE.has(step.name)) return null;
+  if (asked.given && FROM_EDGE.has(step.name)) return null;
 
   const input = frontierRel(from);
   // WHAT THE HOP CARRIES is its input's channels, read off the frontier rather than off a
@@ -1013,10 +1032,10 @@ function movement(step: IRStep, from: Frontier, elem: Elem, fresh: Minter): { re
       type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('label', 'int'), meta('tgt', 'int')),
     });
     const incoming = input ? col(input.id, 'id') : (from as { readonly correlated: Expr }).correlated;
-    const on = labelArgs.length
-      ? and(eq(col(e.id, hop.from), incoming),
-        { kind: 'in-query', expr: col(e.id, 'label'), plan: labelIds(labelArgs, fresh), negated: false })
-      : eq(col(e.id, hop.from), incoming);
+    const on = and(eq(col(e.id, hop.from), incoming),
+      labelArgs.length ? { kind: 'in-query', expr: col(e.id, 'label'), plan: labelIds(labelArgs, fresh), negated: false }
+        // NAMED labels, none of which can match — `out(null)`. NEVER, not "every label".
+        : asked.given ? CONSTANT.false : undefined);
     // A correlated hop FILTERS the edge table against the outer id; a rooted one JOINS the incoming
     // frontier. The projection is identical either way, which is what keeps the second hop from
     // needing a second implementation. A correlated body's `bulk` is synthetic: an EXISTS asks
@@ -1655,18 +1674,19 @@ function terminal(
   // question from every other `by()` here — so the guard at the top of this function declines it.
   if (step.name === 'valueMap' || step.name === 'elementMap') {
     const tokens = args.includes(true);
-    const keys = args.filter((a) => typeof a === 'string') as string[];
-    // A `null` KEY IS IGNORED rather than declined, and the reference pins it rather than us inferring
-    // it: `element.properties(keys)` filters by key membership, so a null never matches, and
-    // `ElementMap.feature`'s `g_V_elementMapXname_age_nullX` answers exactly `elementMap("name","age")`.
-    // Any OTHER argument — a nested traversal, a token this fold does not know — is a form this does
-    // not serve, and answering the same map for it would answer a different question.
-    const nulls = args.filter((a) => a === null).length;
-    if (args.length !== keys.length + nulls + (tokens ? 1 : 0)) return null;
+    // The key set is `propertyKeyArgs`', shared with `properties()`/`values()`: a null key is IGNORED
+    // rather than declined (the reference pins it rather than us inferring it — `element.properties(keys)`
+    // filters by key membership, so a null never matches, and `ElementMap.feature`'s
+    // `g_V_elementMapXname_age_nullX` answers exactly `elementMap("name","age")`), while an ALL-NULL set
+    // is a map with NO entries rather than the whole map. Any OTHER argument — a nested traversal, a
+    // token this fold does not know — is a form this does not serve, and answering the same map for it
+    // would answer a different question.
+    const asked = propertyKeyArgs(args.filter((a) => !(tokens && a === true)));
+    if (!asked) return null;
     // `elementMap()` takes no token OPTION: `ElementMapStep.map` puts `T.id` and `T.label`
     // unconditionally, which is why a `true` argument is not even a form it has.
     if (step.name === 'elementMap' && tokens) return null;
-    const mapped = elementValueMap(input, elem, keys.length ? keys : null,
+    const mapped = elementValueMap(input, elem, asked.all ? null : asked.keys,
       step.name === 'elementMap' || tokens, ctx.labelRegime, fresh,
       step.name === 'elementMap' ? { flat: true, endpoints: true } : {});
     return { rel: mapped.rel, framing: { kind: 'map', keyOf: mapped.keyOf, valOf: mapped.valOf } };
@@ -1697,13 +1717,13 @@ function terminal(
 
   if (step.name === 'properties') {
     // The PROPERTY twin of `values()` below — same join, stopped at the property row instead of
-    // projected down to its value. TinkerPop's `PropertiesStep` with no keys means EVERY key; a
-    // non-string key declines rather than being read as "every", which would answer a different
-    // question.
-    const keys = args.filter((a): a is string => typeof a === 'string');
-    if (keys.length !== args.length) return null;
+    // projected down to its value. `propertyKeyArgs` is the one authority on the key set (no keys means
+    // EVERY key, a null key never matches, and an all-null set is NOT "every"); a non-string, non-null
+    // key declines rather than being read as "every", which would answer a different question.
+    const asked = propertyKeyArgs(args);
+    if (!asked) return null;
     return {
-      rel: propertyRelation(input, elem, keys, fresh),
+      rel: propertyRelation(input, elem, asked.all ? null : asked.keys, fresh),
       framing: { kind: 'property', ownerElem: elem },
     };
   }
@@ -1806,11 +1826,11 @@ function terminal(
   }
 
   if (step.name === 'values') {
-    // TinkerPop's `PropertiesStep` is `element.properties(keys)`: no keys means EVERY key, several
-    // mean membership in the set. A non-string key is a decline rather than a guess — answering
-    // "every key" for one would be answering a different question.
-    const keys = args.filter((a): a is string => typeof a === 'string');
-    if (keys.length !== args.length) return null;
+    // The key set is `propertyKeyArgs`', the same authority `properties()` and `valueMap()` read: no keys
+    // means EVERY key, several mean membership, a null key never matches, and an ALL-NULL set is the
+    // empty result rather than "every". A non-string, non-null key is a decline rather than a guess.
+    const asked = propertyKeyArgs(args);
+    if (!asked) return null;
 
     const { table, owner } = PROPERTIES[elem];
     const props = make.scan({
@@ -1825,11 +1845,8 @@ function terminal(
     const joined = make.join({
       id: fresh('j'), left: input, right: props, join: 'inner', ordered: true, channels: input.channels,
       type: typeOf(...elementCols(input.channels), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-      // The key set is bounded by the QUERY TEXT, never by row count, so an `InList` is right here
-      // and a JSON bind is not (root CLAUDE.md's rule is about data-sized sets).
-      on: and(eq(col(props.id, owner), col(input.id, 'id')), keys.length
-        ? { kind: 'in-list', expr: col(props.id, 'key'), values: keys.map((k) => compilerText(k)) }
-        : undefined),
+      on: and(eq(col(props.id, owner), col(input.id, 'id')),
+        keyMembership(col(props.id, 'key'), asked.all ? null : asked.keys)),
     });
     return {
       rel: make.project({
@@ -4235,6 +4252,16 @@ function propertyTail(
 ): Tail | null {
   if (from === steps.length) return { rel, framing: { kind: 'property', ownerElem: elem }, aliases: labels, bulked: false };
   const step = steps[from]!;
+
+  // `hasKey()` / `hasValue()` — the property stream's OWN filters, and the only two steps whose subject
+  // is a property rather than an element. They preserve the shape, so they recurse like a row op.
+  if (step.name === 'hasKey' || step.name === 'hasValue') {
+    if (step.modulators?.length || step.optionArms) return null;
+    const clause = propertyHasClause(rel, step.name === 'hasKey' ? 'key' : 'value', step.args ?? [], fresh);
+    if (!clause) return null;
+    const kept = make.filter({ id: fresh('f'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
+    return propertyTail(kept, elem, steps, from + 1, bulked, ctx, fresh, labels);
+  }
 
   if (ROW_OPS.has(step.name)) {
     const row = rowOp(step, rel, propertyRowShape(rel, elem, labels), bulked, ctx, fresh);

@@ -357,6 +357,42 @@ const jsonEachInSet = (subject: Expr, value: readonly unknown[], name: string, f
   kind: 'in-query', negated, expr: subject, plan: jsonEachSet(name, value, fresh),
 });
 
+/**
+ * A VARARG VALUE SET over `subject` — the `hasKey(a, b, …)` / `hasValue(a, b, …)` form, where a NULL
+ * member is LEGAL. One argument is an `eq` and several a `within`, which is upstream's own reduction:
+ * `HasContainer(T.key, labels.length == 1 ? P.eq(labels[0]) : P.within(labels))`
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/dsl/graph/GraphTraversal.java:3107`,
+ * and `:3179` for the value side).
+ *
+ * ⚠️ **IT IS NOT `predicateExpr(… {op:'within'})`, and the difference is a null.** A null operand there
+ * DECLINES on purpose and must keep declining: `P.neq(null)` is TRUE for every non-null value while
+ * `NOT (x = NULL)` is NULL, so admitting one generally would turn a decline into a wrong answer. Here the
+ * only two ops are `eq` and `within`, and for exactly those SQL's null propagation IS the reference's
+ * answer — `value.equals(null)` is false, so `g.V().properties().hasKey(null)` is the EMPTY result and
+ * `hasKey(null, 'age')` keeps the `age` properties (`.../features/filter/HasKey.feature:71-101`).
+ *
+ * A single argument that is itself a `P` is that `P`, not a one-member set — `hasValue(P.gt(30))` is a
+ * range and routes to `predicateExpr`.
+ */
+export function valueSet(
+  subject: Expr, args: readonly Arg[], type: SubjectType, fresh?: Minter,
+): Expr | null {
+  if (!args.length) return null;
+  const only = args.length === 1 ? args[0]! : null;
+  if (only && (isPred(only.value) || only.value !== null))
+    return predicateExpr(subject, only.value, type, only.type, only.name, fresh);
+  // A P nested among varargs is not a form Gremlin has (`hasKey(P.eq('a'), 'b')` does not type), so
+  // declining beats folding one into a member list.
+  if (args.some((a) => isPred(a.value))) return null;
+  const values = args.map((a) => (a.value === null ? compilerNull() : operand(a.value, a.type, a.name)));
+  if (values.some((v) => !v)) return null;
+  // ONE member that is null: `x = NULL` is never true, which is the answer, and spelling it as the
+  // comparison rather than as `CONSTANT.false` keeps the reason readable in the emitted SQL.
+  return values.length === 1
+    ? binary('=', subject, values[0]!)
+    : { kind: 'in-list', expr: subject, values: values as Expr[] };
+}
+
 export function predicateExpr(
   subject: Expr, pred: unknown, type: SubjectType = SUBJECT_UNKNOWN,
   opType: TypeNode | null = null, opParam: string | null = null, fresh?: Minter,

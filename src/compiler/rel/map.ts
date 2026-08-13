@@ -7,7 +7,7 @@ import type { Elem } from '../plan/plan.ts';
 import type { IRStep } from '../ir/step.ts';
 import { argValues } from '../../gremlin/frontend.ts';
 import { valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
-import { and, byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EDGE_COLS, eq, fenced, firstOf, jsonOf, meta, NODE_COLS, PROPERTIES, typeOf, typedNode, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, carriedCols, coalesce, collectedArray, collectedOf, EDGE_COLS, eq, fenced, firstOf, jsonOf, keyMembership, meta, NODE_COLS, PROPERTIES, typeOf, typedNode, withPayload, type Minter } from './build.ts';
 import { inferredVtype, LIST_COL } from './list.ts';
 import { edgeLabel, elementNode, externalId, vertexLabels } from './element.ts';
 import { propertyNode } from './property.ts';
@@ -841,12 +841,12 @@ export function elementValueMap(
     id: fresh('vm'), table: table.table, alias: fresh('rvm'), channels: [],
     type: typeOf(meta('id', 'int'), meta(table.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
   });
-  // `keys` is bounded by the QUERY TEXT and never by row count, so an `InList` is right here and the
-  // single-JSON-bind rule does not apply (that rule is about DATA-sized sets).
+  // `keyMembership` (`build.ts`) is the one authority on what a key set MEANS: `null` is every key, a
+  // non-empty set is membership, and an EMPTY set matches nothing — `valueMap(null)` is a map with no
+  // entries, not the whole map.
   const mine = make.filter({
     id: fresh('vf'), input: props, channels: [], type: props.type,
-    pred: and(eq(col(props.id, table.owner), rowid),
-      keys && keys.length ? { kind: 'in-list', expr: col(props.id, 'key'), values: keys.map(compilerText) } : undefined),
+    pred: and(eq(col(props.id, table.owner), rowid), keyMembership(col(props.id, 'key'), keys)),
   });
   // A VERTEX collects each key's values into one `{t:'list', v:[…]}` node; an EDGE's key is single by
   // schema (`UNIQUE(edge, key)`, which is TinkerPop's `Property` being single by spec), so the group is
