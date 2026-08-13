@@ -366,6 +366,7 @@ ran	1	1	63d2fa1ccafefff5	a81cc277501bb980	g.V().out("created"). groupCount("a").
 ran	4	2	cd3d602595f26be7	1c4dc82f872f50e4	g.V().out("created"). project("a", "b"). by("name"). by(__.in("created").count()). order(). by(__.select("b"), Order.desc). select("a")
 ran	1	1	ad612dfc11a4b096	46f8755d38cb5d88	g.V().out("created").groupCount("x").cap("x")
 ran	1	1	63d2fa1ccafefff5	a81cc277501bb980	g.V().out("created").groupCount().by("name")
+ran	4	2	cd3d602595f26be7	1c4dc82f872f50e4	g.V().out("created").order().by("name").coalesce(__.values("name"), __.constant("x"))
 ran	1	1	63d2fa1ccafefff5	a81cc277501bb980	g.V().out("created").values("name"). groupCount("a"). cap("a")
 ran	1	1	63d2fa1ccafefff5	a81cc277501bb980	g.V().out("created").values("name").groupCount()
 ran	12	6	33140da0a93e8563	8d7b0726ba34e1be	g.V().out("knows").V().values("name")

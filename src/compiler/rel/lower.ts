@@ -4984,8 +4984,12 @@ function coalesceArms(
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): FramedRel | null {
   if (step.modulators?.length || step.optionArms) return null;
-  // A merge RE-MINTS the emission order, so a carried position declines here for `unionArms`' reason.
-  if (encounterOf(input.channels)) return null;
+  // `coalesce` is UNORDERED in the corpus (every `Coalesce.feature` scenario), and a TERMINAL coalesce's
+  // per-traverser order is unobserved anyway (no root demand orders the wire). So the same rule as
+  // `union` holds: the incoming/arm-local position does not survive the merge and is dropped, unless a
+  // downstream slice/collect READS the fan-out order (`ctx.ordered`), where the per-traverser mint this
+  // route does not build yet is required. See `unionArms`.
+  if (ctx.ordered) return null;
   const subject = branchSubject(input, framing);
   if (!subject) return null;
   const args = argValues(step);
@@ -5001,7 +5005,7 @@ function coalesceArms(
       : input;
     const arm = continueAs(domain, framing, body!, 0, bulked, inBody(ctx), fresh, labels);
     if (!arm) return null;
-    arms.push(arm);
+    arms.push({ ...arm, rel: dropEncounter(arm.rel, fresh) });
     // The LAST arm owes no guard for anyone, so it is not asked for one — a body whose non-production
     // this route cannot express still coalesces when it is last, which is the common `constant(x)`
     // fallback.
@@ -5015,7 +5019,7 @@ function coalesceArms(
     if (!empty) return null;
     exhausted = and(exhausted, empty);
   }
-  return mergeArms(arms, input.channels, labels, fresh);
+  return mergeArms(arms, withoutEncounter(input.channels), labels, fresh);
 }
 
 function chooseArms(

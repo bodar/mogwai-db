@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. Notes list **only what does not work**; no note means the whole step works. Anything
 unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,479<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,480<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -92,7 +92,7 @@ semantics commitment (JS `RegExp` ≠ Java `Pattern`) rather than on engineering
 |---|:--:|---|
 | `union(a, b…)` | 🟡 | two or more arms ✅, over an ordered input or with an arm-local `order()`/`limit()` (a union is UNORDERED, so the position is dropped). ❌ the SINGLE-arm form; a union whose emission order a downstream slice/collect READS (`union(…).limit(n)`, `.fold()`, `.cap()` — needs the arm-blocked fan-out order, not yet minted) |
 | `choose(pred, a, b)`, `choose(P, a[, b])`, `choose(…).option(…)`, `choose(T.x).option(…)` | ✅ | over ELEMENT and SCALAR streams alike — the condition's subject comes from the framing. A bare `P` is TinkerPop's own `choose(Predicate, …)` overload; a single-arm form passes unmatched traversers through; a `T`-token choice is always productive, so the implicit `Pick.unproductive` arm is provably dead. The boolean form composes over an ordered input or arm-local `order()`/`limit()` (a `choose` is UNORDERED, so the position is dropped). ❌ where a downstream slice/collect READS the fan-out emission order (needs the arm-blocked mint); over a PROPERTY stream |
-| `coalesce` | ✅ | UNION WITH PRIORITY: arm k takes the traversers for which arms 1…k−1 produced nothing. A non-final arm may be a bare value projection (`coalesce(__.values('name'), __.constant('x'))` — it produces iff the property exists) as well as a movement. A body that always produces (`constant`/`count`/`fold`) exhausts it. ❌ where an emission order is already carried |
+| `coalesce` | ✅ | UNION WITH PRIORITY: arm k takes the traversers for which arms 1…k−1 produced nothing. A non-final arm may be a bare value projection (`coalesce(__.values('name'), __.constant('x'))` — it produces iff the property exists) as well as a movement. A body that always produces (`constant`/`count`/`fold`) exhausts it. Composes over an ordered input (the position is dropped — unordered). ❌ where a downstream slice/collect READS the fan-out emission order (needs the per-traverser mint) |
 | `optional`, `branch`, `map(__.…)`, `flatMap`, `sideEffect(__.…)` | ❌ | |
 | `local(__.…)` | ❌ | |
 

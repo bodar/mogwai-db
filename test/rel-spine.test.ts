@@ -122,6 +122,9 @@ const COVERED = [
   // EXISTS — so `coalesce`/`choose`/`where` take a `values(k)`-headed body as a producing gate.
   "g.V().coalesce(__.values('name'), __.constant('x'))",
   "g.V().coalesce(__.values('lang'), __.values('name'))",
+  // …over an ORDERED input: a `coalesce` is unordered in the corpus and a terminal one's per-traverser
+  // order is unobserved, so the incoming position is dropped and the arms merge (mirrors `union`).
+  "g.V().out('created').order().by('name').coalesce(__.values('name'), __.constant('x'))",
   "g.V().where(__.values('name'))", "g.V().not(__.values('lang'))",
   "g.V().choose(__.values('age'), __.values('name'))",
   "g.V().hasLabel('person').values('age').choose(__.is(P.gt(29)), __.constant('older'), __.constant('younger'))",
