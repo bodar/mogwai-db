@@ -122,6 +122,12 @@ const COVERED = [
   "g.V().hasLabel('person').values('age').choose(__.is(P.gt(29)), __.constant('older'), __.constant('younger'))",
   "g.V().hasLabel('person').values('age').choose(P.eq(29), __.constant('matched'))",
   "g.V().hasLabel('person').values('age').choose(P.eq(29), __.constant('matched'), __.constant('other'))",
+  // AN EXPLICIT EMPTY `by()` is the same request as NO `by()` — the traverser itself. Both `group()`
+  // slots, at every host, and the `by()`-hosting exemption is now the whole `BY_HOSTS` set so a value
+  // stream's `group().by(…)` reaches the arm that could always answer it.
+  'g.V().group().by()', "g.V().group().by('name').by()", 'g.V().groupCount().by()',
+  'g.V().properties().group().by()', "g.V().values('name').groupCount().by()", "g.V().values('age').group().by()",
+  "g.V().values('name').groupCount().by(__.constant(1))",
   // `inject()` — a SCALAR source, and the largest single blocker measured over the corpus: 387 of
   // the 2,298 traversals begin with one. Its relation has NO channels: an injected row is one
   // traverser by construction, so there is no multiplicity to carry and nothing has established an

@@ -208,6 +208,21 @@ export const sameGroupRecipe = (a: GroupRecipe, b: GroupRecipe): boolean =>
 export const groupRowCols = (recipe: GroupRecipe): readonly string[] =>
   [KEY_COL, ...(recipe.counting ? [] : [MEMBER_COL, ORD_COL]), ...(recipe.bulkCol ? [recipe.bulkCol] : [])];
 
+/**
+ * AN EXPLICIT EMPTY `by()` IS THE SAME REQUEST AS NO `by()` AT ALL — both name the TRAVERSER ITSELF, and
+ * every consumer in `groupRows` wants them to mean one thing.
+ *
+ * `modulations` reports a missing slot as ABSENT and `by()` as `{key: identity}`, which is the right
+ * distinction for a host whose default is not identity (bare `dedup()` is a whole-row `Distinct`, a
+ * genuinely different lowering from `dedup().by()`) and the wrong one here: `group()`'s own default for
+ * both slots IS the traverser. Not collapsing them declined the whole `group().by().by(X)` family —
+ * `group().by()` never reached the cheap ROWID key, and `group().by('name').by()` never reached the
+ * COLLECT-the-elements arm, both of which the by()-less form has always had. An `Order` on the slot is
+ * NOT collapsed: a comparator is a real request even with an identity key.
+ */
+const named = (modulation: Modulation | undefined): Modulation | undefined =>
+  (modulation && modulation.key.kind === 'identity' && modulation.order === undefined ? undefined : modulation);
+
 export function groupRows(
   input: Rel, host: ChildHost, step: IRStep, bulked: boolean, child: ChildSeam, fresh: Minter,
 ): GroupRows | null {
@@ -242,14 +257,15 @@ export function groupRows(
    * thing from the other side). That is a plan cost and not a wrong answer, and it is the honest
    * trade while the rowid spelling would need a framing arm nothing else wants yet.
    */
-  const elementKey = !bys[0] && host.kind === 'element' ? host : undefined;
-  const key = elementKey ? elementKey.id : byNode(bys[0] ?? { key: { kind: 'identity' } }, host, fresh, child);
+  const keyBy = named(bys[0]);
+  const elementKey = !keyBy && host.kind === 'element' ? host : undefined;
+  const key = elementKey ? elementKey.id : byNode(keyBy ?? { key: { kind: 'identity' } }, host, fresh, child);
   if (!key) return null;
 
   // THE VALUE `by()`, where there is one. A slot `byNode` cannot project declines the whole step rather
   // than silently collecting the elements instead — which would be the right arity and the wrong answer,
   // the one thing the decline contract exists to prevent.
-  const valueBy = bys[1];
+  const valueBy = named(bys[1]);
   /**
    * `by(__.tail())` — the group's value is the LAST TRAVERSER routed to the key, which is the collecting
    * arm with one extraction rather than a value projection.

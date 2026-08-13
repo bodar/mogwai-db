@@ -23,7 +23,7 @@ import { parseCallSpec } from '../../services/params/call-params.ts';
 import { isColumnArg, isNested, isPred, isTokenArg, stepChain, argValues, arg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
-import type { IRStep } from '../ir/strategies.ts';
+import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
 import { childSteps, normalize } from '../ir/passes.ts';
 import { alwaysProduces } from '../ir/productivity.ts';
@@ -1977,11 +1977,18 @@ const namesALiveLabel = (pred: unknown, labels: AliasMap): boolean =>
  *  expression, so an unfenced `and(is(…), is(…))` pays the projection twice over. */
 const CLAUSE_READERS = new Set(['is', 'order', ...SCALAR_FILTER_HOSTS]);
 
-/** The tail steps that HOST a `by()` (`BY_HOSTS` ∩ this fold's vocabulary). Named rather than checked
- *  inline because the blanket `step.modulators?.length` decline must exempt exactly these — a host
- *  added to the fold without being added here silently loses its modulator, which is the failure mode
- *  the modulator seam exists to end. */
-const BY_READERS = new Set(['order', 'dedup', 'project', 'math', 'format']);
+/**
+ * The tail steps that HOST a `by()` — `BY_HOSTS` itself, imported rather than restated.
+ *
+ * It WAS a five-name subset, and the gap was not an intentional narrowing: `group`/`groupCount` read
+ * both their slots through `groupRows`, and the blanket `step.modulators?.length` decline in front of
+ * them refused every `group().by(…)` over a VALUE stream — an arm that had been able to answer since it
+ * landed. The `by()`-hosting builders all either read their modulations or decline them explicitly
+ * (`alias.ts`, `collection.ts`, `sack.ts`, `path.ts`, `projector.ts`, `record.ts`), so the honest
+ * exemption is the whole set and each arm's own refusal is the real gate. Sharing the Pass tier's
+ * constant is also what keeps the two from drifting — the comment used to claim they agreed.
+ */
+const BY_READERS = BY_HOSTS;
 
 /**
  * An `order()`'s sort terms over any host, or `null` to decline.

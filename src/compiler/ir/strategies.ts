@@ -33,7 +33,7 @@ export type { IRStep } from './step.ts';
 const REPEAT_CLUSTER = new Set(['repeat', 'emit', 'times', 'until']);
 /** Steps that absorb trailing by() modulators. Alias-compare where()/not() also
  *  host a single by(key) but are detected structurally (see isAliasCompareWhere). */
-const BY_HOSTS = new Set(['order', 'select', 'project', 'group', 'groupCount', 'path', 'math', 'format', 'sack', 'aggregate', 'dedup']);
+export const BY_HOSTS: ReadonlySet<string> = new Set(['order', 'select', 'project', 'group', 'groupCount', 'path', 'math', 'format', 'sack', 'aggregate', 'dedup']);
 /** Path-family steps additionally absorb from()/to() scoping modulators (a Path is scoped
  *  to the positions between two as() labels). `simplePath`/`cyclicPath` are hosts here only
  *  (not general BY_HOSTS) so their by()/from()/to() fold too. `to` also names a movement
