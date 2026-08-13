@@ -376,6 +376,11 @@ const COVERED = [
   'g.V().choose(__.hasLabel("person"), __.out(), __.in())',
   'g.V().choose(__.out("created"), __.out("knows"), __.in("knows"))',
   'g.V().choose(__.has("name","marko"), __.out(), __.in()).count()',
+  // …over an ORDERED input, and with an ORDER inside an arm: a `choose` is a `BranchStep` like `union`
+  // (`Choose.feature` asserts every scenario unordered), so the incoming/arm-local position is dropped
+  // and the ordered/limited arms merge.
+  'g.V().order().by("name").choose(__.hasLabel("person"), __.out(), __.in())',
+  "g.V().choose(__.values('age').is(P.lte(30)), __.out().order().by('name').limit(1), __.out().order().by('name').limit(2))",
   // A CORRELATED child body is the ordinary fold too, started at the correlated child — so every step
   // the loop knows is available inside a `where`/`filter`/`not` body at once, not one at a time.
   'g.V().where(__.out().order())', 'g.V().where(__.out().count().is(P.gt(1)))',

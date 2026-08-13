@@ -4999,7 +4999,11 @@ function chooseArms(
 ): FramedRel | null {
   if (step.modulators?.length) return null;
   if (step.optionArms) return chooseOptions(step, input, framing, bulked, ctx, fresh, labels);
-  if (encounterOf(input.channels)) return null;
+  // A `choose` is a `BranchStep` like `union` — arm-blocked and UNORDERED (`Choose.feature` asserts
+  // every scenario unordered) — so the same rule holds: the incoming position does not survive the
+  // merge and is dropped, unless a downstream slice/collect READS the fan-out order (`ctx.ordered`),
+  // where the arm-blocked mint this route does not build yet is required. See `unionArms`.
+  if (ctx.ordered) return null;
   const subject = branchSubject(input, framing);
   if (!subject) return null;
   const args = argValues(step);
@@ -5028,7 +5032,10 @@ function chooseArms(
   // The else arm over ZERO steps is `identity` on the complement — see above.
   const armElse = continueAs(guarded(true), framing, otherwise ?? [], 0, bulked, inBody(ctx), fresh, labels);
   if (!armThen || !armElse) return null;
-  return mergeArms([armThen, armElse], input.channels, labels, fresh);
+  // Drop the spent position from each arm (an arm-local `order()`/`limit()`), as `union` does — a
+  // `choose` is unordered, so the merged stream carries none.
+  const dropped = [armThen, armElse].map((arm) => ({ ...arm, rel: dropEncounter(arm.rel, fresh) }));
+  return mergeArms(dropped, withoutEncounter(input.channels), labels, fresh);
 }
 
 /** Do two framings describe the same stream? A shape mismatch between arms is a variant stream, which
