@@ -547,7 +547,11 @@ pattern this whole stage kept finding:
   `childHostOf` maps it — so `union`/`choose`/`coalesce` all fold their arm/condition bodies through a
   property host, and `where`/`filter`/`not`/`and`/`or` route through the SAME `sourceFilter` vocabulary
   (`SCALAR_FILTER_HOSTS`) and preserve the shape. `is` stays declined (a property has no single value).
-  What is LEFT on this tail is `project`/`select` (a record/label read off the property host).
+  What is LEFT on this tail is `project`/`select`. ⚠️ `project(k…).by(…)` over a property is NOT just a
+  missing caller: routing it through `recordOf` with the property host COMPILES and `select(field)` reads
+  the field, but the record→map WIRE framer emits EMPTY maps (`[{}, …]`) — a wrong answer with the right
+  arity. The record/map framer does not yet frame property-derived fields, so this needs framer work, not
+  a one-line dispatch (verified 2026-08-13, reverted rather than shipping the mis-frame).
   **`constant` is now a SINGLE shared retype** (`constantRetype`) reached from every tail — element,
   scalar, list, property, map — rather than two copies plus three gaps.
   ⚠️ **Discovered, high-value, NOT yet done: `fold()`/positional collect after a `union`/`choose`/`coalesce`
