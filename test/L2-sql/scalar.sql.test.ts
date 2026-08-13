@@ -140,7 +140,7 @@ describe('scalar-parent / projection SQL', () => {
 
   test('project() builds one map value per row from correlated field reads — RelIR', () => {
     const p = read('g.V().project("n","a").by("name").by("age")');
-    expect(p.spine).toBe('rel');
+    expect(p.kind).toBe('read');
     expect(p.shape).toEqual({ kind: 'mapValue' });
     // Each field is a correlated read of the CURRENT traverser (`rn.id`), and the pairs array carries
     // the key beside the value's own `{t,v}` node — the same encoding `group()` emits.
@@ -172,7 +172,7 @@ describe('scalar-parent / projection SQL', () => {
     // ONE key with a `by()` — `SelectOneStep`: the label's value, then the by() applied to IT. The
     // stored `vtype` rides along, which is what keeps a selected uuid/datetime exact at the wire.
     const one = read("g.V().as('a').out().select('a').by('name')");
-    expect(one.spine).toBe('rel');
+    expect(one.kind).toBe('read');
     expect(one.shape).toEqual({ kind: 'value', type: PER_ROW('vtype') });
     expect(runWith(store, "g.V().as('a').out().select('a').by('name')").map((r) => r.v).sort())
       .toEqual(['josh', 'josh', 'marko', 'marko', 'marko', 'peter']);
@@ -180,7 +180,7 @@ describe('scalar-parent / projection SQL', () => {
     // SEVERAL keys — `SelectStep`: a RECORD, whose by() ring applies to what each label held rather
     // than to the current traverser. So this is two property reads off two different elements.
     const many = read("g.V().as('a').out().as('b').select('a','b').by('name')");
-    expect(many.spine).toBe('rel');
+    expect(many.kind).toBe('read');
     expect(many.shape).toEqual({ kind: 'mapValue' });
     expect((runWith(store, "g.V().as('a').out().as('b').select('a','b').by('name')") as any[])
       .map(entries).sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y))))
@@ -212,7 +212,7 @@ describe('scalar-parent / projection SQL', () => {
     // loop owns the field's framing takes the rest of the chain and nothing is decoded back out of a
     // blob. A value field re-roots to a VALUE stream…
     const degree = read('g.V().project("degree").by(__.out().count()).select("degree")');
-    expect(degree.spine).toBe('rel');
+    expect(degree.kind).toBe('read');
     expect(degree.shape).toEqual({ kind: 'value', type: STATIC('long') });
     // …a PROPERTY field keeps the stored type it was read with…
     expect(read('g.V().project("n").by("name").select("n")').shape)

@@ -8,7 +8,7 @@
 // test/compiler.test.ts (it runs SQL + asserts results, a different kind of test).
 import { test, expect, describe } from 'bun:test';
 import { STATIC, TYPED_MEMBERS, UNKNOWN } from '../../src/sql/kernel/render.ts';
-import { compile } from '../../src/compiler/compiler.ts';
+import { compile, UnsupportedTraversal } from '../../src/compiler/compiler.ts';
 import { executeQuery } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
 import { read as bare_read, read, run, runWith, seededStore } from '../support/harness.ts';
@@ -284,7 +284,7 @@ describe('group / properties SQL', () => {
     // block assembler puts them in one SELECT. So the assertion worth making is that the SEED is a
     // compile-time constant inlined into the fold, not that a named relation carries it.
     const p = read('g.withSack(0.0d).V().sack(sum).by("age").sack()', rel);
-    expect(p.spine).toBe('rel');
+    expect(p.kind).toBe('read');
     expect(p.shape).toEqual({ kind: 'value', type: UNKNOWN });
     expect(p.sql).toContain('(0.0 + (SELECT');
     expect(p.binds).toEqual([]);
@@ -323,7 +323,7 @@ describe('group / properties SQL', () => {
   test('group().by(__.project) — a RECORD-keyed group over an edge stream (upstream getEdges)', () => {
     const gremlin = 'g.E().group().by(__.project("o","l","i").by(__.outV().values("name")).by(__.label()).by(__.inV().values("name"))).by(__.tail())';
     const p = read(gremlin);
-    expect(p.spine).toBe('rel');
+    expect(p.kind).toBe('read');
     expect(p.shape).toEqual({ kind: 'mapValue' });
     // The key IS the record's map node, named once as a column and grouped by that column — the
     // plan-quality rule every by() key here follows (a correlated subquery inlined at each position
@@ -352,7 +352,7 @@ describe('group / properties SQL', () => {
   test('properties().group() — a RECORD key over a PROPERTY stream (upstream getVertexProperties)', () => {
     const gremlin = 'g.V().properties().group().by(__.project("n","k","v").by(__.element().values("name")).by(__.key()).by(__.value())).by(__.tail())';
     const p = read(gremlin);
-    expect(p.spine).toBe('rel');
+    expect(p.kind).toBe('read');
     expect(p.shape).toEqual({ kind: 'mapValue' });
     // Every key part is the ORDINARY child seam over a PROPERTY host — `element()` re-roots to the
     // owner (exactly one by the schema) and `key()`/`value()` are correlated reads of the stored row.
@@ -417,25 +417,13 @@ describe('group / properties SQL', () => {
  * labels — `vendor/tinkerpop/gremlin-core/.../step/Scoping.java:117-131`), so the arm lives in
  * `modulator.ts` and EVERY host gained it at once.
  *
- * Every shape here is one legacy REFUSES, which is the §6·1 state "RelIR is ahead" — so each asserts
- * the RelIR answer absolutely, against the reference's semantics, rather than comparing spines.
+ * The shapes the arm cannot express are asserted to REFUSE (raise `UnsupportedTraversal`); everything
+ * it can express asserts the answer absolutely, against the reference's semantics.
  */
 describe('by(__.select(label)) — the alias arm', () => {
   const node = (v: any): any => (v && typeof v === 'object' && 't' in v
     ? (v.t === 'vertex' || v.t === 'edge' ? v.v.props.name[0].v : v.t === 'list' ? v.v.map(node) : v.v)
     : v);
-  /** What ROUTE answers this, counting a legacy THROW as legacy — a refusal is an answer about which
-   *  spine owns the shape, and swallowing it into a compile error would hide the very asymmetry the
-   *  §6·1 "RelIR is ahead" state exists to record. */
-  const routeOf = (gremlin: string): string => {
-    try {
-      const plan = compile(gremlin, {});
-      return plan.kind === 'read' ? plan.spine : 'legacy';
-    } catch { return 'legacy'; }
-  };
-
-
-
   test('a RECORD field keeps the label as an ELEMENT, so it re-enters as a vertex stream', () => {
     const store = seededStore();
     // The record's payoff, stated as a property rather than as a spelling: the field holds the
@@ -444,7 +432,7 @@ describe('by(__.select(label)) — the alias arm', () => {
     expect(new Set(runWith(store, 'g.V().as("v").out().project("vertex","n").by(__.select("v")).by("name").select("vertex").values("name")')
       .map((r) => r.v))).toEqual(new Set(['marko', 'josh', 'peter']));
     const plan = read('g.V().as("v").out().project("vertex","n").by(__.select("v")).by("name")');
-    expect(plan.spine).toBe('rel');
+    expect(plan.kind).toBe('read');
     expect(plan.shape).toEqual({ kind: 'mapValue' });
   });
 
@@ -455,6 +443,6 @@ describe('by(__.select(label)) — the alias arm', () => {
       'g.V().out().project("x").by(__.select("nope"))',
       'g.V().as("a").out().as("a").project("x").by(__.select(Pop.all, "a"))',
       'g.V().as("a").as("b").out().project("x").by(__.select("a","b"))',
-    ]) expect(routeOf(gremlin), gremlin).toBe('legacy');
+    ]) expect(() => compile(gremlin, {}), gremlin).toThrow(UnsupportedTraversal);
   });
 });

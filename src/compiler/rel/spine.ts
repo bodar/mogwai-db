@@ -176,7 +176,7 @@ export function finishLowering(lowered: RelLowering): Compiled | Program {
   const isDiscard = lowered.shape.kind === 'discard';
   if (isDiscard || !relational) {
     if (!isDiscard || relational) throw new Error('RelIR spine: a discard shape and a relational result disagree about whether this program yields traversers');
-    return { kind: 'program', program: lowered.plan, shape: { kind: 'discard' }, spine: 'rel' };
+    return { kind: 'program', program: lowered.plan, shape: { kind: 'discard' } };
   }
 
   const { sql, binds } = render(relational);
@@ -206,6 +206,6 @@ export function finishLowering(lowered: RelLowering): Compiled | Program {
   // does rather than a write-shaped copy, which is the property §6·3 had to preserve while moving where
   // that projection is built.
   return effects.length
-    ? { kind: 'program', program: lowered.plan, tail: { sql, binds }, shape: lowered.shape, spine: 'rel' }
-    : { kind: 'read', sql, binds, shape: lowered.shape, spine: 'rel' };
+    ? { kind: 'program', program: lowered.plan, tail: { sql, binds }, shape: lowered.shape }
+    : { kind: 'read', sql, binds, shape: lowered.shape };
 }

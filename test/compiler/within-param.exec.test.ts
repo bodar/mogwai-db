@@ -15,7 +15,7 @@ import { exec } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 
 const store = seededStore();
-const onRel = (g: string, p: Record<string, any> = {}) => { const c = compile(g, p); return c.kind === 'read' ? c.spine : c.kind; };
+const kindOf = (g: string, p: Record<string, any> = {}) => compile(g, p).kind;
 const plan = (g: string, p: Record<string, any> = {}) => compile(g, p) as any;
 const vals = async (g: string, p: Record<string, any> = {}) => {
   const out: string[] = [];
@@ -28,7 +28,7 @@ describe('collection-PARAMETER within/without → one jsonb(?) bind via json_eac
 
   test('within($names) is ONE bind, json_each, data NOT in the statement text', async () => {
     const g = "g.V().values('name').is(within(names))";
-    expect(onRel(g, { names: NAMES })).toBe('rel');
+    expect(kindOf(g, { names: NAMES })).toBe('read');
     const p = plan(g, { names: NAMES });
     expect(p.binds).toHaveLength(1);                                   // the whole array as one jsonb bind
     expect(p.binds[0]).toBe(JSON.stringify(NAMES));                   // the JSON text, not spread values
@@ -40,14 +40,14 @@ describe('collection-PARAMETER within/without → one jsonb(?) bind via json_eac
   test('a >25-member param set stays on rel (no decline to legacy) as ONE bind', async () => {
     const many = Array.from({ length: 30 }, (_, i) => 'x' + i).concat('marko');
     const g = "g.V().values('name').is(within(names))";
-    expect(onRel(g, { names: many })).toBe('rel');
+    expect(kindOf(g, { names: many })).toBe('read');
     expect(plan(g, { names: many }).binds).toHaveLength(1);
     expect(await vals(g, { names: many })).toEqual(['marko']);
   });
 
   test('a LITERAL within is unchanged — inline IN-list, zero binds', async () => {
     const g = "g.V().values('name').is(within('marko','vadas'))";
-    expect(onRel(g)).toBe('rel');
+    expect(kindOf(g)).toBe('read');
     expect(plan(g).binds).toHaveLength(0);
     expect(plan(g).sql).toContain("IN ('marko', 'vadas')");
     expect(await vals(g)).toEqual(['marko', 'vadas']);

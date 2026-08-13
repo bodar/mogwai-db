@@ -20,18 +20,17 @@ import { exec } from '../support/executor.ts';
 import { decodeAll } from '../support/decode.ts';
 
 const store = new GraphStore(new BunSqlite(':memory:'));
-/** 'rel' iff the traversal lowers on the RelIR spine rather than declining to legacy. */
-const onRel = (g: string) => { const p = compile(g, {}); return p.kind === 'read' ? p.spine : 'legacy'; };
-// FORCE the RelIR spine for the answer: this pins RelIR's CORRECT result, and legacy's wrong lexical
-// answer is documented in the header, not asserted — so the file is `test:legacy-spine`-safe (ambient
-// `executeQuery` would run these on legacy under MOGWAI_RELIR=0 and hit the very bug it documents).
+/** The compile kind — 'read' when the traversal lowers to a read. */
+const kindOf = (g: string) => compile(g, {}).kind;
+// These pin the CORRECT lexical/numeric ordering; the historical wrong lexical answer is documented
+// in the header, not asserted.
 const relExec = exec(store);
 const vals = async (g: string) =>
   (await decodeAll(relExec.buffers(g, {}, {}))).map((x: any) => x?.constructor ? `${x.constructor.name}:${x.toString()}` : String(x));
 
 describe('inject() exact-tail ordering — numeric on rel, fixing legacy lexical compare', () => {
   test('BigDecimal subject casts to REAL: gt/lt are numeric, not lexical', async () => {
-    expect(onRel('g.inject(9.99m).is(P.gt(9.0))')).toBe('rel');
+    expect(kindOf('g.inject(9.99m).is(P.gt(9.0))')).toBe('read');
     expect(await vals('g.inject(9.99m).is(P.gt(9.0))')).toEqual(['BigDecimal:9.99']);
     // Legacy returns [9.99] here ('9.99' > '10.0' lexically) — the wrong answer this fixes.
     expect(await vals('g.inject(9.99m).is(P.gt(10.0))')).toEqual([]);
@@ -41,13 +40,13 @@ describe('inject() exact-tail ordering — numeric on rel, fixing legacy lexical
   });
 
   test('big BigInt (>2^53) subject casts to INTEGER', async () => {
-    expect(onRel('g.inject(9007199254740993L).is(P.gt(9007199254740992L))')).toBe('rel');
+    expect(kindOf('g.inject(9007199254740993L).is(P.gt(9007199254740992L))')).toBe('read');
     expect(await vals('g.inject(9007199254740993L).is(P.gt(9007199254740992L))')).toEqual(['BigInt:9007199254740993']);
     expect(await vals('g.inject(9007199254740993L).is(P.lt(9007199254740992L))')).toEqual([]);
   });
 
   test('Duration subject casts to INTEGER (total nanos)', async () => {
-    expect(onRel('g.inject(Duration(9000,0)).is(P.gt(Duration(3600,0)))')).toBe('rel');
+    expect(kindOf('g.inject(Duration(9000,0)).is(P.gt(Duration(3600,0)))')).toBe('read');
     expect(await vals('g.inject(Duration(9000,0)).is(P.gt(Duration(3600,0)))')).toEqual(['Duration:9000000000000']);
     expect(await vals('g.inject(Duration(9000,0)).is(P.lt(Duration(3600,0)))')).toEqual([]);
   });
@@ -61,7 +60,7 @@ describe('inject() exact-tail ordering — numeric on rel, fixing legacy lexical
   // `constant(9.99m)` is the sibling of `inject(9.99m)`: it too has a declared type, so an exact tail
   // frames STATIC(type, text) and orders numerically, where it used to frame UNKNOWN and decline.
   test('constant() exact tail frames typed + orders numerically (not UNKNOWN)', async () => {
-    expect(onRel('g.inject(1).constant(9.99m).is(P.gt(9.0))')).toBe('rel');
+    expect(kindOf('g.inject(1).constant(9.99m).is(P.gt(9.0))')).toBe('read');
     expect(await vals('g.inject(1).constant(9.99m).is(P.gt(9.0))')).toEqual(['BigDecimal:9.99']);
     expect(await vals('g.inject(1).constant(9.99m).is(P.gt(10.0))')).toEqual([]);
     expect(await vals('g.inject(1).constant(9.99m)')).toEqual(['BigDecimal:9.99']);

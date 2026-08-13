@@ -21,7 +21,7 @@ describe('branch SQL (and/or/union/optional/choose/coalesce/map/flatMap)', () =>
     // `TraversalUtil.test` per arm, so the lowering is the connective over the answers the arms
     // already have — each movement arm is the correlated `EXISTS` a `where()` body would be.
     const a = read('g.V().and(__.out("knows"), __.out("created"))');
-    expect(a.spine).toBe('rel');
+    expect(a.kind).toBe('read');
     expect(a.sql).toMatch(/WHERE \(EXISTS \(.*\) AND EXISTS \(/s);
     expect(read('g.V().or(__.out("knows"), __.in("created"))').sql).toMatch(/WHERE \(EXISTS \(.*\) OR EXISTS \(/s);
     // A SINGLE arm is legal Gremlin — `and(t)`/`or(t)` is just "t must produce". ZERO arms declines

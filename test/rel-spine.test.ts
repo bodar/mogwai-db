@@ -755,7 +755,7 @@ describe('the RelIR spine', () => {
       'g.V().has("name","marko").label()', 'g.V().label().count()',
       'g.V().hasLabel("person").label().dedup()', 'g.V().label().order()',
     ]) {
-      expect(read(gremlin).spine, gremlin).toBe('rel');
+      expect(read(gremlin).kind, gremlin).toBe('read');
       expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toBeDefined();
     }
 
@@ -769,7 +769,7 @@ describe('the RelIR spine', () => {
     // actually matters for an unordered answer — is `test:perturbed`'s to assert, not this test's.
     const sorted = (rows: readonly unknown[]): unknown[] => [...rows].sort((a, b) => String(a).localeCompare(String(b)));
     for (const gremlin of ['g.V().id()', 'g.E().id()', 'g.V().id().count()', 'g.V().hasLabel("person").id()']) {
-      expect(read(gremlin).spine, gremlin).toBe('rel');
+      expect(read(gremlin).kind, gremlin).toBe('read');
       const via = () =>
         decodeAll(exec(seededStore()).buffers(gremlin, {}, {}));
       expect(sorted(await via()), gremlin).toEqual(sorted(await via()));
@@ -789,7 +789,7 @@ describe('the RelIR spine', () => {
       'g.V().labels()', 'g.E().labels()', 'g.V().labels().fold()', 'g.V().labels().count()',
       'g.V().labels().dedup()', 'g.V().has("name","marko").labels()', 'g.V().labels().order()',
     ]) {
-      expect(read(gremlin).spine, gremlin).toBe('rel');
+      expect(read(gremlin).kind, gremlin).toBe('read');
       expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toBeDefined();
     }
 
@@ -1154,7 +1154,7 @@ describe('the RelIR spine', () => {
     // The 100-bind cap is a PARAMETER budget and a held literal is not a parameter (root CLAUDE.md).
     const gremlin = `g.inject(${Array.from({ length: 101 }, (_, i) => i).join(',')})`;
     const plan = read(gremlin);
-    expect(plan.spine).toBeDefined();
+    expect(plan.kind).toBe('read');
     expect(plan.binds).toHaveLength(0);
     expect(cfLimitViolation(plan.sql, plan.binds)).toBeNull();
     expect(store.query(plan.sql, plan.binds).map((row: any) => row.v)).toEqual(Array.from({ length: 101 }, (_, i) => i));
@@ -1248,7 +1248,7 @@ describe('the RelIR spine', () => {
     };
     const gremlin = "g.V().has('age', gt(p)).has('age', gt(p))";
     const one = compileRel(gremlin, { p: 20 });
-    expect(one.spine).toBeDefined();
+    expect(one.kind).toBe('read');
     expect(one.binds).toEqual([20]);                                // ONE bind, however many uses
     // The one placeholder is reused at every site — here 4 times, because the vtype-aware compare key
     // spells each operand twice and there are two predicates; the point is reuse, not the exact count.
@@ -1298,10 +1298,10 @@ describe('the RelIR spine', () => {
     // productivity filter omitted on BOTH sides is a shared defect a differential cannot see, and the
     // reference graph makes the difference visible — 6 vertices, only 2 with a `lang`.
     const dropped = read("g.V().dedup().by('lang')");
-    expect(dropped.spine).toBeDefined();
+    expect(dropped.kind).toBe('read');
     expect(store.query(dropped.sql, dropped.binds).length).toBe(1);
     const kept = read("g.withStrategies(ProductiveByStrategy).V().dedup().by('lang')");
-    expect(kept.spine).toBeDefined();
+    expect(kept.kind).toBe('read');
     // One survivor per distinct `lang` (java) PLUS one for the null key — SQL groups NULLs together in
     // a `PARTITION BY`, which is what TinkerPop's "all non-productive traversers share a key" means.
     expect(store.query(kept.sql, kept.binds).length).toBe(2);
@@ -1315,7 +1315,7 @@ describe('the RelIR spine', () => {
     // 1. ELIGIBILITY: `min`/`max` admit TEXT because Gremlin's Comparable does, and a numeric-only
     //    guard would answer NULL here rather than a wrong number.
     const minText = read("g.V().values('name').min()");
-    expect(minText.spine).toBeDefined();
+    expect(minText.kind).toBe('read');
     expect(store.query(minText.sql, minText.binds).map((row: any) => row.v)).toEqual(['josh']);
 
     // 2. BULK WEIGHTING applies to sum/mean and NOT to min/max, and it is only observable once a
@@ -1397,7 +1397,7 @@ describe('the RelIR spine', () => {
     for (const value of ['12L', '9007199254740993L', '300L'])
       runWith(graph, `g.addV("n").property("k",${value})`);
     const plan = read("g.V().hasLabel('n').values('k').order()");
-    expect(plan.spine).toBeDefined();
+    expect(plan.kind).toBe('read');
     expect(graph.query(plan.sql, plan.binds).map((row: any) => String(row.v))).toEqual(['12', '300', '9007199254740993']);
   });
 
@@ -1425,11 +1425,11 @@ describe('the RelIR spine', () => {
     // PATH RelIR cannot state at all, so RelIR declines the shape outright rather than implementing a
     // side of it.)
     for (const predicateInlining of [true, false])
-      expect(read("g.V().where(__.out('knows'))", { fastPaths: { predicateInlining } }).spine).toBeDefined();
+      expect(read("g.V().where(__.out('knows'))", { fastPaths: { predicateInlining } }).kind).toBe('read');
     // `movementCollapse` is the other side of the same coin: RelIR states BOTH forms, so it covers
     // the traversal either way and the flag only changes what it emits.
     for (const movementCollapse of [true, false]) {
-      expect(read('g.V().out()', { fastPaths: { movementCollapse } }).spine).toBeDefined();
+      expect(read('g.V().out()', { fastPaths: { movementCollapse } }).kind).toBe('read');
     }
     // Matched on `sum(…) AS bulk`, not on `GROUP BY`: the element framing projection has a GROUP BY
     // of its own (the property aggregation), so that alone would pass either way. And not on
@@ -1559,7 +1559,7 @@ describe('the RelIR spine', () => {
         'g.V().hasLabel("person").fold().unfold()',
         'g.V().out("created").fold().unfold().dedup().values("name")',
       ]) {
-        expect(read(gremlin).spine, gremlin).toBe('rel');
+        expect(read(gremlin).kind, gremlin).toBe('read');
         expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toBeDefined();
       }
     })();
@@ -1595,7 +1595,7 @@ describe('the RelIR spine', () => {
         // a SCALAR host — the members are the values
         'g.V().values("name").aggregate("x").cap("x")',
       ]) {
-        expect(read(gremlin).spine, gremlin).toBe('rel');
+        expect(read(gremlin).kind, gremlin).toBe('read');
         expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toBeDefined();
       }
     })();
@@ -1624,7 +1624,7 @@ describe('the RelIR spine', () => {
         // line of the lattice and the reason this is a widening rather than a re-encoding.
         'g.V().hasLabel("person").union(__.values("name"), __.values("name"))',
       ]) {
-        expect(read(gremlin).spine, gremlin).toBe('rel');
+        expect(read(gremlin).kind, gremlin).toBe('read');
         expect(await decodeAll(exec(seededStore()).buffers(gremlin, {}, {})), gremlin).toBeDefined();
       }
     })();
@@ -1646,7 +1646,7 @@ describe('the RelIR spine', () => {
         'g.V().union(__.values("name"), __.identity())',
         'g.V().union(__.values("name"), __.out())',
       ]) {
-        expect(read(gremlin).spine, gremlin).toBe('rel');
+        expect(read(gremlin).kind, gremlin).toBe('read');
         // Legacy states `wholeResult` explicitly as undefined and RelIR omits the key; the framer
         // reads `shape.wholeResult` either way, so the arm LIST is the claim and this normalizes the
         // spelling rather than pinning it.
@@ -1698,7 +1698,7 @@ describe('the RelIR spine', () => {
         // `Choose.feature:244-256` pins four until the override was read.
         'g.V().hasLabel("person").choose(__.values("age")).option(P.between(26, 30), __.constant("x")).option(P.between(20, 30), __.constant("y")).option(Pick.none, __.constant("z"))',
       ]) {
-        expect(read(gremlin).spine, gremlin).toBe('rel');
+        expect(read(gremlin).kind, gremlin).toBe('read');
         // AS A MULTISET, because neither spine pins the ARM order here: no `encounter` is live (both
         // decline a branch under one), so the merge is a bare `UNION ALL` and which arm's rows land
         // first is SQLite's. The corpus agrees — every option-map scenario is `unordered`. What is

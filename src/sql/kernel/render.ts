@@ -1,5 +1,5 @@
 import type { GraphStore } from '../../storage.ts';
-import { q, type Expression, type Query, type Relation } from './q.ts';
+import { q, type Query, type Relation } from './q.ts';
 import type { ValueNode, ValueType } from '../../gremlin/types.ts';
 import type { Elem } from '../../compiler/plan/plan.ts';
 import type { Plan as RelPlan } from '../../rel/plan.ts';
@@ -349,18 +349,11 @@ export type Shape =
   | { kind: 'pathGrouped'; elem: ElemShape; byKey: boolean } // recursive: N rows per path (pk, ord, element|value), grouped
   | { kind: 'discard' };
 
-/** Which lowering produced a compile. There are two only while the RelIR migration runs, and
- *  `legacy` is scheduled for deletion with the spine it names (§6·1 — the dual spine is a harness
- *  with an end date). It is a compile FACT, not a flag: the coverage ratchet reads it, and so does
- *  anyone asking why a traversal's SQL looks the way it does. */
-export type Spine = 'legacy' | 'rel';
-
 export interface Compiled {
   kind: 'read';
   sql: string;
   binds: any[];
   shape: Shape;
-  spine: Spine;
 }
 
 /**
@@ -383,7 +376,6 @@ export interface Program {
    *  may hold a `RowsBind` marker, which the executor fills with the rows it retained. */
   tail?: { sql: string; binds: any[] };
   shape: Shape;
-  spine: Spine;
 }
 
 /** What `compile()` hands back: one statement, a program, or the legacy write closure. */
@@ -400,17 +392,6 @@ export type WriteResult =
  * the ordinary read spine rather than growing a second output vocabulary in write.ts. */
 export interface WriteContinuation { shape: Shape; run: (store: GraphStore) => any[]; }
 export interface WritePlan { kind: 'write'; run: (store: GraphStore) => WriteResult[]; continuation?: WriteContinuation; }
-
-/** Boundary: assemble the Query's CTE prefix + `tail` into one tree (Query.render)
- *  and wrap as a read Compiled. Every bound value lives as a Value token in a CTE
- *  body or the tail, so binds fall out of the single render. */
-export function readCompiled(query: Query, tail: Expression, shape: Shape): Compiled {
-  const { sql, binds } = query.render(tail);
-  // Every caller of this boundary IS the legacy spine; the RelIR route composes its relation into
-  // the same framing and re-stamps the field. So the default is a statement about who is here, not
-  // an unknown.
-  return { kind: 'read', sql, binds, shape, spine: 'legacy' };
-}
 
 /** Render `SELECT <cols> FROM <current id-relation>` over a Query's CTE prefix to
  *  {sql,binds}. The write paths materialize target ids this way before mutating. */

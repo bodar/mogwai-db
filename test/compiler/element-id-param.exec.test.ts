@@ -19,7 +19,7 @@ import { exec } from '../support/executor.ts';
 import { decode } from '../support/decode.ts';
 
 const store = seededStore();
-const onRel = (g: string, p: Record<string, any> = {}) => { const c = compile(g, p); return c.kind === 'read' ? c.spine : c.kind; };
+const kindOf = (g: string, p: Record<string, any> = {}) => compile(g, p).kind;
 const plan = (g: string, p: Record<string, any> = {}) => compile(g, p) as any;
 // PINNED TO RelIR, as `plan` above already is. This file's subject is the RelIR bind discipline —
 // "a bind serves a user PARAMETER, nothing else earns one" — so an ambient answer helper was asserting
@@ -37,7 +37,7 @@ const vals = (g: string, p: Record<string, any> = {}) => valsIn(store, g, p);
 describe('V()/E() id PARAMETER → bind, never inline', () => {
   test('V($xs) collection is ONE jsonb(?) bind exploded by json_each, data NOT in the text', async () => {
     const g = "g.V(xs).values('name')";
-    expect(onRel(g, { xs: [1, 2] })).toBe('rel');
+    expect(kindOf(g, { xs: [1, 2] })).toBe('read');
     const p = plan(g, { xs: [1, 2] });
     expect(p.binds).toHaveLength(1);                        // the whole array, one jsonb bind
     expect(p.binds[0]).toBe(JSON.stringify([1, 2]));        // JSON text, not spread values

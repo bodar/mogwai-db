@@ -65,7 +65,7 @@ test('g.E().drop() removes every edge but keeps all vertices', () => {
 // JSON value (§6·2); `test/cf-limits.test.ts` is where that is measured at 250 elements.
 test('drop() compiles to a RelIR program whose target is snapshotted, not a re-evaluated CTE', () => {
   const vertex = compile('g.V().has("name","marko").drop()', {});
-  expect([vertex.kind, (vertex as { spine?: string }).spine]).toEqual(['program', 'rel']);
+  expect(vertex.kind).toBe('program');
   if (vertex.kind !== 'program') throw new Error('unreachable');
   const snapshots = vertex.program.bindings.filter((binding) => binding.snapshot);
   // Two: the matched vertices, and the edges incident to them.
@@ -350,7 +350,7 @@ test('mergeV creates when no match, matches when it exists (inline map)', () => 
 // statements between have changed the very properties it asked about.
 test('mergeV compiles to a RelIR program whose two branches are both unconditional statements', () => {
   const plan = compile('g.mergeV([(T.label): "person", name: "marko"]).option(Merge.onMatch, [age: 33])', {});
-  expect([plan.kind, (plan as { spine?: string }).spine]).toEqual(['program', 'rel']);
+  expect(plan.kind).toBe('program');
   if (plan.kind !== 'program') throw new Error('unreachable');
   // ONE snapshot: the search. Nothing else here is read after being written.
   expect(plan.program.bindings.filter((binding) => binding.snapshot).length).toBe(1);

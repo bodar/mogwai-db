@@ -161,7 +161,7 @@ describe('repeat / path SQL', () => {
 
   test('until(predicate) carries loops and guards the recursive frontier with the shared predicate', () => {
     const p = read('g.V(1).repeat(__.out()).until(__.has("name","ripple"))');
-    expect(p.spine).toBe('rel');
+    expect(p.kind).toBe('read');
     expect(p.sql).toMatch(/WITH RECURSIVE wk_w\d+\(id, lp0, bulk\)/);
     expect(p.sql).toMatch(/w\d+\.lp0 \+ 1/);
     expect(p.sql).toContain('IS NOT 1');             // NULL-safe: only predicate TRUE stops expansion
@@ -178,7 +178,7 @@ describe('repeat / path SQL', () => {
 
   test('while-do (until before repeat) qualifies the seed id in the correlated predicate', () => {
     const p = read('g.V(3).until(__.has("name","lop")).repeat(__.out())');
-    expect(p.spine).toBe('rel');
+    expect(p.kind).toBe('read');
     // Both the seed and later rows are tested through the walk relation's qualified id, never the
     // `node=id` self-match that would read the wrong property row.
     expect(p.sql).toMatch(/rp\d+\.node = w\d+\.id/);
@@ -190,14 +190,14 @@ describe('repeat / path SQL', () => {
     // The walk uses the SAME child predicate as where()/choose(), so its movement EXISTS is
     // correlated directly to the qualified SelfRef row rather than to a private repeat compiler.
     const p = read('g.V(1).repeat(__.out()).until(__.out())');
-    expect(p.spine).toBe('rel');
+    expect(p.kind).toBe('read');
     expect(p.sql).toMatch(/EXISTS \(SELECT rme\d+\.tgt AS one FROM edges rme\d+ WHERE \(rme\d+\.src = w\d+\.id\)\)/);
   });
 
 
   test('a both() walk is a COMPOUND term — one arm per direction, not one arm with an OR', () => {
     const p = read('g.V(1).repeat(__.both()).emit()');
-    expect(p.spine).toBe('rel');
+    expect(p.kind).toBe('read');
     // seed UNION ALL arm1 UNION ALL arm2 — each arm references the walk exactly once, which is the
     // only shape SQLite accepts (§6). The counter bump distributes over the arms rather than sitting
     // above them, because a projection over a compound would take a derived table and collect both
@@ -215,7 +215,7 @@ describe('repeat / path SQL', () => {
     // what proves the body lowers, carries no effects and changes no shape — and then discarded, the
     // substitution Calcite spells as PruneEmptyRules.
     const p = read('g.V(1).repeat(__.out())');
-    expect(p.spine).toBe('rel');
+    expect(p.kind).toBe('read');
     expect(p.sql).not.toContain('WITH RECURSIVE');
     expect(p.sql).toContain('1 = 0');
   });
@@ -224,7 +224,7 @@ describe('repeat / path SQL', () => {
 
   test('emit() BEFORE repeat needs no exit filter — the walk relation IS the emitted set', () => {
     const p = read('g.V(1).emit().repeat(__.out())');
-    expect(p.spine).toBe('rel');
+    expect(p.kind).toBe('read');
     expect(p.sql).toMatch(/WITH RECURSIVE wk_w\d+\(id, lp0, bulk\)/);
     // Every row the walk holds leaves it, seed included, so nothing filters the walk on the way out.
     expect(p.sql).not.toMatch(/FROM wk_w\d+ \w+ WHERE/);
@@ -232,7 +232,7 @@ describe('repeat / path SQL', () => {
 
   test('emit() AFTER repeat filters the walk to depth >= 1, excluding the seed', () => {
     const p = read('g.V(1).repeat(__.out()).emit()');
-    expect(p.spine).toBe('rel');
+    expect(p.kind).toBe('read');
     expect(p.sql).toMatch(/w\d+\.lp0 > 0/);
   });
 
@@ -240,7 +240,7 @@ describe('repeat / path SQL', () => {
     // The until-after exit is literally and(deeper, tested), so `deeper OR (deeper AND tested)`
     // reduces to `deeper` — the predicate must not be spelled into the output filter at all.
     const p = read('g.V(1).repeat(__.out()).until(__.hasLabel("software")).emit()');
-    expect(p.spine).toBe('rel');
+    expect(p.kind).toBe('read');
     expect(p.sql).toMatch(/w\d+\.lp0 > 0/);
     // …while the EXPANSION guard still consults it, so the walk stops at a software vertex.
     expect(p.sql).toContain('IS NOT 1');
@@ -252,7 +252,7 @@ describe('repeat / path SQL', () => {
     const bare = read('g.V(1).repeat(__.out()).until(__.hasLabel("software")).emit()');
     expect(bare.sql).not.toContain(') OR (');
     const pred = read('g.V(1).repeat(__.out()).until(__.hasLabel("software")).emit(__.hasLabel("person"))');
-    expect(pred.spine).toBe('rel');
+    expect(pred.kind).toBe('read');
     expect(pred.sql).toContain(') OR (');
     expect(pred.sql).toMatch(/w\d+\.lp0 > 0/);
   });
@@ -260,7 +260,7 @@ describe('repeat / path SQL', () => {
   test('until-before with emit-after is a UNION ALL of two arms, not one predicate', () => {
     // The two output routes cannot suppress each other, so a row satisfying both leaves TWICE.
     const p = read('g.V(1).until(__.hasLabel("software")).repeat(__.out()).emit()');
-    expect(p.spine).toBe('rel');
+    expect(p.kind).toBe('read');
     expect(p.sql).toContain(' UNION ALL ');
     expect(p.sql).toMatch(/w\d+\.lp0 > 0/);
     // …and the two arms SHARE one walk. `name.ts` binds a multiply-read `Recursive` under its own
@@ -313,7 +313,7 @@ describe('repeat / path SQL', () => {
       "g.V().local(__.aggregate('a')).repeat(__.out().local(__.aggregate('a'))).times(2).cap('a')",
     ]) {
       const p = read(gremlin);
-      expect(p.spine, gremlin).toBe('rel');
+      expect(p.kind, gremlin).toBe('read');
       expect(p.sql, gremlin).not.toContain('w.depth');
       expect(p.sql, gremlin).not.toContain('RECURSIVE');
     }
