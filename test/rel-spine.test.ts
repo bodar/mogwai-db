@@ -361,6 +361,12 @@ const COVERED = [
   'g.V().as("a").union(__.out(), __.in()).select("a")',
   // …and over a VALUE parent, where the arms are scalar bodies rather than movements.
   'g.V().values("name").union(__.identity(), __.identity())',
+  // …over an ORDERED input, and with an ORDER inside an arm: a `union` is a fresh UNORDERED stream
+  // (every scenario of `Union.feature` asserts unordered), so the incoming position and an arm-local
+  // `order().limit()`'s spent position are both dropped and the ordered/limited arms merge.
+  "g.V().order().by('name').union(__.out(), __.in())",
+  'g.V().union(__.out("created").order().by("name"), __.out("knows").order().by("name"))',
+  'g.V().union(__.out("created").order().by("name").limit(2), __.out("knows").order().by("name").limit(1))',
   // `choose(cond, then[, else])` is the SAME merge over arms GUARDED by the condition and its
   // negation — so it is the arm merge plus a predicate, not a second branch implementation. An absent
   // `else` is `identity`: a non-matching traverser passes through, which an empty arm body expresses
@@ -465,7 +471,6 @@ const DECLINED = [
   // `Pick.unproductive` are distinguishable only where the choice reports productivity BESIDE its
   // value. What still declines is a choice whose body cannot report one, and a `T`-TOKEN choice
   // (`choose(T.label)`, no nested body at all), which is a different projection.
-  "g.V().order().by('name').union(__.out(), __.in())",  // a live emission order: the merge key needs the origin
   'g.inject()',                       // the EMPTY relation, which `Values` refuses to express (§3.3)
   "g.inject([1,2],3)",                // MIXED list/scalar args: the VARIANT shape, not either of them
   // `g.inject(['a','b']).order(Scope.local)` LEFT this list: the member sort landed, and it takes the

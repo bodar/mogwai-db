@@ -1588,6 +1588,31 @@ const remintOrder = (rel: Rel, encounter: Channel, fresh: Minter): Rel => renumb
 );
 
 /**
+ * DROP a carried emission order — a `Project` that forgets the `encounter` column and its channel,
+ * leaving every other column and the rows themselves untouched.
+ *
+ * A branch that produces a fresh UNORDERED stream (`union`, every scenario of which the corpus asserts
+ * unordered) discards whatever position its input carried and whatever order an arm minted inside
+ * itself: an arm's `order().by(k).limit(n)` has already CONSUMED its position to pick the members, so
+ * the column past that limit is dead weight that only stops otherwise-identical arms from merging. A
+ * downstream slice that needs a position mints its OWN (§10's fan-out order), which is why forgetting
+ * it here is the honest model rather than a loss. A no-op where there is no encounter to drop.
+ */
+const dropEncounter = (rel: Rel, fresh: Minter): Rel => {
+  const encounter = encounterOf(rel.channels);
+  if (!encounter) return rel;
+  const cols = rel.type.cols.filter((column) => column.name !== encounter.col);
+  return make.project({
+    id: fresh('ue'), input: rel, channels: rel.channels.filter((channel) => channel.role !== 'encounter'),
+    type: typeOf(...cols), exprs: cols.map((column) => [column.name, col(rel.id, column.name)] as const),
+  });
+};
+
+/** The channel list a positionless merge declares — the input's, minus any emission order (`dropEncounter`). */
+const withoutEncounter = (channels: Channels): Channels =>
+  channels.filter((channel) => channel.role !== 'encounter');
+
+/**
  * The convergent-walk COLLAPSE: `SELECT id, SUM(bulk) … GROUP BY id`, so the frontier stays bounded
  * by reachable |V| instead of by the (exponential) walk count.
  *
@@ -4518,10 +4543,19 @@ function unionArms(
   ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): FramedRel | null {
   if (step.modulators?.length || step.optionArms) return null;
-  // Read off the RELATION, not off `demandsEncounter`: what matters is whether a position is
-  // physically carried here, which an `order()` upstream can make true where the chain-global flag
-  // does not, and vice versa.
-  if (encounterOf(input.channels)) return null;
+  // A `union` is a fresh UNORDERED stream (`BranchStep` drains arm-by-arm and every scenario of
+  // `Union.feature` asserts unordered), so a position the input carried OR an arm minted inside itself
+  // does NOT survive the merge — dropping it is what lets an ordered/limited arm merge rather than
+  // decline on a channel its sibling has not got. But where a downstream positional/collecting consumer
+  // READS the fan-out's emission order (`ctx.ordered`, the chain-global demand), the merge would have to
+  // present a DETERMINISTIC arm-blocked order for that slice to be stable — which this route does not
+  // MINT yet — so it declines there rather than let a bare `LIMIT` read incidental `UNION ALL` byte
+  // order (the perturbed-unstable `@Unsupported` emission-order scenarios, e.g.
+  // `g.V(4).union(out, in).limit(2)`). This is strictly more permissive than the old
+  // `encounterOf(input.channels)` guard: a demand always mints an encounter on the source, so every
+  // chain that guard refused this one still refuses, and the ADDED cases are exactly the positionless
+  // unions (`g.V().order().by(k).union(out, in)`) whose dropped order is unobservable.
+  if (ctx.ordered) return null;
 
   const args = argValues(step);
   if (args.length < 2 || args.some((arg) => !isNested(arg))) return null;
@@ -4532,9 +4566,9 @@ function unionArms(
   for (const body of bodies) {
     const arm = continueAs(input, framing, body!, 0, bulked, inBody(ctx), fresh, labels);
     if (!arm) return null;
-    arms.push(arm);
+    arms.push({ ...arm, rel: dropEncounter(arm.rel, fresh) });
   }
-  return mergeArms(arms, input.channels, labels, fresh);
+  return mergeArms(arms, withoutEncounter(input.channels), labels, fresh);
 }
 
 /**

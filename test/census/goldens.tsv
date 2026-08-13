@@ -1,11 +1,9 @@
 # The behavioural census — the refactor guard. GENERATED; regenerate with `mise run census-record`.
 # Records what the engine DOES with every test/L1-corpus/corpus.txt traversal, so a later commit
-# can be diffed against it. Goldens record BOTH pinned spine positions; the answer gate covers
-# both. `bun test` FAILS if a traversal stops executing, if an executing traversal returns a
-# DIFFERENT multiset, or if a clean deferral becomes a crash.
+# can be diffed against it. `bun test` FAILS if a traversal stops executing, if an executing
+# traversal returns a DIFFERENT multiset, or if a clean deferral becomes a crash.
 # Never re-record to make a red build green without a written reason — that is the one thing
 # this file exists to prevent. See test/census/README.md.
-# `spine` is the RelIR migration COVERAGE ratchet: a traversal may move legacy -> rel, never back.
 status	n	d	ms	ord	query
 ran	6	6	451a72ec9b6e35bc	1398710f0f2e9dc4	g.E()
 ran	6	6	ac898afbc8893256	4de4569900f5f806	g.E().elementMap()
@@ -239,6 +237,7 @@ ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().has("song", "name", "OH BOY").ou
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().has("uuid", P.typeOf(GType.UUID)).values("name")
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().has('name','DRUMS').in('followedBy').order().by('name').range(1,4).in('followedBy').order().by('name').range(1,4)
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().has('name','DRUMS').repeat(in('followedBy').order().by('name').range(1,4)).times(2)
+ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().has('name','HEY BO DIDDLEY'). union(out('followedBy').order().by('name').limit(2), out('sungBy').order().by('name').limit(1)). union(out('followedBy').order().by('name').limit(2), out('sungBy').order().by('name').limit(1))
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().has('name','JAM').out('followedBy').order().by('name').limit(2).out('followedBy').order().by('name').limit(2)
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().has('name','JAM').repeat(out('followedBy').order().by('name').limit(2)).times(2)
 ran	0	0	e3b0c44298fc1c14	e3b0c44298fc1c14	g.V().has('name','foo').property(Cardinality.set, ["name":"bar", "age": Cardinality.single(43) ])

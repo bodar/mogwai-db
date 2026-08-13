@@ -4,7 +4,7 @@ What you can rely on. A ✅ step works **anywhere in a traversal**, however deep
 the top. Notes list **only what does not work**; no note means the whole step works. Anything
 unsupported throws a clear error and never mis-executes.
 
-**L3 conformance: <!-- L3:passing -->1,476<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
+**L3 conformance: <!-- L3:passing -->1,477<!-- /L3:passing -->/2,260 · corpus parse+chain: 2,395/2,395.**
 
 | Mark | Meaning |
 |---|:--|
@@ -90,7 +90,7 @@ semantics commitment (JS `RegExp` ≠ Java `Pattern`) rather than on engineering
 
 | Step | | Notes |
 |---|:--:|---|
-| `union(a, b…)` | 🟡 | two or more arms ✅. ❌ the SINGLE-arm form |
+| `union(a, b…)` | 🟡 | two or more arms ✅, over an ordered input or with an arm-local `order()`/`limit()` (a union is UNORDERED, so the position is dropped). ❌ the SINGLE-arm form; a union whose emission order a downstream slice/collect READS (`union(…).limit(n)`, `.fold()`, `.cap()` — needs the arm-blocked fan-out order, not yet minted) |
 | `choose(pred, a, b)`, `choose(P, a[, b])`, `choose(…).option(…)`, `choose(T.x).option(…)` | ✅ | over ELEMENT and SCALAR streams alike — the condition's subject comes from the framing. A bare `P` is TinkerPop's own `choose(Predicate, …)` overload; a single-arm form passes unmatched traversers through; a `T`-token choice is always productive, so the implicit `Pick.unproductive` arm is provably dead. ❌ where an emission order is already carried (a merge re-mints it); over a PROPERTY stream |
 | `coalesce` | ✅ | UNION WITH PRIORITY: arm k takes the traversers for which arms 1…k−1 produced nothing. A body that always produces (`constant`/`count`/`fold`) exhausts it. ❌ where an emission order is already carried |
 | `optional`, `branch`, `map(__.…)`, `flatMap`, `sideEffect(__.…)` | ❌ | |

@@ -1,11 +1,9 @@
 # The behavioural census — the refactor guard. GENERATED; regenerate with `mise run census-record`.
 # Records what the engine DOES with every test/L1-corpus/corpus.txt traversal, so a later commit
-# can be diffed against it. Goldens record BOTH pinned spine positions; the answer gate covers
-# both. `bun test` FAILS if a traversal stops executing, if an executing traversal returns a
-# DIFFERENT multiset, or if a clean deferral becomes a crash.
+# can be diffed against it. `bun test` FAILS if a traversal stops executing, if an executing
+# traversal returns a DIFFERENT multiset, or if a clean deferral becomes a crash.
 # Never re-record to make a red build green without a written reason — that is the one thing
 # this file exists to prevent. See test/census/README.md.
-# `spine` is the RelIR migration COVERAGE ratchet: a traversal may move legacy -> rel, never back.
 status	message	query
 deferred	Label mutation is not supported: addLabel() on an edge	g.E().addLabel("friend").labels().fold()
 deferred	this traversal is not supported yet: no lowering covers g.E().asString()	g.E().asString()
@@ -237,7 +235,6 @@ deferred	this traversal is not supported yet: no lowering covers g.V().has("pers
 deferred	this traversal is not supported yet: no lowering covers g.V().has("person","name",P.within("vadas","peter")).group().by().by(__.out().order().fold())	g.V().has("person","name",P.within("vadas","peter")).group().by().by(__.out().order().fold())
 deferred	this traversal is not supported yet: no lowering covers g.V().has("person","name",P.within("vadas","peter")).group().by().by(__.out().order().fold().count(local))	g.V().has("person","name",P.within("vadas","peter")).group().by().by(__.out().order().fold().count(local))
 deferred	this traversal is not supported yet: no lowering covers g.V().has("song","name","MIGHT AS WELL"). shortestPath(). with("~tinkerpop.shortestPath.target", __.has("song","name","MAYBE YOU KNOW HOW I FEEL")). with("~tinkerpop.shortestPath.edges", __.outE("followedBy")). with("~tinkerpop.shortestPath.distance", "weight")	g.V().has("song","name","MIGHT AS WELL"). shortestPath(). with("~tinkerpop.shortestPath.target", __.has("song","name","MAYBE YOU KNOW HOW I FEEL")). with("~tinkerpop.shortestPath.edges", __.outE("followedBy")). with("~tinkerpop.shortestPath.distance", "weight")
-deferred	this traversal is not supported yet: no lowering covers g.V().has('name','HEY BO DIDDLEY'). union(out('followedBy').order().by('name').limit(2), out('sungBy').order().by('name').limit(1)). union(out('followedBy').order().by('name').limit(2), out('sungBy').order().by('name').limit(1))	g.V().has('name','HEY BO DIDDLEY'). union(out('followedBy').order().by('name').limit(2), out('sungBy').order().by('name').limit(1)). union(out('followedBy').order().by('name').limit(2), out('sungBy').order().by('name').limit(1))
 deferred	this traversal is not supported yet: no lowering covers g.V().has('name','HEY BO DIDDLEY').repeat(union(out('followedBy').order().by('name').limit(2),out('sungBy').order().by('name').limit(1))).times(2)	g.V().has('name','HEY BO DIDDLEY').repeat(union(out('followedBy').order().by('name').limit(2),out('sungBy').order().by('name').limit(1))).times(2)
 deferred	this traversal is not supported yet: no lowering covers g.V().has(T.label, "person").as("a").local(__.out("created").as("b")).select("a", "b").by("name").by(T.id)	g.V().has(T.label, "person").as("a").local(__.out("created").as("b")).select("a", "b").by("name").by(T.id)
 deferred	this traversal is not supported yet: no lowering covers g.V().has(T.label, null)	g.V().has(T.label, null)
