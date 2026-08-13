@@ -10,7 +10,7 @@ import type { IRStep } from '../ir/strategies.ts';
 import type { ChildSeam } from './child.ts';
 import { byEncounter, carriedCols, coalesce, collectedOf, EMPTY_ARRAY, fenced, jsonOf, meta, typedNode, typeOf, withPayload, type Minter } from './build.ts';
 import { predicateExpr, storedCompareOn, SUBJECT_UNKNOWN } from './predicate.ts';
-import { modulations } from './modulator.ts';
+import { byExpr, modulations, orderProductivity } from './modulator.ts';
 import { elementObject } from './element.ts';
 import type { Elem } from '../plan/plan.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
@@ -268,7 +268,17 @@ const LOCAL_BY_HOSTS: ReadonlySet<string> = new Set(['order', 'dedup']);
 export function listMemberOp(
   step: IRStep, input: Rel, of: ListOf, fresh: Minter, child?: ChildSeam,
 ): { readonly rel: Rel; readonly of: ListOf; readonly rewrites?: boolean; readonly set?: boolean } | null {
-  if ((step.modulators?.length && !LOCAL_BY_HOSTS.has(step.name)) || step.optionArms || !isBareList(of)) return null;
+  if ((step.modulators?.length && !LOCAL_BY_HOSTS.has(step.name)) || step.optionArms) return null;
+  // ⚠️ **MEMBER ADMISSION IS PER ARM, NOT AT THE DOOR.** It was one `isBareList` gate, which is the right
+  // answer for exactly the arms that read a member AS A VALUE — a string transform and a member
+  // predicate cannot be asked of a rowid. It is the wrong answer for every arm that does not: a local
+  // SLICE reads only positions, and `order`/`dedup` need the member's compare key and identity, which an
+  // ELEMENT list answers as well as a scalar one does (`GremlinValueComparator` compares an Element by
+  // its id, `ElementHelper.hashCode` hashes it by its id — the same two facts the property `RowShape`
+  // states one layer up). A single door therefore refused `g.V().fold().order(local).by('age')` as
+  // inexpressible when the projection is an ordinary child-seam question about the member.
+  const elemOf = of.kind === 'elem' ? of.elem : null;
+  if (!isBareList(of) && !elemOf) return null;
   const rel = fenced(input, fresh);
   const list = col(rel.id, LIST_COL);
 
@@ -276,7 +286,8 @@ export function listMemberOp(
   // permanent type error on a collection (a list is not a string) which legacy raises TinkerPop's own
   // message for, so declining hands it the message rather than inventing a second one.
   if (STRING_LOCAL_TX.has(step.name)) {
-    if (!isLocalScope(step)) return null;
+    // A member read AS A VALUE: an element member is a ROWID, so the transform would rewrite the id.
+    if (!isLocalScope(step) || !isBareList(of)) return null;
     const members = membersOf(list, fresh);
     // `literal: false` — a member is a value inside a JSON document, not a compile-time literal the
     // constant-folding arms could evaluate, so the folded transforms (`asBool`, bare `asNumber`)
@@ -346,7 +357,9 @@ export function listMemberOp(
       // ⚠️ THE KEY IS THE PAYLOAD **AND** THE TAG, which is the same lesson the property identity key
       // records: `{t:'byte',v:1}` and `{t:'int',v:1}` share a payload and are `Byte(1)` and `Integer(1)`
       // — not equal in Java, so not one member. A bare list has no tag and the payload is the whole key.
-      const tag = memberVtype(of, members);
+      // An ELEMENT member's identity is its ROWID and nothing else (`ElementHelper.hashCode(Element)` is
+      // `element.id().hashCode()`), which the payload already is.
+      const tag = elemOf ? undefined : memberVtype(of, members);
       const rank = 'mdr';
       const ranked = make.window({
         id: fresh('mdw'), input: members, channels: [], type: typeOf(...members.type.cols, meta(rank, 'int')),
@@ -375,24 +388,51 @@ export function listMemberOp(
     const bys = child ? modulations(step, (step.modulators ?? []).length, child) : [];
     if (!bys) return null;
     const parsed = bys.length ? bys : [{ key: { kind: 'identity' } as const }];
-    // ONE key, and it must be the MEMBER ITSELF. A member has exactly one value, so a second `by()`
-    // would have nothing to name; a PROJECTION off it (`by('age')`, a nested body) is a question about
-    // an element, which is the child seam's rather than this module's — `isBareList` has already
-    // gated the only list that could answer it. `shuffle` is `RANDOM()` per row, its own answer.
-    if (parsed.length !== 1 || parsed[0]!.key.kind !== 'identity' || parsed[0]!.order === 'shuffle') return null;
+    // ONE key. A member has exactly one value, so a second `by()` would have nothing to name; `shuffle`
+    // is `RANDOM()` per row and its own answer.
+    if (parsed.length !== 1 || parsed[0]!.order === 'shuffle') return null;
     const only = parsed[0]!;
-    // `memberCompareKey`, NOT a second policy: it is the same `storedCompareOn` authority the
-    // row-level `order().by()` and the local reducers spend, so a value carried as decimal TEXT
-    // (a long past 2^53, a bigint, a bigdecimal, a duration) sorts NUMERICALLY rather than
-    // lexicographically. Getting that wrong is the defect the local reducers already had.
-    const key = memberCompareKey(of, members);
+    // WHICH KEY, and the split is the member ENCODING's rather than the step's.
+    //
+    // Over a SCALAR member the key must be the member ITSELF — a value has no properties — and it is
+    // `memberCompareKey`, NOT a second policy: the same `storedCompareOn` authority the row-level
+    // `order().by()` and the local reducers spend, so a value carried as decimal TEXT (a long past 2^53,
+    // a bigint, a bigdecimal, a duration) sorts NUMERICALLY rather than lexicographically. Getting that
+    // wrong is the defect the local reducers already had.
+    //
+    // Over an ELEMENT member every projection an element has is available, because the member IS an
+    // element addressed by its rowid — which is precisely a `ChildHost`, so `by('age')`, `by(T.label)`
+    // and `by(<nested body>)` are the ordinary `by()` vocabulary rather than anything list-specific. A
+    // bare `by()` sorts by the rowid, which is `GremlinValueComparator`'s own answer for an Element
+    // (`Comparator.comparing(Element::id, this)`).
+    //
+    // ⚠️ SPELLED AGAINST THE RELATION IT IS READ FROM, twice where a drop is owed — a node addresses its
+    // own INPUT, and the productivity filter puts a relation BETWEEN the explode and the aggregate. This
+    // is `bulkSlice`'s rule (`lower.ts`) and the defect it prevents is a plan referencing an alias that is
+    // out of scope where it is read.
+    const keyOn = (m: Rel): Expr | null => (elemOf
+      ? byExpr(only, { kind: 'element', elem: elemOf, id: col(m.id, MEMBER.value) }, fresh, true, child)
+      : only.key.kind === 'identity' ? memberCompareKey(of, m) : null);
+    const probe = keyOn(members);
+    if (!probe) return null;
+    // AN UNPRODUCTIVE `by()` DROPS THE MEMBER, and the reference pins it rather than us inferring it:
+    // `g.V().fold().order(local).by('age')` answers FOUR vertices on the modern graph, not six — `lop`
+    // and `ripple` have no age (`Order.feature:281-289`). It is a member FILTER, which is the same
+    // predicate `orderProductivity` returns for a row and the reason it takes the step: with
+    // `ProductiveByStrategy` on, nothing is dropped at all.
+    const drop = orderProductivity(step, only, probe);
+    const kept = drop
+      ? make.filter({ id: fresh('mof'), input: members, channels: [], type: members.type, pred: drop })
+      : members;
+    const key = drop ? keyOn(kept) : probe;
+    if (!key) return null;
     return {
-      rel: withList(rel, listOfMembers(members, memberNode(of, members), [
+      rel: withList(rel, listOfMembers(kept, memberNode(of, kept), [
         { expr: key, dir: only.order === 'desc' ? 'desc' : 'asc' },
         // THE ORIGINAL POSITION BREAKS TIES, and it is not tidiness: `json_group_array` takes rows in
         // whatever order SQLite produced, so equal keys would land in an arbitrary one — the defect
         // `mise run test:perturbed` exists to find and that no assertion in the ladder can see.
-        memberOrder(members),
+        memberOrder(kept),
       ], fresh), fresh),
       of,
     };
@@ -435,7 +475,9 @@ export function listMemberOp(
   // can be NULL — hence `IS NOT TRUE` rather than `NOT (…)`.
   if (step.name === 'all' || step.name === 'any' || step.name === 'none') {
     const args = argValues(step);
-    if (args.length !== 1) return null;
+    // A member PREDICATE reads the member as a value; over an element it is a question about the element
+    // and therefore the child seam's, not this module's.
+    if (args.length !== 1 || !isBareList(of)) return null;
     const members = membersOf(list, fresh);
     const pred = memberPredicate(memberPayload(of, members), args[0]);
     if (!pred) return null;

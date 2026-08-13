@@ -105,6 +105,14 @@ const COVERED = [
   "g.V().out().in().values('name').fold().dedup(Scope.local).unfold()",
   "g.inject(['a','b']).reverse()", "g.V().values('age').fold().order(local).by(desc).reverse()",
   "g.V().values('name').fold().reverse().unfold()",
+  // AN ELEMENT-MEMBER list. Member admission is per ARM: the ops that read a member as a VALUE still
+  // decline (a rowid is not a string), and the ops that do not — the local slices, and `order`/`dedup`
+  // whose compare key and identity an Element answers by its id — now serve it. `by(k)`/`by(T.label)`/
+  // `by(<body>)` are the ordinary `by()` vocabulary over a member-as-`ChildHost`.
+  "g.V().fold().order(local)", "g.V().fold().order(local).by('age')", "g.V().fold().order(local).by('age', desc)",
+  "g.V().fold().order(local).by(T.label)", "g.V().fold().order(local).by(__.values('age'))",
+  'g.V().fold().dedup(local)', 'g.V().fold().range(local, 0, 2)',
+  "g.V().fold().order(local).by('age').unfold().values('name')",
   // `inject()` — a SCALAR source, and the largest single blocker measured over the corpus: 387 of
   // the 2,298 traversals begin with one. Its relation has NO channels: an injected row is one
   // traverser by construction, so there is no multiplicity to carry and nothing has established an
@@ -448,7 +456,6 @@ const DECLINED = [
   // vtype-aware compare key from `byExpr` rather than a second policy. The guard that REPLACES it is
   // the one that still holds — an ELEMENT list's members are ROWIDS, so every member op declines
   // (`isBareList`): a question about the element is the child seam's, not the list module's.
-  'g.V().fold().order(Scope.local)',
   "g.V().values('age').is(P.typeOf(GType.MAP))", // a MAP retype needs the map shape, not a decode
   'g.V().has(T.label,null)',          // a null label VALUE: legacy owns what that means
   // A `T` TOKEN IS LEGAL PER HOST, NOT PER GRAMMAR. All four parse; each host answers its OWN pair and
