@@ -459,11 +459,17 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   host they descend from. The **per-origin SLICE has LANDED** (`partitionedSlice`): a trailing
   `limit`/`skip`/`range` inside the body is `n` per HOST — a `row_number() PARTITION BY origin` window,
   `dedupOn`'s shape, ordered by `encounter`+payload so the impl-defined "result should be OF … count N" pick
-  is DETERMINISTIC and perturbation-stable (L3 +8). 🚧 What is LEFT of the fan-out multiplier, each fail-closed
-  today and each the SAME per-origin machinery: a **reducing barrier** (`local(__.out().fold())` per-origin
-  fold → `GROUP BY origin` + a `LEFT JOIN`/`COALESCE` seed so a sink emits `[]` not `[null]`; the `count` arm
-  already exists via `groupReduced`) and **per-origin order** (`local(__.out().order().by(k))`) — the same
-  window is what `group().by(k).by(__.out().fold()|limit(n)|order())` needs; `tail` (count-from-end); a **child-body-label ESCAPE**
+  is DETERMINISTIC and perturbation-stable (L3 +8; = Calcite `convertDistinctOn`). The **per-origin FOLD has
+  LANDED** too, and NOT via `GROUP BY origin`: `local(__.out().fold())` is the SAME correlated shape as
+  `local(__.out().count())`, so `scalarChild`'s movement-then-reducer arm accepts a `list`-framed tail and
+  lands a correlated LIST subquery. The seed is FREE — `foldElements`/`foldScalars` already
+  `COALESCE(json_group_array, '[]')`, so a sink's subquery over an empty body yields `[]` with no seed
+  machinery. And because the body is ONE correlated subquery per host, a barrier INSIDE it (`order()`/`dedup()`
+  before the fold) is scoped per-origin for FREE and correct (L3 +1). 🚧 What is LEFT of the fan-out multiplier,
+  fail-closed today: a per-origin SCALAR-order path (`values(k).order().fold()` still declines — a scalar
+  stream order in the correlated body), and the reductions with NO fold (`max(local)`/`mean(local)` after a
+  scoped fold); the same machinery is what `group().by(k).by(__.out().fold()|limit(n)|order())` needs;
+  `tail` (count-from-end); a **child-body-label ESCAPE**
   (`local(out().as('b')).select('a','b')` — the reference's 4 maps, currently declined not `[]`; the same
   @Unsupported feature as `map(out().as('a')).select('a')`); **path HIDING** through a fan-out
   (`flatMap(out().out()).path()` is `[v,end]`, `FlatMap.feature:56`); and `map`'s per-origin WINDOW (it takes

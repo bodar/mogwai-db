@@ -818,8 +818,14 @@ export function foldScalars(
   const vtypeCol = perRowColumnOf(opts.type);
   const vtype = vtypeCol ? col(input.id, vtypeCol) : undefined;
   const flagged = vtype ? withLossyFlag(input, vtype, fresh) : input;
-  const order: readonly SortTerm[] = (opts.order ?? []).map((column) => ({ expr: col(flagged.id, column), dir: 'asc' }));
   const value = col(flagged.id, 'v');
+  // ORDER BY the encounter when there is one; else by the VALUE — a DETERMINISTIC order for a per-origin
+  // CORRELATED fold (`scalarChild`'s list arm), whose `EXISTS`-shaped hop mints no encounter, so without
+  // this its `json_group_array` is SCAN order — right by luck, wrong under `test:perturbed`. Only the
+  // no-encounter branch is new, so an ordinary fold's SQL is byte-unchanged.
+  const order: readonly SortTerm[] = opts.order?.length
+    ? opts.order.map((column) => ({ expr: col(flagged.id, column), dir: 'asc' as const }))
+    : [{ expr: value, dir: 'asc' as const }];
   const member = vtype
     ? {
       kind: 'case',
@@ -874,7 +880,11 @@ export function foldScalars(
 export function foldElements(
   input: Rel, elem: Elem, opts: { readonly order?: readonly string[] }, fresh: Minter,
 ): { readonly rel: Rel; readonly of: ListOf } {
-  const order: readonly SortTerm[] = (opts.order ?? []).map((column) => ({ expr: col(input.id, column), dir: 'asc' }));
+  // ORDER BY the encounter when there is one; else by the member ROWID — see `foldScalars`. Only the
+  // no-encounter (correlated) branch is new, so an ordinary element fold's SQL is byte-unchanged.
+  const order: readonly SortTerm[] = opts.order?.length
+    ? opts.order.map((column) => ({ expr: col(input.id, column), dir: 'asc' as const }))
+    : [{ expr: col(input.id, 'id'), dir: 'asc' as const }];
   return {
     rel: make.aggregate({
       id: fresh('fe'), input, channels: [], type: typeOf(meta(LIST_COL, 'json')),
