@@ -1,5 +1,5 @@
 import { groupableChannels, mergeChannels, sameChannels, withChannel, type Channel, type ChannelRole, type Channels } from '../../channels.ts';
-import { col, compilerInt, compilerNull, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
 import { emit, emitRelational } from '../../rel/emit.ts';
@@ -4718,27 +4718,53 @@ function propertyTail(
  * Pass re-rooted (`sourceFilter`'s `childPredicate` roots at the current traverser and cannot lower a
  * leading `select`), so routing these here first is pure gain.
  */
+/** The `P` ops an alias-vs-alias compare admits, mapped to their SQL comparison — identity (`eq`/`neq`)
+ *  and, under a `by(key)`, the orderings. `within`/`between`/text ops are not two-single-alias shapes. */
+const ALIAS_CMP: Record<string, BinaryOp | undefined> = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
+
 function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter): Rel | 'decline' | null {
-  if ((step.name !== 'where' && step.name !== 'not') || step.modulators?.length || step.optionArms) return null;
-  // Two-variable theta: `where(k1, P.eq/neq(k2))` between two bound ELEMENT aliases (rowid compare).
+  if ((step.name !== 'where' && step.name !== 'not') || step.optionArms) return null;
+  // Two-variable theta: `where(k1, P.op(k2))[.by(key)]` between two bound ELEMENT aliases — TinkerPop's
+  // `WherePredicateStep`. WITHOUT a `by()`, `eq`/`neq` compare the elements' IDENTITY (rowid); WITH a
+  // `by(key)` the comparison is over each alias's PROJECTED value (`a.age` vs `b.age`), and any ordering
+  // op is meaningful. A non-productive `by()` yields NULL, so the comparison drops the row (NULL is not
+  // true) exactly as TinkerPop drops it.
   if (step.name === 'where') {
     const wargs = argValues(step);
     const pred = step.args?.[1]?.value;
     if (wargs.length === 2 && typeof wargs[0] === 'string' && isPred(pred)
-      && (pred.op === 'eq' || pred.op === 'neq') && pred.operands.length === 1 && typeof pred.operands[0]!.value === 'string') {
+      && pred.operands.length === 1 && typeof pred.operands[0]!.value === 'string' && ALIAS_CMP[pred.op]) {
       const projA = aliasProjection(rel, labels, wargs[0], 'last', fresh);
       const projB = aliasProjection(rel, labels, pred.operands[0]!.value as string, 'last', fresh);
       // A non-element theta (a scalar-alias compare) is an unbuilt shape; fall through (sourceFilter
       // declines it too) rather than over-claiming a fail-closed decline.
       if (projA && projB && projA.read.kind === 'element' && projB.read.kind === 'element') {
-        const same = eq(aliasIdAt(col(rel.id, projA.entry.col), 'last'), aliasIdAt(col(rel.id, projB.entry.col), 'last'));
-        return make.filter({
-          id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type,
-          pred: pred.op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same },
-        });
+        const bys = modulations(step, 1, childSeam(ctx, fresh));
+        if (!bys) return step.modulators?.length ? 'decline' : null;
+        if (!bys.length) {
+          // IDENTITY compare — only `eq`/`neq` are meaningful over two rowids.
+          if (pred.op !== 'eq' && pred.op !== 'neq') return 'decline';
+          const same = eq(aliasIdAt(col(rel.id, projA.entry.col), 'last'), aliasIdAt(col(rel.id, projB.entry.col), 'last'));
+          return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: pred.op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same } });
+        }
+        // VALUE compare under a `by(key)`: project the key off each alias's element host, compare.
+        const hostOf = (proj: NonNullable<typeof projA>): ChildHost =>
+          ({ kind: 'element', id: aliasIdAt(col(rel.id, proj.entry.col), 'last'), elem: (proj.read as { elem: Elem }).elem, row: { rel, aliases: labels } });
+        const seam = childSeam(ctx, fresh);
+        const [aVal, bVal] = [byExpr(bys[0]!, hostOf(projA), fresh, true, seam), byExpr(bys[0]!, hostOf(projB), fresh, true, seam)];
+        if (!aVal || !bVal) return 'decline';
+        // A non-productive `by()` DROPS the row (`productivityFilter` = each value `IS NOT NULL`), which
+        // is also what the NULL-propagating compare does — conjoined for belt-and-braces. Under
+        // `ProductiveByStrategy` the filter is undefined DESPITE a key: a non-productive `by()` then
+        // KEEPS the row as a real NULL, a null-keeping compare this does not build, so DECLINE.
+        const [prodA, prodB] = [productivityFilter(step, aVal), productivityFilter(step, bVal)];
+        if (!prodA || !prodB) return 'decline';
+        const cmp: Expr = { kind: 'binary', op: ALIAS_CMP[pred.op]!, left: aVal, right: bVal };
+        return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: and(and(prodA, prodB), cmp) });
       }
     }
   }
+  if (step.modulators?.length) return null; // a modulated where/not that is not the theta above is not an alias filter.
   // A where/not whose body re-roots at a bound alias (`as(k)`→`select(k)`): a filter leg. Only claim it
   // when every alias it reads is LIVE here; otherwise it is not this stream's alias filter.
   const leg = classifyWhereLeg(step, ctx.params);
