@@ -142,10 +142,16 @@ half instead of declining) was checked directly: the admission scenario `GroupCo
 EXACTLY `{marko:6,vadas:2,lop:6,josh:6,ripple:2,peter:2}` (matches TinkerPop), and the census re-record moved
 exactly ONE traversal deferred→ran with zero golden answers changed. L3 1546→1547.
 
-**`union()` declines when the stream carries an encounter channel** (`unionArms`' `encounterOf` guard). Any
-chain ending in a collecting consumer demands an encounter, so `g.V().union(__.aggregate("a"), …).cap("a")`
-declines at the UNION, not the collection — branch-arm sites otherwise work. This is the `union()` row in the
-capstone table above, and why no union-arm scenario is in the L4 feature.
+**Branch-arm collection sites** — ✅ LANDED. The `union()`-declines-on-an-encounter-channel guard this
+bullet described is gone: `union`/`choose` merge a FRESH UNORDERED stream, dropping the spent encounter and
+minting a deterministic one only where a downstream collecting/positional consumer demands it
+(`withFanoutOrder`, the branch-emission-order substrate), so `g.V().union(__.aggregate("a"), …).cap("a")`
+compiles. The remaining neighbour was `coalesce`: a non-final arm needs a "produced nothing" predicate and
+`alwaysProduces` reads the LAST step alone, so a pure side-effect arm (`aggregate("a")`, labelled
+`groupCount("a")`, `sideEffect(…)`, `identity()`) was not seen as always-firing and `coalesce` declined —
+fixed by a whole-body `isStreamIdentity` check (`coalesceArms`, `lower.ts`). Asserted in
+`test/compiler/branch-collection-sites.exec.test.ts`; no corpus scenario has the shape, so L3/census did not
+move (`legality-not-corpus-defines-support`).
 
 **`count(Scope.local)` — the local-reducer vocabulary.** Over a MAP, `select("a").count(local)` counts ENTRIES
 (3 scenarios). Over an ELEMENT-membered list it declines (over a scalar-membered one it lowers), so an element
@@ -195,8 +201,10 @@ blocked in a DIFFERENT substrate four features away.
 |---|---|
 | `…local(aggregate("a")).outE().inV().simplePath()…` | `simplePath()` |
 | `…local(aggregate("a")).bothE().sample(1).otherV()…` | `sample()` |
-| `…local(aggregate("a")).union(__.out(), __.in()).local(aggregate("a"))…` | `union()` on an encounter channel (above) |
 | `…by(__.outE("created").count())…by(__.inE("created").values("weight").sum())…` | the `by(<reducer>)` type gap |
+
+(The `…union(__.out(), __.in()).local(aggregate("a"))…` row is GONE — branch-arm sites now compile;
+`g.V().local(aggregate("a")).union(__.out(),__.in()).local(aggregate("a")).cap("a").unfold().count()` = 18.)
 
 So `test/L4-addendum/group-multi-site.feature` is where the keyed merge is asserted at all: the corpus's one
 multi-site scenario is unreachable until the element-keyed `select(Column.keys)` above lands.
