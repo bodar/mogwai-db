@@ -34,11 +34,10 @@ export type StoreFactory = () => GraphStore;
  *  the only authority on which chains carry effects. A traversal that fails to compile is not a
  *  write (it will throw identically however it is run).
  *
- *  **Asked as "not a read", not as "is a `WritePlan`".** A mutating traversal can compile to more than
- *  one artifact (a write closure or a `program`), and a probe that named only one silently let a
- *  `g.V().drop()` share the read store and empty it for every traversal after it. The question this
- *  probe is really asking is whether a shared store survives the traversal, and only `kind === 'read'`
- *  answers yes.
+ *  **Asked as "not a read", not as "is a write".** A mutating traversal compiles to a `program`, and a
+ *  probe that string-matched `addV`/`drop` instead silently let a `g.V().drop()` share the read store and
+ *  empty it for every traversal after it. The question this probe is really asking is whether a shared
+ *  store survives the traversal, and only `kind === 'read'` answers yes.
  *
  *  NOTE this uses a bare `compile()`, so it sees no service registry: a `call()` traversal throws
  *  here and is reported as a non-write, which is correct (no `call()` form is a write today). Do

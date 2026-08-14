@@ -1,6 +1,5 @@
-import type { GraphStore } from '../../storage.ts';
 import { q, type Query, type Relation } from './q.ts';
-import type { ValueNode, ValueType } from '../../gremlin/types.ts';
+import type { ValueType } from '../../gremlin/types.ts';
 import type { Elem } from '../../compiler/plan/plan.ts';
 import type { Plan as RelPlan } from '../../rel/plan.ts';
 
@@ -384,10 +383,9 @@ export interface Compiled {
  * runs, statements and retained reads alike, ending in the rows to frame.
  *
  * It sits beside `Compiled` rather than inside it because the difference is real — a read is ONE
- * statement and this is several — and beside `WritePlan` rather than replacing it because the two
- * say opposite things about where the traversal machine lives: a `WritePlan` is a JS closure that
- * walks drivers and calls the store, while this is DATA the algebra produced and one executor runs.
- * `WritePlan` is the older write-closure path; this is what replaces it.
+ * statement and this is several. It is DATA the algebra produced and one executor runs, not a machine
+ * that walks the store; a write ships across an RPC exactly as a read does (see
+ * `docs/2026-08-07-edge-compilation-plan.md`). It is what the deleted `WritePlan` closure was replaced by.
  *
  * `shape` is the framing contract exactly as a read's is, so the wire layer needs no write vocabulary.
  */
@@ -401,20 +399,9 @@ export interface Program {
   shape: Shape;
 }
 
-/** What `compile()` hands back: one statement, a program, or the legacy write closure. */
-export type Executable = Compiled | Program | WritePlan;
-
-export type WriteResult =
-  // A vertex's props are multi-valued per key (cardinality list/set); an EDGE's are not — TinkerPop's
-  // edge `Property` is single by spec. The asymmetry is the schema's, so the type carries it.
-  | { readonly vertex: { readonly id: any; readonly labels: readonly string[]; readonly props: Record<string, ValueNode[]> } }
-  | { readonly edge: { readonly id: any; readonly label: string; readonly src: any; readonly tgt: any; readonly props: Record<string, ValueNode> } };
-
-/** A mutation may continue as a normal read traversal (e.g. `addV(...).label()`). The
- * mutation remains imperative at the storage seam, while its follower is compiled/framed by
- * the ordinary read spine rather than growing a second output vocabulary in write.ts. */
-export interface WriteContinuation { shape: Shape; run: (store: GraphStore) => any[]; }
-export interface WritePlan { kind: 'write'; run: (store: GraphStore) => WriteResult[]; continuation?: WriteContinuation; }
+/** What `compile()` hands back: one statement, or a several-statement program. Both are DATA — every
+ *  traversal, read or write, ships across an RPC (`docs/2026-08-07-edge-compilation-plan.md`). */
+export type Executable = Compiled | Program;
 
 /** Render `SELECT <cols> FROM <current id-relation>` over a Query's CTE prefix to
  *  {sql,binds}. The write paths materialize target ids this way before mutating. */

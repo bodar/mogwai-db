@@ -10,7 +10,7 @@ import { segmentPlan } from './rel/segment.ts';
 import { createAppScope, createRequestScope } from '../scopes.ts';
 import { servicesNamedBy } from '../services/params/call-params.ts';
 // Re-export the compile-output contract so execute.ts / tests keep importing it here.
-export type { Compiled, Executable, Program, WritePlan, WriteResult, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from '../sql/kernel/render.ts';
+export type { Compiled, Executable, Program, Shape, ValueType, ListOf, MapEntry, MapOf, ElemShape, GroupKey, GroupVal, PathPos } from '../sql/kernel/render.ts';
 export { staticTypeOf, perRowColumnOf, perRowColumn, hasTypedMembers, memberTypeOf, withMemberType, isPerRow, SCALAR_MEMBERS, TYPED_MEMBERS, PER_ROW, PER_ROW_ENVELOPE, STATIC, UNKNOWN } from '../sql/kernel/render.ts';
 export type { ScalarType } from '../sql/kernel/render.ts';
 export type { CompileOptions, FastPathConfig } from './options/fast-paths.ts';
@@ -30,10 +30,9 @@ export type { CompileOptions, FastPathConfig } from './options/fast-paths.ts';
 // concrete inject/verify/fold bodies + classification Sets stay in ir/strategies.ts.
 
 /** Apply v4 iterate()'s trailing discard: execute for effect, return nothing. Shared by the
- *  sync (Compiled/WritePlan) and segment resume paths — a discard turns any read leaf's shape
- *  into `discard` and empties a write's result. */
+ *  sync (Compiled/Program) and segment resume paths — a discard turns any read or write leaf's
+ *  shape into `discard`, so the program still runs its effects but frames no traversers. */
 function applyDiscard(plan: Executable): Executable {
-  if (plan.kind === 'write') { const inner = plan.run; return { kind: 'write', run: (s) => { inner(s); return []; } }; }
   return { ...plan, shape: { kind: 'discard' } };
 }
 

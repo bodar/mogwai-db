@@ -590,30 +590,6 @@ const bulkOf = (r: any): bigint => (r?.bulk != null ? BigInt(r.bulk) : 1n);
 // The write path and all non-element value shapes frame through frameValues (bulk 1); only the
 // element leaves read the column here, so the multiplicity plumbing touches exactly two cases.
 function* frameResolved(store: GraphStore, plan: Executable): Generator<Framed> {
-  if (plan.kind === 'write') {
-    if (plan.continuation) {
-      plan.run(store);
-      const { shape, run } = plan.continuation;
-      const rows = run(store);
-      if (shape.kind === 'vertex') { for (const r of rows) yield { buf: rowVertex(r), bulk: bulkOf(r) }; return; }
-      if (shape.kind === 'edge') { for (const r of rows) yield { buf: rowEdge(r), bulk: bulkOf(r) }; return; }
-      for (const buf of frameValues(rows, shape)) yield { buf, bulk: 1n };
-      return;
-    }
-    for (const r of plan.run(store)) {
-      // A write response's vertex prop bag is already {key:[values]} — the shape vertexBuffer wants.
-      // It used to be flat and get wrapped in a 1-list here, which silently truncated a
-      // multi-property to its first value on the write path only.
-      if ('vertex' in r) yield { buf: vertexBuffer(r.vertex.id, r.vertex.labels, r.vertex.props), bulk: 1n };
-      else {
-        const e = r.edge;
-        // Frame via edgeBuffer so edge properties materialize — routing through
-        // anySerializer's EdgeSerializer drops them (same client bug edgeBuffer works around).
-        yield { buf: edgeBuffer(e.id, e.label, e.src, e.tgt, e.props ?? {}), bulk: 1n };
-      }
-    }
-    return;
-  }
   // A PROGRAM's rows come from the executor rather than one `query`, and everything downstream is
   // identical: shape is the framing contract whether the traversal wrote or only read (§2), so the
   // effects change WHERE the rows come from and nothing about how they are framed.
@@ -822,7 +798,7 @@ export class Executor implements ExecutorApi {
     return plan.compiled;
   }
 
-  /** Drive a (possibly segmented) plan to a final synchronous Compiled/WritePlan — the ONE await
+  /** Drive a (possibly segmented) plan to a final synchronous Compiled/Program — the ONE await
    *  boundary, and the ONLY async loop outside a runtime entry point. A pure single-segment
    *  traversal (all of Phases 1-5) returns immediately, zero async overhead. A barrier (federate)
    *  loops: read+drain head → await apply() → land + resume. `federationDepth` rides

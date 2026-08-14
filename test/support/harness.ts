@@ -42,8 +42,8 @@ export function seededStore() {
  */
 export const runWith = (store: GraphStore, q: string, options?: CompileOptions) => {
   const p = compile(q, {}, options);
-  if (p.kind === 'write') return p.run(store);
-  // A RelIR program is several statements, so running it is the executor's job, not a `query` call.
+  // A RelIR program is several statements (every write is one), so running it is the executor's job,
+  // not a `query` call.
   if (p.kind === 'program') return [...runProgram(store, p.program, p.tail)] as any[];
   return store.query(p.sql, p.binds);
 };
