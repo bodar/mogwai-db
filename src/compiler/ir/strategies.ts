@@ -586,7 +586,7 @@ const isAllArg = (a: any): boolean =>
 /** Steps that emit EXACTLY their input traverser, once and unchanged — they write side-effect or
  *  channel state and leave the stream alone. A per-traverser host over a body of only these is that
  *  body. Recursive on the hosts themselves, so `local(__.local(__.aggregate("a")))` unwraps too. */
-function isStreamIdentity(s: Step, params: Record<string, any>): boolean {
+export function isStreamIdentity(s: Step, params: Record<string, any>): boolean {
   if (s.name === 'aggregate' || s.name === 'sideEffect' || s.name === 'identity') return true;
   // A LABELLED group/groupCount is a SIDE EFFECT: `GroupSideEffectStep`/`GroupCountSideEffectStep`
   // extend `SideEffectBarrierStep`, whose `processAllStarts` re-adds the traverser unchanged

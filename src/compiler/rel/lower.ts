@@ -24,7 +24,7 @@ import { parseCallSpec } from '../../services/params/call-params.ts';
 import { isColumnArg, isNested, isPred, isTokenArg, stepChain, argValues, arg, type Arg, type MergePolicy } from '../../gremlin/frontend.ts';
 import { BigDecimal, Duration, flatType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit, countLit, itemTypeAt, sliceBound } from './const.ts';
-import { BY_HOSTS, type IRStep } from '../ir/strategies.ts';
+import { BY_HOSTS, isStreamIdentity, type IRStep } from '../ir/strategies.ts';
 import { analyzeChain, type ChainFacts } from '../ir/analyze.ts';
 import { childSteps, normalize } from '../ir/passes.ts';
 import { alwaysProduces } from '../ir/productivity.ts';
@@ -5438,7 +5438,12 @@ function coalesceArms(
     // `constant()` in a non-final position means no later arm can ever fire. `childPredicate` cannot
     // answer "this body produces nothing" for a body that ignores its input, so `alwaysProduces`
     // (`ir/productivity.ts`, the same authority the filter-no-op Pass reads) supplies the constant.
-    const empty = alwaysProduces(body!) ? CONSTANT.false : childPredicate(body!, subject, fresh, ctx, true);
+    // A body of ONLY STREAM-IDENTITY steps (a side-effect arm — `aggregate("a")`, a labelled
+    // `groupCount("a")`, `sideEffect(…)`, `identity()`) emits exactly its input, so it too always
+    // fires; `alwaysProduces` cannot see it because it reads the LAST step alone (`out().aggregate("a")`
+    // must NOT qualify — `out()` can produce nothing), so the whole-body check is separate.
+    const alwaysFires = alwaysProduces(body!) || body!.every((inner) => isStreamIdentity(inner, ctx.params));
+    const empty = alwaysFires ? CONSTANT.false : childPredicate(body!, subject, fresh, ctx, true);
     if (!empty) return null;
     exhausted = and(exhausted, empty);
   }
