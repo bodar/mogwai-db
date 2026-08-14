@@ -5855,11 +5855,16 @@ function flatMapRejoin(
 
 /**
  * A PER-ORIGIN SLICE — `local(__.out().limit(n))`'s "n per HOST", a `row_number` window PARTITIONED by
- * the `origin` channel. `dedupOn`'s shape (window → filter the rank → reproject), with the rank kept
- * only where `offset < rn ≤ offset+limit` (`limit === null` is the open `skip`/`range(k,-1)` upper
- * bound). The corpus pins these as *"result should be OF … count N"* — the pick per origin is
- * IMPL-DEFINED — but the order is `encounter` then the whole payload so the choice is DETERMINISTIC and
- * survives `test:perturbed`, one valid member of the accepted set rather than a scan-luck row.
+ * the `origin` channel. `dedupOn`'s shape (window → filter the rank → reproject), which is Calcite's
+ * per-partition top-N EXACTLY: `convertDistinctOn`
+ * (`vendor/calcite/core/src/main/java/org/apache/calcite/sql2rel/SqlToRelConverter.java:1045-1113`)
+ * projects `ROW_NUMBER() OVER (PARTITION BY keys ORDER BY collation)`, filters the rank, then projects
+ * it away — with `ROW_NUMBER` (positional) NOT `rank`, so a `limit` never keeps ties as extra rows.
+ * Calcite's DISTINCT ON filters `rn = 1`; this keeps the rank where `offset < rn ≤ offset+limit`
+ * (`limit === null` is the open `skip`/`range(k,-1)` upper bound), the top-N + range generalization.
+ * The corpus pins these as *"result should be OF … count N"* — the pick per origin is IMPL-DEFINED —
+ * but the order is `encounter` then the whole payload so the choice is DETERMINISTIC and survives
+ * `test:perturbed`, one valid member of the accepted set rather than a scan-luck row.
  */
 function partitionedSlice(rows: Rel, originCol: string, window: Slice, fresh: Minter): Rel {
   const position = encounterOf(rows.channels);
