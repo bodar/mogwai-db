@@ -10,7 +10,7 @@ import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { exprChildren, forEachRel } from '../../rel/walk.ts';
 import type { ColMeta, SortTerm } from '../../rel/types.ts';
-import { armBatches, assertsGType, collectionAssert, isLocalScope, isStreamBarrier, PATH_LIST_OPS, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
+import { armBatches, assertsGType, collectionAssert, isLocalScope, isStreamBarrier, PATH_LIST_OPS, type Slice, sliceOf, sliceParamNames, typeOfAssert } from '../ir/step.ts';
 import { labelReads, labelsBoundBefore } from '../ir/labels.ts';
 import { bulkObservedFrom } from '../ir/bulk.ts';
 import { meetScalarTypes, memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticTypeOf, UNKNOWN, type ListOf, type MapOf, type ScalarType, type Shape, type ValueType } from '../../sql/kernel/render.ts';
@@ -5786,7 +5786,6 @@ function flatMapRejoin(
   body: readonly IRStep[], steps: readonly IRStep[], at: number, bulked: boolean, ctx: ChainCtx, fresh: Minter, labels: AliasMap,
 ): Tail | null {
   if ((step.name !== 'flatMap' && step.name !== 'local') || framing.kind !== 'elements') return null;
-  if (body.some(isStreamBarrier)) return null;
   // PATH HIDING — "Objects from flatMap traversal should be hidden from path()"
   // (`vendor/tinkerpop/gremlin-test/.../map/FlatMap.feature:56`): `flatMap(out().out()).path()` is
   // `[v, end]`, NOT `[v, mid, end]`. The rejoin lowers the body through the ordinary fold, whose hops
@@ -5805,17 +5804,61 @@ function flatMapRejoin(
     const outerReads = labelReads(steps.slice(at + 1), ctx.params);
     if (outerReads.all || [...bodyBound].some((label) => outerReads.labels.has(label))) return null;
   }
-  const rows = childRows(body, rel, framing.elem, labels, ctx, fresh);
+  // A TRAILING GLOBAL SLICE is scoped PER ORIGIN — `local(__.bothE('created').limit(1))` is one edge
+  // per HOST vertex, not one edge total. The prefix must be barrier-free (the slice is the only
+  // barrier), and only `limit`/`skip`/`range` (`sliceOf`) reach here — `tail` counts from the end (a
+  // per-origin total this does not yet compute) and stays declined. Everything before it is the plain
+  // rejoin. `map` is excluded above, so a slice under it (its per-origin WINDOW taking rn=1) is a
+  // separate lowering.
+  const last = body[body.length - 1]!;
+  const perOriginSlice = body.length > 1 && (last.name === 'limit' || last.name === 'skip' || last.name === 'range') && !isLocalScope(last);
+  const prefix = perOriginSlice ? body.slice(0, -1) : body;
+  if (prefix.some(isStreamBarrier)) return null;
+  const rows = childRows(prefix, rel, framing.elem, labels, ctx, fresh);
   if (!rows) return null;
+  const window = perOriginSlice ? partitionedSlice(rows.rel, rows.origin, sliceOf(last), fresh) : rows.rel;
   // DROP origin — flatMap flattens, so the host a row descended from is internal and must not ride into
   // a downstream whole-row `dedup`/merge. Everything else (payload + carried channels) rides through.
-  const channels = rows.rel.channels.filter((channel) => channel.role !== 'origin');
-  const cols = rows.rel.type.cols.filter((column) => column.name !== rows.origin);
+  const channels = window.channels.filter((channel) => channel.role !== 'origin');
+  const cols = window.type.cols.filter((column) => column.name !== rows.origin);
   const shed = make.project({
-    id: fresh('fx'), input: rows.rel, channels, type: typeOf(...cols),
-    exprs: cols.map((column) => [column.name, col(rows.rel.id, column.name)] as const),
+    id: fresh('fx'), input: window, channels, type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, col(window.id, column.name)] as const),
   });
   return continueAs(shed, rows.framing, steps, at + 1, bulked, ctx, fresh, labels);
+}
+
+/**
+ * A PER-ORIGIN SLICE — `local(__.out().limit(n))`'s "n per HOST", a `row_number` window PARTITIONED by
+ * the `origin` channel. `dedupOn`'s shape (window → filter the rank → reproject), with the rank kept
+ * only where `offset < rn ≤ offset+limit` (`limit === null` is the open `skip`/`range(k,-1)` upper
+ * bound). The corpus pins these as *"result should be OF … count N"* — the pick per origin is
+ * IMPL-DEFINED — but the order is `encounter` then the whole payload so the choice is DETERMINISTIC and
+ * survives `test:perturbed`, one valid member of the accepted set rather than a scan-luck row.
+ */
+function partitionedSlice(rows: Rel, originCol: string, window: Slice, fresh: Minter): Rel {
+  const position = encounterOf(rows.channels);
+  const cols = [...payloadCols(rows), ...carriedCols(rows.channels)];
+  const RN = 'prn';
+  const ranked = make.window({
+    id: fresh('pw'), input: rows, channels: rows.channels, type: typeOf(...rows.type.cols, meta(RN, 'int')),
+    specs: [[RN, {
+      kind: 'window-expr', fn: 'row_number', args: [],
+      spec: {
+        partitionBy: [col(rows.id, originCol)],
+        orderBy: [...(position ? [{ expr: col(rows.id, position.col), dir: 'asc' as const }] : []),
+          ...payloadCols(rows).map((column) => ({ expr: col(rows.id, column.name), dir: 'asc' as const }))],
+      },
+    }]],
+  });
+  const lower: Expr = { kind: 'binary', op: '>', left: col(ranked.id, RN), right: compilerInt(window.offset) };
+  const pred: Expr = window.limit === null ? lower
+    : and(lower, { kind: 'binary', op: '<=', left: col(ranked.id, RN), right: compilerInt(window.offset + window.limit) });
+  const kept = make.filter({ id: fresh('pf'), input: ranked, channels: ranked.channels, type: ranked.type, pred });
+  return make.project({
+    id: fresh('pk'), input: kept, channels: rows.channels, type: typeOf(...cols),
+    exprs: cols.map((column) => [column.name, col(kept.id, column.name)] as const),
+  });
 }
 
 /**

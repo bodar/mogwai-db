@@ -470,6 +470,10 @@ const COVERED = [
   "g.V().flatMap(__.out().values('name'))", "g.V().local(__.out().values('name'))",
   "g.V().local(__.outE().inV())", "g.V().local(__.out().has('lang','java'))",
   "g.V().local(__.out()).dedup()",
+  // A TRAILING GLOBAL SLICE is scoped PER ORIGIN — n per HOST, a `row_number` window
+  // PARTITIONED by `origin` (`partitionedSlice`). limit/skip/range; `tail` (count-from-end) declines.
+  "g.V().local(__.out().limit(1))", "g.V().local(__.out().range(0,2))", "g.V().local(__.out().skip(1))",
+  "g.V().local(__.outE('knows').limit(1)).inV()", "g.V().local(__.outE().limit(1)).inV().values('name')",
   // A body that DROPS — `map(__.values('age'))` above emits nothing for the two software vertices,
   // which is the productivity signal being required rather than assumed.
   "g.V().map(__.values('age')).count()",
