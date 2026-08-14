@@ -111,10 +111,20 @@ of it is collection work — the collection substrate is done.
 
 ### Substrate — each unlocks several, do these first
 
-**Element-keyed `select(Column.keys)`** — unblocks the ready admission below and the `local(group…)` splice.
-`entrySide`/`sideList` decline an `elem` side deliberately: the blob holds a `{t:'vertex', v:{…}}` node and
-the SCALAR framer would emit it as a JSON string (`map.ts`'s own comment). One scenario directly, but it gates
-the admission.
+**Element-keyed `select(Column.keys)`** — ✅ LANDED (keys; `Column.values` still pending, below), and the fix
+was DEEPER than the framing tweak this bullet first guessed. The real defect was a PREMATURE FOLD: `cap`
+folded the grouping into a JSONB map, which expands each element key to a PUBLIC `COALESCE(uid,id)` payload —
+and the map blob is framed in JS (`execute.ts`), which cannot expand a rowid back, so the key node had to be
+pre-expanded, LOSING the rowid the graph is keyed by. That is fatal for the admission's
+`select(Column.keys).unfold().both()` (`GroupCount.feature:212`): the keys must MOVE, and movement needs the
+rowid — the same reason element LISTS keep rowids-until-root (`list.ts` `unfoldList`). Both references agree
+(TinkerPop keys are live `Vertex` objects; Calcite key-selection is a projection over `(key,agg)` rows), as
+does this doc's own thesis. So the fold is now CONSUMER-DRIVEN: `cap` recognises a following
+`select(Column.keys)` and projects the DISTINCT key rowids straight off the member rows into a Set
+(`collection.ts` `groupedKeys` + the `cap` lookahead in `lower.ts`), which moves natively. Asserted in
+`test/compiler/grouped-keys.exec.test.ts`; L3/census did not move because the direct corpus scenario is gated
+further along by the admission below (`legality-not-corpus-defines-support`). **This generalises Phase 2b
+(cancel a fold the consumer never needed) and is the substrate the remaining `cap` reads should follow.**
 
 **The ready admission: `local(group("a"))`/`local(groupCount("a"))` as a stream identity** — a KEYED
 `group("a")`/`groupCount("a")` IS a stream identity: `GroupSideEffectStep`/`GroupCountSideEffectStep` both
