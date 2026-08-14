@@ -78,3 +78,22 @@ export function insertSet(
   }));
   return 1;
 }
+
+/**
+ * SET-BASED DELETE — remove every row of `table` whose `column` is in `ids`, as ONE statement with
+ * ONE JSON bind (`… IN (SELECT value FROM json_each(?))`). Returns statements issued (0 for an empty
+ * id set, 1 otherwise).
+ *
+ * The Delete half of the set-based write substrate, and deliberately a DIRECT fixed-shape statement
+ * rather than a RelIR `Delete` program. The RelIR cascade delete (`compiler/rel/write.ts`) takes a
+ * membership against a RELATION — a snapshot the plan joins to, which is what preserves a drop's
+ * pre-mutation view. A membership against LITERAL ids has no relation to render and no projection to
+ * build, so a program adds ceremony and no property; this is the same call the loader's collision
+ * read already makes (`bulk.ts` `assertFree`). `json_each` routes each member by its own storage
+ * class, so a number matches an INTEGER key and a string a TEXT one, exactly as `V($ids)` does.
+ */
+export function deleteMembers(store: RowSource, table: string, column: string, ids: readonly unknown[]): number {
+  if (!ids.length) return 0;
+  store.query(`DELETE FROM ${table} WHERE ${column} IN (SELECT value FROM json_each(?))`, [JSON.stringify([...ids])]);
+  return 1;
+}
