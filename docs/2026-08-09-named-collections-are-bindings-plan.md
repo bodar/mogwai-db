@@ -183,6 +183,15 @@ between vertex sites, so the label stays homogeneous — `elements`, not `mixed`
 the census; it is asserted in `test/L4-addendum/mixed-collection.feature` and
 `test/compiler/mixed-collection.exec.test.ts` (`legality-not-corpus-defines-support`).
 
+Landing the substrate also discharged the deferral `seedAsSite` had carried since Phase 7: a
+`withSideEffect(k, [items], Operator.addAll)` LIST seed beside ELEMENT (or already-mixed) members —
+`addAll([1,2,3], bulkSetOfVertices)` = `[1,2,3, v…]` — now prepends the seed's items as site 0 and folds
+to a mixed collection, where it used to decline ("a scalar seed beside ELEMENT members … not this
+function's to invent"). `accumulate`'s mixed-merge guard admits `addAll` (it CONCATENATES, so the seed
+items' kinds and the members' need not agree) while still declining every arithmetic operator over a
+heterogeneous multiset (a ClassCastException in the reference). A `Set` seed's dedup rides through as
+`firstOccurrences` over the envelope column.
+
 ### Leaf gaps — one thing each, no downstream unlock
 
 **A declared policy on a KEYED label.** A seeded `group("a")` accumulates INTO the declared map
