@@ -37,8 +37,8 @@ Facts about the platform, not preferences.
   O(graph) on the DO's serial request budget and cannot be capped there. This is why the lowering pins
   the access path at compile time from what the traversal already states — a join-order fence
   (`Join.ordered`, the LEFT side is the outer loop; only an `inner` join may carry it) and a source
-  seek that lifts a `has(k,v)`'s correlated `EXISTS` into a driven `DISTINCT` join (`src/rel/passes/seek.ts`,
-  gated `propertySeek`, `GATE_ONLY_FAST_PATHS`). Both are physical statements of a fact the traversal
+  seek that lifts a `has(k,v)`'s correlated `EXISTS` into a driven `DISTINCT` join
+  (`src/rel/passes/semijoin.ts`'s `indexSeek`, gated `propertySeek`, `GATE_ONLY_FAST_PATHS`). Both are physical statements of a fact the traversal
   fixed, changing no rows, so the plan is **stable without stats**: a mid-size graph's 1-hop filtered
   lookup went ~9.8 s (planner guessing, superlinear) → ~19 ms, identical with and without
   `sqlite_stat1`. ⚠️ Benchmarks must `ANALYZE` or they measure the wrong plan. `test/plan-stability.test.ts`
@@ -175,12 +175,12 @@ makes a new kind a compile error. Rewriting is memoised, so the DAG stays a DAG.
 | **`check`** | the fail-closed verifier — column resolution, `Agg`/`WindowExpr` placement, §3.5 obligations, both §3.6 budgets, and the recursive-term laws via `src/rel/block.ts`. Always on in dev/tests |
 | **`name`** | named CTE vs inlined derived table per shared node, honouring `Materialize`. **The only pass with a production caller** (`lower.ts`) |
 | **`prune`** | column pruning — a walk carries only what its body and its consumer read |
-| **`seek`** | lifts a correlated property `EXISTS` in front of the scan it filters, as a DISTINCT relation the plan is driven from. Switched by `propertySeek` |
+| **`semijoin`** | the PHYSICAL tier: lift a correlated property `EXISTS` in front of the bare scan it filters, as a DISTINCT relation the plan is DRIVEN from (a semi-join). ONE decorrelation with the access path as a pluggable `OwnerSeek` strategy — `indexSeek` (base `vp_key_value`, switched by `propertySeek`) and `trigramSeek` (the `property_fts` trigram index, switched by `ftsSubstringPredicate`, positive + negative TextP). The caller passes the enabled strategies STRATEGY-MAJOR (trigram before index, so a substring predicate takes the trigram index); the pass reads no config. Formerly two clones, `seek.ts` + `fts.ts` |
 | **`fuse`** | 🚧 small semantic rewrites. Ask what still buys anything the assembler doesn't before wiring it |
 | **`flatten`** | ✅ landed by DISSOLUTION, not as a pass. `expandRepeatBody` is deleted; the join-flattening / decorrelation legality it needed became `src/rel/block.ts` (`shapeOf`/`fromTree`/`fusedInto` — Calcite `SqlImplementor.needNewSubQuery` prior art), consumed by `recursive.ts` (P1/barrier laws) and the emitter. No standalone `JoinUnionTranspose` pass was built: a `union`-topped body decorrelates structurally (block.ts treats a union side as `closed`→derived table while the self-ref stays unwrapped in the term's FROM), so `repeat(__.bothE().inV())` composes without one |
-| **`recognize`** | 🚧 the fast paths as plan rewrites, so a fast-path decline can be lifted |
+| **`recognize`** | RETIRED as a distinct pass. "Fast paths as plan rewrites" is not a tier of its own but the physical-rewrite KIND, now realised by `semijoin` (two `OwnerSeek` strategies over the finished algebra); `recognize` was a placeholder name, not a term of art. What remains is a PERF tail, not a pass: `trigramSeek` fires only on a filter over a bare scan with a literal ≥3-char term, so a nested / non-scan-rooted / parameterized `containing()` takes the correct-but-unindexed generic `LIKE`. Gate any widening on a real slow query + EXPLAIN, not on a structural hunch — the uncovered cases already answer correctly |
 
-**Declared is not wired.** Only `name` and `seek` have production callers; there is no object that
+**Declared is not wired.** Only `name` and `semijoin` have production callers; there is no object that
 orders them — the order above is the order.
 
 ---
@@ -497,7 +497,9 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
     (needs a key STACK, not one `bord_p`); a **scoped-fold arm** (`union(values('name').fold(), …)` — the
     per-origin fold's grouping empties `branchOrder` since its group policy is `undefined`; the parent is
     the group key, so `MIN(bord_p)` would carry it, but that is a channel-core change).
-- **`recognize` (§4) — the fast paths as plan rewrites,** so a fast-path decline can be lifted.
+- **`recognize` — RETIRED.** "Fast paths as plan rewrites" landed as the `semijoin` physical tier
+  (§4), not as an umbrella pass. The residual (a nested/param `containing()` taking generic `LIKE`) is
+  a PERF tail on already-correct queries, gated on measurement — not a pass to build.
 
 **Guard-binding family** — a shared mechanism (a GRAPH-dependent refusal → `Binding.guard`, §6·5):
 
@@ -629,7 +631,8 @@ preference.
 **The decline contract.** `null` is the ONLY decline, cheap and total — a partial lowering that
 silently drops a filter is invisible, and a module whose contract is `null` must not let a throw escape
 (§6·5 for the three that legitimately do). **A fast path is never silently dropped**
-(`has(k,containing(t))` routes the trigram index and DECLINES until `recognize`).
+(`has(k,containing(t))` routes the trigram index via `semijoin`'s `trigramSeek`; a nested/param form
+DECLINES the trigram strategy and takes the correct-but-unindexed generic `LIKE` — a perf tail, never a dropped filter).
 
 **Before reproducing a reference distinction, ask what a client can SEE.** Three bands: it changes the
 VALUE → build it; it changes the decoded CLASS across a boundary every GLV has (Number ↔

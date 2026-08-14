@@ -862,7 +862,7 @@ export const propSortKeyFor = (idExpr: Expression, elem: Elem, key: string): Exp
 /** Does ANY value under `key` satisfy `pred` (undefined → the key exists at all)? EXISTS over
  *  the normalized table → multi-property has() semantics. This generic LIKE path is the semantic
  *  authority; the `ftsSubstringPredicate` trigram rewrite happens over the FINISHED algebra
- *  (`src/rel/passes/fts.ts`) and only replaces this where it fires. */
+ *  (`src/rel/passes/semijoin.ts`, `trigramSeek`) and only replaces this where it fires. */
 export const propHasFor = (idExpr: Expression, elem: Elem, key: string, pred: any): Expression => {
   const s = propSource(elem);
   const base = q`SELECT 1 FROM ${s.table} WHERE ${s.owner}=${idExpr} AND ${s.key}=${value(key)}`;

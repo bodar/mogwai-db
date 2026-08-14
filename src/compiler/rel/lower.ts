@@ -4,8 +4,7 @@ import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
 import { emit, emitRelational } from '../../rel/emit.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
-import { seek } from '../../rel/passes/seek.ts';
-import { fts } from '../../rel/passes/fts.ts';
+import { indexSeek, semijoin, trigramSeek } from '../../rel/passes/semijoin.ts';
 import { render } from '../../sql/kernel/q.ts';
 import { plan as program, type Binding, type Plan } from '../../rel/plan.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -779,10 +778,10 @@ function hasLabelClause(labelArgs: readonly Arg[], subject: ElementSubject, fres
  * the outer element, because a property FILTER asks whether a row is there and joining instead would
  * multiply the traverser once per matching property.
  *
- * **This shape is what `src/rel/passes/seek.ts` recognises**, and the recognition is by shape rather
- * than by anything this function announces: a correlated `EXISTS` over a property scan can be
- * CHECKED but never DRIVEN FROM, so on a bare source the pass lifts it in front of the scan as an
- * index seek. Nothing here needs to change for that, which is the point of putting it in a pass.
+ * **This shape is what `src/rel/passes/semijoin.ts` recognises** (`indexSeek`), and the recognition
+ * is by shape rather than by anything this function announces: a correlated `EXISTS` over a property
+ * scan can be CHECKED but never DRIVEN FROM, so on a bare source the pass lifts it in front of the
+ * scan as an index seek. Nothing here needs to change for that, which is the point of putting it in a pass.
  */
 function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, fresh: Minter, valType: TypeNode | null = null, valParam: string | null = null): Expr | null {
   const elem = subject.elem;
@@ -3570,11 +3569,11 @@ export interface Lowering {
   readonly params?: Record<string, any>;
   readonly collapse?: boolean;
   readonly correlatedChildren?: boolean;
-  /** May the driving property seek run (`src/rel/passes/seek.ts`)? A PHYSICAL rewrite over the
-   *  finished algebra, so unlike every other flag here it changes no lowering decision — which is
-   *  why it is read once, at the pass, rather than threaded into the fold. */
+  /** May the driving property seek run (`src/rel/passes/semijoin.ts`, `indexSeek`)? A PHYSICAL
+   *  rewrite over the finished algebra, so unlike every other flag here it changes no lowering
+   *  decision — which is why it is read once, at the pass, rather than threaded into the fold. */
   readonly propertySeek?: boolean;
-  /** May the physical TextP FTS rewrite drive a bare element scan? */
+  /** May the physical TextP FTS rewrite drive a bare element scan (`semijoin.ts`, `trigramSeek`)? */
   readonly ftsSubstringPredicate?: boolean;
   /**
    * The GRAPH's declared vertex-label cardinality — a CAPABILITY, not a strategy, which is why it is
@@ -3835,13 +3834,15 @@ const lowered = (chain: Tail, propertySeek: boolean, ftsSubstringPredicate: bool
   if (!wire) return null;
   // PHYSICAL PASSES RUN BEFORE NAMING, because naming decides CTE boundaries from the DAG's sharing
   // and a rewrite that changes the DAG after that decision would be naming a plan that no longer
-  // exists. `seek` is the first of them (`src/rel/passes/seek.ts`); it is a `Rel → Rel` identity on
-  // every shape it does not recognise, so this line is where the next one joins rather than a
-  // special case for this one. The switch is read HERE and not inside the pass: a pass is a total
-  // function of its input, and a pass that consulted a config would be one more place a
-  // configuration could change coverage rather than only performance.
-  const physical = ftsSubstringPredicate ? fts(wire.rel) : wire.rel;
-  const named = nameBindings(propertySeek ? seek(physical) : physical);
+  // exists. `semijoin` (`src/rel/passes/semijoin.ts`) is the physical tier: a `Rel → Rel` identity on
+  // every shape no offered strategy recognises. The switches are read HERE and not inside the pass —
+  // a pass is a total function of its input, so a config can only change which access-path STRATEGIES
+  // are offered, never whether the plan exists. Order is load-bearing: `trigramSeek` before
+  // `indexSeek` gives a substring predicate the trigram index rather than a base-table `LIKE`.
+  const named = nameBindings(semijoin(wire.rel, [
+    ...(ftsSubstringPredicate ? [trigramSeek] : []),
+    ...(propertySeek ? [indexSeek] : []),
+  ]));
   // EFFECTS FIRST, then whatever CTEs the result still needs — `checkPlan` proves a `Ref` resolves
   // only backwards, so the order the executor runs IS the order the checker walked. `name` is called
   // on the result alone because a write step has already named its own target's shared nodes; the
@@ -4109,7 +4110,7 @@ function lowerChain(steps: readonly IRStep[], opts: Lowering, fresh: Minter): Ta
     pred = and(pred, clause);
   }
 
-  // The `Filter` this builds over a bare element scan is what `src/rel/passes/seek.ts` reads: a
+  // The `Filter` this builds over a bare element scan is what `src/rel/passes/semijoin.ts` reads: a
   // selective property predicate here can only be CHECKED, and the pass is what turns it into the
   // relation the plan is driven from. Deliberately not decided here — recognising it on the ALGEBRA
   // means it cannot drift with which STEPS happen to fold into this run.

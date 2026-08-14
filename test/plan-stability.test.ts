@@ -6,7 +6,7 @@ import { read } from './support/harness.ts';
 import { accessPaths } from './support/sql-core.ts';
 
 // Plan STABILITY — the regression guard for the join-order fence (`Join.ordered`) and the source
-// seek (`src/rel/passes/seek.ts`, `propertySeek`). RelIR plan §1 P4 records why they exist: DO SQLite
+// seek (`src/rel/passes/semijoin.ts`, `indexSeek` / `propertySeek`). RelIR plan §1 P4 records why they exist: DO SQLite
 // gathers statistics but cannot BOUND `ANALYZE`, so the lowering pins the access path at compile time
 // from what the traversal already states, and a filtered lookup must reach the SAME plan with and
 // without `sqlite_stat1`. A plan only correct after `ANALYZE` is a plan wrong on every young graph —

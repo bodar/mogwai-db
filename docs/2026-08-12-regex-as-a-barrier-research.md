@@ -81,7 +81,7 @@ contains the blast radius but does not shrink it.
 ## The piece that makes it actually good: trigram prefilter
 
 The `property_fts` FTS5 **trigram** index already backs `tinker.search` and the `TextP` substring
-predicates (`src/services/CLAUDE.md`; the live rewrite is `src/rel/passes/fts.ts`, applied over the
+predicates (`src/services/CLAUDE.md`; the live rewrite is `src/rel/passes/semijoin.ts`'s `trigramSeek`, applied over the
 finished algebra in `lowered` and gated by the `ftsSubstringPredicate` flag from
 `src/compiler/options/fast-paths.ts`). Almost every real regex carries a required literal run
 (`^SKU-\d+` must contain `SKU-`). So:
@@ -175,7 +175,7 @@ decision itself is the gate, and it is a product/correctness call, not an engine
 | Barrier model is generic, not federate-specific | `src/compiler/segment.ts:9-14`, `:43` |
 | Bound-join re-injection (`within` over distinct set) | `src/compiler/ir/injection.ts:11-14`, `:22`; `src/services/catalog/federate.ts:81-82` |
 | One batched hop, scatter in SQL `resume` | `src/services/catalog/federate.ts:68-83` |
-| Trigram index + substring fast path | `src/services/CLAUDE.md`; **`src/rel/passes/fts.ts`** (the live physical rewrite over the finished algebra, gated `ftsSubstringPredicate`); `src/compiler/options/fast-paths.ts` |
+| Trigram index + substring fast path | `src/services/CLAUDE.md`; **`src/rel/passes/semijoin.ts`'s `trigramSeek`** (the live physical rewrite over the finished algebra, gated `ftsSubstringPredicate`); `src/compiler/options/fast-paths.ts` |
 | Barrier boundary + resume on the RelIR route | `src/compiler/rel/segment.ts` |
 | A data-sized row set crosses as ONE JSON bind | `src/compiler/rel/foreign.ts` (`foreignRelation`) |
 | A detached element has no live adjacency | `detachedTail` in `src/compiler/rel/lower.ts` |

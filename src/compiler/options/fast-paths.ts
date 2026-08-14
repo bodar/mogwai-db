@@ -47,7 +47,8 @@ export interface FastPathConfig {
   readonly repeatBodyExpansion: boolean;
   /**
    * Lift a correlated property `EXISTS` over a bare element scan in front of that scan, as a
-   * `DISTINCT` relation of owner ids the plan is DRIVEN from (`src/rel/passes/seek.ts`). Disabling
+   * `DISTINCT` relation of owner ids the plan is DRIVEN from (`src/rel/passes/semijoin.ts`,
+   * `indexSeek`). Disabling
    * leaves the predicate where the lowering put it — same rows, checked instead of sought.
    *
    * **The EIGHTH switch, and the first that selects a physical ACCESS PATH rather than a lowering

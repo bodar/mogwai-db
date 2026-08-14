@@ -42,8 +42,9 @@ while what they operate on keeps TinkerPop's.
   recursive dispatcher to reach back through.
 - **Fast paths are opt-in, never the semantic authority.** Two survive the single-spine cut and both
   are switches the lowering READS rather than a second lowering: `movementCollapse` (the grouped
-  `SUM(bulk)` movement) and `propertySeek` (`src/rel/passes/seek.ts`, a physical rewrite over the
-  finished algebra). Either position must compile the same traversal — turning one off may change the
+  `SUM(bulk)` movement) and `propertySeek` (`src/rel/passes/semijoin.ts`, a physical rewrite over the
+  finished algebra — the same pass hosts the trigram `ftsSubstringPredicate` seek as a second
+  access-path strategy). Either position must compile the same traversal — turning one off may change the
   PLAN, never whether there is one — and L5's per-switch sweep is what checks that claim. No new
   switch without its differential + perf evidence in the same change.
 - **Shape is CONSULTED, never CONSTRUCTED — the bright line.** Shape may be an annotation a Pass reads

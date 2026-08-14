@@ -23,7 +23,7 @@ export interface RelRequest {
    *  state, which is why it is offered rather than assumed (both positions stay expressible, so the
    *  differential has two forms to compare). */
   readonly collapse: boolean;
-  /** Whether the driving property seek (`src/rel/passes/seek.ts`) may lift a correlated property
+  /** Whether the driving property seek (`src/rel/passes/semijoin.ts`, `indexSeek`) may lift a correlated property
    *  `EXISTS` in front of the scan it filters. A physical rewrite over the finished algebra rather
    *  than a lowering choice, which is why it arrives here as a flag and is applied by a pass. */
   readonly propertySeek: boolean;

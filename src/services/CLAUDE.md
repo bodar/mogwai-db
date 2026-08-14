@@ -1,6 +1,6 @@
 # src/services — call() + Service Registry + full-text search
 
-_Scope: `src/services/**` (+ the `ftsSubstringPredicate` rewrite, `src/rel/passes/fts.ts`)._
+_Scope: `src/services/**` (+ the `ftsSubstringPredicate` rewrite, `src/rel/passes/semijoin.ts`'s `trigramSeek`)._
 
 `call()` is the extensibility seam: a `Service` registers into a `ServiceRegistry` and contributes
 to the compile. `g.call(…)` contributes a RELATION spliced in at the head of the chain; `V().call(…)`
@@ -31,5 +31,5 @@ substrings).
   per-write delete makes bulk writes O(n²). Delete FTS rows ONLY on a genuine overwrite.
 - The `ftsSubstringPredicate` rewrite routes ≥3-char positive substring predicates over stored
   properties through the index; generic `LIKE` stays the authority + fallback for everything else. It
-  is a PHYSICAL rewrite over the finished algebra (`src/rel/passes/fts.ts`, applied in `lowered`), not
-  a step-level special case.
+  is a PHYSICAL rewrite over the finished algebra (`src/rel/passes/semijoin.ts`'s `trigramSeek`
+  strategy, applied in `lowered`), not a step-level special case.
