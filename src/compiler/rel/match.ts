@@ -293,6 +293,66 @@ function rootLabel(patterns: readonly Pattern[]): string | null {
 const syn = (host: IRStep, name: string, values: unknown[] = []): IRStep =>
   ({ name, args: values.map((v) => arg(v)), ctx: host.ctx });
 
+/** A `where(<body>)`/`not(<body>)` filter LEG lowered against a stream that CARRIES the bound aliases —
+ *  the match binding table OR the record a terminal `match`/`select` produced (`recordTail`). A leg
+ *  BINDS nothing and only NARROWS: `where` keeps rows the body produces for (a SEMI join / EXISTS),
+ *  `not` keeps rows it does not (an ANTI join / NOT EXISTS).
+ *
+ *  Two lowerings, tried in order:
+ *  - A SINGLE-correlation leg with a MOVEMENT-headed body is a correlated `[NOT] EXISTS` — the tested
+ *    predicate seam (`child.predicate` → `correlatedExists`), re-rooted at the one bound element.
+ *  - Otherwise — a MULTI-correlation leg (the body constrains a SECOND bound alias) OR a single leg
+ *    whose body `child.predicate` cannot express (a RECURSIVE/reducing walk, `repeat().times()`) — is a
+ *    SEMI/ANTI JOIN against a FRESH walk of the body. `legRight` builds the walk with its own source,
+ *    binding the start and each `where(P.eq/neq(label))` position (at ANY depth) as a channel, and
+ *    `make.join` correlates it back on every position. The right must be a relation OF ITS OWN, never a
+ *    re-derivation of the carrying table (`col(rel.id, …)` on both sides collapses the correlation),
+ *    which is why `child.chain` lowers it over a fresh `V()`/`E()` source — and that path lowers the
+ *    FULL step vocabulary, so a `repeat` body works here where a single-subject `EXISTS` cannot thread. */
+export function applyLeg(
+  leg: { readonly negated: boolean; readonly start: string; readonly body: readonly IRStep[]; readonly reads: readonly string[] },
+  rel: Rel, labels: AliasMap, child: ChildSeam, host: IRStep, fresh: Minter,
+): Rel | null {
+  const startProj = aliasProjection(rel, labels, leg.start, 'last', fresh);
+  if (!startProj || startProj.read.kind !== 'element') return null;
+
+  if (leg.reads.length === 1) {
+    const subject: Subject = { kind: 'element', id: aliasIdAt(col(rel.id, startProj.entry.col), 'last'), rel, elem: startProj.read.elem };
+    const clause = child.predicate(leg.body, subject, leg.negated);
+    // A movement-headed body answered here; a non-movement head (a recursive/reducing walk) declines
+    // and falls through to the fresh-walk join, which lowers the body via `child.chain`.
+    if (clause) return make.filter({ id: fresh('ml'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
+  }
+
+  const { chain: rightBody, corr } = legRight(leg.start, leg.body, host, fresh);
+  const src = child.rooted([syn(host, startProj.read.elem === 'edge' ? 'E' : 'V')]);
+  if (!src || src.framing.kind !== 'elements') return null;
+  const ran = child.chain(src.rel, src.framing, rightBody, new Map());
+  if (!ran) return null;
+  const live = liveAliases(ran.aliases, ran.rel);
+  let on: Expr | undefined;
+  for (const { op, label, channel } of corr) {
+    const lproj = aliasProjection(rel, labels, label, 'last', fresh);
+    const rEntry = live.get(channel);
+    if (!lproj || !rEntry) return null;
+    const same = lproj.read.kind === 'element'
+      ? eq(aliasIdAt(col(rel.id, lproj.entry.col), 'last'), aliasIdAt(col(ran.rel.id, rEntry.col), 'last'))
+      : eq(aliasValueAt(col(rel.id, lproj.entry.col), 'last'), aliasValueAt(col(ran.rel.id, rEntry.col), 'last'));
+    on = and(on, op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same });
+  }
+  if (!on) return null;
+  return make.join({ id: fresh('mj'), left: rel, right: ran.rel, join: leg.negated ? 'anti' : 'semi', on, channels: rel.channels, type: rel.type });
+}
+
+/** Parse a top-level `where(<body>)`/`not(<body>)` step (over a record's bound aliases) into a leg, or
+ *  `null` to decline. The same classifier `match` uses for a filter argument — the body's leading `as`
+ *  is Pass-re-rooted to `select(start)`, and `reads` is every alias it references. */
+export function classifyWhereLeg(step: IRStep, params: Record<string, any>): { readonly negated: boolean; readonly start: string; readonly body: readonly IRStep[]; readonly reads: readonly string[] } | null {
+  if ((step.name !== 'where' && step.name !== 'not') || step.modulators?.length || step.optionArms) return null;
+  const p = classifyLeg(step, params);
+  return p && p.kind === 'leg' ? p : null;
+}
+
 /** What a pattern body PRODUCED as the thing its `as(end)` binds or constrains: an ELEMENT (a movement
  *  end, addressed by rowid) or a SCALAR VALUE (`count()`/`values()`/`select(key)` end, addressed by the
  *  `v` column and its `vtype` tag). `value` is the expression a back edge compares against the stored
@@ -385,53 +445,9 @@ export function lowerMatch(
     }
 
     if (p.kind === 'leg') {
-      const startProj = aliasProjection(rel, labels, p.start, 'last', fresh);
-      if (!startProj || startProj.read.kind !== 'element') return null;
-
-      // A SINGLE-correlation leg — its body reads only its own start alias — is a correlated
-      // `[NOT] EXISTS` over that one element, which is EXACTLY the tested predicate seam: re-root at the
-      // start element (the `select(start)` the Pass produced), and hand the rest of the body to
-      // `child.predicate`. `where` keeps rows the body produces for (a semi-join); `not` keeps rows it
-      // does not (an anti-join), and the seam's `negated` flag is that distinction.
-      if (p.reads.length === 1) {
-        const subject: Subject = { kind: 'element', id: aliasIdAt(col(rel.id, startProj.entry.col), 'last'), rel, elem: startProj.read.elem };
-        const clause = child.predicate(p.body, subject, p.negated);
-        if (!clause) return null;
-        rel = make.filter({ id: fresh('ml'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
-        continue;
-      }
-
-      // A MULTI-correlation leg — the body constrains a SECOND bound alias (`not(as('a').out().as('b'))`
-      // correlates on a AND b) — is a multi-column SEMI (where) / ANTI (not) JOIN, the shape a
-      // single-subject EXISTS cannot thread. The `emit` layer already renders semi/anti as
-      // `[NOT] EXISTS (SELECT 1 FROM <right> WHERE <on>)` with the right's outer references resolving
-      // against the LEFT — but only if the right is a relation OF ITS OWN, never a re-derivation of the
-      // binding table (`col(rel.id, …)` on both sides of a join resolves to whichever copy is nearest in
-      // scope, collapsing the correlation). So build the walk FRESH: a source of its own, binding the
-      // start and each `where(P.eq/neq(label))` position — at ANY depth — as a CHANNEL, then correlate
-      // that relation back to the binding table on every such position.
-      const { chain: rightBody, corr } = legRight(p.start, p.body, step, fresh);
-      const src = child.rooted([syn(step, startProj.read.elem === 'edge' ? 'E' : 'V')]);
-      if (!src || src.framing.kind !== 'elements') return null;
-      const ran = child.chain(src.rel, src.framing, rightBody, new Map());
-      if (!ran) return null;
-      const live = liveAliases(ran.aliases, ran.rel);
-      // One clause per correlation, conjoined. An element alias ties by rowid, a value alias by its
-      // stored scalar; both sides read the SAME shape (the right binds the walk's own elements/values),
-      // so the LEFT's shape decides the compare. `neq` is `NOT (=)` — the same spelling the inline
-      // `where(key, P.neq)` clause uses.
-      let on: Expr | undefined;
-      for (const { op, label, channel } of corr) {
-        const lproj = aliasProjection(rel, labels, label, 'last', fresh);
-        const rEntry = live.get(channel);
-        if (!lproj || !rEntry) return null;
-        const same = lproj.read.kind === 'element'
-          ? eq(aliasIdAt(col(rel.id, lproj.entry.col), 'last'), aliasIdAt(col(ran.rel.id, rEntry.col), 'last'))
-          : eq(aliasValueAt(col(rel.id, lproj.entry.col), 'last'), aliasValueAt(col(ran.rel.id, rEntry.col), 'last'));
-        on = and(on, op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same });
-      }
-      if (!on) return null;
-      rel = make.join({ id: fresh('mj'), left: rel, right: ran.rel, join: p.negated ? 'anti' : 'semi', on, channels: rel.channels, type: rel.type });
+      const filtered = applyLeg(p, rel, labels, child, step, fresh);
+      if (!filtered) return null;
+      rel = filtered;
       continue;
     }
 

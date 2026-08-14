@@ -17,7 +17,7 @@ import { meetScalarTypes, memberTypeOf, PER_ROW, perRowColumnOf, STATIC, staticT
 import type { Elem } from '../plan/plan.ts';
 import { fieldNamed, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { recordField, recordNode, recordOf, recordPayload, selectKeys } from './record.ts';
-import { lowerMatch } from './match.ts';
+import { applyLeg, classifyWhereLeg, lowerMatch } from './match.ts';
 import { propertyElement, propertyHasClause, propertyId, propertyIdentityKey, propertyKey, propertyOrderTerms, propertyPayload, propertyReadOf, propertyRelation, propertyRowId, propertyValue } from './property.ts';
 import type { RelCallSite, Service } from '../../services/spi/types.ts';
 import { parseCallSpec } from '../../services/params/call-params.ts';
@@ -4782,6 +4782,22 @@ function recordTail(
           id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type,
           pred: pred.op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same },
         });
+        continue;
+      }
+    }
+
+    // `where(<body>)` / `not(<body>)` — a filter LEG over the record's bound aliases, the SAME
+    // existence semi/anti join `match`'s traversal legs build (`applyLeg`), now applied to the record
+    // stream a terminal `match`/`select` produced. Re-roots at the body's start alias and tests whether
+    // it produces (`where`) or does not (`not`); a `repeat`/`count` body lowers through the fresh-walk
+    // JOIN arm, an ordinary movement body through the correlated `EXISTS`. A leg reads only bound
+    // aliases, so a body naming an unbound one declines.
+    if ((step.name === 'where' || step.name === 'not') && !step.modulators?.length && !step.optionArms) {
+      const leg = classifyWhereLeg(step, ctx.params);
+      if (leg) {
+        const filtered = applyLeg(leg, rel, labels, childSeam(ctx, fresh), step, fresh);
+        if (!filtered) return null;
+        rel = filtered;
         continue;
       }
     }

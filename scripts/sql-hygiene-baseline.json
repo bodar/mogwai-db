@@ -122,7 +122,7 @@
   "count": {
     "binds": 4,
     "bytes": 3205,
-    "compiler": 21,
+    "compiler": 26,
     "bound": 3
   },
   "dateAdd": {
@@ -577,8 +577,8 @@
   },
   "where": {
     "binds": 0,
-    "bytes": 2347,
-    "compiler": 24,
+    "bytes": 5163,
+    "compiler": 47,
     "bound": 0
   }
 }
