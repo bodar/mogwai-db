@@ -474,6 +474,11 @@ const COVERED = [
   // PARTITIONED by `origin` (`partitionedSlice`). limit/skip/range; `tail` (count-from-end) declines.
   "g.V().local(__.out().limit(1))", "g.V().local(__.out().range(0,2))", "g.V().local(__.out().skip(1))",
   "g.V().local(__.outE('knows').limit(1)).inV()", "g.V().local(__.outE().limit(1)).inV().values('name')",
+  // A PER-ORIGIN FOLD — a list per HOST, the correlated subquery `scalarChild` builds; a sink emits `[]`
+  // from `foldElements`' own `COALESCE` seed (no per-origin seed machinery). List tail (`unfold`) reads it.
+  "g.V().local(__.out().fold())", "g.V().local(__.out().values('name').fold())",
+  "g.V().local(__.outE().fold())", "g.V().local(__.outE().values('weight').fold())",
+  "g.V().local(__.out().fold()).unfold()", "g.V().local(__.outE().fold()).unfold()",
   // A body that DROPS — `map(__.values('age'))` above emits nothing for the two software vertices,
   // which is the productivity signal being required rather than assumed.
   "g.V().map(__.values('age')).count()",
@@ -571,11 +576,10 @@ const DECLINED = [
   "g.V().has('name',null)",           // a null value: not a literal the lowering can compare
   // The per-traverser hosts' own refusals, each a CARDINALITY the correlated scalar cannot honour.
   // A vertex property key is MULTI-VALUED, so an every-result policy needs the rejoin rather than the
-  // first; a fan-out body has no "first" a correlated subquery can name; a per-parent `fold()`/slice
-  // and a bare `count()` are barriers scoped to one start, which is the same rejoin.
+  // first; a fan-out body has no "first" a correlated subquery can name; a bare `count()` is a barrier
+  // with no movement to correlate. (A per-origin `fold()`/slice now LOWERS — see COVERED.)
   "g.V().local(__.values('name'))",
   "g.V().map(__.out())",
-  "g.V().local(__.outE().fold())",
   "g.V().local(__.count())",
   // A numeric reducer over an EMPTY child: the seam cannot state productivity (the aggregate is NULL
   // both there and over an all-null input that `MaxLocalStep` genuinely emits), and `map` must drop.

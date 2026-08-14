@@ -96,7 +96,6 @@ Feature: mogwai addendum — positional determinism (canonical emission order, S
   # The ELEMENT-list branch of the same root builder: its members expand to full payloads, which is
   # a different projection from the scalar-list branch below but the same dropped ORDER BY.
   @gap:emission-order
-  @Unsupported
   Scenario: g_V_orderXbyXnameXX_localXoutXcreatedX_foldX
     Given the modern graph
     And the traversal of

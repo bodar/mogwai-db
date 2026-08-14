@@ -5737,6 +5737,11 @@ function perTraverserChild(
   const payload = ((): { readonly cols: readonly (readonly [ColMeta, Expr])[]; readonly framing: RelFraming } | null => {
     if (produced.framing.kind === 'elements')
       return { cols: [[meta('id', 'int', true), produced.expr]], framing: produced.framing };
+    // A PER-ORIGIN FOLD's value is ONE list per host — the correlated subquery `scalarChild` built,
+    // landed in the canonical `list` column so the list tail (`unfold`, `count(local)`, a set op) reads
+    // it exactly as a global `fold()`'s.
+    if (produced.framing.kind === 'list')
+      return { cols: [[meta(LIST_COL, 'json'), produced.expr]], framing: produced.framing };
     if (produced.framing.kind !== 'scalar') return null;
     // The type rides where the seam put it: a stored value's `vtype` is a second correlated read, so it
     // becomes a column and the framing says `perRow`; a reducer's own tag is static and needs none.
@@ -6118,8 +6123,6 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
   const child = movement(body[0]!, { correlated: host.id }, host.elem, fresh);
   if (child) {
     const tail = continueAs(child.rel, { kind: 'elements', elem: child.elem }, body, 1, false, inBody(ctx), fresh, NO_ALIASES);
-    if (!tail || tail.framing.kind !== 'scalar'
-      || (tail.framing.result !== 'count' && tail.framing.result !== 'number')) return null;
     // …AND THE RELATION MUST ACTUALLY HAVE COLLAPSED, which the framing marker does NOT say.
     //
     // `result` is a TYPE fact — "this value is a count", which decides the `vt` column and the wire tag
@@ -6128,13 +6131,28 @@ function scalarChild(body: readonly IRStep[], host: ChildHost, ctx: ChainCtx, fr
     // producer it stopped holding: `__.out().local(__.in().count())` is one count PER OUT-VERTEX, so
     // the subquery has as many rows as the fan-out and SQLite silently takes the first. Measured — it
     // answered `[1,3,3,null,null,null]` where the reference gives `[1,1,1,3,3,3]`.
-    if (!collapsedToOneRow(tail.rel)) return null;
+    if (!tail || !collapsedToOneRow(tail.rel)) return null;
 
     // A fence anywhere below is also a decline: this plan is correlated to the outer row, and a
     // Materialize forces a named CTE that cannot reference it.
     let materialized = false;
     forEachRel(tail.rel, (rel) => { if (rel.kind === 'materialize') materialized = true; });
     if (materialized) return null;
+
+    // A PER-ORIGIN FOLD — the correlated body reduced to ONE list, `local(__.out().fold())`'s "a list
+    // per HOST". `foldScalars`/`foldElements` (`list.ts`) COALESCE an empty fold to `[]` — FoldStep's
+    // `ArrayListSupplier` seed (`vendor/tinkerpop/gremlin-core/.../step/map/FoldStep.java:47`) — so a
+    // sink host emits `[]` from the correlated subquery over an empty body with NO per-origin seed
+    // machinery. (Calcite frames a per-group aggregate the same way, `SqlSplittableAggFunction`.) The
+    // fold IS the collapse `collapsedToOneRow` requires, and a fold is ALWAYS productive (it seeds).
+    if (tail.framing.kind === 'list') {
+      const list = make.project({
+        id: fresh('bl'), input: tail.rel, channels: [], type: typeOf(meta(LIST_COL, 'json')),
+        exprs: [[LIST_COL, col(tail.rel.id, LIST_COL)]],
+      });
+      return { expr: { kind: 'scalar', plan: list }, framing: tail.framing, present: ALWAYS_PRODUCTIVE, yields: 'one' };
+    }
+    if (tail.framing.kind !== 'scalar' || (tail.framing.result !== 'count' && tail.framing.result !== 'number')) return null;
 
     // `count()` and the numeric reducers deliberately differ only in empty-input productivity.
     // CountGlobalStep seeds 0, while SumGlobalStep leaves NON_EMITTING_SEED in place and
