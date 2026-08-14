@@ -502,10 +502,31 @@ export function listRetype(
   readonly rel: Rel; readonly type: import('../../sql/kernel/render.ts').ScalarType;
   readonly result?: 'number' | 'count'; readonly productiveNull?: boolean;
 } | null {
-  if (step.modulators?.length || step.optionArms || !isBareList(of)) return null;
+  if (step.modulators?.length || step.optionArms) return null;
   const args = argValues(step);
   const rel = fenced(input, fresh);
   const list = col(rel.id, LIST_COL);
+
+  // `count(Scope.local)` counts the MEMBERS — a long, and the one local reduction that needs no
+  // eligibility guard because a member's storage class cannot make it uncountable. It is answered
+  // BEFORE the bare-list gate below, since it never reads a member's VALUE: an ELEMENT-membered list
+  // (`aggregate("a").cap("a")`) and a nested one count their members exactly as a scalar list does.
+  if (step.name === 'count' && isLocalScope(step)) {
+    if (args.some((arg) => typeof arg === 'number')) return null;
+    const members = membersOf(list, fresh);
+    const total: Expr = {
+      kind: 'scalar',
+      plan: make.aggregate({
+        id: fresh('mc'), input: members, channels: [], type: typeOf(meta('v', 'int')),
+        groupBy: [], aggs: [['v', { kind: 'agg', fn: 'count', args: [] }]],
+      }),
+    };
+    return { rel: withPayload(rel, [['v', total]], [meta('v', 'int')], fresh), type: STATIC('long'), result: 'count' };
+  }
+
+  // Everything past here reads a member's VALUE (a string transform, a value reducer), which only the
+  // SCALAR-membered vocabulary can supply.
+  if (!isBareList(of)) return null;
 
   // `conjoin(sep)` joins the MEMBERS into one string, skipping nulls — so the result is a string
   // whatever the members were, and an all-null list conjoins to `''` rather than to NULL.
@@ -531,21 +552,6 @@ export function listRetype(
       }),
     };
     return { rel: withPayload(rel, [['v', joined]], [meta('v', 'text', true)], fresh), type: STATIC('string') };
-  }
-
-  // `count(Scope.local)` counts the MEMBERS — a long, and the one local reduction that needs no
-  // eligibility guard because a member's storage class cannot make it uncountable.
-  if (step.name === 'count' && isLocalScope(step)) {
-    if (args.some((arg) => typeof arg === 'number')) return null;
-    const members = membersOf(list, fresh);
-    const total: Expr = {
-      kind: 'scalar',
-      plan: make.aggregate({
-        id: fresh('mc'), input: members, channels: [], type: typeOf(meta('v', 'int')),
-        groupBy: [], aggs: [['v', { kind: 'agg', fn: 'count', args: [] }]],
-      }),
-    };
-    return { rel: withPayload(rel, [['v', total]], [meta('v', 'int')], fresh), type: STATIC('long'), result: 'count' };
   }
 
   // The REDUCER family over the members — the same `reducer.ts` authority the row-level reducers use,
