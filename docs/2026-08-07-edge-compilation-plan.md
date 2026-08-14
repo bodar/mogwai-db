@@ -1,6 +1,7 @@
 # Compiling at the edge — ship plans, not queries
 
-**A PLAN, gated on §7 — nothing here lands until `WritePlan` reaches 0, and the last phase cannot start before then.**
+**A PLAN. §7's gate is now MET** — `WritePlan` is deleted (2026-08-15); `Executable` is `Compiled | Program`,
+both data. Phases 0/1 are unblocked and Phase 2 no longer waits on a write closure.
 
 **This is not a performance optimization.** It is a consequence of the one hard constraint the
 platform imposes; the numbers below are evidence the consequence is worth acting on, not the reason
@@ -84,17 +85,17 @@ this is a larger effect than the per-request ratio.
 
 Decided entirely by whether `Executable` is data.
 
+`Executable` is now `Compiled | Program` — **both data** (the `WritePlan` closure is deleted, §7).
+
 | variant | shape | crosses? |
 |---|---|---|
 | `Compiled` | `{kind:'read', sql, binds, shape, spine}` | **yes** |
 | `Program` | `{kind:'program', program: RelPlan, tail?: {sql, binds}, shape, spine}` | **yes** |
-| `WritePlan` | `{kind:'write', run: (store) => WriteResult[]}` | **no — a closure** |
 
 `Program` is RelIR's several-statement form — **data the algebra produced, not a machine that walks
 the store** (`src/sql/kernel/render.ts`), carrying a `RowsBind` marker the executor fills from
-retained rows. A multi-statement write ships exactly as a read does. `WritePlan` is the legacy write
-closure, already on the deletion list `Program` exists to replace — **this is the whole dependency
-(§7).**
+retained rows. A multi-statement write ships exactly as a read does. There is no longer a closure
+variant to fail the seam: the legacy `WritePlan` that §7 gated on is gone.
 
 `shape` travels with both, so the DO can frame or return rows for the edge to frame; framing where
 the rows are is fewer bytes.
@@ -169,6 +170,19 @@ accident:
 `io()` on a graph's own data still needs the store for one half of the operation, so it is a **split**
 barrier, not a movable one. Naming that distinction is part of Phase 3, not a detail of it.
 
+**An iterative, store-bound barrier is DO-RESIDENT, and this is the constraint Phase 2 must not
+regress.** The graph-algorithms plan (`docs/2026-07-24-graph-algorithms-plan.md`) lands OLAP
+(pageRank/wcc/…) as a `barrier` whose body is a **host-driven convergence loop** — 20–50 bulk SQL
+statements, each O(E) over *this graph's own edges*, stopping on a dynamic `MAX(ABS(Δ)) < tolerance`.
+Every iteration needs the local store, and the loop is not expressible as a static `Program`. The
+Worker drives the segment BOUNDARY (which segment runs where); a barrier whose body is a store-bound
+loop must run that loop inside ONE DO call, **never** as Worker-driven per-iteration RPCs — that would
+turn N in-DO statements into N round trips, each crossing the |V|-sized score relation twice (§4·2).
+Federation and a future regex barrier (`docs/2026-08-12-regex-as-a-barrier-research.md`, whose JS
+predicate touches no store) are the *movable* case; an iterative store-bound barrier is the
+DO-resident one, beside `io()`'s split half. So `apply()`'s residence, not just its segmentation, is
+part of the §4·3 classification.
+
 ### 4·4 The enabling refactor
 
 `drive()` is a private method closing over `this.store` and `this.app`. Make it a free function over
@@ -205,20 +219,21 @@ when queries get faster. **Making execution 500× faster makes the compile share
 
 ---
 
-## 7. The dependency, and it is checkable
+## 7. The dependency — MET (2026-08-15)
 
-**`WritePlan` must reach 0 in `scripts/deletion-ratchet.tsv`** (at **15**, filed under Phase 2.6 —
-*"a write is `Plan.bindings`, not a private `run(store)`"* — alongside `runWriteChainFull` (3) and
-`materializeElementDrivers` (4)). `mise run deletion` gates the floor, so the dependency is a
-CI-checkable number, not a judgement call.
+**`WritePlan` is deleted.** Writes moved onto the RelIR `Program` arm (`kind:'program'`) — data an
+executor runs, not a private `run(store)` closure — and the last thing keeping the closure type alive
+(the union member, one framing branch, two shims) is gone. `Executable` is now `Compiled | Program`,
+both data, and narrowing the union was itself the proof: `tsc` would error at any surviving write
+construction site, and it is green.
 
-Until 0, `Executable` includes a closure and §4·1's fallback arm is load-bearing. After 0,
-`Executable` narrows to `Compiled | Program` — both data — and no traversal has a plan that cannot
-cross the seam.
+Consequence for §4·1: the fallback arm no longer exists to carry a closure. It stays only as the
+compile-failure / unsupported-traversal path — a plan that does not exist crosses nothing — not because
+any *successful* compile can produce something the seam cannot take. No traversal has a plan that
+cannot cross the seam.
 
-That work is in flight (the RelIR write path, `docs/2026-08-01-write-path-plan.md` +
-`docs/2026-08-01-relir-build-plan.md` §8). **Nothing here should be built ahead of it**, and nothing
-here asks it to change course — the phases below simply start after.
+The RelIR write path that made this possible landed via `docs/2026-08-01-write-path-plan.md` +
+`docs/2026-08-01-relir-build-plan.md` §8. The phases below are unblocked.
 
 ### Phases
 
