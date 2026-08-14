@@ -43,7 +43,7 @@ import { REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, projectorValue, REL_PROJECTORS } from './projector.ts';
 import { isLongSumClass, isReducer, reducerAggregate, sumTower } from './reducer.ts';
 import { elementAddE, elementAddLabel, elementAddV, elementDrop, elementDropLabel, elementMergeE, elementMergeV, elementProperty, propertyDrop, propertyWrites, type Effects } from './write.ts';
-import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, nonIterableTraverser, unfoldList } from './list.ts';
+import { BARE_LIST, collectionRetype, foldElements, foldScalars, LIST_COL, LIST_FUNCTIONS, listMemberOp, listPayload, listRetype, listSetOp, NODE_COL, nonIterableTraverser, unfoldList } from './list.ts';
 import { ENTRY, elementHost, elementValueMap, entrySide, groupBarrier, groupMap, groupRows, mapEntryPayload, mapKey, mapLiteralBlob, mapPayload, MAP_COL, mapSelect, mapSide, mapSize, unfoldMap } from './map.ts';
 import { edgeEndpoint, elementPayload } from './element.ts';
 import { foreignLabelValue, foreignRejoin, foreignRelation, foreignValues } from './foreign.ts';
@@ -3229,9 +3229,14 @@ function listTail(
         { expr: col(unfolded.rel.id, unfolded.ord), dir: 'asc' as const },
       ];
       const payloadCols: readonly ColMeta[] = unfolded.member ? [meta(LIST_COL, 'json')]
-        : unfolded.elem ? [meta('id', 'int')]
-          : [meta('v', 'any', true), ...(unfolded.typed ? [meta('vtype', 'text', true)] : [])];
+        : unfolded.nodes ? [meta(NODE_COL, 'json', true)]
+          : unfolded.elem ? [meta('id', 'int')]
+            : [meta('v', 'any', true), ...(unfolded.typed ? [meta('vtype', 'text', true)] : [])];
       const positioned = renumber(unfolded.rel, terms, [...payloadCols, ...carriedCols(channels)], channels, fresh);
+      // A MIXED list's members are HETEROGENEOUS self-describing nodes, so the unfolded stream is a
+      // per-row `typedNode` — terminal, exactly as a variant is (a stream that is a vertex on one row
+      // and an edge on the next cannot uniformly continue), and `continueAs` declines any follower.
+      if (unfolded.nodes) return continueAs(positioned, { kind: 'typedNode' }, steps, at + 1, false, ctx, fresh, labels);
       // A NESTED list's members are LISTS, so the unfolded stream stays in the list vocabulary rather
       // than entering the scalar one — the same explode, a different payload.
       if (unfolded.member) return listTail(positioned, unfolded.member, steps, at + 1, ctx, fresh, labels);
@@ -3798,6 +3803,18 @@ const framed = (chain: Tail, fresh: Minter): { readonly rel: Rel; readonly shape
     // has no columns and `discard` is already the whole contract. The algebra owes the framing layer nothing
     // further, which is exactly what every other arm here now also means.
     case 'variant': return variantPayload(chain.rel, framing.arms, fresh);
+    // A per-row TYPED NODE is already ONE self-describing envelope per row in `NODE_COL`; the wire
+    // parses and frames each with `frameTypedNode`, so the payload is that column in emission order.
+    case 'typedNode': {
+      const ordered = byEncounter(chain.rel, fresh);
+      return {
+        rel: make.project({
+          id: fresh('tn'), input: ordered, channels: [], type: typeOf(meta(NODE_COL, 'json', true)),
+          exprs: [[NODE_COL, col(ordered.id, NODE_COL)]],
+        }),
+        shape: { kind: 'typedNode' },
+      };
+    }
     case 'discard': return { rel: chain.rel, shape: { kind: 'discard' } };
   }
 };
@@ -4595,6 +4612,10 @@ function continueAs(
     // are expressible but none is written, so a step after a variant DECLINES rather than being
     // silently dropped — the map arm's reasoning exactly.
     case 'variant': return from === steps.length ? { rel, framing, aliases: labels, bulked: false } : null;
+    // A per-row TYPED NODE is terminal for the variant's reason: a stream whose rows are different
+    // shapes has no uniform continuation. A `count`/`dedup` over one is expressible but unwritten, so a
+    // follower DECLINES rather than being dropped.
+    case 'typedNode': return from === steps.length ? { rel, framing, aliases: labels, bulked: false } : null;
     case 'discard': return null;
   }
 }
@@ -5548,7 +5569,11 @@ const sameFraming = (left: RelFraming, right: RelFraming): boolean =>
                 // (the detached tail admits three reads and no branch), so declining keeps the switch
                 // total rather than merging two relations that are not the same width.
                 : left.kind === 'detached' ? false
-                  : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
+                  // A per-row TYPED NODE arm is a branch whose body is `cap(mixed).unfold()`. It is
+                  // terminal (no uniform continuation), so a branch arm ending in one is not built;
+                  // decline rather than union two heterogeneous node streams positionally.
+                  : left.kind === 'typedNode' ? false
+                    : right.kind === 'scalar' && JSON.stringify(left.type) === JSON.stringify(right.type);
 
 const sameColumns = (left: readonly ColMeta[], right: readonly ColMeta[]): boolean =>
   left.length === right.length && left.every((column, i) => column.name === right[i]!.name);

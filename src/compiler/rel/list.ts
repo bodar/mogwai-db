@@ -3,7 +3,7 @@ import { sliceBound } from './const.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { SortTerm } from '../../rel/types.ts';
-import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
+import { hasTypedMembers, memberTypeOf, sameScalarType, perRowColumnOf, PER_ROW_ENVELOPE, SCALAR_MEMBERS, STATIC, TYPED_MEMBERS, UNKNOWN, withMemberType, type ListOf, type MixedArm, type ScalarType, type Shape } from '../../sql/kernel/render.ts';
 import { isNested, isPred, argValues } from '../../gremlin/frontend.ts';
 import { isLocalScope, LIST_LOCAL_TX, sliceOf, sliceParamNames, STRING_LOCAL_TX } from '../ir/step.ts';
 import type { IRStep } from '../ir/strategies.ts';
@@ -679,12 +679,41 @@ export function listRetype(
  * it is only a total order where the relation has one row — which is why the caller re-mints through
  * `renumber` rather than declaring `mo` the channel directly.
  */
+/** The column an unfolded MIXED member rides in — one self-describing `{t,v}` envelope per row, as
+ *  JSON text the `typedNode` framer parses. */
+export const NODE_COL = 'node';
+
 export function unfoldList(
   rel: Rel, of: ListOf, fresh: Minter,
-): { readonly rel: Rel; readonly ord: string; readonly typed: boolean; readonly member?: ListOf; readonly elem?: Elem } | null {
+): { readonly rel: Rel; readonly ord: string; readonly typed: boolean; readonly member?: ListOf; readonly elem?: Elem; readonly nodes?: readonly MixedArm[] } | null {
   // A NESTED list unfolds into one LIST traverser per member (a `product()`'s pair-lists), which is
   // the same explode with a different payload column — so it is one arm rather than a second function.
   if (of.kind === 'list') return unfoldNested(rel, of, fresh);
+  // A MIXED list unfolds into one SELF-DESCRIBING NODE per member: the members are heterogeneous
+  // `{t,v}` envelopes (a vertex beside an edge beside a value), so each becomes a `typedNode` row the
+  // wire frames by its own tag. There is no single element/scalar vocabulary to re-enter — a stream
+  // that is a vertex on one row and an edge on the next cannot take `out()` — so this is TERMINAL,
+  // exactly as the stream-level variant is.
+  if (of.kind === 'mixed') {
+    const exploded = make.explode({
+      id: fresh('umx'), input: rel, expr: col(rel.id, LIST_COL), channels: rel.channels, as: MEMBER,
+      type: typeOf(...rel.type.cols, meta(MEMBER.value, 'any', true), meta(MEMBER.ord, 'int'), meta(MEMBER.type, 'text', true)),
+    });
+    return {
+      rel: make.project({
+        id: fresh('umn'), input: exploded, channels: rel.channels,
+        type: typeOf(meta(NODE_COL, 'json', true), ...carriedCols(rel.channels), meta(MEMBER.ord, 'int')),
+        // `json()` turns the JSONB envelope into the text the framer parses — the same read the whole
+        // mixed list takes (`listPayloadExpr`), one member at a time.
+        exprs: [[NODE_COL, jsonOf(col(exploded.id, MEMBER.value))],
+          ...rel.channels.map((channel) => [channel.col, col(exploded.id, channel.col)] as const),
+          [MEMBER.ord, col(exploded.id, MEMBER.ord)]],
+      }),
+      ord: MEMBER.ord,
+      typed: false,
+      nodes: of.arms,
+    };
+  }
   // AN ELEMENT list unfolds back into the ELEMENT vocabulary, and that round trip is the whole reason
   // the members stay rowids: `fold()` collected ids, so `unfold()` hands back a relation whose payload
   // is an `id` — an ordinary element relation, indistinguishable from the one the fold consumed, so

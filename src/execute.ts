@@ -680,6 +680,10 @@ function* frameValues(rows: any[], shape: import('./sql/kernel/render.ts').Shape
     case 'mapValue': for (const r of rows) yield frameTypedNode({ t: 'map', v: JSON.parse(r.map) }); return;
     // A Map.Entry stream (map unfold): one size-1 MAP per row.
     case 'mapEntry': for (const r of rows) yield mapEntryBuffer(r, shape.keyOf, shape.valOf); return;
+    // A per-row self-describing TYPED NODE (unfold() over a mixed-member collection): each row's
+    // `node` column is a `{t,v}` envelope (JSON text) → the ONE frameTypedNode rule frames a vertex,
+    // an edge or a scalar leaf by its own tag, preserving a per-member type the variant arm cannot.
+    case 'typedNode': for (const r of rows) yield frameTypedNode(r.node == null ? null : JSON.parse(r.node)); return;
     case 'path': for (const r of rows) yield pathBuffer(r, shape.positions); return;
     // pathGrouped folds pk-runs into Paths — a bounded fold, so yield each completed Path.
     case 'pathGrouped': yield* pathGroupedBuffers(rows, shape.elem, shape.byKey); return;

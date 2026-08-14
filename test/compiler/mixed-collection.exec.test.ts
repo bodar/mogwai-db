@@ -49,4 +49,26 @@ describe('mixed-member collections', () => {
       'g.V().aggregate("a").outE().aggregate("a").cap("a").count(Scope.local)', {}));
     expect(Number(members)).toBe(12);
   });
+
+  test('unfold() over a mixed list emits one typed traverser per member, in site order', async () => {
+    // each member frames by its OWN {t,v} tag (frameTypedNode) — a vertex, an edge, a value — which is
+    // what preserves a per-member type the stream variant's single static scalar arm would infer away.
+    const ve = await decodeAll(executeQuery(seededStore(),
+      'g.V().aggregate("a").outE().aggregate("a").cap("a").unfold()', {})) as any[];
+    expect(ve.map((x) => x?.constructor?.name)).toEqual([...Array(6).fill('Vertex'), ...Array(6).fill('Edge')]);
+
+    const vs = await decodeAll(executeQuery(seededStore(),
+      'g.V().aggregate("a").values("name").aggregate("a").cap("a").unfold()', {})) as any[];
+    expect(vs.map((x) => x?.constructor?.name)).toEqual([...Array(6).fill('Vertex'), ...Array(6).fill('String')]);
+    expect(vs.slice(6).sort()).toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+  });
+
+  test('an all-vertex label still unfolds through the element vocabulary, not the mixed one', async () => {
+    // the corpus scenario: outE()/inV() are movements between two VERTEX aggregate sites, so the label
+    // is homogeneous and stays `elements` — mixed is reserved for genuinely different kinds.
+    const list = await decodeAll(executeQuery(seededStore(),
+      'g.V().local(aggregate("a")).outE().inV().local(aggregate("a")).cap("a").unfold().dedup()', {})) as any[];
+    expect(list.every((x) => x?.constructor?.name === 'Vertex')).toBe(true);
+    expect(list.map((v: any) => nameOf(v)).sort()).toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
+  });
 });

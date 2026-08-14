@@ -267,7 +267,9 @@ function fieldNode(read: FieldRead, field: RecordField, fresh: Minter): Expr | n
     // `project()` slot, or a map-valued child. Its column holds the pairs array, so the member is that
     // array under the same envelope the record arm above adds. One encoding, two producers.
     case 'map': return mapNode(own('map'));
-    case 'list': case 'path': case 'mapEntry': case 'property': case 'discard': return null;
+    // A per-row TYPED NODE field would be a `cap(mixed).unfold()` in a `project()` slot — terminal, and
+    // `byField` produces no such thing, so it declines like `variant` for the same reason.
+    case 'list': case 'path': case 'mapEntry': case 'property': case 'typedNode': case 'discard': return null;
   }
 }
 

@@ -104,6 +104,14 @@ export type RelFraming =
    *  is a framing rather than a node-set question for §6·3's reason — the algebra builds the VALUE
    *  (one `Union` over re-projected arms) and `execute.ts` frames it. */
   | { readonly kind: 'variant'; readonly arms: readonly VariantArm[] }
+  /** A per-row SELF-DESCRIBING TYPED NODE — each row is one `{t,v}` envelope, framed by the ONE
+   *  `frameTypedNode` rule (`execute.ts`). Produced by `unfold()` over a MIXED-member collection
+   *  (`ListOf.mixed`): its members are heterogeneous self-describing nodes, so each frames by its own
+   *  tag — a vertex, an edge, a scalar leaf. It is the member-level tagged union framed the member way,
+   *  distinct from `variant` (a per-row union framed through vk-columns) because a self-describing
+   *  envelope carries the per-member scalar TYPE that `variant`'s single static scalar arm cannot.
+   *  Terminal, exactly as `variant` is. */
+  | { readonly kind: 'typedNode' }
   | { readonly kind: 'discard' };
 
 /**
@@ -203,6 +211,8 @@ export function framingCols(framing: RelFraming): readonly ColMeta[] | null {
     // A DETACHED element is not a field either: its payload is the whole landed tuple rather than the
     // `id` an element field carries, and nothing correlates back to it — a barrier's rows exist only
     // after the segment boundary, so no expression inside one plan can name them.
-    case 'detached': case 'variant': case 'property': case 'discard': return null;
+    // A per-row TYPED NODE is not a fixed-width field either — its payload is one opaque `{t,v}`
+    // envelope whose shape varies by row, exactly the reason `variant` declines.
+    case 'detached': case 'variant': case 'typedNode': case 'property': case 'discard': return null;
   }
 }

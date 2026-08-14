@@ -359,6 +359,13 @@ export type Shape =
   | { kind: 'elementMap'; keys: string[] | null; labelSet: boolean }
   | { kind: 'map'; entries: MapEntry[] }
   | { kind: 'mapValue' } // one whole map VALUE per row: a `map` JSONB column [[keyNode,valNode],…] with self-describing {t,v} scalar sides → one GraphBinary MAP (frameTypedNode)
+  // A per-row SELF-DESCRIBING TYPED NODE: each row's `node` column is one `{t,v}` envelope (JSON text),
+  // framed by the ONE `frameTypedNode` rule — a vertex, an edge, a scalar leaf, each by its own tag.
+  // The wire form of `unfold()` over a MIXED-member collection (`ListOf.mixed`): the member-level
+  // tagged union, framed the member way rather than through `variant`'s vk-columns — which is what
+  // preserves a per-member scalar type (a uuid/datetime member) the variant shape's static scalar arm
+  // would infer away. Terminal, exactly as `variant` is.
+  | { kind: 'typedNode' }
   | { kind: 'mapEntry'; keyOf: MapOf; valOf: MapOf } // one Map.Entry per row (a MapStream unfold) → each frames as a size-1 GraphBinary MAP
   | { kind: 'group'; key: GroupKey; val: GroupVal }
   | { kind: 'path'; positions: PathPos[] }                 // linear: one row per path, per-position columns
