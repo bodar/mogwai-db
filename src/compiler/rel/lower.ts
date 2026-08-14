@@ -2054,13 +2054,30 @@ function terminal(
       type: typeOf(...elementCols(owned.channels), meta('node', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
       on: eq(col(names.id, 'id'), col(owned.id, 'label')),
     });
+    // A vertex may carry SEVERAL labels, so `labels()` fans one traverser out into one row per label,
+    // and their emission order is THIS step's to pin. Left unpinned, a downstream `fold()` collects
+    // them in whatever order SQLite scanned `vertex_labels` — reversed under `reverse_unordered_selects`
+    // — so a deterministic-looking result passes only by luck (`mise run test:perturbed`). Establish it
+    // canonically, by the `label` dictionary id: the SAME order the element payload's
+    // `json_group_array(name ORDER BY lid)` (element.ts) and `by(T.label)`'s first-label pick already
+    // use, so a vertex's labels read identically wherever they are read. Across origins the order is the
+    // arriving emission order where the stream has one, else the origin rowid — total either way, which
+    // the `encounter` channel requires.
+    const arriving = encounterOf(input.channels);
+    const staged = make.project({
+      id: fresh('lv'), input: named, channels: named.channels,
+      type: typeOf(meta('v', 'text'), meta('id', 'int'), meta('label', 'int'), ...carriedCols(named.channels)),
+      exprs: [['v', col(named.id, 'name')], ['id', col(named.id, 'id')], ['label', col(named.id, 'label')],
+        ...named.channels.map((channel) => [channel.col, col(named.id, channel.col)] as const)],
+    });
+    const channels = arriving ? staged.channels : withChannel(staged.channels, ENCOUNTER);
     return {
-      rel: make.project({
-        id: fresh('lv'), input: named, channels: named.channels,
-        type: typeOf(meta('v', 'text'), ...carriedCols(named.channels)),
-        exprs: [['v', col(named.id, 'name')],
-          ...named.channels.map((channel) => [channel.col, col(named.id, channel.col)] as const)],
-      }),
+      rel: renumber(
+        staged,
+        [{ expr: col(staged.id, arriving ? arriving.col : 'id'), dir: 'asc' }, { expr: col(staged.id, 'label'), dir: 'asc' }],
+        [meta('v', 'text'), ...carriedCols(channels)],
+        channels, fresh,
+      ),
       framing: { kind: 'scalar', type: STATIC('string') },
     };
   }
