@@ -341,14 +341,18 @@ function accumulate(held: Collection, added: Collection, fresh: Minter): Collect
     };
   }
   // EVERYTHING ELSE among {elements, scalars, mixed} is a MIXED collection — the member-level tagged
-  // union. A declared merge POLICY over mixed members has no fold this route spells (a seed is a list
-  // or a scalar, neither of which combines with a heterogeneous multiset), so it declines rather than
-  // dropping the seed.
-  if (merge) return null;
+  // union. `addAll` CONCATENATES, so it composes with a heterogeneous multiset and is spent at the read
+  // by prepending its seed items as site 0 (`seedAsSite`/`reduceMixed`) — the members' kinds and the
+  // seed items' need not agree. Every OTHER declared operator acts on a VALUE (`(Number) a` etc.), which
+  // is a ClassCastException over a mixed multiset in the reference, so it declines rather than dropping
+  // the seed.
+  if (merge && merge.operator !== ADD_ALL) return null;
   return {
     sites: [...envelopeSites(held, fresh), ...envelopeSites(added, fresh)],
     of: { kind: 'mixed', arms: dedupeArms([...armsOf(held.of), ...armsOf(added.of)]) },
-    merge: undefined,
+    // The `addAll` policy (if any) is CARRIED, not spent here: it is spent at the read by prepending
+    // its seed items (`reduce` → `seedAsSite`), exactly as it is for a homogeneous collection.
+    merge,
   };
 }
 
@@ -566,21 +570,6 @@ export function reduce(collection: Collection, fresh: Minter): FramedRel | null 
   // What it shares with the other two arms is everything that matters: N sites are a `UNION ALL` of
   // member relations, ordered by (site ordinal, that site's own), reduced ONCE at the read.
   if (collection.of.kind === 'reduced') return { rel: collection.sites[0]!.rel, framing: collection.of.framing };
-  // A MIXED collection's sites already hold `{t,v}` envelopes in ONE column (`envelopeSites`), so the
-  // reduction is the ordinary list fold — `UNION ALL` the sites, then `json_group_array` the envelope
-  // column, exactly as `foldScalars` does over a typed member. The framing is a `mixed` list, and
-  // `unfold()` reads its `arms` to build a variant.
-  if (collection.of.kind === 'mixed') {
-    const site = collection.sites.length === 1
-      ? collection.sites[0]!
-      : accumulated(collection.sites, [MEMBER_ENVELOPE], fresh);
-    const order = site.order.map((name) => ({ expr: col(site.rel.id, name), dir: 'asc' as const }));
-    const rel = make.aggregate({
-      id: fresh('fx'), input: site.rel, channels: [], type: typeOf(meta(LIST_COL, 'json')),
-      groupBy: [], aggs: [[LIST_COL, collectedArray(jsonOf(col(site.rel.id, MEMBER_ENVELOPE)), order)]],
-    });
-    return { rel, framing: { kind: 'list', of: { kind: 'mixed', arms: collection.of.arms } } };
-  }
   if (collection.of.kind === 'grouped') {
     const { recipe } = collection.of;
     const grouped = collection.sites.length === 1
@@ -593,14 +582,22 @@ export function reduce(collection: Collection, fresh: Minter): FramedRel | null 
     return { rel: map.rel, framing: { kind: 'map', keyOf: map.keyOf, valOf: map.valOf } };
   }
   // `addAll` IS the ordinary list fold — over one more site. So the policy is spent BEFORE the
-  // reduction rather than instead of it, and everything downstream sees a plain collection.
+  // reduction rather than instead of it, and everything downstream sees a plain collection. This
+  // precedes the MIXED dispatch because spending a LIST seed beside element members is exactly what
+  // TURNS the collection mixed (`seedAsSite`).
   const seeded = collection.merge?.operator === ADD_ALL ? seedAsSite(collection, fresh) : collection;
   if (!seeded) return null;
+  // A MIXED collection's sites hold `{t,v}` envelopes in ONE column (`envelopeSites`), so its reduction
+  // is the ordinary list fold over that column. A `Set` seed's dedup is read from the ORIGINAL policy —
+  // `seedAsSite` has already prepended the items, so the merge on `seeded` no longer says "set".
+  if (seeded.of.kind === 'mixed') {
+    const setSeeded = collection.merge?.operator === ADD_ALL && collection.merge.seed.value instanceof Set;
+    return reduceMixed(seeded, setSeeded, fresh);
+  }
   const { sites, of, merge } = seeded;
-  // `grouped`/`reduced` are maps, `mixed` reduced above — the seeded list fold below serves only the two
-  // list arms. A `mixed` here would mean a declared policy over mixed members, which `accumulate`
-  // already refused (a seed cannot fold into a heterogeneous multiset).
-  if (of.kind === 'grouped' || of.kind === 'reduced' || of.kind === 'mixed') return null;
+  // `grouped`/`reduced` are maps — the seeded list fold below serves only the two list arms. `mixed` was
+  // dispatched just above.
+  if (of.kind === 'grouped' || of.kind === 'reduced') return null;
   // `assign` REPLACES, so only the LAST merge survives and every site before it is dead — which makes
   // it the one policy that narrows the site list rather than reading all of it.
   const surviving = merge?.operator === ASSIGN ? [sites[sites.length - 1]!] : sites;
@@ -621,6 +618,30 @@ export function reduce(collection: Collection, fresh: Minter): FramedRel | null 
     ? listed(foldElements(rel, of.elem, { order }, fresh))
     : listed(foldScalars(rel, { type: of.type, productiveNull: of.productiveNull, order }, fresh));
   return setSeeded ? { ...folded, framing: { ...folded.framing, set: true } } : folded;
+}
+
+/**
+ * A MIXED collection, REDUCED — `UNION ALL` the sites (each already one `{t,v}` envelope column) and
+ * `json_group_array` that column, exactly as `foldScalars` folds a typed member. The framing is a
+ * `mixed` list, whose `arms` `unfold()` reads to emit a per-member typed-node stream.
+ *
+ * `set` makes it a `Set` on the wire and DEDUPS the members — a `Set`-seeded `addAll`, the member-level
+ * form of the same rule the scalar fold takes: `firstOccurrences` over the envelope column, which is a
+ * KEYED dedup by the whole self-describing member (a vertex and an equal-valued int never collide, two
+ * equal ints do), and the marker rides out on the framing.
+ */
+function reduceMixed(collection: Collection, set: boolean, fresh: Minter): FramedRel {
+  const arms = collection.of.kind === 'mixed' ? collection.of.arms : [];
+  const site = collection.sites.length === 1
+    ? collection.sites[0]!
+    : accumulated(collection.sites, [MEMBER_ENVELOPE], fresh);
+  const deduped = set ? firstOccurrences(site, [MEMBER_ENVELOPE], fresh) : site;
+  const order = deduped.order.map((name) => ({ expr: col(deduped.rel.id, name), dir: 'asc' as const }));
+  const rel = make.aggregate({
+    id: fresh('fx'), input: deduped.rel, channels: [], type: typeOf(meta(LIST_COL, 'json')),
+    groupBy: [], aggs: [[LIST_COL, collectedArray(jsonOf(col(deduped.rel.id, MEMBER_ENVELOPE)), order)]],
+  });
+  return { rel, framing: { kind: 'list', of: { kind: 'mixed', arms }, ...(set ? { set: true } : {}) } };
 }
 
 /**
@@ -714,9 +735,6 @@ function seedAsSite({ sites, of, merge }: Collection, fresh: Minter): Collection
   // An EMPTY seed adds nothing, and `Values` has no empty form — so it is the absence of a site, not a
   // site of no rows.
   if (!items.length) return { sites, of, merge };
-  // Mixed member SHAPES — a scalar seed beside ELEMENT members — is the member-level tagged union
-  // (Phase 3b), one level below the stream variant. Not this function's to invent.
-  if (of.kind !== 'scalars') return null;
   const literals = items.map(constLit);
   if (literals.some((literal) => literal === null)) return null;
   // Each item's DECLARED type, met the same way two sites' are. Where the items agree the seed site is
@@ -745,7 +763,12 @@ function seedAsSite({ sites, of, merge }: Collection, fresh: Minter): Collection
     // operator that ever sees this site.
     perTraverser: false,
   };
-  return accumulate({ sites: [seed], of: { kind: 'scalars', type, productiveNull: of.productiveNull }, merge },
+  // The seed is a SCALAR site, whatever the members are; the members KEEP their kind. Where they are
+  // scalars too the meet keeps the collection scalar; where they are ELEMENTS or already MIXED the
+  // combination is the member-level tagged union — the Phase 3b case this function used to defer, now
+  // that `accumulate` produces one. The `addAll` policy rides through unchanged (it is what `reduce`
+  // reads to apply a `Set` seed's dedup), exactly as it did for the scalar-only case.
+  return accumulate({ sites: [seed], of: { kind: 'scalars', type, productiveNull: of.kind === 'scalars' && of.productiveNull }, merge },
     { sites, of, merge }, fresh);
 }
 

@@ -43,6 +43,29 @@ Feature: mogwai addendum — a named collection filled by sites of DIFFERENT mem
       | e[peter-created->lop] |
 
   @gap:mixed-collection
+  Scenario: g_withSideEffectXa_1_2_3_addAllX_V_aggregateXaX_capXaX_unfold
+    Given the modern graph
+    And the traversal of
+      """
+      g.withSideEffect("a", [1i,2i,3i], Operator.addAll).V().aggregate("a").cap("a").unfold()
+      """
+    # addAll([1,2,3], bulkSetOfVertices) = [1,2,3, v…]: the seed's items are ints and the members are
+    # vertices, so the label is mixed and the seed prepends as site 0. TinkerPop's own scenarios only
+    # ever seed a SCALAR-membered label; this is the same rule with a heterogeneous result.
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].i |
+      | d[2].i |
+      | d[3].i |
+      | v[marko] |
+      | v[vadas] |
+      | v[lop] |
+      | v[josh] |
+      | v[ripple] |
+      | v[peter] |
+
+  @gap:mixed-collection
   Scenario: g_V_aggregateXaX_valuesXnameX_aggregateXaX_capXaX_unfold
     Given the modern graph
     And the traversal of

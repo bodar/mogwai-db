@@ -63,6 +63,29 @@ describe('mixed-member collections', () => {
     expect(vs.slice(6).sort()).toEqual(['josh', 'lop', 'marko', 'peter', 'ripple', 'vadas']);
   });
 
+  test('a withSideEffect list seed prepends before element members — a mixed collection', async () => {
+    // `addAll([1,2,3], bulkSetOfVertices)` = [1,2,3, v…] — the seed items and the members are different
+    // kinds, so the label is mixed. The seed used to decline (seedAsSite deferred it to Phase 3b).
+    const list = await decodeAll(executeQuery(seededStore(),
+      'g.withSideEffect("a",[1,2,3],Operator.addAll).V().aggregate("a").cap("a").unfold()', {})) as any[];
+    expect(kinds(list)).toEqual(['Number', 'Number', 'Number', ...Array(6).fill('Vertex')]);
+    expect(list.slice(0, 3).map(Number)).toEqual([1, 2, 3]);
+  });
+
+  test('a list seed prepends before genuinely-mixed sites, in order', async () => {
+    const list = await decodeAll(executeQuery(seededStore(),
+      'g.withSideEffect("a",[1,2,3],Operator.addAll).V().aggregate("a").outE().aggregate("a").cap("a").unfold()', {})) as any[];
+    expect(kinds(list)).toEqual(['Number', 'Number', 'Number', ...Array(6).fill('Vertex'), ...Array(6).fill('Edge')]);
+  });
+
+  test('a non-addAll operator over mixed members declines — it acts on a value, not a multiset', async () => {
+    // `sum`/`mult`/… are `(Number) a` in the reference — a ClassCastException over a heterogeneous
+    // multiset — so a declared arithmetic policy over mixed sites fails closed rather than mis-folding.
+    expect(() => executeQuery(seededStore(),
+      'g.withSideEffect("a",1,Operator.sum).V().aggregate("a").outE().aggregate("a").cap("a")', {}))
+      .toThrow(/not supported/);
+  });
+
   test('an all-vertex label still unfolds through the element vocabulary, not the mixed one', async () => {
     // the corpus scenario: outE()/inV() are movements between two VERTEX aggregate sites, so the label
     // is homogeneous and stays `elements` — mixed is reserved for genuinely different kinds.
