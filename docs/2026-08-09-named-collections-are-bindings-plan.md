@@ -194,17 +194,30 @@ heterogeneous multiset (a ClassCastException in the reference). A `Set` seed's d
 
 ### Leaf gaps — one thing each, no downstream unlock
 
-**A declared policy on a KEYED label.** A seeded `group("a")` accumulates INTO the declared map
-(`GroupBiOperator` merges maps); `registerGrouping`/`registerMap` declines rather than dropping the seed. One
-scenario.
+**A declared policy on a KEYED label.** ⚠️ **NOT a leaf — a multi-mechanism feature, left fail-closed
+deliberately.** A seeded `group("a")` accumulates INTO the declared map, and the one corpus scenario
+(`Group.feature:186`, `withSideEffect("a",[marko:["666"],noone:["blah"]]).V().group("a").by("name").by(__.outE().label().fold()).cap("a").unfold().group().by(Column.keys).by(select(Column.values).order(local))`)
+stacks four separate mechanisms: a MAP-seed parsed and merged PER KEY (`GroupBiOperator` concatenates
+value lists per key — not the `(key,contribution)` member-row union this module has, but a map-level
+merge); a `fold()` VALUE, i.e. the `reduced`/pooled arm (single-site), so the seed cannot be member rows;
+and a trailing `group().by(Column.keys).by(select(Column.values).order(local))` that is its own gap. Even
+the simplest seeded shape (`withSideEffect([marko:[999]]).V().group("a").by("name")`) produces a MIXED
+value list (an int seed item beside vertices), which is mixed-members at the group-VALUE level that
+`map.ts` does not build. There is no clean small slice; `registerGrouping` declining is the honest answer,
+not a punt. Building it is a real feature, separate from this doc.
 
-**Phase 2b — the reduction a `cap().unfold()` never needed.** Still emitted (`cap("a").unfold()` folds into a
-JSONB array and immediately `json_each`s it back); with members held pre-fold the answer is the member
-relation itself. ⚠️ **The question it must answer is not rhetorical:** the fold pins member order with
-`Agg.orderBy` on the encounter channel, while the member relation carries that channel but no `ORDER BY`. So
-the cancellation is sound only where the consumer does not depend on the list's order, and **`mise run
-test:perturbed`, not the corpus, is what decides that.** Cancelling into an ordered movement is the
-conservative form.
+**Phase 2b — the reduction a `cap().unfold()` never needed.** ✅ LANDED. `cap("a").unfold()` used to fold
+members into a JSONB array and immediately `json_each` them back; now the fold is CANCELLED — `readUnfolded`
+(`collection.ts`) hands the member relation straight out and `capUnfolded` (`lower.ts`) mints an encounter
+from the SITE ORDER, so the emitted plan reads `nodes`/`v`/the envelope column directly (no `json_each`) and
+each member re-enters the ordinary element/scalar/typed-node loop. The order trap this bullet warned about
+is discharged by the mint, not dodged: the `ROW_NUMBER` over the site order reproduces the fold's `ORDER BY`
+plus `unfold`'s re-mint EXACTLY, so the cancel is order-preserving and `mise run test:perturbed` stays at its
+pre-existing count (measured — the same 5 unrelated failures, none from this). Only a PLAIN multiset cancels:
+a declared merge (a seed prepend, a `Set` dedup, an `assign` narrowing) is not a no-op so it takes the
+ordinary `reduce`, and a `grouped`/`reduced` collection is a MAP whose `unfold` is entries. Asserted in
+`test/compiler/cap-unfold-cancel.exec.test.ts` (the plan no longer folds; answers unchanged, which the census
+also holds).
 
 **`within(__.cap('a').unfold())`** — ⚠️ declines at the `where`; the predicate operand's label resolution is
 its own gap (Phase 5 was a precondition, not the whole of it). NOT a collection gap.

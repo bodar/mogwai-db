@@ -53,7 +53,7 @@ import { extendPath, PATH_CHANNEL, pathCarried, pathPayload, pathPositions, seed
 import { type LabelRegime } from '../../api.ts';
 import { sackMutate, sackOperator, sackRead, seedSack } from './sack.ts';
 import { variantArm, variantArmOf, variantHasList, variantPayload, type VariantArm } from './variant.ts';
-import { collectionOf, groupedKeys, readCollection, registerCollection, registerGrouping, type Collections } from './collection.ts';
+import { collectionOf, groupedKeys, readCollection, readUnfolded, registerCollection, registerGrouping, type Collections } from './collection.ts';
 import { repeatWalk } from './walk.ts';
 import { optionArms, type OptionArm } from '../ir/option-map.ts';
 import { MUTATING_STEPS } from '../ir/strategies.ts';
@@ -2888,6 +2888,16 @@ function scalarTail(
         const keys = collection && groupedKeys(collection, fresh);
         if (keys) return continueAs(keys.rel, keys.framing, steps, at + 2, false, ctx, fresh, NO_ALIASES);
       }
+      // CONSUMER-DRIVEN FOLD, the other half: `cap("a").unfold()` folds the members to a JSONB array and
+      // immediately explodes it back, so the fold is the IDENTITY on the member rows — the collection
+      // already holds one row per member. `readUnfolded` hands back the member relation directly and
+      // `capUnfolded` mints an encounter from the SITE ORDER, so the stream is what fold+unfold produced
+      // minus the JSON round trip. Only a plain multiset of list members cancels (see `readUnfolded`).
+      if (next && next.name === 'unfold' && !(next.args ?? []).length && !next.modulators?.length) {
+        const collection = collectionOf(step, ctx.collections);
+        const members = collection && readUnfolded(collection, fresh);
+        if (members) return capUnfolded(members, steps, at + 2, ctx, fresh);
+      }
       const collected = readCollection(step, ctx.collections, fresh);
       if (!collected) return null;
       return continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
@@ -4424,6 +4434,16 @@ function elementTail(
         const keys = collection && groupedKeys(collection, fresh);
         if (keys) return continueAs(keys.rel, keys.framing, steps, at + 2, false, ctx, fresh, NO_ALIASES);
       }
+      // CONSUMER-DRIVEN FOLD, the other half: `cap("a").unfold()` folds the members to a JSONB array and
+      // immediately explodes it back, so the fold is the IDENTITY on the member rows — the collection
+      // already holds one row per member. `readUnfolded` hands back the member relation directly and
+      // `capUnfolded` mints an encounter from the SITE ORDER, so the stream is what fold+unfold produced
+      // minus the JSON round trip. Only a plain multiset of list members cancels (see `readUnfolded`).
+      if (next && next.name === 'unfold' && !(next.args ?? []).length && !next.modulators?.length) {
+        const collection = collectionOf(step, ctx.collections);
+        const members = collection && readUnfolded(collection, fresh);
+        if (members) return capUnfolded(members, steps, at + 2, ctx, fresh);
+      }
       const collected = readCollection(step, ctx.collections, fresh);
       if (!collected) return null;
       return continueAs(collected.rel, collected.framing, steps, at + 1, false, ctx, fresh, NO_ALIASES);
@@ -4618,6 +4638,34 @@ function continueAs(
     case 'typedNode': return from === steps.length ? { rel, framing, aliases: labels, bulked: false } : null;
     case 'discard': return null;
   }
+}
+
+/**
+ * `cap("a").unfold()` WITHOUT the fold — the member relation `readUnfolded` handed back, minted into an
+ * ordinary element/scalar/typed-node stream so the rest of the chain is the same loop `unfold()` over a
+ * folded list would run.
+ *
+ * The encounter is minted from the SITE ORDER (`renumber`), which reproduces the fold's `ORDER BY` plus
+ * `unfold`'s re-mint exactly — so the cancel is order-preserving, which is what `readUnfolded`'s doc
+ * promises and what `mise run test:perturbed` checks. `bulked` is false: a cap collapsed the stream to
+ * one traverser and each member now stands for exactly one, the reset `unfoldList`'s callers also make.
+ */
+function capUnfolded(
+  members: NonNullable<ReturnType<typeof readUnfolded>>, steps: readonly IRStep[], from: number,
+  ctx: ChainCtx, fresh: Minter,
+): Tail | null {
+  const channels = withChannel([], ENCOUNTER);
+  const terms: readonly SortTerm[] = members.order.map((name) => ({ expr: col(members.rel.id, name), dir: 'asc' as const }));
+  const payload: readonly ColMeta[] = members.kind === 'elements' ? [meta('id', 'int')]
+    : members.kind === 'scalars'
+      ? [meta('v', 'any', true), ...(perRowColumnOf(members.type!) ? [meta(perRowColumnOf(members.type!)!, 'text', true)] : [])]
+      : [meta(NODE_COL, 'json', true)];
+  const positioned = renumber(members.rel, terms, [...payload, ...carriedCols(channels)], channels, fresh);
+  if (members.kind === 'elements') return elementTail(positioned, members.elem!, steps, from, false, ctx, fresh, NO_ALIASES);
+  if (members.kind === 'scalars')
+    return scalarTail(positioned, { kind: 'scalar', type: members.type!, ...(members.productiveNull ? { productiveNull: true } : {}) },
+      steps, from, false, ctx, fresh, NO_ALIASES);
+  return continueAs(positioned, { kind: 'typedNode' }, steps, from, false, ctx, fresh, NO_ALIASES);
 }
 
 /**

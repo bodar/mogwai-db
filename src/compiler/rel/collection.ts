@@ -11,7 +11,7 @@ import { isLocalScope, ranPerTraverser } from '../ir/step.ts';
 import type { IRStep } from '../ir/step.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
 import { byField, isProductiveBy, modulations, productivityFilter } from './modulator.ts';
-import { foldElements, foldScalars, inferredVtype, LIST_COL } from './list.ts';
+import { foldElements, foldScalars, inferredVtype, LIST_COL, NODE_COL } from './list.ts';
 import { carriedCols, collectedArray, eq, jsonOf, meta, typedNode, typeOf, withMergedVtype, type Minter } from './build.ts';
 import { elementNode } from './element.ts';
 import { framingCols, type FramedRel, type RelFraming } from './framing.ts';
@@ -979,6 +979,55 @@ export function collectionOf(step: IRStep, collections: Collections): Collection
   if (step.modulators?.length) return undefined;
   const label = labelOf(step);
   return label === null ? undefined : collections.get(label);
+}
+
+/**
+ * `cap("a").unfold()` — the members AS A STREAM, WITHOUT folding them to a JSONB array first.
+ *
+ * The other consumer-driven read (`groupedKeys`'s sibling): `cap` folds to a list and `unfold` explodes
+ * it straight back, so `cap("a").unfold()` is the IDENTITY on the member rows — the collection already
+ * holds one row per member. Cancelling the round trip returns the member relation itself; the caller
+ * mints an encounter from the SITE ORDER so downstream ordering is exactly what the fold's `ORDER BY`
+ * plus `unfold`'s re-mint would have produced (which is why this is safe under `mise run test:perturbed`
+ * — the order is PINNED, not left to the scan).
+ *
+ * Only a plain multiset of LIST members cancels:
+ * - a declared MERGE is not a no-op (a seed prepends, a `Set` dedups, an `assign` narrows), so a seeded
+ *   collection takes the ordinary `reduce`;
+ * - a `grouped`/`reduced` collection is a MAP, whose `unfold` is ENTRIES rather than members — a
+ *   different explode the map tail owns.
+ *
+ * The payload is projected to the ONE canonical column each stream reads (`id`/`v`/`node`), so the
+ * envelope column name stays private here and the caller sees an ordinary element/scalar/typed-node
+ * stream.
+ */
+export function readUnfolded(
+  collection: Collection, fresh: Minter,
+): { readonly rel: Rel; readonly order: readonly string[]; readonly kind: 'elements' | 'scalars' | 'mixed';
+  readonly elem?: Elem; readonly type?: ScalarType; readonly productiveNull?: boolean } | null {
+  if (collection.merge) return null;
+  const of = collection.of;
+  if (of.kind === 'grouped' || of.kind === 'reduced') return null;
+  const site = collection.sites.length === 1 ? collection.sites[0]! : accumulated(collection.sites, memberCols(of), fresh);
+  const order = site.order;
+  const orderMeta = order.map((name) => site.rel.type.cols.find((column) => column.name === name) ?? meta(name, 'any'));
+  const orderExprs = order.map((name) => [name, col(site.rel.id, name)] as const);
+  const project = (payload: readonly (readonly [string, Expr])[], cols: readonly import('../../rel/types.ts').ColMeta[]): Rel =>
+    make.project({ id: fresh('cu'), input: site.rel, channels: [], type: typeOf(...cols, ...orderMeta),
+      exprs: [...payload, ...orderExprs] });
+  if (of.kind === 'elements')
+    return { rel: project([['id', col(site.rel.id, 'id')]], [meta('id', 'int')]), order, kind: 'elements', elem: of.elem };
+  if (of.kind === 'scalars') {
+    const vcol = perRowColumnOf(of.type);
+    return {
+      rel: project([['v', col(site.rel.id, 'v')], ...(vcol ? [[vcol, col(site.rel.id, vcol)] as const] : [])],
+        [meta('v', 'any', true), ...(vcol ? [meta(vcol, 'text', true)] : [])]),
+      order, kind: 'scalars', type: of.type, productiveNull: of.productiveNull,
+    };
+  }
+  // A mixed member is a `{t,v}` envelope; `json()` turns the JSONB blob into the text the `typedNode`
+  // framer parses, one member per row — the same read `listPayloadExpr` does over the whole list.
+  return { rel: project([[NODE_COL, jsonOf(col(site.rel.id, MEMBER_ENVELOPE))]], [meta(NODE_COL, 'json', true)]), order, kind: 'mixed' };
 }
 
 /**
