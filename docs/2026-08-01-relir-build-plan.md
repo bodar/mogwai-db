@@ -456,11 +456,14 @@ LOUDLY when a shape lands, so check them before assuming something is untracked:
   CONSUMER is what is left. **`flatMap`/`local` FAN-OUT bodies now consume it** (`flatMapRejoin`,
   `lower.ts`): a barrier-free body is TRANSPARENT (`flatMap(__.out())` is `out()`), so it mints `origin`,
   lowers the body, drops `origin` after — a downstream whole-row `dedup` must not distinguish rows by which
-  host they descend from. 🚧 What is LEFT of the fan-out multiplier, each fail-closed today and each the SAME
-  per-origin machinery: a **barrier in the body** (`local(__.out().fold())` per-origin fold → `GROUP BY origin`;
-  `local(__.out().limit(n))` per-origin SLICE → a window `PARTITION BY origin`; `local(__.out().order().by(k))`
-  per-origin order) — this is where local() STOPS being flatMap and scopes the barrier, and the same window is
-  what `group().by(k).by(__.out().fold()|limit(n)|order())` needs; a **child-body-label ESCAPE**
+  host they descend from. The **per-origin SLICE has LANDED** (`partitionedSlice`): a trailing
+  `limit`/`skip`/`range` inside the body is `n` per HOST — a `row_number() PARTITION BY origin` window,
+  `dedupOn`'s shape, ordered by `encounter`+payload so the impl-defined "result should be OF … count N" pick
+  is DETERMINISTIC and perturbation-stable (L3 +8). 🚧 What is LEFT of the fan-out multiplier, each fail-closed
+  today and each the SAME per-origin machinery: a **reducing barrier** (`local(__.out().fold())` per-origin
+  fold → `GROUP BY origin` + a `LEFT JOIN`/`COALESCE` seed so a sink emits `[]` not `[null]`; the `count` arm
+  already exists via `groupReduced`) and **per-origin order** (`local(__.out().order().by(k))`) — the same
+  window is what `group().by(k).by(__.out().fold()|limit(n)|order())` needs; `tail` (count-from-end); a **child-body-label ESCAPE**
   (`local(out().as('b')).select('a','b')` — the reference's 4 maps, currently declined not `[]`; the same
   @Unsupported feature as `map(out().as('a')).select('a')`); **path HIDING** through a fan-out
   (`flatMap(out().out()).path()` is `[v,end]`, `FlatMap.feature:56`); and `map`'s per-origin WINDOW (it takes
