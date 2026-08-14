@@ -357,6 +357,7 @@ ran	1	1	3f8bd85417e5d8e7	b429f4ffc76b1637	g.V().match(__.as("a").out("knows").as
 ran	2	2	37fe1ab0b434ba38	e8ed810172bc0913	g.V().match(__.as("a").out("knows").as("b"), __.as("a").out("created").as("c"))
 ran	2	2	65148ba770d121d8	d5d4fbb228c52654	g.V().match(__.as("a").out("knows").as("b"), __.as("b").out("created").as("c"))
 ran	1	1	745bc1c771310b4d	4acb791e01e3701f	g.V().match(__.as("a").out("knows").as("b"), __.as("b").out("created").as("c"), __.as("a").out("created").as("c")).dedup("a", "b", "c").select("a").by("name")
+ran	4	3	7f53924d33afadae	6ab9d7066265c7aa	g.V().match(__.as("a").out("knows").as("b"), __.as("b").out("created").has("name", "lop"), __.as("b").match(__.as("b").out("created").as("d"), __.as("d").in("created").as("c")).select("c").as("c")).select("a", "b", "c")
 ran	6	2	1685f76c6dc05c61	ddc78e147f973c33	g.V().match(__.as("a").out("knows").count().as("b")).select("b")
 ran	2	2	8f9672180f138ee8	e3b81f7047f4a154	g.V().match(__.as("a").out("knows").values("name").as("b")).identity()
 ran	6	6	f20a0f30d2b71626	0de34caead4a9058	g.V().match(__.as("a").out().as("b"))

@@ -232,10 +232,15 @@ function classify(a: unknown, params: Record<string, any>): Pattern | null {
   // The body must not itself re-anchor (an intra-pattern `as()` is a later phase).
   if (body.some((s) => s.name === 'as')) return null;
   if (hasEnd) return { kind: 'binding', start, body, end: ends[0]! };
-  // A no-end constraint folds as a re-rooted FILTER, so its body must not move (a moving no-end body
-  // is an existence semi-join, a later phase) and must be non-empty (a bare `as('a')` binds `a` at the
-  // root and is not a pattern).
-  if (!body.length || body.some((s) => MOVEMENTS.has(s.name))) return null;
+  // A bare `as('a')` binds `a` at the root and is not a pattern.
+  if (!body.length) return null;
+  // A MOVING no-end body is an EXISTENCE check — TinkerPop's `MatchEndStep` with a null key passes the
+  // traverser through iff the body PRODUCED, so `as('b').out('created').has('name','lop')` survives a
+  // `b` exactly when it has such an out-edge. That is a single-correlation semi-join reading only
+  // `start` — the same shape a `where(<body>)` leg takes — so route it as a `leg`, whose
+  // `child.predicate` builds the correlated `EXISTS`. A FILTER-ONLY body has no adjacency to test and
+  // stays a re-rooted `constraint` (a pure narrowing of `start`).
+  if (body.some((s) => MOVEMENTS.has(s.name))) return { kind: 'leg', negated: false, start, body, reads: [start] };
   return { kind: 'constraint', start, body };
 }
 
