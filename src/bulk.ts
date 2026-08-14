@@ -9,8 +9,10 @@
 //
 // Four invariants, and the third is the one that makes this safe to have at all:
 //
-//  1. **No statement's bind list is a function of row count** — every insert goes through
-//     `insertRows` (src/rowbatch.ts), so nothing here can breach a Durable Object's 100-bind cap.
+//  1. **No statement's bind list is a function of row count** — every insert is one relational
+//     `insertSet` (src/setwrite.ts), whose N rows cross as ONE JSON bind exploded by `json_each`, so
+//     nothing here can breach a Durable Object's 100-bind cap. The collision-check reads land the
+//     same way — one `json_each(?)` membership, never an `IN (…)` sized by the batch.
 //  2. **Runtime-uniform.** No ATTACH, no second database, no literal inlining, no Bun-only branch:
 //     the same statements run on `bun:sqlite` and on DO storage.
 //  3. **It REUSES the write path's semantics, never reimplements them.** The value channel is
@@ -30,7 +32,7 @@
 // one pass with no schema change. Under the default `'preserve'` a collision fails closed with a
 // message naming the option — never a silent merge, and never a raw UNIQUE constraint error.
 import type { GraphStore } from './storage.ts';
-import { bindChunks, insertRows, placeholders } from './rowbatch.ts';
+import { insertSet, type SetColumn } from './setwrite.ts';
 import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } from './gremlin/types.ts';
 import { PROPERTY_FTS_COLUMNS, propertyFtsRows, type OwnerElem } from './services/fts-index.ts';
 
@@ -297,29 +299,35 @@ export class BulkLoader {
   }
 
   private assertFree(table: string, column: 'id' | 'uid', values: readonly unknown[], remedy: string): void {
-    for (const chunk of bindChunks(values)) {
-      // `MIN` rather than `LIMIT 1`: which colliding id the message NAMES is user-visible, and a
-      // bare LIMIT 1 names whichever the scan reached first — so the same failed load reported a
-      // different id depending on SQLite's scan direction (`mise run test:perturbed`). The lowest
-      // one is stable and is the one a user re-running the load will hit first anyway.
-      const clash = this.store.query<{ v: unknown }>(
-        `SELECT MIN(${column}) AS v FROM ${table} WHERE ${column} IN (${placeholders(chunk.length)})`, chunk)[0];
-      this.counts.statements++;
-      if (clash !== undefined && clash.v !== null)
-        throw new Error(`bulk load: ${table} ${column} ${JSON.stringify(clash.v)} already exists in this graph — ${remedy}`);
-    }
+    if (!values.length) return;
+    // The batch's ids cross as ONE JSON bind exploded by `json_each` — a membership set sized by DATA
+    // is a single value, never an `IN (…)` list the DO bind cap would reject (§6·2). `json_each` routes
+    // a JSON number to the INTEGER `id` and a JSON string to the TEXT `uid` by its own storage class,
+    // exactly as a `V($ids)` id list does.
+    //
+    // `MIN` rather than `LIMIT 1`: which colliding id the message NAMES is user-visible, and a bare
+    // LIMIT 1 names whichever the scan reached first — so the same failed load reported a different id
+    // depending on SQLite's scan direction (`mise run test:perturbed`). The lowest one is stable and is
+    // the one a user re-running the load will hit first anyway.
+    const clash = this.store.query<{ v: unknown }>(
+      `SELECT MIN(${column}) AS v FROM ${table} WHERE ${column} IN (SELECT value FROM json_each(?))`,
+      [JSON.stringify([...values])])[0];
+    this.counts.statements++;
+    if (clash !== undefined && clash.v !== null)
+      throw new Error(`bulk load: ${table} ${column} ${JSON.stringify(clash.v)} already exists in this graph — ${remedy}`);
   }
 
-  /** A batch of rows for one table. `jsonbValue` is the collection/meta shape — a SEPARATE statement
-   *  because a fixed-shape `VALUES` tuple cannot render `?` for one row's value and `jsonb(?)` for
-   *  another's. Splitting by shape (rather than binding JSON text for scalars too) is what keeps a
-   *  scalar's SQLite storage class, which every numeric order/range predicate rides on. */
+  /** A batch of rows for one table, as ONE relational `Insert` (src/setwrite.ts). `jsonbValue` is the
+   *  collection shape — its `value` column crosses as `jsonb(<text>)` rather than a bare cell, the same
+   *  way `meta` always does. The scalar and collection batches stay SEPARATE calls because a scalar's
+   *  storage class must be the JSON value's own (`42` → INTEGER), which every numeric order/range
+   *  predicate rides on, while a collection's is a parsed blob; one statement cannot spell both cells. */
   private land(table: string, columns: readonly string[], rows: unknown[][], jsonbValue = false): void {
-    if (!rows.length) return;
-    // A JSONB column binds its JSON TEXT wrapped in `jsonb(?)`. `meta` always rides that shape —
-    // `jsonb(NULL)` is NULL (verified), so a nullable JSONB column needs no second statement.
-    const cell = (c: string) => (c === 'meta' || (jsonbValue && c === 'value') ? 'jsonb(?)' : '?');
-    this.counts.statements += insertRows(this.store, table, columns, rows, { cell });
+    // A JSONB column carries its JSON TEXT wrapped in `jsonb(<text>)`. `meta` always rides that shape —
+    // `jsonb(NULL)` is NULL (verified), so a nullable JSONB column needs no second batch.
+    const isJsonb = (c: string) => c === 'meta' || (jsonbValue && c === 'value');
+    const spec: SetColumn[] = columns.map((c) => ({ name: c, type: isJsonb(c) ? 'blob' : 'any', jsonb: isJsonb(c) }));
+    this.counts.statements += insertSet(this.store, table, spec, rows);
   }
 
   private resolveEndpoint(id: number | string, edge: BulkEdge): number {
